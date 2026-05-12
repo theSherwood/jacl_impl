@@ -963,6 +963,18 @@ bool gc_should_major(ThreadHeap *heap) {
 size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                                    uint32_t watermark, uint8_t current_mark,
                                    BlockPool *pool) {
+    /* Serialize blocks-list mutation with the allocator. The lock is held
+     * for the entire sweep of this heap. Slow-path allocations on this
+     * worker will stall briefly, but the bump-allocation fast path is
+     * unaffected (it doesn't touch heap->blocks). The sweep itself runs
+     * in tens of microseconds for typical heaps. */
+    MUTEX_LOCK(heap->blocks_mutex);
+
+    /* Re-snapshot current_block under the lock to avoid §7's stale-skip
+     * race: the value passed in by the caller may have been computed before
+     * the allocator switched current_block. */
+    skip_block = heap->current_block;
+
     GCBlock **pp = &heap->blocks;
     size_t    bytes_survived = 0;
     size_t    old_gen_bytes  = 0; /* recount old gen during concurrent sweep */
@@ -1118,6 +1130,7 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
     /* Update old gen tracking — concurrent sweep recounts everything */
     heap->old_gen_bytes = old_gen_bytes;
 
+    MUTEX_UNLOCK(heap->blocks_mutex);
     return bytes_survived;
 }
 

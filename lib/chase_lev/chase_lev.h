@@ -55,6 +55,23 @@
 /* Sentinel value for inactive thief slots */
 #define CL_EPOCH_INACTIVE UINT64_MAX
 
+/* Data-slot access mode:
+ *   Default: plain reads/writes synchronized via release/acquire on
+ *            top/bottom. Correct on TSO and ARM with the per-side fences,
+ *            but TSAN flags them because synchronization isn't per-address.
+ *   CHASE_LEV_ATOMIC_DATA: use atomic-relaxed ops on buf->data[i]. Lets
+ *            TSAN see the synchronization. Only valid when CHASE_LEV_T is
+ *            a scalar/pointer type (__atomic_load_n requires scalar).
+ *            Required when concurrent readers outside push/take/steal exist
+ *            (e.g. gc__scan_deque in runtime.c). */
+#ifdef CHASE_LEV_ATOMIC_DATA
+#define CL_DATA_LOAD(slot)         ATOMIC_LOAD_EXPLICIT((slot), MEM_RELAXED)
+#define CL_DATA_STORE(slot, val)   ATOMIC_STORE_EXPLICIT((slot), (val), MEM_RELAXED)
+#else
+#define CL_DATA_LOAD(slot)         (*(slot))
+#define CL_DATA_STORE(slot, val)   ((void)(*(slot) = (val)))
+#endif
+
 /* Allocation hooks — define CHASE_LEV_MALLOC/CHASE_LEV_FREE before including
  * to use tracked or custom allocators. Defaults to malloc/free. */
 #ifndef CHASE_LEV_MALLOC
@@ -212,9 +229,14 @@ static inline void CL_DEQUE_PUSH(CL_DEQUE* dq, CHASE_LEV_T element) {
   if (size >= ((uint64_t)1 << buf->log_capacity)) {
     /* Buffer full — grow */
     CL_BUFFER* new_buf = CL_BUFFER_NEW(buf->log_capacity + 1);
-    /* Copy existing elements preserving circular mapping */
+    /* Copy existing elements preserving circular mapping. The old buffer
+     * may be observed by concurrent thieves until we retire it below; the
+     * load goes through CL_DATA_LOAD so TSAN can see the slot access when
+     * CHASE_LEV_ATOMIC_DATA is set. The new buffer is owned solely by us
+     * at this point, so writes are always plain. */
     for (uint64_t i = t; i < b; i++) {
-      new_buf->data[i & new_buf->mask] = buf->data[i & buf->mask];
+      new_buf->data[i & new_buf->mask] =
+        CL_DATA_LOAD(&buf->data[i & buf->mask]);
     }
     /* Retire old buffer (thieves may still be reading it) */
     CL_RETIRED* node = (CL_RETIRED*)CHASE_LEV_MALLOC(sizeof(CL_RETIRED));
@@ -232,7 +254,10 @@ static inline void CL_DEQUE_PUSH(CL_DEQUE* dq, CHASE_LEV_T element) {
     CL_DEQUE_RECLAIM(dq);
   }
 
-  buf->data[b & buf->mask] = element;
+  /* Synchronization with thieves is via the release fence + atomic store on
+   * `bottom` below. When CHASE_LEV_ATOMIC_DATA is set, CL_DATA_STORE uses a
+   * relaxed atomic store so TSAN can track the slot access. */
+  CL_DATA_STORE(&buf->data[b & buf->mask], element);
   ATOMIC_FENCE(MEM_RELEASE);
   ATOMIC_STORE_EXPLICIT(&dq->bottom, b + 1, MEM_RELAXED);
 }
@@ -253,7 +278,7 @@ static inline bool CL_DEQUE_TAKE(CL_DEQUE* dq, CHASE_LEV_T* result) {
     return false;
   }
 
-  *result = buf->data[b & buf->mask];
+  *result = CL_DATA_LOAD(&buf->data[b & buf->mask]);
   if (size > 0) {
     /* Safe zone — no race with thieves */
     return true;
@@ -289,7 +314,7 @@ static inline bool CL_DEQUE_STEAL(CL_DEQUE* dq, CHASE_LEV_T* result, int thief_i
 
   /* Read element optimistically before CAS */
   CL_BUFFER* buf = ATOMIC_LOAD_EXPLICIT(&dq->buffer, MEM_ACQUIRE);
-  CHASE_LEV_T elem = buf->data[t & buf->mask];
+  CHASE_LEV_T elem = CL_DATA_LOAD(&buf->data[t & buf->mask]);
 
   /* Try to increment top to claim this element */
   uint64_t expected = t;
@@ -327,6 +352,8 @@ static inline bool CL_DEQUE_STEAL(CL_DEQUE* dq, CHASE_LEV_T* result, int thief_i
 #undef CL_DEQUE_REGISTER_THIEF
 #undef CL_DEQUE_UNREGISTER_THIEF
 #undef CL_EPOCH_INACTIVE
+#undef CL_DATA_LOAD
+#undef CL_DATA_STORE
 #ifdef CL_MAX_THIEVES_DEFAULTED
 #undef CL_DEQUE_MAX_THIEVES
 #undef CL_MAX_THIEVES_DEFAULTED

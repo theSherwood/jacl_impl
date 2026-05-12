@@ -49,6 +49,8 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - `STRUCT_DESIGN.md` — struct value-type architecture (no header, C-ABI layout)
 - `GENERATOR_STATE_MACHINE.md` — generator SM transform
 - `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
+- `SYNCHRONIZATION.md` — per-field shared-state synchronization reference
+- `AUDIT.md` — audit findings + fix tracker
 
 ## Known Limitations
 

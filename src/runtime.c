@@ -16,6 +16,9 @@
 
 #define CHASE_LEV_T    uintptr_t
 #define CHASE_LEV_NAME rt_deque
+/* gc__scan_deque reads buf->data concurrently with the owner's push, so we
+ * need TSAN-visible synchronization on the slot accesses. See chase_lev.h. */
+#define CHASE_LEV_ATOMIC_DATA
 #include "../lib/chase_lev/chase_lev.h"
 
 /* ======================================================================
@@ -65,6 +68,14 @@ typedef struct WorkerThread {
     thread_t           thread;               /* OS thread handle */
     arena_t            arena;                /* per-worker arena for VM */
     int               *steal_ids;            /* thief IDs on other workers' public deques */
+    /* Pinned inbox: other workers route tasks here when escape analysis pins
+     * a closure to this worker. The owner drains this into private_deque at
+     * the top of each loop iteration, preserving private_deque's SPSC
+     * contract. Mutex-protected MPSC. */
+    uintptr_t         *pinned_inbox;
+    volatile intptr_t  pinned_inbox_count;
+    intptr_t           pinned_inbox_cap;
+    platform_mutex_t   pinned_inbox_mutex;
 } WorkerThread;
 
 struct Runtime {
@@ -80,6 +91,11 @@ struct Runtime {
     volatile intptr_t   inbox_count;
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
+    /* GC scanner thief slots: registered once at init so gc__scan_deque can
+     * safely read deque buffers under epoch-based reclamation. One slot per
+     * (worker, deque) pair. Index by worker_id. */
+    int                *gc_thief_public_ids;
+    int                *gc_thief_private_ids;
 };
 
 /* Forward declarations for functions used in the worker loop */
@@ -194,11 +210,17 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
         uintptr_t task_val = 0;
         bool found = false;
 
-        /* 1. Check global inbox (lockless empty check, batched drain) */
-        if (rt->inbox_count > 0) {
+        /* 1. Check global inbox (lockless empty check, batched drain).
+         * Relaxed load is sufficient: a stale "empty" read just defers
+         * pickup by one loop iteration; the under-lock count is
+         * authoritative. The under-lock drain mutates count via a local
+         * variable and publishes the final value atomically so concurrent
+         * lockless readers never race a plain RMW. */
+        if (ATOMIC_LOAD_EXPLICIT(&rt->inbox_count, MEM_RELAXED) > 0) {
             MUTEX_LOCK(rt->inbox_mutex);
-            while (rt->inbox_count > 0) {
-                uintptr_t tv = rt->inbox[--rt->inbox_count];
+            intptr_t local = rt->inbox_count;
+            while (local > 0) {
+                uintptr_t tv = rt->inbox[--local];
                 if (!found) {
                     task_val = tv;
                     found = true;
@@ -206,10 +228,31 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                     rt_deque_deque_push(self->private_deque, tv);
                 }
             }
+            ATOMIC_STORE_EXPLICIT(&rt->inbox_count, local, MEM_RELEASE);
             MUTEX_UNLOCK(rt->inbox_mutex);
         }
 
-        /* 2. Check own private deque (priority for thread-local tasks) */
+        /* 2. Drain our pinned inbox into private_deque. Tasks routed here
+         * by other workers when their closure was pinned to us. Same
+         * lockless-empty-check + batched-drain pattern as the global inbox. */
+        if (ATOMIC_LOAD_EXPLICIT(&self->pinned_inbox_count, MEM_RELAXED) > 0) {
+            MUTEX_LOCK(self->pinned_inbox_mutex);
+            intptr_t local = self->pinned_inbox_count;
+            while (local > 0) {
+                uintptr_t tv = self->pinned_inbox[--local];
+                if (!found) {
+                    task_val = tv;
+                    found = true;
+                } else {
+                    rt_deque_deque_push(self->private_deque, tv);
+                }
+            }
+            ATOMIC_STORE_EXPLICIT(&self->pinned_inbox_count, local,
+                                  MEM_RELEASE);
+            MUTEX_UNLOCK(self->pinned_inbox_mutex);
+        }
+
+        /* 3. Check own private deque (priority for thread-local tasks) */
         if (!found)
             found = rt_deque_deque_take(self->private_deque, &task_val);
 
@@ -290,6 +333,15 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
  * ====================================================================== */
 
 void runtime_init(Runtime *rt, int num_workers) {
+    runtime__init_state(rt, num_workers);
+    runtime__start_threads(rt);
+}
+
+/* runtime__init_state — initialize all Runtime/WorkerThread fields except
+ * the OS-level worker threads. Factored out so test helpers can build a
+ * Runtime that doesn't run any worker threads (for unit tests of GC roots,
+ * write barriers, etc.) without duplicating the setup. */
+void runtime__init_state(Runtime *rt, int num_workers) {
     int i, j;
 
     rt->num_workers  = num_workers;
@@ -326,6 +378,13 @@ void runtime_init(Runtime *rt, int num_workers) {
         w->arena = (arena_t){0};
         runtime__init_worker_vm(w);
 
+        /* Pinned inbox: per-worker MPSC queue for cross-worker pinned tasks */
+        w->pinned_inbox_cap   = 32;
+        w->pinned_inbox_count = 0;
+        w->pinned_inbox = (uintptr_t *)malloc(
+            (size_t)w->pinned_inbox_cap * sizeof(uintptr_t));
+        MUTEX_INIT(w->pinned_inbox_mutex);
+
         w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
         for (j = 0; j < num_workers; j++)
             w->steal_ids[j] = -1;
@@ -341,8 +400,23 @@ void runtime_init(Runtime *rt, int num_workers) {
         }
     }
 
-    /* Start worker threads */
+    /* Register a persistent GC scanner thief slot per deque so gc__scan_deque
+     * can read buffers safely under chase-lev's epoch-based reclamation.
+     * The slot stays INACTIVE except while gc__scan_deque is actively
+     * reading; we set it to the current epoch during the scan to pin any
+     * retired buffer the read might touch. */
+    rt->gc_thief_public_ids  = (int *)malloc((size_t)num_workers * sizeof(int));
+    rt->gc_thief_private_ids = (int *)malloc((size_t)num_workers * sizeof(int));
     for (i = 0; i < num_workers; i++) {
+        rt->gc_thief_public_ids[i]  =
+            rt_deque_deque_register_thief(rt->workers[i].public_deque);
+        rt->gc_thief_private_ids[i] =
+            rt_deque_deque_register_thief(rt->workers[i].private_deque);
+    }
+}
+
+void runtime__start_threads(Runtime *rt) {
+    for (int i = 0; i < rt->num_workers; i++) {
         THREAD_CREATE(&rt->workers[i].thread, NULL,
                       runtime__worker_loop, &rt->workers[i]);
     }
@@ -353,14 +427,18 @@ void runtime_init(Runtime *rt, int num_workers) {
  * ====================================================================== */
 
 void runtime_destroy(Runtime *rt) {
-    int i, j;
-
-    /* Signal all workers to stop */
+    /* Signal all workers to stop and join them */
     ATOMIC_STORE_EXPLICIT(&rt->shutdown, 1, MEM_RELEASE);
-
-    /* Join all worker threads */
-    for (i = 0; i < rt->num_workers; i++)
+    for (int i = 0; i < rt->num_workers; i++)
         THREAD_JOIN(rt->workers[i].thread, NULL);
+    runtime__teardown_state(rt);
+}
+
+/* runtime__teardown_state — release all Runtime/WorkerThread resources.
+ * Assumes worker threads (if any were started) have already been joined.
+ * Mirror of runtime__init_state. */
+void runtime__teardown_state(Runtime *rt) {
+    int i, j;
 
     /* Unregister all thieves BEFORE freeing any deques (avoids use-after-free
      * when worker i's thief slot references worker j's already-freed deque) */
@@ -373,6 +451,22 @@ void runtime_destroy(Runtime *rt) {
         }
     }
 
+    /* Unregister GC scanner thief slots */
+    if (rt->gc_thief_public_ids) {
+        for (i = 0; i < rt->num_workers; i++) {
+            if (rt->gc_thief_public_ids[i] >= 0)
+                rt_deque_deque_unregister_thief(
+                    rt->workers[i].public_deque, rt->gc_thief_public_ids[i]);
+            if (rt->gc_thief_private_ids[i] >= 0)
+                rt_deque_deque_unregister_thief(
+                    rt->workers[i].private_deque, rt->gc_thief_private_ids[i]);
+        }
+        free(rt->gc_thief_public_ids);
+        free(rt->gc_thief_private_ids);
+        rt->gc_thief_public_ids  = NULL;
+        rt->gc_thief_private_ids = NULL;
+    }
+
     /* Cleanup each worker */
     for (i = 0; i < rt->num_workers; i++) {
         WorkerThread *w = &rt->workers[i];
@@ -383,6 +477,12 @@ void runtime_destroy(Runtime *rt) {
             free((RuntimeTask *)task_val);
         while (rt_deque_deque_take(w->private_deque, &task_val))
             free((RuntimeTask *)task_val);
+
+        /* Drain pending pinned tasks (threads are joined, no race) */
+        for (intptr_t k = 0; k < w->pinned_inbox_count; k++)
+            free((RuntimeTask *)w->pinned_inbox[k]);
+        free(w->pinned_inbox);
+        MUTEX_DESTROY(w->pinned_inbox_mutex);
 
         free(w->steal_ids);
 
@@ -414,13 +514,17 @@ void runtime_destroy(Runtime *rt) {
 
 void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
     MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
+    intptr_t c = rt->inbox_count;
+    if (c >= rt->inbox_cap) {
         intptr_t new_cap = rt->inbox_cap * 2;
         rt->inbox = (uintptr_t *)realloc(rt->inbox,
                                           (size_t)new_cap * sizeof(uintptr_t));
         rt->inbox_cap = new_cap;
     }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    rt->inbox[c] = (uintptr_t)task;
+    /* Release on count: pairs with lockless MEM_RELAXED loads in the worker
+     * loop and the MEM_ACQUIRE load in gc_enumerate_roots. */
+    ATOMIC_STORE_EXPLICIT(&rt->inbox_count, c + 1, MEM_RELEASE);
     MUTEX_UNLOCK(rt->inbox_mutex);
 }
 
@@ -433,13 +537,25 @@ void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
  * ====================================================================== */
 
 void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
-    if (worker_id >= 0 && worker_id < rt->num_workers) {
-        rt_deque_deque_push(rt->workers[worker_id].private_deque,
-                            (uintptr_t)task);
-    } else {
+    if (worker_id < 0 || worker_id >= rt->num_workers) {
         /* Fallback: worker ID not valid (e.g., task created outside workers) */
         runtime__push_inbox(rt, task);
+        return;
     }
+    WorkerThread *target = &rt->workers[worker_id];
+    MUTEX_LOCK(target->pinned_inbox_mutex);
+    intptr_t c = target->pinned_inbox_count;
+    if (c >= target->pinned_inbox_cap) {
+        intptr_t new_cap = target->pinned_inbox_cap * 2;
+        target->pinned_inbox = (uintptr_t *)realloc(target->pinned_inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        target->pinned_inbox_cap = new_cap;
+    }
+    target->pinned_inbox[c] = (uintptr_t)task;
+    /* Release on count: pairs with lockless MEM_RELAXED loads in the target
+     * worker's loop and the MEM_ACQUIRE load in gc_enumerate_roots. */
+    ATOMIC_STORE_EXPLICIT(&target->pinned_inbox_count, c + 1, MEM_RELEASE);
+    MUTEX_UNLOCK(target->pinned_inbox_mutex);
 }
 
 /* ======================================================================
@@ -526,26 +642,48 @@ void runtime_submit_task(Runtime *rt, JaclClosure *closure,
 #define GC_BUSY_SPIN_MAX 10000
 
 /* Snapshot a Chase-Lev deque's contents and push task gc_roots onto mark stack.
- * Conservative: may include already-completed or stolen tasks (harmless). */
-void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
+ * Conservative: may include already-completed or stolen tasks (harmless).
+ *
+ * Buffer-reclamation safety: chase-lev frees retired buffers only when no
+ * registered thief has an epoch ≤ the buffer's retire_epoch. We hold a
+ * persistent GC thief slot per deque (`thief_id`); writing our observed
+ * `dq->epoch` to that slot before reading `dq->buffer` pins any retired
+ * buffer we might still be reading from. Resetting to INACTIVE lets the
+ * owner reclaim it on the next push grow. */
+void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms, int thief_id) {
+    /* Epoch enter: announce we're reading at the current epoch.
+     * RELEASE order pairs with the owner's ACQUIRE load in CL_DEQUE_RECLAIM,
+     * giving a happens-before edge that pins any retired buffer with
+     * retire_epoch <= our observed epoch. */
+    uint64_t e = ATOMIC_LOAD_EXPLICIT(&dq->epoch, MEM_ACQUIRE);
+    ATOMIC_STORE_EXPLICIT(&dq->thieves[thief_id].epoch, e, MEM_RELEASE);
+
     uint64_t t = ATOMIC_LOAD_EXPLICIT(&dq->top, MEM_ACQUIRE);
     ATOMIC_FENCE(MEM_SEQ_CST);
     uint64_t b = ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE);
 
-    if ((int64_t)(b - t) <= 0) return; /* empty */
-
-    /* Read buffer pointer — visible after acquire on top/bottom */
-    rt_deque_buffer *buf = dq->buffer;
-
-    for (uint64_t i = t; i < b; i++) {
-        uintptr_t val = buf->data[i & buf->mask];
-        if (val > WORKER_BUSY) {
-            RuntimeTask *task = (RuntimeTask *)val;
-            gc__ms_push_val(ms, task->gc_root);
-            gc__ms_push_val(ms, task->gc_root2);
-            gc__ms_push_val(ms, task->gc_root3);
+    if ((int64_t)(b - t) > 0) {
+        /* Atomic-acquire load: pairs with the release store in PUSH's grow
+         * path. Our thief epoch already pins the buffer against reclaim. */
+        rt_deque_buffer *buf = ATOMIC_LOAD_EXPLICIT(&dq->buffer, MEM_ACQUIRE);
+        for (uint64_t i = t; i < b; i++) {
+            uintptr_t val = ATOMIC_LOAD_EXPLICIT(
+                &buf->data[i & buf->mask], MEM_RELAXED);
+            if (val > WORKER_BUSY) {
+                RuntimeTask *task = (RuntimeTask *)val;
+                gc__ms_push_val(ms, task->gc_root);
+                gc__ms_push_val(ms, task->gc_root2);
+                gc__ms_push_val(ms, task->gc_root3);
+            }
         }
     }
+
+    /* Epoch exit: stop pinning retired buffers. UINT64_MAX is the sentinel
+     * value chase-lev uses for "thief inactive" (CL_EPOCH_INACTIVE before
+     * the template undefs it). RELEASE order ensures all our buffer reads
+     * happen-before this slot reset is visible to the owner's reclaim. */
+    ATOMIC_STORE_EXPLICIT(&dq->thieves[thief_id].epoch,
+                          UINT64_MAX, MEM_RELEASE);
 }
 
 /* Enumerate all GC roots across the runtime and push onto mark stack.
@@ -590,9 +728,10 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
             gc__ms_push_val(ms, task->gc_root3);
         }
 
-        /* 2–3. Deque snapshots (public + private) */
-        gc__scan_deque(w->public_deque, ms);
-        gc__scan_deque(w->private_deque, ms);
+        /* 2–3. Deque snapshots (public + private) — use the GC thief slot
+         * to pin buffers against concurrent grow-and-reclaim. */
+        gc__scan_deque(w->public_deque,  ms, rt->gc_thief_public_ids[w_idx]);
+        gc__scan_deque(w->private_deque, ms, rt->gc_thief_private_ids[w_idx]);
 
         /* CPS continuations capture all live state as task roots (per
          * GC_CONCURRENCY_DESIGN.md Section 7). VM stack scanning removed —
@@ -629,9 +768,21 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         for (uint8_t sci = 0; sci < w->vm.saved_ctx_count; sci++) {
             gc__ms_push_val(ms, w->vm.saved_ctx[sci]);
         }
+
+        /* 9. Pinned inbox: tasks routed here by other workers awaiting
+         * drain into this worker's private_deque. Acquired under lock so
+         * we don't race with a concurrent push. */
+        MUTEX_LOCK(w->pinned_inbox_mutex);
+        for (intptr_t pi = 0; pi < w->pinned_inbox_count; pi++) {
+            RuntimeTask *task = (RuntimeTask *)w->pinned_inbox[pi];
+            gc__ms_push_val(ms, task->gc_root);
+            gc__ms_push_val(ms, task->gc_root2);
+            gc__ms_push_val(ms, task->gc_root3);
+        }
+        MUTEX_UNLOCK(w->pinned_inbox_mutex);
     }
 
-    /* 7. Inbox tasks (external submissions awaiting pickup) */
+    /* 10. Inbox tasks (external submissions awaiting pickup) */
     MUTEX_LOCK(rt->inbox_mutex);
     for (intptr_t i = 0; i < rt->inbox_count; i++) {
         RuntimeTask *task = (RuntimeTask *)rt->inbox[i];
@@ -671,22 +822,16 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
  * `drained` tracks how far each worker's buffer has been processed.
  * Returns true if any new entries were found.
  *
- * Memory-ordering invariant (pairs with grey_buf_push in gc.c):
- * The acquire load of gb->count below synchronizes-with the release store
- * in grey_buf_push. This ensures visibility of:
- *   - All entry writes gb->entries[0..count-1]
- *   - The gb->entries pointer itself (which may have changed due to realloc)
- * Therefore reading gb->entries[j] for j < current is safe even if the
- * worker reallocated the buffer between our previous and current drain. */
+ * Synchronization: each GreyBuffer has a mutex held by grey_buf_push during
+ * its realloc + entry write + count update. We acquire the same mutex here
+ * to read the entries array safely. See AUDIT.md §3 and SYNCHRONIZATION.md. */
 bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
                                  uint32_t *drained) {
     bool found_new = false;
     for (int i = 0; i < rt->num_workers; i++) {
         GreyBuffer *gb = &rt->workers[i].grey_buf;
-        /* Acquire on count: synchronizes-with release in grey_buf_push.
-         * Ensures we see the post-realloc entries pointer and all written
-         * entries up to count. */
-        uint32_t current = ATOMIC_LOAD_EXPLICIT(&gb->count, MEM_ACQUIRE);
+        MUTEX_LOCK(gb->mutex);
+        uint32_t current = gb->count;
         if (current > drained[i]) {
             found_new = true;
             for (uint32_t j = drained[i]; j < current; j++) {
@@ -694,6 +839,7 @@ bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
             }
             drained[i] = current;
         }
+        MUTEX_UNLOCK(gb->mutex);
     }
     return found_new;
 }
@@ -782,18 +928,22 @@ void gc_concurrent_collect(Runtime *rt) {
 
     for (i = 0; i < nw; i++) {
         ThreadHeap *heap = &rt->workers[i].vm.heap;
-        size_t survived = gc_sweep_concurrent(heap, heap->current_block,
-                                               watermark, mark,
+        /* Pass NULL: gc_sweep_concurrent re-snapshots heap->current_block
+         * under heap->blocks_mutex internally (fixes AUDIT.md §7's stale
+         * skip-block race). */
+        size_t survived = gc_sweep_concurrent(heap, NULL, watermark, mark,
                                                &rt->block_pool);
         gc__adjust_threshold(heap, survived);
     }
 
     /* 9. Toggle current_mark on all heaps, reset allocation counters
      * and grey buffers.
-     * Plain store on grey_buf.count is safe: gc_active=0 (release, step 7)
-     * ensures workers have stopped calling grey_buf_push. The subsequent
-     * gc_running=0 (release, step 10) publishes the reset before the next
-     * cycle's gc_active=1 (release) re-enables write barriers. */
+     *
+     * The grey_buf reset is done under the buffer's mutex. Even though
+     * gc_active=0 (step 7) signals workers to stop firing the barrier, an
+     * in-flight grey_buf_push that already passed the fast-path check may
+     * still be in the slow path when we reach here. The mutex serializes
+     * us with any such in-flight push. */
     uint8_t next_mark = 1 - mark;
     for (i = 0; i < rt->num_workers; i++) {
         ThreadHeap *wh = &rt->workers[i].vm.heap;
@@ -803,7 +953,10 @@ void gc_concurrent_collect(Runtime *rt) {
         wh->gc_cycle_count++;
         /* Concurrent GC is always major — snapshot old gen size */
         wh->last_major_old_gen_bytes = wh->old_gen_bytes;
-        rt->workers[i].grey_buf.count = 0;
+        GreyBuffer *gb = &rt->workers[i].grey_buf;
+        MUTEX_LOCK(gb->mutex);
+        gb->count = 0;
+        MUTEX_UNLOCK(gb->mutex);
     }
 
     gc__ms_destroy(&ms);

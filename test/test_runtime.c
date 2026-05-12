@@ -200,63 +200,14 @@ static int test_grey_buffer_grow(void) {
 /* Helper: init a Runtime struct without starting worker threads.
  * Workers are allocated and VMs initialized, but no threads are created.
  * This allows deterministic root enumeration testing in isolation. */
+/* Init a Runtime without spawning worker threads. Delegates to the
+ * canonical setup in runtime.c so this stays in sync with runtime_init. */
 static void rt_test__init_no_threads(Runtime *rt, int num_workers) {
-    int i;
-    rt->num_workers  = num_workers;
-    rt->global_epoch = 0;
-    rt->gc_running   = 0;
-    rt->gc_active    = 0;
-    rt->shutdown     = 0;
-
-    gc_block_pool_init(&rt->block_pool);
-
-    rt->inbox_cap   = 16;
-    rt->inbox_count = 0;
-    rt->inbox = (uintptr_t *)malloc((size_t)rt->inbox_cap * sizeof(uintptr_t));
-    MUTEX_INIT(rt->inbox_mutex);
-
-    rt->workers = (WorkerThread *)calloc((size_t)num_workers,
-                                          sizeof(WorkerThread));
-    for (i = 0; i < num_workers; i++) {
-        WorkerThread *w = &rt->workers[i];
-        w->id      = i;
-        w->runtime = rt;
-        w->currently_executing = WORKER_IDLE;
-        w->thread_epoch        = 0;
-        w->public_deque  = rt_deque_deque_new(4);
-        w->private_deque = rt_deque_deque_new(4);
-        grey_buf_init(&w->grey_buf);
-        remembered_set_init(&w->remembered_set);
-        w->arena = (arena_t){0};
-        runtime__init_worker_vm(w);
-        w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
-    }
+    runtime__init_state(rt, num_workers);
 }
 
-/* Helper: destroy a Runtime that was init'd without threads */
 static void rt_test__destroy_no_threads(Runtime *rt) {
-    int i;
-    for (i = 0; i < rt->num_workers; i++) {
-        WorkerThread *w = &rt->workers[i];
-        uintptr_t task_val;
-        while (rt_deque_deque_take(w->public_deque, &task_val))
-            free((RuntimeTask *)task_val);
-        while (rt_deque_deque_take(w->private_deque, &task_val))
-            free((RuntimeTask *)task_val);
-        rt_deque_deque_free(w->public_deque);
-        rt_deque_deque_free(w->private_deque);
-        grey_buf_destroy(&w->grey_buf);
-        remembered_set_destroy(&w->remembered_set);
-        free(w->steal_ids);
-        vm_destroy(&w->vm);
-        arena_destroy(&w->arena);
-    }
-    free(rt->workers);
-    for (intptr_t k = 0; k < rt->inbox_count; k++)
-        free((RuntimeTask *)rt->inbox[k]);
-    free(rt->inbox);
-    MUTEX_DESTROY(rt->inbox_mutex);
-    gc_block_pool_destroy(&rt->block_pool);
+    runtime__teardown_state(rt);
 }
 
 /* Helper: check if a raw pointer appears in the mark stack */
@@ -858,6 +809,11 @@ static int test_epoch_watermark_collect(void) {
 
     uint8_t mark = w->vm.heap.current_mark;
 
+    /* gc_sweep_concurrent re-snapshots heap->current_block under its mutex
+     * and skips it (production safety, AUDIT.md §7). For this single-thread
+     * unit test we want to sweep ALL blocks including the one our test
+     * objects are in, so clear current_block before the call. */
+    w->vm.heap.current_block = NULL;
     /* Watermark = 5. old_val (epoch=3 < 5): dead. new_val (epoch=10 >= 5): immune. */
     gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, NULL);
 

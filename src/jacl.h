@@ -167,18 +167,23 @@ typedef struct {
 } BlockPool;
 
 typedef struct {
-    GCBlock   *blocks;
-    GCBlock   *current_block;
-    uint8_t   *cursor;
-    uint8_t   *limit;
-    size_t     bytes_since_gc;
-    size_t     gc_threshold;
-    BlockPool *pool;
-    uint8_t    current_mark;
-    bool       needs_gc;
-    size_t     old_gen_bytes;
-    size_t     last_major_old_gen_bytes;
-    uint32_t   gc_cycle_count;
+    GCBlock         *blocks;
+    GCBlock         *current_block;
+    uint8_t         *cursor;
+    uint8_t         *limit;
+    size_t           bytes_since_gc;
+    size_t           gc_threshold;
+    BlockPool       *pool;
+    uint8_t          current_mark;
+    bool             needs_gc;
+    size_t           old_gen_bytes;
+    size_t           last_major_old_gen_bytes;
+    uint32_t         gc_cycle_count;
+    /* Serializes `blocks` list mutation (owner head-insert in gc_alloc slow
+     * path) with `gc_sweep_concurrent`'s walk + unlink. The bump-allocation
+     * fast path doesn't touch the list. See AUDIT.md §§7, 15 and
+     * SYNCHRONIZATION.md. MUST stay in sync with the definition in gc.c. */
+    platform_mutex_t blocks_mutex;
 } ThreadHeap;
 
 /* HeapRecord — heap-allocated, pointer-accessed struct shape. Used by ctx
@@ -193,9 +198,14 @@ typedef struct {
 } HeapRecord;
 
 typedef struct {
-    JaclVal  *entries;
-    uint32_t  count;
-    uint32_t  cap;
+    JaclVal         *entries;
+    uint32_t         count;
+    uint32_t         cap;
+    /* Serializes grey_buf_push (which may realloc entries) with the GC
+     * thread's drain reads. Push is rare (only during gc_active && heap
+     * value mutation), so mutex contention is bounded. See SYNCHRONIZATION.md
+     * and AUDIT.md §3. MUST stay in sync with the definition in gc.c. */
+    platform_mutex_t mutex;
 } GreyBuffer;
 
 typedef struct {
@@ -1545,6 +1555,7 @@ typedef struct {
     void *data;
     JaclVal gc_root;
     JaclVal gc_root2;
+    JaclVal gc_root3;
 } RuntimeTask;
 
 typedef struct Runtime Runtime;
@@ -1562,6 +1573,14 @@ typedef struct WorkerThread {
     thread_t           thread;
     arena_t            arena;
     int               *steal_ids;
+    /* Pinned inbox: other workers route tasks here when escape analysis pins
+     * a closure to this worker. The owner drains this into private_deque at
+     * the top of each loop iteration, preserving private_deque's SPSC
+     * contract. Mutex-protected MPSC. MUST stay in sync with runtime.c. */
+    uintptr_t         *pinned_inbox;
+    volatile intptr_t  pinned_inbox_count;
+    intptr_t           pinned_inbox_cap;
+    platform_mutex_t   pinned_inbox_mutex;
 } WorkerThread;
 
 struct Runtime {
@@ -1576,6 +1595,9 @@ struct Runtime {
     volatile intptr_t   inbox_count;
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
+    /* GC scanner thief slots — see runtime.c. MUST stay in sync. */
+    int                *gc_thief_public_ids;
+    int                *gc_thief_private_ids;
 };
 
 extern JACL_THREAD_LOCAL int rt__worker_id;
@@ -2277,13 +2299,19 @@ extern void runtime__emergency_gc (void *ctx);
 extern void *runtime__worker_loop (void *arg);
 extern void runtime_init (Runtime *rt, int num_workers);
 extern void runtime_destroy (Runtime *rt);
+/* Lower-level init: set up Runtime state WITHOUT spawning worker threads.
+ * Tests that drive the state machine deterministically use these. Production
+ * code should use runtime_init / runtime_destroy. */
+extern void runtime__init_state (Runtime *rt, int num_workers);
+extern void runtime__start_threads (Runtime *rt);
+extern void runtime__teardown_state (Runtime *rt);
 extern void runtime__push_inbox (Runtime *rt, RuntimeTask *task);
 extern void runtime__push_pinned (Runtime *rt, RuntimeTask *task, int worker_id);
 extern void runtime_submit (Runtime *rt, void (*fn)(void *), void *data);
 extern void runtime__setup_call (VM *vm, JaclClosure *cl, int argc, JaclVal *argv);
 extern void runtime__exec_closure (void *data);
 extern void runtime_submit_task (Runtime *rt, JaclClosure *closure, bool thread_local);
-extern void gc__scan_deque (rt_deque_deque *dq, GCMarkStack *ms);
+extern void gc__scan_deque (rt_deque_deque *dq, GCMarkStack *ms, int thief_id);
 extern void gc_enumerate_roots (Runtime *rt, GCMarkStack *ms);
 extern bool gc__drain_grey_bufs (Runtime *rt, GCMarkStack *ms, uint32_t *drained);
 extern void gc_concurrent_collect (Runtime *rt);
@@ -2399,5 +2427,18 @@ extern size_t jacl__sizeof_ctx_pool (void);
 extern size_t jacl__sizeof_environment (void);
 extern size_t jacl__sizeof_stack_trace (void);
 extern size_t jacl__sizeof_stack_trace_entry (void);
+
+/* Runtime / GC structs added after the AUDIT.md fixes — see embed.c. */
+extern size_t jacl__sizeof_worker_thread (void);
+extern size_t jacl__sizeof_runtime (void);
+extern size_t jacl__sizeof_runtime_task (void);
+extern size_t jacl__sizeof_thread_heap (void);
+extern size_t jacl__sizeof_grey_buffer (void);
+extern size_t jacl__sizeof_remembered_set (void);
+
+extern size_t jacl__offsetof_worker_thread_epoch (void);
+extern size_t jacl__offsetof_worker_currently_executing (void);
+extern size_t jacl__offsetof_runtime_inbox_count (void);
+extern size_t jacl__offsetof_runtime_task_gc_root3 (void);
 
 #endif /* JACL_H */

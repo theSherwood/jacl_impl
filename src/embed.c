@@ -1286,4 +1286,30 @@ size_t jacl__sizeof_environment(void)       { return sizeof(Environment); }
 size_t jacl__sizeof_stack_trace(void)       { return sizeof(StackTrace); }
 size_t jacl__sizeof_stack_trace_entry(void) { return sizeof(StackTraceEntry); }
 
+/* Runtime / GC shared structs — added after the AUDIT.md fixes added new
+ * fields. Drift here silently corrupted thread_epoch reads from tests once
+ * already; these checks catch the next time it happens. */
+size_t jacl__sizeof_worker_thread(void)     { return sizeof(WorkerThread); }
+size_t jacl__sizeof_runtime(void)           { return sizeof(Runtime); }
+size_t jacl__sizeof_runtime_task(void)      { return sizeof(RuntimeTask); }
+size_t jacl__sizeof_thread_heap(void)       { return sizeof(ThreadHeap); }
+size_t jacl__sizeof_grey_buffer(void)       { return sizeof(GreyBuffer); }
+size_t jacl__sizeof_remembered_set(void)    { return sizeof(RememberedSet); }
+
+/* Offset checks for fields whose drift has produced concrete bugs.
+ * thread_epoch was the symptom of the WorkerThread drift; currently_executing
+ * is read by the GC root scanner via the BUSY-sentinel protocol. */
+size_t jacl__offsetof_worker_thread_epoch(void) {
+    return offsetof(WorkerThread, thread_epoch);
+}
+size_t jacl__offsetof_worker_currently_executing(void) {
+    return offsetof(WorkerThread, currently_executing);
+}
+size_t jacl__offsetof_runtime_inbox_count(void) {
+    return offsetof(Runtime, inbox_count);
+}
+size_t jacl__offsetof_runtime_task_gc_root3(void) {
+    return offsetof(RuntimeTask, gc_root3);
+}
+
 #endif /* EMBED_C */

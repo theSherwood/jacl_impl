@@ -3585,62 +3585,14 @@ static int test_cont_error_propagation(void) {
 
 /* --- Test helpers for non-threaded runtime (same as test_runtime.c) --- */
 
+/* Init a Runtime without spawning worker threads — delegates to the
+ * canonical setup in runtime.c. */
 static void m14__init_no_threads(Runtime *rt, int num_workers) {
-    int i;
-    rt->num_workers  = num_workers;
-    rt->global_epoch = 0;
-    rt->gc_running   = 0;
-    rt->gc_active    = 0;
-    rt->shutdown     = 0;
-
-    gc_block_pool_init(&rt->block_pool);
-
-    rt->inbox_cap   = 16;
-    rt->inbox_count = 0;
-    rt->inbox = (uintptr_t *)malloc((size_t)rt->inbox_cap * sizeof(uintptr_t));
-    MUTEX_INIT(rt->inbox_mutex);
-
-    rt->workers = (WorkerThread *)calloc((size_t)num_workers,
-                                          sizeof(WorkerThread));
-    for (i = 0; i < num_workers; i++) {
-        WorkerThread *w = &rt->workers[i];
-        w->id      = i;
-        w->runtime = rt;
-        w->currently_executing = WORKER_IDLE;
-        w->thread_epoch        = 0;
-        w->public_deque  = rt_deque_deque_new(4);
-        w->private_deque = rt_deque_deque_new(4);
-        grey_buf_init(&w->grey_buf);
-        remembered_set_init(&w->remembered_set);
-        w->arena = (arena_t){0};
-        runtime__init_worker_vm(w);
-        w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
-    }
+    runtime__init_state(rt, num_workers);
 }
 
 static void m14__destroy_no_threads(Runtime *rt) {
-    int i;
-    for (i = 0; i < rt->num_workers; i++) {
-        WorkerThread *w = &rt->workers[i];
-        uintptr_t task_val;
-        while (rt_deque_deque_take(w->public_deque, &task_val))
-            free((RuntimeTask *)task_val);
-        while (rt_deque_deque_take(w->private_deque, &task_val))
-            free((RuntimeTask *)task_val);
-        rt_deque_deque_free(w->public_deque);
-        rt_deque_deque_free(w->private_deque);
-        grey_buf_destroy(&w->grey_buf);
-        remembered_set_destroy(&w->remembered_set);
-        free(w->steal_ids);
-        vm_destroy(&w->vm);
-        arena_destroy(&w->arena);
-    }
-    free(rt->workers);
-    for (intptr_t k = 0; k < rt->inbox_count; k++)
-        free((RuntimeTask *)rt->inbox[k]);
-    free(rt->inbox);
-    MUTEX_DESTROY(rt->inbox_mutex);
-    gc_block_pool_destroy(&rt->block_pool);
+    runtime__teardown_state(rt);
 }
 
 static bool m14__ms_contains(GCMarkStack *ms, void *target) {

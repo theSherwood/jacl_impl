@@ -218,19 +218,23 @@ JACL_THREAD_LOCAL uint32_t gc__thread_epoch = 0;
 /* --- ThreadHeap: per-thread heap state --- */
 
 typedef struct {
-    GCBlock   *blocks;         /* linked list of all owned blocks */
-    GCBlock   *current_block;  /* block being allocated into */
-    uint8_t   *cursor;         /* next allocation position */
-    uint8_t   *limit;          /* end of current free-line run */
-    size_t     bytes_since_gc; /* allocation counter for GC trigger */
-    size_t     gc_threshold;   /* adaptive threshold (starts at GC_THRESHOLD) */
-    BlockPool *pool;           /* shared block pool */
-    uint8_t    current_mark;   /* alternates 0/1 each GC cycle */
-    bool       needs_gc;       /* set by gc_alloc when threshold exceeded */
+    GCBlock         *blocks;         /* linked list of all owned blocks */
+    GCBlock         *current_block;  /* block being allocated into */
+    uint8_t         *cursor;         /* next allocation position */
+    uint8_t         *limit;          /* end of current free-line run */
+    size_t           bytes_since_gc; /* allocation counter for GC trigger */
+    size_t           gc_threshold;   /* adaptive threshold (starts at GC_THRESHOLD) */
+    BlockPool       *pool;           /* shared block pool */
+    uint8_t          current_mark;   /* alternates 0/1 each GC cycle */
+    bool             needs_gc;       /* set by gc_alloc when threshold exceeded */
     /* Generational GC scheduling */
-    size_t     old_gen_bytes;           /* total bytes in old generation */
-    size_t     last_major_old_gen_bytes; /* old_gen_bytes at end of last major GC */
-    uint32_t   gc_cycle_count;          /* total GC cycles run (first cycle is major) */
+    size_t           old_gen_bytes;           /* total bytes in old generation */
+    size_t           last_major_old_gen_bytes; /* old_gen_bytes at end of last major GC */
+    uint32_t         gc_cycle_count;          /* total GC cycles run (first cycle is major) */
+    /* Mutex serializing blocks-list mutation (head-insert in gc_alloc slow
+     * path) with gc_sweep_concurrent's traversal + unlink. Hot allocation
+     * path (bump within current free-line run) does NOT acquire this. */
+    platform_mutex_t blocks_mutex;
 } ThreadHeap;
 
 void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -246,6 +250,7 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->old_gen_bytes           = 0;
     heap->last_major_old_gen_bytes = 0;
     heap->gc_cycle_count          = 0;
+    MUTEX_INIT(heap->blocks_mutex);
 }
 
 /* Forward-declare thread-local (defined later in this file) */
@@ -266,6 +271,7 @@ void gc_heap_destroy(ThreadHeap *heap) {
     heap->current_block = NULL;
     heap->cursor = NULL;
     heap->limit = NULL;
+    MUTEX_DESTROY(heap->blocks_mutex);
     /* Clear thread-local if it points to this heap, to prevent use-after-free */
     if (gc__current_heap == heap) {
         gc__current_heap = NULL;
@@ -385,20 +391,28 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
 
     if (total >= GC_BLOCK_SIZE) return NULL;
 
-    /* Fast path: bump within current free-line run */
+    /* Fast path: bump within current free-line run.
+     * Does NOT touch heap->blocks, so no lock needed. */
     if (heap->cursor && heap->cursor + total <= heap->limit) {
         return gc__bump_alloc(heap, total, obj_type);
     }
 
-    /* Slow path: scan all blocks from line 0 for a large-enough free run */
+    /* Slow path: scan blocks list. Lock to serialize with concurrent sweep
+     * which may be unlinking empty blocks. The lock is held through
+     * head-insert if we acquire a new block. The lock is released before
+     * tier-1 emergency GC (which re-acquires it for its own work). */
     needed_lines = (int)((total + GC_LINE_SIZE - 1) / GC_LINE_SIZE);
+
+    MUTEX_LOCK(heap->blocks_mutex);
     b = heap->blocks;
     while (b) {
         if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
         }
         b = b->next;
     }
+    MUTEX_UNLOCK(heap->blocks_mutex);
 
     /* No room in any existing block — acquire a new one from the pool */
     new_block = gc_block_pool_get(heap->pool);
@@ -414,13 +428,16 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     }
 
     /* After emergency GC: rescan existing blocks (GC may have freed runs) */
+    MUTEX_LOCK(heap->blocks_mutex);
     b = heap->blocks;
     while (b) {
         if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
         }
         b = b->next;
     }
+    MUTEX_UNLOCK(heap->blocks_mutex);
 
     /* After emergency GC: retry pool (GC may have recycled blocks) */
     new_block = gc_block_pool_get(heap->pool);
@@ -456,11 +473,15 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     return NULL; /* unreachable (handler aborts) */
 
 got_block:
+    /* Head-insert under the blocks mutex so we don't race with sweep's
+     * traversal or unlink. */
+    MUTEX_LOCK(heap->blocks_mutex);
     new_block->next = heap->blocks;
     heap->blocks = new_block;
     heap->current_block = new_block;
     heap->cursor = new_block->payload;
     heap->limit  = new_block->payload + GC_BLOCK_SIZE;
+    MUTEX_UNLOCK(heap->blocks_mutex);
 
     return gc__bump_alloc(heap, total, obj_type);
 }
@@ -694,50 +715,40 @@ void *gc__struct_registry = NULL;
 
 /* ======================================================================
  * GreyBuffer: per-thread append-only buffer for write barrier entries.
- * Thread-local writes only (no contention). GC reads a snapshot of count
- * during mark phase draining.
+ *
+ * Writer (owner) and reader (GC drain) are serialized by `gb->mutex`.
+ * Push is rare in practice — only fires during gc_active && on mutable-
+ * container mutation && when the stored value is a heap type — so mutex
+ * contention is bounded.
+ *
+ * Earlier design (lock-free, release-store on count) had an unsoundness:
+ * grey_buf_push's realloc could free the old entries buffer while the
+ * GC reader was iterating it. See AUDIT.md §3. The mutex serializes
+ * realloc with the read loop, eliminating the UAF.
  * ====================================================================== */
 
 #define GREY_BUF_INIT_CAP 256
 
 typedef struct {
-    JaclVal  *entries;
-    uint32_t  count;
-    uint32_t  cap;
+    JaclVal         *entries;
+    uint32_t         count;
+    uint32_t         cap;
+    platform_mutex_t mutex;
 } GreyBuffer;
 
 void grey_buf_init(GreyBuffer *gb) {
     gb->entries = (JaclVal *)malloc(GREY_BUF_INIT_CAP * sizeof(JaclVal));
     gb->count   = 0;
     gb->cap     = GREY_BUF_INIT_CAP;
+    MUTEX_INIT(gb->mutex);
 }
 
-/* grey_buf_push — Thread-local push with concurrent GC reader safety.
+/* grey_buf_push — append v under the buffer's mutex.
  *
- * Race scenario: A worker thread calls grey_buf_push (which may realloc the
- * entries array) while the GC thread concurrently reads entries via
- * gc__drain_grey_bufs.
- *
- * Why this is safe:
- *   1. realloc() copies all existing entries to the new buffer before
- *      returning, so entries[0..c-1] are valid in the new allocation.
- *   2. gb->entries[c] = v writes the new entry into the (possibly new) buffer.
- *   3. The release store to gb->count (below) happens-after both the realloc
- *      (which updated gb->entries) and the entry write (gb->entries[c] = v).
- *   4. In gc__drain_grey_bufs, the acquire load of gb->count sees the new
- *      count only after the release store, which transitively makes both the
- *      new gb->entries pointer and all entries[0..count-1] visible.
- *
- * Critical invariant: the gb->entries pointer store (from realloc) and the
- * gb->entries[c] store MUST both happen-before the release store to count.
- * This is guaranteed because they are all plain stores in the same thread,
- * and the release fence on count prevents reordering past them.
- *
- * Note: the GC thread only reads entries[drained[i]..count-1], never the
- * entries pointer directly through a load — it reads gb->entries once per
- * drain call, and the acquire on count ensures it sees the post-realloc
- * pointer if count reflects post-realloc entries. */
+ * The mutex serializes us with gc__drain_grey_bufs, so the GC reader never
+ * observes a half-realloc'd entries pointer or a freed old buffer. */
 void grey_buf_push(GreyBuffer *gb, JaclVal v) {
+    MUTEX_LOCK(gb->mutex);
     uint32_t c = gb->count;
     if (c >= gb->cap) {
         uint32_t new_cap = gb->cap * 2;
@@ -746,9 +757,10 @@ void grey_buf_push(GreyBuffer *gb, JaclVal v) {
         gb->cap = new_cap;
     }
     gb->entries[c] = v;
-    /* Release on count ensures entries[0..count-1] are visible to GC thread
-     * after acquire load of count */
+    /* Release on count: preserved for any readers that may legitimately use
+     * the count outside the mutex (e.g. an empty-check fast path). */
     ATOMIC_STORE_EXPLICIT(&gb->count, c + 1, MEM_RELEASE);
+    MUTEX_UNLOCK(gb->mutex);
 }
 
 void grey_buf_destroy(GreyBuffer *gb) {
@@ -756,6 +768,7 @@ void grey_buf_destroy(GreyBuffer *gb) {
     gb->entries = NULL;
     gb->count   = 0;
     gb->cap     = 0;
+    MUTEX_DESTROY(gb->mutex);
 }
 
 /* ======================================================================

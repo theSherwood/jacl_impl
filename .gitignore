@@ -8,5 +8,7 @@ a.out
 .claude
 .build_*
 .build/
+.build-tsan/
+.token-savior/
 build/
 *.gch

@@ -34,6 +34,7 @@ LIB_ONLY=0
 FILTER=""
 CLEAN=0
 PARALLEL=0
+TSAN=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
@@ -41,13 +42,29 @@ for arg in "$@"; do
     --test=*) FILTER="${arg#--test=}" ;;
     --parallel|-j) PARALLEL=$(nproc) ;;
     --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
+    --tsan) TSAN=1 ;;
   esac
 done
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-BUILD_DIR="${DIR}/.build"
+# TSAN mode uses a separate build cache so .build doesn't get poisoned with
+# instrumented binaries. The cache is keyed on the mode via the platform stamp.
+if [ "$TSAN" -eq 1 ]; then
+  BUILD_DIR="${DIR}/.build-tsan"
+  TSAN_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1"
+  CFLAGS="$CFLAGS $TSAN_FLAGS"
+  # halt_on_error=1: abort on first race so downstream UAFs don't cascade
+  # and tests can't hang after data corruption. exitcode=66 keeps the
+  # build runner's pass/fail logic working.
+  export TSAN_OPTIONS="halt_on_error=1 exitcode=66 second_deadlock_stack=1${TSAN_OPTIONS:+ $TSAN_OPTIONS}"
+  echo "TSAN mode: thread sanitizer enabled, build dir: $BUILD_DIR"
+  echo "         TSAN_OPTIONS=$TSAN_OPTIONS"
+else
+  TSAN_FLAGS=""
+  BUILD_DIR="${DIR}/.build"
+fi
 mkdir -p "$BUILD_DIR"
 
 if [ "$CLEAN" -eq 1 ]; then
@@ -106,6 +123,10 @@ TESTS=(
     "test/test_m11.c|m11|"
     "test/test_gc.c|gc|"
     "test/test_runtime.c|runtime|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_chaos_pinned_deque.c|chaos_pinned_deque|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_chaos_gc_deque_scan.c|chaos_gc_deque_scan|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_chaos_grey_buf.c|chaos_grey_buf|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_chaos_gc_alloc_sweep.c|chaos_gc_alloc_sweep|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
@@ -257,6 +278,11 @@ for entry in "${TESTS[@]}"; do
     flags="$CFLAGS"
     if [ -n "$extra_cflags" ]; then
         flags="$extra_cflags"
+        # Per-test flag lines override CFLAGS entirely; re-append TSAN flags
+        # so sanitizer instrumentation is preserved.
+        if [ "$TSAN" -eq 1 ]; then
+            flags="$flags $TSAN_FLAGS"
+        fi
     fi
 
     # Check if binary is up-to-date
