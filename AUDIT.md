@@ -22,7 +22,7 @@ now fixed too. **No open correctness items remain.**
 | B | Soak-surfaced races | 5 additional fixes, TSAN-validated |
 | C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
-| D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings) |
+| D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys` |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -52,21 +52,40 @@ generator path in spread). Same pattern as `c39ee12`. Suite
 unchanged: 87 pass, 14 pre-existing HAMT/RRB. TSAN unchanged
 relative to baseline (the §D.2 fix is pure single-thread ordering).
 
+§D.1 `JACL_ASSERT_TAG` macro is also landed. 56 asserts cover all
+four categories: 8 SM-field opcodes, 16 struct-field-store primitive
+extractions, 26 typed-collection pointer extractions, 6 stream/SM
+closure dereferences. The macro compiles to `assert(pred(v))` in
+debug builds, no-op under `-DNDEBUG`. The pass surfaced two real
+bugs and one piece of brittle test infrastructure:
+
+- **Typer bug (now fixed)**: `(HEAD_MAP_KEYS, TYPE_TYPED_MAP)` was
+  always inferred as `TYPE_TYPED_VEC`, even when the map's keys
+  were dyn (`inferred_key_struct_idx == UINT32_MAX`). The runtime
+  emit/consume in `OP_TYPED_MAP_KEYS` had always switched on
+  `key_type_idx == 0xFFFF` correctly, so the inconsistency had been
+  silent — `vec-len` against the dyn-keys output worked only because
+  `jacl_typed_vec_count` happens to share its count-field offset
+  with `jacl_vec_count`. Fixed in `typer.c` to emit `TYPE_VEC` for
+  the dyn-keys branch; assert now passes.
+- **Test bugs (now fixed)**: `test_struct_new_inline_opcode`,
+  `test_struct_new_inline_wide`, and `test_struct_new_inline_padding_zeroed`
+  in `test/test_compiler.c` hand-emitted bytecode using
+  `type_idx=1` (the reserved ctx slot) where they meant the first
+  user struct (`type_idx=2`), and pushed `jacl_i32(1)` into a
+  bool field. Both worked pre-assert because the runtime defaults
+  to an 8-byte raw memcpy for non-primitive fields and
+  `jacl_as_bool` returns payload bit 0. Fixed.
+
 The remaining work is non-correctness hardening:
 
 ### Punch list (in priority)
 
-1. **§D.1 `JACL_ASSERT_TAG` macro** — ~32 unchecked `jacl_as_*`
-   extraction sites in `vm.c`. §D.6 demonstrated these aren't safely
-   "trust the compiler"; a debug-only assert at every unchecked
-   extraction would have caught §D.6 at the call site instead of as
-   a SEGV. Mechanical, ~50 LoC. Worth doing because the next class
-   of compiler/VM coordination bug will land at one of these sites.
-2. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
+1. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
    `return VM_RUNTIME_ERROR` leaves the operand stack unbalanced.
    Macro-based refactor. Pure cleanup; defends against DoS-style
    slot drift.
-3. **Architectural items §10–§17** — throughput, latency, ergonomics.
+2. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
 
 §D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
@@ -706,28 +725,44 @@ reports the error and tears down. **For any opcode that pushes
 intermediate values then errors, those values stay on the operand
 stack.** This is the foundation of the §D.2 findings.
 
-### D.1 Tag-check completeness — ~32 unchecked extractions
+### D.1 Tag-check completeness — **FIXED** (56 asserts, 1 typer bug found)
 
 Survey of every `jacl_as_*` call in opcode handlers asks: was the
-source tag verified (`jacl_is_*`) first? Result: ~32 unchecked vs ~8
-checked, concentrated in three areas. None is reachable from
-well-typed user code — the compiler/typer is supposed to guarantee
-type-correctness before emitting the opcode. The risk is **layered
-trust**: a compiler/typer bug compounds into a wild-pointer read in
-the VM.
+source tag verified (`jacl_is_*`) first? Original estimate: ~32
+unchecked vs ~8 checked, concentrated in four areas. Real count
+turned out larger after enumerating every typed-collection opcode
+and per-primitive struct-field-store case: 56 sites total.
 
 | Area | Opcodes | Source | Status |
 |------|---------|--------|--------|
-| State-machine fields | `OP_GET_STATE_FIELD{,_CELL,_WIDE}`, `OP_SET_STATE_FIELD{,_CELL,_WIDE}`, `OP_GET_RESUME_POINT`, `OP_SET_RESUME_POINT` (`vm.c:8165-8265`) | `frame->stack_base + 0` — compiler invariant: slot 0 of a state-machine function holds the SM | Trust the compiler. Add `assert(jacl_is_state_machine(...))` in debug builds. |
-| Struct field stores | `OP_HEAP_RECORD_NEW`, `OP_STRUCT_NEW_INLINE`, `OP_STRUCT_SET_INLINE`, `OP_STRUCT_SET_UPVALUE` (`vm.c:6564-6910`) | Popped from stack; bytecode operand declares the type | Trust the typer. The opcode trusts the field-type operand, not the value's actual tag. Misemit → corruption. |
-| Typed collections | `OP_TYPED_VEC_*`, `OP_TYPED_MAP_*` (`vm.c:10015-10920`) | Popped from stack | Trust the typer. Add `assert(jacl_is_typed_*(...))` in debug builds. |
-| Stream / SM closure | `OP_STREAM_NEXT` reading `stream->state_machine` and `sm->sm_closure` (`vm.c:7493-7494`) | Field of a heap object | Trust struct invariants; field is populated only by the runtime. |
+| State-machine fields | `OP_GET_STATE_FIELD{,_CELL,_WIDE}`, `OP_SET_STATE_FIELD{,_CELL,_WIDE}`, `OP_GET_RESUME_POINT`, `OP_SET_RESUME_POINT` | `frame->stack_base + 0` — compiler invariant: slot 0 of a state-machine function holds the SM | **8 asserts** |
+| Struct field stores | `OP_HEAP_RECORD_NEW`, `OP_STRUCT_NEW_INLINE`, `OP_STRUCT_SET_INLINE`, `OP_STRUCT_SET_UPVALUE` | Popped from stack; bytecode operand declares the type | **16 asserts** (4 primitive types × 4 opcodes) |
+| Typed collections | `OP_TYPED_VEC_*`, `OP_TYPED_MAP_*` (length / push / set / concat / slice / each / transform / filter / keys / vals / has / remove / print / eq) | Popped from stack | **26 asserts** |
+| Stream / SM closure | `OP_SPREAD`, `OP_STREAM_NEXT`, `OP_COLLECT` reading `stream->state_machine` and `sm->sm_closure` | Field of a heap object | **6 asserts** (3 SM + 3 closure) |
 
-**Recommendation**: add a single `JACL_ASSERT_TAG(v, jacl_is_*)` macro
-that compiles to a debug-build check (`assert`) and a release-build
-no-op. Sprinkle at every unchecked extraction site. ~32 lines of
-mechanical change. Catches compiler/typer regressions early without
-slowing release builds. No correctness change on its own.
+Macro: `JACL_ASSERT_TAG(v, pred)` expands to `assert(pred(v))`. Compiles
+to no-op under `-DNDEBUG`.
+
+**Bug surfaced — typer mis-inferred `map-keys` over dyn-keyed maps**:
+The typer at `src/typer.c` unconditionally inferred
+`(map-keys x : typed-map K V) → typed-vec` even when K was dyn
+(`inferred_key_struct_idx == UINT32_MAX`). The runtime emit and consume
+in `OP_TYPED_MAP_KEYS` had always switched on `key_type_idx == 0xFFFF`
+correctly — the dyn branch pushed a plain `jacl_vector_ptr`, never a
+typed one. The inconsistency had been silent because `vec-len`
+downstream worked anyway: `jacl_typed_vec_count` shares its count-field
+offset with `jacl_vec_count`. The assert surfaced this immediately
+(`test_typed_map_keys` triggered `Assertion 'jacl_is_typed_vector(tvec_val)'`).
+Fixed: typer now branches on `recv->inferred_key_struct_idx == UINT32_MAX`
+and emits `TYPE_VEC` for the dyn-keys case.
+
+**Test brittleness surfaced — `test_struct_new_inline_*`**: three sub-
+tests in `test/test_compiler.c` hand-emit bytecode using `type_idx=1`
+(the reserved ctx slot) where they meant the first user struct
+(`type_idx=2`), and pushed `jacl_i32(1)` into a bool field. Pre-assert,
+these "worked" because the runtime defaults to an 8-byte raw memcpy
+for non-primitive fields, and `jacl_as_bool` returns payload bit 0.
+Fixed.
 
 ### D.2 Stack discipline — ~60 severity-(ii) and ~8 severity-(iii) leaks
 

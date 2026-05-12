@@ -2277,11 +2277,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           return;
         case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
           if (recv_t == TYPE_TYPED_MAP) {
-            node->inferred_type = TYPE_TYPED_VEC;
-            /* keys → typed-vec of key type; vals → typed-vec of value type */
-            node->inferred_struct_idx =
-                (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
-                                       : recv->inferred_struct_idx;
+            /* keys: dyn-keyed maps return a plain vec (matches the
+             * runtime path in OP_TYPED_MAP_KEYS keyed on
+             * key_type_idx == 0xFFFF); only struct/scalar-typed keys
+             * yield a typed vec. vals on a TYPE_TYPED_MAP always have
+             * a declared value type, so they're always typed-vec. */
+            if (hid == HEAD_MAP_KEYS &&
+                recv->inferred_key_struct_idx == UINT32_MAX) {
+              node->inferred_type = TYPE_VEC;
+            } else {
+              node->inferred_type = TYPE_TYPED_VEC;
+              node->inferred_struct_idx =
+                  (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
+                                         : recv->inferred_struct_idx;
+            }
           } else if (recv_t == TYPE_MAP) {
             node->inferred_type = TYPE_VEC;
           }

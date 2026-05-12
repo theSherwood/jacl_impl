@@ -18,6 +18,17 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
+#include <assert.h>
+
+/* §D.1: debug-only sanity check at every unchecked `jacl_as_*`
+ * extraction. The compiler/typer is supposed to guarantee tag
+ * correctness before emitting these opcodes, but §D.6 demonstrated
+ * the trust can break (a compiler-level coordination bug between
+ * spawn-body SM-wrapping and inner-call frame management surfaced
+ * as a wild-pointer SEGV in OP_SET_STATE_FIELD). This assertion
+ * catches the next such regression at the call site rather than as
+ * a downstream crash. Compiles to nothing under -DNDEBUG. */
+#define JACL_ASSERT_TAG(v, pred) assert(pred(v))
 
 /* --- Stack size --- */
 
@@ -6598,21 +6609,25 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           uint32_t off = sdef->fields[i].offset;
           switch (sdef->fields[i].type) {
             case TYPE_BOOL: {
+              JACL_ASSERT_TAG(val, jacl_is_bool);
               uint8_t b = jacl_as_bool(val) ? 1 : 0;
               s->data[off] = b;
               break;
             }
             case TYPE_I32: {
+              JACL_ASSERT_TAG(val, jacl_is_i32);
               int32_t n = jacl_as_i32(val);
               memcpy(s->data + off, &n, 4);
               break;
             }
             case TYPE_U32: {
+              JACL_ASSERT_TAG(val, jacl_is_u32);
               uint32_t n = jacl_as_u32(val);
               memcpy(s->data + off, &n, 4);
               break;
             }
             case TYPE_F32: {
+              JACL_ASSERT_TAG(val, jacl_is_f32);
               float f = jacl_as_f32(val);
               memcpy(s->data + off, &f, 4);
               break;
@@ -6695,23 +6710,27 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           switch (sdef->fields[i].type) {
             case TYPE_BOOL: {
               JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              JACL_ASSERT_TAG(v, jacl_is_bool);
               scratch[off] = jacl_as_bool(v) ? 1 : 0;
               break;
             }
             case TYPE_I32: {
               JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              JACL_ASSERT_TAG(v, jacl_is_i32);
               int32_t n = jacl_as_i32(v);
               memcpy(scratch + off, &n, 4);
               break;
             }
             case TYPE_U32: {
               JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              JACL_ASSERT_TAG(v, jacl_is_u32);
               uint32_t n = jacl_as_u32(v);
               memcpy(scratch + off, &n, 4);
               break;
             }
             case TYPE_F32: {
               JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              JACL_ASSERT_TAG(v, jacl_is_f32);
               float f = jacl_as_f32(v);
               memcpy(scratch + off, &f, 4);
               break;
@@ -6836,10 +6855,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (result != VM_OK) return result;
         uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
         switch ((JaclType)field_type) {
-          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
-          case TYPE_I32: { int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
-          case TYPE_U32: { uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
-          case TYPE_F32: { float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
+          case TYPE_BOOL: { JACL_ASSERT_TAG(new_val, jacl_is_bool); uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
+          case TYPE_I32: { JACL_ASSERT_TAG(new_val, jacl_is_i32); int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_U32: { JACL_ASSERT_TAG(new_val, jacl_is_u32); uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_F32: { JACL_ASSERT_TAG(new_val, jacl_is_f32); float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
           case TYPE_I64: { int64_t n = (int64_t)new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
           case TYPE_U64: { uint64_t n = new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
           case TYPE_F64: { double d; memcpy(&d, &new_val, 8); memcpy(struct_base + byte_offset, &d, 8); break; }
@@ -6941,10 +6960,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (result != VM_OK) return result;
         uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
         switch ((JaclType)field_type) {
-          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
-          case TYPE_I32: { int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
-          case TYPE_U32: { uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
-          case TYPE_F32: { float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
+          case TYPE_BOOL: { JACL_ASSERT_TAG(new_val, jacl_is_bool); uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
+          case TYPE_I32: { JACL_ASSERT_TAG(new_val, jacl_is_i32); int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_U32: { JACL_ASSERT_TAG(new_val, jacl_is_u32); uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_F32: { JACL_ASSERT_TAG(new_val, jacl_is_f32); float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
           case TYPE_I64: { int64_t n = (int64_t)new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
           case TYPE_U64: { uint64_t n = new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
           case TYPE_F64: { double d; memcpy(&d, &new_val, 8); memcpy(struct_base + byte_offset, &d, 8); break; }
@@ -7276,7 +7295,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               BytecodeChunk* caller_chunk = vm->chunk;
 
               /* SM generator: call sm_closure(state_obj, nil) each time */
+              JACL_ASSERT_TAG(stream->state_machine, jacl_is_state_machine);
               JaclStateMachine* sm = jacl_as_state_machine(stream->state_machine);
+              JACL_ASSERT_TAG(sm->sm_closure, jacl_is_closure);
               JaclClosure* sm_cl = jacl_as_closure(sm->sm_closure);
 
               /* Check frame capacity BEFORE pushing args. See AUDIT.md
@@ -7531,7 +7552,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         /* --- State machine generator path --- */
         if (!jacl_is_nil(stream->state_machine)) {
+          JACL_ASSERT_TAG(stream->state_machine, jacl_is_state_machine);
           JaclStateMachine* sm = jacl_as_state_machine(stream->state_machine);
+          JACL_ASSERT_TAG(sm->sm_closure, jacl_is_closure);
           JaclClosure* sm_cl = jacl_as_closure(sm->sm_closure);
 
           /* SM generators always call the same way: sm_closure(state_obj, nil) */
@@ -7921,7 +7944,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BytecodeChunk* caller_chunk = vm->chunk;
 
           /* State machine generator: call sm_closure(state_obj, nil) */
+          JACL_ASSERT_TAG(stream->state_machine, jacl_is_state_machine);
           JaclStateMachine* sm = jacl_as_state_machine(stream->state_machine);
+          JACL_ASSERT_TAG(sm->sm_closure, jacl_is_closure);
           JaclClosure* sm_cl = jacl_as_closure(sm->sm_closure);
 
           result = vm__push(vm, sm->sm_closure);
@@ -8203,6 +8228,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_GET_STATE_FIELD: {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         result = vm__push(vm, sm->fields[field_index]);
         if (result != VM_OK) return result;
@@ -8212,6 +8238,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_SET_STATE_FIELD: {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         JaclVal value;
         result = vm__pop(vm, &value);
@@ -8223,6 +8250,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_GET_STATE_FIELD_CELL: {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         JaclVal cell = sm->fields[field_index];
         JaclMutableRef *ref = jacl_as_cell(cell);
@@ -8234,6 +8262,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_SET_STATE_FIELD_CELL: {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         JaclVal cell = sm->fields[field_index];
         JaclMutableRef *ref = jacl_as_cell(cell);
@@ -8255,6 +8284,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t base_idx = vm__read_byte(vm);
         uint8_t width    = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         uint32_t push_base = vm->stack_top;
         for (uint8_t i = 0; i < width; i++) {
@@ -8276,6 +8306,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t base_idx = vm__read_byte(vm);
         uint8_t width    = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         /* Copy from stack (bottom of the N-slot range first) */
         for (uint8_t i = 0; i < width; i++) {
@@ -8291,6 +8322,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_GET_RESUME_POINT: {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         result = vm__push(vm, jacl_i32((int32_t)sm->resume_point));
         if (result != VM_OK) return result;
@@ -8299,6 +8331,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_SET_RESUME_POINT: {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         JaclVal value;
         result = vm__pop(vm, &value);
@@ -9985,6 +10018,7 @@ interpret_done:
           return VM_RUNTIME_ERROR;
         }
 
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         int32_t idx = jacl_as_i32(idx_val);
 
@@ -10053,6 +10087,7 @@ interpret_done:
         JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         gc__current_heap = &vm->heap;
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_push_back_wide(tvec, slots);
@@ -10080,6 +10115,7 @@ interpret_done:
           return VM_RUNTIME_ERROR;
         }
 
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         int32_t idx = jacl_as_i32(idx_val);
 
@@ -10097,6 +10133,7 @@ interpret_done:
       case OP_TYPED_VEC_LEN: {
         JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_typed_vec_count(tvec)));
         if (result != VM_OK) return result;
@@ -10109,6 +10146,8 @@ interpret_done:
         JaclVal b_val, a_val;
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(a_val, jacl_is_typed_vector);
+        JACL_ASSERT_TAG(b_val, jacl_is_typed_vector);
         jacl_typed_vec_root* a = (jacl_typed_vec_root*)jacl_as_ptr(a_val);
         jacl_typed_vec_root* b = (jacl_typed_vec_root*)jacl_as_ptr(b_val);
         gc__current_heap = &vm->heap;
@@ -10133,6 +10172,7 @@ interpret_done:
           vm__set_error(vm, "vec-slice: expected i32 end, got %s", vm__type_name(end_val));
           return VM_RUNTIME_ERROR;
         }
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         int32_t start = jacl_as_i32(start_val);
         int32_t end = jacl_as_i32(end_val);
@@ -10174,6 +10214,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_vector);
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
           uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
@@ -10236,6 +10277,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_map);
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
           uint32_t kwidth = kdef ? ((kdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal)) : 0;
@@ -10349,6 +10391,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_vector);
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
           uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
@@ -10417,6 +10460,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_map);
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
           uint32_t kwidth = kdef ? ((kdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal)) : 0;
@@ -10535,6 +10579,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_vector);
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
           bool push_inline = closure->has_inline_params;
@@ -10605,6 +10650,7 @@ interpret_done:
                          (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          JACL_ASSERT_TAG(coll_val, jacl_is_typed_map);
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
           uint32_t kwidth = kdef ? vm__struct_width(kdef) : 0;
@@ -10754,6 +10800,7 @@ interpret_done:
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         leaf = jacl_typed_map_get_leaf(tmap, key_slots, kw);
 
@@ -10800,6 +10847,7 @@ interpret_done:
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
 
         gc__current_heap = &vm->heap;
@@ -10821,6 +10869,7 @@ interpret_done:
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         bool found = (key_type_idx == 0xFFFF)
                        ? jacl_typed_map_has(tmap, key_slots[0])
@@ -10842,6 +10891,7 @@ interpret_done:
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         gc__current_heap = &vm->heap;
         jacl_typed_map_node* new_tmap = (key_type_idx == 0xFFFF)
@@ -10855,6 +10905,7 @@ interpret_done:
       case OP_TYPED_MAP_LEN: {
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_typed_map_count(tmap)));
         if (result != VM_OK) return result;
@@ -10866,6 +10917,7 @@ interpret_done:
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         gc__current_heap = &vm->heap;
         jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
@@ -10902,6 +10954,7 @@ interpret_done:
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         uint32_t width = vm__typed_elem_width(vm, type_idx);
 
@@ -10925,6 +10978,7 @@ interpret_done:
         JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         uint32_t count = jacl_typed_vec_count(tvec);
 
@@ -10958,6 +11012,7 @@ interpret_done:
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         bool val_is_scalar = (type_idx >= 0xFF00);
         bool key_is_scalar = (key_type_idx >= 0xFF00 && key_type_idx != 0xFFFF);
@@ -11010,6 +11065,8 @@ interpret_done:
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(a_val, jacl_is_typed_vector);
+        JACL_ASSERT_TAG(b_val, jacl_is_typed_vector);
         jacl_typed_vec_root* a = (jacl_typed_vec_root*)jacl_as_ptr(a_val);
         jacl_typed_vec_root* b = (jacl_typed_vec_root*)jacl_as_ptr(b_val);
 
@@ -11048,6 +11105,8 @@ interpret_done:
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
 
+        JACL_ASSERT_TAG(a_val, jacl_is_typed_map);
+        JACL_ASSERT_TAG(b_val, jacl_is_typed_map);
         jacl_typed_map_node* a = (jacl_typed_map_node*)jacl_as_ptr(a_val);
         jacl_typed_map_node* b = (jacl_typed_map_node*)jacl_as_ptr(b_val);
 

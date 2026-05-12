@@ -4915,9 +4915,9 @@ static int test_struct_new_inline_opcode(void) {
   chunk_add_constant(&chunk, jacl_i32(20));
   chunk_write(&chunk, OP_CONST, 1);
   chunk_write_u16(&chunk, 1, 1);
-  /* OP_STRUCT_NEW_INLINE type_idx=1 (Point) */
+  /* OP_STRUCT_NEW_INLINE type_idx=2 (Point — slot 1 reserved for ctx) */
   chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
-  chunk_write_u16(&chunk, 1, 1);
+  chunk_write_u16(&chunk, 2, 1);
   /* Pop inline data and halt */
   chunk_write(&chunk, OP_POP, 1);
   chunk_write(&chunk, OP_HALT, 1);
@@ -5007,9 +5007,9 @@ static int test_struct_new_inline_wide(void) {
     chunk_write(&chunk, OP_CONST_F64, 1);
     chunk_write_u16(&chunk, ci, 1);
   }
-  /* OP_STRUCT_NEW_INLINE type_idx=1 */
+  /* OP_STRUCT_NEW_INLINE type_idx=2 (Vec3 — slot 1 reserved for ctx) */
   chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
-  chunk_write_u16(&chunk, 1, 1);
+  chunk_write_u16(&chunk, 2, 1);
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
@@ -5056,8 +5056,8 @@ static int test_struct_new_inline_padding_zeroed(void) {
 
   BytecodeChunk chunk;
   chunk_init(&chunk, &arena);
-  /* Push bool (i32 value 1 = true) */
-  chunk_add_constant(&chunk, jacl_i32(1));
+  /* Push bool true */
+  chunk_add_constant(&chunk, JACL_TRUE);
   chunk_write(&chunk, OP_CONST, 1);
   chunk_write_u16(&chunk, 0, 1);
   /* Push i32 value 42 */
