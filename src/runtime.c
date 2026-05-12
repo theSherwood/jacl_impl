@@ -76,6 +76,16 @@ typedef struct WorkerThread {
     volatile intptr_t  pinned_inbox_count;
     intptr_t           pinned_inbox_cap;
     platform_mutex_t   pinned_inbox_mutex;
+    /* Retired tasks: epoch-deferred free list. After running a task, the
+     * worker can't free it immediately because gc_enumerate_roots may have
+     * observed the task pointer via currently_executing and be about to
+     * dereference task->gc_root*. We defer freeing until a new GC cycle
+     * has started (global_epoch > retire_epoch), which means the previous
+     * GC's scan has completed (gc_running CAS guarantees no overlap). */
+    RuntimeTask      **retired_tasks;
+    uint64_t          *retired_epochs;
+    uint32_t           retired_count;
+    uint32_t           retired_cap;
 } WorkerThread;
 
 struct Runtime {
@@ -195,6 +205,46 @@ void runtime__emergency_gc(void *ctx) {
  *   4. If not found: mark idle, backoff sleep
  * ====================================================================== */
 
+/* Retire a task: append to the deferred-free list with the current global
+ * epoch. The actual free happens later, once global_epoch has advanced past
+ * retire_epoch (which means the GC scan that may have observed this task
+ * via currently_executing has completed). */
+static void runtime__retire_task(WorkerThread *self, RuntimeTask *task) {
+    if (self->retired_count >= self->retired_cap) {
+        uint32_t new_cap = self->retired_cap * 2;
+        self->retired_tasks = (RuntimeTask **)realloc(self->retired_tasks,
+            (size_t)new_cap * sizeof(RuntimeTask *));
+        self->retired_epochs = (uint64_t *)realloc(self->retired_epochs,
+            (size_t)new_cap * sizeof(uint64_t));
+        self->retired_cap = new_cap;
+    }
+    uint64_t e = ATOMIC_LOAD_EXPLICIT(&self->runtime->global_epoch,
+                                       MEM_ACQUIRE);
+    self->retired_tasks[self->retired_count]  = task;
+    self->retired_epochs[self->retired_count] = e;
+    self->retired_count++;
+}
+
+/* Free any retired tasks whose retire_epoch is strictly less than the
+ * current global_epoch. By that point, gc_running has been reset since the
+ * task was retired, so any GC scan that observed the task pointer has
+ * completed and no longer references it. */
+static void runtime__drain_retired(WorkerThread *self) {
+    uint64_t now = ATOMIC_LOAD_EXPLICIT(&self->runtime->global_epoch,
+                                         MEM_ACQUIRE);
+    uint32_t write = 0;
+    for (uint32_t i = 0; i < self->retired_count; i++) {
+        if (self->retired_epochs[i] < now) {
+            free(self->retired_tasks[i]);
+        } else {
+            self->retired_tasks[write]  = self->retired_tasks[i];
+            self->retired_epochs[write] = self->retired_epochs[i];
+            write++;
+        }
+    }
+    self->retired_count = write;
+}
+
 THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
     WorkerThread *self = (WorkerThread *)arg;
     Runtime *rt = self->runtime;
@@ -203,6 +253,10 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
     rt__worker_id = self->id;
 
     while (!ATOMIC_LOAD_EXPLICIT(&rt->shutdown, MEM_ACQUIRE)) {
+        /* Drain any retired tasks whose epoch has expired. This is the
+         * deferred free for tasks finished on previous iterations. */
+        if (self->retired_count > 0) runtime__drain_retired(self);
+
         /* Announce BUSY before any deque/inbox operation */
         ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_BUSY,
                               MEM_RELEASE);
@@ -294,17 +348,25 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
             /* Execute the task */
             task->fn(task->data);
 
-            /* Free the task envelope */
-            free(task);
-
             /* Mark idle */
             ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_IDLE,
                                   MEM_RELEASE);
 
+            /* Retire the task — deferred free. Cannot free immediately
+             * because gc_enumerate_roots may have observed the task pointer
+             * via currently_executing and not yet dereferenced gc_root*.
+             * The actual free happens once global_epoch advances past the
+             * retire_epoch (the previous GC's scan has completed by then). */
+            runtime__retire_task(self, task);
+
             /* GC trigger: if allocation threshold exceeded, try to start GC */
-            if (self->vm.heap.bytes_since_gc > GC_THRESHOLD) {
-                self->vm.heap.bytes_since_gc = 0;
-                self->vm.heap.needs_gc = false;
+            size_t bsg = ATOMIC_LOAD_EXPLICIT(
+                &self->vm.heap.bytes_since_gc, MEM_RELAXED);
+            if (bsg > GC_THRESHOLD) {
+                ATOMIC_STORE_EXPLICIT(&self->vm.heap.bytes_since_gc, 0,
+                                      MEM_RELAXED);
+                ATOMIC_STORE_EXPLICIT(&self->vm.heap.needs_gc, false,
+                                      MEM_RELAXED);
                 {
                     uint32_t gc_expected = 0;
                     if (ATOMIC_CAS(&rt->gc_running, &gc_expected, 1,
@@ -385,6 +447,14 @@ void runtime__init_state(Runtime *rt, int num_workers) {
             (size_t)w->pinned_inbox_cap * sizeof(uintptr_t));
         MUTEX_INIT(w->pinned_inbox_mutex);
 
+        /* Retired tasks: epoch-deferred free list */
+        w->retired_cap    = 32;
+        w->retired_count  = 0;
+        w->retired_tasks  = (RuntimeTask **)malloc(
+            (size_t)w->retired_cap * sizeof(RuntimeTask *));
+        w->retired_epochs = (uint64_t *)malloc(
+            (size_t)w->retired_cap * sizeof(uint64_t));
+
         w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
         for (j = 0; j < num_workers; j++)
             w->steal_ids[j] = -1;
@@ -427,11 +497,16 @@ void runtime__start_threads(Runtime *rt) {
  * ====================================================================== */
 
 void runtime_destroy(Runtime *rt) {
-    /* Signal all workers to stop and join them */
+    runtime__stop_threads(rt);
+    runtime__teardown_state(rt);
+}
+
+/* runtime__stop_threads — signal shutdown and join all worker threads.
+ * Resources are NOT freed; call runtime__teardown_state afterwards. */
+void runtime__stop_threads(Runtime *rt) {
     ATOMIC_STORE_EXPLICIT(&rt->shutdown, 1, MEM_RELEASE);
     for (int i = 0; i < rt->num_workers; i++)
         THREAD_JOIN(rt->workers[i].thread, NULL);
-    runtime__teardown_state(rt);
 }
 
 /* runtime__teardown_state — release all Runtime/WorkerThread resources.
@@ -483,6 +558,12 @@ void runtime__teardown_state(Runtime *rt) {
             free((RuntimeTask *)w->pinned_inbox[k]);
         free(w->pinned_inbox);
         MUTEX_DESTROY(w->pinned_inbox_mutex);
+
+        /* Free retired tasks (threads are joined, no GC running) */
+        for (uint32_t k = 0; k < w->retired_count; k++)
+            free(w->retired_tasks[k]);
+        free(w->retired_tasks);
+        free(w->retired_epochs);
 
         free(w->steal_ids);
 
@@ -667,8 +748,12 @@ void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms, int thief_id) {
          * path. Our thief epoch already pins the buffer against reclaim. */
         rt_deque_buffer *buf = ATOMIC_LOAD_EXPLICIT(&dq->buffer, MEM_ACQUIRE);
         for (uint64_t i = t; i < b; i++) {
+            /* ACQUIRE: pairs with chase_lev.h's CL_DATA_STORE which uses
+             * RELEASE (CHASE_LEV_ATOMIC_DATA mode). Without per-slot
+             * acquire, the GC can read the pointer but miss the writer
+             * thread's earlier writes to the pointed-to task struct. */
             uintptr_t val = ATOMIC_LOAD_EXPLICIT(
-                &buf->data[i & buf->mask], MEM_RELAXED);
+                &buf->data[i & buf->mask], MEM_ACQUIRE);
             if (val > WORKER_BUSY) {
                 RuntimeTask *task = (RuntimeTask *)val;
                 gc__ms_push_val(ms, task->gc_root);
@@ -948,8 +1033,8 @@ void gc_concurrent_collect(Runtime *rt) {
     for (i = 0; i < rt->num_workers; i++) {
         ThreadHeap *wh = &rt->workers[i].vm.heap;
         wh->current_mark   = next_mark;
-        wh->bytes_since_gc = 0;
-        wh->needs_gc       = false;
+        ATOMIC_STORE_EXPLICIT(&wh->bytes_since_gc, 0, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&wh->needs_gc, false, MEM_RELAXED);
         wh->gc_cycle_count++;
         /* Concurrent GC is always major — snapshot old gen size */
         wh->last_major_old_gen_bytes = wh->old_gen_bytes;

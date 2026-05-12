@@ -1998,8 +1998,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
   CallFrame* frame = &vm->frames[vm->frame_count - 1];
 
   for (;;) {
-    /* GC safepoint: collect if threshold exceeded */
-    if (vm->heap.needs_gc) {
+    /* GC safepoint: collect if threshold exceeded. Atomic load — needs_gc
+     * may be set by gc_alloc from another worker's view through this
+     * heap, and reset by the concurrent GC. */
+    if (ATOMIC_LOAD_EXPLICIT(&vm->heap.needs_gc, MEM_RELAXED)) {
       if (!vm->runtime) {
         /* Single-threaded: choose minor or major GC */
         if (gc_should_major(&vm->heap)) {
@@ -2008,8 +2010,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           gc_collect_minor(&vm->heap, vm, vm->remembered_set);
         }
       } else {
-        vm->heap.needs_gc = false;
-        vm->heap.bytes_since_gc = 0;
+        ATOMIC_STORE_EXPLICIT(&vm->heap.needs_gc, false, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&vm->heap.bytes_since_gc, 0, MEM_RELAXED);
         gc_concurrent_trigger(vm->runtime);
       }
     }

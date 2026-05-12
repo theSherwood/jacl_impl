@@ -354,11 +354,19 @@ void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
     GCHeader *hdr;
 
     heap->cursor += total;
-    heap->bytes_since_gc += total;
+    /* bytes_since_gc is read by the concurrent GC (gc__adjust_threshold) from
+     * another thread. Tag accesses as relaxed atomic so TSAN can see the
+     * synchronization. Owner is sole writer; relaxed RMW is sufficient
+     * because precise values aren't required (this is a GC heuristic). */
+    size_t bsg = ATOMIC_LOAD_EXPLICIT(&heap->bytes_since_gc, MEM_RELAXED);
+    bsg += total;
+    ATOMIC_STORE_EXPLICIT(&heap->bytes_since_gc, bsg, MEM_RELAXED);
 
-    /* Flag GC if adaptive threshold exceeded (checked by VM at next safepoint) */
-    if (heap->bytes_since_gc > heap->gc_threshold) {
-        heap->needs_gc = true;
+    /* Flag GC if adaptive threshold exceeded (checked by VM at next safepoint).
+     * Relaxed atomic load — threshold may be concurrently adjusted by GC. */
+    size_t thresh = ATOMIC_LOAD_EXPLICIT(&heap->gc_threshold, MEM_RELAXED);
+    if (bsg > thresh) {
+        ATOMIC_STORE_EXPLICIT(&heap->needs_gc, true, MEM_RELAXED);
     }
 
     gc__mark_lines(heap->current_block,

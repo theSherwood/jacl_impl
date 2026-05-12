@@ -208,14 +208,30 @@ under the lock.
   is currently bumping into.
 
 ### `ThreadHeap.bytes_since_gc`, `gc_threshold`, `needs_gc`
-- **W**: owner only
-- **R**: owner only
-- **Sync**: none required (single owner)
+- **W**: owner (allocator) and GC worker
+- **R**: owner (allocator, VM safepoint) and GC worker
+- **Sync**: relaxed atomic ops on all accesses
+- **Order**: `MEM_RELAXED` everywhere — these are heuristics, the value
+  being slightly stale is acceptable, but the access itself must be
+  atomic so TSAN can track it.
 - **Note**: the worker_loop's GC-trigger check (`bytes_since_gc > GC_THRESHOLD`)
   uses the static threshold rather than the adaptive `gc_threshold`.
   **UNSOUND-ish (AUDIT.md §6)**: not a race, but a correctness/efficiency
   miss — adaptive scheduling is bypassed in multi-threaded mode.
   **Fix pending** (one-line change).
+
+### `WorkerThread.retired_tasks`, `retired_epochs`, `retired_count`
+- **W**: owner only — `runtime__retire_task` appends after a task runs;
+  `runtime__drain_retired` compacts at the top of each loop iteration
+- **R**: owner only
+- **Sync**: none required (single owner)
+- **Invariant**: a task is freed only when `global_epoch > retire_epoch`,
+  which means a new GC cycle has started since the task was retired. The
+  `gc_running` CAS guarantees no overlap, so by the time `global_epoch`
+  advances, the previous GC's scan (which may have observed the task via
+  `currently_executing`) has completed. Without this, freeing a task
+  while the GC is dereferencing `task->gc_root*` is a UAF (surfaced by
+  `test_chaos_soak` under TSAN).
 
 ### `ThreadHeap.current_mark`
 - **W**: GC at end of cycle (toggles 0↔1)

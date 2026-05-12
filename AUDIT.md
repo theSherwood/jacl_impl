@@ -253,6 +253,60 @@ In rough priority:
 
 All P0s addressed. Remaining items 7–8 are P1 and quick.
 
+## Additional issues found by the soak test (Phase C)
+
+The soak test (`test/test_chaos_soak.c`) — 4 driver threads submitting a
+randomized mix of allocation / atom-write-barrier / pinned-task ops to 4
+workers — surfaced several more issues that only show up under sustained
+concurrent load. All fixed:
+
+### S1. Task envelope freed before GC scan completes
+`runtime__worker_loop` was calling `free(task)` after running the task,
+before `currently_executing` was reset to IDLE. A concurrent
+`gc_enumerate_roots` could observe the task pointer via
+`currently_executing` and dereference `task->gc_root*` after the free.
+Fix: defer task free until a new GC epoch starts (per-worker
+`retired_tasks` list, drained when `global_epoch` advances past
+`retire_epoch`). The GC scan that observed the task pointer must have
+completed by the time we cross into a new epoch (gc_running CAS
+guarantees no overlap).
+
+### S2. `heap->bytes_since_gc` and `heap->gc_threshold` races
+Both written by the allocator (worker) and read by `gc__adjust_threshold`
+(GC worker). Fix: relaxed atomic accesses everywhere. These are
+heuristics so relaxed is sufficient — the value being slightly stale is
+fine, but the access itself must be atomic.
+
+### S3. `heap->needs_gc` race
+Written by `gc_alloc` (worker), `gc_concurrent_collect` end-of-cycle
+(GC worker), and the VM safepoint. Fix: atomic-relaxed accesses
+everywhere.
+
+### S4. `gc__trace_object`'s mutable-ref trace was a plain load
+Tracing `OBJ_MUTABLE_REF` read `MREF_VAL(ref)` as a plain load. Atom
+mutations atomic-store this slot from worker threads. Race. Worse: a
+plain load doesn't pair with the release-store, so the GC could see a
+fresh pointer but miss writes to the pointed-to object's GCHeader.
+Fix: atomic ACQUIRE load — pairs with the worker's RELEASE store.
+
+### S5. Chase-Lev fence + relaxed-store opaque to TSAN
+The Chase-Lev paper's pattern (relaxed-store-on-data, release-fence,
+relaxed-store-on-bottom) is correct under C11 but TSAN's per-location
+vector clocks don't track happens-before through a free-standing fence.
+Fix: replace with a direct release-store on `bottom`. Same C11
+guarantee, cleaner for TSAN. Also strengthened `CL_DATA_LOAD`/
+`CL_DATA_STORE` (the new opt-in atomic data mode) from relaxed to
+acquire/release, and matched the consumer side in `gc__scan_deque`.
+
+### Phase C testing infrastructure
+
+- `test/test_chaos_soak.c` — randomized concurrent workload, time-bounded,
+  seed-reproducible. Currently configured for 4 drivers × 4 workers
+  default 5s, override via `SOAK_DURATION_SEC` env var.
+- Validated TSAN-clean at 5s, 30s, and 60s durations (433K tasks at 60s).
+- Drivers self-throttle when the queue runs ahead of execution so the
+  test terminates in bounded time even under TSAN's 20x slowdown.
+
 ## Testing infrastructure
 
 A TSAN build mode is now available: `./build.sh --tsan [--test=NAME]`. It

@@ -1581,6 +1581,11 @@ typedef struct WorkerThread {
     volatile intptr_t  pinned_inbox_count;
     intptr_t           pinned_inbox_cap;
     platform_mutex_t   pinned_inbox_mutex;
+    /* Retired tasks: epoch-deferred free list. See runtime.c for invariant. */
+    RuntimeTask      **retired_tasks;
+    uint64_t          *retired_epochs;
+    uint32_t           retired_count;
+    uint32_t           retired_cap;
 } WorkerThread;
 
 struct Runtime {
@@ -2304,6 +2309,7 @@ extern void runtime_destroy (Runtime *rt);
  * code should use runtime_init / runtime_destroy. */
 extern void runtime__init_state (Runtime *rt, int num_workers);
 extern void runtime__start_threads (Runtime *rt);
+extern void runtime__stop_threads (Runtime *rt);
 extern void runtime__teardown_state (Runtime *rt);
 extern void runtime__push_inbox (Runtime *rt, RuntimeTask *task);
 extern void runtime__push_pinned (Runtime *rt, RuntimeTask *task, int worker_id);

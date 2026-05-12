@@ -65,8 +65,14 @@
  *            Required when concurrent readers outside push/take/steal exist
  *            (e.g. gc__scan_deque in runtime.c). */
 #ifdef CHASE_LEV_ATOMIC_DATA
-#define CL_DATA_LOAD(slot)         ATOMIC_LOAD_EXPLICIT((slot), MEM_RELAXED)
-#define CL_DATA_STORE(slot, val)   ATOMIC_STORE_EXPLICIT((slot), (val), MEM_RELAXED)
+/* Acquire/release on slot accesses establishes happens-before through
+ * the slot pointer itself. Per-location synchronization in addition to
+ * the bottom/top release-acquire pair. This is technically more
+ * synchronization than the Chase-Lev paper requires (which relies only
+ * on bottom/top fences), but TSAN's per-location vector clock tracking
+ * is more reliable when each shared location carries its own HB edge. */
+#define CL_DATA_LOAD(slot)         ATOMIC_LOAD_EXPLICIT((slot), MEM_ACQUIRE)
+#define CL_DATA_STORE(slot, val)   ATOMIC_STORE_EXPLICIT((slot), (val), MEM_RELEASE)
 #else
 #define CL_DATA_LOAD(slot)         (*(slot))
 #define CL_DATA_STORE(slot, val)   ((void)(*(slot) = (val)))
@@ -254,12 +260,13 @@ static inline void CL_DEQUE_PUSH(CL_DEQUE* dq, CHASE_LEV_T element) {
     CL_DEQUE_RECLAIM(dq);
   }
 
-  /* Synchronization with thieves is via the release fence + atomic store on
-   * `bottom` below. When CHASE_LEV_ATOMIC_DATA is set, CL_DATA_STORE uses a
-   * relaxed atomic store so TSAN can track the slot access. */
+  /* Synchronization with thieves is via the release store on `bottom`.
+   * The Chase-Lev paper uses a release fence + relaxed-store; that's
+   * equivalent under C11 but harder for TSAN to track through individual
+   * memory locations. Direct release-store works on all platforms and
+   * keeps TSAN happy. */
   CL_DATA_STORE(&buf->data[b & buf->mask], element);
-  ATOMIC_FENCE(MEM_RELEASE);
-  ATOMIC_STORE_EXPLICIT(&dq->bottom, b + 1, MEM_RELAXED);
+  ATOMIC_STORE_EXPLICIT(&dq->bottom, b + 1, MEM_RELEASE);
 }
 
 /* ---- Take (owner only, pops from bottom) ---- */

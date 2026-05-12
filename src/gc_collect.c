@@ -151,9 +151,15 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_MUTABLE_REF: {
         JaclMutableRef *ref = (JaclMutableRef *)payload;
         /* Only trace for plain JaclVal boxes (type_idx==0).
-           Struct boxes (type_idx>0) contain raw bytes — no GC references. */
+           Struct boxes (type_idx>0) contain raw bytes — no GC references.
+           ACQUIRE load: pairs with the RELEASE store atom mutations use.
+           Without this pairing, the GC can read a fresh pointer but miss
+           the writes the writer made before the release (e.g. the
+           GCHeader fields of the newly-allocated value). */
         if (ref->type_idx == 0) {
-            gc__ms_push_val(ms, MREF_VAL(ref));
+            JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                (volatile uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
+            gc__ms_push_val(ms, v);
         }
         break;
     }
@@ -640,23 +646,25 @@ void gc_sweep_intern_table(JaclInternTable *table,
  * Low survival (<20%) → decrease threshold by 25% (lots of garbage).
  * Clamped to [GC_THRESHOLD_MIN, GC_THRESHOLD_MAX]. */
 void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
-    size_t allocated = heap->bytes_since_gc;
+    size_t allocated = ATOMIC_LOAD_EXPLICIT(&heap->bytes_since_gc,
+                                             MEM_RELAXED);
     if (allocated == 0) return;
 
     /* survival_rate = bytes_survived / bytes_allocated (percentage * 100) */
     size_t rate_pct = (bytes_survived * 100) / allocated;
 
+    /* gc_threshold is read by the allocator (gc__bump_alloc) from another
+     * thread. Tag accesses as relaxed atomic — it's a heuristic, precision
+     * isn't required, but the access must be atomic for TSAN. */
+    size_t th = ATOMIC_LOAD_EXPLICIT(&heap->gc_threshold, MEM_RELAXED);
     if (rate_pct > 80) {
-        /* High survival — back off, increase threshold by 50% */
-        heap->gc_threshold = heap->gc_threshold + heap->gc_threshold / 2;
+        th = th + th / 2;       /* High survival — back off */
     } else if (rate_pct < 20) {
-        /* Low survival — collect more often, decrease threshold by 25% */
-        heap->gc_threshold = heap->gc_threshold - heap->gc_threshold / 4;
+        th = th - th / 4;       /* Low survival — collect more often */
     }
-
-    /* Clamp to bounds */
-    if (heap->gc_threshold < GC_THRESHOLD_MIN) heap->gc_threshold = GC_THRESHOLD_MIN;
-    if (heap->gc_threshold > GC_THRESHOLD_MAX) heap->gc_threshold = GC_THRESHOLD_MAX;
+    if (th < GC_THRESHOLD_MIN) th = GC_THRESHOLD_MIN;
+    if (th > GC_THRESHOLD_MAX) th = GC_THRESHOLD_MAX;
+    ATOMIC_STORE_EXPLICIT(&heap->gc_threshold, th, MEM_RELAXED);
 }
 
 void gc_collect(ThreadHeap *heap, VM *vm) {
