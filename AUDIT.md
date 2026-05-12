@@ -585,6 +585,189 @@ acquire/release, and matched the consumer side in `gc__scan_deque`.
 - Drivers self-throttle when the queue runs ahead of execution so the
   test terminates in bounded time even under TSAN's 20x slowdown.
 
+## Compiler / VM audit (Phase D, May 2026)
+
+After all P0/P1 GC/concurrency items closed, the next-largest unaudited
+surface is the bytecode compiler (`src/compiler.c`, 13.5K LoC) and
+bytecode VM (`src/vm.c`, 11.7K LoC) — 25K of code, never audited at the
+depth GC got. Phase D scope: enumerate hazards in three categories
+(tag-check completeness on opcode handlers, stack discipline across
+error paths, CPS capture correctness). One concrete fix landed; the
+rest is documented for follow-up.
+
+### D.0 The dispatch-loop convention
+
+`vm__run` (`src/vm.c:2000`) is a `for (;;) { switch (instruction) }`
+loop. Opcode handlers signal errors via:
+
+- `result = vm__push(...); if (result != VM_OK) return result;` — bubble
+  a `VM_STACK_OVERFLOW` etc. up.
+- `vm__set_error(vm, ...); return VM_RUNTIME_ERROR;` — direct return for
+  type/semantic errors.
+
+Neither path resets `vm->stack_top` or frame state. The error
+propagates to the caller of `vm__run` (typically `vm_exec`), which
+reports the error and tears down. **For any opcode that pushes
+intermediate values then errors, those values stay on the operand
+stack.** This is the foundation of the §D.2 findings.
+
+### D.1 Tag-check completeness — ~32 unchecked extractions
+
+Survey of every `jacl_as_*` call in opcode handlers asks: was the
+source tag verified (`jacl_is_*`) first? Result: ~32 unchecked vs ~8
+checked, concentrated in three areas. None is reachable from
+well-typed user code — the compiler/typer is supposed to guarantee
+type-correctness before emitting the opcode. The risk is **layered
+trust**: a compiler/typer bug compounds into a wild-pointer read in
+the VM.
+
+| Area | Opcodes | Source | Status |
+|------|---------|--------|--------|
+| State-machine fields | `OP_GET_STATE_FIELD{,_CELL,_WIDE}`, `OP_SET_STATE_FIELD{,_CELL,_WIDE}`, `OP_GET_RESUME_POINT`, `OP_SET_RESUME_POINT` (`vm.c:8165-8265`) | `frame->stack_base + 0` — compiler invariant: slot 0 of a state-machine function holds the SM | Trust the compiler. Add `assert(jacl_is_state_machine(...))` in debug builds. |
+| Struct field stores | `OP_HEAP_RECORD_NEW`, `OP_STRUCT_NEW_INLINE`, `OP_STRUCT_SET_INLINE`, `OP_STRUCT_SET_UPVALUE` (`vm.c:6564-6910`) | Popped from stack; bytecode operand declares the type | Trust the typer. The opcode trusts the field-type operand, not the value's actual tag. Misemit → corruption. |
+| Typed collections | `OP_TYPED_VEC_*`, `OP_TYPED_MAP_*` (`vm.c:10015-10920`) | Popped from stack | Trust the typer. Add `assert(jacl_is_typed_*(...))` in debug builds. |
+| Stream / SM closure | `OP_STREAM_NEXT` reading `stream->state_machine` and `sm->sm_closure` (`vm.c:7493-7494`) | Field of a heap object | Trust struct invariants; field is populated only by the runtime. |
+
+**Recommendation**: add a single `JACL_ASSERT_TAG(v, jacl_is_*)` macro
+that compiles to a debug-build check (`assert`) and a release-build
+no-op. Sprinkle at every unchecked extraction site. ~32 lines of
+mechanical change. Catches compiler/typer regressions early without
+slowing release builds. No correctness change on its own.
+
+### D.2 Stack discipline — ~60 severity-(ii) and ~8 severity-(iii) leaks
+
+Survey of every `return VM_RUNTIME_ERROR` (or equivalent) asks: is the
+operand stack in a balanced state at that point? Result: most error
+paths leak 1–3 slots; a handful in iterating opcodes can leak more.
+
+**Severity classification**:
+- **(i) Cosmetic**: error before any stack work; VM terminates anyway.
+- **(ii) Slot leak per error**: pops without re-pushing, or partial
+  pushes before erroring. Each error shrinks effective stack capacity.
+  Bounded by 256-slot cap (`VM_STACK_MAX`, see §16); enough accumulated
+  errors and even normal code starts hitting `VM_STACK_OVERFLOW`.
+- **(iii) Mid-iteration leak**: an iterating opcode pushes args, then
+  the *next* check fails (frame overflow, type error). Per-call leak
+  is bounded by per-iteration push count (2–3 slots for `OP_TRANSFORM`,
+  variable for `OP_SPREAD`).
+
+**Categories** (representative, not exhaustive):
+
+| Pattern | Sites | Per-error leak |
+|---------|-------|----------------|
+| Binary arith/compare pops both, then type-checks: `OP_MOD`, `OP_LT`, `OP_GT`, `OP_LE`, `OP_GE`, `OP_NEG` | `vm.c:2080-2231` | 1–2 slots |
+| `OP_CALL` pre-frame-push arity / not-callable checks | `vm.c:2443-2575` | `arg_count + 1` slots |
+| Destructuring pops source, then errors: `OP_DESTRUCTURE_VEC*`, `OP_DESTRUCTURE_NAMED*` | `vm.c:2902-3145` | 1 + partial slots |
+| String ops pop, then type-check: `OP_CONCAT`, `OP_STR_LEN`, `OP_STR_INDEX`, `OP_STR_SLICE` | `vm.c:3146-3390` | 1–3 slots |
+| Collection ops pop, then type-check: `OP_VEC_GET/SET/CONCAT/SLICE`, `OP_MAP_*` | `vm.c:3500-3840` | 1–3 slots |
+| Mutation ops pop, then type-check: `OP_DEREF`, `OP_RESET`, `OP_SWAP` | `vm.c:5231-5400+` | 1–3 slots |
+| Conversion ops pop, then type-check (`to-i32`, `to-i64`, …) | `vm.c:5765-5926` | 1 slot |
+| **Iterating opcodes push args then frame-check**: `OP_EACH`, `OP_TRANSFORM`, `OP_FILTER`, `OP_PARALLEL`, `OP_RACE`, `OP_SPREAD` | `vm.c:4040-5191`, `7180-7300` | (iii): 2–3 slots per failed call |
+
+**Recommendation**: two complementary fixes.
+
+1. *Move "would-fail" checks before any pushes/pops.* For iterating
+   opcodes, move the `frame_count >= VM_FRAMES_MAX` check above the arg
+   pushes. Eliminates the (iii) category. Mechanical — one fix per
+   iterating opcode. **One concrete fix landed in this audit pass**
+   (`OP_TRANSFORM`, both vec and map paths) as a pattern demonstration.
+
+2. *Either restructure error returns to reset stack_top, or add a
+   `VM_ERROR(...)` macro that does so.* Eliminates the (ii) category.
+   Touches ~60 sites; pure refactor, no semantics change. The macro
+   approach:
+   ```c
+   #define VM_ERROR(vm, ...) do { \
+       vm->stack_top = saved_stack_top; \
+       vm__set_error(vm, __VA_ARGS__); \
+       return VM_RUNTIME_ERROR; \
+   } while (0)
+   ```
+   plus `uint32_t saved_stack_top = vm->stack_top;` at the top of each
+   opcode case. Tedious, mechanical, low-risk.
+
+Neither fix changes correctness for **well-behaved** programs that
+never hit a runtime error. The class of bugs they close: cumulative
+slot drift in programs that recover from errors (currently impossible
+to do cleanly), and the obscure "your stack is corrupted, here's a
+nonsensical type error from 50 ops downstream" symptom.
+
+### D.3 CPS capture correctness
+
+The CPS transform (`src/compiler.c:2209-3700`) is **closure + state-
+machine based**, not pure CPS. Each suspending procedure compiles to a
+state machine: a single closure with two synthetic params (`__sm`,
+`__rv`), an upfront dispatch table that jumps to resume labels by ID,
+and a state object containing every let-binding/parameter live across
+suspensions. Variables are read/written via `OP_GET_STATE_FIELD` /
+`OP_SET_STATE_FIELD` inline as assignments execute.
+
+**The capture set is collected by `sm__walk_locals`
+(`src/compiler.c:1577`)**, which recursively walks the body AST and
+emits a state field for every `def`/`mut`/destructuring binding it
+encounters. It handles destructured vectors, named destructuring, rest
+patterns, typed bindings with struct widths, and recurses into all
+expression positions.
+
+**Liveness pruning** (`sm__optimize_state_layout`,
+`src/compiler.c:2124`) — would remove variables whose `first_write <
+last_read` doesn't cross a suspension — **is only enabled for
+yield-only generators** (`src/compiler.c:2131-2136`). For
+`await`/`parallel`/`race`, all bindings are kept conservatively:
+> "Await/parallel/race have a diamond control flow (inline resolution
+> vs resume path) that makes stack-local slot numbering inconsistent
+> across the two paths."
+
+This is the right tradeoff for soundness. The cost is a bigger state
+object; the win is a much simpler invariant to verify.
+
+**Potential hazard the survey flagged**: inner closures defined inside
+a suspending function may capture outer locals into their own
+upvalues. The capture happens at closure-creation time and the closure
+holds the captured value (or a cell, for mutable bindings) directly.
+After a suspension, if the inner closure is invoked, it accesses its
+upvalues — not the state object. So the suspending function's state
+object doesn't need to back the inner closure's upvalues *as long as
+the inner closure's upvalues are direct value copies, not pointers
+into the state object*. Worth a focused property test: define an inner
+closure, suspend, run a GC, invoke the closure, verify it sees the
+right values. None of the existing CPS tests in `test/jacl/cps_*.jacl`
+hit this exact pattern.
+
+**Recommendation**: add `test/jacl/cps_inner_closure_capture.jacl`
+that exercises the inner-closure-survives-suspension case under GC
+pressure. If it passes, document the invariant and close the
+investigation. If it fails, dig deeper.
+
+### D.4 What landed in this audit pass
+
+Frame-check ordering fixed across all three iterating opcodes that had
+the same vec/map iteration shape (`OP_EACH`, `OP_TRANSFORM`,
+`OP_FILTER` — 6 sites total). The `vm->frame_count >= VM_FRAMES_MAX`
+check now runs **before** the args-push, eliminating the
+severity-(iii) 2–3-slot leak per failed call. Full normal-mode suite
+unchanged (87 pass, 14 pre-existing HAMT/RRB failures unrelated).
+
+`OP_PARALLEL`, `OP_RACE`, and `OP_SPREAD` have similar but
+shape-different sites (more state to track per iteration); same fix
+applies and is queued as follow-up.
+
+### D.5 Next steps (rough priority)
+
+1. **Mechanical**: move pre-push checks for the remaining iterating
+   opcodes (§D.2 row "Iterating opcodes"). Each ~3 LoC.
+2. **Mechanical**: introduce `JACL_ASSERT_TAG` and apply to the ~32
+   unchecked extraction sites (§D.1). Catches compiler/typer
+   regressions in CI without affecting release-build performance.
+3. **One test**: `cps_inner_closure_capture.jacl` (§D.3).
+4. **Larger**: the §D.2 macro-based error-return restructuring. Touches
+   60 sites. Pure cleanup.
+
+None of these are correctness bugs reachable from well-typed JACL code
+today. They're hardening against compiler/typer regressions and
+DoS-style stack-drift attacks. The §9 SATB fix that closed Phase C is
+the last *correctness* fix the audit identified.
+
 ## Testing infrastructure
 
 A TSAN build mode is now available: `./build.sh --tsan [--test=NAME]`. It

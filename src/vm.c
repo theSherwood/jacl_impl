@@ -3885,17 +3885,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint32_t i = 0; i < count; i++) {
             jacl_vec_get_result gr = jacl_vec_get(vec, i);
 
+            /* Check frame capacity BEFORE pushing args. The original
+             * order (push, then check) leaked 2 slots on overflow —
+             * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + argument */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
             result = vm__push(vm, gr.value);
             if (result != VM_OK) return result;
 
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
@@ -3941,6 +3944,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclVal key = jacl_map_key_from_leaf(ir.item);
             JaclVal value = jacl_map_value_from_leaf(ir.item);
 
+            /* Check frame capacity BEFORE pushing args. See AUDIT.md
+             * §D.2 — push-then-check leaked 3 slots per overflow. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + key + value */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
@@ -3948,12 +3958,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             result = vm__push(vm, value);
             if (result != VM_OK) return result;
-
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
@@ -4085,17 +4089,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint32_t i = 0; i < count; i++) {
             jacl_vec_get_result gr = jacl_vec_get(vec, i);
 
+            /* Check frame capacity BEFORE pushing args. The original
+             * order (push, then check) leaked 2 slots on overflow —
+             * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + argument */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
             result = vm__push(vm, gr.value);
             if (result != VM_OK) return result;
 
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
@@ -4151,6 +4158,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclVal key = jacl_map_key_from_leaf(ir.item);
             JaclVal value = jacl_map_value_from_leaf(ir.item);
 
+            /* Check frame capacity BEFORE pushing args. See AUDIT.md
+             * §D.2 — push-then-check leaked 3 slots per overflow. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + key + value */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
@@ -4158,12 +4172,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             result = vm__push(vm, value);
             if (result != VM_OK) return result;
-
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
@@ -4270,17 +4278,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint32_t i = 0; i < count; i++) {
             jacl_vec_get_result gr = jacl_vec_get(vec, i);
 
+            /* Check frame capacity BEFORE pushing args. The original
+             * order (push, then check) leaked 2 slots on overflow —
+             * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + argument */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
             result = vm__push(vm, gr.value);
             if (result != VM_OK) return result;
 
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
@@ -4337,6 +4348,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclVal key = jacl_map_key_from_leaf(ir.item);
             JaclVal value = jacl_map_value_from_leaf(ir.item);
 
+            /* Check frame capacity BEFORE pushing args. See AUDIT.md
+             * §D.2 — push-then-check leaked 3 slots per overflow. */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+
             /* Push closure as callee slot + key + value */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
@@ -4344,12 +4362,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             result = vm__push(vm, value);
             if (result != VM_OK) return result;
-
-            /* Set up call frame */
-            if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
-              return VM_RUNTIME_ERROR;
-            }
             uint32_t caller_frame_count = vm->frame_count;
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
