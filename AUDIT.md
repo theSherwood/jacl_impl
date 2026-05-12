@@ -1,5 +1,58 @@
 # JACL Codebase Audit
 
+## If you're picking this up later
+
+This audit was written over a few sessions in May 2026. Six P0 issues + five
+soak-surfaced issues are fixed. Two P1 items remain (§4 intern table sweep
+under concurrent GC, §6 adaptive threshold in worker loop).
+
+**The loop that fixed each issue, for future use:**
+
+1. Read the audit item.
+2. Write a focused reproducer in `test/test_chaos_*.c` that pushes the exact
+   pattern. Register it in `build.sh`. Keep it small enough that TSAN catches
+   the race in seconds.
+3. Run under `./build.sh --tsan --test=chaos_<name>`. Confirm the report
+   matches the audit's prediction.
+4. Implement the fix in the runtime/GC/chase-lev. Re-run the chaos test
+   under both normal mode and `--tsan` until clean.
+5. Run `./build.sh --tsan --test=runtime` and `--test=m13` to check for
+   regressions. Run the full suite with `./build.sh` for normal-mode
+   regression.
+6. Update `SYNCHRONIZATION.md`: mark the unsoundness fixed in §8, update
+   the per-field row, link the chaos test.
+7. Update this file (`AUDIT.md`): strike the issue, link the chaos test,
+   note any related issues found.
+
+**Useful invocations:**
+
+```sh
+./build.sh                              # full normal-mode test sweep
+./build.sh --tsan                       # full TSAN-mode sweep
+./build.sh --test=<name>                # one test, normal mode
+./build.sh --tsan --test=<name>         # one test, TSAN
+
+# Soak (longer durations more likely to surface rare races):
+SOAK_DURATION_SEC=60 \
+  TSAN_OPTIONS="halt_on_error=1 exitcode=66" \
+  ./.build-tsan/chaos_soak
+
+# Reproduce a specific soak failure:
+SOAK_SEED=<seed>  SOAK_DURATION_SEC=<sec>  ./.build-tsan/chaos_soak
+```
+
+**Three documents that should evolve together:**
+
+- `GC_CONCURRENCY_DESIGN.md` — the *why* (design intent)
+- `SYNCHRONIZATION.md` — the *what protects what*, per-field
+- `AUDIT.md` (this file) — the *gaps between the two*, with fix status
+
+Any change to runtime/GC shared state should update all three; struct
+drift between `src/runtime.c`/`src/gc.c` and `src/jacl.h` is caught at
+build time by `test/test_struct_sizes.c`.
+
+
+
 Scope: GC, concurrency, runtime; spot checks on the rest. ~112K LoC; this audit
 focuses on the novel parts in depth.
 
