@@ -22,33 +22,65 @@ Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
 surveyed and documented. See git log for the per-commit story.
 
-### Remaining work (no correctness bugs, all hardening / tech debt)
+### Start-here for next session
 
-In rough priority:
+**Open correctness bug: §D.6** — *the one thing to fix next.* SEGV
+from valid user code:
 
-1. **§D.6 SEGV from `spawn` + deep recursion** — *only correctness bug
-   currently open*. Reachable from valid user code; full repro in
-   `AUDIT.md §D.6`. ASAN-traced to an unchecked
-   `jacl_as_state_machine` extraction at `vm.c:8190` reading a
-   non-SM value from `frame->stack_base + 0`. Likely a compiler/runtime
-   miscompile in the spawn-body wrapping. Investigate first.
-2. **§D.3 — closed**: `test/jacl/cps_inner_closure_capture.jacl`
-   verifies inner closures defined before a suspension still observe
-   their captured values after. Test passes; investigation closed.
-3. **§D.1 `JACL_ASSERT_TAG` macro**: ~32 unchecked `jacl_as_*`
-   extractions in `vm.c`. §D.6 shows these aren't purely "trust the
-   compiler" — the trust is breakable. Add a debug-only assert; would
-   have caught §D.6 at the call site instead of as a SEGV. Mechanical,
-   ~50 LoC.
-4. **§D.2 remaining frame-check reorderings**: `OP_PARALLEL`,
+```jacl
+proc burn {n} {
+  if [== $n 0] { 1 } else {
+    def g [vec 1 2 3 4 5 6 7 8 9 10]
+    burn [- $n 1]
+  }
+}
+proc main {
+  def f [spawn { burn 70 }]
+  def _ [await $f]
+}
+main
+```
+
+Without `spawn`: clean `stack overflow` at depth 64 (`VM_FRAMES_MAX`).
+Inside `spawn`: SEGV at depth ≈58 before the boundary check fires.
+ASAN points to `src/vm.c:8190` in `OP_SET_STATE_FIELD`:
+
+```c
+JaclVal state_val = vm->stack[frame->stack_base + 0];
+JaclStateMachine *sm = jacl_as_state_machine(state_val);  // unchecked
+sm->fields[field_index] = value;  // SEGV — sm is garbage
+```
+
+Full analysis + ASAN trace + investigation hypotheses in `§D.6` below.
+Suggested first move: dump the bytecode for both the spawn body and
+`burn`'s body, compare which opcode is at the SEGV PC, and trace it
+back to its emit site in `src/compiler.c`. A `--dump-bc` flag may or
+may not exist; if not, a 20-LoC dump helper added temporarily to the
+test harness is the fastest path.
+
+### Punch list (in priority)
+
+1. **§D.6 SEGV** — only open correctness bug. Above.
+2. **§D.1 `JACL_ASSERT_TAG` macro** — ~32 unchecked `jacl_as_*`
+   extraction sites in `vm.c`. §D.6 proves these aren't safely
+   "trust the compiler"; debug-only assert would have caught §D.6 at
+   the call site instead of as a SEGV. Mechanical, ~50 LoC. Likely
+   surfaces other latent issues during the rebuild — worth doing
+   right after §D.6.
+3. **§D.2 remaining frame-check reorderings** — `OP_PARALLEL`,
    `OP_RACE`, `OP_SPREAD`. Same pattern as the fix that landed for
-   `OP_EACH`/`OP_TRANSFORM`/`OP_FILTER`. ~10 LoC.
-5. **§D.2 broader stack-discipline cleanup**: ~60 sites where a
+   `OP_EACH` / `OP_TRANSFORM` / `OP_FILTER` (commit `c39ee12`).
+   ~10 LoC.
+4. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
    `return VM_RUNTIME_ERROR` leaves the operand stack unbalanced.
-   Macro-based refactor; pure cleanup. Defends against DoS-style slot
-   drift.
-6. **Architectural items (§10–17)**: throughput, latency, code
-   ergonomics. Not correctness. Defer until profiled.
+   Macro-based refactor. Pure cleanup; defends against DoS-style
+   slot drift.
+5. **Architectural items §10–§17** — throughput, latency, ergonomics.
+   Not correctness. Defer until profiled.
+
+§D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
+that inner closures defined before a suspension still see their
+captured values after. Passes.
 
 ### How earlier phases were structured
 
@@ -78,6 +110,9 @@ In rough priority:
 ./build.sh --test=<name>                # one test, normal mode
 ./build.sh --tsan --test=<name>         # one test, TSAN
 
+# Run a single .jacl test directly through the harness:
+.build/jacl_harness test/jacl/<name>.jacl
+
 # Soak (longer durations more likely to surface rare races):
 SOAK_DURATION_SEC=60 \
   TSAN_OPTIONS="halt_on_error=1 exitcode=66" \
@@ -85,7 +120,27 @@ SOAK_DURATION_SEC=60 \
 
 # Reproduce a specific soak failure:
 SOAK_SEED=<seed>  SOAK_DURATION_SEC=<sec>  ./.build-tsan/chaos_soak
+
+# Ad-hoc ASAN build for crash investigation (used to trace §D.6):
+cc -fsanitize=address -fno-omit-frame-pointer -g -O0 -D_DEFAULT_SOURCE \
+   -o /tmp/jacl_asan src/jacl.c test/test_jacl_harness.c -lpthread -lm
+/tmp/jacl_asan path/to/repro.jacl
 ```
+
+**Expected normal-mode suite result:** 87 passed, 14 pre-existing
+failures (all `hamt*` / `rrb_vec*`, blocked by the removed `lib/rc`
+include path — unrelated to the audit).
+
+**Chaos test inventory (all `--tsan`-clean as of end of phase D):**
+| Chaos test | Reproduces |
+|------------|-----------|
+| `chaos_soak` | randomized 4×4 worker/driver load — catches general regressions |
+| `chaos_pinned_deque` | §1 cross-worker MPSC violation on `private_deque` |
+| `chaos_gc_deque_scan` | §2 GC scanning a Chase-Lev buffer without thief registration |
+| `chaos_grey_buf` | §3 grey-buffer realloc vs. drain race |
+| `chaos_gc_alloc_sweep` | §7 / §15 stale `current_block` and block-recycle races |
+| `chaos_concurrent_intern` | §4 intern table sweep under concurrent GC |
+| `chaos_satb_deref` | §9 SATB barrier deref-mutate-GC stress |
 
 **Three documents that should evolve together:**
 
