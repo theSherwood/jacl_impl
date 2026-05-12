@@ -8,9 +8,11 @@ When you add or change a shared field, **update this document**. If you find
 a field in the codebase that's not listed here, that's a bug (in the doc or
 the code).
 
-> Status as of 2026-05-12: documents the implementation after fixes for
-> AUDIT.md §§1, 2, 8a. Known-unsound fields (§§3, 4, 6, 7, 15 in AUDIT.md)
-> are called out below with **UNSOUND** tags.
+> Status as of 2026-05-12: all GC/concurrency unsoundness items the
+> audit found are fixed — see §8 below for the full checklist. Open
+> correctness items are tracked in AUDIT.md's punch list. The only one
+> currently open is **§D.6** (a compiler/VM SEGV, not a GC/concurrency
+> race — so it doesn't appear in §8 here).
 
 ## Notation
 
@@ -290,11 +292,13 @@ under the lock.
 ### `GCHeader.obj_type`, `alloc_total`
 - **W**: allocator at allocation
 - **R**: GC sweep walking objects
-- **Sync**: non-atomic, but bound by skip_block (allocator writes only to
+- **Sync**: non-atomic, bound by skip_block (allocator writes only to
   current_block; sweep skips current_block)
-- **UNSOUND in combination with §7**: if owner switches current_block
-  mid-sweep, sweep can read `alloc_total` while owner writes it. **Fix
-  pending**.
+- AUDIT.md §7 is fixed: `heap->blocks_mutex` now serializes
+  `gc_alloc`'s slow-path list traversal + head-insert against
+  `gc_sweep_concurrent`'s walk, and the sweep re-snapshots
+  `current_block` under that lock. The owner-switches-current_block-
+  mid-sweep race no longer exists.
 
 ### `BlockPool.free_list`, `total_blocks_allocated`
 - **W**: any worker via `gc_block_pool_get`/`gc_block_pool_return`, under

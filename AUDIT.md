@@ -2,11 +2,12 @@
 
 ## If you're picking this up later
 
-This audit was written over several sessions in May 2026. **All
-identified correctness bugs reachable from well-typed JACL code are
-fixed.** What remains is hardening (debug-mode asserts, error-path
-robustness, one missing test) plus the architectural / performance
-items that were always out of scope.
+This audit was written over several sessions in May 2026. All eight
+GC/concurrency correctness items in "Critical correctness issues" are
+fixed, plus five soak-surfaced fixes, plus the §9 SATB-barrier UAF.
+Phase D (compiler/VM) surveyed three categories and landed a
+frame-check ordering fix, but **opened one new correctness bug
+(§D.6)** that is now the only open correctness item.
 
 ### Status at end of phase D (2026-05-12)
 
@@ -16,11 +17,12 @@ items that were always out of scope.
 | B | Soak-surfaced races | 5 additional fixes, TSAN-validated |
 | C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
-| D | Compiler/VM audit | 3 surveys; frame-check ordering fix landed |
+| D | Compiler/VM audit | 3 surveys; frame-check ordering fix landed; **§D.6 opened** (spawn + deep recursion SEGV — still open) |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
-surveyed and documented. See git log for the per-commit story.
+surveyed; §D.6 opened during the §D.3 test work. See git log for the
+per-commit story.
 
 ### Start-here for next session
 
@@ -154,8 +156,11 @@ build time by `test/test_struct_sizes.c`.
 
 
 
-Scope: GC, concurrency, runtime; spot checks on the rest. ~112K LoC; this audit
-focuses on the novel parts in depth.
+Scope: GC, concurrency, runtime; phase D extended into compiler + VM.
+Total non-test code is ~80K LoC (~62K hand-written after subtracting
+the 16.7K generated `lib/unicode/unicode_tables.h`). This audit
+focuses on the novel parts in depth — the GC/concurrency runtime
+got full coverage; compiler/VM got three targeted surveys (see §D).
 
 ## Critical correctness issues
 
@@ -853,6 +858,8 @@ unchanged (87 pass, 14 pre-existing HAMT/RRB failures unrelated).
 shape-different sites (more state to track per iteration); same fix
 applies and is queued as follow-up.
 
+The §D.3 test work also surfaced a new correctness bug — §D.6 below.
+
 ### D.6 New finding from §D.3 test work — `spawn` + deep recursion SEGV
 
 While constructing the inner-closure-capture test, a separate crash
@@ -957,21 +964,12 @@ at depth 30 — well below the threshold — so the existing CPS
 invariant test still passes. A dedicated reproducer for §D.6 would
 either crash or assert; punt that until we have a clear fix.
 
-### D.5 Next steps (rough priority)
+### D.5 Next steps
 
-1. **Mechanical**: move pre-push checks for the remaining iterating
-   opcodes (§D.2 row "Iterating opcodes"). Each ~3 LoC.
-2. **Mechanical**: introduce `JACL_ASSERT_TAG` and apply to the ~32
-   unchecked extraction sites (§D.1). Catches compiler/typer
-   regressions in CI without affecting release-build performance.
-3. **One test**: `cps_inner_closure_capture.jacl` (§D.3).
-4. **Larger**: the §D.2 macro-based error-return restructuring. Touches
-   60 sites. Pure cleanup.
-
-None of these are correctness bugs reachable from well-typed JACL code
-today. They're hardening against compiler/typer regressions and
-DoS-style stack-drift attacks. The §9 SATB fix that closed Phase C is
-the last *correctness* fix the audit identified.
+Superseded by the "Punch list" at the top of this file — see
+"Start-here for next session". §D.6 is item #1 (the open correctness
+bug); the mechanical hardening items are #2–#4. Kept here as a
+pointer so search-for-§D.5 reaches the right place.
 
 ## Testing infrastructure
 
