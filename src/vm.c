@@ -4790,6 +4790,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           uint8_t *saved_ip = vm->ip;
           BytecodeChunk *saved_chunk = vm->chunk;
           uint32_t saved_frame_count = vm->frame_count;
+          uint32_t saved_stack_top   = vm->stack_top;
 
           if (cl->is_sm_compiled) {
             /* SM closure: create state machine, call synchronously */
@@ -4823,24 +4824,30 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           VMResult sub = vm__run(vm, saved_frame_count);
 
+          /* Capture result before restoring VM state.  On error, sub_run
+             may leave frame_count/stack_top deep (e.g. an OP_CALL hit
+             VM_FRAMES_MAX and bailed without unwinding).  If we don't
+             reset them here, the next opcode in the outer chunk runs
+             against a stale CallFrame — see §D.6 in AUDIT.md. */
+          JaclVal spawn_result = JACL_NIL;
+          bool body_ok = (sub == VM_OK && vm->stack_top > saved_stack_top);
+          if (body_ok) {
+            spawn_result = vm->stack[vm->stack_top - 1];
+          }
+
+          vm->frame_count = saved_frame_count;
+          vm->stack_top   = saved_stack_top;
           frame = &vm->frames[vm->frame_count - 1];
           vm->ip    = saved_ip;
           vm->chunk = saved_chunk;
 
-          /* Resolve future with the return value */
-          JaclVal spawn_result = JACL_NIL;
-          if (sub == VM_OK && vm->stack_top > 0) {
-            spawn_result = vm->stack[--vm->stack_top];
-          } else if (sub != VM_OK) {
+          if (body_ok) {
+            jacl_future_resolve(fut, spawn_result,
+                                vm->grey_buf, vm->gc_active_ptr);
+          } else {
             JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
             jacl_future_error(fut, err, vm->grey_buf, vm->gc_active_ptr);
-            ctx_unfork(vm, saved_ctx);
-            result = vm__push(vm, f);
-            if (result != VM_OK) return result;
-            break;
           }
-          jacl_future_resolve(fut, spawn_result,
-                              vm->grey_buf, vm->gc_active_ptr);
 
           ctx_unfork(vm, saved_ctx);
 
@@ -4976,6 +4983,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             uint32_t saved_stack_top = vm->stack_top;
 
             if (cl->is_sm_compiled) {
+              /* Check frame capacity BEFORE allocating SM or pushing
+               * args. See AUDIT.md §D.2 — push-then-check leaked 3
+               * slots per overflow. */
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+
               /* SM: create state machine, call synchronously */
               JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
               JaclStateMachine *sm = jacl_as_state_machine(sm_val);
@@ -4988,10 +5003,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               result = vm__push(vm, JACL_NIL);
               if (result != VM_OK) return result;
 
-              if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
-                return VM_STACK_OVERFLOW;
-              }
               CallFrame *sf = &vm->frames[vm->frame_count++];
               sf->closure    = cl;
               sf->return_ip  = saved_ip;
@@ -5027,14 +5038,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 results[i] = JACL_NIL;
               }
             } else {
-              /* Non-suspending closure: call directly */
-              result = vm__push(vm, closures[i]);
-              if (result != VM_OK) return result;
-
+              /* Check frame capacity BEFORE pushing args. See AUDIT.md
+               * §D.2 — push-then-check leaked 1 slot per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
                 vm__set_error(vm, "stack overflow");
                 return VM_STACK_OVERFLOW;
               }
+
+              /* Non-suspending closure: call directly */
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+
               CallFrame *sf = &vm->frames[vm->frame_count++];
               sf->closure    = cl;
               sf->return_ip  = saved_ip;
@@ -5152,8 +5166,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
             uint32_t saved_frame_count = vm->frame_count;
+            uint32_t saved_stack_top   = vm->stack_top;
 
             if (cl->is_sm_compiled) {
+              /* Check frame capacity BEFORE allocating SM or pushing
+               * args. See AUDIT.md §D.2 — push-then-check leaked 3
+               * slots per overflow. */
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+
               /* SM: create state machine, call synchronously */
               JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
               JaclStateMachine *sm = jacl_as_state_machine(sm_val);
@@ -5166,10 +5189,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               result = vm__push(vm, JACL_NIL);
               if (result != VM_OK) return result;
 
-              if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
-                return VM_STACK_OVERFLOW;
-              }
               CallFrame *sf = &vm->frames[vm->frame_count++];
               sf->closure    = cl;
               sf->return_ip  = saved_ip;
@@ -5180,29 +5199,34 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
               VMResult sub = vm__run(vm, saved_frame_count);
 
+              /* Capture result before restoring VM state (see §D.6). */
+              JaclVal body_result = JACL_NIL;
+              bool body_ok = (sub == VM_OK && vm->stack_top > saved_stack_top);
+              if (body_ok) body_result = vm->stack[vm->stack_top - 1];
+
+              vm->frame_count = saved_frame_count;
+              vm->stack_top   = saved_stack_top;
               frame = &vm->frames[vm->frame_count - 1];
               vm->ip    = saved_ip;
               vm->chunk = saved_chunk;
 
               if (!have_winner) {
                 have_winner = true;
-                if (sub == VM_OK && vm->stack_top > 0) {
-                  winner_result = vm->stack[--vm->stack_top];
-                } else {
-                  winner_result = jacl_set_error(jacl_inline_string("error", 5));
-                }
-              } else {
-                if (sub == VM_OK && vm->stack_top > 0) vm->stack_top--;
+                winner_result = body_ok ? body_result
+                  : jacl_set_error(jacl_inline_string("error", 5));
               }
             } else {
-              /* Non-suspending closure: call directly */
-              result = vm__push(vm, closures[i]);
-              if (result != VM_OK) return result;
-
+              /* Check frame capacity BEFORE pushing args. See AUDIT.md
+               * §D.2 — push-then-check leaked 1 slot per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
                 vm__set_error(vm, "stack overflow");
                 return VM_STACK_OVERFLOW;
               }
+
+              /* Non-suspending closure: call directly */
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+
               CallFrame *sf = &vm->frames[vm->frame_count++];
               sf->closure    = cl;
               sf->return_ip  = saved_ip;
@@ -5213,20 +5237,21 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
               VMResult sub = vm__run(vm, saved_frame_count);
 
+              /* Capture result before restoring VM state (see §D.6). */
+              JaclVal body_result = JACL_NIL;
+              bool body_ok = (sub == VM_OK && vm->stack_top > saved_stack_top);
+              if (body_ok) body_result = vm->stack[vm->stack_top - 1];
+
+              vm->frame_count = saved_frame_count;
+              vm->stack_top   = saved_stack_top;
               frame = &vm->frames[vm->frame_count - 1];
               vm->ip    = saved_ip;
               vm->chunk = saved_chunk;
 
               if (!have_winner) {
                 have_winner = true;
-                if (sub == VM_OK && vm->stack_top > 0) {
-                  winner_result = vm->stack[--vm->stack_top];
-                } else {
-                  winner_result = jacl_set_error(jacl_inline_string("error", 5));
-                }
-              } else {
-                /* Loser: discard result */
-                if (sub == VM_OK && vm->stack_top > 0) vm->stack_top--;
+                winner_result = body_ok ? body_result
+                  : jacl_set_error(jacl_inline_string("error", 5));
               }
             }
 
@@ -7253,16 +7278,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* SM generator: call sm_closure(state_obj, nil) each time */
               JaclStateMachine* sm = jacl_as_state_machine(stream->state_machine);
               JaclClosure* sm_cl = jacl_as_closure(sm->sm_closure);
+
+              /* Check frame capacity BEFORE pushing args. See AUDIT.md
+               * §D.2 — push-then-check leaked 3 slots per overflow. */
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+
               result = vm__push(vm, sm->sm_closure);
               if (result != VM_OK) return result;
               result = vm__push(vm, stream->state_machine);
               if (result != VM_OK) return result;
               result = vm__push(vm, JACL_NIL);
               if (result != VM_OK) return result;
-              if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
-                return VM_RUNTIME_ERROR;
-              }
               CallFrame* new_frame = &vm->frames[vm->frame_count++];
               new_frame->closure    = sm_cl;
               new_frame->return_ip  = NULL;

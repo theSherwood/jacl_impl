@@ -1,0 +1,27 @@
+# expect: ok
+#
+# AUDIT.md §D.6 regression: a spawn body that hits VM_FRAMES_MAX must not
+# SEGV.  Pre-fix, the stack-overflow inside the spawn body's recursive
+# `burn` call returned VM_RUNTIME_ERROR from the inner vm__run without
+# unwinding vm->frame_count or vm->stack_top.  The outer OP_SPAWN's
+# error path then restored vm->ip/vm->chunk but left the deep frames
+# behind, so the next opcode in main's chunk executed against a stale
+# (burn) CallFrame — landing on OP_SET_STATE_FIELD with a non-state-
+# machine value in slot 0 and dereferencing garbage.
+#
+# Post-fix: OP_SPAWN's single-threaded path resets frame_count/stack_top
+# after the inner vm__run, the spawn body's overflow becomes a future
+# error, and await surfaces it cleanly.  We only care that the program
+# completes without a SEGV; the await result is allowed to be an error.
+proc burn {n} {
+  if [== $n 0] { 1 } else {
+    def g [vec 1 2 3 4 5 6 7 8 9 10]
+    burn [- $n 1]
+  }
+}
+proc main {} {
+  def f [spawn { burn 70 }]
+  def _ [await $f]
+  print "ok"
+}
+main

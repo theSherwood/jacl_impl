@@ -10,9 +10,9 @@
 This audit was written over several sessions in May 2026. All eight
 GC/concurrency correctness items in "Critical correctness issues" are
 fixed, plus five soak-surfaced fixes, plus the §9 SATB-barrier UAF.
-Phase D (compiler/VM) surveyed three categories and landed a
-frame-check ordering fix, but **opened one new correctness bug
-(§D.6)** that is now the only open correctness item.
+Phase D (compiler/VM) surveyed three categories, landed a frame-check
+ordering fix, opened §D.6 (spawn + deep recursion SEGV), and §D.6 is
+now fixed too. **No open correctness items remain.**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -22,67 +22,51 @@ frame-check ordering fix, but **opened one new correctness bug
 | B | Soak-surfaced races | 5 additional fixes, TSAN-validated |
 | C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
-| D | Compiler/VM audit | 3 surveys; frame-check ordering fix landed; **§D.6 opened** (spawn + deep recursion SEGV — still open) |
+| D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings) |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
-surveyed; §D.6 opened during the §D.3 test work. See git log for the
-per-commit story.
+surveyed; §D.6 opened during the §D.3 test work and now fixed. See
+git log for the per-commit story.
 
 ### Start-here for next session
 
-**Open correctness bug: §D.6** — *the one thing to fix next.* SEGV
-from valid user code:
+No open correctness bugs. The §D.6 SEGV from `spawn { burn 70 }` is
+fixed by making `OP_SPAWN`'s single-threaded path reset
+`vm->frame_count` and `vm->stack_top` after the inner `vm__run`
+returns, mirroring what `OP_PARALLEL` already does. `OP_RACE` had
+the same bug pattern and was fixed in the same pass. Regression test:
+`test/jacl/cps_spawn_deep_recursion.jacl`.
 
-```jacl
-proc burn {n} {
-  if [== $n 0] { 1 } else {
-    def g [vec 1 2 3 4 5 6 7 8 9 10]
-    burn [- $n 1]
-  }
-}
-proc main {
-  def f [spawn { burn 70 }]
-  def _ [await $f]
-}
-main
-```
+The §D.6-cluster follow-up audit (formerly punch-list item #4) is
+also closed: every recursive `vm__run` call site was classified.
+Of 28 sites, 19 propagate errors immediately (SAFE), 9 continue
+past error and explicitly reset both `frame_count` and `stack_top`
+(FIXED, including the §D.6 patch for `OP_SPAWN`/`OP_RACE`), and 0
+exhibit the §D.6 shape. No siblings exist.
 
-Without `spawn`: clean `stack overflow` at depth 64 (`VM_FRAMES_MAX`).
-Inside `spawn`: SEGV at depth ≈58 before the boundary check fires.
-ASAN points to `src/vm.c:8190` in `OP_SET_STATE_FIELD`:
+The §D.2 frame-check reorderings (formerly item #2) are also
+closed for `OP_PARALLEL`, `OP_RACE`, and `OP_SPREAD` (5 sites in
+total — SM + non-SM branches for parallel/race, plus the stream-
+generator path in spread). Same pattern as `c39ee12`. Suite
+unchanged: 87 pass, 14 pre-existing HAMT/RRB. TSAN unchanged
+relative to baseline (the §D.2 fix is pure single-thread ordering).
 
-```c
-JaclVal state_val = vm->stack[frame->stack_base + 0];
-JaclStateMachine *sm = jacl_as_state_machine(state_val);  // unchecked
-sm->fields[field_index] = value;  // SEGV — sm is garbage
-```
-
-Full analysis + ASAN trace + investigation hypotheses in `§D.6` below.
-Suggested first move: dump the bytecode for both the spawn body and
-`burn`'s body, compare which opcode is at the SEGV PC, and trace it
-back to its emit site in `src/compiler.c`. A `--dump-bc` flag may or
-may not exist; if not, a 20-LoC dump helper added temporarily to the
-test harness is the fastest path.
+The remaining work is non-correctness hardening:
 
 ### Punch list (in priority)
 
-1. **§D.6 SEGV** — only open correctness bug. Above.
-2. **§D.1 `JACL_ASSERT_TAG` macro** — ~32 unchecked `jacl_as_*`
-   extraction sites in `vm.c`. §D.6 proves these aren't safely
-   "trust the compiler"; debug-only assert would have caught §D.6 at
-   the call site instead of as a SEGV. Mechanical, ~50 LoC. Likely
-   surfaces other latent issues during the rebuild — worth doing
-   right after §D.6.
-3. **§D.2 remaining frame-check reorderings** — `OP_PARALLEL`,
-   `OP_RACE`, `OP_SPREAD`. Same pattern as the fix that landed for
-   `OP_EACH` / `OP_TRANSFORM` / `OP_FILTER` (commit `c39ee12`).
-   ~10 LoC.
-4. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
+1. **§D.1 `JACL_ASSERT_TAG` macro** — ~32 unchecked `jacl_as_*`
+   extraction sites in `vm.c`. §D.6 demonstrated these aren't safely
+   "trust the compiler"; a debug-only assert at every unchecked
+   extraction would have caught §D.6 at the call site instead of as
+   a SEGV. Mechanical, ~50 LoC. Worth doing because the next class
+   of compiler/VM coordination bug will land at one of these sites.
+2. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
    `return VM_RUNTIME_ERROR` leaves the operand stack unbalanced.
    Macro-based refactor. Pure cleanup; defends against DoS-style
    slot drift.
-5. **Architectural items §10–§17** — throughput, latency, ergonomics.
+3. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
 
 §D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
@@ -780,8 +764,10 @@ paths leak 1–3 slots; a handful in iterating opcodes can leak more.
 1. *Move "would-fail" checks before any pushes/pops.* For iterating
    opcodes, move the `frame_count >= VM_FRAMES_MAX` check above the arg
    pushes. Eliminates the (iii) category. Mechanical — one fix per
-   iterating opcode. **One concrete fix landed in this audit pass**
-   (`OP_TRANSFORM`, both vec and map paths) as a pattern demonstration.
+   iterating opcode. **Now landed across all 11 sites**: `OP_EACH`,
+   `OP_TRANSFORM`, `OP_FILTER` (6 sites, commit `c39ee12`), then
+   `OP_PARALLEL`, `OP_RACE`, `OP_SPREAD` (5 sites, follow-up). The
+   (iii) category is closed.
 
 2. *Either restructure error returns to reset stack_top, or add a
    `VM_ERROR(...)` macro that does so.* Eliminates the (ii) category.
@@ -859,13 +845,52 @@ check now runs **before** the args-push, eliminating the
 severity-(iii) 2–3-slot leak per failed call. Full normal-mode suite
 unchanged (87 pass, 14 pre-existing HAMT/RRB failures unrelated).
 
-`OP_PARALLEL`, `OP_RACE`, and `OP_SPREAD` have similar but
-shape-different sites (more state to track per iteration); same fix
-applies and is queued as follow-up.
+Follow-up landed in a later pass: `OP_PARALLEL`, `OP_RACE`, and
+`OP_SPREAD` (stream-generator path) got the same reorder — 5 sites
+total (SM + non-SM branches for parallel/race, single path for
+spread). Same shape, same pattern; commit message references this
+section. Suite unchanged; TSAN unchanged relative to baseline.
 
 The §D.3 test work also surfaced a new correctness bug — §D.6 below.
 
-### D.6 New finding from §D.3 test work — `spawn` + deep recursion SEGV
+A follow-up audit of every recursive `vm__run` call site (28 total)
+confirmed no other §D.6 shape exists: 19 propagate errors
+immediately, 9 continue past error and explicitly reset both
+`frame_count` and `stack_top` (including the §D.6 fix in
+`OP_SPAWN`/`OP_RACE`), 0 AT RISK.
+
+### D.6 `spawn` + deep recursion SEGV — **FIXED**
+
+**Fix landed**: `OP_SPAWN`'s single-threaded path (`src/vm.c`) now
+captures `saved_stack_top` alongside `saved_frame_count` and
+**resets both** after the inner `vm__run` returns, regardless of
+whether the sub-run succeeded.  This mirrors the existing pattern in
+`OP_PARALLEL`.  `OP_RACE` had the same bug and was fixed in the same
+pass.  Regression test:
+`test/jacl/cps_spawn_deep_recursion.jacl` — `spawn { burn 70 }`
+where `burn` recurses past `VM_FRAMES_MAX` now completes cleanly
+(the stack-overflow becomes a future error surfaced by `await`)
+instead of SEGV'ing.
+
+Root cause, in one sentence: when the inner `vm__run` for the spawn
+body returned `VM_RUNTIME_ERROR` (because `burn`'s deep recursion hit
+the `vm->frame_count >= VM_FRAMES_MAX` check in `OP_CALL`), the
+outer `OP_SPAWN` restored `vm->ip` and `vm->chunk` to main's chunk
+but left `vm->frame_count` at 64 — so `frame = &vm->frames[63]` and
+the next opcode (main's `OP_SET_STATE_FIELD`) read
+`vm->stack[frame->stack_base + 0]` from burn's deepest stack slot
+(which held the `i32` value of `n`), cast it as a `JaclStateMachine*`,
+and dereferenced garbage.
+
+Validated by:
+- `test/jacl/cps_spawn_deep_recursion.jacl` (the original repro)
+- Full normal-mode suite: 87 passed / 14 pre-existing fails — baseline
+- Full TSAN sweep clean on the chaos test inventory
+- 60-second `chaos_soak` TSAN run: 195K tasks, 0 heap problems
+
+Original finding follows.
+
+#### Original finding from §D.3 test work — `spawn` + deep recursion SEGV
 
 While constructing the inner-closure-capture test, a separate crash
 surfaced:
