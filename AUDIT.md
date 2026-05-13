@@ -12,9 +12,10 @@ GC/concurrency correctness items in "Critical correctness issues" are
 fixed, plus five soak-surfaced fixes, plus the §9 SATB-barrier UAF.
 Phase D (compiler/VM) surveyed three categories, landed a frame-check
 ordering fix, opened §D.6 (spawn + deep recursion SEGV), and §D.6 is
-now fixed too. **One open correctness item discovered 2026-05-13 while
-building the perf bench harness — see Punch list item #0 (SEGV under
-sustained allocation pressure).**
+now fixed too. **2026-05-13 perf-bench surfaced two new bugs: a pair
+of single-thread GC walker bugs (now FIXED in `b521b1d`) and a deeper
+concurrent-GC issue with non-CPS closures losing their VM-stack roots
+(open — see Punch list item #0b).**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -95,19 +96,60 @@ The remaining work is non-correctness, performance/architecture:
 
 ### Punch list (in priority)
 
-0. **Open: SEGV under sustained allocation pressure** (found 2026-05-13
-   while building the perf bench harness). The scenario in
-   `test/jacl/bench/collection_churn.jacl` deterministically segfaults
-   via `jacl_harness` at N≥840 (top-level combined HAMT + RRB
-   build + update + read loops with `mut`/`while`). At N=500 it fails
-   intermittently during runtime/vm teardown with "double free or
-   corruption (!prev)". At N=200 stable (0/30 stress runs failed).
-   Likely a cross-heap GC interaction or a teardown race —
-   `runtime_destroy` joins workers and then `vm_destroy` frees the
-   temp VM's heap, but the closure was allocated in the temp VM's
-   heap and was referenced from worker tasks. Reproducer is the
-   benched scenario with N bumped back up. Investigate before
-   pushing N higher or adding more scenarios.
+0a. ~~SEGV under sustained allocation pressure via jacl_harness (single-thread path)~~
+   **FIXED** in `b521b1d`. Root causes were two real bugs in
+   `src/gc_collect.c`:
+
+   - `gc_mark` / `gc_mark_minor` pushed every `vm->frames[i].closure`
+     to the mark stack unconditionally, but `vm_exec` and `embed.c`
+     synthesize stack-allocated frame closures for top-level chunks.
+     `gc_header_of(cl)` then read 4 bytes BEFORE the stack variable
+     under any alloc-pressure GC. Fix: skip closures that aren't in
+     the heap (their chunk constants are already enumerated separately
+     and they carry no upvalues).
+   - All five sweep walkers (`gc_sweep`, both `gc_mark_minor` walks,
+     and both phases of `gc_sweep_concurrent`) used line-skip on
+     `total==0`. That breaks when a live object straddles a line
+     boundary with a zeroed dead object immediately before it — the
+     walker leaps past the live object's header into its payload,
+     reads garbage `alloc_total`, and `memset`s past the block in
+     `gc_sweep_concurrent` Phase 1. Fix: advance ptr by 8 (the
+     alignment) on zero, not by line.
+
+0b. **Open: concurrent GC + non-CPS closures lose VM-stack roots.**
+   `gc_enumerate_roots` in `runtime.c` does NOT scan worker VM stacks
+   (the comment cites "CPS captures all state" per
+   GC_CONCURRENCY_DESIGN.md §7). But the spawn task path runs
+   non-suspending closures *directly* (`runtime__spawn_task_exec`'s
+   non-CPS branch). For these, intermediate values constructed during
+   e.g. HAMT/RRB path-copy live only on the worker's `vm->stack` and
+   can be swept by a concurrent GC mid-execution. Surfaces as a SEGV
+   in `gc__trace_object` reading garbage payload bytes from a re-used
+   slot.
+
+   Reproducer: `test/jacl/bench/collection_churn.jacl` at N≥500.
+   Failure rate under stress: ~20% at N=500, deterministic at higher
+   N. Walker fixes above changed *where* the SEGV lands but did not
+   eliminate it. AddressSanitizer trace points at `gc__trace_object`
+   for an object whose `alloc_total==0` but other fields look like a
+   re-allocated payload — consistent with a worker re-using a swept
+   slot for a fresh allocation while the GC mark phase still holds the
+   stale reference.
+
+   Possible fixes (in increasing scope):
+   - Scan worker VM stacks in `gc_enumerate_roots`, using the
+     BUSY-sentinel protocol to synchronize and atomic-relaxed loads
+     on slot values. Each pushed value still passes
+     `jacl_is_heap_type` and would ideally `gc__ptr_in_heap`-filter
+     to avoid stale-pointer pushes.
+   - Add `OBJ_INVALID = 0` to `GCObjType` so zeroed headers don't
+     dispatch to `OBJ_CLOSURE` — defense in depth.
+   - Force all spawn-task bodies through CPS so VM-stack-only
+     intermediates can't exist.
+
+   The bench scenario is sized to N=200 (stable, 0/30 stress runs)
+   while this stays open. Investigate before pushing N higher or
+   relying on perf numbers from heavy-allocation non-CPS workloads.
 
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
