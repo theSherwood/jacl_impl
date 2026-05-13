@@ -53,8 +53,22 @@ with the two GC races that blocked it AND the five sibling
 gc_stress_atom × 50 is clean with CV applied. The write-barrier
 discipline is now uniform: any heap-pointer slot write on any
 GC-managed object goes through `gc_write_barrier`, unconditional
-on both deletion and insertion sides. (#0c fixed 2026-05-13:
-external roots API.)
+on both deletion and insertion sides.
+
+**Known theoretical hole, not surfacing as a bug today**: §9
+recommendation #2 (capture mutable-load values into a per-worker
+"stack root set" scanned by `gc_enumerate_roots`) is **still
+open** — see §9e below. The write-side races are all closed, but
+the *read-side* operand-stack-rooting gap remains: a worker can
+hold a derived heap value on the operand stack across a GC moment
+with no other root, relying on epoch protection or the value's
+container still pointing to it. JACL's CPS compiler de facto
+avoids this pattern (heap values live across suspensions only via
+SM state fields, which the GC scans), but it's a convention, not
+a runtime invariant. No concrete UAF has been observed; revisit
+if one ever does, or if JACL grows beyond CPS-only concurrency.
+
+(#0c fixed 2026-05-13: external roots API.)
 The §D.6 SEGV from `spawn { burn 70 }` is
 fixed by making `OP_SPAWN`'s single-threaded path reset
 `vm->frame_count` and `vm->stack_top` after the inner `vm__run`
@@ -634,32 +648,62 @@ mutated by another thread, GC runs before consumption."
 
 #### 9e. Recommended hardening (ranked)
 
-1. **Make the SATB barrier unconditional on the deletion side.** Drop
-   the `gc_active` gate for the `old_val` grey-buffer push; always fire
-   it when a heap value is overwritten in a mutable container. The
-   insertion-barrier push can stay gated (insertion only matters during
-   an active cycle). The grey buffer is reset at the end of every GC
-   cycle, so a barrier push between cycles is a bounded waste of memory
-   and one atomic store per mutation. Eliminates the race cleanly.
-   Estimated work: hours, plus a regression run.
+1. **Make the SATB barrier unconditional on the deletion side.** —
+   **DONE** (§9 fix + §10/§11 race #1 + sibling-holes pass extended
+   this to insertion side too — see below). Both sides of
+   `gc_write_barrier` now fire unconditionally, and every heap-pointer
+   slot write on every GC-managed object is routed through it
+   (mutable refs, FutureWaiter chains, sm->fields, sm->sm_closure,
+   sm->error_k, cl->upvalues, stream->cached_value/next_fn/state_machine,
+   etc.).
 
 2. **Capture mutable-load values into a thread-local "stack root set."**
-   On every `OP_DEREF` / `OP_GET_CELL_*` that produces a heap value,
-   stash it into a per-worker root set that `gc_enumerate_roots` scans.
-   Clear the slot when the value is consumed. More compiler involvement;
-   matches the JVM "handle table" model. Heavier than (1).
+   — **STILL OPEN** (2026-05-13). The barrier discipline closes
+   write-side races, but the *read-side* operand-stack-rooting gap
+   that motivated this recommendation remains: a worker that does
+   `OP_DEREF` on an atom (or `OP_GET_CELL_*`, or `OP_GET_STATE_FIELD`
+   producing a heap value) pushes the value onto the operand stack,
+   which is **not** a GC root in concurrent mode. The value is safe
+   only because of one of the following coincidences:
+
+   - Another rooted path also holds the value (e.g., the atom still
+     points to it because nobody has reset the atom yet — the §9 SATB
+     fix covers the "someone resets the atom" case but not the case
+     where the value's only ref happens to vanish via some unrelated
+     code path).
+   - The value's epoch protects it (allocated this cycle).
+   - The worker consumes the value before the next safepoint where a
+     concurrent GC could observe it as unrooted.
+
+   None of these are formally guaranteed. The class of programs
+   that's safe today is "CPS-segments that don't hold mutable-loaded
+   heap values across allocations" — which the JACL compiler does
+   currently enforce *de facto* by virtue of how CPS lowering
+   structures locals (state fields cross suspensions; pure stack
+   slots don't). But this is a runtime-correctness property held by
+   compiler convention rather than a runtime invariant, and the §D
+   audits made it clear there's no static check enforcing it.
+
+   **Why we left it open**: every concrete UAF the audit identified
+   so far has been on the *write side* (mutation overwriting the
+   value's only ref), not the *read side* (consumer holds value
+   across a GC moment with no other ref). The chaos tests + 250 GC-
+   stress runs under CV show no symptoms of read-side races. So
+   while §9-#2 is theoretically necessary for fully-defended
+   semantics, it's not surfacing as a bug today. Implementation
+   would touch every `OP_DEREF`/`OP_GET_CELL_*`/`OP_GET_STATE_FIELD`/
+   `OP_GET_UPVALUE` opcode and every site that produces a derived
+   heap value from a mutable load, plus add per-worker "handle
+   table" infrastructure scanned by `gc_enumerate_roots`. JVM-style.
+   Significant work; revisit if a read-side UAF ever shows up under
+   stress, or if JACL grows beyond CPS-only concurrency (e.g.,
+   preemptive task switching mid-segment).
 
 3. **Scan the VM operand stack in `gc_enumerate_roots` with safepoint
-   synchronization.** Add a BUSY-sentinel-style protocol so the GC can
-   pause T at an opcode boundary, snapshot its stack, then continue.
-   Standard tracing-GC approach; biggest change. Probably the cleanest
-   long-term answer if JACL grows beyond CPS-only concurrency.
-
-(1) is the right first move: small, contained, undoes the gap. A
-follow-up chaos test should drive a thread to OP_DEREF an atom, force a
-mutation from another thread, and force a GC trigger in the window —
-ideally surfacing the UAF on TSAN/ASAN pre-fix so we have a regression
-guard.
+   synchronization.** — Alternative to #2; same problem space, just a
+   different mechanism (pause-and-snapshot vs. eager handle-table).
+   Also still open. Likely the cleanest long-term answer if JACL
+   ever needs preemptive concurrency, but heavier than #2 today.
 
 #### 9f. Adjacent, less critical observations from the survey
 
