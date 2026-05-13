@@ -235,6 +235,9 @@ typedef struct {
      * path) with gc_sweep_concurrent's traversal + unlink. Hot allocation
      * path (bump within current free-line run) does NOT acquire this. */
     platform_mutex_t blocks_mutex;
+    /* §14 slow-path resume anchor — see jacl.h for the rationale. Cleared
+     * by sweep at end of each GC cycle. */
+    GCBlock         *search_block;
     /* Cumulative perf counters. Sole writer is the heap's owning worker;
      * read across workers by jacl_perf_snapshot post-quiesce. MUST stay in
      * sync with the definition in jacl.h. */
@@ -257,6 +260,7 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->last_major_old_gen_bytes = 0;
     heap->gc_cycle_count          = 0;
     MUTEX_INIT(heap->blocks_mutex);
+    heap->search_block = NULL;
     heap->total_bytes_allocated = 0;
     heap->total_allocs          = 0;
     heap->slow_path_allocs      = 0;
@@ -280,6 +284,7 @@ void gc_heap_destroy(ThreadHeap *heap) {
     heap->current_block = NULL;
     heap->cursor = NULL;
     heap->limit = NULL;
+    heap->search_block = NULL;
     MUTEX_DESTROY(heap->blocks_mutex);
     /* Clear thread-local if it points to this heap, to prevent use-after-free */
     if (gc__current_heap == heap) {
@@ -432,18 +437,29 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     /* Slow path: scan blocks list. Lock to serialize with concurrent sweep
      * which may be unlinking empty blocks. The lock is held through
      * head-insert if we acquire a new block. The lock is released before
-     * tier-1 emergency GC (which re-acquires it for its own work). */
+     * tier-1 emergency GC (which re-acquires it for its own work).
+     *
+     * §14: resume the block walk from heap->search_block (set on the
+     * previous successful fit). Lines within each block are still scanned
+     * from 0 so smaller free runs left over from a larger find-fit call
+     * remain reachable for subsequent smaller allocations. Sweep clears
+     * search_block at end of each GC cycle so freed runs near the list
+     * head are picked up on the next pass. */
     needed_lines = (int)((total + GC_LINE_SIZE - 1) / GC_LINE_SIZE);
 
     MUTEX_LOCK(heap->blocks_mutex);
-    b = heap->blocks;
+    b = heap->search_block ? heap->search_block : heap->blocks;
     while (b) {
         if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            heap->search_block = b;
             MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
         }
         b = b->next;
     }
+    /* No fit found through end of list — reset anchor so the next
+     * allocation (after pool_get below) starts fresh at heap->blocks. */
+    heap->search_block = NULL;
     MUTEX_UNLOCK(heap->blocks_mutex);
 
     /* No room in any existing block — acquire a new one from the pool */
@@ -459,16 +475,19 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
         gc__emergency_gc_fn(gc__emergency_gc_ctx);
     }
 
-    /* After emergency GC: rescan existing blocks (GC may have freed runs) */
+    /* After emergency GC: rescan existing blocks (GC may have freed runs).
+     * Sweep cleared search_block, so this naturally restarts at the head. */
     MUTEX_LOCK(heap->blocks_mutex);
-    b = heap->blocks;
+    b = heap->search_block ? heap->search_block : heap->blocks;
     while (b) {
         if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            heap->search_block = b;
             MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
         }
         b = b->next;
     }
+    heap->search_block = NULL;
     MUTEX_UNLOCK(heap->blocks_mutex);
 
     /* After emergency GC: retry pool (GC may have recycled blocks) */

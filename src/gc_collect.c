@@ -584,6 +584,8 @@ size_t gc_sweep(ThreadHeap *heap) {
     heap->cursor        = NULL;
     heap->limit         = NULL;
     heap->current_block = NULL;
+    /* §14: reset slow-path resume cursor (see comment above). */
+    heap->search_block  = NULL;
 
     /* Update old gen tracking — major GC recounts everything */
     heap->old_gen_bytes = old_gen_bytes;
@@ -939,6 +941,10 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
     heap->cursor        = NULL;
     heap->limit         = NULL;
     heap->current_block = NULL;
+    /* §14: reset slow-path resume cursor — sweep may have freed runs
+     * before search_block, and re-walking from heap->blocks head will
+     * find them. */
+    heap->search_block  = NULL;
 
     /* Update old gen tracking — add newly promoted bytes */
     heap->old_gen_bytes += promoted_bytes;
@@ -1180,6 +1186,14 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
 
     /* Update old gen tracking — concurrent sweep recounts everything */
     heap->old_gen_bytes = old_gen_bytes;
+
+    /* §14: reset slow-path resume cursor so the post-sweep allocator
+     * re-discovers freed runs near the list head. Either search_block
+     * has been unlinked (UAF if we left it set) or it still points at
+     * an existing block but earlier blocks now have free runs the
+     * resume cursor would skip. Held under blocks_mutex; the gc_alloc
+     * slow path takes the same mutex before reading these fields. */
+    heap->search_block = NULL;
 
     MUTEX_UNLOCK(heap->blocks_mutex);
     return bytes_survived;

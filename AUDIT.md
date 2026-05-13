@@ -699,12 +699,37 @@ value; a single bit test (or a 256-entry tag-byte lookup table) would cut
 this. Hot path: every `grey_buf_push`, every `gc__ms_push_val`, every
 `gc_write_barrier`.
 
-### 14. `gc__find_free_run` slow path is O(blocks × 512)
-When the current free run is exhausted, `gc_alloc` scans every block in the
+### 14. `gc__find_free_run` slow path is O(blocks × 512) — **PARTIALLY FIXED** (tier 1)
+~~When the current free run is exhausted, `gc_alloc` scans every block in the
 heap from line 0 (`src/gc.c:393-401`). Each block scan is
-O(GC_LINES_PER_BLOCK=512). Heaps grow to thousands of blocks under load. A
-free-list (per-block "first free line" or a heap-level intrusive free-run
-list) would convert this from O(n²) to O(1) amortized.
+O(GC_LINES_PER_BLOCK=512). Heaps grow to thousands of blocks under load.~~
+
+**Tier-1 fix landed**: added `heap->search_block`, an anchor pointing to the
+block where the last successful `gc__find_fit_in_block` returned. The slow
+path now resumes the block walk from there instead of restarting at
+`heap->blocks` head every call. Lines within each block are still scanned
+from line 0, so smaller leftover free runs (skipped because they didn't
+fit a larger allocation) remain reachable for subsequent smaller
+allocations. Sweep clears `search_block` at the end of each GC cycle so
+freshly-freed runs near the list head are picked up on the next pass.
+
+Benchmark deltas (BENCH_TIMED_ITERS=500, geomean of 8 runs):
+
+| Scenario | wall_median | wall_min | gc_total_ns |
+|----------|------------:|---------:|------------:|
+| `collection_churn` | **-25.7%** | (noise) | -7.7% |
+| `string_concat`    | **-26.8%** | -53.3% | -29.9% |
+| `box_churn`        | -11.1% | (noise) | -29.1% |
+| `spawn_chain`      | -11.9% | -28.0% | -3.0% |
+
+Profile snapshot after fix: see `docs/profiles/2026-05-13_after_s14_fix.txt`.
+`gc__find_fit_in_block` is still the largest single function (48% mixed,
+57% collection_churn) — its per-call cost remains high because it line-scans
+the current block's line map. Tier-2 (per-block "first free line" hint)
+and tier-3 (heap-level intrusive free-run list) are the next steps if more
+is needed; the audit's original recommendation was tier-3. With wall time
+already down 25%+ on the alloc-heavy scenarios, deferring further tiers
+behind real-workload profiling is reasonable.
 
 ### 15. Block recycle in concurrent sweep races with owner traversal
 `gc_sweep_concurrent` (`src/gc_collect.c:1109-1112`) unlinks fully-empty blocks

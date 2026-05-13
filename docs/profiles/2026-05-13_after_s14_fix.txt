@@ -1,0 +1,33 @@
+# Post-fix profile: mixed (all 4 scenarios), BENCH_TIMED_ITERS=1000
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+4.609 100.00  4.609 100.00   <Total>
+2.212  48.00  2.212  48.00   gc__find_fit_in_block
+0.676  14.67  2.347  50.92   runtime__worker_loop
+0.315   6.84  1.229  26.67   vm__run
+0.303   6.58  0.382   8.28   gc_sweep_concurrent
+0.293   6.36  0.293   6.36   unicode_grapheme_next.part.0
+0.224   4.87  0.224   4.87   <static>@0x188051 (<libc.so.6>)
+0.100   2.16  0.109   2.36   rope_string__compute_hash
+0.084   1.82  0.362   7.85   rope_summary_summarize
+0.051   1.10  0.053   1.15   clock_nanosleep
+
+# Post-fix profile: collection_churn, BENCH_TIMED_ITERS=2000
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.786 100.00  1.786 100.00   <Total>
+1.013  56.73  1.013  56.73   gc__find_fit_in_block
+0.220  12.34  0.272  15.24   gc_sweep_concurrent
+0.199  11.17  1.148  64.27   vm__run
+0.105   5.86  0.105   5.86   <static>@0x188051 (<libc.so.6>)
+0.048   2.68  0.459  25.68   jacl_map_mk_internal_copy
+0.041   2.29  0.041   2.29   jacl_val_hash
+0.020   1.12  1.084  60.69   gc_alloc
+0.017   0.95  0.053   2.96   jacl_map_set_recursive.constprop.0
+0.017   0.95  0.337  18.87   jacl_vec_set_in_tree

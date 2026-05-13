@@ -184,6 +184,19 @@ typedef struct {
      * fast path doesn't touch the list. See AUDIT.md §§7, 15 and
      * SYNCHRONIZATION.md. MUST stay in sync with the definition in gc.c. */
     platform_mutex_t blocks_mutex;
+    /* §14 slow-path resume anchor. When the bump-allocation fast path
+     * exhausts the current free run, the slow path scans the blocks list
+     * looking for another fit. Without this anchor, the scan restarts at
+     * heap->blocks head every call — O(blocks × 512) of line-map churn
+     * even though most blocks have already been observed full for this
+     * allocation size. With this anchor, the scan resumes at the block
+     * where the last fit was found; lines within that block are still
+     * scanned from 0 so smaller free runs left over from larger
+     * find-fit calls remain reachable. Cleared to NULL by sweep at end
+     * of each GC cycle so freed runs near the list head are picked up
+     * on the next pass, and on slow-path miss-through-end so we don't
+     * grow the heap unnecessarily. */
+    GCBlock         *search_block;
     /* Cumulative perf counters (owner is sole writer; perf-snapshot reads
      * across workers post-quiesce). Never reset by GC — bytes_since_gc is
      * the GC-trigger counter, this is the lifetime accumulator. */
