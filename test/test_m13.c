@@ -101,7 +101,7 @@ static int test_future_add_waiter_pending(void) {
 
     /* Use a simple value as placeholder continuation */
     JaclVal cont = jacl_i32(100);
-    bool added = jacl_future_add_waiter(fut, cont, &vm.heap);
+    bool added = jacl_future_add_waiter(fut, cont, &vm.heap, NULL, NULL);
     ASSERT(added);
     ASSERT(fut->waiters != NULL);
     ASSERT_U64_EQ(fut->waiters->continuation, cont);
@@ -124,7 +124,7 @@ static int test_future_add_waiter_resolved(void) {
     jacl_future_resolve(fut, jacl_i32(42), NULL, NULL);
 
     JaclVal cont = jacl_i32(200);
-    bool added = jacl_future_add_waiter(fut, cont, &vm.heap);
+    bool added = jacl_future_add_waiter(fut, cont, &vm.heap, NULL, NULL);
     ASSERT(!added); /* should return false — already resolved */
 
     vm_destroy(&vm);
@@ -144,7 +144,7 @@ static int test_future_add_waiter_errored(void) {
     jacl_future_error(fut, jacl_set_error(jacl_i32(1)), NULL, NULL);
 
     JaclVal cont = jacl_i32(300);
-    bool added = jacl_future_add_waiter(fut, cont, &vm.heap);
+    bool added = jacl_future_add_waiter(fut, cont, &vm.heap, NULL, NULL);
     ASSERT(!added);
 
     vm_destroy(&vm);
@@ -165,9 +165,9 @@ static int test_future_multiple_waiters(void) {
     JaclVal c2 = jacl_i32(20);
     JaclVal c3 = jacl_i32(30);
 
-    ASSERT(jacl_future_add_waiter(fut, c1, &vm.heap));
-    ASSERT(jacl_future_add_waiter(fut, c2, &vm.heap));
-    ASSERT(jacl_future_add_waiter(fut, c3, &vm.heap));
+    ASSERT(jacl_future_add_waiter(fut, c1, &vm.heap, NULL, NULL));
+    ASSERT(jacl_future_add_waiter(fut, c2, &vm.heap, NULL, NULL));
+    ASSERT(jacl_future_add_waiter(fut, c3, &vm.heap, NULL, NULL));
 
     FutureWaiter *waiters = jacl_future_resolve(fut, jacl_i32(99), NULL, NULL);
 
@@ -185,8 +185,11 @@ static int test_future_multiple_waiters(void) {
     ASSERT_U64_EQ(waiters->next->continuation, c2);
     ASSERT_U64_EQ(waiters->next->next->continuation, c1);
 
-    /* After resolve, waiters list should be cleared */
-    ASSERT(fut->waiters == NULL);
+    /* After resolve, the chain stays attached to fut->waiters (AUDIT.md
+     * §10-11): detaching would be an unbarriered heap-pointer overwrite
+     * and a concurrent GC tracing the future could miss the chain. The
+     * chain is reclaimed naturally once the future itself is unreachable. */
+    ASSERT(fut->waiters == waiters);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -233,7 +236,7 @@ static int test_gc_trace_future_waiters(void) {
 
     /* Add a waiter with a heap value continuation */
     JaclVal cont = jacl_i64(&vm.heap, 99999LL);
-    jacl_future_add_waiter(fut, cont, &vm.heap);
+    jacl_future_add_waiter(fut, cont, &vm.heap, NULL, NULL);
 
     /* Root the future */
     vm.stack[0] = f;
@@ -1519,8 +1522,8 @@ static int test_await_multiple_awaiters(void) {
     JaclVal c2 = jacl_future(&vm.heap);
 
     /* Add waiters (using the future vals as dummy continuations) */
-    bool added1 = jacl_future_add_waiter(fut, c1, &vm.heap);
-    bool added2 = jacl_future_add_waiter(fut, c2, &vm.heap);
+    bool added1 = jacl_future_add_waiter(fut, c1, &vm.heap, NULL, NULL);
+    bool added2 = jacl_future_add_waiter(fut, c2, &vm.heap, NULL, NULL);
     ASSERT(added1);
     ASSERT(added2);
 
@@ -2774,9 +2777,9 @@ static int test_integ_multi_awaiter_same(void) {
     JaclVal c2 = jacl_future(&vm.heap);
     JaclVal c3 = jacl_future(&vm.heap);
 
-    ASSERT(jacl_future_add_waiter(fut, c1, &vm.heap));
-    ASSERT(jacl_future_add_waiter(fut, c2, &vm.heap));
-    ASSERT(jacl_future_add_waiter(fut, c3, &vm.heap));
+    ASSERT(jacl_future_add_waiter(fut, c1, &vm.heap, NULL, NULL));
+    ASSERT(jacl_future_add_waiter(fut, c2, &vm.heap, NULL, NULL));
+    ASSERT(jacl_future_add_waiter(fut, c3, &vm.heap, NULL, NULL));
 
     FutureWaiter *waiters = jacl_future_resolve(fut, jacl_i32(42), NULL, NULL);
     int count = 0;

@@ -769,6 +769,210 @@ static int test_write_barrier_satb_protects_held_value(void) {
     TEST_PASS();
 }
 
+/* AUDIT.md §10/§11 race #2 regression: jacl_future_add_waiter must
+ * push the continuation to the grey buffer so it survives a concurrent
+ * GC cycle. The exact pattern: a fresh future/waiter (watermark-protected
+ * but NOT in any mark path) is registered with an OLD continuation. The
+ * waiter is kept by the watermark check in sweep, but its OLD
+ * continuation has no mark and no watermark protection. Without the
+ * unconditional grey-push, the sweep reclaims the continuation.
+ *
+ * The setup: allocate V at low epoch, advance watermark past V, then
+ * allocate fut + add_waiter — both fresh. fut is NOT rooted (no env
+ * binding). fut survives sweep via watermark only; nothing traces it.
+ * V's only reachability is via fut→waiters→continuation, which isn't
+ * traced. Pre-fix: V is reclaimed. Post-fix: grey-push keeps V alive. */
+static int test_future_add_waiter_grey_push(void) {
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Allocate V at epoch=1 (OLD — will fall under watermark). */
+    gc__thread_epoch = 1;
+    JaclVal v = jacl_i64(heap, 0x5566778899aabbccLL);
+    void *v_ptr = jacl_as_ptr(v);
+    GCHeader *v_hdr = gc_header_of(v_ptr);
+    uint8_t orig_obj_type = v_hdr->obj_type;
+    uint16_t orig_total   = v_hdr->alloc_total;
+    ASSERT_INT_EQ(v_hdr->epoch, 1);
+
+    /* Force a fresh current_block so sweep visits V's block. */
+    while (heap->current_block != NULL && heap->cursor < heap->limit) {
+        (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    }
+    (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Advance epochs so V is now OLD (below watermark). Fresh allocs
+     * (future, waiter) will be at the new epoch — watermark-protected
+     * but NOT traceable via any root. */
+    ATOMIC_STORE_EXPLICIT(&rt.global_epoch, 5, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&w->thread_epoch, 5, MEM_RELEASE);
+    gc__thread_epoch = 5;
+
+    /* Allocate fresh future. NOT rooted in env or anywhere else — the
+     * future is kept alive only by the watermark check in sweep. The
+     * mark phase will never enumerate it. */
+    JaclVal fut_val = jacl_future(heap);
+    JaclFuture *fut = jacl_as_future(fut_val);
+
+    /* Add V as a waiter. The waiter is also fresh (watermark-protected).
+     * Pre-fix: V has no protection. Post-fix: grey push protects it. */
+    bool added = jacl_future_add_waiter(fut, v, heap,
+                                        w->vm.grey_buf, w->vm.gc_active_ptr);
+    ASSERT(added);
+
+    /* Run synchronous concurrent GC. */
+    uint32_t expected = 0;
+    bool ok = ATOMIC_CAS(&rt.gc_running, &expected, 1,
+                         MEM_ACQ_REL, MEM_RELAXED);
+    ASSERT(ok);
+    gc_concurrent_collect(&rt);
+
+    /* Pre-fix: V swept (header zeroed). Post-fix: V grey-buffered →
+     * marked → header intact. */
+    ASSERT_INT_EQ(v_hdr->obj_type, orig_obj_type);
+    ASSERT_INT_EQ(v_hdr->alloc_total, orig_total);
+    ASSERT_I64_EQ(jacl_as_i64(v), 0x5566778899aabbccLL);
+
+    (void)fut_val; (void)fut; /* silence unused */
+    rt_test__destroy_no_threads(&rt);
+    gc__thread_epoch = 0;
+    TEST_PASS();
+}
+
+/* AUDIT.md §10-11 regression: jacl_future_resolve must keep the
+ * FutureWaiter chain reachable across a concurrent GC cycle. Pre-fix,
+ * resolve did `waiters = f->waiters; f->waiters = NULL` — an unbarriered
+ * heap-pointer overwrite. A GC cycle that traced the future after the
+ * NULL store missed the chain (and the continuations it transitively
+ * roots via OBJ_FUTURE_WAITER → continuation). The C local holding the
+ * detached head is not a GC root, so the chain and its continuations
+ * could be swept while runtime__schedule_waiters was still iterating.
+ *
+ * Post-fix: the chain stays attached to f->waiters across resolve, so
+ * OBJ_FUTURE tracing keeps the chain reachable. Verified by allocating
+ * waiters with old-epoch continuations, advancing the watermark past
+ * them, resolving, then running gc_concurrent_collect synchronously
+ * and asserting the FutureWaiter nodes and continuations survive. */
+static int test_future_resolve_waiter_chain_survives_gc(void) {
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Allocate at epoch=1 — the chain we want the watermark to fall on top
+     * of so we'd see UAF in pre-fix code. */
+    gc__thread_epoch = 1;
+
+    JaclVal fut_val = jacl_future(heap);
+    JaclFuture *fut = jacl_as_future(fut_val);
+
+    /* Root the future in env so it stays reachable across the GC cycle. */
+    w->vm.env.names[w->vm.env.count]  = jacl_inline_string("f", 1);
+    w->vm.env.values[w->vm.env.count] = fut_val;
+    w->vm.env.count++;
+
+    /* Push three waiters, each with a heap-typed continuation (jacl_i64).
+     * Each continuation is reachable ONLY via its FutureWaiter node —
+     * i.e., its only path is fut->waiters->(...)->continuation. */
+    JaclVal cont_vals[3];
+    void *cont_ptrs[3];
+    GCHeader *cont_hdrs[3];
+    uint8_t cont_orig_type[3];
+    uint16_t cont_orig_total[3];
+
+    for (int i = 0; i < 3; i++) {
+        cont_vals[i] = jacl_i64(heap, 0x1100LL + i);
+        cont_ptrs[i] = jacl_as_ptr(cont_vals[i]);
+        cont_hdrs[i] = gc_header_of(cont_ptrs[i]);
+        cont_orig_type[i]  = cont_hdrs[i]->obj_type;
+        cont_orig_total[i] = cont_hdrs[i]->alloc_total;
+        ASSERT_INT_EQ(cont_hdrs[i]->epoch, 1);
+        bool added = jacl_future_add_waiter(fut, cont_vals[i], heap, NULL, NULL);
+        ASSERT(added);
+    }
+
+    /* Snapshot FutureWaiter node identities and headers. add_waiter
+     * prepends, so walk-order from f->waiters is reverse of add-order:
+     * node_ptrs[i] holds the i-th node in walk order, whose continuation
+     * is cont_vals[2 - i]. */
+    FutureWaiter *node_ptrs[3];
+    GCHeader *node_hdrs[3];
+    uint8_t  node_orig_type[3];
+    uint16_t node_orig_total[3];
+    {
+        FutureWaiter *cur = fut->waiters;
+        for (int i = 0; i < 3; i++) {
+            ASSERT(cur != NULL);
+            node_ptrs[i]      = cur;
+            node_hdrs[i]      = gc_header_of(cur);
+            node_orig_type[i] = node_hdrs[i]->obj_type;
+            node_orig_total[i] = node_hdrs[i]->alloc_total;
+            ASSERT_INT_EQ(node_hdrs[i]->epoch, 1);
+            ASSERT(cur->continuation == cont_vals[2 - i]);
+            cur = cur->next;
+        }
+        ASSERT(cur == NULL);
+    }
+
+    /* Force a fresh current_block before GC so the sweep actually visits
+     * the blocks holding our waiters/continuations (gc_sweep_concurrent
+     * skips heap->current_block — AUDIT.md §7). */
+    while (heap->current_block != NULL && heap->cursor < heap->limit) {
+        (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    }
+    (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Advance epochs past the waiter chain so the watermark would
+     * normally permit reclamation. */
+    ATOMIC_STORE_EXPLICIT(&rt.global_epoch, 5, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&w->thread_epoch, 5, MEM_RELEASE);
+    gc__thread_epoch = 5;
+
+    /* Resolve. Pre-fix would NULL f->waiters here; post-fix leaves it
+     * attached so OBJ_FUTURE tracing keeps the chain alive. */
+    JaclVal result = jacl_i64(heap, 0x424242LL);
+    FutureWaiter *returned = jacl_future_resolve(fut, result,
+                                                 w->vm.grey_buf,
+                                                 w->vm.gc_active_ptr);
+
+    /* The returned head must be the chain head — and the chain must
+     * still be attached to f. */
+    ASSERT(returned == fut->waiters);
+    ASSERT(returned == node_ptrs[0]);
+
+    /* Run a synchronous concurrent GC cycle from this thread. */
+    uint32_t expected = 0;
+    bool ok = ATOMIC_CAS(&rt.gc_running, &expected, 1,
+                         MEM_ACQ_REL, MEM_RELAXED);
+    ASSERT(ok);
+    gc_concurrent_collect(&rt);
+
+    /* Each FutureWaiter node must have survived: header intact, next
+     * link intact, continuation intact (walk-order is reverse of
+     * add-order — see snapshot above). */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_INT_EQ(node_hdrs[i]->obj_type, node_orig_type[i]);
+        ASSERT_INT_EQ(node_hdrs[i]->alloc_total, node_orig_total[i]);
+        ASSERT(node_ptrs[i]->continuation == cont_vals[2 - i]);
+    }
+    ASSERT(node_ptrs[0]->next == node_ptrs[1]);
+    ASSERT(node_ptrs[1]->next == node_ptrs[2]);
+    ASSERT(node_ptrs[2]->next == NULL);
+
+    /* Each continuation must have survived. */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_INT_EQ(cont_hdrs[i]->obj_type, cont_orig_type[i]);
+        ASSERT_INT_EQ(cont_hdrs[i]->alloc_total, cont_orig_total[i]);
+        ASSERT_I64_EQ(jacl_as_i64(cont_vals[i]), 0x1100LL + i);
+    }
+
+    rt_test__destroy_no_threads(&rt);
+    gc__thread_epoch = 0;
+    TEST_PASS();
+}
+
 static int test_write_barrier_null_fast_path(void) {
     /* When gc_active_ptr is NULL (single-threaded mode), barrier is a no-op */
     GreyBuffer gb;
@@ -1474,6 +1678,8 @@ int main(void) {
         { "write_barrier_gc_inactive",       test_write_barrier_gc_inactive },
         { "write_barrier_satb_unconditional", test_write_barrier_satb_unconditional },
         { "write_barrier_satb_protects_held_value", test_write_barrier_satb_protects_held_value },
+        { "future_resolve_waiter_chain_survives_gc", test_future_resolve_waiter_chain_survives_gc },
+        { "future_add_waiter_grey_push", test_future_add_waiter_grey_push },
         { "write_barrier_null_fast_path",    test_write_barrier_null_fast_path },
         { "write_barrier_inline_skipped",    test_write_barrier_inline_types_skipped },
         { "write_barrier_mixed_types",       test_write_barrier_mixed_types },

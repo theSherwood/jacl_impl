@@ -147,6 +147,9 @@ struct Runtime {
     volatile intptr_t   inbox_count;
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
+    /* Wakeup CV: signaled by push_inbox/push_pinned after appending; workers
+     * park on it in the idle path. Replaces 1-10ms sleep backoff. AUDIT §11. */
+    platform_cond_t     work_cv;
     /* GC scanner thief slots: registered once at init so gc__scan_deque can
      * safely read deque buffers under epoch-based reclamation. One slot per
      * (worker, deque) pair. Index by worker_id. */
@@ -260,7 +263,7 @@ void runtime__emergency_gc(void *ctx) {
  *   1. Set currently_executing = BUSY (pop-in-transit protocol)
  *   2. Try: inbox → private deque → public deque → steal from others
  *   3. If found: publish task, set epoch, execute, mark idle
- *   4. If not found: mark idle, backoff sleep
+ *   4. If not found: mark idle, park on rt->work_cv with 1ms timeout
  * ====================================================================== */
 
 /* Retire a task: append to the deferred-free list with the current global
@@ -306,7 +309,6 @@ static void runtime__drain_retired(WorkerThread *self) {
 THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
     WorkerThread *self = (WorkerThread *)arg;
     Runtime *rt = self->runtime;
-    int backoff = 0;
 
     rt__worker_id = self->id;
 
@@ -448,16 +450,25 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                     }
                 }
             }
-
-            backoff = 0;
         } else {
-            /* No work found — go idle with progressive backoff */
+            /* No work found — park on rt->work_cv with 1ms timeout.
+             * Lost-wakeup defense: re-check inbox_count under inbox_mutex
+             * before waiting (pushers signal under the same mutex).
+             * Pinned pushes don't share the inbox_mutex predicate, so they
+             * acquire it briefly to signal; we also check pinned_inbox_count
+             * inside the predicate as a defensive double-check. Shutdown is
+             * a predicate too so stop_threads' broadcast exits us promptly. */
             ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_IDLE,
                                   MEM_RELEASE);
-            if (backoff < 10)
-                backoff++;
             uint64_t sleep_start = runtime__now_ns();
-            SLEEP_MILLISECONDS(backoff);
+            MUTEX_LOCK(rt->inbox_mutex);
+            if (rt->inbox_count == 0 &&
+                ATOMIC_LOAD_EXPLICIT(&self->pinned_inbox_count,
+                                     MEM_RELAXED) == 0 &&
+                !ATOMIC_LOAD_EXPLICIT(&rt->shutdown, MEM_ACQUIRE)) {
+                COND_WAIT_FOR_MS(rt->work_cv, rt->inbox_mutex, 1);
+            }
+            MUTEX_UNLOCK(rt->inbox_mutex);
             self->stats.idle_sleep_ns += runtime__now_ns() - sleep_start;
         }
     }
@@ -495,6 +506,7 @@ void runtime__init_state(Runtime *rt, int num_workers) {
     rt->inbox_count = 0;
     rt->inbox = (uintptr_t *)malloc((size_t)rt->inbox_cap * sizeof(uintptr_t));
     MUTEX_INIT(rt->inbox_mutex);
+    COND_INIT(rt->work_cv);
 
     /* External roots — initially empty, grown on first pin */
     rt->external_roots      = NULL;
@@ -584,9 +596,15 @@ void runtime_destroy(Runtime *rt) {
 }
 
 /* runtime__stop_threads — signal shutdown and join all worker threads.
- * Resources are NOT freed; call runtime__teardown_state afterwards. */
+ * Resources are NOT freed; call runtime__teardown_state afterwards.
+ *
+ * Broadcast under inbox_mutex wakes all parked workers immediately;
+ * each re-checks shutdown after wake and exits the loop. AUDIT §11. */
 void runtime__stop_threads(Runtime *rt) {
     ATOMIC_STORE_EXPLICIT(&rt->shutdown, 1, MEM_RELEASE);
+    MUTEX_LOCK(rt->inbox_mutex);
+    COND_BROADCAST(rt->work_cv);
+    MUTEX_UNLOCK(rt->inbox_mutex);
     for (int i = 0; i < rt->num_workers; i++)
         THREAD_JOIN(rt->workers[i].thread, NULL);
 }
@@ -666,6 +684,7 @@ void runtime__teardown_state(Runtime *rt) {
     for (intptr_t k = 0; k < rt->inbox_count; k++)
         free((RuntimeTask *)rt->inbox[k]);
     free(rt->inbox);
+    COND_DESTROY(rt->work_cv);
     MUTEX_DESTROY(rt->inbox_mutex);
 
     /* Release external root storage (values themselves are not freed —
@@ -696,6 +715,8 @@ void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
     /* Release on count: pairs with lockless MEM_RELAXED loads in the worker
      * loop and the MEM_ACQUIRE load in gc_enumerate_roots. */
     ATOMIC_STORE_EXPLICIT(&rt->inbox_count, c + 1, MEM_RELEASE);
+    /* Wake one idle worker — signal-one is right since we added one task. */
+    COND_SIGNAL(rt->work_cv);
     MUTEX_UNLOCK(rt->inbox_mutex);
 }
 
@@ -727,6 +748,12 @@ void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
      * worker's loop and the MEM_ACQUIRE load in gc_enumerate_roots. */
     ATOMIC_STORE_EXPLICIT(&target->pinned_inbox_count, c + 1, MEM_RELEASE);
     MUTEX_UNLOCK(target->pinned_inbox_mutex);
+
+    /* Wake an idle worker (any worker — target may or may not be the one
+     * that picks it up; non-targeted wakeups fall through within 1ms). */
+    MUTEX_LOCK(rt->inbox_mutex);
+    COND_SIGNAL(rt->work_cv);
+    MUTEX_UNLOCK(rt->inbox_mutex);
 }
 
 /* ======================================================================

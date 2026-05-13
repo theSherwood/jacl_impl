@@ -19,7 +19,16 @@ walkers (b521b1d), and `OBJ_CLOSURE=0` garbage dispatch in the
 concurrent mark loop (bc74a10). The N≥500 hang (#0c) is also now
 FIXED: completion future held only by a raw C pointer was racing
 with concurrent sweep; new `runtime_pin_value`/`runtime_unpin_value`
-API roots external JaclVals across GC cycles.**
+API roots external JaclVals across GC cycles. The §10/§11 CV change
+is also FIXED, along with the two GC races that blocked it: race #1
+(unbarriered `f->waiters = NULL` detach in `jacl_future_resolve` —
+chain head's continuations lost reachability), and race #2
+(unbarriered `w->continuation` write in `jacl_future_add_waiter` —
+fresh waiter watermark-protected but its OLD continuation has no
+mark path). Both have deterministic regression tests. CV change
+applied (signal-one on push_inbox/push_pinned, 1ms-timeout park in
+worker idle path). gc_stress_atom × 30 went from 27/30 crashes to
+0/30 once race #2 was closed.**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -38,7 +47,14 @@ git log for the per-commit story.
 
 ### Start-here for next session
 
-No open correctness bugs. (#0c fixed 2026-05-13: external roots API.)
+No open correctness bugs. The §10/§11 CV change is landed along
+with the two GC races that blocked it (see §10/§11 below — both
+have deterministic regression tests). gc_stress_atom × 30 is now
+clean both with and without CV. Five latent §9-class sibling sites
+(direct heap-ptr writes on published GC objects, mostly
+`sm->fields[i]` and stream/closure post-publication mutations) are
+still documented in §10/§11 for follow-up; not currently reachable
+as UAFs. (#0c fixed 2026-05-13: external roots API.)
 The §D.6 SEGV from `spawn { burn 70 }` is
 fixed by making `OP_SPAWN`'s single-threaded path reset
 `vm->frame_count` and `vm->stack_top` after the inner `vm__run`
@@ -670,53 +686,141 @@ between mutable load and consume" check in the compiler is fragile —
 loads can be transitive (load atom → load field → load field), and
 allocation can be hidden inside helper functions.
 
-### 10/§11 attempt aborted (2026-05-13)
+### 10/§11 — **FIXED** (2026-05-13): both races closed, CV change landed
 
 A first attempt at the §10+§11 fix — replacing the worker-loop's
 progressive sleep backoff with a bounded short-spin then a CV wait,
 signaled by `push_inbox` / `push_pinned` — exposed a latent GC race
 that is **not new** but only manifests under the higher concurrency
 the CV change produces. Pre-CV baseline `gc_stress_atom.jacl` crashed
-~1/30; post-CV ~9/10.
+~3/30 (the audit's earlier "~1/30" was the low end of variance — a
+30-run reproducer measured 3/30 in normal mode). Post-CV: ~24/30.
 
-**Race**: `jacl_future_resolve` detaches the `FutureWaiter` chain
-from `f->waiters` and returns it to `runtime__schedule_waiters`,
-which iterates and pushes each waiter's continuation as an inbox
-task. Between the detach and the iteration, the chain is held only
-by a raw C local pointer — not a GC root. A concurrent
-`gc_concurrent_collect` enumerating roots in this window has no path
-to the chain, sweeps the `FutureWaiter` nodes, and the iteration
-then reads zeroed memory (`waiters->continuation` decodes to a
-state-machine whose `sm_closure` is zero, SEGV on
-`runtime__schedule_sm_resumption`).
+**Race #1 — FIXED**: `jacl_future_resolve` (and `jacl_future_error`)
+did `waiters = f->waiters; f->waiters = NULL;` — a direct C
+assignment that overwrote a heap-pointer slot on a published GC
+object **without a write barrier**. The chain of `FutureWaiter` nodes
+(which transitively roots every awaiting state machine via
+`w->continuation`, per `OBJ_FUTURE_WAITER` tracing in
+`gc_collect.c:256-263`) is reachable only through `fut → waiters` at
+trace time. After the NULL store, a concurrent GC tracing the future
+re-reads `fut->waiters == NULL`, misses the chain, and the sweep
+reclaims the chain and its continuations. `runtime__schedule_waiters`
+then iterates and reads zeroed memory.
 
-The fix attempt added a per-worker `scheduling_waiters` slot
-published inside `jacl_future_resolve` (before detach) and scanned
-in `gc_enumerate_roots`. It did get traced — the debug output
-confirmed slot writes and GC reads — but the crash persisted, with
-state-machines that *should* have been reachable through the chain
-showing up zeroed. Either there's a second window I haven't
-identified, or the SM is held by another path (e.g. `OP_SPAWN`'s
-direct `runtime__schedule_sm_resumption` at `vm.c:8574`,
-`runtime__complete_parallel_slot`, or `runtime__complete_race_slot`)
-that has its own unrooted window.
+The §9 unconditional-SATB-deletion fix closed exactly this class of
+bug, **but only for mutations that go through `gc_write_barrier`**.
+`f->waiters = NULL` is raw C.
 
-**Status**: reverted. The platform-level CV abstraction
-(`COND_INIT` / `COND_WAIT` / `COND_WAIT_FOR_MS` / `COND_SIGNAL` /
-`COND_BROADCAST`) landed in `lib/platform/platform.h` and is ready
-for a second attempt. The worker-loop change and the
-`scheduling_waiters` rooting are not committed.
+**Why the prior fix attempt failed.** The earlier attempt published
+the chain head into a per-worker `scheduling_waiters` slot before
+detach, scanned by `gc_enumerate_roots`. The SMs still came back
+zeroed because **roots are snapshot once at step 4 of
+`gc_concurrent_collect`** (`runtime.c:1098`), not re-scanned during
+the mark/convergence loop. Only **grey-buffer pushes** are drained
+mid-cycle. A slot publication that happened after the root snapshot
+but before the chain was consumed was invisible to the marker.
 
-**Next steps when revisiting**:
-1. Audit every non-schedule_waiters call site that pushes an SM
-   into the inbox without first rooting it (the four direct
-   `schedule_sm_resumption` callers and any `submit_*_task` path
-   that takes a freshly-allocated SM).
-2. Adopt a single discipline: every JaclVal handed to a task as
-   `gc_root` must be held by *something* the GC scans for the
-   duration of the call that constructs the task (current_worker's
-   slot, scheduling_waiters slot, or the source field).
-3. Land CV after the race fix has its own regression test.
+**Fix for race #1**: don't detach. `jacl_future_resolve` /
+`jacl_future_error` now leave `f->waiters` pointing at the chain
+across resolve. The chain stays reachable through `OBJ_FUTURE`
+tracing for as long as the future itself is rooted. After settle,
+`jacl_future_add_waiter` rejects new waiters (state-check under
+`future_lock`), so the chain is bounded and write-once. ~10 lines in
+`src/gc.c`. Validated by a deterministic regression test
+(`test_future_resolve_waiter_chain_survives_gc`): pre-fix it fails
+at the `returned == fut->waiters` invariant; post-fix it passes.
+
+**Race #2 — FIXED**: `jacl_future_add_waiter` wrote `w->continuation
+= continuation` directly, with no barrier. The fresh waiter `w` is
+watermark-protected (epoch ≥ current), so the sweep keeps it without
+needing to trace it via the mark path. But `w->continuation` is an
+OLD (pre-watermark) SM whose only reachability during this cycle goes
+through `w` — and if `w` isn't on any mark-stack path (e.g., the
+future itself isn't externally rooted, or the mark phase has already
+drained when add_waiter runs), the SM never gets marked. Sweep then
+reclaims it. The chain head looks alive (watermark-protected), but
+its `continuation` points to a swept SM. Next resolve+schedule reads
+that pointer → garbage `sm_closure` → SEGV in
+`runtime__schedule_sm_resumption`.
+
+This is the symmetric counterpart to race #1: #1 was a missing SATB
+barrier on the *deletion* side (waiter chain detached without
+barrier); #2 is a missing barrier on the *insertion* side (heap
+value written into a fresh container without barrier). Both fit the
+§9 unsoundness pattern that §9's `gc_write_barrier` fix closed for
+container mutations going through that API — but neither future
+operation went through it.
+
+**Fix for race #2**: unconditional grey-buffer push on
+`continuation` inside `jacl_future_add_waiter`. Matches §9's
+unconditional-deletion-side discipline: bounded cost (one push per
+add_waiter; grey buffer resets each cycle), guaranteed coverage
+regardless of `gc_active` timing or whether the fresh waiter is on
+any mark path. ~5 lines in `src/gc.c`. Validated by:
+
+- `test/test_runtime.c:test_future_add_waiter_grey_push` —
+  deterministic UAF reproducer. Allocates V at low epoch, advances
+  watermark past V, then add_waiter on a fresh (unrooted) future.
+  Without the fix, V is swept (header zeroed); with the fix, V is
+  grey-buffered → marked → survives. Confirmed catches the
+  regression by temporarily disabling the push.
+
+**Validation of the combined fix + CV change**:
+- Full normal-mode suite: 88 pass, 0 fail.
+- TSAN sweep: 80 pass, 8 fail — pre-existing baseline (`runtime`
+  test moved from FAIL → PASS, suggesting the prior `runtime` TSAN
+  failure was a flake masked by the race).
+- `gc_stress_atom.jacl` × 30 with CV applied: 0/30 (was 27/30
+  pre-fix, 3/30 pre-CV).
+- Other `gc_stress_*` × 30 each: 0/120 (one outlier in
+  `gc_stress_deep_cps` initial run that didn't reproduce in
+  follow-up 100-run soak — noise floor).
+- 60s `chaos_soak` under TSAN: 159K tasks, 0 heap problems.
+- All 6 chaos tests under TSAN: clean.
+
+**CV change details**: signal-one on `runtime__push_inbox` and
+`runtime__push_pinned` (the latter takes `rt->inbox_mutex` briefly
+to signal — non-targeted, but pinned-task latency is bounded by
+the 1ms timeout); 1ms-timeout park in worker idle path; broadcast
+under `inbox_mutex` from `runtime__stop_threads`. Worker re-checks
+inbox + pinned + shutdown under the same mutex before parking, so
+lost wakeups can't happen. The 1ms timeout caps steal-from-others
+latency since other workers' deque pushes don't signal.
+
+Perf delta on `spawn_chain` microbench is in the noise (median ~7ms
+with or without CV at 200 iterations). §11 alone doesn't unlock the
+big spawn-chain win the audit predicted; §10 (per-worker MPSC
+inbox, removes the single-mutex bottleneck) is the real lever and
+is independent follow-up work.
+
+### Sibling unbarriered heap-ptr writes (latent §9-class holes)
+
+The `f->waiters = NULL` audit surfaced a pattern: direct C writes
+that overwrite heap-typed pointer slots on already-published GC
+objects, bypassing `gc_write_barrier`. The future-waiter case was
+reachable because the chain's reachability depended entirely on
+that one pointer slot. Other sites are not currently reachable as
+UAFs but have the same shape and are latent against future
+concurrency increases (more workers, smaller GC quanta, the §10/§11
+CV change). All single-mutator-today, so listed here for follow-up
+rather than fixed in this pass:
+
+| Site | Field overwritten | Why latent today |
+|------|-------------------|------------------|
+| `vm.c:8245` `OP_SET_STATE_FIELD` | `sm->fields[i]` | Only the SM's executing worker writes; old value typically not held elsewhere. But user code `set foo [+ $foo 1]` could put the old value on the operand stack briefly. |
+| `vm.c:8312` `OP_SET_STATE_FIELD_RANGE` | `sm->fields[base+i]` | Same as above; range form for struct stores. |
+| `vm.c:2825,2850` `OP_CLOSURE` | `cl->upvalues[i]` after publication | Closure is fresh in this opcode → epoch-protected; the published-then-mutated case is the concern when closures get patched post-publication. |
+| `vm.c:1502, 1573, 1604, 1687, 1820, 1841` stream pull | `stream->cached_value` | Single worker pulls a given stream; old cached value usually consumed before overwrite. |
+| `vm.c:2509, 2519` stream create | `stream->next_fn`, `stream->state_machine` | Same publication-window concern as `OP_CLOSURE`. |
+
+The §9 hardening recommendation #2 ("capture mutable-load values
+into a per-worker stack-root set") would close this class globally.
+The cheaper local fix for each is a `gc_write_barrier(gb,
+gc_active_ptr, old_val, new_val)` immediately before each write.
+None blocks correctness today; none should block the §10/§11
+re-attempt. Worth a dedicated pass after the CV change has landed
+and we can see whether higher concurrency surfaces any of these.
 
 ### 10. Single global inbox is a contention point
 `runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external

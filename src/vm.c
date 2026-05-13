@@ -8493,7 +8493,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (vm->runtime) {
           /* PENDING in runtime mode — register state machine as waiter
              on the future and suspend by returning VM_OK. */
-          bool added = jacl_future_add_waiter(fut, state_val, &vm->heap);
+          bool added = jacl_future_add_waiter(fut, state_val, &vm->heap,
+                                              vm->grey_buf, vm->gc_active_ptr);
           if (!added) {
             /* Race: future resolved between our check and add_waiter.
                Push result and continue inline. */

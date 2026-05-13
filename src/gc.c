@@ -1020,7 +1020,19 @@ JaclVal jacl_future(ThreadHeap *heap) {
 }
 
 /* --- Resolve: set result + RESOLVED state, return waiter list.
- *     Fires write barrier (old=NIL, new=result) for concurrent GC. --- */
+ *     Fires write barrier (old=NIL, new=result) for concurrent GC.
+ *
+ *     The waiter chain is NOT detached from f->waiters — see AUDIT.md
+ *     §9b/§10-11. Detaching would overwrite a heap pointer slot without
+ *     a write barrier, and a concurrent GC tracing this future after
+ *     the NULL store would miss the chain (and the awaiting SMs it
+ *     transitively roots via OBJ_FUTURE_WAITER.continuation). The
+ *     chain stays attached so OBJ_FUTURE tracing keeps it reachable
+ *     while runtime__schedule_waiters iterates. After settle,
+ *     jacl_future_add_waiter no longer mutates the chain (state check
+ *     under future_lock), so the chain is bounded and write-once.
+ *     It will be reclaimed naturally once the future itself becomes
+ *     unreachable from any root. --- */
 
 FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
                                           GreyBuffer *gb,
@@ -1031,13 +1043,13 @@ FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
     f->result = (uint64_t)result;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_RESOLVED, MEM_RELEASE);
     waiters = f->waiters;
-    f->waiters = NULL;
     future_unlock(f);
     return waiters;
 }
 
 /* --- Error: set error result + ERROR state, return waiter list.
- *     Fires write barrier (old=NIL, new=error) for concurrent GC. --- */
+ *     Fires write barrier (old=NIL, new=error) for concurrent GC.
+ *     Chain detach skipped for the same reason as jacl_future_resolve. --- */
 
 FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
                                         GreyBuffer *gb,
@@ -1048,7 +1060,6 @@ FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
     f->result = (uint64_t)error;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_ERROR, MEM_RELEASE);
     waiters = f->waiters;
-    f->waiters = NULL;
     future_unlock(f);
     return waiters;
 }
@@ -1057,7 +1068,9 @@ FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
  *     If already resolved/errored, return false (caller schedules immediately). --- */
 
 bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
-                                    ThreadHeap *heap) {
+                                    ThreadHeap *heap,
+                                    GreyBuffer *gb,
+                                    volatile uint32_t *gc_active_ptr) {
     bool added = false;
     future_lock(f);
     if (ATOMIC_LOAD_EXPLICIT(&f->state, MEM_RELAXED) == FUTURE_PENDING) {
@@ -1066,6 +1079,18 @@ bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
         w->continuation = continuation;
         w->next = f->waiters;
         f->waiters = w;
+        /* AUDIT.md §10/§11 race #2: the fresh waiter w is watermark-protected
+         * (epoch >= current), so the sweep keeps it without the mark phase
+         * needing to trace it. But w->continuation is an OLD (pre-watermark)
+         * SM whose only reachability path during this cycle may go through w.
+         * If w isn't reached during mark (e.g., f wasn't rooted by an
+         * external path), the SM is not marked and gets swept. Unconditional
+         * grey-push on continuation greyifies the SM — the next mark phase
+         * picks it up regardless of when add_waiter ran relative to the
+         * cycle. Matches the §9 unconditional-deletion-side discipline. */
+        if (gb && jacl_is_heap_type(continuation)) {
+            grey_buf_push(gb, continuation);
+        }
         added = true;
     }
     future_unlock(f);

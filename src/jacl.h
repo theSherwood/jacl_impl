@@ -1642,6 +1642,8 @@ struct Runtime {
     volatile intptr_t   inbox_count;
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
+    /* Wakeup CV — see runtime.c. MUST stay in sync. */
+    platform_cond_t     work_cv;
     /* GC scanner thief slots — see runtime.c. MUST stay in sync. */
     int                *gc_thief_public_ids;
     int                *gc_thief_private_ids;
@@ -1929,7 +1931,8 @@ extern void future_unlock (JaclFuture *f);
 extern JaclVal jacl_future (ThreadHeap *heap);
 extern FutureWaiter *jacl_future_resolve (JaclFuture *f, JaclVal result, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
 extern FutureWaiter *jacl_future_error (JaclFuture *f, JaclVal error, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
-extern bool jacl_future_add_waiter (JaclFuture *f, JaclVal continuation, ThreadHeap *heap);
+extern bool jacl_future_add_waiter (JaclFuture *f, JaclVal continuation, ThreadHeap *heap,
+                                    GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
 extern JaclStream *jacl_as_stream (JaclVal v);
 extern JaclVal jacl_stream (ThreadHeap *heap);
 extern JaclVal parallel_agg_ptr (ParallelAgg *p);
