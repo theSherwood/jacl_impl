@@ -2,6 +2,7 @@
 #include "../src/jacl.h"
 
 #include <dirent.h>
+#include <limits.h>
 
 /* ===== Print capture helper ===== */
 
@@ -443,7 +444,7 @@ static int run_module_test(const char* dir_path) {
   free(source);
 
   /* Resolve to absolute path for module system */
-  char abs_path[1024];
+  char abs_path[PATH_MAX];
   if (!realpath(main_path, abs_path)) {
     fprintf(stderr, "  Could not resolve path: %s\n", main_path);
     return 0;

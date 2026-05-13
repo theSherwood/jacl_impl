@@ -1,6 +1,7 @@
 #include "test_helpers.h"
 #include "../src/jacl.h"
 
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -2993,7 +2994,7 @@ static int test_module_resolve_path(void) {
 
   /* Use build.sh (which we know exists) as a test target */
   /* Resolve "build.sh" relative to src/jacl.c's parent directory */
-  char importer[1024];
+  char importer[PATH_MAX];
   realpath("src/jacl.c", importer);
 
   /* "../../build.sh" from src/ should resolve to project root's build.sh */
@@ -3017,7 +3018,7 @@ static int test_module_resolve_path_not_found(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
-  char importer[1024];
+  char importer[PATH_MAX];
   realpath("src/jacl.c", importer);
 
   const char* resolved = module__resolve_path(importer, "nonexistent_file_xyz.jacl", &arena);
@@ -3217,7 +3218,7 @@ static int test_compile_module_basic(void) {
   /* Write a dummy main so realpath works */
   write_temp_jacl(dir, "main.jacl", "");
 
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
   realpath(importer_path, real_importer);
 
   /* Resolve lib.jacl canonical path */
@@ -3295,7 +3296,7 @@ static int test_compile_module_mutable_export(void) {
 
   char importer_path[1024];
   snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
   realpath(importer_path, real_importer);
 
   const char* state_canonical = module__resolve_path(real_importer, "state.jacl", &arena);
@@ -3373,7 +3374,7 @@ static int test_compile_module_private_excluded(void) {
 
   char importer_path[1024];
   snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
   realpath(importer_path, real_importer);
 
   const char* priv_canonical = module__resolve_path(real_importer, "priv.jacl", &arena);
@@ -3441,7 +3442,7 @@ static int test_compile_module_cached(void) {
 
   char importer_path[1024];
   snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
   realpath(importer_path, real_importer);
 
   const char* lib_canonical = module__resolve_path(real_importer, "lib.jacl", &arena);
@@ -3510,7 +3511,7 @@ static int test_compile_module_typed_exports(void) {
 
   char importer_path[1024];
   snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
   realpath(importer_path, real_importer);
 
   const char* math_canonical = module__resolve_path(real_importer, "math.jacl", &arena);
@@ -3612,7 +3613,7 @@ static int test_import_registers_globals(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007a", "lib.jacl",
                    "def x 42\nproc add {a, b} { + $a $b }\n",
@@ -3661,7 +3662,7 @@ static int test_import_unknown_export_error(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007b", "lib.jacl",
                    "def x 42\n",
@@ -3698,7 +3699,7 @@ static int test_import_conflict_error(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007c", "lib.jacl",
                    "def x 42\n",
@@ -3739,7 +3740,7 @@ static int test_import_typed_propagation(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
                    "proc i64 add {i64 a, i64 b} { + $a $b }\n",
@@ -3783,7 +3784,7 @@ static int test_import_arity_check(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007e", "lib.jacl",
                    "proc add {a, b} { + $a $b }\n",
@@ -3820,7 +3821,7 @@ static int test_import_type_check(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
                    "proc i64 add {i64 a, i64 b} { + $a $b }\n",
@@ -3857,7 +3858,7 @@ static int test_import_mutable_flag(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007g", "state.jacl",
                    "mut count 0\n",
@@ -3899,7 +3900,7 @@ static int test_module_mut_emits_box(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us008a", "state.jacl",
                    "mut count 0\n",
@@ -3984,7 +3985,7 @@ static int test_module_mutable_import_is_box(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us008b", "state.jacl",
                    "mut count 0\ndef name \"bob\"\n",
@@ -4030,7 +4031,7 @@ static int test_module_set_emits_reset(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us008c", "state.jacl",
                    "mut count 0\n",
@@ -4080,7 +4081,7 @@ static int test_module_set_immutable_errors(void) {
   ModuleCache cache; ImportStack istack;
   BytecodeChunk chunk; JaclInternTable intern;
   Compiler importer; Module importer_mod;
-  char real_importer[1024];
+  char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us008d", "lib.jacl",
                    "def x 42\n",
@@ -4208,7 +4209,7 @@ static int test_compile_program_topo_order(void) {
   ASSERT_U32_EQ(pr.error_count, 0);
   ASSERT_U32_EQ(pr.module_count, 3);
   /* Root (main.jacl) must be last */
-  char main_resolved[1024];
+  char main_resolved[PATH_MAX];
   realpath("/tmp/jacl_us009c/main.jacl", main_resolved);
   ASSERT_STR_EQ(pr.modules[2]->path, main_resolved);
 

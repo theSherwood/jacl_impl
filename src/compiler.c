@@ -7,6 +7,7 @@
 #ifndef COMPILER_C
 #define COMPILER_C
 
+#include <limits.h>
 #include <string.h>
 
 /* --- Forward declarations for struct types --- */
@@ -815,7 +816,7 @@ const char* module__resolve_path(const char* importer_path,
   }
 
   /* Canonicalize with realpath() — resolves .., ., and symlinks */
-  char resolved[1024];
+  char resolved[PATH_MAX];
   if (!realpath(joined, resolved)) return NULL; /* file not found */
 
   /* Copy into arena */
@@ -13167,7 +13168,7 @@ ProgramResult jacl_compile_program(const char* root_path,
   memset(&result, 0, sizeof(result));
 
   /* Canonicalize root path */
-  char resolved[1024];
+  char resolved[PATH_MAX];
   if (!realpath(root_path, resolved)) {
     result.error_count = 1;
     char buf[256];
