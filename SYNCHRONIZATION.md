@@ -12,11 +12,13 @@ When you add or change a shared field, **update this document**. If you find
 a field in the codebase that's not listed here, that's a bug (in the doc or
 the code).
 
-> Status as of 2026-05-12: all GC/concurrency unsoundness items the
-> audit found are fixed — see §8 below for the full checklist. Open
-> correctness items are tracked in AUDIT.md's punch list. The only one
-> currently open is **§D.6** (a compiler/VM SEGV, not a GC/concurrency
-> race — so it doesn't appear in §8 here).
+> Status as of 2026-05-13: all GC/concurrency unsoundness items the
+> audit found are fixed — see §8 below for the full checklist. No
+> correctness items are open. Phase D (compiler/VM survey) is also
+> closed: §D.1 `JACL_ASSERT_TAG` pass, §D.2 frame-check reorder + the
+> `VM_ERROR` stack-discipline pass, §D.6 spawn-recursion SEGV are all
+> landed. See AUDIT.md for the per-commit story; remaining work in
+> the punch list is architectural (§10–§17, defer until profiled).
 
 ## Notation
 
