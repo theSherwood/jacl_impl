@@ -12,10 +12,12 @@ GC/concurrency correctness items in "Critical correctness issues" are
 fixed, plus five soak-surfaced fixes, plus the §9 SATB-barrier UAF.
 Phase D (compiler/VM) surveyed three categories, landed a frame-check
 ordering fix, opened §D.6 (spawn + deep recursion SEGV), and §D.6 is
-now fixed too. **2026-05-13 perf-bench surfaced two new bugs: a pair
-of single-thread GC walker bugs (now FIXED in `b521b1d`) and a deeper
-concurrent-GC issue with non-CPS closures losing their VM-stack roots
-(open — see Punch list item #0b).**
+now fixed too. **2026-05-13 perf-bench surfaced three new bugs in
+GC/concurrency, all SEGV-class — all FIXED: stack-closure underflow
+in single-thread mark (b521b1d), sweep-walker overshoot in all five
+walkers (b521b1d), and `OBJ_CLOSURE=0` garbage dispatch in the
+concurrent mark loop (bc74a10). A separate occasional-hang at N≥500
+remains open (#0c).**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -116,40 +118,35 @@ The remaining work is non-correctness, performance/architecture:
      `gc_sweep_concurrent` Phase 1. Fix: advance ptr by 8 (the
      alignment) on zero, not by line.
 
-0b. **Open: concurrent GC + non-CPS closures lose VM-stack roots.**
-   `gc_enumerate_roots` in `runtime.c` does NOT scan worker VM stacks
-   (the comment cites "CPS captures all state" per
-   GC_CONCURRENCY_DESIGN.md §7). But the spawn task path runs
-   non-suspending closures *directly* (`runtime__spawn_task_exec`'s
-   non-CPS branch). For these, intermediate values constructed during
-   e.g. HAMT/RRB path-copy live only on the worker's `vm->stack` and
-   can be swept by a concurrent GC mid-execution. Surfaces as a SEGV
-   in `gc__trace_object` reading garbage payload bytes from a re-used
-   slot.
+0b. ~~SEGV in `gc__trace_object` on garbage `OBJ_CLOSURE` dispatch~~
+   **FIXED** in `bc74a10`. The mark loop now skips any header whose
+   `alloc_total == 0`. Root cause: `OBJ_CLOSURE = 0` in the
+   `GCObjType` enum, so any zero-byte at the obj_type offset
+   dispatches to the closure case. A header reads zero either from
+   a mid-init publication race (gc__bump_alloc writes `alloc_total`
+   LAST) or a post-sweep stale reference. Either way, dispatching as
+   closure and reading `cl->upvalues[i]` from garbage SEGVs. The
+   guard is correct because a valid live object always has
+   `alloc_total > 0`.
 
-   Reproducer: `test/jacl/bench/collection_churn.jacl` at N≥500.
-   Failure rate under stress: ~20% at N=500, deterministic at higher
-   N. Walker fixes above changed *where* the SEGV lands but did not
-   eliminate it. AddressSanitizer trace points at `gc__trace_object`
-   for an object whose `alloc_total==0` but other fields look like a
-   re-allocated payload — consistent with a worker re-using a swept
-   slot for a fresh allocation while the GC mark phase still holds the
-   stale reference.
+   Earlier theory ("non-CPS loses VM-stack roots") was wrong: epoch
+   protection DOES cover allocations during a task — the worker's
+   `gc__thread_epoch` is set at task pickup and stays constant for
+   the task, and the GC watermark is `min(thread_epochs)` so new
+   allocs always satisfy `epoch >= watermark`. So intermediate
+   values during HAMT path-copy etc. are correctly kept alive even
+   without being on the mark stack.
 
-   Possible fixes (in increasing scope):
-   - Scan worker VM stacks in `gc_enumerate_roots`, using the
-     BUSY-sentinel protocol to synchronize and atomic-relaxed loads
-     on slot values. Each pushed value still passes
-     `jacl_is_heap_type` and would ideally `gc__ptr_in_heap`-filter
-     to avoid stale-pointer pushes.
-   - Add `OBJ_INVALID = 0` to `GCObjType` so zeroed headers don't
-     dispatch to `OBJ_CLOSURE` — defense in depth.
-   - Force all spawn-task bodies through CPS so VM-stack-only
-     intermediates can't exist.
+   Stress on test_perf at N=500: 14/20 SEGV → 0/50 SEGV. Combined
+   with #0a's walker fixes.
 
-   The bench scenario is sized to N=200 (stable, 0/30 stress runs)
-   while this stays open. Investigate before pushing N higher or
-   relying on perf numbers from heavy-allocation non-CPS workloads.
+0c. **Open: rare hang under sustained allocation pressure.**
+   At N=500 the bench scenario hangs ~12% of the time (6/50 in a
+   `timeout 30` stress). No crash — process is killed by timeout.
+   Likely a GC-or-future deadlock under heavy load. N=200 is fully
+   stable (0/30). Investigate before raising the bench N higher;
+   the perf telemetry should help (look for a cycle where
+   `gc_total_ns` blows up or `tasks_executed` plateaus).
 
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
