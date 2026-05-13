@@ -48,13 +48,13 @@ git log for the per-commit story.
 ### Start-here for next session
 
 No open correctness bugs. The §10/§11 CV change is landed along
-with the two GC races that blocked it (see §10/§11 below — both
-have deterministic regression tests). gc_stress_atom × 30 is now
-clean both with and without CV. Five latent §9-class sibling sites
-(direct heap-ptr writes on published GC objects, mostly
-`sm->fields[i]` and stream/closure post-publication mutations) are
-still documented in §10/§11 for follow-up; not currently reachable
-as UAFs. (#0c fixed 2026-05-13: external roots API.)
+with the two GC races that blocked it AND the five sibling
+§9-class holes (direct heap-ptr writes on GC-managed objects).
+gc_stress_atom × 50 is clean with CV applied. The write-barrier
+discipline is now uniform: any heap-pointer slot write on any
+GC-managed object goes through `gc_write_barrier`, unconditional
+on both deletion and insertion sides. (#0c fixed 2026-05-13:
+external roots API.)
 The §D.6 SEGV from `spawn { burn 70 }` is
 fixed by making `OP_SPAWN`'s single-threaded path reset
 `vm->frame_count` and `vm->stack_top` after the inner `vm__run`
@@ -794,33 +794,57 @@ big spawn-chain win the audit predicted; §10 (per-worker MPSC
 inbox, removes the single-mutex bottleneck) is the real lever and
 is independent follow-up work.
 
-### Sibling unbarriered heap-ptr writes (latent §9-class holes)
+### Sibling unbarriered heap-ptr writes — **FIXED** (2026-05-13)
 
 The `f->waiters = NULL` audit surfaced a pattern: direct C writes
 that overwrite heap-typed pointer slots on already-published GC
-objects, bypassing `gc_write_barrier`. The future-waiter case was
-reachable because the chain's reachability depended entirely on
-that one pointer slot. Other sites are not currently reachable as
-UAFs but have the same shape and are latent against future
-concurrency increases (more workers, smaller GC quanta, the §10/§11
-CV change). All single-mutator-today, so listed here for follow-up
-rather than fixed in this pass:
+objects, bypassing `gc_write_barrier`. Five sibling sites had the
+same shape:
 
-| Site | Field overwritten | Why latent today |
-|------|-------------------|------------------|
-| `vm.c:8245` `OP_SET_STATE_FIELD` | `sm->fields[i]` | Only the SM's executing worker writes; old value typically not held elsewhere. But user code `set foo [+ $foo 1]` could put the old value on the operand stack briefly. |
-| `vm.c:8312` `OP_SET_STATE_FIELD_RANGE` | `sm->fields[base+i]` | Same as above; range form for struct stores. |
-| `vm.c:2825,2850` `OP_CLOSURE` | `cl->upvalues[i]` after publication | Closure is fresh in this opcode → epoch-protected; the published-then-mutated case is the concern when closures get patched post-publication. |
-| `vm.c:1502, 1573, 1604, 1687, 1820, 1841` stream pull | `stream->cached_value` | Single worker pulls a given stream; old cached value usually consumed before overwrite. |
-| `vm.c:2509, 2519` stream create | `stream->next_fn`, `stream->state_machine` | Same publication-window concern as `OP_CLOSURE`. |
+| Site | Field overwritten |
+|------|-------------------|
+| `vm.c` `OP_SET_STATE_FIELD` | `sm->fields[i]` (heap slot) |
+| `vm.c` `OP_SET_STATE_FIELD_WIDE` | `sm->fields[base+i]` (inline-struct raw bytes — **no barrier needed**, marked via `field_inline_bitmap`) |
+| `vm.c` `OP_CLOSURE` (3 capture branches) | `cl->upvalues[i]` (fresh closure) |
+| `vm.c` stream pull (multiple paths) | `stream->cached_value` |
+| `vm.c` stream create | `stream->next_fn`, `stream->state_machine` |
+| `vm.c` SM construction (adjacent — not flagged in original audit but same shape) | `sm->sm_closure`, `sm->error_k`, `sm->fields[i]` during construction |
+
+**Foundation fix**: `gc_write_barrier`'s insertion side is now
+unconditional (matching the §9 deletion-side discipline). The
+§9 gating assumption — "a new value stored after GC scanned the
+container is already visible through the container" — holds only
+for already-marked containers. Fresh containers (watermark-protected
+but never traced) lose inserted values regardless of `gc_active`
+state, which was race #2's mechanism. Unconditional insertion-side
+push closes that gap globally.
+
+**Per-site fixes**: each of the listed sites now calls
+`gc_write_barrier` (or the `vm__slot_set` helper that wraps it) on
+heap-pointer slot writes. The raw-bytes path
+(`OP_SET_STATE_FIELD_WIDE`) is explicitly excluded because its slots
+are not heap pointers and must not be grey-pushed.
+
+Three deterministic synchronous-GC regression tests
+(`test_sm_field_store_barrier`, `test_closure_upvalue_store_barrier`,
+plus the prior `test_future_add_waiter_grey_push`) validate the
+unified-barrier semantics across the §10/§11 race shapes. Validation:
+
+- Full normal-mode suite: 88/88.
+- `gc_stress_*` × 50 each (atom, spawn, race, deep_cps, persistent)
+  with CV applied: 0/250.
+- TSAN: 9 baseline failures (pre-existing non-chaos test issues),
+  unchanged.
+- 60s `chaos_soak` under TSAN: 187K tasks, 0 heap problems.
 
 The §9 hardening recommendation #2 ("capture mutable-load values
-into a per-worker stack-root set") would close this class globally.
-The cheaper local fix for each is a `gc_write_barrier(gb,
-gc_active_ptr, old_val, new_val)` immediately before each write.
-None blocks correctness today; none should block the §10/§11
-re-attempt. Worth a dedicated pass after the CV change has landed
-and we can see whether higher concurrency surfaces any of these.
+into a per-worker stack-root set") remains a possible global
+alternative for the broader operand-stack-rooting question, but
+isn't needed for the heap-pointer-slot write class. With these
+fixes plus the §9 deletion-side and §10/§11 races #1/#2, the
+write-barrier discipline is uniform: any heap-pointer slot write
+on any GC-managed object goes through `gc_write_barrier`,
+unconditionally on both sides.
 
 ### 10. Single global inbox is a contention point
 `runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external
