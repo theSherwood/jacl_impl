@@ -892,25 +892,45 @@ void remembered_set_destroy(RememberedSet *rs) {
 /* ======================================================================
  * Write barrier: hybrid SATB (deletion) + insertion barrier.
  *
- * Fires on mutable container mutations (reset!, swap!, set! on cells).
+ * Fires on any heap-pointer mutation: mutable container reset!/swap!/
+ * set-cell!, but also state-machine field stores, closure upvalue
+ * stores, stream field stores, future-waiter chain mutations, and any
+ * other site that overwrites a heap-typed slot on a GC-managed object.
  *
- * Deletion side (SATB) — UNCONDITIONAL. Whenever a heap value is
- * overwritten in a mutable container, the previous value is pushed to
- * the thread-local grey buffer regardless of gc_active. This closes
- * AUDIT.md §9: if the gate gated this push on gc_active, a worker that
- * read V_old from the container onto its operand stack and then ran
- * into a concurrent mutation (by itself or another thread) while
+ * BOTH SIDES UNCONDITIONAL.
+ *
+ * Deletion side (SATB) — closes AUDIT.md §9. If the gate gated this
+ * push on gc_active, a worker that read V_old from the container onto
+ * its operand stack and then ran into a concurrent mutation while
  * gc_active was still false would lose V_old's reachability — V_old's
  * only container ref is gone, the operand stack isn't a GC root in
  * concurrent mode, and if V_old's epoch is below the next watermark
- * the sweep would reclaim it under the worker. The grey buffer is
- * reset every GC cycle; entries pushed between cycles cost one atomic
- * store per heap-valued overwrite and serve as conservative marks for
- * the next cycle. Insertion side stays gated — it only matters during
- * an active cycle (a new value stored after GC scanned the container).
+ * the sweep would reclaim it under the worker.
+ *
+ * Insertion side — closes AUDIT.md §10/§11 race #2. The original
+ * design gated the insertion push on gc_active, assuming "a new value
+ * stored after GC scanned the container is already visible through
+ * the container." That assumption holds only for containers that are
+ * ALREADY MARKED (pre-existing, in some root path). For FRESH
+ * containers — watermark-protected but never traced — insertions are
+ * lost: the container survives sweep via the watermark check without
+ * the mark phase ever visiting its slots, so a heap value inserted
+ * into a fresh container has no protection unless the value is
+ * independently rooted. Race #2 was the future-waiter case: a fresh
+ * FutureWaiter w whose continuation pointed to an OLD state machine
+ * — w survived via watermark, the SM had no other mark path, sweep
+ * reclaimed it. Making the insertion push unconditional means every
+ * heap value placed into any heap-managed slot is conservatively
+ * marked for the next cycle, regardless of container freshness.
+ *
+ * The grey buffer is reset every GC cycle; entries pushed between
+ * cycles cost one atomic store per heap-valued mutation and serve as
+ * conservative marks for the next cycle. Bounded by mutation rate
+ * within one cycle.
  *
  * Single-threaded mode (NULL gc_active_ptr) bypasses both: single
- * tracing GC scans the VM stack, so V_old can't be lost there.
+ * tracing GC scans the VM stack, so neither V_old nor V_new can be
+ * lost there.
  * ====================================================================== */
 
 void gc_write_barrier(GreyBuffer *gb,
@@ -919,13 +939,12 @@ void gc_write_barrier(GreyBuffer *gb,
     /* Single-threaded mode: no gc_active flag → no barrier needed */
     if (!gc_active_ptr) return;
 
-    /* SATB deletion barrier — unconditional. See header comment. */
+    /* SATB deletion side — unconditional. */
     if (jacl_is_heap_type(old_val))
         grey_buf_push(gb, old_val);
 
-    /* Insertion barrier — only during an active cycle. */
-    if (jacl_is_heap_type(new_val) &&
-        ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED))
+    /* Insertion side — also unconditional. */
+    if (jacl_is_heap_type(new_val))
         grey_buf_push(gb, new_val);
 }
 
@@ -1079,18 +1098,11 @@ bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
         w->continuation = continuation;
         w->next = f->waiters;
         f->waiters = w;
-        /* AUDIT.md §10/§11 race #2: the fresh waiter w is watermark-protected
-         * (epoch >= current), so the sweep keeps it without the mark phase
-         * needing to trace it. But w->continuation is an OLD (pre-watermark)
-         * SM whose only reachability path during this cycle may go through w.
-         * If w isn't reached during mark (e.g., f wasn't rooted by an
-         * external path), the SM is not marked and gets swept. Unconditional
-         * grey-push on continuation greyifies the SM — the next mark phase
-         * picks it up regardless of when add_waiter ran relative to the
-         * cycle. Matches the §9 unconditional-deletion-side discipline. */
-        if (gb && jacl_is_heap_type(continuation)) {
-            grey_buf_push(gb, continuation);
-        }
+        /* AUDIT.md §10/§11 race #2: w is a freshly-allocated container,
+         * watermark-protected without being traced. The insertion side
+         * of gc_write_barrier (now unconditional) greyifies continuation
+         * so the next mark phase keeps it alive. */
+        gc_write_barrier(gb, gc_active_ptr, JACL_NIL, continuation);
         added = true;
     }
     future_unlock(f);

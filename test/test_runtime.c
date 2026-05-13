@@ -599,14 +599,13 @@ static int test_write_barrier_gc_active(void) {
 }
 
 static int test_write_barrier_gc_inactive(void) {
-    /* When gc_active is false, only the SATB (deletion) side of the
-     * barrier fires — see AUDIT.md §9. The previous behavior (full
-     * no-op when gc_active=false) was unsound: a worker could deref V
-     * from an atom, another thread could mutate the atom unbarriered,
-     * and a subsequent concurrent GC could reclaim V before the worker
-     * consumed it. The insertion side stays gated on gc_active because
-     * a new value stored before GC enumerates the container is already
-     * visible to GC. */
+    /* Both sides of the barrier fire unconditionally regardless of
+     * gc_active (AUDIT.md §9 + §10/§11 race #2). Deletion side closes
+     * the V_old-on-stack race; insertion side closes the fresh-container
+     * race (a freshly-allocated container survives sweep via watermark
+     * without being traced, so inserted heap values have no other mark
+     * path unless we grey-push them here). The grey buffer is reset each
+     * cycle so the between-cycle pushes are bounded. */
     Runtime rt;
     rt_test__init_no_threads(&rt, 1);
     WorkerThread *w = &rt.workers[0];
@@ -618,10 +617,10 @@ static int test_write_barrier_gc_inactive(void) {
     gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr,
                      old_val, new_val);
 
-    /* SATB deletion barrier fired unconditionally: V_old is in the
-     * grey buffer. Insertion barrier did NOT fire (gc_active=false). */
-    ASSERT_INT_EQ(w->grey_buf.count, 1);
+    /* Both sides fired even with gc_active=false. */
+    ASSERT_INT_EQ(w->grey_buf.count, 2);
     ASSERT(w->grey_buf.entries[0] == old_val);
+    ASSERT(w->grey_buf.entries[1] == new_val);
 
     rt_test__destroy_no_threads(&rt);
     TEST_PASS();
@@ -646,19 +645,21 @@ static int test_write_barrier_satb_unconditional(void) {
     ASSERT_INT_EQ(w->grey_buf.count, 1);
     ASSERT(w->grey_buf.entries[0] == heap_old);
 
-    /* Heap old, heap new, gc_active=0: still SATB only. */
+    /* Heap old, heap new, gc_active=0: BOTH sides fire (insertion side
+     * is also unconditional now — AUDIT.md §10/§11 race #2). */
     JaclVal heap_new1 = jacl_i64(&w->vm.heap, 222);
     gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, heap_old, heap_new1);
-    ASSERT_INT_EQ(w->grey_buf.count, 2);
+    ASSERT_INT_EQ(w->grey_buf.count, 3);
     ASSERT(w->grey_buf.entries[1] == heap_old);
+    ASSERT(w->grey_buf.entries[2] == heap_new1);
 
-    /* Activate GC: now both fire. */
+    /* Activate GC: same behavior, both fire. */
     ATOMIC_STORE_EXPLICIT(&rt.gc_active, 1, MEM_RELEASE);
     JaclVal heap_new2 = jacl_i64(&w->vm.heap, 333);
     gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, heap_old, heap_new2);
-    ASSERT_INT_EQ(w->grey_buf.count, 4);
-    ASSERT(w->grey_buf.entries[2] == heap_old);
-    ASSERT(w->grey_buf.entries[3] == heap_new2);
+    ASSERT_INT_EQ(w->grey_buf.count, 5);
+    ASSERT(w->grey_buf.entries[3] == heap_old);
+    ASSERT(w->grey_buf.entries[4] == heap_new2);
 
     ATOMIC_STORE_EXPLICIT(&rt.gc_active, 0, MEM_RELEASE);
     rt_test__destroy_no_threads(&rt);
