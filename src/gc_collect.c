@@ -395,6 +395,10 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     }
 }
 
+/* Forward declaration — defined below; used by the closure-root push to
+ * skip stack-allocated synthesized closures (no GCHeader). */
+bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr);
+
 /* ======================================================================
  * gc_mark: trace from GC roots through the object graph, marking live objects
  * ====================================================================== */
@@ -414,10 +418,16 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
         }
     }
 
-    /* 2. Call frame closures */
+    /* 2. Call frame closures. Skip stack-allocated synthesized closures
+     * (vm_exec's top_closure, embed.c's top_closure_wrapper) — they
+     * have no GCHeader, so gc_header_of(cl) would read 4 bytes before
+     * a stack variable. Their chunk constants are pushed below (step 5)
+     * and they carry no upvalues, so skipping the closure itself is
+     * safe — nothing reachable only through them is lost. */
     for (uint32_t i = 0; i < vm->frame_count; i++) {
-        if (vm->frames[i].closure) {
-            gc__ms_push(&ms, vm->frames[i].closure);
+        JaclClosure *cl = vm->frames[i].closure;
+        if (cl && gc__ptr_in_heap(heap, cl)) {
+            gc__ms_push(&ms, cl);
         }
     }
 
@@ -509,11 +519,9 @@ size_t gc_sweep(ThreadHeap *heap) {
             uint16_t  total = hdr->alloc_total;
 
             if (total == 0) {
-                /* No object here — skip to next line boundary */
-                size_t offset = (size_t)(ptr - block->payload);
-                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
-                if (next_line >= GC_BLOCK_SIZE) break;
-                ptr = block->payload + next_line;
+                /* Zero region — advance by 8 (alignment). See
+                 * gc_sweep_concurrent for why line-skip is unsafe. */
+                ptr += 8;
                 continue;
             }
 
@@ -740,10 +748,11 @@ void gc_mark_minor(ThreadHeap *heap, VM *vm,
         }
     }
 
-    /* 2. Call frame closures */
+    /* 2. Call frame closures. See gc_mark for the stack-closure skip rationale. */
     for (uint32_t i = 0; i < vm->frame_count; i++) {
-        if (vm->frames[i].closure) {
-            gc__ms_push(&ms, vm->frames[i].closure);
+        JaclClosure *cl = vm->frames[i].closure;
+        if (cl && gc__ptr_in_heap(heap, cl)) {
+            gc__ms_push(&ms, cl);
         }
     }
 
@@ -850,10 +859,9 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
             uint16_t  total = hdr->alloc_total;
 
             if (total == 0) {
-                size_t offset = (size_t)(ptr - block->payload);
-                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
-                if (next_line >= GC_BLOCK_SIZE) break;
-                ptr = block->payload + next_line;
+                /* Zero region — advance by alignment. See
+                 * gc_sweep_concurrent for why line-skip is unsafe. */
+                ptr += 8;
                 continue;
             }
 
@@ -884,10 +892,9 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
             uint16_t  total = hdr->alloc_total;
 
             if (total == 0) {
-                size_t offset = (size_t)(ptr - block->payload);
-                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
-                if (next_line >= GC_BLOCK_SIZE) break;
-                ptr = block->payload + next_line;
+                /* Zero region — advance by alignment. See
+                 * gc_sweep_concurrent for why line-skip is unsafe. */
+                ptr += 8;
                 continue;
             }
 
@@ -1026,16 +1033,22 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
         uint8_t *ptr = block->payload;
         uint8_t *end = block->payload + GC_BLOCK_SIZE;
 
-        /* Phase 1: zero dead objects (old line map still intact) */
+        /* Phase 1: zero dead objects (old line map still intact).
+         *
+         * Walker invariant: ptr always points at an object header OR at
+         * a zeroed region. On total==0 we advance by 8 (the GC alignment)
+         * rather than jumping to the next line — a previously-dead-and-
+         * zeroed object inside an OCCUPIED line can sit immediately
+         * before a live object that starts mid-line and spans into the
+         * next line. Line-skipping would jump OVER that live object's
+         * header and land in its payload, where bytes look like a
+         * "header" with garbage alloc_total. */
         while (ptr < end) {
             GCHeader *hdr   = (GCHeader *)ptr;
             uint16_t  total = hdr->alloc_total;
 
             if (total == 0) {
-                size_t offset    = (size_t)(ptr - block->payload);
-                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
-                if (next_line >= GC_BLOCK_SIZE) break;
-                ptr = block->payload + next_line;
+                ptr += 8;
                 continue;
             }
 
@@ -1060,10 +1073,8 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             uint16_t  total = hdr->alloc_total;
 
             if (total == 0) {
-                size_t offset    = (size_t)(ptr - block->payload);
-                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
-                if (next_line >= GC_BLOCK_SIZE) break;
-                ptr = block->payload + next_line;
+                /* Zero region — advance by alignment (see Phase 1 comment). */
+                ptr += 8;
                 continue;
             }
 
