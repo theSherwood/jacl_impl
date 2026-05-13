@@ -235,6 +235,12 @@ typedef struct {
      * path) with gc_sweep_concurrent's traversal + unlink. Hot allocation
      * path (bump within current free-line run) does NOT acquire this. */
     platform_mutex_t blocks_mutex;
+    /* Cumulative perf counters. Sole writer is the heap's owning worker;
+     * read across workers by jacl_perf_snapshot post-quiesce. MUST stay in
+     * sync with the definition in jacl.h. */
+    uint64_t         total_bytes_allocated;
+    uint64_t         total_allocs;
+    uint64_t         slow_path_allocs;
 } ThreadHeap;
 
 void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -251,6 +257,9 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->last_major_old_gen_bytes = 0;
     heap->gc_cycle_count          = 0;
     MUTEX_INIT(heap->blocks_mutex);
+    heap->total_bytes_allocated = 0;
+    heap->total_allocs          = 0;
+    heap->slow_path_allocs      = 0;
 }
 
 /* Forward-declare thread-local (defined later in this file) */
@@ -362,6 +371,14 @@ void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
     bsg += total;
     ATOMIC_STORE_EXPLICIT(&heap->bytes_since_gc, bsg, MEM_RELAXED);
 
+    /* Cumulative perf counters — relaxed RMW. Same single-writer pattern. */
+    {
+        uint64_t a = ATOMIC_LOAD_EXPLICIT(&heap->total_bytes_allocated, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&heap->total_bytes_allocated, a + total, MEM_RELAXED);
+        uint64_t n = ATOMIC_LOAD_EXPLICIT(&heap->total_allocs, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&heap->total_allocs, n + 1, MEM_RELAXED);
+    }
+
     /* Flag GC if adaptive threshold exceeded (checked by VM at next safepoint).
      * Relaxed atomic load — threshold may be concurrently adjusted by GC. */
     size_t thresh = ATOMIC_LOAD_EXPLICIT(&heap->gc_threshold, MEM_RELAXED);
@@ -403,6 +420,13 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
      * Does NOT touch heap->blocks, so no lock needed. */
     if (heap->cursor && heap->cursor + total <= heap->limit) {
         return gc__bump_alloc(heap, total, obj_type);
+    }
+
+    /* Falling through to the slow path. Count it; this is the §14 hot-path
+     * proxy. Single-writer relaxed RMW, same pattern as bump_alloc. */
+    {
+        uint64_t s = ATOMIC_LOAD_EXPLICIT(&heap->slow_path_allocs, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&heap->slow_path_allocs, s + 1, MEM_RELAXED);
     }
 
     /* Slow path: scan blocks list. Lock to serialize with concurrent sweep

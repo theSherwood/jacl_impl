@@ -184,6 +184,12 @@ typedef struct {
      * fast path doesn't touch the list. See AUDIT.md §§7, 15 and
      * SYNCHRONIZATION.md. MUST stay in sync with the definition in gc.c. */
     platform_mutex_t blocks_mutex;
+    /* Cumulative perf counters (owner is sole writer; perf-snapshot reads
+     * across workers post-quiesce). Never reset by GC — bytes_since_gc is
+     * the GC-trigger counter, this is the lifetime accumulator. */
+    uint64_t         total_bytes_allocated;
+    uint64_t         total_allocs;
+    uint64_t         slow_path_allocs;
 } ThreadHeap;
 
 /* HeapRecord — heap-allocated, pointer-accessed struct shape. Used by ctx
@@ -1558,6 +1564,27 @@ typedef struct {
     JaclVal gc_root3;
 } RuntimeTask;
 
+/* Per-worker counters (writer is the worker thread itself; readers are the
+ * perf-snapshot API which reads after all workers are quiesced). All updates
+ * are relaxed atomics for cross-thread visibility under TSAN. */
+typedef struct {
+    uint64_t tasks_executed;
+    uint64_t steal_attempts;     /* one increment per pass through the steal loop */
+    uint64_t steal_successes;
+    uint64_t idle_sleep_ns;      /* cumulative time spent in backoff sleep */
+    uint64_t inbox_pops;         /* tasks pulled from the global inbox */
+    uint64_t pinned_inbox_pops;  /* tasks pulled from own pinned inbox */
+} WorkerStats;
+
+/* Runtime-wide GC cycle counters (writer is gc_concurrent_collect, called
+ * serially via gc_running CAS; readers are the perf-snapshot API). */
+typedef struct {
+    uint64_t total_cycles;        /* concurrent_collect invocations */
+    uint64_t total_cycle_ns;      /* sum of wall-clock cycle durations */
+    uint64_t max_cycle_ns;        /* worst observed cycle duration */
+    uint64_t total_mark_rounds;   /* sum of convergence-loop rounds */
+} GCStats;
+
 typedef struct Runtime Runtime;
 
 typedef struct WorkerThread {
@@ -1586,6 +1613,8 @@ typedef struct WorkerThread {
     uint64_t          *retired_epochs;
     uint32_t           retired_count;
     uint32_t           retired_cap;
+    /* Perf counters — see WorkerStats. */
+    WorkerStats        stats;
 } WorkerThread;
 
 struct Runtime {
@@ -1603,6 +1632,8 @@ struct Runtime {
     /* GC scanner thief slots — see runtime.c. MUST stay in sync. */
     int                *gc_thief_public_ids;
     int                *gc_thief_private_ids;
+    /* Perf counters — see GCStats. */
+    GCStats             gc_stats;
 };
 
 extern JACL_THREAD_LOCAL int rt__worker_id;
@@ -2324,6 +2355,26 @@ extern void gc__scan_deque (rt_deque_deque *dq, GCMarkStack *ms, int thief_id);
 extern void gc_enumerate_roots (Runtime *rt, GCMarkStack *ms);
 extern bool gc__drain_grey_bufs (Runtime *rt, GCMarkStack *ms, uint32_t *drained);
 extern void gc_concurrent_collect (Runtime *rt);
+
+/* --- Perf snapshot (runtime.c) ---
+ * One struct, summed across workers. Reads after THREAD_JOIN / quiesce. */
+typedef struct {
+    int      num_workers;
+    /* GC cycle stats */
+    GCStats  gc;
+    /* Allocation stats summed across worker heaps */
+    uint64_t total_bytes_allocated;
+    uint64_t total_allocs;
+    uint64_t slow_path_allocs;
+    /* Worker stats summed across workers */
+    WorkerStats workers_total;
+    /* Instantaneous state */
+    uint32_t current_heap_blocks;
+    intptr_t current_inbox_depth;
+} JaclPerfSnapshot;
+
+extern JaclPerfSnapshot jacl_perf_snapshot (Runtime *rt);
+extern void jacl_perf_snapshot_print_json (FILE *out, const JaclPerfSnapshot *snap);
 extern void gc__concurrent_task (void *data);
 extern void gc_concurrent_trigger (void *runtime_ptr);
 extern JaclVal runtime__create_resolve_closure (ThreadHeap *heap, arena_t *arena, JaclVal future_val);

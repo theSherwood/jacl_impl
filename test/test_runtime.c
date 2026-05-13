@@ -1369,6 +1369,56 @@ static int test_atom_cas_concurrent(void) {
     TEST_PASS();
 }
 
+static int test_perf_snapshot_counters(void) {
+    /* Smoke test for jacl_perf_snapshot: submit some tasks, allocate,
+     * force a GC cycle, and verify the snapshot's counters move. */
+    Runtime rt;
+    runtime_init(&rt, 2);
+
+    /* Allocate via direct gc_alloc on worker 0's heap. This exercises
+     * gc__bump_alloc's perf counters. We do this from the main thread —
+     * the worker may also touch the heap, but for ~100 small allocs
+     * with no concurrent GC, races are not an issue for the counters. */
+    ThreadHeap *heap = &rt.workers[0].vm.heap;
+    ThreadHeap *saved_heap = gc__current_heap;
+    gc__current_heap = heap;
+    for (int i = 0; i < 100; i++) {
+        (void)gc_alloc(heap, OBJ_CLOSURE, sizeof(JaclClosure));
+    }
+    gc__current_heap = saved_heap;
+
+    /* Submit 50 no-op tasks; some should be stolen, exercising worker stats. */
+    volatile intptr_t counter = 0;
+    int num_tasks = 50;
+    for (int i = 0; i < num_tasks; i++) {
+        runtime_submit(&rt, rt_test__increment, (void *)&counter);
+    }
+    for (int ms = 0; ms < 5000; ms++) {
+        if (ATOMIC_LOAD_EXPLICIT(&counter, MEM_ACQUIRE) >= (intptr_t)num_tasks)
+            break;
+        SLEEP_MILLISECONDS(1);
+    }
+    ASSERT_I64_EQ(ATOMIC_LOAD_EXPLICIT(&counter, MEM_ACQUIRE),
+                  (int64_t)num_tasks);
+
+    /* Force one GC cycle so gc_stats.total_cycles becomes >= 1. */
+    uint32_t expected = 0;
+    if (ATOMIC_CAS(&rt.gc_running, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
+        gc_concurrent_collect(&rt);
+    }
+
+    JaclPerfSnapshot s = jacl_perf_snapshot(&rt);
+    ASSERT_INT_EQ(s.num_workers, 2);
+    ASSERT(s.total_allocs >= 100);
+    ASSERT(s.total_bytes_allocated >= 100 * sizeof(JaclClosure));
+    ASSERT(s.workers_total.tasks_executed >= (uint64_t)num_tasks);
+    ASSERT(s.gc.total_cycles >= 1);
+    ASSERT(s.current_heap_blocks >= 1);
+
+    runtime_destroy(&rt);
+    TEST_PASS();
+}
+
 static int test_box_non_atomic(void) {
     /* Box operations remain plain (non-atomic) — no CAS, no atomic load/store */
     Runtime rt;
@@ -1445,6 +1495,8 @@ int main(void) {
         { "atom_swap_write_barrier",     test_atom_swap_write_barrier },
         { "atom_cas_concurrent",         test_atom_cas_concurrent },
         { "box_non_atomic",              test_box_non_atomic },
+        /* Perf snapshot smoke test */
+        { "perf_snapshot_counters",      test_perf_snapshot_counters },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

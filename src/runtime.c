@@ -45,8 +45,52 @@ typedef struct {
 #define WORKER_IDLE ((uintptr_t)0)
 #define WORKER_BUSY ((uintptr_t)1)
 
+/* Perf counter typedefs — mirror the definitions in jacl.h. Unity build
+ * does not include jacl.h (separately-compiled tests do), so both copies
+ * must be kept in sync. Validated by test/test_struct_sizes.c. */
+typedef struct {
+    uint64_t tasks_executed;
+    uint64_t steal_attempts;
+    uint64_t steal_successes;
+    uint64_t idle_sleep_ns;
+    uint64_t inbox_pops;
+    uint64_t pinned_inbox_pops;
+} WorkerStats;
+
+typedef struct {
+    uint64_t total_cycles;
+    uint64_t total_cycle_ns;
+    uint64_t max_cycle_ns;
+    uint64_t total_mark_rounds;
+} GCStats;
+
+typedef struct {
+    int      num_workers;
+    GCStats  gc;
+    uint64_t total_bytes_allocated;
+    uint64_t total_allocs;
+    uint64_t slow_path_allocs;
+    WorkerStats workers_total;
+    uint32_t current_heap_blocks;
+    intptr_t current_inbox_depth;
+} JaclPerfSnapshot;
+
 /* GreyBuffer is defined in gc.c (part of the GC subsystem, before vm.c in
  * the unity build). grey_buf_init/push/destroy are available here. */
+
+/* Monotonic nanosecond clock for perf counters. Emscripten + Windows fall
+ * back to zero so perf telemetry stays consistent (degraded, not broken)
+ * on platforms without clock_gettime(CLOCK_MONOTONIC). */
+#if defined(__EMSCRIPTEN__) || defined(_WIN32)
+static inline uint64_t runtime__now_ns(void) { return 0; }
+#else
+#include <time.h>
+static inline uint64_t runtime__now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+#endif
 
 /* ======================================================================
  * WorkerThread and Runtime structures
@@ -86,6 +130,8 @@ typedef struct WorkerThread {
     uint64_t          *retired_epochs;
     uint32_t           retired_count;
     uint32_t           retired_cap;
+    /* Perf counters — see WorkerStats in jacl.h. */
+    WorkerStats        stats;
 } WorkerThread;
 
 struct Runtime {
@@ -106,6 +152,8 @@ struct Runtime {
      * (worker, deque) pair. Index by worker_id. */
     int                *gc_thief_public_ids;
     int                *gc_thief_private_ids;
+    /* Perf counters — see GCStats in jacl.h. */
+    GCStats             gc_stats;
 };
 
 /* Forward declarations for functions used in the worker loop */
@@ -273,6 +321,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
         if (ATOMIC_LOAD_EXPLICIT(&rt->inbox_count, MEM_RELAXED) > 0) {
             MUTEX_LOCK(rt->inbox_mutex);
             intptr_t local = rt->inbox_count;
+            uint64_t popped_here = 0;
             while (local > 0) {
                 uintptr_t tv = rt->inbox[--local];
                 if (!found) {
@@ -281,9 +330,11 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                 } else {
                     rt_deque_deque_push(self->private_deque, tv);
                 }
+                popped_here++;
             }
             ATOMIC_STORE_EXPLICIT(&rt->inbox_count, local, MEM_RELEASE);
             MUTEX_UNLOCK(rt->inbox_mutex);
+            self->stats.inbox_pops += popped_here;
         }
 
         /* 2. Drain our pinned inbox into private_deque. Tasks routed here
@@ -292,6 +343,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
         if (ATOMIC_LOAD_EXPLICIT(&self->pinned_inbox_count, MEM_RELAXED) > 0) {
             MUTEX_LOCK(self->pinned_inbox_mutex);
             intptr_t local = self->pinned_inbox_count;
+            uint64_t popped_here = 0;
             while (local > 0) {
                 uintptr_t tv = self->pinned_inbox[--local];
                 if (!found) {
@@ -300,10 +352,12 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                 } else {
                     rt_deque_deque_push(self->private_deque, tv);
                 }
+                popped_here++;
             }
             ATOMIC_STORE_EXPLICIT(&self->pinned_inbox_count, local,
                                   MEM_RELEASE);
             MUTEX_UNLOCK(self->pinned_inbox_mutex);
+            self->stats.pinned_inbox_pops += popped_here;
         }
 
         /* 3. Check own private deque (priority for thread-local tasks) */
@@ -316,6 +370,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
 
         /* 4. Try stealing from other workers' public deques */
         if (!found) {
+            self->stats.steal_attempts++;
             for (int i = 0; i < rt->num_workers && !found; i++) {
                 if (i == self->id) continue;
                 found = rt_deque_deque_steal(
@@ -323,6 +378,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                     &task_val,
                     self->steal_ids[i]);
             }
+            if (found) self->stats.steal_successes++;
         }
 
         if (found) {
@@ -347,6 +403,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
 
             /* Execute the task */
             task->fn(task->data);
+            self->stats.tasks_executed++;
 
             /* Mark idle */
             ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_IDLE,
@@ -389,7 +446,9 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                                   MEM_RELEASE);
             if (backoff < 10)
                 backoff++;
+            uint64_t sleep_start = runtime__now_ns();
             SLEEP_MILLISECONDS(backoff);
+            self->stats.idle_sleep_ns += runtime__now_ns() - sleep_start;
         }
     }
 
@@ -417,6 +476,7 @@ void runtime__init_state(Runtime *rt, int num_workers) {
     rt->gc_running   = 0;
     rt->gc_active    = 0;
     rt->shutdown     = 0;
+    memset(&rt->gc_stats, 0, sizeof(rt->gc_stats));
 
     gc_block_pool_init(&rt->block_pool);
 
@@ -939,6 +999,9 @@ void gc_concurrent_collect(Runtime *rt) {
     GCMarkStack ms;
     gc__ms_init(&ms);
 
+    uint64_t cycle_start_ns = runtime__now_ns();
+    uint64_t mark_rounds_observed = 0;
+
     /* Set struct registry for GC tracing */
     if (rt->num_workers > 0) {
         gc__struct_registry = rt->workers[0].vm.struct_registry;
@@ -1003,6 +1066,7 @@ void gc_concurrent_collect(Runtime *rt) {
             }
             rounds++;
         } while (has_new && rounds < GC_FINAL_DRAIN_MAX_ROUNDS);
+        mark_rounds_observed = (uint64_t)rounds;
     }
 
     free(drained);
@@ -1066,6 +1130,17 @@ void gc_concurrent_collect(Runtime *rt) {
 
     gc__ms_destroy(&ms);
 
+    /* Record cycle stats before releasing gc_running. Sole writer is whichever
+     * worker won the gc_running CAS, so no atomicity needed for the RMW; reads
+     * happen post-quiesce via jacl_perf_snapshot. */
+    {
+        uint64_t cycle_ns = runtime__now_ns() - cycle_start_ns;
+        rt->gc_stats.total_cycles++;
+        rt->gc_stats.total_cycle_ns += cycle_ns;
+        if (cycle_ns > rt->gc_stats.max_cycle_ns) rt->gc_stats.max_cycle_ns = cycle_ns;
+        rt->gc_stats.total_mark_rounds += mark_rounds_observed;
+    }
+
     /* 10. Set gc_running = false (allow next GC cycle) */
     ATOMIC_STORE_EXPLICIT(&rt->gc_running, 0, MEM_RELEASE);
 }
@@ -1074,6 +1149,81 @@ void gc_concurrent_collect(Runtime *rt) {
 void gc__concurrent_task(void *data) {
     Runtime *rt = (Runtime *)data;
     gc_concurrent_collect(rt);
+}
+
+/* ======================================================================
+ * jacl_perf_snapshot — aggregate per-worker counters into one struct.
+ *
+ * Intended call site: after all submitted work has drained and workers
+ * are quiesced (typically after a benchmark scenario completes). Reads
+ * are relaxed atomic so we see eventually-consistent values even if a
+ * worker is still mid-task; callers wanting precise numbers should
+ * quiesce first.
+ * ====================================================================== */
+JaclPerfSnapshot jacl_perf_snapshot(Runtime *rt) {
+    JaclPerfSnapshot s;
+    memset(&s, 0, sizeof(s));
+    if (!rt) return s;
+    s.num_workers = rt->num_workers;
+    s.gc          = rt->gc_stats;
+    for (int i = 0; i < rt->num_workers; i++) {
+        WorkerThread *w = &rt->workers[i];
+        ThreadHeap   *h = &w->vm.heap;
+        s.total_bytes_allocated +=
+            ATOMIC_LOAD_EXPLICIT(&h->total_bytes_allocated, MEM_RELAXED);
+        s.total_allocs +=
+            ATOMIC_LOAD_EXPLICIT(&h->total_allocs, MEM_RELAXED);
+        s.slow_path_allocs +=
+            ATOMIC_LOAD_EXPLICIT(&h->slow_path_allocs, MEM_RELAXED);
+        s.workers_total.tasks_executed    += w->stats.tasks_executed;
+        s.workers_total.steal_attempts    += w->stats.steal_attempts;
+        s.workers_total.steal_successes   += w->stats.steal_successes;
+        s.workers_total.idle_sleep_ns     += w->stats.idle_sleep_ns;
+        s.workers_total.inbox_pops        += w->stats.inbox_pops;
+        s.workers_total.pinned_inbox_pops += w->stats.pinned_inbox_pops;
+    }
+    s.current_heap_blocks  = rt->block_pool.total_blocks_allocated;
+    s.current_inbox_depth  = ATOMIC_LOAD_EXPLICIT(&rt->inbox_count, MEM_RELAXED);
+    return s;
+}
+
+void jacl_perf_snapshot_print_json(FILE *out, const JaclPerfSnapshot *s) {
+    if (!out || !s) return;
+    fprintf(out,
+        "{"
+        "\"num_workers\":%d,"
+        "\"gc_cycles\":%llu,"
+        "\"gc_total_ns\":%llu,"
+        "\"gc_max_ns\":%llu,"
+        "\"gc_mark_rounds\":%llu,"
+        "\"total_bytes_allocated\":%llu,"
+        "\"total_allocs\":%llu,"
+        "\"slow_path_allocs\":%llu,"
+        "\"tasks_executed\":%llu,"
+        "\"steal_attempts\":%llu,"
+        "\"steal_successes\":%llu,"
+        "\"idle_sleep_ns\":%llu,"
+        "\"inbox_pops\":%llu,"
+        "\"pinned_inbox_pops\":%llu,"
+        "\"current_heap_blocks\":%u,"
+        "\"current_inbox_depth\":%lld"
+        "}\n",
+        s->num_workers,
+        (unsigned long long)s->gc.total_cycles,
+        (unsigned long long)s->gc.total_cycle_ns,
+        (unsigned long long)s->gc.max_cycle_ns,
+        (unsigned long long)s->gc.total_mark_rounds,
+        (unsigned long long)s->total_bytes_allocated,
+        (unsigned long long)s->total_allocs,
+        (unsigned long long)s->slow_path_allocs,
+        (unsigned long long)s->workers_total.tasks_executed,
+        (unsigned long long)s->workers_total.steal_attempts,
+        (unsigned long long)s->workers_total.steal_successes,
+        (unsigned long long)s->workers_total.idle_sleep_ns,
+        (unsigned long long)s->workers_total.inbox_pops,
+        (unsigned long long)s->workers_total.pinned_inbox_pops,
+        s->current_heap_blocks,
+        (long long)s->current_inbox_depth);
 }
 
 /* Trigger concurrent GC from vm.c's safepoint.
