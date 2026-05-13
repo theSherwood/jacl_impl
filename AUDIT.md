@@ -12,7 +12,9 @@ GC/concurrency correctness items in "Critical correctness issues" are
 fixed, plus five soak-surfaced fixes, plus the §9 SATB-barrier UAF.
 Phase D (compiler/VM) surveyed three categories, landed a frame-check
 ordering fix, opened §D.6 (spawn + deep recursion SEGV), and §D.6 is
-now fixed too. **No open correctness items remain.**
+now fixed too. **One open correctness item discovered 2026-05-13 while
+building the perf bench harness — see Punch list item #0 (SEGV under
+sustained allocation pressure).**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -92,6 +94,20 @@ recovery lands, the operand stack will be balanced.
 The remaining work is non-correctness, performance/architecture:
 
 ### Punch list (in priority)
+
+0. **Open: SEGV under sustained allocation pressure** (found 2026-05-13
+   while building the perf bench harness). The scenario in
+   `test/jacl/bench/collection_churn.jacl` deterministically segfaults
+   via `jacl_harness` at N≥840 (top-level combined HAMT + RRB
+   build + update + read loops with `mut`/`while`). At N=500 it fails
+   intermittently during runtime/vm teardown with "double free or
+   corruption (!prev)". At N=200 stable (0/30 stress runs failed).
+   Likely a cross-heap GC interaction or a teardown race —
+   `runtime_destroy` joins workers and then `vm_destroy` frees the
+   temp VM's heap, but the closure was allocated in the temp VM's
+   heap and was referenced from worker tasks. Reproducer is the
+   benched scenario with N bumped back up. Investigate before
+   pushing N higher or adding more scenarios.
 
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
