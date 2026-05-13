@@ -1017,12 +1017,22 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
             }
         }
 
-        /* 7. Current ctx register (implicit context struct) */
-        gc__ms_push_val(ms, w->vm.ctx);
+        /* 7. Current ctx register (implicit context struct).
+         * ACQUIRE pairs with the RELEASE stores in ctx_fork / ctx_unfork /
+         * OP_SET_CTX. Plain reads here can tear or miss the GCHeader fields
+         * the allocator wrote before publishing the pointer. */
+        {
+            JaclVal cv = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                (volatile uint64_t*)&w->vm.ctx, MEM_ACQUIRE);
+            gc__ms_push_val(ms, cv);
+        }
 
-        /* 8. Saved ctx stack (with-ctx nesting) */
+        /* 8. Saved ctx stack (with-ctx nesting).
+         * Same RELEASE/ACQUIRE pairing — slots written by OP_CTX_FORK. */
         for (uint8_t sci = 0; sci < w->vm.saved_ctx_count; sci++) {
-            gc__ms_push_val(ms, w->vm.saved_ctx[sci]);
+            JaclVal sv = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                (volatile uint64_t*)&w->vm.saved_ctx[sci], MEM_ACQUIRE);
+            gc__ms_push_val(ms, sv);
         }
 
         /* 9. Pinned inbox: tasks routed here by other workers awaiting

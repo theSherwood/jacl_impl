@@ -166,14 +166,20 @@ HeapRecord *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
 }
 
 void ctx_pool_free(JaclCtxPool *pool, HeapRecord *s) {
-    /* Clear reference fields to prevent stale GC pointers */
+    /* Clear reference fields to prevent stale GC pointers.
+     * The freed struct may still be on the concurrent GC's mark stack
+     * (enumerated as a root before unfork ran). RELEASE-store pairs with
+     * gc__trace_object's ACQUIRE-load of OBJ_HEAP_RECORD fields, so the
+     * trace either sees the old (still-rooted-elsewhere) value or NIL —
+     * never a torn read. */
     StructTypeDef *sdef = pool->sdef;
     for (uint32_t i = 0; i < sdef->field_count; i++) {
         JaclType ft = sdef->fields[i].type;
         if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
             ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
-            JaclVal nil_val = JACL_NIL;
-            memcpy(s->data + sdef->fields[i].offset, &nil_val, sizeof(JaclVal));
+            ATOMIC_STORE_EXPLICIT(
+                (volatile uint64_t*)(s->data + sdef->fields[i].offset),
+                (uint64_t)JACL_NIL, MEM_RELEASE);
         }
     }
 
@@ -1247,7 +1253,13 @@ static JaclVal ctx_fork(VM *vm, JaclVal parent_ctx) {
     if (dst) {
         StructTypeRegistry *reg = vm->struct_registry;
         memcpy(dst->data, src->data, reg->defs[reg->ctx_type_idx]->total_size);
-        vm->ctx = jacl_heap_record_val(dst);
+        /* RELEASE: pairs with gc_enumerate_roots' ACQUIRE load of vm.ctx.
+         * Without atomic ordering the concurrent GC can see the new pointer
+         * but miss the GCHeader fields the allocator wrote first, or trace
+         * a torn value. */
+        ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+                              (uint64_t)jacl_heap_record_val(dst),
+                              MEM_RELEASE);
     }
     return saved;
 }
@@ -1256,7 +1268,9 @@ static void ctx_unfork(VM *vm, JaclVal saved_ctx) {
     if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
         ctx_pool_free(vm->ctx_pool, jacl_as_heap_record_ptr(vm->ctx));
     }
-    vm->ctx = saved_ctx;
+    /* RELEASE: see ctx_fork. */
+    ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+                          (uint64_t)saved_ctx, MEM_RELEASE);
 }
 
 /* Forward declaration for recursive call from OP_EACH */
@@ -9937,7 +9951,10 @@ interpret_done:
           vm__set_error(vm, "with-ctx: failed to allocate ctx");
           return VM_RUNTIME_ERROR;
         }
-        vm->saved_ctx[vm->saved_ctx_count++] = old_ctx;
+        /* RELEASE: pairs with gc_enumerate_roots' ACQUIRE on saved_ctx[i]. */
+        ATOMIC_STORE_EXPLICIT(
+            (volatile uint64_t*)&vm->saved_ctx[vm->saved_ctx_count++],
+            (uint64_t)old_ctx, MEM_RELEASE);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_ctx, vm->ctx);
         break;
       }
@@ -9958,7 +9975,9 @@ interpret_done:
         result = vm__pop(vm, &new_ctx);
         if (result != VM_OK) return result;
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, vm->ctx, new_ctx);
-        vm->ctx = new_ctx;
+        /* RELEASE: see ctx_fork. */
+        ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+                              (uint64_t)new_ctx, MEM_RELEASE);
         break;
       }
 

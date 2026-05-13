@@ -381,8 +381,13 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
                 JaclType ft = sdef->fields[i].type;
                 if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
                     ft == TYPE_CLOSURE || ft == TYPE_DYN) {
-                    JaclVal val;
-                    memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
+                    /* ACQUIRE pairs with ctx_pool_free's RELEASE-store of
+                     * NIL into these slots. The freed-but-still-grey record
+                     * gets traced as either the original (still-rooted)
+                     * value or NIL, never a torn read. */
+                    JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                        (volatile uint64_t*)(s->data + sdef->fields[i].offset),
+                        MEM_ACQUIRE);
                     gc__ms_push_val(ms, val);
                 }
             }
@@ -637,12 +642,16 @@ void gc_sweep_intern_table(JaclInternTable *table,
      * worker may be head-inserting a fresh block from gc_alloc's slow
      * path. Hold blocks_mutex for the walk to serialize with that
      * insert; same lock the concurrent block-sweep takes (AUDIT.md §7,
-     * §15). Single-threaded callers (watermark==0) skip this — there's
-     * no other thread touching the list. Lock order matches jacl_intern:
-     * gc_alloc takes blocks_mutex outside table->lock, never the reverse,
-     * so acquiring blocks_mutex while holding table->lock here is safe. */
-    bool need_blocks_lock = (watermark != 0);
-    if (need_blocks_lock) MUTEX_LOCK(heap->blocks_mutex);
+     * §15). Lock order matches jacl_intern: gc_alloc takes blocks_mutex
+     * outside table->lock, never the reverse, so acquiring blocks_mutex
+     * while holding table->lock here is safe.
+     *
+     * Always lock — using watermark==0 as the discriminator for "single-
+     * threaded" was wrong: in concurrent mode the watermark can be 0 on
+     * the first cycle (fresh workers at thread_epoch=0), and the gate
+     * skipped exactly when the lock was needed. The uncontended single-
+     * threaded acquire is free. */
+    MUTEX_LOCK(heap->blocks_mutex);
 
     for (uint32_t i = 0; i < table->cap; i++) {
         JaclHeapString *entry = table->entries[i];
@@ -671,7 +680,7 @@ void gc_sweep_intern_table(JaclInternTable *table,
         table->tombstone_count++;
     }
 
-    if (need_blocks_lock) MUTEX_UNLOCK(heap->blocks_mutex);
+    MUTEX_UNLOCK(heap->blocks_mutex);
     MUTEX_UNLOCK(table->lock);
 }
 
