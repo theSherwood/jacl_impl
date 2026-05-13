@@ -392,6 +392,19 @@ void runtime__complete_race_slot(void *runtime_ptr,
                                          JaclVal agg_val,
                                          JaclVal result);
 
+/* --- Heap-pointer slot write helper (AUDIT §10/§11) ---
+ *
+ * Wraps gc_write_barrier + assignment for any heap-pointer slot
+ * inside a GC-managed object: stream->cached_value, stream->next_fn,
+ * stream->state_machine, sm->sm_closure, sm->fields[i] (non-inline),
+ * etc. The barrier handles both sides unconditionally so fresh
+ * containers (watermark-protected but never traced) don't lose
+ * inserted heap values. */
+static inline void vm__slot_set(VM *vm, JaclVal *slot, JaclVal new_val) {
+    gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, *slot, new_val);
+    *slot = new_val;
+}
+
 /* --- Type name helper for error messages --- */
 
 const char* vm__type_name(JaclVal v) {
@@ -1499,7 +1512,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             /* Already exhausted - check if we stored an error value */
             if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
                 *out_value = stream->cached_value;
-                stream->cached_value = JACL_NIL;
+                vm__slot_set(vm, &stream->cached_value, JACL_NIL);
                 return STREAM_PULL_VALUE;  /* Return the error value */
             }
             stream->state = STREAM_EXHAUSTED;
@@ -1570,7 +1583,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
 
                 /* Return error value */
                 stream->state = STREAM_ERROR;
-                stream->cached_value = JACL_NIL;
+                vm__slot_set(vm, &stream->cached_value, JACL_NIL);
                 *out_value = jacl_set_error(err_msg);
                 return STREAM_PULL_VALUE;  /* Return error as the final value */
             }
@@ -1601,7 +1614,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             /* Already exhausted - check if we stored an error value */
             if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
                 *out_value = stream->cached_value;
-                stream->cached_value = JACL_NIL;
+                vm__slot_set(vm, &stream->cached_value, JACL_NIL);
                 return STREAM_PULL_VALUE;
             }
             stream->state = STREAM_EXHAUSTED;
@@ -1684,7 +1697,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
                 }
 
                 stream->state = STREAM_ERROR;
-                stream->cached_value = JACL_NIL;
+                vm__slot_set(vm, &stream->cached_value, JACL_NIL);
                 *out_value = jacl_set_error(err_msg);
                 return STREAM_PULL_VALUE;
             }
@@ -1817,7 +1830,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
 
     if (inner == VM_YIELD) {
         stream->state        = STREAM_CONSUMED;
-        stream->cached_value = vm->yield_value;
+        vm__slot_set(vm, &stream->cached_value, vm->yield_value);
         vm->stack_top   = caller_stack_top;
         vm->frame_count = caller_frame_count;
         vm->ip          = caller_ip;
@@ -1838,7 +1851,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             }
         }
         stream->state        = STREAM_EXHAUSTED;
-        stream->cached_value = JACL_NIL;
+        vm__slot_set(vm, &stream->cached_value, JACL_NIL);
         vm->stack_top   = caller_stack_top;
         vm->frame_count = caller_frame_count;
         vm->ip          = caller_ip;
@@ -2506,17 +2519,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           JaclVal stream_val = jacl_stream(&vm->heap);
           JaclStream* stream = jacl_as_stream(stream_val);
-          stream->next_fn = callee;
+          vm__slot_set(vm, &stream->next_fn, callee);
 
           if (closure->is_sm_compiled) {
             /* State machine generator: allocate SM object, copy args into fields */
             JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
             JaclStateMachine* sm = jacl_as_state_machine(sm_val);
-            sm->sm_closure = callee;
+            vm__slot_set(vm, &sm->sm_closure, callee);
             for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
-              sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
+              vm__slot_set(vm, &sm->fields[i], vm->stack[vm->stack_top - arg_count + i]);
             }
-            stream->state_machine = sm_val;
+            vm__slot_set(vm, &stream->state_machine, sm_val);
             stream->arg_count = 0;
           } else {
             /* CPS generator: save args for deferred first-call */
@@ -2543,9 +2556,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Allocate state machine and copy user args into fields */
           JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
           JaclStateMachine* sm = jacl_as_state_machine(sm_val);
-          sm->sm_closure = callee;
+          vm__slot_set(vm, &sm->sm_closure, callee);
           for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
-            sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
+            vm__slot_set(vm, &sm->fields[i], vm->stack[vm->stack_top - arg_count + i]);
           }
           /* Propagate error_k from caller SM to inner SM so that the
              completion callback (resolve_k, parallel_k, race_k) is
@@ -2556,7 +2569,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclVal outer_sm_val = vm->stack[frame->stack_base + 0];
             if (jacl_is_state_machine(outer_sm_val)) {
               JaclStateMachine *outer_sm = jacl_as_state_machine(outer_sm_val);
-              sm->error_k = outer_sm->error_k;
+              vm__slot_set(vm, &sm->error_k, outer_sm->error_k);
             }
           }
           /* Replace stack args with (sm_val, JACL_NIL) */
@@ -2639,9 +2652,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
           JaclStateMachine* sm = jacl_as_state_machine(sm_val);
-          sm->sm_closure = callee;
+          vm__slot_set(vm, &sm->sm_closure, callee);
           for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
-            sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
+            vm__slot_set(vm, &sm->fields[i], vm->stack[vm->stack_top - arg_count + i]);
           }
           uint32_t callee_pos = vm->stack_top - arg_count - 1;
           vm->stack[callee_pos + 1] = sm_val;
@@ -4832,7 +4845,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* SM closure: create state machine, call synchronously */
             JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
             JaclStateMachine *sm = jacl_as_state_machine(sm_val);
-            sm->sm_closure = closure_val;
+            vm__slot_set(vm, &sm->sm_closure, closure_val);
 
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
@@ -5030,7 +5043,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* SM: create state machine, call synchronously */
               JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
               JaclStateMachine *sm = jacl_as_state_machine(sm_val);
-              sm->sm_closure = closures[i];
+              vm__slot_set(vm, &sm->sm_closure, closures[i]);
 
               result = vm__push(vm, closures[i]);
               if (result != VM_OK) return result;
@@ -5216,7 +5229,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* SM: create state machine, call synchronously */
               JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
               JaclStateMachine *sm = jacl_as_state_machine(sm_val);
-              sm->sm_closure = closures[i];
+              vm__slot_set(vm, &sm->sm_closure, closures[i]);
 
               result = vm__push(vm, closures[i]);
               if (result != VM_OK) return result;
@@ -7352,7 +7365,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
               if (inner == VM_YIELD) {
                 stream->state = STREAM_CONSUMED;
-                stream->cached_value = vm->yield_value;
+                vm__slot_set(vm, &stream->cached_value, vm->yield_value);
                 vm->stack_top   = caller_stack_top;
                 vm->frame_count = caller_frame_count;
                 vm->ip    = caller_ip;
@@ -7362,8 +7375,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 tmp_vec = jacl_vec_push_back(tmp_vec, vm->yield_value);
               } else if (inner == VM_OK) {
                 stream->state = STREAM_EXHAUSTED;
-                stream->next_fn = JACL_NIL;
-                stream->cached_value = JACL_NIL;
+                vm__slot_set(vm, &stream->next_fn, JACL_NIL);
+                vm__slot_set(vm, &stream->cached_value, JACL_NIL);
                 vm->stack_top   = caller_stack_top;
                 vm->frame_count = caller_frame_count;
                 vm->ip    = caller_ip;
@@ -7371,7 +7384,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 frame = &vm->frames[vm->frame_count - 1];
               } else {
                 stream->state = STREAM_ERROR;
-                stream->next_fn = JACL_NIL;
+                vm__slot_set(vm, &stream->next_fn, JACL_NIL);
                 return inner;
               }
             }
@@ -7608,7 +7621,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           if (inner == VM_YIELD) {
             stream->state = STREAM_CONSUMED;
-            stream->cached_value = vm->yield_value;
+            vm__slot_set(vm, &stream->cached_value, vm->yield_value);
             vm->stack_top   = caller_stack_top;
             vm->frame_count = caller_frame_count;
             vm->ip    = caller_ip;
@@ -7636,7 +7649,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               break;
             }
             stream->state = STREAM_EXHAUSTED;
-            stream->cached_value = JACL_NIL;
+            vm__slot_set(vm, &stream->cached_value, JACL_NIL);
             vm->stack_top   = caller_stack_top;
             vm->frame_count = caller_frame_count;
             vm->ip    = caller_ip;
@@ -7685,7 +7698,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Already exhausted - check for cached error */
             if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
               result = vm__push(vm, stream->cached_value);
-              stream->cached_value = JACL_NIL;
+              vm__slot_set(vm, &stream->cached_value, JACL_NIL);
               if (result != VM_OK) return result;
               break;
             }
@@ -7821,7 +7834,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Already exhausted - check for cached error */
             if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
               result = vm__push(vm, stream->cached_value);
-              stream->cached_value = JACL_NIL;
+              vm__slot_set(vm, &stream->cached_value, JACL_NIL);
               if (result != VM_OK) return result;
               break;
             }
@@ -7999,7 +8012,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           if (inner == VM_YIELD) {
             stream->state = STREAM_CONSUMED;
-            stream->cached_value = vm->yield_value;
+            vm__slot_set(vm, &stream->cached_value, vm->yield_value);
             vm->stack_top   = caller_stack_top;
             vm->frame_count = caller_frame_count;
             vm->ip    = caller_ip;
@@ -8023,7 +8036,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               }
             }
             stream->state = STREAM_EXHAUSTED;
-            stream->cached_value = JACL_NIL;
+            vm__slot_set(vm, &stream->cached_value, JACL_NIL);
             vm->stack_top   = caller_stack_top;
             vm->frame_count = caller_frame_count;
             vm->ip    = caller_ip;
@@ -8597,11 +8610,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           sm_val = vm->stack[vm->stack_top - 2];     /* re-read after GC */
           future_val = vm->stack[vm->stack_top - 1];  /* re-read after GC */
           JaclStateMachine *inner_sm = jacl_as_state_machine(sm_val);
-          inner_sm->sm_closure = callee;
-          inner_sm->error_k = resolve_k;
+          vm__slot_set(vm, &inner_sm->sm_closure, callee);
+          vm__slot_set(vm, &inner_sm->error_k, resolve_k);
           for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
             /* args at: stack_top - 2(roots) - arg_count + i */
-            inner_sm->fields[i] = vm->stack[vm->stack_top - 2 - arg_count + i];
+            vm__slot_set(vm, &inner_sm->fields[i], vm->stack[vm->stack_top - 2 - arg_count + i]);
           }
 
           /* 4. Submit inner SM as a task */
@@ -8628,9 +8641,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
             JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
             JaclStateMachine* sm = jacl_as_state_machine(sm_val);
-            sm->sm_closure = callee;
+            vm__slot_set(vm, &sm->sm_closure, callee);
             for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
-              sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
+              vm__slot_set(vm, &sm->fields[i], vm->stack[vm->stack_top - arg_count + i]);
             }
             uint32_t callee_pos = vm->stack_top - arg_count - 1;
             vm->stack[callee_pos + 1] = sm_val;
@@ -11343,7 +11356,7 @@ VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
       /* SM main closure: create state machine, call with (sm_val, nil) */
       JaclVal sm_val = gc_alloc_state_machine(&vm->heap, main_cl->sm_field_count);
       JaclStateMachine *sm = jacl_as_state_machine(sm_val);
-      sm->sm_closure = main_cl_val;
+      vm__slot_set(vm, &sm->sm_closure, main_cl_val);
 
       vm->stack_top = 0;
       vm->stack[0]  = main_cl_val;
@@ -11799,7 +11812,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
       /* SM main closure: create state machine, call with (sm_val, nil) */
       JaclVal sm_val = gc_alloc_state_machine(&vm->heap, main_cl->sm_field_count);
       JaclStateMachine *sm = jacl_as_state_machine(sm_val);
-      sm->sm_closure = main_cl_val;
+      vm__slot_set(vm, &sm->sm_closure, main_cl_val);
 
       vm->stack_top = 0;
       vm->stack[0]  = main_cl_val;
