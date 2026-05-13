@@ -27,8 +27,26 @@ static void syntax__set_pos(JaclSyntax *syn, AstNode *node) {
  * syntax_from_ast: recursively convert AstNode → JaclVal syntax object
  * ------------------------------------------------------------------------- */
 
+static JaclVal syntax_from_ast__inner(AstNode *node, ThreadHeap *heap,
+                                      JaclInternTable *intern);
+
+/* Public entry: pins gc__current_heap to `heap` for the call's scope.
+ * Required because the inner body uses jacl_vec_*, jacl_map_* etc. which
+ * allocate via gc__current_heap (TLS); when called during compilation
+ * inside a transient macro_ctx (which has set TLS to its own heap as a
+ * side effect of vm_init), syntax-quote vecs would otherwise land in the
+ * doomed heap and dangle as soon as the macro_ctx was destroyed. */
 JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
                         JaclInternTable *intern) {
+    ThreadHeap *prev_heap = gc__current_heap;
+    gc__current_heap = heap;
+    JaclVal result = syntax_from_ast__inner(node, heap, intern);
+    gc__current_heap = prev_heap;
+    return result;
+}
+
+static JaclVal syntax_from_ast__inner(AstNode *node, ThreadHeap *heap,
+                                      JaclInternTable *intern) {
     if (!node) return JACL_NIL;
 
     JaclVal syn_val = gc_alloc_syntax(heap);
