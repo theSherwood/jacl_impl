@@ -96,6 +96,32 @@ The remaining work is non-correctness, performance/architecture:
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
 
+### Housekeeping (2026-05-13)
+
+Two test-hygiene items, neither affects runtime correctness:
+
+- **Dead RC-mode paths removed from `lib/hamt/hamt.h` and
+  `lib/rrb_vec/rrb_vec.h`.** Both headers had a long-stale
+  `#ifndef *_GC_MODE` branch that still `#include "../rc/rc.h"`, but
+  `lib/rc/` was deleted back in `1ed778a` ("never wired in"). Every
+  production caller (`src/collections.c`, `src/jacl.h`) defines
+  `*_GC_MODE`, so the RC fallback only existed for 14 standalone
+  template tests that hadn't compiled since the rc removal. Deleted
+  the RC branches (the transient API + RC node destructors) and the
+  14 orphan tests; headers now hard-require `*_GC_ALLOC` via `#error`.
+  ~11k LOC removed, no production change. Commit `8dc407f`.
+- **`test_chaos_gc_deque_scan` deflaked.** Two stacked races caused
+  ~7/30 failures under `--parallel`, ~1/30 in isolation: (i) the
+  scanner loop checked `owner_done` at the top, so a fast owner that
+  finished before the scanner got CPU caused the scanner to exit
+  before its first observation; (ii) even after fixing that, the
+  scanner's 5000-round atomic loop completes in microseconds while
+  the owner is still alloc/grow-bound, so all rounds could see
+  `b=t=0` and `sum` stayed zero. Fix: drop the unused `owner_done`
+  flag, always run `SCAN_ITERS` rounds, and add a second sync point
+  — wait for `dq->bottom > 0` before starting the scan loop.
+  Validated 0/100 isolated, 0/30 `--parallel`. Commit `d39314b`.
+
 §D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
 that inner closures defined before a suspension still see their
 captured values after. Passes.
@@ -145,9 +171,11 @@ cc -fsanitize=address -fno-omit-frame-pointer -g -O0 -D_DEFAULT_SOURCE \
 /tmp/jacl_asan path/to/repro.jacl
 ```
 
-**Expected normal-mode suite result:** 87 passed, 14 pre-existing
-failures (all `hamt*` / `rrb_vec*`, blocked by the removed `lib/rc`
-include path — unrelated to the audit).
+**Expected normal-mode suite result:** 87 passed, 0 failed. The 14
+`hamt*` / `rrb_vec*` standalone tests that had been blocked by the
+removed `lib/rc` include path were retired together with the dead
+RC-mode branches of those headers — see the 2026-05-13 housekeeping
+note below.
 
 **Chaos test inventory (all `--tsan`-clean as of end of phase D):**
 | Chaos test | Reproduces |
