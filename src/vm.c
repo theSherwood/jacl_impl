@@ -30,6 +30,19 @@
  * a downstream crash. Compiles to nothing under -DNDEBUG. */
 #define JACL_ASSERT_TAG(v, pred) assert(pred(v))
 
+/* §D.2: balance the operand stack on error returns inside an opcode
+ * handler. Each opcode that pops or pushes before potentially erroring
+ * should declare `uint32_t saved_stack_top = vm->stack_top;` at the
+ * top of its case, then use VM_ERROR(vm, ...) for any error return
+ * after that point. The macro resets stack_top to the captured value,
+ * sets the error message, and returns VM_RUNTIME_ERROR — eliminating
+ * the cumulative slot drift documented in AUDIT.md §D.2. */
+#define VM_ERROR(vm_, ...) do { \
+    (vm_)->stack_top = saved_stack_top; \
+    vm__set_error((vm_), __VA_ARGS__); \
+    return VM_RUNTIME_ERROR; \
+} while (0)
+
 /* --- Stack size --- */
 
 #define VM_STACK_MAX 256
@@ -2089,6 +2102,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MOD: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2099,9 +2113,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, mod_res);
           if (result != VM_OK) return result;
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '%%': modulo is not supported for f32");
-          return VM_RUNTIME_ERROR;
         } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
           JaclVal mod_res = jacl_u32_mod(a, b);
           if (jacl_is_error(mod_res) && !jacl_is_error(a) && !jacl_is_error(b))
@@ -2109,15 +2122,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, mod_res);
           if (result != VM_OK) return result;
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '%%': expected matching numeric types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
         break;
       }
 
       case OP_NEG: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal a;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
         JaclVal res;
@@ -2128,10 +2141,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_u32(a)) {
           res = jacl_u32_neg(a);
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '-': expected numeric type, got %s",
             vm__type_name(a));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
@@ -2148,6 +2160,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_LT: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2161,16 +2174,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) < 0);
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '<': expected matching types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_GT: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2184,16 +2197,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) > 0);
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '>': expected matching types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_LE: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2207,16 +2220,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) <= 0);
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '<=': expected matching types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_GE: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2230,10 +2243,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) >= 0);
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in '>=': expected matching types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
@@ -2911,24 +2923,23 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_DESTRUCTURE_VEC: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         uint8_t skip_mask = vm__read_byte(vm);
         JaclVal vec_val;
         result = vm__pop(vm, &vec_val);
         if (result != VM_OK) return result;
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "destructuring requires a vector, got %s",
               vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         uint32_t vec_len = jacl_vec_count(vec);
         if (vec_len != n) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "destructuring length mismatch: expected %u elements, got %u",
               (unsigned)n, (unsigned)vec_len);
-          return VM_RUNTIME_ERROR;
         }
         /* Push elements 0..N-1 onto stack, skipping positions in skip_mask */
         for (uint8_t i = 0; i < n; i++) {
@@ -2941,23 +2952,22 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_DESTRUCTURE_VEC_REST: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         JaclVal vec_val;
         result = vm__pop(vm, &vec_val);
         if (result != VM_OK) return result;
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "destructuring requires a vector, got %s",
               vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         uint32_t vec_len = jacl_vec_count(vec);
         if (vec_len < n) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "destructuring rest: expected at least %u elements, got %u",
               (unsigned)n, (unsigned)vec_len);
-          return VM_RUNTIME_ERROR;
         }
         /* Push first N elements individually */
         for (uint8_t i = 0; i < n; i++) {
@@ -2978,6 +2988,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_DESTRUCTURE_NAMED: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         /* Read N constant indices for field names */
         uint16_t name_indices[256];
@@ -3002,10 +3013,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
             }
             if (fi == sdef->field_count) {
-              vm__set_error(vm,
+              VM_ERROR(vm,
                   "destructuring: struct '%.*s' has no field '%.*s'",
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
-              return VM_RUNTIME_ERROR;
             }
             JaclVal field_val = vm__heap_record_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
@@ -3019,24 +3029,23 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (!jacl_map_has(map, key_val)) {
               char fname[64]; uint32_t flen;
               flen = jacl_string_data(key_val, fname, sizeof(fname));
-              vm__set_error(vm,
+              VM_ERROR(vm,
                   "destructuring: map has no key '%.*s'",
                   (int)flen, fname);
-              return VM_RUNTIME_ERROR;
             }
             result = vm__push(vm, jacl_map_get(map, key_val));
             if (result != VM_OK) return result;
           }
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "named destructuring requires a struct or map, got %s",
               vm__type_name(src_val));
-          return VM_RUNTIME_ERROR;
         }
         break;
       }
 
       case OP_DESTRUCTURE_NAMED_REST: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         /* Read N constant indices for explicit field names to extract */
         uint16_t name_indices[256];
@@ -3062,10 +3071,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
             }
             if (fi == sdef->field_count) {
-              vm__set_error(vm,
+              VM_ERROR(vm,
                   "destructuring: struct '%.*s' has no field '%.*s'",
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
-              return VM_RUNTIME_ERROR;
             }
             JaclVal field_val = vm__heap_record_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
@@ -3108,10 +3116,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (!jacl_map_has(map, key_val)) {
               char fname[64]; uint32_t flen;
               flen = jacl_string_data(key_val, fname, sizeof(fname));
-              vm__set_error(vm,
+              VM_ERROR(vm,
                   "destructuring: map has no key '%.*s'",
                   (int)flen, fname);
-              return VM_RUNTIME_ERROR;
             }
             result = vm__push(vm, jacl_map_get(map, key_val));
             if (result != VM_OK) return result;
@@ -3146,15 +3153,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_map_ptr(rest_map));
           if (result != VM_OK) return result;
         } else {
-          vm__set_error(vm,
+          VM_ERROR(vm,
               "named destructuring requires a struct or map, got %s",
               vm__type_name(src_val));
-          return VM_RUNTIME_ERROR;
         }
         break;
       }
 
       case OP_CONCAT: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -3162,10 +3169,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(b)) { result = vm__push(vm, b); if (result != VM_OK) return result; break; }
 
         if (!jacl_is_string(a) || !jacl_is_string(b)) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "type error in 'concat': expected strings, got %s and %s",
             vm__type_name(a), vm__type_name(b));
-          return VM_RUNTIME_ERROR;
         }
 
         uint32_t len_a = jacl_string_byte_len(a);
@@ -3225,13 +3231,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STR_LEN: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
         if (!jacl_is_string(val)) {
-          vm__set_error(vm, "type error in 'length': expected string, got %s",
+          VM_ERROR(vm, "type error in 'length': expected string, got %s",
                        vm__type_name(val));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, jacl_i32((int32_t)jacl_string_len(val)));
         if (result != VM_OK) return result;
@@ -3239,13 +3245,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STR_BYTE_LEN: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
         if (!jacl_is_string(val)) {
-          vm__set_error(vm, "type error in 'byte-length': expected string, got %s",
+          VM_ERROR(vm, "type error in 'byte-length': expected string, got %s",
                        vm__type_name(val));
-          return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, jacl_i32((int32_t)jacl_string_byte_len(val)));
         if (result != VM_OK) return result;
@@ -3253,20 +3259,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STR_INDEX: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal idx_val, str_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &str_val); if (result != VM_OK) return result;
         if (jacl_is_error(str_val)) { result = vm__push(vm, str_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_string(str_val)) {
-          vm__set_error(vm, "type error in 'index': expected string, got %s",
+          VM_ERROR(vm, "type error in 'index': expected string, got %s",
                        vm__type_name(str_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
-          vm__set_error(vm, "type error in 'index': expected i32 index, got %s",
+          VM_ERROR(vm, "type error in 'index': expected i32 index, got %s",
                        vm__type_name(idx_val));
-          return VM_RUNTIME_ERROR;
         }
         int32_t idx = jacl_as_i32(idx_val);
         uint32_t glen = jacl_string_len(str_val);
@@ -3303,6 +3308,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STR_SLICE: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal end_val, start_val, str_val;
         result = vm__pop(vm, &end_val);   if (result != VM_OK) return result;
         result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
@@ -3311,14 +3317,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_string(str_val)) {
-          vm__set_error(vm, "type error in 'slice': expected string, got %s",
+          VM_ERROR(vm, "type error in 'slice': expected string, got %s",
                        vm__type_name(str_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(start_val)) {
-          vm__set_error(vm, "type error in 'slice': expected i32 start, got %s",
+          VM_ERROR(vm, "type error in 'slice': expected i32 start, got %s",
                        vm__type_name(start_val));
-          return VM_RUNTIME_ERROR;
         }
         /* Use grapheme count for bounds, not byte length */
         uint32_t glen = jacl_string_len(str_val);
@@ -3329,9 +3333,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_i32(end_val)) {
           end = jacl_as_i32(end_val);
         } else {
-          vm__set_error(vm, "type error in 'slice': expected i32 end, got %s",
+          VM_ERROR(vm, "type error in 'slice': expected i32 end, got %s",
                        vm__type_name(end_val));
-          return VM_RUNTIME_ERROR;
         }
         /* Clamp grapheme bounds */
         if (start < 0) start = 0;
@@ -3509,6 +3512,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_GET: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal idx_val, vec_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
@@ -3516,16 +3520,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
-            vm__set_error(vm, "vec-get requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-get requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-get': expected vector, got %s",
                          vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
-          vm__set_error(vm, "type error in 'vec-get': expected i32 index, got %s",
+          VM_ERROR(vm, "type error in 'vec-get': expected i32 index, got %s",
                        vm__type_name(idx_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         int32_t idx = jacl_as_i32(idx_val);
@@ -3540,16 +3542,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_LEN: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal vec_val;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
-            vm__set_error(vm, "vec-len requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-len requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-len': expected vector, got %s",
                          vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_vec_count(vec)));
@@ -3558,6 +3560,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_PUSH: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal elem, vec_val;
         result = vm__pop(vm, &elem); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
@@ -3565,11 +3568,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
-            vm__set_error(vm, "vec-push requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-push requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-push': expected vector, got %s",
                          vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         gc__current_heap = &vm->heap;
@@ -3580,6 +3582,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_SET: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal elem, idx_val, vec_val;
         result = vm__pop(vm, &elem); if (result != VM_OK) return result;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
@@ -3589,22 +3592,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
-            vm__set_error(vm, "vec-set requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-set requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-set': expected vector, got %s",
                          vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
-          vm__set_error(vm, "type error in 'vec-set': expected i32 index, got %s",
+          VM_ERROR(vm, "type error in 'vec-set': expected i32 index, got %s",
                        vm__type_name(idx_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         int32_t idx = jacl_as_i32(idx_val);
         if (idx < 0) {
-          vm__set_error(vm, "vec-set: negative index %d", (int)idx);
-          return VM_RUNTIME_ERROR;
+          VM_ERROR(vm, "vec-set: negative index %d", (int)idx);
         }
         uint32_t count = jacl_vec_count(vec);
         gc__current_heap = &vm->heap;
@@ -3626,6 +3626,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_CONCAT: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal b_val, a_val;
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
@@ -3633,19 +3634,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(a_val)) {
           if (jacl_is_stream(a_val))
-            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-concat': expected vector, got %s",
                          vm__type_name(a_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_vector(b_val)) {
           if (jacl_is_stream(b_val))
-            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-concat': expected vector, got %s",
                          vm__type_name(b_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a_val);
         jacl_vec_root* vb = (jacl_vec_root*)jacl_as_ptr(b_val);
@@ -3657,6 +3656,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_VEC_SLICE: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal end_val, start_val, vec_val;
         result = vm__pop(vm, &end_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
@@ -3666,21 +3666,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
-            vm__set_error(vm, "vec-slice requires a vector; got stream (use collect to materialize)");
+            VM_ERROR(vm, "vec-slice requires a vector; got stream (use collect to materialize)");
           else
-            vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
+            VM_ERROR(vm, "type error in 'vec-slice': expected vector, got %s",
                          vm__type_name(vec_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(start_val)) {
-          vm__set_error(vm, "type error in 'vec-slice': expected i32 start, got %s",
+          VM_ERROR(vm, "type error in 'vec-slice': expected i32 start, got %s",
                        vm__type_name(start_val));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(end_val)) {
-          vm__set_error(vm, "type error in 'vec-slice': expected i32 end, got %s",
+          VM_ERROR(vm, "type error in 'vec-slice': expected i32 end, got %s",
                        vm__type_name(end_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         int32_t start = jacl_as_i32(start_val);
@@ -3723,15 +3720,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_GET: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-get': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-get': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         if (jacl_map_has(map, key_val)) {
@@ -3744,15 +3741,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_HAS: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-has': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-has': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         result = vm__push(vm, jacl_bool(jacl_map_has(map, key_val)));
@@ -3761,13 +3758,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_LEN: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-len': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-len': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_map_count(map)));
@@ -3776,6 +3773,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_SET: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal val, key_val, map_val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
@@ -3784,9 +3782,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-set': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-set': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         gc__current_heap = &vm->heap;
@@ -3797,15 +3794,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_REMOVE: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-remove': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-remove': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         gc__current_heap = &vm->heap;
@@ -3816,13 +3813,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_KEYS: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-keys': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-keys': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         gc__current_heap = &vm->heap;
@@ -3841,13 +3838,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_MAP_VALS: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
         if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_map(map_val)) {
-          vm__set_error(vm, "type error in 'map-vals': expected map, got %s",
+          VM_ERROR(vm, "type error in 'map-vals': expected map, got %s",
                        vm__type_name(map_val));
-          return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         gc__current_heap = &vm->heap;
@@ -5277,6 +5274,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_DEREF: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal container;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
         if (jacl_is_error(container)) {
@@ -5284,16 +5282,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
-          vm__set_error(vm, "deref: expected box or atom, got %s",
+          VM_ERROR(vm, "deref: expected box or atom, got %s",
                        vm__type_name(container));
-          return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         if (ref->type_idx > 0) {
           /* Struct box: materialize data[] into a heap HeapRecord */
           if (!vm->struct_registry || ref->type_idx >= vm->struct_registry->count) {
-            vm__set_error(vm, "deref: invalid struct type index %u", (unsigned)ref->type_idx);
-            return VM_RUNTIME_ERROR;
+            VM_ERROR(vm, "deref: invalid struct type index %u", (unsigned)ref->type_idx);
           }
           StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
           gc__current_heap = &vm->heap;
@@ -5318,6 +5314,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_RESET: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal new_val, container;
         result = vm__pop(vm, &new_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
@@ -5330,17 +5327,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
-          vm__set_error(vm, "reset!: expected box or atom, got %s",
+          VM_ERROR(vm, "reset!: expected box or atom, got %s",
                        vm__type_name(container));
-          return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         if (ref->type_idx > 0) {
           /* Struct box: copy new struct data into box */
           HeapRecord* s = jacl_as_heap_record_ptr(new_val);
           if (!s || s->type_idx != ref->type_idx) {
-            vm__set_error(vm, "reset!: struct type mismatch in box");
-            return VM_RUNTIME_ERROR;
+            VM_ERROR(vm, "reset!: struct type mismatch in box");
           }
           StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
           memcpy(ref->data, s->data, sdef->total_size);
@@ -5422,6 +5417,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_SWAP: {
+        uint32_t saved_stack_top = vm->stack_top;
         JaclVal closure_val, container;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
@@ -5434,23 +5430,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
-          vm__set_error(vm, "swap!: expected box or atom, got %s",
+          VM_ERROR(vm, "swap!: expected box or atom, got %s",
                        vm__type_name(container));
-          return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_closure(closure_val)) {
-          vm__set_error(vm, "swap!: expected closure as second argument, got %s",
+          VM_ERROR(vm, "swap!: expected closure as second argument, got %s",
                        vm__type_name(closure_val));
-          return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         JaclClosure* closure = jacl_as_closure(closure_val);
 
         if (closure->param_count != 1) {
-          vm__set_error(vm,
+          VM_ERROR(vm,
             "swap!: closure must take 1 parameter, got %d",
             (int)closure->param_count);
-          return VM_RUNTIME_ERROR;
         }
 
         bool swap_is_atom = jacl_is_atom(container);
@@ -5805,6 +5798,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       /* --- M11: Type conversion opcodes --- */
 
       case OP_TO_I32: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5823,16 +5817,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_u64(val))); }
             else if (jacl_is_f32(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_f32(val))); }
             else if (jacl_is_f64(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_f64(val))); }
-            else { vm__set_error(vm, "cannot convert %s to i32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to i32", vm__type_name(val)); }
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-i32"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-i32"); }
         }
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_TO_I64: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5851,17 +5846,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { i = (int64_t)jacl_as_u64(val); }
             else if (jacl_is_f32(val)) { i = (int64_t)jacl_as_f32(val); }
             else if (jacl_is_f64(val)) { i = (int64_t)jacl_as_f64(val); }
-            else { vm__set_error(vm, "cannot convert %s to i64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to i64", vm__type_name(val)); }
             result = vm__push(vm, (uint64_t)i);
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-i64"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-i64"); }
         }
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_TO_U32: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5880,17 +5876,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { u = (uint32_t)jacl_as_u64(val); }
             else if (jacl_is_f32(val)) { u = (uint32_t)jacl_as_f32(val); }
             else if (jacl_is_f64(val)) { u = (uint32_t)jacl_as_f64(val); }
-            else { vm__set_error(vm, "cannot convert %s to u32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to u32", vm__type_name(val)); }
             result = vm__push(vm, jacl_u32(u));
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-u32"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-u32"); }
         }
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_TO_U64: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5909,17 +5906,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { u = jacl_as_u64(val); }
             else if (jacl_is_f32(val)) { u = (uint64_t)jacl_as_f32(val); }
             else if (jacl_is_f64(val)) { u = (uint64_t)jacl_as_f64(val); }
-            else { vm__set_error(vm, "cannot convert %s to u64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to u64", vm__type_name(val)); }
             result = vm__push(vm, u);
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-u64"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-u64"); }
         }
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_TO_F32: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5938,17 +5936,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { f = (float)jacl_as_u64(val); }
             else if (jacl_is_f32(val)) { f = jacl_as_f32(val); }
             else if (jacl_is_f64(val)) { f = (float)jacl_as_f64(val); }
-            else { vm__set_error(vm, "cannot convert %s to f32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to f32", vm__type_name(val)); }
             result = vm__push(vm, jacl_f32(f));
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-f32"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-f32"); }
         }
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_TO_F64: {
+        uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -5968,10 +5967,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             else if (jacl_is_u64(val)) { d = (double)jacl_as_u64(val); }
             else if (jacl_is_f32(val)) { d = (double)jacl_as_f32(val); }
             else if (jacl_is_f64(val)) { d = jacl_as_f64(val); }
-            else { vm__set_error(vm, "cannot convert %s to f64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            else { VM_ERROR(vm, "cannot convert %s to f64", vm__type_name(val)); }
             break;
           }
-          default: { vm__set_error(vm, "invalid source type for to-f64"); return VM_RUNTIME_ERROR; }
+          default: { VM_ERROR(vm, "invalid source type for to-f64"); }
         }
         if (need_push) {
           uint64_t raw;

@@ -22,7 +22,7 @@ now fixed too. **No open correctness items remain.**
 | B | Soak-surfaced races | 5 additional fixes, TSAN-validated |
 | C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
-| D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys` |
+| D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys`; §D.2 `VM_ERROR` stack-discipline pass (72 error returns across 39 opcodes) |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -77,15 +77,23 @@ bugs and one piece of brittle test infrastructure:
   to an 8-byte raw memcpy for non-primitive fields and
   `jacl_as_bool` returns payload bit 0. Fixed.
 
-The remaining work is non-correctness hardening:
+The §D.2 broader stack-discipline cleanup is also landed. A
+`VM_ERROR(vm, ...)` macro now resets `vm->stack_top` to a per-opcode
+`saved_stack_top` snapshot, sets the error message, and returns
+`VM_RUNTIME_ERROR` in one shot. 72 error returns across 39 opcodes
+were converted (Categories §D.2: binary arith/compare, destructuring,
+string ops, vector/map ops, mutation ops, conversion ops). The pass
+also picked up sibling sites the original audit didn't list
+(`OP_VEC_LEN`/`OP_VEC_PUSH`/`OP_MAP_HAS`/`OP_MAP_LEN`/`OP_MAP_REMOVE`/
+`OP_MAP_KEYS`/`OP_MAP_VALS`/`OP_STR_BYTE_LEN`). Cumulative slot drift
+across error returns is now closed for these opcodes; if/when error
+recovery lands, the operand stack will be balanced.
+
+The remaining work is non-correctness, performance/architecture:
 
 ### Punch list (in priority)
 
-1. **§D.2 broader stack-discipline cleanup** — ~60 sites where a
-   `return VM_RUNTIME_ERROR` leaves the operand stack unbalanced.
-   Macro-based refactor. Pure cleanup; defends against DoS-style
-   slot drift.
-2. **Architectural items §10–§17** — throughput, latency, ergonomics.
+1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.
 
 §D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
@@ -764,7 +772,7 @@ these "worked" because the runtime defaults to an 8-byte raw memcpy
 for non-primitive fields, and `jacl_as_bool` returns payload bit 0.
 Fixed.
 
-### D.2 Stack discipline — ~60 severity-(ii) and ~8 severity-(iii) leaks
+### D.2 Stack discipline — **FIXED** (72 sites via `VM_ERROR` macro + 11 iterating-opcode reorders)
 
 Survey of every `return VM_RUNTIME_ERROR` (or equivalent) asks: is the
 operand stack in a balanced state at that point? Result: most error
@@ -805,24 +813,31 @@ paths leak 1–3 slots; a handful in iterating opcodes can leak more.
    (iii) category is closed.
 
 2. *Either restructure error returns to reset stack_top, or add a
-   `VM_ERROR(...)` macro that does so.* Eliminates the (ii) category.
-   Touches ~60 sites; pure refactor, no semantics change. The macro
-   approach:
+   `VM_ERROR(...)` macro that does so.* **Now landed.** Defined
+   `VM_ERROR(vm_, ...)` at the top of `src/vm.c`:
    ```c
-   #define VM_ERROR(vm, ...) do { \
-       vm->stack_top = saved_stack_top; \
-       vm__set_error(vm, __VA_ARGS__); \
+   #define VM_ERROR(vm_, ...) do { \
+       (vm_)->stack_top = saved_stack_top; \
+       vm__set_error((vm_), __VA_ARGS__); \
        return VM_RUNTIME_ERROR; \
    } while (0)
    ```
-   plus `uint32_t saved_stack_top = vm->stack_top;` at the top of each
-   opcode case. Tedious, mechanical, low-risk.
+   Each affected opcode case declares
+   `uint32_t saved_stack_top = vm->stack_top;` at the top and uses
+   `VM_ERROR(vm, ...)` for any error return after a pop/push. 72
+   error returns converted across 39 opcodes. Categories covered:
+   binary arith/compare, destructuring (vec + named, including rest
+   variants), string ops (concat / len / byte-len / index / slice),
+   vector ops (get/len/push/set/concat/slice), map ops
+   (get/has/len/set/remove/keys/vals), mutation ops (deref / reset / swap),
+   conversion ops (to-i32/i64/u32/u64/f32/f64).
 
 Neither fix changes correctness for **well-behaved** programs that
 never hit a runtime error. The class of bugs they close: cumulative
 slot drift in programs that recover from errors (currently impossible
 to do cleanly), and the obscure "your stack is corrupted, here's a
-nonsensical type error from 50 ops downstream" symptom.
+nonsensical type error from 50 ops downstream" symptom. The (ii) and
+(iii) categories are both closed.
 
 ### D.3 CPS capture correctness
 
