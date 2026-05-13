@@ -17,8 +17,12 @@ the code).
 > correctness items are open. Phase D (compiler/VM survey) is also
 > closed: §D.1 `JACL_ASSERT_TAG` pass, §D.2 frame-check reorder + the
 > `VM_ERROR` stack-discipline pass, §D.6 spawn-recursion SEGV are all
-> landed. See AUDIT.md for the per-commit story; remaining work in
-> the punch list is architectural (§10–§17, defer until profiled).
+> landed. §10 (single global inbox contention) is now also fixed —
+> from-worker submissions push directly to own `public_deque`, no
+> mutex, no CV signal; externals still use the global inbox path.
+> See AUDIT.md for the per-commit story; remaining work in the
+> punch list is architectural (§11–§17 minus the closed items,
+> defer until profiled).
 
 ## Notation
 
@@ -35,15 +39,20 @@ under the lock.
 
 ## 1. Task scheduling
 
-### `Runtime.inbox` (uintptr_t array) — global inbox
-- **W**: any thread, under `inbox_mutex`
+### `Runtime.inbox` (uintptr_t array) — global inbox (external-only)
+- **W**: external (non-worker) threads only, under `inbox_mutex`
 - **R**: any worker, under `inbox_mutex` (during drain)
 - **Sync**: `inbox_mutex`
 - **Order**: under-lock
 - **Invariant**: contents are consistent while lock is held
+- **Note (§10 fix, 2026-05-13)**: `runtime__push_inbox` now has a
+  from-worker fast path that pushes to the caller's own `public_deque`
+  and returns without touching this array or its mutex. Only external
+  threads (`rt__current_worker == NULL` or pointing to a different
+  runtime) reach this path.
 
 ### `Runtime.inbox_count` (volatile intptr_t)
-- **W**: anyone holding `inbox_mutex` (push under lock; worker drain under lock)
+- **W**: external pushers (under `inbox_mutex`); worker drainers (under lock)
 - **R**: writers (under lock); workers (lockless empty-check)
 - **Sync**: mutex for the array; atomic ops on the count itself
 - **Order**: writers do `ATOMIC_STORE_EXPLICIT(..., MEM_RELEASE)` at end of
@@ -54,7 +63,7 @@ under the lock.
   with the array contents.
 
 ### `Runtime.inbox_cap`, `Runtime.inbox` (pointer)
-- **W**: any pusher growing the buffer, under `inbox_mutex`
+- **W**: any external pusher growing the buffer, under `inbox_mutex`
 - **R**: drainers under `inbox_mutex`
 - **Sync**: `inbox_mutex`
 - **Order**: under-lock
@@ -77,6 +86,11 @@ under the lock.
 - **Note**: `buf->data[i]` accesses go through `CL_DATA_LOAD`/`CL_DATA_STORE`.
   When `CHASE_LEV_ATOMIC_DATA` is defined (the runtime's instantiation), these
   are relaxed atomic; otherwise plain. Synchronization is via top/bottom.
+- **Note (§10 fix, 2026-05-13)**: owner-side `_push` is now reached
+  from two call sites: the worker loop's inbox/pinned-inbox drains
+  (existing) and `runtime__push_inbox`'s from-worker fast path
+  (added). Both run on the owner's thread, so the SPSC owner-push
+  contract is preserved.
 
 ### `WorkerThread.private_deque` — Chase-Lev SPSC (no thieves)
 - **W**: owner only

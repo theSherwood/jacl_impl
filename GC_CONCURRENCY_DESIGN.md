@@ -652,3 +652,21 @@ If GC runs between task submission and execution, the unrooted value can be coll
 2. **Batched drain**: When non-empty, drain all pending tasks in one lock acquisition, pushing them to the worker's private deque.
 
 This eliminates lock acquisition for the common case (empty inbox) and reduces per-drain cost from O(tasks) lock acquisitions to O(1).
+
+### 17.5 Push-Side Inbox Contention (AUDIT §10, 2026-05-13)
+
+**Problem**: 17.4 fixed the empty-check side. The *push* side was still serialized by `inbox_mutex`: every `runtime__push_inbox` call (which covers `runtime_submit`, all non-pinned `runtime__schedule_continuation`, all non-pinned `runtime__schedule_sm_resumption`, and all spawn/parallel/race fallbacks when the closure isn't pinned) acquired the mutex. On `spawn_chain`, this means every continuation submitted from a worker funnels through one global mutex — and the worker is also the one that will most likely run it next, so the mutex round-trip is pure overhead.
+
+**Amendment**: `runtime__push_inbox` fast-paths on `rt__current_worker`. If the caller is a worker thread in this runtime, push directly to `self->public_deque` and return — Chase-Lev SPSC on the owner-push side, no mutex, no CV signal. Other workers steal from `public_deque` via the existing steal path, preserving load balancing. Externals (no worker context) keep the global inbox + CV signal path.
+
+Why `public_deque` rather than per-worker MPSC inbox:
+- The owner-side `_push` is the canonical Chase-Lev pattern. Already exercised by the worker loop's inbox/pinned-inbox drains.
+- The §1/§2 fixes already cover safety: SPSC owner-push, GC thief slots registered at init, epoch-protected buffer reclamation.
+- No new data structures; ~17 lines in `runtime.c`.
+
+Why no CV signal on the fast path:
+- The submitter is itself active (it's mid-loop). It will pop its own deque on the next iteration.
+- Parked workers find the task via the steal path within the 1ms CV timeout (the §11 bounded latency we already accepted).
+- Signaling would require briefly acquiring `inbox_mutex`, defeating the point of the fast path.
+
+Validation (2026-05-13): `spawn_chain` N=200 — `inbox_pops` 11407 → 220 (98% drop), `steal_successes` 0 → 1873, wall median ~7.3ms → ~6.5ms. Full normal-mode 88/88; TSAN baseline unchanged; all 7 chaos tests TSAN-clean; gc_stress × 250 = 0 fails; 60s `chaos_soak` TSAN = 216K tasks, 0 heap problems.
