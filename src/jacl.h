@@ -1632,6 +1632,13 @@ struct Runtime {
     /* GC scanner thief slots — see runtime.c. MUST stay in sync. */
     int                *gc_thief_public_ids;
     int                *gc_thief_private_ids;
+    /* External GC roots — JaclVals pinned by C embedders (e.g. completion
+     * futures held by polling threads). Scanned by gc_enumerate_roots so
+     * concurrent GC doesn't sweep values held only by raw C pointers. */
+    JaclVal            *external_roots;
+    uint32_t            external_root_count;
+    uint32_t            external_root_cap;
+    platform_mutex_t    external_roots_mutex;
     /* Perf counters — see GCStats. */
     GCStats             gc_stats;
 };
@@ -2348,6 +2355,10 @@ extern void runtime__teardown_state (Runtime *rt);
 extern void runtime__push_inbox (Runtime *rt, RuntimeTask *task);
 extern void runtime__push_pinned (Runtime *rt, RuntimeTask *task, int worker_id);
 extern void runtime_submit (Runtime *rt, void (*fn)(void *), void *data);
+/* Pin a JaclVal as a GC root from outside any GC-scanned structure. Required
+ * for completion futures held only by raw C pointers across GC cycles. */
+extern uint32_t runtime_pin_value (Runtime *rt, JaclVal val);
+extern void     runtime_unpin_value (Runtime *rt, uint32_t handle);
 extern void runtime__setup_call (VM *vm, JaclClosure *cl, int argc, JaclVal *argv);
 extern void runtime__exec_closure (void *data);
 extern void runtime_submit_task (Runtime *rt, JaclClosure *closure, bool thread_local);

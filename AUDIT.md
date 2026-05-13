@@ -16,8 +16,10 @@ now fixed too. **2026-05-13 perf-bench surfaced three new bugs in
 GC/concurrency, all SEGV-class — all FIXED: stack-closure underflow
 in single-thread mark (b521b1d), sweep-walker overshoot in all five
 walkers (b521b1d), and `OBJ_CLOSURE=0` garbage dispatch in the
-concurrent mark loop (bc74a10). A separate occasional-hang at N≥500
-remains open (#0c).**
+concurrent mark loop (bc74a10). The N≥500 hang (#0c) is also now
+FIXED: completion future held only by a raw C pointer was racing
+with concurrent sweep; new `runtime_pin_value`/`runtime_unpin_value`
+API roots external JaclVals across GC cycles.**
 
 ### Status at end of phase D (2026-05-12)
 
@@ -36,7 +38,8 @@ git log for the per-commit story.
 
 ### Start-here for next session
 
-No open correctness bugs. The §D.6 SEGV from `spawn { burn 70 }` is
+No open correctness bugs. (#0c fixed 2026-05-13: external roots API.)
+The §D.6 SEGV from `spawn { burn 70 }` is
 fixed by making `OP_SPAWN`'s single-threaded path reset
 `vm->frame_count` and `vm->stack_top` after the inner `vm__run`
 returns, mirroring what `OP_PARALLEL` already does. `OP_RACE` had
@@ -140,13 +143,30 @@ The remaining work is non-correctness, performance/architecture:
    Stress on test_perf at N=500: 14/20 SEGV → 0/50 SEGV. Combined
    with #0a's walker fixes.
 
-0c. **Open: rare hang under sustained allocation pressure.**
-   At N=500 the bench scenario hangs ~12% of the time (6/50 in a
-   `timeout 30` stress). No crash — process is killed by timeout.
-   Likely a GC-or-future deadlock under heavy load. N=200 is fully
-   stable (0/30). Investigate before raising the bench N higher;
-   the perf telemetry should help (look for a cycle where
-   `gc_total_ns` blows up or `tasks_executed` plateaus).
+0c. ~~Rare hang under sustained allocation pressure at N≥500.~~
+   **FIXED**. Root cause: the completion future allocated by
+   `rt_run_to_completion` / `test_perf` lives on the GC heap but is
+   held by a raw C pointer that the GC does not scan. While the spawn
+   task is in flight, the future is rooted via `task->gc_root`. Once
+   the task resolves the future and retires, the future is unreachable
+   from any GC root. A concurrent GC after retire then sweeps the
+   future block and `memset`s its memory — `state` reads back as
+   `FUTURE_PENDING = 0`, `result = NIL`, `waiters = NULL`. The polling
+   thread sees PENDING forever and the process hangs.
+
+   Reproduction was deterministic with `PERF_DEBUG_HANG=1`: the
+   future's `GCHeader` came back all-zero (`epoch=0 mark=0 gen=0
+   obj_type=0 alloc_total=0`) — the block had been swept under us.
+
+   Fix: added a `runtime_pin_value` / `runtime_unpin_value` API on
+   `Runtime`. A pinned `JaclVal` is held in a mutex-protected array
+   and scanned by `gc_enumerate_roots`. `rt_run_to_completion` and
+   `test_perf.c` now pin the completion future across the polling
+   window. Validated: 0/50 hangs at N=500 (was 12% pre-fix), full
+   normal-mode suite 88 pass, TSAN regression set unchanged (9 failures
+   pre-existing in non-chaos tests, no new races). The same API will
+   be the right answer for any future C-side embedder that needs to
+   observe a JaclVal across GC cycles.
 
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Defer until profiled.

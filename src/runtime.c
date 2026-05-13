@@ -152,6 +152,16 @@ struct Runtime {
      * (worker, deque) pair. Index by worker_id. */
     int                *gc_thief_public_ids;
     int                *gc_thief_private_ids;
+    /* External GC roots — JaclVals pinned by C embedders (e.g. completion
+     * futures held by polling threads). Without this, the future allocated
+     * inside rt_run_to_completion / test_perf is rooted only via the spawn
+     * task's gc_root; once the task retires, a concurrent GC reclaims the
+     * future and the polling C thread reads zeroed memory (state=PENDING
+     * forever — AUDIT.md #0c). */
+    JaclVal            *external_roots;
+    uint32_t            external_root_count;
+    uint32_t            external_root_cap;
+    platform_mutex_t    external_roots_mutex;
     /* Perf counters — see GCStats in jacl.h. */
     GCStats             gc_stats;
 };
@@ -486,6 +496,12 @@ void runtime__init_state(Runtime *rt, int num_workers) {
     rt->inbox = (uintptr_t *)malloc((size_t)rt->inbox_cap * sizeof(uintptr_t));
     MUTEX_INIT(rt->inbox_mutex);
 
+    /* External roots — initially empty, grown on first pin */
+    rt->external_roots      = NULL;
+    rt->external_root_count = 0;
+    rt->external_root_cap   = 0;
+    MUTEX_INIT(rt->external_roots_mutex);
+
     /* Allocate and initialize workers */
     rt->workers = (WorkerThread *)calloc((size_t)num_workers,
                                           sizeof(WorkerThread));
@@ -652,6 +668,14 @@ void runtime__teardown_state(Runtime *rt) {
     free(rt->inbox);
     MUTEX_DESTROY(rt->inbox_mutex);
 
+    /* Release external root storage (values themselves are not freed —
+     * they live in GC heaps which are torn down by vm_destroy above) */
+    free(rt->external_roots);
+    rt->external_roots      = NULL;
+    rt->external_root_count = 0;
+    rt->external_root_cap   = 0;
+    MUTEX_DESTROY(rt->external_roots_mutex);
+
     gc_block_pool_destroy(&rt->block_pool);
 }
 
@@ -708,6 +732,44 @@ void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
 /* ======================================================================
  * Task submission — external callers push to the global inbox
  * ====================================================================== */
+
+/* ======================================================================
+ * External root pinning — keep a JaclVal alive across GC cycles when held
+ * only by a C pointer outside any GC-scanned structure. Required for
+ * completion futures observed by polling C threads (rt_run_to_completion,
+ * test_perf, embedders). Without pinning, a concurrent GC after task
+ * retire reclaims the future and the C reader sees zeroed memory.
+ * ====================================================================== */
+
+uint32_t runtime_pin_value(Runtime *rt, JaclVal val) {
+    MUTEX_LOCK(rt->external_roots_mutex);
+    /* Reuse the first cleared slot to keep handles bounded under churn */
+    for (uint32_t i = 0; i < rt->external_root_count; i++) {
+        if (rt->external_roots[i] == JACL_NIL) {
+            rt->external_roots[i] = val;
+            MUTEX_UNLOCK(rt->external_roots_mutex);
+            return i;
+        }
+    }
+    if (rt->external_root_count >= rt->external_root_cap) {
+        uint32_t new_cap = rt->external_root_cap ? rt->external_root_cap * 2 : 8;
+        rt->external_roots = (JaclVal *)realloc(rt->external_roots,
+                                  (size_t)new_cap * sizeof(JaclVal));
+        rt->external_root_cap = new_cap;
+    }
+    uint32_t handle = rt->external_root_count++;
+    rt->external_roots[handle] = val;
+    MUTEX_UNLOCK(rt->external_roots_mutex);
+    return handle;
+}
+
+void runtime_unpin_value(Runtime *rt, uint32_t handle) {
+    MUTEX_LOCK(rt->external_roots_mutex);
+    if (handle < rt->external_root_count) {
+        rt->external_roots[handle] = JACL_NIL;
+    }
+    MUTEX_UNLOCK(rt->external_roots_mutex);
+}
 
 void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
@@ -941,6 +1003,14 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         gc__ms_push_val(ms, task->gc_root3);
     }
     MUTEX_UNLOCK(rt->inbox_mutex);
+
+    /* 11. External roots pinned by C embedders. NIL slots are skipped by
+     * gc__ms_push_val (heap-type check). */
+    MUTEX_LOCK(rt->external_roots_mutex);
+    for (uint32_t i = 0; i < rt->external_root_count; i++) {
+        gc__ms_push_val(ms, rt->external_roots[i]);
+    }
+    MUTEX_UNLOCK(rt->external_roots_mutex);
 }
 
 /* ======================================================================
@@ -1926,6 +1996,10 @@ VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
     JaclVal completion = jacl_future(&rt->workers[0].vm.heap);
     JaclFuture *cfut = jacl_as_future(completion);
 
+    /* Pin against GC so concurrent sweep after task retire doesn't zero
+     * the future memory while this thread is still polling it. */
+    uint32_t pin = runtime_pin_value(rt, completion);
+
     runtime__submit_spawn_task(rt, closure, completion, JACL_NIL);
 
     /* Block until the completion future resolves (with timeout) */
@@ -1936,6 +2010,7 @@ VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
     }
 
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
+    runtime_unpin_value(rt, pin);
     if (state == FUTURE_ERROR || state == FUTURE_PENDING) {
         return VM_RUNTIME_ERROR;
     }

@@ -170,6 +170,10 @@ static int run_scenario(const char* path, const char* name,
         JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
         JaclFuture* cfut   = jacl_as_future(completion);
 
+        /* Pin so concurrent GC doesn't reclaim the future while we're
+         * polling it via a raw C pointer (AUDIT.md #0c). */
+        uint32_t pin = runtime_pin_value(&rt, completion);
+
         uint64_t t0 = now_ns();
         runtime__submit_spawn_task(&rt, closure, completion, rt.workers[0].vm.ctx);
 
@@ -186,6 +190,7 @@ static int run_scenario(const char* path, const char* name,
 
         if (timed_out) {
             fprintf(stderr, "  %s iter %d: timed out\n", name, iter);
+            runtime_unpin_value(&rt, pin);
             ok = 0;
             break;
         }
@@ -199,6 +204,7 @@ static int run_scenario(const char* path, const char* name,
             }
             fprintf(stderr, "  %s iter %d: runtime error: %s\n", name, iter,
                     err ? err : "(unknown)");
+            runtime_unpin_value(&rt, pin);
             ok = 0;
             break;
         }
@@ -206,6 +212,7 @@ static int run_scenario(const char* path, const char* name,
         if (iter >= WARMUP_ITERS) {
             timings[iter - WARMUP_ITERS] = dt;
         }
+        runtime_unpin_value(&rt, pin);
     }
 
     if (ok) {
