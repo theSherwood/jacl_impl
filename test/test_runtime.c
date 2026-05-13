@@ -842,6 +842,69 @@ static int test_future_add_waiter_grey_push(void) {
     TEST_PASS();
 }
 
+/* AUDIT.md §10/§11 sibling site: OP_SET_STATE_FIELD writes a heap
+ * value into sm->fields[i] on a state machine. If the SM is fresh
+ * (watermark-protected) and the inserted value is OLD (pre-watermark),
+ * the value has no other mark path and is reclaimed by sweep unless
+ * the write goes through gc_write_barrier. This test verifies the
+ * unified-barrier semantics protect this case.
+ *
+ * Same shape as test_future_add_waiter_grey_push, but for the
+ * sm->fields[i] case. */
+static int test_sm_field_store_barrier(void) {
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Allocate V at epoch=1 (OLD). */
+    gc__thread_epoch = 1;
+    JaclVal v = jacl_i64(heap, 0xdeadbeefdeadbeefLL);
+    void *v_ptr = jacl_as_ptr(v);
+    GCHeader *v_hdr = gc_header_of(v_ptr);
+    uint8_t orig_obj_type = v_hdr->obj_type;
+    uint16_t orig_total   = v_hdr->alloc_total;
+
+    /* Force fresh current_block so sweep visits V's block. */
+    while (heap->current_block != NULL && heap->cursor < heap->limit) {
+        (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    }
+    (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Advance epochs. */
+    ATOMIC_STORE_EXPLICIT(&rt.global_epoch, 5, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&w->thread_epoch, 5, MEM_RELEASE);
+    gc__thread_epoch = 5;
+
+    /* Allocate fresh SM. NOT rooted anywhere — survives only via the
+     * watermark check in sweep, never traced by mark phase. */
+    JaclVal sm_val = gc_alloc_state_machine(heap, 4);
+    JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+
+    /* Simulate OP_SET_STATE_FIELD writing V into sm->fields[0]: barrier
+     * then assignment. */
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr,
+                     sm->fields[0], v);
+    sm->fields[0] = v;
+
+    /* Run synchronous concurrent GC. */
+    uint32_t expected = 0;
+    bool ok = ATOMIC_CAS(&rt.gc_running, &expected, 1,
+                         MEM_ACQ_REL, MEM_RELAXED);
+    ASSERT(ok);
+    gc_concurrent_collect(&rt);
+
+    /* V must survive — header intact, payload intact. */
+    ASSERT_INT_EQ(v_hdr->obj_type, orig_obj_type);
+    ASSERT_INT_EQ(v_hdr->alloc_total, orig_total);
+    ASSERT_I64_EQ(jacl_as_i64(v), 0xdeadbeefdeadbeefLL);
+
+    (void)sm_val;
+    rt_test__destroy_no_threads(&rt);
+    gc__thread_epoch = 0;
+    TEST_PASS();
+}
+
 /* AUDIT.md §10-11 regression: jacl_future_resolve must keep the
  * FutureWaiter chain reachable across a concurrent GC cycle. Pre-fix,
  * resolve did `waiters = f->waiters; f->waiters = NULL` — an unbarriered
@@ -1681,6 +1744,7 @@ int main(void) {
         { "write_barrier_satb_protects_held_value", test_write_barrier_satb_protects_held_value },
         { "future_resolve_waiter_chain_survives_gc", test_future_resolve_waiter_chain_survives_gc },
         { "future_add_waiter_grey_push", test_future_add_waiter_grey_push },
+        { "sm_field_store_barrier", test_sm_field_store_barrier },
         { "write_barrier_null_fast_path",    test_write_barrier_null_fast_path },
         { "write_barrier_inline_skipped",    test_write_barrier_inline_types_skipped },
         { "write_barrier_mixed_types",       test_write_barrier_mixed_types },

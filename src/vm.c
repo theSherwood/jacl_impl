@@ -8242,6 +8242,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal value;
         result = vm__pop(vm, &value);
         if (result != VM_OK) return result;
+        /* AUDIT §10/§11: heap-pointer write on a published GC object.
+         * Inline-struct slots (raw bytes) are written by OP_SET_STATE_FIELD_WIDE
+         * and never reach here, so no bitmap check needed. */
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         sm->fields[field_index], value);
         sm->fields[field_index] = value;
         break;
       }
