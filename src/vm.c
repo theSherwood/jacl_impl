@@ -11752,8 +11752,16 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
     return VM_RUNTIME_ERROR;
   }
 
-  JaclInternTable intern_table;
-  intern_table_init(&intern_table, arena);
+  /* Allocate the intern table in the arena, not on the stack: jacl_run
+   * stores its address in vm->intern_table and callers may read it back
+   * after we return (e.g. to intern a key for a map produced by the run).
+   * A stack-local would leave vm->intern_table dangling once this frame
+   * unwinds — silent in normal mode, but TSAN catches the post-return
+   * pthread_mutex_lock as use-of-destroyed-mutex. The pthread handle
+   * itself is leaked until arena_destroy; on Unix it's pure userspace
+   * state. */
+  JaclInternTable *intern_table = (JaclInternTable*)arena_alloc(arena, sizeof(JaclInternTable));
+  intern_table_init(intern_table, arena);
 
   ExpandState es;
   memset(&es, 0, sizeof(es));
@@ -11764,7 +11772,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 
-  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es, JACL_NIL);
+  CompileResult cr = compiler_compile(parse, arena, intern_table, &vm->heap, NULL, &es, JACL_NIL);
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;
@@ -11773,11 +11781,10 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
     struct_registry__destroy(cr.struct_registry);
-    intern_table_destroy(&intern_table);
     return VM_RUNTIME_ERROR;
   }
 
-  vm->intern_table = &intern_table;
+  vm->intern_table = intern_table;
   vm->struct_registry = cr.struct_registry;
 
   /* Initialize ctx subsystem (pool + initial ctx with pwd) */
@@ -11791,7 +11798,6 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
     VMResult r = vm_exec(vm, &cr.chunk);
     if (r != VM_OK) {
       struct_registry__destroy(cr.struct_registry);
-      intern_table_destroy(&intern_table);
       return r;
     }
 
@@ -11799,7 +11805,6 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
     if (!jacl_is_closure(main_cl_val)) {
       vm->error_message = "internal error: suspending top-level did not produce closure";
       struct_registry__destroy(cr.struct_registry);
-      intern_table_destroy(&intern_table);
       return VM_RUNTIME_ERROR;
     }
     JaclClosure *main_cl = jacl_as_closure(main_cl_val);
@@ -11837,7 +11842,6 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
 
       r = vm__run(vm, 1);
       struct_registry__destroy(cr.struct_registry);
-      intern_table_destroy(&intern_table);
       return r;
     }
 
@@ -11878,13 +11882,11 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
       vm->stack_top = 1;
     }
     struct_registry__destroy(cr.struct_registry);
-    intern_table_destroy(&intern_table);
     return r;
   }
 
   VMResult result = vm_exec(vm, &cr.chunk);
   struct_registry__destroy(cr.struct_registry);
-  intern_table_destroy(&intern_table);
   return result;
 }
 
