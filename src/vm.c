@@ -2822,7 +2822,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                     uv_index, w, frame->stack_base, vm->stack_top);
                   return VM_RUNTIME_ERROR;
                 }
-                cl->upvalues[uv_slot + w] = vm->stack[src];
+                JaclVal v = vm->stack[src];
+                /* AUDIT §10/§11: closure is fresh (watermark-protected,
+                 * not in any mark path). Insertion barrier on each heap
+                 * upvalue value. Skip inline-struct raw-byte slots
+                 * (width > 1 with bitmap set). */
+                bool is_raw = (width > 1) &&
+                              BITMAP_GET(vm->inline_slot_bitmap, src);
+                if (!is_raw) {
+                  gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                                   JACL_NIL, v);
+                }
+                cl->upvalues[uv_slot + w] = v;
               }
               /* US-014: propagate bitmap from stack to closure upvalues */
               if (width > 1) {
@@ -2847,7 +2858,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   uv_index, sm->field_count);
                 return VM_RUNTIME_ERROR;
               }
-              cl->upvalues[uv_slot] = sm->fields[uv_index];
+              JaclVal v = sm->fields[uv_index];
+              /* AUDIT §10/§11: barrier on heap insertion into fresh closure.
+               * Skip inline-struct slots (raw bytes per SM bitmap). */
+              if (!BITMAP_GET(sm->field_inline_bitmap, uv_index)) {
+                gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, v);
+              }
+              cl->upvalues[uv_slot] = v;
               /* US-014: SM field upvalue copies 1 slot only — propagate
                  bitmap from SM, not from stack width */
               if (BITMAP_GET(sm->field_inline_bitmap, uv_index)) {
@@ -2866,7 +2883,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                     uv_index, w, frame->closure->upvalue_total_slots);
                   return VM_RUNTIME_ERROR;
                 }
-                cl->upvalues[uv_slot + w] = frame->closure->upvalues[uv_index + w];
+                JaclVal v = frame->closure->upvalues[uv_index + w];
+                /* AUDIT §10/§11: barrier on heap insertion into fresh
+                 * closure. Skip inline-struct slots (width > 1 with
+                 * parent bitmap set). */
+                bool is_raw = (width > 1) &&
+                  BITMAP_GET(frame->closure->upvalue_inline_bitmap,
+                             uv_index + w);
+                if (!is_raw) {
+                  gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                                   JACL_NIL, v);
+                }
+                cl->upvalues[uv_slot + w] = v;
               }
               /* US-014: propagate bitmap from parent closure upvalues */
               if (width > 1) {
