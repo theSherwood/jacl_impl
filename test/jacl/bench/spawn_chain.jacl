@@ -1,0 +1,24 @@
+# Bench scenario: sequential spawn+await chain
+#
+# Each iteration spawns a tiny task and immediately awaits it. The body
+# does no work itself — the cost is dominated by:
+#   - future allocation (one per spawn)
+#   - inbox push/pop round-trip
+#   - CPS continuation closure allocation + capture-state writes
+#   - future resolve + waiter scheduling
+#
+# This is the "spawn latency" scenario. Throughput-oriented spawn
+# scenarios (spawn N, await N) would also stress the inbox but mostly
+# along a different axis; that's a separate scenario worth adding once
+# the latency baseline is in.
+#
+# Output: sum 1..50 = 1275 (constant — keeps DCE honest).
+
+mut i 0
+mut acc 0
+while [< $i 50] {
+  def f [spawn { + $i 1 }]
+  set acc [+ $acc [await $f]]
+  set i [+ $i 1]
+}
+print $acc

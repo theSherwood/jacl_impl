@@ -1,0 +1,23 @@
+# Bench scenario: tight small-object allocation
+#
+# Allocates 2000 short-lived boxes in a loop, dereferencing each once.
+# Targets:
+#   - gc_alloc fast path (bump within the current free run)
+#   - sweep efficiency on short-lived objects (everything dies young)
+#   - gc__find_free_run slow path once a block fills (§14)
+#
+# Unlike collection_churn this doesn't build persistent structures —
+# every box is unreachable by the next iteration. The mutator just
+# accumulates an i64 sum, so the surviving heap stays tiny and the
+# scenario is mostly an alloc/collect storm.
+#
+# Output: sum 0..1999 = 1999000.
+
+mut i 0
+mut acc 0
+while [< $i 2000] {
+  def b [box $i]
+  set acc [+ $acc [deref $b]]
+  set i [+ $i 1]
+}
+print $acc

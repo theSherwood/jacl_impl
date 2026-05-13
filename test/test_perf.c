@@ -298,6 +298,9 @@ typedef struct {
 
 static const Scenario SCENARIOS[] = {
     { "collection_churn", BENCH_DIR "/collection_churn.jacl" },
+    { "spawn_chain",      BENCH_DIR "/spawn_chain.jacl" },
+    { "box_churn",        BENCH_DIR "/box_churn.jacl" },
+    { "string_concat",    BENCH_DIR "/string_concat.jacl" },
 };
 
 int main(void) {

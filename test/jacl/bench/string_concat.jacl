@@ -1,0 +1,20 @@
+# Bench scenario: linear string concatenation
+#
+# Repeatedly concatenates a one-char suffix onto an accumulating string.
+# 500 iterations produces a 501-char final string. Targets:
+#   - string heap allocation (each concat allocates a fresh string)
+#   - intern-table interaction for short constants ("y")
+#   - GC pressure from short-lived intermediate strings
+#
+# The total bytes copied grow O(N²) (1+2+...+N), so this scenario gets
+# slower-than-linear with N — keep N modest.
+#
+# Output: 501 (constant).
+
+mut s "x"
+mut i 0
+while [< $i 500] {
+  set s [concat $s "y"]
+  set i [+ $i 1]
+}
+print [length $s]
