@@ -30,7 +30,69 @@ applied (signal-one on push_inbox/push_pinned, 1ms-timeout park in
 worker idle path). gc_stress_atom × 30 went from 27/30 crashes to
 0/30 once race #2 was closed.**
 
-### Status at end of phase D (2026-05-12)
+**2026-05-13 TSAN-baseline triage pass surfaced four more real
+bugs** that had been blanket-labeled "pre-existing TSAN failures"
+without root-causing. All FIXED:
+
+- **`realpath` buffer too small (compiler)** — 11 sites across
+  `src/compiler.c`, `test/test_compiler.c`, `test/test_jacl_harness.c`
+  passed a `char[1024]` destination to `realpath`. POSIX requires
+  `PATH_MAX` (4096 on Linux). glibc fortify (active under `-O1` with
+  Ubuntu's default `_FORTIFY_SOURCE=2`, which TSAN mode enables but
+  normal `-O0` mode does not) aborts unconditionally on the
+  compile-time-known size mismatch. Latent in production: real
+  paths fit in 1024, but any path between 1024 and PATH_MAX would
+  have silently overflowed. Commit `c7dea0d`.
+
+- **`syntax_from_ast` leaked vec data into doomed macro_ctx heap
+  (syntax)** — the function takes an explicit `heap` parameter but
+  its body uses `jacl_vec_empty` / `jacl_vec_push_back` / etc.,
+  which allocate via `gc__current_heap` TLS. When `jacl_eval`
+  created a transient `macro_ctx` via `jacl_ctx_new` — whose
+  `vm_init` side-effects TLS to the new heap — quote-constant vec
+  data landed in macro_ctx's heap. `jacl_ctx_destroy(macro_ctx)`
+  freed those blocks, leaving the compiled chunk with a constant
+  pointing into freed memory. Normally invisible (freed bits still
+  readable); TSAN catches the free→read sequence exactly. Fix:
+  public wrapper pins TLS to the explicit `heap` arg for its scope.
+  Commit `491ad0d`.
+
+- **`jacl_run`'s `JaclInternTable` was a stack-local (integration)** —
+  declared on the stack, initialized (including a mutex), pointer
+  stored in `vm->intern_table`, then `intern_table_destroy` (which
+  `MUTEX_DESTROY`s the mutex) called at return. Callers that read
+  `vm.intern_table` post-return (e.g., to intern a key for a map
+  the run produced — exactly what `test_job_returns_map_with_pid`
+  does) dereferenced a doubly-dangling pointer. Silent in normal
+  mode (stack memory still readable, glibc's pthread_mutex_lock
+  doesn't validate destruction). Fix: allocate intern_table in the
+  arena; drop the redundant destroy. Commit `7469a98`.
+
+- **Cluster of GC/worker races on ctx state (jacl_harness, partial)**
+  — five distinct shapes, all real C11 races:
+  - `gc_sweep_intern_table` walked `heap->blocks` without
+    `blocks_mutex` when `watermark==0`, on the false assumption
+    "watermark==0 ⇒ single-threaded." In concurrent mode the first
+    GC cycle has watermark 0 (workers at thread_epoch=0), and the
+    gate skipped the lock exactly when a worker might be
+    head-inserting a block.
+  - `vm.ctx` (current implicit-context register), `vm.saved_ctx[]`
+    (with-ctx nesting stack), and `ctx_pool_free`'s NIL-out of
+    freed-ctx reference fields were all plain stores racing with
+    plain reads in `gc_enumerate_roots` / `gc__trace_object`.
+    RELEASE-store + ACQUIRE-load pairing applied to each.
+
+  Commit `2465a10`. `jacl_harness` still has remaining TSAN races
+  on heap-pointer slot writes paired with `gc_write_barrier` (e.g.
+  `sm->fields[i] = value` at vm.c:8305) — these are correct under
+  the audit's SATB+watermark barrier discipline, but TSAN's
+  per-location vector clocks don't see barrier-mediated happens-
+  before (same shape AUDIT §S5 flagged for Chase-Lev). Out of
+  scope for the triage pass; would need a systematic
+  atomic-store/load conversion of every heap-pointer slot access
+  across the runtime.
+
+### Status at end of phase D (2026-05-12) + TSAN triage (2026-05-13)
 
 | Phase | Scope | Outcome |
 |-------|-------|---------|
@@ -39,21 +101,38 @@ worker idle path). gc_stress_atom × 30 went from 27/30 crashes to
 | C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
 | D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys`; §D.2 `VM_ERROR` stack-discipline pass (72 error returns across 39 opcodes) |
+| E | TSAN-baseline triage | Audit had dismissed 8 TSAN failures as "pre-existing flakes" without triaging; 4 turned out to be real bugs (PATH_MAX, syntax TLS, jacl_run stack-local intern_table, ctx-state race cluster) — see commits `c7dea0d` / `491ad0d` / `7469a98` / `2465a10`. TSAN baseline now 83 pass / 5 fail. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
-surveyed; §D.6 opened during the §D.3 test work and now fixed. See
-git log for the per-commit story.
+surveyed; §D.6 opened during the §D.3 test work and now fixed. Four
+additional real bugs found by phase-E TSAN triage. See git log for
+the per-commit story.
 
 ### Start-here for next session
 
 No open correctness bugs. The §10/§11 CV change is landed along
 with the two GC races that blocked it AND the five sibling
 §9-class holes (direct heap-ptr writes on GC-managed objects).
-gc_stress_atom × 50 is clean with CV applied. The write-barrier
-discipline is now uniform: any heap-pointer slot write on any
-GC-managed object goes through `gc_write_barrier`, unconditional
-on both deletion and insertion sides.
+The phase-E TSAN triage closed four additional real bugs that had
+been masked as "pre-existing flakes." gc_stress_atom × 50 is clean
+with CV applied. The write-barrier discipline is uniform: any
+heap-pointer slot write on any GC-managed object goes through
+`gc_write_barrier`, unconditional on both deletion and insertion
+sides.
+
+**TSAN baseline (5 remaining failures, all triaged not real)**:
+
+| Test | Why it fails | Action |
+|------|--------------|--------|
+| `perf` | `jacl_perf_snapshot` reads perf counters at runtime.c:1299 with no atomics while workers increment them at runtime.c:385. Counters are intentionally unsynchronized (cost). | None needed; mark `_Atomic` + relaxed if cosmetic cleanup wanted. |
+| `chase_lev_stress` | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
+| `rwlock` | `test_rwlock_concurrent_readers` increments a global `g_state.x++` from two threads while each only holds the rwlock in **read mode**. Reader-shared rwlock doesn't serialize mutations by definition — the test itself is incorrect. | Fix the test (use write-mode for mutation, or use atomics on the counter). |
+| `cross_thread_string` | Main thread writes a stack local at line 97 after spawning thread T1 that reads it at line 59 — no join, no barrier, no handoff synchronization. Test bug. | Fix the test (join before main-thread mutation). |
+| `jacl_harness` | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
+
+The first four are test/tooling issues; only the fifth is a design
+tradeoff in the runtime. None blocks shipping.
 
 **Known theoretical hole, not surfacing as a bug today**: §9
 recommendation #2 (capture mutable-load values into a per-worker
