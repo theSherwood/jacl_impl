@@ -478,6 +478,8 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {
         GCHeader *hdr = gc_header_of(ptr);
+        /* See gc_concurrent_collect for the alloc_total==0 guard. */
+        if (hdr->alloc_total == 0) continue;
         if (hdr->mark == mark) continue; /* already marked this cycle */
         hdr->mark = mark;
         gc__trace_object(ptr, &ms);
@@ -810,6 +812,8 @@ void gc_mark_minor(ThreadHeap *heap, VM *vm,
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {
         GCHeader *hdr = gc_header_of(ptr);
+        /* See gc_concurrent_collect for the alloc_total==0 guard. */
+        if (hdr->alloc_total == 0) continue;
         if (hdr->mark == mark) continue; /* already marked this cycle */
         hdr->mark = mark;
 

@@ -1038,6 +1038,11 @@ void gc_concurrent_collect(Runtime *rt) {
 
     while (gc__ms_pop(&ms, &ptr)) {
         GCHeader *hdr = gc_header_of(ptr);
+        /* Defensive: alloc_total==0 means either pre-init (allocator has
+         * not yet written this field) or post-sweep (object was zeroed).
+         * A valid live object always has alloc_total > 0. Skip rather than
+         * dispatch on obj_type=0 (OBJ_CLOSURE) and read garbage payload. */
+        if (hdr->alloc_total == 0) continue;
         if (hdr->mark == mark) continue; /* already marked this cycle */
         hdr->mark = mark;
         gc__trace_object(ptr, &ms);
@@ -1060,6 +1065,7 @@ void gc_concurrent_collect(Runtime *rt) {
             has_new = gc__drain_grey_bufs(rt, &ms, drained);
             while (gc__ms_pop(&ms, &ptr)) {
                 GCHeader *hdr = gc_header_of(ptr);
+                if (hdr->alloc_total == 0) continue;
                 if (hdr->mark == mark) continue;
                 hdr->mark = mark;
                 gc__trace_object(ptr, &ms);
