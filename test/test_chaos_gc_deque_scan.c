@@ -38,13 +38,11 @@
 typedef struct {
     rt_deque_deque   *dq;
     volatile int     *start_flag;
-    volatile int     *owner_done;
 } OwnerCtx;
 
 typedef struct {
     rt_deque_deque   *dq;
     volatile int     *start_flag;
-    volatile int     *owner_done;
     volatile uint64_t observed_sum;  /* anti-DCE: sum of values seen */
 } ScannerCtx;
 
@@ -60,21 +58,25 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE owner_fn(void *arg) {
             rt_deque_deque_take(ctx->dq, &v);
         }
     }
-    ATOMIC_STORE_EXPLICIT(ctx->owner_done, 1, MEM_RELEASE);
     return (THREAD_PROC_RETURN)0;
 }
 
 /* Mimics the current gc__scan_deque: snapshot top/bottom, then read
- * dq->buffer and buf->data[i & buf->mask] without registering as a thief. */
+ * dq->buffer and buf->data[i & buf->mask] without registering as a thief.
+ *
+ * After start_flag flips, wait until the owner has pushed at least one
+ * value before scanning. Otherwise scanner's 5000 rounds — each just a
+ * handful of atomic ops — can complete in microseconds, before the owner
+ * (which has to allocate, grow buffers, etc.) gets its first push out.
+ * Every round would see an empty deque and sum would stay zero. */
 static THREAD_PROC_RETURN THREAD_PROC_TYPE unsafe_scanner_fn(void *arg) {
     ScannerCtx *ctx = (ScannerCtx *)arg;
     rt_deque_deque *dq = ctx->dq;
     uint64_t sum = 0;
     while (!ATOMIC_LOAD_EXPLICIT(ctx->start_flag, MEM_ACQUIRE)) { }
+    while (ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE) == 0) { }
 
-    int rounds = 0;
-    while (rounds < SCAN_ITERS &&
-           !ATOMIC_LOAD_EXPLICIT(ctx->owner_done, MEM_ACQUIRE)) {
+    for (int rounds = 0; rounds < SCAN_ITERS; rounds++) {
         uint64_t t = ATOMIC_LOAD_EXPLICIT(&dq->top, MEM_ACQUIRE);
         ATOMIC_FENCE(MEM_SEQ_CST);
         uint64_t b = ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE);
@@ -86,23 +88,23 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE unsafe_scanner_fn(void *arg) {
                 sum += buf->data[i & buf->mask];
             }
         }
-        rounds++;
     }
     ctx->observed_sum = sum;
     return (THREAD_PROC_RETURN)0;
 }
 
-/* Mirrors the fixed gc__scan_deque: epoch enter, read, epoch exit. */
+/* Mirrors the fixed gc__scan_deque: epoch enter, read, epoch exit.
+ * Runs SCAN_ITERS rounds unconditionally; waits for the owner's first
+ * push (see unsafe_scanner_fn comment for why). */
 static THREAD_PROC_RETURN THREAD_PROC_TYPE safe_scanner_fn(void *arg) {
     ScannerCtx *ctx = (ScannerCtx *)arg;
     rt_deque_deque *dq = ctx->dq;
     uint64_t sum = 0;
     while (!ATOMIC_LOAD_EXPLICIT(ctx->start_flag, MEM_ACQUIRE)) { }
+    while (ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE) == 0) { }
 
     int thief_id = rt_deque_deque_register_thief(dq);
-    int rounds = 0;
-    while (rounds < SCAN_ITERS &&
-           !ATOMIC_LOAD_EXPLICIT(ctx->owner_done, MEM_ACQUIRE)) {
+    for (int rounds = 0; rounds < SCAN_ITERS; rounds++) {
         /* Epoch enter (RELEASE pairs with owner's ACQUIRE in reclaim) */
         uint64_t e = ATOMIC_LOAD_EXPLICIT(&dq->epoch, MEM_ACQUIRE);
         ATOMIC_STORE_EXPLICIT(&dq->thieves[thief_id].epoch, e, MEM_RELEASE);
@@ -121,7 +123,6 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE safe_scanner_fn(void *arg) {
         /* Epoch exit (RELEASE: all reads of buf above happen-before this) */
         ATOMIC_STORE_EXPLICIT(&dq->thieves[thief_id].epoch,
                               UINT64_MAX, MEM_RELEASE);
-        rounds++;
     }
     rt_deque_deque_unregister_thief(dq, thief_id);
     ctx->observed_sum = sum;
@@ -132,12 +133,10 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE safe_scanner_fn(void *arg) {
 static int test_unsafe_scan_demonstrates_uaf(void) {
     rt_deque_deque *dq = rt_deque_deque_new(3);
     volatile int start_flag = 0;
-    volatile int owner_done = 0;
 
-    OwnerCtx octx = { .dq = dq, .start_flag = &start_flag,
-                      .owner_done = &owner_done };
+    OwnerCtx octx = { .dq = dq, .start_flag = &start_flag };
     ScannerCtx sctx = { .dq = dq, .start_flag = &start_flag,
-                        .owner_done = &owner_done, .observed_sum = 0 };
+                        .observed_sum = 0 };
 
     thread_t owner, scanner;
     THREAD_CREATE(&owner, NULL, owner_fn, &octx);
@@ -157,12 +156,10 @@ static int test_unsafe_scan_demonstrates_uaf(void) {
 static int test_safe_scan_with_thief_slot(void) {
     rt_deque_deque *dq = rt_deque_deque_new(3); /* tiny → forces grows */
     volatile int start_flag = 0;
-    volatile int owner_done = 0;
 
-    OwnerCtx octx = { .dq = dq, .start_flag = &start_flag,
-                      .owner_done = &owner_done };
+    OwnerCtx octx = { .dq = dq, .start_flag = &start_flag };
     ScannerCtx sctx = { .dq = dq, .start_flag = &start_flag,
-                        .owner_done = &owner_done, .observed_sum = 0 };
+                        .observed_sum = 0 };
 
     thread_t owner, scanner;
     THREAD_CREATE(&owner, NULL, owner_fn, &octx);
