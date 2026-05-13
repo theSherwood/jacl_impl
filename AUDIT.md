@@ -169,7 +169,11 @@ The remaining work is non-correctness, performance/architecture:
    observe a JaclVal across GC cycles.
 
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
-   Not correctness. Defer until profiled.
+   Not correctness. Profile baseline captured 2026-05-13; see
+   "Profiling baseline" section below for which items the data
+   actually pushes to the top of the queue (TL;DR: §14 is huge,
+   §11/worker-loop is huge on spawn-heavy, vm__run dispatch is
+   the next big block in alloc-heavy non-string code).
 
 ### Housekeeping (2026-05-13)
 
@@ -200,6 +204,74 @@ Two test-hygiene items, neither affects runtime correctness:
 §D.3 is closed: `test/jacl/cps_inner_closure_capture.jacl` verifies
 that inner closures defined before a suspension still see their
 captured values after. Passes.
+
+### Profiling baseline (2026-05-13)
+
+`test/test_perf.c` now runs four scenarios (`collection_churn`,
+`spawn_chain`, `box_churn`, `string_concat`). The bench harness
+accepts `BENCH_TIMED_ITERS` / `BENCH_WARMUP_ITERS` / `BENCH_SCENARIOS`
+env vars to amplify runtime for profilers. Raw text reports are in
+`docs/profiles/2026-05-13_*.txt`; this section is the summary.
+
+Captured via `gprofng collect app -p hi` on an `-O2 -g
+-fno-omit-frame-pointer` build (no TSAN). 2 workers. Numbers are
+exclusive CPU time as % of scenario total.
+
+| Function | mixed | collection_churn | box_churn | spawn_chain | Audit item |
+|----------|------:|-----------------:|----------:|------------:|------------|
+| `gc__find_fit_in_block` | **51%** | **58%** | **21%** | <1% | **§14** |
+| `runtime__worker_loop` (excl) | 13% | — | — | **97%** | **§11 / §10** |
+| `unicode_grapheme_next` | 8% | — | — | — | (string-specific) |
+| `gc_sweep_concurrent` | 7% | 15% | 8% | <1% | (sweep cost) |
+| `vm__run` | 5% | 10% | **47%** | <1% | (dispatch) |
+| `rope_string__compute_hash` | 2% | — | — | — | (string-specific) |
+
+**Headline.** The audit's top suspicion was right: **§14 is the
+single biggest CPU sink** in any allocation-heavy workload. On
+`collection_churn`, `gc__find_fit_in_block` alone is 58% of CPU —
+more than the rest of GC + interpreter combined. A per-block
+"first free line" hint or heap-level free-run list converting it
+from O(blocks × 512) to O(1) amortized would be the biggest single
+perf win available.
+
+**Spawn-heavy workloads look completely different.** `spawn_chain`
+spends 97% of CPU in the worker loop's spin-and-backoff path, not in
+GC at all. This is `§10` (single-mutex inbox) plus `§11` (10ms
+progressive backoff, no condition variable). Both audit items will
+need to land for spawn throughput to move. The 4.6s of `idle_sleep_ns`
+in the bench output confirms `§11` directly — that's wall-clock spent
+in `SLEEP_MILLISECONDS(backoff)` while the inbox sits with no real
+work ready.
+
+**Box-churn (small ephemerals) is dispatch-bound.** Once allocation
+is cheap (a free run is usually available), `vm__run` becomes the
+hot loop at 47% — the switch-on-opcode dispatch itself, including
+the per-iteration safepoint check. A computed-goto / direct-threaded
+rewrite of the dispatch loop would help this profile. Not on the
+audit punch list explicitly but implied by `§13` ("tag dispatch in
+`jacl_is_heap_type`" — same pattern).
+
+**Surprise observation.** `unicode_grapheme_next` accounts for ~8%
+of mixed CPU, driven entirely by string-concat's rope summary
+computation. This isn't on the audit punch list at all — it's a
+specific consequence of the rope/string design that should be
+investigated separately (cache or lazy-evaluate the rope summary?).
+
+**Recommended order of attack.**
+
+1. **§14** — universal win, large magnitude, well-understood fix.
+2. **§11 + §10** — required for spawn-heavy throughput; the two
+   are coupled (a real condition variable needs a per-worker
+   inbox or sharded queue to wake the right worker).
+3. **VM dispatch (§13 family)** — computed-goto rewrite of
+   `vm__run` for the dispatch-bound regime.
+4. **Rope summary perf** — separate investigation; not on the
+   AUDIT.md list, surfaced by this profile.
+
+A regression bench is now available: `./build.sh --test=perf`
+prints JSONL stats for all four scenarios, and `tools/bench-diff.sh`
+compares two JSONL snapshots. Capture a baseline before each
+attempt and diff after.
 
 ### How earlier phases were structured
 

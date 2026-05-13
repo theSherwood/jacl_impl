@@ -1,0 +1,108 @@
+# Functions (box_churn)
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+0.274 100.00  0.274 100.00   <Total>
+0.130  47.27  0.232  84.73   vm__run
+0.058  21.09  0.058  21.09   gc__find_fit_in_block
+0.022   8.00  0.028  10.18   gc_sweep_concurrent
+0.017   6.18  0.017   6.18   <static>@0x188051 (<libc.so.6>)
+0.011   4.00  0.011   4.00   vm__env_set
+0.009   3.27  0.015   5.45   gc__bump_alloc
+0.007   2.55  0.008   2.91   clock_nanosleep
+0.004   1.45  0.007   2.55   <static>@0xaaa3b (<libc.so.6>)
+0.003   1.09  0.073  26.55   gc_alloc
+0.003   1.09  0.003   1.09   jacl_add_i32
+0.002   0.73  0.002   0.73   <static>@0x2440 (<jacl_perf_O2>)
+0.002   0.73  0.002   0.73   madvise
+0.001   0.36  0.001   0.36   <static>@0x5e92b (<libc.so.6>)
+0.001   0.36  0.001   0.36   <static>@0x98548 (<libc.so.6>)
+0.001   0.36  0.001   0.36   jacl_lt_i32
+0.001   0.36  0.006   2.18   malloc
+0.001   0.36  0.001   0.36   mprotect
+0.001   0.36  0.001   0.36   pthread_mutex_lock
+0.001   0.36  0.255  93.09   runtime__worker_loop
+
+# Callers/callees (box_churn)
+Functions sorted by metric: Exclusive Total CPU Time
+Callers and callees sorted by metric: Attributed Total CPU Time
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.274   0.    *<Total>
+0.255  93.09   <static>@0x9c446 (<libc.so.6>)
+0.010   3.64   vm__run
+0.007   2.55   __libc_start_main
+0.001   0.36   gc_alloc
+0.001   0.36   malloc
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.010   4.29   <Total>
+0.222  95.71   runtime__spawn_task_exec
+0.130  55.79  *vm__run
+0.072  30.90   gc_alloc
+0.015   6.44   gc__bump_alloc
+0.011   4.72   vm__env_set
+0.003   1.29   jacl_add_i32
+0.001   0.43   __snprintf_chk
+0.001   0.43   jacl_lt_i32
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.058 100.00   gc_alloc
+0.058 100.00  *gc__find_fit_in_block
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.028 100.00   gc_concurrent_collect
+0.022  78.57  *gc_sweep_concurrent
+0.006  21.43   <static>@0x188051 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.007  41.18   gc_block_pool_get
+0.006  35.29   gc_sweep_concurrent
+0.004  23.53   gc__bump_alloc
+0.017 100.00  *<static>@0x188051 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.011 100.00   vm__run
+0.011 100.00  *vm__env_set
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.015 100.00   vm__run
+0.009  60.00  *gc__bump_alloc
+0.004  26.67   <static>@0x188051 (<libc.so.6>)
+0.002  13.33   <static>@0x2440 (<jacl_perf_O2>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.008 100.00   nanosleep
+0.007  87.50  *clock_nanosleep
+0.001  12.50   <static>@0x98548 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.005  71.43   malloc
+0.002  28.57   <static>@0xaaa3b (<libc.so.6>)
+0.      0.     free
+0.004  57.14  *<static>@0xaaa3b (<libc.so.6>)
+0.002  28.57   madvise
+0.001  14.29   mprotect
+0.      0.     <static>@0xaaa3b (<libc.so.6>)
+
+Attr. Total    Name

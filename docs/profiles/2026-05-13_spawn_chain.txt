@@ -1,0 +1,108 @@
+# Functions (spawn_chain)
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total    Incl. Total     Name
+CPU            CPU
+  sec.      %    sec.      %
+14.578 100.00  14.578 100.00   <Total>
+14.119  96.85  14.470  99.26   runtime__worker_loop
+ 0.135   0.92   0.240   1.65   vm__run
+ 0.059   0.40   0.062   0.42   clock_nanosleep
+ 0.045   0.31   0.045   0.31   gc__find_fit_in_block
+ 0.026   0.18   0.033   0.23   <static>@0xaaa3b (<libc.so.6>)
+ 0.022   0.15   0.022   0.15   pthread_mutex_lock
+ 0.021   0.14   0.050   0.34   malloc
+ 0.017   0.12   0.017   0.12   <static>@0x188051 (<libc.so.6>)
+ 0.011   0.08   0.011   0.08   jacl_is_heap_type
+ 0.011   0.08   0.072   0.49   runtime__spawn_task_exec
+ 0.010   0.07   0.213   1.46   runtime__state_machine_task_exec
+ 0.009   0.06   0.015   0.10   free
+ 0.008   0.05   0.008   0.05   gc_sweep_concurrent
+ 0.008   0.05   0.008   0.05   pthread_mutex_unlock
+ 0.007   0.05   0.007   0.05   <static>@0x2440 (<jacl_perf_O2>)
+ 0.006   0.04   0.017   0.12   ctx_fork
+ 0.005   0.03   0.008   0.05   ctx_pool_alloc
+ 0.005   0.03   0.012   0.08   gc__bump_alloc
+ 0.005   0.03   0.019   0.13   gc_write_barrier
+
+# Callers/callees (spawn_chain)
+Functions sorted by metric: Exclusive Total CPU Time
+Callers and callees sorted by metric: Attributed Total CPU Time
+
+Attr. Total     Name
+CPU
+  sec.      %
+14.578   0.    *<Total>
+14.470  99.26   <static>@0x9c446 (<libc.so.6>)
+ 0.041   0.28   __libc_start_main
+ 0.028   0.19   runtime__submit_spawn_task
+ 0.016   0.11   runtime__schedule_sm_resumption
+ 0.008   0.05   pthread_mutex_lock
+ 0.005   0.03   malloc
+ 0.003   0.02   pthread_mutex_unlock
+ 0.001   0.01   <static>@0x66e6b (<libc.so.6>)
+ 0.001   0.01   __snprintf_chk
+ 0.001   0.01   gc__bump_alloc
+ 0.001   0.01   runtime__create_resolve_closure
+ 0.001   0.01   runtime__push_inbox
+ 0.001   0.01   runtime__spawn_task_exec
+ 0.001   0.01   vm__run
+
+Attr. Total     Name
+CPU
+  sec.      %
+14.470 100.00   <static>@0x5115c (<libgp-collector.so>)
+14.119  97.57  *runtime__worker_loop
+ 0.213   1.47   runtime__state_machine_task_exec
+ 0.071   0.49   runtime__spawn_task_exec
+ 0.026   0.18   nanosleep
+ 0.013   0.09   free
+ 0.010   0.07   gc_concurrent_collect
+ 0.010   0.07   pthread_mutex_lock
+ 0.004   0.03   runtime__continuation_task_exec
+ 0.003   0.02   <static>@0x2440 (<jacl_perf_O2>)
+ 0.001   0.01   clock_gettime
+ 0.001   0.01   pthread_mutex_unlock
+
+Attr. Total     Name
+CPU
+  sec.      %
+ 0.001   0.41   <Total>
+ 0.203  84.65   runtime__state_machine_task_exec
+ 0.033  13.69   runtime__spawn_task_exec
+ 0.003   1.24   runtime__continuation_task_exec
+ 0.135  56.02  *vm__run
+ 0.049  20.33   gc_alloc
+ 0.013   5.39   gc_write_barrier
+ 0.011   4.56   jacl_future_add_waiter
+ 0.010   4.15   gc__bump_alloc
+ 0.006   2.49   __snprintf_chk
+ 0.005   2.07   gc_remembered_set_barrier
+ 0.004   1.66   jacl_val_eq
+ 0.003   1.24   jacl_add_i32
+ 0.002   0.83   jacl_lt_i32
+ 0.002   0.83   pthread_mutex_unlock
+ 0.001   0.41   sink_print
+
+Attr. Total     Name
+CPU
+  sec.      %
+ 0.062 100.00   nanosleep
+ 0.059  95.16  *clock_nanosleep
+ 0.003   4.84   <static>@0x98548 (<libc.so.6>)
+
+Attr. Total     Name
+CPU
+  sec.      %
+ 0.045 100.00   gc_alloc
+ 0.045 100.00  *gc__find_fit_in_block
+
+Attr. Total     Name
+CPU
+  sec.      %
+ 0.029  87.88   malloc
+ 0.004  12.12   free
+ 0.026  78.79  *<static>@0xaaa3b (<libc.so.6>)
+ 0.004  12.12   mprotect
+ 0.003   9.09   <static>@0xa8d44 (<libc.so.6>)
+

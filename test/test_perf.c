@@ -22,9 +22,16 @@
 /* ── Config ─────────────────────────────────────────────────────── */
 
 #define BENCH_DIR        "test/jacl/bench"
-#define WARMUP_ITERS     2
-#define TIMED_ITERS      5
-#define COMPLETION_MS    30000  /* 30s per iter — bench scenarios can be slow */
+#define WARMUP_ITERS_DEFAULT 2
+#define TIMED_ITERS_DEFAULT  5
+#define TIMED_ITERS_MAX      8192
+#define COMPLETION_MS        30000 /* 30s per iter — bench scenarios can be slow */
+
+/* Iteration counts can be overridden via env for profiling runs:
+ *   BENCH_WARMUP_ITERS, BENCH_TIMED_ITERS
+ * Output is still 5-number-summary stats so JSON output stays comparable. */
+static int s_warmup_iters = WARMUP_ITERS_DEFAULT;
+static int s_timed_iters  = TIMED_ITERS_DEFAULT;
 
 /* ── Timing helpers ─────────────────────────────────────────────── */
 
@@ -160,8 +167,8 @@ static int run_scenario(const char* path, const char* name,
         copy_env(&rt.workers[i].vm, &vm);
     }
 
-    uint64_t timings[TIMED_ITERS];
-    int total_iters = WARMUP_ITERS + TIMED_ITERS;
+    uint64_t *timings = (uint64_t *)calloc((size_t)s_timed_iters, sizeof(uint64_t));
+    int total_iters = s_warmup_iters + s_timed_iters;
     int ok = 1;
 
     JaclPerfSnapshot pre = jacl_perf_snapshot(&rt);
@@ -209,8 +216,8 @@ static int run_scenario(const char* path, const char* name,
             break;
         }
 
-        if (iter >= WARMUP_ITERS) {
-            timings[iter - WARMUP_ITERS] = dt;
+        if (iter >= s_warmup_iters) {
+            timings[iter - s_warmup_iters] = dt;
         }
         runtime_unpin_value(&rt, pin);
     }
@@ -218,10 +225,10 @@ static int run_scenario(const char* path, const char* name,
     if (ok) {
         JaclPerfSnapshot post = jacl_perf_snapshot(&rt);
 
-        qsort(timings, TIMED_ITERS, sizeof(uint64_t), cmp_u64);
+        qsort(timings, (size_t)s_timed_iters, sizeof(uint64_t), cmp_u64);
         uint64_t wall_min    = timings[0];
-        uint64_t wall_median = timings[TIMED_ITERS / 2];
-        uint64_t wall_max    = timings[TIMED_ITERS - 1];
+        uint64_t wall_median = timings[s_timed_iters / 2];
+        uint64_t wall_max    = timings[s_timed_iters - 1];
 
         fprintf(out,
             "{"
@@ -251,7 +258,7 @@ static int run_scenario(const char* path, const char* name,
               "\"current_heap_blocks\":%u"
             "}"
             "}\n",
-            name, git_sha, WARMUP_ITERS, TIMED_ITERS,
+            name, git_sha, s_warmup_iters, s_timed_iters,
             (unsigned long long)wall_min,
             (unsigned long long)wall_median,
             (unsigned long long)wall_max,
@@ -283,6 +290,7 @@ static int run_scenario(const char* path, const char* name,
     SLEEP_MILLISECONDS(50);
 
     runtime_destroy(&rt);
+    free(timings);
     free(source);
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -304,6 +312,21 @@ static const Scenario SCENARIOS[] = {
 };
 
 int main(void) {
+    /* Iteration overrides for profiling runs */
+    const char* w_env = getenv("BENCH_WARMUP_ITERS");
+    const char* t_env = getenv("BENCH_TIMED_ITERS");
+    /* Comma-separated allowlist of scenarios; if set, others are skipped.
+     * Useful for isolating one scenario under a profiler. */
+    const char* only_env = getenv("BENCH_SCENARIOS");
+    if (w_env && *w_env) {
+        int n = atoi(w_env);
+        if (n >= 0 && n <= TIMED_ITERS_MAX) s_warmup_iters = n;
+    }
+    if (t_env && *t_env) {
+        int n = atoi(t_env);
+        if (n >= 1 && n <= TIMED_ITERS_MAX) s_timed_iters = n;
+    }
+
     const char* sha_env = getenv("BENCH_GIT_SHA");
     char sha[64];
     if (sha_env && *sha_env) {
@@ -332,8 +355,13 @@ int main(void) {
     }
 
     int passed = 0;
+    int ran    = 0;
     int total  = (int)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0]));
     for (int i = 0; i < total; i++) {
+        if (only_env && *only_env && !strstr(only_env, SCENARIOS[i].name)) {
+            continue;
+        }
+        ran++;
         fprintf(stderr, "  %-30s ", SCENARIOS[i].name);
         if (run_scenario(SCENARIOS[i].file, SCENARIOS[i].name, sha, out)) {
             fprintf(stderr, "OK\n");
@@ -342,10 +370,11 @@ int main(void) {
             fprintf(stderr, "FAIL\n");
         }
     }
+    if (ran == 0) ran = total; /* avoid 0/0 in output */
 
     if (out != stdout) fclose(out);
-    fprintf(stderr, "\n%d/%d scenarios passed\n", passed, total);
+    fprintf(stderr, "\n%d/%d scenarios passed\n", passed, ran);
     /* Pass the build-runner expectation (build.sh greps for "x/y passed"). */
-    printf("%d/%d tests passed\n", passed, total);
-    return passed == total ? 0 : 1;
+    printf("%d/%d tests passed\n", passed, ran);
+    return passed == ran ? 0 : 1;
 }

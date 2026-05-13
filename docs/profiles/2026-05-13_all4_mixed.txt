@@ -1,0 +1,108 @@
+# Functions (all4_mixed)
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+3.690 100.00  3.690 100.00   <Total>
+1.879  50.93  1.879  50.93   gc__find_fit_in_block
+0.470  12.73  1.448  39.23   runtime__worker_loop
+0.292   7.92  0.292   7.92   unicode_grapheme_next.part.0
+0.258   7.00  0.309   8.38   gc_sweep_concurrent
+0.194   5.27  0.627  17.00   vm__run
+0.151   4.08  0.151   4.08   <static>@0x188051 (<libc.so.6>)
+0.089   2.40  0.097   2.62   rope_string__compute_hash
+0.086   2.32  0.358   9.70   rope_summary_summarize
+0.031   0.84  0.031   0.84   gc_sweep_intern_table.part.0
+0.030   0.81  2.001  54.23   gc_alloc
+0.025   0.68  0.027   0.73   clock_nanosleep
+0.015   0.41  0.015   0.41   vm__env_set
+0.014   0.38  0.063   1.70   jacl_map_mk_internal_copy
+0.013   0.35  0.028   0.76   gc__bump_alloc
+0.011   0.30  0.011   0.30   jacl_val_hash
+0.008   0.22  0.015   0.41   <static>@0xaaa3b (<libc.so.6>)
+0.008   0.22  0.086   2.32   gc_block_pool_get
+0.007   0.19  0.008   0.22   pthread_mutex_unlock
+0.006   0.16  0.006   0.16   jacl_add_i32
+
+# Callers/callees (all4_mixed)
+Functions sorted by metric: Exclusive Total CPU Time
+Callers and callees sorted by metric: Attributed Total CPU Time
+
+Attr. Total    Name
+CPU
+ sec.      %
+3.690   0.    *<Total>
+2.112  57.23   rope_concat
+1.448  39.23   <static>@0x9c446 (<libc.so.6>)
+0.075   2.03   jacl_vec_set
+0.023   0.62   __libc_start_main
+0.015   0.41   vm__run
+0.004   0.11   gc_alloc
+0.004   0.11   runtime__schedule_sm_resumption
+0.003   0.08   runtime__submit_spawn_task
+0.002   0.05   pthread_mutex_unlock
+0.002   0.05   vm__env_set
+0.001   0.03   gc__bump_alloc
+0.001   0.03   grey_buf_push
+0.001   0.03   runtime__spawn_task_exec
+
+Attr. Total    Name
+CPU
+ sec.      %
+1.879 100.00   gc_alloc
+1.879 100.00  *gc__find_fit_in_block
+
+Attr. Total    Name
+CPU
+ sec.      %
+1.448 100.00   <static>@0x5115c (<libgp-collector.so>)
+0.470  32.44  *runtime__worker_loop
+0.593  40.98   runtime__spawn_task_exec
+0.341  23.55   gc_concurrent_collect
+0.026   1.79   runtime__state_machine_task_exec
+0.014   0.96   nanosleep
+0.002   0.14   free
+0.001   0.07   <static>@0x2430 (<jacl_perf_O2>)
+0.001   0.07   pthread_mutex_unlock
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.270  92.49   rope_summary_summarize
+0.022   7.51   jacl_intern
+0.292 100.00  *unicode_grapheme_next.part.0
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.309 100.00   gc_concurrent_collect
+0.258  83.55  *gc_sweep_concurrent
+0.051  16.45   <static>@0x188051 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.015   2.38   <Total>
+0.588  93.80   runtime__spawn_task_exec
+0.024   3.82   runtime__state_machine_task_exec
+0.194  31.00  *vm__run
+0.097  15.42   rope_string__compute_hash
+0.071  11.29   jacl_map_set
+0.066  10.49   rope_from_str
+0.044   7.00   jacl_vec_push_back
+0.038   6.04   jacl_string_new
+0.035   5.56   jacl_vec_set
+0.027   4.29   gc_alloc
+0.013   2.07   vm__env_set
+0.008   1.27   gc__bump_alloc
+0.006   0.95   jacl_add_i32
+0.005   0.79   jacl_string_byte_len
+0.004   0.64   gc_write_barrier
+0.004   0.64   jacl_lt_i32
+0.004   0.64   rope_concat
+0.002   0.32   __snprintf_chk
+0.002   0.32   jacl_map_get
+0.002   0.32   jacl_string_data
+0.002   0.32   jacl_val_eq
+0.001   0.16   jacl_map_get_leaf.constprop.0

@@ -1,0 +1,108 @@
+# Functions (collection_churn)
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.328 100.00  1.328 100.00   <Total>
+0.764  57.51  0.764  57.51   gc__find_fit_in_block
+0.197  14.86  0.221  16.67   gc_sweep_concurrent
+0.132   9.91  0.760  57.21   vm__run
+0.060   4.50  0.060   4.50   <static>@0x188051 (<libc.so.6>)
+0.032   2.40  0.295  22.22   jacl_map_mk_internal_copy
+0.028   2.10  0.028   2.10   jacl_val_hash
+0.020   1.50  0.819  61.64   gc_alloc
+0.016   1.20  0.023   1.73   gc__bump_alloc
+0.011   0.83  0.322  24.25   jacl_vec_set_in_tree
+0.007   0.53  0.029   2.18   jacl_map_set_recursive.constprop.0
+0.007   0.53  0.007   0.53   vm__env_set
+0.006   0.45  0.006   0.45   __popcountdi2
+0.005   0.38  0.005   0.38   jacl_add_i32
+0.005   0.38  0.009   0.68   jacl_map_get_leaf.constprop.0
+0.005   0.38  0.159  11.94   jacl_vec_push_back
+0.004   0.30  0.004   0.30   clock_nanosleep
+0.004   0.30  0.033   2.48   gc_block_pool_get
+0.004   0.30  0.004   0.30   madvise
+0.003   0.23  0.003   0.23   <static>@0x2440 (<jacl_perf_O2>)
+
+# Callers/callees (collection_churn)
+Functions sorted by metric: Exclusive Total CPU Time
+Callers and callees sorted by metric: Attributed Total CPU Time
+
+Attr. Total    Name
+CPU
+ sec.      %
+1.328   0.    *<Total>
+0.981  73.87   <static>@0x9c446 (<libc.so.6>)
+0.323  24.32   jacl_vec_set
+0.009   0.68   __libc_start_main
+0.007   0.53   vm__run
+0.005   0.38   gc_alloc
+0.001   0.08   __snprintf_chk
+0.001   0.08   pthread_mutex_lock
+0.001   0.08   pthread_mutex_unlock
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.764 100.00   gc_alloc
+0.764 100.00  *gc__find_fit_in_block
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.221 100.00   gc_concurrent_collect
+0.197  89.19  *gc_sweep_concurrent
+0.024  10.81   <static>@0x188051 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.007   0.92   <Total>
+0.753  99.08   runtime__spawn_task_exec
+0.132  17.32  *vm__run
+0.309  40.68   jacl_map_set
+0.159  20.87   jacl_vec_push_back
+0.136  17.85   jacl_vec_set
+0.009   1.18   jacl_map_get_leaf.constprop.0
+0.007   0.92   vm__env_set
+0.005   0.66   jacl_add_i32
+0.001   0.13   __snprintf_chk
+0.001   0.13   gc_alloc
+0.001   0.13   jacl_map_get
+0.001   0.13   jacl_vec_get
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.027  45.00   gc_block_pool_get
+0.024  40.00   gc_sweep_concurrent
+0.005   8.33   gc__bump_alloc
+0.003   5.00   jacl_vec_set_in_tree
+0.001   1.67   jacl_vec_push_back
+0.060 100.00  *<static>@0x188051 (<libc.so.6>)
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.279  94.59   jacl_map_set
+0.016   5.41   jacl_map_set_recursive.constprop.0
+0.032  10.81  *jacl_map_mk_internal_copy
+0.258  87.50   gc_alloc
+0.003   1.01   gc__bump_alloc
+0.002   0.68   __popcountdi2
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.020  71.43   jacl_vec_set_in_tree
+0.004  14.29   jacl_vec_push_back
+0.002   7.14   jacl_map_set_recursive.constprop.0
+0.001   3.57   jacl_map_get_leaf.constprop.0
+0.001   3.57   jacl_map_set
+0.028 100.00  *jacl_val_hash
+
+Attr. Total    Name
+CPU
+ sec.      %
+0.005   0.61   <Total>
