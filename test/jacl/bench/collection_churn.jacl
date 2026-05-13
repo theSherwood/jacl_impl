@@ -1,0 +1,59 @@
+# Bench scenario: collection churn (HAMT + RRB)
+#
+# Builds a 1000-entry map and a 1000-element vector, then does 1000 functional
+# updates on each, then sums all values back via 1000 reads. Exercises:
+#   - HAMT path-copy + alloc (every map-set produces a new internal node chain)
+#   - RRB tail/tree appends + path-copy on set
+#   - GC barriers on the inserted/replaced child pointers (§13)
+#   - Allocation slow path once blocks fill (§14)
+#
+# Uses while+mut instead of tail recursion because the compiler does not
+# currently emit OP_TAIL_CALL — recursive iteration is bounded by
+# VM_FRAMES_MAX (64). The collection values themselves stay persistent.
+#
+# Top-level code (no proc wrapper) because the harness submits the chunk
+# as a spawn task — wrapping in `proc main` and calling it adds frames
+# and changes the suspension shape.
+#
+# Prints the sum-of-reads (a constant) so DCE can't elide the work and the
+# bench harness can validate output as a smoke check.
+
+mut n 200
+
+mut m [map]
+mut i 0
+while [< $i $n] {
+  set m [map-set $m $i $i]
+  set i [+ $i 1]
+}
+set i 0
+while [< $i $n] {
+  set m [map-set $m $i [* $i 2]]
+  set i [+ $i 1]
+}
+mut ms 0
+set i 0
+while [< $i $n] {
+  set ms [+ $ms [map-get $m $i]]
+  set i [+ $i 1]
+}
+
+mut v [vec]
+set i 0
+while [< $i $n] {
+  set v [vec-push $v $i]
+  set i [+ $i 1]
+}
+set i 0
+while [< $i $n] {
+  set v [vec-set $v $i [* $i 2]]
+  set i [+ $i 1]
+}
+mut vs 0
+set i 0
+while [< $i $n] {
+  set vs [+ $vs [vec-get $v $i]]
+  set i [+ $i 1]
+}
+
+print [+ $ms $vs]

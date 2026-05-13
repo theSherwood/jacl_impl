@@ -162,6 +162,7 @@ TESTS=(
     "test/test_typed_map.c|typed_map|"
     "test/test_struct_sizes.c|struct_sizes|"
     "test/test_bench.c|bench|"
+    "test/test_perf.c|perf|"
 )
 
 # Filter tests if --lib flag is set
