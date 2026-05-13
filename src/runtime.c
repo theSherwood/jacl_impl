@@ -703,6 +703,23 @@ void runtime__teardown_state(Runtime *rt) {
  * ====================================================================== */
 
 void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
+    /* §10 fast path: from-worker submission pushes directly to the caller's
+     * own public_deque, bypassing the global inbox mutex. The deque is
+     * Chase-Lev SPSC on the owner-push side; other workers can steal from
+     * the public deque, preserving load balancing. No CV signal is needed
+     * — the submitter is itself active (will pop on its next iteration),
+     * and parked workers wake on the 1ms CV timeout and find the task via
+     * the steal path. The GC's deque scan is already registered as a
+     * thief (§2) and epoch-protected, so concurrent collection is safe. */
+    WorkerThread *self = rt__current_worker;
+    if (self != NULL && self->runtime == rt) {
+        rt_deque_deque_push(self->public_deque, (uintptr_t)task);
+        return;
+    }
+
+    /* Slow path: external thread (no worker context). Use the global inbox
+     * + CV signal as before. External submissions are low-volume relative
+     * to from-worker, so the mutex here is no longer a hot-path concern. */
     MUTEX_LOCK(rt->inbox_mutex);
     intptr_t c = rt->inbox_count;
     if (c >= rt->inbox_cap) {

@@ -201,9 +201,17 @@ The remaining work is non-correctness, performance/architecture:
 1. **Architectural items §10–§17** — throughput, latency, ergonomics.
    Not correctness. Profile baseline captured 2026-05-13; see
    "Profiling baseline" section below for which items the data
-   actually pushes to the top of the queue (TL;DR: §14 is huge,
-   §11/worker-loop is huge on spawn-heavy, vm__run dispatch is
-   the next big block in alloc-heavy non-string code).
+   actually pushes to the top of the queue. **§10 (single global
+   inbox) is now FIXED (2026-05-13)** — from-worker submissions
+   bypass the global mutex by pushing directly to own `public_deque`,
+   eliminating 98% of inbox-mutex traffic on `spawn_chain` and
+   activating work-stealing (0 → 1873 steal_successes). Wall delta
+   on the bench is modest (~10%) because `spawn_chain` is half pinned
+   tasks (already off the global mutex) and the remaining ceiling is
+   the 1ms CV wake-up timeout. **§14 tier-1** is already landed.
+   Next perf levers: §14 tier-2/3 (per-block free hint, heap-level
+   free-run list), §13 (computed-goto VM dispatch), rope-summary
+   perf in string_concat.
 
 ### Housekeeping (2026-05-13)
 
@@ -289,10 +297,16 @@ investigated separately (cache or lazy-evaluate the rope summary?).
 
 **Recommended order of attack.**
 
-1. **§14** — universal win, large magnitude, well-understood fix.
-2. **§11 + §10** — required for spawn-heavy throughput; the two
+1. ~~**§14** — universal win, large magnitude, well-understood fix.~~
+   **Tier-1 landed**; tier-2/3 still available (see §14 below).
+2. ~~**§11 + §10** — required for spawn-heavy throughput; the two
    are coupled (a real condition variable needs a per-worker
-   inbox or sharded queue to wake the right worker).
+   inbox or sharded queue to wake the right worker).~~
+   **Both landed.** §11 CV change in 2026-05-13. §10 from-worker
+   fast path in 2026-05-13 (this pass). The "coupled" framing
+   turned out to be partly wrong: the fast path pushes to own
+   `public_deque` (mutex-free, no CV signal), and the existing
+   global CV with 1ms timeout handles externals fine.
 3. **VM dispatch (§13 family)** — computed-goto rewrite of
    `vm__run` for the dispatch-bound regime.
 4. **Rope summary perf** — separate investigation; not on the
@@ -890,13 +904,57 @@ write-barrier discipline is uniform: any heap-pointer slot write
 on any GC-managed object goes through `gc_write_barrier`,
 unconditionally on both sides.
 
-### 10. Single global inbox is a contention point
-`runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external
+### 10. Single global inbox is a contention point — **FIXED** (2026-05-13)
+~~`runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external
 submission, plus all pinned-on-fallback, plus most spawn / SM resumption. The
 design's M14 amendment removed contention for the empty-check side; the push
 side is still serialized. For high spawn-rate workloads, this caps throughput
 at single-core mutex acquisition. Either per-worker MPSC inboxes, or a sharded
-LIFO with worker hashing.
+LIFO with worker hashing.~~
+
+**Fix landed**: `runtime__push_inbox` now has a from-worker fast path. If
+`rt__current_worker` is set and points to a worker in the same runtime,
+the task is pushed directly to that worker's `public_deque` — Chase-Lev
+SPSC on the owner-push side, no mutex, no CV signal. Other workers
+steal from the public deque, preserving load-balancing. Externals (no
+worker context) still take the global inbox + CV signal path.
+
+Why public deque rather than per-worker MPSC inbox: the SPSC owner-push
+to `public_deque` is the canonical Chase-Lev pattern and was already
+covered by the §1/§2 fixes (private/public split + GC thief registration
++ epoch-protected buffer reclamation). No new data structures needed.
+Cross-worker pinned routing remains on `pinned_inbox` (per-worker MPSC,
+unchanged). The fast path skips the CV signal because the submitter is
+itself active (will drain its own deque on the next loop iteration); a
+parked worker sees the new task via the steal path within the 1ms CV
+timeout. This bounded latency is the same one the §11 fix already
+accepted.
+
+**Validation (2026-05-13)**:
+- `spawn_chain` bench (N=200, 8 runs): median 7.3ms → 6.5ms (~10%).
+- `inbox_pops` on `spawn_chain`: 11407 → 220 (98% drop — only external
+  submissions hit the global inbox now).
+- `steal_successes` on `spawn_chain`: 0 → 1873 (work-stealing is now
+  actively exercised; previously every non-pinned submission funneled
+  through the global inbox and was drained back into the submitter's
+  own private deque).
+- Full normal-mode suite: 88/88.
+- TSAN suite: 80/8 — matches pre-fix baseline exactly (8 pre-existing
+  perf-counter races + chase_lev_stress/rwlock/compiler/integration/
+  jacl_harness/cross_thread_string/syntax flakes, all pre-existing).
+- All 7 chaos tests under TSAN: clean.
+- `gc_stress_*` × 50 each (atom, spawn, race, deep_cps, persistent):
+  0/250.
+- 60s `chaos_soak` under TSAN: 216K tasks, 0 heap problems.
+
+The wall delta is smaller than the profile predicted because
+`spawn_chain` is ~50% pinned tasks (which already use per-worker
+`pinned_inbox` and didn't go through the global mutex). The §10 fix
+removed the mutex from the *other* 50% and unlocked actual
+work-stealing on `public_deque`. The remaining ceiling on `spawn_chain`
+is the 1ms CV wake-up timeout (§11 path); driving that down would
+require per-worker CV with targeted signaling, which doesn't help
+the dominant in-worker submission case anyway.
 
 ### 11. Worker idle backoff is `SLEEP_MILLISECONDS(backoff)` up to 10 ms
 `src/runtime.c:281`. Latency for a task arriving when all workers are idle is
