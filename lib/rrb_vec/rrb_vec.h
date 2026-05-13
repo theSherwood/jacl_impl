@@ -1,9 +1,14 @@
 /* rrb_vec.h - RRB Persistent Vector (include-as-template)
  *
  * Immutable vector backed by a Relaxed Radix Balanced tree with
- * copy-on-write semantics and reference counting.
+ * copy-on-write semantics; nodes are GC-managed.
  *
  * Define RRB_VEC_T (element type) and RRB_VEC_NAME (prefix) before including.
+ * Required GC hooks:
+ *   RRB_VEC_GC_ALLOC(obj_type, payload_size) — allocation function
+ *   RRB_VEC_GC_OBJ_INTERNAL, RRB_VEC_GC_OBJ_LEAF, RRB_VEC_GC_OBJ_ROOT — obj types
+ * RRB_VEC_ALLOCATOR (optional) supplies an Allocator for size tables and temp arrays.
+ *
  * Can be included multiple times with different values.
  *
  * Example:
@@ -86,8 +91,6 @@
 #define RV_ROTATE_LEFT       RV_NS(_rotate_left)
 #define RV_LEAF_REHASH       RV_NS(_leaf_rehash)
 #define RV_INTERNAL_REHASH   RV_NS(_internal_rehash)
-#define RV_NODE_DESTROY      RV_NS(_node_destroy)
-#define RV_ROOT_DESTROY    RV_NS(_root_destroy)
 #define RV_MK_LEAF         RV_NS(_mk_leaf)
 #define RV_MK_INTERNAL     RV_NS(_mk_internal)
 #define RV_MK_ROOT         RV_NS(_mk_root)
@@ -116,18 +119,16 @@
 
 #include "../platform/platform.h"
 
-/* Allocation hooks */
+#ifndef RRB_VEC_GC_ALLOC
+#error "RRB_VEC_GC_ALLOC must be defined before including rrb_vec.h"
+#endif
+
+/* Auxiliary allocator for size tables and temp arrays (NOT nodes). */
 #ifndef RRB_VEC_ALLOCATOR
 #define RRB_VEC_ALLOCATOR    libc_allocator
 #define RRB_VEC_ALLOC_DEFAULTED 1
 #endif
 
-#ifdef RRB_VEC_GC_MODE
-/* --- GC mode: nodes allocated via gc_alloc, no reference counting ---
- * Caller must define RRB_VEC_GC_ALLOC(obj_type, payload_size),
- * RRB_VEC_GC_OBJ_INTERNAL, RRB_VEC_GC_OBJ_LEAF, RRB_VEC_GC_OBJ_ROOT. */
-
-/* Auxiliary allocator for size tables, temp arrays (NOT nodes) */
 static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
 
 /* Node allocation via GC */
@@ -135,35 +136,10 @@ static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
 #define RV_ALLOC_INTERNAL(sz)  RRB_VEC_GC_ALLOC(RRB_VEC_GC_OBJ_INTERNAL, (sz))
 #define RV_ALLOC_ROOT(sz)      RRB_VEC_GC_ALLOC(RRB_VEC_GC_OBJ_ROOT, (sz))
 
-/* No-op reference counting */
+/* No-op reference counting (GC handles node lifecycle) */
 #define RV_RC_REF(p)   (p)
 #define RV_RC_UNREF(p) ((void)0)
 #define RV_RC_COUNT(p) ((intptr_t)2)
-
-/* Unused in GC mode but kept for cleanup section */
-#define RV_RC_ALLOC RV_NS(_rc_alloc_unused)
-
-#else /* !RRB_VEC_GC_MODE */
-
-static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
-
-/* Wire into rc.h template */
-#define RC_ALLOCATOR RV_NS(_allocator)
-#define RC_NAME      RRB_VEC_NAME
-#include "../rc/rc.h"
-
-/* RC function aliases */
-#define RV_RC_ALLOC RV_NS(_rc_alloc)
-#define RV_RC_REF   RV_NS(_rc_ref)
-#define RV_RC_UNREF RV_NS(_rc_unref)
-#define RV_RC_COUNT RV_NS(_rc_count)
-
-/* Allocation wrappers delegate to RC */
-#define RV_ALLOC_LEAF(sz)      RV_RC_ALLOC((sz), RV_NODE_DESTROY)
-#define RV_ALLOC_INTERNAL(sz)  RV_RC_ALLOC((sz), RV_NODE_DESTROY)
-#define RV_ALLOC_ROOT(sz)      RV_RC_ALLOC((sz), RV_ROOT_DESTROY)
-
-#endif /* RRB_VEC_GC_MODE */
 
 /* --- Constants --- */
 
@@ -288,13 +264,6 @@ static inline uint32_t RV_HASH(RV_ROOT* root) {
   return root ? root->hash : 0;
 }
 
-/* --- Forward declarations (RC mode only) --- */
-
-#ifndef RRB_VEC_GC_MODE
-static void RV_NODE_DESTROY(void* arg);
-static void RV_ROOT_DESTROY(void* arg);
-#endif
-
 /* --- Node construction --- */
 
 static inline RV_LEAF* RV_MK_LEAF(uint32_t stride) {
@@ -326,33 +295,6 @@ static inline RV_ROOT* RV_MK_ROOT(RV_NODE* root, RV_LEAF* tail, uint32_t count, 
   r->hash    = (root ? root->hash : 0) ^ (tail ? tail->header.hash : 0);
   return r;
 }
-
-/* --- Node destruction (RC mode only — GC handles lifecycle) --- */
-
-#ifndef RRB_VEC_GC_MODE
-static void RV_NODE_DESTROY(void* arg) {
-  RV_NODE* node = (RV_NODE*)arg;
-  if (!node) return;
-
-  if (node->type == RV_NODE_INTERNAL_VAL) {
-    RV_INTERNAL* n = (RV_INTERNAL*)node;
-    for (uint32_t i = 0; i < n->child_count; i++) {
-      RV_RC_UNREF(n->children[i]);
-    }
-    if (n->size_table) {
-      RV_NS(_allocator).free(RV_NS(_allocator).ctx, n->size_table);
-    }
-  }
-  /* Leaf nodes have no children to unref — elements are stored by value */
-}
-
-static void RV_ROOT_DESTROY(void* arg) {
-  RV_ROOT* r = (RV_ROOT*)arg;
-  if (!r) return;
-  if (r->root) RV_RC_UNREF(r->root);
-  if (r->tail) RV_RC_UNREF((RV_NODE*)r->tail);
-}
-#endif /* !RRB_VEC_GC_MODE */
 
 /* --- Internal helpers for push_back / get --- */
 
@@ -1444,552 +1386,6 @@ static inline RV_ROOT* RV_SORT(RV_ROOT* r, RV_CMP_FN cmp) {
   return result;
 }
 
-/* --- Transient API (RC mode only — requires ref counting for ownership checks) --- */
-
-#ifndef RRB_VEC_GC_MODE
-
-#define RV_TRANSIENT           RV_NS(_transient)
-#define RV_TRANSIENT_FN        RV_NS(_transient_fn)
-#define RV_PERSISTENT_FN       RV_NS(_persistent_fn)
-#define RV_TRANSIENT_PUSH_BACK RV_NS(_transient_push_back)
-#define RV_TRANSIENT_PUSH_TAIL RV_NS(_transient_push_tail)
-#define RV_TRANSIENT_SET       RV_NS(_transient_set)
-#define RV_TRANSIENT_SET_IN_TREE RV_NS(_transient_set_in_tree)
-#define RV_TRANSIENT_POP_BACK  RV_NS(_transient_pop_back)
-#define RV_TRANSIENT_POP_RESULT_T RV_NS(_transient_pop_result)
-#define RV_TRANSIENT_REMOVE_RIGHTMOST RV_NS(_transient_remove_rightmost)
-#define RV_TRANSIENT_PUSH_FRONT RV_NS(_transient_push_front)
-#define RV_TRANSIENT_POP_FRONT  RV_NS(_transient_pop_front)
-
-typedef struct RV_TRANSIENT {
-  RV_NODE*  root;
-  RV_LEAF*  tail;
-  uint32_t  count;
-  uint32_t  shift;
-  thread_t  owner;
-  uint32_t  stride;
-} RV_TRANSIENT;
-
-/* Sentinel owner value: all bits set — no real thread should match */
-static const thread_t RV_NS(_invalid_owner) = (thread_t)0;
-
-static inline void RV_NS(_transient_destroy)(void* arg) {
-  RV_TRANSIENT* t = (RV_TRANSIENT*)arg;
-  if (!t) return;
-  if (t->root) RV_RC_UNREF(t->root);
-  if (t->tail) RV_RC_UNREF((RV_NODE*)t->tail);
-}
-
-static inline RV_TRANSIENT* RV_TRANSIENT_FN(RV_ROOT* r) {
-  if (!r) return NULL;
-  RV_TRANSIENT* t = (RV_TRANSIENT*)RV_RC_ALLOC(sizeof(RV_TRANSIENT), RV_NS(_transient_destroy));
-  t->root   = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
-  /* Eagerly copy the tail so the transient exclusively owns it */
-  t->tail   = RV_COPY_LEAF(r->tail);
-  t->count  = r->count;
-  t->shift  = r->shift;
-  t->owner  = THREAD_SELF();
-  t->stride = r->stride;
-  return t;
-}
-
-static inline RV_ROOT* RV_PERSISTENT_FN(RV_TRANSIENT* t) {
-  if (!t) return NULL;
-  /* Check if already invalidated (must come before owner check) */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return NULL;
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-  /* Take ownership of root and tail from the transient */
-  RV_NODE* root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
-  RV_LEAF* tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* result = RV_MK_ROOT(root, tail, t->count, t->shift, t->stride);
-  /* Invalidate the transient */
-  t->owner = RV_NS(_invalid_owner);
-  return result;
-}
-
-/* --- Transient push_tail (in-place when owned) --- */
-
-static inline RV_NODE* RV_TRANSIENT_PUSH_TAIL(uint32_t level, uint32_t count, RV_NODE* node, RV_NODE* tail_node) {
-  if (level == RV_BITS) {
-    RV_INTERNAL* old = (RV_INTERNAL*)node;
-    if (RV_RC_COUNT(old) == 1) {
-      /* Owned — mutate in place */
-      old->children[old->child_count] = (RV_NODE*)RV_RC_REF(tail_node);
-      old->child_count++;
-      RV_INTERNAL_REHASH(old);
-      return node;
-    }
-    /* Shared — copy */
-    RV_INTERNAL* new_node = RV_MK_INTERNAL();
-    for (uint32_t i = 0; i < old->child_count; i++) {
-      new_node->children[i] = (RV_NODE*)RV_RC_REF(old->children[i]);
-    }
-    new_node->children[old->child_count] = (RV_NODE*)RV_RC_REF(tail_node);
-    new_node->child_count = old->child_count + 1;
-    RV_INTERNAL_REHASH(new_node);
-    return (RV_NODE*)new_node;
-  }
-
-  RV_INTERNAL* old = (RV_INTERNAL*)node;
-  uint32_t subidx = ((count - 1) >> level) & RV_MASK;
-
-  if (subidx < old->child_count) {
-    /* Recurse into existing subtree */
-    RV_NODE* new_child = RV_TRANSIENT_PUSH_TAIL(level - RV_BITS, count, old->children[subidx], tail_node);
-    if (RV_RC_COUNT(old) == 1) {
-      if (new_child != old->children[subidx]) {
-        RV_RC_UNREF(old->children[subidx]);
-        old->children[subidx] = new_child;
-      }
-      RV_INTERNAL_REHASH(old);
-      return node;
-    }
-    RV_INTERNAL* new_node = RV_MK_INTERNAL();
-    for (uint32_t i = 0; i < old->child_count; i++) {
-      new_node->children[i] = (RV_NODE*)RV_RC_REF(old->children[i]);
-    }
-    new_node->child_count = old->child_count;
-    RV_RC_UNREF(new_node->children[subidx]);
-    new_node->children[subidx] = new_child;
-    RV_INTERNAL_REHASH(new_node);
-    return (RV_NODE*)new_node;
-  } else {
-    /* Create new path */
-    RV_NODE* new_path = RV_NEW_PATH(level - RV_BITS, (RV_NODE*)RV_RC_REF(tail_node));
-    if (RV_RC_COUNT(old) == 1) {
-      old->children[subidx] = new_path;
-      old->child_count = subidx + 1;
-      RV_INTERNAL_REHASH(old);
-      return node;
-    }
-    RV_INTERNAL* new_node = RV_MK_INTERNAL();
-    for (uint32_t i = 0; i < old->child_count; i++) {
-      new_node->children[i] = (RV_NODE*)RV_RC_REF(old->children[i]);
-    }
-    new_node->children[subidx] = new_path;
-    new_node->child_count = subidx + 1;
-    RV_INTERNAL_REHASH(new_node);
-    return (RV_NODE*)new_node;
-  }
-}
-
-/* --- Transient push_back (in-place) --- */
-
-static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_BACK(RV_TRANSIENT* t, RRB_VEC_T value) {
-  assert((!t || t->stride == 1) && "use transient wide API for strided vecs");
-  if (!t) return NULL;
-  /* Check if already invalidated (must come before owner check) */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return NULL;
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-
-  if (t->tail->count < RV_BRANCH) {
-    /* Tail has room — write directly */
-    t->tail->elements[t->tail->count * t->stride] = value;
-    t->tail->count++;
-    RV_LEAF_REHASH(t->tail);
-    t->count++;
-    return t;
-  }
-
-  /* Tail is full — push into tree, create new tail */
-  RV_LEAF* old_tail = t->tail;
-  RV_LEAF_REHASH(old_tail);
-  RV_LEAF* new_tail = RV_MK_LEAF(t->stride);
-  new_tail->elements[0] = value;
-  new_tail->count = 1;
-  RV_LEAF_REHASH(new_tail);
-
-  RV_NODE* new_root;
-  uint32_t new_shift = t->shift;
-
-  if (t->root == NULL) {
-    /* Tree was empty — wrap old tail in an internal node */
-    RV_INTERNAL* node = RV_MK_INTERNAL();
-    node->children[0] = (RV_NODE*)RV_RC_REF((RV_NODE*)old_tail);
-    node->child_count = 1;
-    RV_INTERNAL_REHASH(node);
-    new_root = (RV_NODE*)node;
-  } else {
-    uint32_t tree_count = t->count - old_tail->count;
-    uint32_t capacity = (uint32_t)1 << (t->shift + RV_BITS);
-    if (tree_count >= capacity) {
-      /* Overflow: create new root level */
-      RV_INTERNAL* new_top = RV_MK_INTERNAL();
-      new_top->children[0] = (RV_NODE*)RV_RC_REF(t->root);
-      new_top->children[1] = RV_NEW_PATH(t->shift, (RV_NODE*)RV_RC_REF((RV_NODE*)old_tail));
-      new_top->child_count = 2;
-      RV_INTERNAL_REHASH(new_top);
-      new_root = (RV_NODE*)new_top;
-      new_shift = t->shift + RV_BITS;
-      RV_RC_UNREF(t->root);
-    } else {
-      /* Push old tail into existing tree — use t->count (total count including tail)
-       * as routing key, matching Clojure's cnt convention */
-      new_root = RV_TRANSIENT_PUSH_TAIL(t->shift, t->count, t->root, (RV_NODE*)old_tail);
-      if (new_root != t->root) {
-        RV_RC_UNREF(t->root);
-      }
-    }
-  }
-
-  RV_RC_UNREF((RV_NODE*)old_tail);
-  t->root = new_root;
-  t->tail = new_tail;
-  t->count++;
-  t->shift = new_shift;
-  return t;
-}
-
-/* --- Transient set (in-place when owned) --- */
-
-static inline RV_NODE* RV_TRANSIENT_SET_IN_TREE(uint32_t level, RV_NODE* node, uint32_t index, RRB_VEC_T value) {
-  if (level == 0) {
-    /* Leaf level */
-    RV_LEAF* leaf = (RV_LEAF*)node;
-    if (RV_RC_COUNT(leaf) == 1) {
-      /* Owned — mutate in place */
-      leaf->elements[index * leaf->stride] = value;
-      RV_LEAF_REHASH(leaf);
-      return node;
-    }
-    /* Shared — copy */
-    RV_LEAF* new_leaf = RV_COPY_LEAF(leaf);
-    new_leaf->elements[index * new_leaf->stride] = value;
-    RV_LEAF_REHASH(new_leaf);
-    return (RV_NODE*)new_leaf;
-  }
-
-  RV_INTERNAL* old = (RV_INTERNAL*)node;
-  uint32_t slot;
-  uint32_t child_index;
-  if (old->size_table) {
-    slot = 0;
-    while (old->size_table[slot] <= index) slot++;
-    child_index = (slot > 0) ? index - old->size_table[slot - 1] : index;
-  } else {
-    slot = (index >> level) & RV_MASK;
-    child_index = index - (slot << level);
-  }
-
-  /* Ensure we have an owned node BEFORE recursing — top-down copy.
-   * This is critical: if the parent is shared, children appear owned (rc=1)
-   * but are actually shared between old and new parent after copy.
-   * Copying first ensures children get correct rc before the recursion checks. */
-  RV_INTERNAL* work;
-  if (RV_RC_COUNT(old) == 1) {
-    work = old;
-  } else {
-    work = RV_COPY_INTERNAL(old);
-  }
-
-  RV_NODE* new_child = RV_TRANSIENT_SET_IN_TREE(level - RV_BITS, work->children[slot], child_index, value);
-  if (new_child != work->children[slot]) {
-    RV_RC_UNREF(work->children[slot]);
-    work->children[slot] = new_child;
-  }
-  RV_INTERNAL_REHASH(work);
-  return (RV_NODE*)work;
-}
-
-static inline RV_TRANSIENT* RV_TRANSIENT_SET(RV_TRANSIENT* t, uint32_t index, RRB_VEC_T value) {
-  assert((!t || t->stride == 1) && "use transient wide API for strided vecs");
-  if (!t) return NULL;
-  /* Check if already invalidated */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return NULL;
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-  /* Bounds check */
-  if (index >= t->count) {
-#ifndef NDEBUG
-    assert(0 && "transient set: index out of bounds");
-#endif
-    return NULL;
-  }
-
-  /* Check if index is in the tail */
-  uint32_t tail_off = t->count - t->tail->count;
-  if (index >= tail_off) {
-    /* Tail is always owned — write directly */
-    t->tail->elements[(index - tail_off) * t->stride] = value;
-    RV_LEAF_REHASH(t->tail);
-    return t;
-  }
-
-  /* In the tree — use in-place mutation when owned */
-  RV_NODE* new_root = RV_TRANSIENT_SET_IN_TREE(t->shift, t->root, index, value);
-  if (new_root != t->root) {
-    RV_RC_UNREF(t->root);
-    t->root = new_root;
-  }
-  return t;
-}
-
-/* --- Transient pop_back result --- */
-
-typedef struct RV_TRANSIENT_POP_RESULT_T {
-  RV_TRANSIENT* transient;
-  RRB_VEC_T     value;
-  bool          found;
-} RV_TRANSIENT_POP_RESULT_T;
-
-/* --- Transient remove_rightmost (in-place when owned) --- */
-
-static inline RV_NODE* RV_TRANSIENT_REMOVE_RIGHTMOST(uint32_t level, RV_NODE* node) {
-  RV_INTERNAL* old = (RV_INTERNAL*)node;
-
-  if (level == RV_BITS) {
-    /* At lowest internal level, the rightmost child is the leaf to remove */
-    if (old->child_count == 1) {
-      /* Node becomes empty — caller must unref this node */
-      return NULL;
-    }
-    if (RV_RC_COUNT(old) == 1) {
-      /* Owned — mutate in place */
-      old->child_count--;
-      RV_RC_UNREF(old->children[old->child_count]);
-      old->children[old->child_count] = NULL;
-      RV_INTERNAL_REHASH(old);
-      return node;
-    }
-    /* Shared — copy without last child */
-    RV_INTERNAL* new_node = RV_MK_INTERNAL();
-    new_node->child_count = old->child_count - 1;
-    for (uint32_t i = 0; i < new_node->child_count; i++) {
-      new_node->children[i] = (RV_NODE*)RV_RC_REF(old->children[i]);
-    }
-    if (old->size_table) {
-      size_t st_size = sizeof(uint32_t) * new_node->child_count;
-      new_node->size_table = (uint32_t*)RV_NS(_allocator).alloc(RV_NS(_allocator).ctx, st_size);
-      memcpy(new_node->size_table, old->size_table, st_size);
-    }
-    RV_INTERNAL_REHASH(new_node);
-    return (RV_NODE*)new_node;
-  }
-
-  /* Higher level — top-down copy: ensure we own the node BEFORE recursing */
-  RV_INTERNAL* work;
-  if (RV_RC_COUNT(old) == 1) {
-    work = old;
-  } else {
-    work = RV_COPY_INTERNAL(old);
-  }
-
-  uint32_t last = work->child_count - 1;
-  RV_NODE* new_child = RV_TRANSIENT_REMOVE_RIGHTMOST(level - RV_BITS, work->children[last]);
-
-  if (new_child == NULL) {
-    /* Child subtree became empty */
-    RV_RC_UNREF(work->children[last]);
-    work->children[last] = NULL;
-    work->child_count--;
-    if (work->child_count == 0) {
-      return NULL;
-    }
-  } else {
-    if (new_child != work->children[last]) {
-      RV_RC_UNREF(work->children[last]);
-      work->children[last] = new_child;
-    }
-    /* Update size table if present — subtree lost a leaf */
-    if (work->size_table) {
-      work->size_table[last] = (last > 0 ? work->size_table[last - 1] : 0)
-                               + RV_SUBTREE_COUNT(new_child, level - RV_BITS);
-    }
-  }
-  RV_INTERNAL_REHASH(work);
-  return (RV_NODE*)work;
-}
-
-/* --- Transient pop_back (in-place) --- */
-
-static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_BACK(RV_TRANSIENT* t) {
-  if (!t) return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  /* Check if already invalidated */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-  /* Empty check */
-  if (t->count == 0) {
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-
-  RRB_VEC_T popped = t->tail->elements[(t->tail->count - 1) * t->stride];
-
-  if (t->tail->count > 1) {
-    /* Tail has more than one element — just shrink */
-    t->tail->count--;
-    RV_LEAF_REHASH(t->tail);
-    t->count--;
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = t, .value = popped, .found = true};
-  }
-
-  /* Tail has exactly 1 element */
-  if (t->root == NULL) {
-    /* Popping last element */
-    t->tail->count = 0;
-    t->count = 0;
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = t, .value = popped, .found = true};
-  }
-
-  /* Pull rightmost leaf from tree to become new tail */
-  RV_LEAF* new_tail = RV_COPY_LEAF(RV_RIGHTMOST_LEAF(t->root, t->shift));
-  RV_NODE* old_root = t->root;
-  RV_NODE* new_tree = RV_TRANSIENT_REMOVE_RIGHTMOST(t->shift, old_root);
-  uint32_t new_shift = t->shift;
-
-  /* Unref old root if it was replaced (not mutated in place) */
-  if (new_tree != old_root) {
-    RV_RC_UNREF(old_root);
-  }
-
-  /* Shrink tree if root has single child */
-  while (new_tree != NULL && new_shift > RV_BITS) {
-    RV_INTERNAL* top = (RV_INTERNAL*)new_tree;
-    if (top->child_count == 1) {
-      RV_NODE* child = (RV_NODE*)RV_RC_REF(top->children[0]);
-      RV_RC_UNREF(new_tree);
-      new_tree = child;
-      new_shift -= RV_BITS;
-    } else {
-      break;
-    }
-  }
-
-  RV_RC_UNREF((RV_NODE*)t->tail);
-  t->root = new_tree;
-  t->tail = new_tail;
-  t->count--;
-  t->shift = new_shift;
-
-  return (RV_TRANSIENT_POP_RESULT_T){.transient = t, .value = popped, .found = true};
-}
-
-/* --- Transient push_front (via concat) --- */
-
-static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_FRONT(RV_TRANSIENT* t, RRB_VEC_T value) {
-  assert((!t || t->stride == 1) && "push_front not supported for strided vecs");
-  if (!t) return NULL;
-  /* Check if already invalidated */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return NULL;
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-
-  /* Create a temporary persistent view of the transient's current state */
-  RV_NODE* tmp_root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
-  RV_LEAF* tmp_tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift, t->stride);
-
-  /* Create single-element vec and concat */
-  RV_ROOT* single = RV_EMPTY();
-  RV_ROOT* s1 = RV_PUSH_BACK(single, value);
-  RV_UNREF(single);
-  RV_ROOT* result = RV_CONCAT(s1, temp);
-  RV_UNREF(s1);
-  RV_UNREF(temp);
-
-  /* Replace transient internals with result */
-  if (t->root) RV_RC_UNREF(t->root);
-  RV_RC_UNREF((RV_NODE*)t->tail);
-
-  t->root  = result->root ? (RV_NODE*)RV_RC_REF(result->root) : NULL;
-  t->tail  = (RV_LEAF*)RV_RC_REF((RV_NODE*)result->tail);
-  t->count = result->count;
-  t->shift = result->shift;
-
-  RV_UNREF(result);
-  return t;
-}
-
-/* --- Transient pop_front (via get + slice) --- */
-
-static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_FRONT(RV_TRANSIENT* t) {
-  if (!t) return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  /* Check if already invalidated */
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-  /* Owner check */
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-  /* Empty check */
-  if (t->count == 0) {
-    return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
-  }
-
-  /* Create a temporary persistent view of the transient's current state */
-  RV_NODE* tmp_root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
-  RV_LEAF* tmp_tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift, t->stride);
-
-  /* Get first element */
-  RV_GET_RESULT gr = RV_GET(temp, 0);
-  RRB_VEC_T popped = gr.value;
-
-  /* Slice off first element */
-  RV_ROOT* rest;
-  if (t->count == 1) {
-    rest = RV_EMPTY();
-  } else {
-    rest = RV_SLICE(temp, 1, t->count);
-  }
-  RV_UNREF(temp);
-
-  /* Replace transient internals with result */
-  if (t->root) RV_RC_UNREF(t->root);
-  RV_RC_UNREF((RV_NODE*)t->tail);
-
-  t->root  = rest->root ? (RV_NODE*)RV_RC_REF(rest->root) : NULL;
-  t->tail  = (RV_LEAF*)RV_RC_REF((RV_NODE*)rest->tail);
-  t->count = rest->count;
-  t->shift = rest->shift;
-
-  RV_UNREF(rest);
-  return (RV_TRANSIENT_POP_RESULT_T){.transient = t, .value = popped, .found = true};
-}
-
-#endif /* !RRB_VEC_GC_MODE — end of transient API */
-
 /* --- Map into (cross-type) --- */
 
 #ifdef RRB_VEC_MAP_INTO_DEST_NAME
@@ -2031,9 +1427,6 @@ static inline RV_MAP_INTO_DEST_ROOT* RV_MAP_INTO(RV_ROOT* r, RV_MAP_INTO_FN fn) 
 
 /* --- Map and filter --- */
 
-#ifdef RRB_VEC_GC_MODE
-/* GC mode: use persistent push_back (no transients available) */
-
 static inline RV_ROOT* RV_MAP(RV_ROOT* r, RV_MAP_FN fn) {
   if (!r || r->count == 0) return RV_EMPTY();
 
@@ -2064,220 +1457,6 @@ static inline RV_ROOT* RV_FILTER(RV_ROOT* r, RV_PRED_FN pred) {
   return result;
 }
 
-#else /* !RRB_VEC_GC_MODE */
-/* RC mode: use transient push_back for efficiency */
-
-static inline RV_ROOT* RV_MAP(RV_ROOT* r, RV_MAP_FN fn) {
-  RV_ROOT* empty = RV_EMPTY();
-  if (!r || r->count == 0) return empty;
-
-  RV_TRANSIENT* t = RV_TRANSIENT_FN(empty);
-  RV_UNREF(empty);
-
-  RV_ITER_T it = RV_ITER_INIT(r);
-  while (1) {
-    RV_ITER_RESULT ir = RV_ITER_NEXT(&it);
-    if (ir.done) break;
-    RV_TRANSIENT_PUSH_BACK(t, fn(ir.value));
-  }
-
-  RV_ROOT* result = RV_PERSISTENT_FN(t);
-  RV_RC_UNREF(t);
-  return result;
-}
-
-static inline RV_ROOT* RV_FILTER(RV_ROOT* r, RV_PRED_FN pred) {
-  RV_ROOT* empty = RV_EMPTY();
-  if (!r || r->count == 0) return empty;
-
-  RV_TRANSIENT* t = RV_TRANSIENT_FN(empty);
-  RV_UNREF(empty);
-
-  RV_ITER_T it = RV_ITER_INIT(r);
-  while (1) {
-    RV_ITER_RESULT ir = RV_ITER_NEXT(&it);
-    if (ir.done) break;
-    if (pred(ir.value)) {
-      RV_TRANSIENT_PUSH_BACK(t, ir.value);
-    }
-  }
-
-  RV_ROOT* result = RV_PERSISTENT_FN(t);
-  RV_RC_UNREF(t);
-  return result;
-}
-
-#endif /* RRB_VEC_GC_MODE */
-
-/* --- Transient iterator (RC mode only) --- */
-
-#ifndef RRB_VEC_GC_MODE
-
-#define RV_TRANSIENT_ITER_T    RV_NS(_transient_iter)
-#define RV_TRANSIENT_ITER_INIT RV_NS(_transient_iter_init)
-#define RV_TRANSIENT_ITER_NEXT RV_NS(_transient_iter_next)
-
-typedef struct RV_TRANSIENT_ITER_T {
-  RV_TRANSIENT* transient;
-  uint32_t      index;
-  RV_LEAF*      leaf;
-  uint32_t      leaf_base;
-} RV_TRANSIENT_ITER_T;
-
-static inline RV_TRANSIENT_ITER_T RV_TRANSIENT_ITER_INIT(RV_TRANSIENT* t) {
-  RV_TRANSIENT_ITER_T it;
-  memset(&it, 0, sizeof(it));
-  if (!t || THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
-    return it;
-  }
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return it;
-  }
-  it.transient = t;
-  if (t->count > 0) {
-    /* Seed with the first leaf */
-    uint32_t tail_off = t->count - t->tail->count;
-    if (tail_off == 0) {
-      /* All elements in tail */
-      it.leaf = t->tail;
-      it.leaf_base = 0;
-    } else {
-      /* First leaf is in the tree — traverse leftmost path */
-      RV_NODE* node = t->root;
-      for (uint32_t level = t->shift; level > 0; level -= RV_BITS) {
-        RV_INTERNAL* n = (RV_INTERNAL*)node;
-        node = n->children[0];
-      }
-      it.leaf = (RV_LEAF*)node;
-      it.leaf_base = 0;
-    }
-  }
-  return it;
-}
-
-static inline RV_ITER_RESULT RV_TRANSIENT_ITER_NEXT(RV_TRANSIENT_ITER_T* it) {
-  if (!it->transient || it->index >= it->transient->count) {
-    return (RV_ITER_RESULT){.done = true};
-  }
-  uint32_t local = it->index - it->leaf_base;
-  if (local >= it->leaf->count) {
-    /* Need to advance to next leaf */
-    uint32_t tail_off = it->transient->count - it->transient->tail->count;
-    if (it->index >= tail_off) {
-      /* In tail */
-      it->leaf = it->transient->tail;
-      it->leaf_base = tail_off;
-    } else {
-      /* In tree — traverse to find leaf */
-      RV_NODE* node = it->transient->root;
-      uint32_t idx = it->index;
-      for (uint32_t level = it->transient->shift; level > 0; level -= RV_BITS) {
-        RV_INTERNAL* n = (RV_INTERNAL*)node;
-        uint32_t slot;
-        if (n->size_table) {
-          slot = 0;
-          while (n->size_table[slot] <= idx) slot++;
-          if (slot > 0) idx -= n->size_table[slot - 1];
-        } else {
-          slot = (idx >> level) & RV_MASK;
-          idx -= slot << level;
-        }
-        node = n->children[slot];
-      }
-      it->leaf = (RV_LEAF*)node;
-      it->leaf_base = it->index - idx;
-    }
-    local = it->index - it->leaf_base;
-  }
-  RRB_VEC_T val = it->leaf->elements[local * it->leaf->stride];
-  it->index++;
-  return (RV_ITER_RESULT){.value = val, .done = false};
-}
-
-/* --- Transient for_each --- */
-
-#define RV_TRANSIENT_FOR_EACH RV_NS(_transient_for_each)
-
-typedef void (*RV_NS(_for_each_fn))(RRB_VEC_T);
-
-static inline void RV_TRANSIENT_FOR_EACH(RV_TRANSIENT* t, RV_NS(_for_each_fn) fn) {
-  if (!t || THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) return;
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return;
-  }
-  RV_TRANSIENT_ITER_T it = RV_TRANSIENT_ITER_INIT(t);
-  while (1) {
-    RV_ITER_RESULT ir = RV_TRANSIENT_ITER_NEXT(&it);
-    if (ir.done) break;
-    fn(ir.value);
-  }
-}
-
-/* --- Transient map --- */
-
-#define RV_TRANSIENT_MAP RV_NS(_transient_map)
-
-static inline RV_TRANSIENT* RV_TRANSIENT_MAP(RV_TRANSIENT* t, RV_MAP_FN fn) {
-  if (!t) return NULL;
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) return NULL;
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-
-  RV_ROOT* empty_root = RV_EMPTY();
-  RV_TRANSIENT* result = RV_TRANSIENT_FN(empty_root);
-  RV_UNREF(empty_root);
-
-  RV_TRANSIENT_ITER_T it = RV_TRANSIENT_ITER_INIT(t);
-  while (1) {
-    RV_ITER_RESULT ir = RV_TRANSIENT_ITER_NEXT(&it);
-    if (ir.done) break;
-    RV_TRANSIENT_PUSH_BACK(result, fn(ir.value));
-  }
-
-  return result;
-}
-
-/* --- Transient filter --- */
-
-#define RV_TRANSIENT_FILTER RV_NS(_transient_filter)
-
-static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred) {
-  if (!t) return NULL;
-  if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) return NULL;
-  if (!THREAD_EQUAL(THREAD_SELF(), t->owner)) {
-#ifndef NDEBUG
-    assert(0 && "transient used by non-owner thread");
-#endif
-    return NULL;
-  }
-
-  RV_ROOT* empty_root = RV_EMPTY();
-  RV_TRANSIENT* result = RV_TRANSIENT_FN(empty_root);
-  RV_UNREF(empty_root);
-
-  RV_TRANSIENT_ITER_T it = RV_TRANSIENT_ITER_INIT(t);
-  while (1) {
-    RV_ITER_RESULT ir = RV_TRANSIENT_ITER_NEXT(&it);
-    if (ir.done) break;
-    if (pred(ir.value)) {
-      RV_TRANSIENT_PUSH_BACK(result, ir.value);
-    }
-  }
-
-  return result;
-}
-
-#endif /* !RRB_VEC_GC_MODE — end of transient iterator/map/filter */
 
 /* --- Cleanup all internal macros --- */
 
@@ -2331,10 +1510,6 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_SET_WIDE
 #undef RV_FROM_ARRAY_STRIDED
 
-#ifndef RRB_VEC_GC_MODE
-#undef RV_NODE_DESTROY
-#undef RV_ROOT_DESTROY
-#endif
 #undef RV_MK_LEAF
 #undef RV_MK_INTERNAL
 #undef RV_MK_ROOT
@@ -2368,31 +1543,9 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_EQ_FN
 #undef RV_CMP_FN
 
-#ifndef RRB_VEC_GC_MODE
-#undef RV_TRANSIENT
-#undef RV_TRANSIENT_FN
-#undef RV_PERSISTENT_FN
-#undef RV_TRANSIENT_PUSH_BACK
-#undef RV_TRANSIENT_PUSH_TAIL
-#undef RV_TRANSIENT_SET
-#undef RV_TRANSIENT_SET_IN_TREE
-#undef RV_TRANSIENT_POP_BACK
-#undef RV_TRANSIENT_POP_RESULT_T
-#undef RV_TRANSIENT_REMOVE_RIGHTMOST
-#undef RV_TRANSIENT_PUSH_FRONT
-#undef RV_TRANSIENT_POP_FRONT
-#undef RV_TRANSIENT_ITER_T
-#undef RV_TRANSIENT_ITER_INIT
-#undef RV_TRANSIENT_ITER_NEXT
-#undef RV_TRANSIENT_FOR_EACH
-#undef RV_TRANSIENT_MAP
-#undef RV_TRANSIENT_FILTER
-#endif
-
 #undef RV_NODE_INTERNAL_VAL
 #undef RV_NODE_LEAF_VAL
 
-#undef RV_RC_ALLOC
 #undef RV_RC_REF
 #undef RV_RC_UNREF
 #undef RV_RC_COUNT
@@ -2405,13 +1558,10 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_BRANCH
 #undef RV_MASK
 
-#ifdef RRB_VEC_GC_MODE
-#undef RRB_VEC_GC_MODE
 #undef RRB_VEC_GC_ALLOC
 #undef RRB_VEC_GC_OBJ_INTERNAL
 #undef RRB_VEC_GC_OBJ_LEAF
 #undef RRB_VEC_GC_OBJ_ROOT
-#endif
 
 #ifdef RRB_VEC_ALLOC_DEFAULTED
 #undef RRB_VEC_ALLOCATOR
