@@ -266,6 +266,64 @@ typedef pthread_mutex_t platform_mutex_t;
 
 /*
  * ---------------------------------------------------------------------------
+ * Condition variable
+ *
+ * Pairs with platform_mutex_t. Mutex must be held when calling COND_WAIT*.
+ * COND_WAIT_FOR_MS returns 0 on signal, non-zero on timeout. The mutex may
+ * be released and re-acquired internally; the caller must re-check its
+ * predicate after waking.
+ * ---------------------------------------------------------------------------
+ */
+
+#ifdef __EMSCRIPTEN__
+
+/* Single-threaded: no waiters, no signaling */
+typedef int platform_cond_t;
+#define COND_INIT(c)          ((void)(c))
+#define COND_DESTROY(c)       ((void)(c))
+#define COND_WAIT(c, m)       ((void)(c), (void)(m))
+#define COND_WAIT_FOR_MS(c, m, ms) ((void)(c), (void)(m), (void)(ms), 0)
+#define COND_SIGNAL(c)        ((void)(c))
+#define COND_BROADCAST(c)     ((void)(c))
+
+#elif defined(_WIN32)
+
+typedef CONDITION_VARIABLE platform_cond_t;
+#define COND_INIT(c)      InitializeConditionVariable(&(c))
+#define COND_DESTROY(c)   ((void)(c))
+#define COND_WAIT(c, m)   SleepConditionVariableCS(&(c), &(m), INFINITE)
+#define COND_WAIT_FOR_MS(c, m, ms) \
+    (SleepConditionVariableCS(&(c), &(m), (DWORD)(ms)) ? 0 : 1)
+#define COND_SIGNAL(c)    WakeConditionVariable(&(c))
+#define COND_BROADCAST(c) WakeAllConditionVariable(&(c))
+
+#else
+
+typedef pthread_cond_t platform_cond_t;
+#define COND_INIT(c)      pthread_cond_init(&(c), NULL)
+#define COND_DESTROY(c)   pthread_cond_destroy(&(c))
+#define COND_WAIT(c, m)   pthread_cond_wait(&(c), &(m))
+static inline int platform__cond_timedwait_ms(pthread_cond_t *c,
+                                              pthread_mutex_t *m,
+                                              long ms) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += ms / 1000;
+    ts.tv_nsec += (ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec  += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    return pthread_cond_timedwait(c, m, &ts);
+}
+#define COND_WAIT_FOR_MS(c, m, ms) platform__cond_timedwait_ms(&(c), &(m), (ms))
+#define COND_SIGNAL(c)    pthread_cond_signal(&(c))
+#define COND_BROADCAST(c) pthread_cond_broadcast(&(c))
+
+#endif
+
+/*
+ * ---------------------------------------------------------------------------
  * Read-Write Lock
  * ---------------------------------------------------------------------------
  */

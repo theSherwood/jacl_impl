@@ -670,6 +670,54 @@ between mutable load and consume" check in the compiler is fragile —
 loads can be transitive (load atom → load field → load field), and
 allocation can be hidden inside helper functions.
 
+### 10/§11 attempt aborted (2026-05-13)
+
+A first attempt at the §10+§11 fix — replacing the worker-loop's
+progressive sleep backoff with a bounded short-spin then a CV wait,
+signaled by `push_inbox` / `push_pinned` — exposed a latent GC race
+that is **not new** but only manifests under the higher concurrency
+the CV change produces. Pre-CV baseline `gc_stress_atom.jacl` crashed
+~1/30; post-CV ~9/10.
+
+**Race**: `jacl_future_resolve` detaches the `FutureWaiter` chain
+from `f->waiters` and returns it to `runtime__schedule_waiters`,
+which iterates and pushes each waiter's continuation as an inbox
+task. Between the detach and the iteration, the chain is held only
+by a raw C local pointer — not a GC root. A concurrent
+`gc_concurrent_collect` enumerating roots in this window has no path
+to the chain, sweeps the `FutureWaiter` nodes, and the iteration
+then reads zeroed memory (`waiters->continuation` decodes to a
+state-machine whose `sm_closure` is zero, SEGV on
+`runtime__schedule_sm_resumption`).
+
+The fix attempt added a per-worker `scheduling_waiters` slot
+published inside `jacl_future_resolve` (before detach) and scanned
+in `gc_enumerate_roots`. It did get traced — the debug output
+confirmed slot writes and GC reads — but the crash persisted, with
+state-machines that *should* have been reachable through the chain
+showing up zeroed. Either there's a second window I haven't
+identified, or the SM is held by another path (e.g. `OP_SPAWN`'s
+direct `runtime__schedule_sm_resumption` at `vm.c:8574`,
+`runtime__complete_parallel_slot`, or `runtime__complete_race_slot`)
+that has its own unrooted window.
+
+**Status**: reverted. The platform-level CV abstraction
+(`COND_INIT` / `COND_WAIT` / `COND_WAIT_FOR_MS` / `COND_SIGNAL` /
+`COND_BROADCAST`) landed in `lib/platform/platform.h` and is ready
+for a second attempt. The worker-loop change and the
+`scheduling_waiters` rooting are not committed.
+
+**Next steps when revisiting**:
+1. Audit every non-schedule_waiters call site that pushes an SM
+   into the inbox without first rooting it (the four direct
+   `schedule_sm_resumption` callers and any `submit_*_task` path
+   that takes a freshly-allocated SM).
+2. Adopt a single discipline: every JaclVal handed to a task as
+   `gc_root` must be held by *something* the GC scans for the
+   duration of the call that constructs the task (current_worker's
+   slot, scheduling_waiters slot, or the source field).
+3. Land CV after the race fix has its own regression test.
+
 ### 10. Single global inbox is a contention point
 `runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external
 submission, plus all pinned-on-fallback, plus most spawn / SM resumption. The
