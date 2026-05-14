@@ -1,0 +1,113 @@
+# Post rope-summary-incremental fix, 2026-05-14
+# vs 2026-05-14_post_tier2_baseline.jsonl
+
+bench-diff: 83eba88 → 83eba88
+  baseline: /jacl_impl/docs/profiles/2026-05-14_post_tier2_baseline.jsonl
+  new:      /jacl_impl/docs/profiles/2026-05-14_rope_summarized_after.jsonl
+
+  [box_churn]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                  1.14M          1.17M   +   2.2%
+    wall_ns_min                    88.44K              0    -100.0%
+    wall_ns_max            18446744073.71G          3.29M    -100.0%
+    gc_cycles                           3              3       0.0%
+    gc_total_ns                     5.54M          4.13M     -25.4%
+    gc_max_ns                       3.83M          2.99M     -22.0%
+    gc_mark_rounds                      3              3       0.0%
+    bytes_allocated                10.09M         10.09M       0.0%
+    allocs                        420.42K        420.42K       0.0%
+    slow_path_allocs                  158            156      -1.3%
+    tasks_executed                    213            213       0.0%
+    steal_attempts                    405            414   +   2.2%
+    steal_successes                     0              0          —
+    idle_sleep_ns                 403.03M        521.95M   +  29.5%
+    inbox_pops                        210            210       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks               120            102     -15.0%
+
+  [collection_churn]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                  2.00M          1.18M     -41.1%
+    wall_ns_min                   325.00K        141.03K     -56.6%
+    wall_ns_max            18446744073.71G 18446744073.71G      -0.0%
+    gc_cycles                           7              8   +  14.3%
+    gc_total_ns                    50.10M         30.52M     -39.1%
+    gc_max_ns                      16.25M         12.47M     -23.3%
+    gc_mark_rounds                      7              8   +  14.3%
+    bytes_allocated                83.32M         83.32M       0.0%
+    allocs                        509.67K        509.67K       0.0%
+    slow_path_allocs                1.62K          1.82K   +  12.3%
+    tasks_executed                    217            218   +   0.5%
+    steal_attempts                    463            385     -16.8%
+    steal_successes                     3              3       0.0%
+    idle_sleep_ns                 493.81M        449.79M      -8.9%
+    inbox_pops                        210            210       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks               688            838   +  21.8%
+
+  [spawn_chain]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                  3.00M          2.00M     -33.3%
+    wall_ns_min                     1.00M        373.17K     -62.7%
+    wall_ns_max                     7.00M         35.00M   + 400.0%
+    gc_cycles                           1              1       0.0%
+    gc_total_ns                     2.00M              0    -100.0%
+    gc_max_ns                       2.00M              0    -100.0%
+    gc_mark_rounds                      3              3       0.0%
+    bytes_allocated                 2.60M          2.60M   +   0.0%
+    allocs                         43.24K         43.25K   +   0.0%
+    slow_path_allocs                   44             40      -9.1%
+    tasks_executed                 21.41K         21.41K   +   0.0%
+    steal_attempts                  6.61K          6.16K      -6.9%
+    steal_successes                 1.78K          1.83K   +   2.8%
+    idle_sleep_ns                 712.48M        790.84M   +  11.0%
+    inbox_pops                        210            210       0.0%
+    pinned_inbox_pops              10.50K         10.50K       0.0%
+    current_heap_blocks                40             40       0.0%
+
+  [string_concat]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                  4.00M          2.31M     -42.3%
+    wall_ns_min                   916.55K        485.82K     -47.0%
+    wall_ns_max                    23.08M 18446744073.71G  +79917540320364.4%
+    gc_cycles                          15             14      -6.7%
+    gc_total_ns                   125.18M         75.51M     -39.7%
+    gc_max_ns                      25.00M         19.00M     -24.0%
+    gc_mark_rounds                     15             14      -6.7%
+    bytes_allocated               268.38M        268.38M       0.0%
+    allocs                        312.27K        312.27K       0.0%
+    slow_path_allocs                7.83K          7.83K      -0.0%
+    tasks_executed                    225            224      -0.4%
+    steal_attempts                    771            520     -32.6%
+    steal_successes                    12              7     -41.7%
+    idle_sleep_ns                 829.60M          1.23G   +  48.7%
+    inbox_pops                        210            210       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks             1.31K          1.50K   +  13.9%
+
+
+# Post-fix profile, string_concat
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+5.164 100.00  5.164 100.00   <Total>
+1.871  36.24  1.871  36.24   gc__find_fit_in_block
+0.751  14.53  0.921  17.83   gc_sweep_concurrent
+0.610  11.82  0.630  12.21   rope_string__compute_hash
+0.600  11.63  0.600  11.63   <static>@0x188051 (<libc.so.6>)
+0.160   3.10  1.271  24.61   vm__run
+0.130   2.52  0.140   2.71   clock_nanosleep
+0.130   2.52  0.130   2.52   unicode_grapheme_next.part.0
+0.120   2.33  0.130   2.52   gc_sweep_intern_table.part.0
+0.080   1.55  0.080   1.55   pthread_cond_signal
+0.060   1.16  0.130   2.52   gc__bump_alloc
+0.060   1.16  2.422  46.90   rope_st_concat
+0.050   0.97  2.312  44.77   gc_alloc
+0.050   0.97  2.492  48.26   rope_concat
+0.050   0.97  0.170   3.29   rope_from_str.part.0

@@ -104,6 +104,8 @@ without root-causing. All FIXED:
 | E | TSAN-baseline triage | Audit had dismissed 8 TSAN failures as "pre-existing flakes" without triaging; 4 turned out to be real bugs (PATH_MAX, syntax TLS, jacl_run stack-local intern_table, ctx-state race cluster) — see commits `c7dea0d` / `491ad0d` / `7469a98` / `2465a10`. TSAN baseline now 83 pass / 5 fail. |
 | E+ | TSAN-baseline cleanup | Closed 2 of the 5 remaining failures (`rwlock`, `cross_thread_string`) and reclassified `perf` as a `jacl_harness` sibling once the WorkerStats counter race got fixed. Surfaced + fixed a real bug in `sum_tree.h` (per-instantiation handler state needed `JACL_THREAD_LOCAL`). TSAN baseline now 85 pass / 3 fail. |
 | E++ | ctx-pool elimination (§18) | Surfaced via `perf`: the ctx pool's lockless free-list reuse can recycle slots that SM state fields still reference across worker boundaries. Real UAF; not a §S5 missing-atomics issue. Eliminated the pool entirely (option 1) — `ctx_pool_alloc` → direct `gc_alloc`, `ctx_pool_free` → no-op. Closes the race; bench is *faster* (collection_churn -20%, spawn_chain -13%). Closed `perf` together with the §S5 slice 1 (`vm->env`) and a `GcStats` cycle-counter atomic fix. TSAN baseline now 86 pass / 2 fail. |
+| E+++ | TSAN baseline triage (2026-05-14) | Triaged the 2 remaining failures (`jacl_harness`, `chase_lev_stress`) rather than fixing. Walked the actual TSAN output for both. `jacl_harness`: **1 distinct site** — `sm->fields[i] = value` at `vm.c:8300` paired with the GC trace at `gc_collect.c:303`. The `gc_write_barrier` two lines before the write maintains SATB correctness; TSAN can't see the happens-before because it runs through grey-buffer count atomics, not the slot itself. `chase_lev_stress`: **2 distinct sites** — `chase_lev.h:268` (fence-mediated data store, the test doesn't opt into `CHASE_LEV_ATOMIC_DATA`) and `test_helpers.h:86` (epoch-protected `free`; TSAN can't track happens-before through the epoch wait loop). Both documented as known-and-safe. Coverage of the runtime's actual chase_lev usage is `chaos_pinned_deque`/`chaos_gc_deque_scan` (both TSAN-clean); coverage of the heap-pointer-slot write discipline is the unified-barrier regression tests + 250-run gc_stress soak. The §S5 atomic-conversion pass remains available but is declined: only 1 of the named sites surfaces under current workloads, and the conversion would introduce an ongoing maintenance footgun (every new heap-pointer slot write must route through the atomic primitive or TSAN cleanliness silently regresses). TSAN baseline 86 pass / 2 fail, both known-and-safe. |
+| F | Rope-summary incremental combine (2026-05-14) | The post-tier-2 profile put `unicode_grapheme_next` at 19% of `string_concat` CPU — biggest non-GC sink, unmasked by tier-2's alloc-path wins. Root cause: `sum_tree.h`'s `ST_MK_LEAF` re-runs `summarize(elems, count)` over the full merged byte buffer every time `ST_CONCAT` merges two leaves, even though both child summaries are already cached on the leaves and the rope's invariants (codepoint-aligned splits, junctions made grapheme-safe by `rope_concat`) make summary monoidal across the merge. Added `ST_MK_LEAF_SUMMARIZED(elems, count, summary)` that accepts a precomputed summary; the three leaf-merge sites in `ST_CONCAT` (same-height, height-left>right, height-right>left) now pass `combine(ll->summary, rl->summary)` instead of forcing a full re-scan. Wins (BENCH_TIMED_ITERS=200, single run): `string_concat` wall_median **-42.3%**, `collection_churn` **-41.1%**, `spawn_chain` **-33.3%**, `box_churn` +2% (noise). Profile confirms: `unicode_grapheme_next` 19% → **2.5%**, `rope_summary_summarize` out of the top 18 entirely. Full normal-mode suite 88/88, 5×30 gc_stress soak clean, 30s TSAN chaos_soak clean (153K tasks), TSAN baseline unchanged. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -123,11 +125,16 @@ heap-pointer slot write on any GC-managed object goes through
 `gc_write_barrier`, unconditional on both deletion and insertion
 sides.
 
-**TSAN baseline (3 remaining failures, all in the same family)**:
+**TSAN baseline (2 remaining failures, both documented as known-and-safe)**:
 
 A second pass (2026-05-14) closed two of the five originally-listed
 failures and clarified that two of the remaining three are the same
-underlying issue as `jacl_harness`. Surprises from the pass:
+underlying issue as `jacl_harness`. A third pass (2026-05-14, later)
+triaged the two stragglers — `jacl_harness` and `chase_lev_stress` —
+and documented both as known-and-safe rather than open. Both are
+TSAN-blindness on barrier/fence/epoch-mediated synchronization, not
+missed barriers; see the table below for the per-test triage.
+Surprises from the second pass:
 
 - `cross_thread_string` was framed as a missing release/acquire on the
   `SharedSlot` publication signal. Fixing that exposed a deeper race
@@ -150,14 +157,19 @@ underlying issue as `jacl_harness`. Surprises from the pass:
 |------|--------|--------------------------------------|--------|
 | ~~`rwlock`~~ | **FIXED** (2026-05-14) | `g_state.max_concurrent` updated under read lock by two readers — read locks don't serialize mutations. | CAS-loop atomic peak update. |
 | ~~`cross_thread_string`~~ | **FIXED** (2026-05-14) | (a) `SharedSlot.ready` was the publication signal but plain-read/written. (b) `sum_tree.h` per-instantiation `ST_HANDLER_STATE` was a non-TLS global written by every rope op. | (a) Atomic load/store explicit with release/acquire. (b) `JACL_THREAD_LOCAL` on the handler-state declaration. |
-| `chase_lev_stress` | open | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
+| `chase_lev_stress` | known, triaged 2026-05-14 | 38 warnings across 2 distinct sites, both fence/epoch-mediated. (a) `chase_lev.h:268` — plain data store, synchronized via the release-store on `bottom` two lines later; the test doesn't `#define CHASE_LEV_ATOMIC_DATA` (the TSAN-friendly mode `src/runtime.c` opts into). (b) `test_helpers.h:86` — `free()` of a retired buffer that a thief read earlier, safe by the epoch protocol; TSAN can't see happens-before through the epoch wait loop. | Documented as known-and-safe. Real coverage of the runtime's actual usage is `chaos_pinned_deque` + `chaos_gc_deque_scan` (both TSAN-clean). Even setting `CHASE_LEV_ATOMIC_DATA` in the test would only close site (a); site (b) is fundamentally TSAN-invisible. Porting the runtime's wrapper into the standalone test would duplicate runtime logic in tests — declined. |
 | ~~`perf`~~ | **FIXED** (2026-05-14) | (a) `WorkerStats` counter race — atomic load/store. (b) `gc_enumerate_roots` reads `vm->env` slots — §S5 slice 1. (c) ctx-pool-vs-SM-state UAF — pool eliminated entirely (§18 option 1). (d) `GcStats` cycle-counter race — atomic load/store, same pattern as WorkerStats. |
-| `jacl_harness` | open | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, vm->env, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
+| `jacl_harness` | known, triaged 2026-05-14 | Triage run (`TSAN_OPTIONS=halt_on_error=0`) surfaced **1 distinct race site** across the entire suite: write at `vm.c:8300` (`sm->fields[field_index] = value` in `OP_SET_STATE_FIELD`) vs read at `gc_collect.c:303` (the OBJ_STATE_MACHINE trace). Two lines before the write (`vm.c:8298`), `gc_write_barrier` already fires the SATB deletion push, so the GC always sees either the old value (via grey buffer) or the new value (via the slot). The happens-before runs through the grey-buffer count atomics, not through `sm->fields[i]` directly — TSAN's per-location vector clocks can't observe it. Other audit-named sites (`cl->upvalues`, stream fields, `vm->env`) share the shape but didn't surface in this workload. No missed §9 sibling. | Documented as known-and-safe. The §S5 atomic-conversion pass (convert every heap-pointer slot write/read to `ATOMIC_STORE_EXPLICIT`/`ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE) would silence it but is declined for now: only 1 of the named sites actually surfaces, the conversion has near-zero runtime impact but introduces an ongoing maintenance footgun (every new heap-pointer slot write must use the atomic primitive or TSAN cleanliness silently regresses). Revisit if a future Phase-E-style triage finds bugs masked here, or if a new site does surface. |
 
-`chase_lev_stress` is a test-infrastructure issue (the bare primitive
-without the runtime's wrapper). `jacl_harness` is the remaining §S5
-heap-pointer-slot conversion (sm->fields, cl->upvalues, stream
-fields, etc.). None blocks shipping.
+Both remaining failures are **TSAN-blindness on barrier/fence/epoch-
+mediated synchronization**, not missed barriers. Neither blocks
+shipping. The 2026-05-14 triage walked the actual TSAN output for
+both — see commit history for the run details. The `jacl_harness`
+report came from a single bytecode site whose two-line barrier
+context is in the source; the `chase_lev_stress` reports are split
+between the well-known fence-store pattern and the epoch-protected
+reclamation pattern, both intentionally TSAN-invisible in the
+primitive.
 
 **Known theoretical hole, not surfacing as a bug today**: §9
 recommendation #2 (capture mutable-load values into a per-worker
@@ -315,11 +327,41 @@ The remaining work is non-correctness, performance/architecture:
    the 1ms CV wake-up timeout. **§14 tier-1 + tier-2** are now both
    landed (tier-2 in 2026-05-14: per-block `first_free_line` hint —
    wall_median -16.9% to -59.1% on alloc-heavy scenarios, stacked on
-   top of tier-1's wins). Next perf levers: §14 tier-3 (heap-level
-   intrusive free-run list — defer until a fresh profile says it's
-   still the top sink), §13 (computed-goto VM dispatch for the
-   `box_churn` dispatch-bound regime), rope-summary perf in
-   `string_concat`.
+   top of tier-1's wins). **§14 tier-3 attempted and reverted
+   (2026-05-14)** — intrusive free-run list designed exactly as the
+   audit's tier-3 sketch (head pointer on ThreadHeap, nodes written
+   into the start of each free run, sweep rebuilds the list each
+   cycle, allocator slow path pops first-fit before the line-map
+   scan). Bench regression of +21% to +650% wall_median, driven by
+   three interactions the audit's sketch didn't surface:
+   (1) **Walker invariant**: sweep's Phase 1 walker reads
+       `alloc_total` from every 8-byte boundary in dead-zone bytes,
+       expecting zero so it can advance 8. Intrusive `GCFreeRun`
+       nodes put non-zero bytes there; `alloc_total` at byte offsets
+       6/14/22 only reads zero by canonical-pointer luck on x86_64,
+       and 4 bytes of struct padding aren't zeroed at all. Walker
+       mis-advances into garbage and rescan-loops, which inflated
+       `gc_total_ns` 8x on string_concat.
+   (2) **search_block locality**: tier-1's `search_block` anchor
+       keeps a worker allocating from one block until exhausted
+       (maximizing in-block locality); pop_fit picks an arbitrary
+       run from any block (LIFO from sweep order), forcing block-
+       bouncing. `current_heap_blocks` grew 14–23% on alloc-heavy
+       scenarios — more blocks, more sweep work.
+   (3) **List growth**: pop_fit is O(runs) under `blocks_mutex`,
+       and sweep pushed every free run with no size threshold. On
+       fragmented heaps (~1500 blocks in string_concat) the list
+       walk dominated slow-path latency.
+   Conclusion: tier-3 is more invasive than the audit framed and
+   needs a different design (e.g. non-intrusive node storage in a
+   separate slab, locality-preserving pop order, size-bucketed
+   lists). Not a quick win. **Reverted** (only AUDIT.md docs landed
+   from this attempt); pivoted to rope-summary perf instead —
+   **landed, see phase F row** (`ST_MK_LEAF_SUMMARIZED` short-
+   circuit in `ST_CONCAT`'s leaf-merge sites; `unicode_grapheme_next`
+   19% → 2.5% on `string_concat`, wall_median -42%). §13
+   (computed-goto) remains the next lever for the dispatch-bound
+   regime (`vm__run` at 52% of `box_churn`).
 
 ### Housekeeping (2026-05-13)
 
@@ -407,8 +449,11 @@ investigated separately (cache or lazy-evaluate the rope summary?).
 
 1. ~~**§14** — universal win, large magnitude, well-understood fix.~~
    **Tier-1 + tier-2 landed** (2026-05-13 + 2026-05-14). Tier-3
-   (heap-level intrusive free-run list) still available — defer
-   until a fresh profile says it's still the top sink.
+   **attempted and reverted (2026-05-14)** — see the "Punch list"
+   item #1 above for the design that didn't pan out and the three
+   interactions that broke it (walker invariant, search_block
+   locality, list growth). Open to a redesign but no longer a quick
+   win.
 2. ~~**§11 + §10** — required for spawn-heavy throughput; the two
    are coupled (a real condition variable needs a per-worker
    inbox or sharded queue to wake the right worker).~~
@@ -417,10 +462,32 @@ investigated separately (cache or lazy-evaluate the rope summary?).
    turned out to be partly wrong: the fast path pushes to own
    `public_deque` (mutex-free, no CV signal), and the existing
    global CV with 1ms timeout handles externals fine.
-3. **VM dispatch (§13 family)** — computed-goto rewrite of
-   `vm__run` for the dispatch-bound regime.
-4. **Rope summary perf** — separate investigation; not on the
-   AUDIT.md list, surfaced by this profile.
+3. ~~**Rope summary perf** — promoted to top of remaining queue by
+   the 2026-05-14 post-tier-2 profile. `unicode_grapheme_next` is
+   19% of `string_concat`, with `rope_summary_summarize` (5%) and
+   `rope_string__compute_hash` (6%) right behind — ~30% of the
+   scenario in the rope hot path. Tier-2's alloc-path wins
+   unmasked this (it was 8% of mixed before; now it's the largest
+   single non-GC sink). Likely fixable with a cached/lazy rope
+   summary.~~ **Landed (2026-05-14)** — see phase F row above.
+   `ST_MK_LEAF_SUMMARIZED` short-circuit in `ST_CONCAT`'s three
+   leaf-merge sites cut `unicode_grapheme_next` 19% → 2.5% on
+   `string_concat`; wall_median -42% on `string_concat`. Adjacent
+   wins on `collection_churn` (-41%) and `spawn_chain` (-33%) too
+   — those scenarios don't use strings, so the deltas are likely
+   single-run noise, but worth re-measuring on a multi-run setup
+   if anyone investigates.
+4. **VM dispatch (§13 family)** — computed-goto rewrite of
+   `vm__run` for the dispatch-bound regime. `vm__run` is 52% of
+   `box_churn` post-tier-2. Bigger single-scenario delta than #3
+   but biggest scope (whole dispatch loop) and a portability
+   story (`&&label` GCC/Clang-only — needs MSVC fallback).
+5. **`rope_string__compute_hash`** — surfaced as the new top non-
+   GC sink on `string_concat` post-rope-summary fix (12%, up from
+   6% in absolute share because the total time shrank). Likely
+   benefits from the same caching pattern (cache hash on the rope
+   root, invalidate on mutation — though rope is persistent, so
+   invalidation is rare in practice).
 
 A regression bench is now available: `./build.sh --test=perf`
 prints JSONL stats for all four scenarios, and `tools/bench-diff.sh`

@@ -1,0 +1,114 @@
+# Fresh profile at 83eba88, 2026-05-14
+# Build: -O2 -g -fno-omit-frame-pointer, 2 workers, BENCH_TIMED_ITERS=3000
+# Post-tier-1, post-tier-2, post-§18 (ctx-pool elimination)
+
+## Mixed (all 4 scenarios)
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total    Incl. Total     Name
+CPU            CPU
+  sec.      %    sec.      %
+12.138 100.00  12.138 100.00   <Total>
+ 4.333  35.70   8.816  72.63   runtime__worker_loop
+ 2.152  17.72   2.152  17.72   gc__find_fit_in_block
+ 0.931   7.67   3.182  26.22   vm__run
+ 0.871   7.17   0.871   7.17   unicode_grapheme_next.part.0
+ 0.690   5.69   0.821   6.76   gc_sweep_concurrent
+ 0.560   4.62   0.560   4.62   <static>@0x188051 (<libc.so.6>)
+ 0.520   4.29   0.520   4.29   pthread_cond_signal
+ 0.260   2.14   0.270   2.23   <static>@0x98bf5 (<libc.so.6>)
+ 0.240   1.98   0.280   2.31   rope_string__compute_hash
+ 0.200   1.65   1.011   8.33   rope_summary_summarize
+ 0.180   1.48   0.190   1.57   clock_nanosleep
+ 0.120   0.99   0.160   1.32   gc__bump_alloc
+ 0.110   0.91   0.110   0.91   gc_sweep_intern_table.part.0
+ 0.090   0.74   2.572  21.19   gc_alloc
+ 0.070   0.58   0.350   2.89   jacl_map_mk_internal_copy
+ 0.060   0.49   0.060   0.49   jacl_val_hash
+
+## collection_churn
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+5.624 100.00  5.624 100.00   <Total>
+2.382  42.35  2.382  42.35   gc__find_fit_in_block
+0.841  14.95  4.113  73.13   vm__run
+0.560   9.96  0.640  11.39   gc_sweep_concurrent
+0.370   6.58  0.370   6.58   <static>@0x188051 (<libc.so.6>)
+0.270   4.80  1.381  24.56   jacl_map_mk_internal_copy
+0.130   2.31  0.130   2.31   jacl_val_hash
+0.110   1.96  2.702  48.04   gc_alloc
+0.110   1.96  0.771  13.70   jacl_vec_set_in_tree
+0.080   1.42  0.090   1.60   clock_nanosleep
+0.080   1.42  0.180   3.20   gc__bump_alloc
+0.060   1.07  0.260   4.63   jacl_map_set_recursive.constprop.0
+0.060   1.07  0.060   1.07   vm__env_set
+0.050   0.89  0.050   0.89   jacl_val_eq
+
+## box_churn
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.411 100.00  1.411 100.00   <Total>
+0.741  52.48  1.171  82.98   vm__run
+0.230  16.31  0.230  16.31   gc__find_fit_in_block
+0.090   6.38  0.090   6.38   <static>@0x188051 (<libc.so.6>)
+0.040   2.84  0.040   2.84   clock_nanosleep
+0.040   2.84  0.070   4.96   gc__bump_alloc
+0.040   2.84  0.340  24.11   gc_alloc
+0.040   2.84  0.090   6.38   gc_sweep_concurrent
+0.030   2.13  0.030   2.13   <static>@0x98bf5 (<libc.so.6>)
+0.030   2.13  0.040   2.84   <static>@0xaaa3b (<libc.so.6>)
+0.030   2.13  0.030   2.13   pthread_cond_signal
+0.030   2.13  0.030   2.13   vm__env_set
+0.020   1.42  0.020   1.42   <static>@0x3490 (<perf_bench>)
+0.010   0.71  0.010   0.71   <static>@0x66e6b (<libc.so.6>)
+
+## spawn_chain
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total    Incl. Total     Name
+CPU            CPU
+  sec.      %    sec.      %
+25.868 100.00  25.868 100.00   <Total>
+21.865  84.53  25.007  96.67   runtime__worker_loop
+ 0.801   3.09   0.801   3.09   pthread_cond_signal
+ 0.721   2.79   0.731   2.82   <static>@0x98bf5 (<libc.so.6>)
+ 0.590   2.28   1.751   6.77   vm__run
+ 0.400   1.55   0.440   1.70   clock_nanosleep
+ 0.170   0.66   0.170   0.66   <static>@0x98fb9 (<libc.so.6>)
+ 0.140   0.54   0.140   0.54   pthread_mutex_lock
+ 0.130   0.50   0.130   0.50   <static>@0x98f31 (<libc.so.6>)
+ 0.100   0.39   0.190   0.74   malloc
+ 0.090   0.35   0.120   0.46   <static>@0xaaa3b (<libc.so.6>)
+ 0.080   0.31   0.250   0.97   pthread_mutex_unlock
+ 0.070   0.27   1.601   6.19   runtime__state_machine_task_exec
+ 0.060   0.23   0.060   0.23   ctx_fork
+
+## string_concat
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+6.314 100.00  6.314 100.00   <Total>
+2.081  32.96  2.081  32.96   gc__find_fit_in_block
+1.231  19.49  1.231  19.49   unicode_grapheme_next.part.0
+0.781  12.36  0.941  14.90   gc_sweep_concurrent
+0.530   8.40  0.530   8.40   <static>@0x188051 (<libc.so.6>)
+0.360   5.71  0.410   6.50   rope_string__compute_hash
+0.310   4.91  1.471  23.30   rope_summary_summarize
+0.170   2.69  1.081  17.12   vm__run
+0.130   2.06  0.130   2.06   gc_sweep_intern_table.part.0
+0.090   1.43  0.090   1.43   clock_nanosleep
+0.060   0.95  2.492  39.46   gc_alloc
+0.050   0.79  0.050   0.79   <static>@0x98bf5 (<libc.so.6>)
+0.050   0.79  0.080   1.27   gc__bump_alloc
+0.040   0.63  0.050   0.79   <static>@0xaaa3b (<libc.so.6>)
+0.040   0.63  1.851  29.32   rope_concat
+0.040   0.63  0.250   3.96   rope_from_str.part.0
+0.040   0.63  2.402  38.03   rope_st_concat
