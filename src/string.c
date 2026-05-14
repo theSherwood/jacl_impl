@@ -486,10 +486,16 @@ int jacl_string_cmp(JaclVal a, JaclVal b) {
   return 0;
 }
 
-/* --- Compute FNV-1a hash over rope bytes in chunks (no large allocation) --- */
-
-uint32_t rope_string__compute_hash(rope r) {
-  uint32_t hash = 2166136261u;
+/* --- FNV-1a hash extension over rope bytes ---
+ *
+ * FNV-1a is a left-fold over input bytes: each byte XORs into the running
+ * state and the state gets multiplied by the FNV prime.  Crucially, that
+ * means hash(a ++ b) is computable as "start FNV from hash(a), then absorb
+ * b's bytes" — no need to re-fold a.  rope_string__hash_extend exposes that
+ * shape so callers building hash(a ++ b) where hash(a) is already known
+ * (e.g. OP_CONCAT) can pay only O(|b|) instead of O(|a| + |b|). */
+uint32_t rope_string__hash_extend(uint32_t prev_hash, rope r) {
+  uint32_t hash = prev_hash;
   size_t total = rope_byte_count(r);
   uint8_t chunk[256];
   size_t pos = 0;
@@ -504,6 +510,10 @@ uint32_t rope_string__compute_hash(rope r) {
     pos += n;
   }
   return hash;
+}
+
+uint32_t rope_string__compute_hash(rope r) {
+  return rope_string__hash_extend(2166136261u, r);
 }
 
 /* --- Create a JaclRopeString on the GC heap from raw bytes --- */

@@ -3264,7 +3264,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             free_rb = true;
           }
           rope rc = rope_concat(ra, rb);
-          uint32_t hash = rope_string__compute_hash(rc);
+          /* hash(a ++ b) = continue FNV-1a from hash(a) over b's bytes.
+           * jacl_val_hash(a) returns FNV-1a over a's bytes for every
+           * string variant (inline / heap / rope), so this avoids
+           * rescanning a's bytes — the dominant cost in append-loops. */
+          uint32_t hash = rope_string__hash_extend(jacl_val_hash(a), rb);
           JaclRopeString* rs = (JaclRopeString*)gc_alloc(
               &vm->heap, OBJ_ROPE_STRING, sizeof(JaclRopeString));
           rs->hash = hash;

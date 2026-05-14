@@ -1991,6 +1991,7 @@ extern bool jacl_string_eq (JaclVal a, JaclVal b);
 extern const char *jacl_string_flat_ptr (JaclVal v, char *buf, size_t buflen);
 extern int jacl_string_cmp (JaclVal a, JaclVal b);
 extern uint32_t rope_string__compute_hash (rope r);
+extern uint32_t rope_string__hash_extend  (uint32_t prev_hash, rope r);
 extern JaclVal jacl_rope_string_create (ThreadHeap *heap, const uint8_t *data, size_t len);
 extern bool jacl_utf8_validate (const char *data, size_t len);
 extern bool jacl_nfd_normalize (const char *data, size_t len, uint8_t *stack_buf, size_t stack_cap, uint8_t **out, size_t *out_len);
