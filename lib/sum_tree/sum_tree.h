@@ -72,6 +72,7 @@
 
 /* Internal helpers */
 #define ST_MK_LEAF          ST_NS(_mk_leaf)
+#define ST_MK_LEAF_SUMMARIZED ST_NS(_mk_leaf_summarized)
 #define ST_MK_INTERNAL      ST_NS(_mk_internal)
 #define ST_MK_ROOT          ST_NS(_mk_root)
 #define ST_RECOMPUTE_SUMMARY ST_NS(_recompute_summary)
@@ -246,6 +247,26 @@ static inline ST_LEAF* ST_MK_LEAF(const STREE_T* elems, size_t count) {
     memcpy(leaf->elements, elems, sizeof(STREE_T) * count);
   }
   leaf->summary = ST_HANDLER_STATE.summarize(leaf->elements, count);
+  return leaf;
+}
+
+/* Like MK_LEAF but takes a precomputed summary — used when merging two
+ * leaves whose summaries are already known.  Under the rope's leaf-alignment
+ * invariants (codepoint-aligned splits, junctions made grapheme-safe by the
+ * higher-level rope_concat), monoidal combine of the two child summaries
+ * equals summarize over the merged bytes, so this saves the O(count)
+ * re-scan of summarize (which is the dominant cost for grapheme-heavy
+ * summaries — UAX#29 break detection). */
+static inline ST_LEAF* ST_MK_LEAF_SUMMARIZED(const STREE_T* elems,
+                                              size_t count,
+                                              STREE_SUMMARY_T summary) {
+  ST_LEAF* leaf = (ST_LEAF*)ST_ALLOC_LEAF(sizeof(ST_LEAF));
+  leaf->header  = (ST_NODE){.type = ST_NODE_LEAF_VAL};
+  leaf->count   = count;
+  if (count > 0 && elems) {
+    memcpy(leaf->elements, elems, sizeof(STREE_T) * count);
+  }
+  leaf->summary = summary;
   return leaf;
 }
 
@@ -732,11 +753,14 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
       ST_LEAF* ll = (ST_LEAF*)left.node;
       ST_LEAF* rl = (ST_LEAF*)right.node;
       if (ll->count + rl->count <= STREE_LEAF_MAX) {
-        /* Merge into single leaf */
+        /* Merge into single leaf — summary combines monoidally because
+         * the higher-level rope_concat made the junction grapheme-safe
+         * and leaves are codepoint-aligned. */
         STREE_T merged_elems[STREE_LEAF_MAX];
         memcpy(merged_elems, ll->elements, sizeof(STREE_T) * ll->count);
         memcpy(merged_elems + ll->count, rl->elements, sizeof(STREE_T) * rl->count);
-        ST_LEAF* ml = ST_MK_LEAF(merged_elems, ll->count + rl->count);
+        STREE_SUMMARY_T merged_summary = ST_HANDLER_STATE.combine(ll->summary, rl->summary);
+        ST_LEAF* ml = ST_MK_LEAF_SUMMARIZED(merged_elems, ll->count + rl->count, merged_summary);
         return (ST_ROOT){.node = (ST_NODE*)ml, .count = total_count, .height = left.height};
       }
     } else if (left.node->type == ST_NODE_INTERNAL_VAL && right.node->type == ST_NODE_INTERNAL_VAL) {
@@ -780,7 +804,8 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
         STREE_T merged_elems[STREE_LEAF_MAX];
         memcpy(merged_elems, bl->elements, sizeof(STREE_T) * bl->count);
         memcpy(merged_elems + bl->count, rl->elements, sizeof(STREE_T) * rl->count);
-        merged_a = (ST_NODE*)ST_MK_LEAF(merged_elems, bl->count + rl->count);
+        STREE_SUMMARY_T merged_summary = ST_HANDLER_STATE.combine(bl->summary, rl->summary);
+        merged_a = (ST_NODE*)ST_MK_LEAF_SUMMARIZED(merged_elems, bl->count + rl->count, merged_summary);
       }
     } else if (bottom->type == ST_NODE_INTERNAL_VAL && right.node->type == ST_NODE_INTERNAL_VAL) {
       ST_INTERNAL* bi = (ST_INTERNAL*)bottom;
@@ -862,7 +887,8 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
         STREE_T merged_elems[STREE_LEAF_MAX];
         memcpy(merged_elems, ll->elements, sizeof(STREE_T) * ll->count);
         memcpy(merged_elems + ll->count, bl->elements, sizeof(STREE_T) * bl->count);
-        merged_a = (ST_NODE*)ST_MK_LEAF(merged_elems, ll->count + bl->count);
+        STREE_SUMMARY_T merged_summary = ST_HANDLER_STATE.combine(ll->summary, bl->summary);
+        merged_a = (ST_NODE*)ST_MK_LEAF_SUMMARIZED(merged_elems, ll->count + bl->count, merged_summary);
       }
     } else if (left.node->type == ST_NODE_INTERNAL_VAL && bottom->type == ST_NODE_INTERNAL_VAL) {
       ST_INTERNAL* li = (ST_INTERNAL*)left.node;
@@ -1135,6 +1161,7 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
 #undef ST_COPY_RANGE
 
 #undef ST_MK_LEAF
+#undef ST_MK_LEAF_SUMMARIZED
 #undef ST_MK_INTERNAL
 #undef ST_MK_ROOT
 #undef ST_RECOMPUTE_SUMMARY
