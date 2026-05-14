@@ -564,12 +564,24 @@ size_t gc_sweep(ThreadHeap *heap) {
             ptr += total;
         }
 
-        /* Phase 3: check if block is entirely free */
-        bool all_free = true;
+        /* Phase 3: find first free line + check if block is entirely free.
+         * §14 tier-2: the first FREE position becomes the block's scan
+         * hint so the next slow-path search skips the occupied prefix. */
+        int first_free = GC_LINES_PER_BLOCK;
         for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
-            if (block->line_map[i] != GC_LINE_FREE) {
-                all_free = false;
+            if (block->line_map[i] == GC_LINE_FREE) {
+                first_free = i;
                 break;
+            }
+        }
+        bool all_free = (first_free == 0);
+        if (all_free) {
+            /* Confirm: line 0 free doesn't imply whole block free. */
+            for (int i = 1; i < GC_LINES_PER_BLOCK; i++) {
+                if (block->line_map[i] != GC_LINE_FREE) {
+                    all_free = false;
+                    break;
+                }
             }
         }
 
@@ -579,6 +591,7 @@ size_t gc_sweep(ThreadHeap *heap) {
             else      heap->blocks = next;
             gc_block_pool_return(heap->pool, block);
         } else {
+            block->first_free_line = (uint16_t)first_free;
             prev = block;
         }
 
@@ -943,6 +956,21 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
             ptr += total;
         }
 
+        /* §14 tier-2: refresh per-block first-free hint from the final
+         * line_map. Minor sweep doesn't unlink fully-empty blocks (old
+         * objects keep blocks pinned), so the all-free shortcut isn't
+         * needed here. */
+        {
+            int first_free = GC_LINES_PER_BLOCK;
+            for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
+                if (block->line_map[i] == GC_LINE_FREE) {
+                    first_free = i;
+                    break;
+                }
+            }
+            block->first_free_line = (uint16_t)first_free;
+        }
+
         block = next;
     }
 
@@ -1176,12 +1204,28 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
          */
         memcpy(block->line_map, new_map, GC_LINES_PER_BLOCK);
 
-        /* If block is fully empty, unlink it and return to pool immediately */
-        bool all_free = true;
+        /* Find first free line in the new map (§14 tier-2 hint) and
+         * detect whole-empty blocks in the same pass. The hint is set
+         * AFTER the memcpy above so a benign concurrent reader on
+         * line_map can't see a hint pointing past where the old map
+         * has FREE lines. Concurrent slow-path readers serialize on
+         * heap->blocks_mutex (held for the whole sweep), so the actual
+         * worry is only the bump-alloc fast path on skip_block — and
+         * skip_block isn't swept here. */
+        int first_free = GC_LINES_PER_BLOCK;
         for (int line = 0; line < GC_LINES_PER_BLOCK; line++) {
-            if (new_map[line] != GC_LINE_FREE) {
-                all_free = false;
+            if (new_map[line] == GC_LINE_FREE) {
+                first_free = line;
                 break;
+            }
+        }
+        bool all_free = (first_free == 0);
+        if (all_free) {
+            for (int line = 1; line < GC_LINES_PER_BLOCK; line++) {
+                if (new_map[line] != GC_LINE_FREE) {
+                    all_free = false;
+                    break;
+                }
             }
         }
         if (all_free && pool) {
@@ -1189,6 +1233,7 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             block->next = NULL;
             gc_block_pool_return(pool, block);
         } else {
+            block->first_free_line = (uint16_t)first_free;
             pp = &block->next;
         }
     }

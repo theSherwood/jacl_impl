@@ -287,10 +287,14 @@ The remaining work is non-correctness, performance/architecture:
    activating work-stealing (0 → 1873 steal_successes). Wall delta
    on the bench is modest (~10%) because `spawn_chain` is half pinned
    tasks (already off the global mutex) and the remaining ceiling is
-   the 1ms CV wake-up timeout. **§14 tier-1** is already landed.
-   Next perf levers: §14 tier-2/3 (per-block free hint, heap-level
-   free-run list), §13 (computed-goto VM dispatch), rope-summary
-   perf in string_concat.
+   the 1ms CV wake-up timeout. **§14 tier-1 + tier-2** are now both
+   landed (tier-2 in 2026-05-14: per-block `first_free_line` hint —
+   wall_median -16.9% to -59.1% on alloc-heavy scenarios, stacked on
+   top of tier-1's wins). Next perf levers: §14 tier-3 (heap-level
+   intrusive free-run list — defer until a fresh profile says it's
+   still the top sink), §13 (computed-goto VM dispatch for the
+   `box_churn` dispatch-bound regime), rope-summary perf in
+   `string_concat`.
 
 ### Housekeeping (2026-05-13)
 
@@ -377,7 +381,9 @@ investigated separately (cache or lazy-evaluate the rope summary?).
 **Recommended order of attack.**
 
 1. ~~**§14** — universal win, large magnitude, well-understood fix.~~
-   **Tier-1 landed**; tier-2/3 still available (see §14 below).
+   **Tier-1 + tier-2 landed** (2026-05-13 + 2026-05-14). Tier-3
+   (heap-level intrusive free-run list) still available — defer
+   until a fresh profile says it's still the top sink.
 2. ~~**§11 + §10** — required for spawn-heavy throughput; the two
    are coupled (a real condition variable needs a per-worker
    inbox or sharded queue to wake the right worker).~~
@@ -1056,7 +1062,7 @@ value; a single bit test (or a 256-entry tag-byte lookup table) would cut
 this. Hot path: every `grey_buf_push`, every `gc__ms_push_val`, every
 `gc_write_barrier`.
 
-### 14. `gc__find_free_run` slow path is O(blocks × 512) — **PARTIALLY FIXED** (tier 1)
+### 14. `gc__find_free_run` slow path is O(blocks × 512) — **PARTIALLY FIXED** (tier 1 + tier 2)
 ~~When the current free run is exhausted, `gc_alloc` scans every block in the
 heap from line 0 (`src/gc.c:393-401`). Each block scan is
 O(GC_LINES_PER_BLOCK=512). Heaps grow to thousands of blocks under load.~~
@@ -1070,23 +1076,47 @@ fit a larger allocation) remain reachable for subsequent smaller
 allocations. Sweep clears `search_block` at the end of each GC cycle so
 freshly-freed runs near the list head are picked up on the next pass.
 
-Benchmark deltas (BENCH_TIMED_ITERS=500, geomean of 8 runs):
+**Tier-2 fix landed (2026-05-14)**: added `GCBlock.first_free_line` —
+per-block scan hint. Invariant: lines `[0, first_free_line)` are all
+OCCUPIED. Written by sweep (post line-map rebuild, computed in the same
+pass that already scans for all-empty blocks) and by
+`gc__find_fit_in_block` on successful fit (advance to `run_start` —
+the find_free_run walk just confirmed `[hint, run_start)` is OCCUPIED).
+Both writers run under `heap->blocks_mutex`; the bump-alloc fast path
+doesn't touch it. Cost: 2 bytes per block, one extra compare/store per
+slow-path scan call. Win: aged blocks with a heavy OCCUPIED prefix no
+longer rescan that prefix on every slow-path call — the canonical
+remaining cost that tier-1 didn't address.
 
-| Scenario | wall_median | wall_min | gc_total_ns |
-|----------|------------:|---------:|------------:|
-| `collection_churn` | **-25.7%** | (noise) | -7.7% |
-| `string_concat`    | **-26.8%** | -53.3% | -29.9% |
-| `box_churn`        | -11.1% | (noise) | -29.1% |
-| `spawn_chain`      | -11.9% | -28.0% | -3.0% |
+Tier-1 benchmark deltas (BENCH_TIMED_ITERS=500, geomean of 8 runs)
+remain as documented above. Tier-2 stacked on top
+(BENCH_TIMED_ITERS=200, single clean run after warmup; see
+`docs/profiles/2026-05-14_tier2_*`):
 
-Profile snapshot after fix: see `docs/profiles/2026-05-13_after_s14_fix.txt`.
-`gc__find_fit_in_block` is still the largest single function (48% mixed,
-57% collection_churn) — its per-call cost remains high because it line-scans
-the current block's line map. Tier-2 (per-block "first free line" hint)
-and tier-3 (heap-level intrusive free-run list) are the next steps if more
-is needed; the audit's original recommendation was tier-3. With wall time
-already down 25%+ on the alloc-heavy scenarios, deferring further tiers
-behind real-workload profiling is reasonable.
+| Scenario | wall_median | gc_total_ns |
+|----------|------------:|------------:|
+| `collection_churn` | **-16.9%** | -11.8% |
+| `string_concat`    | **-59.1%** | +14.7% (cycles +1) |
+| `box_churn`        | **-39.5%** |  -3.7% |
+| `spawn_chain`      | (noise, -0.0%) | -24.1% |
+
+The string_concat win is dominant because that scenario's heap grows to
+~1500 blocks during the run — the OCCUPIED prefix on aged blocks was
+exactly the cost tier-2 targets. `spawn_chain` shows no wall delta
+(expected: not alloc-bound; profile pinned 97% in worker idle path).
+GC totals nudged in mixed directions because the trigger-vs-survivor
+ratio shifted slightly — `bytes_allocated` is unchanged across all
+scenarios, so total mutator work is the same.
+
+Validation: 88/88 normal-mode suite, TSAN baseline unchanged (5
+pre-existing fails — perf, chase_lev_stress, rwlock,
+cross_thread_string, jacl_harness), all 7 chaos tests TSAN-clean, 60s
+TSAN `chaos_soak` clean (201K tasks, 0 heap problems).
+
+Tier-3 (heap-level intrusive free-run list — the audit's original
+recommendation) remains available but is now a secondary lever: after
+tier-1 + tier-2, profile re-capture should show a different top sink.
+Defer until a real-workload profile says it's still needed.
 
 ### 15. Block recycle in concurrent sweep races with owner traversal
 `gc_sweep_concurrent` (`src/gc_collect.c:1109-1112`) unlinks fully-empty blocks

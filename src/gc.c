@@ -132,6 +132,7 @@ typedef struct GCBlock {
     uint8_t         payload[GC_BLOCK_SIZE];       /* allocation area */
     uint8_t         line_map[GC_LINES_PER_BLOCK]; /* one byte per line */
     struct GCBlock *next;                          /* linked list */
+    uint16_t        first_free_line;               /* §14 tier-2 scan hint */
 } GCBlock;
 
 /* --- BlockPool: thread-safe pool of free blocks --- */
@@ -183,6 +184,7 @@ GCBlock *gc_block_pool_get(BlockPool *pool) {
     memset(block->payload, 0, GC_BLOCK_SIZE);
     memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
     block->next = NULL;
+    block->first_free_line = 0;
     return block;
 }
 
@@ -342,11 +344,22 @@ bool gc__find_free_run(GCBlock *block, int from,
 }
 
 /* Search a block (from line `from`) for a free run >= needed_lines.
- * On success, sets heap cursor/limit/current_block and returns true. */
+ * On success, sets heap cursor/limit/current_block and returns true.
+ *
+ * §14 tier-2: scan starts at max(from, block->first_free_line) — lines
+ * [0, first_free_line) are known OCCUPIED. On success, advance
+ * first_free_line to run_start (we just walked past any OCCUPIED prefix
+ * from the previous hint to run_start, so [0, run_start) is OCCUPIED).
+ * The whole chosen run [run_start, run_start+run_len) will be consumed
+ * by bump-alloc before the next slow-path call (cursor exhaustion is
+ * what triggers slow-path), so any leftover free space here is
+ * transient and the next slow-path lookup will see the run as fully
+ * marked. Caller (gc_alloc) holds heap->blocks_mutex. */
 bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
                                   int needed_lines, int from) {
     int run_start, run_len;
-    int scan = from;
+    int hint = (int)block->first_free_line;
+    int scan = from > hint ? from : hint;
     while (gc__find_free_run(block, scan, &run_start, &run_len)) {
         if (run_len >= needed_lines) {
             heap->current_block = block;
@@ -354,6 +367,9 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
                          + ((size_t)run_start * GC_LINE_SIZE);
             heap->limit  = block->payload
                          + ((size_t)(run_start + run_len) * GC_LINE_SIZE);
+            if (run_start > hint) {
+                block->first_free_line = (uint16_t)run_start;
+            }
             return true;
         }
         scan = run_start + run_len;
@@ -510,6 +526,7 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
                 memset(new_block->payload, 0, GC_BLOCK_SIZE);
                 memset(new_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
                 new_block->next = NULL;
+                new_block->first_free_line = 0;
                 goto got_block;
             }
             /* malloc failed — release the reserved slot */

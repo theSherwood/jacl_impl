@@ -157,6 +157,14 @@ typedef struct GCBlock {
     uint8_t         payload[GC_BLOCK_SIZE];
     uint8_t         line_map[GC_LINES_PER_BLOCK];
     struct GCBlock *next;
+    /* §14 tier-2: per-block scan hint. Invariant: lines [0, first_free_line)
+     * are all OCCUPIED. Updated by sweep (post line-map rebuild) and by
+     * gc__find_fit_in_block on successful fit. Both writers run under
+     * heap->blocks_mutex; bump-alloc fast path doesn't touch it. Lets the
+     * slow-path block scan skip the long occupied prefix on aged blocks
+     * (the dominant remaining cost in `gc__find_fit_in_block` after the
+     * tier-1 cross-block anchor landed). */
+    uint16_t        first_free_line;
 } GCBlock;
 
 typedef struct {
