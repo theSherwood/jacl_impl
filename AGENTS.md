@@ -5,6 +5,10 @@
 - Prefer simple, straight-line code to complex abstractions
 - Run tests with a timeout to avoid hanging tests during development.
 - Avoid altering tests unless you know the test is testing the wrong thing.
+- Three pre-merge baselines for any change to `src/` or `include/`:
+  `./build.sh` (88/0), `./build.sh --tsan` (86/2 known-and-safe),
+  `./build.sh --wasm` (Emscripten compile check; skipped if `emcc`
+  isn't installed). See `AUDIT.md` for rationale.
 - Prefer snake_case for values and functions. Prefer PascalCase for types.
 - If there is a DESIGN.md, upon completion of an entire prd.json, update DESIGN.md to show what was completed. Be very concise about things already implemented.
 

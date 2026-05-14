@@ -6,7 +6,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 | Area        | Decision                                                                                                                                                                                                                                                                 |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Execution   | Bytecode VM (AST → bytecode → stack-based interpreter)                                                                                                                                                                                                                   |
+| Execution   | Bytecode VM (AST → bytecode → stack-based interpreter). Dispatch is direct-threaded (computed-goto) on GCC/Clang; switch fallback on Emscripten/WASM.                                                                                                                    |
 | Values      | 64-bit tagged values (tag byte + 56-bit payload). i32/f32 inline, pointers for heap types. Tainted/secret/error flag bits in tag.                                                                                                                                        |
 | Syntax      | Three-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields), `()` infix mode. Bare words are strings; `$var` reads a variable. Binding operators (`=`, `:`, `::`) sugar `def`/`mut`/`set`. Full reference: `SYNTAX.md`.                |
 | Concurrency | Direct-style. CPS transform for await/parallel/race, state-machine transform for generators (`GENERATOR_STATE_MACHINE.md`). NxM work-stealing scheduler. Atoms for shared state, boxes for thread-local.                                                                 |
@@ -126,7 +126,7 @@ src/           JACL pipeline (plain .c files, unity build via jacl.c)
   compiler.c   AST → bytecode compiler
   syntax.c     Macro expansion
   collections.c, runtime.c   Builtins + scheduler
-  vm.c         Stack-based bytecode interpreter
+  vm.c         Stack-based bytecode interpreter (direct-threaded dispatch)
   embed.c      C embedding API
 lib/           Infrastructure (single-header libraries)
   arena/       Bulk allocation
