@@ -107,12 +107,16 @@ without root-causing. All FIXED:
 | E+++ | TSAN baseline triage (2026-05-14) | Triaged the 2 remaining failures (`jacl_harness`, `chase_lev_stress`) rather than fixing. Walked the actual TSAN output for both. `jacl_harness`: **1 distinct site** — `sm->fields[i] = value` at `vm.c:8300` paired with the GC trace at `gc_collect.c:303`. The `gc_write_barrier` two lines before the write maintains SATB correctness; TSAN can't see the happens-before because it runs through grey-buffer count atomics, not the slot itself. `chase_lev_stress`: **2 distinct sites** — `chase_lev.h:268` (fence-mediated data store, the test doesn't opt into `CHASE_LEV_ATOMIC_DATA`) and `test_helpers.h:86` (epoch-protected `free`; TSAN can't track happens-before through the epoch wait loop). Both documented as known-and-safe. Coverage of the runtime's actual chase_lev usage is `chaos_pinned_deque`/`chaos_gc_deque_scan` (both TSAN-clean); coverage of the heap-pointer-slot write discipline is the unified-barrier regression tests + 250-run gc_stress soak. The §S5 atomic-conversion pass remains available but is declined: only 1 of the named sites surfaces under current workloads, and the conversion would introduce an ongoing maintenance footgun (every new heap-pointer slot write must route through the atomic primitive or TSAN cleanliness silently regresses). TSAN baseline 86 pass / 2 fail, both known-and-safe. |
 | F | Rope-summary incremental combine (2026-05-14) | The post-tier-2 profile put `unicode_grapheme_next` at 19% of `string_concat` CPU — biggest non-GC sink, unmasked by tier-2's alloc-path wins. Root cause: `sum_tree.h`'s `ST_MK_LEAF` re-runs `summarize(elems, count)` over the full merged byte buffer every time `ST_CONCAT` merges two leaves, even though both child summaries are already cached on the leaves and the rope's invariants (codepoint-aligned splits, junctions made grapheme-safe by `rope_concat`) make summary monoidal across the merge. Added `ST_MK_LEAF_SUMMARIZED(elems, count, summary)` that accepts a precomputed summary; the three leaf-merge sites in `ST_CONCAT` (same-height, height-left>right, height-right>left) now pass `combine(ll->summary, rl->summary)` instead of forcing a full re-scan. Wins (BENCH_TIMED_ITERS=200, single run): `string_concat` wall_median **-42.3%**, `collection_churn` **-41.1%**, `spawn_chain` **-33.3%**, `box_churn` +2% (noise). Profile confirms: `unicode_grapheme_next` 19% → **2.5%**, `rope_summary_summarize` out of the top 18 entirely. Full normal-mode suite 88/88, 5×30 gc_stress soak clean, 30s TSAN chaos_soak clean (153K tasks), TSAN baseline unchanged. Commit `f43d67f`. |
 | G | FNV-1a hash extend in OP_CONCAT (2026-05-14) | Once phase F removed the rope-summary cost, `rope_string__compute_hash` surfaced as the next sink (8% of `string_concat`). Same shape of fix: FNV-1a is a left-fold over bytes, so `hash(a ++ b) == continue_FNV(hash(a), b's bytes)`. Every string-tagged variant (inline / heap / rope) already exposes `hash(a)` via `jacl_val_hash`. Added `rope_string__hash_extend(prev_hash, r)` (`compute_hash` now delegates with `prev_hash = FNV_INIT`); `OP_CONCAT`'s large-concat path uses `hash_extend(jacl_val_hash(a), rb)` instead of `compute_hash(rc)`. For append-loop workloads (a grows, b is tiny) per-concat hash work goes from O(\|a\|+\|b\|) to O(\|b\|). Magnitude: smaller than phase F — the post-rope-fix profile of `string_concat` had `rope_string__compute_hash` at 8% of CPU (~0.55s of a 6.5s run), and gprofng on these short scenarios has very high run-to-run variance (saw 3.5s → 12s spread across 5 samples at the same SHA, same args). `rope_string__compute_hash` drops out of the top 15 post-fix; bench wall_median diff at 200 iters showed -13% on `string_concat` (within single-run noise but directionally right). The other `compute_hash` callers (`jacl_rope_string_create`, the slice path at `vm.c:3433`) don't have a prefix hash to extend from and still hash from scratch. Suite 88/88, gc_stress 5×30 clean, 30s TSAN chaos_soak clean (72K tasks), TSAN baseline unchanged. Commit `ea77e52`. |
+| H | §14 max_free_run_lines + sweep dedup (2026-05-14) | The tier-3 redesign mentioned in punch list #1. Instrumented gc_alloc's slow path first (Phase A counters: `blocks_scanned` + `lines_scanned` + later `blocks_rejected_fast` on `ThreadHeap` and `JaclPerfSnapshot`, BENCH_TIMED_ITERS=2000) before designing. Data showed each slow-path call visits **230–370 blocks**, scanning **35–180 lines/block** post-tier-2. The outer block-walk dominates. Phase D first: dedupe the post-sweep block summary (find first_free + verify all_free) into one helper `gc__summarize_block_map`, replacing three near-identical epilogues in `gc_sweep` / `gc_sweep_minor` / `gc_sweep_concurrent`. -12 LoC net, zero behavior change, sets up Phase B to land the new field in one place. Phase B: add `uint16_t max_free_run_lines` to `GCBlock` (next to `first_free_line`). Sweep writes authoritatively in the existing summary pass; `gc_alloc`'s outer walk does `if (block->max_free_run_lines < needed_lines) continue;` as O(1) reject before calling `gc__find_fit_in_block`; on a miss inside the block, the run walker tightens the cached bound to the authoritative max seen. Wins on BENCH_TIMED_ITERS=2000: lines_scanned **-98.8%** on collection_churn (694.7M → 8.5M), **-94.4%** on string_concat (758.7M → 42.5M), **-98.7%** on box_churn (66.6M → 0.8M), **-94.6%** on spawn_chain. Wall_median: collection_churn -25%, string_concat **-59%**, box_churn -16% (single-run, directional). Outer-walk visits are unchanged by design; ~97-99% of visits are now O(1)-rejected. The remaining ~500 lines/admitted-block (distance from `first_free_line` to the chosen run on admitted blocks) is the next lever if more is needed — Phase C territory. Full suite 88/88, 30x gc_stress_atom clean, TSAN baseline unchanged (86/2), 30s TSAN chaos_soak clean (73883 tasks). Commits `51c9c3a` / `4d0858b` / `4059961`. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
 surveyed; §D.6 opened during the §D.3 test work and now fixed. Four
-additional real bugs found by phase-E TSAN triage. See git log for
-the per-commit story.
+additional real bugs found by phase-E TSAN triage. **§14 now FIXED
+end-to-end via phase H** (per-block `max_free_run_lines` O(1) reject,
+2026-05-14) — replaces the reverted tier-3-as-intrusive-list attempt
+and closes the perf item that was driving the punch list. See git log
+for the per-commit story.
 
 ### Start-here for next session
 
@@ -353,21 +357,20 @@ The remaining work is non-correctness, performance/architecture:
        and sweep pushed every free run with no size threshold. On
        fragmented heaps (~1500 blocks in string_concat) the list
        walk dominated slow-path latency.
-   Conclusion: tier-3 is more invasive than the audit framed and
-   needs a different design (e.g. non-intrusive node storage in a
-   separate slab, locality-preserving pop order, size-bucketed
-   lists). Not a quick win. **Reverted** (only AUDIT.md docs landed
-   from this attempt); pivoted to rope-summary perf instead —
-   **landed (phase F row)**: `ST_MK_LEAF_SUMMARIZED` short-circuit
-   in `ST_CONCAT`'s leaf-merge sites; `unicode_grapheme_next` 19%
-   → 2.5% on `string_concat`, wall_median -42%. Followed by
-   **FNV-1a hash extend (phase G row)** in `OP_CONCAT`'s rope
-   path: `rope_string__compute_hash` 8% → out-of-top-15 on
-   `string_concat`; magnitude smaller than F and noisier to
-   measure (see "Caveat on bench measurements" below). §13
-   (computed-goto) remains the next lever for the dispatch-bound
-   regime — `vm__run` is now **61% of `box_churn`** post-F (up
-   from 52% pre-F as a share of a smaller scenario total).
+   Conclusion: tier-3-as-intrusive-list is more invasive than the audit
+   framed. **Reverted**; pivoted to rope-summary perf (phase F row),
+   FNV-1a hash extend (phase G row), and then to a different tier-3-
+   class fix: **per-block `max_free_run_lines` O(1) reject (phase H row,
+   2026-05-14)**. Same problem, no intrusive nodes, no heap-level list.
+   Result: `lines_scanned` -94 to -99% across alloc-heavy scenarios,
+   ~97-99% of slow-path block visits now O(1)-rejected. §14 is now
+   marked FIXED. The intrusive-list sketch in this item is preserved
+   for posterity — it documents why the obvious tier-3 design didn't
+   pan out and informed Phase B's design choices. §13 (computed-goto)
+   remains the next lever for the dispatch-bound regime — `vm__run` is
+   **61% of `box_churn`** post-F (up from 52% pre-F as a share of a
+   smaller scenario total); WASM portability story (`&&label` is
+   GCC/Clang-only) is the main scope question.
 
 ### Housekeeping (2026-05-13)
 
@@ -534,20 +537,26 @@ remaining concentrated levers are scenario-specific:
    (`hash(a ++ b) = continue_FNV(hash(a), b's bytes)`); win is
    smaller and noisier than phase F's was.
 
-**Status after phases F + G**: there is no single sink above 14% in
+**Status after phases F + G + H**: there is no single sink above 14% in
 the **mixed** profile (excluding `runtime__worker_loop`'s spin/CV
-idle time, which is intentional). The remaining concentrated
-opportunities are:
+idle time, which is intentional). After phase H (per-block
+`max_free_run_lines` reject), `gc__find_fit_in_block`'s in-block scan
+work dropped 94–99%; remaining cost is the outer block-walk pointer-
+chase (unchanged by H, by design) plus the in-block scan on the
+admitted block. Remaining concentrated opportunities:
 
-- §13 dispatch — 61% of `box_churn`, biggest single-scenario lever
-- `gc__find_fit_in_block` — 36–45% in alloc-heavy scenarios; §14
-  tier-3 (intrusive free-run list) attempted and reverted in phase
-  E-pre-F (see Punch list item #1) — needs a different design
-  (non-intrusive node storage, locality-preserving pop order,
-  size-bucketed lists)
-- `gc_sweep_concurrent` — 12–15% in alloc-heavy; same family as
-  the find_fit sink, would likely benefit from any new tier-3
-  design that also restructures how sweep rebuilds free state
+- §13 dispatch — 61% of `box_churn`, biggest single-scenario lever.
+  WASM portability is the main design question (`&&label` is
+  GCC/Clang-only; could `#ifdef` it and let WASM fall through to the
+  switch, or invest in WASM tail-call dispatch for parity).
+- `gc__find_fit_in_block` residual — ~500 lines per admitted block
+  on alloc-heavy scenarios (distance from `first_free_line` to the
+  chosen run). Phase C territory: in-block index structure (per-
+  block free-run array or skiplist). Re-profile after H lands;
+  likely no longer a top sink.
+- `gc_sweep_concurrent` — 12–15% in alloc-heavy pre-H. Re-profile
+  to see if H's reduced mutator alloc work also lowered the sweep
+  share, or if it's still meaningfully concentrated.
 
 Diminishing returns territory for further perf work. Defensible
 stopping points: capture a fresh profile of a *real* JACL workload
@@ -1234,7 +1243,7 @@ value; a single bit test (or a 256-entry tag-byte lookup table) would cut
 this. Hot path: every `grey_buf_push`, every `gc__ms_push_val`, every
 `gc_write_barrier`.
 
-### 14. `gc__find_free_run` slow path is O(blocks × 512) — **PARTIALLY FIXED** (tier 1 + tier 2)
+### 14. `gc__find_free_run` slow path is O(blocks × 512) — **FIXED** (tier 1 + tier 2 + Phase B)
 ~~When the current free run is exhausted, `gc_alloc` scans every block in the
 heap from line 0 (`src/gc.c:393-401`). Each block scan is
 O(GC_LINES_PER_BLOCK=512). Heaps grow to thousands of blocks under load.~~
@@ -1289,6 +1298,61 @@ Tier-3 (heap-level intrusive free-run list — the audit's original
 recommendation) remains available but is now a secondary lever: after
 tier-1 + tier-2, profile re-capture should show a different top sink.
 Defer until a real-workload profile says it's still needed.
+
+**Phase B fix landed (2026-05-14)**: instead of the heap-level intrusive
+free-run list (the original tier-3 sketch that was attempted and
+reverted — see Punch list item #1), the same problem yielded to a
+per-block `max_free_run_lines` upper-bound hint. Added `uint16_t
+max_free_run_lines` to `GCBlock` (next to `first_free_line`). Sweep
+writes it authoritatively in the same pass that derives
+`first_free_line` (one-pass scan via the deduped
+`gc__summarize_block_map` helper that Phase D introduced). `gc_alloc`'s
+outer block walk does `if (block->max_free_run_lines < needed_lines)
+continue;` as an O(1) reject before calling `gc__find_fit_in_block`.
+On a slow-path miss inside the block, the run walker tightens the
+cached bound to the authoritative max seen during the walk; the bound
+is conservative (never under-states the actual max) between sweeps so
+a false admit costs only one in-block scan.
+
+Why this works where the intrusive-list tier-3 didn't, mapped to the
+three failure modes called out in Punch list item #1:
+
+1. **Walker invariant intact** — no metadata stored in free payload.
+   `max_free_run_lines` lives in the block header struct (out-of-band
+   from `payload[]`), so sweep's "advance by 8 over zero bytes"
+   convention is preserved.
+2. **Block-level locality preserved** — the `search_block` anchor and
+   the outer block-walk order are unchanged. Phase B only narrows
+   *which* blocks the walk pays the line scan on.
+3. **No heap-level list growth** — no list, no `blocks_mutex`-held
+   sweep, no size-bucketing required.
+
+Phase A instrumentation (`blocks_scanned` + `lines_scanned` +
+`blocks_rejected_fast` counters on `ThreadHeap` and `JaclPerfSnapshot`)
+drove the design decision. At BENCH_TIMED_ITERS=2000, each slow-path
+call visited 230–370 blocks scanning 35–180 lines/block before Phase
+B; afterwards 97–99% of those visits are O(1)-rejected:
+
+| Scenario | lines_scanned pre | post | drop | wall_median |
+|----------|------------------:|-----:|-----:|------------:|
+| `collection_churn` |   694.7M |   8.5M | **-98.8%** | 8.0→6.0 ms |
+| `string_concat`    |   758.7M |  42.5M | **-94.4%** | 14.6→6.0 ms |
+| `box_churn`        |    66.6M |   0.8M | **-98.7%** | 7.4→6.2 ms |
+| `spawn_chain`      |     5.4M |   0.3M | -94.6%      | (not-bound) |
+
+(wall_median single-run; per the F/G caveat the directional signal is
+the line-scan reduction.) The remaining cost is ~500 lines per
+admitted block — distance from `first_free_line` to the chosen run on
+blocks that pass the reject. That's Phase C territory (in-block index
+structure, e.g. per-block free-run array) if a future profile still
+shows `gc__find_fit_in_block` hot. With Phase B in, it should fall
+out of the top sinks; re-profile to confirm before designing further.
+
+Validation: 88/88 normal-mode suite, 30x gc_stress_atom clean, TSAN
+baseline unchanged (86/2 — `jacl_harness` + `chase_lev_stress`, both
+documented known-and-safe), 30s TSAN chaos_soak clean (73883 tasks).
+Commits `51c9c3a` (instrumentation), `4d0858b` (Phase D dedup),
+`4059961` (Phase B).
 
 ### 15. Block recycle in concurrent sweep races with owner traversal
 `gc_sweep_concurrent` (`src/gc_collect.c:1109-1112`) unlinks fully-empty blocks
