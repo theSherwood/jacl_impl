@@ -7,7 +7,11 @@
 
 typedef struct {
     JaclVal value;
-    volatile int ready;        /* 0 = not ready, 1 = value ready, 2 = done */
+    int ready;                 /* 0 = not ready, 1 = value ready, 2 = done.
+                                  Accessed via ATOMIC_LOAD/STORE_EXPLICIT
+                                  with release/acquire — .ready is the
+                                  publication signal that orders .value
+                                  reads on the consumer side. */
     platform_mutex_t mutex;
 } SharedSlot;
 
@@ -56,7 +60,7 @@ typedef struct {
 static THREAD_PROC_RETURN THREAD_PROC_TYPE inline_receiver_fn(void *arg) {
     ThreadArg *ta = (ThreadArg *)arg;
     /* Wait for value to be ready */
-    while (ta->slot->ready != 1) {
+    while (ATOMIC_LOAD_EXPLICIT(&ta->slot->ready, MEM_ACQUIRE) != 1) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -67,11 +71,11 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE inline_receiver_fn(void *arg) {
     uint32_t len = jacl_string_data(v, buf, sizeof(buf));
     if (len != 3 || memcmp(buf, "abc", 3) != 0) {
         fprintf(stderr, "FAIL: inline string content mismatch\n");
-        ta->slot->ready = -1;
+        ATOMIC_STORE_EXPLICIT(&ta->slot->ready, -1, MEM_RELEASE);
         return 0;
     }
 
-    ta->slot->ready = 2; /* done */
+    ATOMIC_STORE_EXPLICIT(&ta->slot->ready, 2, MEM_RELEASE); /* done */
     return 0;
 }
 
@@ -94,7 +98,7 @@ static int test_inline_string_cross_thread(void) {
 
     /* Pass the value */
     slot.value = v;
-    slot.ready = 1;
+    ATOMIC_STORE_EXPLICIT(&slot.ready, 1, MEM_RELEASE);
 
     THREAD_JOIN(th, NULL);
     ASSERT(slot.ready == 2);
@@ -120,7 +124,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE interned_receiver_fn(void *arg) {
     gc_heap_init(&heap, ta->pool);
     gc__current_heap = &heap;
 
-    while (ta->slot->ready != 1) {
+    while (ATOMIC_LOAD_EXPLICIT(&ta->slot->ready, MEM_ACQUIRE) != 1) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -134,12 +138,12 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE interned_receiver_fn(void *arg) {
     uint32_t len = jacl_string_data(v, buf, sizeof(buf));
     if (len != 12 || memcmp(buf, "hello_intern", 12) != 0) {
         fprintf(stderr, "FAIL: interned string content mismatch (len=%u)\n", len);
-        ta->slot->ready = -1;
+        ATOMIC_STORE_EXPLICIT(&ta->slot->ready, -1, MEM_RELEASE);
         gc_heap_destroy(&heap);
         return 0;
     }
 
-    ta->slot->ready = 2;
+    ATOMIC_STORE_EXPLICIT(&ta->slot->ready, 2, MEM_RELEASE);
     gc_heap_destroy(&heap);
     return 0;
 }
@@ -169,7 +173,7 @@ static int test_interned_string_cross_thread(void) {
 
     /* Pass value */
     slot.value = v;
-    slot.ready = 1;
+    ATOMIC_STORE_EXPLICIT(&slot.ready, 1, MEM_RELEASE);
 
     THREAD_JOIN(th, NULL);
     ASSERT(slot.ready == 2);
@@ -190,7 +194,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_receiver_fn(void *arg) {
     gc_heap_init(&heap, ta->pool);
     gc__current_heap = &heap;
 
-    while (ta->slot->ready != 1) {
+    while (ATOMIC_LOAD_EXPLICIT(&ta->slot->ready, MEM_ACQUIRE) != 1) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -204,7 +208,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_receiver_fn(void *arg) {
     size_t byte_len = rope_byte_count(rs->r);
     if (byte_len != 200) {
         fprintf(stderr, "FAIL: rope byte_len=%zu expected 200\n", byte_len);
-        ta->slot->ready = -1;
+        ATOMIC_STORE_EXPLICIT(&ta->slot->ready, -1, MEM_RELEASE);
         gc_heap_destroy(&heap);
         return 0;
     }
@@ -215,7 +219,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_receiver_fn(void *arg) {
     size_t rd = rope_cursor_read(&c, buf, 10);
     if (rd != 10) {
         fprintf(stderr, "FAIL: rope cursor read %zu expected 10\n", rd);
-        ta->slot->ready = -1;
+        ATOMIC_STORE_EXPLICIT(&ta->slot->ready, -1, MEM_RELEASE);
         gc_heap_destroy(&heap);
         return 0;
     }
@@ -224,13 +228,13 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_receiver_fn(void *arg) {
         if (buf[i] != (uint8_t)('a' + (i % 26))) {
             fprintf(stderr, "FAIL: rope byte[%zu]=%u expected %u\n",
                     i, buf[i], (uint8_t)('a' + (i % 26)));
-            ta->slot->ready = -1;
+            ATOMIC_STORE_EXPLICIT(&ta->slot->ready, -1, MEM_RELEASE);
             gc_heap_destroy(&heap);
             return 0;
         }
     }
 
-    ta->slot->ready = 2;
+    ATOMIC_STORE_EXPLICIT(&ta->slot->ready, 2, MEM_RELEASE);
     gc_heap_destroy(&heap);
     return 0;
 }
@@ -257,7 +261,7 @@ static int test_rope_string_cross_thread(void) {
     THREAD_CREATE(&th, NULL, rope_receiver_fn, &ta);
 
     slot.value = v;
-    slot.ready = 1;
+    ATOMIC_STORE_EXPLICIT(&slot.ready, 1, MEM_RELEASE);
 
     THREAD_JOIN(th, NULL);
     ASSERT(slot.ready == 2);
@@ -289,10 +293,10 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_creator_a_fn(void *arg) {
     JaclVal v = jacl_rope_string_create(&heap, data, 200);
 
     ta->slot->value = v;
-    ta->slot->ready = 1;
+    ATOMIC_STORE_EXPLICIT(&ta->slot->ready, 1, MEM_RELEASE);
 
     /* Keep heap alive until main is done */
-    while (ta->slot->ready != 2) {
+    while (ATOMIC_LOAD_EXPLICIT(&ta->slot->ready, MEM_ACQUIRE) != 2) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -312,9 +316,9 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_creator_b_fn(void *arg) {
     JaclVal v = jacl_rope_string_create(&heap, data, 200);
 
     ta->slot->value = v;
-    ta->slot->ready = 1;
+    ATOMIC_STORE_EXPLICIT(&ta->slot->ready, 1, MEM_RELEASE);
 
-    while (ta->slot->ready != 2) {
+    while (ATOMIC_LOAD_EXPLICIT(&ta->slot->ready, MEM_ACQUIRE) != 2) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -340,7 +344,8 @@ static int test_rope_concat_cross_thread(void) {
     THREAD_CREATE(&th_b, NULL, rope_creator_b_fn, &ta_b);
 
     /* Wait for both ropes */
-    while (slot_a.ready != 1 || slot_b.ready != 1) {
+    while (ATOMIC_LOAD_EXPLICIT(&slot_a.ready, MEM_ACQUIRE) != 1 ||
+           ATOMIC_LOAD_EXPLICIT(&slot_b.ready, MEM_ACQUIRE) != 1) {
         SLEEP_MILLISECONDS(1);
     }
 
@@ -379,8 +384,8 @@ static int test_rope_concat_cross_thread(void) {
     unpin_value(&vm, h_b);
 
     /* Release creator threads */
-    slot_a.ready = 2;
-    slot_b.ready = 2;
+    ATOMIC_STORE_EXPLICIT(&slot_a.ready, 2, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&slot_b.ready, 2, MEM_RELEASE);
     THREAD_JOIN(th_a, NULL);
     THREAD_JOIN(th_b, NULL);
 

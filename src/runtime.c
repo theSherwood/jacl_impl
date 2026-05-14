@@ -78,6 +78,17 @@ typedef struct {
 /* GreyBuffer is defined in gc.c (part of the GC subsystem, before vm.c in
  * the unity build). grey_buf_init/push/destroy are available here. */
 
+/* Single-writer relaxed-atomic add for perf counters. Sole writer is the
+ * heap/worker's owning thread; cross-thread reads happen in
+ * jacl_perf_snapshot post-quiesce (workers are still running, so the
+ * reader sees relaxed-consistent values, not necessarily latest, but
+ * that's fine for telemetry). Pattern matches the existing
+ * total_bytes_allocated bookkeeping in gc__bump_alloc. */
+static inline void stats_add_u64(uint64_t *p, uint64_t delta) {
+    uint64_t v = ATOMIC_LOAD_EXPLICIT(p, MEM_RELAXED);
+    ATOMIC_STORE_EXPLICIT(p, v + delta, MEM_RELAXED);
+}
+
 /* Monotonic nanosecond clock for perf counters. Emscripten + Windows fall
  * back to zero so perf telemetry stays consistent (degraded, not broken)
  * on platforms without clock_gettime(CLOCK_MONOTONIC). */
@@ -346,7 +357,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
             }
             ATOMIC_STORE_EXPLICIT(&rt->inbox_count, local, MEM_RELEASE);
             MUTEX_UNLOCK(rt->inbox_mutex);
-            self->stats.inbox_pops += popped_here;
+            stats_add_u64(&self->stats.inbox_pops, popped_here);
         }
 
         /* 2. Drain our pinned inbox into private_deque. Tasks routed here
@@ -369,7 +380,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
             ATOMIC_STORE_EXPLICIT(&self->pinned_inbox_count, local,
                                   MEM_RELEASE);
             MUTEX_UNLOCK(self->pinned_inbox_mutex);
-            self->stats.pinned_inbox_pops += popped_here;
+            stats_add_u64(&self->stats.pinned_inbox_pops, popped_here);
         }
 
         /* 3. Check own private deque (priority for thread-local tasks) */
@@ -382,7 +393,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
 
         /* 4. Try stealing from other workers' public deques */
         if (!found) {
-            self->stats.steal_attempts++;
+            stats_add_u64(&self->stats.steal_attempts, 1);
             for (int i = 0; i < rt->num_workers && !found; i++) {
                 if (i == self->id) continue;
                 found = rt_deque_deque_steal(
@@ -390,7 +401,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                     &task_val,
                     self->steal_ids[i]);
             }
-            if (found) self->stats.steal_successes++;
+            if (found) stats_add_u64(&self->stats.steal_successes, 1);
         }
 
         if (found) {
@@ -415,7 +426,7 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
 
             /* Execute the task */
             task->fn(task->data);
-            self->stats.tasks_executed++;
+            stats_add_u64(&self->stats.tasks_executed, 1);
 
             /* Mark idle */
             ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_IDLE,
@@ -469,7 +480,8 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                 COND_WAIT_FOR_MS(rt->work_cv, rt->inbox_mutex, 1);
             }
             MUTEX_UNLOCK(rt->inbox_mutex);
-            self->stats.idle_sleep_ns += runtime__now_ns() - sleep_start;
+            stats_add_u64(&self->stats.idle_sleep_ns,
+                          runtime__now_ns() - sleep_start);
         }
     }
 
@@ -1305,12 +1317,18 @@ JaclPerfSnapshot jacl_perf_snapshot(Runtime *rt) {
             ATOMIC_LOAD_EXPLICIT(&h->total_allocs, MEM_RELAXED);
         s.slow_path_allocs +=
             ATOMIC_LOAD_EXPLICIT(&h->slow_path_allocs, MEM_RELAXED);
-        s.workers_total.tasks_executed    += w->stats.tasks_executed;
-        s.workers_total.steal_attempts    += w->stats.steal_attempts;
-        s.workers_total.steal_successes   += w->stats.steal_successes;
-        s.workers_total.idle_sleep_ns     += w->stats.idle_sleep_ns;
-        s.workers_total.inbox_pops        += w->stats.inbox_pops;
-        s.workers_total.pinned_inbox_pops += w->stats.pinned_inbox_pops;
+        s.workers_total.tasks_executed +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.tasks_executed, MEM_RELAXED);
+        s.workers_total.steal_attempts +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.steal_attempts, MEM_RELAXED);
+        s.workers_total.steal_successes +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.steal_successes, MEM_RELAXED);
+        s.workers_total.idle_sleep_ns +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.idle_sleep_ns, MEM_RELAXED);
+        s.workers_total.inbox_pops +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.inbox_pops, MEM_RELAXED);
+        s.workers_total.pinned_inbox_pops +=
+            ATOMIC_LOAD_EXPLICIT(&w->stats.pinned_inbox_pops, MEM_RELAXED);
     }
     s.current_heap_blocks  = rt->block_pool.total_blocks_allocated;
     s.current_inbox_depth  = ATOMIC_LOAD_EXPLICIT(&rt->inbox_count, MEM_RELAXED);

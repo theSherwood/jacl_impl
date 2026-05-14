@@ -181,8 +181,14 @@ static int run_scenario(const char* path, const char* name,
          * polling it via a raw C pointer (AUDIT.md #0c). */
         uint32_t pin = runtime_pin_value(&rt, completion);
 
+        /* worker 0's vm.ctx is mutated by ctx_unfork from the worker
+         * thread between iterations (release-store on each task); read
+         * with matching acquire so TSAN sees the happens-before. The
+         * worker is idle between iters, so the read is unambiguous. */
+        JaclVal w0_ctx = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+            (volatile uint64_t*)&rt.workers[0].vm.ctx, MEM_ACQUIRE);
         uint64_t t0 = now_ns();
-        runtime__submit_spawn_task(&rt, closure, completion, rt.workers[0].vm.ctx);
+        runtime__submit_spawn_task(&rt, closure, completion, w0_ctx);
 
         int timed_out = 1;
         for (int ms = 0; ms < COMPLETION_MS; ms++) {

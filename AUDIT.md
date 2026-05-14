@@ -102,6 +102,7 @@ without root-causing. All FIXED:
 | C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
 | D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys`; §D.2 `VM_ERROR` stack-discipline pass (72 error returns across 39 opcodes) |
 | E | TSAN-baseline triage | Audit had dismissed 8 TSAN failures as "pre-existing flakes" without triaging; 4 turned out to be real bugs (PATH_MAX, syntax TLS, jacl_run stack-local intern_table, ctx-state race cluster) — see commits `c7dea0d` / `491ad0d` / `7469a98` / `2465a10`. TSAN baseline now 83 pass / 5 fail. |
+| E+ | TSAN-baseline cleanup | Closed 2 of the 5 remaining failures (`rwlock`, `cross_thread_string`) and reclassified `perf` as a `jacl_harness` sibling once the WorkerStats counter race got fixed. Surfaced + fixed a real bug in `sum_tree.h` (per-instantiation handler state needed `JACL_THREAD_LOCAL`). TSAN baseline now 85 pass / 3 fail. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -121,18 +122,40 @@ heap-pointer slot write on any GC-managed object goes through
 `gc_write_barrier`, unconditional on both deletion and insertion
 sides.
 
-**TSAN baseline (5 remaining failures, all triaged not real)**:
+**TSAN baseline (3 remaining failures, all in the same family)**:
 
-| Test | Why it fails | Action |
-|------|--------------|--------|
-| `perf` | `jacl_perf_snapshot` reads perf counters at runtime.c:1299 with no atomics while workers increment them at runtime.c:385. Counters are intentionally unsynchronized (cost). | None needed; mark `_Atomic` + relaxed if cosmetic cleanup wanted. |
-| `chase_lev_stress` | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
-| `rwlock` | `test_rwlock_concurrent_readers` increments a global `g_state.x++` from two threads while each only holds the rwlock in **read mode**. Reader-shared rwlock doesn't serialize mutations by definition — the test itself is incorrect. | Fix the test (use write-mode for mutation, or use atomics on the counter). |
-| `cross_thread_string` | Main thread writes a stack local at line 97 after spawning thread T1 that reads it at line 59 — no join, no barrier, no handoff synchronization. Test bug. | Fix the test (join before main-thread mutation). |
-| `jacl_harness` | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
+A second pass (2026-05-14) closed two of the five originally-listed
+failures and clarified that two of the remaining three are the same
+underlying issue as `jacl_harness`. Surprises from the pass:
 
-The first four are test/tooling issues; only the fifth is a design
-tradeoff in the runtime. None blocks shipping.
+- `cross_thread_string` was framed as a missing release/acquire on the
+  `SharedSlot` publication signal. Fixing that exposed a deeper race
+  on `rope_st_handler_state` — a `static` global in `sum_tree.h` that
+  every rope op writes (with idempotent handler values) at the start
+  of each call. Fix: mark it `JACL_THREAD_LOCAL`. The global was a
+  same-class bug as the §17 thread-local-convention discussion. Both
+  layers had to land for the test to go green.
+
+- `perf` was framed as "perf counters are intentionally
+  unsynchronized." That was true of the `WorkerStats` fields the
+  audit named at runtime.c:1299/385, and atomizing them was a clean
+  ~15-line fix (new `stats_add_u64` helper + atomic loads in
+  `jacl_perf_snapshot`). But once that race went away, TSAN tripped
+  on `gc_enumerate_roots` reading `vm->env`'s `vm__env_set`-written
+  slot — the exact `jacl_harness` shape. So `perf` is no longer its
+  own thing; it's a `jacl_harness` sibling.
+
+| Test | Status | Why it fails (after 2026-05-14 pass) | Action |
+|------|--------|--------------------------------------|--------|
+| ~~`rwlock`~~ | **FIXED** (2026-05-14) | `g_state.max_concurrent` updated under read lock by two readers — read locks don't serialize mutations. | CAS-loop atomic peak update. |
+| ~~`cross_thread_string`~~ | **FIXED** (2026-05-14) | (a) `SharedSlot.ready` was the publication signal but plain-read/written. (b) `sum_tree.h` per-instantiation `ST_HANDLER_STATE` was a non-TLS global written by every rope op. | (a) Atomic load/store explicit with release/acquire. (b) `JACL_THREAD_LOCAL` on the handler-state declaration. |
+| `chase_lev_stress` | open | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
+| `perf` | open (same family as `jacl_harness`) | `WorkerStats` counter race fixed in 2026-05-14. Remaining race: `gc_enumerate_roots` reads `vm->env` slots that workers' `vm__env_set` writes — same heap-pointer slot pattern as `jacl_harness`. SATB-barrier-mediated; TSAN can't observe the happens-before. | Closes when the global atomic-store/load conversion for heap-pointer slots lands. |
+| `jacl_harness` | open | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, vm->env, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
+
+`chase_lev_stress` is a test-infrastructure issue (the bare primitive
+without the runtime's wrapper). `perf` and `jacl_harness` are the
+same design tradeoff — landing one closes both. None blocks shipping.
 
 **Known theoretical hole, not surfacing as a bug today**: §9
 recommendation #2 (capture mutable-load values into a per-worker

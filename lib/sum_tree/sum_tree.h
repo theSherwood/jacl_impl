@@ -158,9 +158,15 @@ typedef struct ST_HANDLERS {
   ST_LEAF_SEARCH_FN leaf_search;
 } ST_HANDLERS;
 
-/* --- Per-instantiation static state --- */
+/* --- Per-instantiation static state ---
+ *
+ * Thread-local because rope/sum-tree ops are called from multiple threads
+ * (workers building ropes for string-concat, cross-thread rope passing,
+ * etc.) and the handlers are an idempotent per-thread cache, not shared
+ * state. Without TLS, two threads calling ST_SET_HANDLERS race on the
+ * same global even though they write identical handler values. */
 
-static ST_HANDLERS ST_HANDLER_STATE;
+static JACL_THREAD_LOCAL ST_HANDLERS ST_HANDLER_STATE;
 
 static inline void ST_SET_HANDLERS(ST_HANDLERS handlers) {
   ST_HANDLER_STATE = handlers;

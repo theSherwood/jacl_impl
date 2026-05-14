@@ -46,11 +46,17 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE reader_thread(void *arg) {
   RWLOCK_RDLOCK(g_state.rwlock);
 
   /* Increment readers_inside atomically */
-  int cur = (int)ATOMIC_INC((intptr_t *)&g_state.readers_inside);
-  /* Record peak */
-  if (cur > g_state.max_concurrent) {
-    g_state.max_concurrent = cur;
-  }
+  intptr_t cur = ATOMIC_INC((intptr_t *)&g_state.readers_inside);
+  /* CAS-loop the peak. Two readers hold the rwlock in read mode at the
+   * same time — the lock doesn't serialize the peak update, so it must
+   * be atomic. Relaxed is fine: monotonic max, no ordering needed. */
+  intptr_t old;
+  do {
+    old = ATOMIC_LOAD_EXPLICIT((intptr_t *)&g_state.max_concurrent,
+                               MEM_RELAXED);
+    if (cur <= old) break;
+  } while (!ATOMIC_CAS((intptr_t *)&g_state.max_concurrent, &old, cur,
+                       MEM_RELAXED, MEM_RELAXED));
 
   /* Hold the read lock briefly so the other reader can overlap */
   SLEEP_MILLISECONDS(50);
