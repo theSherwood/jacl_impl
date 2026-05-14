@@ -2042,91 +2042,350 @@ static int vm__exec_collect_stdin(VM* vm, JaclVal stdin_val, char** out_buf, siz
 /**
  * Inner dispatch loop. Runs until OP_HALT or until frame_count drops
  * to min_frame (used by OP_EACH to execute closures inline).
+ *
+ * §13 (2026-05-14): dispatch is direct-threaded (computed-goto) on
+ * GCC/Clang non-WASM targets, falling back to a switch on
+ * Emscripten / other compilers. The audit measured `vm__run` at
+ * 57% of `box_churn` CPU under the central-switch dispatch; pushing
+ * the next-opcode jump down into each handler's tail lets the
+ * branch predictor learn per-opcode successor patterns. Emscripten
+ * lowers `&&label` to a single WASM `br_table` (loses the per-site
+ * prediction benefit), so we keep the switch there.
  */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)
+#  define JACL_VM_COMPUTED_GOTO 1
+#endif
+
 VMResult vm__run(VM* vm, uint32_t min_frame) {
   CallFrame* frame = &vm->frames[vm->frame_count - 1];
+  uint8_t   instruction;
+  VMResult  result;
+
+  /* Per-dispatch prelude: GC safepoint + line tracking + opcode fetch.
+   * Inlined into each DISPATCH() so the indirect jump at the end of
+   * every opcode handler stays a one-instruction tail — that's what
+   * gives the branch predictor a per-opcode prediction site. */
+  #define VM_PRELUDE() do {                                                    \
+      if (ATOMIC_LOAD_EXPLICIT(&vm->heap.needs_gc, MEM_RELAXED)) {              \
+        if (!vm->runtime) {                                                    \
+          if (gc_should_major(&vm->heap)) gc_collect(&vm->heap, vm);           \
+          else gc_collect_minor(&vm->heap, vm, vm->remembered_set);            \
+        } else {                                                               \
+          ATOMIC_STORE_EXPLICIT(&vm->heap.needs_gc, false, MEM_RELAXED);       \
+          ATOMIC_STORE_EXPLICIT(&vm->heap.bytes_since_gc, 0, MEM_RELAXED);     \
+          gc_concurrent_trigger(vm->runtime);                                  \
+        }                                                                      \
+      }                                                                        \
+      vm->error_line = vm->chunk->lines[(uint32_t)(vm->ip - vm->chunk->code)]; \
+      instruction = vm__read_byte(vm);                                         \
+    } while (0)
+
+#ifdef JACL_VM_COMPUTED_GOTO
+  /* Direct-threaded dispatch table. One entry per opcode in OpCode
+   * declaration order. MUST mirror the OpCode enum in `bytecode.c`
+   * (the version the unity build sees — jacl.h's mirror is one
+   * shorter as of 2026-05-14; pre-existing enum drift, tracked
+   * separately). Add a new opcode? Add a row here AND a CASE(op):
+   * handler below in the same pass — otherwise dispatch crashes or
+   * fails to compile. */
+  static void* const dispatch_table[] = {
+    [OP_CONST] = &&L_OP_CONST,
+    [OP_NIL] = &&L_OP_NIL,
+    [OP_TRUE] = &&L_OP_TRUE,
+    [OP_FALSE] = &&L_OP_FALSE,
+    [OP_POP] = &&L_OP_POP,
+    [OP_ADD] = &&L_OP_ADD,
+    [OP_SUB] = &&L_OP_SUB,
+    [OP_MUL] = &&L_OP_MUL,
+    [OP_DIV] = &&L_OP_DIV,
+    [OP_MOD] = &&L_OP_MOD,
+    [OP_NEG] = &&L_OP_NEG,
+    [OP_EQ] = &&L_OP_EQ,
+    [OP_LT] = &&L_OP_LT,
+    [OP_GT] = &&L_OP_GT,
+    [OP_LE] = &&L_OP_LE,
+    [OP_GE] = &&L_OP_GE,
+    [OP_PRINT] = &&L_OP_PRINT,
+    [OP_DEF_GLOBAL] = &&L_OP_DEF_GLOBAL,
+    [OP_GET_GLOBAL] = &&L_OP_GET_GLOBAL,
+    [OP_GET_LOCAL] = &&L_OP_GET_LOCAL,
+    [OP_SET_LOCAL] = &&L_OP_SET_LOCAL,
+    [OP_GET_UPVALUE] = &&L_OP_GET_UPVALUE,
+    [OP_JUMP] = &&L_OP_JUMP,
+    [OP_JUMP_IF_FALSE] = &&L_OP_JUMP_IF_FALSE,
+    [OP_LOOP] = &&L_OP_LOOP,
+    [OP_CALL] = &&L_OP_CALL,
+    [OP_TAIL_CALL] = &&L_OP_TAIL_CALL,
+    [OP_RETURN] = &&L_OP_RETURN,
+    [OP_RETURN_WIDE] = &&L_OP_RETURN_WIDE,
+    [OP_CLOSURE] = &&L_OP_CLOSURE,
+    [OP_POP_N] = &&L_OP_POP_N,
+    [OP_CONCAT] = &&L_OP_CONCAT,
+    [OP_STR_LEN] = &&L_OP_STR_LEN,
+    [OP_STR_BYTE_LEN] = &&L_OP_STR_BYTE_LEN,
+    [OP_STR_INDEX] = &&L_OP_STR_INDEX,
+    [OP_STR_SLICE] = &&L_OP_STR_SLICE,
+    [OP_TO_STRING] = &&L_OP_TO_STRING,
+    [OP_VEC] = &&L_OP_VEC,
+    [OP_VEC_GET] = &&L_OP_VEC_GET,
+    [OP_VEC_LEN] = &&L_OP_VEC_LEN,
+    [OP_VEC_PUSH] = &&L_OP_VEC_PUSH,
+    [OP_VEC_SET] = &&L_OP_VEC_SET,
+    [OP_VEC_CONCAT] = &&L_OP_VEC_CONCAT,
+    [OP_VEC_SLICE] = &&L_OP_VEC_SLICE,
+    [OP_VEC_SPREAD] = &&L_OP_VEC_SPREAD,
+    [OP_MAP] = &&L_OP_MAP,
+    [OP_MAP_GET] = &&L_OP_MAP_GET,
+    [OP_MAP_HAS] = &&L_OP_MAP_HAS,
+    [OP_MAP_LEN] = &&L_OP_MAP_LEN,
+    [OP_MAP_SET] = &&L_OP_MAP_SET,
+    [OP_MAP_REMOVE] = &&L_OP_MAP_REMOVE,
+    [OP_MAP_KEYS] = &&L_OP_MAP_KEYS,
+    [OP_MAP_VALS] = &&L_OP_MAP_VALS,
+    [OP_EACH] = &&L_OP_EACH,
+    [OP_TRANSFORM] = &&L_OP_TRANSFORM,
+    [OP_FILTER] = &&L_OP_FILTER,
+    [OP_ERROR] = &&L_OP_ERROR,
+    [OP_IS_ERROR] = &&L_OP_IS_ERROR,
+    [OP_ERROR_VAL] = &&L_OP_ERROR_VAL,
+    [OP_CHECK_ERROR] = &&L_OP_CHECK_ERROR,
+    [OP_JUMP_IF_ERROR] = &&L_OP_JUMP_IF_ERROR,
+    [OP_STACK_TRACE] = &&L_OP_STACK_TRACE,
+    [OP_MAKE_CELL] = &&L_OP_MAKE_CELL,
+    [OP_GET_CELL_LOCAL] = &&L_OP_GET_CELL_LOCAL,
+    [OP_SET_CELL_LOCAL] = &&L_OP_SET_CELL_LOCAL,
+    [OP_GET_CELL_UPVALUE] = &&L_OP_GET_CELL_UPVALUE,
+    [OP_SET_CELL_UPVALUE] = &&L_OP_SET_CELL_UPVALUE,
+    [OP_SET_GLOBAL] = &&L_OP_SET_GLOBAL,
+    [OP_BOX] = &&L_OP_BOX,
+    [OP_BOX_STRUCT] = &&L_OP_BOX_STRUCT,
+    [OP_ATOM] = &&L_OP_ATOM,
+    [OP_DEREF] = &&L_OP_DEREF,
+    [OP_RESET] = &&L_OP_RESET,
+    [OP_SWAP] = &&L_OP_SWAP,
+    [OP_IS_BOX] = &&L_OP_IS_BOX,
+    [OP_IS_BOX_TYPED] = &&L_OP_IS_BOX_TYPED,
+    [OP_IS_ATOM] = &&L_OP_IS_ATOM,
+    [OP_IS_FUTURE] = &&L_OP_IS_FUTURE,
+    [OP_AWAIT] = &&L_OP_AWAIT,
+    [OP_SPAWN] = &&L_OP_SPAWN,
+    [OP_RESOLVE_FUTURE] = &&L_OP_RESOLVE_FUTURE,
+    [OP_PARALLEL] = &&L_OP_PARALLEL,
+    [OP_RACE] = &&L_OP_RACE,
+    [OP_COMPLETE_PARALLEL] = &&L_OP_COMPLETE_PARALLEL,
+    [OP_COMPLETE_RACE] = &&L_OP_COMPLETE_RACE,
+    [OP_ADD_I64] = &&L_OP_ADD_I64,
+    [OP_SUB_I64] = &&L_OP_SUB_I64,
+    [OP_MUL_I64] = &&L_OP_MUL_I64,
+    [OP_DIV_I64] = &&L_OP_DIV_I64,
+    [OP_MOD_I64] = &&L_OP_MOD_I64,
+    [OP_NEG_I64] = &&L_OP_NEG_I64,
+    [OP_LT_I64] = &&L_OP_LT_I64,
+    [OP_GT_I64] = &&L_OP_GT_I64,
+    [OP_LE_I64] = &&L_OP_LE_I64,
+    [OP_GE_I64] = &&L_OP_GE_I64,
+    [OP_EQ_I64] = &&L_OP_EQ_I64,
+    [OP_DIV_U64] = &&L_OP_DIV_U64,
+    [OP_MOD_U64] = &&L_OP_MOD_U64,
+    [OP_LT_U64] = &&L_OP_LT_U64,
+    [OP_GT_U64] = &&L_OP_GT_U64,
+    [OP_LE_U64] = &&L_OP_LE_U64,
+    [OP_GE_U64] = &&L_OP_GE_U64,
+    [OP_ADD_F64] = &&L_OP_ADD_F64,
+    [OP_SUB_F64] = &&L_OP_SUB_F64,
+    [OP_MUL_F64] = &&L_OP_MUL_F64,
+    [OP_DIV_F64] = &&L_OP_DIV_F64,
+    [OP_MOD_F64] = &&L_OP_MOD_F64,
+    [OP_NEG_F64] = &&L_OP_NEG_F64,
+    [OP_LT_F64] = &&L_OP_LT_F64,
+    [OP_GT_F64] = &&L_OP_GT_F64,
+    [OP_LE_F64] = &&L_OP_LE_F64,
+    [OP_GE_F64] = &&L_OP_GE_F64,
+    [OP_EQ_F64] = &&L_OP_EQ_F64,
+    [OP_TO_I32] = &&L_OP_TO_I32,
+    [OP_TO_I64] = &&L_OP_TO_I64,
+    [OP_TO_U32] = &&L_OP_TO_U32,
+    [OP_TO_U64] = &&L_OP_TO_U64,
+    [OP_TO_F32] = &&L_OP_TO_F32,
+    [OP_TO_F64] = &&L_OP_TO_F64,
+    [OP_TO_DYN] = &&L_OP_TO_DYN,
+    [OP_CONST_I64] = &&L_OP_CONST_I64,
+    [OP_CONST_U64] = &&L_OP_CONST_U64,
+    [OP_CONST_F64] = &&L_OP_CONST_F64,
+    [OP_HEAP_RECORD_NEW] = &&L_OP_HEAP_RECORD_NEW,
+    [OP_HEAP_RECORD_GET] = &&L_OP_HEAP_RECORD_GET,
+    [OP_HEAP_RECORD_SET] = &&L_OP_HEAP_RECORD_SET,
+    [OP_HEAP_RECORD_GET_DYN] = &&L_OP_HEAP_RECORD_GET_DYN,
+    [OP_HEAP_RECORD_SET_DYN] = &&L_OP_HEAP_RECORD_SET_DYN,
+    [OP_HEAP_RECORD_GET_INLINE] = &&L_OP_HEAP_RECORD_GET_INLINE,
+    [OP_HEAP_RECORD_SET_INLINE] = &&L_OP_HEAP_RECORD_SET_INLINE,
+    [OP_RESET_INLINE] = &&L_OP_RESET_INLINE,
+    [OP_STRUCT_NEW_INLINE] = &&L_OP_STRUCT_NEW_INLINE,
+    [OP_STRUCT_GET_INLINE] = &&L_OP_STRUCT_GET_INLINE,
+    [OP_STRUCT_SET_INLINE] = &&L_OP_STRUCT_SET_INLINE,
+    [OP_STRUCT_STORE_INLINE] = &&L_OP_STRUCT_STORE_INLINE,
+    [OP_STRUCT_GET_UPVALUE] = &&L_OP_STRUCT_GET_UPVALUE,
+    [OP_STRUCT_SET_UPVALUE] = &&L_OP_STRUCT_SET_UPVALUE,
+    [OP_LOAD_INLINE_LOCAL] = &&L_OP_LOAD_INLINE_LOCAL,
+    [OP_LOAD_INLINE_UPVALUE] = &&L_OP_LOAD_INLINE_UPVALUE,
+    [OP_PRINT_STRUCT] = &&L_OP_PRINT_STRUCT,
+    [OP_STRUCT_EQ_TOS] = &&L_OP_STRUCT_EQ_TOS,
+    [OP_STRUCT_GET_INLINE_TOS] = &&L_OP_STRUCT_GET_INLINE_TOS,
+    [OP_STRUCT_EXPAND] = &&L_OP_STRUCT_EXPAND,
+    [OP_STRUCT_EQ_INLINE] = &&L_OP_STRUCT_EQ_INLINE,
+    [OP_STRUCT_HASH_INLINE] = &&L_OP_STRUCT_HASH_INLINE,
+    [OP_HASH] = &&L_OP_HASH,
+    [OP_CLOSE_LOOP] = &&L_OP_CLOSE_LOOP,
+    [OP_DESTRUCTURE_VEC] = &&L_OP_DESTRUCTURE_VEC,
+    [OP_DESTRUCTURE_NAMED] = &&L_OP_DESTRUCTURE_NAMED,
+    [OP_DESTRUCTURE_VEC_REST] = &&L_OP_DESTRUCTURE_VEC_REST,
+    [OP_DESTRUCTURE_NAMED_REST] = &&L_OP_DESTRUCTURE_NAMED_REST,
+    [OP_SPREAD] = &&L_OP_SPREAD,
+    [OP_CALL_SPREAD] = &&L_OP_CALL_SPREAD,
+    [OP_FOLD_SPREAD] = &&L_OP_FOLD_SPREAD,
+    [OP_COLLECT_VARIADIC] = &&L_OP_COLLECT_VARIADIC,
+    [OP_YIELD] = &&L_OP_YIELD,
+    [OP_STREAM_NEXT] = &&L_OP_STREAM_NEXT,
+    [OP_COLLECT] = &&L_OP_COLLECT,
+    [OP_IS_STREAM_EXHAUSTED] = &&L_OP_IS_STREAM_EXHAUSTED,
+    [OP_COUNT] = &&L_OP_COUNT,
+    [OP_TAKE] = &&L_OP_TAKE,
+    [OP_FIRST] = &&L_OP_FIRST,
+    [OP_LINES] = &&L_OP_LINES,
+    [OP_GET_STATE_FIELD] = &&L_OP_GET_STATE_FIELD,
+    [OP_SET_STATE_FIELD] = &&L_OP_SET_STATE_FIELD,
+    [OP_GET_RESUME_POINT] = &&L_OP_GET_RESUME_POINT,
+    [OP_SET_RESUME_POINT] = &&L_OP_SET_RESUME_POINT,
+    [OP_YIELD_SM] = &&L_OP_YIELD_SM,
+    [OP_AWAIT_SM] = &&L_OP_AWAIT_SM,
+    [OP_CALL_SUSPEND] = &&L_OP_CALL_SUSPEND,
+    [OP_GET_STATE_FIELD_CELL] = &&L_OP_GET_STATE_FIELD_CELL,
+    [OP_SET_STATE_FIELD_CELL] = &&L_OP_SET_STATE_FIELD_CELL,
+    [OP_GET_STATE_FIELD_WIDE] = &&L_OP_GET_STATE_FIELD_WIDE,
+    [OP_SET_STATE_FIELD_WIDE] = &&L_OP_SET_STATE_FIELD_WIDE,
+    [OP_SYNTAX_SPLICE] = &&L_OP_SYNTAX_SPLICE,
+    [OP_SYNTAX_OP] = &&L_OP_SYNTAX_OP,
+    [OP_INTERPRET] = &&L_OP_INTERPRET,
+    [OP_INTERPRET_PRELUDE] = &&L_OP_INTERPRET_PRELUDE,
+    [OP_EXEC] = &&L_OP_EXEC,
+    [OP_AWAIT_JOB] = &&L_OP_AWAIT_JOB,
+    [OP_SIGNAL] = &&L_OP_SIGNAL,
+    [OP_HALT] = &&L_OP_HALT,
+    [OP_GET_CTX] = &&L_OP_GET_CTX,
+    [OP_CTX_FORK] = &&L_OP_CTX_FORK,
+    [OP_CTX_RESTORE] = &&L_OP_CTX_RESTORE,
+    [OP_SET_CTX] = &&L_OP_SET_CTX,
+    [OP_RANGE] = &&L_OP_RANGE,
+    [OP_OPTIONAL_GET] = &&L_OP_OPTIONAL_GET,
+    [OP_TYPED_VEC] = &&L_OP_TYPED_VEC,
+    [OP_TYPED_VEC_PUSH] = &&L_OP_TYPED_VEC_PUSH,
+    [OP_TYPED_VEC_SET] = &&L_OP_TYPED_VEC_SET,
+    [OP_TYPED_VEC_LEN] = &&L_OP_TYPED_VEC_LEN,
+    [OP_TYPED_MAP] = &&L_OP_TYPED_MAP,
+    [OP_TYPED_MAP_SET] = &&L_OP_TYPED_MAP_SET,
+    [OP_TYPED_MAP_HAS] = &&L_OP_TYPED_MAP_HAS,
+    [OP_TYPED_MAP_REMOVE] = &&L_OP_TYPED_MAP_REMOVE,
+    [OP_TYPED_MAP_LEN] = &&L_OP_TYPED_MAP_LEN,
+    [OP_TYPED_MAP_KEYS] = &&L_OP_TYPED_MAP_KEYS,
+    [OP_TYPED_MAP_VALS] = &&L_OP_TYPED_MAP_VALS,
+    [OP_TYPED_VEC_PRINT] = &&L_OP_TYPED_VEC_PRINT,
+    [OP_TYPED_MAP_PRINT] = &&L_OP_TYPED_MAP_PRINT,
+    [OP_TYPED_VEC_EQ] = &&L_OP_TYPED_VEC_EQ,
+    [OP_TYPED_MAP_EQ] = &&L_OP_TYPED_MAP_EQ,
+    [OP_IS_BOX_TYPED_VEC] = &&L_OP_IS_BOX_TYPED_VEC,
+    [OP_IS_BOX_TYPED_MAP] = &&L_OP_IS_BOX_TYPED_MAP,
+    [OP_TYPED_VEC_CONCAT] = &&L_OP_TYPED_VEC_CONCAT,
+    [OP_TYPED_VEC_SLICE] = &&L_OP_TYPED_VEC_SLICE,
+    [OP_TYPED_EACH] = &&L_OP_TYPED_EACH,
+    [OP_TYPED_TRANSFORM] = &&L_OP_TYPED_TRANSFORM,
+    [OP_TYPED_FILTER] = &&L_OP_TYPED_FILTER,
+    [OP_TYPED_VEC_GET_INLINE] = &&L_OP_TYPED_VEC_GET_INLINE,
+    [OP_TYPED_MAP_GET_INLINE] = &&L_OP_TYPED_MAP_GET_INLINE,
+    [OP_INLINE_TO_LOCAL] = &&L_OP_INLINE_TO_LOCAL,
+    [OP_DEREF_INLINE] = &&L_OP_DEREF_INLINE,
+    [OP_PTR_LOAD] = &&L_OP_PTR_LOAD,
+    [OP_PTR_STORE] = &&L_OP_PTR_STORE,
+    [OP_PTR_OFFSET] = &&L_OP_PTR_OFFSET,
+    [OP_PTR_DIFF] = &&L_OP_PTR_DIFF,
+    [OP_PTR_ADD_OFFSET] = &&L_OP_PTR_ADD_OFFSET,
+    [OP_PTR_LOAD_INLINE] = &&L_OP_PTR_LOAD_INLINE,
+    [OP_PTR_STORE_INLINE] = &&L_OP_PTR_STORE_INLINE,
+    [OP_PRINT_PTR] = &&L_OP_PRINT_PTR,
+  };
+
+  #define CASE(op)   L_##op
+  #define DISPATCH() do {                                                      \
+      VM_PRELUDE();                                                            \
+      if ((size_t)instruction >=                                               \
+          sizeof(dispatch_table)/sizeof(*dispatch_table))                      \
+        goto L_unknown_opcode;                                                 \
+      goto *dispatch_table[instruction];                                       \
+    } while (0)
+
+  DISPATCH();  /* enter dispatch */
+#else
+  #define CASE(op)   case op
+  #define DISPATCH() break
 
   for (;;) {
-    /* GC safepoint: collect if threshold exceeded. Atomic load — needs_gc
-     * may be set by gc_alloc from another worker's view through this
-     * heap, and reset by the concurrent GC. */
-    if (ATOMIC_LOAD_EXPLICIT(&vm->heap.needs_gc, MEM_RELAXED)) {
-      if (!vm->runtime) {
-        /* Single-threaded: choose minor or major GC */
-        if (gc_should_major(&vm->heap)) {
-          gc_collect(&vm->heap, vm);
-        } else {
-          gc_collect_minor(&vm->heap, vm, vm->remembered_set);
-        }
-      } else {
-        ATOMIC_STORE_EXPLICIT(&vm->heap.needs_gc, false, MEM_RELAXED);
-        ATOMIC_STORE_EXPLICIT(&vm->heap.bytes_since_gc, 0, MEM_RELAXED);
-        gc_concurrent_trigger(vm->runtime);
-      }
-    }
-
-    /* Track source line for error reporting */
-    uint32_t instr_offset = (uint32_t)(vm->ip - vm->chunk->code);
-    vm->error_line = vm->chunk->lines[instr_offset];
-
-    uint8_t instruction = vm__read_byte(vm);
-    VMResult result;
+    VM_PRELUDE();
 
     switch (instruction) {
+#endif
 
-      case OP_CONST: {
+      CASE(OP_CONST): {
         uint16_t index = vm__read_u16(vm);
         result = vm__push(vm, vm->chunk->constants[index]);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_NIL: {
+      CASE(OP_NIL): {
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TRUE: {
+      CASE(OP_TRUE): {
         result = vm__push(vm, JACL_TRUE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_FALSE: {
+      CASE(OP_FALSE): {
         result = vm__push(vm, JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_POP: {
+      CASE(OP_POP): {
         JaclVal discard;
         result = vm__pop(vm, &discard);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_ADD: {
+      CASE(OP_ADD): {
         VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32, jacl_u32_add, "+");
-        break;
+        DISPATCH();
       }
 
-      case OP_SUB: {
+      CASE(OP_SUB): {
         VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32, jacl_u32_sub, "-");
-        break;
+        DISPATCH();
       }
 
-      case OP_MUL: {
+      CASE(OP_MUL): {
         VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32, jacl_u32_mul, "*");
-        break;
+        DISPATCH();
       }
 
-      case OP_DIV: {
+      CASE(OP_DIV): {
         VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32, jacl_u32_div, "/");
-        break;
+        DISPATCH();
       }
 
-      case OP_MOD: {
+      CASE(OP_MOD): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
@@ -2151,10 +2410,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             "type error in '%%': expected matching numeric types, got %s and %s",
             vm__type_name(a), vm__type_name(b));
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_NEG: {
+      CASE(OP_NEG): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal a;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
@@ -2171,20 +2430,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(a));
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_EQ: {
+      CASE(OP_EQ): {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
         JaclVal res = jacl_bool(vm__deep_eq(a, b));
         result = vm__push(vm, res);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LT: {
+      CASE(OP_LT): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
@@ -2204,10 +2463,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(a), vm__type_name(b));
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GT: {
+      CASE(OP_GT): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
@@ -2227,10 +2486,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(a), vm__type_name(b));
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LE: {
+      CASE(OP_LE): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
@@ -2250,10 +2509,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(a), vm__type_name(b));
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GE: {
+      CASE(OP_GE): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
@@ -2273,10 +2532,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(a), vm__type_name(b));
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PRINT: {
+      CASE(OP_PRINT): {
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
 
@@ -2314,7 +2573,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         } else if (jacl_is_nil(val)) {
           text = "nil\n";
           len = 4;
@@ -2379,7 +2638,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm->print_fn("\n", 1, vm->print_ctx);
             result = vm__push(vm, JACL_NIL);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
         } else if (jacl_is_struct(val)) {
           HeapRecord* s = jacl_as_heap_record_ptr(val);
@@ -2395,7 +2654,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
@@ -2404,7 +2663,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         } else {
           text = "<unknown>\n";
           len = 10;
@@ -2414,10 +2673,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         /* print returns nil */
         result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_DEF_GLOBAL: {
+      CASE(OP_DEF_GLOBAL): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal name = vm->chunk->constants[name_idx];
         JaclVal value;
@@ -2425,10 +2684,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm__env_set(vm, name, value);
         /* def returns nil */
         result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_GLOBAL: {
+      CASE(OP_GET_GLOBAL): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal name = vm->chunk->constants[name_idx];
         bool found;
@@ -2442,36 +2701,36 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, value); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_LOCAL: {
+      CASE(OP_GET_LOCAL): {
         uint8_t slot = vm__read_byte(vm);
         result = vm__push(vm, vm->stack[frame->stack_base + slot]);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_LOCAL: {
+      CASE(OP_SET_LOCAL): {
         uint8_t slot = vm__read_byte(vm);
         vm->stack[frame->stack_base + slot] = vm->stack[vm->stack_top - 1];
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_UPVALUE: {
+      CASE(OP_GET_UPVALUE): {
         uint8_t index = vm__read_byte(vm);
         result = vm__push(vm, frame->closure->upvalues[index]);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_JUMP: {
+      CASE(OP_JUMP): {
         uint16_t offset = vm__read_u16(vm);
         vm->ip += offset;
-        break;
+        DISPATCH();
       }
 
-      case OP_JUMP_IF_FALSE: {
+      CASE(OP_JUMP_IF_FALSE): {
         uint16_t offset = vm__read_u16(vm);
         JaclVal condition;
         result = vm__pop(vm, &condition);
@@ -2479,16 +2738,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (vm__is_falsy(condition)) {
           vm->ip += offset;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_LOOP: {
+      CASE(OP_LOOP): {
         uint16_t offset = vm__read_u16(vm);
         vm->ip -= offset;
-        break;
+        DISPATCH();
       }
 
-      case OP_CALL: {
+      CASE(OP_CALL): {
         uint8_t arg_count = vm__read_byte(vm);
         JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
 
@@ -2510,7 +2769,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->stack_top -= (arg_count + 1); /* pop args + callee */
           result = vm__push(vm, ret);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_closure(callee)) {
@@ -2554,7 +2813,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->stack_top -= (arg_count + 1); /* pop args + callee */
           result = vm__push(vm, stream_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* SM-compiled non-generator: transparently wrap user args into SM */
@@ -2619,10 +2878,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         frame     = new_frame;
         vm->ip    = frame->chunk->code;
         vm->chunk = frame->chunk;
-        break;
+        DISPATCH();
       }
 
-      case OP_TAIL_CALL: {
+      CASE(OP_TAIL_CALL): {
         uint8_t arg_count = vm__read_byte(vm);
         JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
 
@@ -2645,7 +2904,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->stack_top -= (arg_count + 1);
           result = vm__push(vm, ret);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_closure(callee)) {
@@ -2709,10 +2968,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         vm->ip    = frame->chunk->code;
         vm->chunk = frame->chunk;
-        break;
+        DISPATCH();
       }
 
-      case OP_RETURN: {
+      CASE(OP_RETURN): {
         JaclVal return_value;
         result = vm__pop(vm, &return_value);
         if (result != VM_OK) return result;
@@ -2745,10 +3004,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (vm->frame_count <= min_frame) {
           return VM_OK;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_RETURN_WIDE: {
+      CASE(OP_RETURN_WIDE): {
         uint8_t width = vm__read_byte(vm);
 
         /* Read return slots from callee stack top */
@@ -2786,10 +3045,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (vm->frame_count <= min_frame) {
           return VM_OK;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_CLOSURE: {
+      CASE(OP_CLOSURE): {
         uint16_t index = vm__read_u16(vm);
         JaclClosure* template = jacl_as_closure(vm->chunk->constants[index]);
 
@@ -2937,10 +3196,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         /* cl is already on the stack from the root push above */
-        break;
+        DISPATCH();
       }
 
-      case OP_POP_N: {
+      CASE(OP_POP_N): {
         uint8_t count = vm__read_byte(vm);
         if (vm->stack_top < count) {
           vm__set_error(vm, "stack underflow");
@@ -2951,10 +3210,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_CLR(vm->inline_slot_bitmap, si);
         }
         vm->stack_top -= count;
-        break;
+        DISPATCH();
       }
 
-      case OP_CLOSE_LOOP: {
+      CASE(OP_CLOSE_LOOP): {
         /* Pop N values under the top-of-stack value.
            Used by break inside for-loops to clean up hidden locals
            while preserving the break value on top. */
@@ -2972,10 +3231,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top - 1);
           }
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_DESTRUCTURE_VEC: {
+      CASE(OP_DESTRUCTURE_VEC): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         uint8_t skip_mask = vm__read_byte(vm);
@@ -3001,10 +3260,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_DESTRUCTURE_VEC_REST: {
+      CASE(OP_DESTRUCTURE_VEC_REST): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         JaclVal vec_val;
@@ -3037,10 +3296,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_vector_ptr(rest));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_DESTRUCTURE_NAMED: {
+      CASE(OP_DESTRUCTURE_NAMED): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         /* Read N constant indices for field names */
@@ -3094,10 +3353,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               "named destructuring requires a struct or map, got %s",
               vm__type_name(src_val));
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_DESTRUCTURE_NAMED_REST: {
+      CASE(OP_DESTRUCTURE_NAMED_REST): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t n = vm__read_byte(vm);
         /* Read N constant indices for explicit field names to extract */
@@ -3210,16 +3469,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               "named destructuring requires a struct or map, got %s",
               vm__type_name(src_val));
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_CONCAT: {
+      CASE(OP_CONCAT): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
-        if (jacl_is_error(a)) { result = vm__push(vm, a); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(b)) { result = vm__push(vm, b); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(a)) { result = vm__push(vm, a); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(b)) { result = vm__push(vm, b); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_string(a) || !jacl_is_string(b)) {
           VM_ERROR(vm,
@@ -3284,44 +3543,44 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STR_LEN: {
+      CASE(OP_STR_LEN): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
-        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_string(val)) {
           VM_ERROR(vm, "type error in 'length': expected string, got %s",
                        vm__type_name(val));
         }
         result = vm__push(vm, jacl_i32((int32_t)jacl_string_len(val)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STR_BYTE_LEN: {
+      CASE(OP_STR_BYTE_LEN): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
-        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_string(val)) {
           VM_ERROR(vm, "type error in 'byte-length': expected string, got %s",
                        vm__type_name(val));
         }
         result = vm__push(vm, jacl_i32((int32_t)jacl_string_byte_len(val)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STR_INDEX: {
+      CASE(OP_STR_INDEX): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal idx_val, str_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &str_val); if (result != VM_OK) return result;
-        if (jacl_is_error(str_val)) { result = vm__push(vm, str_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(str_val)) { result = vm__push(vm, str_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_string(str_val)) {
           VM_ERROR(vm, "type error in 'index': expected string, got %s",
                        vm__type_name(str_val));
@@ -3361,18 +3620,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STR_SLICE: {
+      CASE(OP_STR_SLICE): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal end_val, start_val, str_val;
         result = vm__pop(vm, &end_val);   if (result != VM_OK) return result;
         result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &str_val);   if (result != VM_OK) return result;
-        if (jacl_is_error(str_val)) { result = vm__push(vm, str_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(str_val)) { result = vm__push(vm, str_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_string(str_val)) {
           VM_ERROR(vm, "type error in 'slice': expected string, got %s",
                        vm__type_name(str_val));
@@ -3456,13 +3715,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_STRING: {
+      CASE(OP_TO_STRING): {
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
-        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; DISPATCH(); }
 
         /* Cells are transparent — dereference before converting */
         if (jacl_is_cell(val)) {
@@ -3528,10 +3787,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC: {
+      CASE(OP_VEC): {
         uint8_t count = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
         jacl_vec_root* vec = jacl_vec_empty();
@@ -3542,10 +3801,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top -= count;
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_SPREAD: {
+      CASE(OP_VEC_SPREAD): {
         uint8_t fixed_args = vm__read_byte(vm);
         uint8_t num_spreads = vm__read_byte(vm);
         uint32_t total_args = fixed_args;
@@ -3565,16 +3824,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top = base;
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_GET: {
+      CASE(OP_VEC_GET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal idx_val, vec_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
-        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
             VM_ERROR(vm, "vec-get requires a vector; got stream (use collect to materialize)");
@@ -3595,14 +3854,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_LEN: {
+      CASE(OP_VEC_LEN): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal vec_val;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
-        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
             VM_ERROR(vm, "vec-len requires a vector; got stream (use collect to materialize)");
@@ -3613,16 +3872,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_vec_count(vec)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_PUSH: {
+      CASE(OP_VEC_PUSH): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal elem, vec_val;
         result = vm__pop(vm, &elem); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
-        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
             VM_ERROR(vm, "vec-push requires a vector; got stream (use collect to materialize)");
@@ -3635,18 +3894,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_vec_root* new_vec = jacl_vec_push_back(vec, elem);
         result = vm__push(vm, jacl_vector_ptr(new_vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_SET: {
+      CASE(OP_VEC_SET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal elem, idx_val, vec_val;
         result = vm__pop(vm, &elem); if (result != VM_OK) return result;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
-        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
             VM_ERROR(vm, "vec-set requires a vector; got stream (use collect to materialize)");
@@ -3679,16 +3938,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_vector_ptr(final));
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_CONCAT: {
+      CASE(OP_VEC_CONCAT): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal b_val, a_val;
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
-        if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(a_val)) {
           if (jacl_is_stream(a_val))
             VM_ERROR(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
@@ -3709,18 +3968,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_vec_root* new_vec = jacl_vec_concat(va, vb);
         result = vm__push(vm, jacl_vector_ptr(new_vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_VEC_SLICE: {
+      CASE(OP_VEC_SLICE): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal end_val, start_val, vec_val;
         result = vm__pop(vm, &end_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
-        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_vector(vec_val)) {
           if (jacl_is_stream(vec_val))
             VM_ERROR(vm, "vec-slice requires a vector; got stream (use collect to materialize)");
@@ -3757,10 +4016,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP: {
+      CASE(OP_MAP): {
         uint8_t pair_count = vm__read_byte(vm);
         jacl_map_node* map = NULL;
         gc__current_heap = &vm->heap;
@@ -3773,16 +4032,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top -= 2 * pair_count;
         result = vm__push(vm, jacl_map_ptr(map));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_GET: {
+      CASE(OP_MAP_GET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-get': expected map, got %s",
                        vm__type_name(map_val));
@@ -3794,16 +4053,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_HAS: {
+      CASE(OP_MAP_HAS): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-has': expected map, got %s",
                        vm__type_name(map_val));
@@ -3811,14 +4070,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         result = vm__push(vm, jacl_bool(jacl_map_has(map, key_val)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_LEN: {
+      CASE(OP_MAP_LEN): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-len': expected map, got %s",
                        vm__type_name(map_val));
@@ -3826,18 +4085,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_map_count(map)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_SET: {
+      CASE(OP_MAP_SET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal val, key_val, map_val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-set': expected map, got %s",
                        vm__type_name(map_val));
@@ -3847,16 +4106,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_map_node* new_map = jacl_map_set(map, key_val, val);
         result = vm__push(vm, jacl_map_ptr(new_map));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_REMOVE: {
+      CASE(OP_MAP_REMOVE): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal key_val, map_val;
         result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(key_val)) { result = vm__push(vm, key_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-remove': expected map, got %s",
                        vm__type_name(map_val));
@@ -3866,14 +4125,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_map_node* new_map = jacl_map_unset(map, key_val);
         result = vm__push(vm, jacl_map_ptr(new_map));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_KEYS: {
+      CASE(OP_MAP_KEYS): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-keys': expected map, got %s",
                        vm__type_name(map_val));
@@ -3891,14 +4150,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MAP_VALS: {
+      CASE(OP_MAP_VALS): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal map_val;
         result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
-        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(map_val)) { result = vm__push(vm, map_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_map(map_val)) {
           VM_ERROR(vm, "type error in 'map-vals': expected map, got %s",
                        vm__type_name(map_val));
@@ -3916,16 +4175,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_EACH: {
+      CASE(OP_EACH): {
         JaclVal closure_val, coll_val;
         JaclVal error_val = JACL_NIL;  /* US-005: track error from stream */
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm,
@@ -4119,15 +4378,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TRANSFORM: {
+      CASE(OP_TRANSFORM): {
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm,
@@ -4308,15 +4567,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_FILTER: {
+      CASE(OP_FILTER): {
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm,
@@ -4485,10 +4744,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_ERROR: {
+      CASE(OP_ERROR): {
         /* Peek top-of-stack, set error flag, leave on stack */
         if (vm->stack_top == 0) {
           vm__set_error(vm, "stack underflow");
@@ -4496,29 +4755,29 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         vm->stack[vm->stack_top - 1] = jacl_set_error(vm->stack[vm->stack_top - 1]);
         vm__capture_trace(vm);
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_ERROR: {
+      CASE(OP_IS_ERROR): {
         /* Pop value, push true if error-flagged, else false */
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         result = vm__push(vm, jacl_bool(jacl_is_error(val)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_ERROR_VAL: {
+      CASE(OP_ERROR_VAL): {
         /* Peek top-of-stack, clear error flag, leave on stack */
         if (vm->stack_top == 0) {
           vm__set_error(vm, "stack underflow");
           return VM_RUNTIME_ERROR;
         }
         vm->stack[vm->stack_top - 1] = jacl_clear_error(vm->stack[vm->stack_top - 1]);
-        break;
+        DISPATCH();
       }
 
-      case OP_CHECK_ERROR: {
+      CASE(OP_CHECK_ERROR): {
         uint16_t offset = vm__read_u16(vm);
         if (vm->stack_top == 0) {
           vm__set_error(vm, "stack underflow");
@@ -4563,10 +4822,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Not an error: pop and continue */
           vm->stack_top--;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_JUMP_IF_ERROR: {
+      CASE(OP_JUMP_IF_ERROR): {
         uint16_t offset = vm__read_u16(vm);
         if (vm->stack_top == 0) {
           vm__set_error(vm, "stack underflow");
@@ -4576,10 +4835,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(top)) {
           vm->ip += offset;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_STACK_TRACE: {
+      CASE(OP_STACK_TRACE): {
         if (vm->stack_trace.count == 0) {
           /* No error has been created yet — push empty string */
           result = vm__push(vm, jacl_inline_string("", 0));
@@ -4607,10 +4866,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, trace_str);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_MAKE_CELL: {
+      CASE(OP_MAKE_CELL): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
@@ -4619,19 +4878,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_cell_ptr(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_CELL_LOCAL: {
+      CASE(OP_GET_CELL_LOCAL): {
         uint8_t slot = vm__read_byte(vm);
         JaclVal cell = vm->stack[frame->stack_base + slot];
         JaclMutableRef* ref = jacl_as_cell(cell);
         result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_CELL_LOCAL: {
+      CASE(OP_SET_CELL_LOCAL): {
         uint8_t slot = vm__read_byte(vm);
         JaclVal new_value;
         result = vm__pop(vm, &new_value); if (result != VM_OK) return result;
@@ -4643,19 +4902,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_CELL_UPVALUE: {
+      CASE(OP_GET_CELL_UPVALUE): {
         uint8_t index = vm__read_byte(vm);
         JaclVal cell = frame->closure->upvalues[index];
         JaclMutableRef* ref = jacl_as_cell(cell);
         result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_CELL_UPVALUE: {
+      CASE(OP_SET_CELL_UPVALUE): {
         uint8_t index = vm__read_byte(vm);
         JaclVal new_value;
         result = vm__pop(vm, &new_value); if (result != VM_OK) return result;
@@ -4667,10 +4926,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_GLOBAL: {
+      CASE(OP_SET_GLOBAL): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal name = frame->chunk->constants[name_idx];
         JaclVal value;
@@ -4678,15 +4937,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm__env_set(vm, name, value);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_BOX: {
+      CASE(OP_BOX): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         if (jacl_is_error(value)) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
         ref->type_idx = 0;
@@ -4694,10 +4953,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_BOX_STRUCT: {
+      CASE(OP_BOX_STRUCT): {
         /* Wrap a struct value in a JaclMutableRef. Accepts either:
            - N inline struct slots on TOS (marked in inline_slot_bitmap), or
            - a single heap HeapRecord pointer on TOS (legacy global path). */
@@ -4732,22 +4991,22 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclVal value = vm->stack[--vm->stack_top];
           if (jacl_is_error(value)) {
             result = vm__push(vm, value); if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
           HeapRecord* s = jacl_as_heap_record_ptr(value);
           memcpy(ref->data, s->data, sdef->total_size);
         }
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_ATOM: {
+      CASE(OP_ATOM): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         if (jacl_is_error(value)) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
         ref->type_idx = 0;
@@ -4755,18 +5014,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_atom_ptr(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_BOX: {
+      CASE(OP_IS_BOX): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         result = vm__push(vm, jacl_bool(jacl_is_box(value)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_BOX_TYPED: {
+      CASE(OP_IS_BOX_TYPED): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
@@ -4777,10 +5036,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_BOX_TYPED_VEC: {
+      CASE(OP_IS_BOX_TYPED_VEC): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         bool match = false;
@@ -4790,10 +5049,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_BOX_TYPED_MAP: {
+      CASE(OP_IS_BOX_TYPED_MAP): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         bool match = false;
@@ -4803,32 +5062,32 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_ATOM: {
+      CASE(OP_IS_ATOM): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         result = vm__push(vm, jacl_bool(jacl_is_atom(value)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_FUTURE: {
+      CASE(OP_IS_FUTURE): {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         result = vm__push(vm, jacl_bool(jacl_is_future(value)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_AWAIT: {
+      CASE(OP_AWAIT): {
         /* CPS await removed — all async functions use OP_AWAIT_SM now */
         vm__set_error(vm, "CPS await not supported (use state machine path)");
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_SPAWN: {
+      CASE(OP_SPAWN): {
         /* Pop closure, create pending future, execute closure (resolving
            future with result), push future. */
         JaclVal closure_val;
@@ -4919,10 +5178,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_RESOLVE_FUTURE: {
+      CASE(OP_RESOLVE_FUTURE): {
         /* Pop result value, pop future, resolve the future, push nil.
            Used by the resolve_k closure generated for CPS spawn.
            Schedules any registered waiters as tasks (runtime mode). */
@@ -4943,10 +5202,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_COMPLETE_PARALLEL: {
+      CASE(OP_COMPLETE_PARALLEL): {
         /* Pop result, index (i32), agg_val. Complete parallel slot:
            store result, handle error, increment counter, maybe schedule join.
            Used by parallel_k closures (SM body error_k). */
@@ -4966,10 +5225,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_COMPLETE_RACE: {
+      CASE(OP_COMPLETE_RACE): {
         /* Pop result, agg_val. CAS-settle race, winner schedules join.
            Used by race_k closures (SM body error_k). */
         JaclVal race_result;
@@ -4984,10 +5243,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PARALLEL: {
+      CASE(OP_PARALLEL): {
         /* Parallel: read uint8_t N, pop continuation + N closures.
            Fork N tasks, suspend until all complete, continuation receives
            result vector [r0, r1, ..., r_{N-1}] in input order. */
@@ -5171,10 +5430,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, cont_arg);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_RACE: {
+      CASE(OP_RACE): {
         /* Race: read uint8_t N, pop continuation + N closures.
            Fork N tasks, first to complete wins, continuation receives
            winner's result (or error). */
@@ -5327,16 +5586,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, winner_result);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_DEREF: {
+      CASE(OP_DEREF): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal container;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
         if (jacl_is_error(container)) {
           result = vm__push(vm, container); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
           VM_ERROR(vm, "deref: expected box or atom, got %s",
@@ -5367,21 +5626,21 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, deref_val);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_RESET: {
+      CASE(OP_RESET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal new_val, container;
         result = vm__pop(vm, &new_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
         if (jacl_is_error(container)) {
           result = vm__push(vm, container); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (jacl_is_error(new_val)) {
           result = vm__push(vm, new_val); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
           VM_ERROR(vm, "reset!: expected box or atom, got %s",
@@ -5413,10 +5672,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, new_val);
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_RESET_INLINE: {
+      CASE(OP_RESET_INLINE): {
         /* Struct-box reset with inline new bytes.
            Operand: u16 type_idx.
            Stack before: [..., box, s0, s1, ..., s{N-1}]
@@ -5442,7 +5701,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
           }
           vm->stack_top -= width;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_box(box_val)) {
           vm__set_error(vm, "reset_inline: expected struct box, got %s",
@@ -5470,21 +5729,21 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - 1);
         vm->stack_top -= 1;
-        break;
+        DISPATCH();
       }
 
-      case OP_SWAP: {
+      CASE(OP_SWAP): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal closure_val, container;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
         if (jacl_is_error(container)) {
           result = vm__push(vm, container); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (jacl_is_error(closure_val)) {
           result = vm__push(vm, closure_val); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_box(container) && !jacl_is_atom(container)) {
           VM_ERROR(vm, "swap!: expected box or atom, got %s",
@@ -5649,7 +5908,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         result = vm__push(vm, swap_result);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* --- VM-internal macros for typed arithmetic opcodes (vm.c only) --- */
@@ -5758,35 +6017,35 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       /* --- M11: i64 typed arithmetic/comparison opcodes --- */
 
-      case OP_ADD_I64: { VM__I64_BINOP(+); break; }
-      case OP_SUB_I64: { VM__I64_BINOP(-); break; }
-      case OP_MUL_I64: { VM__I64_BINOP(*); break; }
-      case OP_DIV_I64: { VM__I64_DIVOP(/); break; }
-      case OP_MOD_I64: { VM__I64_DIVOP(%); break; }
-      case OP_NEG_I64: { VM__I64_NEG(); break; }
-      case OP_LT_I64:  { VM__I64_CMPOP(<); break; }
-      case OP_GT_I64:  { VM__I64_CMPOP(>); break; }
-      case OP_LE_I64:  { VM__I64_CMPOP(<=); break; }
-      case OP_GE_I64:  { VM__I64_CMPOP(>=); break; }
-      case OP_EQ_I64:  { VM__I64_CMPOP(==); break; }
+      CASE(OP_ADD_I64): { VM__I64_BINOP(+); DISPATCH(); }
+      CASE(OP_SUB_I64): { VM__I64_BINOP(-); DISPATCH(); }
+      CASE(OP_MUL_I64): { VM__I64_BINOP(*); DISPATCH(); }
+      CASE(OP_DIV_I64): { VM__I64_DIVOP(/); DISPATCH(); }
+      CASE(OP_MOD_I64): { VM__I64_DIVOP(%); DISPATCH(); }
+      CASE(OP_NEG_I64): { VM__I64_NEG(); DISPATCH(); }
+      CASE(OP_LT_I64):  { VM__I64_CMPOP(<); DISPATCH(); }
+      CASE(OP_GT_I64):  { VM__I64_CMPOP(>); DISPATCH(); }
+      CASE(OP_LE_I64):  { VM__I64_CMPOP(<=); DISPATCH(); }
+      CASE(OP_GE_I64):  { VM__I64_CMPOP(>=); DISPATCH(); }
+      CASE(OP_EQ_I64):  { VM__I64_CMPOP(==); DISPATCH(); }
 
       /* --- M11: f64 typed arithmetic/comparison opcodes --- */
 
-      case OP_ADD_F64: { VM__F64_BINOP(+); break; }
-      case OP_SUB_F64: { VM__F64_BINOP(-); break; }
-      case OP_MUL_F64: { VM__F64_BINOP(*); break; }
-      case OP_DIV_F64: { VM__F64_DIVOP(); break; }
-      case OP_MOD_F64: { VM__F64_MODOP(); break; }
-      case OP_NEG_F64: { VM__F64_NEG(); break; }
-      case OP_LT_F64:  { VM__F64_CMPOP(<); break; }
-      case OP_GT_F64:  { VM__F64_CMPOP(>); break; }
-      case OP_LE_F64:  { VM__F64_CMPOP(<=); break; }
-      case OP_GE_F64:  { VM__F64_CMPOP(>=); break; }
-      case OP_EQ_F64:  { VM__F64_CMPOP(==); break; }
+      CASE(OP_ADD_F64): { VM__F64_BINOP(+); DISPATCH(); }
+      CASE(OP_SUB_F64): { VM__F64_BINOP(-); DISPATCH(); }
+      CASE(OP_MUL_F64): { VM__F64_BINOP(*); DISPATCH(); }
+      CASE(OP_DIV_F64): { VM__F64_DIVOP(); DISPATCH(); }
+      CASE(OP_MOD_F64): { VM__F64_MODOP(); DISPATCH(); }
+      CASE(OP_NEG_F64): { VM__F64_NEG(); DISPATCH(); }
+      CASE(OP_LT_F64):  { VM__F64_CMPOP(<); DISPATCH(); }
+      CASE(OP_GT_F64):  { VM__F64_CMPOP(>); DISPATCH(); }
+      CASE(OP_LE_F64):  { VM__F64_CMPOP(<=); DISPATCH(); }
+      CASE(OP_GE_F64):  { VM__F64_CMPOP(>=); DISPATCH(); }
+      CASE(OP_EQ_F64):  { VM__F64_CMPOP(==); DISPATCH(); }
 
       /* --- M11: u64 unsigned-specific opcodes --- */
 
-      case OP_DIV_U64: {
+      CASE(OP_DIV_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
@@ -5798,10 +6057,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, a / b);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_MOD_U64: {
+      CASE(OP_MOD_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
@@ -5813,48 +6072,48 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, a % b);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LT_U64: {
+      CASE(OP_LT_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
         result = vm__push(vm, raw_a < raw_b ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GT_U64: {
+      CASE(OP_GT_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
         result = vm__push(vm, raw_a > raw_b ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LE_U64: {
+      CASE(OP_LE_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
         result = vm__push(vm, raw_a <= raw_b ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GE_U64: {
+      CASE(OP_GE_U64): {
         JaclVal raw_b, raw_a;
         result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
         result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
         result = vm__push(vm, raw_a >= raw_b ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* --- M11: Type conversion opcodes --- */
 
-      case OP_TO_I32: {
+      CASE(OP_TO_I32): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -5880,10 +6139,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           default: { VM_ERROR(vm, "invalid source type for to-i32"); }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_I64: {
+      CASE(OP_TO_I64): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -5910,10 +6169,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           default: { VM_ERROR(vm, "invalid source type for to-i64"); }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_U32: {
+      CASE(OP_TO_U32): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -5940,10 +6199,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           default: { VM_ERROR(vm, "invalid source type for to-u32"); }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_U64: {
+      CASE(OP_TO_U64): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -5970,10 +6229,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           default: { VM_ERROR(vm, "invalid source type for to-u64"); }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_F32: {
+      CASE(OP_TO_F32): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -6000,10 +6259,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           default: { VM_ERROR(vm, "invalid source type for to-f32"); }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_F64: {
+      CASE(OP_TO_F64): {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
@@ -6035,10 +6294,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, raw);
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TO_DYN: {
+      CASE(OP_TO_DYN): {
         uint8_t src_type = vm__read_byte(vm);
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
@@ -6076,22 +6335,22 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* --- M11: Typed constant opcodes --- */
 
-      case OP_CONST_I64:
-      case OP_CONST_U64:
-      case OP_CONST_F64: {
+      CASE(OP_CONST_I64):
+      CASE(OP_CONST_U64):
+      CASE(OP_CONST_F64): {
         uint16_t idx = vm__read_u16(vm);
         /* Push raw 64-bit value from constant pool (no tag) */
         result = vm__push(vm, vm->chunk->constants[idx]);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_GET: {
+      CASE(OP_HEAP_RECORD_GET): {
         uint16_t field_offset = vm__read_u16(vm);
         uint8_t field_type = vm__read_byte(vm);
         JaclVal struct_val;
@@ -6100,7 +6359,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field access on non-struct value");
@@ -6111,10 +6370,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal field_val = vm__heap_record_read_field(NULL, s, field_offset, field_type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_SET: {
+      CASE(OP_HEAP_RECORD_SET): {
         uint16_t field_offset = vm__read_u16(vm);
         uint8_t field_type = vm__read_byte(vm);
         JaclVal new_val;
@@ -6126,7 +6385,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field mutation on non-struct value");
@@ -6145,10 +6404,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Push struct value back (for chaining) */
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_GET_INLINE: {
+      CASE(OP_HEAP_RECORD_GET_INLINE): {
         /* Pop a heap record, push N inline slots from data+offset.
            Operands: u16 byte_offset, u16 sub_type_idx. */
         uint16_t field_offset = vm__read_u16(vm);
@@ -6157,7 +6416,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val); if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field access on non-struct value");
@@ -6180,10 +6439,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += sub_width;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_SET_INLINE: {
+      CASE(OP_HEAP_RECORD_SET_INLINE): {
         /* Pop N inline struct slots, pop heap record, copy bytes to
            data+offset, push record back (for chaining).
            Operands: u16 byte_offset, u16 sub_type_idx. */
@@ -6209,7 +6468,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           vm->stack_top -= sub_width;
           /* error JaclVal already on TOS where record was; leave it */
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field mutation on non-struct value");
@@ -6222,10 +6481,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
         }
         vm->stack_top -= sub_width;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_LOAD: {
+      CASE(OP_PTR_LOAD): {
         /* Pop a u64 pointer (typed [Ptr T] from typer's perspective),
          * read N bytes at *ptr+offset interpreted as field_type, push
          * the resulting value. Used for typed pointer field reads
@@ -6239,7 +6498,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(ptr_val)) {
           result = vm__push(vm, ptr_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-load: expected pointer (u64), got non-pointer value");
@@ -6265,10 +6524,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_STORE: {
+      CASE(OP_PTR_STORE): {
         /* Pop value, pop pointer, write value at *ptr+offset
          * interpreted as field_type. Pushes the pointer back so set
          * forms can chain. Operands: u16 byte_offset, u8 field_type. */
@@ -6283,12 +6542,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(ptr_val)) {
           result = vm__push(vm, ptr_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (jacl_is_error(new_val)) {
           result = vm__push(vm, new_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-store: expected pointer (u64), got non-pointer value");
@@ -6313,10 +6572,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, ptr_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_OFFSET: {
+      CASE(OP_PTR_OFFSET): {
         /* Typed pointer arithmetic: pop n (signed), pop u64 p, push
          * p + n * elem_size. Used by [ptr-offset $p $n] for walking
          * arrays. The compiler bakes elem_size in based on the
@@ -6331,12 +6590,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(ptr_val)) {
           result = vm__push(vm, ptr_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (jacl_is_error(n_val)) {
           result = vm__push(vm, n_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-offset: expected pointer (u64) base");
@@ -6355,10 +6614,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint64_t out  = base + (uint64_t)(n * (int64_t)elem_size);
         result = vm__push(vm, jacl_u64(&vm->heap, out));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_ADD_OFFSET: {
+      CASE(OP_PTR_ADD_OFFSET): {
         /* Pop u64 ptr, push ptr+offset. Used for taking the address
          * of a nested struct field via [addr $p->inner->...]. */
         uint16_t byte_offset = vm__read_u16(vm);
@@ -6368,7 +6627,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(ptr_val)) {
           result = vm__push(vm, ptr_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-add-offset: expected pointer (u64)");
@@ -6377,10 +6636,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint64_t base = jacl_as_u64(ptr_val);
         result = vm__push(vm, jacl_u64(&vm->heap, base + byte_offset));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_LOAD_INLINE: {
+      CASE(OP_PTR_LOAD_INLINE): {
         /* Pop a u64 pointer, push N inline JaclVal slots copied from
          * *ptr+offset (interpreted as inline struct bytes). N is
          * derived from the sub_type_idx's total_size. Mirrors
@@ -6399,7 +6658,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(ptr_val)) {
           result = vm__push(vm, ptr_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-load-inline: expected pointer (u64)");
@@ -6420,10 +6679,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += sub_width;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_STORE_INLINE: {
+      CASE(OP_PTR_STORE_INLINE): {
         /* Pop N inline JaclVal slots, pop a u64 pointer, copy bytes
          * to *ptr+offset. Pushes the pointer back for chaining.
          * Mirrors OP_HEAP_RECORD_SET_INLINE but writes raw memory. */
@@ -6446,7 +6705,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
           }
           vm->stack_top -= sub_width;
-          break;  /* error stays on TOS where ptr was */
+          DISPATCH();  /* error stays on TOS where ptr was */
         }
         if (!jacl_is_u64(ptr_val)) {
           vm__set_error(vm, "ptr-store-inline: expected pointer (u64)");
@@ -6463,10 +6722,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
         }
         vm->stack_top -= sub_width;
-        break;
+        DISPATCH();
       }
 
-      case OP_PTR_DIFF: {
+      CASE(OP_PTR_DIFF): {
         /* Typed pointer subtraction: pop u64 b, pop u64 a, push
          * (i64)(a-b)/elem_size. elem_size is baked in from the
          * pointee's static type. */
@@ -6481,8 +6740,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal a_val;
         result = vm__pop(vm, &a_val);
         if (result != VM_OK) return result;
-        if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; DISPATCH(); }
         if (!jacl_is_u64(a_val) || !jacl_is_u64(b_val)) {
           vm__set_error(vm, "ptr-diff: expected two pointers (u64)");
           return VM_RUNTIME_ERROR;
@@ -6492,10 +6751,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         int64_t diff = (a - b) / (int64_t)elem_size;
         result = vm__push(vm, jacl_i64(&vm->heap, diff));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_GET_DYN: {
+      CASE(OP_HEAP_RECORD_GET_DYN): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;
         result = vm__pop(vm, &struct_val);
@@ -6503,7 +6762,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         /* Handle maps: field access becomes map lookup */
         if (jacl_is_map(struct_val)) {
@@ -6515,7 +6774,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, JACL_NIL);
           }
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field access requires struct or map");
@@ -6546,10 +6805,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                                                    (int)sdef->fields[fi].type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_OPTIONAL_GET: {
+      CASE(OP_OPTIONAL_GET): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;
         result = vm__pop(vm, &struct_val);
@@ -6558,13 +6817,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_nil(struct_val)) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         /* Error propagation */
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         /* Handle maps */
         if (jacl_is_map(struct_val)) {
@@ -6576,7 +6835,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, JACL_NIL);
           }
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         /* Structs must use -> not ?. */
         vm__set_error(vm, "?. cannot be used on %s; use -> for struct field access",
@@ -6584,7 +6843,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_HEAP_RECORD_SET_DYN: {
+      CASE(OP_HEAP_RECORD_SET_DYN): {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal new_val;
         result = vm__pop(vm, &new_val);
@@ -6595,7 +6854,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(struct_val)) {
           result = vm__push(vm, struct_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         /* Handle maps: field set becomes map-set (returns new map) */
         if (jacl_is_map(struct_val)) {
@@ -6605,7 +6864,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           jacl_map_node* new_map = jacl_map_set(map, name_val, new_val);
           result = vm__push(vm, jacl_map_ptr(new_map));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_struct(struct_val)) {
           vm__set_error(vm, "field mutation requires struct or map");
@@ -6639,10 +6898,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm__heap_record_write_field(sd, foff2, (int)sdef2->fields[fi2].type, new_val);
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HEAP_RECORD_NEW: {
+      CASE(OP_HEAP_RECORD_NEW): {
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "invalid struct type index %u", (unsigned)type_idx);
@@ -6716,10 +6975,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top -= field_count;
         result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_NEW_INLINE: {
+      CASE(OP_STRUCT_NEW_INLINE): {
         /* Construct an inline struct from field arguments on the stack.
            Primitive field args occupy 1 stack slot each (JaclVal).
            Nested struct field args occupy width inline slots (raw bytes).
@@ -6840,10 +7099,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, si);
         }
         vm->stack_top = base + width;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_GET_INLINE: {
+      CASE(OP_STRUCT_GET_INLINE): {
         /* Read a field from a stack-resident inline struct.
            Operands: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type.
            The struct occupies consecutive stack slots starting at
@@ -6895,10 +7154,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, field_val);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_SET_INLINE: {
+      CASE(OP_STRUCT_SET_INLINE): {
         /* Write a field to a stack-resident inline struct.
            Operands: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type.
            Pops the new value from stack, writes to the struct's byte region,
@@ -6922,10 +7181,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_STORE_INLINE: {
+      CASE(OP_STRUCT_STORE_INLINE): {
         /* De-materialize a heap HeapRecord into N consecutive stack slots.
            Operands: uint8_t base_slot, uint16_t type_idx.
            Reads heap struct pointer from stack[base_slot], writes raw bytes
@@ -6955,10 +7214,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         for (uint32_t si = abs_base; si < abs_base + width; si++) {
           BITMAP_SET(vm->inline_slot_bitmap, si);
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_GET_UPVALUE: {
+      CASE(OP_STRUCT_GET_UPVALUE): {
         /* US-008: Read a field from a closure-captured inline struct.
            Same as OP_STRUCT_GET_INLINE but base is frame->closure->upvalues[base_uv_slot]. */
         uint8_t base_uv_slot = vm__read_byte(vm);
@@ -7002,10 +7261,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, field_val);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_SET_UPVALUE: {
+      CASE(OP_STRUCT_SET_UPVALUE): {
         /* US-008: Write a field to a closure-captured inline struct.
            Same as OP_STRUCT_SET_INLINE but base is frame->closure->upvalues[base_uv_slot]. */
         uint8_t base_uv_slot = vm__read_byte(vm);
@@ -7027,10 +7286,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LOAD_INLINE_LOCAL: {
+      CASE(OP_LOAD_INLINE_LOCAL): {
         /* Copy N inline struct slots from a local to TOS, no heap alloc.
            Operands: uint8_t base_slot, uint16_t type_idx. */
         uint8_t base_slot = vm__read_byte(vm);
@@ -7052,10 +7311,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_GET_INLINE_TOS: {
+      CASE(OP_STRUCT_GET_INLINE_TOS): {
         /* Pop an inline struct from TOS, push field value.
            Operands: u16 type_idx, u16 byte_offset, u8 field_type
            [+ u16 sub_type_idx if field_type == TYPE_STRUCT]. */
@@ -7106,10 +7365,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
         }
         (void)sdef;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_EQ_TOS: {
+      CASE(OP_STRUCT_EQ_TOS): {
         /* Pop two structs from TOS (rhs first, then lhs), memcmp, push bool.
            Each can be inline or heap — vm__pop_struct dispatches.
            Operand: uint16_t type_idx. */
@@ -7126,10 +7385,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         bool eq = (memcmp(lhs, rhs, sdef->total_size) == 0);
         result = vm__push(vm, jacl_bool(eq));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PRINT_STRUCT: {
+      CASE(OP_PRINT_STRUCT): {
         /* Pop N inline struct slots, format Name{f: v, ...}, print + newline.
            Operand: uint16_t type_idx. */
         uint16_t type_idx = vm__read_u16(vm);
@@ -7153,10 +7412,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_PRINT_PTR: {
+      CASE(OP_PRINT_PTR): {
         /* Pop a tagged u64 (the [Ptr T] value) and format as
          * "Ptr<Name>(0xADDR)". The pointee idx encodes either a
          * scalar JaclType (via JACL_SCALAR_TYPE_IDX) or a struct
@@ -7191,10 +7450,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_LOAD_INLINE_UPVALUE: {
+      CASE(OP_LOAD_INLINE_UPVALUE): {
         /* Copy N inline struct slots from a closure upvalue to TOS, no heap alloc.
            Operands: uint8_t base_uv_slot, uint16_t type_idx. */
         uint8_t base_uv_slot = vm__read_byte(vm);
@@ -7216,10 +7475,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_EXPAND: {
+      CASE(OP_STRUCT_EXPAND): {
         /* Phase 5a: Pop heap HeapRecord from stack top, push raw bytes as N inline slots.
            Operand: uint16_t type_idx. */
         uint16_t type_idx = vm__read_u16(vm);
@@ -7243,10 +7502,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_EQ_INLINE: {
+      CASE(OP_STRUCT_EQ_INLINE): {
         /* US-013: Compare two stack-resident inline structs via memcmp.
            Operands: uint8_t base_a, uint8_t base_b, uint16_t total_size.
            Pushes bool result. */
@@ -7258,10 +7517,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         bool eq = (memcmp(bytes_a, bytes_b, total_size) == 0);
         result = vm__push(vm, jacl_bool(eq));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_STRUCT_HASH_INLINE: {
+      CASE(OP_STRUCT_HASH_INLINE): {
         /* US-013: Hash a stack-resident inline struct's raw bytes.
            Operands: uint8_t base_slot, uint16_t total_size, uint16_t type_idx.
            Pushes i32 hash result. */
@@ -7275,10 +7534,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, jacl_i32((int32_t)h));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HASH: {
+      CASE(OP_HASH): {
         /* US-013: Generic hash — pop any value, push i32 hash. */
         JaclVal val;
         result = vm__pop(vm, &val);
@@ -7286,10 +7545,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t h = jacl_val_hash(val);
         result = vm__push(vm, jacl_i32((int32_t)h));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SPREAD: {
+      CASE(OP_SPREAD): {
         JaclVal spread_val;
         result = vm__pop(vm, &spread_val);
         if (result != VM_OK) return result;
@@ -7428,10 +7687,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         vm->spread_counts[vm->spread_count_top++] = len;
-        break;
+        DISPATCH();
       }
 
-      case OP_CALL_SPREAD: {
+      CASE(OP_CALL_SPREAD): {
         uint8_t fixed_args = vm__read_byte(vm);
         uint8_t num_spreads = vm__read_byte(vm);
         /* Compute total args */
@@ -7464,7 +7723,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm->stack_top -= (total_args + 1);
           result = vm__push(vm, ret);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_closure(callee)) {
@@ -7497,10 +7756,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         frame     = new_frame;
         vm->ip    = frame->chunk->code;
         vm->chunk = frame->chunk;
-        break;
+        DISPATCH();
       }
 
-      case OP_FOLD_SPREAD: {
+      CASE(OP_FOLD_SPREAD): {
         uint8_t op_id = vm__read_byte(vm);
         uint8_t fixed_args = vm__read_byte(vm);
         uint8_t num_spreads = vm__read_byte(vm);
@@ -7562,16 +7821,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top = base;
         result = vm__push(vm, acc);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_YIELD: {
+      CASE(OP_YIELD): {
         /* CPS yield removed — all generators use OP_YIELD_SM now */
         vm__set_error(vm, "CPS yield not supported (use state machine path)");
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_STREAM_NEXT: {
+      CASE(OP_STREAM_NEXT): {
         /* stream_next: pulls next value from a generator stream.
            Supports both CPS-based and state-machine-based generators. */
         JaclVal stream_val;
@@ -7586,7 +7845,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (stream->state == STREAM_EXHAUSTED) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Derived streams (filter, etc.) use the unified helper */
@@ -7597,7 +7856,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, pulled);
           if (result != VM_OK) return result;
           frame = &vm->frames[vm->frame_count - 1];
-          break;
+          DISPATCH();
         }
 
         /* Save caller context */
@@ -7645,7 +7904,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             frame = &vm->frames[vm->frame_count - 1];
             result = vm__push(vm, vm->yield_value);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           } else if (inner == VM_OK) {
             /* Check if SM function returned an error value (error propagated
                through OP_CHECK_ERROR frame unwinding returns VM_OK). */
@@ -7662,7 +7921,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               frame = &vm->frames[vm->frame_count - 1];
               result = vm__push(vm, sm_ret);
               if (result != VM_OK) return result;
-              break;
+              DISPATCH();
             }
             stream->state = STREAM_EXHAUSTED;
             vm__slot_set(vm, &stream->cached_value, JACL_NIL);
@@ -7673,7 +7932,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             frame = &vm->frames[vm->frame_count - 1];
             result = vm__push(vm, JACL_NIL);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           } else {
             stream->state = STREAM_ERROR;
             return inner;
@@ -7685,7 +7944,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_COLLECT: {
+      CASE(OP_COLLECT): {
         /* collect: materialize a stream into a vector, or identity on vectors */
         JaclVal coll_val;
         result = vm__pop(vm, &coll_val);
@@ -7695,7 +7954,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Identity: return vector unchanged */
           result = vm__push(vm, coll_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_stream(coll_val)) {
@@ -7716,11 +7975,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               result = vm__push(vm, stream->cached_value);
               vm__slot_set(vm, &stream->cached_value, JACL_NIL);
               if (result != VM_OK) return result;
-              break;
+              DISPATCH();
             }
             result = vm__push(vm, jacl_inline_string("", 0));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
 
           /* Read all remaining output into arena-allocated buffer */
@@ -7807,7 +8066,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             frame = &vm->frames[vm->frame_count - 1];
             result = vm__push(vm, jacl_set_error(err_msg));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
 
           /* Success - clean up stderr temp file */
@@ -7829,7 +8088,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, result_str);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* US-006: Exec buffer streams collect to the full string (not lines vector) */
@@ -7840,7 +8099,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, stdout_str);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* US-009: Exec pipe streams collect all output from pipeline */
@@ -7852,11 +8111,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               result = vm__push(vm, stream->cached_value);
               vm__slot_set(vm, &stream->cached_value, JACL_NIL);
               if (result != VM_OK) return result;
-              break;
+              DISPATCH();
             }
             result = vm__push(vm, jacl_inline_string("", 0));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
 
           /* Read all remaining output */
@@ -7947,7 +8206,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             frame = &vm->frames[vm->frame_count - 1];
             result = vm__push(vm, jacl_set_error(err_msg));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
 
           /* Success */
@@ -7967,7 +8226,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, result_str);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Derived streams (filter, etc.) use the unified pull helper */
@@ -7985,7 +8244,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, jacl_vector_ptr(collect_vec));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         gc__current_heap = &vm->heap;
@@ -8070,10 +8329,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_vector_ptr(collect_vec));
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_IS_STREAM_EXHAUSTED: {
+      CASE(OP_IS_STREAM_EXHAUSTED): {
         /* Pop a value. Push true if it's an exhausted stream, else false. */
         JaclVal sv;
         result = vm__pop(vm, &sv);
@@ -8085,24 +8344,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, exhausted ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_COUNT: {
+      CASE(OP_COUNT): {
         JaclVal coll_val;
         result = vm__pop(vm, &coll_val);
         if (result != VM_OK) return result;
         if (jacl_is_error(coll_val)) {
           result = vm__push(vm, coll_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (jacl_is_vector(coll_val)) {
           jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
           result = vm__push(vm, jacl_i32((int32_t)jacl_vec_count(vec)));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (jacl_is_stream(coll_val)) {
@@ -8120,7 +8379,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, jacl_i32(cnt));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         vm__set_error(vm, "count requires a vector or stream, got %s",
@@ -8128,7 +8387,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_TAKE: {
+      CASE(OP_TAKE): {
         JaclVal n_val, coll_val;
         result = vm__pop(vm, &n_val);
         if (result != VM_OK) return result;
@@ -8137,12 +8396,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(coll_val)) {
           result = vm__push(vm, coll_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (jacl_is_error(n_val)) {
           result = vm__push(vm, n_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_i32(n_val)) {
@@ -8170,7 +8429,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
           }
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (jacl_is_stream(coll_val)) {
@@ -8182,7 +8441,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           ts->arg_count  = 2;
           result = vm__push(vm, take_stream_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         vm__set_error(vm, "take requires a vector or stream, got %s",
@@ -8190,14 +8449,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_FIRST: {
+      CASE(OP_FIRST): {
         JaclVal coll_val;
         result = vm__pop(vm, &coll_val);
         if (result != VM_OK) return result;
         if (jacl_is_error(coll_val)) {
           result = vm__push(vm, coll_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (jacl_is_vector(coll_val)) {
@@ -8209,7 +8468,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
           }
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (jacl_is_stream(coll_val)) {
@@ -8218,7 +8477,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (stream->state == STREAM_EXHAUSTED) {
             result = vm__push(vm, JACL_NIL);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
 
           /* Use unified pull helper for all stream kinds */
@@ -8231,7 +8490,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, pulled);
             if (result != VM_OK) return result;
           }
-          break;
+          DISPATCH();
         }
 
         vm__set_error(vm, "first requires a vector or stream, got %s",
@@ -8239,14 +8498,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_LINES: {
+      CASE(OP_LINES): {
         JaclVal str_val;
         result = vm__pop(vm, &str_val);
         if (result != VM_OK) return result;
         if (jacl_is_error(str_val)) {
           result = vm__push(vm, str_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         if (!jacl_is_string(str_val)) {
@@ -8263,10 +8522,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         ls->arg_count  = 2;
         result = vm__push(vm, lines_stream_val);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_COLLECT_VARIADIC: {
+      CASE(OP_COLLECT_VARIADIC): {
         uint8_t min_arity = vm__read_byte(vm);
         uint32_t actual_count = vm->stack_top - frame->stack_base;
         uint32_t extra = actual_count > min_arity ? actual_count - min_arity : 0;
@@ -8278,20 +8537,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Collapse: set rest param slot and adjust stack_top */
         vm->stack[frame->stack_base + min_arity] = jacl_vector_ptr(vec);
         vm->stack_top = frame->stack_base + min_arity + 1;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_STATE_FIELD: {
+      CASE(OP_GET_STATE_FIELD): {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         result = vm__push(vm, sm->fields[field_index]);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_STATE_FIELD: {
+      CASE(OP_SET_STATE_FIELD): {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
@@ -8305,10 +8564,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                          sm->fields[field_index], value);
         sm->fields[field_index] = value;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_STATE_FIELD_CELL: {
+      CASE(OP_GET_STATE_FIELD_CELL): {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
@@ -8317,10 +8576,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclMutableRef *ref = jacl_as_cell(cell);
         result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_STATE_FIELD_CELL: {
+      CASE(OP_SET_STATE_FIELD_CELL): {
         uint8_t field_index = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
@@ -8336,10 +8595,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         MREF_VAL(ref) = new_val;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_STATE_FIELD_WIDE: {
+      CASE(OP_GET_STATE_FIELD_WIDE): {
         /* Copy N consecutive JaclVal slots from SM fields to the stack.
            Used to load a struct stored inline across multiple SM slots. */
         uint8_t base_idx = vm__read_byte(vm);
@@ -8356,10 +8615,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         for (uint32_t si = push_base; si < push_base + width; si++) {
           BITMAP_SET(vm->inline_slot_bitmap, si);
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_STATE_FIELD_WIDE: {
+      CASE(OP_SET_STATE_FIELD_WIDE): {
         /* Copy N consecutive JaclVal slots from stack top into SM fields.
            The top-of-stack holds the raw struct data across width slots.
            Byte-offset addressing: sm->fields[base_idx..base_idx+width-1]
@@ -8378,19 +8637,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(sm->field_inline_bitmap, base_idx + i);
         }
         vm->stack_top -= width;
-        break;
+        DISPATCH();
       }
 
-      case OP_GET_RESUME_POINT: {
+      CASE(OP_GET_RESUME_POINT): {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         result = vm__push(vm, jacl_i32((int32_t)sm->resume_point));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_RESUME_POINT: {
+      CASE(OP_SET_RESUME_POINT): {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
@@ -8398,10 +8657,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &value);
         if (result != VM_OK) return result;
         sm->resume_point = (uint32_t)jacl_as_i32(value);
-        break;
+        DISPATCH();
       }
 
-      case OP_YIELD_SM: {
+      CASE(OP_YIELD_SM): {
         /* State machine yield: pop yielded value, return VM_YIELD.
            No continuation closure — the SM function is re-entered via
            the dispatch table on the next stream_next call. */
@@ -8412,7 +8671,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_YIELD;
       }
 
-      case OP_AWAIT_SM: {
+      CASE(OP_AWAIT_SM): {
         /* State machine await: pop value from stack.
            - If it's a Job map: do blocking wait and return result
            - If it's a Future: handle via SM suspension semantics */
@@ -8532,7 +8791,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
             result = vm__push(vm, jacl_map_ptr(result_map));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
         }
 
@@ -8573,10 +8832,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_CALL_SUSPEND: {
+      CASE(OP_CALL_SUSPEND): {
         /* Like OP_CALL, but for calls to known suspending procs in SM context.
            In concurrent mode: spawn the inner SM as a separate task with a
            future, push the future (OP_AWAIT_SM follows to handle suspension).
@@ -8702,15 +8961,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_SYNTAX_SPLICE: {
+      CASE(OP_SYNTAX_SPLICE): {
         vm__set_error(vm, "OP_SYNTAX_SPLICE is no longer supported");
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_SYNTAX_OP: {
+      CASE(OP_SYNTAX_OP): {
         /* US-015: syntax introspection. US-016: syntax construction.
          * US-017: user-raised syntax errors. Subops:
          *   0  = syntax-kind      (syntax → string)
@@ -8746,7 +9005,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (jacl_is_error(msg)) {
             result = vm__push(vm, msg);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
           if (!jacl_is_string(msg)) {
             vm__set_error(vm, "type error in 'syntax-error': expected string message, got %s",
@@ -8766,12 +9025,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (jacl_is_error(syn_val)) {
             result = vm__push(vm, syn_val);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
           if (jacl_is_error(msg)) {
             result = vm__push(vm, msg);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
           if (!jacl_is_string(msg)) {
             vm__set_error(vm, "type error in 'syntax-error': expected string message, got %s",
@@ -9045,7 +9304,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             break;
           }
           }
-          break;
+          DISPATCH();
         }
 
         /* Introspection path (subops 0-6): pop one syntax value, dispatch. */
@@ -9054,7 +9313,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(val)) {
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (!jacl_is_syntax(val)) {
           static const char *names[] = {
@@ -9159,10 +9418,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "unknown OP_SYNTAX_OP subop %u", subop);
           return VM_RUNTIME_ERROR;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_INTERPRET: {
+      CASE(OP_INTERPRET): {
         /* Read arity byte: 1 = [interpret $src], 2 = [interpret $prelude $src] */
         uint8_t interp_arity = *vm->ip++;
 
@@ -9182,12 +9441,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(src_val)) {
           result = vm__push(vm, src_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
         if (interp_arity == 2 && jacl_is_error(prelude_val)) {
           result = vm__push(vm, prelude_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Type-check: source must be string — return error value, not exception */
@@ -9196,7 +9455,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                         vm__type_name(src_val));
           result = vm__push(vm, jacl_set_error(JACL_NIL));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Type-check: prelude must be map or nil — return error value, not exception */
@@ -9205,7 +9464,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                         vm__type_name(prelude_val));
           result = vm__push(vm, jacl_set_error(JACL_NIL));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Extract source bytes into arena. */
@@ -9275,7 +9534,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                                            : "interpret error";
           result = vm__push(vm, jacl_set_error(JACL_NIL));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* Execute the compiled closure on the parent VM. */
@@ -9341,7 +9600,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__push(vm, out);
         if (result != VM_OK) return result;
 interpret_done:
-        break;
+        DISPATCH();
       }
 
       /* US-004: [interpret-prelude] — returns the default permissive prelude
@@ -9357,7 +9616,7 @@ interpret_done:
        *   box, atom, deref, reset, swap,
        *   lines, stream_next
        */
-      case OP_INTERPRET_PRELUDE: {
+      CASE(OP_INTERPRET_PRELUDE): {
         gc__current_heap = &vm->heap;
         jacl_map_node *m = NULL;
 
@@ -9379,14 +9638,14 @@ interpret_done:
 
         result = vm__push(vm, jacl_map_ptr(m));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* Unified OP_EXEC with flags byte dispatch
        * Flags: EXEC_FLAG_FULL=0x01, EXEC_FLAG_STDIN=0x02, EXEC_FLAG_BG=0x04, EXEC_FLAG_PIPE=0x08
        * If EXEC_FLAG_PIPE, next byte is command count.
        */
-      case OP_EXEC: {
+      CASE(OP_EXEC): {
         uint8_t flags = vm__read_byte(vm);
 
         /* === PIPE MODE (flags & 0x08) === */
@@ -9494,7 +9753,7 @@ interpret_done:
 
           result = vm__push(vm, stream_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* For non-PIPE modes, handle stdin first if EXEC_FLAG_STDIN */
@@ -9566,7 +9825,7 @@ interpret_done:
 
           result = vm__push(vm, jacl_map_ptr(m));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* === BUILD COMMAND STRING (shared by remaining modes) === */
@@ -9582,7 +9841,7 @@ interpret_done:
           if (collect_result == -2) {
             /* Error value pushed to stack */
             frame = &vm->frames[vm->frame_count - 1];
-            break;
+            DISPATCH();
           }
         }
 
@@ -9617,7 +9876,7 @@ interpret_done:
 
           result = vm__push(vm, stream_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         snprintf(full_cmd, sizeof(full_cmd), "%s 2>%s", cmd_buf, stderr_path);
@@ -9672,7 +9931,7 @@ interpret_done:
 
           result = vm__push(vm, jacl_map_ptr(result_map));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         /* === BASIC MODE (flags == 0) === */
@@ -9689,7 +9948,7 @@ interpret_done:
 
           result = vm__push(vm, stream_val);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
       }
 
@@ -9699,7 +9958,7 @@ interpret_done:
        * If value is a resolved future: return result
        * If value is a pending future: error (non-SM context can't suspend)
        */
-      case OP_AWAIT_JOB: {
+      CASE(OP_AWAIT_JOB): {
         JaclVal val;
         result = vm__pop(vm, &val);
         if (result != VM_OK) return result;
@@ -9816,7 +10075,7 @@ interpret_done:
 
             result = vm__push(vm, jacl_map_ptr(result_map));
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           }
         }
 
@@ -9828,12 +10087,12 @@ interpret_done:
           if (fstate == FUTURE_RESOLVED) {
             result = vm__push(vm, (JaclVal)fut->result);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           } else if (fstate == FUTURE_ERROR) {
             JaclVal err = (JaclVal)fut->result;
             result = vm__push(vm, err | JACL_FLAG_ERROR);
             if (result != VM_OK) return result;
-            break;
+            DISPATCH();
           } else {
             vm__set_error(vm, "cannot await pending future outside async context");
             return VM_RUNTIME_ERROR;
@@ -9849,7 +10108,7 @@ interpret_done:
        * Stack: [job_map, signal_name] -> [bool]
        * Returns $true if signal sent, $false if process already exited.
        */
-      case OP_SIGNAL: {
+      CASE(OP_SIGNAL): {
         JaclVal sig_name_val;
         result = vm__pop(vm, &sig_name_val);
         if (result != VM_OK) return result;
@@ -9926,20 +10185,20 @@ interpret_done:
           return VM_RUNTIME_ERROR;
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_HALT: {
+      CASE(OP_HALT): {
         return VM_OK;
       }
 
-      case OP_GET_CTX: {
+      CASE(OP_GET_CTX): {
         result = vm__push(vm, vm->ctx);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_CTX_FORK: {
+      CASE(OP_CTX_FORK): {
         if (!vm->ctx_pool || vm->ctx == JACL_NIL) {
           vm__set_error(vm, "with-ctx: no ctx available");
           return VM_RUNTIME_ERROR;
@@ -9958,20 +10217,20 @@ interpret_done:
             (uint64_t*)&vm->saved_ctx[vm->saved_ctx_count++],
             (uint64_t)old_ctx, MEM_RELEASE);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_ctx, vm->ctx);
-        break;
+        DISPATCH();
       }
 
-      case OP_CTX_RESTORE: {
+      CASE(OP_CTX_RESTORE): {
         /* Pop saved ctx from VM save stack, free forked ctx to pool, restore */
         if (vm->saved_ctx_count == 0) {
           vm__set_error(vm, "ctx restore: no saved ctx");
           return VM_RUNTIME_ERROR;
         }
         ctx_unfork(vm, vm->saved_ctx[--vm->saved_ctx_count]);
-        break;
+        DISPATCH();
       }
 
-      case OP_SET_CTX: {
+      CASE(OP_SET_CTX): {
         /* Pop value from stack and store in vm->ctx (used by SM resume) */
         JaclVal new_ctx;
         result = vm__pop(vm, &new_ctx);
@@ -9980,10 +10239,10 @@ interpret_done:
         /* RELEASE: see ctx_fork. */
         ATOMIC_STORE_EXPLICIT((uint64_t*)&vm->ctx,
                               (uint64_t)new_ctx, MEM_RELEASE);
-        break;
+        DISPATCH();
       }
 
-      case OP_RANGE: {
+      CASE(OP_RANGE): {
         /* Create a range stream: pop end, pop start, push stream.
          * Next byte: 0 = exclusive (..<), 1 = inclusive (..=) */
         uint8_t inclusive = *vm->ip++;
@@ -10019,12 +10278,12 @@ interpret_done:
         rs->arg_count = 3;
         result = vm__push(vm, range_stream);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* --- Typed vector operations --- */
 
-      case OP_TYPED_VEC: {
+      CASE(OP_TYPED_VEC): {
         uint16_t type_idx = vm__read_u16(vm);
         uint8_t count = vm__read_byte(vm);
 
@@ -10048,7 +10307,7 @@ interpret_done:
           }
           result = vm__push(vm, jacl_typed_vector_ptr(tvec));
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -10070,10 +10329,10 @@ interpret_done:
         }
         result = vm__push(vm, jacl_typed_vector_ptr(tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_GET_INLINE: {
+      CASE(OP_TYPED_VEC_GET_INLINE): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal idx_val, tvec_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
@@ -10100,7 +10359,7 @@ interpret_done:
           const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
           result = vm__push(vm, *ptr);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -10118,10 +10377,10 @@ interpret_done:
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
-      case OP_INLINE_TO_LOCAL: {
+      CASE(OP_INLINE_TO_LOCAL): {
         uint8_t base_slot = vm__read_byte(vm);
         uint16_t type_idx = vm__read_u16(vm);
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -10138,10 +10397,10 @@ interpret_done:
           BITMAP_CLR(vm->inline_slot_bitmap, si);
         }
         vm->stack_top -= width;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_PUSH: {
+      CASE(OP_TYPED_VEC_PUSH): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal slots[VM_MAX_STRUCT_SLOTS];
         if (type_idx >= 0xFF00) {
@@ -10160,10 +10419,10 @@ interpret_done:
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_push_back_wide(tvec, slots);
         result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_SET: {
+      CASE(OP_TYPED_VEC_SET): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal slots[VM_MAX_STRUCT_SLOTS];
         if (type_idx >= 0xFF00) {
@@ -10194,20 +10453,20 @@ interpret_done:
         }
         result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_LEN: {
+      CASE(OP_TYPED_VEC_LEN): {
         JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
         JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_typed_vec_count(tvec)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_CONCAT: {
+      CASE(OP_TYPED_VEC_CONCAT): {
         uint16_t type_idx = vm__read_u16(vm);
         (void)type_idx;
         JaclVal b_val, a_val;
@@ -10221,10 +10480,10 @@ interpret_done:
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_concat(a, b);
         result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_SLICE: {
+      CASE(OP_TYPED_VEC_SLICE): {
         uint16_t type_idx = vm__read_u16(vm);
         (void)type_idx;
         JaclVal end_val, start_val, tvec_val;
@@ -10253,19 +10512,19 @@ interpret_done:
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_slice(tvec, (uint32_t)start, (uint32_t)end);
         result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
       /* ===== Typed HOF opcodes ===== */
 
-      case OP_TYPED_EACH: {
+      CASE(OP_TYPED_EACH): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm, "type error in 'each': expected closure, got %s",
@@ -10432,17 +10691,17 @@ interpret_done:
         }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_TRANSFORM: {
+      CASE(OP_TYPED_TRANSFORM): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm, "type error in 'transform': expected closure, got %s",
@@ -10619,17 +10878,17 @@ interpret_done:
                        vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_FILTER: {
+      CASE(OP_TYPED_FILTER): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
-        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
-        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; DISPATCH(); }
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm, "type error in 'filter': expected closure, got %s",
@@ -10812,12 +11071,12 @@ interpret_done:
                        vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
-        break;
+        DISPATCH();
       }
 
       /* ===== Typed Map opcodes ===== */
 
-      case OP_TYPED_MAP: {
+      CASE(OP_TYPED_MAP): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         uint8_t pair_count = vm__read_byte(vm);
@@ -10850,10 +11109,10 @@ interpret_done:
         }
         result = vm__push(vm, jacl_typed_map_ptr(tmap));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_GET_INLINE: {
+      CASE(OP_TYPED_MAP_GET_INLINE): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         jacl_typed_map_leaf* leaf;
@@ -10881,7 +11140,7 @@ interpret_done:
           /* Scalar value — single-slot copy. */
           result = vm__push(vm, *val_ptr);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -10896,10 +11155,10 @@ interpret_done:
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_SET: {
+      CASE(OP_TYPED_MAP_SET): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal val_slots[VM_MAX_STRUCT_SLOTS];
@@ -10921,10 +11180,10 @@ interpret_done:
         jacl_typed_map_node* new_tmap = jacl_typed_map_set_wide(tmap, key_slots, kw, val_slots, vw);
         result = vm__push(vm, jacl_typed_map_ptr(new_tmap));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_HAS: {
+      CASE(OP_TYPED_MAP_HAS): {
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
         uint32_t kw;
@@ -10943,10 +11202,10 @@ interpret_done:
                        : jacl_typed_map_has_wide(tmap, key_slots, kw);
         result = vm__push(vm, jacl_bool(found));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_REMOVE: {
+      CASE(OP_TYPED_MAP_REMOVE): {
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
         uint32_t kw;
@@ -10966,20 +11225,20 @@ interpret_done:
                        : jacl_typed_map_unset_wide(tmap, key_slots, kw);
         result = vm__push(vm, jacl_typed_map_ptr(new_tmap));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_LEN: {
+      CASE(OP_TYPED_MAP_LEN): {
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
         JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         result = vm__push(vm, jacl_i32((int32_t)jacl_typed_map_count(tmap)));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_KEYS: {
+      CASE(OP_TYPED_MAP_KEYS): {
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -11013,10 +11272,10 @@ interpret_done:
           result = vm__push(vm, jacl_typed_vector_ptr(tvec));
         }
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_VALS: {
+      CASE(OP_TYPED_MAP_VALS): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -11037,10 +11296,10 @@ interpret_done:
         }
         result = vm__push(vm, jacl_typed_vector_ptr(tvec));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_PRINT: {
+      CASE(OP_TYPED_VEC_PRINT): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
@@ -11070,10 +11329,10 @@ interpret_done:
         vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_PRINT: {
+      CASE(OP_TYPED_MAP_PRINT): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal tmap_val;
@@ -11123,10 +11382,10 @@ interpret_done:
         vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_VEC_EQ: {
+      CASE(OP_TYPED_VEC_EQ): {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal b_val, a_val;
         result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
@@ -11140,7 +11399,7 @@ interpret_done:
         if (a == b) {
           result = vm__push(vm, JACL_TRUE);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -11148,7 +11407,7 @@ interpret_done:
         if (count != jacl_typed_vec_count(b)) {
           result = vm__push(vm, JACL_FALSE);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         bool equal = true;
@@ -11162,10 +11421,10 @@ interpret_done:
         }
         result = vm__push(vm, jacl_bool(equal));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_TYPED_MAP_EQ: {
+      CASE(OP_TYPED_MAP_EQ): {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal b_val, a_val;
@@ -11180,14 +11439,14 @@ interpret_done:
         if (a == b) {
           result = vm__push(vm, JACL_TRUE);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         if (jacl_typed_map_count(a) != jacl_typed_map_count(b)) {
           result = vm__push(vm, JACL_FALSE);
           if (result != VM_OK) return result;
-          break;
+          DISPATCH();
         }
 
         uint32_t key_stride = 1;
@@ -11220,10 +11479,10 @@ interpret_done:
         }
         result = vm__push(vm, jacl_bool(equal));
         if (result != VM_OK) return result;
-        break;
+        DISPATCH();
       }
 
-      case OP_DEREF_INLINE: {
+      CASE(OP_DEREF_INLINE): {
         /* Phase 5d: Deref a struct box, push inline bytes directly.
            Operand: uint16_t type_idx.
            Avoids heap allocation (unlike OP_DEREF for struct boxes). */
@@ -11251,15 +11510,25 @@ interpret_done:
         for (uint32_t si = 0; si < width; si++)
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         vm->stack_top += width;
-        break;
+        DISPATCH();
       }
 
+#ifdef JACL_VM_COMPUTED_GOTO
+  L_unknown_opcode:
+    vm__set_error(vm, "unknown opcode %d", (int)instruction);
+    return VM_RUNTIME_ERROR;
+#else
       default: {
         vm__set_error(vm, "unknown opcode %d", (int)instruction);
         return VM_RUNTIME_ERROR;
       }
-    }
-  }
+    }  /* end switch */
+  }    /* end for */
+#endif
+
+  #undef CASE
+  #undef DISPATCH
+  #undef VM_PRELUDE
 }
 
 #undef VM__BINARY_NUMERIC_OP

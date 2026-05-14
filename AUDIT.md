@@ -45,21 +45,17 @@ build time by `test/test_struct_sizes.c`.
 These are non-correctness — code health, ergonomics, deferred perf
 levers. None block shipping. Roughly ordered by leverage.
 
-### §13. VM dispatch (computed-goto / direct-threaded)
+### §13. VM dispatch (computed-goto / direct-threaded) — **DONE 2026-05-14**
 
-`vm__run` is **57% of `box_churn` CPU** in the post-H profile (was 61%
-pre-H as a share of a smaller scenario total). It's the biggest single-
-scenario lever remaining. A computed-goto rewrite (`&&label`) is the
-standard fix; the open design question is WASM portability — `&&label`
-is GCC/Clang-only and clang lowers it to `br_table` in WASM (loses the
-per-opcode prediction benefit). Options:
-
-1. `#ifdef __GNUC__` computed-goto, native switch fallback for WASM
-2. Tail-call dispatch backend for WASM (different source structure;
-   doubles the dispatch surface area to maintain)
-3. Don't diverge — keep the switch everywhere
-
-Decision deferred until WASM is on the actual roadmap.
+Closed via option 1: `#if (defined(__GNUC__)||defined(__clang__)) &&
+!defined(__EMSCRIPTEN__)` selects computed-goto with a 222-entry
+direct-threaded dispatch table; switch path stays for WASM (Emscripten
+lowers `&&label` to a single `br_table` and loses per-opcode
+prediction benefit). See `AUDIT_HISTORY.md` § "§13 VM dispatch
+(2026-05-14)" for the implementation notes and perf numbers (modest
+~2–3 % on `box_churn` at -O2 — GCC already optimizes the dense switch
+well; the bigger win is the architectural lever for future opcode
+work).
 
 ### §16. VM stack hard-capped at 256
 

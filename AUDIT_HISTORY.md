@@ -1531,6 +1531,54 @@ equivalent) through the templates would remove a class of hard-to-diagnose
   design originally had GCHeader replace a 16-byte RCHeader. Worth a sweep for
   stray `RCHeader` references / offset assumptions.
 
+## §13 VM dispatch (2026-05-14)
+
+The audit measured `vm__run` at 57 % of `box_churn` CPU under the
+central-switch dispatch and asked for computed-goto; option 1 from the
+audit (ifdef computed-goto, switch fallback for WASM) landed.
+
+**Shape.** A 222-entry `static void* const dispatch_table[]` lives at
+function scope inside `vm__run`. Each `case OP_X:` became `CASE(OP_X):`
+where `CASE(op)` expands to `case op` (switch mode) or `L_##op` (goto
+mode). Each case-ending `break;` became `DISPATCH();` — including the
+~150 *internal* early-exit breaks scattered through opcode bodies that
+relied on the outer switch to "go to next instruction" (not just the
+~210 terminal ones). 348 break replacements across the body. The
+dispatch macros are `#undef`ed at the end of `vm__run` so they don't
+leak.
+
+The feature gate is `#if (defined(__GNUC__) || defined(__clang__)) &&
+!defined(__EMSCRIPTEN__)` — Emscripten defines `__GNUC__` (it's clang)
+but lowers `&&label` to a single WASM `br_table`, losing the
+per-opcode prediction benefit, so the switch path is what runs there.
+
+**Caveats.**
+- The dispatch_table mirrors the OpCode enum from `bytecode.c`
+  (which the unity build sees), not `jacl.h` (which test files see —
+  one entry shorter as of 2026-05-14, pre-existing enum drift). Adding
+  an opcode requires touching both the table and adding a `CASE(op):`
+  handler in the same pass.
+- `VM_PRELUDE()` is a macro, not a function call, on purpose: in goto
+  mode the per-opcode dispatch sequence (GC safepoint check + line
+  tracking + opcode fetch + indirect jump) is inlined at the tail of
+  every handler, which is what gives the branch predictor a per-site
+  prediction context. Function-call overhead would defeat the
+  optimization.
+
+**Perf.** Microbench `box_churn` at -O2 (500 timed iters, average of
+3 runs): pre-§13 median ≈ 1,162 µs, post-§13 median ≈ 1,132 µs —
+roughly 2–3 % faster. Smaller than the 15 %+ this transform sometimes
+delivers on other interpreters. Likely reasons: (a) GCC at -O2 already
+recognizes the dense `case 0..221:` and emits a near-optimal jump
+table for the switch, and (b) other parts of the loop (allocation, GC
+safepoint, push/pop helpers) dominate dispatch overhead. The bigger
+value here is having the structure in place for future opcode work
+where the per-handler tail-call shape matters more.
+
+**Validation.** Normal-mode 88/0; TSAN baseline 86/2 preserved
+(known-and-safe `chase_lev_stress` + `jacl_harness`); WASM compile
+clean via `./build.sh --wasm`.
+
 ## Smaller things
 
 - `gc_sweep` and `gc_sweep_concurrent` duplicate ~80% of their loop bodies;
