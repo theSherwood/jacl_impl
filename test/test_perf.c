@@ -255,6 +255,7 @@ static int run_scenario(const char* path, const char* name,
               "\"slow_path_allocs\":%llu,"
               "\"blocks_scanned\":%llu,"
               "\"lines_scanned\":%llu,"
+              "\"blocks_rejected_fast\":%llu,"
               "\"tasks_executed\":%llu,"
               "\"steal_attempts\":%llu,"
               "\"steal_successes\":%llu,"
@@ -279,6 +280,7 @@ static int run_scenario(const char* path, const char* name,
             (unsigned long long)(post.slow_path_allocs - pre.slow_path_allocs),
             (unsigned long long)(post.blocks_scanned - pre.blocks_scanned),
             (unsigned long long)(post.lines_scanned - pre.lines_scanned),
+            (unsigned long long)(post.blocks_rejected_fast - pre.blocks_rejected_fast),
             (unsigned long long)(post.workers_total.tasks_executed -
                                  pre.workers_total.tasks_executed),
             (unsigned long long)(post.workers_total.steal_attempts -

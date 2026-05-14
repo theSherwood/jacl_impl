@@ -133,6 +133,17 @@ typedef struct GCBlock {
     uint8_t         line_map[GC_LINES_PER_BLOCK]; /* one byte per line */
     struct GCBlock *next;                          /* linked list */
     uint16_t        first_free_line;               /* §14 tier-2 scan hint */
+    /* §14 Phase-B: largest contiguous FREE run in line_map, in lines.
+     * Written authoritatively by sweep; updated conservatively by
+     * gc__find_fit_in_block on a slow-path fit (to the largest non-
+     * chosen run seen during the scan). The bump-alloc fast path
+     * doesn't touch it. Lets gc_alloc's outer block walk O(1)-reject
+     * blocks with insufficient room before entering the line scan.
+     * Conservative upper bound: may overestimate between sweeps (since
+     * bump-alloc shrinks the chosen run lazily) but never underestimate
+     * the actual largest run, so a "false admit" only costs one line
+     * scan that fails to find a fit. */
+    uint16_t        max_free_run_lines;
 } GCBlock;
 
 /* --- BlockPool: thread-safe pool of free blocks --- */
@@ -185,6 +196,7 @@ GCBlock *gc_block_pool_get(BlockPool *pool) {
     memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
     block->next = NULL;
     block->first_free_line = 0;
+    block->max_free_run_lines = GC_LINES_PER_BLOCK; /* whole block FREE */
     return block;
 }
 
@@ -246,14 +258,16 @@ typedef struct {
     uint64_t         total_bytes_allocated;
     uint64_t         total_allocs;
     uint64_t         slow_path_allocs;
-    /* §14 Phase-A instrumentation: cumulative work done in the slow path.
-     * blocks_scanned counts every block visited by the outer block-walk
-     * (including the one that ultimately fits). lines_scanned counts every
-     * line_map byte gc__find_free_run inspects across all slow-path calls.
-     * Ratios over slow_path_allocs say whether the outer or inner loop is
-     * hot — drives the Phase-B redesign. */
+    /* §14 instrumentation. Pre-Phase-B: blocks_scanned counted every block
+     * visited by the outer walk. Post-Phase-B: blocks_scanned counts only
+     * blocks that PASSED the max_free_run_lines reject (i.e. entered the
+     * in-block line scan); blocks_rejected_fast counts the cheap O(1)
+     * rejects. blocks_scanned + blocks_rejected_fast = total visited.
+     * lines_scanned tallies line_map bytes inspected inside the inner
+     * scan (which now only runs on admitted blocks). */
     uint64_t         blocks_scanned;
     uint64_t         lines_scanned;
+    uint64_t         blocks_rejected_fast;
 } ThreadHeap;
 
 void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -276,6 +290,7 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->slow_path_allocs      = 0;
     heap->blocks_scanned        = 0;
     heap->lines_scanned         = 0;
+    heap->blocks_rejected_fast  = 0;
 }
 
 /* Forward-declare thread-local (defined later in this file) */
@@ -371,6 +386,7 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
     int hint = (int)block->first_free_line;
     int scan = from > hint ? from : hint;
     int scan_origin = scan;
+    int max_run_seen = 0;     /* §14 Phase-B: tightens bound on miss */
     bool found = false;
     /* §14 Phase-A: every call corresponds to one block visited by the
      * slow-path block-walk. Single relaxed RMW. */
@@ -379,6 +395,7 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
         ATOMIC_STORE_EXPLICIT(&heap->blocks_scanned, v + 1, MEM_RELAXED);
     }
     while (gc__find_free_run(block, scan, &run_start, &run_len)) {
+        if (run_len > max_run_seen) max_run_seen = run_len;
         if (run_len >= needed_lines) {
             heap->current_block = block;
             heap->cursor = block->payload
@@ -393,6 +410,15 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
             break;
         }
         scan = run_start + run_len;
+    }
+    /* §14 Phase-B: on miss we walked every run from hint to end-of-block,
+     * so max_run_seen is the authoritative max free run. Tighten the
+     * cached bound. On hit we stopped early at the chosen run; we don't
+     * know about runs after it, so leave the bound unchanged (the
+     * chosen run is about to be consumed by bump-alloc, and any larger
+     * remaining run would still be admitted by a higher cached value). */
+    if (!found) {
+        block->max_free_run_lines = (uint16_t)max_run_seen;
     }
     /* §14 Phase-A: tally lines actually inspected (from hint forward, up
      * to either the chosen run's end or end-of-block on miss). Single
@@ -498,7 +524,15 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     MUTEX_LOCK(heap->blocks_mutex);
     b = heap->search_block ? heap->search_block : heap->blocks;
     while (b) {
-        if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+        /* §14 Phase-B: O(1) reject for blocks that can't possibly fit.
+         * max_free_run_lines is a conservative upper bound between
+         * sweeps, so admitting a block here that ultimately doesn't fit
+         * costs one find_fit_in_block scan (which then tightens the
+         * bound to the authoritative max). */
+        if ((int)b->max_free_run_lines < needed_lines) {
+            uint64_t r = ATOMIC_LOAD_EXPLICIT(&heap->blocks_rejected_fast, MEM_RELAXED);
+            ATOMIC_STORE_EXPLICIT(&heap->blocks_rejected_fast, r + 1, MEM_RELAXED);
+        } else if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
             heap->search_block = b;
             MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
@@ -528,7 +562,10 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     MUTEX_LOCK(heap->blocks_mutex);
     b = heap->search_block ? heap->search_block : heap->blocks;
     while (b) {
-        if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+        if ((int)b->max_free_run_lines < needed_lines) {
+            uint64_t r = ATOMIC_LOAD_EXPLICIT(&heap->blocks_rejected_fast, MEM_RELAXED);
+            ATOMIC_STORE_EXPLICIT(&heap->blocks_rejected_fast, r + 1, MEM_RELAXED);
+        } else if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
             heap->search_block = b;
             MUTEX_UNLOCK(heap->blocks_mutex);
             return gc__bump_alloc(heap, total, obj_type);
@@ -559,6 +596,7 @@ void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
                 memset(new_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
                 new_block->next = NULL;
                 new_block->first_free_line = 0;
+                new_block->max_free_run_lines = GC_LINES_PER_BLOCK;
                 goto got_block;
             }
             /* malloc failed — release the reserved slot */

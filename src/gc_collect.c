@@ -95,20 +95,26 @@ void gc__finalize_dead(GCHeader *hdr) {
  * extend the same loop with max_free_run_lines.
  * ====================================================================== */
 typedef struct {
-    int  first_free;   /* first FREE line index, GC_LINES_PER_BLOCK if none */
-    bool all_free;     /* entire block is FREE */
+    int  first_free;     /* first FREE line index, GC_LINES_PER_BLOCK if none */
+    int  max_free_run;   /* longest contiguous FREE run in lines */
+    bool all_free;       /* entire block is FREE */
 } GCBlockSweepSummary;
 
 static GCBlockSweepSummary gc__summarize_block_map(const uint8_t *line_map) {
     GCBlockSweepSummary s;
-    s.first_free = GC_LINES_PER_BLOCK;
-    s.all_free   = true;
+    s.first_free   = GC_LINES_PER_BLOCK;
+    s.max_free_run = 0;
+    s.all_free     = true;
     bool found_first = false;
+    int  cur_run = 0;
     for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
         if (line_map[i] == GC_LINE_FREE) {
             if (!found_first) { s.first_free = i; found_first = true; }
+            cur_run++;
+            if (cur_run > s.max_free_run) s.max_free_run = cur_run;
         } else {
             s.all_free = false;
+            cur_run = 0;
         }
     }
     return s;
@@ -587,9 +593,9 @@ size_t gc_sweep(ThreadHeap *heap) {
             ptr += total;
         }
 
-        /* Phase 3: derive first-free hint and all-free flag from the
-         * rebuilt line map. §14 tier-2: first_free_line lets the next
-         * slow-path search skip the OCCUPIED prefix. */
+        /* Phase 3: derive scan hint, max free run, and all-free flag
+         * from the rebuilt line map. §14 tier-2 + Phase-B: both per-
+         * block hints are refreshed authoritatively here. */
         GCBlockSweepSummary sum = gc__summarize_block_map(block->line_map);
         if (sum.all_free) {
             /* Remove from heap's block list and return to pool */
@@ -597,7 +603,8 @@ size_t gc_sweep(ThreadHeap *heap) {
             else      heap->blocks = next;
             gc_block_pool_return(heap->pool, block);
         } else {
-            block->first_free_line = (uint16_t)sum.first_free;
+            block->first_free_line    = (uint16_t)sum.first_free;
+            block->max_free_run_lines = (uint16_t)sum.max_free_run;
             prev = block;
         }
 
@@ -962,12 +969,14 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
             ptr += total;
         }
 
-        /* §14 tier-2: refresh per-block first-free hint from the final
-         * line_map. Minor sweep doesn't unlink fully-empty blocks (old
-         * objects keep blocks pinned), so the all_free flag is ignored. */
+        /* §14 tier-2 + Phase-B: refresh first-free hint and max free
+         * run from the final line_map. Minor sweep doesn't unlink
+         * fully-empty blocks (old objects keep blocks pinned), so the
+         * all_free flag is ignored. */
         {
             GCBlockSweepSummary sum = gc__summarize_block_map(block->line_map);
-            block->first_free_line = (uint16_t)sum.first_free;
+            block->first_free_line    = (uint16_t)sum.first_free;
+            block->max_free_run_lines = (uint16_t)sum.max_free_run;
         }
 
         block = next;
@@ -1217,7 +1226,8 @@ size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             block->next = NULL;
             gc_block_pool_return(pool, block);
         } else {
-            block->first_free_line = (uint16_t)sum.first_free;
+            block->first_free_line    = (uint16_t)sum.first_free;
+            block->max_free_run_lines = (uint16_t)sum.max_free_run;
             pp = &block->next;
         }
     }

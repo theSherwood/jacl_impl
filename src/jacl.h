@@ -165,6 +165,9 @@ typedef struct GCBlock {
      * (the dominant remaining cost in `gc__find_fit_in_block` after the
      * tier-1 cross-block anchor landed). */
     uint16_t        first_free_line;
+    /* §14 Phase-B: largest contiguous FREE run in line_map. See gc.c
+     * definition for semantics. MUST stay in sync (struct-size test). */
+    uint16_t        max_free_run_lines;
 } GCBlock;
 
 typedef struct {
@@ -211,10 +214,11 @@ typedef struct {
     uint64_t         total_bytes_allocated;
     uint64_t         total_allocs;
     uint64_t         slow_path_allocs;
-    /* §14 Phase-A instrumentation; see gc.c definition for semantics. MUST
+    /* §14 instrumentation; see gc.c definition for semantics. MUST
      * stay in sync with the gc.c definition (struct-size test enforces). */
     uint64_t         blocks_scanned;
     uint64_t         lines_scanned;
+    uint64_t         blocks_rejected_fast;
 } ThreadHeap;
 
 /* HeapRecord — heap-allocated, pointer-accessed struct shape. Used by ctx
@@ -2406,13 +2410,15 @@ typedef struct {
     uint64_t total_bytes_allocated;
     uint64_t total_allocs;
     uint64_t slow_path_allocs;
-    /* §14 Phase-A instrumentation: per-call work done in gc_alloc's slow
-     * path. blocks_scanned / slow_path_allocs is avg blocks visited;
-     * lines_scanned / slow_path_allocs is avg line_map bytes inspected
-     * inside gc__find_free_run. Ratio between the two tells whether the
-     * outer (block-walk) or inner (line-walk) loop is hot. */
+    /* §14 instrumentation: per-call work done in gc_alloc's slow path.
+     * blocks_scanned counts blocks that passed the max_free_run_lines
+     * reject and entered the in-block line scan. blocks_rejected_fast
+     * counts cheap O(1) rejects. lines_scanned tallies line_map bytes
+     * inspected inside the inner scan. blocks_scanned +
+     * blocks_rejected_fast = total outer-loop iterations. */
     uint64_t blocks_scanned;
     uint64_t lines_scanned;
+    uint64_t blocks_rejected_fast;
     /* Worker stats summed across workers */
     WorkerStats workers_total;
     /* Instantaneous state */
