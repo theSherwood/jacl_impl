@@ -150,7 +150,7 @@ underlying issue as `jacl_harness`. Surprises from the pass:
 | ~~`rwlock`~~ | **FIXED** (2026-05-14) | `g_state.max_concurrent` updated under read lock by two readers — read locks don't serialize mutations. | CAS-loop atomic peak update. |
 | ~~`cross_thread_string`~~ | **FIXED** (2026-05-14) | (a) `SharedSlot.ready` was the publication signal but plain-read/written. (b) `sum_tree.h` per-instantiation `ST_HANDLER_STATE` was a non-TLS global written by every rope op. | (a) Atomic load/store explicit with release/acquire. (b) `JACL_THREAD_LOCAL` on the handler-state declaration. |
 | `chase_lev_stress` | open | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
-| `perf` | open (same family as `jacl_harness`) | `WorkerStats` counter race fixed in 2026-05-14. Remaining race: `gc_enumerate_roots` reads `vm->env` slots that workers' `vm__env_set` writes — same heap-pointer slot pattern as `jacl_harness`. SATB-barrier-mediated; TSAN can't observe the happens-before. | Closes when the global atomic-store/load conversion for heap-pointer slots lands. |
+| `perf` | open (different family than originally framed) | (a) `WorkerStats` counter race — FIXED 2026-05-14. (b) `gc_enumerate_roots` reads `vm->env` slots — FIXED 2026-05-14 (§S5 slice 1, commit `83d2736`). (c) **NEW** ctx-pool-vs-SM-state UAF: SM compiler stores `vm.ctx` (pool-backed `HeapRecord*`) into a state field across suspensions; on resume (possibly on a different worker) `OP_SET_CTX` restores `vm.ctx` to that pointer. Meanwhile the original owning worker may have `ctx_unfork`'d the ctx, putting it back on its pool's free list, where it can be re-issued for an unrelated ctx. See deep-dive below. | Needs design discussion — see `ctx-pool vs SM-state` section. |
 | `jacl_harness` | open | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, vm->env, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
 
 `chase_lev_stress` is a test-infrastructure issue (the bare primitive
@@ -1155,6 +1155,105 @@ sweep — that's the race.
 locals + temporaries, and deeply nested expression evaluation hits it. Either
 grow on demand or document the limit and emit a clear error. Today an overflow
 returns `VM_STACK_OVERFLOW` but most callers don't surface it gracefully.
+
+### 18. ctx-pool vs SM-state captured-pointer UAF (2026-05-14)
+
+Surfaced while investigating `perf`'s remaining TSAN failure after the
+§S5 slice 1 (`vm->env` atomic) closed the originally-listed race.
+TSAN now flags:
+
+- Worker T_a (parent worker): mid-spawn, `ctx_fork` does
+  `memcpy(dst->data, src->data, total_size)` reading `parent_ctx->data`
+- Worker T_b (different worker): `ctx_unfork` → `ctx_pool_free` doing
+  NIL-writes (release-stored) and free-list-next-pointer-write (plain)
+  on `s->data` at the same address
+
+For two different workers to touch the same byte, T_a's `parent_ctx`
+must point at the same `HeapRecord` that T_b is freeing. T_a got it
+from `vm->ctx` at the `OP_SPAWN` site. T_b owns the underlying pool
+slot. So `vm->ctx` on T_a is a pointer into T_b's ctx pool.
+
+How that happens: the SM compiler at `compiler.c:3468–3471` emits
+`OP_GET_STATE_FIELD ctx_field_idx; OP_SET_CTX` as part of the
+resume-dispatch prelude. The corresponding suspension path saved
+`vm->ctx` (via `OP_GET_CTX`) into the SM's state field. So an SM that
+suspends on one worker and resumes on another carries a pool-backed
+`HeapRecord*` across the boundary in its state field, and the resume
+path stores it back into the new worker's `vm->ctx`.
+
+Once on the new worker:
+
+1. The new worker reads from `vm->ctx` (for example, the snapshot/
+   memcpy at `OP_SPAWN`, or any `OP_GET_CTX` consumer).
+2. The old worker — whose pool still owns the slot — eventually does
+   `ctx_unfork`, which runs `ctx_pool_free`, NIL-ing reference fields
+   and pushing the slot's first 8 bytes onto the pool's free list.
+3. The old worker can then `ctx_pool_alloc` and re-issue the same slot
+   for an unrelated future ctx, overwriting all its bytes.
+
+The `gc_enumerate_roots` walk at `runtime.c:1033–1040` scans each
+worker's `ctx_pool->free_list_head` so the *memory* stays GC-alive,
+but the pool's free-list reuse path is independent of GC reachability —
+nothing prevents it from re-issuing a slot that an SM state field
+still references.
+
+**Severity.** Reachable in the runtime today; observed by TSAN in
+`test_perf` (`spawn_chain` scenario). The bench passes in normal mode
+because the timing is rare (parent worker finishes `ctx_unfork`
+between the SM's resume and the resume's first `vm->ctx`-using
+opcode) and the read often gets stale-but-plausible data. Worst-case
+manifestations:
+
+- Resumed SM reads ctx struct fields → gets unrelated ctx's data
+  (silent semantic bug: "function called with X where Y expected").
+- Resumed SM is mid-memcpy when the slot is re-issued → torn read of
+  mixed-source bytes.
+- Resumed SM reads at `data[0..7]` exactly when `ctx_pool_free`'s
+  free-list-next-pointer-write executes → reads a pool free-list
+  pointer where a ctx field should be.
+
+Not a §S5 missing-atomics issue — making the access atomic doesn't
+fix it. The slot is genuinely freed and reused.
+
+**Fix options (in order of complexity):**
+
+1. **Eliminate the ctx pool.** Use `gc_alloc` on every fork; let GC
+   reclaim. Simplest. Loses the pool's allocation-overhead
+   optimization, but §14 tier-1+tier-2 made `gc_alloc` significantly
+   cheaper. Worth measuring first.
+
+2. **Snapshot at suspension / capture sites.** Make `OP_GET_CTX`
+   allocate a fresh non-pooled `HeapRecord` and copy bytes into it,
+   so the captured pointer is GC-managed (no pool reuse). Surgical
+   — touches `OP_GET_CTX` and any other site that lets a pool-backed
+   ctx pointer escape into long-lived storage. Adds one gc_alloc per
+   ctx-capturing suspension.
+
+3. **Defer `ctx_pool_free` to GC sweep.** Pool-free becomes "mark for
+   reclaim"; the GC sweep does the actual free-list push only for
+   slots that GC has determined are unreachable. Keeps the fast
+   alloc path; complicates the sweep. Solves the issue universally
+   because GC roots include SM state fields.
+
+4. **Refcount ctx slots.** Each escape-into-state-field path bumps a
+   refcount; `ctx_pool_free` only puts on free list at zero.
+   Pervasive change.
+
+(2) is the most surgical; (1) is the simplest and lets `gc_alloc`'s
+recent perf work absorb the cost; (3) is the most architecturally
+clean. The right pick depends on what fraction of total CPU
+`ctx_pool_alloc` / `_free` actually save. The audit's profiling
+baseline didn't isolate the pool — that should be the first move.
+
+**Partial fix evaluated and reverted (2026-05-14):** I tried
+snapshotting `parent_ctx` at spawn submit time (`runtime__submit_spawn_task`
+allocates a fresh non-pooled `HeapRecord`, memcpys parent's ctx into
+it, child uses the snapshot). That closes the *spawn-time* race
+between submit and child's `ctx_fork`, but the SM-state-saved-ctx
+race fires earlier: by the time submit runs on the parent worker,
+`vm->ctx` was already set by an `OP_SET_CTX` from a saved state
+field, pointing into another worker's pool. So the spawn-side
+snapshot doesn't help and just adds a gc_alloc per spawn. Reverted.
 
 ### 17. Inconsistent thread-local convention
 `gc__current_heap`, `gc__thread_epoch`, `gc__emergency_gc_fn`, `gc__interning`,
