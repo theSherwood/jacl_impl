@@ -216,7 +216,7 @@ JaclRopeString* jacl_as_rope_string(JaclVal v) {
 }
 
 JaclVal jacl_rope_string_ptr(JaclRopeString* p) {
-  return JACL_TAG_ROPE_STRING | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+  return JACL_PACK_PTR(JACL_TAG_ROPE_STRING, p);
 }
 
 /* --- Unified string API (works for inline, heap, and rope strings) --- */

@@ -14,6 +14,7 @@
  * System headers
  * ======================================================================== */
 
+#include <assert.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -41,6 +42,15 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_SHIFT      56
 #define JACL_TAG_MASK       ((uint64_t)0xFF << JACL_TAG_SHIFT)
 #define JACL_PAYLOAD_MASK   ((UINT64_C(1) << JACL_TAG_SHIFT) - 1)
+
+/* Pack a pointer payload into a tagged JaclVal. The debug-only assert
+ * catches a pointer wider than the 56-bit payload — without it, the
+ * mask would silently truncate high bits into the tag. The mask itself
+ * stays for release-build defense; with the assert holding, it's a
+ * no-op on every supported platform today (48-bit user-space VA). */
+#define JACL_PACK_PTR(tag, p)                                                 \
+    (assert(((uintptr_t)(p) >> JACL_TAG_SHIFT) == 0),                         \
+     (tag) | ((uint64_t)(uintptr_t)(p) & JACL_PAYLOAD_MASK))
 
 #define JACL_FLAG_TAINTED   ((uint64_t)1 << 63)
 #define JACL_FLAG_SECRET    ((uint64_t)1 << 62)
@@ -255,10 +265,10 @@ typedef struct FutureWaiter {
 } FutureWaiter;
 
 typedef struct {
-    volatile uint32_t   state;
-    volatile uint64_t   result;
+    uint32_t            state;       /* atomic — load/store via ATOMIC_*_EXPLICIT */
+    uint64_t            result;      /* atomic */
     FutureWaiter       *waiters;
-    volatile uint32_t   lock;
+    uint32_t            lock;        /* atomic — CAS spinlock */
 } JaclFuture;
 
 #define FUTURE_PENDING      0
@@ -291,16 +301,16 @@ typedef struct {
 } JaclStream;
 
 typedef struct {
-    volatile uint32_t completed;
-    volatile uint32_t errored;
-    volatile uint64_t error_val;
+    uint32_t          completed;     /* atomic — fetch_add for completion count */
+    uint32_t          errored;       /* atomic — first-error-wins CAS */
+    uint64_t          error_val;     /* atomic — set under errored CAS winner */
     uint32_t          count;
     JaclVal           state_machine;
     JaclVal           results[];
 } ParallelAgg;
 
 typedef struct {
-    volatile uint32_t settled;
+    uint32_t          settled;       /* atomic — winner CAS */
     JaclVal           state_machine;
 } RaceAgg;
 
@@ -1426,7 +1436,7 @@ struct Compiler {
 #define CTX_POOL_INIT_SIZE 8
 
 typedef struct {
-    volatile uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
+    uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
     uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
     uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
     StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
@@ -1496,7 +1506,7 @@ typedef struct {
   BytecodeChunk* top_chunk;
   GreyBuffer*    grey_buf;
   RememberedSet* remembered_set;
-  volatile uint32_t *gc_active_ptr;
+  uint32_t  *gc_active_ptr;
   void*          runtime;
   int            worker_id;
   const char*    error_message;
@@ -1621,8 +1631,8 @@ typedef struct WorkerThread {
     rt_deque_deque    *private_deque;
     GreyBuffer         grey_buf;
     RememberedSet      remembered_set;
-    volatile uintptr_t currently_executing;
-    volatile uint64_t  thread_epoch;
+    uintptr_t          currently_executing; /* atomic — see runtime.c */
+    uint64_t           thread_epoch;         /* atomic */
     VM                 vm;
     Runtime           *runtime;
     int                id;
@@ -1634,7 +1644,7 @@ typedef struct WorkerThread {
      * the top of each loop iteration, preserving private_deque's SPSC
      * contract. Mutex-protected MPSC. MUST stay in sync with runtime.c. */
     uintptr_t         *pinned_inbox;
-    volatile intptr_t  pinned_inbox_count;
+    intptr_t           pinned_inbox_count;  /* atomic — MPSC counter */
     intptr_t           pinned_inbox_cap;
     platform_mutex_t   pinned_inbox_mutex;
     /* Retired tasks: epoch-deferred free list. See runtime.c for invariant. */
@@ -1649,13 +1659,13 @@ typedef struct WorkerThread {
 struct Runtime {
     WorkerThread       *workers;
     int                 num_workers;
-    volatile uint64_t   global_epoch;
-    volatile uint32_t   gc_running;
-    volatile uint32_t   gc_active;
+    uint64_t            global_epoch;   /* atomic — incremented at each GC start */
+    uint32_t            gc_running;     /* atomic — CAS for GC entry */
+    uint32_t            gc_active;      /* atomic — set during mark phase */
     BlockPool           block_pool;
-    volatile int        shutdown;
+    int                 shutdown;       /* atomic — shutdown signal */
     uintptr_t          *inbox;
-    volatile intptr_t   inbox_count;
+    intptr_t            inbox_count;    /* atomic — MPSC counter */
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
     /* Wakeup CV — see runtime.c. MUST stay in sync. */
@@ -1938,17 +1948,17 @@ extern void remembered_set_init (RememberedSet *rs);
 extern void remembered_set_push (RememberedSet *rs, JaclVal container);
 extern uint32_t remembered_set_drain (RememberedSet *rs, JaclVal *out_entries, uint32_t out_cap);
 extern void remembered_set_destroy (RememberedSet *rs);
-extern void gc_write_barrier (GreyBuffer *gb, volatile uint32_t *gc_active_ptr, JaclVal old_val, JaclVal new_val);
+extern void gc_write_barrier (GreyBuffer *gb, uint32_t *gc_active_ptr, JaclVal old_val, JaclVal new_val);
 extern void gc_remembered_set_barrier (RememberedSet *rs, JaclVal container, JaclVal new_val);
 extern JaclVal jacl_future_ptr (JaclFuture *p);
 extern JaclFuture *jacl_as_future (JaclVal v);
 extern void future_lock (JaclFuture *f);
 extern void future_unlock (JaclFuture *f);
 extern JaclVal jacl_future (ThreadHeap *heap);
-extern FutureWaiter *jacl_future_resolve (JaclFuture *f, JaclVal result, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
-extern FutureWaiter *jacl_future_error (JaclFuture *f, JaclVal error, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
+extern FutureWaiter *jacl_future_resolve (JaclFuture *f, JaclVal result, GreyBuffer *gb, uint32_t *gc_active_ptr);
+extern FutureWaiter *jacl_future_error (JaclFuture *f, JaclVal error, GreyBuffer *gb, uint32_t *gc_active_ptr);
 extern bool jacl_future_add_waiter (JaclFuture *f, JaclVal continuation, ThreadHeap *heap,
-                                    GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
+                                    GreyBuffer *gb, uint32_t *gc_active_ptr);
 extern JaclStream *jacl_as_stream (JaclVal v);
 extern JaclVal jacl_stream (ThreadHeap *heap);
 extern JaclVal parallel_agg_ptr (ParallelAgg *p);

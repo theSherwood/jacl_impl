@@ -124,19 +124,10 @@ if a real-workload profile pins them.
 
 ### Smaller items
 
-- `gc__oom_panic_default` calls `abort()` without a callback hook. For
-  embedded use, this should be a callback returning an error code.
-- `volatile` is used on shared fields *in addition to* atomic load/
-  store macros. The atomics are sufficient; `volatile` is noise and on
-  some compilers inhibits optimization. Mechanical sweep.
-- `parallel_agg_ptr`, `race_agg_ptr`, `jacl_future_ptr` build values
-  with `(uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK`. The mask is
-  unnecessary if pointer alignment is enforced, or silently truncating
-  high bits if it isn't. Either way the mask hides bugs.
-- **Stray `RCHeader` references / offset assumptions**: all collection
-  layouts now assume 8-byte `GCHeader` prefix, but the design once had
-  GCHeader replace a 16-byte RCHeader. Worth a sweep to confirm nothing
-  still bakes in the old offset.
+The mechanical-sweep batch (oom-panic hook, redundant `volatile`,
+`JACL_PAYLOAD_MASK` truncation, stray `RCHeader` audit) closed
+2026-05-14 — see `AUDIT_HISTORY.md` § "Smaller things" for the
+per-item resolutions.
 
 ### Known theoretical hole, not surfacing as a bug today
 

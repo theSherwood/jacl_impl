@@ -135,7 +135,7 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
  */
 
 typedef struct {
-    volatile uintptr_t free_list_head; /* unused, retained for ABI/struct-size */
+    uintptr_t free_list_head; /* unused, retained for ABI/struct-size */
     uint32_t struct_size;
     uint32_t type_idx;
     StructTypeDef *sdef;
@@ -190,7 +190,7 @@ typedef struct {
   BytecodeChunk* top_chunk;       /* top-level chunk for GC root scanning */
   GreyBuffer*    grey_buf;       /* write barrier target (NULL in single-threaded) */
   RememberedSet* remembered_set; /* generational write barrier target (NULL in single-threaded) */
-  volatile uint32_t *gc_active_ptr; /* pointer to runtime's gc_active (NULL in single-threaded) */
+  uint32_t  *gc_active_ptr; /* pointer to runtime's gc_active, atomic (NULL in single-threaded) */
   void*          runtime;        /* Runtime pointer for concurrent GC trigger (NULL in single-threaded) */
   int            worker_id;      /* Worker thread ID for task pinning (-1 if not on a worker) */
   const char*    error_message;  /* last error message, or NULL */
@@ -1252,7 +1252,7 @@ static JaclVal ctx_fork(VM *vm, JaclVal parent_ctx) {
          * Without atomic ordering the concurrent GC can see the new pointer
          * but miss the GCHeader fields the allocator wrote first, or trace
          * a torn value. */
-        ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+        ATOMIC_STORE_EXPLICIT((uint64_t*)&vm->ctx,
                               (uint64_t)jacl_heap_record_val(dst),
                               MEM_RELEASE);
     }
@@ -1264,7 +1264,7 @@ static void ctx_unfork(VM *vm, JaclVal saved_ctx) {
         ctx_pool_free(vm->ctx_pool, jacl_as_heap_record_ptr(vm->ctx));
     }
     /* RELEASE: see ctx_fork. */
-    ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+    ATOMIC_STORE_EXPLICIT((uint64_t*)&vm->ctx,
                           (uint64_t)saved_ctx, MEM_RELEASE);
 }
 
@@ -9952,7 +9952,7 @@ interpret_done:
         }
         /* RELEASE: pairs with gc_enumerate_roots' ACQUIRE on saved_ctx[i]. */
         ATOMIC_STORE_EXPLICIT(
-            (volatile uint64_t*)&vm->saved_ctx[vm->saved_ctx_count++],
+            (uint64_t*)&vm->saved_ctx[vm->saved_ctx_count++],
             (uint64_t)old_ctx, MEM_RELEASE);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_ctx, vm->ctx);
         break;
@@ -9975,7 +9975,7 @@ interpret_done:
         if (result != VM_OK) return result;
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, vm->ctx, new_ctx);
         /* RELEASE: see ctx_fork. */
-        ATOMIC_STORE_EXPLICIT((volatile uint64_t*)&vm->ctx,
+        ATOMIC_STORE_EXPLICIT((uint64_t*)&vm->ctx,
                               (uint64_t)new_ctx, MEM_RELEASE);
         break;
       }

@@ -191,7 +191,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
            GCHeader fields of the newly-allocated value). */
         if (ref->type_idx == 0) {
             JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                (volatile uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
+                (uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
             gc__ms_push_val(ms, v);
         }
         break;
@@ -422,7 +422,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
                      * the pool itself was removed in §18 but the
                      * pairing remains valid for other paths.) */
                     JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                        (volatile uint64_t*)(s->data + sdef->fields[i].offset),
+                        (uint64_t*)(s->data + sdef->fields[i].offset),
                         MEM_ACQUIRE);
                     gc__ms_push_val(ms, val);
                 }

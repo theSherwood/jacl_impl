@@ -221,6 +221,30 @@ void jacl_vm_free(JaclVM* vm) {
   free(vm);
 }
 
+/* --- OOM handler bridge ---
+ *
+ * Internal `gc__oom_handler` is `void (*)(ThreadHeap*, size_t)` — neither
+ * `ThreadHeap` nor `gc__oom_handler` is public. Embedders set a handler
+ * with the public signature `void (*)(size_t, void*)`; this shim
+ * adapts it. If the embedder's handler returns (instead of longjmp/
+ * abort), gc_alloc returns NULL to the caller. */
+
+typedef void (*EmbedOomHandler)(size_t request_size, void* user_data);
+
+static EmbedOomHandler embed__oom_user_handler = NULL;
+static void           *embed__oom_user_data    = NULL;
+
+static void embed__oom_handler_shim(ThreadHeap *heap, size_t request_size) {
+  (void)heap;
+  embed__oom_user_handler(request_size, embed__oom_user_data);
+}
+
+void jacl_set_oom_handler(EmbedOomHandler handler, void* user_data) {
+  embed__oom_user_handler = handler;
+  embed__oom_user_data    = user_data;
+  gc__oom_handler = handler ? embed__oom_handler_shim : gc__oom_panic_default;
+}
+
 /* --- Error value helpers --- */
 
 JaclVal embed__make_error(JaclVM* jvm, const char* msg) {

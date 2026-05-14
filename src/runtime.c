@@ -118,8 +118,8 @@ typedef struct WorkerThread {
     /* Per-thread GC heap lives in vm.heap — uses shared BlockPool */
     GreyBuffer         grey_buf;             /* write barrier entries */
     RememberedSet      remembered_set;      /* generational old→young pointer tracking */
-    volatile uintptr_t currently_executing;  /* IDLE / BUSY / task ptr */
-    volatile uint64_t  thread_epoch;         /* set to global_epoch before each task */
+    uintptr_t          currently_executing;  /* IDLE / BUSY / task ptr (atomic) */
+    uint64_t           thread_epoch;         /* set to global_epoch before each task (atomic) */
     VM                 vm;                   /* per-thread VM instance */
     Runtime           *runtime;              /* back-pointer */
     int                id;                   /* worker index */
@@ -131,7 +131,7 @@ typedef struct WorkerThread {
      * the top of each loop iteration, preserving private_deque's SPSC
      * contract. Mutex-protected MPSC. */
     uintptr_t         *pinned_inbox;
-    volatile intptr_t  pinned_inbox_count;
+    intptr_t           pinned_inbox_count;   /* MPSC counter (atomic) */
     intptr_t           pinned_inbox_cap;
     platform_mutex_t   pinned_inbox_mutex;
     /* Retired tasks: epoch-deferred free list. After running a task, the
@@ -151,14 +151,14 @@ typedef struct WorkerThread {
 struct Runtime {
     WorkerThread       *workers;
     int                 num_workers;
-    volatile uint64_t   global_epoch;        /* incremented at each GC start */
-    volatile uint32_t   gc_running;          /* 0 = idle, 1 = GC in progress (CAS) */
-    volatile uint32_t   gc_active;           /* 1 during mark phase (write barriers check) */
+    uint64_t            global_epoch;        /* incremented at each GC start (atomic) */
+    uint32_t            gc_running;          /* 0 = idle, 1 = GC in progress (CAS) */
+    uint32_t            gc_active;           /* 1 during mark phase (atomic) */
     BlockPool           block_pool;          /* shared block pool for all workers */
-    volatile int        shutdown;            /* signal workers to stop */
+    int                 shutdown;            /* signal workers to stop (atomic) */
     /* Task inbox: external submissions (mutex-protected LIFO stack) */
     uintptr_t          *inbox;
-    volatile intptr_t   inbox_count;
+    intptr_t            inbox_count;         /* atomic */
     intptr_t            inbox_cap;
     platform_mutex_t    inbox_mutex;
     /* Wakeup CV: signaled by push_inbox/push_pinned after appending; workers
@@ -889,8 +889,7 @@ void runtime_submit_task(Runtime *rt, JaclClosure *closure,
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__exec_closure;
     task->data     = closure;
-    task->gc_root  = JACL_TAG_CLOSURE
-                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root  = JACL_PACK_PTR(JACL_TAG_CLOSURE, closure);
     task->gc_root2 = JACL_NIL;
     task->gc_root3 = JACL_NIL;
 
@@ -1044,7 +1043,7 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
          * the allocator wrote before publishing the pointer. */
         {
             JaclVal cv = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                (volatile uint64_t*)&w->vm.ctx, MEM_ACQUIRE);
+                (uint64_t*)&w->vm.ctx, MEM_ACQUIRE);
             gc__ms_push_val(ms, cv);
         }
 
@@ -1052,7 +1051,7 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
          * Same RELEASE/ACQUIRE pairing — slots written by OP_CTX_FORK. */
         for (uint8_t sci = 0; sci < w->vm.saved_ctx_count; sci++) {
             JaclVal sv = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                (volatile uint64_t*)&w->vm.saved_ctx[sci], MEM_ACQUIRE);
+                (uint64_t*)&w->vm.saved_ctx[sci], MEM_ACQUIRE);
             gc__ms_push_val(ms, sv);
         }
 
@@ -1881,8 +1880,7 @@ void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
     task->fn       = runtime__spawn_task_exec;
     task->data     = std;
     task->gc_root  = future_val; /* Future is the GC root for this task */
-    task->gc_root2 = JACL_TAG_CLOSURE
-                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root2 = JACL_PACK_PTR(JACL_TAG_CLOSURE, closure);
     task->gc_root3 = parent_ctx; /* Keep parent ctx alive until task starts */
 
     if (closure->pinned && closure->pin_worker_id >= 0) {
@@ -1985,8 +1983,7 @@ void runtime__submit_parallel_task(void *runtime_ptr,
     task->fn       = runtime__parallel_task_exec;
     task->data     = ptd;
     task->gc_root  = agg_val; /* Aggregate is the GC root — traces continuation + results */
-    task->gc_root2 = JACL_TAG_CLOSURE
-                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root2 = JACL_PACK_PTR(JACL_TAG_CLOSURE, closure);
     task->gc_root3 = parent_ctx;
 
     if (closure->pinned && closure->pin_worker_id >= 0) {
@@ -2083,8 +2080,7 @@ void runtime__submit_race_task(void *runtime_ptr,
     task->fn       = runtime__race_task_exec;
     task->data     = rtd;
     task->gc_root  = agg_val;
-    task->gc_root2 = JACL_TAG_CLOSURE
-                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root2 = JACL_PACK_PTR(JACL_TAG_CLOSURE, closure);
     task->gc_root3 = parent_ctx;
 
     if (closure->pinned && closure->pin_worker_id >= 0) {

@@ -637,7 +637,7 @@ HeapRecord* jacl_as_heap_record_ptr(JaclVal v) {
 }
 
 JaclVal jacl_heap_record_val(HeapRecord* s) {
-    return JACL_TAG_STRUCT | ((uint64_t)(uintptr_t)s & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_STRUCT, s);
 }
 
 /* ======================================================================
@@ -647,19 +647,19 @@ JaclVal jacl_heap_record_val(HeapRecord* s) {
 JaclVal jacl_i64(ThreadHeap *heap, int64_t n) {
     JaclHeapI64 *h = (JaclHeapI64 *)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     h->value = n;
-    return JACL_TAG_I64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_I64, h);
 }
 
 JaclVal jacl_u64(ThreadHeap *heap, uint64_t n) {
     JaclHeapU64 *h = (JaclHeapU64 *)gc_alloc(heap, OBJ_HEAP_U64, sizeof(JaclHeapU64));
     h->value = n;
-    return JACL_TAG_U64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_U64, h);
 }
 
 JaclVal jacl_f64(ThreadHeap *heap, double d) {
     JaclHeapF64 *h = (JaclHeapF64 *)gc_alloc(heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
     h->value = d;
-    return JACL_TAG_F64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_F64, h);
 }
 
 /* --- i64 arithmetic --- */
@@ -1021,7 +1021,7 @@ void remembered_set_destroy(RememberedSet *rs) {
  * ====================================================================== */
 
 void gc_write_barrier(GreyBuffer *gb,
-                                     volatile uint32_t *gc_active_ptr,
+                                     uint32_t *gc_active_ptr,
                                      JaclVal old_val, JaclVal new_val) {
     /* Single-threaded mode: no gc_active flag → no barrier needed */
     if (!gc_active_ptr) return;
@@ -1086,16 +1086,16 @@ typedef struct FutureWaiter {
 
 /* JaclFuture: the future value itself */
 typedef struct {
-    volatile uint32_t   state;       /* FUTURE_PENDING / RESOLVED / ERROR */
-    volatile uint64_t   result;      /* JaclVal result (valid when resolved/errored) */
+    uint32_t            state;       /* FUTURE_PENDING / RESOLVED / ERROR (atomic) */
+    uint64_t            result;      /* JaclVal result, valid when settled (atomic) */
     FutureWaiter       *waiters;     /* linked list of waiting continuations */
-    volatile uint32_t   lock;        /* CAS spinlock: 0=unlocked, 1=locked */
+    uint32_t            lock;        /* CAS spinlock: 0=unlocked, 1=locked */
 } JaclFuture;
 
 /* --- Pointer tag/untag for futures --- */
 
 JaclVal jacl_future_ptr(JaclFuture *p) {
-    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_FUTURE, p);
 }
 
 JaclFuture *jacl_as_future(JaclVal v) {
@@ -1142,7 +1142,7 @@ JaclVal jacl_future(ThreadHeap *heap) {
 
 FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
                                           GreyBuffer *gb,
-                                          volatile uint32_t *gc_active_ptr) {
+                                          uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
     gc_write_barrier(gb, gc_active_ptr, JACL_NIL, result);
     future_lock(f);
@@ -1159,7 +1159,7 @@ FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
 
 FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
                                         GreyBuffer *gb,
-                                        volatile uint32_t *gc_active_ptr) {
+                                        uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
     gc_write_barrier(gb, gc_active_ptr, JACL_NIL, error);
     future_lock(f);
@@ -1176,7 +1176,7 @@ FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
 bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
                                     ThreadHeap *heap,
                                     GreyBuffer *gb,
-                                    volatile uint32_t *gc_active_ptr) {
+                                    uint32_t *gc_active_ptr) {
     bool added = false;
     future_lock(f);
     if (ATOMIC_LOAD_EXPLICIT(&f->state, MEM_RELAXED) == FUTURE_PENDING) {
@@ -1252,9 +1252,9 @@ JaclVal jacl_stream(ThreadHeap *heap) {
  * ====================================================================== */
 
 typedef struct {
-    volatile uint32_t completed;     /* atomic completion counter */
-    volatile uint32_t errored;       /* 0 or 1 (first-error-wins CAS) */
-    volatile uint64_t error_val;     /* first error value (JaclVal) */
+    uint32_t          completed;     /* atomic completion counter */
+    uint32_t          errored;       /* 0 or 1 (first-error-wins CAS) */
+    uint64_t          error_val;     /* first error value (JaclVal, atomic) */
     uint32_t          count;         /* total N */
     JaclVal           state_machine; /* state machine object for join resumption */
     JaclVal           results[];     /* trailing array of N result slots */
@@ -1265,7 +1265,7 @@ typedef struct {
  * GCHeader ensures correct tracing). Never exposed to user code. */
 
 JaclVal parallel_agg_ptr(ParallelAgg *p) {
-    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_FUTURE, p);
 }
 
 ParallelAgg *as_parallel_agg(JaclVal v) {
@@ -1295,14 +1295,14 @@ JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
 /* RaceAgg tracks a first-to-complete race among N tasks.
  * Uses CAS on settled flag to determine the single winner. */
 typedef struct {
-    volatile uint32_t settled;       /* 0 = not settled, 1 = winner determined */
+    uint32_t          settled;       /* 0 = not settled, 1 = winner determined (CAS) */
     JaclVal           state_machine; /* state machine object for join resumption */
 } RaceAgg;
 
 /* Tag/untag helpers — same tagging scheme as ParallelAgg */
 
 JaclVal race_agg_ptr(RaceAgg *r) {
-    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)r & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_FUTURE, r);
 }
 
 RaceAgg *as_race_agg(JaclVal v) {

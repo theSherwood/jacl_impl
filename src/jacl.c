@@ -3,6 +3,7 @@
 #define JACL_C
 
 /* --- System headers --- */
+#include <assert.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>

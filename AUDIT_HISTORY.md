@@ -1539,14 +1539,38 @@ equivalent) through the templates would remove a class of hard-to-diagnose
   ~400 LoC.
 - `gc__oom_panic_default` calls `abort()` without giving callers a chance to
   clean up. For embedded use, this should be a callback returning an error
-  code.
+  code. **FIXED** (2026-05-14): public `jacl_set_oom_handler(handler,
+  user_data)` added to `include/jacl.h` + `embed.c`. The underlying
+  `gc__oom_handler` global already supported non-aborting return (alloc
+  returns NULL); the new setter exposes it through a stable embed API
+  without leaking `ThreadHeap` to embedders.
 - `volatile` is used on shared fields **in addition to** atomic load/store
   macros. The atomics are sufficient; the volatile is noise and on some
-  compilers inhibits optimization.
+  compilers inhibits optimization. **FIXED** (2026-05-14): swept all
+  `volatile` qualifiers from struct field declarations (`JaclFuture`,
+  `ParallelAgg`, `RaceAgg`, `WorkerThread`, `Runtime`, `JaclCtxPool`, VM
+  `gc_active_ptr`) and from the `(volatile uint64_t*)` casts at
+  `ATOMIC_*_EXPLICIT` call sites — the macros re-cast to `_Atomic` (C11) /
+  `volatile` (MSVC) internally so the caller-side qualifier is redundant.
+  Both jacl.h mirrors and the .c definitions updated so `test_struct_sizes`
+  stays in sync. TSAN suite preserved at the 86/2 baseline; chaos_soak
+  20-s smoke clean.
 - `parallel_agg_ptr`, `race_agg_ptr`, `jacl_future_ptr` all build the value
   with `(uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK`. The mask is unnecessary
   if pointer alignment is enforced — and if it *is* necessary, you're silently
-  truncating high bits. Either way, the mask hides bugs.
+  truncating high bits. Either way, the mask hides bugs. **FIXED**
+  (2026-05-14): introduced `JACL_PACK_PTR(tag, p)` in jacl.h / value.c.
+  The macro asserts in debug builds that the pointer fits in the 56-bit
+  payload (so a future LA57-host with wider VAs fails loudly instead of
+  silently truncating into the tag) and keeps the mask in release for
+  belt-and-suspenders defense. Replaced the ~25 callsites across value.c,
+  gc.c, runtime.c, string.c that used the raw pattern.
+- **Stray RCHeader references / offset assumptions**: a sweep was warranted
+  because the design once had `GCHeader` (8B) replace a 16B `RCHeader` on
+  HAMT/RRB nodes. **CONFIRMED CLEAN** (2026-05-14): zero stray references
+  in `src/`; the only mention is one historical-context comment in
+  `gc.c:5` ("replacing the 16-byte RCHeader used by collections") that
+  bakes in no offset assumption. No fix needed.
 - `DESIGN.md` lists M13 (concurrency) as **COMPLETE**, but several of the
   issues above are real correctness bugs in concurrency. Worth a "known
   issues" section so this isn't claimed as production-ready.

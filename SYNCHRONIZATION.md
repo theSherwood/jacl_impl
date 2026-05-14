@@ -51,7 +51,7 @@ under the lock.
   threads (`rt__current_worker == NULL` or pointing to a different
   runtime) reach this path.
 
-### `Runtime.inbox_count` (volatile intptr_t)
+### `Runtime.inbox_count` (intptr_t, atomic)
 - **W**: external pushers (under `inbox_mutex`); worker drainers (under lock)
 - **R**: writers (under lock); workers (lockless empty-check)
 - **Sync**: mutex for the array; atomic ops on the count itself
@@ -99,7 +99,7 @@ under the lock.
 - **Pinned cross-worker submissions land in `pinned_inbox`, not `private_deque`**
   (audit §1 fix). The owner drains pinned_inbox → private_deque each loop.
 
-### `WorkerThread.currently_executing` (volatile uintptr_t)
+### `WorkerThread.currently_executing` (uintptr_t, atomic)
 - **W**: owner only — sets BUSY, then task_ptr, then IDLE
 - **R**: GC during `gc_enumerate_roots`
 - **Sync**: atomic load/store
@@ -108,14 +108,14 @@ under the lock.
   task-publish. GC spin-waits on BUSY (~ns) so it never misses an in-transit
   task. See GC_CONCURRENCY_DESIGN.md §7.
 
-### `Runtime.gc_running` (volatile uint32_t)
+### `Runtime.gc_running` (uint32_t, atomic)
 - **W**: anyone trying to start a GC, via CAS 0→1; GC owner CAS 1→0
 - **R**: any thread doing the start-CAS
 - **Sync**: `ATOMIC_CAS`
 - **Order**: `MEM_ACQ_REL` on success, `MEM_RELAXED` on failure
 - **Invariant**: at most one concurrent GC cycle in flight
 
-### `Runtime.gc_active` (volatile uint32_t)
+### `Runtime.gc_active` (uint32_t, atomic)
 - **W**: GC thread — set to 1 at mark start, 0 at sweep start
 - **R**: every mutator on every write-barrier call (`gc_write_barrier`)
 - **Sync**: atomic load/store
@@ -125,7 +125,7 @@ under the lock.
   "off" reading means a missed barrier for a value that won't be reclaimed
   this cycle anyway (next cycle will trace it).
 
-### `Runtime.shutdown` (volatile int)
+### `Runtime.shutdown` (int, atomic)
 - **W**: main thread in `runtime_destroy`
 - **R**: every worker, every loop iteration
 - **Sync**: atomic load/store
@@ -134,7 +134,7 @@ under the lock.
 
 ## 2. GC orchestration
 
-### `Runtime.global_epoch` (volatile uint64_t)
+### `Runtime.global_epoch` (uint64_t, atomic)
 - **W**: GC thread at start of cycle (increment)
 - **R**: workers when picking up a task (snapshot into `thread_epoch`)
 - **Sync**: atomic
@@ -142,7 +142,7 @@ under the lock.
 - **Invariant**: after GC publishes epoch N, every task picked up by any
   worker sees `thread_epoch >= N`
 
-### `WorkerThread.thread_epoch` (volatile uint64_t)
+### `WorkerThread.thread_epoch` (uint64_t, atomic)
 - **W**: owner — at start of each task pickup
 - **R**: GC computing the watermark; owner via `gc__thread_epoch` (TLS) for
   allocation stamping
@@ -367,7 +367,7 @@ under the lock.
 
 ## 5. Concurrency primitives
 
-### `JaclFuture.state` (volatile uint32_t)
+### `JaclFuture.state` (uint32_t, atomic)
 - **W**: resolver via `jacl_future_resolve` / `jacl_future_error`, under
   `f->lock`
 - **R**: any awaiter
@@ -375,7 +375,7 @@ under the lock.
 - **Order**: writer `MEM_RELEASE` on `state`; readers `MEM_ACQUIRE`
 - **Invariant**: when state ≥ RESOLVED, `result` is valid for read
 
-### `JaclFuture.result` (volatile uint64_t)
+### `JaclFuture.result` (uint64_t, atomic)
 - Written under `f->lock` before `state` is published. Readers see it after
   the state acquire.
 
@@ -384,7 +384,7 @@ under the lock.
 - **R**: under `f->lock`
 - **Sync**: spinlock
 
-### `JaclFuture.lock` (volatile uint32_t)
+### `JaclFuture.lock` (uint32_t, atomic CAS)
 - CAS-based spinlock (M14 §17.3 — replaced `platform_mutex_t` to avoid the
   finalizer leak). 0 = unlocked, 1 = locked.
 

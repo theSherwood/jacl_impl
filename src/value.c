@@ -26,6 +26,17 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_MASK       ((uint64_t)0xFF << JACL_TAG_SHIFT)
 #define JACL_PAYLOAD_MASK   ((UINT64_C(1) << JACL_TAG_SHIFT) - 1)
 
+/* Pack a pointer payload into a tagged JaclVal. The debug-only assert
+ * catches a pointer wider than the 56-bit payload — without it, the
+ * mask would silently truncate high bits into the tag. The mask itself
+ * stays for release-build defense; with the assert holding, it's a
+ * no-op on every supported platform today (48-bit user-space VA). */
+#ifndef JACL_PACK_PTR
+#define JACL_PACK_PTR(tag, p)                                                 \
+    (assert(((uintptr_t)(p) >> JACL_TAG_SHIFT) == 0),                         \
+     (tag) | ((uint64_t)(uintptr_t)(p) & JACL_PAYLOAD_MASK))
+#endif
+
 /* --- Flag bits (within the tag byte) --- */
 
 #define JACL_FLAG_TAINTED   ((uint64_t)1 << 63)  /* Bit 7 of tag byte */
@@ -147,23 +158,23 @@ typedef char jacl_assert_ptr_fits_payload_[(sizeof(void *) <= sizeof(uint64_t)) 
 /* --- Pointer-payload constructors --- */
 
 JaclVal jacl_string_ptr(void *p) {
-    return JACL_TAG_STRING | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_STRING, p);
 }
 
 JaclVal jacl_vector_ptr(void *p) {
-    return JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_VECTOR, p);
 }
 
 JaclVal jacl_map_ptr(void *p) {
-    return JACL_TAG_MAP | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_MAP, p);
 }
 
 JaclVal jacl_closure_ptr(void *p) {
-    return JACL_TAG_CLOSURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_CLOSURE, p);
 }
 
 JaclVal jacl_bignum_ptr(void *p) {
-    return JACL_TAG_BIGNUM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_BIGNUM, p);
 }
 
 /* --- Pointer extractor --- */
@@ -210,7 +221,7 @@ typedef struct {
 
 /* Cell: internal auto-boxing for mut locals */
 JaclVal jacl_cell_ptr(JaclMutableRef *p) {
-    return JACL_TAG_CELL | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_CELL, p);
 }
 
 JaclMutableRef *jacl_as_cell(JaclVal v) {
@@ -223,7 +234,7 @@ bool jacl_is_cell(JaclVal v) {
 
 /* Box: user-facing thread-local mutable container */
 JaclVal jacl_box_ptr(JaclMutableRef *p) {
-    return JACL_TAG_BOX | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_BOX, p);
 }
 
 JaclMutableRef *jacl_as_box(JaclVal v) {
@@ -236,7 +247,7 @@ bool jacl_is_box(JaclVal v) {
 
 /* Atom: user-facing CAS container (functionally same as box in M10) */
 JaclVal jacl_atom_ptr(JaclMutableRef *p) {
-    return JACL_TAG_ATOM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_ATOM, p);
 }
 
 JaclMutableRef *jacl_as_atom(JaclVal v) {
@@ -275,7 +286,7 @@ bool jacl_is_stream(JaclVal v) {
 }
 
 JaclVal jacl_stream_ptr(void *p) {
-    return JACL_TAG_STREAM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_STREAM, p);
 }
 
 /* State machine */
@@ -284,7 +295,7 @@ bool jacl_is_state_machine(JaclVal v) {
 }
 
 JaclVal jacl_state_machine_ptr(void *p) {
-    return JACL_TAG_STATE_MACHINE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_STATE_MACHINE, p);
 }
 
 /* Syntax object */
@@ -293,7 +304,7 @@ bool jacl_is_syntax(JaclVal v) {
 }
 
 JaclVal jacl_syntax_ptr(void *p) {
-    return JACL_TAG_SYNTAX | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_SYNTAX, p);
 }
 
 /* Typed vector */
@@ -302,7 +313,7 @@ bool jacl_is_typed_vector(JaclVal v) {
 }
 
 JaclVal jacl_typed_vector_ptr(void *p) {
-    return JACL_TAG_TYPED_VECTOR | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_TYPED_VECTOR, p);
 }
 
 /* Typed map */
@@ -311,7 +322,7 @@ bool jacl_is_typed_map(JaclVal v) {
 }
 
 JaclVal jacl_typed_map_ptr(void *p) {
-    return JACL_TAG_TYPED_MAP | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+    return JACL_PACK_PTR(JACL_TAG_TYPED_MAP, p);
 }
 
 /* --- Inline string constructor --- */

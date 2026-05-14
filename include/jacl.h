@@ -144,6 +144,18 @@ JACL_API JaclVal     jacl_struct_get(JaclVM* vm, JaclVal s, const char* field_na
 JACL_API bool        jacl_struct_set(JaclVM* vm, JaclVal s, const char* field_name, JaclVal value);
 JACL_API const char* jacl_struct_type_name(JaclVM* vm, JaclVal s);
 
+/* --- OOM handler ---
+ *
+ * The handler runs after every allocation tier (GC, expand pool, malloc)
+ * has failed. If it returns, the failing allocation returns NULL to the
+ * runtime — callers must be prepared for that. The default handler logs
+ * heap state and calls abort(), which is the right behavior for most
+ * embedded programs but not for hosts that need to recover. Passing
+ * NULL restores the default handler. Process-global. */
+typedef void (*JaclOomHandler)(size_t request_size, void* user_data);
+
+JACL_API void jacl_set_oom_handler(JaclOomHandler handler, void* user_data);
+
 /* --- Trampoline API (requires libffi) --- */
 
 JACL_API JaclTrampoline* jacl_trampoline_new(JaclVM* vm, JaclVal closure, const char* sig);
