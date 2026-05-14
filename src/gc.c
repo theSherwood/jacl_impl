@@ -246,6 +246,14 @@ typedef struct {
     uint64_t         total_bytes_allocated;
     uint64_t         total_allocs;
     uint64_t         slow_path_allocs;
+    /* §14 Phase-A instrumentation: cumulative work done in the slow path.
+     * blocks_scanned counts every block visited by the outer block-walk
+     * (including the one that ultimately fits). lines_scanned counts every
+     * line_map byte gc__find_free_run inspects across all slow-path calls.
+     * Ratios over slow_path_allocs say whether the outer or inner loop is
+     * hot — drives the Phase-B redesign. */
+    uint64_t         blocks_scanned;
+    uint64_t         lines_scanned;
 } ThreadHeap;
 
 void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -266,6 +274,8 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->total_bytes_allocated = 0;
     heap->total_allocs          = 0;
     heap->slow_path_allocs      = 0;
+    heap->blocks_scanned        = 0;
+    heap->lines_scanned         = 0;
 }
 
 /* Forward-declare thread-local (defined later in this file) */
@@ -360,6 +370,14 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
     int run_start, run_len;
     int hint = (int)block->first_free_line;
     int scan = from > hint ? from : hint;
+    int scan_origin = scan;
+    bool found = false;
+    /* §14 Phase-A: every call corresponds to one block visited by the
+     * slow-path block-walk. Single relaxed RMW. */
+    {
+        uint64_t v = ATOMIC_LOAD_EXPLICIT(&heap->blocks_scanned, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&heap->blocks_scanned, v + 1, MEM_RELAXED);
+    }
     while (gc__find_free_run(block, scan, &run_start, &run_len)) {
         if (run_len >= needed_lines) {
             heap->current_block = block;
@@ -370,11 +388,25 @@ bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
             if (run_start > hint) {
                 block->first_free_line = (uint16_t)run_start;
             }
-            return true;
+            found = true;
+            scan = run_start + run_len;
+            break;
         }
         scan = run_start + run_len;
     }
-    return false;
+    /* §14 Phase-A: tally lines actually inspected (from hint forward, up
+     * to either the chosen run's end or end-of-block on miss). Single
+     * RMW at exit keeps the hot loop tight. */
+    {
+        int reached = found ? scan : GC_LINES_PER_BLOCK;
+        int walked  = reached - scan_origin;
+        if (walked > 0) {
+            uint64_t v = ATOMIC_LOAD_EXPLICIT(&heap->lines_scanned, MEM_RELAXED);
+            ATOMIC_STORE_EXPLICIT(&heap->lines_scanned,
+                                  v + (uint64_t)walked, MEM_RELAXED);
+        }
+    }
+    return found;
 }
 
 /* Bump-allocate at the current cursor position.

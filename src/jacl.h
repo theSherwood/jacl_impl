@@ -211,6 +211,10 @@ typedef struct {
     uint64_t         total_bytes_allocated;
     uint64_t         total_allocs;
     uint64_t         slow_path_allocs;
+    /* §14 Phase-A instrumentation; see gc.c definition for semantics. MUST
+     * stay in sync with the gc.c definition (struct-size test enforces). */
+    uint64_t         blocks_scanned;
+    uint64_t         lines_scanned;
 } ThreadHeap;
 
 /* HeapRecord — heap-allocated, pointer-accessed struct shape. Used by ctx
@@ -2402,6 +2406,13 @@ typedef struct {
     uint64_t total_bytes_allocated;
     uint64_t total_allocs;
     uint64_t slow_path_allocs;
+    /* §14 Phase-A instrumentation: per-call work done in gc_alloc's slow
+     * path. blocks_scanned / slow_path_allocs is avg blocks visited;
+     * lines_scanned / slow_path_allocs is avg line_map bytes inspected
+     * inside gc__find_free_run. Ratio between the two tells whether the
+     * outer (block-walk) or inner (line-walk) loop is hot. */
+    uint64_t blocks_scanned;
+    uint64_t lines_scanned;
     /* Worker stats summed across workers */
     WorkerStats workers_total;
     /* Instantaneous state */

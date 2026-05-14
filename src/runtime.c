@@ -70,6 +70,8 @@ typedef struct {
     uint64_t total_bytes_allocated;
     uint64_t total_allocs;
     uint64_t slow_path_allocs;
+    uint64_t blocks_scanned;
+    uint64_t lines_scanned;
     WorkerStats workers_total;
     uint32_t current_heap_blocks;
     intptr_t current_inbox_depth;
@@ -1339,6 +1341,10 @@ JaclPerfSnapshot jacl_perf_snapshot(Runtime *rt) {
             ATOMIC_LOAD_EXPLICIT(&h->total_allocs, MEM_RELAXED);
         s.slow_path_allocs +=
             ATOMIC_LOAD_EXPLICIT(&h->slow_path_allocs, MEM_RELAXED);
+        s.blocks_scanned +=
+            ATOMIC_LOAD_EXPLICIT(&h->blocks_scanned, MEM_RELAXED);
+        s.lines_scanned +=
+            ATOMIC_LOAD_EXPLICIT(&h->lines_scanned, MEM_RELAXED);
         s.workers_total.tasks_executed +=
             ATOMIC_LOAD_EXPLICIT(&w->stats.tasks_executed, MEM_RELAXED);
         s.workers_total.steal_attempts +=
@@ -1369,6 +1375,8 @@ void jacl_perf_snapshot_print_json(FILE *out, const JaclPerfSnapshot *s) {
         "\"total_bytes_allocated\":%llu,"
         "\"total_allocs\":%llu,"
         "\"slow_path_allocs\":%llu,"
+        "\"blocks_scanned\":%llu,"
+        "\"lines_scanned\":%llu,"
         "\"tasks_executed\":%llu,"
         "\"steal_attempts\":%llu,"
         "\"steal_successes\":%llu,"
@@ -1386,6 +1394,8 @@ void jacl_perf_snapshot_print_json(FILE *out, const JaclPerfSnapshot *s) {
         (unsigned long long)s->total_bytes_allocated,
         (unsigned long long)s->total_allocs,
         (unsigned long long)s->slow_path_allocs,
+        (unsigned long long)s->blocks_scanned,
+        (unsigned long long)s->lines_scanned,
         (unsigned long long)s->workers_total.tasks_executed,
         (unsigned long long)s->workers_total.steal_attempts,
         (unsigned long long)s->workers_total.steal_successes,

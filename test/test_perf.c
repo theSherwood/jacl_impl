@@ -253,6 +253,8 @@ static int run_scenario(const char* path, const char* name,
               "\"bytes_allocated\":%llu,"
               "\"allocs\":%llu,"
               "\"slow_path_allocs\":%llu,"
+              "\"blocks_scanned\":%llu,"
+              "\"lines_scanned\":%llu,"
               "\"tasks_executed\":%llu,"
               "\"steal_attempts\":%llu,"
               "\"steal_successes\":%llu,"
@@ -275,6 +277,8 @@ static int run_scenario(const char* path, const char* name,
             (unsigned long long)(post.total_bytes_allocated - pre.total_bytes_allocated),
             (unsigned long long)(post.total_allocs - pre.total_allocs),
             (unsigned long long)(post.slow_path_allocs - pre.slow_path_allocs),
+            (unsigned long long)(post.blocks_scanned - pre.blocks_scanned),
+            (unsigned long long)(post.lines_scanned - pre.lines_scanned),
             (unsigned long long)(post.workers_total.tasks_executed -
                                  pre.workers_total.tasks_executed),
             (unsigned long long)(post.workers_total.steal_attempts -
