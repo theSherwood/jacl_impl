@@ -684,7 +684,15 @@ static inline uint32_t vm__pop_struct(VM* vm, uint16_t type_idx, JaclVal* out) {
   return width;
 }
 
-/* --- Environment helpers --- */
+/* --- Environment helpers ---
+ *
+ * Concurrent access pattern: the owning worker (sole writer) calls
+ * vm__env_set/grow/get. The GC root scanner (gc_enumerate_roots, runs
+ * on the GC worker thread) reads `env.values` to push roots. Writer-
+ * side stores and reader-side loads on count/values pointer/values[i]
+ * use release/acquire so TSAN can observe the happens-before. The
+ * single-threaded gc_mark paths and same-thread vm__env_get reads stay
+ * plain (no cross-thread access). */
 
 void vm__env_grow(VM* vm) {
   uint32_t new_cap = vm->env.cap * 2;
@@ -693,28 +701,36 @@ void vm__env_grow(VM* vm) {
   memcpy(new_names, vm->env.names, vm->env.count * sizeof(JaclVal));
   memcpy(new_values, vm->env.values, vm->env.count * sizeof(JaclVal));
   vm->env.names  = new_names;
-  vm->env.values = new_values;
+  /* Pointer swap races with the GC root scanner's load of vm.env.values.
+   * Release-store; the scanner does acquire-load. New array is already
+   * populated via memcpy above, so the scanner sees a fully-initialized
+   * array regardless of which pointer it observes. */
+  ATOMIC_STORE_EXPLICIT(&vm->env.values, new_values, MEM_RELEASE);
   vm->env.cap    = new_cap;
 }
 
 void vm__env_set(VM* vm, JaclVal name, JaclVal value) {
   /* Check if name already exists */
-  for (uint32_t i = 0; i < vm->env.count; i++) {
+  uint32_t count = vm->env.count;  /* sole writer; plain load */
+  for (uint32_t i = 0; i < count; i++) {
     if (vm->env.names[i] == name) {
-      vm->env.values[i] = value;
+      ATOMIC_STORE_EXPLICIT(&vm->env.values[i], value, MEM_RELEASE);
       return;
     }
   }
   /* New entry */
-  if (vm->env.count >= vm->env.cap) {
+  if (count >= vm->env.cap) {
     vm__env_grow(vm);
   }
-  vm->env.names[vm->env.count]  = name;
-  vm->env.values[vm->env.count] = value;
-  vm->env.count++;
+  vm->env.names[count] = name;
+  ATOMIC_STORE_EXPLICIT(&vm->env.values[count], value, MEM_RELEASE);
+  /* Release-store on count gives the scanner happens-before for the
+   * slot write above. Scanner acquire-loads count before iterating. */
+  ATOMIC_STORE_EXPLICIT(&vm->env.count, count + 1, MEM_RELEASE);
 }
 
 JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
+  /* Same-thread reader; plain loads. */
   for (uint32_t i = 0; i < vm->env.count; i++) {
     if (vm->env.names[i] == name) {
       *found = true;

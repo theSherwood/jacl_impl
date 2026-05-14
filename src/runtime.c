@@ -1006,9 +1006,19 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
          * GC_CONCURRENCY_DESIGN.md Section 7). VM stack scanning removed —
          * not thread-safe and unnecessary with CPS transform. */
 
-        /* 4. Global environment values */
-        for (uint32_t i = 0; i < w->vm.env.count; i++) {
-            gc__ms_push_val(ms, w->vm.env.values[i]);
+        /* 4. Global environment values. Acquire-loads pair with the
+         * worker's release-stores in vm__env_set / vm__env_grow. Load
+         * count FIRST: writer assigns env.values (grow) before
+         * incrementing count, so if we see a fresh count, the matching
+         * fresh values pointer is also visible. Per-slot acquire on the
+         * iterated reads makes TSAN happy about the slot accesses. */
+        uint32_t env_n = ATOMIC_LOAD_EXPLICIT(&w->vm.env.count,
+                                              MEM_ACQUIRE);
+        JaclVal *env_vals = ATOMIC_LOAD_EXPLICIT(&w->vm.env.values,
+                                                 MEM_ACQUIRE);
+        for (uint32_t i = 0; i < env_n; i++) {
+            JaclVal v = ATOMIC_LOAD_EXPLICIT(&env_vals[i], MEM_ACQUIRE);
+            gc__ms_push_val(ms, v);
         }
 
         /* 5. Intern table entries — treated as weak roots, matching
