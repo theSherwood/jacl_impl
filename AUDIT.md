@@ -105,7 +105,8 @@ without root-causing. All FIXED:
 | E+ | TSAN-baseline cleanup | Closed 2 of the 5 remaining failures (`rwlock`, `cross_thread_string`) and reclassified `perf` as a `jacl_harness` sibling once the WorkerStats counter race got fixed. Surfaced + fixed a real bug in `sum_tree.h` (per-instantiation handler state needed `JACL_THREAD_LOCAL`). TSAN baseline now 85 pass / 3 fail. |
 | E++ | ctx-pool elimination (§18) | Surfaced via `perf`: the ctx pool's lockless free-list reuse can recycle slots that SM state fields still reference across worker boundaries. Real UAF; not a §S5 missing-atomics issue. Eliminated the pool entirely (option 1) — `ctx_pool_alloc` → direct `gc_alloc`, `ctx_pool_free` → no-op. Closes the race; bench is *faster* (collection_churn -20%, spawn_chain -13%). Closed `perf` together with the §S5 slice 1 (`vm->env`) and a `GcStats` cycle-counter atomic fix. TSAN baseline now 86 pass / 2 fail. |
 | E+++ | TSAN baseline triage (2026-05-14) | Triaged the 2 remaining failures (`jacl_harness`, `chase_lev_stress`) rather than fixing. Walked the actual TSAN output for both. `jacl_harness`: **1 distinct site** — `sm->fields[i] = value` at `vm.c:8300` paired with the GC trace at `gc_collect.c:303`. The `gc_write_barrier` two lines before the write maintains SATB correctness; TSAN can't see the happens-before because it runs through grey-buffer count atomics, not the slot itself. `chase_lev_stress`: **2 distinct sites** — `chase_lev.h:268` (fence-mediated data store, the test doesn't opt into `CHASE_LEV_ATOMIC_DATA`) and `test_helpers.h:86` (epoch-protected `free`; TSAN can't track happens-before through the epoch wait loop). Both documented as known-and-safe. Coverage of the runtime's actual chase_lev usage is `chaos_pinned_deque`/`chaos_gc_deque_scan` (both TSAN-clean); coverage of the heap-pointer-slot write discipline is the unified-barrier regression tests + 250-run gc_stress soak. The §S5 atomic-conversion pass remains available but is declined: only 1 of the named sites surfaces under current workloads, and the conversion would introduce an ongoing maintenance footgun (every new heap-pointer slot write must route through the atomic primitive or TSAN cleanliness silently regresses). TSAN baseline 86 pass / 2 fail, both known-and-safe. |
-| F | Rope-summary incremental combine (2026-05-14) | The post-tier-2 profile put `unicode_grapheme_next` at 19% of `string_concat` CPU — biggest non-GC sink, unmasked by tier-2's alloc-path wins. Root cause: `sum_tree.h`'s `ST_MK_LEAF` re-runs `summarize(elems, count)` over the full merged byte buffer every time `ST_CONCAT` merges two leaves, even though both child summaries are already cached on the leaves and the rope's invariants (codepoint-aligned splits, junctions made grapheme-safe by `rope_concat`) make summary monoidal across the merge. Added `ST_MK_LEAF_SUMMARIZED(elems, count, summary)` that accepts a precomputed summary; the three leaf-merge sites in `ST_CONCAT` (same-height, height-left>right, height-right>left) now pass `combine(ll->summary, rl->summary)` instead of forcing a full re-scan. Wins (BENCH_TIMED_ITERS=200, single run): `string_concat` wall_median **-42.3%**, `collection_churn` **-41.1%**, `spawn_chain` **-33.3%**, `box_churn` +2% (noise). Profile confirms: `unicode_grapheme_next` 19% → **2.5%**, `rope_summary_summarize` out of the top 18 entirely. Full normal-mode suite 88/88, 5×30 gc_stress soak clean, 30s TSAN chaos_soak clean (153K tasks), TSAN baseline unchanged. |
+| F | Rope-summary incremental combine (2026-05-14) | The post-tier-2 profile put `unicode_grapheme_next` at 19% of `string_concat` CPU — biggest non-GC sink, unmasked by tier-2's alloc-path wins. Root cause: `sum_tree.h`'s `ST_MK_LEAF` re-runs `summarize(elems, count)` over the full merged byte buffer every time `ST_CONCAT` merges two leaves, even though both child summaries are already cached on the leaves and the rope's invariants (codepoint-aligned splits, junctions made grapheme-safe by `rope_concat`) make summary monoidal across the merge. Added `ST_MK_LEAF_SUMMARIZED(elems, count, summary)` that accepts a precomputed summary; the three leaf-merge sites in `ST_CONCAT` (same-height, height-left>right, height-right>left) now pass `combine(ll->summary, rl->summary)` instead of forcing a full re-scan. Wins (BENCH_TIMED_ITERS=200, single run): `string_concat` wall_median **-42.3%**, `collection_churn` **-41.1%**, `spawn_chain` **-33.3%**, `box_churn` +2% (noise). Profile confirms: `unicode_grapheme_next` 19% → **2.5%**, `rope_summary_summarize` out of the top 18 entirely. Full normal-mode suite 88/88, 5×30 gc_stress soak clean, 30s TSAN chaos_soak clean (153K tasks), TSAN baseline unchanged. Commit `f43d67f`. |
+| G | FNV-1a hash extend in OP_CONCAT (2026-05-14) | Once phase F removed the rope-summary cost, `rope_string__compute_hash` surfaced as the next sink (8% of `string_concat`). Same shape of fix: FNV-1a is a left-fold over bytes, so `hash(a ++ b) == continue_FNV(hash(a), b's bytes)`. Every string-tagged variant (inline / heap / rope) already exposes `hash(a)` via `jacl_val_hash`. Added `rope_string__hash_extend(prev_hash, r)` (`compute_hash` now delegates with `prev_hash = FNV_INIT`); `OP_CONCAT`'s large-concat path uses `hash_extend(jacl_val_hash(a), rb)` instead of `compute_hash(rc)`. For append-loop workloads (a grows, b is tiny) per-concat hash work goes from O(\|a\|+\|b\|) to O(\|b\|). Magnitude: smaller than phase F — the post-rope-fix profile of `string_concat` had `rope_string__compute_hash` at 8% of CPU (~0.55s of a 6.5s run), and gprofng on these short scenarios has very high run-to-run variance (saw 3.5s → 12s spread across 5 samples at the same SHA, same args). `rope_string__compute_hash` drops out of the top 15 post-fix; bench wall_median diff at 200 iters showed -13% on `string_concat` (within single-run noise but directionally right). The other `compute_hash` callers (`jacl_rope_string_create`, the slice path at `vm.c:3433`) don't have a prefix hash to extend from and still hash from scratch. Suite 88/88, gc_stress 5×30 clean, 30s TSAN chaos_soak clean (72K tasks), TSAN baseline unchanged. Commit `ea77e52`. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -357,11 +358,16 @@ The remaining work is non-correctness, performance/architecture:
    separate slab, locality-preserving pop order, size-bucketed
    lists). Not a quick win. **Reverted** (only AUDIT.md docs landed
    from this attempt); pivoted to rope-summary perf instead —
-   **landed, see phase F row** (`ST_MK_LEAF_SUMMARIZED` short-
-   circuit in `ST_CONCAT`'s leaf-merge sites; `unicode_grapheme_next`
-   19% → 2.5% on `string_concat`, wall_median -42%). §13
+   **landed (phase F row)**: `ST_MK_LEAF_SUMMARIZED` short-circuit
+   in `ST_CONCAT`'s leaf-merge sites; `unicode_grapheme_next` 19%
+   → 2.5% on `string_concat`, wall_median -42%. Followed by
+   **FNV-1a hash extend (phase G row)** in `OP_CONCAT`'s rope
+   path: `rope_string__compute_hash` 8% → out-of-top-15 on
+   `string_concat`; magnitude smaller than F and noisier to
+   measure (see "Caveat on bench measurements" below). §13
    (computed-goto) remains the next lever for the dispatch-bound
-   regime (`vm__run` at 52% of `box_churn`).
+   regime — `vm__run` is now **61% of `box_churn`** post-F (up
+   from 52% pre-F as a share of a smaller scenario total).
 
 ### Housekeeping (2026-05-13)
 
@@ -445,6 +451,43 @@ computation. This isn't on the audit punch list at all — it's a
 specific consequence of the rope/string design that should be
 investigated separately (cache or lazy-evaluate the rope summary?).
 
+### Profiling baseline (2026-05-14, post phases F + G)
+
+Re-captured after the rope-summary fix (phase F) and FNV-1a hash
+extend (phase G).  Raw artifacts in
+`docs/profiles/2026-05-14_post_tier2_profile.txt` (pre-F),
+`docs/profiles/2026-05-14_rope_summarized_diff.txt` (after F), and
+`docs/profiles/2026-05-14_hash_extend_after.jsonl` (after G).  Same
+build settings as the 2026-05-13 baseline (`-O2 -g
+-fno-omit-frame-pointer`, no TSAN, 2 workers, BENCH_TIMED_ITERS=3000
+for the gprofng captures).
+
+| Function | mixed | collection_churn | box_churn | spawn_chain | string_concat | Note |
+|----------|------:|-----------------:|----------:|------------:|--------------:|------|
+| `runtime__worker_loop` (excl) | **44%** | — | — | **81%** | — | unchanged (CV-idle dominated) |
+| `gc__find_fit_in_block` | 14% | **36%** | 7% | <1% | **36%** | down from 51% mixed, still the alloc-heavy ceiling |
+| `vm__run` | 9% | 15% | **61%** | 2% | 5% | up from 47%→61% on box_churn (share grew as F/G shrank total) |
+| `gc_sweep_concurrent` | 5% | 12% | 2% | <1% | 15% | unchanged proportionally |
+| `pthread_cond_signal` | 4% | 1% | 5% | 5% | 1% | the §11 CV change |
+| `rope_string__compute_hash` | 1% | — | — | — | (out of top 15) | was 8% pre-G |
+| `unicode_grapheme_next` | <1% | — | — | — | 3% | was 19% pre-F |
+
+**Headline shift.** With F + G in, the *mixed* profile has **no
+single sink above ~14%** (excluding `runtime__worker_loop`'s
+intentional spin/CV-idle time). The runtime is well-balanced; the
+remaining concentrated levers are scenario-specific:
+
+- `box_churn` is now overwhelmingly **dispatch-bound** (`vm__run`
+  61%) — §13 (computed-goto / direct-threaded rewrite) is the
+  biggest unclaimed lever.
+- `collection_churn` and `string_concat` are still **alloc-bound**
+  (`gc__find_fit_in_block` 36% + `gc_sweep_concurrent` 12–15%) —
+  §14 tier-3 territory, but the naïve intrusive-list design
+  failed (see Punch list item #1); needs a redesign.
+- `spawn_chain` is unchanged in shape: 81% in worker idle path.
+  Driving it down further means per-worker targeted CV signaling,
+  significant architectural work.
+
 **Recommended order of attack.**
 
 1. ~~**§14** — universal win, large magnitude, well-understood fix.~~
@@ -478,21 +521,58 @@ investigated separately (cache or lazy-evaluate the rope summary?).
    single-run noise, but worth re-measuring on a multi-run setup
    if anyone investigates.
 4. **VM dispatch (§13 family)** — computed-goto rewrite of
-   `vm__run` for the dispatch-bound regime. `vm__run` is 52% of
-   `box_churn` post-tier-2. Bigger single-scenario delta than #3
+   `vm__run` for the dispatch-bound regime. `vm__run` is **61% of
+   `box_churn` post-rope-fixes** (was 52% pre-fix; share grew as
+   everything else shrank). Bigger single-scenario delta than #3
    but biggest scope (whole dispatch loop) and a portability
    story (`&&label` GCC/Clang-only — needs MSVC fallback).
-5. **`rope_string__compute_hash`** — surfaced as the new top non-
+5. ~~**`rope_string__compute_hash`** — surfaced as the new top non-
    GC sink on `string_concat` post-rope-summary fix (12%, up from
-   6% in absolute share because the total time shrank). Likely
-   benefits from the same caching pattern (cache hash on the rope
-   root, invalidate on mutation — though rope is persistent, so
-   invalidation is rare in practice).
+   6% in absolute share because the total time shrank).~~
+   **Landed (2026-05-14) as phase G** — see the status row above.
+   Incremental FNV-1a extend over the right side of the concat
+   (`hash(a ++ b) = continue_FNV(hash(a), b's bytes)`); win is
+   smaller and noisier than phase F's was.
+
+**Status after phases F + G**: there is no single sink above 14% in
+the **mixed** profile (excluding `runtime__worker_loop`'s spin/CV
+idle time, which is intentional). The remaining concentrated
+opportunities are:
+
+- §13 dispatch — 61% of `box_churn`, biggest single-scenario lever
+- `gc__find_fit_in_block` — 36–45% in alloc-heavy scenarios; §14
+  tier-3 (intrusive free-run list) attempted and reverted in phase
+  E-pre-F (see Punch list item #1) — needs a different design
+  (non-intrusive node storage, locality-preserving pop order,
+  size-bucketed lists)
+- `gc_sweep_concurrent` — 12–15% in alloc-heavy; same family as
+  the find_fit sink, would likely benefit from any new tier-3
+  design that also restructures how sweep rebuilds free state
+
+Diminishing returns territory for further perf work. Defensible
+stopping points: capture a fresh profile of a *real* JACL workload
+(rather than these microbenchmarks) and let that profile drive
+the next pass — the synthetic benches have served their purpose
+on the easy wins.
 
 A regression bench is now available: `./build.sh --test=perf`
 prints JSONL stats for all four scenarios, and `tools/bench-diff.sh`
 compares two JSONL snapshots. Capture a baseline before each
 attempt and diff after.
+
+**Caveat on bench measurements (learned 2026-05-14)**: at
+`BENCH_TIMED_ITERS=200` the per-iter `wall_ns_median` can swing
+±50% between single runs, and `wall_ns_max` regularly wraps
+(reported as `18446744073.71G`) suggesting clock-source quirks.
+At 500–3000 iters the median locks to ~2ms steps (clock
+granularity, not the runtime's wall-clock floor). For changes
+smaller than ~15% wall_median delta, *gprofng* CPU samples are
+more reliable than the bench's own wall numbers — but even
+gprofng on short scenarios has wide run-to-run variance (seen
+3.5s → 12s across 5 samples at the same SHA). Quick rule of
+thumb: trust the *direction* of a profile-shift observation
+(e.g. "function X disappears from the top sinks") more than the
+exact magnitude unless you have ≥5 runs to average.
 
 ### How earlier phases were structured
 
