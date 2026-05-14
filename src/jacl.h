@@ -47,9 +47,12 @@ typedef uint64_t JaclVal;
  * catches a pointer wider than the 56-bit payload — without it, the
  * mask would silently truncate high bits into the tag. The mask itself
  * stays for release-build defense; with the assert holding, it's a
- * no-op on every supported platform today (48-bit user-space VA). */
+ * no-op on every supported platform today (48-bit user-space VA).
+ *
+ * Note: cast to uint64_t *before* the shift — on wasm32 / other 32-bit
+ * targets, uintptr_t is 32 bits, so a >> 56 on uintptr_t is UB. */
 #define JACL_PACK_PTR(tag, p)                                                 \
-    (assert(((uintptr_t)(p) >> JACL_TAG_SHIFT) == 0),                         \
+    (assert(((uint64_t)(uintptr_t)(p) >> JACL_TAG_SHIFT) == 0),               \
      (tag) | ((uint64_t)(uintptr_t)(p) & JACL_PAYLOAD_MASK))
 
 #define JACL_FLAG_TAINTED   ((uint64_t)1 << 63)

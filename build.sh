@@ -35,6 +35,7 @@ FILTER=""
 CLEAN=0
 PARALLEL=0
 TSAN=0
+WASM=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
@@ -43,8 +44,34 @@ for arg in "$@"; do
     --parallel|-j) PARALLEL=$(nproc) ;;
     --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
     --tsan) TSAN=1 ;;
+    --wasm) WASM=1 ;;
   esac
 done
+
+# --wasm mode: compile-only check that the unity build still produces a
+# WASM module via emscripten. No tests are run (emcc output is a .wasm/.js
+# pair; there's no native test harness for it). Skips with a clear notice
+# when emcc is missing instead of silently passing. Exclusive with --tsan.
+if [ "$WASM" -eq 1 ]; then
+  if [ "$TSAN" -eq 1 ]; then
+    echo "error: --wasm and --tsan are mutually exclusive."
+    exit 2
+  fi
+  if ! command -v emcc >/dev/null 2>&1; then
+    echo "WASM check: SKIPPED (emcc not on PATH)."
+    echo "  Install Emscripten SDK to enable: https://emscripten.org"
+    exit 0
+  fi
+  DIR="$(cd "$(dirname "$0")" && pwd)"
+  echo "=== WASM build check (emcc) ==="
+  if bash "$DIR/build_wasm.sh"; then
+    echo "WASM build: PASS"
+    exit 0
+  else
+    echo "WASM build: FAIL"
+    exit 1
+  fi
+fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"

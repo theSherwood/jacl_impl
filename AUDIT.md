@@ -20,10 +20,15 @@ barrier UAF, 4 TSAN-triage real bugs, the §18 ctx-pool UAF, and the
 mixed-CPU profile. See `AUDIT_HISTORY.md` for the per-phase story.
 
 **Test baselines:**
-- Normal-mode suite: 88 pass / 0 fail
-- TSAN baseline: 86 pass / 2 fail (`jacl_harness` and `chase_lev_stress`),
-  both **documented as known-and-safe** — TSAN blindness on barrier/
-  fence/epoch-mediated synchronization, not missed barriers.
+- Normal-mode suite: 88 pass / 0 fail (`./build.sh`).
+- TSAN baseline: 86 pass / 2 fail (`./build.sh --tsan`).
+  `jacl_harness` and `chase_lev_stress` are the two **documented as
+  known-and-safe** — TSAN blindness on barrier/fence/epoch-mediated
+  synchronization, not missed barriers.
+- WASM compile check: clean (`./build.sh --wasm` — gated on `emcc`
+  on PATH; skips with a notice if absent). Run before merging any
+  change to `src/` or `include/` so the embedded/WASM target doesn't
+  silently regress.
 
 **Three docs that should evolve together:**
 
@@ -148,6 +153,7 @@ CPS-only concurrency.
 ```sh
 ./build.sh                              # full normal-mode test sweep
 ./build.sh --tsan                       # full TSAN-mode sweep
+./build.sh --wasm                       # WASM compile-only check (emcc)
 ./build.sh --test=<name>                # one test, normal mode
 ./build.sh --tsan --test=<name>         # one test, TSAN
 

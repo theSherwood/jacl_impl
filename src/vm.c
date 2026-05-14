@@ -779,6 +779,9 @@ void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
   buf->len += len;
 }
 
+/* Forward declarations for unity-build / wasm strict-prototype mode. */
+void vm__fmt_value(VMFormatBuf* buf, JaclVal val);
+
 /* Format a struct (Name{f1: v1, ...}) from raw C-ABI bytes.
  * Used by both heap-struct OP_PRINT path and inline OP_PRINT_STRUCT. */
 void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* data) {

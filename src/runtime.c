@@ -491,6 +491,12 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
     return (THREAD_PROC_RETURN)0;
 }
 
+/* Forward declarations for unity-build / wasm strict-prototype mode. */
+void runtime__init_state(Runtime *rt, int num_workers);
+void runtime__start_threads(Runtime *rt);
+void runtime__stop_threads(Runtime *rt);
+void runtime__teardown_state(Runtime *rt);
+
 /* ======================================================================
  * runtime_init: create worker threads and start the pool
  * ====================================================================== */
