@@ -43,19 +43,8 @@ build time by `test/test_struct_sizes.c`.
 ## Open items
 
 These are non-correctness — code health, ergonomics, deferred perf
-levers. None block shipping. Roughly ordered by leverage.
-
-### §13. VM dispatch (computed-goto / direct-threaded) — **DONE 2026-05-14**
-
-Closed via option 1: `#if (defined(__GNUC__)||defined(__clang__)) &&
-!defined(__EMSCRIPTEN__)` selects computed-goto with a 222-entry
-direct-threaded dispatch table; switch path stays for WASM (Emscripten
-lowers `&&label` to a single `br_table` and loses per-opcode
-prediction benefit). See `AUDIT_HISTORY.md` § "§13 VM dispatch
-(2026-05-14)" for the implementation notes and perf numbers (modest
-~2–3 % on `box_churn` at -O2 — GCC already optimizes the dense switch
-well; the bigger win is the architectural lever for future opcode
-work).
+levers. None block shipping. Roughly ordered by **remaining**
+leverage; closed items live below the open ones.
 
 ### §16. VM stack hard-capped at 256
 
@@ -63,7 +52,8 @@ work).
 + temporaries; deeply nested expression evaluation hits the cap. Today
 an overflow returns `VM_STACK_OVERFLOW` but most callers don't surface
 it gracefully. Either grow on demand or document the limit and emit a
-clear error message. Correctness/ergonomics, not perf.
+clear error message. Correctness/ergonomics, not perf. Most actionable
+of the open items — bounded scope, user-visible.
 
 ### §17. Inconsistent thread-local convention
 
@@ -75,7 +65,7 @@ heap parameter. Threading a `JaclCtx*` (or equivalent) through the
 templates would remove a class of hard-to-diagnose "wrong heap" bugs
 and make sub-VM / sandbox embedding cleaner. Larger refactor.
 
-### §12. `JaclFuture` waiters list spinlock
+### §12. `JaclFuture` waiters list spinlock — *not observed*
 
 `f->lock` is a CAS spinlock (M14 traded `platform_mutex_t` for it to
 avoid a finalizer leak). Under heavy waiter contention, spinning blocks
@@ -83,7 +73,7 @@ the OS scheduler from migrating a worker that's holding the lock —
 preempted holder leads to all other waiters spinning until reschedule.
 Not observed in any chaos test. Consider parking after N spins.
 
-### §11. Worker idle CV-park timeout
+### §11. Worker idle CV-park timeout — *architectural, deferred*
 
 Phase 10/11 landed a real CV-based wake-up path. Residual: workers park
 with a **1 ms timeout** to bound max latency for cases the signaling
@@ -123,12 +113,19 @@ if a real-workload profile pins them.
   walker bodies stayed separate. Pure code health, no perf win, ~400
   LoC removable. Same for `gc_mark` / `gc_mark_minor`.
 
-### Smaller items
+## Closed items
 
-The mechanical-sweep batch (oom-panic hook, redundant `volatile`,
-`JACL_PAYLOAD_MASK` truncation, stray `RCHeader` audit) closed
-2026-05-14 — see `AUDIT_HISTORY.md` § "Smaller things" for the
-per-item resolutions.
+Pointers only — full bodies live in `AUDIT_HISTORY.md`.
+
+- **§13 VM dispatch (computed-goto / direct-threaded)** —
+  closed 2026-05-14 (option 1: ifdef computed-goto, switch fallback
+  for WASM). 222-entry direct-threaded dispatch table, ~2-3 % perf
+  delta on `box_churn` at -O2; main value is the architectural lever.
+  See `AUDIT_HISTORY.md` § "§13 VM dispatch (2026-05-14)".
+- **Smaller items batch** — closed 2026-05-14: oom-panic public
+  hook, redundant-`volatile` strip, `JACL_PACK_PTR` debug-asserting
+  helper, stray `RCHeader` sweep. See `AUDIT_HISTORY.md` §
+  "Smaller things" for the per-item resolutions.
 
 ### Known theoretical hole, not surfacing as a bug today
 
