@@ -35,8 +35,8 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 9   | Error Handling            | **COMPLETE** | Error flag propagation, `try`                                                             |
 | 10  | Mutable State             | **COMPLETE** | `mut`, `set!`, `box`, `atom`                                                              |
 | 11  | Static Type System        | **COMPLETE** | Typed/unboxed values, compile-time checking                                               |
-| 12  | Garbage Collection        | **COMPLETE** | Epoch-based tracing GC, non-moving generational (sticky mark-bit), minor/major scheduling |
-| 13  | Concurrency               | **COMPLETE** | NxM scheduler, parallel/spawn/await, escape analysis for mutable capture pinning          |
+| 12  | Garbage Collection        | **COMPLETE** ⚠ | Epoch-based tracing GC, non-moving generational (sticky mark-bit), minor/major scheduling. Hardened by May 2026 audit campaign — see note below. |
+| 13  | Concurrency               | **COMPLETE** ⚠ | NxM scheduler, parallel/spawn/await, escape analysis for mutable capture pinning. Hardened by May 2026 audit campaign — see note below. |
 | 14  | Module System             | **COMPLETE** | File modules, both `use` forms, cross-module typing, sandboxed `interpret`                |
 | 15  | Macro System              | **COMPLETE** | AST macros via syntax objects, hygienic expansion, quasiquoting, `gensym`                 |
 | 16  | Phase 2 Syntax            | **COMPLETE** | Three-mode delimiters, infix in `()`, binding operators (`=`/`:`/`::`)                    |
@@ -50,7 +50,41 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - `GENERATOR_STATE_MACHINE.md` — generator SM transform
 - `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
 - `SYNCHRONIZATION.md` — per-field shared-state synchronization reference
-- `AUDIT.md` — audit findings + fix tracker
+- `AUDIT.md` — currently-open audit items (small, active)
+- `AUDIT_HISTORY.md` — archive of the May 2026 audit campaign (large, read-only)
+
+## M12/M13 hardening note (May 2026)
+
+M12 (GC) and M13 (Concurrency) shipped functional but a multi-session
+audit campaign in May 2026 surfaced and closed real correctness bugs
+in the concurrent paths. Items closed include:
+
+- 8 critical GC/concurrency races (Chase-Lev SPSC contract, GC thief
+  registration, grey-buffer realloc race, intern table sweep,
+  adaptive-threshold load, stale `current_block`, mark bit-field
+  packing, lockless `inbox_count`)
+- The §9 SATB-barrier UAF (deletion barrier now unconditional)
+- 5 soak-surfaced races (task envelope retire, `bytes_since_gc`,
+  `needs_gc`, mutable-ref trace, ctx-state cluster)
+- The §18 ctx-pool slot-reuse UAF (pool eliminated entirely)
+- 4 TSAN-triage real bugs that had been blanket-labeled "pre-existing
+  flakes" (PATH_MAX, syntax TLS, jacl_run stack-local intern_table,
+  ctx-state race cluster)
+- Compiler/VM §D survey: tag-check completeness, stack discipline,
+  spawn + deep recursion SEGV
+
+Plus perf hardening: §14 alloc slow path tier-1+2+B (Phase B
+landed 2026-05-14), rope-summary incremental combine, FNV-1a hash
+extend, generational sweep scheduling.
+
+**Current baselines:** normal-mode suite 88/88, TSAN baseline 86/2
+(both failures documented known-and-safe — TSAN blindness on barrier/
+fence/epoch-mediated synchronization, not missed barriers).
+
+The full per-bug record is in `AUDIT_HISTORY.md`; per-field
+synchronization invariants are in `SYNCHRONIZATION.md`. Open
+non-correctness items (code health, deferred perf levers) are in
+`AUDIT.md`.
 
 ## Known Limitations
 

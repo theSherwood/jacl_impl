@@ -1,0 +1,14 @@
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.203 100.00  1.203 100.00   <Total>
+0.258  21.46  0.260  21.62   <static>@0x98bf5 (<libc.so.6>)
+0.193  16.07  0.231  19.22   gc_sweep_concurrent
+0.164  13.59  0.262  21.79   gc_alloc
+0.128  10.60  0.135  11.18   clock_nanosleep
+0.118   9.78  0.118   9.78   <static>@0x188051 (<libc.so.6>)
+0.036   2.98  0.036   2.98   <static>@0x98fb9 (<libc.so.6>)
+0.036   2.98  0.036   2.98   gc_sweep_intern_table.part.0
+0.034   2.82  0.770  63.96   runtime__worker_loop
+0.031   2.57  0.113   9.36   vm__run
+

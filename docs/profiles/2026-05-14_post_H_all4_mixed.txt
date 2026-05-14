@@ -1,0 +1,21 @@
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total    Incl. Total     Name
+CPU            CPU
+  sec.      %    sec.      %
+28.881 100.00  28.881 100.00   <Total>
+14.699  50.89  25.447  88.11   runtime__worker_loop
+ 2.997  10.38   7.272  25.18   vm__run
+ 2.733   9.46   3.463  11.99   gc_alloc
+ 1.892   6.55   2.265   7.84   gc_sweep_concurrent
+ 1.155   4.00   1.155   4.00   <static>@0x188051 (<libc.so.6>)
+ 1.151   3.98   1.151   3.98   pthread_cond_signal
+ 0.626   2.17   0.642   2.22   <static>@0x98bf5 (<libc.so.6>)
+ 0.333   1.15   0.341   1.18   clock_nanosleep
+ 0.271   0.94   1.028   3.56   jacl_map_mk_internal_copy
+ 0.222   0.77   0.227   0.79   gc_sweep_intern_table.part.0
+ 0.213   0.74   0.213   0.74   jacl_val_hash
+ 0.213   0.74   0.213   0.74   vm__env_set
+ 0.203   0.70   0.368   1.27   gc__bump_alloc
+ 0.203   0.70   0.203   0.70   unicode_grapheme_next.part.0
+

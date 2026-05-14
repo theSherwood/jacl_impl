@@ -1,0 +1,14 @@
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.232 100.00  1.232 100.00   <Total>
+0.401  32.52  0.498  40.45   gc_sweep_concurrent
+0.203  16.50  0.506  41.10   vm__run
+0.197  16.02  0.197  16.02   <static>@0x188051 (<libc.so.6>)
+0.135  10.92  0.216  17.56   gc_alloc
+0.072   5.83  0.072   5.83   jacl_val_hash
+0.049   3.96  0.145  11.73   jacl_map_mk_internal_copy
+0.030   2.43  0.146  11.81   jacl_vec_set_in_tree
+0.018   1.46  0.018   1.46   vm__env_set
+0.014   1.13  0.014   1.13   <static>@0x98bf5 (<libc.so.6>)
+

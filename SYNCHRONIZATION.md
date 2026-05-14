@@ -453,18 +453,40 @@ the window is so tiny.
 
 ## 8. Known unsoundness checklist
 
+All audit-named items below are closed as of 2026-05-14. Section
+numbers reference `AUDIT_HISTORY.md`. Closed items are kept here for
+discoverability; if any is reopened, copy back into `AUDIT.md` as an
+active issue.
+
 | ID | Field/path | Status |
 |----|------------|--------|
+| §1 | `runtime__push_pinned` violated Chase-Lev SPSC contract on private_deque | fixed 2026-05-12 (per-worker pinned MPSC inbox) |
+| §2 | GC scanning a Chase-Lev buffer without thief registration | fixed 2026-05-12 (persistent GC thief slot; bracketed epoch enter/exit) |
 | §3 | grey_buf entries pointer during realloc | fixed 2026-05-12 (mutex) |
 | §4 | intern table sweep in concurrent GC | fixed 2026-05-12 (weak roots + per-cycle sweep + epoch watermark) |
 | §6 | adaptive GC threshold ignored in worker loop | fixed 2026-05-12 (atomic-relaxed load) |
-| §7 | stale current_block in concurrent sweep | fixed 2026-05-12 (blocks_mutex) |
+| §7 | stale current_block in concurrent sweep | fixed 2026-05-12 (blocks_mutex; current_block re-snapshot under lock) |
+| §8 | bit-field `mark` updated concurrently with allocator on neighboring object | fixed 2026-05-12 |
+| §8a | lockless `inbox_count` read was plain-int data race | fixed 2026-05-12 (atomic load/store) |
 | §9 | SATB barrier gated on gc_active leaves a UAF window when a deref'd value is on a thread's stack and the source atom is mutated before gc_active=true | fixed 2026-05-12 (deletion-side push unconditional; insertion-side still gated) |
+| §10 | single global inbox contention point | fixed 2026-05-13 (from-worker submissions push to own public_deque) |
+| §11 | worker idle backoff was `SLEEP_MILLISECONDS` up to 10ms | fixed 2026-05-13 (real CV park with 1ms timeout) — residual perf consideration only |
+| §10/§11 sibling races | unbarriered `f->waiters = NULL` and unbarriered `w->continuation` writes in future resolve/add-waiter paths | fixed 2026-05-13 (write barriers added unconditionally) |
 | §15 | block recycle race with owner heap walk | fixed 2026-05-12 (blocks_mutex) |
-| line_map | benign torn-read race during concurrent sweep | known-benign, doc-only |
+| §18 | ctx-pool vs SM-state captured-pointer UAF (slot reused while still referenced from an SM state field) | fixed 2026-05-14 (option 1: ctx pool eliminated — `ctx_pool_alloc` → direct `gc_alloc`, `ctx_pool_free` → no-op) |
+| S1 | task envelope freed before GC scan completes | fixed 2026-05-13 (envelope retire via worker retired_tasks ring) |
+| S2 | `heap->bytes_since_gc` / `gc_threshold` plain RMW from concurrent GC | fixed 2026-05-13 (relaxed atomics) |
+| S3 | `heap->needs_gc` plain bool | fixed 2026-05-13 (relaxed atomic) |
+| S4 | `gc__trace_object` mutable-ref trace was plain load | fixed 2026-05-13 (release/acquire pair with mutator stores) |
+| S5 (named sites) | Chase-Lev fence + relaxed-store opaque to TSAN | declined as systematic conversion (maintenance footgun); slice 1 (`vm->env`) and `WorkerStats` counter race closed individually |
+| ctx-state cluster | `vm.ctx` / `vm.saved_ctx[]` / `ctx_pool_free` NIL-writes plain stores racing with `gc_enumerate_roots`/`gc__trace_object` | fixed 2026-05-13 (RELEASE/ACQUIRE pairing; commit `2465a10`) |
+| line_map | benign torn-read race during concurrent sweep | known-benign, documented in §3 above |
+| `jacl_harness` TSAN report | `sm->fields[i] = value` paired with the GC trace; gc_write_barrier maintains SATB correctness; TSAN can't see the happens-before through grey-buffer count atomics | known-and-safe (2026-05-14 triage) |
+| `chase_lev_stress` TSAN report | fence-mediated data store + epoch-protected free; TSAN invisible in the primitive | known-and-safe (2026-05-14 triage) |
 
-When you fix one of these, move the line to "fixed (date)" and remove the
-caveat in the relevant section above.
+When you fix any newly-discovered unsoundness, add a row here. If
+re-opening a closed item, also restore it to `AUDIT.md` as an active
+section with the reproduction details.
 
 ## 9. How to update this document
 
@@ -483,16 +505,23 @@ caveat in the relevant section above.
 
 Things this document doesn't yet pin down:
 
-- **CPS continuations and VM stack reachability** — partially addressed.
-  AUDIT.md §9 closed the worst hole: the SATB barrier now fires
-  unconditionally on heap-typed overwrites, so a value loaded from a
-  mutable container and held across a GC moment is protected even if
-  its source is mutated before `gc_active=true`. AUDIT.md §D.3
-  (`test/jacl/cps_inner_closure_capture.jacl`) verifies that inner
-  closures defined before a suspension still observe their captures
-  after. **Not yet built**: the property test the original design
-  asked for (instrument GC at random safepoints, check VM stack for
-  dangling references). Worth doing as belt-and-braces.
+- **CPS continuations and VM stack reachability** — write side closed,
+  read side theoretical.  `AUDIT_HISTORY.md` §9 closed the worst hole:
+  the SATB barrier now fires unconditionally on heap-typed overwrites,
+  so a value loaded from a mutable container and held across a GC
+  moment is protected even if its source is mutated before
+  `gc_active=true`. `AUDIT_HISTORY.md` §D.3
+  (`test/jacl/cps_inner_closure_capture.jacl`) verifies inner closures
+  defined before a suspension still observe their captures after.
+  **Still open**: the read-side operand-stack-rooting gap (`AUDIT.md`
+  "Known theoretical hole" — a worker can hold a derived heap value on
+  the operand stack across a GC moment with no other root). JACL's CPS
+  compiler de facto avoids this pattern (heap values live across
+  suspensions only via SM state fields, which the GC scans) but it's a
+  convention, not a runtime invariant. No concrete UAF observed; the
+  property test the original design asked for (instrument GC at random
+  safepoints, check VM stack for dangling references) would be the
+  belt-and-braces.
 - **Finalization**: the design defers FFI resource cleanup to explicit
   `with-open` / `defer`. There's no current GC hook for finalization.
   If one is added, it needs to specify ordering w.r.t. sweep and write

@@ -1,0 +1,14 @@
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+0.503 100.00  0.503 100.00   <Total>
+0.289  57.43  0.376  74.65   vm__run
+0.056  11.09  0.069  13.66   gc_sweep_concurrent
+0.038   7.52  0.058  11.49   gc_alloc
+0.027   5.35  0.027   5.35   <static>@0x188051 (<libc.so.6>)
+0.012   2.38  0.012   2.38   <static>@0x98bf5 (<libc.so.6>)
+0.012   2.38  0.012   2.38   clock_nanosleep
+0.011   2.18  0.011   2.18   pthread_cond_signal
+0.010   1.98  0.010   1.98   vm__env_set
+0.007   1.39  0.007   1.39   jacl_add_i32
+
