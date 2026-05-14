@@ -381,10 +381,13 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
                 JaclType ft = sdef->fields[i].type;
                 if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
                     ft == TYPE_CLOSURE || ft == TYPE_DYN) {
-                    /* ACQUIRE pairs with ctx_pool_free's RELEASE-store of
-                     * NIL into these slots. The freed-but-still-grey record
-                     * gets traced as either the original (still-rooted)
-                     * value or NIL, never a torn read. */
+                    /* ACQUIRE pairs with any release-store into a
+                     * heap-record field (struct field assignments,
+                     * etc.). Ensures the trace sees fully-published
+                     * pointer values rather than torn writes.
+                     * (Originally added for ctx_pool_free's NIL writes;
+                     * the pool itself was removed in §18 but the
+                     * pairing remains valid for other paths.) */
                     JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
                         (volatile uint64_t*)(s->data + sdef->fields[i].offset),
                         MEM_ACQUIRE);
@@ -461,15 +464,8 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
         }
     }
 
-    /* 7. Ctx pool free-list entries (keep pooled structs alive) */
-    if (vm->ctx_pool) {
-        uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&vm->ctx_pool->free_list_head, MEM_ACQUIRE);
-        while (fl != 0) {
-            HeapRecord *ps = (HeapRecord *)fl;
-            gc__ms_push(&ms, ps);
-            fl = *(uintptr_t *)ps->data;
-        }
-    }
+    /* 7. (formerly: walked ctx_pool->free_list_head). Pool removed
+     * in AUDIT.md §18 — see runtime.c gc_enumerate_roots comment. */
 
     /* 8. Current ctx register (implicit context struct) */
     gc__ms_push_val(&ms, vm->ctx);

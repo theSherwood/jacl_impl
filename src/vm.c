@@ -103,93 +103,72 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
                          uint32_t *gensym_counter,
                          uint32_t scope_mark, const char **err);
 
-/* --- Ctx Pool: GC-managed free-list of pre-allocated ctx structs --- */
-
-#define CTX_POOL_INIT_SIZE 8
+/* --- Ctx allocation (formerly: lockless free-list pool) ---
+ *
+ * History: this used to be a per-worker lockless free-list pool that
+ * pre-allocated a handful of ctx HeapRecords and recycled them across
+ * ctx_fork/ctx_unfork. AUDIT.md §18 (2026-05-14) documented the design
+ * flaw: SM-compiled functions persist a pool-backed `HeapRecord*` into
+ * a state field across suspensions (compiler.c emits OP_GET_CTX →
+ * state field on suspension, OP_SET_CTX restoring on resume). On
+ * resume — possibly on a different worker — vm.ctx points into the
+ * original worker's pool. If that worker's task body subsequently does
+ * ctx_unfork → ctx_pool_free, the slot goes back onto its free list
+ * and can be re-issued for an unrelated future ctx. The resumed SM
+ * then reads recycled bytes. The GC keeps the memory alive (free list
+ * is a root) but does not police pool reuse.
+ *
+ * Fix: drop the pool. ctx_pool_alloc is now just gc_alloc; the freed
+ * memory becomes unreachable when vm.ctx is restored at ctx_unfork
+ * and is reclaimed by the GC on the next cycle. The free-list NIL
+ * writes and CAS pushes are gone — both their race surface and their
+ * (modest) cost. The JaclCtxPool struct stays so callers don't have
+ * to thread struct_size/type_idx through their own state, but
+ * free_list_head is unused.
+ *
+ * Perf: ctx_pool_alloc previously did atomic CAS + memset(struct_size).
+ * gc_alloc does a bump + a header write; the previously-allocated slot
+ * memory is already zeroed (block init memsets the whole 64KB; sweep
+ * zeros dead objects). So this should be perf-neutral or a small win
+ * in addition to closing the race. Validated by the bench pair in
+ * docs/profiles/2026-05-14_drop_ctx_pool_*.
+ */
 
 typedef struct {
-    volatile uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
-    uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
-    uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
-    StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
+    volatile uintptr_t free_list_head; /* unused, retained for ABI/struct-size */
+    uint32_t struct_size;
+    uint32_t type_idx;
+    StructTypeDef *sdef;
 } JaclCtxPool;
 
 void ctx_pool_init(JaclCtxPool *pool, ThreadHeap *heap,
                    StructTypeRegistry *reg) {
+    (void)heap;
     uint32_t idx = reg->ctx_type_idx;
     StructTypeDef *sdef = reg->defs[idx];
     pool->free_list_head = 0;
     pool->struct_size = sdef->total_size;
     pool->type_idx = idx;
     pool->sdef = sdef;
-
-    /* Pre-allocate CTX_POOL_INIT_SIZE ctx structs and link into free list */
-    for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
-        HeapRecord *s = (HeapRecord *)gc_alloc(heap, OBJ_HEAP_RECORD,
-                          sizeof(HeapRecord) + sdef->total_size);
-        s->type_idx = idx;
-        s->total_size = sdef->total_size;
-        memset(s->data, 0, sdef->total_size);
-
-        /* Link into free list: store next pointer at byte 0 of data[] */
-        uintptr_t head;
-        do {
-            head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
-            *(uintptr_t *)s->data = head;
-        } while (!ATOMIC_CAS(&pool->free_list_head, &head,
-                              (uintptr_t)s, MEM_RELEASE, MEM_RELAXED));
-    }
 }
 
 HeapRecord *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
-    /* Try to pop from free list via atomic CAS */
-    uintptr_t head;
-    for (;;) {
-        head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
-        if (head == 0) break;
-        HeapRecord *s = (HeapRecord *)head;
-        uintptr_t next = *(uintptr_t *)s->data;
-        if (ATOMIC_CAS(&pool->free_list_head, &head, next,
-                        MEM_ACQ_REL, MEM_RELAXED)) {
-            /* Zero data before returning */
-            memset(s->data, 0, pool->struct_size);
-            return s;
-        }
-    }
-    /* Pool empty: allocate fresh via gc_alloc */
     HeapRecord *s = (HeapRecord *)gc_alloc(heap, OBJ_HEAP_RECORD,
                       sizeof(HeapRecord) + pool->struct_size);
+    if (!s) return NULL;
     s->type_idx = pool->type_idx;
     s->total_size = pool->struct_size;
-    memset(s->data, 0, pool->struct_size);
+    /* gc_alloc returns zeroed memory (block init memsets new blocks;
+     * sweep zeros swept objects) — no explicit memset needed. */
     return s;
 }
 
 void ctx_pool_free(JaclCtxPool *pool, HeapRecord *s) {
-    /* Clear reference fields to prevent stale GC pointers.
-     * The freed struct may still be on the concurrent GC's mark stack
-     * (enumerated as a root before unfork ran). RELEASE-store pairs with
-     * gc__trace_object's ACQUIRE-load of OBJ_HEAP_RECORD fields, so the
-     * trace either sees the old (still-rooted-elsewhere) value or NIL —
-     * never a torn read. */
-    StructTypeDef *sdef = pool->sdef;
-    for (uint32_t i = 0; i < sdef->field_count; i++) {
-        JaclType ft = sdef->fields[i].type;
-        if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
-            ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
-            ATOMIC_STORE_EXPLICIT(
-                (volatile uint64_t*)(s->data + sdef->fields[i].offset),
-                (uint64_t)JACL_NIL, MEM_RELEASE);
-        }
-    }
-
-    /* Push to free list: store next pointer at byte 0 of data[] */
-    uintptr_t head;
-    do {
-        head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
-        *(uintptr_t *)s->data = head;
-    } while (!ATOMIC_CAS(&pool->free_list_head, &head,
-                          (uintptr_t)s, MEM_RELEASE, MEM_RELAXED));
+    (void)pool;
+    (void)s;
+    /* No-op. The caller has restored vm.ctx to saved_ctx; this
+     * HeapRecord is now unreachable from any root and will be
+     * reclaimed by the next GC cycle. See §18. */
 }
 
 /* --- VM state --- */

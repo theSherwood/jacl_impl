@@ -103,6 +103,7 @@ without root-causing. All FIXED:
 | D | Compiler/VM audit | 3 surveys; frame-check ordering fix (8 iterating opcodes); §D.6 opened and fixed (spawn + deep recursion SEGV); recursive `vm__run` follow-up audit clean (0 §D.6 siblings); §D.1 `JACL_ASSERT_TAG` pass (56 asserts) caught a typer bug in `map-keys`; §D.2 `VM_ERROR` stack-discipline pass (72 error returns across 39 opcodes) |
 | E | TSAN-baseline triage | Audit had dismissed 8 TSAN failures as "pre-existing flakes" without triaging; 4 turned out to be real bugs (PATH_MAX, syntax TLS, jacl_run stack-local intern_table, ctx-state race cluster) — see commits `c7dea0d` / `491ad0d` / `7469a98` / `2465a10`. TSAN baseline now 83 pass / 5 fail. |
 | E+ | TSAN-baseline cleanup | Closed 2 of the 5 remaining failures (`rwlock`, `cross_thread_string`) and reclassified `perf` as a `jacl_harness` sibling once the WorkerStats counter race got fixed. Surfaced + fixed a real bug in `sum_tree.h` (per-instantiation handler state needed `JACL_THREAD_LOCAL`). TSAN baseline now 85 pass / 3 fail. |
+| E++ | ctx-pool elimination (§18) | Surfaced via `perf`: the ctx pool's lockless free-list reuse can recycle slots that SM state fields still reference across worker boundaries. Real UAF; not a §S5 missing-atomics issue. Eliminated the pool entirely (option 1) — `ctx_pool_alloc` → direct `gc_alloc`, `ctx_pool_free` → no-op. Closes the race; bench is *faster* (collection_churn -20%, spawn_chain -13%). Closed `perf` together with the §S5 slice 1 (`vm->env`) and a `GcStats` cycle-counter atomic fix. TSAN baseline now 86 pass / 2 fail. |
 
 Eight P0/P1 items in "Critical correctness issues" fixed; five
 soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
@@ -150,12 +151,13 @@ underlying issue as `jacl_harness`. Surprises from the pass:
 | ~~`rwlock`~~ | **FIXED** (2026-05-14) | `g_state.max_concurrent` updated under read lock by two readers — read locks don't serialize mutations. | CAS-loop atomic peak update. |
 | ~~`cross_thread_string`~~ | **FIXED** (2026-05-14) | (a) `SharedSlot.ready` was the publication signal but plain-read/written. (b) `sum_tree.h` per-instantiation `ST_HANDLER_STATE` was a non-TLS global written by every rope op. | (a) Atomic load/store explicit with release/acquire. (b) `JACL_THREAD_LOCAL` on the handler-state declaration. |
 | `chase_lev_stress` | open | Standalone deque primitive stress test doesn't register a GC-thief slot or use the epoch-protected reclamation flow that `src/runtime.c` wraps Chase-Lev with (§2 fix). Tests the primitive in isolation, not the runtime's use of it. | Test-infra issue; either port the runtime's epoch protocol into the standalone test, or document that the bare primitive isn't TSAN-safe by itself. |
-| `perf` | open (different family than originally framed) | (a) `WorkerStats` counter race — FIXED 2026-05-14. (b) `gc_enumerate_roots` reads `vm->env` slots — FIXED 2026-05-14 (§S5 slice 1, commit `83d2736`). (c) **NEW** ctx-pool-vs-SM-state UAF: SM compiler stores `vm.ctx` (pool-backed `HeapRecord*`) into a state field across suspensions; on resume (possibly on a different worker) `OP_SET_CTX` restores `vm.ctx` to that pointer. Meanwhile the original owning worker may have `ctx_unfork`'d the ctx, putting it back on its pool's free list, where it can be re-issued for an unrelated ctx. See deep-dive below. | Needs design discussion — see `ctx-pool vs SM-state` section. |
+| ~~`perf`~~ | **FIXED** (2026-05-14) | (a) `WorkerStats` counter race — atomic load/store. (b) `gc_enumerate_roots` reads `vm->env` slots — §S5 slice 1. (c) ctx-pool-vs-SM-state UAF — pool eliminated entirely (§18 option 1). (d) `GcStats` cycle-counter race — atomic load/store, same pattern as WorkerStats. |
 | `jacl_harness` | open | Plain stores into heap-pointer slots paired with `gc_write_barrier` (e.g. `sm->fields[i] = value` at vm.c:8305). The barrier maintains the SATB invariant correctly, but TSAN's per-location vector clocks don't see the barrier-mediated happens-before — same shape as AUDIT §S5 documented for Chase-Lev fences. | If TSAN-cleanliness is a goal, a systematic pass to convert every heap-pointer slot write (and corresponding GC trace read) to `ATOMIC_STORE_EXPLICIT` / `ATOMIC_LOAD_EXPLICIT` with RELEASE/ACQUIRE ordering. Touches dozens of sites — sm->fields, cl->upvalues, stream->cached_value, vm->env, etc. Not needed for correctness; correctness comes from the barriers + watermark, not from the access primitive. |
 
 `chase_lev_stress` is a test-infrastructure issue (the bare primitive
-without the runtime's wrapper). `perf` and `jacl_harness` are the
-same design tradeoff — landing one closes both. None blocks shipping.
+without the runtime's wrapper). `jacl_harness` is the remaining §S5
+heap-pointer-slot conversion (sm->fields, cl->upvalues, stream
+fields, etc.). None blocks shipping.
 
 **Known theoretical hole, not surfacing as a bug today**: §9
 recommendation #2 (capture mutable-load values into a per-worker
@@ -1156,7 +1158,35 @@ locals + temporaries, and deeply nested expression evaluation hits it. Either
 grow on demand or document the limit and emit a clear error. Today an overflow
 returns `VM_STACK_OVERFLOW` but most callers don't surface it gracefully.
 
-### 18. ctx-pool vs SM-state captured-pointer UAF (2026-05-14)
+### 18. ctx-pool vs SM-state captured-pointer UAF — **FIXED** (2026-05-14)
+
+**Fix landed (option 1): the ctx pool was eliminated.** `ctx_pool_alloc`
+is now a direct `gc_alloc(OBJ_HEAP_RECORD)`; `ctx_pool_free` is a no-op.
+The `JaclCtxPool` struct stays (callers still hold `struct_size` /
+`type_idx` / `sdef` for the alloc), but `free_list_head` is unused —
+freed ctxs become unreachable when `vm.ctx` is restored at `ctx_unfork`
+and are reclaimed by the GC on the next cycle. The free-list-walks in
+`gc_enumerate_roots` (`runtime.c`) and `gc_mark` (`gc_collect.c`) are
+gone (free list is always empty). The 3 obsolete `test_ctx_pool_*`
+tests in `test_gc.c` were retired.
+
+Bench result (median-of-5, BENCH_TIMED_ITERS=200): **-20.1%** on
+`collection_churn`, **-13.4%** on `spawn_chain`, **-5.0%** on
+`string_concat`, **-1.7%** (noise) on `box_churn`. So pool removal is
+a perf *win* in addition to closing the race. The CAS pop + `memset`
+the pool was doing per ctx alloc was more expensive than the
+post-`§14` `gc_alloc` bump path.
+
+Two adjacent races fell out of the same investigation, both fixed:
+the §S5 slice 1 `vm->env` race (separate commit `83d2736`), and a
+`GcStats` cycle-counter race (writer in `gc_concurrent_collect` doing
+plain `+=` while `jacl_perf_snapshot` struct-copied the field;
+converted to atomic load/store, same pattern as `WorkerStats`).
+
+Original analysis follows for posterity.
+
+---
+
 
 Surfaced while investigating `perf`'s remaining TSAN failure after the
 §S5 slice 1 (`vm->env` atomic) closed the originally-listed race.
@@ -1254,6 +1284,8 @@ race fires earlier: by the time submit runs on the parent worker,
 `vm->ctx` was already set by an `OP_SET_CTX` from a saved state
 field, pointing into another worker's pool. So the spawn-side
 snapshot doesn't help and just adds a gc_alloc per spawn. Reverted.
+
+**Resolution:** picked option 1. See header at top of §18.
 
 ### 17. Inconsistent thread-local convention
 `gc__current_heap`, `gc__thread_epoch`, `gc__emergency_gc_fn`, `gc__interning`,

@@ -1029,15 +1029,11 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
          * intern entry was pinned and the table grew without bound under
          * string churn (AUDIT.md §4). */
 
-        /* 6. Ctx pool free-list entries (keep pooled structs alive) */
-        if (w->vm.ctx_pool) {
-            uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&w->vm.ctx_pool->free_list_head, MEM_ACQUIRE);
-            while (fl != 0) {
-                HeapRecord *ps = (HeapRecord *)fl;
-                gc__ms_push(ms, ps);
-                fl = *(uintptr_t *)ps->data;
-            }
-        }
+        /* 6. (formerly: walked ctx_pool->free_list_head). The pool
+         * was removed in AUDIT.md §18 — ctx allocations now go
+         * straight through gc_alloc, and freed ctxs become reachable
+         * only via vm->ctx / vm->saved_ctx[] (scanned just below).
+         * Free list is always empty; no walk needed. */
 
         /* 7. Current ctx register (implicit context struct).
          * ACQUIRE pairs with the RELEASE stores in ctx_fork / ctx_unfork /
@@ -1282,15 +1278,23 @@ void gc_concurrent_collect(Runtime *rt) {
 
     gc__ms_destroy(&ms);
 
-    /* Record cycle stats before releasing gc_running. Sole writer is whichever
-     * worker won the gc_running CAS, so no atomicity needed for the RMW; reads
-     * happen post-quiesce via jacl_perf_snapshot. */
+    /* Record cycle stats before releasing gc_running. Sole writer is
+     * whichever worker won the gc_running CAS; reader is jacl_perf_snapshot
+     * which can run concurrently (snapshot may be called from the main
+     * thread mid-run, not just post-quiesce — see test_perf.c). Use the
+     * same relaxed-atomic single-writer pattern as WorkerStats. */
     {
         uint64_t cycle_ns = runtime__now_ns() - cycle_start_ns;
-        rt->gc_stats.total_cycles++;
-        rt->gc_stats.total_cycle_ns += cycle_ns;
-        if (cycle_ns > rt->gc_stats.max_cycle_ns) rt->gc_stats.max_cycle_ns = cycle_ns;
-        rt->gc_stats.total_mark_rounds += mark_rounds_observed;
+        stats_add_u64(&rt->gc_stats.total_cycles, 1);
+        stats_add_u64(&rt->gc_stats.total_cycle_ns, cycle_ns);
+        uint64_t prev_max = ATOMIC_LOAD_EXPLICIT(
+            &rt->gc_stats.max_cycle_ns, MEM_RELAXED);
+        if (cycle_ns > prev_max) {
+            ATOMIC_STORE_EXPLICIT(&rt->gc_stats.max_cycle_ns,
+                                  cycle_ns, MEM_RELAXED);
+        }
+        stats_add_u64(&rt->gc_stats.total_mark_rounds,
+                      mark_rounds_observed);
     }
 
     /* 10. Set gc_running = false (allow next GC cycle) */
@@ -1317,7 +1321,15 @@ JaclPerfSnapshot jacl_perf_snapshot(Runtime *rt) {
     memset(&s, 0, sizeof(s));
     if (!rt) return s;
     s.num_workers = rt->num_workers;
-    s.gc          = rt->gc_stats;
+    /* Field-by-field atomic loads — same relaxed pattern as WorkerStats. */
+    s.gc.total_cycles =
+        ATOMIC_LOAD_EXPLICIT(&rt->gc_stats.total_cycles, MEM_RELAXED);
+    s.gc.total_cycle_ns =
+        ATOMIC_LOAD_EXPLICIT(&rt->gc_stats.total_cycle_ns, MEM_RELAXED);
+    s.gc.max_cycle_ns =
+        ATOMIC_LOAD_EXPLICIT(&rt->gc_stats.max_cycle_ns, MEM_RELAXED);
+    s.gc.total_mark_rounds =
+        ATOMIC_LOAD_EXPLICIT(&rt->gc_stats.total_mark_rounds, MEM_RELAXED);
     for (int i = 0; i < rt->num_workers; i++) {
         WorkerThread *w = &rt->workers[i];
         ThreadHeap   *h = &w->vm.heap;
