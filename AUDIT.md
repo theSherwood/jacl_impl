@@ -83,11 +83,43 @@ Not observed in any chaos test. Consider parking after N spins.
 
 Phase 10/11 landed a real CV-based wake-up path. Residual: workers park
 with a **1 ms timeout** to bound max latency for cases the signaling
-path can't reach (notably emergency-GC polling at `runtime.c:166`).
+path can't reach (notably the from-worker fast-path push to own
+public_deque, `runtime.c:737` — deliberately mutex-free, no signal).
 On `spawn_chain`, `runtime__worker_loop` is 81% of CPU — almost
 entirely the timed park. Driving this down further would mean targeted
-per-worker signaling for every wake path, including emergency GC.
-Architectural work; substantial scope.
+per-worker signaling for every wake path. Architectural work;
+substantial scope.
+
+**Attempted 2026-05-15 and reverted.** The straightforward design —
+per-worker (idle_mutex, idle_cv, wake_pending) + an O(num_workers)
+idle-scan that signals one idle worker on every push (including the
+from-worker fast path) — passed all tests and was TSAN-clean, but
+regressed `spawn_chain` wall-time 5× (2.6 ms → 13 ms median at default
+iters). Cause: `spawn_chain` is a *serial* chain — each iteration's
+continuation lands on the submitter's own public_deque and the
+submitter would have popped it on its next loop iteration. Waking an
+idle peer forces a cross-worker steal + cache-line bounce for no
+benefit. A minimal version (per-worker CVs, targeted pinned wake, no
+from-worker signal) was perf-neutral but doesn't address the 81% CPU
+symptom (workers still poll on the 1 ms timeout). See
+`AUDIT_HISTORY.md` § "§11 attempt and revert (2026-05-15)" for the
+diff and bench numbers.
+
+**Lesson for the next attempt.** A real fix has to distinguish
+spawn-chain serial workloads (don't wake peers — submitter handles
+the continuation) from parallel workloads (wake peers — there's
+genuine work to share). The submit site can't tell which it is.
+Candidate strategies:
+- Wake only when own deque depth exceeds a threshold (~2 items).
+- Lazy wake: defer signaling by N ns, cancel if the submitter pops
+  the work itself in the meantime.
+- Per-worker "recently-active" hint: if my own deque was non-empty
+  on my previous loop iteration, keep my new pushes local; only
+  signal peers when I'm actively idling-down.
+
+Each is its own multi-day project with bench validation. Defer until
+a real workload (not `spawn_chain` microbench) actually pins this as
+the bottleneck.
 
 ### Performance smells (deferred)
 

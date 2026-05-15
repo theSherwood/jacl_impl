@@ -1594,6 +1594,77 @@ known-and-safe per AUDIT.md) plus `rope_concat`'s
 confirmed by reverting both `src/runtime.c` and `src/vm.c` and
 seeing the same failure). WASM compile-only: clean.
 
+## §11 attempt and revert (2026-05-15)
+
+Tried the straightforward version of "targeted per-worker signaling"
+from the §11 open-item entry. Did not ship. Documented here so the
+next attempt doesn't repeat the experiment.
+
+**What was built:**
+
+- Per-`WorkerThread` `idle_mutex`, `idle_cv`, atomic `wake_pending`
+  flag.
+- `runtime__signal_worker(w)`: lock `w->idle_mutex`, set
+  `wake_pending = 1`, `COND_SIGNAL(w->idle_cv)`, unlock. The flag is
+  the cond_wait predicate; serialization by the worker's own mutex
+  defeats lost-wakeup races.
+- `runtime__wake_one_idle(rt, exclude_id)`: scan workers, find one
+  with `currently_executing == WORKER_IDLE`, call `signal_worker`.
+  O(num_workers) atomic ACQUIRE loads in the miss case.
+- `runtime__wake_all(rt)`: signal every worker. Replaces shutdown
+  broadcast.
+- Call sites updated:
+  - Inbox slow path (external thread): `wake_one_idle(rt, -1)` after
+    the inbox push.
+  - Inbox fast path (from-worker): `wake_one_idle(rt, self->id)`
+    after the deque push.
+  - Pinned push: `signal_worker(target)` directly (the target is the
+    only worker that can drain its own pinned inbox).
+  - Shutdown: `wake_all(rt)`.
+- Worker park: `COND_WAIT(self->idle_cv, self->idle_mutex)` with no
+  timeout (the from-worker fast-path signal was supposed to cover
+  the case the 1 ms timeout was bridging).
+- Removed `rt->work_cv` entirely.
+
+**TSAN result:** clean. Only the documented known-and-safe SATB read
+at `vm.c:8583`.
+
+**Normal-mode tests:** 87/1 (same `chaos_concurrent_intern` flake as
+the §16 baseline; reproduced on a clean revert).
+
+**Perf result (the reason for revert):**
+
+| scenario          | baseline median | full §11 median |
+|-------------------|----------------:|----------------:|
+| collection_churn  |          6.0 ms |          5.0 ms |
+| **spawn_chain**   |     **2.6 ms** |    **13.0 ms** |
+| box_churn         |          6.0 ms |          4.1 ms |
+| string_concat     |          4.0 ms |          3.5 ms |
+
+`spawn_chain` regressed ~5×. Cause: each await→spawn iteration's
+continuation lands on the submitter's own `public_deque`. Pre-§11
+the submitter would have popped it on its next loop iteration with no
+cross-worker traffic. With the from-worker signal, an idle peer woke
+and stole the continuation, forcing a steal + cache-line ping-pong
+every hop. A microbench artifact in one sense (real serial chains
+are short-lived) but also a stress case the audit specifically called
+out.
+
+**Minimal version** (dropped the from-worker signal; kept per-worker
+CVs, targeted pinned wake, 1 ms timeout) was perf-neutral on all four
+scenarios within bench noise, but didn't address §11's stated 81%
+CPU-in-worker-loop symptom (workers still poll on the 1 ms timeout).
+Not worth the complexity for no measurable win, so the whole attempt
+was reverted.
+
+**Lesson:** the cheap version of §11 doesn't deliver. A real fix has
+to distinguish serial spawn-chains from parallel workloads at the
+submit site, which the submitter can't tell directly. See the
+"Lesson for the next attempt" in `AUDIT.md` §11 for candidate
+strategies (depth-threshold wake, lazy/deferred signal,
+recently-active hint). All multi-day projects with bench validation;
+defer until a real workload pins this as the bottleneck.
+
 ## §13 VM dispatch (2026-05-14)
 
 The audit measured `vm__run` at 57 % of `box_churn` CPU under the
