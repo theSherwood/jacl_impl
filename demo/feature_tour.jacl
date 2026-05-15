@@ -1,0 +1,560 @@
+#!/usr/bin/env jacl
+#{ version: tour }
+
+## A whirlwind tour of every implemented JACL feature.
+## Each section is independent; ordering roughly mirrors SYNTAX.md.
+## Run with: .build/jacl_harness demo/feature_tour.jacl
+
+# expect: hello, world
+# expect: 7
+# expect: 5
+# expect: 11
+# expect: 42
+# expect: 1000000
+# expect: 3.14
+# expect: 30
+# expect: 7
+# expect: 5
+# expect: 9
+# expect: 7
+# expect: 5
+# expect: hi alice, 1+2=3, total=42
+# expect: SELECT *
+# expect: FROM users
+# expect: 100
+# expect: 6
+# expect: [vec 1 2 3]
+# expect: 3
+# expect: 2
+# expect: [vec 1 2 3 4]
+# expect: [vec 1 2 3 99 5]
+# expect: [vec 2 3]
+# expect: [map "b" 2 "a" 1]
+# expect: 1
+# expect: true
+# expect: false
+# expect: [map "b" 2 "a" 1 "c" 3]
+# expect: [map "a" 1]
+# expect: true
+# expect: positive
+# expect: zero
+# expect: 55
+# expect: 1
+# expect: 2
+# expect: 3
+# expect: 10
+# expect: 20
+# expect: a
+# expect: b
+# expect: 1
+# expect: 3
+# expect: 20
+# expect: 7
+# expect: 120
+# expect: 15
+# expect: 21
+# expect: 50
+# expect: [vec 2 3 4]
+# expect: 10
+# expect: [vec 2 4 6]
+# expect: [vec 3 4 5]
+# expect: 12
+# expect: 4
+# expect: [vec 1 2 3 4]
+# expect: [vec 1 2 3 4 5]
+# expect: [vec 1 2 3]
+# expect: [vec 6]
+# expect: 3
+# expect: 1
+# expect: [vec 1 2]
+# expect: [vec "a" "b" "c"]
+# expect: 1
+# expect: 2
+# expect: 3
+# expect: 1
+# expect: 3
+# expect: 1
+# expect: [vec 2 3 4]
+# expect: 10
+# expect: 20
+# expect: Point{x: 1, y: 2}
+# expect: 99
+# expect: 20
+# expect: 42
+# expect: 1000000
+# expect: hello
+# expect: nil
+# expect: deep
+# expect: 0
+# expect: 1
+# expect: 99
+# expect: true
+# expect: true
+# expect: true
+# expect: false
+# expect: boom
+# expect: caught: oops
+# expect: 42
+# expect: true
+# expect: 99
+# expect: 42
+# expect: 198
+# expect: 7
+# expect: 2
+# expect: 1
+# expect: [vec 4 16 36 64 100]
+# expect: tour complete
+
+# --- 1. Comments and pragmas ------------------------------------------
+# Single-line comment.
+## Doc comment (extractable by tooling).
+#{ pragma-name }                     # parser-level pragma, ignored at runtime
+
+# --- 2. Literals and printing -----------------------------------------
+# => hello, world
+print "hello, world"
+
+# --- 3. Bindings: command form and operator form ---------------------
+# def is immutable, mut is reassignable, set/`::` rebinds.
+# => 7
+def a 3
+def b 4
+print [+ $a $b]
+
+# => 5
+c = 5                                # = is the prelude macro for def
+print [+ $c 0]
+
+# => 11
+counter : 10                         # : is the prelude macro for mut
+counter :: [+ $counter 1]            # :: rebinds
+print $counter
+
+# --- 4. Typed bindings -----------------------------------------------
+# => 42
+# => 1000000
+# => 3.14
+def i64 ti 42
+def u64 tu 1000000
+def f64 tf 3.14
+print [to-string $ti]
+print [to-string $tu]
+print [to-string $tf]
+
+# => 30
+def i64 x 10
+def i64 y 20
+print [to-string [+ $x $y]]
+
+# Type conversion via [to TYPE val]
+# => 7
+def i32 small 7
+def i64 wide [to i64 $small]
+print [to-string $wide]
+
+# --- 5. Three parsing modes: [] juxtaposition, () infix, {} command --
+# In [], items are juxtaposed (no operators between them).
+# In (), symbolic operators parse infix, no precedence, left-assoc.
+# => 5
+print [+ 2 [- 5 2]]                  # juxtaposition + nested call
+# => 9
+print (1 + 2 * 3)                    # left-assoc: (1+2)*3 = 9
+# => 7
+print (1 + (2 * 3))                  # explicit grouping
+# => 5
+print (10 - 3 - 2)                   # left-assoc subtract
+
+# --- 6. String interpolation -----------------------------------------
+# => hi alice, 1+2=3, total=42
+def who "alice"
+def qty 14
+def price 3
+print "hi $who, 1+2=$[+ 1 2], total=$($qty * $price)"
+
+# Triple-quoted multi-line string with Kotlin-style indent strip.
+# => SELECT *
+# => FROM users
+def q """
+    SELECT *
+    FROM users
+    """
+print $q
+
+# --- 7. Line continuation --------------------------------------------
+# => 100
+def big \
+  100
+print $big
+
+# --- 8. Separators (; , newline) -------------------------------------
+# => 6
+def p 1; def q2 2, def r 3
+print [+ $p [+ $q2 $r]]
+
+# --- 9. Vectors and maps ---------------------------------------------
+# Persistent (RRB-tree / HAMT) immutable collections.
+# => [vec 1 2 3]
+# => 3
+# => 2
+# => [vec 1 2 3 4]
+# => [vec 1 2 3 99 5]
+# => [vec 2 3]
+def v [vec 1 2 3]
+print $v
+print [vec-len $v]
+print [vec-get $v 1]
+print [vec-push $v 4]
+print [vec-set [vec 1 2 3 4 5] 3 99]
+print [vec-slice [vec 1 2 3 4] 1 3]
+
+# => [map "a" 1 "b" 2]
+# => 1
+# => true
+# => false
+# => [map "a" 1 "b" 2 "c" 3]
+# => [map "a" 1]
+def m [map "a" 1 "b" 2]
+print $m
+print [map-get $m "a"]
+print [map-has $m "a"]
+print [map-has $m "z"]
+print [map-set $m "c" 3]
+print [map-remove $m "b"]
+
+# Structural equality.
+# => true
+print [== [vec 1 2 3] [vec 1 2 3]]
+
+# --- 10. Conditionals ------------------------------------------------
+# if is an expression — it returns the taken branch.
+# => positive
+# => zero
+def n 7
+if ($n > 0) {
+  print "positive"
+} elif ($n == 0) {
+  print "zero"
+} else {
+  print "negative"
+}
+def z 0
+if ($z > 0) {
+  print "positive"
+} elif ($z == 0) {
+  print "zero"
+} else {
+  print "negative"
+}
+
+# --- 11. Loops -------------------------------------------------------
+# while
+# => 55
+mut sum 0
+mut i 1
+while ($i <= 10) {
+  sum :: [+ $sum $i]
+  i :: [+ $i 1]
+}
+print $sum
+
+# for, four forms: C-style, implicit $it, explicit binding, callback
+# => 1
+# => 2
+# => 3
+for [vec 1 2 3] { print $it }
+
+# => 10
+# => 20
+for [vec 10 20] item { print $item }
+
+# => a
+# => b
+proc dump {x} { print $x }
+for [vec "a" "b"] $dump
+
+# break / continue inside block-form for
+# => 1
+# => 3
+for [vec 1 2 3 4] {
+  if ($it == 2) { continue }
+  if ($it == 4) { break }
+  print $it
+}
+
+# --- 12. Procs: typed, recursive, closures, anonymous, variadic -----
+# Untyped proc.
+# => 20
+proc double {n} { * $n 2 }
+print [double 10]
+
+# Typed proc with type-before-name everywhere.
+# => 7
+proc i64 add {i64 a, i64 b} { + $a $b }
+print [to-string [add 3 4]]
+
+# Recursion.
+# => 120
+proc fact {n} { if [== $n 0] { 1 } { * $n [fact [- $n 1]] } }
+print [fact 5]
+
+# Closure over a free variable.
+# => 15
+proc mkadd {x} { proc inner {y} { + $x $y } }
+def add10 [mkadd 10]
+print [add10 5]
+
+# Anonymous proc.
+# => 21
+mul = proc {a, b} { * $a $b }
+print [mul 3 7]
+
+# Higher-order proc.
+# => 50
+proc apply {f, x} { f $x }
+quintuple = proc {n} { * $n 5 }
+print [apply $quintuple 10]
+
+# Variadic params: `..rest` collects remaining args into a vector.
+# => [vec 2 3 4]
+proc tail {first, ..rest} { $rest }
+print [tail 1 2 3 4]
+
+# Spread `..` flips the direction: explode a vector into separate args.
+# => 10
+nums = [vec 1 2 3 4]
+print [+ ..$nums]
+
+# --- 13. Lambda shorthand --------------------------------------------
+# `[\ ... $it ...]` is the implicit-$it single-arg lambda macro.
+# => [vec 2 4 6]
+print [transform [vec 1 2 3] [\ * $it 2]]
+
+# => [vec 3 4 5]
+print [filter [vec 1 2 3 4 5] [\ > $it 2]]
+
+# --- 14. Pipes -------------------------------------------------------
+# `|` is a command-mode operator — desugars to first-arg threading.
+# => 12
++ 1 2 | * 4 | print                  # → [print [* [+ 1 2] 4]]
+
+# Pipeline with filter and count.
+# => 4
+vec 1 2 3 4 5 6 7 | filter [\ > $it 3] | count | print
+
+# --- 15. Streams: ranges, yield, lazy ops, collect -------------------
+# Ranges produce streams in () infix mode.
+# => [vec 1 2 3 4]
+print [collect (1 ..< 5)]
+# => [vec 1 2 3 4 5]
+print [collect (1 ..= 5)]
+
+# Generator via yield.
+# => [vec 1 2 3]
+proc gen {} { yield 1; yield 2; yield 3 }
+print [collect [gen]]
+
+# Lazy stream pipeline.
+# => [vec 6 8 10]
+print [collect [transform [filter [gen] [\ > $it 2]] [\ * $it 2]]]
+
+# Sequence ops on streams.
+# => 3
+print [count [gen]]
+# => 1
+print [first [gen]]
+# => [vec 1 2]
+print [collect [take [gen] 2]]
+
+# `lines` splits a string into a lazy line stream.
+# => [vec "a" "b" "c"]
+print [collect [lines "a\nb\nc"]]
+
+# --- 16. Destructuring -----------------------------------------------
+# Positional vectors with []
+# => 1
+# => 2
+# => 3
+def [d1 d2 d3] [vec 1 2 3]
+print $d1; print $d2; print $d3
+
+# Wildcard `_` skips.
+# => 1
+# => 3
+def [w1 _ w3] [vec 1 2 3]
+print $w1; print $w3
+
+# Rest pattern `..name`.
+# => 1
+# => [vec 2 3 4]
+[head ..rest] = [vec 1 2 3 4]
+print $head; print $rest
+
+# Named destructuring with {} against a struct.
+# => 10
+# => 20
+struct Pt {i32 x, i32 y}
+proc demo-destructure {} {
+  def pt [Pt 10 20]
+  def {x, y} $pt
+  print $x; print $y
+}
+demo-destructure
+
+# --- 17. Structs -----------------------------------------------------
+# Definition with type-before-name, optional `mut` on fields.
+# => Point{x: 1, y: 2}
+struct Point {i32 x, i32 y}
+proc demo-struct {} {
+  def p [Point 1 2]
+  print $p
+}
+demo-struct
+
+# Field access via `->` (chains for maps too — see §19).
+# Nested-struct field access (`struct Line {Point start, Point end}` and
+# `$ln->start->x`) is supported — see test/jacl/struct_field_nested.jacl.
+
+# Mutable field write via `. obj field val` 3-arg dot form.
+# => 99
+# => 20
+struct Mp {mut i32 x, i32 y}
+proc demo-mut {} {
+  def p [Mp 10 20]
+  . $p x 99
+  print $p->x
+  print $p->y
+}
+demo-mut
+
+# Structs may carry every numeric type.
+# => 42
+# => 1000000
+struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f}
+proc demo-all {} {
+  def s [All 42 1000000 7 9999999 1.5 2.5]
+  print $s->a; print $s->b
+}
+demo-all
+
+# --- 18. Optional chaining `?.` --------------------------------------
+# Returns nil instead of erroring on a missing map key.
+# => hello
+# => nil
+def om [map "name" "hello"]
+print ($om ?. name)
+print ($om ?. missing)
+
+# --- 19. Maps with chained `->` --------------------------------------
+# => deep
+def inner [map "y" "deep"]
+def outer [map "x" $inner]
+print $outer->x->y
+
+# --- 20. Mutable state primitives: box, atom, swap, reset, deref -----
+# `box`: thread-local mutable cell. `atom`: lock-free shared cell.
+# => 0
+# => 1
+# => 99
+def b [box 0]
+print [deref $b]
+proc inc {x} { + $x 1 }
+swap $b $inc
+print [deref $b]
+reset $b 99
+print [deref $b]
+
+# => true
+# => true
+print [box? [box 0]]
+print [atom? [atom 0]]
+
+# --- 21. Errors as values --------------------------------------------
+# => true
+# => false
+# => boom
+print [error? [error "boom"]]
+print [error? 42]
+print [error-val [error "boom"]]
+
+# try/catch as a block form.
+# => caught: oops
+print [try { error "oops" } e { concat "caught: " [error-val $e] }]
+
+# try with no error.
+# => 42
+print [try { 42 } e { 0 }]
+
+# An error as a non-final statement short-circuits the enclosing proc.
+# => true
+proc fails {} {
+  error "fail"
+  print "never reached"
+  42
+}
+print [error? [fails]]
+
+# --- 22. Implicit context ($ctx) ------------------------------------
+# Modules can declare typed, dynamically-scoped fields on $ctx.
+# `with-ctx` is the explicit fork site; regular proc calls share $ctx.
+ctx mut i32 level = 42
+# => 99
+# => 42
+with-ctx {level 99} {
+  print $ctx->level
+}
+print $ctx->level
+
+# with-ctx is an expression — body's last value propagates.
+# => 198
+def doubled [* 2 [with-ctx {level 99} { $ctx->level }]]
+print $doubled
+
+# Mutating $ctx in a callee is visible to the caller (no implicit fork).
+# => 7
+proc bump-level {} { set $ctx->level 7 }
+with-ctx {level 0} {
+  bump-level
+  print $ctx->level
+}
+
+# --- 23. Same-scope shadowing is a compile error --------------------
+# (Shown here only as a comment — uncommenting would fail compilation.)
+# {
+#   def x 1
+#   def x 2     # error: x already defined in this scope
+# }
+# A nested block is fine.
+# => 2
+# => 1
+def shadowed 1
+{
+  def shadowed 2
+  print $shadowed
+}
+print $shadowed
+
+# --- 24. Pipes composing the whole tour ------------------------------
+# => [vec 4 16 36 64 100]
+1 ..= 10 \
+  | filter [\ == 0 ($it % 2)] \
+  | transform [\ * $it $it] \
+  | collect \
+  | print
+
+# --- 25. Concurrency: spawn / await / parallel / race ---------------
+# Concurrency primitives suspend the calling proc and re-run it through
+# a CPS state machine. In the current compiler, calling a suspending
+# proc at top level conflicts with top-level `struct` definitions, so
+# the runnable concurrency demo lives in demo/concurrency_tour.jacl.
+# Syntax sketch (see that file for the runnable version):
+#
+#   proc main {} {
+#     def f [spawn { + 20 22 }]   # → Future
+#     print [await $f]            # → 42
+#     print [parallel { 10 } { 20 }]  # → [vec 10 20]
+#     print [race { 7 } { 7 }]        # → 7
+#   }
+#   main
+
+print "tour complete"
+# => tour complete

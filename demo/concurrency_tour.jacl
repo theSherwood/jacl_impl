@@ -1,0 +1,36 @@
+# expect: 42
+# expect: true
+# expect: [vec 10 20]
+# expect: 7
+# expect: tour complete
+
+## Concurrency companion to demo/feature_tour.jacl.
+##
+## Run with: .build/jacl_harness demo/concurrency_tour.jacl
+##
+## Spawn/await/parallel/race rewrite the calling proc into a CPS state
+## machine. In the current compiler that conflicts with placing
+## `struct` declarations at top level *after* a suspending top-level
+## call, so the concurrency demo lives in its own file.
+
+proc main {} {
+  # `spawn` returns a Future for a JACL async task. `await` suspends.
+  # In single-threaded mode futures resolve immediately; in concurrent
+  # mode they run on the NxM work-stealing scheduler.
+  def f [spawn { + 20 22 }]
+  print [await $f]                # → 42
+
+  # Future predicate.
+  print [future? $f]              # → true
+
+  # `parallel` runs N blocks, returns a vector of N results in order.
+  def r [parallel { 10 } { 20 }]
+  print $r                        # → [vec 10 20]
+
+  # `race` runs N blocks, returns the first to complete.
+  def r2 [race { 7 } { 7 }]
+  print $r2                       # → 7
+
+  print "tour complete"
+}
+main
