@@ -8,7 +8,7 @@ JACL syntax is built around a three-mode delimiter system. This document is the 
 
 - `[]` — **Juxtaposition**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]` and nesting `[foo [bar 3] 2]`.
 - `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). `|` pipes between commands. Used for code blocks, param lists, struct field declarations (same construct, differentiated by context).
-- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3 2]]`. `|` means bitwise OR in this mode.
+- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3 2]]`. Modeled on Tcl's `expr` — a sublanguage for arithmetic and predicates, not a full expression language. Operators have the same semantics here as in `{}`; the difference is only which form is ergonomic to invoke.
 
 ## Key syntax decisions
 
@@ -815,9 +815,10 @@ No special-casing of `$env` in the language — it's an atom with a listener, sa
 ### Core semantics
 
 - Every proc receives `$ctx` implicitly — no explicit parameter needed
-- Mutations to `$ctx` fields propagate downward to callees within the same scope (true dynamic scoping)
-- Each proc call gets a fork of the caller's `$ctx` — changes don't leak back to the caller
-- `with-ctx` is the primitive for creating a scoped fork with specific field changes
+- `$ctx` is **shared across regular proc calls** within a single call stack. A callee's `set $ctx.field` mutation *is* visible to the caller after the callee returns, and to any sibling callees later in the same scope. This is true dynamic scoping with no implicit scope boundary at proc-call sites.
+- A **fresh fork of `$ctx` is created only at explicit sites**: `with-ctx { ... }`, `spawn { ... }`, `parallel { ... } { ... }`, `race { ... } { ... }`. Mutations inside one of those scopes do not leak out when the scope ends.
+- `with-ctx` is the primitive for scoped mutations. Scoped commands like `cd` are expected to be macros that desugar to `with-ctx`, so state changes that should be local become syntactically visible (`cd "build" { ... }`) rather than relying on a hidden per-call fork.
+- An earlier design forked at every proc call. It was abandoned for performance. May be revisited.
 
 ### Built-in fields
 
@@ -828,23 +829,33 @@ No special-casing of `$env` in the language — it's an atom with a listener, sa
 
 ### Dynamic scoping
 
-Mutations within a scope are visible to all callees in that scope:
+Mutations within a scope are visible to all callees and subsequent
+code in that scope, including across proc-call boundaries:
 
 ```
-cd "src"              # mutates $ctx.pwd
-do-stuff              # sees $ctx.pwd = ".../src"
-!make                 # child process CWD = $ctx.pwd
-```
-
-But changes don't leak upward — each proc call gets a fork:
-
-```
-proc setup {} {
-  cd "build"          # mutates this proc's fork of $ctx
+proc setup-paths {} {
+  set $ctx.log-level 2      # mutates the shared $ctx
 }
-setup                 # setup's fork is discarded on return
-# $ctx.pwd unchanged here
+setup-paths
+print $ctx.log-level         # → 2 — change persists after return
 ```
+
+To scope a mutation, use `with-ctx` (or a block-scoped macro like
+`cd "build" { ... }` that desugars to `with-ctx`):
+
+```
+with-ctx {pwd "build"} {
+  !make                # runs in build/, sees the scoped pwd
+}
+# $ctx.pwd restored — the with-ctx fork was discarded on block exit
+```
+
+This is a deliberate trade-off. Fork-on-every-call would scope
+mutations automatically but pays a fork cost at every call site;
+fork-at-explicit-sites makes the scoping syntactically visible and
+keeps proc calls cheap. Users who want the auto-scoping discipline
+should write `cd`-style block macros for state changes they want
+contained.
 
 ### Forking context
 
@@ -954,21 +965,33 @@ with-db $other-conn {
 }
 ```
 
-`spawn` is the exception — it snapshots `$ctx` at spawn time, because the task runs independently of the call stack:
+Concurrency primitives (`spawn`, `parallel`, `race`) snapshot `$ctx` at the spawn site, since the spawned task runs independently of the caller's stack:
 
 ```
-cd "src"
-def f [spawn {
-  # sees $ctx.pwd = ".../src" (snapshot)
-  cd "lib"            # only affects this task's fork
-  !make
-}]
-# parent $ctx unaffected
+with-ctx {pwd "src"} {
+  def f [spawn {
+    # sees $ctx.pwd = ".../src" (snapshot taken at spawn site)
+    with-ctx {pwd "lib"} {
+      !make             # runs in lib/, only inside this task's scope
+    }
+    # spawned task's outer $ctx.pwd = ".../src" again
+  }]
+  # ... parent $ctx.pwd here = ".../src"
+}
+# back to original pwd — with-ctx scope ended
 ```
 
 ### Performance
 
-Copy-on-write: forking is a pointer copy. A new `$ctx` is only allocated when a field is actually mutated. Most proc calls don't mutate `$ctx`, so zero overhead. The compiler can further optimize by statically marking procs as "ctx-pure" (no mutations in the proc or its callees) and skipping the fork entirely.
+Regular proc calls have **zero `$ctx` overhead** — caller and callee share the same `$ctx` record, so there's no allocation or copy at call sites.
+
+The explicit fork sites (`with-ctx`, `spawn`, `parallel`, `race`) each pay one fork cost on entry:
+
+- A pooled `HeapRecord` slot is taken from the per-VM `ctx_pool` (O(1)).
+- The parent's `$ctx` payload is eager-`memcpy`'d into the fresh slot (one struct-sized copy — the ctx type's `total_size`).
+- On scope exit, the slot is returned to the pool.
+
+Pool sizing keeps `with-ctx` and concurrency forks cheap in practice. There is currently no copy-on-write or static "ctx-pure" analysis — both have been considered but neither is implemented. The current model is simpler to reason about and the fork sites are infrequent enough that the eager-copy cost hasn't surfaced as a bottleneck.
 
 ## Error handling
 
@@ -1030,10 +1053,7 @@ set count ($count + 1)  ↔  count :: ($count + 1)
 
 ### Infix-mode operators (`()`)
 
-In `()`, operators work between values/expressions. The same symbol can have different semantics per mode via operator overloading:
-
-- `|` in `{}` = pipe between commands
-- `|` in `()` = bitwise OR on values
+In `()`, operators work between values/expressions. **An operator has the same semantics in every mode** — `|` is `|`, `+` is `+`. The difference between modes is whether infix invocation is ergonomic, not what the operator means. Bitwise operations needed in `()` go through named commands (`[bit-or $a $b]`, etc.) rather than reusing the pipe glyph.
 
 ### User-definable operators
 
@@ -1041,7 +1061,7 @@ Operators are a kind of macro. Users can define new operators using the same mec
 
 - **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; introspection/construction APIs are available for advanced macros. See DESIGN.md M15 for full details.
 - **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Binding operators (`=`, `:`, `::`) need no special treatment because the bound name comes from the caller's code (spliced via `~`, retains caller's scope). Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
-- The same symbol can have different semantics per mode (e.g. `|` is a pipe in `{}` and bitwise OR in `()`). This is currently handled by the prelude defining different macros per mode at the parser level rather than a user-facing mode-dispatch mechanism on `defmacro`.
+- One operator → one meaning. Mode-dependent operator semantics are explicitly rejected.
 
 ### Prelude
 
@@ -1180,12 +1200,12 @@ The syntax is the same for both phases. Full parametric generics (type variables
 - Atom listeners — `watch` adds watchers to any atom; env sync is one application
 - I/O redirection — commands (`write-file`, `append-file`), not operators; string/stream piped to `!cmd` feeds stdin
 - Aliases — compile-time macros that rewrite call sites with arg appending
-- Implicit context (`$ctx`) — typed, dynamically-scoped, user-extensible; `with-ctx` forks, proc calls fork, mutations propagate downward
+- Implicit context (`$ctx`) — typed, dynamically-scoped, user-extensible; `with-ctx` / `spawn` / `parallel` / `race` are the only fork sites; regular proc calls share `$ctx` with the caller and a callee's `set $ctx.field` propagates back
 - `$ctx` user-extensible — modules declare typed fields at top level; compiler enforces field existence and type
 - `$ctx` field conflicts — compile error, same as name conflicts with `use {..}`
 - `$ctx` default values — three forms: no default (runtime error if unset), default value, optional type (nil if unset)
 - `$ctx` closures — resolve at call time (true dynamic scoping); `spawn` snapshots at spawn time
-- `$ctx` performance — copy-on-write forking, compiler marks ctx-pure procs to skip fork
+- `$ctx` performance — regular proc calls have zero ctx overhead (no fork); explicit fork sites eager-`memcpy` a pooled `HeapRecord` slot on entry. Copy-on-write and a static "ctx-pure" pass were considered but not implemented.
 - Globbing — explicit `glob` command, reads `$ctx.pwd`, returns stream; no implicit expansion anywhere
 - Conditionals — `if $cond {} elif $cond2 {} else {}`, is an expression, composes with pipes
 - `for` replaces `each` — `for` is the single iteration construct, `each` removed
