@@ -252,71 +252,407 @@ you need to share.
 
 ## 3. Weaknesses
 
-### 3.1 The shell-language pitch is undercut by what's still missing
+### 3.1 The surface-language story is in flight
 
+The runtime — concurrency, GC, FFI, embedding — is further along than
+the shell-side surface features that distinguish a glue/scripting
+language. Still unimplemented per the `SYNTAX.md` status table:
 `par-each`, `timeout`, `$env`, `watch`, `glob`, `read-file` /
-`write-file`, regex, and bignum are still unimplemented. Those aren't
-corner cases — they are core shell-language and scripting expectations.
-The runtime/concurrency foundation is excellent; the surface-level shell
-features lag it. A user reaching for JACL "to replace big bash scripts"
-today will hit the I/O command gap immediately.
+`write-file` / `append-file`, regex. None of these are corner cases
+for the stated audience; all are scheduled work.
 
-### 3.2 The numeric story is the most surprising gap
+This is a status observation, not a critique of the design. Worth
+flagging because anyone reading the pitch and the runtime story
+might over-estimate how close the surface language is to matching
+them.
 
-`JACL_TAG_BIGNUM` exists in the value layout and `lib/bignum/` is 2,100
-LOC of bigint/bigfloat/rational. None of it is wired into the VM. Either
-commit to the numeric tower (and pay the integer-overflow-promotes-to-
-bignum cost) or remove the dead reservation. The current state — tag
-bit reserved, lib present, zero dispatch sites — is the worst of both:
-maintenance burden with no user value.
+**The ordering is the unusual part, and it's deliberate.** Most new
+languages ship a surface and then harden the runtime, often
+discovering soundness problems years in. JACL went the other way:
+the hardest engineering — non-moving epoch GC, NxM work-stealing,
+direct-style CPS+SM concurrency, the May 2026 audit campaign — is
+the work that's done, because the author had concerns about the
+soundness of the model and chose to prove it out before building
+surface area on top. The surface features that remain are mostly
+straightforward builtins composing with primitives that already
+exist (`par-each` on top of `spawn` + streams, `glob` reading
+`$ctx.pwd`, `read-file` returning a stream). That's the easy half
+of the work, and now that the soundness questions are mostly
+settled, the gaps can be plugged. The current state — runtime
+ahead of surface — is "right order, partway through," not "easy
+parts forgotten."
 
-### 3.3 `match` not being implemented is bigger than the "Large" tag suggests
+### 3.2 The numeric story is unfinished
 
-It's lexed, `HEAD_MATCH` is a special form, but there's no compile path.
-For a language that explicitly cites Clojure as a parent and has done
-the work to ship structs, futures, and macros, no pattern matching is a
-strange prioritization. The typer rules for match arms (the deferred
-TYPE_SYSTEM item) are dead-code until then, but the *runtime* match
-impl is the load-bearing piece — users will reach for it constantly in
-error handling, parsing, and shape dispatch.
+`JACL_TAG_BIGNUM` exists in the value layout (`value.c:65`) and
+`lib/bignum/` is 2,100 LOC of self-contained bigint/bigfloat/rational
+code. The VM has no arithmetic dispatch for the tag. An earlier draft
+of this critique called the current state "the worst of both worlds";
+that overstated it — the tag reservation is one packed bit, the lib
+doesn't drag on the main runtime, and the wiring is the work the
+schedule reflects.
 
-### 3.4 Some declared features look like namespace squats
+**The plan is bigint + bigfloat, not the full tower.** Arbitrary-
+precision integers and floats will be available both as automatic
+promotion targets in the dynamic type (so `dyn` integer arithmetic
+that overflows `i64` promotes rather than wrapping or trapping —
+Python-style semantics) and as typed slots (`bigint x = ...`,
+`bigfloat y = ...`) for users who want explicit precision. Rationals
+get cut from the integration plan even though `lib/bignum/rational.h`
+exists — the lib stays self-contained, the wiring won't include it.
 
-Tainted/secret tag flag bits in the value layout (DESIGN.md:10) — where
-are the consumers? The flags exist but there's no propagation analysis
-or sink-side check. Either there's a pass I missed, or those bits are
-reservations awaiting a feature that hasn't landed. Same shape as
-bignum and regex: laying tracks without trains.
+What's left as a real concern: until the wiring lands, scripts that
+silently assume Python-style integer semantics will get the
+typed-`i64` failure mode (overflow / trap) on inputs they didn't
+anticipate. The places this surfaces in glue/scripting are narrower
+than I first claimed — file sizes and network byte counts fit
+comfortably in `i64`/`u64` on every modern system — but real:
+cryptographic glue (keys, signatures, large hashes as integers),
+JSON interop where the source has unbounded numbers, and the
+default-`dyn` arithmetic users assume Just Works. "Unfinished
+rather than wasteful," and the cap on which scripts JACL can host
+narrows once promotion lands.
 
-### 3.5 Stack limits are tight
+### 3.3 `match` may not ship at all — and that's defensible
 
-`VM_STACK_MAX = 256` and `VM_FRAMES_MAX = 64` are fine for shell scripts
-and embedding glue, but substantial JACL code (recursive descent parsers,
-tree algorithms, math libraries) will hit the 64-frame ceiling. §16
-made the failure mode legible, which is the right first step, but the
-limit itself will be a recurring complaint as soon as anyone writes a
-real program. Worth a "what's the path to growable stacks" answer
-before declaring done.
+`match` is lexed, `HEAD_MATCH` is recognized as a special form
+(`compiler.c:2527`), the typer-side rules are deferred, the runtime
+compile path doesn't exist. The earlier critique called this
+"load-bearing" and ranked it "highest-leverage single feature." Both
+overclaimed. Bash and Tcl ship without pattern matching; the
+glue/scripting audience can use `if`/`elif`/`error?` ladders for the
+shape-dispatch cases that pattern matching would otherwise clean up.
+The `SYNTAX.md` sketch (literals, bindings, type patterns, guards,
+pipe composition) is ambitious; the cost is `Large`; the benefit is
+ergonomic improvement on existing patterns rather than unlocking new
+ones. "May not be worth the cost" is a reasonable read.
 
-### 3.6 The audit discipline that's a strength is also a tell about complexity
+**If `match` does ship, the interesting design path is implementing
+it as a macro rather than a special form.** Most languages bake match
+into the compiler because pattern compilation (decision tree
+generation, exhaustiveness analysis, binding scope) is non-trivial.
+Doing it as a user-space macro would require the macro system to
+support real compile-time computation — building decision trees,
+emitting binding sites with correct scope, attributing pattern errors
+back to source locations through generated AST. JACL's macro system
+runs bodies on a real VM at expansion time
+(`jacl_ctx_run_closure`-driven, per the macro-eval-rewrite PRD), so
+the machinery is plausibly there. If `match`-as-macro lands cleanly,
+it's strong evidence the macro system is powerful enough for serious
+DSL work; if it doesn't, it surfaces the limits.
 
-You need a `SYNCHRONIZATION.md` because the system has more shared state
-than one person can hold in their head. Not a problem yet (one author,
-recent codebase) but every new contributor will pay an onboarding tax
-to read three docs before touching `runtime.c` or `gc.c`. The fact that
-`WorkerThread`/`Runtime`/`ThreadHeap` are duplicated between
-`runtime.c`/`gc.c` and `jacl.h` (with `test_struct_sizes.c` as the
-drift guard) is the kind of mitigation that survives one author and
-dies on the second.
+Two friction points to expect on the macro path:
 
-### 3.7 `vm.c` is 12,200 lines
+- **Typer integration.** The `TYPE_SYSTEM.md` deferred "match arm-walk"
+  item assumes the typer needs special rules for pattern binding
+  scope. A macro can emit destructure + type-check code that the
+  existing typer already handles, but only if the macro is careful
+  enough to produce a shape the typer recognizes. The typer doesn't
+  natively know "this `def` is a pattern binding scoped to this arm."
+- **Error attribution.** A pattern-compile error inside a macro is
+  harder to point at the source location than an error in a
+  compiler-path handler. JACL's syntax objects already carry source
+  position, but the macro has to thread it through every generated
+  node — easy to drop on a wrong-shape pattern.
 
-Direct-threaded dispatch makes that somewhat unavoidable (the giant
-CASE table is structural), but 12k lines in one TU is a place where
-bugs hide. The `OBJ_CLOSURE = 0` enum hazard is the canonical example:
-a defense-in-depth fix is a 2-line enum reorder, but no one made it
-because the cost-to-walk-the-blast-radius is high. That's the smell of
-a TU that's too big.
+So: `match` is the right feature to *evaluate* the macro system
+against, even if it doesn't make the cut into the language. Worth
+keeping in scope as a litmus test even while it's not committed as a
+shipping feature.
+
+### 3.4 Half-built features — every one is on a planned path
+
+Originally framed as "namespace squats." After two rounds of
+clarification, the framing doesn't survive: every reserved-but-
+unwired feature in the codebase has an intended landing. What
+differs is the *carrying cost* and the *design certainty*. The
+section reads more honestly as a status of half-built work than as
+an indictment of unused scaffolding.
+
+- **Tainted/secret tag bits — foresighted, with the typed-vs-runtime
+  question still open.** `value.c:45–46` defines `JACL_FLAG_TAINTED`
+  and `JACL_FLAG_SECRET` with a full helper API (`jacl_is_tainted`,
+  `jacl_set_tainted`, `jacl_clear_tainted`, plus the secret-flag
+  versions in `value.c:392–400`), and they're preserved across GC
+  via `JACL_FLAGS_MASK` (`gc.c:723, 780, 836`). Grep returns zero
+  producers and zero consumers elsewhere in the codebase today — but
+  the feature is planned, not abandoned: taint/secret tracking
+  complements the `interpret` capability sandbox by letting an
+  embedder mark untrusted inputs and reject them at sensitive sinks.
+  The open design question is whether taint becomes a runtime-only
+  property (the current bit-flag infrastructure already supports
+  this) or a type-system property (`tainted str` as a distinct type,
+  with sinks rejecting tainted inputs at compile time). Static
+  information-flow systems are powerful but historically hard to
+  make ergonomic; runtime taint is simpler and well-matched to the
+  scaffolding that exists. The bits are foresighted prerequisites
+  for whichever flavor lands.
+
+- **Bignum / regex — libs ahead of integration.** `lib/bignum/` is
+  2.1k LOC, `lib/regex/` is 2.3k LOC. Both are self-contained and
+  don't drag on the main runtime; `JACL_TAG_BIGNUM` exists but isn't
+  dispatched. The wiring is the scheduled work. One sub-detail
+  surfaced from 3.2: per the planned bigint + bigfloat integration
+  (rationals dropped), `lib/bignum/rational.h` (~241 lines) is dead
+  code that won't be wired even when the rest of bignum lands. The
+  smallest unambiguous "won't ever be used" piece in the tree, but
+  also genuinely small — a non-issue unless someone goes hunting
+  for it.
+
+- **`match` — reserving the word, not prerequisites.** Per 3.3,
+  `match` may not ship at all, and if it does, it's likely a macro
+  rather than a compiler-path special form. The existing scaffolding
+  (TOKEN_MATCH in the lexer, HEAD_MATCH in `ast.c`, the entry in
+  `macro__is_special_form` at `compiler.c:2527`) functions as
+  "reserve the word, prevent user macros from shadowing it" rather
+  than "load-bearing prerequisites for the implementation." Cost is
+  tiny — one lexer keyword, one HEAD enum entry, one special-form
+  recognition line — and the reservation makes sense even if the
+  feature doesn't land.
+
+The net pattern: there's no truly unjustified architecture-without-
+implementation in the codebase. The original "namespace squat"
+framing was hunting for a kind of dead-weight that isn't actually
+there. The accurate critique is narrower: some planned features have
+open design questions (taint typed-or-not, match-or-no-match), and
+those uncertainties carry small forward costs (tag bits, scaffolding,
+dormant libs) that are easy to defer. That's a normal state for an
+in-flight language, not a weakness.
+
+### 3.5 Stack limits are tighter than they look because TCO isn't wired
+
+`VM_STACK_MAX = 256` and `VM_FRAMES_MAX = 64`. §16 (2026-05-15) made
+the failure mode legible by distinguishing operand-stack vs call-
+frame overflow and propagating the result to the awaiter. So far so
+good.
+
+The buried issue: **`OP_TAIL_CALL` exists in the VM** (declared
+`bytecode.c:43`, handler at `vm.c:2901–2935`) and reuses the current
+frame. **The compiler never emits it** — grep for
+`OP_TAIL_CALL`/`emit_tail`/`tail_position`/`is_tail` in `compiler.c`
+returns nothing. So every recursive call consumes a fresh frame. The
+infrastructure is in place; the compiler-side analysis pass that
+identifies tail-position call sites just hasn't been written. Per
+the author, the gap is unimplemented rather than deliberate.
+
+That makes 64 frames noticeably tighter than it would otherwise be:
+
+- **With TCO**: 64 frames covers all practical recursion depths because
+  tail-recursive walkers, traversers, and accumulators don't consume
+  frames at all.
+- **Without TCO**: a 64-deep directory tree, a 64-deep JSON document, a
+  64-deep AST visitor each runs out of frames. These come up in
+  glue/scripting; they aren't "math library" use cases.
+
+Two paths forward, both planned:
+
+- **Short-term: bump the constants.** `CallFrame` is ~32 bytes
+  (4 pointers + one `uint32_t`, `vm.c:80–86`). Going from 64 frames
+  to 256 costs ~6KB more per VM; from 256 operand slots to 1024
+  costs ~6KB more. ~12KB total for a 4× increase across both limits
+  — negligible per VM, and the author has said it should happen.
+- **Durable fix: compiler-emitted `OP_TAIL_CALL`.** The runtime side
+  is done. Compiler-side analysis is small: identify proc bodies
+  whose last expression is a call, in tail position (not inside
+  `try`, not the source of a binding, not followed by a pipe stage
+  that consumes the return). One nuance — suspending procs are
+  CPS-transformed, so the "tail call" in a suspending proc becomes a
+  continuation construction. That's not impossible (the SM-compile
+  path could emit a continuation-tail variant) but it's the part
+  worth thinking through before the analysis pass lands.
+
+Growable stacks are a further option (heap-allocated arrays, GC-
+traced, inline-bitmap shadow arrays scaled to stack size), but
+probably not needed if TCO + 4× constants are in. The audience
+isn't writing parsers in JACL itself; the planned mitigations
+should cover the recursive-traversal patterns that do come up.
+
+### 3.6 Necessary complexity for the full build, but the embed cost is real
+
+The runtime architecture — NxM work-stealing + non-moving generational
+GC + lockless Chase-Lev deques + direct-style CPS+SM suspension — is
+*load-bearing* for the capabilities it provides. You cannot have those
+goals and a simpler runtime story; the per-field synchronization
+invariants in `SYNCHRONIZATION.md` aren't unnecessary architecture, they
+are necessary architecture documented at a level most production
+runtimes skip. That's a strength.
+
+The honest follow-up: the audience JACL targets (glue/scripting, with
+embedding as the path to widening) doesn't strictly need all of those
+capabilities. The architecture has been built with capability headroom
+in mind — the full runtime is more powerful than glue/scripting demands
+— and the cost of that headroom is showing up in embed scenarios
+where binary size and per-VM footprint matter. That's the version of
+"too much complexity" worth taking seriously: not "the design is over-
+engineered for what it does," but "the full capability set costs more
+than embedders want to pay when they don't need all of it."
+
+#### Highest-leverage cut: build-time-conditional multi-threaded runtime
+
+The single largest source of complexity is the multi-threaded runtime
+layer:
+
+- `runtime.c` — workers, Chase-Lev deques (public + private per
+  worker), grey buffer, thief registration, idle CV park, work-stealing
+  scheduler.
+- `gc.c` / `gc_collect.c` concurrent paths — concurrent sweep, SATB
+  write barrier, remembered set, epoch protection, watermark logic.
+- All of `lib/chase_lev/`.
+- Most of `SYNCHRONIZATION.md`.
+
+**The single-threaded paths already exist.** `vm.c:5120–5125` shows
+the spawn dispatch as `if (vm->runtime) { runtime__submit_spawn_task(...) }
+else { /* synchronous single-threaded path */ }`, repeated for
+parallel and race. So `spawn`/`await`/`parallel`/`race` semantics are
+already implemented twice — once for the threaded runtime and once
+as cooperative single-thread coroutines.
+
+Gating the threaded runtime behind a build flag (e.g. `JACL_THREADED`)
+would let embed users opt for the single-threaded build and get:
+
+- Plausibly 30–50% smaller binary (everything in `runtime.c`, the
+  concurrent GC paths, Chase-Lev, the thread machinery).
+- Half of `SYNCHRONIZATION.md`'s surface gone (most of it is about
+  cross-thread state).
+- No atomics in hot paths — alloc fastpath stops reading TLS, GC mark
+  loop stops doing epoch-protected reads.
+- WASM-friendly. The WASM build is hampered by thread machinery it
+  can't use anyway; the single-threaded build would be the natural
+  WASM default.
+
+CPS + SM cooperative concurrency stays. The surface language stays.
+FFI stays. Structs, macros, gradual typing all stay. What's lost is
+CPU parallelism — exactly the capability glue/scripting embed users
+mostly don't need.
+
+This is the highest-leverage lever. It fits the "capability headroom"
+goal because the full threaded runtime stays available as the default
+build; users who care about embed size opt out.
+
+#### Tier-2 lever: simpler GC for the single-threaded build
+
+If you have the threaded-or-not flag, you can also pick a simpler GC
+for the single-threaded build. Caveat: the generational collector is
+**fully wired**, not partial — `hdr->gen` bit, `survive_count`-based
+promotion, `gc_mark_minor`/`gc_sweep_minor`, `RememberedSet` with a
+working write barrier, `gc_should_major` dispatch logic at the trigger
+site. So "drop generations for embed" would be removing working code,
+not unwiring a stub.
+
+The trade is: lose a generational collector that already pays off on
+long-running scripts (old-gen objects skipped on minor cycles), in
+exchange for a smaller binary and simpler reasoning. Whether this is
+worth it depends on the target embed workload — a script that runs
+once and exits doesn't benefit much from generations; a long-lived
+embedded plugin does. Worth measuring before committing.
+
+If you take the cut, the candidates are: drop generations (remove
+`gc_mark_minor`/`gc_sweep_minor`/`RememberedSet`/`gc_should_major`),
+drop the concurrent sweep (redundant with single-threaded), drop the
+SATB barrier (only matters for concurrent collection), keep the
+block/line free-run allocator (it's a good non-moving design and
+earns its keep). Estimated: another 15–25% off the embed binary on
+top of the threaded-or-not cut.
+
+#### Smaller cuts, independent of the build-flag work
+
+- **Consolidate dual struct definitions.** `WorkerThread`, `Runtime`,
+  `RuntimeTask`, `ThreadHeap`, `GreyBuffer`, `RememberedSet` are
+  defined twice — in `runtime.c`/`gc.c` (unity build) and in
+  `src/jacl.h` (separately-compiled tests), with
+  `test/test_struct_sizes.c` as a sizeof + offsetof drift guard. The
+  guard catches size changes but only spot-checks individual field
+  offsets, so silent reorderings that preserve total size can slip
+  through to a future failure mode. Options: thread everything via
+  `jacl.h` (forces full rebuilds on internal-field changes), make
+  tests go through the unity build (couples test compilation to the
+  runtime), or use opaque pointers + accessor functions in `jacl.h`
+  (cleanest, costs a few accessor functions). Doesn't shed runtime
+  size, but removes a class of drift bug and a chunk of maintenance
+  overhead.
+
+- **`vm.c` split.** Currently 12,200 lines in one TU. Direct-threaded
+  dispatch wants opcodes co-located, but splitting by category
+  (arithmetic / control flow / collections / GC ops / shell / SM
+  resume) while keeping the dispatch table in one place could
+  plausibly halve the file size. Doesn't cut runtime cost; reduces
+  cognitive load and may make small fixes (the `OBJ_CLOSURE = 0`
+  enum hazard is the canonical case) actually get made instead of
+  deferred.
+
+- **Drop `lib/bignum/rational.h`** (per 3.4 update). 241 LOC that
+  won't be wired. Pure cleanup, negligible win, but worth doing if
+  any reorganization happens nearby.
+
+- **Check the `ctx_pool`.** `$ctx` forks are rare (only at
+  `with-ctx` / `spawn` / `parallel` / `race`) and short-lived. The
+  pool may not be earning its keep over regular `gc_alloc`. Worth
+  profiling before cutting; could be one less data structure.
+
+#### What to leave alone
+
+- **Struct value-type / inline opcodes.** Big complexity, big payoff
+  for FFI. Stays.
+- **Direct-style CPS + SM concurrency.** The differentiator. Stays.
+- **`interpret` capability sandbox.** Core for embed use cases. Stays.
+- **Macro system.** Core to language identity. Stays.
+- **C-ABI struct layout.** FFI win. Stays.
+
+#### Recommended order
+
+1. **Prototype `JACL_THREADED` as a build flag.** Even before any
+   cuts, get the codebase to compile with the threaded runtime
+   disabled and verify the single-threaded paths actually work
+   standalone. Where the runtime layer leaks into the single-threaded
+   path will itself be useful audit signal.
+
+2. **Measure.** Binary size and per-VM footprint for both flavors.
+   Quantify the win before deciding whether to also pursue the
+   simpler-GC path.
+
+3. **Decide on the GC swap based on measurements.** If the build-flag
+   alone hits the embed size budget, leave the GC alone. If you need
+   more, take the simpler-GC cut and accept the regression on
+   long-running workloads.
+
+4. **In parallel**: the smaller cuts (struct consolidation, `vm.c`
+   split, rationals removal, ctx-pool check) can happen any time and
+   are independent of the build-flag work.
+
+The reconciliation between "capability headroom" (1) and "intellectual
+interest" (3) and "embed cost" pressures: the full capability stays
+the default; opt-out flags handle the embed case. That's the cleanest
+seam I can see.
+
+#### Residual concerns independent of cuts
+
+- **Onboarding friction.** A new contributor has to read
+  `GC_CONCURRENCY_DESIGN.md`, `SYNCHRONIZATION.md`, and `AUDIT.md`
+  before touching `runtime.c` or `gc.c` without risking a regression.
+  That's the cost of the complexity (which is load-bearing for the
+  full build), not the cost of the discipline (which is what makes
+  the cost survivable). The build-flag work narrows this — embed
+  contributors who only build single-threaded face a much smaller
+  surface — but doesn't eliminate it for full-build maintainers.
+
+### 3.7 `vm.c` is large but the structural floor is high
+
+12,200 lines in one TU. The direct-threaded dispatch table (222
+opcodes per AUDIT.md §13) wants its handlers in one TU for the
+goto-label addressing trick to work, so a fully decomposed-by-file
+VM is off the table. Splitting by category (arithmetic / control
+flow / collections / GC ops / shell / SM resume) could plausibly
+halve the file size while keeping the dispatch table cohesive — the
+structural floor is high, but not 12k high.
+
+The concrete signal that the file is currently *too* big is the
+`OBJ_CLOSURE = 0` enum hazard in `jacl.h:116` / `gc.c:22`: a 2-line
+enum reorder (introduce `OBJ_INVALID = 0`, shift the rest by one)
+that would be defense-in-depth against the mid-init read-race /
+post-sweep stale-ref class of bugs. The fix hasn't been made because
+walking the blast radius of an enum-value shift across 12k lines of
+opcode handlers is expensive enough to defer indefinitely. Small,
+real signal that the cost-of-edit is starting to bite.
 
 ## 4. Pulling-their-weight scorecard
 
