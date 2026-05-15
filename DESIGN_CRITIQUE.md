@@ -819,26 +819,56 @@ that's fine; coherent design from known pieces is what languages
 that ship actually need.
 
 1. **Three-mode delimiter parsing — `[]` juxtaposition, `{}` command
-   mode, `()` `expr`-style sublanguage.** Closest to *novel* of any
-   entry. Tcl has commands-as-default; Lisp has parens-everywhere;
-   Smalltalk has unary/binary/keyword forms without delimiters. None
-   have parser-mode-by-delimiter as a unifying concept. The
-   `[]`/`{}` split is the workhorse — one rule handles params,
-   struct fields, blocks, and `with-ctx` field maps. `()` is a
-   deliberately-narrow expression sublanguage modeled on Tcl's
-   `expr`, with mode-independent operator semantics (no `|`-as-pipe
-   vs `|`-as-bitor split). Worth it.
+   mode, `()` `expr`-style sublanguage.** *Distinctive system, with
+   pieces that have heritage.* The closest precedent is Tcl: `()` is
+   essentially what Tcl's `expr` command does (switch to expression
+   parsing) lifted from a command into a syntactic primitive. Lisp
+   has read tables for per-character dispatch; Smalltalk has
+   unary/binary/keyword forms without delimiters. I haven't found a
+   prior coherent system that uses parser-mode-by-delimiter as a
+   unifying concept across an entire language, but
+   absence-of-precedent-I-found isn't evidence-of-absence. The
+   distinctive lift here is making `()` syntactic rather than
+   command-driven, and pairing it with the `[]`/`{}` split.
 
-2. **Direct-style CPS + SM concurrency on a tagged-value VM with
-   non-moving epoch GC.** *Distinctive combination.* Each piece
-   exists elsewhere (CPS in Scheme implementations, SM-compilation
-   of generators in JS/Python/Rust, tagged-value scripting VMs are
-   common, non-moving epoch GCs exist). The combination of all four
-   on a scripting VM, with direct-style syntax that hides the
-   suspension, is unusual. Caveat per §2.1: `SuspensionAnalysis` is
-   implicit compile-time coloring; the architectural property is
-   "no user-visible async keyword," not "no coloring at all." Worth
-   it — the technical differentiator.
+   The `[]`/`{}` split is the real workhorse, but the honest
+   statement is *one parser output shape, multiple contextual
+   consumers*. `{}` produces a command-mode AST as a sequence of
+   comma/newline/semicolon-separated commands. Each consumer reads
+   it differently: param lists treat each entry as a param
+   declaration, struct fields as a typed name, blocks as a statement
+   to execute, `with-ctx` as a field-value pair. The unification
+   is real (one parsing rule, one AST shape) but the validation
+   complexity lives in the consumers, not in the parser.
+
+   Operator semantics are mode-independent (no `|`-as-pipe vs
+   `|`-as-bitor split per the §1 reframing). The cost of that
+   consistency: the macro layer occupies `|` for pipe composition,
+   so `($a | $b)` parses fine as infix but expands to pipe semantics
+   in every mode. Users who want bitwise-or write `[bit-or $a $b]`.
+   The restriction is semantic (the operator's macro definition),
+   not syntactic (the parser does not reject `|` inside `()`) —
+   worth naming precisely because the parser-vs-macro split is the
+   actual mechanism. Worth it overall.
+
+2. **Direct-style suspension: one state-machine transform covering
+   both async (`await`/`parallel`/`race`) and generators (`yield`),
+   running on a runtime with non-blocking GC.** *Distinctive
+   combination.* State-machine compilation of generators is in
+   JS/Python/Rust; lifting the same transform to cover `await` as
+   well — distinguished only by which suspension points the
+   `SuspensionAnalysis` pass finds (`yield` → stream-returning
+   closure, `await`/`parallel`/`race` → future-returning closure) —
+   is unusual. An earlier architecture had a separate CPS transform
+   for async; that path was removed (`vm.c:5102, 7845` now error on
+   the legacy opcodes), leaving a single mechanism. The non-moving
+   epoch GC underneath has prior art, but the combination —
+   direct-style scripting syntax, one suspension transform serving
+   two surface forms, GC that collects concurrently — is unusual at
+   this scale. Caveat per §2.1: `SuspensionAnalysis` is implicit
+   compile-time coloring; the architectural property is "no
+   user-visible async keyword," not "no coloring at all." Worth it
+   — the technical differentiator.
 
 3. **Macro system with syntax objects + hygiene + run-on-VM
    expansion.** *Distinctive vs. the alternatives in this niche.*
@@ -882,13 +912,18 @@ that ship actually need.
    *Pragmatic combination.* NaN-boxing predates JACL; errors-as-
    values is Erlang and OCaml territory; pipe-short-circuit on
    failure is essentially `set -o pipefail`. What's distinctive is
-   combining the tag-bit propagation with `catch` as a pipe stage
-   and `try`/`catch` as a block form, so that error handling and
-   shell-pipeline composition use the same primitive. Pragmatic
-   ergonomics, not a novel mechanism. Worth it for the
-   glue/scripting target; the trade-offs (silent-swallow risk,
-   `parallel` mixed results, low-grade runtime tax) are documented
-   in §2.3.
+   combining tag-bit propagation with a VM-level short-circuit
+   (`OP_JUMP_IF_ERROR`) so a pipeline stops on first error without
+   any user-facing scaffolding, and pairing it with `try`/`catch` as
+   a block form for non-pipeline code. SYNTAX.md also sketches
+   `catch` as a pipe stage; that one isn't implemented yet (no
+   `catch` head, no prelude binding) — when it lands the
+   pipe-stage form will let inline recovery share the same
+   primitive, but today the distinctive combination is tag-bit +
+   short-circuit + block-form `try`. Pragmatic ergonomics, not a
+   novel mechanism. Worth it for the glue/scripting target; the
+   trade-offs (silent-swallow risk, `parallel` mixed results,
+   low-grade runtime tax) are documented in §2.3.
 
 7. **Capability-restricted `interpret` sharing the parent heap.**
    *Pragmatic engineering choice.* Most sandboxes use a separate
@@ -901,16 +936,31 @@ that ship actually need.
    address-space isolation. Distinctive vs. the alternatives;
    sound for the audience.
 
-Dropped from the original list: the **methodological** entry
-(`SYNCHRONIZATION.md` per-field reference + multi-phase audit
-pattern). It's a strength of the codebase, not a design choice of
-the language; it lives more naturally in §7 (As a program) than as
-a "distinctive design choice." Removed here, retained there.
-
-Added: the C-ABI struct layout entry (§5 entry 5) and the macro
-system entry (§5 entry 3), both of which the original list
-underweighted. Both are among the more identifiable JACL
-differentiators in practice.
+8. **Jobs and Futures duck-typed at the await site.** *Distinctive
+   shell-language choice.* Most languages with both async and
+   subprocesses treat them as separate abstractions: Python
+   (`asyncio.Task` vs `subprocess`), Node (`Promise` vs
+   `child_process`), Go (goroutine vs `os/exec`). The closest
+   precedent is Erlang ports, which model OS processes as
+   Erlang-process peers. JACL's approach is more pragmatic than a
+   unified type: a Job is a plain map
+   `{_is_job: true, pid, _stdout_path, _stderr_path}` produced
+   directly by `OP_EXEC` when the parser sees `!cmd &` (no
+   desugaring to `spawn`), while a Future is a separate
+   first-class object. `OP_AWAIT_JOB` (`vm.c:9978`) discriminates
+   at the await site: Job → `waitpid` + read captured streams;
+   Future → resolve. `parallel`/`race` plumb the same
+   discrimination through their child-completion handling, so
+   `parallel { !start-api } { !start-db }` and
+   `parallel { compute-thing } { fetch-thing }` compose under the
+   same surface forms even though the values flowing through are
+   different types. `signal`/`cancel` are Job-only operations on
+   the map. The distinctive lift isn't a unified Future type — it's
+   that the language pushes the unification to the *await/compose
+   sites* rather than the *value type*, which keeps the shell-Job
+   representation cheap (just a map) while preserving uniform
+   surface syntax for the audience that's gluing external processes
+   into concurrent programs.
 
 ## 6. Domains
 
