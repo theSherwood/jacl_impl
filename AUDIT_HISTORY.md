@@ -1514,7 +1514,15 @@ snapshot doesn't help and just adds a gc_alloc per spawn. Reverted.
 already lives on `WorkerThread`. The thread-locals exist mostly for HAMT / RRB
 template code that doesn't take a heap parameter. Threading a `JaclCtx*` (or
 equivalent) through the templates would remove a class of hard-to-diagnose
-"wrong heap" bugs and make sub-VM / sandbox embedding cleaner.
+"wrong heap" bugs and shave the TLS read off the alloc fastpath.
+
+This was originally framed as a sandbox-embedding prerequisite. It is not.
+Sandboxing is implemented by the `interpret` primitive (`src/vm.c:9441`),
+which runs untrusted source in-place on the parent VM's heap and intern
+table, with a fresh top-level env populated from a capability prelude map.
+Same heap, same GC cycle, same workers — the env stack is what gets reset.
+Per-OS-thread VM isolation (the only thing §17 would unlock) is not a use
+case JACL has.
 
 ## Performance smells
 

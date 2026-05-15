@@ -50,7 +50,7 @@ These are non-correctness — code health, ergonomics, deferred perf
 levers. None block shipping. Roughly ordered by **remaining**
 leverage; closed items live below the open ones.
 
-### §17. Inconsistent thread-local convention
+### §17. Inconsistent thread-local convention — *low priority, no feature blocked*
 
 `gc__current_heap`, `gc__thread_epoch`, `gc__emergency_gc_fn`,
 `gc__interning`, `rt__worker_id`, `rt__current_worker` are scattered
@@ -58,7 +58,18 @@ globals. Worker context already lives on `WorkerThread`. The thread-
 locals exist mostly for HAMT/RRB template code that doesn't take a
 heap parameter. Threading a `JaclCtx*` (or equivalent) through the
 templates would remove a class of hard-to-diagnose "wrong heap" bugs
-and make sub-VM / sandbox embedding cleaner. Larger refactor.
+and shave the TLS read off the alloc fastpath (also listed under
+performance smells). Larger refactor.
+
+**Not a sandbox prerequisite.** Sandboxing is already implemented by
+the `interpret` primitive (`src/vm.c:9441`), which compiles and runs
+untrusted source *in-place* on the parent VM's heap, with a fresh
+top-level env populated from a capability prelude map. Same heap,
+same arena, same intern table, same GC cycle, same workers — only
+the env is reset. Per-OS-thread VM isolation (the only thing §17
+would unlock) is not a use case JACL has. See
+`test/test_interpret_sandbox.c` for the seven end-to-end scenarios
+the sandbox API supports today.
 
 ### §12. `JaclFuture` waiters list spinlock — *not observed*
 
