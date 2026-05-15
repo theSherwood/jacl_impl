@@ -1531,6 +1531,61 @@ equivalent) through the templates would remove a class of hard-to-diagnose
   design originally had GCHeader replace a 16-byte RCHeader. Worth a sweep for
   stray `RCHeader` references / offset assumptions.
 
+## §16 VM stack overflow surfacing (2026-05-15)
+
+The audit (§16 in the open-items list) framed VM_STACK_MAX = 256 as
+"either grow on demand or document the limit and emit a clear error
+message" — the cheap fix here is the latter. Two distinct overflows
+were collapsed under one error string and one of them silently lost
+its message on completion paths.
+
+**What changed:**
+
+- Two helpers in `vm.c` (`vm__set_frame_overflow`,
+  `vm__set_operand_overflow`) replace every bare
+  `vm__set_error(vm, "stack overflow")`. The frame variant says
+  `"call depth exceeded (max 64 frames) — too much nested recursion"`;
+  the operand variant says `"operand stack overflow (max 256 slots)
+  [at <context>] — expression too deeply nested"`. The pre-existing
+  contextual variants (`"stack overflow (swap inline)"` etc.) now
+  carry the same prefix + limit number but keep their location tag.
+- Worker SM/spawn/parallel/race completion in `runtime.c` previously
+  fell back to `jacl_set_error(jacl_inline_string("error", 5))` on
+  any VM error from the body, silently dropping `vm->error_message`.
+  A new static helper `runtime__make_completion_error(vm)` carries
+  the real message through. Worker VMs run with `vm->intern_table =
+  NULL`, which `jacl_string_new`'s intern tier would deref — the
+  helper detects this and truncates to inline-string rather than
+  crashing.
+- `src/jacl.h` now documents both caps where they're defined.
+
+**Tests:**
+
+- New `test/jacl/overflow_call_depth.jacl` — `# expect-error: call
+  depth exceeded`, triggered by unbounded direct recursion.
+- Two existing C tests updated to the new error substring:
+  `test_call_frame_overflow` in `test/test_vm.c` and the recursion
+  test in `test/test_compiler.c`.
+
+**Out of scope:**
+
+- Growing the stack on demand — explicitly rejected by the user.
+- Investigating WHY worker VMs run tasks after `runtime_destroy`
+  with intern_table = NULL (a latent issue this work surfaced via
+  the new helper's allocation attempt). The helper now degrades
+  gracefully; the underlying lifecycle gap is its own item if it
+  surfaces in another way.
+
+**Validation.** Normal-mode sweep: 87/1 — the single failure is
+`chaos_concurrent_intern`, a pre-existing flake unrelated to this
+change (confirmed by reverting `src/runtime.c` and observing the
+same 1-in-5 to 2-in-10 failure rate on the test under both
+configurations). TSAN sweep: 86/2 — `chase_lev_stress` (documented
+known-and-safe per AUDIT.md) plus `rope_concat`'s
+`test_rope_concat_zwj_at_junction` (pre-existing under TSAN;
+confirmed by reverting both `src/runtime.c` and `src/vm.c` and
+seeing the same failure). WASM compile-only: clean.
+
 ## §13 VM dispatch (2026-05-14)
 
 The audit measured `vm__run` at 57 % of `box_churn` CPU under the

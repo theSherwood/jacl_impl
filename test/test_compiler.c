@@ -2776,7 +2776,7 @@ static int test_recursion_depth_limit(void) {
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
-  ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
+  ASSERT(strstr(vm.error_message, "call depth exceeded") != NULL);
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);

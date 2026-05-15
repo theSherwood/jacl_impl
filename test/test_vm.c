@@ -2225,7 +2225,7 @@ static int test_call_frame_overflow(void) {
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
-  ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
+  ASSERT(strstr(vm.error_message, "call depth exceeded") != NULL);
 
   vm_destroy(&vm);
   arena_destroy(&arena);

@@ -432,6 +432,23 @@ void vm__set_error(VM* vm, const char* fmt, ...) {
   vm->error_message = msg;
 }
 
+/* Stack overflow helpers — distinguish operand stack (VM_STACK_MAX slots)
+ * from call-frame stack (VM_FRAMES_MAX frames) so users know which limit
+ * they hit. §16 in AUDIT.md. */
+void vm__set_frame_overflow(VM* vm) {
+  vm__set_error(vm, "call depth exceeded (max %d frames) — too much nested recursion",
+                (int)VM_FRAMES_MAX);
+}
+void vm__set_operand_overflow(VM* vm, const char* where) {
+  if (where) {
+    vm__set_error(vm, "operand stack overflow (max %d slots) at %s — expression too deeply nested",
+                  (int)VM_STACK_MAX, where);
+  } else {
+    vm__set_error(vm, "operand stack overflow (max %d slots) — expression too deeply nested",
+                  (int)VM_STACK_MAX);
+  }
+}
+
 /* --- Default print function: write to stdout --- */
 
 void vm__default_print(const char* text, uint32_t len, void* ctx) {
@@ -557,7 +574,7 @@ void vm_destroy(VM* vm) {
 
 VMResult vm__push(VM* vm, JaclVal value) {
   if (vm->stack_top >= VM_STACK_MAX) {
-    vm->error_message = "stack overflow";
+    vm__set_operand_overflow(vm, NULL);
     return VM_STACK_OVERFLOW;
   }
   vm->stack[vm->stack_top++] = value;
@@ -1351,7 +1368,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             if (r != VM_OK) return STREAM_PULL_ERROR;
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return STREAM_PULL_ERROR;
             }
             uint32_t cf_count = vm->frame_count;
@@ -1410,7 +1427,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         if (r != VM_OK) return STREAM_PULL_ERROR;
 
         if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return STREAM_PULL_ERROR;
         }
         uint32_t cf_count = vm->frame_count;
@@ -1827,7 +1844,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
     if (r != VM_OK) return STREAM_PULL_ERROR;
 
     if (vm->frame_count >= VM_FRAMES_MAX) {
-        vm__set_error(vm, "stack overflow");
+        vm__set_frame_overflow(vm);
         return STREAM_PULL_ERROR;
     }
     CallFrame* nf = &vm->frames[vm->frame_count++];
@@ -2865,7 +2882,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         if (vm->frame_count >= VM_FRAMES_MAX) {
-          vm__set_error(vm, "stack overflow");
+          vm__set_frame_overflow(vm);
           return VM_RUNTIME_ERROR;
         }
 
@@ -4213,7 +4230,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
              * order (push, then check) leaked 2 slots on overflow —
              * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -4271,7 +4288,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Check frame capacity BEFORE pushing args. See AUDIT.md
              * §D.2 — push-then-check leaked 3 slots per overflow. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -4338,7 +4355,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t cb_fc = vm->frame_count;
@@ -4417,7 +4434,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
              * order (push, then check) leaked 2 slots on overflow —
              * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -4485,7 +4502,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Check frame capacity BEFORE pushing args. See AUDIT.md
              * §D.2 — push-then-check leaked 3 slots per overflow. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -4606,7 +4623,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
              * order (push, then check) leaked 2 slots on overflow —
              * see AUDIT.md §D.2 severity-(iii) iterating-opcode leak. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -4675,7 +4692,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Check frame capacity BEFORE pushing args. See AUDIT.md
              * §D.2 — push-then-check leaked 3 slots per overflow. */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
 
@@ -5135,7 +5152,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return VM_STACK_OVERFLOW;
           }
           CallFrame *sf = &vm->frames[vm->frame_count++];
@@ -5311,7 +5328,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                * args. See AUDIT.md §D.2 — push-then-check leaked 3
                * slots per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return VM_STACK_OVERFLOW;
               }
 
@@ -5365,7 +5382,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* Check frame capacity BEFORE pushing args. See AUDIT.md
                * §D.2 — push-then-check leaked 1 slot per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return VM_STACK_OVERFLOW;
               }
 
@@ -5497,7 +5514,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                * args. See AUDIT.md §D.2 — push-then-check leaked 3
                * slots per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return VM_STACK_OVERFLOW;
               }
 
@@ -5543,7 +5560,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* Check frame capacity BEFORE pushing args. See AUDIT.md
                * §D.2 — push-then-check leaked 1 slot per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return VM_STACK_OVERFLOW;
               }
 
@@ -5781,7 +5798,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (closure->param_total_slots > closure->param_count) {
             /* Closure expects inline struct param — push raw bytes */
             if (vm->stack_top + width > VM_STACK_MAX) {
-              vm__set_error(vm, "stack overflow (swap inline)");
+              vm__set_operand_overflow(vm, "swap inline");
               return VM_STACK_OVERFLOW;
             }
             memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
@@ -5802,7 +5819,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return VM_RUNTIME_ERROR;
           }
           uint32_t caller_frame_count = vm->frame_count;
@@ -5855,7 +5872,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
             /* Set up call frame */
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_frame_count = vm->frame_count;
@@ -6429,7 +6446,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
         uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
         if (vm->stack_top + sub_width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (heap_record_get_inline)");
+          vm__set_operand_overflow(vm, "heap_record_get_inline");
           return VM_STACK_OVERFLOW;
         }
         HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
@@ -6670,7 +6687,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         if (vm->stack_top + sub_width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (ptr-load-inline)");
+          vm__set_operand_overflow(vm, "ptr-load-inline");
           return VM_STACK_OVERFLOW;
         }
         memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
@@ -7088,7 +7105,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top -= total_input_slots;
 
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (inline struct)");
+          vm__set_operand_overflow(vm, "inline struct");
           return VM_STACK_OVERFLOW;
         }
 
@@ -7132,7 +7149,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
             uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
             if (vm->stack_top + sub_width > VM_STACK_MAX) {
-              vm__set_error(vm, "stack overflow (struct_get_inline nested)");
+              vm__set_operand_overflow(vm, "struct_get_inline nested");
               return VM_STACK_OVERFLOW;
             }
             /* Note: struct_base is a pointer into vm->stack; it remains
@@ -7243,7 +7260,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
             uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
             if (vm->stack_top + sub_width > VM_STACK_MAX) {
-              vm__set_error(vm, "stack overflow (struct_get_upvalue nested)");
+              vm__set_operand_overflow(vm, "struct_get_upvalue nested");
               return VM_STACK_OVERFLOW;
             }
             memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
@@ -7301,7 +7318,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (load_inline_local)");
+          vm__set_operand_overflow(vm, "load_inline_local");
           return VM_STACK_OVERFLOW;
         }
         uint8_t* src = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
@@ -7347,7 +7364,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             StructTypeDef* sub = vm->struct_registry->defs[sub_type_idx];
             uint32_t sub_width = (sub->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
             if (vm->stack_top + sub_width > VM_STACK_MAX) {
-              vm__set_error(vm, "stack overflow (get_inline_tos nested)");
+              vm__set_operand_overflow(vm, "get_inline_tos nested");
               return VM_STACK_OVERFLOW;
             }
             memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
@@ -7465,7 +7482,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (load_inline_upvalue)");
+          vm__set_operand_overflow(vm, "load_inline_upvalue");
           return VM_STACK_OVERFLOW;
         }
         uint8_t* src = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
@@ -7618,7 +7635,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* Check frame capacity BEFORE pushing args. See AUDIT.md
                * §D.2 — push-then-check leaked 3 slots per overflow. */
               if (vm->frame_count >= VM_FRAMES_MAX) {
-                vm__set_error(vm, "stack overflow");
+                vm__set_frame_overflow(vm);
                 return VM_RUNTIME_ERROR;
               }
 
@@ -7744,7 +7761,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         if (vm->frame_count >= VM_FRAMES_MAX) {
-          vm__set_error(vm, "stack overflow");
+          vm__set_frame_overflow(vm);
           return VM_RUNTIME_ERROR;
         }
 
@@ -7881,7 +7898,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return VM_RUNTIME_ERROR;
           }
           CallFrame* new_frame = &vm->frames[vm->frame_count++];
@@ -8272,7 +8289,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return VM_RUNTIME_ERROR;
           }
           CallFrame* new_frame = &vm->frames[vm->frame_count++];
@@ -8928,7 +8945,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
-            vm__set_error(vm, "stack overflow");
+            vm__set_frame_overflow(vm);
             return VM_STACK_OVERFLOW;
           }
           CallFrame *sf = &vm->frames[vm->frame_count++];
@@ -9555,7 +9572,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (vm->frame_count >= VM_FRAMES_MAX) {
           vm->stack_top = saved_stack_top;
           vm->env.count = saved_env_count;
-          vm__set_error(vm, "stack overflow");
+          vm__set_frame_overflow(vm);
           return VM_RUNTIME_ERROR;
         }
 
@@ -10368,7 +10385,7 @@ interpret_done:
         const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
         /* Push width inline slots directly from RRB leaf data */
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow in typed vec get inline");
+          vm__set_operand_overflow(vm, "typed vec get inline");
           return VM_RUNTIME_ERROR;
         }
         memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
@@ -10571,7 +10588,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -10658,7 +10675,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -10748,7 +10765,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -10841,7 +10858,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -10935,7 +10952,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -11031,7 +11048,7 @@ interpret_done:
             }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
-              vm__set_error(vm, "stack overflow");
+              vm__set_frame_overflow(vm);
               return VM_RUNTIME_ERROR;
             }
             uint32_t caller_fc = vm->frame_count;
@@ -11146,7 +11163,7 @@ interpret_done:
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t width = vm__struct_width(sdef);
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow in typed map get inline");
+          vm__set_operand_overflow(vm, "typed map get inline");
           return VM_RUNTIME_ERROR;
         }
         memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
@@ -11502,7 +11519,7 @@ interpret_done:
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
         if (vm->stack_top + width > VM_STACK_MAX) {
-          vm__set_error(vm, "stack overflow (deref inline)");
+          vm__set_operand_overflow(vm, "deref inline");
           return VM_STACK_OVERFLOW;
         }
         memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));

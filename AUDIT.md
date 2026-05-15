@@ -10,14 +10,18 @@
 > - `SYNCHRONIZATION.md` — the *what protects what*, per-field reference
 > - `AUDIT_HISTORY.md` — the audit's worked-through backlog (read-only archive)
 
-## Current state (2026-05-14)
+## Current state (2026-05-15)
 
 All correctness items from the May 2026 audit campaign are closed:
 8 critical GC/concurrency items, 5 soak-surfaced races, the §9 SATB
 barrier UAF, 4 TSAN-triage real bugs, the §18 ctx-pool UAF, and the
 §D compiler/VM survey items. The runtime is well-balanced after the
 §14 Phase-B fix landed — no single non-idle sink above ~10% in the
-mixed-CPU profile. See `AUDIT_HISTORY.md` for the per-phase story.
+mixed-CPU profile. §16 (VM stack-overflow surfacing) closed
+2026-05-15 — operand-stack vs call-depth overflow now produce
+distinct, limit-naming error messages, and worker-completion paths
+propagate `vm->error_message` to the awaiter. See `AUDIT_HISTORY.md`
+for the per-phase story.
 
 **Test baselines:**
 - Normal-mode suite: 88 pass / 0 fail (`./build.sh`).
@@ -45,15 +49,6 @@ build time by `test/test_struct_sizes.c`.
 These are non-correctness — code health, ergonomics, deferred perf
 levers. None block shipping. Roughly ordered by **remaining**
 leverage; closed items live below the open ones.
-
-### §16. VM stack hard-capped at 256
-
-`VM_STACK_MAX = 256` in `src/jacl.h`. Every call frame consumes locals
-+ temporaries; deeply nested expression evaluation hits the cap. Today
-an overflow returns `VM_STACK_OVERFLOW` but most callers don't surface
-it gracefully. Either grow on demand or document the limit and emit a
-clear error message. Correctness/ergonomics, not perf. Most actionable
-of the open items — bounded scope, user-visible.
 
 ### §17. Inconsistent thread-local convention
 
@@ -117,6 +112,16 @@ if a real-workload profile pins them.
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **§16 VM stack overflow surfacing** — closed 2026-05-15 (cheap fix).
+  Kept `VM_STACK_MAX = 256` / `VM_FRAMES_MAX = 64`. The ~44 bare
+  `"stack overflow"` error strings in `vm.c` now resolve through one of
+  two helpers — `vm__set_operand_overflow` (operand stack, with location
+  tag) or `vm__set_frame_overflow` (call-frame depth) — each naming the
+  limit numerically. SM/spawn/parallel/race completion in `runtime.c`
+  now propagates `vm->error_message` to the awaiter via
+  `runtime__make_completion_error` (with NULL-intern-table fallback for
+  worker VMs). See `AUDIT_HISTORY.md` § "§16 VM stack overflow surfacing
+  (2026-05-15)".
 - **§13 VM dispatch (computed-goto / direct-threaded)** —
   closed 2026-05-14 (option 1: ifdef computed-goto, switch fallback
   for WASM). 222-entry direct-threaded dispatch table, ~2-3 % perf

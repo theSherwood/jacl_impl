@@ -1,0 +1,5 @@
+# expect-error: call depth exceeded
+# Unbounded direct recursion hits VM_FRAMES_MAX (64) and should surface
+# a clean call-depth error instead of a generic "stack overflow". §16.
+proc rec {n} { rec [+ $n 1] }
+rec 0

@@ -1706,6 +1706,31 @@ void runtime__schedule_continuation(void *runtime_ptr,
     }
 }
 
+/* Build an error JaclVal that carries the VM's current error message as
+ * payload, falling back to the inline "error" string when no message was
+ * set. Used by spawn/parallel/race/SM completion paths so that overflow
+ * and other VM errors surface to the awaiter instead of being collapsed
+ * to a generic value. */
+static JaclVal runtime__make_completion_error(VM *vm) {
+    const char *msg = vm->error_message;
+    if (!msg || !msg[0]) {
+        return jacl_set_error(jacl_inline_string("error", 5));
+    }
+    /* Worker VMs run with vm->intern_table = NULL — jacl_string_new
+     * would deref it for the intern tier (8-128 bytes). When the table
+     * isn't there, fall back to whatever fits inline. The caller sees a
+     * truncated message rather than a crash. */
+    if (!vm->intern_table) {
+        size_t len = strlen(msg);
+        if (len > 7) len = 7;
+        return jacl_set_error(jacl_inline_string(msg, len));
+    }
+    gc__current_heap = &vm->heap;
+    JaclVal s = jacl_string_new(&vm->heap, vm->intern_table,
+                                msg, (uint32_t)strlen(msg));
+    return jacl_set_error(s);
+}
+
 /* ======================================================================
  * State machine task data and execution (US-014)
  * ====================================================================== */
@@ -1737,7 +1762,7 @@ void runtime__state_machine_task_exec(void *data) {
     if (completed) {
         JaclVal result;
         if (r != VM_OK) {
-            result = jacl_set_error(jacl_inline_string("error", 5));
+            result = runtime__make_completion_error(vm);
         } else if (vm->stack_top > 0) {
             result = vm->stack[vm->stack_top - 1];
         } else {
@@ -1840,7 +1865,7 @@ void runtime__spawn_task_exec(void *data) {
                 } else {
                     JaclVal err = (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
                         ? vm->stack[vm->stack_top - 1]
-                        : jacl_set_error(jacl_inline_string("error", 5));
+                        : runtime__make_completion_error(vm);
                     FutureWaiter *waiters = jacl_future_error(fut, err,
                                       &self->grey_buf, &self->runtime->gc_active);
                     runtime__schedule_waiters(self->runtime, waiters, err);
@@ -1861,7 +1886,7 @@ void runtime__spawn_task_exec(void *data) {
                                 &self->grey_buf, &self->runtime->gc_active);
             runtime__schedule_waiters(self->runtime, waiters, spawn_result);
         } else {
-            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+            JaclVal err = runtime__make_completion_error(vm);
             FutureWaiter *waiters = jacl_future_error(fut, err,
                               &self->grey_buf, &self->runtime->gc_active);
             runtime__schedule_waiters(self->runtime, waiters, err);
@@ -1943,7 +1968,7 @@ void runtime__parallel_task_exec(void *data) {
             if (r == VM_OK && vm->stack_top > 0) {
                 task_result = vm->stack[vm->stack_top - 1];
             } else {
-                task_result = jacl_set_error(jacl_inline_string("error", 5));
+                task_result = runtime__make_completion_error(vm);
             }
             runtime__complete_parallel_slot(self->runtime, vm,
                                              ptd->agg_val, ptd->index, task_result);
@@ -1960,7 +1985,7 @@ void runtime__parallel_task_exec(void *data) {
         if (r == VM_OK && vm->stack_top > 0) {
             task_result = vm->stack[vm->stack_top - 1];
         } else {
-            task_result = jacl_set_error(jacl_inline_string("error", 5));
+            task_result = runtime__make_completion_error(vm);
         }
 
         runtime__complete_parallel_slot(self->runtime, vm,
@@ -2044,7 +2069,7 @@ void runtime__race_task_exec(void *data) {
             if (r == VM_OK && vm->stack_top > 0) {
                 task_result = vm->stack[vm->stack_top - 1];
             } else {
-                task_result = jacl_set_error(jacl_inline_string("error", 5));
+                task_result = runtime__make_completion_error(vm);
             }
             runtime__complete_race_slot(self->runtime, vm,
                                          rtd->agg_val, task_result);
@@ -2059,7 +2084,7 @@ void runtime__race_task_exec(void *data) {
         if (r == VM_OK && vm->stack_top > 0) {
             task_result = vm->stack[vm->stack_top - 1];
         } else {
-            task_result = jacl_set_error(jacl_inline_string("error", 5));
+            task_result = runtime__make_completion_error(vm);
         }
 
         runtime__complete_race_slot(self->runtime, vm,

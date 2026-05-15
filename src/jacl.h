@@ -1449,6 +1449,13 @@ typedef struct {
  * Types — vm.c
  * ======================================================================== */
 
+/* VM resource caps. These are hard limits — overflow surfaces as a
+ * runtime error from the VM (operand-stack-overflow / call-depth-exceeded)
+ * with a message naming the limit. See AUDIT.md §16.
+ *   - VM_STACK_MAX  : operand-stack slot count. Hit by deep expression
+ *                     nesting, wide inline structs, large spreads.
+ *   - VM_FRAMES_MAX : call-frame depth. Hit by deep recursion. Convert
+ *                     to a tail call, state machine, or trampoline. */
 #define VM_STACK_MAX        256
 #define VM_FRAMES_MAX       64
 #define VM_ENV_INIT_CAP     16
