@@ -699,37 +699,111 @@ decay between sessions.
 
 ## 4. Pulling-their-weight scorecard
 
-### 4.1 Earning their keep
+After the section 1–3 revisions, the simple earning/not-earning split
+the original draft used no longer fits the picture. Four buckets read
+honestly. The bottom line up front: **the residual genuinely-wasted
+complexity is small.** Most of what looked like waste on first pass
+turned out to be either earning its keep, foresighted for a planned
+feature, or a candidate for build-flag-conditional inclusion rather
+than removal.
 
-- **CPS + SM concurrency transform.** The differentiator.
-- **Errors as tag-bit flag + pipe short-circuit.** Clean and composable.
-- **Epoch non-moving GC.** Right for embedding scenarios where you can't
-  stop-the-world; possibly over-engineered for pure scripting use, but
-  the audit hardening is done.
-- **Three-mode parser, `[]` / `{}` split.** Yes.
-- **C-ABI struct layout.** Big FFI win.
-- **`interpret` capability sandbox sharing parent heap.** Clever; the
-  trade-off (no per-thread VM isolation) is documented in §17 and is
-  the right call for embed scenarios.
-- **Typed `$ctx` with COW forking.** Solves a real problem most
-  languages punt on.
+### 4.1 Earning their keep (full build)
+
+These pay off for the language as currently built. Trade-offs are
+documented elsewhere; the net is positive.
+
+- **CPS + SM concurrency transform.** The differentiator. Caveat per
+  §2.1: "no function coloring" is a syntax claim; `SuspensionAnalysis`
+  is implicit compile-time coloring.
+- **Errors as tag-bit flag + pipe short-circuit.** Clean composition;
+  silent-swallow and `parallel`-mixed-results trades documented in §2.3.
+- **Epoch non-moving generational GC.** Fully wired generations
+  (verified in §3.6: `hdr->gen`, promotion via `survive_count`,
+  `gc_mark_minor`/`gc_sweep_minor`, `RememberedSet` + barrier,
+  `gc_should_major` dispatch). Pays off on long-running scripts.
+- **Three-mode parser as a system.** `[]`/`{}` is the workhorse; `()`
+  is a deliberately-narrow `expr`-style sublanguage with mode-
+  independent operator semantics (§1).
+- **C-ABI struct layout.** Big FFI win. Asymmetric per §2.5 —
+  stack-passed structs get the full benefit; collection/closure-capture
+  patterns still box.
+- **`interpret` capability sandbox sharing parent heap.** Trade-off
+  (no per-thread VM isolation) documented in AUDIT §17; right call
+  for embed scenarios.
+- **Typed `$ctx` (in its corrected scope).** Earns its keep in the
+  scope where fork is explicit: `with-ctx`, `spawn`, `parallel`,
+  `race`. Regular proc calls share `$ctx` per §2.4 / the SYNTAX.md
+  correction.
 - **Macro system with syntax objects + hygiene.** Core to language
-  identity; the cost is real but Lisp-without-macros isn't Lisp.
+  identity. Macro/parser contract issue (binding-operator shape
+  ambiguity) is real but a refinement, not a "doesn't earn."
+- **Operators-as-macros, one meaning per operator.** Clean unified
+  model after the §1 walk-back.
+- **Stream type + sequence ops over streams and vectors.** Composes
+  with `for`/`filter`/`transform`; lets `!cmd` pipelines stay lazy.
+- **Bytecode VM + direct-threaded dispatch.** Foundational. The
+  direct-threaded path (AUDIT §13) earns ~2–3% on its own but the
+  architectural option matters more than the delta.
+- **Gradual type system.** Pays off at FFI/static slots; the deferred
+  items (closure signatures, imported struct fields, swap struct-elem
+  narrowing) are refinements rather than gaps in the core.
 
-### 4.2 Not earning their keep (yet)
+### 4.2 Build-flag candidates (full earning, but high embed cost)
 
-- **`()` infix mode as a third parser mode.** Worst cost/benefit of the
-  three modes. Either drop it and have operators be `{}`-mode macros,
-  or commit to real precedence so users aren't paying a tax for a
-  half-measure.
-- **Tainted/secret tag bits.** Namespace squat without consumers.
-- **Bignum tag + lib.** Namespace squat without dispatch.
-- **Regex lib.** Namespace squat without dispatch.
-- **`match` enum entry / special-form recognition without compile path.**
-  Minor, but the same shape.
-- **Prelude binding-operator macros.** The parser-shape-pattern-matching
-  in `=` / `:` / `::` is verbose enough to suggest the parser should
-  be emitting a cleaner shape.
+Earning their keep for the full build; costing more than embed users
+want to pay. Per §3.6, the cleanest answer is conditional compilation
+rather than removal.
+
+- **Multi-threaded runtime** (workers, Chase-Lev deques, grey buffer,
+  idle CV park, thief registration). Highest-leverage cut. The
+  single-threaded paths already exist in `vm.c`.
+- **Concurrent sweep + SATB write barrier + epoch protection.** Tied
+  to the threaded runtime — only matters when collection runs
+  concurrently with mutators.
+- **Generational GC (tier-2 cut).** Working code, not a stub. Trade-
+  off discussed in §3.6: lose long-running-script pay-off, gain
+  binary size and reasoning simplicity. Measure before committing.
+
+### 4.3 Waiting on integration (will earn once wired)
+
+Reserved or partially-built. Carrying costs are small; landing the
+wiring unlocks the payoff.
+
+- **Bigint + bigfloat dispatch.** `JACL_TAG_BIGNUM` reserved;
+  `lib/bignum/` ready; planned with implicit promotion in `dyn` per §3.2.
+- **Regex.** `lib/regex/` (Thompson NFA) self-contained; integration
+  scheduled.
+- **Shell-language surface features.** `par-each`, `timeout`, `$env` +
+  built-in aliases, `watch`, `glob`, `read-file`/`write-file`/
+  `append-file`. The runtime primitives they compose on top of are
+  already in place.
+- **`match` (uncertain).** May not ship; if it does, macro path is
+  a litmus test for the macro system (§3.3).
+- **TCO emission.** `OP_TAIL_CALL` exists in the VM; compiler-side
+  tail-position analysis pass needed (§3.5).
+- **Taint/secret enforcement.** Flag bits and helper API present;
+  producers, consumers, and the typed-vs-runtime design choice still
+  open (§3.4).
+
+### 4.4 Genuinely not earning (the small residual)
+
+After the walk-backs, this bucket is short.
+
+- **`lib/bignum/rational.h`** (~241 LOC). Won't be wired per the
+  bigint + bigfloat integration plan (§3.2). Pure cleanup; worth
+  dropping if any nearby reorganization happens.
+- **`OBJ_CLOSURE = 0` enum wart** (§3.7). Working mitigation in place
+  (`alloc_total != 0` skip in the mark loop); defense-in-depth fix
+  (introduce `OBJ_INVALID = 0`, shift the rest) is two lines and
+  unticketed.
+- **`ctx_pool` (maybe).** Forks happen only at four explicit sites and
+  are short-lived; the pool may not earn over regular `gc_alloc`. Per
+  §3.6, profile before deciding.
+
+That's it. Everything else either pays its way today, is a build-flag
+question rather than a removal question, or is on a planned integration
+path. The original draft's longer "not earning" list collapsed to three
+small items once the framings settled.
 
 ## 5. Innovations and whether they're worth it
 
