@@ -805,26 +805,112 @@ question rather than a removal question, or is on a planned integration
 path. The original draft's longer "not earning" list collapsed to three
 small items once the framings settled.
 
-## 5. Innovations and whether they're worth it
+## 5. Distinctive design choices
 
-1. **Three-mode delimiter parsing.** Novel as a coherent system. Worth
-   it for `[]` / `{}`; cut or rethink `()`.
-2. **Direct-style CPS+SM concurrency on a tagged-value VM with
-   non-moving epoch GC.** The combination is unusual; each piece exists
-   elsewhere. Worth it — the technically distinguishing feature.
-3. **Implicit typed `$ctx` with compile-time field declarations + COW
-   forking + spawn-snapshot semantics.** A genuinely new take on
-   dynamic scoping. Worth it.
-4. **Error-flag-bit in tagged values + implicit propagation through
-   pipes.** Not entirely new (NaN-boxing has been around) but the
-   pipe-short-circuit composition is a fresh combination. Worth it.
-5. **Capability-restricted `interpret` reusing parent heap.** Pragmatic,
-   not a research contribution, but the trade-off analysis in §17
-   (sandboxing without per-VM isolation) is the right one for the embed
-   scenario.
-6. **Methodological:** the `SYNCHRONIZATION.md` per-field reference and
-   the multi-phase audit pattern. Not a language feature but a project
-   artifact worth keeping.
+The original framing here was "innovations." That implies new
+contributions in the CS-research sense, which is the wrong yardstick
+for a glue/scripting language. The honest question is **what makes
+JACL identifiable as JACL vs. the alternatives a user might actually
+consider** — Lua, Wren, embedded Python, Tcl, Nushell. Each entry
+below is rated for whether it's *novel* (new mechanism), *distinctive*
+(unusual combination of known pieces), or *pragmatic* (good
+engineering trade). Most are distinctive rather than novel — and
+that's fine; coherent design from known pieces is what languages
+that ship actually need.
+
+1. **Three-mode delimiter parsing — `[]` juxtaposition, `{}` command
+   mode, `()` `expr`-style sublanguage.** Closest to *novel* of any
+   entry. Tcl has commands-as-default; Lisp has parens-everywhere;
+   Smalltalk has unary/binary/keyword forms without delimiters. None
+   have parser-mode-by-delimiter as a unifying concept. The
+   `[]`/`{}` split is the workhorse — one rule handles params,
+   struct fields, blocks, and `with-ctx` field maps. `()` is a
+   deliberately-narrow expression sublanguage modeled on Tcl's
+   `expr`, with mode-independent operator semantics (no `|`-as-pipe
+   vs `|`-as-bitor split). Worth it.
+
+2. **Direct-style CPS + SM concurrency on a tagged-value VM with
+   non-moving epoch GC.** *Distinctive combination.* Each piece
+   exists elsewhere (CPS in Scheme implementations, SM-compilation
+   of generators in JS/Python/Rust, tagged-value scripting VMs are
+   common, non-moving epoch GCs exist). The combination of all four
+   on a scripting VM, with direct-style syntax that hides the
+   suspension, is unusual. Caveat per §2.1: `SuspensionAnalysis` is
+   implicit compile-time coloring; the architectural property is
+   "no user-visible async keyword," not "no coloring at all." Worth
+   it — the technical differentiator.
+
+3. **Macro system with syntax objects + hygiene + run-on-VM
+   expansion.** *Distinctive vs. the alternatives in this niche.*
+   Lua has no real macros; Tcl's `uplevel` works at runtime not
+   compile time; embedded Python has no macros. JACL's Racket-school
+   approach — macro bodies compiled into closures, executed on a
+   real VM at expansion time via `jacl_ctx_run_closure` — gives
+   compile-time computation power that the typical embedding-
+   language alternatives don't have. The operators-as-macros uniform
+   model is downstream of this: `|`, `=`, `:`, `::` are all
+   user-redefinable in the same mechanism the prelude uses. Worth
+   it; the trade-off is parser-shape ambiguity bleeding into macro
+   bodies (§1), which is a refinement to address rather than a
+   reason to question the choice.
+
+4. **Implicit typed `$ctx` with fork only at explicit sites.**
+   *Distinctive combination.* Dynamic scoping itself is old (Common
+   Lisp special vars, Racket `parameterize`, Clojure dynamic vars).
+   What's distinctive: typed compile-time field declarations,
+   forks at four explicit sites (`with-ctx`, `spawn`, `parallel`,
+   `race`) rather than per-call, spawn-time snapshot for tasks that
+   outlive their caller's stack. The result is a dynamic-scoping
+   story that's typed at the language level and lazy at the runtime
+   level. Worth it.
+
+5. **C-ABI struct layout without a value header in a tagged-value
+   language.** *Distinctive engineering choice.* Most dynamic
+   languages box everything (Lua, Wren, Ruby, Python). JACL's
+   no-header struct layout — combined with inline opcodes for
+   field access, escape analysis for capture detection, and the
+   `is_value_type` registry flag — lets user structs pass to C
+   without translation. The implementation work is substantial
+   (per `STRUCT_DESIGN.md`) and the design choice is unusual for
+   a scripting language with macros and sandbox semantics. The
+   FFI passthrough is one of the more identifiable JACL
+   differentiators. Asymmetric per §2.5 — stack-passed structs get
+   the full win, collection/closure-capture patterns still box —
+   but the asymmetry is in the right place.
+
+6. **Errors as a tag-bit flag composing with pipe short-circuit.**
+   *Pragmatic combination.* NaN-boxing predates JACL; errors-as-
+   values is Erlang and OCaml territory; pipe-short-circuit on
+   failure is essentially `set -o pipefail`. What's distinctive is
+   combining the tag-bit propagation with `catch` as a pipe stage
+   and `try`/`catch` as a block form, so that error handling and
+   shell-pipeline composition use the same primitive. Pragmatic
+   ergonomics, not a novel mechanism. Worth it for the
+   glue/scripting target; the trade-offs (silent-swallow risk,
+   `parallel` mixed results, low-grade runtime tax) are documented
+   in §2.3.
+
+7. **Capability-restricted `interpret` sharing the parent heap.**
+   *Pragmatic engineering choice.* Most sandboxes use a separate
+   VM/heap (Lua sandboxes, browser iframes, `multiprocessing`).
+   JACL runs untrusted source in-place on the parent VM's heap with
+   a fresh top-level env populated from a capability prelude map.
+   The trade-off (no per-OS-thread VM isolation) is documented in
+   AUDIT §17 and is the right call for the embed scenario — the
+   primary defense is which capabilities the embedder exposes, not
+   address-space isolation. Distinctive vs. the alternatives;
+   sound for the audience.
+
+Dropped from the original list: the **methodological** entry
+(`SYNCHRONIZATION.md` per-field reference + multi-phase audit
+pattern). It's a strength of the codebase, not a design choice of
+the language; it lives more naturally in §7 (As a program) than as
+a "distinctive design choice." Removed here, retained there.
+
+Added: the C-ABI struct layout entry (§5 entry 5) and the macro
+system entry (§5 entry 3), both of which the original list
+underweighted. Both are among the more identifiable JACL
+differentiators in practice.
 
 ## 6. Domains
 
