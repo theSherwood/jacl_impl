@@ -1211,17 +1211,17 @@ The syntax is the same for both phases. Full parametric generics (type variables
 15. **Operator overloading** — desired but not designed. Operators should be user-definable.
 16. **Boolean/logical operators** — `and`/`or`/`not`: word-form, symbol-form, or both? Precedence in `()` infix mode? Connects to operator overloading. Deferred.
 17. **Standard library surface** — deferred. What's builtin vs module?
-18. **Job detection** — Is it static (compiler sees `spawn { !cmd }`) or dynamic (runtime checks if the task launched a process)? Static means the compiler knows at spawn-site whether it's a Job or plain Future. Dynamic means any Future could become a Job if it happens to exec a process.
-19. **`cancel` semantics** — Does `cancel` on a Job send SIGTERM with a grace period then SIGKILL? Or just SIGKILL immediately? What does `cancel` do on a plain Future — cooperative cancellation or hard kill?
-20. **`&` syntax** — Confirmed as sugar for `spawn { !cmd }`? Does it work only on `!cmd` or on any command? (`expensive-work &` for a JACL proc?)
+18. ~~**Job detection**~~ — resolved: static. The compiler decides at the `!cmd` call site whether to emit `OP_EXEC` with `EXEC_FLAG_BG` (Job) or basic mode (foreground stream).
+19. **`cancel` semantics** — current impl: `[cancel $job]` desugars to `[signal $job SIGTERM]` — SIGTERM only, no grace-then-SIGKILL fallback. Whether the runtime should escalate after a timeout, and what `cancel` should mean on a plain JACL Future (cooperative cancellation), are still open.
+20. ~~**`&` syntax**~~ — resolved: `&` is parser-recognized only on `!cmd` heads (`shell_cmd.background` AST flag), compiles to `OP_EXEC | EXEC_FLAG_BG`. Does **not** apply to arbitrary JACL procs — `expensive-work &` is not a valid background form; use `[spawn { ... }]` for JACL-side concurrency.
 21. **Alias scoping** — Are aliases file-scoped like `def`? Can you import them from modules (`use "aliases.jacl" {..}`)? Or are they session/config-level (like `.bashrc` aliases)?
 22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
-23. **`signal` on plain Future** — Type error? Silently ignored? Probably a type error — only Jobs have a process to signal.
+23. ~~**`signal` on plain Future**~~ — resolved: runtime error. `OP_SIGNAL` requires the operand to be a Job map (checks `_is_job` marker); anything else returns `"signal requires a Job map"`.
 24. **`$ctx` vs `$env` relationship** — Does `$ctx.env` subsume `$env`? Or does `$env` remain as the OS-synced atom while `$ctx.env` is the JACL-scoped view? If both exist, which does `!cmd` inherit?
 
 ## Implementation status
 
-Features from this document compared against the current codebase. Last updated: 2026-05-07.
+Features from this document compared against the current codebase. Last updated: 2026-05-15.
 
 ### Implemented
 
@@ -1266,20 +1266,21 @@ Features from this document compared against the current codebase. Last updated:
 | Module visibility (`_` prefix = private) | compiler-enforced at import |
 | Pragmas (`#{ ... }`) | yes |
 | Same-scope shadowing error | compile-time |
+| Shell interop (`!cmd`, `exec`) | `OP_EXEC` with FULL/STDIN/BG/PIPE flags; OS pipes, stdin/stdout |
+| Jobs (Future + OS process) | `exec` BG mode + `signal`/`cancel`; map carries `pid`. `&` sugar + cancel semantics still design-open |
 
 ### Not yet implemented
 
 | Feature | Complexity | Dependencies | Notes |
 |---------|-----------|--------------|-------|
-| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Lexed/parsed but no compiler/runtime; literals, bindings, type patterns, guards, pipe composition |
-| **Shell interop** (`!cmd`, `exec`) | Large | none (streams + `$ctx` both done) | `!` prefix, OS pipes, stdin/stdout, error mapping |
+| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Lexed + `HEAD_MATCH` recognized as special-form, but no compile path; literals, bindings, type patterns, guards, pipe composition |
 | **Callable values** (maps/atoms in `[]` head position) | Medium | None | `[$colors red]`, `[$config port]` |
 | **Atom listeners** (`watch`) | Medium | None | General-purpose watcher mechanism |
 | **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners |
-| **Aliases** (`alias ll { !ls -la }`) | Small | Shell interop | Compile-time rewrite with arg appending |
-| **Globbing** (`glob` command) | Medium | Shell interop | Returns stream of paths; reads `$ctx.pwd` |
+| **Aliases** (`alias ll { !ls -la }`) | Small | none (shell interop done) | Compile-time rewrite with arg appending |
+| **Globbing** (`glob` command) | Medium | none (shell interop done) | Returns stream of paths; reads `$ctx.pwd` |
 | **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | none (streams done) | Pipe-friendly file I/O |
-| **Jobs** (future + OS process) | Medium | Shell interop | `pid`, `signal`, `cancel`, `&` sugar |
 | **`par-each`** | Medium | none (streams + concurrency both done) | Concurrent stream processing |
 | **`timeout`** | Small | none (concurrency done) | Sugar for `race` + sleep |
-| **Regular expressions** | Medium | None | Literal syntax TBD |
+| **Regular expressions** | Medium | None | `lib/regex/` (Thompson NFA) exists, not wired into VM; literal syntax TBD |
+| **Bignum / numeric tower** | Medium | None | `JACL_TAG_BIGNUM` + `lib/bignum/` exist; no VM arithmetic dispatch |
