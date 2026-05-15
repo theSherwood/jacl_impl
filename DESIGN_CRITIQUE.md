@@ -635,24 +635,67 @@ seam I can see.
   contributors who only build single-threaded face a much smaller
   surface — but doesn't eliminate it for full-build maintainers.
 
-### 3.7 `vm.c` is large but the structural floor is high
+### 3.7 `vm.c` is large; the cost is token economy, not cognitive load
 
-12,200 lines in one TU. The direct-threaded dispatch table (222
-opcodes per AUDIT.md §13) wants its handlers in one TU for the
-goto-label addressing trick to work, so a fully decomposed-by-file
-VM is off the table. Splitting by category (arithmetic / control
-flow / collections / GC ops / shell / SM resume) could plausibly
-halve the file size while keeping the dispatch table cohesive — the
-structural floor is high, but not 12k high.
+12,200 lines in one TU. Direct-threaded dispatch (222 opcodes per
+AUDIT.md §13) wants the handlers reachable from one dispatch loop
+for the goto-label addressing trick, but the handlers themselves
+don't have to be inline in the same source file — a split via
+`#include`-d handler files (CPython's pattern) could co-locate the
+dispatch loop while distributing handler bodies across category
+files. A practical split (arithmetic / control flow / collections /
+GC ops / shell / SM resume) could plausibly take the core `vm.c`
+down to 1–2k lines plus a directory of handler includes.
 
-The concrete signal that the file is currently *too* big is the
-`OBJ_CLOSURE = 0` enum hazard in `jacl.h:116` / `gc.c:22`: a 2-line
-enum reorder (introduce `OBJ_INVALID = 0`, shift the rest by one)
-that would be defense-in-depth against the mid-init read-race /
-post-sweep stale-ref class of bugs. The fix hasn't been made because
-walking the blast radius of an enum-value shift across 12k lines of
-opcode handlers is expensive enough to defer indefinitely. Small,
-real signal that the cost-of-edit is starting to bite.
+**The cost metric is different than it would be for human dev.** JACL's
+development is primarily agent-driven, so the cost of 12k lines is
+not "humans get lost in it" but "each cross-cutting read burns more
+tokens than it needs to." Evidence the file size isn't blocking work:
+the §D.1 `JACL_ASSERT_TAG` pass (56 sites) and §D.2 `VM_ERROR`
+cleanup (72 sites across 39 opcodes) both landed, so motivated work
+gets done. The cost is in the *steady-state token economy* — every
+exploratory pass, every cross-handler refactor, every "understand
+the dispatch" reading session pays the full-file load cost. A split
+would shift that toward "pay for what you load," cheaper on
+category-localized changes (the common case) and roughly neutral on
+genuinely cross-cutting ones.
+
+So: worth doing for ongoing token cost, not urgent because no
+specific edit has been blocked by the size.
+
+**Aside on the `OBJ_CLOSURE = 0` enum.** An earlier draft of this
+critique cited this as a "cost-of-edit too high" signal — the fix
+not happening because walking the blast radius across 12k lines was
+too expensive. After confirming with the author, the actual reason
+is closer to "small wart, working mitigation in place, never
+escalated to a priority item." Briefly, since this surfaces a
+different kind of issue worth recording:
+
+- `GCObjType` is the heap-object-kind tag stored in every GC header.
+  `OBJ_CLOSURE` is the first enum value (`gc.c:22`), so it equals
+  zero.
+- Risk: a GC header read mid-init (before `obj_type` is written) or
+  post-sweep (stale ref into a zeroed slot) would have a zero
+  `obj_type` and dispatch to the closure handler, reading upvalue
+  pointers on garbage.
+- Did surface: the May 2026 perf-bench bug, fixed in `bc74a10` by
+  having the mark loop skip any object with `alloc_total == 0`
+  (which a live object never has). That mitigation is reliable —
+  the SEGV class is closed.
+- Defense-in-depth proposal: introduce `OBJ_INVALID = 0`, shift the
+  real types up by one. Then a zero `obj_type` dispatches to "no
+  real case" regardless of `alloc_total`. Two-line enum change,
+  modest blast radius across `GCObjType` switch sites.
+
+The reason this surfaces in a critique like this one and not in
+day-to-day work: design warts known to a previous agent session
+don't necessarily persist in the author's working memory, and there
+isn't a durable issue-tracker surface for "small defense-in-depth
+fixes worth doing eventually." That's a meta-issue separate from
+the file-size concern — worth its own note: critical reviews catch
+this kind of thing precisely because they re-derive everything from
+the code, but the findings need somewhere durable to live or they
+decay between sessions.
 
 ## 4. Pulling-their-weight scorecard
 
