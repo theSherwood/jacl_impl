@@ -9,7 +9,7 @@
 #
 # Uses while+mut instead of tail recursion because the compiler does not
 # currently emit OP_TAIL_CALL — recursive iteration is bounded by
-# VM_FRAMES_MAX (64). The collection values themselves stay persistent.
+# VM_FRAMES_MAX (256). The collection values themselves stay persistent.
 #
 # Top-level code (no proc wrapper) because the harness submits the chunk
 # as a spawn task — wrapping in `proc main` and calling it adds frames

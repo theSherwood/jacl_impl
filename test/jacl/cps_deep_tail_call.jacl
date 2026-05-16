@@ -2,7 +2,9 @@
 # mode: concurrent
 # Deep CPS recursion via tail-call optimization.
 # Computes sum 1..1000 = 500500 via recursive spawn/await.
-# This would have hit stack overflow at ~65 iterations without TCO.
+# This would have hit stack overflow at ~257 iterations without TCO
+# (VM_FRAMES_MAX = 256). At 1000 iterations it's still well past the
+# limit, so the test exercises CPS/SM resumption rather than plain frames.
 proc sum {n} {
   if [== $n 0] {
     0

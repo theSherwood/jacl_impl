@@ -7,7 +7,7 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-05-15.
+Last refreshed: 2026-05-16.
 
 ---
 
