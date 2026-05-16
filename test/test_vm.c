@@ -2305,7 +2305,7 @@ static int test_tail_call_basic(void) {
 }
 
 /* Test: self-recursive tail call does NOT overflow frames.
- * A closure tail-calls itself 200 times (way past VM_FRAMES_MAX=64),
+ * A closure tail-calls itself 500 times (way past VM_FRAMES_MAX=256),
  * decrementing a counter each time, then returns 0 at base case.
  * With OP_CALL this would overflow; with OP_TAIL_CALL it must succeed. */
 static int test_tail_call_no_frame_overflow(void) {
@@ -2369,11 +2369,11 @@ static int test_tail_call_no_frame_overflow(void) {
   BytecodeChunk main_chunk;
   chunk_init(&main_chunk, &arena);
   uint16_t cl_main = chunk_add_constant(&main_chunk, jacl_closure(cl));
-  uint16_t c200 = chunk_add_constant(&main_chunk, jacl_i32(200));
+  uint16_t c500 = chunk_add_constant(&main_chunk, jacl_i32(500));
   chunk_write(&main_chunk, OP_CONST, 1);
   chunk_write_u16(&main_chunk, cl_main, 1);
   chunk_write(&main_chunk, OP_CONST, 1);
-  chunk_write_u16(&main_chunk, c200, 1);
+  chunk_write_u16(&main_chunk, c500, 1);
   chunk_write(&main_chunk, OP_CALL, 1);
   chunk_write(&main_chunk, 1, 1);
   chunk_write(&main_chunk, OP_HALT, 1);

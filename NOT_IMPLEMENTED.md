@@ -26,7 +26,8 @@ Status snapshot:
 | **Globbing** (`glob`) | Medium | None | Reads `$ctx.pwd`; returns a stream. Pattern engine + brace expansion. |
 | **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | None | Pipe-friendly file I/O. |
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |
-| **`timeout`** | Small | None | Sugar for `race { sleep N; error "timeout" }`. Mostly a prelude macro. |
+| **`sleep`** (suspending) | Small-medium | None | No `OP_SLEEP` / no `sleep` builtin today (platform has `nanosleep`, but exposing it would need to suspend the SM, not block the worker thread). Prerequisite for `timeout`. ~80–150 LOC: scheduler-integrated wakeup + opcode handler + compiler emit. |
+| **`timeout`** | Small | `sleep` (above) | Once `sleep` exists, this is a ~10-line prelude macro over `race { body } { sleep N; error "timeout" }`. The `DESIGN_CRITIQUE.md §9.4` framing "Mostly a prelude macro" was correct for the macro itself but understated the `sleep` prerequisite. |
 | **Regular expressions** | Medium | Lib exists (see §2) | Literal syntax (`/regex/`) + capture-group bindings + VM bridge. |
 | **Bignum / numeric tower** | Medium | Lib exists (see §2) | `JACL_TAG_BIGNUM` exists; no VM arithmetic dispatch. Plan is bigint+bigfloat with implicit promotion in `dyn`. Rationals dropped. |
 

@@ -1109,7 +1109,8 @@ estimates from comparable existing features.
 | Globbing (`glob`) | 0 | +200–400 | Pattern engine + brace expansion + `$ctx.pwd` integration; returns a stream. |
 | `read-file` / `write-file` / `append-file` | 0 | +150–250 | Wrappers over fread/fwrite emitting/consuming streams. |
 | `par-each` | 0 | +150–300 | Composes existing `spawn` + stream pull. Hard part is backpressure (DESIGN.md Open Questions). |
-| `timeout N {body}` | 0 | +50–100 | Sugar for `race { sleep N; error "timeout" }`. Mostly a prelude macro. |
+| `sleep N` (suspending) | 0 | +80–150 | Prerequisite for `timeout`. No `sleep` builtin today. Needs scheduler-integrated wakeup (not blocking `nanosleep` — must suspend the SM so the worker can run other tasks). |
+| `timeout N {body}` | 0 | +10 (after `sleep` lands) | Prelude macro over `race { body } { sleep N; error "timeout" }`. The macro itself is trivial; the cost is in the `sleep` prerequisite above. |
 | Regex (literal syntax + integration) | 2,500 (lib carrying) | +300–600 wiring | VM bridge + literal `/regex/` lex + capture-group binding. Lib is already there. |
 | Bigint + bigfloat dispatch | ~1,870 (lib carrying) + 1 tag bit | +500–1,000 wiring | Arithmetic dispatch in vm.c + implicit promotion in dyn paths + typed `bigint`/`bigfloat` slots. Rationals dropped. |
 | TCO emission | ~25 (OP_TAIL_CALL handler already in vm) | +100–200 | Compiler-side tail-position analysis pass per §3.5. |
