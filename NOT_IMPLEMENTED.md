@@ -109,7 +109,9 @@ decisions that need a call before code can be written.
 - **GC:** Scheduling heuristics (current: adaptive allocation-byte
   threshold; tuning is open).
 - **Errors:** Error chaining / wrapping. Whether to mark procs as
-  error-capable explicitly or trust propagation.
+  error-capable explicitly or trust propagation. Whether stack
+  overflow should be catchable via `try`/`catch` like other errors —
+  see §10 for the current inconsistency.
 - **Modules:** Search path / resolution rules beyond
   relative-to-importer. Versioning / dependency management. Visibility
   beyond underscore convention (`pub`/`priv` keywords if encapsulation
@@ -210,6 +212,39 @@ From `DESIGN.md` § "Known Limitations".
 - **"ctx-pure" pruning is future work.** The compiler does not mark
   procs as ctx-pure to skip the fork. `with-ctx` always pays the fork
   cost when entered. Future analysis pass.
+- **Stack overflow is not catchable at toplevel.** JACL's error model
+  is "errors are values that propagate" (`try`/`catch` catches anything
+  with the error flag), but stack overflow bypasses it. Two different
+  behaviors today for the same condition:
+  - *Inside `spawn`/`parallel`/`race`:* overflow becomes a regular
+    error value on the future; `await` surfaces it; downstream
+    `try`/`catch` catches it. This is the §16 path
+    (`runtime__make_completion_error`) and matches the design intent.
+  - *At toplevel / inside `try`:* overflow returns `VM_RUNTIME_ERROR`
+    (or `VM_STACK_OVERFLOW`) directly from `vm__run` to the C caller,
+    bypassing the in-VM error-value machinery. Verified empirically:
+    `try { rec 0 } e { ... }` with infinite-recursion `rec` does not
+    catch — the program exits with the message and any post-`try`
+    code never fires.
+
+  Making overflow uniformly catchable requires reserving headroom (a
+  few stack slots + frames) so the error-value push and unwind can
+  run, plus growing every overflow check site to route through the
+  in-VM error machinery instead of returning to C. The hard-fatal
+  floor stays as defense-in-depth (overflow-during-`catch`-body
+  itself can't be catchable — that's where you have to give up). The
+  smaller-effort alternative is to declare overflow fatal-by-design
+  (machine-limit, not user-recoverable) and document that `try`
+  won't catch it — bash-flavored honesty, but it forecloses the
+  "retry with a different strategy" pattern.
+
+  Tests covering current behavior: `test_vm.c:227` (operand stack),
+  `test_vm.c:1633` (error_line), `test_vm.c:2190` (call frames),
+  `test_compiler.c:2760` (compiler-emitted recursion), and the
+  end-to-end fixtures `test/jacl/overflow_call_depth.jacl` (toplevel)
+  + `test/jacl/cps_spawn_deep_recursion.jacl` (across a spawn
+  boundary). No test today asserts `try`/`catch` semantics for
+  overflow — add one when the design call is made.
 
 ---
 
