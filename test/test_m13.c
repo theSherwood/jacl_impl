@@ -2304,9 +2304,10 @@ static int test_oom_tier3_panic(void) {
     oom_panic_called = false;
 
     /* Fill the single block with LIVE data (rooted on VM stack).
-     * Use large payloads (~248 bytes each) so 255 objects fill the 64KB block.
-     * 256-byte aligned allocs × 255 = ~65280 bytes ≈ 64KB. */
-    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+     * Use large payloads (~248 bytes each) so ~255 objects fill the 64KB block.
+     * 256-byte aligned allocs × 255 = ~65280 bytes ≈ 64KB. Stop short of
+     * filling so the OOM-triggering loop below runs inside setjmp protection. */
+    for (int i = 0; i < 200; i++) {
         void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
         if (!p) break;
         JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
@@ -2403,8 +2404,9 @@ static int test_oom_panic_diagnostic(void) {
     gc__oom_handler = test__oom_panic_handler;
     oom_panic_called = false;
 
-    /* Fill the single block with large live objects (rooted on stack) */
-    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+    /* Fill the single block with large live objects (rooted on stack).
+     * Stop short of filling so the OOM trigger fires inside setjmp protection. */
+    for (int i = 0; i < 200; i++) {
         void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
         if (!p) break;
         JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
@@ -3813,8 +3815,9 @@ static int test_gc_oom_tier3_handler_info(void) {
     gc__oom_handler = test__oom_panic_handler;
     oom_panic_called = false;
 
-    /* Fill with live data (rooted on stack) */
-    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+    /* Fill with live data (rooted on stack). Stop short of filling so the
+     * OOM trigger fires inside the setjmp-protected loop below. */
+    for (int i = 0; i < 200; i++) {
         void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
         if (!p) break;
         JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);

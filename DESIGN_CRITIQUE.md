@@ -419,53 +419,35 @@ those uncertainties carry small forward costs (tag bits, scaffolding,
 dormant libs) that are easy to defer. That's a normal state for an
 in-flight language, not a weakness.
 
-### 3.5 Stack limits are tighter than they look because TCO isn't wired
+### 3.5 Stack limits — the short-term bump landed, TCO still pending
 
-`VM_STACK_MAX = 256` and `VM_FRAMES_MAX = 64`. §16 (2026-05-15) made
-the failure mode legible by distinguishing operand-stack vs call-
-frame overflow and propagating the result to the awaiter. So far so
-good.
+`VM_STACK_MAX = 1024` and `VM_FRAMES_MAX = 256` as of 2026-05-16. The
+old values (256/64) were noticeably tight: a 64-deep directory tree,
+JSON document, or AST visitor would run out of frames. The 4× bump
+costs ~12 KB more per VM (`CallFrame` is ~32 bytes; the stack array is
+8 bytes/slot) — negligible. §16 (2026-05-15) had already made the
+failure mode legible by distinguishing operand-stack vs call-frame
+overflow and propagating the result to the awaiter.
 
-The buried issue: **`OP_TAIL_CALL` exists in the VM** (declared
-`bytecode.c:43`, handler at `vm.c:2901–2935`) and reuses the current
-frame. **The compiler never emits it** — grep for
-`OP_TAIL_CALL`/`emit_tail`/`tail_position`/`is_tail` in `compiler.c`
-returns nothing. So every recursive call consumes a fresh frame. The
-infrastructure is in place; the compiler-side analysis pass that
-identifies tail-position call sites just hasn't been written. Per
-the author, the gap is unimplemented rather than deliberate.
-
-That makes 64 frames noticeably tighter than it would otherwise be:
-
-- **With TCO**: 64 frames covers all practical recursion depths because
-  tail-recursive walkers, traversers, and accumulators don't consume
-  frames at all.
-- **Without TCO**: a 64-deep directory tree, a 64-deep JSON document, a
-  64-deep AST visitor each runs out of frames. These come up in
-  glue/scripting; they aren't "math library" use cases.
-
-Two paths forward, both planned:
-
-- **Short-term: bump the constants.** `CallFrame` is ~32 bytes
-  (4 pointers + one `uint32_t`, `vm.c:80–86`). Going from 64 frames
-  to 256 costs ~6KB more per VM; from 256 operand slots to 1024
-  costs ~6KB more. ~12KB total for a 4× increase across both limits
-  — negligible per VM, and the author has said it should happen.
-- **Durable fix: compiler-emitted `OP_TAIL_CALL`.** The runtime side
-  is done. Compiler-side analysis is small: identify proc bodies
-  whose last expression is a call, in tail position (not inside
-  `try`, not the source of a binding, not followed by a pipe stage
-  that consumes the return). One nuance — suspending procs are
-  CPS-transformed, so the "tail call" in a suspending proc becomes a
-  continuation construction. That's not impossible (the SM-compile
-  path could emit a continuation-tail variant) but it's the part
-  worth thinking through before the analysis pass lands.
+The durable fix — compiler-emitted `OP_TAIL_CALL` — is still pending.
+**`OP_TAIL_CALL` exists in the VM** (declared `bytecode.c:43`, handler
+at `vm.c:2901–2935`) and reuses the current frame, but the compiler
+never emits it. So tail-recursive walkers still consume one frame per
+call. With 256 frames the practical impact is small for the
+glue/scripting audience, but the work to emit it is bounded: identify
+proc bodies whose last expression is a call in tail position (not
+inside `try`, not the source of a binding, not followed by a pipe
+stage that consumes the return). One nuance — suspending procs are
+CPS-transformed, so the "tail call" in a suspending proc becomes a
+continuation construction. That's not impossible (the SM-compile path
+could emit a continuation-tail variant) but it's the part worth
+thinking through before the analysis pass lands.
 
 Growable stacks are a further option (heap-allocated arrays, GC-
 traced, inline-bitmap shadow arrays scaled to stack size), but
-probably not needed if TCO + 4× constants are in. The audience
-isn't writing parsers in JACL itself; the planned mitigations
-should cover the recursive-traversal patterns that do come up.
+probably not needed if TCO is in. The audience isn't writing parsers
+in JACL itself; the post-bump constants + planned TCO should cover the
+recursive-traversal patterns that do come up.
 
 ### 3.6 Necessary complexity for the full build, but the embed cost is real
 

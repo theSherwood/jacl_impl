@@ -45,8 +45,8 @@
 
 /* --- Stack size --- */
 
-#define VM_STACK_MAX 256
-#define VM_FRAMES_MAX 64
+#define VM_STACK_MAX 1024
+#define VM_FRAMES_MAX 256
 
 /* --- Environment initial capacity --- */
 

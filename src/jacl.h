@@ -1456,8 +1456,8 @@ typedef struct {
  *                     nesting, wide inline structs, large spreads.
  *   - VM_FRAMES_MAX : call-frame depth. Hit by deep recursion. Convert
  *                     to a tail call, state machine, or trampoline. */
-#define VM_STACK_MAX        256
-#define VM_FRAMES_MAX       64
+#define VM_STACK_MAX        1024
+#define VM_FRAMES_MAX       256
 #define VM_ENV_INIT_CAP     16
 #define VM_STACK_TRACE_MAX  32
 

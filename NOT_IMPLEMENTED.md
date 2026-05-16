@@ -55,10 +55,10 @@ Scaffolding that exists in the runtime but no compiler path emits it.
 
 - **`OP_TAIL_CALL`** — handler at `vm.c:2901–2935`; compiler never
   emits it. Compiler-side tail-position analysis pass not written.
-  Without TCO, `VM_FRAMES_MAX = 64` is tight for deep recursive
-  traversal (64-deep JSON, AST visitors). Author has flagged
-  bumping the stack constants (4× → ~12KB per VM) as a parallel
-  short-term mitigation. Full discussion: `DESIGN_CRITIQUE.md` §3.5.
+  The short-term mitigation (4× bump of `VM_STACK_MAX` / `VM_FRAMES_MAX`
+  to 1024 / 256) landed 2026-05-16, so practical recursion depths are
+  now comfortable; the durable fix is still the compiler pass. Full
+  discussion: `DESIGN_CRITIQUE.md` §3.5.
 - **`JACL_FLAG_TAINTED` / `JACL_FLAG_SECRET`** — full bit-flag API
   (`value.c:45-46, 392-400`) preserved across GC (`JACL_FLAGS_MASK`,
   `gc.c:723, 780, 836`). Zero producers, zero consumers. Open design
@@ -149,10 +149,6 @@ From `STRUCT_DESIGN.md` § "Open Questions".
 - **Fixed-size arrays in structs** (e.g. `[u8; 16]`). Layout system
   can accommodate; not yet wired. Useful for byte buffers without
   strings.
-- **Stack size:** `VM_STACK_MAX = 256`, `VM_FRAMES_MAX = 64`. Wide
-  structs in deep call stacks can exhaust the operand stack. §16
-  (2026-05-15) made overflow legible but didn't raise the limits.
-  Bump-the-constants is queued per `DESIGN_CRITIQUE.md` §3.5.
 - **Wide cells / globals.** Mut bindings and globals store `JaclVal`
   slots; structs must go through `[box]`. A wide-cell architecture
   could allow inline mut struct bindings; not pursued.
