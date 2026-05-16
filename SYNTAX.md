@@ -1214,8 +1214,13 @@ The syntax is the same for both phases. Full parametric generics (type variables
 
 ### Needs design work
 
+Open design questions live in **`NOT_IMPLEMENTED.md` §6** (syntax-level
+open questions). Question numbers below are stable — they're
+referenced from `NOT_IMPLEMENTED.md` and elsewhere — so resolved items
+stay listed as historical record.
+
 1. ~~**String interpolation**~~ — resolved, see String interpolation section.
-2. **Boolean/logical operators** — `and`/`or`/`not`: word-form, symbol-form, or both? Precedence in `()` infix mode? Deferred.
+2. **Boolean/logical operators** — see `NOT_IMPLEMENTED.md` §6.
 3. ~~**Early return**~~ — resolved: `return` exits nearest `proc`, blocks are inlined.
 4. ~~**Loops**~~ — resolved: `for` replaces `each`, `while` stays, `break`/`continue` work in block forms.
 5. ~~**Module visibility**~~ — resolved: everything top-level is public, underscore prefix is private (compiler-enforced).
@@ -1227,17 +1232,17 @@ The syntax is the same for both phases. Full parametric generics (type variables
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
 12. ~~**Optional chaining**~~ — resolved: `($val ?. field)` in infix mode.
 13. ~~**Field access syntax**~~ — resolved: `->` only. `$user->name`, chained `$a->b->c`. `.` was rejected because bare words are strings (filenames/paths use `.` heavily). Implemented in lexer/parser; desugars to `[. expr field]`.
-14. **Regular expressions** — deferred. Need literal syntax eventually.
-15. **Operator overloading** — desired but not designed. Operators should be user-definable.
-16. **Boolean/logical operators** — `and`/`or`/`not`: word-form, symbol-form, or both? Precedence in `()` infix mode? Connects to operator overloading. Deferred.
-17. **Standard library surface** — deferred. What's builtin vs module?
+14. **Regular expressions** — see `NOT_IMPLEMENTED.md` §1, §2, §6.
+15. **Operator overloading** — see `NOT_IMPLEMENTED.md` §6.
+16. **Boolean/logical operators** — see `NOT_IMPLEMENTED.md` §6 (duplicate of Q2).
+17. **Standard library surface** — see `NOT_IMPLEMENTED.md` §6.
 18. ~~**Job detection**~~ — resolved: static. The compiler decides at the `!cmd` call site whether to emit `OP_EXEC` with `EXEC_FLAG_BG` (Job) or basic mode (foreground stream).
-19. **`cancel` semantics** — current impl: `[cancel $job]` desugars to `[signal $job SIGTERM]` — SIGTERM only, no grace-then-SIGKILL fallback. Whether the runtime should escalate after a timeout, and what `cancel` should mean on a plain JACL Future (cooperative cancellation), are still open.
+19. **`cancel` semantics** — see `NOT_IMPLEMENTED.md` §6. Current impl: `[cancel $job]` desugars to `[signal $job SIGTERM]` — SIGTERM only, no escalation; cooperative cancel on plain Future is open.
 20. ~~**`&` syntax**~~ — resolved: `&` is parser-recognized only on `!cmd` heads (`shell_cmd.background` AST flag), compiles to `OP_EXEC | EXEC_FLAG_BG`. Does **not** apply to arbitrary JACL procs — `expensive-work &` is not a valid background form; use `[spawn { ... }]` for JACL-side concurrency.
-21. **Alias scoping** — Are aliases file-scoped like `def`? Can you import them from modules (`use "aliases.jacl" {..}`)? Or are they session/config-level (like `.bashrc` aliases)?
+21. **Alias scoping** — see `NOT_IMPLEMENTED.md` §6.
 22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
 23. ~~**`signal` on plain Future**~~ — resolved: runtime error. `OP_SIGNAL` requires the operand to be a Job map (checks `_is_job` marker); anything else returns `"signal requires a Job map"`.
-24. **`$ctx` vs `$env` relationship** — Does `$ctx.env` subsume `$env`? Or does `$env` remain as the OS-synced atom while `$ctx.env` is the JACL-scoped view? If both exist, which does `!cmd` inherit?
+24. **`$ctx` vs `$env` relationship** — see `NOT_IMPLEMENTED.md` §6.
 
 ## Implementation status
 
@@ -1291,16 +1296,4 @@ Features from this document compared against the current codebase. Last updated:
 
 ### Not yet implemented
 
-| Feature | Complexity | Dependencies | Notes |
-|---------|-----------|--------------|-------|
-| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Lexed + `HEAD_MATCH` recognized as special-form, but no compile path; literals, bindings, type patterns, guards, pipe composition |
-| **Callable values** (maps/atoms in `[]` head position) | Medium | None | `[$colors red]`, `[$config port]` |
-| **Atom listeners** (`watch`) | Medium | None | General-purpose watcher mechanism |
-| **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners |
-| **Aliases** (`alias ll { !ls -la }`) | Small | none (shell interop done) | Compile-time rewrite with arg appending |
-| **Globbing** (`glob` command) | Medium | none (shell interop done) | Returns stream of paths; reads `$ctx.pwd` |
-| **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | none (streams done) | Pipe-friendly file I/O |
-| **`par-each`** | Medium | none (streams + concurrency both done) | Concurrent stream processing |
-| **`timeout`** | Small | none (concurrency done) | Sugar for `race` + sleep |
-| **Regular expressions** | Medium | None | `lib/regex/` (Thompson NFA) exists, not wired into VM; literal syntax TBD |
-| **Bignum / numeric tower** | Medium | None | `JACL_TAG_BIGNUM` + `lib/bignum/` exist; no VM arithmetic dispatch |
+See **`NOT_IMPLEMENTED.md` §1** for the canonical table.

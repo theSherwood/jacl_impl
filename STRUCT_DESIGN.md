@@ -225,16 +225,5 @@ coordination — see `TYPE_SYSTEM.md` for the typer-side perspective.
 
 ## Open Questions
 
-- **Fixed-size arrays in structs** (e.g., `[u8; 16]`): useful for byte
-  buffers without strings. Layout system can accommodate; not yet wired.
-- **Stack size:** `VM_STACK_MAX = 256` slots, `VM_FRAMES_MAX = 64`. Wide
-  structs in deep call stacks could exhaust the operand stack. §16
-  (2026-05-15) added `vm__set_operand_overflow` and
-  `vm__set_frame_overflow` so the two limits surface as distinct,
-  numerically-named error messages and propagate to awaiters via
-  `runtime__make_completion_error`, but the limits themselves are
-  unchanged.
-- **Wide cells / globals:** mut bindings and globals currently store
-  `JaclVal` slots; structs in those slots must go through `[box]`. A
-  wide-cell architecture could allow inline mut struct bindings, but
-  is not pursued here.
+See **`NOT_IMPLEMENTED.md` §7** — fixed-size arrays in structs,
+stack-size constants, wide cells / globals.

@@ -484,23 +484,15 @@ Generational collection is an optimization on top of the base GC. Implement the 
 4. Minor GC mode that skips old objects
 5. Scheduling heuristics for minor vs. major
 
-## 12. Collection Migration (HAMT, RRB)
+## 12. Collection Migration (HAMT, RRB) — done
 
-### Current: Reference Counting
-
-HAMT and RRB nodes use `RCHeader` (refcount + destructor). COW operations `RC_REF` shared nodes and `RC_UNREF` replaced nodes, triggering cascading frees.
-
-### Future: GC-Managed
-
-- Replace `RCHeader` with `GCHeader` on all collection nodes
-- Route allocation through per-thread GC heap (`gc_alloc`)
-- Remove all `RC_REF` / `RC_UNREF` calls from collection operations
-- COW operations just create new nodes; old nodes become garbage when unreachable
-
-**Benefits:**
-- No cascading decrements (latency spikes eliminated)
-- No atomic refcount operations
-- Simpler collection code
+HAMT and RRB nodes are GC-managed. Each node type has its own GC
+object tag (`OBJ_HAMT_INTERNAL` / `OBJ_HAMT_LEAF` / `OBJ_HAMT_COLLISION`,
+`OBJ_RRB_INTERNAL` / `OBJ_RRB_LEAF` / `OBJ_RRB_ROOT`) and is traced from
+`gc_collect.c` (`gc_collect.c:201–266`). The single-header libs still
+expose `H_RC_REF` / `H_RC_UNREF` / equivalents as compatibility
+macros, but they are zero-cost no-ops (`lib/hamt/hamt.h:132–133`). COW
+operations create new nodes; old nodes become garbage when unreachable.
 
 ## 13. Arena Migration
 
@@ -519,7 +511,13 @@ HAMT and RRB nodes use `RCHeader` (refcount + destructor). COW operations `RC_RE
 
 ### String Interning
 
-Currently strings are interned forever in an arena-backed table. With GC:
+The intern table is GC-aware: `gc_sweep_intern_table` (called from
+`gc_collect`, `gc_collect.c:747`) evicts dead entries based on mark
+bits before sweep zeroes their memory. Phase-2 weak-reference
+interning is in place — the historical "Phase 1 immortal" plan was
+superseded.
+
+Historical phasing notes (kept for context):
 
 - **Phase 1**: Keep immortal interning (simple, strings are usually long-lived)
 - **Phase 2** (if needed): Weak-reference intern table — GC can reclaim unused strings

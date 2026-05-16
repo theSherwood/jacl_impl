@@ -97,9 +97,5 @@ parallel body that itself suspends has its own SM or closure.
 
 ## Future work
 
-The current SM has all locals always live in the state. A
-yield-liveness pass that nulls out fields known dead after each
-yield point would improve GC tracing (less work per major collection)
-and reduce retained memory. Pay-off is workload-dependent — long-lived
-generators with large dead sets benefit most. Not currently a
-measured bottleneck; deferred.
+See **`NOT_IMPLEMENTED.md` §8** — yield-liveness pass for SM-stored
+locals.

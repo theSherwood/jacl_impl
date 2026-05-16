@@ -50,6 +50,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - `GENERATOR_STATE_MACHINE.md` — generator SM transform
 - `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
 - `SYNCHRONIZATION.md` — per-field shared-state synchronization reference
+- `NOT_IMPLEMENTED.md` — single index of all planned / deferred / half-built items
 - `AUDIT.md` — currently-open audit items (small, active)
 - `AUDIT_HISTORY.md` — archive of the May 2026 audit campaign (large, read-only)
 
@@ -86,29 +87,18 @@ synchronization invariants are in `SYNCHRONIZATION.md`. Open
 non-correctness items (code health, deferred perf levers) are in
 `AUDIT.md`.
 
-## Known Limitations
+## Open items
 
-**Escape analysis: boxes in collections are not tracked.** The escape analysis (compiler.c) detects direct mutable captures and transitive captures through closures, but does not detect box/cell refs stored in collections. If a box is stashed into a vector and that vector is passed to `spawn`, the task will not be pinned. Fixing this would require tracking taint through collection operations (vec-push, map-set, etc.).
+Known limitations, open design questions, and planned-but-not-yet-
+implemented features all live in **`NOT_IMPLEMENTED.md`** (single
+index, organized by category, with pointers back to the owning doc
+for full discussion).
+
+### Resolved limitations (historical record)
 
 ~~**Macros cannot run interpreted code at expansion time.**~~ Resolved: macro bodies are now compiled into closures and executed on a real VM at expansion time via `jacl_ctx_run_closure`. Macros can call arbitrary functions, use `gensym` as a real builtin, and perform any computation that returns a syntax object. Implemented in the macro-eval-rewrite PRD (US-005 through US-013).
 
 ~~**7-byte inline name limit.**~~ Resolved: variable names longer than 7 bytes now use heap-interned strings (pointer-stable, `==` comparison works). Names up to 128 bytes are supported. The `compiler__name_val` helper routes names ≤7 bytes to inline strings and 8–128 bytes to interned strings. Gensym prefixes are allowed up to 64 bytes. Implemented in US-002, US-003, and US-004.
-
-## Open Questions
-
-Architecture-level design questions, not implementation TODOs. Syntax-level open questions live in `SYNTAX.md`. For per-feature implementation status see `SYNTAX.md`.
-
-**Type system:** Numeric tower / bignum integration (the `bignum/` lib exists but isn't wired into the VM). Variant types.
-
-**Concurrency:** Tainted/secret flag interaction with cross-thread communication. Channel primitives (may not be needed given atoms + futures). Backpressure / bounded concurrency for `par-each`. Job/Future cancel semantics (see SYNTAX.md Q19).
-
-**GC:** Scheduling heuristics.
-
-**Errors:** Error chaining / wrapping. Whether to mark procs as error-capable explicitly or trust propagation.
-
-**Modules:** Search path / resolution rules beyond relative-to-importer. Versioning / dependency management. Visibility beyond underscore convention (`pub`/`priv` keywords if encapsulation needs grow).
-
-**Macros:** Whether all builtins should be rewritten as macros where possible.
 
 ## Project Layout
 

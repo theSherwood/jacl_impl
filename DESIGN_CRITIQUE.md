@@ -1016,3 +1016,168 @@ The shell features (`par-each`, `glob`, `$env`, file I/O) matter for
 the "scrappy shell language" pitch and would come second. The
 numeric-tower wiring matters for credibility but is third-priority
 because most embed/shell use cases don't need bignums.
+
+## 9. Feature cost breakdown
+
+A complement to §4's scorecard: for each feature in the language,
+roughly how many LOC would disappear if it were removed and nothing
+else changed. Useful when weighing build-flag cuts (§3.6) or asking
+"what does X actually cost us."
+
+Numbers are estimates from line-by-line passes over `src/` and `lib/`
+(non-test), accurate to within ~20% for cross-cutting features. The
+sum across features is **not** the codebase total — many features
+share infrastructure (e.g. removing `parallel` doesn't get back 100%
+of the work-stealing runtime if `spawn` stays). Read this as relative
+cost ranking, not an additive accounting.
+
+Codebase baseline (non-test): **src/** ≈ 47.6k LOC, **lib/** ≈ 31.5k
+LOC (single-header), grand total ≈ 79k LOC.
+
+### 9.1 Runtime infrastructure — live
+
+| Feature | Est. LOC | Notes |
+|---|---|---|
+| Bytecode VM core (dispatch loop, frames, locals, stack, value layout) | ~3,000 | vm.c dispatch infrastructure + bytecode.c (629) + value.c (868). 185-opcode dispatch table. |
+| Direct-threaded dispatch (computed-goto) vs switch fallback | ~250 | Two parallel dispatch implementations + table. AUDIT §13 puts it at ~2–3% perf on its own. |
+| Bump-allocating Immix-style allocator | ~530 | gc.c §"Block-based heap allocator". Block pool + line bitmap + bump cursor. Single-threaded build keeps this. |
+| Tracing mark/sweep collector | ~500 | gc_collect.c mark+sweep+trace. Single-threaded path. |
+| Generational GC (minor cycle, RememberedSet, write barrier) | ~350 | mark_minor + sweep_minor + gen-barrier + RememberedSet + should_major. Tier-2 cut per §3.6 — working code, not a stub. |
+| Concurrent sweep / SATB barrier / epoch protection | ~400 | Only matters when threaded runtime runs; falls out with `JACL_THREADED=0`. |
+| Multi-threaded runtime (workers, Chase-Lev deques, scheduler) | ~1,500 + 372 lib | runtime.c worker-relevant sections; chase_lev/chase_lev.h. Largest single-flag cut per §3.6. |
+| Single-threaded coroutine paths for spawn/await/parallel/race | ~300 | Scattered if-branches in vm.c. Inseparable from the concurrency surface — stays even if threaded runtime drops. |
+| Intern table + string sweep + 3-tier string system | ~740 | string.c (658) + gc_sweep_intern (86). Rope is a thin bridge to the sum_tree lib. |
+| Escape analysis for spawn-captured mutables | ~250 | compiler.c AST walker shells + suspension classification. Inseparable from concurrency. |
+| FFI / embedding (jacl_vm_new, ext fn registry, trampolines) | ~1,340 | embed.c whole. Trampolines alone ~250. |
+| `[Ptr T]` typed pointers + `extern` declarations | ~800 | Typer Ptr/Addr handlers (~120) + compiler Ptr/Addr (~280) + vm Ptr opcodes (~280) + extern (~80). |
+| `interpret` capability sandbox | ~290 | Surprisingly cheap — heap is shared, most cost is capability-prelude plumbing. |
+| `$ctx` (declaration, fork, restore, dynamic scoping) | ~600 | ctx_fork/restore vm handlers (~25) + parser ctx_decl (68) + typer/compiler/vm ctx mentions (172) + cascading. |
+
+### 9.2 Language surface — live
+
+| Feature | Est. LOC | Notes |
+|---|---|---|
+| Three-mode parser (`[]`, `{}`, `()`) | parser.c **3,097** total; `()` infix specifically ≈ 310 | parse_infix (81) + parse_infix_operand (229). `()` is the cleanest single cut and takes ranges with it. The `[]`/`{}` halves are co-recursive — can't carve gradually. |
+| Lexer | 1,743 (~30 keywords) | Dropping a keyword is ~3 lines each. |
+| Bare-words-as-strings | ~140 | Embedded in `parse_atom`. Not removable without rewriting parser. |
+| String interpolation (`$var`, `$[...]`, `$(...)`) | ~400 | parser `parse_interp_string` 319 + vm/compiler interp emit. |
+| Triple-quoted multi-line strings | ~80 | Lexer-side only. |
+| Arrow access `->` (chained) | ~100 (syntax only) | The struct field machinery is in the Structs row. |
+| Optional chaining `?.` | ~50 | Parser + vm OP_OPTIONAL_GET (35). Very cheap. |
+| Lambda shorthand `[\ ...]` with `$it` | ~10 (prelude macro) | Macro system pays for itself elsewhere. |
+| `if`/`elif`/`else` (expression-valued) | ~270 | parse_if_form (142) + compiler HEAD_IF (128). |
+| `while` | ~150 | parse_while_form (76) + compiler HEAD_WHILE (76). |
+| `for` (4 forms) | ~570 | compiler HEAD_FOR (388) + vm OP_TYPED_EACH (177). Most expensive control structure. |
+| `break`/`continue`/`return` | ~110 | compiler BREAK (33) + CONTINUE (36) + RETURN (20) + LoopContext (16). |
+| `try`/`catch` (block form) | ~125 | compiler HEAD_TRY (83) + vm error-check + JUMP_IF_ERROR (~40). |
+| Errors as tag-bit flag + pipe short-circuit | ~200 | Flag bits in value.c (~40) + OP_CHECK_ERROR / OP_JUMP_IF_ERROR (~50) + scattered propagation hooks (~100). |
+| Persistent vectors (RRB) | ~2,000 | lib/rrb_vec/rrb_vec.h (1,569) + vm OP_VEC_* + compiler HEAD_VEC_*. Removing this needs an alternative vector type. |
+| Persistent maps (HAMT) | ~1,300 | lib/hamt/hamt.h (895) + vm OP_MAP_* + compiler HEAD_MAP_*. |
+| Mutable cells: `mut`/`set`, box, atom, swap, reset, deref | ~1,500 | compiler MUT (404) + SET (266) + smaller cell HEADs + vm OP_SWAP (285) + DEREF/RESET/ATOM/IS_*/cell ops. OP_SWAP carries the closure-call-through-SM-trampoline complexity. |
+| Variadic procs (`..rest`) | ~170 | parser proc_params (92) + OP_COLLECT_VARIADIC plumbing. |
+| Destructuring (positional, named, rest, wildcard) | ~1,000 | parse_destructure_vec (182) + parse_destructure_named (138) + compiler (~595) + vm DESTRUCTURE_VEC/NAMED/_REST (~80). |
+| Splat / spread `..` | ~350 | vm OP_SPREAD (142) + OP_CALL_SPREAD (69) + OP_FOLD_SPREAD (65) + compile-side. |
+| Pipe `\|`, `&&`, `\|\|` (command-mode operators) | ~80 | Each is a prelude macro (~10) + compiler HEAD_PIPE (10) / AMP_AMP (17) / PIPE_PIPE (17). Cheap because they're macros. |
+| Binding operators `=` / `:` / `::` | ~75 | Pure prelude macros (prelude.jacl:14–89). |
+| Streams (yield, stream type, sequence ops) | ~750 | gc.c JaclStream (47) + vm STREAM_NEXT (114) + COLLECT (388) + COUNT/TAKE/FIRST/LINES (~180). OP_COLLECT covers both stream-collect and typed-collection materialization. |
+| `yield` + generator state machine | +150 marginal over async | Shares the SM transform with async. |
+| `filter` / `transform` (HOF) over streams and vectors | included above | Delegate to small vm OP_FILTER/OP_TRANSFORM handlers. |
+| Ranges `(1 ..< n)`, `(1 ..= n)` | ~80 | Parser infix + compiler DOTDOT_LT/EQ (15 each) + vm OP_RANGE (41). |
+| Macro system (defmacro, syntax-quote, gensym, hygiene) | ~2,200 | syntax.c (1,401) + compiler syntax-quote section (208) + vm OP_SYNTAX_OP (452) / OP_SYNTAX_SPLICE. Core differentiator. |
+| Operators-as-macros (prelude.jacl) | ~180 | prelude.jacl (90) + prelude_source.h (92). Trivially small surface, large semantic leverage. |
+| Module system (`use`, both forms, cross-module typing, privacy) | ~800 | parse_use (230) + compiler module sections + cross-module typer collector. |
+| Same-scope shadowing error | ~20 | Handful of checks in compiler scope helpers. |
+| Gradual / static type system | ~4,000 | typer.c (3,148) + type_error.c (270) + ast.c type-related (~200) + compiler typed-collection compile (~400). The typer-as-authority architecture makes carving hard. |
+| Typed collections (`[Vec T]`, `[Map K V]`) | ~1,300 | OP_TYPED_VEC/MAP/EACH/TRANSFORM/FILTER + typed-vec/map handlers (~240) + compiler typed-collection compile (~400) + typer rules (~200). Phase 1 (compile-time check only) is what shipped; Phase 2 (unboxed storage) is future. |
+| Struct value-type system (no-header layout, inline opcodes, escape analysis) | ~3,000 | OP_STRUCT_* + STRUCT_NEW_INLINE etc. (~600) + struct-heavy paths in compiler HEAD_DOT (552) / PROC (631) / DEF (542) (~1,500 attributable) + typer struct rules (~400) + ast.c struct-registry (~100) + registry mgmt (~200). Largest discrete feature. |
+| Shell interop (`!cmd`, `exec`, OS pipes, stdin/stdout/BG) | ~600 | compiler HEAD_EXEC (25) + vm OP_EXEC (313) + OP_AWAIT_JOB (150) + OP_SIGNAL (80) + parser `!` (~30). |
+| Jobs (Future + OS process map) | +150 marginal over `spawn` | Mostly inside OP_EXEC / AWAIT_JOB / SIGNAL above. |
+| `spawn` / `await` / `parallel` / `race` (state machines, scheduling) | ~1,300 | vm AWAIT_SM (164) + SPAWN (94) + PARALLEL (187) + RACE (156) + RESOLVE_FUTURE (24) + CALL_SUSPEND (129) + COMPLETE_PARALLEL/RACE (~40) + gc.c future/parallel-agg/race-agg (~200) + compiler SPAWN/AWAIT/PARALLEL/RACE (~280). |
+| State machine transform (suspension analysis, liveness, body compile, dispatch table) | ~2,800 | compiler.c suspension+SM analysis+liveness+body compile (~2,500) + vm SM resume / state-field opcodes (~250) + gc.c JaclStateMachine (39). Biggest single piece of compiler complexity. Underlies both async and generators. |
+| Pragmas `#{...}` | ~30 | Lexer recognition stub. |
+
+### 9.3 Library code carried by the runtime (single-header)
+
+| Lib | Status | LOC | Notes |
+|---|---|---|---|
+| `lib/unicode/unicode_tables.h` | Live | **16,733** | Generated UCD tables. Largest single file. Mandatory for grapheme/NFD/word-break. |
+| `lib/sum_tree/` (rope, sum_tree, rdoc, utf8) | Live | ~5,000 | Backs the rope tier of strings. |
+| `lib/regex/` (nfa + variants) | **Planned** | ~2,500 | Thompson NFA, not wired into VM. Pure carrying cost until wired (§3.4, §4.3). |
+| `lib/rrb_vec/rrb_vec.h` | Live | 1,569 | Backs persistent vector. |
+| `lib/unicode/unicode.h` | Live | 1,530 | UCS API surface. |
+| `lib/bignum/` (bigint + bigfloat + rational) | **Planned** (bigint+bigfloat) / **dead** (rational) | ~2,100 | Dormant. `rational.h` (241) won't be wired per §3.2 / §4.4 — only unambiguous "won't ever be used" piece in the tree. |
+| `lib/hamt/hamt.h` | Live | 895 | Backs persistent map. |
+| `lib/platform/platform.h` | Live | 417 | Atomics + threading abstractions. |
+| `lib/chase_lev/chase_lev.h` | Live | 372 | Work-stealing deque. Falls out with `JACL_THREADED=0`. |
+| `lib/arena/arena.h` | Live | 206 | Used for AST allocation. |
+
+### 9.4 Planned features — projected LOC if implemented
+
+These exist today as small scaffolding (sometimes 0 LOC, sometimes a
+reserved keyword and one HEAD enum entry). Projected adds are rough
+estimates from comparable existing features.
+
+| Feature | Current cost | Projected add | Notes |
+|---|---|---|---|
+| `match` / case | ~5 (token + HEAD + special-form recognition) | +800–1,500 if compiler path; +1,500–2,500 if macro path | Uncertain landing per §3.3. Macro path uses existing machinery but pattern compilation is non-trivial. |
+| Callable maps / atoms in `[]` head | 0 | +50–100 | One dispatch arm in OP_CALL + typer rule. |
+| Atom listeners (`watch`) | 0 | +150–250 | Watch list per atom, fire on swap/reset, GC-trace the callbacks. |
+| `$env` (atom of map, OS sync) | 0 | +300–500 | Built on atom listeners + setenv/unsetenv glue + `$home`/`$pwd`/`$pid` alias plumbing. |
+| Aliases (`alias ll {!ls -la}`) | 0 | +100–200 | Compile-time syntactic rewrite layer in the macro system. |
+| Globbing (`glob`) | 0 | +200–400 | Pattern engine + brace expansion + `$ctx.pwd` integration; returns a stream. |
+| `read-file` / `write-file` / `append-file` | 0 | +150–250 | Wrappers over fread/fwrite emitting/consuming streams. |
+| `par-each` | 0 | +150–300 | Composes existing `spawn` + stream pull. Hard part is backpressure (DESIGN.md Open Questions). |
+| `timeout N {body}` | 0 | +50–100 | Sugar for `race { sleep N; error "timeout" }`. Mostly a prelude macro. |
+| Regex (literal syntax + integration) | 2,500 (lib carrying) | +300–600 wiring | VM bridge + literal `/regex/` lex + capture-group binding. Lib is already there. |
+| Bigint + bigfloat dispatch | ~1,870 (lib carrying) + 1 tag bit | +500–1,000 wiring | Arithmetic dispatch in vm.c + implicit promotion in dyn paths + typed `bigint`/`bigfloat` slots. Rationals dropped. |
+| TCO emission | ~25 (OP_TAIL_CALL handler already in vm) | +100–200 | Compiler-side tail-position analysis pass per §3.5. |
+| Taint/secret enforcement | ~100 (flag bits + helpers) | +200–400 runtime or +500–800 typed | Depends on runtime-only vs type-system property choice per §3.4. |
+| Closure literal call signatures (typer) | 0 | +150–300 in typer | Track param/return on `def x [proc {y} {...}]` bindings. |
+| Imported struct field typing (typer) | 0 | +200–400 | Cross-module struct-idx alignment. |
+| `swap` struct-element narrowing | 0 | +50–100 | OP_SWAP_INLINE parallel to OP_DEREF_INLINE. |
+| `catch` as a pipe stage | 0 | +50–100 | Prelude macro or HEAD_CATCH handler. |
+
+### 9.5 Architectural cross-cuts
+
+Per §3.6, these aren't individually-deletable features — they're
+build-flag candidates where one toggle pulls many things out at once.
+
+| Cut | Est. savings | What's lost |
+|---|---|---|
+| `JACL_THREADED=0` build flag | ~3,000–4,000 active LOC (workers + chase_lev lib + concurrent GC paths + SATB + epoch protection) | CPU parallelism. Single-threaded coroutine paths for spawn/await/parallel/race remain. |
+| Drop generational GC (tier-2 cut) | ~350–500 | Long-running-script perf on old-gen objects. |
+| Drop sum_tree rope tier | ~5,000 (lib) + ~150 (string.c bridges) | Large-string editing performance. Inline + interned tiers remain. |
+| Drop typed collections (`[Vec T]`, `[Map K V]`) | ~1,300 | Compile-time element checking; falls back to dyn collections. |
+| Drop `$ctx` | ~600 + cascading simplifications | Dynamic-scoping for ambient state. |
+| Drop FFI / embedding | ~1,340 (embed.c) + ~800 (Ptr/extern/trampolines) | The whole embedding API; can't be used as a library from C. |
+| Drop concurrency surface entirely (spawn/await/parallel/race/yield) | ~5,000–6,000 (SM transform 2,800 + async surface 1,300 + threaded runtime 1,500 + integrations) | The headline feature; also kills generators via yield. |
+| Drop macros + syntax-quote + prelude | ~2,200 + need to inline what the prelude does (~150) | Operators-as-macros gone; would need hard-coded operators. |
+
+### 9.6 Top-line ranking
+
+The cheapest "biggest binary win per feature dropped" levers, ranked:
+
+1. **Multi-threaded runtime + concurrent GC paths + Chase-Lev lib** — ~4,000 LOC active for `JACL_THREADED=0`. Largest single lever (§3.6).
+2. **Struct value-type system** — ~3,000. Major FFI differentiator; expensive but earning per §2.5.
+3. **State machine transform** — ~2,800. Inseparable from the concurrency surface; falls out if spawn/await/parallel/race/yield all go.
+4. **Macro system** — ~2,200. Drops with operators-as-macros and the prelude.
+5. **Sum-tree / rope lib** — ~5,000 lib LOC. Large but lazy — only matters when strings get big.
+6. **Typer** — ~3,000–4,000. Can't carve gradually; gradual typing is all-or-nothing as architected.
+7. **Bignum lib** — ~2,100 carrying today; *grows* by ~500–1,000 once wired.
+8. **Regex lib** — ~2,500 carrying today; *grows* by ~300–600 once wired.
+
+Cheapest features per unit of user-visible surface are the
+macro-implemented ones (binding operators, lambda shorthand,
+`and`/`or`/`not`, pipe, prelude operators — each ~10 lines).
+Essentially free.
+
+Most expensive per unit of surface: `for` (~570 LOC for 4 forms),
+`OP_SWAP` (~285 LOC for `swap`), `OP_COLLECT` (~388 LOC, but covers
+stream materialization broadly), `OP_EXEC` (~313 LOC for shell
+interop).
+
+The §4.4 "genuinely not earning" residual translates directly: only
+~290 LOC of unambiguous dead weight in the whole tree
+(`rational.h` at 241 + `ctx_pool` at ~50 if it doesn't profile well).
+The rest of the cost is either earning, build-flag-conditional, or
+waiting on integration.

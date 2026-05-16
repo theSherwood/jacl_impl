@@ -234,28 +234,9 @@ errors at compile time via `jacl_format_ptr_*` formatters in
 
 ## Deferred items
 
-These have no concrete workload pulling on them but are tracked
-for future sessions:
-
-- **Closure literal call signatures.** Anonymous closures get
-  `TYPE_CLOSURE` but the typer doesn't carry their parameter /
-  return signature, so calls to a captured anon closure stay dyn.
-  Closing this needs the typer to record signatures on binding
-  metadata when `def x { proc {y} { ... } }` and propagate
-  through var-refs.
-- **Imported struct exports field-typing.** Imported struct types
-  go through the typer's CapitalCase placeholder pre-pass with
-  empty fields. Field access on imported structs stays dyn at the
-  typer level; the compiler's shared struct registry has the real
-  fields, so codegen still works. Closing this needs typer↔compiler
-  struct-idx alignment across modules.
-- **`[swap $box fn]` struct-element narrowing.** Swap with a
-  scalar-element box narrows; struct-element swap stays dyn.
-  Needs an `OP_SWAP_INLINE` opcode parallel to `OP_DEREF_INLINE`
-  (which already powers struct-element box deref narrowing).
-- **Match arm-walk.** `match` is lexed and parsed but has no
-  compiler / runtime implementation. Typer rules would be dead
-  code until the feature itself is implemented.
+See **`NOT_IMPLEMENTED.md` §4** for the canonical list of typer-side
+deferred work (closure literal signatures, imported struct
+field-typing, `swap` struct-element narrowing, match arm-walk).
 
 ## Test coverage
 
