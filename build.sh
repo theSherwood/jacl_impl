@@ -115,7 +115,6 @@ TESTS=(
     "lib/regex/test_nfa_rope.c|nfa_rope|"
     "lib/bignum/test_bigint.c|bigint|"
     "lib/bignum/test_bigfloat.c|bigfloat|"
-    "lib/bignum/test_rational.c|rational|"
     "test/test_value.c|value|"
     "test/test_lexer.c|lexer|"
     "test/test_parser.c|parser|"

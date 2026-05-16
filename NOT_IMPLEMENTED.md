@@ -40,12 +40,12 @@ From `DESIGN.md` "Project Layout" and `DESIGN_CRITIQUE.md` §3.2, §3.4.
 - **`lib/regex/`** (~2,500 LOC) — Thompson NFA. Needs literal syntax,
   VM dispatch, capture-group binding. Projected wiring add: +300–600
   LOC. (`SYNTAX.md` Q14 — literal syntax TBD.)
-- **`lib/bignum/`** (~2,100 LOC) — bigint + bigfloat + rational.
-  - **bigint + bigfloat**: planned. Will be both `dyn` promotion
-    targets (Python-style overflow promotion) and typed slots
-    (`bigint x`, `bigfloat y`). Projected wiring add: +500–1,000 LOC.
-  - **`lib/bignum/rational.h`** (~241 LOC) — **dead**. Won't be wired
-    per `DESIGN_CRITIQUE.md` §3.2 / §4.4. Safe to delete on next pass.
+- **`lib/bignum/`** (~1,860 LOC after rational deletion) — bigint +
+  bigfloat. Planned. Will be both `dyn` promotion targets
+  (Python-style overflow promotion) and typed slots (`bigint x`,
+  `bigfloat y`). Projected wiring add: +500–1,000 LOC. `rational.h`
+  and `test_rational.c` deleted 2026-05-16 — rationals were cut from
+  the integration plan per `DESIGN_CRITIQUE.md` §3.2 / §4.4.
 
 ---
 
@@ -204,11 +204,6 @@ From `DESIGN.md` § "Known Limitations".
   vectors/maps. A box stashed into a vector that's then passed to
   `spawn` will not pin the task. Fixing requires taint tracking
   through collection ops (`vec-push`, `map-set`, ...).
-- **`fork-per-proc-call` is doc fiction.** Regular `OP_CALL` shares
-  `vm->ctx` with the caller — fork only happens at `spawn`, `parallel`,
-  `race`, `with-ctx`. A callee's `set $ctx.field` *will* leak back.
-  This is intentional (per-call fork would be expensive); `SYNTAX.md`
-  needs correction. Full discussion: `DESIGN_CRITIQUE.md` § 3 (early).
 - **"ctx-pure" pruning is future work.** The compiler does not mark
   procs as ctx-pure to skip the fork. `with-ctx` always pays the fork
   cost when entered. Future analysis pass.

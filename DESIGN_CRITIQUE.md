@@ -199,19 +199,20 @@ enforcement contains the worst dynamic-scoping pitfalls.
 Three places where the original framing was too generous, including
 one where I was repeating doc claims that the code doesn't back up:
 
-- **`fork-per-proc-call` is doc fiction.** `SYNTAX.md` says "Each
-  proc call gets a fork of the caller's `$ctx`," but the
-  implementation only calls `ctx_fork` at `spawn` (vm.c:5129),
-  `parallel` (5319), `race` (5505), and `with-ctx` (10227). Regular
-  `OP_CALL` (vm.c:2767) shares `vm->ctx` with the caller. That's
-  actually a sensible implementation choice — per-call forking would
-  be a huge tax — but it means dynamic-scoping pitfalls are *more*
-  present than the doc suggests, since a callee's `set $ctx.field`
-  *will* leak back to the caller. The query-builder example in
-  `SYNTAX.md` works precisely because the doc is wrong; if every
-  proc call forked, the sibling-mutation pattern wouldn't propagate.
-  `SYNTAX.md` should be corrected to "fork happens at concurrency
-  boundaries and explicit `with-ctx`, not per-call."
+- **`fork-per-proc-call` was doc fiction** *(corrected since this
+  critique was written, commit `a5d25c0`)*. The original `SYNTAX.md`
+  said "Each proc call gets a fork of the caller's `$ctx`," but the
+  implementation only calls `ctx_fork` at `spawn`, `parallel`,
+  `race`, and `with-ctx`. Regular `OP_CALL` shares `vm->ctx` with
+  the caller. That's a sensible implementation choice — per-call
+  forking would be a huge tax — but it means dynamic-scoping
+  pitfalls were *more* present than the original doc suggested,
+  since a callee's `set $ctx.field` *will* leak back to the caller.
+  The query-builder example in the early `SYNTAX.md` worked
+  precisely because the doc was wrong; if every proc call forked,
+  the sibling-mutation pattern wouldn't propagate. `SYNTAX.md` now
+  states the actual behavior — fork happens at concurrency
+  boundaries and explicit `with-ctx`, not per-call.
 - **"ctx-pure" pruning is future work, not current.** The doc
   describes the compiler "marking procs as ctx-pure to skip the
   fork entirely." Grep finds no such pass — no `ctx_pure`, no
@@ -562,9 +563,8 @@ top of the threaded-or-not cut.
   enum hazard is the canonical case) actually get made instead of
   deferred.
 
-- **Drop `lib/bignum/rational.h`** (per 3.4 update). 241 LOC that
-  won't be wired. Pure cleanup, negligible win, but worth doing if
-  any reorganization happens nearby.
+- ~~**Drop `lib/bignum/rational.h`**~~ — done 2026-05-16. `rational.h`
+  and `test_rational.c` deleted, build.sh entry removed.
 
 - **Check the `ctx_pool`.** `$ctx` forks are rare (only at
   `with-ctx` / `spawn` / `parallel` / `race`) and short-lived. The
@@ -771,9 +771,9 @@ wiring unlocks the payoff.
 
 After the walk-backs, this bucket is short.
 
-- **`lib/bignum/rational.h`** (~241 LOC). Won't be wired per the
-  bigint + bigfloat integration plan (§3.2). Pure cleanup; worth
-  dropping if any nearby reorganization happens.
+- ~~**`lib/bignum/rational.h`** (~241 LOC)~~ — deleted 2026-05-16.
+  Was the only unambiguous "won't ever be wired" piece in the tree;
+  bucket is now empty save for `OBJ_CLOSURE = 0` below.
 - **`OBJ_CLOSURE = 0` enum wart** (§3.7). Working mitigation in place
   (`alloc_total != 0` skip in the mark loop); defense-in-depth fix
   (introduce `OBJ_INVALID = 0`, shift the rest) is two lines and
@@ -1087,7 +1087,7 @@ LOC (single-header), grand total ≈ 79k LOC.
 | `lib/regex/` (nfa + variants) | **Planned** | ~2,500 | Thompson NFA, not wired into VM. Pure carrying cost until wired (§3.4, §4.3). |
 | `lib/rrb_vec/rrb_vec.h` | Live | 1,569 | Backs persistent vector. |
 | `lib/unicode/unicode.h` | Live | 1,530 | UCS API surface. |
-| `lib/bignum/` (bigint + bigfloat + rational) | **Planned** (bigint+bigfloat) / **dead** (rational) | ~2,100 | Dormant. `rational.h` (241) won't be wired per §3.2 / §4.4 — only unambiguous "won't ever be used" piece in the tree. |
+| `lib/bignum/` (bigint + bigfloat) | **Planned** | ~1,860 | Dormant. `rational.h` (241 LOC) deleted 2026-05-16 per §3.2 / §4.4. |
 | `lib/hamt/hamt.h` | Live | 895 | Backs persistent map. |
 | `lib/platform/platform.h` | Live | 417 | Atomics + threading abstractions. |
 | `lib/chase_lev/chase_lev.h` | Live | 372 | Work-stealing deque. Falls out with `JACL_THREADED=0`. |
@@ -1158,8 +1158,8 @@ Most expensive per unit of surface: `for` (~570 LOC for 4 forms),
 stream materialization broadly), `OP_EXEC` (~313 LOC for shell
 interop).
 
-The §4.4 "genuinely not earning" residual translates directly: only
-~290 LOC of unambiguous dead weight in the whole tree
-(`rational.h` at 241 + `ctx_pool` at ~50 if it doesn't profile well).
-The rest of the cost is either earning, build-flag-conditional, or
-waiting on integration.
+The §4.4 "genuinely not earning" residual translates directly: after
+the 2026-05-16 `rational.h` deletion, the unambiguous-dead-weight
+bucket is essentially empty (~50 LOC of `ctx_pool` remaining, pending
+a profile to confirm it isn't earning). The rest of the cost is
+either earning, build-flag-conditional, or waiting on integration.
