@@ -1,0 +1,7 @@
+# expect: nil
+# sleep evaluates to nil (after wake).
+proc main {} {
+  def r [sleep 0.01]
+  print $r
+}
+main

@@ -1,0 +1,8 @@
+# expect: done
+# Toplevel sleep — non-SM context routes through OP_SLEEP_BLOCK,
+# nanosleeps on the current thread.
+proc main {} {
+  sleep 0.01
+  print "done"
+}
+main

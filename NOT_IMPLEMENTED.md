@@ -7,7 +7,7 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-05-16.
+Last refreshed: 2026-05-18.
 
 ---
 
@@ -26,8 +26,6 @@ Status snapshot:
 | **Globbing** (`glob`) | Medium | None | Reads `$ctx.pwd`; returns a stream. Pattern engine + brace expansion. |
 | **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | None | Pipe-friendly file I/O. |
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |
-| **`sleep`** (suspending) | Small-medium | None | No `OP_SLEEP` / no `sleep` builtin today (platform has `nanosleep`, but exposing it would need to suspend the SM, not block the worker thread). Prerequisite for `timeout`. ~80–150 LOC: scheduler-integrated wakeup + opcode handler + compiler emit. |
-| **`timeout`** | Small | `sleep` (above) | Once `sleep` exists, this is a ~10-line prelude macro over `race { body } { sleep N; error "timeout" }`. The `DESIGN_CRITIQUE.md §9.4` framing "Mostly a prelude macro" was correct for the macro itself but understated the `sleep` prerequisite. |
 | **Regular expressions** | Medium | Lib exists (see §2) | Literal syntax (`/regex/`) + capture-group bindings + VM bridge. |
 | **Bignum / numeric tower** | Medium | Lib exists (see §2) | `JACL_TAG_BIGNUM` exists; no VM arithmetic dispatch. Plan is bigint+bigfloat with implicit promotion in `dyn`. Rationals dropped. |
 
@@ -166,6 +164,41 @@ From `GENERATOR_STATE_MACHINE.md` § "Future work".
   fields. A liveness pass that nulls dead fields at each yield point
   would shrink retained memory and reduce major-GC tracing work. Not
   measured as a bottleneck; deferred.
+
+---
+
+## 8b. Timer thread (`sleep` wakeups) — known limits
+
+Shipped 2026-05-18 as a dedicated OS thread per `Runtime` that owns a
+deadline-sorted singly-linked list of pending sleeps. Adequate for
+current workloads; the following corners are explicitly deferred:
+
+- **Eagerly started.** `runtime__start_threads` creates the timer thread
+  unconditionally, even for Runtimes that will never call `sleep`. Cost
+  is one parked pthread (~8KB stack + TCB). Cheap fix: start lazily on
+  first `runtime__schedule_timer` call (CAS-guarded). Not pursued; no
+  workload pulls on it.
+- **O(n) insertion.** Timer entries are kept in a sorted singly-linked
+  list. Fine for small concurrent-sleep counts; replace with a binary
+  heap if a workload pushes into the hundreds.
+- **One thread per Runtime.** Embedders that churn Runtimes pay
+  per-Runtime thread spawn/join. No current embedder does this; the
+  natural progression if it ever bites is workers-poll-min-heap (gives
+  up the eager wakeup but no extra thread), then platform-specific
+  `timerfd_create` / `kqueue` shims behind `platform.h`.
+- **No cancellation.** `[timeout n body]`'s losing branch keeps running
+  after the race settles — its eventual result is discarded but it
+  still occupies a worker. Connected to `SYNTAX.md` Q19 (`cancel`
+  semantics, see §6).
+- **Wake granularity.** Sub-millisecond deadlines round up to 1ms via
+  `COND_WAIT_FOR_MS`. Coarse but matches the worker idle-park
+  granularity (`AUDIT.md` §11).
+- **Emscripten / single-threaded builds.** `THREAD_CREATE` is a no-op
+  there, so `OP_SLEEP_SM` in a concurrent context would silently never
+  wake. Currently single-threaded mode doesn't have a runtime, so
+  `OP_SLEEP_BLOCK` (toplevel `nanosleep`) is the only path — but if a
+  single-threaded runtime ever ships, the timer-thread no-op becomes a
+  correctness hole. Worth flagging if/when that happens.
 
 ---
 

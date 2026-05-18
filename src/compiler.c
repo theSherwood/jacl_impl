@@ -1105,7 +1105,8 @@ static void analyze__walk_body__visit(AstNode* node, void* vctx) {
     HeadId hid = (HeadId)node->data.command.head_id;
     if (head->type == AST_LIT_STRING) {
       /* Direct suspension points */
-      if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
+      if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL || hid == HEAD_RACE ||
+          hid == HEAD_SLEEP) {
         ctx->info->direct_suspends = true;
       } else if (hid == HEAD_YIELD) {
         ctx->info->direct_suspends = true;
@@ -1366,6 +1367,7 @@ static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
         case HEAD_AWAIT:    sp_type = SUSPEND_AWAIT;    break;
         case HEAD_PARALLEL: sp_type = SUSPEND_PARALLEL; break;
         case HEAD_RACE:     sp_type = SUSPEND_RACE;     break;
+        case HEAD_SLEEP:    sp_type = SUSPEND_AWAIT;    break;
         default:            is_sp = false; sp_type = SUSPEND_YIELD; break;
       }
 
@@ -1937,7 +1939,8 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
 
         /* --- Suspension points: increment segment AFTER evaluating args --- */
         if (hid == HEAD_YIELD || hid == HEAD_AWAIT ||
-            hid == HEAD_PARALLEL || hid == HEAD_RACE) {
+            hid == HEAD_PARALLEL || hid == HEAD_RACE ||
+            hid == HEAD_SLEEP) {
           for (uint32_t i = 0; i < argc; i++) {
             sm__liveness_walk__visit(args[i], ctx);
           }
@@ -2284,7 +2287,8 @@ static bool ast__contains_suspension__pred(AstNode* node, void* vctx) {
     if (head->type == AST_LIT_STRING) {
       HeadId hid = (HeadId)node->data.command.head_id;
       if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL ||
-          hid == HEAD_RACE  || hid == HEAD_YIELD) {
+          hid == HEAD_RACE  || hid == HEAD_YIELD ||
+          hid == HEAD_SLEEP) {
         return true;
       }
       if (hid == HEAD_PROC || hid == HEAD_SPAWN) return false;
@@ -2527,6 +2531,7 @@ bool macro__is_special_form(const char* name, uint32_t len) {
     case HEAD_MATCH:        case HEAD_QUOTE:
     case HEAD_SPAWN:        case HEAD_YIELD:
     case HEAD_AWAIT:        case HEAD_RETURN:
+    case HEAD_SLEEP:
     case HEAD_DEFMACRO:     case HEAD_CONTINUE:
     case HEAD_PARALLEL:     case HEAD_DEFSTRUCT:
     case HEAD_SYNTAX_QUOTE: return true;
@@ -9683,6 +9688,49 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* sleep — suspending pause. In SM context, suspends via the timer thread;
+     at toplevel/non-SM, blocks on nanosleep. Always evaluates to nil. */
+  if (hid == HEAD_SLEEP) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "sleep", "1 argument", argc);
+      return;
+    }
+    if (c->sm_analysis) {
+      if (c->in_try_body) {
+        compiler__error(c, line, col,
+            "cannot suspend inside try/catch; use error capture on futures instead");
+        return;
+      }
+      if (c->in_non_suspending_callback) {
+        compiler__error(c, line, col,
+            "cannot suspend inside non-suspending callback");
+        return;
+      }
+      /* SM sleep: compile duration, set resume_point, emit OP_SLEEP_SM
+         (always suspends — no inline-resolved path). Resume label lands at
+         dispatch backpatch; OP_GET_LOCAL 1 pushes __rv (nil) as the value. */
+      compiler__compile_node(c, args[0]);
+      uint32_t sp_idx = c->sm_suspension_idx++;
+      compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
+      compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
+      compiler__emit_byte(c, OP_SLEEP_SM, line);
+      /* Resume label: dispatch table backpatch lands here on wake. */
+      if (sp_idx < c->sm_dispatch.label_count) {
+        compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
+      }
+      /* Push resume value from slot 1 (__rv) — always nil for sleep. */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, 1, line);
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
+    /* Non-SM context: just block the current thread. */
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SLEEP_BLOCK, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
   /* yield — generator suspension point (state machine). */
   if (hid == HEAD_YIELD) {
     if (argc != 1) {
@@ -12486,6 +12534,26 @@ bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
 }
 
 /* Check if any AST node requires macro expansion (defmacro or \ command). */
+/* Names of prelude macros that need to trigger macro expansion when used as
+ * a command head. The list is auto-generated from src/prelude.jacl by
+ * build.sh — adding a `defmacro NAME ...` to the prelude automatically
+ * makes user invocations of NAME route through the expander. Adding a
+ * prelude macro that would miscompile if expanded (e.g. one whose name
+ * collides with a parser-level form like `=` or `:`) is now caller-beware
+ * at the prelude-author level — see prelude.jacl for the note about why
+ * binding/pipe operators must not be defined as macros. */
+#include "prelude_macro_names.h"
+
+static bool compiler__head_is_prelude_macro(const char *s, uint32_t len) {
+  for (size_t i = 0; i < JACL_PRELUDE_MACRO_NAMES_COUNT; i++) {
+    if (jacl_prelude_macro_names[i].len == len &&
+        memcmp(jacl_prelude_macro_names[i].name, s, len) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool compiler__node_needs_expansion__pred(AstNode *node, void *vctx) {
   (void)vctx;
   if (!node) return false;
@@ -12493,8 +12561,8 @@ static bool compiler__node_needs_expansion__pred(AstNode *node, void *vctx) {
   if (node->type == AST_COMMAND) {
     AstNode *head = node->data.command.head;
     if (head && head->type == AST_LIT_STRING
-        && head->data.lit_string.length == 1
-        && head->data.lit_string.value[0] == '\\')
+        && compiler__head_is_prelude_macro(head->data.lit_string.value,
+                                           head->data.lit_string.length))
       return true;
     if (compiler__node_needs_expansion__pred(head, NULL)) return true;
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
@@ -12530,9 +12598,11 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   result.suspending    = false;
   result.macro_table   = NULL;
 
-  /* Pre-compilation suspension analysis */
-  SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count, heap, intern_table);
+  /* Compiler init — suspension analysis runs after macro expansion below,
+     so that macros expanding to suspending forms (e.g. `timeout` → `race`)
+     mark the surrounding proc as suspending and trigger SM compilation. */
+  SuspensionMap suspension_map;
+  memset(&suspension_map, 0, sizeof(suspension_map));
 
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
@@ -12612,9 +12682,9 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   }
 
   /* Macro expansion pass: compile defmacro bodies, expand macro calls.
-   * Runs after parsing, before the main compilation pass.
-   * Fast-path: skip entirely if the AST has no defmacros and no command
-   * heads that match a built-in macro name (currently just \). */
+   * Runs after parsing, before suspension analysis and the main compilation
+   * pass. Fast-path: skip entirely if the AST has no defmacros and no
+   * command heads that match a built-in macro name (currently just \). */
   if (parse.error_count == 0 && compiler__needs_expansion(parse.nodes, parse.count)) {
     uint32_t err_line = 0, err_col = 0;
     const char *expand_err = ast_expand_macros(
@@ -12623,6 +12693,15 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     if (expand_err) {
       compiler__error(&c, err_line, err_col, expand_err);
     }
+  }
+
+  /* Suspension analysis — runs on the post-expansion AST so macros that
+     expand into await/race/sleep/etc. correctly mark their enclosing proc
+     as suspending. */
+  if (parse.error_count == 0 && result.error_count == 0) {
+    suspension_map = compiler__analyze_suspension(
+        parse.nodes, parse.count, heap, intern_table);
+    c.suspension_map = &suspension_map;
   }
 
   /* Type-inference pass. Populates inferred_type / inferred_struct_idx /

@@ -179,9 +179,25 @@ struct Runtime {
     uint32_t            external_root_count;
     uint32_t            external_root_cap;
     platform_mutex_t    external_roots_mutex;
+    /* Timer thread: drives `sleep` wakeups. Owns a deadline-sorted singly-
+     * linked list of pending sleeps. Started on first runtime_init that has
+     * workers; signaled by runtime__schedule_timer and on shutdown. */
+    thread_t            timer_thread;
+    int                 timer_thread_started;
+    int                 timer_shutdown;
+    platform_mutex_t    timer_mutex;
+    platform_cond_t     timer_cv;
+    struct TimerEntry  *timer_head;
     /* Perf counters — see GCStats in jacl.h. */
     GCStats             gc_stats;
 };
+
+typedef struct TimerEntry {
+    uint64_t            deadline_ns;
+    JaclVal             sm_val;       /* state machine to resume */
+    uint32_t            root_handle;  /* external root pin */
+    struct TimerEntry  *next;
+} TimerEntry;
 
 /* Forward declarations for functions used in the worker loop */
 void gc__concurrent_task(void *data);
@@ -535,6 +551,13 @@ void runtime__init_state(Runtime *rt, int num_workers) {
     rt->external_root_cap   = 0;
     MUTEX_INIT(rt->external_roots_mutex);
 
+    /* Timer thread state — thread itself is started by runtime__start_threads */
+    rt->timer_thread_started = 0;
+    rt->timer_shutdown       = 0;
+    rt->timer_head           = NULL;
+    MUTEX_INIT(rt->timer_mutex);
+    COND_INIT(rt->timer_cv);
+
     /* Allocate and initialize workers */
     rt->workers = (WorkerThread *)calloc((size_t)num_workers,
                                           sizeof(WorkerThread));
@@ -600,10 +623,19 @@ void runtime__init_state(Runtime *rt, int num_workers) {
     }
 }
 
+static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__timer_thread_loop(void *arg);
+
 void runtime__start_threads(Runtime *rt) {
     for (int i = 0; i < rt->num_workers; i++) {
         THREAD_CREATE(&rt->workers[i].thread, NULL,
                       runtime__worker_loop, &rt->workers[i]);
+    }
+    /* Timer thread for `sleep` wakeups. On platforms without real threads
+     * (emscripten), THREAD_CREATE is a no-op and timers won't fire; sleep
+     * in that mode should go through OP_SLEEP_BLOCK instead. */
+    if (THREAD_CREATE(&rt->timer_thread, NULL,
+                      runtime__timer_thread_loop, rt) == 0) {
+        rt->timer_thread_started = 1;
     }
 }
 
@@ -626,8 +658,20 @@ void runtime__stop_threads(Runtime *rt) {
     MUTEX_LOCK(rt->inbox_mutex);
     COND_BROADCAST(rt->work_cv);
     MUTEX_UNLOCK(rt->inbox_mutex);
+    /* Signal timer thread to exit (broadcast in case multiple, though
+     * there's only one timer thread per runtime). */
+    if (rt->timer_thread_started) {
+        ATOMIC_STORE_EXPLICIT(&rt->timer_shutdown, 1, MEM_RELEASE);
+        MUTEX_LOCK(rt->timer_mutex);
+        COND_BROADCAST(rt->timer_cv);
+        MUTEX_UNLOCK(rt->timer_mutex);
+    }
     for (int i = 0; i < rt->num_workers; i++)
         THREAD_JOIN(rt->workers[i].thread, NULL);
+    if (rt->timer_thread_started) {
+        THREAD_JOIN(rt->timer_thread, NULL);
+        rt->timer_thread_started = 0;
+    }
 }
 
 /* runtime__teardown_state — release all Runtime/WorkerThread resources.
@@ -715,6 +759,10 @@ void runtime__teardown_state(Runtime *rt) {
     rt->external_root_count = 0;
     rt->external_root_cap   = 0;
     MUTEX_DESTROY(rt->external_roots_mutex);
+
+    /* Timer thread state — the thread itself drained the list on exit. */
+    MUTEX_DESTROY(rt->timer_mutex);
+    COND_DESTROY(rt->timer_cv);
 
     gc_block_pool_destroy(&rt->block_pool);
 }
@@ -845,6 +893,100 @@ void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     task->gc_root3 = JACL_NIL;
 
     runtime__push_inbox(rt, task);
+}
+
+/* ======================================================================
+ * Timer thread — drives `sleep` wakeups.
+ *
+ * Maintains a deadline-sorted singly-linked list of TimerEntry. Each entry
+ * pins its SM via runtime_pin_value so the GC traces it across the wait.
+ * On each iteration the thread either parks indefinitely (empty list),
+ * sleeps until the earliest deadline (timed wait), or pops expired entries
+ * and schedules SM resumption via runtime__schedule_sm_resumption.
+ *
+ * Insertion is O(n) (linear scan). Adequate for the expected sleep count
+ * (small fixed pool of concurrent timers); upgrade to a binary heap if a
+ * workload pushes it.
+ *
+ * Shutdown: runtime__stop_threads sets timer_shutdown and broadcasts on
+ * timer_cv. The thread drains the list (unpinning each entry — SMs are
+ * discarded silently, matching the worker-shutdown convention) and exits.
+ * ====================================================================== */
+
+void runtime__schedule_sm_resumption(void *runtime_ptr,
+                                             JaclVal state_machine,
+                                             JaclVal result);
+
+static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__timer_thread_loop(void *arg) {
+    Runtime *rt = (Runtime *)arg;
+    MUTEX_LOCK(rt->timer_mutex);
+    while (!ATOMIC_LOAD_EXPLICIT(&rt->timer_shutdown, MEM_ACQUIRE)) {
+        if (!rt->timer_head) {
+            COND_WAIT(rt->timer_cv, rt->timer_mutex);
+            continue;
+        }
+        uint64_t now = runtime__now_ns();
+        if (rt->timer_head->deadline_ns <= now) {
+            /* Expired — detach, release lock, dispatch, reacquire. */
+            TimerEntry *e = rt->timer_head;
+            rt->timer_head = e->next;
+            MUTEX_UNLOCK(rt->timer_mutex);
+
+            runtime_unpin_value(rt, e->root_handle);
+            runtime__schedule_sm_resumption(rt, e->sm_val, JACL_NIL);
+            free(e);
+
+            MUTEX_LOCK(rt->timer_mutex);
+        } else {
+            uint64_t wait_ns = rt->timer_head->deadline_ns - now;
+            long wait_ms = (long)(wait_ns / 1000000ULL);
+            if (wait_ms == 0) wait_ms = 1;  /* round sub-ms up so we always wake */
+            COND_WAIT_FOR_MS(rt->timer_cv, rt->timer_mutex, wait_ms);
+        }
+    }
+    /* Drain pending timers without firing — SMs will be discarded. */
+    TimerEntry *e = rt->timer_head;
+    rt->timer_head = NULL;
+    MUTEX_UNLOCK(rt->timer_mutex);
+    while (e) {
+        TimerEntry *next = e->next;
+        runtime_unpin_value(rt, e->root_handle);
+        free(e);
+        e = next;
+    }
+    return (THREAD_PROC_RETURN)0;
+}
+
+/* Register a sleep wakeup. Pins the SM as an external GC root and inserts
+ * a timer entry sorted by deadline. Called from VM dispatch (OP_SLEEP_SM)
+ * on a worker thread; the timer thread fires the wakeup.
+ *
+ * duration_ns is measured from "now" (CLOCK_MONOTONIC). 0 means "wake on
+ * the next timer-thread cycle" — useful for `sleep 0` as a yield point. */
+void runtime__schedule_timer(void *runtime_ptr, uint64_t duration_ns,
+                             JaclVal sm_val) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+    uint64_t deadline_ns = runtime__now_ns() + duration_ns;
+
+    TimerEntry *e = (TimerEntry *)malloc(sizeof(TimerEntry));
+    e->deadline_ns = deadline_ns;
+    e->sm_val      = sm_val;
+    e->root_handle = runtime_pin_value(rt, sm_val);
+    e->next        = NULL;
+
+    MUTEX_LOCK(rt->timer_mutex);
+    /* Insert sorted by deadline (ascending). Equal deadlines: append after
+     * existing entries to preserve FIFO among same-deadline sleeps. */
+    TimerEntry **cur = &rt->timer_head;
+    while (*cur && (*cur)->deadline_ns <= deadline_ns) {
+        cur = &(*cur)->next;
+    }
+    e->next = *cur;
+    *cur = e;
+    /* Wake the timer thread; if the new entry is earlier than what it's
+     * currently waiting for, it needs to recompute its sleep deadline. */
+    COND_SIGNAL(rt->timer_cv);
+    MUTEX_UNLOCK(rt->timer_mutex);
 }
 
 /* ======================================================================

@@ -262,6 +262,35 @@ else
     echo "prelude_source.h is up-to-date"
 fi
 
+# Generate prelude_macro_names.h — list of every macro NAME in prelude.jacl.
+# Drives the compiler macro-expansion fast-path: any user invocation of one
+# of these heads needs to be expanded. Hand-maintaining this list (as we
+# used to) silently dropped new prelude macros from expansion.
+PRELUDE_NAMES_HDR="$DIR/src/prelude_macro_names.h"
+if [ ! -f "$PRELUDE_NAMES_HDR" ] || [ "$PRELUDE_NAMES_HDR" -ot "$PRELUDE_SRC" ]; then
+    echo -n "Generating prelude_macro_names.h... "
+    {
+        echo '/* Auto-generated from prelude.jacl — do not edit. */'
+        echo '/* List of (name, length) pairs for every macro defined in the prelude. */'
+        echo 'static const struct { const char *name; uint32_t len; } jacl_prelude_macro_names[] = {'
+        # Grab the second token of each `defmacro NAME ...` line, emit as
+        # a C struct literal. Escapes backslash for the `\` macro name.
+        grep -E '^[[:space:]]*defmacro[[:space:]]+' "$PRELUDE_SRC" |
+          awk '{print $2}' |
+          while IFS= read -r name; do
+            esc=$(printf '%s' "$name" | sed 's/\\/\\\\/g')
+            len=${#name}
+            printf '    { "%s", %d },\n' "$esc" "$len"
+          done
+        echo '};'
+        echo "#define JACL_PRELUDE_MACRO_NAMES_COUNT \
+(sizeof(jacl_prelude_macro_names) / sizeof(jacl_prelude_macro_names[0]))"
+    } > "$PRELUDE_NAMES_HDR"
+    echo "ok"
+else
+    echo "prelude_macro_names.h is up-to-date"
+fi
+
 # Phase 0: Build shared libjacl.a (compile the unity build once)
 LIBJACL="$BUILD_DIR/libjacl.a"
 JACL_OBJ="$BUILD_DIR/jacl.o"

@@ -76,7 +76,7 @@ typedef enum {
   HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
 
   /* Concurrency / suspension */
-  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE,
+  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE, HEAD_SLEEP,
 
   /* Vec ops */
   HEAD_VEC,
@@ -182,6 +182,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "yield", 5) == 0) return HEAD_YIELD;
       if (memcmp(s, "await", 5) == 0) return HEAD_AWAIT;
       if (memcmp(s, "spawn", 5) == 0) return HEAD_SPAWN;
+      if (memcmp(s, "sleep", 5) == 0) return HEAD_SLEEP;
       if (memcmp(s, "match", 5) == 0) return HEAD_MATCH;
       if (memcmp(s, "break", 5) == 0) return HEAD_BREAK;
       if (memcmp(s, "print", 5) == 0) return HEAD_PRINT;

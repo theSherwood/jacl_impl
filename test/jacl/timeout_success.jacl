@@ -1,0 +1,9 @@
+# mode: concurrent
+# expect: 7
+# `timeout` macro: body completes well within the deadline, so its
+# value wins the race against the sleeping branch.
+proc main {} {
+  def r [timeout 1.0 { + 3 4 }]
+  print $r
+}
+main

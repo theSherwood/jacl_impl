@@ -189,6 +189,8 @@ typedef enum {
   OP_SET_RESUME_POINT, /* no operand; pop i32 value, write to state_obj resume_point */
   OP_YIELD_SM,       /* SM yield: pop value, store in vm->yield_value, return VM_YIELD (no continuation) */
   OP_AWAIT_SM,       /* SM await: pop future, read state_obj from frame slot 0; if resolved: push result; if pending: register SM waiter, return VM_OK */
+  OP_SLEEP_SM,       /* SM sleep: pop seconds (number); register timer with runtime, suspend SM (return VM_OK) */
+  OP_SLEEP_BLOCK,    /* Blocking sleep: pop seconds (number); nanosleep blocking on current thread, push nil — used in non-SM contexts */
   OP_CALL_SUSPEND,   /* uint8_t arg_count; like OP_CALL but spawns SM callee as task + await; for calls to suspending procs in SM context */
   OP_GET_STATE_FIELD_CELL, /* uint8_t field_idx; read cell from SM field, deref, push value */
   OP_SET_STATE_FIELD_CELL, /* uint8_t field_idx; read cell from SM field, pop value, write through cell w/ barrier, push NIL */
@@ -577,6 +579,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SET_RESUME_POINT:    return "OP_SET_RESUME_POINT";
     case OP_YIELD_SM:            return "OP_YIELD_SM";
     case OP_AWAIT_SM:            return "OP_AWAIT_SM";
+    case OP_SLEEP_SM:            return "OP_SLEEP_SM";
+    case OP_SLEEP_BLOCK:         return "OP_SLEEP_BLOCK";
     case OP_CALL_SUSPEND:        return "OP_CALL_SUSPEND";
     case OP_GET_STATE_FIELD_CELL: return "OP_GET_STATE_FIELD_CELL";
     case OP_SET_STATE_FIELD_CELL: return "OP_SET_STATE_FIELD_CELL";

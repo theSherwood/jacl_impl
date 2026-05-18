@@ -2434,6 +2434,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_FOR,         TYPE_NIL    },
       /* Yield — pushes nil after resume in current SM compilation. */
       { HEAD_YIELD,       TYPE_NIL    },
+      /* Sleep — always evaluates to nil (after wake or after nanosleep). */
+      { HEAD_SLEEP,       TYPE_NIL    },
       /* Job control — bool indicates delivered/cancelled. */
       { HEAD_SIGNAL,      TYPE_BOOL   },
       { HEAD_CANCEL,      TYPE_BOOL   },

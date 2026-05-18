@@ -1863,7 +1863,7 @@ static int test_defmacro_registers_in_table(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 9);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 1 user-defined */
+    ASSERT(cr.macro_table->count == 6);  /* 5 prelude (\, and, or, not, timeout) + 1 user-defined */
 
     MacroEntry* entry = macro_table_lookup(cr.macro_table, "unless", 6);
     ASSERT(entry != NULL);
@@ -1909,7 +1909,7 @@ static int test_defmacro_zero_params_registers(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 9);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 1 user-defined */
+    ASSERT(cr.macro_table->count == 6);  /* 5 prelude (\, and, or, not, timeout) + 1 user-defined */
 
     MacroEntry* entry = macro_table_lookup(cr.macro_table, "now", 3);
     ASSERT(entry != NULL);
@@ -1937,7 +1937,7 @@ static int test_defmacro_multiple_register(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 10);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 2 user-defined */
+    ASSERT(cr.macro_table->count == 7);  /* 5 prelude (\, and, or, not, timeout) + 2 user-defined */
 
     MacroEntry* e1 = macro_table_lookup(cr.macro_table, "unless", 6);
     ASSERT(e1 != NULL);

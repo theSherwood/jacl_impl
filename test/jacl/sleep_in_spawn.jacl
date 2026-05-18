@@ -1,0 +1,13 @@
+# mode: concurrent
+# expect: 42
+# sleep inside a spawn body — exercises the SM suspension path
+# (OP_SLEEP_SM + timer-thread wakeup).
+proc work {} {
+  sleep 0.02
+  + 40 2
+}
+proc main {} {
+  def f [spawn { work }]
+  print [await $f]
+}
+main

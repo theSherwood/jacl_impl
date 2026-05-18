@@ -11,51 +11,14 @@ defmacro \ {head ..rest} {
   [make-syntax "command" [make-syntax "lit-string" "proc"] [vec $nm $params $blk]]
 }
 
-# Binding operator =: x = 3 expands to [def x 3]
-# Parser produces [= [x] 3]; macro unwraps zero-arg commands to simple names
-defmacro = {lhs rhs} {
-  # Check if lhs is a zero-arg command (bare name from parser)
-  if [== [syntax-kind $lhs] "command"] {
-    if [== [vec-len [syntax-args $lhs]] 0] {
-      # Unwrap: [x] -> x
-      def name [syntax-head $lhs]
-      syntax-quote [def ~name ~rhs]
-    } else {
-      # Multi-arg command: destructuring pattern
-      syntax-quote [def ~lhs ~rhs]
-    }
-  } else {
-    # Not a command: pass through
-    syntax-quote [def ~lhs ~rhs]
-  }
-}
-
-# Mutable binding operator :: x : 0 expands to [mut x 0]
-defmacro : {lhs rhs} {
-  if [== [syntax-kind $lhs] "command"] {
-    if [== [vec-len [syntax-args $lhs]] 0] {
-      def name [syntax-head $lhs]
-      syntax-quote [mut ~name ~rhs]
-    } else {
-      syntax-quote [mut ~lhs ~rhs]
-    }
-  } else {
-    syntax-quote [mut ~lhs ~rhs]
-  }
-}
-
-# Pipe operator: foo a | bar b expands to [bar [foo a] b]
-# Threads lhs as first argument to rhs command
-defmacro | {lhs rhs} {
-  if [== [syntax-kind $rhs] "command"] {
-    def head [syntax-head $rhs]
-    def args [syntax-args $rhs]
-    def new-args [vec-concat [vec $lhs] $args]
-    [make-syntax "command" $head $new-args]
-  } else {
-    syntax-error "pipe operator | requires a command on the right side"
-  }
-}
+# NOTE: Binding operators (=, :, ::) and the pipe operator (|) used to be
+# defined here as macros, but the parser already desugars them at parse
+# time (typed bindings like `i64 x = 5` go through a dedicated rule and
+# would be MIScompiled if these macros expanded — `lhs` ends up wrapped
+# in a stray command). Removed 2026-05-18 along with the macro fast-path
+# fix that started consuming the auto-generated prelude name list — any
+# entry here triggers expansion at every user call site, so a macro that
+# can't safely fire must not appear in the file.
 
 # Logical AND: [and a b] expands to [&& a b] for short-circuit behavior
 defmacro and {a b} {
@@ -74,16 +37,11 @@ defmacro not {a} {
   [make-syntax "command" $head [vec $a]]
 }
 
-# Reassignment operator ::: x :: 5 expands to [set x 5]
-defmacro :: {lhs rhs} {
-  if [== [syntax-kind $lhs] "command"] {
-    if [== [vec-len [syntax-args $lhs]] 0] {
-      def name [syntax-head $lhs]
-      syntax-quote [set ~name ~rhs]
-    } else {
-      syntax-quote [set ~lhs ~rhs]
-    }
-  } else {
-    syntax-quote [set ~lhs ~rhs]
-  }
+# timeout n body — race body against a sleeping branch that errors after n
+# seconds. Returns body's value if it completes within the deadline,
+# otherwise an error value with payload "timeout".  Requires a suspending
+# context (the implicit one created by spawn/parallel/race/proc with
+# suspending callees).
+defmacro timeout {n body} {
+  syntax-quote [race ~body { sleep ~n; error "timeout" }]
 }

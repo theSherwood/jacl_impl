@@ -355,6 +355,8 @@ void runtime__schedule_continuation(void *runtime_ptr,
 void runtime__schedule_sm_resumption(void *runtime_ptr,
                                              JaclVal state_machine,
                                              JaclVal result);
+void runtime__schedule_timer(void *runtime_ptr, uint64_t duration_ns,
+                             JaclVal sm_val);
 void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result);
@@ -2275,6 +2277,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_SET_RESUME_POINT] = &&L_OP_SET_RESUME_POINT,
     [OP_YIELD_SM] = &&L_OP_YIELD_SM,
     [OP_AWAIT_SM] = &&L_OP_AWAIT_SM,
+    [OP_SLEEP_SM] = &&L_OP_SLEEP_SM,
+    [OP_SLEEP_BLOCK] = &&L_OP_SLEEP_BLOCK,
     [OP_CALL_SUSPEND] = &&L_OP_CALL_SUSPEND,
     [OP_GET_STATE_FIELD_CELL] = &&L_OP_GET_STATE_FIELD_CELL,
     [OP_SET_STATE_FIELD_CELL] = &&L_OP_SET_STATE_FIELD_CELL,
@@ -8849,6 +8853,83 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
         }
+        DISPATCH();
+      }
+
+      CASE(OP_SLEEP_SM): {
+        /* SM sleep: pop seconds, register a timer with the runtime, and
+           suspend by returning VM_OK with the frame intact. The compiler
+           emits OP_SET_RESUME_POINT immediately before this op, so when
+           the timer fires and the SM is resumed via
+           runtime__schedule_sm_resumption, the dispatch table at SM entry
+           jumps to the resume label (which pushes __rv = nil onto the
+           stack as the sleep expression's value). */
+        JaclVal dur_val;
+        result = vm__pop(vm, &dur_val);
+        if (result != VM_OK) return result;
+
+        double secs;
+        if (jacl_is_i32(dur_val))      secs = (double)jacl_as_i32(dur_val);
+        else if (jacl_is_i64(dur_val)) secs = (double)jacl_as_i64(dur_val);
+        else if (jacl_is_f32(dur_val)) secs = (double)jacl_as_f32(dur_val);
+        else if (jacl_is_f64(dur_val)) secs = jacl_as_f64(dur_val);
+        else {
+          vm__set_error(vm, "sleep requires a number, got %s",
+                       vm__type_name(dur_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!(secs >= 0.0)) secs = 0.0;  /* clamp negative + NaN to 0 */
+
+        if (vm->runtime) {
+          /* Concurrent: hand off to the timer thread and suspend. */
+          JaclVal state_val = vm->stack[frame->stack_base + 0];
+          uint64_t duration_ns = (uint64_t)(secs * 1e9);
+          runtime__schedule_timer(vm->runtime, duration_ns, state_val);
+          return VM_OK;
+        }
+        /* Single-threaded fallback: there is no scheduler to wake us, so
+           block this thread. Acceptable because non-runtime mode has no
+           other work to run anyway. */
+        {
+          struct timespec ts;
+          ts.tv_sec  = (time_t)secs;
+          ts.tv_nsec = (long)((secs - (double)ts.tv_sec) * 1e9);
+          if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+          nanosleep(&ts, NULL);
+        }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_SLEEP_BLOCK): {
+        /* Toplevel/non-SM sleep: pop seconds, nanosleep on the current
+           thread, push nil. Always blocking — used when the surrounding
+           proc isn't compiled as a state machine. */
+        JaclVal dur_val;
+        result = vm__pop(vm, &dur_val);
+        if (result != VM_OK) return result;
+
+        double secs;
+        if (jacl_is_i32(dur_val))      secs = (double)jacl_as_i32(dur_val);
+        else if (jacl_is_i64(dur_val)) secs = (double)jacl_as_i64(dur_val);
+        else if (jacl_is_f32(dur_val)) secs = (double)jacl_as_f32(dur_val);
+        else if (jacl_is_f64(dur_val)) secs = jacl_as_f64(dur_val);
+        else {
+          vm__set_error(vm, "sleep requires a number, got %s",
+                       vm__type_name(dur_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!(secs >= 0.0)) secs = 0.0;
+
+        struct timespec ts;
+        ts.tv_sec  = (time_t)secs;
+        ts.tv_nsec = (long)((secs - (double)ts.tv_sec) * 1e9);
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        nanosleep(&ts, NULL);
+
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
         DISPATCH();
       }
 

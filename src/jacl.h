@@ -596,7 +596,7 @@ typedef enum {
   HEAD_IF, HEAD_WHILE, HEAD_FOR,
   HEAD_BREAK, HEAD_CONTINUE, HEAD_RETURN,
   HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
-  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE,
+  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE, HEAD_SLEEP,
   HEAD_VEC,
   HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
   HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
@@ -909,6 +909,8 @@ typedef enum {
   OP_SET_RESUME_POINT,
   OP_YIELD_SM,
   OP_AWAIT_SM,
+  OP_SLEEP_SM,    /* pop seconds (number); register timer with runtime, suspend SM */
+  OP_SLEEP_BLOCK, /* pop seconds (number); nanosleep blocking, push nil — non-SM path */
   OP_CALL_SUSPEND,
   OP_GET_STATE_FIELD_CELL,
   OP_SET_STATE_FIELD_CELL,
@@ -1690,6 +1692,13 @@ struct Runtime {
     uint32_t            external_root_count;
     uint32_t            external_root_cap;
     platform_mutex_t    external_roots_mutex;
+    /* Timer thread state — drives `sleep` wakeups. See runtime.c. */
+    thread_t            timer_thread;
+    int                 timer_thread_started;
+    int                 timer_shutdown;
+    platform_mutex_t    timer_mutex;
+    platform_cond_t     timer_cv;
+    struct TimerEntry  *timer_head;
     /* Perf counters — see GCStats. */
     GCStats             gc_stats;
 };

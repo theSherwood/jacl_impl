@@ -1,0 +1,19 @@
+# mode: concurrent
+# expect: 3
+# Three concurrent sleeps: if they truly run in parallel (timer thread
+# wakes each independently), all three resolve and we count 3. A naive
+# blocking implementation would still produce 3 — but the wall time
+# would be ~3x as long. We don't assert timing here; we only assert
+# that multiple concurrent sleeps don't deadlock or drop wakeups.
+proc nap {} {
+  sleep 0.02
+  1
+}
+proc main {} {
+  def a [spawn { nap }]
+  def b [spawn { nap }]
+  def c [spawn { nap }]
+  def sum [+ [+ [await $a] [await $b]] [await $c]]
+  print $sum
+}
+main
