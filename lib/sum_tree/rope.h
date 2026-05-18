@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "utf8.h"
 
@@ -31,6 +32,53 @@ static inline rope_summary rope_summary_combine(rope_summary a, rope_summary b) 
 }
 
 static inline rope_summary rope_summary_summarize(const uint8_t* elems, size_t count) {
+  /* Single-pass ASCII detection plus newline + CR-LF counts. For pure
+   * ASCII input — the common case for code, English text, and most
+   * config formats — we can fill every summary field from these counts
+   * alone, since bytes ≡ codepoints ≡ graphemes for ASCII (the one
+   * exception is CR followed by LF, which UAX #29 joins into a single
+   * grapheme). This avoids the per-byte table-lookup work in
+   * unicode_grapheme_count, which dominates the non-ASCII path
+   * (~77 % of rope_from_str on a 200KB ASCII buffer). */
+  size_t lines      = 0;
+  size_t crlf_pairs = 0;
+  size_t i          = 0;
+  bool   ascii      = true;
+
+  while (i + 8 <= count) {
+    uint64_t w;
+    memcpy(&w, elems + i, 8);
+    if (w & 0x8080808080808080ULL) { ascii = false; break; }
+    /* Per-byte check for '\n' is unavoidable; word-level "any byte is 0x0A"
+     * detection would still need a per-byte resolution step on a hit. */
+    for (size_t k = 0; k < 8; k++) {
+      if (elems[i + k] == 0x0A) {
+        lines++;
+        if (i + k > 0 && elems[i + k - 1] == 0x0D) crlf_pairs++;
+      }
+    }
+    i += 8;
+  }
+  if (ascii) {
+    for (; i < count; i++) {
+      uint8_t b = elems[i];
+      if (b & 0x80) { ascii = false; break; }
+      if (b == 0x0A) {
+        lines++;
+        if (i > 0 && elems[i - 1] == 0x0D) crlf_pairs++;
+      }
+    }
+  }
+  if (ascii) {
+    return (rope_summary){
+      .bytes     = count,
+      .chars     = count,
+      .lines     = lines,
+      .graphemes = count - crlf_pairs
+    };
+  }
+
+  /* Non-ASCII: fall back to the general unicode helpers. */
   return (rope_summary){
     .bytes     = count,
     .chars     = utf8_codepoint_count(elems, count),

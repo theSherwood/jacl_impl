@@ -10,7 +10,7 @@
 > - `SYNCHRONIZATION.md` — the *what protects what*, per-field reference
 > - `AUDIT_HISTORY.md` — the audit's worked-through backlog (read-only archive)
 
-## Current state (2026-05-15)
+## Current state (2026-05-19)
 
 All correctness items from the May 2026 audit campaign are closed:
 8 critical GC/concurrency items, 5 soak-surfaced races, the §9 SATB
@@ -24,11 +24,53 @@ propagate `vm->error_message` to the awaiter. See `AUDIT_HISTORY.md`
 for the per-phase story.
 
 **Test baselines:**
-- Normal-mode suite: 88 pass / 0 fail (`./build.sh`).
-- TSAN baseline: 86 pass / 2 fail (`./build.sh --tsan`).
-  `jacl_harness` and `chase_lev_stress` are the two **documented as
-  known-and-safe** — TSAN blindness on barrier/fence/epoch-mediated
-  synchronization, not missed barriers.
+- Normal-mode suite: 85 pass / 2 fail (`./build.sh`) as of 2026-05-19
+  on `a5cc623`. Drift from the prior 87/0 — both failures are
+  pre-existing on `main`, not caused by any in-flight work, and
+  reproduce with the local working tree stashed. **Under
+  investigation; not yet triaged into the open-items list below.**
+  - `rope_concat`: `test_rope_concat_zwj_at_junction` (7/8 sub-tests
+    pass). Previously listed as TSAN-only; the same sub-test now also
+    fails in normal mode. May or may not be the same underlying issue
+    as the TSAN-side hang.
+  - `stream_type`: `stream_print` fails — `fmt.len == 8 expected,
+    got 3` at `test_stream_type.c:55`. New failure not in the May
+    audit campaign's known list.
+- TSAN baseline: 85 pass / 2 fail (`./build.sh --tsan`).
+  `chase_lev_stress` and `rope_concat` are the two **known-and-safe**
+  TSAN-only failures — TSAN blindness on barrier/fence/epoch-mediated
+  synchronization, not missed barriers. Both also fail with all of
+  `src/runtime.c` + `src/vm.c` reverted, confirming neither is owned
+  by JACL runtime code.
+  - `chase_lev_stress`: 11/11 functional sub-tests PASS; ~20 race
+    warnings from `test_stress_epoch_thief_rotation` cause the
+    non-zero exit. Two distinct sites — `chase_lev.h:268` (plain
+    data store synchronized by the release-store on `bottom` two
+    lines later; the standalone test doesn't `#define
+    CHASE_LEV_ATOMIC_DATA`, the TSAN-friendly mode `src/runtime.c`
+    opts into) and `test_helpers.h:86` (epoch-protected `free` of a
+    retired buffer; TSAN can't track happens-before through the
+    epoch wait loop). Coverage of the runtime's actual chase_lev
+    use lives in `chaos_pinned_deque` + `chaos_gc_deque_scan`, both
+    TSAN-clean.
+  - `rope_concat`: `test_rope_concat_zwj_at_junction` (7/8 sub-tests
+    pass). Now also fails in normal mode — see normal-mode entry
+    above; the two may have a common cause. The other rope-tier
+    coverage (`test_rope_string`, `test_rope_slice_grapheme`,
+    `test_concat_tiers`, `test_gc_rope_tracing`) is TSAN-clean, and
+    the production rope path through `string.c` is exercised by
+    `string_concat`-bench under TSAN without issue.
+
+  AUDIT_HISTORY.md §"TSAN baseline triage (2026-05-14)" carries the
+  full chase_lev triage walk-through and the original zwj-test
+  TSAN-only confirmation (now stale on the TSAN-only claim).
+- Soak flake (`chaos_soak`): randomized 4×4 worker/driver test
+  intermittently livelocks — all workers stuck in
+  `gc_alloc → runtime__emergency_gc → SLEEP_MILLISECONDS` while the
+  main thread waits in `pthread_join` (see `runtime.c:671`,
+  `gc.c:557`). Reproduces on `a5cc623` independent of working-tree
+  state. Most invocations exit cleanly in ~5 s with a different
+  seed; some seeds hang indefinitely. Not yet bisected.
 - WASM compile check: clean (`./build.sh --wasm` — gated on `emcc`
   on PATH; skips with a notice if absent). Run before merging any
   change to `src/` or `include/` so the embedded/WASM target doesn't

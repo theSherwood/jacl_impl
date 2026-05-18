@@ -183,6 +183,188 @@ int test_from_str_invalid_utf8(void) {
   TEST_PASS();
 }
 
+/* === ASCII fast-path in rope_summary_summarize ===
+ *
+ * The summarize function takes a single-pass ASCII fast-path that fills
+ * every summary field from byte/newline/CR-LF counts alone, bypassing
+ * unicode_grapheme_count. These tests cover the boundaries of that path:
+ * word-loop only, tail only, CR-LF detection within and across word
+ * boundaries, and falling out of the fast-path on a high-bit byte at
+ * each escape site. Outputs are checked against the same getters
+ * (rope_byte_count etc.) the non-fast-path tests use, so a regression in
+ * either branch is visible. */
+
+int test_ascii_fastpath_word_loop_only(void) {
+  printf("Running test_ascii_fastpath_word_loop_only... ");
+  tracker_reset();
+
+  /* 24 bytes, exact multiple of 8, no newlines — exercises only the
+   * word loop, no tail. */
+  const uint8_t* str = (const uint8_t*)"abcdefghijklmnopqrstuvwx";
+  rope r = rope_from_str(str, 24);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 24);
+  ASSERT_INT_EQ(rope_char_count(r), 24);
+  ASSERT_INT_EQ(rope_line_count(r), 0);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 24);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_short_tail_only(void) {
+  printf("Running test_ascii_fastpath_short_tail_only... ");
+  tracker_reset();
+
+  /* 5 bytes — skips word loop entirely, runs only the tail loop. */
+  const uint8_t* str = (const uint8_t*)"hi!\nx";
+  rope r = rope_from_str(str, 5);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 5);
+  ASSERT_INT_EQ(rope_char_count(r), 5);
+  ASSERT_INT_EQ(rope_line_count(r), 1);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 5);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_lf_counts(void) {
+  printf("Running test_ascii_fastpath_lf_counts... ");
+  tracker_reset();
+
+  /* Three '\n' bytes spread across word and tail regions. */
+  const uint8_t* str = (const uint8_t*)"a\nbcdefgh\nij\n";  /* 13 bytes */
+  rope r = rope_from_str(str, 13);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 13);
+  ASSERT_INT_EQ(rope_char_count(r), 13);
+  ASSERT_INT_EQ(rope_line_count(r), 3);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 13);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_crlf_within_word(void) {
+  printf("Running test_ascii_fastpath_crlf_within_word... ");
+  tracker_reset();
+
+  /* "aa\r\nbb\r\n" — 8 bytes, two CR-LFs both inside the single word
+   * iteration. graphemes = bytes - crlf_pairs = 8 - 2 = 6. */
+  const uint8_t* str = (const uint8_t*)"aa\r\nbb\r\n";
+  rope r = rope_from_str(str, 8);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 8);
+  ASSERT_INT_EQ(rope_char_count(r), 8);
+  ASSERT_INT_EQ(rope_line_count(r), 2);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 6);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_crlf_across_word_boundary(void) {
+  printf("Running test_ascii_fastpath_crlf_across_word_boundary... ");
+  tracker_reset();
+
+  /* CR at byte 7 (last in first word), LF at byte 8 (first in second
+   * word). The CR-LF lookback (elems[i+k-1]) must reach back across the
+   * 8-byte iteration boundary; relies on indexing into elems, not a
+   * local word buffer. graphemes = 16 - 1 = 15. */
+  const uint8_t* str = (const uint8_t*)"abcdefg\r\nhijklmn";  /* 16 bytes */
+  rope r = rope_from_str(str, 16);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 16);
+  ASSERT_INT_EQ(rope_char_count(r), 16);
+  ASSERT_INT_EQ(rope_line_count(r), 1);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 15);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_falls_back_on_high_bit_in_word(void) {
+  printf("Running test_ascii_fastpath_falls_back_on_high_bit_in_word... ");
+  tracker_reset();
+
+  /* "abcdef" + "é" + "g" — high bit in word loop's first iteration
+   * triggers escape. é(2 bytes) means bytes=9, chars=8, graphemes=8.
+   * Cross-checks that the fallback path is reached and produces the
+   * same answer the non-fast-path code would. */
+  const uint8_t str[] = {
+    'a', 'b', 'c', 'd', 'e', 'f',
+    0xC3, 0xA9,  /* é */
+    'g'
+  };
+  rope r = rope_from_str(str, sizeof(str));
+
+  ASSERT_INT_EQ(rope_byte_count(r), 9);
+  ASSERT_INT_EQ(rope_char_count(r), 8);
+  ASSERT_INT_EQ(rope_line_count(r), 0);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 8);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_falls_back_on_high_bit_in_tail(void) {
+  printf("Running test_ascii_fastpath_falls_back_on_high_bit_in_tail... ");
+  tracker_reset();
+
+  /* 8 ASCII bytes (one full word iter, clean) followed by 'é' + 'x'
+   * in the tail (high bit in tail loop's escape branch). */
+  const uint8_t str[] = {
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',  /* full word, ascii */
+    0xC3, 0xA9,                              /* é */
+    'x'
+  };
+  rope r = rope_from_str(str, sizeof(str));
+
+  ASSERT_INT_EQ(rope_byte_count(r), 11);
+  ASSERT_INT_EQ(rope_char_count(r), 10);
+  ASSERT_INT_EQ(rope_line_count(r), 0);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 10);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_empty(void) {
+  printf("Running test_ascii_fastpath_empty... ");
+  tracker_reset();
+
+  /* count==0 skips both loops; ascii stays true; returns zeroed
+   * summary. Covers the degenerate-input corner. */
+  rope r = rope_from_str((const uint8_t*)"", 0);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 0);
+  ASSERT_INT_EQ(rope_char_count(r), 0);
+  ASSERT_INT_EQ(rope_line_count(r), 0);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 0);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
+int test_ascii_fastpath_lone_cr_not_counted_as_crlf(void) {
+  printf("Running test_ascii_fastpath_lone_cr_not_counted_as_crlf... ");
+  tracker_reset();
+
+  /* CR with no following LF must not subtract from graphemes; LF with
+   * no preceding CR also must not. */
+  const uint8_t* str = (const uint8_t*)"a\rb\nc";  /* 5 bytes */
+  rope r = rope_from_str(str, 5);
+
+  ASSERT_INT_EQ(rope_byte_count(r), 5);
+  ASSERT_INT_EQ(rope_char_count(r), 5);
+  ASSERT_INT_EQ(rope_line_count(r), 1);
+  ASSERT_INT_EQ(rope_grapheme_count(r), 5);
+
+  rope_unref(r);
+  TEST_PASS();
+}
+
 /* === US-007 Tests: insert / delete / replace === */
 
 int test_insert_beginning(void) {
@@ -1965,7 +2147,7 @@ int test_transient_delete_persistence(void) {
 
 int main(void) {
   int pass = 0, fail = 0;
-  int total = 76;
+  int total = 85;
   typedef int (*test_fn)(void);
   test_fn tests[] = {
     test_empty_rope,
@@ -1977,6 +2159,16 @@ int main(void) {
     test_from_str_large_roundtrip,
     test_from_str_empty,
     test_from_str_invalid_utf8,
+    /* ASCII fast-path */
+    test_ascii_fastpath_word_loop_only,
+    test_ascii_fastpath_short_tail_only,
+    test_ascii_fastpath_lf_counts,
+    test_ascii_fastpath_crlf_within_word,
+    test_ascii_fastpath_crlf_across_word_boundary,
+    test_ascii_fastpath_falls_back_on_high_bit_in_word,
+    test_ascii_fastpath_falls_back_on_high_bit_in_tail,
+    test_ascii_fastpath_empty,
+    test_ascii_fastpath_lone_cr_not_counted_as_crlf,
     /* US-007 */
     test_insert_beginning,
     test_insert_middle,
