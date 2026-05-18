@@ -299,7 +299,12 @@ visible.
 - **Consolidate dual struct definitions** (`runtime.c`/`gc.c` vs
   `jacl.h`). Doesn't shed size; removes drift-bug class. Options:
   thread via `jacl.h`, route tests through unity build, or opaque
-  pointers + accessors.
+  pointers + accessors. **Mitigated 2026-05-18**: every field of
+  `Runtime` + `WorkerThread` is now offset-checked via the X-macro
+  list in `src/struct_drift_fields.h` (driving both `embed.c` getters
+  and `test_struct_sizes.c` checks); a missing field in either
+  definition fails to compile, an offset mismatch fails the test at
+  runtime. The duplication itself remains.
 - **`vm.c` split.** 12,200 lines in one TU. Splitting by category
   (keeping the dispatch table central) could halve it. No runtime
   cost change; cognitive-load only.

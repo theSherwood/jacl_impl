@@ -71,14 +71,20 @@ int main(void) {
   CHECK_SIZE(GreyBuffer,          jacl__sizeof_grey_buffer);
   CHECK_SIZE(RememberedSet,       jacl__sizeof_remembered_set);
 
-  /* Field offsets — catch struct drift that preserves total size
-   * but shifts individual fields (the original WorkerThread bug). */
-  CHECK_OFFSET(WorkerThread, thread_epoch,
-               jacl__offsetof_worker_thread_epoch);
-  CHECK_OFFSET(WorkerThread, currently_executing,
-               jacl__offsetof_worker_currently_executing);
-  CHECK_OFFSET(Runtime, inbox_count,
-               jacl__offsetof_runtime_inbox_count);
+  /* Field offsets — catch struct drift that preserves total size but
+   * shifts individual fields (the original WorkerThread bug). Coverage
+   * is comprehensive (every field of Runtime + WorkerThread) so that a
+   * missing field in either definition fails at compile time
+   * ("no member named …") rather than corrupting memory silently. The
+   * list lives in src/struct_drift_fields.h and is shared with embed.c
+   * — see that header for the update protocol. */
+#include "../src/struct_drift_fields.h"
+#define JACL_DRIFT_CHECK(STRUCT, FIELD) \
+    CHECK_OFFSET(STRUCT, FIELD, jacl__offsetof_##STRUCT##_##FIELD);
+  RUNTIME_FIELDS(JACL_DRIFT_CHECK)
+  WORKER_FIELDS(JACL_DRIFT_CHECK)
+#undef JACL_DRIFT_CHECK
+
   CHECK_OFFSET(RuntimeTask, gc_root3,
                jacl__offsetof_runtime_task_gc_root3);
 

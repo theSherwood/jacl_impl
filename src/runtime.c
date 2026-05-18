@@ -112,6 +112,21 @@ static inline uint64_t runtime__now_ns(void) {
 
 typedef struct Runtime Runtime;
 
+/* ======================================================================
+ * struct WorkerThread / struct Runtime — DUAL DEFINITION
+ *
+ * These structs are also defined in src/jacl.h for separately-compiled
+ * consumers (tests, embedders). The two definitions MUST stay in lockstep
+ * — any field added, removed, or reordered here must be applied to the
+ * jacl.h copy AND listed in src/struct_drift_fields.h.
+ *
+ * Why dual: the unity build (jacl.c) doesn't include jacl.h because that
+ * would re-typedef things like JaclVal — forbidden by -std=c99. Until the
+ * larger refactor (NOT_IMPLEMENTED.md §11) eliminates the duplication, the
+ * struct_drift_fields.h X-macro list keeps test_struct_sizes.c catching
+ * drift at compile/test time instead of through silent memory corruption.
+ * ====================================================================== */
+
 typedef struct WorkerThread {
     rt_deque_deque    *public_deque;         /* stealable tasks */
     rt_deque_deque    *private_deque;        /* thread-local tasks (not stolen) */

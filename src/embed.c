@@ -1320,18 +1320,29 @@ size_t jacl__sizeof_thread_heap(void)       { return sizeof(ThreadHeap); }
 size_t jacl__sizeof_grey_buffer(void)       { return sizeof(GreyBuffer); }
 size_t jacl__sizeof_remembered_set(void)    { return sizeof(RememberedSet); }
 
-/* Offset checks for fields whose drift has produced concrete bugs.
- * thread_epoch was the symptom of the WorkerThread drift; currently_executing
- * is read by the GC root scanner via the BUSY-sentinel protocol. */
-size_t jacl__offsetof_worker_thread_epoch(void) {
-    return offsetof(WorkerThread, thread_epoch);
-}
-size_t jacl__offsetof_worker_currently_executing(void) {
-    return offsetof(WorkerThread, currently_executing);
-}
-size_t jacl__offsetof_runtime_inbox_count(void) {
-    return offsetof(Runtime, inbox_count);
-}
+/* Offset checks for every field of Runtime and WorkerThread, driven by
+ * src/struct_drift_fields.h. Generates one `size_t jacl__offsetof_<struct>_<field>(void)`
+ * function per field, returning the offset from the unity-build view of the
+ * struct. test_struct_sizes.c compares against the jacl.h view of the same
+ * field; any divergence (including a missing field in either view) fails to
+ * compile, catching drift before it can silently corrupt memory.
+ *
+ * Comprehensive coverage exists because adding a field at the end of
+ * Runtime in runtime.c but not jacl.h previously slipped past sizeof-only
+ * checks and corrupted timer-thread state in separately-compiled tests. */
+#include "struct_drift_fields.h"
+
+#define JACL_DRIFT_DEFINE_OFFSETOF(STRUCT, FIELD) \
+    size_t jacl__offsetof_##STRUCT##_##FIELD(void) { \
+        return offsetof(STRUCT, FIELD); \
+    }
+RUNTIME_FIELDS(JACL_DRIFT_DEFINE_OFFSETOF)
+WORKER_FIELDS(JACL_DRIFT_DEFINE_OFFSETOF)
+#undef JACL_DRIFT_DEFINE_OFFSETOF
+
+/* RuntimeTask offsets — gc_root3 was the original drift symptom. Kept
+ * here as a stand-alone check; full coverage isn't worth the X-macro
+ * boilerplate for a 4-field struct. */
 size_t jacl__offsetof_runtime_task_gc_root3(void) {
     return offsetof(RuntimeTask, gc_root3);
 }

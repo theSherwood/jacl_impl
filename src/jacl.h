@@ -1638,6 +1638,11 @@ typedef struct {
 
 typedef struct Runtime Runtime;
 
+/* DUAL DEFINITION: this struct is also defined in src/runtime.c for the
+ * unity build. Any field change MUST be applied to both — and listed in
+ * src/struct_drift_fields.h. See runtime.c for the rationale and
+ * NOT_IMPLEMENTED.md §11 for the consolidation refactor that would
+ * eliminate this duplication. */
 typedef struct WorkerThread {
     rt_deque_deque    *public_deque;
     rt_deque_deque    *private_deque;
@@ -2578,9 +2583,17 @@ extern size_t jacl__sizeof_thread_heap (void);
 extern size_t jacl__sizeof_grey_buffer (void);
 extern size_t jacl__sizeof_remembered_set (void);
 
-extern size_t jacl__offsetof_worker_thread_epoch (void);
-extern size_t jacl__offsetof_worker_currently_executing (void);
-extern size_t jacl__offsetof_runtime_inbox_count (void);
+/* Per-field offset getters for Runtime + WorkerThread, generated from
+ * src/struct_drift_fields.h. test_struct_sizes.c compares these (returning
+ * the unity-build view) against offsetof from the jacl.h view (same struct
+ * names, used here). Any drift between the two definitions fails the test. */
+#include "struct_drift_fields.h"
+#define JACL_DRIFT_DECLARE_OFFSETOF(STRUCT, FIELD) \
+    extern size_t jacl__offsetof_##STRUCT##_##FIELD (void);
+RUNTIME_FIELDS(JACL_DRIFT_DECLARE_OFFSETOF)
+WORKER_FIELDS(JACL_DRIFT_DECLARE_OFFSETOF)
+#undef JACL_DRIFT_DECLARE_OFFSETOF
+
 extern size_t jacl__offsetof_runtime_task_gc_root3 (void);
 
 #endif /* JACL_H */
