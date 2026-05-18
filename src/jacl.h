@@ -1320,6 +1320,7 @@ typedef struct {
   AstNode*            node;
   uint32_t            line;
   uint32_t            column;
+  uint16_t            pre_stack_depth;
 } SuspensionPoint;
 
 typedef struct {
@@ -1344,6 +1345,9 @@ typedef struct {
   SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
   StateLayout     state_layout;
   uint32_t        ctx_field_idx;  /* state field index for __ctx (UINT32_MAX if absent) */
+  uint16_t        max_pre_stack_depth;
+  uint16_t        spill_base_slot;
+  uint16_t        scratch_slot;
 } SuspensionAnalysis;
 
 typedef struct {
@@ -1697,12 +1701,10 @@ struct Runtime {
     uint32_t            external_root_count;
     uint32_t            external_root_cap;
     platform_mutex_t    external_roots_mutex;
-    /* Timer thread state — drives `sleep` wakeups. See runtime.c. */
-    thread_t            timer_thread;
-    int                 timer_thread_started;
-    int                 timer_shutdown;
+    /* Sleep-timer state — deadline-sorted list polled by idle workers.
+     * No dedicated thread; runtime__poll_timers runs on the worker loop.
+     * See runtime.c. */
     platform_mutex_t    timer_mutex;
-    platform_cond_t     timer_cv;
     struct TimerEntry  *timer_head;
     /* Perf counters — see GCStats. */
     GCStats             gc_stats;

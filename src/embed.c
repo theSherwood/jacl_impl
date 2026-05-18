@@ -1329,7 +1329,7 @@ size_t jacl__sizeof_remembered_set(void)    { return sizeof(RememberedSet); }
  *
  * Comprehensive coverage exists because adding a field at the end of
  * Runtime in runtime.c but not jacl.h previously slipped past sizeof-only
- * checks and corrupted timer-thread state in separately-compiled tests. */
+ * checks and corrupted runtime state in separately-compiled tests. */
 #include "struct_drift_fields.h"
 
 #define JACL_DRIFT_DEFINE_OFFSETOF(STRUCT, FIELD) \

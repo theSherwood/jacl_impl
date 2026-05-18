@@ -1,7 +1,7 @@
 # mode: concurrent
 # expect: 42
 # sleep inside a spawn body — exercises the SM suspension path
-# (OP_SLEEP_SM + timer-thread wakeup).
+# (OP_SLEEP_SM + worker-poll wakeup).
 proc work {} {
   sleep 0.02
   + 40 2

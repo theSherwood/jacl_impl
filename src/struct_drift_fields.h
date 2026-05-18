@@ -39,11 +39,7 @@
     X(Runtime, external_root_count) \
     X(Runtime, external_root_cap) \
     X(Runtime, external_roots_mutex) \
-    X(Runtime, timer_thread) \
-    X(Runtime, timer_thread_started) \
-    X(Runtime, timer_shutdown) \
     X(Runtime, timer_mutex) \
-    X(Runtime, timer_cv) \
     X(Runtime, timer_head) \
     X(Runtime, gc_stats)
 #endif

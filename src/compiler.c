@@ -1291,6 +1291,12 @@ typedef struct {
   AstNode*            node;      /* AST node of the suspension point */
   uint32_t            line;      /* source line */
   uint32_t            column;    /* source column */
+  /* Number of operand-stack values live at this suspension that were pushed
+     by enclosing expression evaluators. These must be spilled into reserved
+     state-machine slots before the suspension and restored after the resume
+     label, because runtime__setup_call resets vm->stack_top on every SM
+     re-entry. Computed statically by sm__walk_suspensions. */
+  uint16_t            pre_stack_depth;
 } SuspensionPoint;
 
 /* --- State machine local classification (US-002) --- */
@@ -1317,6 +1323,14 @@ typedef struct {
   SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
   StateLayout     state_layout;
   uint32_t        ctx_field_idx;  /* state field index for __ctx (UINT32_MAX if absent) */
+  /* Operand-stack spill area (see SuspensionPoint::pre_stack_depth).
+     `spill_base_slot` is the first slot of the spill region; the SM has
+     `max_pre_stack_depth` spill slots followed by one scratch slot (used
+     to reshuffle the await/resume value above the restored stack). All
+     three are zero when no suspension needs spilling. */
+  uint16_t        max_pre_stack_depth;
+  uint16_t        spill_base_slot;
+  uint16_t        scratch_slot;
 } SuspensionAnalysis;
 
 /* Create a JaclVal from a name string, routing by length:
@@ -1338,18 +1352,83 @@ typedef struct {
   SuspensionMap*      map;
   ThreadHeap*         heap;
   JaclInternTable*    intern_table;
+  /* Operand-stack depth contributed by enclosing expressions at the current
+     AST node. Each argument of an AST_COMMAND is evaluated with one extra
+     value already on the stack per preceding sibling (so arg i sees depth
+     `depth + i`). This is the spill-count we record at each suspension. */
+  uint16_t            depth;
 } WalkSuspensionsCtx;
 
 static void sm__record_suspension(SuspensionAnalysis* a, AstNode* node,
-                                  SuspensionPointType type) {
+                                  SuspensionPointType type,
+                                  uint16_t pre_stack_depth) {
   if (a->suspension_count >= SM_MAX_SUSPENSION_POINTS) return;
   SuspensionPoint* sp = &a->suspension_points[a->suspension_count];
-  sp->id     = a->suspension_count;
-  sp->type   = type;
-  sp->node   = node;
-  sp->line   = node->start.line;
-  sp->column = node->start.column;
+  sp->id              = a->suspension_count;
+  sp->type            = type;
+  sp->node            = node;
+  sp->line            = node->start.line;
+  sp->column          = node->start.column;
+  sp->pre_stack_depth = pre_stack_depth;
   a->suspension_count++;
+}
+
+static void sm__walk_suspensions__visit(AstNode* node, void* vctx);
+
+/* Adapter for ast__walk_children — it requires a (node, void*) visitor and
+   doesn't know about depth, so non-AST_COMMAND children inherit the current
+   depth unchanged (they don't introduce sibling-induced stack contributions
+   the way command args do). */
+static void sm__walk_suspensions__visit_child(AstNode* node, void* vctx) {
+  sm__walk_suspensions__visit(node, vctx);
+}
+
+/* True when the head emits bytecode that pushes each compiled arg onto the
+   operand stack in turn, then pops them all and pushes one result. For these
+   heads, arg[i] is compiled with `i` sibling values already on the stack —
+   so a suspension inside arg[i] has to spill those siblings.
+
+   Special forms (the `false` cases) emit ad-hoc bytecode shapes: `def`/`mut`/
+   `set` treat arg[0] as a name (not compiled as a value); control-flow heads
+   pop the condition before running the body block, so suspensions inside the
+   body see no operand-stack contribution from the surrounding form. For all
+   of these, args compile at the *parent's* depth, not depth+i.
+
+   HEAD_PARALLEL/HEAD_RACE/HEAD_SPAWN are listed as special forms because
+   their args are closures compiled in fresh scopes (the walk doesn't recurse
+   into them anyway), so the depth accounting is moot.
+
+   Default-true: an unrecognized head is assumed to be function-call shape.
+   A miscategorization here means a missed spill (silently wrong answer) for
+   that head, the same class of bug we're fixing. Audit when adding new
+   non-call-shape special forms. */
+static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
+  switch (hid) {
+    case HEAD_DEF:
+    case HEAD_MUT:
+    case HEAD_SET:
+    case HEAD_PROC:
+    case HEAD_DEFSTRUCT:
+    case HEAD_DEFMACRO:
+    case HEAD_IF:
+    case HEAD_WHILE:
+    case HEAD_FOR:
+    case HEAD_BREAK:
+    case HEAD_CONTINUE:
+    case HEAD_RETURN:
+    case HEAD_TRY:
+    case HEAD_WITH_CTX:
+    case HEAD_MATCH:
+    case HEAD_SPAWN:
+    case HEAD_PARALLEL:
+    case HEAD_RACE:
+    case HEAD_EXTERN:
+    case HEAD_QUOTE:
+    case HEAD_SYNTAX_QUOTE:
+      return false;
+    default:
+      return true;
+  }
 }
 
 static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
@@ -1372,7 +1451,7 @@ static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
       }
 
       if (is_sp) {
-        sm__record_suspension(ctx->analysis, node, sp_type);
+        sm__record_suspension(ctx->analysis, node, sp_type, ctx->depth);
       } else if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
         /* Separate closure scopes — don't recurse */
         return;
@@ -1383,23 +1462,34 @@ static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
             head->data.lit_string.value, head->data.lit_string.length);
         if (suspension_map_lookup(ctx->map, name_val) &&
             !suspension_map_is_generator(ctx->map, name_val)) {
-          sm__record_suspension(ctx->analysis, node, SUSPEND_CALL);
+          sm__record_suspension(ctx->analysis, node, SUSPEND_CALL, ctx->depth);
         }
       }
     }
-    /* Recurse into args (suspension points may nest) */
+    /* Recurse into args (suspension points may nest). For function-call-
+       shape heads, each preceding sibling leaves one value on the stack when
+       its compilation finishes, so arg i sees depth + i. For special forms,
+       args don't accumulate on the operand stack (see
+       sm__head_uses_operand_stack_for_args), so they all compile at the
+       parent's depth. Save/restore around each call so siblings don't see
+       each other's contributions on the way out. */
+    uint16_t saved = ctx->depth;
+    bool fn_shape = (head->type == AST_LIT_STRING) &&
+        sm__head_uses_operand_stack_for_args((HeadId)node->data.command.head_id);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      ctx->depth = fn_shape ? (uint16_t)(saved + i) : saved;
       sm__walk_suspensions__visit(node->data.command.args[i], ctx);
     }
+    ctx->depth = saved;
     return;
   }
-  ast__walk_children(node, sm__walk_suspensions__visit, ctx);
+  ast__walk_children(node, sm__walk_suspensions__visit_child, ctx);
 }
 
 void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
                                   SuspensionMap* map,
                                   ThreadHeap* heap, JaclInternTable* intern_table) {
-  WalkSuspensionsCtx ctx = { analysis, map, heap, intern_table };
+  WalkSuspensionsCtx ctx = { analysis, map, heap, intern_table, 0 };
   sm__walk_suspensions__visit(node, &ctx);
 }
 
@@ -2266,6 +2356,31 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
   analysis.ctx_field_idx = analysis.state_layout.total_slots;
   sm__add_state_field(&analysis.state_layout,
                       jacl_inline_string("__ctx", 5), false, false, 1, 0);
+
+  /* Reserve operand-stack spill slots. When a suspension occurs inside an
+     expression that already has live operand-stack values (e.g.
+     `[+ [+ [await $a] [await $b]] [await $c]]`), runtime__setup_call wipes
+     the operand stack on re-entry, so any pre-suspension values must be
+     stashed into state slots and restored after the resume label. We
+     reserve max(pre_stack_depth) slots plus one scratch slot used to
+     reshuffle the result of the await/sleep above the restored stack.
+     These slots are unnamed (no fields[] entry); they only bump
+     total_slots so the SM allocator sizes its fields[] array correctly
+     and the GC traces them as ordinary roots. */
+  {
+    uint16_t max_depth = 0;
+    for (uint32_t i = 0; i < analysis.suspension_count; i++) {
+      if (analysis.suspension_points[i].pre_stack_depth > max_depth)
+        max_depth = analysis.suspension_points[i].pre_stack_depth;
+    }
+    analysis.max_pre_stack_depth = max_depth;
+    if (max_depth > 0) {
+      analysis.spill_base_slot = (uint16_t)analysis.state_layout.total_slots;
+      analysis.state_layout.total_slots += max_depth;
+      analysis.scratch_slot = (uint16_t)analysis.state_layout.total_slots;
+      analysis.state_layout.total_slots += 1;
+    }
+  }
 
   return analysis;
 }
@@ -9660,21 +9775,61 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       /* SM await: compile future, set resume_point, emit OP_AWAIT_SM.
          Inline (resolved): OP_AWAIT_SM pushes result, jump past resume push.
-         Resume (pending):  dispatch table lands at resume label, push __rv. */
+         Resume (pending):  dispatch table lands at resume label, push __rv.
+
+         Operand-stack spill: if this suspension has prior operand-stack
+         values from enclosing expressions, spill them before pushing the
+         future, then on both the inline and resume paths reshuffle so
+         the result/__rv lands above the restored values. See
+         SuspensionPoint::pre_stack_depth. */
+      uint32_t sp_idx = c->sm_suspension_idx;
+      uint16_t depth = (sp_idx < c->sm_analysis->suspension_count)
+                     ? c->sm_analysis->suspension_points[sp_idx].pre_stack_depth
+                     : 0;
+      uint16_t spill_base = c->sm_analysis->spill_base_slot;
+      uint16_t scratch    = c->sm_analysis->scratch_slot;
+      /* Spill the `depth` values currently on the operand stack into slots
+         spill_base..spill_base+depth-1 (top goes to highest slot). */
+      for (int k = (int)depth - 1; k >= 0; k--) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)(spill_base + (uint16_t)k), line);
+      }
       compiler__compile_node(c, args[0]);
-      uint32_t sp_idx = c->sm_suspension_idx++;
+      sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
       compiler__emit_byte(c, OP_AWAIT_SM, line);
-      /* Inline path: result already on stack; jump past resume value push */
+      /* Inline path: result already on stack. If we spilled, restore the
+         previously-live values below it via a scratch slot. */
+      if (depth > 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+        for (uint16_t k = 0; k < depth; k++) {
+          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
+        }
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+      }
       uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
       /* Resume label: dispatch table backpatch lands here */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) onto stack */
+      /* Push resume value from slot 1 (__rv) onto stack, then if we spilled
+         restore previously-live values below it via the scratch slot. */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
+      if (depth > 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+        for (uint16_t k = 0; k < depth; k++) {
+          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
+        }
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+      }
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
       c->last_expr_type = TYPE_DYN;
@@ -9688,8 +9843,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* sleep — suspending pause. In SM context, suspends via the timer thread;
-     at toplevel/non-SM, blocks on nanosleep. Always evaluates to nil. */
+  /* sleep — suspending pause. In SM context, registers a deadline with the
+     runtime and suspends (worker idle loop fires the resumption); at
+     toplevel/non-SM, blocks on nanosleep. Always evaluates to nil. */
   if (hid == HEAD_SLEEP) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "sleep", "1 argument", argc);
@@ -9708,9 +9864,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       /* SM sleep: compile duration, set resume_point, emit OP_SLEEP_SM
          (always suspends — no inline-resolved path). Resume label lands at
-         dispatch backpatch; OP_GET_LOCAL 1 pushes __rv (nil) as the value. */
+         dispatch backpatch; OP_GET_LOCAL 1 pushes __rv (nil) as the value.
+
+         Operand-stack spill: same shape as HEAD_AWAIT above. Because
+         OP_SLEEP_SM has no inline-resolved path, we only need to restore
+         after the resume label. See SuspensionPoint::pre_stack_depth. */
+      uint32_t sp_idx = c->sm_suspension_idx;
+      uint16_t depth = (sp_idx < c->sm_analysis->suspension_count)
+                     ? c->sm_analysis->suspension_points[sp_idx].pre_stack_depth
+                     : 0;
+      uint16_t spill_base = c->sm_analysis->spill_base_slot;
+      uint16_t scratch    = c->sm_analysis->scratch_slot;
+      for (int k = (int)depth - 1; k >= 0; k--) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)(spill_base + (uint16_t)k), line);
+      }
       compiler__compile_node(c, args[0]);
-      uint32_t sp_idx = c->sm_suspension_idx++;
+      sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
       compiler__emit_byte(c, OP_SLEEP_SM, line);
@@ -9721,6 +9891,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Push resume value from slot 1 (__rv) — always nil for sleep. */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
+      if (depth > 0) {
+        /* Reshuffle nil above the restored values via the scratch slot. */
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+        for (uint16_t k = 0; k < depth; k++) {
+          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
+        }
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)scratch, line);
+      }
       c->last_expr_type = TYPE_NIL;
       return;
     }

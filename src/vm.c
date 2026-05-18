@@ -8881,7 +8881,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (!(secs >= 0.0)) secs = 0.0;  /* clamp negative + NaN to 0 */
 
         if (vm->runtime) {
-          /* Concurrent: hand off to the timer thread and suspend. */
+          /* Concurrent: register the deadline with the runtime and suspend.
+             An idle worker fires the wakeup via runtime__poll_timers. */
           JaclVal state_val = vm->stack[frame->stack_base + 0];
           uint64_t duration_ns = (uint64_t)(secs * 1e9);
           runtime__schedule_timer(vm->runtime, duration_ns, state_val);

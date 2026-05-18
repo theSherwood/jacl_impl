@@ -167,38 +167,36 @@ From `GENERATOR_STATE_MACHINE.md` § "Future work".
 
 ---
 
-## 8b. Timer thread (`sleep` wakeups) — known limits
+## 8b. Sleep timers — known limits
 
-Shipped 2026-05-18 as a dedicated OS thread per `Runtime` that owns a
-deadline-sorted singly-linked list of pending sleeps. Adequate for
-current workloads; the following corners are explicitly deferred:
+Shipped 2026-05-18 (initially as a dedicated OS thread per `Runtime`);
+the dedicated thread was eliminated 2026-05-18 in favor of polling from
+the worker idle loop. `runtime__poll_timers` runs once per worker idle
+iteration, splicing expired entries off the deadline-sorted list and
+dispatching SM resumptions via the existing `schedule_sm_resumption`
+path. Firing latency is bounded by the worker idle-park (currently 1ms
+via `COND_WAIT_FOR_MS`; see `AUDIT.md` §11). Remaining corners:
 
-- **Eagerly started.** `runtime__start_threads` creates the timer thread
-  unconditionally, even for Runtimes that will never call `sleep`. Cost
-  is one parked pthread (~8KB stack + TCB). Cheap fix: start lazily on
-  first `runtime__schedule_timer` call (CAS-guarded). Not pursued; no
-  workload pulls on it.
 - **O(n) insertion.** Timer entries are kept in a sorted singly-linked
   list. Fine for small concurrent-sleep counts; replace with a binary
   heap if a workload pushes into the hundreds.
-- **One thread per Runtime.** Embedders that churn Runtimes pay
-  per-Runtime thread spawn/join. No current embedder does this; the
-  natural progression if it ever bites is workers-poll-min-heap (gives
-  up the eager wakeup but no extra thread), then platform-specific
-  `timerfd_create` / `kqueue` shims behind `platform.h`.
 - **No cancellation.** `[timeout n body]`'s losing branch keeps running
   after the race settles — its eventual result is discarded but it
   still occupies a worker. Connected to `SYNTAX.md` Q19 (`cancel`
   semantics, see §6).
-- **Wake granularity.** Sub-millisecond deadlines round up to 1ms via
-  `COND_WAIT_FOR_MS`. Coarse but matches the worker idle-park
-  granularity (`AUDIT.md` §11).
-- **Emscripten / single-threaded builds.** `THREAD_CREATE` is a no-op
-  there, so `OP_SLEEP_SM` in a concurrent context would silently never
-  wake. Currently single-threaded mode doesn't have a runtime, so
-  `OP_SLEEP_BLOCK` (toplevel `nanosleep`) is the only path — but if a
-  single-threaded runtime ever ships, the timer-thread no-op becomes a
-  correctness hole. Worth flagging if/when that happens.
+- **Wake granularity.** Sub-millisecond deadlines round up to the
+  worker idle-park granularity (1ms today).
+- **Coupling to audit §11.** Firing latency now equals the worker idle-
+  park timeout. When §11 is tackled (lengthen or eliminate the 1ms
+  tick), the new park timeout MUST be capped by
+  `min(idle_park, timer_head->deadline_ns - now)` or sleeps will
+  silently take however long the next non-timer wakeup happens to
+  arrive. Flagged inline in `runtime.c` at the timer block.
+- **Emscripten / single-threaded builds.** Single-threaded mode has no
+  runtime, so `OP_SLEEP_BLOCK` (toplevel `nanosleep`) is the only
+  path. If a single-threaded runtime ever ships, sleep wakeups would
+  fire on whatever single-worker idle path it uses — no longer a
+  silent no-op since there's no dedicated thread to be a no-op.
 
 ---
 
@@ -211,7 +209,11 @@ current workloads; the following corners are explicitly deferred:
   on `spawn_chain`. Real fix needs serial-vs-parallel workload
   distinction at the submit site. Attempted 2026-05-15 and reverted
   (5× regression on `spawn_chain`). See `AUDIT.md` §11 for the lesson
-  and candidate strategies.
+  and candidate strategies. **Extra constraint as of 2026-05-18:**
+  the timer thread was deleted in favor of `runtime__poll_timers`
+  running on the worker idle path, so the 1ms tick is now load-
+  bearing for `sleep` latency. Any fix must compute its park timeout
+  as `min(idle_park, timer_head->deadline_ns - now)` — see §8b.
 - **§12. `JaclFuture` waiters list spinlock.** Not observed under
   contention. Consider parking after N spins if it ever surfaces.
 - **§17. Inconsistent thread-local convention.** Scattered globals
@@ -225,6 +227,15 @@ current workloads; the following corners are explicitly deferred:
 - **§9 read-side operand-stack rooting hole.** Theoretical UAF;
   no concrete bug observed. Convention (CPS-only concurrency)
   prevents it today. See `AUDIT.md` § "Known theoretical hole".
+- **TSan race `vm.c:8587` ↔ `gc_collect.c:336`.** Concurrent GC trace
+  reads `sm->fields[i]` (plain load) while VM dispatch writes
+  `sm->fields[field_index] = value` (plain store) from
+  `OP_SET_STATE_FIELD`. SATB write barrier at `vm.c:8585` makes this
+  logically safe under JACL's GC discipline, but `sm->fields` is not
+  declared `_Atomic`, so TSan flags the unsynchronized concurrent
+  access. Present on baseline `main` under TSan with identical stacks
+  before and after the timer-thread removal / operand-stack-spill
+  changes of 2026-05-18.
 
 ---
 

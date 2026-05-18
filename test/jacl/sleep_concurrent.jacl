@@ -1,8 +1,8 @@
 # mode: concurrent
 # expect: 3
-# Three concurrent sleeps: if they truly run in parallel (timer thread
-# wakes each independently), all three resolve and we count 3. A naive
-# blocking implementation would still produce 3 — but the wall time
+# Three concurrent sleeps: if they truly run in parallel (worker idle
+# polling fires each independently), all three resolve and we count 3.
+# A naive blocking implementation would still produce 3 — but the wall time
 # would be ~3x as long. We don't assert timing here; we only assert
 # that multiple concurrent sleeps don't deadlock or drop wakeups.
 proc nap {} {
