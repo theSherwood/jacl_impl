@@ -1404,12 +1404,24 @@ static void sm__walk_suspensions__visit_child(AstNode* node, void* vctx) {
    non-call-shape special forms. */
 static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
   switch (hid) {
+    /* Bindings & assignments — args[0] is a name pattern (used at compile
+       time, never compiled as a value). HEAD_EQUALS/HEAD_COLON/HEAD_COLON_COLON
+       are syntactic sugar that compiler__rewrite_binding_op rewrites to
+       HEAD_DEF/HEAD_MUT/HEAD_SET, but the walk runs on the original node so
+       all six must be listed here. */
     case HEAD_DEF:
     case HEAD_MUT:
     case HEAD_SET:
+    case HEAD_EQUALS:
+    case HEAD_COLON:
+    case HEAD_COLON_COLON:
+    /* Declarations — separate scopes or compile-time-only. */
     case HEAD_PROC:
     case HEAD_DEFSTRUCT:
     case HEAD_DEFMACRO:
+    case HEAD_EXTERN:
+    /* Control flow — cond is popped before the branch body runs; branch
+       bodies see depth = parent, not parent + i. */
     case HEAD_IF:
     case HEAD_WHILE:
     case HEAD_FOR:
@@ -1419,10 +1431,22 @@ static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
     case HEAD_TRY:
     case HEAD_WITH_CTX:
     case HEAD_MATCH:
+    /* Short-circuit boolean — JUMP_IF_FALSE pops the LHS before compiling
+       the RHS, so RHS suspensions see depth = parent, not parent + 1. */
+    case HEAD_AMP_AMP:
+    case HEAD_PIPE_PIPE:
+    /* Type-coerce — args[0] is a type keyword (i32/f64/...), embedded as
+       compile-time constant rather than pushed; only args[1] is a value. */
+    case HEAD_TO:
+    /* Closure-arg suspensions — bodies are compiled as separate closures
+       with their own SuspensionAnalysis. The walk doesn't recurse here
+       (see sm__walk_suspensions__visit), so this entry only matters for
+       any ambient depth contribution from the head itself. */
     case HEAD_SPAWN:
     case HEAD_PARALLEL:
     case HEAD_RACE:
-    case HEAD_EXTERN:
+    /* Macro / syntax-quote forms — args are syntax objects, not compiled
+       as runtime values in the surrounding SM context. */
     case HEAD_QUOTE:
     case HEAD_SYNTAX_QUOTE:
       return false;
