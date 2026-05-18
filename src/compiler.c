@@ -1452,6 +1452,13 @@ static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
 
       if (is_sp) {
         sm__record_suspension(ctx->analysis, node, sp_type, ctx->depth);
+        /* HEAD_PARALLEL and HEAD_RACE: args are body blocks compiled into
+           separate closures with their own SuspensionAnalysis (see
+           compiler__compile_parallel_body). Recording their inner
+           suspensions on this analysis would inflate suspension_count and
+           desynchronize sm_suspension_idx from the bytecode the outer SM
+           actually emits. Don't recurse. */
+        if (hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
       } else if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
         /* Separate closure scopes — don't recurse */
         return;
@@ -2849,6 +2856,55 @@ void compiler__emit_constant(Compiler* c, JaclVal value, uint32_t line) {
   uint16_t index = chunk_add_constant(c->chunk, value);
   compiler__emit_byte(c, OP_CONST, line);
   compiler__emit_u16(c, index, line);
+}
+
+/* Look up the operand-stack depth recorded for the current suspension point.
+   Peeks `c->sm_suspension_idx` without incrementing; the caller increments it
+   when emitting the actual suspend op. Returns 0 when there is no suspension
+   record at that index (defensive — under correct alignment, this should not
+   happen, but a missed special-form entry in
+   sm__head_uses_operand_stack_for_args would manifest here). */
+static uint16_t compiler__suspension_pre_stack_depth(Compiler* c) {
+  if (!c->sm_analysis) return 0;
+  uint32_t sp_idx = c->sm_suspension_idx;
+  if (sp_idx >= c->sm_analysis->suspension_count) return 0;
+  return c->sm_analysis->suspension_points[sp_idx].pre_stack_depth;
+}
+
+/* Spill `depth` operand-stack values into the SM's reserved spill slots.
+   Top of stack goes to spill_base + depth - 1; bottom to spill_base + 0.
+   No-op when depth == 0. Emitted immediately before code that will trigger
+   an SM suspension (OP_AWAIT_SM / OP_SLEEP_SM / OP_YIELD_SM / OP_PARALLEL /
+   OP_RACE) so the values survive `runtime__setup_call` zeroing stack_top
+   on resume. */
+static void compiler__emit_spill_operand_stack(Compiler* c, uint16_t depth,
+                                                uint32_t line) {
+  if (depth == 0 || !c->sm_analysis) return;
+  uint16_t spill_base = c->sm_analysis->spill_base_slot;
+  for (int k = (int)depth - 1; k >= 0; k--) {
+    compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+    compiler__emit_byte(c, (uint8_t)(spill_base + (uint16_t)k), line);
+  }
+}
+
+/* Restore previously-spilled operand-stack values below the value currently
+   on top. Assumes top-of-stack holds the suspension's result (await result,
+   resume __rv, parallel/race vector, ...). Pops it into the scratch slot,
+   pushes the spilled values back in order (slot 0 first), then pushes the
+   scratch back so the result lands above. No-op when depth == 0. */
+static void compiler__emit_restore_operand_stack(Compiler* c, uint16_t depth,
+                                                  uint32_t line) {
+  if (depth == 0 || !c->sm_analysis) return;
+  uint16_t spill_base = c->sm_analysis->spill_base_slot;
+  uint16_t scratch    = c->sm_analysis->scratch_slot;
+  compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+  compiler__emit_byte(c, (uint8_t)scratch, line);
+  for (uint16_t k = 0; k < depth; k++) {
+    compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+    compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
+  }
+  compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+  compiler__emit_byte(c, (uint8_t)scratch, line);
 }
 
 /* --- Internal: Error reporting --- */
@@ -9773,64 +9829,31 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             "cannot suspend inside non-suspending callback");
         return;
       }
-      /* SM await: compile future, set resume_point, emit OP_AWAIT_SM.
-         Inline (resolved): OP_AWAIT_SM pushes result, jump past resume push.
-         Resume (pending):  dispatch table lands at resume label, push __rv.
-
-         Operand-stack spill: if this suspension has prior operand-stack
-         values from enclosing expressions, spill them before pushing the
-         future, then on both the inline and resume paths reshuffle so
-         the result/__rv lands above the restored values. See
+      /* SM await: spill enclosing operand stack, compile future,
+         set resume_point, emit OP_AWAIT_SM.
+         Inline (resolved): OP_AWAIT_SM pushes result; restore spilled
+         values below it via the scratch slot; jump past resume label.
+         Resume (pending):  dispatch table lands at resume label;
+         OP_GET_LOCAL 1 pushes __rv; same restore. See
          SuspensionPoint::pre_stack_depth. */
-      uint32_t sp_idx = c->sm_suspension_idx;
-      uint16_t depth = (sp_idx < c->sm_analysis->suspension_count)
-                     ? c->sm_analysis->suspension_points[sp_idx].pre_stack_depth
-                     : 0;
-      uint16_t spill_base = c->sm_analysis->spill_base_slot;
-      uint16_t scratch    = c->sm_analysis->scratch_slot;
-      /* Spill the `depth` values currently on the operand stack into slots
-         spill_base..spill_base+depth-1 (top goes to highest slot). */
-      for (int k = (int)depth - 1; k >= 0; k--) {
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)(spill_base + (uint16_t)k), line);
-      }
+      uint16_t depth = compiler__suspension_pre_stack_depth(c);
+      compiler__emit_spill_operand_stack(c, depth, line);
       compiler__compile_node(c, args[0]);
-      sp_idx = c->sm_suspension_idx++;
+      uint32_t sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
       compiler__emit_byte(c, OP_AWAIT_SM, line);
-      /* Inline path: result already on stack. If we spilled, restore the
-         previously-live values below it via a scratch slot. */
-      if (depth > 0) {
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-        for (uint16_t k = 0; k < depth; k++) {
-          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
-        }
-        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-      }
+      /* Inline path: result already on stack. */
+      compiler__emit_restore_operand_stack(c, depth, line);
       uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
-      /* Resume label: dispatch table backpatch lands here */
+      /* Resume label: dispatch table backpatch lands here. */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) onto stack, then if we spilled
-         restore previously-live values below it via the scratch slot. */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
-      if (depth > 0) {
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-        for (uint16_t k = 0; k < depth; k++) {
-          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
-        }
-        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-      }
-      /* Common path: result on stack */
+      compiler__emit_restore_operand_stack(c, depth, line);
+      /* Common path: result on stack. */
       compiler__patch_jump(c, skip_jump);
       c->last_expr_type = TYPE_DYN;
       return;
@@ -9862,25 +9885,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             "cannot suspend inside non-suspending callback");
         return;
       }
-      /* SM sleep: compile duration, set resume_point, emit OP_SLEEP_SM
-         (always suspends — no inline-resolved path). Resume label lands at
-         dispatch backpatch; OP_GET_LOCAL 1 pushes __rv (nil) as the value.
-
-         Operand-stack spill: same shape as HEAD_AWAIT above. Because
-         OP_SLEEP_SM has no inline-resolved path, we only need to restore
-         after the resume label. See SuspensionPoint::pre_stack_depth. */
-      uint32_t sp_idx = c->sm_suspension_idx;
-      uint16_t depth = (sp_idx < c->sm_analysis->suspension_count)
-                     ? c->sm_analysis->suspension_points[sp_idx].pre_stack_depth
-                     : 0;
-      uint16_t spill_base = c->sm_analysis->spill_base_slot;
-      uint16_t scratch    = c->sm_analysis->scratch_slot;
-      for (int k = (int)depth - 1; k >= 0; k--) {
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)(spill_base + (uint16_t)k), line);
-      }
+      /* SM sleep: spill enclosing operand stack, compile duration,
+         set resume_point, emit OP_SLEEP_SM (always suspends — no
+         inline-resolved path). Resume label lands at dispatch backpatch;
+         OP_GET_LOCAL 1 pushes __rv (nil); restore spilled values below
+         nil via the scratch slot. See SuspensionPoint::pre_stack_depth. */
+      uint16_t depth = compiler__suspension_pre_stack_depth(c);
+      compiler__emit_spill_operand_stack(c, depth, line);
       compiler__compile_node(c, args[0]);
-      sp_idx = c->sm_suspension_idx++;
+      uint32_t sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
       compiler__emit_byte(c, OP_SLEEP_SM, line);
@@ -9888,20 +9901,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) — always nil for sleep. */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
-      if (depth > 0) {
-        /* Reshuffle nil above the restored values via the scratch slot. */
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-        for (uint16_t k = 0; k < depth; k++) {
-          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)(spill_base + k), line);
-        }
-        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)scratch, line);
-      }
+      compiler__emit_restore_operand_stack(c, depth, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
@@ -9919,8 +9921,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (c->sm_analysis) {
-      /* SM yield: compile value, set resume_point, emit OP_YIELD_SM,
-         backpatch dispatch label, push nil as yield expression result */
+      /* SM yield: spill enclosing operand stack, compile value,
+         set resume_point, emit OP_YIELD_SM. After resume, push nil
+         (yield's value) and restore spilled values below it. See
+         SuspensionPoint::pre_stack_depth. */
+      uint16_t depth = compiler__suspension_pre_stack_depth(c);
+      compiler__emit_spill_operand_stack(c, depth, line);
       compiler__compile_node(c, args[0]);
       uint32_t sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
@@ -9938,6 +9944,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       /* Push nil as yield expression result (popped by check_error) */
       compiler__emit_byte(c, OP_NIL, line);
+      compiler__emit_restore_operand_stack(c, depth, line);
       c->has_yield = true;
       c->last_expr_type = TYPE_NIL;
       return;
@@ -10040,10 +10047,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (c->sm_analysis) {
-      /* SM parallel: compile bodies, set resume_point, push state object,
-         emit OP_PARALLEL. Two paths like SM await:
-         Inline (single-threaded): result on stack, jump past resume push.
-         Resume (runtime): dispatch table lands at resume label, push __rv. */
+      /* SM parallel: spill enclosing operand stack, compile bodies into
+         closures, set resume_point, push state object, emit OP_PARALLEL.
+         Inline (single-threaded): result on stack; restore spilled values
+         below it. Resume (runtime): dispatch label lands here; push __rv;
+         same restore. See SuspensionPoint::pre_stack_depth. */
+      uint16_t depth = compiler__suspension_pre_stack_depth(c);
+      compiler__emit_spill_operand_stack(c, depth, line);
       for (uint32_t i = 0; i < argc; i++) {
         compiler__compile_parallel_body(c, args[i], line, col);
       }
@@ -10055,15 +10065,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, 0, line);
       compiler__emit_byte(c, OP_PARALLEL, line);
       compiler__emit_byte(c, (uint8_t)argc, line);
-      /* Inline path: result already on stack; jump past resume value push */
+      /* Inline path: result already on stack. */
+      compiler__emit_restore_operand_stack(c, depth, line);
       uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
       /* Resume label: dispatch table backpatch lands here */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) onto stack */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
+      compiler__emit_restore_operand_stack(c, depth, line);
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
       c->last_expr_type = TYPE_DYN;
@@ -10092,10 +10103,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (c->sm_analysis) {
-      /* SM race: compile bodies, set resume_point, push state object,
-         emit OP_RACE. Two paths like SM await/parallel:
-         Inline (single-threaded): result on stack, jump past resume push.
-         Resume (runtime): dispatch table lands at resume label, push __rv. */
+      /* SM race: same shape as parallel above (different op, otherwise
+         identical operand-stack discipline). See SuspensionPoint::
+         pre_stack_depth. */
+      uint16_t depth = compiler__suspension_pre_stack_depth(c);
+      compiler__emit_spill_operand_stack(c, depth, line);
       for (uint32_t i = 0; i < argc; i++) {
         compiler__compile_parallel_body(c, args[i], line, col);
       }
@@ -10107,15 +10119,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, 0, line);
       compiler__emit_byte(c, OP_RACE, line);
       compiler__emit_byte(c, (uint8_t)argc, line);
-      /* Inline path: result already on stack; jump past resume value push */
+      /* Inline path: result already on stack. */
+      compiler__emit_restore_operand_stack(c, depth, line);
       uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
       /* Resume label: dispatch table backpatch lands here */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) onto stack */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
+      compiler__emit_restore_operand_stack(c, depth, line);
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
       c->last_expr_type = TYPE_DYN;
