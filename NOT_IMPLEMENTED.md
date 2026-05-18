@@ -227,15 +227,6 @@ via `COND_WAIT_FOR_MS`; see `AUDIT.md` §11). Remaining corners:
 - **§9 read-side operand-stack rooting hole.** Theoretical UAF;
   no concrete bug observed. Convention (CPS-only concurrency)
   prevents it today. See `AUDIT.md` § "Known theoretical hole".
-- **TSan race `vm.c:8587` ↔ `gc_collect.c:336`.** Concurrent GC trace
-  reads `sm->fields[i]` (plain load) while VM dispatch writes
-  `sm->fields[field_index] = value` (plain store) from
-  `OP_SET_STATE_FIELD`. SATB write barrier at `vm.c:8585` makes this
-  logically safe under JACL's GC discipline, but `sm->fields` is not
-  declared `_Atomic`, so TSan flags the unsynchronized concurrent
-  access. Present on baseline `main` under TSan with identical stacks
-  before and after the timer-thread removal / operand-stack-spill
-  changes of 2026-05-18.
 
 ---
 

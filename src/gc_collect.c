@@ -270,14 +270,22 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- Future: trace result (if resolved/errored) and waiter list --- */
+    /* --- Future: trace result (if resolved/errored) and waiter list ---
+     *
+     * fut->waiters is mutated by jacl_future_add_waiter under future_lock,
+     * but this trace runs without that lock. The head pointer is therefore
+     * loaded atomically (relaxed; correctness relies on the SATB write
+     * barrier in add_waiter greyifying the continuation, not on the load
+     * ordering). Once the head is fixed, the chain itself is write-once
+     * (see comment in jacl_future_resolve), so `w->next` traversal needs
+     * no further atomics. */
     case OBJ_FUTURE: {
         JaclFuture *fut = (JaclFuture *)payload;
         uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
         if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
             gc__ms_push_val(ms, (JaclVal)fut->result);
         }
-        FutureWaiter *w = fut->waiters;
+        FutureWaiter *w = ATOMIC_LOAD_EXPLICIT(&fut->waiters, MEM_RELAXED);
         while (w) {
             gc__ms_push(ms, w); /* trace the waiter node itself */
             w = w->next;
@@ -325,15 +333,22 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- State machine: trace error_k, sm_closure, and non-struct field slots --- */
+    /* --- State machine: trace error_k, sm_closure, and non-struct field slots ---
+     *
+     * These slots are written by vm__slot_set (and OP_SET_STATE_FIELD via that
+     * helper) using ATOMIC_STORE_EXPLICIT(MEM_RELAXED). The matching atomic
+     * load here satisfies the C memory model for concurrent SM-mutation +
+     * GC-mark; SATB correctness is upheld separately by the grey buffer's
+     * mutex and end-of-mark drain, so relaxed ordering is sufficient. */
     case OBJ_STATE_MACHINE: {
         JaclStateMachine *sm = (JaclStateMachine *)payload;
-        gc__ms_push_val(ms, sm->error_k);
-        gc__ms_push_val(ms, sm->sm_closure);
+        gc__ms_push_val(ms, ATOMIC_LOAD_EXPLICIT(&sm->error_k,    MEM_RELAXED));
+        gc__ms_push_val(ms, ATOMIC_LOAD_EXPLICIT(&sm->sm_closure, MEM_RELAXED));
         /* US-014: skip field slots that hold raw inline struct bytes */
         for (uint32_t i = 0; i < sm->field_count; i++) {
             if (!BITMAP_GET(sm->field_inline_bitmap, i)) {
-                gc__ms_push_val(ms, sm->fields[i]);
+                gc__ms_push_val(ms,
+                    ATOMIC_LOAD_EXPLICIT(&sm->fields[i], MEM_RELAXED));
             }
         }
         break;

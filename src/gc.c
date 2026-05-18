@@ -1148,7 +1148,10 @@ FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
     future_lock(f);
     f->result = (uint64_t)result;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_RESOLVED, MEM_RELEASE);
-    waiters = f->waiters;
+    /* Atomic load: f->waiters is also read by gc__trace_object without
+     * future_lock; once any access to the field is atomic, all of them
+     * must be (otherwise mixed atomic/plain is UB per the C memory model). */
+    waiters = ATOMIC_LOAD_EXPLICIT(&f->waiters, MEM_RELAXED);
     future_unlock(f);
     return waiters;
 }
@@ -1165,7 +1168,8 @@ FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
     future_lock(f);
     f->result = (uint64_t)error;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_ERROR, MEM_RELEASE);
-    waiters = f->waiters;
+    /* See jacl_future_resolve for why this load is atomic. */
+    waiters = ATOMIC_LOAD_EXPLICIT(&f->waiters, MEM_RELAXED);
     future_unlock(f);
     return waiters;
 }
@@ -1183,8 +1187,13 @@ bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
         FutureWaiter *w = (FutureWaiter *)gc_alloc(heap, OBJ_FUTURE_WAITER,
                                                      sizeof(FutureWaiter));
         w->continuation = continuation;
-        w->next = f->waiters;
-        f->waiters = w;
+        /* Read+write f->waiters atomically: the head pointer is also read by
+         * gc__trace_object outside future_lock during concurrent marking,
+         * so all accesses must be atomic. w->next is read-only after this
+         * point (waiter chain is write-once; see jacl_future_resolve), so
+         * traversing it from the GC trace doesn't need atomic loads. */
+        w->next = ATOMIC_LOAD_EXPLICIT(&f->waiters, MEM_RELAXED);
+        ATOMIC_STORE_EXPLICIT(&f->waiters, w, MEM_RELAXED);
         /* AUDIT.md §10/§11 race #2: w is a freshly-allocated container,
          * watermark-protected without being traced. The insertion side
          * of gc_write_barrier (now unconditional) greyifies continuation

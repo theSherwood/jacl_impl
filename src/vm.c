@@ -386,10 +386,19 @@ void runtime__complete_race_slot(void *runtime_ptr,
  * stream->state_machine, sm->sm_closure, sm->fields[i] (non-inline),
  * etc. The barrier handles both sides unconditionally so fresh
  * containers (watermark-protected but never traced) don't lose
- * inserted heap values. */
+ * inserted heap values.
+ *
+ * Atomic store on the slot: the concurrent GC marker may load this
+ * slot at any time during a mark cycle (gc__trace_object reads the
+ * matching field via ATOMIC_LOAD_EXPLICIT). The actual SATB ordering
+ * — barrier-push happens-before the value becomes unreachable — is
+ * provided by the grey buffer's mutex and end-of-mark drain, so a
+ * relaxed atomic on the slot itself is sufficient to satisfy the C
+ * memory model; whichever value the marker observes is live (old via
+ * grey buf, new via direct trace). */
 static inline void vm__slot_set(VM *vm, JaclVal *slot, JaclVal new_val) {
     gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, *slot, new_val);
-    *slot = new_val;
+    ATOMIC_STORE_EXPLICIT(slot, new_val, MEM_RELAXED);
 }
 
 /* --- Type name helper for error messages --- */
@@ -8581,10 +8590,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (result != VM_OK) return result;
         /* AUDIT §10/§11: heap-pointer write on a published GC object.
          * Inline-struct slots (raw bytes) are written by OP_SET_STATE_FIELD_WIDE
-         * and never reach here, so no bitmap check needed. */
-        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         sm->fields[field_index], value);
-        sm->fields[field_index] = value;
+         * and never reach here, so no bitmap check needed. Routed through
+         * vm__slot_set so the concurrent GC trace at gc_collect.c sees an
+         * atomic store paired with its atomic load. */
+        vm__slot_set(vm, &sm->fields[field_index], value);
         DISPATCH();
       }
 
