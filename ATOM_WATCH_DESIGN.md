@@ -92,45 +92,27 @@ on the same atom is a small but real case, and watcher firing must
 see a consistent snapshot. The mutex covers the snapshot copy (see
 §Threading); firing happens outside the lock.
 
-## OP_SWAP as CAS-retry
+## OP_SWAP — already CAS-retry
 
-Today's `OP_SWAP` is:
-
-```
-1. load old = ATOMIC_LOAD(ref->val)
-2. call fn(old) → new
-3. ATOMIC_STORE(ref->val, new)
-```
-
-Two concurrent swaps racing on the same atom can lose updates: both
-read `old`, both compute their `new`, both store — one update is
-silently dropped. This was tolerable when nothing observed the
-in-between states, but watchers turn lost transitions into lost
-notifications.
-
-**Fix (lands as its own commit, before watchers):** wrap in
-compare-and-set retry:
+Survey at design time turned up that `OP_SWAP` already implements the
+Clojure-style CAS-retry loop for atoms (`src/vm.c:5878`):
 
 ```
 loop:
-  load old = ATOMIC_LOAD(ref->val)
-  call fn(old) → new
-  if ATOMIC_CAS(ref->val, old, new): commit
+  swap_old_val = ATOMIC_LOAD(ref->val)
+  call fn(swap_old_val) → swap_result
+  if ATOMIC_CAS(ref->val, swap_old_val, swap_result): commit, break
   else: retry
 ```
 
-This matches Clojure `swap!` exactly. Implications:
+So watchers can lift the committed `(swap_old_val, swap_result)` pair
+straight out of the successful-CAS branch. The closure can still run
+more than once per `[swap ...]` under contention; the watcher fires
+exactly once per *committed* CAS, which is what we want.
 
-- The closure can run *more than once* per `[swap ...]` call under
-  contention. Closures are expected to be pure. JACL doesn't enforce
-  purity, but the same caveat applies as in Clojure; document it.
-- The committed old/new pair is unambiguous — exactly the pair seen
-  by the CAS that succeeded. Watchers fire with that pair.
-- For uncontended swaps (the common case), the CAS succeeds first try
-  and there's no perf regression.
-
-`OP_RESET` already does an unconditional atomic store; it stays
-unconditional. The watchers fire with `(old_loaded_before_store, new)`.
+`OP_RESET` does an unconditional atomic store; watchers fire with the
+old value loaded just before the store. (For non-atom boxes, both ops
+use plain stores under the box's structural invariants.)
 
 ## Fire semantics
 
