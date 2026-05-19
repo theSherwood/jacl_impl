@@ -44,7 +44,9 @@ typedef enum {
     OBJ_STATE_MACHINE,
     OBJ_SYNTAX,
     OBJ_TYPED_RRB_LEAF,
-    OBJ_TYPED_HAMT_LEAF
+    OBJ_TYPED_HAMT_LEAF,
+    OBJ_ATOM_REF,
+    OBJ_WATCHER_LIST
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---

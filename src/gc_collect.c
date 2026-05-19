@@ -180,7 +180,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- Mutable ref (cell/box/atom): trace contained value --- */
+    /* --- Mutable ref (cell/box): trace contained value --- */
     case OBJ_MUTABLE_REF: {
         JaclMutableRef *ref = (JaclMutableRef *)payload;
         /* Only trace for plain JaclVal boxes (type_idx==0).
@@ -193,6 +193,29 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
             JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
                 (uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
             gc__ms_push_val(ms, v);
+        }
+        break;
+    }
+
+    /* --- Atom ref: same as plain mutable ref plus the trailing watcher
+     * list pointer slot (NULL until first [watch ...]). --- */
+    case OBJ_ATOM_REF: {
+        JaclMutableRef *ref = (JaclMutableRef *)payload;
+        JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+            (uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
+        gc__ms_push_val(ms, v);
+        JaclWatcherList *wl = (JaclWatcherList *)ATOMIC_LOAD_EXPLICIT(
+            (void **)ATOM_WATCHERS_SLOT(ref), MEM_ACQUIRE);
+        if (wl) gc__ms_push(ms, wl);
+        break;
+    }
+
+    /* --- Watcher list: inline [key, fn, key, fn, ...] entries --- */
+    case OBJ_WATCHER_LIST: {
+        JaclWatcherList *wl = (JaclWatcherList *)payload;
+        for (uint32_t i = 0; i < wl->count; i++) {
+            gc__ms_push_val(ms, WATCHER_KEY(wl, i));
+            gc__ms_push_val(ms, WATCHER_FN(wl, i));
         }
         break;
     }

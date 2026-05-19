@@ -1,0 +1,13 @@
+# expect: 0 -> 1
+# expect: 1 -> 2
+# After unwatch, the registered closure stops firing on subsequent
+# reset/swap. Subsequent prints confirm only the first two transitions
+# produce output.
+def counter [atom 0]
+logger = proc {old, new} { print "$old -> $new" }
+watch $counter "k" $logger
+reset $counter 1
+swap $counter [\ + $it 1]
+unwatch $counter "k"
+reset $counter 99
+swap $counter [\ + $it 1]

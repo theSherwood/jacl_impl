@@ -99,6 +99,7 @@ typedef enum {
   /* Boxes / atoms / coercion */
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
+  HEAD_WATCH, HEAD_UNWATCH,
 
   /* Typed pointers (Stage 5a/5b/5c) */
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
@@ -191,6 +192,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "index", 5) == 0) return HEAD_INDEX;
       if (memcmp(s, "error", 5) == 0) return HEAD_ERROR;
       if (memcmp(s, "atom?", 5) == 0) return HEAD_ATOM_Q;
+      if (memcmp(s, "watch", 5) == 0) return HEAD_WATCH;
       if (memcmp(s, "deref", 5) == 0) return HEAD_DEREF;
       if (memcmp(s, "unbox", 5) == 0) return HEAD_UNBOX;
       if (memcmp(s, "reset", 5) == 0) return HEAD_RESET;
@@ -210,6 +212,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "extern", 6) == 0) return HEAD_EXTERN;
       return HEAD_NONE;
     case 7:
+      if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
       if (memcmp(s, "vec-set", 7) == 0) return HEAD_VEC_SET;

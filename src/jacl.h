@@ -106,6 +106,30 @@ typedef struct {
 /* Access the JaclVal stored in a type_idx==0 MutableRef's data[] */
 #define MREF_VAL(ref) (*(JaclVal*)(ref)->data)
 
+/* --- Atom watchers ---
+ * Atoms are allocated with an OBJ_ATOM_REF tag and an extra pointer slot
+ * after MREF_VAL for the watcher list (NULL until first [watch ...]).
+ * The pointer lives at data[sizeof(JaclVal)..]; ATOM_WATCHERS_SLOT yields
+ * an addressable `JaclWatcherList**` for atomic load/store. The list itself
+ * is a separate OBJ_WATCHER_LIST allocation traced by the GC.
+ *
+ * The watcher list uses an inline flexible array: entries[2*i] is a key,
+ * entries[2*i+1] is a fn. Growth re-allocates the whole object (the GC
+ * collects the old copy once the atom's slot is overwritten and no
+ * in-flight snapshot pins it). */
+#define ATOM_REF_DATA_SIZE  (sizeof(JaclVal) + sizeof(void*))
+typedef struct JaclWatcherList JaclWatcherList;
+#define ATOM_WATCHERS_SLOT(ref) \
+  ((JaclWatcherList**)((ref)->data + sizeof(JaclVal)))
+
+struct JaclWatcherList {
+    uint32_t        count;     /* number of registered (key, fn) pairs */
+    uint32_t        capacity;  /* entries[] holds 2 * capacity JaclVals */
+    JaclVal         entries[]; /* [k0, f0, k1, f1, ...] — immutable after publish */
+};
+#define WATCHER_KEY(wl, i) ((wl)->entries[2*(i)])
+#define WATCHER_FN(wl, i)  ((wl)->entries[2*(i) + 1])
+
 typedef char jacl_assert_ptr_fits_payload_[(sizeof(void *) <= sizeof(uint64_t)) ? 1 : -1];
 
 /* ========================================================================
@@ -138,7 +162,9 @@ typedef enum {
     OBJ_STATE_MACHINE,
     OBJ_SYNTAX,
     OBJ_TYPED_RRB_LEAF,     /* typed vec leaf: raw struct bytes, no GC tracing */
-    OBJ_TYPED_HAMT_LEAF      /* typed map leaf: trace dyn key only, skip struct value bytes */
+    OBJ_TYPED_HAMT_LEAF,    /* typed map leaf: trace dyn key only, skip struct value bytes */
+    OBJ_ATOM_REF,           /* atom variant of JaclMutableRef with trailing watcher-list slot */
+    OBJ_WATCHER_LIST        /* per-atom watcher list: parallel keys/fns arrays + mutex */
 } GCObjType;
 
 #define GC_BLOCK_SIZE       65536
@@ -609,6 +635,7 @@ typedef enum {
   HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
+  HEAD_WATCH, HEAD_UNWATCH,
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF, HEAD_PTR_NULL,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
   HEAD_ADDR,
@@ -982,7 +1009,11 @@ typedef enum {
   /* --- File I/O builtins (read-file / write-file / append-file) --- */
   OP_READ_FILE,            /* pop path (string); push file contents (string) or error */
   OP_WRITE_FILE,           /* pop path (string), pop content (string or stream); write file, push nil or error */
-  OP_APPEND_FILE           /* pop path (string), pop content (string or stream); append to file, push nil or error */
+  OP_APPEND_FILE,          /* pop path (string), pop content (string or stream); append to file, push nil or error */
+
+  /* --- Atom watchers (watch / unwatch) --- */
+  OP_WATCH,                /* pop fn, pop key, pop atom; register fn under key; push nil */
+  OP_UNWATCH               /* pop key, pop atom; remove watcher under key; push nil */
 } OpCode;
 
 typedef struct {

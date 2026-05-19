@@ -1,0 +1,6 @@
+# expect: reset: 0 -> 42
+# `reset` also triggers watchers — they fire regardless of mutation path.
+def a [atom 0]
+fn = proc {old, new} { print "reset: $old -> $new" }
+watch $a "k" $fn
+reset $a 42

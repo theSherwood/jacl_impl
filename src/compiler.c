@@ -5172,6 +5172,7 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
  * Non-core builtins (downgraded to env lookup when prelude is active):
  *   print, interpret, interpret-prelude, spawn, await, parallel, race,
  *   yield, make-syntax, syntax-error, box, atom, deref, reset, swap,
+ *   watch, unwatch,
  *   lines, stream_next, exec, signal, cancel,
  *   read-file, write-file, append-file
  *
@@ -5187,6 +5188,7 @@ const char *jacl_non_core_builtins[] = {
   "spawn", "await", "parallel", "race", "yield",
   "make-syntax", "syntax-error",
   "box", "atom", "deref", "reset", "swap",
+  "watch", "unwatch",
   "lines", "stream_next",
   "exec", "signal", "cancel",
   "read-file", "write-file", "append-file",
@@ -9513,6 +9515,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_SWAP, line);
     c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* watch builtin — [watch ATOM KEY FN] → nil. Registers FN (a 2-arg
+   * closure) under KEY on ATOM; re-registering replaces. */
+  if (hid == HEAD_WATCH) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "watch", "3 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);
+    compiler__compile_node(c, args[2]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_WATCH, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* unwatch builtin — [unwatch ATOM KEY] → nil. No-op if no such key. */
+  if (hid == HEAD_UNWATCH) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "unwatch", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_UNWATCH, line);
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 

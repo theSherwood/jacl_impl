@@ -2432,6 +2432,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_READ_FILE,   TYPE_STR    },
       { HEAD_WRITE_FILE,  TYPE_NIL    },
       { HEAD_APPEND_FILE, TYPE_NIL    },
+      /* Atom watchers — both side-effecting, return nil. */
+      { HEAD_WATCH,       TYPE_NIL    },
+      { HEAD_UNWATCH,     TYPE_NIL    },
       /* Loop forms — emit OP_NIL at normal exit. break-with-value
        * paths could carry a different type but are conservatively
        * unified to nil here; refine in a later commit if needed. */

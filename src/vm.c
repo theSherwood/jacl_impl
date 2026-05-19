@@ -2085,6 +2085,187 @@ static int vm__exec_collect_stdin(VM* vm, JaclVal stdin_val, char** out_buf, siz
 #  define JACL_VM_COMPUTED_GOTO 1
 #endif
 
+/* --- Atom watcher fire helper ---
+ *
+ * Snapshots the watcher list's fn entries onto the operand stack (so they're
+ * GC-rooted across the closure calls), then iterates and invokes each as
+ * `fn(old, new)`. Watcher fns are validated at registration time to take
+ * exactly 2 params; non-conformant entries are skipped defensively.
+ *
+ * Watcher errors propagate (return the error VMResult); subsequent watchers
+ * in this fire are skipped. Re-entry — a watcher that swap/resets the same
+ * atom — triggers a fresh fire cycle on a *new* operand-stack snapshot,
+ * bounded by VM_FRAMES_MAX. The wl pointer we load is immutable
+ * (copy-on-write), so concurrent watch/unwatch on another thread can't
+ * mutate our snapshot mid-fire.
+ */
+static VMResult vm__fire_atom_watchers(VM* vm, JaclMutableRef* ref,
+                                        JaclVal old_val, JaclVal new_val) {
+  JaclWatcherList* wl = (JaclWatcherList*)ATOMIC_LOAD_EXPLICIT(
+      (void**)ATOM_WATCHERS_SLOT(ref), MEM_ACQUIRE);
+  if (!wl || wl->count == 0) return VM_OK;
+
+  uint32_t count = wl->count;
+  uint32_t snap_base = vm->stack_top;
+  if (vm->stack_top + count > VM_STACK_MAX) {
+    vm__set_operand_overflow(vm, "atom watcher snapshot");
+    return VM_STACK_OVERFLOW;
+  }
+  for (uint32_t i = 0; i < count; i++) {
+    vm->stack[vm->stack_top++] = WATCHER_FN(wl, i);
+  }
+  /* From here on, the fn snapshot is GC-rooted on the operand stack. */
+
+  uint8_t* saved_ip = vm->ip;
+  BytecodeChunk* saved_chunk = vm->chunk;
+
+  for (uint32_t i = 0; i < count; i++) {
+    JaclVal fn = vm->stack[snap_base + i];
+    if (!jacl_is_closure(fn)) continue;
+    JaclClosure* cl = jacl_as_closure(fn);
+    if (cl->param_count != 2) continue;
+
+    if (vm->frame_count >= VM_FRAMES_MAX) {
+      vm->stack_top = snap_base;
+      vm__set_frame_overflow(vm);
+      return VM_RUNTIME_ERROR;
+    }
+    if (vm->stack_top + 3 > VM_STACK_MAX) {
+      vm->stack_top = snap_base;
+      vm__set_operand_overflow(vm, "atom watcher call");
+      return VM_STACK_OVERFLOW;
+    }
+
+    vm->stack[vm->stack_top++] = fn;       /* callee */
+    vm->stack[vm->stack_top++] = old_val;
+    vm->stack[vm->stack_top++] = new_val;
+
+    uint32_t caller_frame_count = vm->frame_count;
+    CallFrame* cf = &vm->frames[vm->frame_count++];
+    cf->closure    = cl;
+    cf->return_ip  = vm->ip;
+    cf->stack_base = vm->stack_top - 2;    /* points at old_val; callee one below */
+    cf->chunk      = &cl->chunk;
+    vm->ip    = cl->chunk.code;
+    vm->chunk = &cl->chunk;
+
+    VMResult call_result = vm__run(vm, caller_frame_count);
+    if (call_result != VM_OK) {
+      vm->stack_top = snap_base;
+      return call_result;
+    }
+
+    /* Discard the watcher's return value. */
+    if (vm->stack_top > snap_base + count) vm->stack_top--;
+  }
+
+  vm->ip = saved_ip;
+  vm->chunk = saved_chunk;
+  vm->stack_top = snap_base;
+  return VM_OK;
+}
+
+/* --- Atom watcher list COW builder (used by OP_WATCH / OP_UNWATCH) ---
+ *
+ * Constructs a new watcher list reflecting an add or remove operation,
+ * then CAS-publishes it into the atom's slot. Returns true on success,
+ * false on a CAS race (caller retries) or allocation failure.
+ *
+ * If `remove_key` is true, the entry matching `key` is dropped (no-op if
+ * absent). Otherwise the entry is added (or its fn replaced if `key` is
+ * already present).
+ *
+ * GC barriers: each new (key, fn) entry is greyed via gc_write_barrier
+ * so SATB sees fresh references; the atom is added to the remembered set
+ * if old-gen-to-young-gen.
+ */
+static bool vm__atom_watchers_rebind(VM* vm, JaclMutableRef* ref,
+                                      JaclVal atom_val, JaclVal key,
+                                      JaclVal fn, bool remove_key) {
+  JaclWatcherList* wl_old = (JaclWatcherList*)ATOMIC_LOAD_EXPLICIT(
+      (void**)ATOM_WATCHERS_SLOT(ref), MEM_ACQUIRE);
+  uint32_t old_count = wl_old ? wl_old->count : 0;
+
+  /* Find existing key */
+  uint32_t found = UINT32_MAX;
+  for (uint32_t i = 0; i < old_count; i++) {
+    if (jacl_val_eq(WATCHER_KEY(wl_old, i), key)) { found = i; break; }
+  }
+
+  if (remove_key && found == UINT32_MAX) {
+    /* Nothing to remove — already gone */
+    return true;
+  }
+
+  uint32_t new_count;
+  if (remove_key) {
+    new_count = old_count - 1;
+  } else if (found != UINT32_MAX) {
+    new_count = old_count;  /* replacing existing fn */
+  } else {
+    new_count = old_count + 1;
+  }
+
+  JaclWatcherList* new_wl = NULL;
+  if (new_count > 0) {
+    /* Round capacity up to a power of two (min 4) for amortized growth */
+    uint32_t cap = 4;
+    while (cap < new_count) cap *= 2;
+    gc__current_heap = &vm->heap;
+    new_wl = (JaclWatcherList*)gc_alloc(
+        &vm->heap, OBJ_WATCHER_LIST,
+        sizeof(JaclWatcherList) + (size_t)2 * cap * sizeof(JaclVal));
+    if (!new_wl) return false;
+    new_wl->count = new_count;
+    new_wl->capacity = cap;
+
+    /* Copy from old, skipping removed entry or replacing existing fn */
+    uint32_t dst = 0;
+    for (uint32_t i = 0; i < old_count; i++) {
+      if (remove_key && i == found) continue;
+      JaclVal k = WATCHER_KEY(wl_old, i);
+      JaclVal f = (found == i && !remove_key) ? fn : WATCHER_FN(wl_old, i);
+      WATCHER_KEY(new_wl, dst) = k;
+      WATCHER_FN(new_wl, dst)  = f;
+      dst++;
+    }
+    /* Append new entry if not replacing */
+    if (!remove_key && found == UINT32_MAX) {
+      WATCHER_KEY(new_wl, dst) = key;
+      WATCHER_FN(new_wl, dst)  = fn;
+      dst++;
+    }
+    /* SATB: grey each entry so concurrent mark sees them */
+    for (uint32_t i = 0; i < new_count; i++) {
+      gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                       JACL_NIL, WATCHER_KEY(new_wl, i));
+      gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                       JACL_NIL, WATCHER_FN(new_wl, i));
+    }
+  }
+
+  /* CAS publish: only succeed if slot still equals wl_old */
+  JaclWatcherList* expected = wl_old;
+  if (!ATOMIC_CAS((void**)ATOM_WATCHERS_SLOT(ref), (void**)&expected,
+                  (void*)new_wl, MEM_ACQ_REL, MEM_ACQUIRE)) {
+    /* Race: another thread rebound between our load and CAS. Caller retries. */
+    return false;
+  }
+
+  /* Generational remembered-set barrier: if the atom is old-gen and the
+   * new wl is young-gen, the atom must be visited on the next minor GC.
+   * Inlined here because the standard barrier expects two JaclVals; we
+   * have a JaclVal + a non-tagged heap pointer. */
+  if (vm->remembered_set && new_wl && jacl_is_heap_type(atom_val)) {
+    GCHeader* atom_hdr = gc_header_of(jacl_as_ptr(atom_val));
+    GCHeader* wl_hdr   = gc_header_of(new_wl);
+    if (atom_hdr->gen == 1 && wl_hdr->gen == 0) {
+      remembered_set_push(vm->remembered_set, atom_val);
+    }
+  }
+  return true;
+}
+
 VMResult vm__run(VM* vm, uint32_t min_frame) {
   CallFrame* frame = &vm->frames[vm->frame_count - 1];
   uint8_t   instruction;
@@ -2345,6 +2526,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_READ_FILE] = &&L_OP_READ_FILE,
     [OP_WRITE_FILE] = &&L_OP_WRITE_FILE,
     [OP_APPEND_FILE] = &&L_OP_APPEND_FILE,
+    [OP_WATCH] = &&L_OP_WATCH,
+    [OP_UNWATCH] = &&L_OP_UNWATCH,
   };
 
   #define CASE(op)   L_##op
@@ -5042,10 +5225,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           DISPATCH();
         }
-        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        /* Atoms get OBJ_ATOM_REF (vs the plain OBJ_MUTABLE_REF used for
+         * boxes/cells) and an extra trailing pointer slot for the watcher
+         * list, NULL until first [watch ...]. */
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(
+            &vm->heap, OBJ_ATOM_REF,
+            sizeof(JaclMutableRef) + ATOM_REF_DATA_SIZE);
         ref->type_idx = 0;
-        ref->total_size = sizeof(JaclVal);
+        ref->total_size = ATOM_REF_DATA_SIZE;
         MREF_VAL(ref) = value;
+        *ATOM_WATCHERS_SLOT(ref) = NULL;
         result = vm__push(vm, jacl_atom_ptr(ref));
         if (result != VM_OK) return result;
         DISPATCH();
@@ -5697,6 +5886,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                            reset_old, new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
           ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), new_val, MEM_RELEASE);
+          /* Fire watchers after the store commits. The reset_old/new_val
+           * pair is unambiguous — reset is an unconditional store, so the
+           * load just before it is what we replaced. (Concurrent reset on
+           * another thread could fire its own watchers with a different
+           * old; that's still a valid total ordering.) */
+          VMResult fr = vm__fire_atom_watchers(vm, ref, reset_old, new_val);
+          if (fr != VM_OK) return fr;
+          frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, new_val);
         } else {
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
@@ -5800,6 +5997,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t* saved_ip = vm->ip;
         BytecodeChunk* saved_chunk = vm->chunk;
         JaclVal swap_result;
+        JaclVal committed_old = JACL_NIL;  /* set by the atom CAS-success branch */
 
         if (ref->type_idx > 0) {
           /* Struct box swap: pass current value to closure, copy result back.
@@ -5920,6 +6118,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                                  swap_old_val, swap_result);
                 gc_remembered_set_barrier(vm->remembered_set,
                                           container, swap_result);
+                committed_old = swap_old_val;
                 break; /* exit retry loop */
               }
               /* CAS failed — swap_result becomes garbage, retry */
@@ -5940,7 +6139,90 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->chunk = saved_chunk;
         frame = &vm->frames[vm->frame_count - 1];
 
+        /* Fire watchers for atom mutations now that the CAS committed.
+         * Only atoms carry watchers (OBJ_ATOM_REF); plain box / struct-box
+         * paths skip this entirely. */
+        if (swap_is_atom) {
+          JaclMutableRef* atom_ref = (JaclMutableRef*)jacl_as_ptr(container);
+          VMResult fr = vm__fire_atom_watchers(vm, atom_ref,
+                                                committed_old, swap_result);
+          if (fr != VM_OK) return fr;
+          frame = &vm->frames[vm->frame_count - 1];
+        }
+
         result = vm__push(vm, swap_result);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      /* --- OP_WATCH / OP_UNWATCH — atom watcher registration ---
+       *
+       * Stack on entry:
+       *   OP_WATCH:   ..., atom, key, fn       (pops 3)
+       *   OP_UNWATCH: ..., atom, key           (pops 2)
+       * Always pushes nil on success. Type errors are VM_RUNTIME_ERROR
+       * (programmer bug). Allocation/CAS proceeds via the COW helper
+       * vm__atom_watchers_rebind, which retries on lost CAS races. */
+
+      CASE(OP_WATCH): {
+        JaclVal fn_val, key_val, atom_val;
+        result = vm__pop(vm, &fn_val);   if (result != VM_OK) return result;
+        result = vm__pop(vm, &key_val);  if (result != VM_OK) return result;
+        result = vm__pop(vm, &atom_val); if (result != VM_OK) return result;
+        if (!jacl_is_atom(atom_val)) {
+          vm__set_error(vm, "watch: first argument must be an atom, got %s",
+                       vm__type_name(atom_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_closure(fn_val)) {
+          vm__set_error(vm, "watch: third argument must be a closure, got %s",
+                       vm__type_name(fn_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclClosure* cl = jacl_as_closure(fn_val);
+        if (cl->param_count != 2) {
+          vm__set_error(vm,
+            "watch: closure must take 2 parameters (old, new), got %d",
+            (int)cl->param_count);
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = jacl_as_atom(atom_val);
+        for (int spin = 0; spin < 64; spin++) {
+          if (vm__atom_watchers_rebind(vm, ref, atom_val, key_val,
+                                        fn_val, false)) {
+            break;
+          }
+          if (spin == 63) {
+            vm__set_error(vm, "watch: CAS contention too high (give up after 64 retries)");
+            return VM_RUNTIME_ERROR;
+          }
+        }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_UNWATCH): {
+        JaclVal key_val, atom_val;
+        result = vm__pop(vm, &key_val);  if (result != VM_OK) return result;
+        result = vm__pop(vm, &atom_val); if (result != VM_OK) return result;
+        if (!jacl_is_atom(atom_val)) {
+          vm__set_error(vm, "unwatch: first argument must be an atom, got %s",
+                       vm__type_name(atom_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = jacl_as_atom(atom_val);
+        for (int spin = 0; spin < 64; spin++) {
+          if (vm__atom_watchers_rebind(vm, ref, atom_val, key_val,
+                                        JACL_NIL, true)) {
+            break;
+          }
+          if (spin == 63) {
+            vm__set_error(vm, "unwatch: CAS contention too high");
+            return VM_RUNTIME_ERROR;
+          }
+        }
+        result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         DISPATCH();
       }

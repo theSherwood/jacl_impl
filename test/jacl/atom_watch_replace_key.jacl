@@ -1,0 +1,11 @@
+# expect: A: 0 -> 1
+# expect: B: 1 -> 2
+# Re-registering under the same key replaces the previous closure.
+# The first commit fires A; the second fires B (not A).
+def counter [atom 0]
+loggerA = proc {old, new} { print "A: $old -> $new" }
+loggerB = proc {old, new} { print "B: $old -> $new" }
+watch $counter "k" $loggerA
+reset $counter 1
+watch $counter "k" $loggerB
+swap $counter [\ + $it 1]

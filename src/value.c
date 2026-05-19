@@ -222,6 +222,25 @@ typedef struct {
 #define MREF_VAL(ref) (*(JaclVal*)(ref)->data)
 #endif
 
+/* --- Atom watcher list (see ATOM_WATCH_DESIGN.md) ---
+ * Atoms (OBJ_ATOM_REF) carry an extra trailing pointer slot in their
+ * MutableRef data area at byte offset sizeof(JaclVal); ATOM_WATCHERS_SLOT
+ * yields an addressable JaclWatcherList**. The list itself is a separate
+ * OBJ_WATCHER_LIST allocation with an inline [k0,f0,k1,f1,...] array;
+ * watch/unwatch publishes a fresh list via CAS (copy-on-write). */
+#define ATOM_REF_DATA_SIZE  (sizeof(JaclVal) + sizeof(void*))
+
+typedef struct JaclWatcherList {
+    uint32_t        count;
+    uint32_t        capacity;
+    JaclVal         entries[];
+} JaclWatcherList;
+
+#define ATOM_WATCHERS_SLOT(ref) \
+  ((JaclWatcherList**)((ref)->data + sizeof(JaclVal)))
+#define WATCHER_KEY(wl, i) ((wl)->entries[2*(i)])
+#define WATCHER_FN(wl, i)  ((wl)->entries[2*(i) + 1])
+
 /* Cell: internal auto-boxing for mut locals */
 JaclVal jacl_cell_ptr(JaclMutableRef *p) {
     return JACL_PACK_PTR(JACL_TAG_CELL, p);
