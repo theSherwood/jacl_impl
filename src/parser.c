@@ -1848,9 +1848,12 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   parser__arr_init(&args, p->arena);
 
   /* Detect pattern:
-     { ...           → anonymous proc (current token is already '{')
-     word { ...      → proc name {params} {body}
-     word word { ... → proc type name {params} {body}
+     { ...                 → anonymous proc (current token is already '{')
+     word { ...            → proc name {params} {body}
+     word word { ...       → proc type name {params} {body}
+     [ ... ] word { ...    → proc [CompoundType] name {params} {body}
+                             (compound returns: [Vec T], [Map K V], [Ptr T],
+                              [Future T], [Stream T])
      p->pos points to the first token after 'proc'. */
   if (p->tokens[p->pos].type == TOKEN_LBRACE) {
     /* Anonymous proc: proc {params} {body} — synthesize empty name */
@@ -1860,6 +1863,20 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
     name->end   = proc_head->end;
     name->data.lit_string.value  = "";
     name->data.lit_string.length = 0;
+    parser__arr_push(&args, name);
+  } else if (p->tokens[p->pos].type == TOKEN_LBRACKET) {
+    /* proc [CompoundType] name {params} {body} — bracketed return type. */
+    AstNode* ret_type = parser__parse_expr(p);
+    if (ret_type == NULL || ret_type->type == AST_ERROR) {
+      return parser__error(p, "expected return type after 'proc'", parser__peek(p));
+    }
+    parser__arr_push(&args, ret_type);
+    if (parser__peek(p)->type != TOKEN_WORD &&
+        parser__peek(p)->type != TOKEN_STRUCT) {
+      return parser__error(p, "expected proc name after bracketed return type",
+                           parser__peek(p));
+    }
+    AstNode* name = parser__parse_atom(p);
     parser__arr_push(&args, name);
   } else if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
     /* proc name {params} {body} — no return type */
@@ -2587,9 +2604,12 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
   /* Error from sub-expression (e.g. unclosed bracket): propagate immediately */
   if (head->type == AST_ERROR) return head;
 
-  /* proc syntax: proc [type] name {params} {body} — always requires two {} blocks */
+  /* proc syntax: proc [type] name {params} {body} — always requires two {} blocks.
+   * Compound returns ([Vec T], [Future T], [Stream T], ...) introduce a
+   * leading TOKEN_LBRACKET; the proc-form parser handles both cases. */
   if (head_token_type == TOKEN_PROC && !parser__is_operand_end(p) &&
-      parser__peek(p)->type == TOKEN_WORD) {
+      (parser__peek(p)->type == TOKEN_WORD ||
+       parser__peek(p)->type == TOKEN_LBRACKET)) {
     return parser__parse_proc_form(p, head);
   }
 

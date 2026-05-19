@@ -7,8 +7,10 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-05-19 (§3b generator-tail check landed and section
-removed; see compiler.c `find_disallowed_generator_tail`).
+Last refreshed: 2026-05-19 (§4 annotation-driven `[Stream T]` typing
+landed; for-loop narrowing + yield-site inference deferred as a Phase 2
+unit. §3b generator-tail check landed and section removed; see
+compiler.c `find_disallowed_generator_tail`).
 
 ---
 
@@ -90,16 +92,44 @@ pulling on them; revisit when one shows up.
   parallel to `OP_DEREF_INLINE`. +50–100 LOC.
 - **`match` arm-walk.** Typer rules for `match` patterns. Dead code
   until the feature itself lands.
-- **Parameterized stream element type (`stream<T>`).** Generators are
-  typed `TYPE_STREAM` (`compiler.c:7787-7789`), so a typed binding
-  like `stream s = [gen]` works, but the element type is `dyn`:
-  `for x in s { ... }` always gives `x: dyn` regardless of what the
-  generator yields. Lifting this needs an element-type slot on
-  `TYPE_STREAM` (parallel to `TYPE_TYPED_VEC` / `TYPE_TYPED_MAP`),
-  plus typer rules that flow the yielded-expression type into it at
-  generator compile time and back out at `for`/`stream-next` sites.
-  Cross-module: would also need element-type alignment for streams
-  exported from another file. Estimated +200-400 LOC.
+- **Parameterized stream element type — for-loop narrowing & yield
+  inference (Phase 2).** Annotation-driven typing landed 2026-05-19
+  (`compiler__stream_type_expr`, `typer__stream_type`,
+  `compiler.c:7891` generator-return + parser
+  `parser__parse_proc_form`). `proc [Stream T] gen {} { [yield X] }`
+  now parses, the typer carries the element idx via
+  `proc->return_struct_idx`, and yield arg-mismatch fires for
+  typed→typed and dyn→typed cases (typer.c yield-element check).
+  Range / `..=` / `lines` builtins stamp i64 / str on
+  `inferred_struct_idx`. Two pieces of the original §4 stream item
+  remain deferred:
+
+  1. **For-loop binding narrowing.** `for $it in [gen]` where the
+     stream is `[Stream i64]` would naively narrow `$it` to i64, but
+     the stream stores tagged `JaclVal`s (yield emits `jacl_i32` /
+     `jacl_str` / ...) while typed-i64 locals expect the unboxed
+     wide representation used by `OP_CONST_I64` / typed-vec slots.
+     Narrowing without an unboxing step on `OP_STREAM_NEXT` produces
+     `144115188075855873` (the NaN-boxing tag bits leaking out) where
+     the user expects `1`. Fix needs a per-element unbox op on stream
+     pull, parallel to typed-vec's inline-load path. Estimated
+     +150-250 LOC. Same wide-cell concern blocks yielding an
+     already-typed-i64 value (`def i64 x 42; yield $x` produces nil
+     because `OP_CONST_I64`-style values can't survive
+     `OP_YIELD_SM`'s `vm__pop` — currently masked by the typer's
+     literal-flex exemption, which keeps literals at their default
+     scalar tag).
+  2. **Yield-site inference.** Today an unannotated generator stays
+     `[Stream dyn]`; the typer doesn't walk yield expressions to
+     unify their types. Annotation is the only narrowing path. Adding
+     inference needs a unification policy for mixed yields
+     (error vs widen-to-dyn) and treatment of conditional yields,
+     which is real design work — see the parent design conversation
+     before implementing.
+
+  Cross-module element-type alignment for streams exported from
+  another file also stays deferred (mirrors the imported-struct
+  field-typing carve-out in this same section).
 
 ---
 

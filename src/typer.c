@@ -115,6 +115,14 @@ typedef struct {
    * c->expected_type. Set by callers (e.g., typed def/mut) before recursing
    * into the value expression; restored after. */
   JaclType     expected_type;
+  /* Element-type idx of the enclosing generator's declared [Stream T]
+   * return annotation. UINT32_MAX means either "not inside a generator"
+   * or "[Stream dyn] / no annotation" — in both cases yield is lenient.
+   * Saved on the stack across typer__handle_proc so nested procs don't
+   * leak through. Encoded the same way as inferred_struct_idx on a
+   * stream-valued node (JACL_SCALAR_TYPE_IDX sentinel for scalar
+   * elements, real struct registry idx for struct elements). */
+  uint32_t     yield_elem_struct_idx;
   /* Flow-typing narrowings from [box? Type $var] guards in if-branches.
    * Mirrors compiler.c:2810-2817. Active only inside the then-branch of
    * a box?-guarded if; saved/restored across branch boundaries. */
@@ -266,6 +274,46 @@ static bool typer__future_type(TyperCtx* tc, AstNode* node,
   }
   /* Unknown type name — still recognize as Future so the compiler
    * can backstop the unknown-type error. Element idx stays sentinel. */
+  return true;
+}
+
+/* Recognize [Stream T] type-annotation expressions. Returns true and
+ * writes *out_struct_idx with the element encoding (scalar sentinel
+ * for type keywords like i64, real struct idx for Point). Used on the
+ * proc return-type position so generator return narrows from a bare
+ * TYPE_STREAM to a stream-of-T. Same shape as typer__future_type —
+ * single type-name argument. */
+static bool typer__stream_type(TyperCtx* tc, AstNode* node,
+                               uint32_t* out_struct_idx) {
+  *out_struct_idx = UINT32_MAX;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 6 ||
+      memcmp(h->data.lit_string.value, "Stream", 6) != 0) return false;
+  if (node->data.command.arg_count != 1) return false;
+  AstNode* arg = node->data.command.args[0];
+  if (arg->type != AST_LIT_STRING) return false;
+  const char* nm = arg->data.lit_string.value;
+  uint32_t    nl = arg->data.lit_string.length;
+  if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
+    /* Explicit [Stream dyn] — element idx stays UINT32_MAX, same as
+     * an unannotated generator. Recognized so the syntax is permitted
+     * without falling through to the "unknown type name" backstop. */
+    return true;
+  }
+  if (is_type_keyword(nm, nl)) {
+    *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    return true;
+  }
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0) {
+      *out_struct_idx = si;
+      return true;
+    }
+  }
+  /* Unknown element — still recognize as Stream; element idx stays
+   * sentinel so downstream consumers treat it as [Stream dyn]. */
   return true;
 }
 
@@ -986,6 +1034,11 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       *out_struct_idx = sidx;
       return;
     }
+    if (typer__stream_type(tc, tn, &sidx)) {
+      *out_type = TYPE_STREAM;
+      *out_struct_idx = sidx;
+      return;
+    }
     int tcoll = typer__typed_collection_kind(tn);
     if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
       *out_type = (tcoll == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
@@ -1094,6 +1147,13 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
                      pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
   }
 
+  /* Stash the enclosing generator's stream-element idx so [yield X] in
+   * this body can type-check X against the declared element type.
+   * UINT32_MAX for non-generators or [Stream dyn] — yields stay lenient. */
+  uint32_t saved_yield_idx = tc->yield_elem_struct_idx;
+  tc->yield_elem_struct_idx =
+      (return_type == TYPE_STREAM) ? return_struct_idx : UINT32_MAX;
+
   /* Walk body. For the last statement, push return_type as expected_type
    * so int/float literals at the tail position get narrowed (mirrors
    * compiler.c:3851-3853). */
@@ -1161,6 +1221,7 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   }
 
   typer__scope_pop(tc);
+  tc->yield_elem_struct_idx = saved_yield_idx;
   node->inferred_type = TYPE_CLOSURE; /* proc def emits a closure value */
   return true;
 }
@@ -1989,6 +2050,87 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     typer__infer_node(tc, arg);
     tc->expected_type = saved_et;
   }
+  /* [yield X] inside `[Stream T]` (T != dyn): verify the yielded
+   * expression's type matches T. Yield-into-[Stream dyn] stays lenient
+   * (typed→dyn widens implicitly, parallel to proc returns/dyn args).
+   * Only the first arg matters — yield has arity 1. */
+  if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
+      tc->yield_elem_struct_idx != UINT32_MAX) {
+    AstNode* arg = node->data.command.args[0];
+    JaclType arg_t = (JaclType)arg->inferred_type;
+    uint32_t elem_idx = tc->yield_elem_struct_idx;
+    /* Integer / float literals have flex type — accepted into any
+     * numeric stream element. Note: literal stays at its default
+     * (i32 / f32) at codegen time. The wide-typed-i64 unboxed yield
+     * path has an unrelated bug (see NOT_IMPLEMENTED.md), so we
+     * deliberately don't push expected_type onto the arg upstream. */
+    bool literal_flex = false;
+    if (JACL_IS_SCALAR_TYPE_IDX(elem_idx)) {
+      JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
+      if (arg->type == AST_LIT_INT && is_numeric_type(elem_t)) literal_flex = true;
+      if (arg->type == AST_LIT_FLOAT && (elem_t == TYPE_F32 || elem_t == TYPE_F64))
+        literal_flex = true;
+      if (literal_flex) {
+        /* No-op: literal is accepted. */
+      } else if (arg_t != elem_t && arg_t != TYPE_DYN) {
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: yield expected %s, got %s",
+                 type_name(elem_t), type_name(arg_t));
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      } else if (arg_t == TYPE_DYN) {
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: yield expected %s, got dyn (use [to %s $val])",
+                 type_name(elem_t), type_name(elem_t));
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      }
+    } else {
+      /* Struct element type: compare via struct registry idx. The
+       * typer's struct-idx alignment with the compiler holds for
+       * locally-defined structs (pre-pass sets indices); imported
+       * structs are still placeholder entries, in which case the
+       * arg's struct_idx may be UINT32_MAX even on a real Struct
+       * value. Skip the check in that case rather than false-positive. */
+      if (arg_t == TYPE_DYN) {
+        char err[224];
+        const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+        if (s) {
+          snprintf(err, sizeof(err),
+                   "type error: yield expected %.*s, got dyn (use [to %.*s $val])",
+                   (int)s->name_len, s->name, (int)s->name_len, s->name);
+        } else {
+          snprintf(err, sizeof(err),
+                   "type error: yield expected struct, got dyn");
+        }
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      } else if (arg_t != TYPE_STRUCT) {
+        char err[224];
+        const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+        if (s) {
+          snprintf(err, sizeof(err),
+                   "type error: yield expected %.*s, got %s",
+                   (int)s->name_len, s->name, type_name(arg_t));
+        } else {
+          snprintf(err, sizeof(err),
+                   "type error: yield expected struct, got %s", type_name(arg_t));
+        }
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      } else if (arg->inferred_struct_idx != UINT32_MAX &&
+                 arg->inferred_struct_idx != elem_idx) {
+        const TyperStruct* expected = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+        const TyperStruct* got = (arg->inferred_struct_idx < tc->struct_count) ? &tc->structs[arg->inferred_struct_idx] : NULL;
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: yield expected %.*s, got %.*s",
+                 expected ? (int)expected->name_len : 6,
+                 expected ? expected->name : "struct",
+                 got ? (int)got->name_len : 6,
+                 got ? got->name : "struct");
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      }
+    }
+  }
   if (proc) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
@@ -2470,7 +2612,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
     }
     if (matched) {
-      /* handled */
+      /* Stream constructors: stamp the element-type idx so `for x in s`
+       * narrows the loop binding (parallel to TYPE_TYPED_VEC's idx).
+       * Range operators yield i64 (vm.c OP_RANGE/RANGE_EQ produce i64
+       * via jacl_i64), `lines` yields str. */
+      if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ) {
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_I64);
+      } else if (hid == HEAD_LINES) {
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+      }
     } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
       /* [box $val]: runtime returns a box wrapping the value. The
        * box's element type is the value's static type, encoded the
@@ -3067,6 +3217,7 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
   tc.struct_count  = 2;
   memset(&tc.structs[0], 0, sizeof(tc.structs[0]) * 2);
   tc.expected_type = TYPE_DYN;
+  tc.yield_elem_struct_idx = UINT32_MAX;
   tc.narrowing_count = 0;
 
   /* Pre-pass: register top-level struct definitions, the synthetic

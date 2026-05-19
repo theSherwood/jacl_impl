@@ -12,6 +12,18 @@
 - Prefer snake_case for values and functions. Prefer PascalCase for types.
 - If there is a DESIGN.md, upon completion of an entire prd.json, update DESIGN.md to show what was completed. Be very concise about things already implemented.
 
+## When writing JACL source
+
+- Inside `{}` command-mode blocks (proc bodies, for/while/if bodies,
+  top-level), write bare commands: `yield 10`, not `[yield 10]`;
+  `print $x`, not `[print $x]`. `{}` is command mode — items separated
+  by `;` / `,` / newline are each parsed as a head + args command.
+- Use `[...]` only when nesting one command as a value inside another
+  expression: `print [collect [gen]]` — `collect` is an arg to `print`,
+  so it needs `[]`; `gen` is an arg to `collect`, same.
+- This applies to test sources (`.c` strings, `test/jacl/*.jacl`) and
+  any sample code in docs.
+
 ## When writing C
 
 - Prefer arenas for memory management. This require organizing allocations by lifetime.

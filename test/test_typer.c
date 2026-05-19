@@ -505,6 +505,93 @@ static void test_race_heterogeneous_stays_dyn(void) {
   arena_destroy(&a);
 }
 
+/* --- [Stream T] generator-return annotation ---------------------- */
+
+static void test_proc_stream_return_compound(void) {
+  current_test = "proc_stream_return_compound";
+  arena_t a = {0};
+  /* proc with [Stream i64] return type — call returns TYPE_STREAM with
+   * i64 element idx; for-loop binding narrows to i64. Mirrors the
+   * [Future T] roundtrip — element idx encoded via JACL_SCALAR_TYPE_IDX. */
+  ParseResult r = run_typer(
+      "proc [Stream i64] gen {} { yield 1 }\n"
+      "def s [gen]", &a);
+  AstNode* call = find_cmd(r.nodes[1], "gen");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_STREAM);
+  if (call) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I64);
+    if (call->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: stream elem idx expected %u got %u\n",
+              current_test, want, call->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_range_stream_elem_i64(void) {
+  current_test = "range_stream_elem_i64";
+  arena_t a = {0};
+  /* Range operators ..< / ..= produce TYPE_STREAM with i64 element idx
+   * (matches the runtime — OP_RANGE emits jacl_i64 values). */
+  ParseResult r = run_typer("def s [..< 0 10]", &a);
+  AstNode* rng = find_cmd(r.nodes[0], "..<");
+  ASSERT_NOT_NULL(rng);
+  ASSERT_TYPE(rng, TYPE_STREAM);
+  if (rng) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I64);
+    if (rng->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: range elem idx expected %u got %u\n",
+              current_test, want, rng->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_lines_stream_elem_str(void) {
+  current_test = "lines_stream_elem_str";
+  arena_t a = {0};
+  /* `lines` produces TYPE_STREAM with str element idx. */
+  ParseResult r = run_typer("def s [lines \"a\\nb\"]", &a);
+  AstNode* ln = find_cmd(r.nodes[0], "lines");
+  ASSERT_NOT_NULL(ln);
+  ASSERT_TYPE(ln, TYPE_STREAM);
+  if (ln) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+    if (ln->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: lines elem idx expected %u got %u\n",
+              current_test, want, ln->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_unannotated_generator_stream_dyn(void) {
+  current_test = "unannotated_generator_stream_dyn";
+  arena_t a = {0};
+  /* A generator without [Stream T] annotation returns TYPE_STREAM
+   * with no element idx (UINT32_MAX) — same shape as [Stream dyn].
+   * Mixed-type yields are permitted (yield is lenient when there's
+   * no declared element type to check against). */
+  ParseResult r = run_typer(
+      "proc gen {} { yield 1; yield \"two\" }\n"
+      "def s [gen]", &a);
+  AstNode* call = find_cmd(r.nodes[1], "gen");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_STREAM);
+  if (call) {
+    if (call->inferred_struct_idx != UINT32_MAX) {
+      fprintf(stderr, "  FAIL %s: stream elem idx expected sentinel got %u\n",
+              current_test, call->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
 static void test_future_t_annotation(void) {
   current_test = "future_t_annotation";
   arena_t a = {0};
@@ -979,6 +1066,10 @@ int main(void) {
   test_race_homogeneous_narrows();
   test_race_heterogeneous_stays_dyn();
   test_future_t_annotation();
+  test_proc_stream_return_compound();
+  test_range_stream_elem_i64();
+  test_lines_stream_elem_str();
+  test_unannotated_generator_stream_dyn();
 
   test_ptr_null_typed();
   test_ptr_null_struct_pointee();

@@ -129,6 +129,24 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
   return kind;
 }
 
+/* Recognize a [Stream T] type-annotation expression. Returns true and
+ * sets *out_elem to the element type-name node. Same shape as
+ * [Future T] / [Ptr T] — single type-name argument. The compiler
+ * doesn't drive stream-element typing; this is just a parser-shape
+ * recognizer so proc-return annotations can carry the [Stream T]
+ * syntax through to the typer, which then propagates the element
+ * idx onto the node via JACL_SCALAR_TYPE_IDX / struct registry idx. */
+static bool compiler__stream_type_expr(AstNode* cmd, AstNode** out_elem) {
+  if (cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
+  AstNode* th = cmd->data.command.head;
+  if (th->type != AST_LIT_STRING || th->data.lit_string.length != 6 ||
+      memcmp(th->data.lit_string.value, "Stream", 6) != 0) return false;
+  if (cmd->data.command.arg_count != 1) return false;
+  if (cmd->data.command.args[0]->type != AST_LIT_STRING) return false;
+  if (out_elem) *out_elem = cmd->data.command.args[0];
+  return true;
+}
+
 /* Recognize a [Ptr T] type-annotation expression. Returns true and sets
  * *out_pointee to the pointee type-name node. The compiler doesn't drive
  * pointer typing — this is just a parser-shape recognizer so proc params
@@ -7047,7 +7065,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                            memcmp(hn, "Map", 3) == 0)) ||
               is_ptr_type ||
-              (hl == 6 && memcmp(hn, "Future", 6) == 0);
+              (hl == 6 && (memcmp(hn, "Future", 6) == 0 ||
+                           memcmp(hn, "Stream", 6) == 0));
           if (is_compound_type) {
             /* [Ptr T] storage is a u64 (the runtime rep of any pointer);
              * the typer separately tracks the pointee identity on the
@@ -7384,12 +7403,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         const char* hn = tn->data.command.head->data.lit_string.value;
         uint32_t    hl = tn->data.command.head->data.lit_string.length;
         bool is_ptr = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
+        bool is_stream = (hl == 6 && memcmp(hn, "Stream", 6) == 0);
         bool is_compound =
             (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                          memcmp(hn, "Map", 3) == 0)) ||
             is_ptr ||
+            is_stream ||
             (hl == 6 && memcmp(hn, "Future", 6) == 0);
         if (is_compound) {
+          /* [Stream T] folds into the generator path: proc_return_type
+           * stays DYN here, and the has_yield check below at the
+           * closure-construction site bumps it to TYPE_STREAM. The
+           * element idx is carried by the typer (proc->return_struct_idx)
+           * onto call-site nodes via inferred_struct_idx, which is
+           * where for-loop narrowing reads it. */
           proc_return_type = is_ptr ? TYPE_U64 : TYPE_DYN;
           resolved = true;
         }
@@ -8362,6 +8389,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
       compiler__add_local(c, bind_val, line, col);
       uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
+      /* Note: we don't narrow the loop binding's static type from the
+       * stream's element idx here. The stream stores tagged JaclVals
+       * (yield emits jacl_i32 / jacl_str / ...), but a narrowed local
+       * type causes downstream codegen to expect the unboxed wide
+       * representation used by typed-vec / OP_CONST_I64. Decoupling
+       * the two needs an unboxing op on STREAM_NEXT — deferred
+       * (see NOT_IMPLEMENTED.md §4). */
 
       /* Push loop context */
       LoopContext* lctx = &c->loop_stack[c->loop_depth++];

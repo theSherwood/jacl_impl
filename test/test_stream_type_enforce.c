@@ -231,6 +231,78 @@ static int test_spread_stream_generator(void) {
   TEST_PASS();
 }
 
+/* --- [Stream T] yield element-type enforcement ----------------- */
+
+/* yielding a wrong typed value into [Stream i64] is a compile error. */
+static int test_yield_str_into_stream_i64_errors(void) {
+  ASSERT(run_err(
+    "proc [Stream i64] gen {} { yield \"oops\" }\n"
+    "gen\n",
+    "yield expected i64"));
+  TEST_PASS();
+}
+
+/* yielding a dyn value into [Stream i64] is a compile error (the
+ * commitment-site rule applies — dyn-into-typed-slot needs an
+ * explicit [to T $val] cast, parallel to typed-vec push). */
+static int test_yield_dyn_into_stream_i64_errors(void) {
+  ASSERT(run_err(
+    "proc [Stream i64] gen {x} { yield $x }\n"
+    "gen 1\n",
+    "yield expected i64"));
+  TEST_PASS();
+}
+
+/* int literal narrows to declared element type — `yield 42` into
+ * [Stream i64] picks up the i64 element via expected_type. */
+static int test_yield_literal_narrows_into_stream_i64(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc [Stream i64] gen {} { yield 42 }\n"
+    "print [collect [gen]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 42]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* mixed yields into [Stream dyn] are lenient — same as unannotated. */
+static int test_yield_mixed_into_stream_dyn_ok(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc [Stream dyn] gen {} {\n"
+    "  yield 1\n"
+    "  yield \"two\"\n"
+    "}\n"
+    "print [collect [gen]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 \"two\"]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for-loop over an annotated stream still works end-to-end. Element-
+ * type narrowing on the loop binding is deferred (see NOT_IMPLEMENTED.md
+ * §4 — would need unboxing on OP_STREAM_NEXT), so `$it` stays dyn even
+ * for `[Stream i64]`. */
+static int test_for_in_annotated_stream_iterates(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc [Stream i64] gen {} {\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
+    "}\n"
+    "for [gen] { print $it }\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test: existing typed vec code still works (no false positives) --- */
 static int test_vec_ops_still_work(void) {
   PrintCapture cap;
@@ -275,6 +347,12 @@ int main(void) {
     /* Spread accepts streams */
     { "spread_stream_derived",         test_spread_stream_derived },
     { "spread_stream_generator",       test_spread_stream_generator },
+    /* [Stream T] yield element-type enforcement */
+    { "yield_str_into_stream_i64_errors",   test_yield_str_into_stream_i64_errors },
+    { "yield_dyn_into_stream_i64_errors",   test_yield_dyn_into_stream_i64_errors },
+    { "yield_literal_narrows_into_stream_i64", test_yield_literal_narrows_into_stream_i64 },
+    { "yield_mixed_into_stream_dyn_ok",     test_yield_mixed_into_stream_dyn_ok },
+    { "for_in_annotated_stream_iterates",   test_for_in_annotated_stream_iterates },
     /* No false positives */
     { "vec_ops_still_work",            test_vec_ops_still_work },
   };
