@@ -3702,6 +3702,96 @@ int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
  *      OP_YIELD_SM with resume_point update and dispatch label backpatching
  *   3. After all statements: emit OP_NIL + OP_RETURN (generator exhausted)
  */
+/* Generator tail-position check.
+ *
+ * In a proc with `yield`, the proc's return value is silently discarded by
+ * stream consumers. The narrow check at the `return X` sites catches explicit
+ * returns; this walk catches an implicit value-producing tail expression.
+ *
+ * Returns NULL when the tail recurses to something in the nil-producing
+ * whitelist; otherwise returns the offending AST node for error reporting.
+ *
+ * Whitelist (leaves): yield, for, while, def/mut/set, =/:/::, return,
+ * break/continue, declarations (proc, defstruct, defmacro), one-armed if.
+ * Recursive descent: blocks, two-armed if/else, try/catch (body + handler),
+ * with-ctx (body). Blocks with trailing `;` (or empty blocks) are nil. */
+static AstNode* compiler__find_disallowed_generator_tail(AstNode* node) {
+  if (!node) return NULL;
+
+  switch (node->type) {
+    case AST_BLOCK: {
+      uint32_t count = node->data.block.count;
+      if (count == 0 || node->data.block.trailing_semi) return NULL;
+      return compiler__find_disallowed_generator_tail(
+          node->data.block.commands[count - 1]);
+    }
+
+    case AST_RETURN:
+    case AST_BREAK:
+    case AST_CONTINUE:
+    case AST_DEFSTRUCT:
+    case AST_DEFMACRO:
+    case AST_USE:
+    case AST_CTX_DECL:
+      return NULL;
+
+    case AST_COMMAND: {
+      AstNode** args = node->data.command.args;
+      uint32_t argc = node->data.command.arg_count;
+      HeadId hid = (HeadId)node->data.command.head_id;
+      switch (hid) {
+        case HEAD_YIELD:
+        case HEAD_FOR:
+        case HEAD_WHILE:
+        case HEAD_DEF:
+        case HEAD_MUT:
+        case HEAD_SET:
+        case HEAD_EQUALS:
+        case HEAD_COLON:
+        case HEAD_COLON_COLON:
+        case HEAD_RETURN:
+        case HEAD_BREAK:
+        case HEAD_CONTINUE:
+        case HEAD_PROC:
+        case HEAD_DEFSTRUCT:
+        case HEAD_DEFMACRO:
+          return NULL;
+
+        case HEAD_IF:
+          /* One-armed if is nil when the condition is false; treat as a leaf
+             even though the then-arm's value is dropped when true. Two-armed
+             requires both branches to be tail-safe. */
+          if (argc < 3) return NULL;
+          {
+            AstNode* in_then = compiler__find_disallowed_generator_tail(args[1]);
+            if (in_then) return in_then;
+            return compiler__find_disallowed_generator_tail(args[2]);
+          }
+
+        case HEAD_TRY:
+          /* [try { body } name { handler }] */
+          if (argc != 3) return node;
+          {
+            AstNode* in_body = compiler__find_disallowed_generator_tail(args[0]);
+            if (in_body) return in_body;
+            return compiler__find_disallowed_generator_tail(args[2]);
+          }
+
+        case HEAD_WITH_CTX:
+          /* [with-ctx { overrides } { body }] */
+          if (argc != 2) return node;
+          return compiler__find_disallowed_generator_tail(args[1]);
+
+        default:
+          return node;
+      }
+    }
+
+    default:
+      return node;
+  }
+}
+
 /**
  * Compile a statement list in state machine mode.
  * When return_last_value is true, the last statement's result is kept on the
@@ -7719,6 +7809,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       body_compiler.has_yield = has_yield;
       {
         AstNode* body_block = args[body_arg_idx];
+        if (has_yield) {
+          AstNode* bad_tail =
+              compiler__find_disallowed_generator_tail(body_block);
+          if (bad_tail) {
+            compiler__error(c, bad_tail->start.line, bad_tail->start.column,
+                "generator tail expression produces a value that stream "
+                "consumers silently discard; append `;` to drop it, "
+                "`yield` it, bind it, or restructure");
+          }
+        }
         uint32_t stmt_count = body_block->data.block.count;
         AstNode** body_stmts = body_block->data.block.commands;
         compiler__compile_sm_stmts(&body_compiler, body_stmts, stmt_count,

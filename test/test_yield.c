@@ -1417,7 +1417,7 @@ static int test_sm_error_through_filter(void) {
     "proc gen {} {\n"
     "  [yield 1]\n"
     "  [yield 2]\n"
-    "  [error \"pipe-err\"]\n"
+    "  [error \"pipe-err\"];\n"
     "}\n"
     "def s [gen]\n"
     "[print [stream_next $s]]\n"

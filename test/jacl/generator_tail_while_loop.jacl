@@ -1,0 +1,11 @@
+# expect: [vec 0 1 2]
+# while-loop in tail position is nil-producing; yields inside stream
+# through normally.
+proc gen {n} {
+  mut i 0
+  while [< $i $n] {
+    yield $i
+    i :: [+ $i 1]
+  }
+}
+print [collect [gen 3]]

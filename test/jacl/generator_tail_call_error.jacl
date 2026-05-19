@@ -1,0 +1,9 @@
+# expect-error: generator tail expression produces a value
+# A bare user call in tail position of a generator silently discards
+# its return value via the stream consumer. Add `;` (or yield/bind).
+proc helper {} { return 42 }
+proc gen {} {
+  yield 1
+  helper
+}
+print [collect [gen]]

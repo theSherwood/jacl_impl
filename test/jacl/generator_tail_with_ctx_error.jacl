@@ -1,0 +1,11 @@
+# expect-error: generator tail expression produces a value
+# with-ctx recurses into the body; the body's tail is a value-producing
+# expression that would be silently discarded.
+ctx mut i32 level = 0
+proc gen {} {
+  yield 1
+  with-ctx {level 99} {
+    $ctx->level
+  }
+}
+print [collect [gen]]

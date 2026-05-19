@@ -1,0 +1,12 @@
+# expect: [vec 1 2]
+# Two-armed if where both branches end in `yield` is allowed: the
+# check recurses into both arms and each is whitelisted.
+proc gen {} {
+  yield 1
+  if true {
+    yield 2
+  } else {
+    yield 99
+  }
+}
+print [collect [gen]]

@@ -1,0 +1,10 @@
+# expect: [vec 1 2]
+# One-armed if is treated as a nil-producing leaf: the generator tail
+# check does not descend into its then-block.
+proc helper {} { return 42 }
+proc gen {} {
+  yield 1
+  yield 2
+  if false { helper }
+}
+print [collect [gen]]

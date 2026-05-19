@@ -1,0 +1,9 @@
+# expect: [vec 1]
+# Bare `[return]` in tail position is whitelisted; explicitly exits
+# the generator. (Returning a value is handled by the existing narrow
+# check.)
+proc gen {} {
+  yield 1
+  [return]
+}
+print [collect [gen]]
