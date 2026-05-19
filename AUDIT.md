@@ -24,12 +24,14 @@ propagate `vm->error_message` to the awaiter. See `AUDIT_HISTORY.md`
 for the per-phase story.
 
 **Test baselines:**
-- Normal-mode suite: 86 pass / 1 fail (`./build.sh`) as of 2026-05-19
-  on `a8fab24`. Drift from the prior 87/0 was investigated this
-  session; one of the two regressions (`stream_type`) is now closed,
-  the other (`rope_concat::zwj_at_junction`) is diagnosed and tracked
-  as §19 below. See **Closed items** for the `stream_type` resolution
-  and §19 in the open-items list for the rope_concat GB11 gap.
+- Normal-mode suite: 86 pass / 1 fail (`./build.sh`) as of 2026-05-19.
+  Drift from the prior 87/0 was investigated this session; two of
+  the three regressions are now closed (`stream_type` in `a8fab24`,
+  `chaos_soak` seed-dependent livelock by the worker-loop fix), and
+  the remaining one (`rope_concat::zwj_at_junction`) is diagnosed
+  and tracked as §19 below. See **Closed items** for the
+  `stream_type` and `chaos_soak` resolutions and §19 in the
+  open-items list for the rope_concat GB11 gap.
 - TSAN baseline: 85 pass / 2 fail (`./build.sh --tsan`).
   `chase_lev_stress` and `rope_concat` are the two TSAN-mode
   failures. `chase_lev_stress` is **known-and-safe** — TSAN
@@ -63,14 +65,12 @@ for the per-phase story.
   AUDIT_HISTORY.md §"TSAN baseline triage (2026-05-14)" carries the
   full chase_lev triage walk-through. The zwj-test claim in that
   same entry that it's "TSAN-only" is stale — see §19.
-- Soak flake (`chaos_soak`): randomized 4×4 worker/driver test
-  intermittently livelocks — all workers stuck in
-  `gc_alloc → runtime__emergency_gc → SLEEP_MILLISECONDS` while the
-  main thread waits in `pthread_join` (see `runtime.c:671`,
-  `gc.c:557`). Reproduces on `a5cc623` independent of working-tree
-  state. Most invocations exit cleanly in ~5 s with a different
-  seed; some seeds hang indefinitely. Not yet bisected — tracked as
-  §20 in the open-items list.
+- Soak flake (`chaos_soak`) — **fixed 2026-05-19**, see Closed
+  items §20. The seed-dependent emergency-GC livelock was caused by
+  an async GC-submit pattern in the worker loop; collapsed to the
+  same synchronous trigger `runtime__emergency_gc` uses. Five
+  consecutive `timeout 20 ./.build/chaos_soak` invocations with
+  distinct seeds now pass in 5–10 s each.
 - WASM compile check: clean (`./build.sh --wasm` — gated on `emcc`
   on PATH; skips with a notice if absent). Run before merging any
   change to `src/` or `include/` so the embedded/WASM target doesn't
@@ -125,26 +125,30 @@ that excluded `rope_concat` or against an earlier rope build.
 Investigated 2026-05-19; not yet fixed because the right scope is
 its own user story with proper UAX #29 GB11/12/13 coverage.
 
-### §20. `chaos_soak` emergency-GC livelock — *seed-dependent flake*
+### §21. `gc_concurrent_trigger` async-submit residual risk — *latent, not observed*
 
-Randomized 4×4 worker/driver soak test intermittently livelocks.
-Sampled the stuck process at ~44 min wall / ~1 min CPU:
+`gc_concurrent_trigger` (`runtime.c:1584`) is fired from
+`VM_PRELUDE` on every opcode dispatch when `heap.needs_gc` is set,
+and follows the **same async pattern that caused §20**: CAS
+`gc_running` 0→1, then `runtime_submit(rt, gc__concurrent_task, rt)`.
+The same deadlock window exists in principle — if every worker
+enters `emergency_gc`'s spin-wait before the queued task pops off
+any deque, the task stays enqueued and `gc_running` is stuck at 1.
+The chaos_soak workload exercised the worker-loop path; no test
+yet exercises this bytecode-driven path enough to surface the
+problem, and a bytecode-heavy workload may not reach it because the
+triggering worker keeps running opcodes (and hence keeps draining
+its own deque) instead of falling into the alloc-failure spin.
 
-- main thread: `runtime__stop_threads` → `pthread_join` (`runtime.c:671`)
-- all 4 worker threads: `runtime__worker_loop` →
-  `task_alloc_discard` → `gc_alloc` (`gc.c:557`) →
-  `runtime__emergency_gc` (`runtime.c:297`) → `SLEEP_MILLISECONDS`
-
-Workers can't allocate, emergency GC isn't freeing anything, main
-thread blocked on join. Reproduces on `a5cc623` independent of
-working-tree state. Default `SOAK_DURATION_SEC=5` so most seeds
-exit cleanly; some seeds (e.g. the one selected on 2026-05-19
-~23:42 local) hang indefinitely. Not bisected. Likely root cause
-class: emergency GC sees no reclaimable memory because the workers
-that would mark/sweep are themselves blocked in the same path —
-deadlock or termination-flag-not-honored under contention. Worth
-re-running `SOAK_SEED=<n>` over a range to find a stable repro
-seed before bisecting.
+Same fix shape — collapse to a synchronous
+`gc_concurrent_collect(rt)`. Requires updating
+`test_concurrent_gc_mutual_exclusion` in `test_runtime.c`, which
+currently asserts that a successful trigger increments
+`rt.inbox_count` (the async-submit observable); under synchronous
+semantics the trigger has no inbox effect — the right assertion
+becomes "`gc_running == 0` after the trigger returns." Out of
+scope for the §20 commit because the test rewrite is its own
+small story.
 
 ### §17. Inconsistent thread-local convention — *low priority, no feature blocked*
 
@@ -251,6 +255,26 @@ if a real-workload profile pins them.
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **§20 `chaos_soak` emergency-GC livelock** — closed 2026-05-19.
+  Sampled the stuck process: main thread in `pthread_join`
+  (`runtime.c:671`), all 4 workers in `gc_alloc` (`gc.c:557`) →
+  `runtime__emergency_gc` (`runtime.c:297`) → `SLEEP_MILLISECONDS`,
+  spin-waiting on `gc_running` to clear. No thread was running
+  `gc_concurrent_collect`, so the flag was stranded at 1.
+  Root cause: the worker-loop's GC trigger at `runtime.c:498` used
+  an *async* pattern (CAS `gc_running` 0→1, then `runtime_submit`
+  of `gc__concurrent_task`) while `emergency_gc` uses a
+  *synchronous* one (CAS, then in-thread `gc_concurrent_collect`).
+  If every worker entered `emergency_gc`'s spin before the queued
+  task popped off any deque, the task stayed enqueued forever —
+  workers in the spin-wait don't drain deques. Fix: collapse the
+  worker-loop trigger to the same synchronous shape — direct
+  `gc_concurrent_collect(rt)` after the CAS. `gc__concurrent_task`
+  is retained because `gc_concurrent_trigger` still queues it from
+  `VM_PRELUDE`; that path has the same latent risk, tracked as §21.
+  Verified by five consecutive `timeout 20 chaos_soak` runs with
+  distinct seeds — all pass in 5–10 s where some seeds previously
+  hung indefinitely.
 - **§18 `stream_type::stream_print` regression** — closed 2026-05-19
   in `a8fab24`. Root cause: `VMFormatBuf` and `vm__fmt_init` had
   diverged between `src/jacl.h` (4-field struct / 2-arg init) and
@@ -301,9 +325,17 @@ CPS-only concurrency.
 
 ## Useful invocations
 
+**Always wrap test invocations in a timeout.** The chaos suite — and
+some `.jacl` scripts that drive workers — can occasionally hang on a
+real deadlock or livelock; without a hard timeout, you'll lose
+context noticing. `timeout 240 ./build.sh` is a reasonable ceiling
+for the full normal-mode sweep on a current laptop; bump it under
+TSAN. Per-test wrappers (`timeout 30 ./.build/<test>`) are good when
+narrowing down a hang.
+
 ```sh
-./build.sh                              # full normal-mode test sweep
-./build.sh --tsan                       # full TSAN-mode sweep
+timeout 240 ./build.sh                  # full normal-mode test sweep
+timeout 480 ./build.sh --tsan           # full TSAN-mode sweep
 ./build.sh --wasm                       # WASM compile-only check (emcc)
 ./build.sh --test=<name>                # one test, normal mode
 ./build.sh --tsan --test=<name>         # one test, TSAN

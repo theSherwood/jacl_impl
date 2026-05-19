@@ -494,10 +494,18 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                 ATOMIC_STORE_EXPLICIT(&self->vm.heap.needs_gc, false,
                                       MEM_RELAXED);
                 {
+                    /* Synchronous trigger — same shape as runtime__emergency_gc.
+                     * The earlier async submit pattern (CAS → runtime_submit
+                     * of gc__concurrent_task) was a deadlock vector: if every
+                     * worker subsequently entered emergency_gc's spin-wait
+                     * before the queued task popped off any deque, the task
+                     * stayed enqueued forever and gc_running stranded at 1.
+                     * See AUDIT_HISTORY.md §"§20 chaos_soak livelock". */
                     uint32_t gc_expected = 0;
                     if (ATOMIC_CAS(&rt->gc_running, &gc_expected, 1,
                                    MEM_ACQ_REL, MEM_RELAXED)) {
-                        runtime_submit(rt, gc__concurrent_task, rt);
+                        gc_concurrent_collect(rt);
+                        /* gc_concurrent_collect resets gc_running = 0 */
                     }
                 }
             }
