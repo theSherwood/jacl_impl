@@ -7714,6 +7714,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           break;
         }
       }
+      /* Set has_yield before body compilation so return-site checks see it,
+         even for return statements that lexically precede the first yield. */
+      body_compiler.has_yield = has_yield;
       {
         AstNode* body_block = args[body_arg_idx];
         uint32_t stmt_count = body_block->data.block.count;
@@ -8555,6 +8558,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (hid == HEAD_RETURN) {
     if (argc > 1) {
       compiler__builtin_arity_error(c, line, col, "return", "0 or 1 arguments", argc);
+      return;
+    }
+    if (c->has_yield && argc == 1) {
+      compiler__error(c, line, col,
+          "cannot return a value from a generator (proc contains `yield`); "
+          "stream consumers discard it. Use `[return]` for early exit.");
       return;
     }
     if (argc == 1) {
@@ -12569,6 +12578,13 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_RETURN: {
+      if (c->has_yield && node->data.return_stmt.value) {
+        compiler__error(c, node->start.line, node->start.column,
+            "cannot return a value from a generator (proc contains `yield`); "
+            "stream consumers discard it. Use bare `return` for early exit.");
+        c->last_expr_type = TYPE_NIL;
+        break;
+      }
       /* Compile return value (or nil) */
       if (node->data.return_stmt.value) {
         compiler__compile_node(c, node->data.return_stmt.value);

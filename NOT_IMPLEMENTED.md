@@ -89,6 +89,16 @@ pulling on them; revisit when one shows up.
   parallel to `OP_DEREF_INLINE`. +50–100 LOC.
 - **`match` arm-walk.** Typer rules for `match` patterns. Dead code
   until the feature itself lands.
+- **Parameterized stream element type (`stream<T>`).** Generators are
+  typed `TYPE_STREAM` (`compiler.c:7787-7789`), so a typed binding
+  like `stream s = [gen]` works, but the element type is `dyn`:
+  `for x in s { ... }` always gives `x: dyn` regardless of what the
+  generator yields. Lifting this needs an element-type slot on
+  `TYPE_STREAM` (parallel to `TYPE_TYPED_VEC` / `TYPE_TYPED_MAP`),
+  plus typer rules that flow the yielded-expression type into it at
+  generator compile time and back out at `for`/`stream-next` sites.
+  Cross-module: would also need element-type alignment for streams
+  exported from another file. Estimated +200-400 LOC.
 
 ---
 
