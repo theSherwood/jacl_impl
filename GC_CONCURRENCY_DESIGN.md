@@ -10,7 +10,7 @@
 The GC must be non-stop-the-world, and immutable values are freely shared across threads.
 These requirements make GC and concurrency inseparable:
 
-- **CPS continuations** (concurrency) are what make roots scannable without stopping threads (GC)
+- **Suspension capture** (concurrency) — a suspending proc publishes all its cross-suspension live state into one heap-rooted handle (an SM state object) before yielding control. That handle is what makes roots scannable without stopping threads (GC).
 - **Per-thread heaps** (GC) depend on the thread model (concurrency)
 - **Epoch tracking** (GC) is maintained per-thread and per-task (concurrency)
 - **Write barriers** (GC) apply to mutable containers whose thread-safety rules come from the concurrency model
@@ -34,7 +34,7 @@ Fixed-size thread pool (one worker per core). Each worker thread owns:
 
 ### Tasks
 
-Each task is a **CPS continuation closure**. All tasks are GC roots.
+Each task is a heap-rooted handle the runtime resumes — either a **state machine** (suspending procs: `yield`/`await`/`parallel`/`race`/calls-into-suspending-procs) or a plain **closure** (non-suspending callable). Both are GC roots; the runtime treats them uniformly via `RuntimeTask.gc_root` / `gc_root2` (§17.1).
 
 - **Public deque tasks**: can be stolen by any worker (touch only immutables)
 - **Private deque tasks**: pinned to owning thread (touch thread-local mutables like `box`)
@@ -47,24 +47,24 @@ loop:
   2. Pop from private deque (priority) or public deque, or steal from another worker
   3. Set currently_executing = task
   4. Set thread_epoch = atomic_load(global_epoch)
-  5. Execute the CPS segment (bytecode on local VM stack)
+  5. Execute the segment between suspensions (bytecode on local VM stack)
   6. Segment may enqueue new tasks (spawn, parallel branches)
   7. Set currently_executing = NULL
   8. goto loop
 ```
 
-## 3. CPS Transform
+## 3. Suspension Transform
 
-The compiler splits procedures at **suspension points** — `spawn`, `await`, `parallel`, `race`, channel operations. Each CPS segment is a closure capturing all live variables at that point.
+The compiler identifies **suspension points** — `yield`, `await`, `parallel`, `race`, and calls into suspending procs (`compiler.c:1458` and §1473ff. classify all five). Any proc containing one or more suspension points is **state-machine compiled** (`compiler.c:3724`): the compiler emits a per-proc dispatch table at function entry, assigns each suspension site a unique resume-point index, and lays out a per-instance `JaclStateMachine` whose `fields[]` array holds every local that has to cross a yield boundary. See `GENERATOR_STATE_MACHINE.md` for the full transform; the GC-correctness story this doc cares about lives here.
 
-Between suspension points, a CPS segment executes as normal bytecode on the thread's local VM stack. This is the foundation of GC correctness:
+Between suspensions, the proc executes as ordinary bytecode on the worker's local VM stack. At a suspension, the state machine — already populated with all cross-suspension live locals — is what the runtime holds onto as the resumable handle. This is the foundation of GC correctness:
 
-- The continuation closure captures **all live state** from the previous suspension
-- Any old object accessed between suspensions was reachable through the continuation (which GC scans)
-- New allocations between suspensions get the current epoch (protected)
-- Therefore: every live object is either **reachable from a scannable root** or **epoch-protected**
+- The SM state object captures **all live state** that must cross any suspension; locals that don't are stack-only, transient, and gone when the segment returns
+- Any heap object held across a suspension is reachable through the SM (which GC scans via its `obj_type` trace, just like a closure's upvalues)
+- Allocations made between suspensions get the current epoch (watermark-protected)
+- Therefore: every live object is either **reachable from a scannable root** (the SM, or the closure for non-suspending tasks) or **epoch-protected**
 
-Without CPS, the VM stack is opaque to GC and this invariant breaks.
+Without this capture, the VM stack would be opaque to GC and the invariant would break. The contract is the same one an earlier CPS-closure design provided; the SM is just a more compact representation of the same thing — one heap allocation per stream/suspending-task instead of one closure per yield. AUDIT §9 covers the residual read-side gap: a worker still touches heap values on the VM stack *between* suspensions, so a value loaded from a mutable container and then orphaned by a concurrent mutation is theoretically reclaimable. The hybrid write barrier (§8) closes the write side; the read-side hole is documented in AUDIT.md as a convention rather than a runtime invariant.
 
 ## 4. Epoch-Based Tracing GC
 
@@ -93,7 +93,7 @@ Without CPS, the VM stack is opaque to GC and this invariant breaks.
 
 The watermark = `min(all thread_epochs)` at GC start. Any object allocated at or after the watermark is immune — it's too recent for GC to have complete information about.
 
-**Tradeoff**: A slow thread (long-running CPS segment) holds back the watermark, delaying collection. This is conservative but correct. In practice, CPS segments should be short (suspension points are frequent).
+**Tradeoff**: A slow thread (long-running segment between suspensions) holds back the watermark, delaying collection. This is conservative but correct. In practice, segments between suspensions should be short (suspension points are frequent).
 
 ### 4.4 GC Scheduling
 
@@ -293,7 +293,7 @@ swap! A V_new
 T still has V_old on VM stack → use-after-free
 ```
 
-The root cause: between CPS suspension points, the VM stack is **not** a GC root — only continuation closures are. A value read from a mutable container onto the VM stack, then evicted from the container by another thread's mutation, becomes invisible to the collector.
+The root cause: between suspension points, the VM stack is **not** a GC root — only the heap-rooted task handle (SM or closure) and the values inside it are. A value read from a mutable container onto the VM stack, then evicted from the container by another thread's mutation, becomes invisible to the collector.
 
 A deletion-only barrier (SATB) would protect V_old here. But a deletion-only barrier does NOT protect the new value in the first scenario (the old value was `nil`, so grey-buffering `nil` is useless). JACL needs **both** barriers.
 
@@ -542,12 +542,12 @@ Built on top of the task/deque infrastructure:
 
 | Primitive | Semantics | Implementation |
 |-----------|-----------|----------------|
-| `spawn` | Launch task, get future | Push continuation onto public deque, return future handle |
-| `await` | Block until future resolves | CPS suspend — current continuation waits on future |
-| `parallel` | Fork N tasks, join all | Push N continuations, parent waits for all results |
-| `race` | Fork N tasks, take first | Push N continuations, first result cancels others |
+| `spawn` | Launch task, get future | Push task (SM if the closure body suspends, plain closure otherwise) onto public deque, return future handle |
+| `await` | Block until future resolves | `OP_AWAIT_SM` — register the calling SM as a waiter on the future, return; runtime resumes it via the SM dispatch table when the future settles |
+| `parallel` | Fork N tasks, join all | `OP_PARALLEL` — pop continuation (must be an SM or nil) plus N child closures, fork them, parent SM resumes with `[r0..r_{N-1}]` once all complete |
+| `race` | Fork N tasks, take first | `OP_RACE` — pop continuation (must be an SM or nil) plus N child closures, fork them, parent SM resumes with the winner's result |
 
-Each of these is a **CPS suspension point** — the compiler splits the code here, creating a continuation closure for "what happens after."
+Each of these is a **suspension point** that triggers SM-compilation of the enclosing proc (`compiler.c:1458`). At the suspension site, the compiler assigns a resume-point index and emits the SM-mode opcode; the runtime re-enters the proc through the entry dispatch on resume.
 
 ## 15. Open Questions
 
@@ -590,13 +590,13 @@ Each of these is a **CPS suspension point** — the compiler splits the code her
 - When `race` picks a winner, how are losing tasks cancelled?
 - Can a cancelled task leave mutable state in an inconsistent state?
 
-**Answer**: Cooperative cancellation. Each task has an `is_cancelled` atomic flag. When `race` picks a winner, it sets `is_cancelled` on all losing tasks. A running task checks this flag only at CPS suspension points (the same points where `spawn`, `await`, `parallel`, `race`, and channel operations occur). Between suspension points, a CPS segment executes as uninterruptible bytecode. This means:
+**Answer**: Cooperative cancellation. Each task has an `is_cancelled` atomic flag. When `race` picks a winner, it sets `is_cancelled` on all losing tasks. A running task checks this flag only at suspension points (the same points where `yield`, `await`, `parallel`, `race`, and channel operations occur). Between suspension points, the segment executes as uninterruptible bytecode. This means:
 
 - A task that hasn't started yet (still on a deque) is simply discarded when popped and found cancelled.
 - A task that is mid-execution runs to its next suspension point, then is discarded.
-- A CPS segment is therefore atomic with respect to cancellation — mutable state cannot be left inconsistent, because the segment either completes fully or never started.
+- A segment between suspensions is therefore atomic with respect to cancellation — mutable state cannot be left inconsistent, because the segment either completes fully or never started.
 
-For atoms: `swap!` is CAS-based and completes within a single CPS segment, so cancellation cannot interrupt it mid-operation.
+For atoms: `swap!` is CAS-based and completes within a single segment, so cancellation cannot interrupt it mid-operation.
 
 ### OOM Handling
 - Thread can't allocate a new block: trigger emergency GC? Grow heap limit? Panic?
@@ -613,7 +613,7 @@ These must be interleaved, not sequential:
 
 1. **Object headers** — add `GCHeader` to all heap types, modify constructors
 2. **Per-thread heap allocator** — bump allocator with block lists
-3. **CPS transform** — compiler splits at suspension points, creates continuation closures
+3. **Suspension transform** — compiler classifies suspension points and SM-compiles any proc containing one; per-proc dispatch table + per-instance state object
 4. **Thread pool + deques** — worker threads, work-stealing, task execution loop
 5. **Root enumeration** — deque snapshot, `currently_executing` protocol
 6. **Mark phase** — concurrent tracing from roots
@@ -639,7 +639,7 @@ An audit of the M12/M13 implementation identified several issues requiring desig
 | Parallel task | parallel agg | task body closure |
 | Race task | race agg | task body closure |
 
-If GC runs between task submission and execution, the unrooted value can be collected when no other reference keeps it alive. Epoch watermarking and eager CPS capture mitigate this in practice, but the design is unsound.
+If GC runs between task submission and execution, the unrooted value can be collected when no other reference keeps it alive. Epoch watermarking and eager suspension-time capture (live locals already in the SM's `fields[]` by the time the task is enqueued) mitigate this in practice, but the design is unsound.
 
 **Amendment**: Add `gc_root2` to `RuntimeTask`. All task submission sites populate both slots. Root enumeration (`gc_enumerate_roots`, `gc__scan_deque`, inbox scanning) scans both roots. This is a minimal change that covers all current cases without over-engineering.
 

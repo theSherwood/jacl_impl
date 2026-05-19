@@ -260,12 +260,14 @@ Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 The write-side races are all closed; the *read-side* operand-stack-
 rooting gap remains: a worker can hold a derived heap value on the
 operand stack across a GC moment with no other root, relying on epoch
-protection or the value's container still pointing to it. JACL's CPS
-compiler de facto avoids this pattern (heap values live across
+protection or the value's container still pointing to it. The SM
+lowering de facto avoids this pattern (heap values live across
 suspensions only via SM state fields, which the GC scans), but it's a
 convention, not a runtime invariant. No concrete UAF has been
 observed; revisit if one ever does, or if JACL grows beyond
-CPS-only concurrency.
+suspension-only cross-task concurrency (e.g., if a worker ever runs
+multi-step uninterruptible code that loads a heap value, mutates the
+container, then re-touches the loaded value with no other root).
 
 ## Useful invocations
 

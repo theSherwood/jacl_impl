@@ -110,10 +110,12 @@ itself.
 
 ### 2.1 Direct-style concurrency is the headline
 
-CPS transform for `await`/`parallel`/`race` plus a state-machine
-transform for generators, all sitting on an NxM work-stealing scheduler
-with epoch-based non-moving GC. The combination is rare; each piece is
-not. Two honest caveats to walk back the originally-uncritical praise:
+State-machine transform for every suspending proc — `yield`,
+`await`, `parallel`, `race`, and calls into suspending procs all
+funnel through one per-proc SM dispatch table — sitting on an NxM
+work-stealing scheduler with epoch-based non-moving GC. The
+combination is rare; each piece is not. Two honest caveats to walk
+back the originally-uncritical praise:
 
 - **"No function coloring" is a syntax claim, not an architectural
   one.** There's an implicit compile-time `SuspensionAnalysis` pass
@@ -270,7 +272,8 @@ them.
 languages ship a surface and then harden the runtime, often
 discovering soundness problems years in. JACL went the other way:
 the hardest engineering — non-moving epoch GC, NxM work-stealing,
-direct-style CPS+SM concurrency, the May 2026 audit campaign — is
+direct-style SM-driven cooperative concurrency, the May 2026 audit
+campaign — is
 the work that's done, because the author had concerns about the
 soundness of the model and chose to prove it out before building
 surface area on top. The surface features that remain are mostly
@@ -438,10 +441,11 @@ glue/scripting audience, but the work to emit it is bounded: identify
 proc bodies whose last expression is a call in tail position (not
 inside `try`, not the source of a binding, not followed by a pipe
 stage that consumes the return). One nuance — suspending procs are
-CPS-transformed, so the "tail call" in a suspending proc becomes a
-continuation construction. That's not impossible (the SM-compile path
-could emit a continuation-tail variant) but it's the part worth
-thinking through before the analysis pass lands.
+SM-compiled, so a "tail call" in a suspending proc body would need
+to either resume the caller-SM through its dispatch table or hand
+control to a tail-call variant that reuses the current SM allocation
+rather than allocating a fresh one. Not impossible; just the part
+worth thinking through before the analysis pass lands.
 
 Growable stacks are a further option (heap-allocated arrays, GC-
 traced, inline-bitmap shadow arrays scaled to stack size), but
@@ -452,7 +456,7 @@ recursive-traversal patterns that do come up.
 ### 3.6 Necessary complexity for the full build, but the embed cost is real
 
 The runtime architecture — NxM work-stealing + non-moving generational
-GC + lockless Chase-Lev deques + direct-style CPS+SM suspension — is
+GC + lockless Chase-Lev deques + direct-style SM-driven suspension — is
 *load-bearing* for the capabilities it provides. You cannot have those
 goals and a simpler runtime story; the per-field synchronization
 invariants in `SYNCHRONIZATION.md` aren't unnecessary architecture, they
@@ -502,7 +506,7 @@ would let embed users opt for the single-threaded build and get:
   can't use anyway; the single-threaded build would be the natural
   WASM default.
 
-CPS + SM cooperative concurrency stays. The surface language stays.
+SM-driven cooperative concurrency stays. The surface language stays.
 FFI stays. Structs, macros, gradual typing all stay. What's lost is
 CPU parallelism — exactly the capability glue/scripting embed users
 mostly don't need.
@@ -574,7 +578,7 @@ top of the threaded-or-not cut.
 
 - **Struct value-type / inline opcodes.** Big complexity, big payoff
   for FFI. Stays.
-- **Direct-style CPS + SM concurrency.** The differentiator. Stays.
+- **Direct-style SM-driven concurrency.** The differentiator. Stays.
 - **`interpret` capability sandbox.** Core for embed use cases. Stays.
 - **Macro system.** Core to language identity. Stays.
 - **C-ABI struct layout.** FFI win. Stays.
@@ -693,7 +697,7 @@ than removal.
 These pay off for the language as currently built. Trade-offs are
 documented elsewhere; the net is positive.
 
-- **CPS + SM concurrency transform.** The differentiator. Caveat per
+- **SM-driven concurrency transform.** The differentiator. Caveat per
   §2.1: "no function coloring" is a syntax claim; `SuspensionAnalysis`
   is implicit compile-time coloring.
 - **Errors as tag-bit flag + pipe short-circuit.** Clean composition;
@@ -841,8 +845,9 @@ that ship actually need.
    `SuspensionAnalysis` pass finds (`yield` → stream-returning
    closure, `await`/`parallel`/`race` → future-returning closure) —
    is unusual. An earlier architecture had a separate CPS transform
-   for async; that path was removed (`vm.c:5102, 7845` now error on
-   the legacy opcodes), leaving a single mechanism. The non-moving
+   for async; that path was removed (`vm.c:5307` for await, 8080 +
+   8308 + 8422 for the generator/yield legacy paths — all error out
+   on the retired opcodes), leaving a single mechanism. The non-moving
    epoch GC underneath has prior art, but the combination —
    direct-style scripting syntax, one suspension transform serving
    two surface forms, GC that collects concurrently — is unusual at
