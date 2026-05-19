@@ -213,7 +213,6 @@ typedef struct TimerEntry {
 } TimerEntry;
 
 /* Forward declarations for functions used in the worker loop */
-void gc__concurrent_task(void *data);
 void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
 void gc_concurrent_collect(Runtime *rt);
 
@@ -1472,12 +1471,6 @@ void gc_concurrent_collect(Runtime *rt) {
     ATOMIC_STORE_EXPLICIT(&rt->gc_running, 0, MEM_RELEASE);
 }
 
-/* Task function for concurrent GC — submitted to the inbox */
-void gc__concurrent_task(void *data) {
-    Runtime *rt = (Runtime *)data;
-    gc_concurrent_collect(rt);
-}
-
 /* ======================================================================
  * jacl_perf_snapshot — aggregate per-worker counters into one struct.
  *
@@ -1580,13 +1573,17 @@ void jacl_perf_snapshot_print_json(FILE *out, const JaclPerfSnapshot *s) {
 }
 
 /* Trigger concurrent GC from vm.c's safepoint.
- * Attempts to CAS gc_running from 0 to 1; if successful, submits a GC task. */
+ * CAS gc_running 0->1; if successful, run the collect inline. The
+ * synchronous shape matches runtime__emergency_gc and the worker-loop
+ * trigger — see AUDIT_HISTORY.md §20 for the deadlock that the prior
+ * async-submit pattern produced and §21 for closing it here too. */
 void gc_concurrent_trigger(void *runtime_ptr) {
     Runtime *rt = (Runtime *)runtime_ptr;
     uint32_t expected = 0;
     if (ATOMIC_CAS(&rt->gc_running, &expected, 1,
                     MEM_ACQ_REL, MEM_RELAXED)) {
-        runtime_submit(rt, gc__concurrent_task, rt);
+        gc_concurrent_collect(rt);
+        /* gc_concurrent_collect resets gc_running = 0 */
     }
 }
 

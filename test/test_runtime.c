@@ -1379,21 +1379,36 @@ static int test_concurrent_gc_mark_toggle(void) {
 }
 
 static int test_concurrent_gc_mutual_exclusion(void) {
-    /* gc_running prevents concurrent GC triggers */
+    /* gc_running's CAS gates re-entry to gc_concurrent_collect. The
+     * trigger is now synchronous (matches runtime__emergency_gc and
+     * the worker-loop trigger — see AUDIT.md §20/§21) so we observe
+     * the mutex via gc_running + global_epoch rather than via the
+     * inbox effect the prior async-submit pattern produced. */
     Runtime rt;
     rt_test__init_no_threads(&rt, 1);
 
-    /* Simulate gc_running = true */
+    /* Case 1: gc_running pre-set to 1 — CAS fails, trigger is a no-op. */
     ATOMIC_STORE_EXPLICIT(&rt.gc_running, 1, MEM_RELEASE);
+    uint64_t epoch_before = ATOMIC_LOAD_EXPLICIT(&rt.global_epoch, MEM_ACQUIRE);
 
-    /* gc_concurrent_trigger should fail the CAS and not submit a task */
     gc_concurrent_trigger(&rt);
+
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&rt.gc_running, MEM_ACQUIRE), 1);
+    ASSERT_U64_EQ(ATOMIC_LOAD_EXPLICIT(&rt.global_epoch, MEM_ACQUIRE),
+                  epoch_before);
     ASSERT_I64_EQ(rt.inbox_count, 0);
 
-    /* Reset gc_running, now trigger should succeed */
+    /* Case 2: gc_running reset to 0 — CAS succeeds, collect runs
+     * inline, which increments global_epoch (step 1) and resets
+     * gc_running back to 0 (step 10) before returning. */
     ATOMIC_STORE_EXPLICIT(&rt.gc_running, 0, MEM_RELEASE);
+
     gc_concurrent_trigger(&rt);
-    ASSERT_I64_EQ(rt.inbox_count, 1);
+
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&rt.gc_running, MEM_ACQUIRE), 0);
+    ASSERT_U64_EQ(ATOMIC_LOAD_EXPLICIT(&rt.global_epoch, MEM_ACQUIRE),
+                  epoch_before + 1);
+    ASSERT_I64_EQ(rt.inbox_count, 0);  /* synchronous — no submit */
 
     rt_test__destroy_no_threads(&rt);
     TEST_PASS();

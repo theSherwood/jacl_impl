@@ -2465,7 +2465,6 @@ typedef struct {
 
 extern JaclPerfSnapshot jacl_perf_snapshot (Runtime *rt);
 extern void jacl_perf_snapshot_print_json (FILE *out, const JaclPerfSnapshot *snap);
-extern void gc__concurrent_task (void *data);
 extern void gc_concurrent_trigger (void *runtime_ptr);
 extern JaclVal runtime__create_resolve_closure (ThreadHeap *heap, arena_t *arena, JaclVal future_val);
 extern JaclVal runtime__create_parallel_k (ThreadHeap *heap, arena_t *arena, JaclVal agg_val, uint32_t index);

@@ -125,31 +125,6 @@ that excluded `rope_concat` or against an earlier rope build.
 Investigated 2026-05-19; not yet fixed because the right scope is
 its own user story with proper UAX #29 GB11/12/13 coverage.
 
-### §21. `gc_concurrent_trigger` async-submit residual risk — *latent, not observed*
-
-`gc_concurrent_trigger` (`runtime.c:1584`) is fired from
-`VM_PRELUDE` on every opcode dispatch when `heap.needs_gc` is set,
-and follows the **same async pattern that caused §20**: CAS
-`gc_running` 0→1, then `runtime_submit(rt, gc__concurrent_task, rt)`.
-The same deadlock window exists in principle — if every worker
-enters `emergency_gc`'s spin-wait before the queued task pops off
-any deque, the task stays enqueued and `gc_running` is stuck at 1.
-The chaos_soak workload exercised the worker-loop path; no test
-yet exercises this bytecode-driven path enough to surface the
-problem, and a bytecode-heavy workload may not reach it because the
-triggering worker keeps running opcodes (and hence keeps draining
-its own deque) instead of falling into the alloc-failure spin.
-
-Same fix shape — collapse to a synchronous
-`gc_concurrent_collect(rt)`. Requires updating
-`test_concurrent_gc_mutual_exclusion` in `test_runtime.c`, which
-currently asserts that a successful trigger increments
-`rt.inbox_count` (the async-submit observable); under synchronous
-semantics the trigger has no inbox effect — the right assertion
-becomes "`gc_running == 0` after the trigger returns." Out of
-scope for the §20 commit because the test rewrite is its own
-small story.
-
 ### §17. Inconsistent thread-local convention — *low priority, no feature blocked*
 
 `gc__current_heap`, `gc__thread_epoch`, `gc__emergency_gc_fn`,
@@ -255,6 +230,24 @@ if a real-workload profile pins them.
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **§21 `gc_concurrent_trigger` async-submit residual risk** —
+  closed 2026-05-19, immediately after §20. `gc_concurrent_trigger`
+  (fired from `VM_PRELUDE` on every opcode dispatch when
+  `heap.needs_gc` is set) had the same async pattern as the
+  worker-loop trigger §20 closed — CAS `gc_running` 0→1, then
+  `runtime_submit(rt, gc__concurrent_task, rt)` — and therefore
+  the same deadlock window in principle. Collapsed to the
+  synchronous shape: direct `gc_concurrent_collect(rt)` after the
+  CAS. With this third site converted, all three GC-trigger sites
+  (`runtime__emergency_gc`, worker-loop self-trigger,
+  `gc_concurrent_trigger`) are now identical in shape — uniformity
+  is itself protection against a future contributor adding a fourth
+  async trigger without realizing the deadlock window.
+  `gc__concurrent_task` had no remaining callers and was deleted
+  along with its forward declarations.
+  `test_concurrent_gc_mutual_exclusion` was rewritten to observe
+  the mutex via `gc_running` + `global_epoch` (sync semantics)
+  instead of the prior `inbox_count` (async-submit observable).
 - **§20 `chaos_soak` emergency-GC livelock** — closed 2026-05-19.
   Sampled the stuck process: main thread in `pthread_join`
   (`runtime.c:671`), all 4 workers in `gc_alloc` (`gc.c:557`) →
