@@ -24,24 +24,21 @@ propagate `vm->error_message` to the awaiter. See `AUDIT_HISTORY.md`
 for the per-phase story.
 
 **Test baselines:**
-- Normal-mode suite: 85 pass / 2 fail (`./build.sh`) as of 2026-05-19
-  on `a5cc623`. Drift from the prior 87/0 — both failures are
-  pre-existing on `main`, not caused by any in-flight work, and
-  reproduce with the local working tree stashed. **Under
-  investigation; not yet triaged into the open-items list below.**
-  - `rope_concat`: `test_rope_concat_zwj_at_junction` (7/8 sub-tests
-    pass). Previously listed as TSAN-only; the same sub-test now also
-    fails in normal mode. May or may not be the same underlying issue
-    as the TSAN-side hang.
-  - `stream_type`: `stream_print` fails — `fmt.len == 8 expected,
-    got 3` at `test_stream_type.c:55`. New failure not in the May
-    audit campaign's known list.
+- Normal-mode suite: 86 pass / 1 fail (`./build.sh`) as of 2026-05-19
+  on `a8fab24`. Drift from the prior 87/0 was investigated this
+  session; one of the two regressions (`stream_type`) is now closed,
+  the other (`rope_concat::zwj_at_junction`) is diagnosed and tracked
+  as §19 below. See **Closed items** for the `stream_type` resolution
+  and §19 in the open-items list for the rope_concat GB11 gap.
 - TSAN baseline: 85 pass / 2 fail (`./build.sh --tsan`).
-  `chase_lev_stress` and `rope_concat` are the two **known-and-safe**
-  TSAN-only failures — TSAN blindness on barrier/fence/epoch-mediated
-  synchronization, not missed barriers. Both also fail with all of
-  `src/runtime.c` + `src/vm.c` reverted, confirming neither is owned
-  by JACL runtime code.
+  `chase_lev_stress` and `rope_concat` are the two TSAN-mode
+  failures. `chase_lev_stress` is **known-and-safe** — TSAN
+  blindness on barrier/fence/epoch-mediated synchronization, not
+  missed barriers. It fails with all of `src/runtime.c` +
+  `src/vm.c` reverted, confirming it's not owned by JACL runtime
+  code. `rope_concat`'s TSAN-mode failure is now known to share its
+  cause with the normal-mode failure (see §19), not a TSAN
+  synchronization issue.
   - `chase_lev_stress`: 11/11 functional sub-tests PASS; ~20 race
     warnings from `test_stress_epoch_thief_rotation` cause the
     non-zero exit. Two distinct sites — `chase_lev.h:268` (plain
@@ -54,23 +51,26 @@ for the per-phase story.
     use lives in `chaos_pinned_deque` + `chaos_gc_deque_scan`, both
     TSAN-clean.
   - `rope_concat`: `test_rope_concat_zwj_at_junction` (7/8 sub-tests
-    pass). Now also fails in normal mode — see normal-mode entry
-    above; the two may have a common cause. The other rope-tier
-    coverage (`test_rope_string`, `test_rope_slice_grapheme`,
-    `test_concat_tiers`, `test_gc_rope_tracing`) is TSAN-clean, and
-    the production rope path through `string.c` is exercised by
-    `string_concat`-bench under TSAN without issue.
+    pass). Same sub-test now confirmed to fail in normal mode too
+    — the prior "TSAN-only" classification in AUDIT_HISTORY.md §
+    "TSAN baseline triage (2026-05-14)" is stale. Full diagnosis
+    in §19. The other rope-tier coverage (`test_rope_string`,
+    `test_rope_slice_grapheme`, `test_concat_tiers`,
+    `test_gc_rope_tracing`) is TSAN-clean, and the production rope
+    path through `string.c` is exercised by `string_concat`-bench
+    under TSAN without issue.
 
   AUDIT_HISTORY.md §"TSAN baseline triage (2026-05-14)" carries the
-  full chase_lev triage walk-through and the original zwj-test
-  TSAN-only confirmation (now stale on the TSAN-only claim).
+  full chase_lev triage walk-through. The zwj-test claim in that
+  same entry that it's "TSAN-only" is stale — see §19.
 - Soak flake (`chaos_soak`): randomized 4×4 worker/driver test
   intermittently livelocks — all workers stuck in
   `gc_alloc → runtime__emergency_gc → SLEEP_MILLISECONDS` while the
   main thread waits in `pthread_join` (see `runtime.c:671`,
   `gc.c:557`). Reproduces on `a5cc623` independent of working-tree
   state. Most invocations exit cleanly in ~5 s with a different
-  seed; some seeds hang indefinitely. Not yet bisected.
+  seed; some seeds hang indefinitely. Not yet bisected — tracked as
+  §20 in the open-items list.
 - WASM compile check: clean (`./build.sh --wasm` — gated on `emcc`
   on PATH; skips with a notice if absent). Run before merging any
   change to `src/` or `include/` so the embedded/WASM target doesn't
@@ -91,6 +91,60 @@ build time by `test/test_struct_sizes.c`.
 These are non-correctness — code health, ergonomics, deferred perf
 levers. None block shipping. Roughly ordered by **remaining**
 leverage; closed items live below the open ones.
+
+### §19. `rope_concat` GB11 emoji-ZWJ-emoji junction split — *correctness, low surface*
+
+`test_rope_concat_zwj_at_junction` is the surviving normal-mode (and
+TSAN-mode) failure. The test concatenates `👨` (U+1F468) with
+`ZWJ ❤ VS16`; the expected joined cluster is `👨‍❤️` — one
+grapheme per UAX #29 GB11 (emoji-ZWJ-emoji). The rope reports 2
+graphemes, while `unicode_grapheme_count` on the flat bytes
+correctly reports 1.
+
+The junction fix-up in `lib/sum_tree/rope.h` (added in `c9656e4`)
+scans the *prefix of right* for `GBP_EXTEND | GBP_ZWJ | GBP_SPACINGMARK`
+and migrates only that prefix into left's last leaf. In this test:
+ZWJ is captured (`GBP_ZWJ`), then ❤ (U+2764) — not an Extend/ZWJ/
+SpacingMark — stops the scan. The ZWJ moves left; ❤ + VS16 stay
+in their own leaf. The summary monoid sums independently-summarized
+leaves, so the GB11 join across the leaf boundary is lost.
+
+Minimal correct fix: when right starts with ZWJ, extend the prefix
+scan past the ZWJ to capture the next single emoji codepoint plus
+its trailing Extend / variation selectors, so the entire
+`(emoji ZWJ emoji [VS]…)` sequence lands in one leaf. A complete
+fix would also audit GB12 / GB13 (regional-indicator flag pairs)
+and similar cluster-spanning rules, with regression coverage for:
+emoji-ZWJ-emoji at junction, emoji-VS-ZWJ-emoji, RI-RI flag pairs
+split across leaves.
+
+Pre-existing since `c9656e4` (2026-03-17); AUDIT.md previously
+classified this as TSAN-only, but it's deterministic in normal
+mode too — the prior 87/0 baseline was recorded against a binary
+that excluded `rope_concat` or against an earlier rope build.
+Investigated 2026-05-19; not yet fixed because the right scope is
+its own user story with proper UAX #29 GB11/12/13 coverage.
+
+### §20. `chaos_soak` emergency-GC livelock — *seed-dependent flake*
+
+Randomized 4×4 worker/driver soak test intermittently livelocks.
+Sampled the stuck process at ~44 min wall / ~1 min CPU:
+
+- main thread: `runtime__stop_threads` → `pthread_join` (`runtime.c:671`)
+- all 4 worker threads: `runtime__worker_loop` →
+  `task_alloc_discard` → `gc_alloc` (`gc.c:557`) →
+  `runtime__emergency_gc` (`runtime.c:297`) → `SLEEP_MILLISECONDS`
+
+Workers can't allocate, emergency GC isn't freeing anything, main
+thread blocked on join. Reproduces on `a5cc623` independent of
+working-tree state. Default `SOAK_DURATION_SEC=5` so most seeds
+exit cleanly; some seeds (e.g. the one selected on 2026-05-19
+~23:42 local) hang indefinitely. Not bisected. Likely root cause
+class: emergency GC sees no reclaimable memory because the workers
+that would mark/sweep are themselves blocked in the same path —
+deadlock or termination-flag-not-honored under contention. Worth
+re-running `SOAK_SEED=<n>` over a range to find a stable repro
+seed before bisecting.
 
 ### §17. Inconsistent thread-local convention — *low priority, no feature blocked*
 
@@ -197,6 +251,20 @@ if a real-workload profile pins them.
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **§18 `stream_type::stream_print` regression** — closed 2026-05-19
+  in `a8fab24`. Root cause: `VMFormatBuf` and `vm__fmt_init` had
+  diverged between `src/jacl.h` (4-field struct / 2-arg init) and
+  `src/vm.c` (5-field struct adding `StructTypeRegistry* registry` /
+  3-arg init). Tests including `jacl.h` stack-allocated 24 bytes; the
+  impl wrote 32. The 8-byte stack overflow happened to clobber the
+  adjacent `JaclVal` local with NULL, routing `vm__fmt_value` to the
+  `is_nil` branch (`fmt.len == 3` "nil" instead of `8` "<stream>").
+  Fix: sync the public header to match the impl, update the test to
+  pass `vm.struct_registry`. In-tree callers in `vm.c` were already
+  passing 3 args, so this only manifested via the lone 2-arg test
+  caller. Lesson: when a header struct grows a field, audit every
+  external consumer that stack-allocates it — there's no compiler
+  warning for size disagreement between TUs.
 - **§16 VM stack overflow surfacing** — closed 2026-05-15 (cheap fix).
   Kept `VM_STACK_MAX = 256` / `VM_FRAMES_MAX = 64`. The ~44 bare
   `"stack overflow"` error strings in `vm.c` now resolve through one of
