@@ -97,19 +97,33 @@ The watermark = `min(all thread_epochs)` at GC start. Any object allocated at or
 
 ### 4.4 GC Scheduling
 
-GC is itself a task on a deque. Any worker can execute it.
+GC runs *synchronously on the triggering thread* once it wins the
+`gc_running` CAS. The CAS provides mutual exclusion; the
+synchronous shape provides a forward-progress contract for any
+peer that's spin-waiting on the flag.
 
 ```c
-// Trigger: allocation threshold exceeded
+// Trigger: allocation threshold exceeded (worker-loop self-trigger,
+// runtime__emergency_gc, and gc_concurrent_trigger all follow this
+// shape)
 if (thread->bytes_since_gc > GC_THRESHOLD) {
     if (atomic_cas(&gc_running, false, true)) {
-        enqueue_gc_task(thread->public_deque);
+        gc_concurrent_collect(rt);   // in-thread; resets gc_running = 0 on exit
     }
     thread->bytes_since_gc = 0;
 }
 ```
 
-Mutual exclusion via `gc_running` atomic flag. Only one GC at a time.
+Mutual exclusion via `gc_running` atomic flag. Only one GC at a
+time. The original design had GC scheduled as a task on a deque
+(any worker can execute it); that pattern was reverted after a
+seed-dependent `chaos_soak` livelock (AUDIT_HISTORY.md §§20–21) —
+if every worker fell into `emergency_gc`'s spin-wait before any
+worker popped the queued GC task, the task stayed enqueued and
+`gc_running` stranded at 1 forever. Symmetric synchronous triggers
+across all three acquirer sites close that window by construction:
+the only thread that can set the flag to 1 also runs the only
+function that resets it to 0.
 
 ## 5. Object Headers
 

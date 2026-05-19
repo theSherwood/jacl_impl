@@ -113,7 +113,18 @@ under the lock.
 - **R**: any thread doing the start-CAS
 - **Sync**: `ATOMIC_CAS`
 - **Order**: `MEM_ACQ_REL` on success, `MEM_RELAXED` on failure
-- **Invariant**: at most one concurrent GC cycle in flight
+- **Invariant**: at most one concurrent GC cycle in flight, AND the
+  CAS winner *always* runs `gc_concurrent_collect` synchronously
+  before returning to the caller's loop. There are three acquirer
+  sites — `runtime__emergency_gc`, the worker-loop bytes-since-gc
+  self-trigger, and `gc_concurrent_trigger` (per-opcode safepoint).
+  All three follow the same shape: CAS, then in-thread
+  `gc_concurrent_collect(rt)` (which resets the flag to 0 at step 10).
+  Spin-waiters at `runtime.c:297` therefore have a guaranteed forward
+  progress contract: the flag's writer cannot park before resetting
+  it. AUDIT_HISTORY.md §§20–21 documents the prior async-submit
+  pattern (CAS → `runtime_submit(gc__concurrent_task)`) and the
+  resulting `chaos_soak` livelock that motivated this invariant.
 
 ### `Runtime.gc_active` (uint32_t, atomic)
 - **W**: GC thread — set to 1 at mark start, 0 at sweep start
@@ -526,6 +537,13 @@ Things this document doesn't yet pin down:
   `with-open` / `defer`. There's no current GC hook for finalization.
   If one is added, it needs to specify ordering w.r.t. sweep and write
   barriers.
-- **OOM during concurrent GC**: `runtime__emergency_gc` recurses into
-  `gc_concurrent_collect`. The behavior when an allocator hits OOM mid-GC
-  is not pinned down in this document — it just spins on `gc_running`.
+- **OOM during concurrent GC**: `runtime__emergency_gc` runs
+  `gc_concurrent_collect` inline on the CAS winner. CAS losers spin
+  on `gc_running` — and now have a guaranteed-progress contract
+  thanks to the §20/§21 fix (the flag's writer cannot park before
+  resetting it). The behavior of `gc_concurrent_collect` *itself*
+  hitting OOM mid-sweep (e.g. block-pool exhaustion during a remap)
+  is still not pinned down here; AUDIT.md §15 covers the three-tier
+  escalation but the failure mode if all three tiers exhaust is
+  "abort with `jacl_oom_panic`" rather than a graceful surfaced
+  error.

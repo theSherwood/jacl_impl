@@ -231,57 +231,36 @@ if a real-workload profile pins them.
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
 - **§21 `gc_concurrent_trigger` async-submit residual risk** —
-  closed 2026-05-19, immediately after §20. `gc_concurrent_trigger`
-  (fired from `VM_PRELUDE` on every opcode dispatch when
-  `heap.needs_gc` is set) had the same async pattern as the
-  worker-loop trigger §20 closed — CAS `gc_running` 0→1, then
-  `runtime_submit(rt, gc__concurrent_task, rt)` — and therefore
-  the same deadlock window in principle. Collapsed to the
-  synchronous shape: direct `gc_concurrent_collect(rt)` after the
-  CAS. With this third site converted, all three GC-trigger sites
-  (`runtime__emergency_gc`, worker-loop self-trigger,
-  `gc_concurrent_trigger`) are now identical in shape — uniformity
-  is itself protection against a future contributor adding a fourth
-  async trigger without realizing the deadlock window.
-  `gc__concurrent_task` had no remaining callers and was deleted
-  along with its forward declarations.
-  `test_concurrent_gc_mutual_exclusion` was rewritten to observe
-  the mutex via `gc_running` + `global_epoch` (sync semantics)
-  instead of the prior `inbox_count` (async-submit observable).
-- **§20 `chaos_soak` emergency-GC livelock** — closed 2026-05-19.
-  Sampled the stuck process: main thread in `pthread_join`
-  (`runtime.c:671`), all 4 workers in `gc_alloc` (`gc.c:557`) →
-  `runtime__emergency_gc` (`runtime.c:297`) → `SLEEP_MILLISECONDS`,
-  spin-waiting on `gc_running` to clear. No thread was running
-  `gc_concurrent_collect`, so the flag was stranded at 1.
-  Root cause: the worker-loop's GC trigger at `runtime.c:498` used
-  an *async* pattern (CAS `gc_running` 0→1, then `runtime_submit`
-  of `gc__concurrent_task`) while `emergency_gc` uses a
-  *synchronous* one (CAS, then in-thread `gc_concurrent_collect`).
-  If every worker entered `emergency_gc`'s spin before the queued
-  task popped off any deque, the task stayed enqueued forever —
-  workers in the spin-wait don't drain deques. Fix: collapse the
-  worker-loop trigger to the same synchronous shape — direct
-  `gc_concurrent_collect(rt)` after the CAS. `gc__concurrent_task`
-  is retained because `gc_concurrent_trigger` still queues it from
-  `VM_PRELUDE`; that path has the same latent risk, tracked as §21.
-  Verified by five consecutive `timeout 20 chaos_soak` runs with
-  distinct seeds — all pass in 5–10 s where some seeds previously
-  hung indefinitely.
+  closed 2026-05-19 in `395aba1`. Collapsed the last remaining
+  async-submit GC trigger to the synchronous shape used by the
+  other two acquirers (`runtime__emergency_gc` and the worker-loop
+  self-trigger). With all three sites identical, the pattern
+  asymmetry that allowed §20 is gone. `gc__concurrent_task` had no
+  callers and was deleted. `test_concurrent_gc_mutual_exclusion`
+  rewritten to observe the mutex via `gc_running` + `global_epoch`
+  rather than the now-removed `inbox_count` effect. See
+  `AUDIT_HISTORY.md` § "§21 gc_concurrent_trigger async-submit
+  residual (2026-05-19)".
+- **§20 `chaos_soak` emergency-GC livelock** — closed 2026-05-19
+  in `ef79087`. The worker-loop GC trigger at `runtime.c:498` used
+  an async-submit pattern (CAS → `runtime_submit gc__concurrent_task`)
+  that didn't match `runtime__emergency_gc`'s synchronous shape;
+  on seeds where every worker fell into the alloc-failure spin
+  before the queued task popped off any deque, the task stayed
+  enqueued and `gc_running` stranded at 1. Fix: replace the
+  submit with direct `gc_concurrent_collect(rt)` after the CAS.
+  Verified across five distinct-seed `timeout 20 chaos_soak` runs
+  (5–10 s each) where some seeds previously hung indefinitely.
+  See `AUDIT_HISTORY.md` § "§20 chaos_soak emergency-GC livelock
+  (2026-05-19)".
 - **§18 `stream_type::stream_print` regression** — closed 2026-05-19
-  in `a8fab24`. Root cause: `VMFormatBuf` and `vm__fmt_init` had
-  diverged between `src/jacl.h` (4-field struct / 2-arg init) and
-  `src/vm.c` (5-field struct adding `StructTypeRegistry* registry` /
-  3-arg init). Tests including `jacl.h` stack-allocated 24 bytes; the
-  impl wrote 32. The 8-byte stack overflow happened to clobber the
-  adjacent `JaclVal` local with NULL, routing `vm__fmt_value` to the
-  `is_nil` branch (`fmt.len == 3` "nil" instead of `8` "<stream>").
-  Fix: sync the public header to match the impl, update the test to
-  pass `vm.struct_registry`. In-tree callers in `vm.c` were already
-  passing 3 args, so this only manifested via the lone 2-arg test
-  caller. Lesson: when a header struct grows a field, audit every
-  external consumer that stack-allocates it — there's no compiler
-  warning for size disagreement between TUs.
+  in `a8fab24`. `VMFormatBuf` and `vm__fmt_init` had diverged
+  between `src/jacl.h` (24-byte struct / 2-arg init) and `src/vm.c`
+  (32-byte struct / 3-arg init). External callers stack-allocated
+  the smaller version; the impl's 8-byte overflow corrupted the
+  adjacent local. Fix: sync the public header to the impl. See
+  `AUDIT_HISTORY.md` § "§18 stream_type::stream_print regression
+  (2026-05-19)".
 - **§16 VM stack overflow surfacing** — closed 2026-05-15 (cheap fix).
   Kept `VM_STACK_MAX = 256` / `VM_FRAMES_MAX = 64`. The ~44 bare
   `"stack overflow"` error strings in `vm.c` now resolve through one of

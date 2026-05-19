@@ -2236,3 +2236,198 @@ retired buffers).
 Further chaos work that would pay off: targeted reproducers for findings
 #2, #3, #7/#15; randomized operation soak under TSAN; a CI matrix that runs
 the full suite under both modes.
+
+## §18 `stream_type::stream_print` regression (2026-05-19)
+
+Caught during full-suite verification after the c/ds rope ASCII
+fast-path port. AUDIT.md claimed 87/0 baseline but the actual sweep
+on `a5cc623` was 85/87 — two pre-existing regressions had been hiding.
+`stream_type::stream_print` was one of them.
+
+**Symptom.** `vm__fmt_value` on a stream value produced `fmt.len == 3`
+(`"nil"`) instead of `fmt.len == 8` (`"<stream>"`). Both halves of the
+test pre-condition checked out — `jacl_is_stream(s)` returned true,
+`jacl_is_nil(s)` returned false — yet `vm__fmt_value` somehow routed
+to the `is_nil` branch internally. A throwaway probe binary
+(`/tmp/test_stream_probe.c`) reproduced the failure deterministically
+and tipped off the cause: `sizeof(VMFormatBuf)` was **24 bytes at the
+test's compilation unit and 32 bytes inside `vm.c`**.
+
+**Root cause.** `VMFormatBuf` had two diverged definitions:
+
+- `src/jacl.h` line 1578: 4 fields (`data`, `len`, `cap`, `arena`) =
+  24 bytes
+- `src/vm.c` line 779: 5 fields (the above plus
+  `StructTypeRegistry* registry`) = 32 bytes
+
+The companion `vm__fmt_init` had the same drift — header
+declared 2 args, impl took 3. Tests stack-allocate `VMFormatBuf` via
+the public header view (24 bytes), then call `vm__fmt_init(&fmt,
+&arena)` per the 2-arg prototype. The 3-arg impl writes 32 bytes
+into the 24-byte slot — 8-byte stack overflow past the public
+struct's end. In `test_stream_print`'s frame layout, the byte slot
+immediately above `fmt` happened to be `JaclVal s`; the spilled
+write was NULL (`rdx` register held 0 from a prior call), so `s`
+became NULL = `JACL_NIL`. By the time `vm__fmt_value` saw `val`,
+it correctly dispatched to the nil branch — for the corrupted
+value. No call site, prototype, or struct definition could be
+blamed in isolation; the bug only emerged from the interaction.
+
+In-tree callers in `src/vm.c` all already passed 3 args (they had
+been updated alongside the impl when `registry` was added).
+`test/test_stream_type.c:52` was the only 2-arg caller. The drift
+had been latent since whenever `registry` was added (didn't bisect
+— the test would have started failing the same day the impl
+changed without the header update, but no one noticed because the
+suite's overall pass count didn't budge).
+
+**Fix.** Sync the public header to the impl: add the 5th field,
+update the 2-arg prototype to 3-arg. Pass `vm.struct_registry`
+from the test. The duplicate definition in `vm.c` is left in place
+— `jacl.c` (unity build) doesn't include `jacl.h`, so both TUs
+see exactly one definition, and the two are now identical.
+
+**Lesson.** When a header struct grows a field, audit every
+external consumer that stack-allocates it. There is no compiler
+warning for "stack frame slot is shorter than the impl thinks the
+struct is" across translation units. The unity-build pattern
+hides the drift even further by ensuring `vm.c` never sees the
+public header.
+
+Commit `a8fab24`. Closes the §18 line in AUDIT.md's normal-mode
+baseline drift.
+
+## §20 `chaos_soak` emergency-GC livelock (2026-05-19)
+
+Found during the same post-port verification sweep that caught §18.
+`chaos_soak` was hanging seed-dependently — most invocations exited
+cleanly in ~5 s, but ~20–30% of seeds livelocked indefinitely. The
+first observation took ~44 minutes wall time before the operator
+(me) thought to interrupt and sample the stuck process.
+
+**Symptom.** From `sample $(pgrep chaos_soak)`:
+
+```
+1610 main thread
+  → runtime__stop_threads (runtime.c:671)
+  → _pthread_join → __ulock_wait
+1610 worker thread × 4
+  → runtime__worker_loop (runtime.c:468)
+  → task_alloc_discard (test_chaos_soak.c:57)
+  → gc_alloc (gc.c:557)
+  → runtime__emergency_gc (runtime.c:297)
+  → SLEEP_MILLISECONDS(1)
+```
+
+All four worker threads blocked on the spin-wait at
+`runtime.c:297`. No thread running `gc_concurrent_collect`. Main
+thread blocked in `pthread_join` waiting for the workers.
+
+**Root cause.** `gc_running` was an atomic CAS-mutex with three
+acquirers, and one of them used a different post-CAS shape from
+the other two:
+
+- `runtime__emergency_gc` (alloc-pressure caller): CAS 0→1, then
+  **synchronous** `gc_concurrent_collect(rt)`. On loss, spin-wait
+  for `gc_running == 0`.
+- Worker-loop self-trigger (bytes-since-gc threshold caller,
+  `runtime.c:498`): CAS 0→1, then **`runtime_submit(rt,
+  gc__concurrent_task, rt)`** — queues a task that will run the
+  collect on whichever worker pops it next.
+- `gc_concurrent_trigger` (per-opcode safepoint caller, fired
+  from `VM_PRELUDE` on `heap.needs_gc`): same async-submit shape
+  as the worker-loop trigger.
+
+The async pattern works fine when at least one worker is making
+forward progress through its main loop and pops the queued task.
+It deadlocks when:
+
+1. Worker A in its main loop crosses the bytes-since-gc threshold,
+   CAS-acquires `gc_running`, submits `gc__concurrent_task`,
+   returns to the loop.
+2. Before any worker pops the GC task, Worker B hits an
+   alloc-failure in `gc_alloc`, calls `emergency_gc`, fails the
+   CAS (gc_running == 1), enters the spin-wait.
+3. C and D follow B. Now three workers spin-waiting.
+4. Worker A also hits an alloc-failure, same path, joins the
+   spin-wait.
+
+All four workers are now stuck in the spin loop — none in their
+main loop. The queued `gc__concurrent_task` sits on whichever
+deque it landed on; no thread will pop it. `gc_running` stays at
+1 forever. Main thread blocks on join.
+
+The seed-dependence comes from how quickly all four workers can
+simultaneously hit alloc-pressure after one of them dispatches a
+GC. Most seeds reach a worker that pops the GC task before the
+fourth alloc-failure; some don't.
+
+**Fix.** Collapse the worker-loop trigger to the synchronous
+shape (`runtime.c:498`, commit `ef79087`). Then collapse
+`gc_concurrent_trigger` the same way (`runtime.c:1584`, commit
+`395aba1`) — that path had the same window in principle, just
+hadn't been exercised by a test workload yet. With both
+converted, all three trigger sites are identical: CAS 0→1, run
+`gc_concurrent_collect(rt)` inline, which resets `gc_running` to
+0 at step 10 (`runtime.c:1471`). The flag can no longer strand
+because the only way to set it 1 also runs the only function
+that sets it back to 0.
+
+`gc__concurrent_task` had no callers after the second commit and
+was deleted along with its forward declarations in `runtime.c`
+and the public extern in `jacl.h`.
+
+**Test impact.**
+
+- `chaos_soak`: verified across 5 consecutive 20-second timeout
+  runs with distinct seeds — all pass in 5–10 s where some seeds
+  previously hung indefinitely.
+- `test_concurrent_gc_mutual_exclusion` in `test_runtime.c`
+  rewritten as part of the §21 commit. The old test asserted
+  `rt.inbox_count == 1` after a successful trigger (the
+  async-submit observable). Under synchronous semantics the
+  trigger has no inbox effect — the right observables are
+  `gc_running == 0` (collect ran and reset it) and `global_epoch`
+  incremented (collect's step 1). New assertions cover both.
+
+**Lessons.**
+
+- **Always wrap test runs in `timeout`.** A foreground
+  `./build.sh` with no shell-level timeout cost roughly an hour of
+  session time before I realized the harness was wedged inside
+  chaos_soak. AUDIT.md's "Useful invocations" section now leads
+  with this rule, and a feedback memory captures it for next time.
+- **Pattern asymmetry across acquirers of the same flag is the
+  hazard.** Three sites with the same CAS — but two used in-thread
+  collect and one used an async dispatch — was a design surface
+  bug, not just an isolated mistake at one site. The §21 fix
+  closes the asymmetry, which is itself the protection against a
+  future fourth acquirer re-introducing the deadlock window.
+
+Commits `ef79087` (worker-loop site) and `395aba1` (trigger site
++ test rewrite + dead-code deletion).
+
+## §21 `gc_concurrent_trigger` async-submit residual (2026-05-19)
+
+Closed the same day as §20, as part of the same root-cause story.
+After the worker-loop fix landed in `ef79087`, `gc_concurrent_trigger`
+remained the last site using the async pattern that had caused the
+livelock. By construction it had the same deadlock window, just on a
+different surface (per-opcode safepoint, fired from `VM_PRELUDE` on
+`heap.needs_gc`, rather than the alloc-discard worker-loop check).
+
+The fix is the same one-line collapse: CAS → direct
+`gc_concurrent_collect(rt)`. The test rewrite for
+`test_concurrent_gc_mutual_exclusion` was the only non-trivial
+adjacent change; details under §20 above.
+
+**Why this needed its own commit.** Splitting §20 and §21 across
+commits was a scope choice, not a correctness one. The worker-loop
+fix had a known reproducer (`chaos_soak` livelock); `gc_concurrent_trigger`
+did not. Keeping the bug-with-reproducer separate from the
+latent-by-symmetry fix makes both easier to bisect later if either
+ever causes a regression.
+
+Commit `395aba1`. Together with `ef79087` this leaves all three
+GC-trigger acquirers in identical synchronous shape.
+
