@@ -20,8 +20,7 @@ Status snapshot:
 |---|---|---|---|
 | **`match` / case** | Large | None | Lexed; `HEAD_MATCH` recognized as special form (`compiler.c:2527`); typer rules deferred; no compile/runtime path. May ship as a macro instead of a compiler-path special form — see `DESIGN_CRITIQUE.md` §3.3. |
 | **Callable values** (maps/atoms in `[]` head) | Medium | None | `[$colors red]`, `[$config port]`. +50–100 LOC projected. |
-| **Atom listeners (`watch`)** | Medium | None | Watch list per atom, fire on swap/reset, GC-traced callbacks. Prerequisite for `$env`. Design: `ATOM_WATCH_DESIGN.md`. |
-| **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners. |
+| **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Callable values | Bidirectional OS sync via watchers. Watcher dep met by `watch`/`unwatch` (2026-05-19, `ATOM_WATCH_DESIGN.md`). |
 | **Aliases** (`alias ll { !ls -la }`) | Small | None | Compile-time syntactic rewrite. Scoping (file vs session) unresolved — `SYNTAX.md` Q21. |
 | **Globbing** (`glob`) | Medium | None | Reads `$ctx.pwd`; returns a stream. Pattern engine + brace expansion. |
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |

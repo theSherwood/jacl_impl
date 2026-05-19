@@ -791,14 +791,17 @@ The env sync is built on a general-purpose listener mechanism for atoms. Any ato
 
 ```
 def counter [atom 0]
+logger = proc {old, new} { print "changed: $old → $new" }
 
-watch $counter [proc {old, new} {
-  print "changed: $old → $new"
-}]
-
+watch $counter "log" $logger
 swap $counter [\ + $it 1]
 # prints: changed: 0 → 1
+
+unwatch $counter "log"
+# subsequent swaps no longer fire the watcher
 ```
+
+Watchers fire synchronously in the thread that committed the change, after every `reset` / `swap` mutation, with `(old, new)`. Each watcher is keyed; re-registering the same key replaces the previous closure, and `unwatch` removes it. Multiple watchers fire in registration order. The full surface (storage, threading, re-entrancy, GC) is in `ATOM_WATCH_DESIGN.md`.
 
 The `$env` atom has a built-in listener that:
 

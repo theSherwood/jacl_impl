@@ -258,8 +258,7 @@ you need to share.
 The runtime — concurrency, GC, FFI, embedding — is further along than
 the shell-side surface features that distinguish a glue/scripting
 language. Still unimplemented per the `SYNTAX.md` status table:
-`par-each`, `timeout`, `$env`, `watch`, `glob`, `read-file` /
-`write-file` / `append-file`, regex. None of these are corner cases
+`par-each`, `$env`, `glob`, regex. None of these are corner cases
 for the stated audience; all are scheduled work.
 
 This is a status observation, not a critique of the design. Worth
@@ -755,10 +754,10 @@ wiring unlocks the payoff.
   `lib/bignum/` ready; planned with implicit promotion in `dyn` per §3.2.
 - **Regex.** `lib/regex/` (Thompson NFA) self-contained; integration
   scheduled.
-- **Shell-language surface features.** `par-each`, `timeout`, `$env` +
-  built-in aliases, `watch`, `glob`, `read-file`/`write-file`/
-  `append-file`. The runtime primitives they compose on top of are
-  already in place.
+- **Shell-language surface features.** `par-each`, `$env` +
+  built-in aliases, `glob`. The runtime primitives they compose on
+  top of are already in place. `timeout`, `watch`/`unwatch`, and
+  `read-file`/`write-file`/`append-file` shipped in May 2026.
 - **`match` (uncertain).** May not ship; if it does, macro path is
   a litmus test for the macro system (§3.3).
 - **TCO emission.** `OP_TAIL_CALL` exists in the VM; compiler-side
@@ -1103,8 +1102,8 @@ estimates from comparable existing features.
 |---|---|---|---|
 | `match` / case | ~5 (token + HEAD + special-form recognition) | +800–1,500 if compiler path; +1,500–2,500 if macro path | Uncertain landing per §3.3. Macro path uses existing machinery but pattern compilation is non-trivial. |
 | Callable maps / atoms in `[]` head | 0 | +50–100 | One dispatch arm in OP_CALL + typer rule. |
-| Atom listeners (`watch`) | 0 | +150–250 | Watch list per atom, fire on swap/reset, GC-trace the callbacks. |
-| `$env` (atom of map, OS sync) | 0 | +300–500 | Built on atom listeners + setenv/unsetenv glue + `$home`/`$pwd`/`$pid` alias plumbing. |
+| ~~Atom listeners (`watch`)~~ | — | shipped 2026-05-19 (~330 LOC actual) | `watch ATOM KEY FN` / `unwatch ATOM KEY`. Copy-on-write watcher list (`OBJ_WATCHER_LIST`), atoms get a dedicated `OBJ_ATOM_REF` tag with a trailing slot for the list pointer (NULL until first watch). Fire path is lock-free; CAS publish for register/remove. Re-entrancy bounded by `VM_FRAMES_MAX`. Design in `ATOM_WATCH_DESIGN.md`. |
+| `$env` (atom of map, OS sync) | 0 | +300–500 | Built on atom watchers (shipped) + setenv/unsetenv glue + `$home`/`$pwd`/`$pid` alias plumbing. |
 | Aliases (`alias ll {!ls -la}`) | 0 | +100–200 | Compile-time syntactic rewrite layer in the macro system. |
 | Globbing (`glob`) | 0 | +200–400 | Pattern engine + brace expansion + `$ctx.pwd` integration; returns a stream. |
 | `read-file` / `write-file` / `append-file` | 0 | +150–250 | Wrappers over fread/fwrite emitting/consuming streams. |
