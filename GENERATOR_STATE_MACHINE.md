@@ -43,18 +43,55 @@ Yield writes resume_point + the yielded value, returns. The runtime
 sees `VM_YIELD` and pauses. `OP_STREAM_NEXT` re-enters the proc with
 the same state object, which dispatches via the entry switch.
 
-## Hybrid: SM for generators, CPS for await/parallel/race
+## Suspension uses SM everywhere
 
-await / parallel / race suspend once and resume once. Per-suspension
-allocation is negligible there, and the CPS implementation composes
-across nested concurrency primitives more naturally than a state
-machine would. Keeping CPS for those keeps the scheduler interface
-unchanged.
+Historical note: an earlier design kept CPS for `await` / `parallel` /
+`race` on the grounds that those suspend once per call and the
+per-suspension allocation was negligible. That split has been removed.
+**All suspension points — `yield`, `await`, `parallel`, `race`, and
+calls to suspending procs — now go through the state-machine path.**
+The CPS `OP_AWAIT` handler at `vm.c:5307` is a stub that errors out
+("CPS await not supported"); the live opcodes are `OP_AWAIT_SM`
+(`vm.c:9154`), `OP_PARALLEL` (`vm.c:5472`), `OP_RACE` (`vm.c:5659`),
+and `OP_CALL_SUSPEND` (`vm.c:9396`), each of which requires a
+state-machine continuation.
 
-If a generator body also contains `await`, the two mechanisms
-coexist in one function: the SM handles yield points; CPS handles
-await. The compiler tracks both kinds of suspension separately
-(`SuspensionAnalysis` in compiler.c).
+The compiler's `sm__walk_suspensions__visit` (`compiler.c:1458`) counts
+all five suspension kinds together; if any are present, the enclosing
+function is SM-compiled (`compiler.c:3724`) and each suspension site
+gets a unique resume-point index. A generator body that also `await`s
+is just an SM with both yield-resume and await-resume points in the
+same dispatch table.
+
+The remaining CPS-shaped allocation is `resolve_k` in `runtime.c`,
+created once per `spawn` to publish the spawned closure's result back
+into its future. That's one allocation per `spawn`, not per suspension.
+
+### What still allocates per suspension
+
+`OP_AWAIT_SM` registers the SM on the awaited future's waiter list by
+calling `jacl_future_add_waiter` (`gc.c:1182`), which allocates a
+single `FutureWaiter` node (~48 bytes) per call (`gc.c:1189`). No
+closure, no captured environment. A loop of N sequential `await`s
+allocates N `FutureWaiter` nodes plus the one SM that was allocated
+when the proc was entered. `parallel` / `race` over N child futures
+allocate N waiters (one per child future) per call.
+
+The obvious "embed one waiter slot in the SM struct and reuse it
+across awaits" optimization is **not viable as a local change.** The
+waiter chain is write-once after settle (`gc.c:1133-1143`) and that
+invariant is load-bearing for AUDIT §9b / §10-11 race #2 (the fresh-
+waiter-reclaimed-under-a-worker case the unconditional grey-buf push
+in `gc_write_barrier` closed). An embedded slot linked into future
+A's chain cannot be relinked into future B's chain without mutating
+A's frozen chain. So an embedded slot would only ever help the
+*first* await an SM does, not subsequent iterations of a loop. Making
+it actually amortize requires detaching `f->waiters` at resolve time
+with a SATB push of the old chain head into the grey buffer — a real
+GC change, not a small one, and a re-audit of §9b / §10-11. Skipped
+until a profile points at `FutureWaiter` allocation as a hot spot;
+none does today (AUDIT §11 says `spawn_chain` is dominated by the
+worker idle-park, not allocation).
 
 ## Tradeoffs that informed the design
 
