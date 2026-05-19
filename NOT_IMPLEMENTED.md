@@ -70,6 +70,39 @@ Scaffolding that exists in the runtime but no compiler path emits it.
 
 ---
 
+## 3b. Compile-time diagnostics — deferred
+
+Compiler checks that would catch foot-guns but haven't shipped yet.
+
+- **Implicit value-producing tail inside a generator.** The narrow
+  check shipped 2026-05-19: `[return X]` and `return X` (with a
+  value) inside a proc containing `yield` now error at compile time,
+  because stream consumers silently discard the value
+  (`vm.c:8388-8415`). The broader case — a non-`yield`, non-loop,
+  non-binding tail expression that produces a non-nil value — still
+  compiles silently. Example:
+  ```
+  proc gen {} {
+    yield 1
+    cleanup-resource   # value silently dropped
+  }
+  ```
+  Tightening this requires a recursive AST tail-walk against a
+  curated whitelist of nil-producing forms (`yield`, `for`, `while`,
+  `def`/`mut`/`set`, `=`/`:`/`::`, `[return]`/bare `return`, one-
+  armed `if`, blocks with `trailing_semi`, recursive descent through
+  `if`/`else`, `try`/`catch`, `with-ctx`). Trailing `;` already
+  exists as the explicit-nil escape hatch (`compiler.c:3910-3920`),
+  so the surface-language shape is settled — the cost is in the
+  whitelist itself and tests for each form. Estimated +150-250 LOC
+  plus fixtures. **Open friction question** kept this out of the
+  narrow-rule commit: many natural patterns (a side-effecting call
+  in tail position) currently silent-drop; making them errors forces
+  users to add `;` or restructure. Decide the friction-vs-strictness
+  call before writing the whitelist.
+
+---
+
 ## 4. Type system — deferred items
 
 From `TYPE_SYSTEM.md` § "Deferred items". No concrete workload
