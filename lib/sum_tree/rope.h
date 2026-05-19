@@ -199,7 +199,28 @@ static inline size_t rope_to_str(rope r, uint8_t* buf, size_t buf_len) {
   return rope_st_copy_range(r.root, 0, to_copy, buf);
 }
 
-/* --- Grapheme-safe concat --- */
+/* --- Grapheme-safe concat ---
+ *
+ * The summary monoid sums independently-summarized leaves, so any UAX #29
+ * grapheme cluster that spans the seam between `left` and `right` would be
+ * counted as two clusters instead of one. To prevent this, we detect when
+ * left's trailing grapheme extends into right and splice the affected bytes
+ * through a re-summarized junction leaf.
+ *
+ * Detection strategy: take the last grapheme of `left` (found via
+ * `unicode_grapheme_prev` on left's rightmost leaf — leaves are
+ * grapheme-aligned by construction, so the last grapheme is wholly in the
+ * last leaf), concatenate it with a scan window from the start of `right`,
+ * and run the full UAX #29 forward walker (`unicode_grapheme_next`) from
+ * position 0. The returned offset is where left's last grapheme actually
+ * ends. If that exceeds the size of left's tail, the trailing grapheme
+ * extends into right — by exactly `right_prefix = end - left_tail_len`
+ * bytes — and we need a junction.
+ *
+ * This covers GB9 (Extend / ZWJ), GB9a (SpacingMark), GB11
+ * (Extended_Pictographic ZWJ Extended_Pictographic), GB12/GB13
+ * (Regional_Indicator pairs), and the CR × LF / Hangul rules with a single
+ * codepath, since `unicode_grapheme_next` implements all of UAX #29. */
 
 static inline rope rope_concat(rope left, rope right) {
   rope_st_set_handlers((rope_st_handlers){
@@ -214,86 +235,81 @@ static inline rope rope_concat(rope left, rope right) {
   if (lb == 0) return rope_ref(right);
   if (rb == 0) return rope_ref(left);
 
-  /* O(1) check: decode first codepoint of right */
-  uint8_t peek[4];
-  size_t peek_n = rb < 4 ? rb : 4;
-  rope_st_copy_range(right.root, 0, peek_n, peek);
-  uint32_t first_cp;
-  size_t first_cplen = utf8_decode(peek, peek_n, &first_cp);
+  /* Get left's rightmost leaf */
+  rope_st_node* ln = left.root.node;
+  while (ln->type == rope_st_NODE_INTERNAL) {
+    rope_st_internal* ni = (rope_st_internal*)ln;
+    ln = ni->children[ni->n_children - 1];
+  }
+  rope_st_leaf* left_last = (rope_st_leaf*)ln;
 
-  if (first_cplen > 0) {
-    UnicodeGraphemeBreak gbp = unicode_grapheme_break(first_cp);
-    if (gbp == GBP_EXTEND || gbp == GBP_ZWJ || gbp == GBP_SPACINGMARK) {
-      /* Right starts with combining codepoints — fix-up needed.
-         Move combining prefix from right to left's end so grapheme clusters
-         at the junction are not split across separate leaves/subtrees. */
+  /* Find the start of left's last grapheme cluster within left_last. Since
+     rope_from_str only splits at grapheme-safe positions, the entire last
+     grapheme is contained in left_last. */
+  size_t left_tail_start = unicode_grapheme_prev(
+      left_last->elements, left_last->count, left_last->count);
+  size_t left_tail_len = left_last->count - left_tail_start;
 
-      /* Scan all leading combining codepoints in right */
-      uint8_t scan_buf[128];
-      size_t scan_len = rb < sizeof(scan_buf) ? rb : sizeof(scan_buf);
-      rope_st_copy_range(right.root, 0, scan_len, scan_buf);
+  /* Build a small splice buffer (left's last grapheme + a window of right's
+     prefix) and run the full UAX #29 walker from position 0 to learn how far
+     left's last grapheme actually extends. A 128-byte right-window comfortably
+     covers any realistic single cluster (UAX #29 stream-safe text bounds a
+     single cluster at 32 codepoints); pathological clusters longer than this
+     window fall back to plain concat, accepting the rare miscount over the
+     larger risk of slicing right at a non-grapheme-safe byte. */
+  enum { SCAN_WINDOW = 128 };
+  uint8_t splice_buf[ROPE_LEAF_MAX + SCAN_WINDOW];
+  if (left_tail_len > ROPE_LEAF_MAX) {
+    /* Defensive: shouldn't happen given leaf-size invariants. */
+    return (rope){.root = rope_st_concat(left.root, right.root)};
+  }
+  size_t scan_right = rb < SCAN_WINDOW ? rb : SCAN_WINDOW;
+  memcpy(splice_buf, left_last->elements + left_tail_start, left_tail_len);
+  rope_st_copy_range(right.root, 0, scan_right, splice_buf + left_tail_len);
+  size_t splice_total = left_tail_len + scan_right;
 
-      size_t comb_len = 0;
-      {
-        size_t p = 0;
-        while (p < scan_len) {
-          uint32_t cp;
-          size_t n = utf8_decode(scan_buf + p, scan_len - p, &cp);
-          if (n == 0) break;
-          UnicodeGraphemeBreak g = unicode_grapheme_break(cp);
-          if (g != GBP_EXTEND && g != GBP_ZWJ && g != GBP_SPACINGMARK) break;
-          p += n;
-        }
-        comb_len = p;
-      }
+  size_t g_end = unicode_grapheme_next(splice_buf, splice_total, 0);
 
-      if (comb_len > 0) {
-        /* Get left's rightmost leaf */
-        rope_st_node* ln = left.root.node;
-        while (ln->type == rope_st_NODE_INTERNAL) {
-          rope_st_internal* ni = (rope_st_internal*)ln;
-          ln = ni->children[ni->n_children - 1];
-        }
-        rope_st_leaf* left_last = (rope_st_leaf*)ln;
-
-        /* Build junction buffer: left_last content + combining prefix */
-        size_t junction_len = left_last->count + comb_len;
-        uint8_t junction_buf[ROPE_LEAF_MAX + 128];
-        memcpy(junction_buf, left_last->elements, left_last->count);
-        memcpy(junction_buf + left_last->count, scan_buf, comb_len);
-
-        /* Split left before its rightmost leaf */
-        size_t left_prefix_bytes = lb - left_last->count;
-        rope_st_split_result lsp = rope_st_split(left.root, left_prefix_bytes);
-
-        /* Split right after combining prefix */
-        rope_st_split_result rsp = rope_st_split(right.root, comb_len);
-
-        /* Create junction rope with correct grapheme-safe leaf splitting */
-        rope junction = rope_from_str(junction_buf, junction_len);
-
-        /* Build result: left_prefix + junction + right_rest */
-        rope_st_root tmp;
-        if (lsp.left.node) {
-          tmp = rope_st_concat(lsp.left, junction.root);
-        } else {
-          tmp = junction.root;
-        }
-
-        rope_st_root result;
-        if (rsp.right.node) {
-          result = rope_st_concat(tmp, rsp.right);
-        } else {
-          result = tmp;
-        }
-
-        return (rope){.root = result};
-      }
-    }
+  if (g_end <= left_tail_len) {
+    /* The first cluster terminates inside left's tail — no cross-seam join. */
+    return (rope){.root = rope_st_concat(left.root, right.root)};
   }
 
-  /* No fix-up needed — standard concat */
-  return (rope){.root = rope_st_concat(left.root, right.root)};
+  /* If the walker consumed the entire scan window without breaking AND there
+     are more bytes in right beyond the window, the cluster may extend
+     further. Rather than risk splitting right mid-cluster, fall back to plain
+     concat (accepting the summary miscount for this pathological case). */
+  if (g_end == splice_total && scan_right < rb) {
+    return (rope){.root = rope_st_concat(left.root, right.root)};
+  }
+
+  size_t right_prefix = g_end - left_tail_len;
+
+  /* Build junction: full left_last content + right's prefix bytes. Re-roping
+     this buffer via rope_from_str produces grapheme-safe leaf boundaries. */
+  size_t junction_len = left_last->count + right_prefix;
+  uint8_t junction_buf[ROPE_LEAF_MAX + SCAN_WINDOW];
+  memcpy(junction_buf, left_last->elements, left_last->count);
+  memcpy(junction_buf + left_last->count,
+         splice_buf + left_tail_len, right_prefix);
+
+  /* Split left before its rightmost leaf (clean leaf boundary). */
+  size_t left_prefix_bytes = lb - left_last->count;
+  rope_st_split_result lsp = rope_st_split(left.root, left_prefix_bytes);
+
+  /* Split right after the spliced prefix. */
+  rope_st_split_result rsp = rope_st_split(right.root, right_prefix);
+
+  rope junction = rope_from_str(junction_buf, junction_len);
+
+  rope_st_root tmp = lsp.left.node
+    ? rope_st_concat(lsp.left, junction.root)
+    : junction.root;
+  rope_st_root result = rsp.right.node
+    ? rope_st_concat(tmp, rsp.right)
+    : tmp;
+
+  return (rope){.root = result};
 }
 
 /* --- Dimension extractors for search-by-summary --- */

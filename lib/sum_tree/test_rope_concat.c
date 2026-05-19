@@ -296,11 +296,116 @@ int test_rope_concat_right_all_combining(void) {
   TEST_PASS();
 }
 
+/* Emoji-VS-ZWJ-emoji at junction: left ends with a fully-formed emoji
+   presentation (emoji + VS16), right starts with ZWJ + emoji. UAX #29 GB11
+   joins the whole sequence into one cluster. */
+int test_rope_concat_emoji_vs_zwj_at_junction(void) {
+  printf("Running test_rope_concat_emoji_vs_zwj_at_junction... ");
+  tracker_reset();
+
+  /* Left: heart + VS16 ("❤️") */
+  const uint8_t left_str[] = {
+    0xE2, 0x9D, 0xA4,  /* U+2764 HEAVY BLACK HEART */
+    0xEF, 0xB8, 0x8F   /* U+FE0F VS16 */
+  };
+  rope left = rope_from_str(left_str, 6);
+
+  /* Right: ZWJ + man emoji ("‍👨") */
+  const uint8_t right_str[] = {
+    0xE2, 0x80, 0x8D,  /* U+200D ZWJ */
+    0xF0, 0x9F, 0x91, 0xA8  /* U+1F468 MAN */
+  };
+  rope right = rope_from_str(right_str, 7);
+
+  rope result = rope_concat(left, right);
+
+  uint8_t out[20];
+  size_t written = rope_to_str(result, out, sizeof(out));
+  ASSERT_INT_EQ(written, 13);
+
+  size_t flat_graphemes = unicode_grapheme_count(out, written);
+  ASSERT_INT_EQ(rope_grapheme_count(result), flat_graphemes);
+  ASSERT_INT_EQ(flat_graphemes, 1);
+
+  rope_unref(left);
+  rope_unref(right);
+  rope_unref(result);
+  TEST_PASS();
+}
+
+/* Regional Indicator pair split across the junction: left is a single RI,
+   right is a single RI. UAX #29 GB12/GB13 join them into one flag cluster. */
+int test_rope_concat_ri_pair_at_junction(void) {
+  printf("Running test_rope_concat_ri_pair_at_junction... ");
+  tracker_reset();
+
+  /* Left: U+1F1FA (regional indicator U) */
+  const uint8_t left_str[] = {0xF0, 0x9F, 0x87, 0xBA};
+  rope left = rope_from_str(left_str, 4);
+
+  /* Right: U+1F1F8 (regional indicator S) — together forms the 🇺🇸 flag */
+  const uint8_t right_str[] = {0xF0, 0x9F, 0x87, 0xB8};
+  rope right = rope_from_str(right_str, 4);
+
+  rope result = rope_concat(left, right);
+
+  uint8_t out[10];
+  size_t written = rope_to_str(result, out, sizeof(out));
+  ASSERT_INT_EQ(written, 8);
+
+  size_t flat_graphemes = unicode_grapheme_count(out, written);
+  ASSERT_INT_EQ(rope_grapheme_count(result), flat_graphemes);
+  ASSERT_INT_EQ(flat_graphemes, 1);
+
+  rope_unref(left);
+  rope_unref(right);
+  rope_unref(result);
+  TEST_PASS();
+}
+
+/* Two complete flags concatenated: each side is already a paired RI cluster,
+   so no GB12/GB13 join happens at the seam — the rope should report 2
+   graphemes, not 1. Guards against an over-eager fix-up that joins any
+   adjacent RI codepoints. */
+int test_rope_concat_two_flags_no_join(void) {
+  printf("Running test_rope_concat_two_flags_no_join... ");
+  tracker_reset();
+
+  /* Left: 🇺🇸 */
+  const uint8_t left_str[] = {
+    0xF0, 0x9F, 0x87, 0xBA,
+    0xF0, 0x9F, 0x87, 0xB8
+  };
+  rope left = rope_from_str(left_str, 8);
+
+  /* Right: 🇫🇷 */
+  const uint8_t right_str[] = {
+    0xF0, 0x9F, 0x87, 0xAB,
+    0xF0, 0x9F, 0x87, 0xB7
+  };
+  rope right = rope_from_str(right_str, 8);
+
+  rope result = rope_concat(left, right);
+
+  uint8_t out[20];
+  size_t written = rope_to_str(result, out, sizeof(out));
+  ASSERT_INT_EQ(written, 16);
+
+  size_t flat_graphemes = unicode_grapheme_count(out, written);
+  ASSERT_INT_EQ(rope_grapheme_count(result), flat_graphemes);
+  ASSERT_INT_EQ(flat_graphemes, 2);
+
+  rope_unref(left);
+  rope_unref(right);
+  rope_unref(result);
+  TEST_PASS();
+}
+
 /* === Main === */
 
 int main(void) {
   int pass = 0, fail = 0;
-  int total = 8;
+  int total = 11;
   typedef int (*test_fn)(void);
   test_fn tests[] = {
     test_rope_concat_combining_moves_to_left,
@@ -311,6 +416,9 @@ int main(void) {
     test_rope_concat_zwj_at_junction,
     test_rope_concat_large_with_combining,
     test_rope_concat_right_all_combining,
+    test_rope_concat_emoji_vs_zwj_at_junction,
+    test_rope_concat_ri_pair_at_junction,
+    test_rope_concat_two_flags_no_join,
   };
 
   for (int i = 0; i < total; i++) {

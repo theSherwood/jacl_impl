@@ -24,23 +24,18 @@ propagate `vm->error_message` to the awaiter. See `AUDIT_HISTORY.md`
 for the per-phase story.
 
 **Test baselines:**
-- Normal-mode suite: 86 pass / 1 fail (`./build.sh`) as of 2026-05-19.
-  Drift from the prior 87/0 was investigated this session; two of
-  the three regressions are now closed (`stream_type` in `a8fab24`,
-  `chaos_soak` seed-dependent livelock by the worker-loop fix), and
-  the remaining one (`rope_concat::zwj_at_junction`) is diagnosed
-  and tracked as §19 below. See **Closed items** for the
-  `stream_type` and `chaos_soak` resolutions and §19 in the
-  open-items list for the rope_concat GB11 gap.
-- TSAN baseline: 85 pass / 2 fail (`./build.sh --tsan`).
-  `chase_lev_stress` and `rope_concat` are the two TSAN-mode
-  failures. `chase_lev_stress` is **known-and-safe** — TSAN
-  blindness on barrier/fence/epoch-mediated synchronization, not
-  missed barriers. It fails with all of `src/runtime.c` +
-  `src/vm.c` reverted, confirming it's not owned by JACL runtime
-  code. `rope_concat`'s TSAN-mode failure is now known to share its
-  cause with the normal-mode failure (see §19), not a TSAN
-  synchronization issue.
+- Normal-mode suite: 87 pass / 0 fail (`./build.sh`) as of 2026-05-19.
+  The earlier drift below this baseline has been fully closed:
+  `stream_type` in `a8fab24`, `chaos_soak` seed-dependent livelock
+  by the worker-loop fix, and `rope_concat::zwj_at_junction` via the
+  generalized `rope_concat` junction fix-up (§19, closed below).
+- TSAN baseline: 86 pass / 1 fail (`./build.sh --tsan`).
+  `chase_lev_stress` is the lone TSAN-mode failure and is
+  **known-and-safe** — TSAN blindness on barrier/fence/epoch-mediated
+  synchronization, not missed barriers. It fails with all of
+  `src/runtime.c` + `src/vm.c` reverted, confirming it's not owned by
+  JACL runtime code. `rope_concat`'s prior TSAN-mode failure shared
+  its cause with the normal-mode failure and is closed alongside §19.
   - `chase_lev_stress`: 11/11 functional sub-tests PASS; ~20 race
     warnings from `test_stress_epoch_thief_rotation` cause the
     non-zero exit. Two distinct sites — `chase_lev.h:268` (plain
@@ -52,19 +47,9 @@ for the per-phase story.
     epoch wait loop). Coverage of the runtime's actual chase_lev
     use lives in `chaos_pinned_deque` + `chaos_gc_deque_scan`, both
     TSAN-clean.
-  - `rope_concat`: `test_rope_concat_zwj_at_junction` (7/8 sub-tests
-    pass). Same sub-test now confirmed to fail in normal mode too
-    — the prior "TSAN-only" classification in AUDIT_HISTORY.md §
-    "TSAN baseline triage (2026-05-14)" is stale. Full diagnosis
-    in §19. The other rope-tier coverage (`test_rope_string`,
-    `test_rope_slice_grapheme`, `test_concat_tiers`,
-    `test_gc_rope_tracing`) is TSAN-clean, and the production rope
-    path through `string.c` is exercised by `string_concat`-bench
-    under TSAN without issue.
 
   AUDIT_HISTORY.md §"TSAN baseline triage (2026-05-14)" carries the
-  full chase_lev triage walk-through. The zwj-test claim in that
-  same entry that it's "TSAN-only" is stale — see §19.
+  full chase_lev triage walk-through.
 - Soak flake (`chaos_soak`) — **fixed 2026-05-19**, see Closed
   items §20. The seed-dependent emergency-GC livelock was caused by
   an async GC-submit pattern in the worker loop; collapsed to the
@@ -91,39 +76,6 @@ build time by `test/test_struct_sizes.c`.
 These are non-correctness — code health, ergonomics, deferred perf
 levers. None block shipping. Roughly ordered by **remaining**
 leverage; closed items live below the open ones.
-
-### §19. `rope_concat` GB11 emoji-ZWJ-emoji junction split — *correctness, low surface*
-
-`test_rope_concat_zwj_at_junction` is the surviving normal-mode (and
-TSAN-mode) failure. The test concatenates `👨` (U+1F468) with
-`ZWJ ❤ VS16`; the expected joined cluster is `👨‍❤️` — one
-grapheme per UAX #29 GB11 (emoji-ZWJ-emoji). The rope reports 2
-graphemes, while `unicode_grapheme_count` on the flat bytes
-correctly reports 1.
-
-The junction fix-up in `lib/sum_tree/rope.h` (added in `c9656e4`)
-scans the *prefix of right* for `GBP_EXTEND | GBP_ZWJ | GBP_SPACINGMARK`
-and migrates only that prefix into left's last leaf. In this test:
-ZWJ is captured (`GBP_ZWJ`), then ❤ (U+2764) — not an Extend/ZWJ/
-SpacingMark — stops the scan. The ZWJ moves left; ❤ + VS16 stay
-in their own leaf. The summary monoid sums independently-summarized
-leaves, so the GB11 join across the leaf boundary is lost.
-
-Minimal correct fix: when right starts with ZWJ, extend the prefix
-scan past the ZWJ to capture the next single emoji codepoint plus
-its trailing Extend / variation selectors, so the entire
-`(emoji ZWJ emoji [VS]…)` sequence lands in one leaf. A complete
-fix would also audit GB12 / GB13 (regional-indicator flag pairs)
-and similar cluster-spanning rules, with regression coverage for:
-emoji-ZWJ-emoji at junction, emoji-VS-ZWJ-emoji, RI-RI flag pairs
-split across leaves.
-
-Pre-existing since `c9656e4` (2026-03-17); AUDIT.md previously
-classified this as TSAN-only, but it's deterministic in normal
-mode too — the prior 87/0 baseline was recorded against a binary
-that excluded `rope_concat` or against an earlier rope build.
-Investigated 2026-05-19; not yet fixed because the right scope is
-its own user story with proper UAX #29 GB11/12/13 coverage.
 
 ### §17. Inconsistent thread-local convention — *low priority, no feature blocked*
 
@@ -230,6 +182,26 @@ if a real-workload profile pins them.
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **§19 `rope_concat` cross-seam grapheme cluster join** — closed
+  2026-05-19. The old `rope_concat` fix-up scanned only for
+  Extend/ZWJ/SpacingMark at the start of right and migrated that
+  prefix into left's last leaf, which dropped GB11
+  (Extended_Pictographic ZWJ Extended_Pictographic) and
+  GB12/GB13 (Regional_Indicator pairs) when the join crossed the
+  seam. Replaced with a general detector: take the last grapheme
+  of left's rightmost leaf, splice it with a 128-byte window from
+  right's start, and run `unicode_grapheme_next` from offset 0 to
+  learn how far left's last cluster actually extends. If the
+  returned offset exceeds `left_tail_len`, the excess is the
+  right-side prefix that needs to land in the junction. Covers
+  GB9 / GB9a / GB11 / GB12 / GB13 / CR×LF / Hangul through the
+  single UAX #29 forward walker. Regression coverage:
+  `test_rope_concat_zwj_at_junction` (existing),
+  `test_rope_concat_emoji_vs_zwj_at_junction` and
+  `test_rope_concat_ri_pair_at_junction` (added), plus
+  `test_rope_concat_two_flags_no_join` as a guard against an
+  over-eager fix-up. Normal-mode baseline returns to 87/0, TSAN
+  baseline to 86/1 (only `chase_lev_stress` remains, known-safe).
 - **§21 `gc_concurrent_trigger` async-submit residual risk** —
   closed 2026-05-19 in `395aba1`. Collapsed the last remaining
   async-submit GC trigger to the synchronous shape used by the
