@@ -158,10 +158,35 @@ From `STRUCT_DESIGN.md` § "Open Questions".
 
 From `GENERATOR_STATE_MACHINE.md` § "Future work".
 
-- **Yield-liveness pass.** Current SM keeps all locals live in state
-  fields. A liveness pass that nulls dead fields at each yield point
-  would shrink retained memory and reduce major-GC tracing work. Not
-  measured as a bottleneck; deferred.
+What already exists: a **layout-time** liveness pass
+(`sm__optimize_state_layout`, `compiler.c:2249-2325`) that filters out
+locals whose write-and-last-read sit in the same inter-suspension
+segment — those become normal stack locals instead of SM state
+fields. Two restrictions on this pass leave real work on the table:
+
+- **Yield-only.** The pass bails out the moment any `await` /
+  `parallel` / `race` appears (`compiler.c:2256-2261`) because their
+  diamond control flow (inline-already-resolved vs real-suspend-then-
+  resume) breaks the linear segment numbering the current algorithm
+  assumes. So async procs carry every local in the SM, whether it
+  survives a suspension or not. Lifting this needs a CFG-based
+  liveness pass rather than the existing linear segment walk.
+- **Per-yield-point clearing, deferred.** A field that crosses *some*
+  yield (so layout keeps it) can still be dead after a *specific*
+  yield in the middle of the body — e.g., a generator that loads
+  buffer A, yields N times from A, loads B, yields M times from B.
+  Today A's state field stays live for the whole stream's lifetime;
+  GC can't reclaim what A pointed to until the SM itself dies. A
+  per-yield-point pass would clear dead fields at each yield site,
+  shrinking retained memory and reducing major-GC tracing work.
+  Needs a new `OP_CLEAR_STATE_FIELD` opcode (`bytecode.c:187-198`
+  has get/set variants, no clear).
+
+Best done together: a CFG-based liveness pass replaces the existing
+linear one and emits per-yield-point clears in the same lowering,
+killing both restrictions at once. Estimated +300-600 LOC. Not
+measured as a bottleneck; no workload today retains large heap
+values across phase-distinct SM lifetimes long enough to matter.
 
 ---
 

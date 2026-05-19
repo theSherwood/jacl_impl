@@ -134,5 +134,9 @@ parallel body that itself suspends has its own SM or closure.
 
 ## Future work
 
-See **`NOT_IMPLEMENTED.md` §8** — yield-liveness pass for SM-stored
-locals.
+See **`NOT_IMPLEMENTED.md` §8.** Two related items, ideally done
+together: lift the existing layout-time liveness pass's yield-only
+restriction (CFG-based instead of linear segment walk, so it also
+applies to `await`/`parallel`/`race`), and add per-yield-point
+clearing of dead SM fields so retained heap values from a finished
+generator phase become collectable before the SM itself dies.
