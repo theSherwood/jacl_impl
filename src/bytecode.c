@@ -257,7 +257,12 @@ typedef enum {
   OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
   OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
   OP_PTR_STORE_INLINE,     /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
-  OP_PRINT_PTR             /* u16 pointee_idx; pop tagged u64, print "Ptr<T>(0xADDR)" + newline */
+  OP_PRINT_PTR,            /* u16 pointee_idx; pop tagged u64, print "Ptr<T>(0xADDR)" + newline */
+
+  /* --- File I/O builtins (read-file / write-file / append-file) --- */
+  OP_READ_FILE,            /* pop path (string); push file contents (string) or error */
+  OP_WRITE_FILE,           /* pop path (string), pop content (string or stream); write file, push nil or error */
+  OP_APPEND_FILE           /* pop path (string), pop content (string or stream); append to file, push nil or error */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -540,6 +545,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_PTR_LOAD_INLINE:        return "OP_PTR_LOAD_INLINE";
     case OP_PTR_STORE_INLINE:       return "OP_PTR_STORE_INLINE";
     case OP_PRINT_PTR:              return "OP_PRINT_PTR";
+    case OP_READ_FILE:              return "OP_READ_FILE";
+    case OP_WRITE_FILE:             return "OP_WRITE_FILE";
+    case OP_APPEND_FILE:            return "OP_APPEND_FILE";
     case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";

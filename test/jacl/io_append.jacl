@@ -1,0 +1,7 @@
+# expect: one
+# expect: two
+# expect: three
+# write-file creates/truncates; append-file extends.
+[write-file "one\ntwo\n" "/tmp/jacl_io_append.txt"]
+[append-file "three" "/tmp/jacl_io_append.txt"]
+print [read-file "/tmp/jacl_io_append.txt"]

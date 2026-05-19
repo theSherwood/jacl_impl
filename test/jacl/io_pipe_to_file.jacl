@@ -1,0 +1,8 @@
+# expect: red
+# expect: green
+# expect: blue
+# expect: 
+!echo "red
+green
+blue" | write-file "/tmp/jacl_io_pipe.txt"
+print [read-file "/tmp/jacl_io_pipe.txt"]

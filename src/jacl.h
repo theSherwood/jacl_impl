@@ -615,6 +615,7 @@ typedef enum {
   HEAD_EXTERN,
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
+  HEAD_READ_FILE, HEAD_WRITE_FILE, HEAD_APPEND_FILE,
   HEAD_QUOTE, HEAD_SYNTAX_QUOTE, HEAD_INTERPRET, HEAD_INTERPRET_PRELUDE,
   HEAD_SYNTAX_KIND, HEAD_SYNTAX_DATUM, HEAD_SYNTAX_HEAD,
   HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
@@ -976,7 +977,12 @@ typedef enum {
   /* Nested struct fields through pointers — load/store whole inline structs at *ptr+offset */
   OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
   OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
-  OP_PTR_STORE_INLINE      /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
+  OP_PTR_STORE_INLINE,     /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
+
+  /* --- File I/O builtins (read-file / write-file / append-file) --- */
+  OP_READ_FILE,            /* pop path (string); push file contents (string) or error */
+  OP_WRITE_FILE,           /* pop path (string), pop content (string or stream); write file, push nil or error */
+  OP_APPEND_FILE           /* pop path (string), pop content (string or stream); append to file, push nil or error */
 } OpCode;
 
 typedef struct {

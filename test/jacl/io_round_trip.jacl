@@ -1,0 +1,7 @@
+# expect: alpha
+# expect: beta
+# expect: gamma
+# read-file / write-file basic round trip on a UTF-8 text file.
+[write-file "alpha\nbeta\ngamma" "/tmp/jacl_io_round_trip.txt"]
+def s [read-file "/tmp/jacl_io_round_trip.txt"]
+print $s

@@ -2427,6 +2427,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COLLECT,     TYPE_VEC    },
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
+      /* File I/O — write/append produce nil on success, error value on
+       * failure (catchable via try/catch).  read-file produces a string. */
+      { HEAD_READ_FILE,   TYPE_STR    },
+      { HEAD_WRITE_FILE,  TYPE_NIL    },
+      { HEAD_APPEND_FILE, TYPE_NIL    },
       /* Loop forms — emit OP_NIL at normal exit. break-with-value
        * paths could carry a different type but are conservatively
        * unified to nil here; refine in a later commit if needed. */

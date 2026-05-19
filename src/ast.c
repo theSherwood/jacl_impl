@@ -112,6 +112,7 @@ typedef enum {
   /* Streams / async / shell */
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
+  HEAD_READ_FILE, HEAD_WRITE_FILE, HEAD_APPEND_FILE,
 
   /* Quote / syntax / macros */
   HEAD_QUOTE, HEAD_SYNTAX_QUOTE, HEAD_INTERPRET, HEAD_INTERPRET_PRELUDE,
@@ -240,6 +241,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "interpret", 9) == 0) return HEAD_INTERPRET;
       if (memcmp(s, "defstruct", 9) == 0) return HEAD_DEFSTRUCT;
       if (memcmp(s, "ptr-deref", 9) == 0) return HEAD_PTR_DEREF;
+      if (memcmp(s, "read-file", 9) == 0) return HEAD_READ_FILE;
       return HEAD_NONE;
     case 10:
       if (memcmp(s, "vec-concat", 10) == 0) return HEAD_VEC_CONCAT;
@@ -247,6 +249,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-pos", 10) == 0) return HEAD_SYNTAX_POS;
       if (memcmp(s, "syntax-str", 10) == 0) return HEAD_SYNTAX_STR;
       if (memcmp(s, "ptr-offset", 10) == 0) return HEAD_PTR_OFFSET;
+      if (memcmp(s, "write-file", 10) == 0) return HEAD_WRITE_FILE;
       return HEAD_NONE;
     case 11:
       if (memcmp(s, "byte-length", 11) == 0) return HEAD_BYTE_LENGTH;
@@ -256,6 +259,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-head", 11) == 0) return HEAD_SYNTAX_HEAD;
       if (memcmp(s, "syntax-args", 11) == 0) return HEAD_SYNTAX_ARGS;
       if (memcmp(s, "make-syntax", 11) == 0) return HEAD_MAKE_SYNTAX;
+      if (memcmp(s, "append-file", 11) == 0) return HEAD_APPEND_FILE;
       return HEAD_NONE;
     case 12:
       if (memcmp(s, "syntax-quote", 12) == 0) return HEAD_SYNTAX_QUOTE;

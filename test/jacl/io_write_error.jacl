@@ -1,0 +1,9 @@
+# expect: error
+# write-file surfaces open()/write() failures as error values (try/catch-able)
+# rather than runtime traps — symmetric with read-file on a missing path.
+def r [write-file "hi" "/tmp/jacl_io_no_such_dir_47291/output.txt"]
+if [error? $r] {
+  print "error"
+} else {
+  print "ok"
+}

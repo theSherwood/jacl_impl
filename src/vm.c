@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <assert.h>
+#include <limits.h>
 
 /* §D.1: debug-only sanity check at every unchecked `jacl_as_*`
  * extraction. The compiler/typer is supposed to guarantee tag
@@ -2341,6 +2342,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_PTR_LOAD_INLINE] = &&L_OP_PTR_LOAD_INLINE,
     [OP_PTR_STORE_INLINE] = &&L_OP_PTR_STORE_INLINE,
     [OP_PRINT_PTR] = &&L_OP_PRINT_PTR,
+    [OP_READ_FILE] = &&L_OP_READ_FILE,
+    [OP_WRITE_FILE] = &&L_OP_WRITE_FILE,
+    [OP_APPEND_FILE] = &&L_OP_APPEND_FILE,
   };
 
   #define CASE(op)   L_##op
@@ -7483,6 +7487,170 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         DISPATCH();
       }
 
+      /* --- File I/O builtins ---
+       * read-file:   [read-file PATH]            → string contents (or error)
+       * write-file:  [write-file CONTENT PATH]   → nil (or error)
+       * append-file: [append-file CONTENT PATH]  → nil (or error)
+       *
+       * Errors surface as JACL error values (try/catch-able), not VM
+       * runtime errors, so callers can `[read-file p] | catch {fallback}`.
+       * VM_RUNTIME_ERROR is reserved for type-mismatch / malformed args. */
+
+      CASE(OP_READ_FILE): {
+        JaclVal path_val;
+        result = vm__pop(vm, &path_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_string(path_val)) {
+          vm__set_error(vm, "read-file: path must be a string, got %s",
+                       vm__type_name(path_val));
+          return VM_RUNTIME_ERROR;
+        }
+        char path_buf[PATH_MAX + 1];
+        uint32_t path_len = jacl_string_byte_len(path_val);
+        if (path_len > PATH_MAX) {
+          vm__set_error(vm, "read-file: path too long (%u bytes)", path_len);
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_string_data(path_val, path_buf, sizeof(path_buf));
+        path_buf[path_len] = '\0';
+
+        gc__current_heap = &vm->heap;
+        int fd = open(path_buf, O_RDONLY);
+        if (fd < 0) {
+          char msg[256];
+          snprintf(msg, sizeof(msg), "read-file: %s: %s",
+                   path_buf, strerror(errno));
+          JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                        msg, strlen(msg));
+          if (err == JACL_NIL) err = jacl_inline_string("read error", 10);
+          result = vm__push(vm, jacl_set_error(err));
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        /* Slurp into a growing buffer. Avoid stat() so pipes/devices work. */
+        size_t cap = 4096;
+        size_t len = 0;
+        char* buf = (char*)malloc(cap);
+        if (!buf) { close(fd); vm__set_error(vm, "read-file: out of memory"); return VM_RUNTIME_ERROR; }
+        for (;;) {
+          if (len == cap) {
+            size_t new_cap = cap * 2;
+            char* new_buf = (char*)realloc(buf, new_cap);
+            if (!new_buf) { free(buf); close(fd); vm__set_error(vm, "read-file: out of memory"); return VM_RUNTIME_ERROR; }
+            buf = new_buf; cap = new_cap;
+          }
+          ssize_t n = read(fd, buf + len, cap - len);
+          if (n < 0) {
+            if (errno == EINTR) continue;
+            char msg[256];
+            snprintf(msg, sizeof(msg), "read-file: %s: %s",
+                     path_buf, strerror(errno));
+            free(buf); close(fd);
+            JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                          msg, strlen(msg));
+            if (err == JACL_NIL) err = jacl_inline_string("read error", 10);
+            result = vm__push(vm, jacl_set_error(err));
+            if (result != VM_OK) return result;
+            DISPATCH();
+          }
+          if (n == 0) break;
+          len += (size_t)n;
+        }
+        close(fd);
+
+        JaclVal s = jacl_string_new(&vm->heap, vm->intern_table, buf, len);
+        free(buf);
+        if (s == JACL_NIL) {
+          /* UTF-8 validation failed — surface as error value */
+          const char* m = "read-file: invalid UTF-8 in file contents";
+          JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                        m, strlen(m));
+          if (err == JACL_NIL) err = jacl_inline_string("bad utf8", 8);
+          result = vm__push(vm, jacl_set_error(err));
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        result = vm__push(vm, s);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_WRITE_FILE):
+      CASE(OP_APPEND_FILE): {
+        bool append = (instruction == OP_APPEND_FILE);
+        const char* op_name = append ? "append-file" : "write-file";
+
+        JaclVal path_val, content_val;
+        result = vm__pop(vm, &path_val);
+        if (result != VM_OK) return result;
+        result = vm__pop(vm, &content_val);
+        if (result != VM_OK) return result;
+
+        if (!jacl_is_string(path_val)) {
+          vm__set_error(vm, "%s: path must be a string, got %s",
+                       op_name, vm__type_name(path_val));
+          return VM_RUNTIME_ERROR;
+        }
+        char path_buf[PATH_MAX + 1];
+        uint32_t path_len = jacl_string_byte_len(path_val);
+        if (path_len > PATH_MAX) {
+          vm__set_error(vm, "%s: path too long (%u bytes)", op_name, path_len);
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_string_data(path_val, path_buf, sizeof(path_buf));
+        path_buf[path_len] = '\0';
+
+        /* Collect content via the shared stdin collector — accepts both
+         * strings and streams, joining stream elements with newlines just
+         * like exec stdin. */
+        char* content_buf = NULL;
+        size_t content_len = 0;
+        int cr = vm__exec_collect_stdin(vm, content_val, &content_buf, &content_len);
+        if (cr == -1) return VM_RUNTIME_ERROR;
+        if (cr == -2) {
+          /* Error from upstream stream was pushed; propagate it. */
+          frame = &vm->frames[vm->frame_count - 1];
+          DISPATCH();
+        }
+
+        gc__current_heap = &vm->heap;
+        int flags_open = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+        int fd = open(path_buf, flags_open, 0644);
+        if (fd < 0) {
+          char msg[256];
+          snprintf(msg, sizeof(msg), "%s: %s: %s",
+                   op_name, path_buf, strerror(errno));
+          JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                        msg, strlen(msg));
+          if (err == JACL_NIL) err = jacl_inline_string("write err", 9);
+          result = vm__push(vm, jacl_set_error(err));
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        size_t written = 0;
+        while (written < content_len) {
+          ssize_t n = write(fd, content_buf + written, content_len - written);
+          if (n < 0) {
+            if (errno == EINTR) continue;
+            char msg[256];
+            snprintf(msg, sizeof(msg), "%s: %s: %s",
+                     op_name, path_buf, strerror(errno));
+            close(fd);
+            JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                          msg, strlen(msg));
+            if (err == JACL_NIL) err = jacl_inline_string("write err", 9);
+            result = vm__push(vm, jacl_set_error(err));
+            if (result != VM_OK) return result;
+            DISPATCH();
+          }
+          written += (size_t)n;
+        }
+        close(fd);
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
       CASE(OP_LOAD_INLINE_UPVALUE): {
         /* Copy N inline struct slots from a closure upvalue to TOS, no heap alloc.
            Operands: uint8_t base_uv_slot, uint16_t type_idx. */
@@ -9722,7 +9890,9 @@ interpret_done:
        *   spawn, await, parallel, race, yield,
        *   make-syntax, syntax-error,
        *   box, atom, deref, reset, swap,
-       *   lines, stream_next
+       *   lines, stream_next,
+       *   exec, signal, cancel,
+       *   read-file, write-file, append-file
        */
       CASE(OP_INTERPRET_PRELUDE): {
         gc__current_heap = &vm->heap;

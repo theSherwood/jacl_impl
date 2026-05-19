@@ -7,7 +7,7 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-05-18.
+Last refreshed: 2026-05-19.
 
 ---
 
@@ -24,7 +24,6 @@ Status snapshot:
 | **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners. |
 | **Aliases** (`alias ll { !ls -la }`) | Small | None | Compile-time syntactic rewrite. Scoping (file vs session) unresolved — `SYNTAX.md` Q21. |
 | **Globbing** (`glob`) | Medium | None | Reads `$ctx.pwd`; returns a stream. Pattern engine + brace expansion. |
-| **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | None | Pipe-friendly file I/O. |
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |
 | **Regular expressions** | Medium | Lib exists (see §2) | Literal syntax (`/regex/`) + capture-group bindings + VM bridge. |
 | **Bignum / numeric tower** | Medium | Lib exists (see §2) | `JACL_TAG_BIGNUM` exists; no VM arithmetic dispatch. Plan is bigint+bigfloat with implicit promotion in `dyn`. Rationals dropped. |

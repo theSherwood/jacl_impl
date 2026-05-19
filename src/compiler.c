@@ -5172,7 +5172,8 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
  * Non-core builtins (downgraded to env lookup when prelude is active):
  *   print, interpret, interpret-prelude, spawn, await, parallel, race,
  *   yield, make-syntax, syntax-error, box, atom, deref, reset, swap,
- *   lines, stream_next
+ *   lines, stream_next, exec, signal, cancel,
+ *   read-file, write-file, append-file
  *
  * Everything else (arithmetic, comparison, control flow, binding,
  * destructuring, immutable data ops, vec/map/set ops, string ops,
@@ -5188,6 +5189,7 @@ const char *jacl_non_core_builtins[] = {
   "box", "atom", "deref", "reset", "swap",
   "lines", "stream_next",
   "exec", "signal", "cancel",
+  "read-file", "write-file", "append-file",
   NULL
 };
 
@@ -10050,6 +10052,51 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_constant(c, jacl_intern(c->heap, c->intern_table, "SIGTERM", 7), line);
     compiler__emit_byte(c, OP_SIGNAL, line);
     c->last_expr_type = TYPE_BOOL;
+    return;
+  }
+
+  /* read-file — [read-file path] → string contents (or error value) */
+  if (hid == HEAD_READ_FILE) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "read-file", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_READ_FILE, line);
+    c->last_expr_type = TYPE_STR;
+    return;
+  }
+
+  /* write-file — [write-file content path] → nil (or error value).
+   * Content can be a string or stream. Stream elements are stringified
+   * and joined with newlines (matches exec stdin convention). */
+  if (hid == HEAD_WRITE_FILE) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "write-file", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_WRITE_FILE, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* append-file — [append-file content path] → nil (or error value). */
+  if (hid == HEAD_APPEND_FILE) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "append-file", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_APPEND_FILE, line);
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 
