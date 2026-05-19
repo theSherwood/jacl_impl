@@ -1574,6 +1574,7 @@ typedef struct {
   uint32_t  len;
   uint32_t  cap;
   arena_t*  arena;
+  StructTypeRegistry* registry;
 } VMFormatBuf;
 
 typedef enum {
@@ -2325,7 +2326,7 @@ extern uint16_t vm__read_u16 (VM *vm);
 extern void vm__env_grow (VM *vm);
 extern void vm__env_set (VM *vm, JaclVal name, JaclVal value);
 extern JaclVal vm__env_get (VM *vm, JaclVal name, bool *found);
-extern void vm__fmt_init (VMFormatBuf *buf, arena_t *arena);
+extern void vm__fmt_init (VMFormatBuf *buf, arena_t *arena, StructTypeRegistry *registry);
 extern void vm__fmt_ensure (VMFormatBuf *buf, uint32_t extra);
 extern void vm__fmt_append (VMFormatBuf *buf, const char *str, uint32_t len);
 extern void vm__fmt_value (VMFormatBuf *buf, JaclVal val);

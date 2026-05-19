@@ -49,7 +49,7 @@ static int test_stream_print(void) {
 
   JaclVal s = jacl_stream(&vm.heap);
   VMFormatBuf fmt;
-  vm__fmt_init(&fmt, &arena);
+  vm__fmt_init(&fmt, &arena, vm.struct_registry);
   vm__fmt_value(&fmt, s);
 
   ASSERT_INT_EQ(fmt.len, 8);
