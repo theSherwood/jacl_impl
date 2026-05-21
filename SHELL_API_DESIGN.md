@@ -93,25 +93,23 @@ foreground and background under a single value type:
 ```jacl
 def r {!cmd}                # blocks; r is a finished Job
 $r.exit                     # exit code
-$r.stdout                   # captured output if capture was on
-$r.stderr                   # same
 $r.duration                 # how long it ran
+$r.stdout                   # null unless a channel was attached via create-process (§10)
 
 def j {!cmd &}              # j is a running Job (its own Future)
 $j.pid                      # alive process
 def fin {await $j}          # fin is the same Job, now finished
 ```
 
-To retain stdout on the Job for later inspection, attach a
-`capture` stage:
+To get stdout as a value, terminate a pipeline with a JACL stage:
 
 ```jacl
-def r {!cmd | capture}                 # blocks; $r.stdout is the captured string
-def s {!cmd | collect}                 # blocks; s is the string directly (no Job)
+def s   {!cmd | collect}              # blocks; s is the string directly (no Job)
+def lns {!cmd | lines | collect}      # blocks; lns is a vec<string>
 ```
 
-Without an attached stage, `$r.stdout` is `null` (bytes went to
-terminal passthrough). See §7 for the full vocabulary of stages.
+To hold stdout as a channel readable from another coroutine,
+attach the channel via `create-process` (§10). See §7.
 
 ### 3. Uniform Job shape — running and finished have the same fields
 
@@ -124,21 +122,21 @@ Job {
   pids:     <vec<int>>             # all member PIDs (for pipelines)
   exit:     <int or null>          # null while running, int after done
   exits:    <vec<int> or null>     # per-stage for pipelines (bash $PIPESTATUS)
-  stdout:   <channel/buffer/null>  # depends on capture mode chosen at spawn
-  stderr:   <channel/buffer/null>  # same
-  result:   <any or null>          # see below — for pipelines ending in JACL
-  duration: <duration or null>
+  stdout:   <channel or null>      # the channel attached via create-process, if any
+  stderr:   <channel or null>      # same
+  duration: <duration or null>     # null while running
 }
 ```
 
 Access semantics:
 
 - `$j.exit` returns `null` while running, the exit code after done.
-- `$j.stdout` is the **same kind of thing** at all times. If capture
-  mode was `stream`, it's a channel (open while running, closed
-  after). If `capture`, it's a buffer (growing while running,
-  stable after). If `passthrough` or `discard`, it's null.
-- `$j.result` carries the pipeline's final JACL value (see §4).
+- `$j.stdout` / `$j.stderr` reference the channel attached at spawn
+  time via `create-process` (§10). They are `null` for Jobs created
+  by pipeline syntax — pipeline-syntax invocations route stdout
+  through the pipeline itself, not onto Job fields. A `null` `.stdout`
+  doesn't mean "no output"; it means "no channel was attached to
+  read it from after the fact."
 
 ### 4. Pipeline value = last stage's value
 
@@ -203,60 +201,30 @@ on what's on each side:
 This is a compile-time decision based on syntactic shape, not a
 runtime dispatch.
 
-### 7. Stream configuration via pipeline stages
+### 7. Stream configuration is library / user code
 
-Stream destinations and modes are specified by composing pipeline
-stages, not by a separate `with stdout=...` syntax. This is more
-JACL-idiomatic — users reach for the same composition primitive
-they use everywhere else — and avoids inventing a second
-configuration surface.
+Stream destinations are not part of the language design. Once `|`
+delivers a stream of bytes (or strings, after `lines`, etc.) to the
+right-hand side, the right-hand side is just a JACL command
+consuming a stream. Anything users want to do with that stream —
+materialize it (`collect`), write it to a file (`save-to`), discard
+it, ring-buffer the last N bytes, fan it out — is a regular JACL
+command, not a special pipeline-stage construct.
 
-| Goal | Form |
-|---|---|
-| Capture stdout into Job buffer | `!cmd \| capture` |
-| Capture last N bytes (ring buffer) | `!cmd \| tail N` |
-| Discard stdout silently | `!cmd \| discard` |
-| Write stdout to file | `!cmd \| save-to "path"` |
-| Write stdout to file AND pass through | `!cmd \| tee-to "path"` |
-| Collect stdout as a single string | `!cmd \| collect` |
-| Collect lines as a vec | `!cmd \| lines \| collect` |
-| Consume stdout incrementally | `!cmd \| for line { ... }` |
-| Capture stderr (only) | `!cmd \|! capture` |
-| Discard stderr | `!cmd \|! discard` |
-| Merge stderr into stdout, then process | `!cmd \|+ collect` |
+The default disposition for an unconsumed `!cmd`'s stdout / stderr
+is position-aware (see §1): terminal passthrough in statement
+position, channel-into-next-stage in pipe position. Anything else
+(routing to a specific destination, retaining the bytes for later
+inspection) is achieved by composing with whichever JACL command
+the user reaches for, or by dropping to `create-process` (§10)
+when a custom fd attachment is needed.
 
-**Default (no stage attached)** falls out of position-aware
-behavior (§1):
-
-- Statement position: stdout / stderr → terminal passthrough.
-- Value position (`def r {!cmd}`): stdout / stderr → terminal
-  passthrough. `$r.stdout` is `null`. To retain output on the
-  Job, use `!cmd | capture`.
-- Pipe position: stdout flows into the next stage; stderr → terminal.
-- Backgrounded (`!cmd &`): same defaults as value position.
-
-**No `capture` vs. `stream` mode flag.** The choice is implicit in
-which stage you attach: `| capture` buffers into a stable string;
-`| for line { ... }` (or `| to-channel $ch`) consumes incrementally.
-They're different stages, not different modes of the same one.
-
-**Stages that affect a Job:**
-
-- `capture`, `tail`, `save-to`, `tee-to`, `discard` — terminating
-  stdout-side stages that return the Job (with `.stdout` populated
-  if `capture` / `tail`; otherwise `null`).
-- `|! capture`, `|! discard`, `|! save-to`, etc. — stderr-side
-  equivalents, populating `$j.stderr`.
-
-**Stages that consume the Job:**
-
-- `collect`, `for ... { ... }`, `lines | collect` — return a JACL
-  value, *not* a Job. The pipeline value (§4) is whatever the stage
-  produces.
-
-For unusual configurations not expressible by pipeline stages — e.g.
-fan-out to multiple consumers from one stdout, channel sharing
-across more than two processes — drop to `proc-spawn` (§10).
+A Job's `.stdout` / `.stderr` fields are `null` unless a channel
+was explicitly attached via `create-process` — pipeline-syntax
+runs never populate them. To inspect output from a pipeline-syntax
+invocation, terminate the pipeline with a stage that returns the
+value you want (e.g. `| collect`), or attach a channel via
+`create-process`.
 
 ### 8. Resource lifetime — GC + detached opt-out
 
@@ -310,7 +278,7 @@ short-circuits the whole pipeline. The pipeline's error value carries
 the failing stage's stderr. (Bash `pipefail` equivalent, applied
 always.)
 
-### 10. Explicit low-level primitive — `proc-spawn`
+### 10. Explicit low-level primitive — `create-process`
 
 The `|` macro covers 95% of cases. For hand-wired channel/fd
 configurations — fan-out to multiple consumers, channel sharing
@@ -319,14 +287,14 @@ there is an explicit form:
 
 ```jacl
 def {r w} {pipe}
-def j1 {proc-spawn "cmd1" args {stdout: $w}}
-def j2 {proc-spawn "cmd2" args {stdin: $r}}
+def j1 {create-process "cmd1" args {stdout: $w}}
+def j2 {create-process "cmd2" args {stdin: $r}}
 ```
 
 Or single-call with a record of fd attachments:
 
 ```jacl
-def j {proc-spawn "cmd" args {
+def j {create-process "cmd" args {
   stdin:  $some-channel
   stdout: $other-channel
   stderr: file "errs.log"
@@ -334,7 +302,7 @@ def j {proc-spawn "cmd" args {
 ```
 
 Both `|`-the-macro and `&` are implementable in terms of this. End
-users typically don't write `proc-spawn`; it exists as the escape
+users typically don't write `create-process`; it exists as the escape
 hatch.
 
 ## Worked examples
@@ -345,11 +313,7 @@ hatch.
 # Run and check exit code (just blocks; error short-circuits)
 !my-tool --check
 
-# Capture stdout — attach `capture` stage
-def r {!ls -la | capture}
-$r.stdout                                    # the listing as a string
-
-# Get stdout as a string directly (no surrounding Job)
+# Capture stdout as a string (pipeline terminates in a JACL stage)
 def listing {!ls -la | collect}
 
 # Pipeline ending in JACL
@@ -357,10 +321,7 @@ def files {!find . -name "*.jacl" | lines | collect}
 for $files f { print $f }
 
 # Pipeline of externals (OS pipe, no JACL value between)
-# Attach `capture` if you want the trailing count on the Job
-def r {!grep ERROR access.log | !wc -l | capture}
-$r.exit                                       # 0 if both succeeded
-$r.stdout                                     # the count as bytes/string
+def count {!grep ERROR access.log | !wc -l | collect}
 ```
 
 ### Streaming and backgrounding
@@ -378,10 +339,9 @@ do-other-work
 cancel $fut                                   # tear down
 
 # Backgrounded pipeline producing a value
-def fut {!grep ERROR access.log | !wc -l | capture &}
+def fut {!grep ERROR access.log | !wc -l | collect &}
 do-other-work
-def r {await $fut}
-$r.stdout
+def count {await $fut}
 ```
 
 ### Two-way I/O
@@ -402,23 +362,24 @@ $ch-r | !sort -u | for unique { print $unique }
 
 For configurations the pipeline form can't express (multiple
 consumers of one stdout, shared channels across more than two
-processes), drop to `proc-spawn` (§10).
+processes), drop to `create-process` (§10).
 
 ### Stderr handling
 
 ```jacl
-# Capture stderr separately, stream stdout
-def j {!cmd | for line { handle-line $line } |! capture &}
-await $j
-if {!= $j.exit 0} {
-  print "failed: $j.stderr"
-}
+# Stderr to file while stdout flows normally
+!cmd |! save-to "err.log" | for line { ... }
 
 # Merge stderr into stdout pipeline
 !cmd |+ for line { ... }
 
-# Stderr to file while stdout flows normally
-!cmd |! save-to "err.log" | for line { ... }
+# Stream stderr to a channel for inspection from another coroutine
+def ch {channel}
+def j {create-process "cmd" args {stderr: $ch}}
+spawn {
+  for $ch line { if {is-fatal $line} { signal $j SIGTERM } }
+}
+await $j
 ```
 
 ### Inspecting failure without erroring
@@ -444,51 +405,38 @@ timeout 30 { await $api }
 
 ## Open questions
 
-1. **Pipeline-stage vocabulary and defaults** for the §7 stage set.
-   - Default cap for bare `| capture` (e.g. 64 KiB? 256 KiB?
-     1 MiB?).
-   - Overflow policy when the cap is hit — backpressure (block
-     producer) is the leading candidate; lossy variants live in
-     other stages (`tail`, or `capture overflow=drop-newest`).
-   - Is `collect` (returns the value) a separate command from
-     `capture` (returns a Job with `.stdout` populated), or are
-     they unified with a context-sensitive return type? Probably
-     separate — different return types should have different names.
-   - Naming: `save-to` vs. `write-to-file` vs. overload `write`;
-     `tee-to` vs. `tee`; etc.
-2. **Name of the error-opt-out combinator.** `complete` (Nushell
+1. **Name of the error-opt-out combinator.** `complete` (Nushell
    echo)? `try-exec`? `as-result`? Position-dependent — pipeline
    tail stage vs. wrapper around an expression.
-3. **`cancel` escalation ladder for GC-driven cleanup.** SIGTERM →
+2. **`cancel` escalation ladder for GC-driven cleanup.** SIGTERM →
    how long → SIGKILL. Whether explicit `cancel $j` uses the same
    ladder or stays "kill immediately."
-4. **Per-call environment override syntax.** `with-env { !cmd }`
+3. **Per-call environment override syntax.** `with-env { !cmd }`
    block-form is the obvious answer (parallel to existing
    `with-env` / `with-dir`). Is a per-call form needed at all, or
    does block form cover the use cases?
-5. **`proc-spawn`'s fd-record shape** — field names, accepted
+4. **`create-process`'s fd-record shape** — field names, accepted
    value types (channel, file path, file descriptor int,
-   `discard` sentinel). Lowest priority; depends on the rest
-   being settled.
-6. **Stderr defaults for pipeline-Jobs.** Each process's stderr
+   `discard` sentinel). The actual primitive everything else
+   lowers to, so this needs to be specified precisely.
+5. **Stderr defaults for pipeline-Jobs.** Each process's stderr
    defaults to passthrough independently. If the user wants per-stage
    stderr capture in a multi-process pipeline, do we expose
    per-process `.stderrs` (vec) or only the last stage's? Probably
    per-process to preserve attribution.
-7. **What `$j.pid` returns for a multi-stage pipeline-Job.** Process
+6. **What `$j.pid` returns for a multi-stage pipeline-Job.** Process
    group leader, last process, or vec? `$j.pids` covers the vec
    case; the scalar `.pid` needs a convention (likely the last
    process, to match bash `$!`).
-8. **Migration strategy from current `!cmd` semantics.** Today
+7. **Migration strategy from current `!cmd` semantics.** Today
    `def files {!ls -la}` binds a string; under the redesign it
    binds a Job (and you'd write `def files {!ls -la | collect}` for
    the string). Pre-1.0 affords a clean break, but existing tests
    and demos need updating.
-9. **Interaction with `exec`.** Today's `exec "cmd" args` returns
-   the full struct. Under the redesign, `def r {!cmd | capture}`
-   returns a Job with all the same information. Does `exec` go
-   away, or stay as the "low-level explicit form" parallel to
-   `proc-spawn`?
+8. **Interaction with `exec`.** Today's `exec "cmd" args` returns
+   the full struct. Under the redesign, `def r {!cmd | complete}`
+   covers the same case. Does `exec` go away, or stay as the
+   "low-level explicit form" parallel to `create-process`?
 
 ## Cross-references
 
@@ -510,14 +458,14 @@ timeout 30 { await $api }
 The model is settled enough that implementation could start on a
 narrow spike: replace `EXEC_FLAG_BG`'s tempfile redirection
 (`vm.c:10359-10384`) with `pipe2(O_NONBLOCK)` + worker-idle-loop
-fd polling, exposed via a `| capture` stage on a backgrounded
-`!cmd`. That tests the channel-on-Job-stdout path end-to-end
-without disturbing existing call sites.
+fd polling, exposed initially via a minimal `create-process` form
+that attaches a channel to stdout. That tests the channel-attached-
+to-Job-fd path end-to-end without disturbing existing pipeline
+call sites.
 
-Before that spike, the most blocking open question is **#1
-(pipeline-stage vocabulary and defaults)** — it shapes both the
-runtime data structures (cap size, overflow behavior) and the
-public stage names that everything else composes with. "Bounded
-with backpressure" remains the leading default; the producer-side
-parking infrastructure that requires is also what `for line { ... }`
-needs, so it's not extra work for `capture` specifically.
+The most blocking remaining open question is **#4
+(`create-process`'s fd-record shape)** — it's the primitive that
+everything else lowers to, so its surface needs to be settled
+before the spike. The others (cancel ladder, error-opt-out name,
+per-call env) shape ergonomics but don't gate the implementation
+of the core path.
