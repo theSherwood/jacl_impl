@@ -37,6 +37,21 @@ defmacro not {a} {
   [make-syntax "command" $head [vec $a]]
 }
 
+# incr name — increment a mutable binding in place: [incr i] == [set i [+ $i 1]]
+# Sugar for the common counted-loop step expression. Named `incr` rather
+# than `inc` since `inc` is widely used as a user-defined proc name across
+# the test suite; the prelude must not shadow that.
+#
+# The macro takes a bare name (lit-string syntax) for the set target, then
+# builds a fresh var-ref to that same name for the `+` operand — `syntax-
+# datum` pulls the string out of the lit-string syntax node, and
+# `make-syntax "var-ref"` rebuilds it as a var-ref.
+defmacro incr {x} {
+  def name [syntax-datum $x]
+  def vref [make-syntax "var-ref" $name]
+  syntax-quote [set ~x [+ ~vref 1]]
+}
+
 # timeout n body — race body against a sleeping branch that errors after n
 # seconds. Returns body's value if it completes within the deadline,
 # otherwise an error value with payload "timeout".  Requires a suspending
