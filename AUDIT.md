@@ -200,13 +200,25 @@ hot loop and no closures (see Closed items below) shaved another
 collection_churn -18.7 %, box_churn -13.5 %, string_concat -6.4 %,
 sieve_primes -4.1 %, map_lookup_hot ≈ tie.
 
-**TODO: add a Clojure column to the cross-runtime bench.** Python is a
-useful "what does a non-functional mainstream language do" baseline,
-but JACL's persistent collections + spawn primitives are closer in
-intent to Clojure's. A Clojure mirror under `test/clojure/bench/`
-would give a fairer comparison on `collection_churn`, `map_lookup_hot`,
-and `parallel_map_reduce` (where Python's GIL and mutable dict
-distort the picture).
+A Clojure column was added on 2026-05-22 — see
+`docs/profiles/2026-05-22_3way_summary.md` for the writeup and
+`docs/profiles/2026-05-22_jacl_3way_compare.txt` for the raw table.
+Highlights at 200 timed iters, median:
+
+  - **collection_churn**: JACL ties Clojure (1.05×) and beats Python
+    by 2.5×. Persistent-collection workloads are a real JACL strength
+    now, not a Python-baseline artefact.
+  - **parallel_map_reduce**: JACL ties Python; Clojure wins by 7× via
+    JIT + JVM agent pool.
+  - **spawn_chain**: JACL beats both — 3.6× over Python, 1.2× over
+    Clojure futures. Lightweight spawn primitive paying off.
+  - **fib_recursive / sieve_primes / map_lookup_hot**: Clojure wins
+    20× / 33× / 3.6× respectively — pure JIT advantage on inner
+    loops. No JIT → JACL pays full bytecode dispatch.
+  - **string_concat**: still the biggest closeable gap (Python 18×,
+    Clojure 5.6×) — candidate #1 below.
+  - **box_churn**: Clojure 14× faster is suspicious — likely JIT
+    escape-analysis eliding the atom; not a fair allocator comparison.
 
 Ranked by leverage:
 

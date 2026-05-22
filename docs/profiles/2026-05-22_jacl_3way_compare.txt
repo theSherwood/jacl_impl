@@ -1,0 +1,69 @@
+bench-compare: jacl vs python vs clojure
+  jacl: docs/profiles/2026-05-22_jacl_200iter_final.jsonl
+  python: docs/profiles/2026-05-22_python_200iter_final.jsonl
+  clojure: docs/profiles/2026-05-22_clojure_200iter_final.jsonl
+
+  [box_churn]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            183.00µs     157.00µs       9.23µs             0.86x            0.05x
+    wall_ns_median         228.00µs     182.00µs      16.09µs             0.80x            0.07x
+    wall_ns_max              3.81ms     288.95µs       5.09ms             0.08x            1.34x
+
+  [box_literal_churn]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            211.00µs     162.69µs     111.21µs             0.77x            0.53x
+    wall_ns_median         244.00µs     193.18µs     123.92µs             0.79x            0.51x
+    wall_ns_max              2.83ms     298.20µs     802.78µs             0.11x            0.28x
+
+  [collection_churn]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            226.00µs     567.31µs     229.80µs             2.51x            1.02x
+    wall_ns_median         279.00µs     709.42µs     293.43µs             2.54x            1.05x
+    wall_ns_max              2.50ms     916.84µs     860.49µs             0.37x            0.34x
+
+  [fib_recursive]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min             14.71ms      10.99ms     767.22µs             0.75x            0.05x
+    wall_ns_median          15.43ms      11.64ms     807.47µs             0.75x            0.05x
+    wall_ns_max             21.33ms      18.03ms       1.69ms             0.85x            0.08x
+
+  [map_lookup_hot]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min              1.84ms       1.19ms     268.85µs             0.65x            0.15x
+    wall_ns_median           1.99ms       1.32ms     559.96µs             0.66x            0.28x
+    wall_ns_max             36.47ms       1.80ms       6.22ms             0.05x            0.17x
+
+  [parallel_map_reduce]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            313.00µs     646.47µs      36.36µs             2.07x            0.12x
+    wall_ns_median         627.00µs     699.16µs      90.81µs             1.12x            0.14x
+    wall_ns_max            915.00µs       1.12ms       1.25ms             1.23x            1.36x
+
+  [sieve_primes]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min              5.61ms       3.32ms     177.96µs             0.59x            0.03x
+    wall_ns_median           6.74ms       3.56ms     202.74µs             0.53x            0.03x
+    wall_ns_max            134.38ms       5.86ms     535.70µs             0.04x            0.00x
+
+  [spawn_chain]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            102.00µs       1.96ms     405.87µs            19.20x            3.98x
+    wall_ns_median         628.00µs       2.25ms     525.36µs             3.58x            0.84x
+    wall_ns_max              2.23ms       3.96ms     964.26µs             1.78x            0.43x
+
+  [string_concat]
+    metric                     jacl       python      clojure  ratio[python/jacl] ratio[clojure/jacl]
+    ------------------ ------------ ------------ ------------  ---------------- ----------------
+    wall_ns_min            243.00µs      25.77µs      71.76µs             0.11x            0.30x
+    wall_ns_median         510.00µs      26.14µs      89.44µs             0.05x            0.18x
+    wall_ns_max              3.16ms      51.99µs     241.09µs             0.02x            0.08x
+
+  scenarios only in python: collection_churn_mut

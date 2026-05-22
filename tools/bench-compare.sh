@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 #
-# bench-compare.sh — side-by-side comparison of two JSONL bench files
-# from different runtimes (e.g. JACL test_perf vs tools/bench-python.py).
+# bench-compare.sh — side-by-side comparison of two or three JSONL
+# bench files from different runtimes (e.g. JACL test_perf vs
+# tools/bench-python.py vs tools/bench-clojure.clj).
 #
 # Usage:
-#   tools/bench-compare.sh JACL.jsonl PYTHON.jsonl
+#   tools/bench-compare.sh BASELINE.jsonl OTHER.jsonl [THIRD.jsonl]
 #
 # Compares wall_ns_{min,median,max} across runtimes per scenario.
 # Scenarios that exist in only one file are noted but not compared.
-# A "ratio" column shows new/baseline on wall_ns_median — values >1
-# mean the second runtime is slower.
+# Ratio columns show other/baseline — values >1 mean the named
+# runtime is slower than the baseline.
 
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
-    echo "usage: $0 BASELINE.jsonl OTHER.jsonl" >&2
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    echo "usage: $0 BASELINE.jsonl OTHER.jsonl [THIRD.jsonl]" >&2
     exit 2
 fi
 
-python3 - "$1" "$2" <<'PY'
+python3 - "$@" <<'PY'
 import json, sys
 
-base_path, other_path = sys.argv[1], sys.argv[2]
+paths = sys.argv[1:]
 
 def load_jsonl(path):
     out = {}
@@ -34,9 +35,6 @@ def load_jsonl(path):
             out[r["scenario"]] = r
     return out
 
-base = load_jsonl(base_path)
-other = load_jsonl(other_path)
-
 def label(records, fallback):
     for r in records.values():
         rt = r.get("runtime")
@@ -47,8 +45,14 @@ def label(records, fallback):
             return "jacl"
     return fallback
 
-base_label = label(base, "baseline")
-other_label = label(other, "other")
+runtimes = []
+for i, p in enumerate(paths):
+    recs = load_jsonl(p)
+    runtimes.append({
+        "path": p,
+        "label": label(recs, "rt%d" % i),
+        "records": recs,
+    })
 
 def fmt_ns(v):
     if v is None:
@@ -64,30 +68,40 @@ def fmt_ratio(b, n):
     r = n / b
     return f"{r:6.2f}x"
 
-print(f"bench-compare: {base_label} vs {other_label}")
-print(f"  baseline ({base_label}): {base_path}")
-print(f"  other    ({other_label}): {other_path}")
+labels = [rt["label"] for rt in runtimes]
+print("bench-compare: " + " vs ".join(labels))
+for rt in runtimes:
+    print(f"  {rt['label']}: {rt['path']}")
 print()
 
 METRICS = ["wall_ns_min", "wall_ns_median", "wall_ns_max"]
 
-shared = sorted(set(base) & set(other))
-only_base = sorted(set(base) - set(other))
-only_other = sorted(set(other) - set(base))
+# Scenarios present in ALL runtimes.
+shared_sets = [set(rt["records"]) for rt in runtimes]
+shared = sorted(set.intersection(*shared_sets))
 
 for name in shared:
     print(f"  [{name}]")
-    b, n = base[name], other[name]
-    hdr = f"    {'metric':<18} {base_label:>12} {other_label:>12}  {'ratio':>8}"
-    print(hdr)
-    print(f"    {'-'*18} {'-'*12} {'-'*12}  {'-'*8}")
+    base = runtimes[0]["records"][name]
+    # Header
+    cols = [f"{rt['label']:>12}" for rt in runtimes]
+    ratio_cols = [f"{('ratio['+rt['label']+'/'+runtimes[0]['label']+']'):>16}" for rt in runtimes[1:]]
+    print("    " + f"{'metric':<18} " + " ".join(cols) + "  " + " ".join(ratio_cols))
+    print("    " + "-"*18 + " " + " ".join(["-"*12 for _ in runtimes]) + "  " + " ".join(["-"*16 for _ in runtimes[1:]]))
     for m in METRICS:
-        bv = b.get(m); nv = n.get(m)
-        print(f"    {m:<18} {fmt_ns(bv):>12} {fmt_ns(nv):>12}  {fmt_ratio(bv, nv):>8}")
+        bv = base.get(m)
+        vals = [fmt_ns(rt["records"][name].get(m)) for rt in runtimes]
+        ratios = [fmt_ratio(bv, rt["records"][name].get(m)) for rt in runtimes[1:]]
+        # right-justify ratio under header width (16 cols)
+        ratios_padded = [f"{r:>16}" for r in ratios]
+        vals_padded = [f"{v:>12}" for v in vals]
+        print("    " + f"{m:<18} " + " ".join(vals_padded) + "  " + " ".join(ratios_padded))
     print()
 
-if only_base:
-    print(f"  scenarios only in {base_label}: {', '.join(only_base)}")
-if only_other:
-    print(f"  scenarios only in {other_label}: {', '.join(only_other)}")
+# Report scenarios only in some runtimes.
+all_scenarios = set().union(*shared_sets)
+for rt in runtimes:
+    only = sorted(set(rt["records"]) - set(shared))
+    if only:
+        print(f"  scenarios only in {rt['label']}: {', '.join(only)}")
 PY

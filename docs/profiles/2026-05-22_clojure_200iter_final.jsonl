@@ -1,0 +1,9 @@
+{"clojure_version":"1.10.3","wall_ns_median":16092,"timed_iters":200,"result":1999000,"runtime":"clojure","wall_ns_min":9231,"wall_ns_max":5085280,"warmup_iters":50,"scenario":"box_churn","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":123915,"timed_iters":200,"result":20000,"runtime":"clojure","wall_ns_min":111210,"wall_ns_max":802777,"warmup_iters":50,"scenario":"box_literal_churn","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":293429,"timed_iters":200,"result":79600,"runtime":"clojure","wall_ns_min":229800,"wall_ns_max":860494,"warmup_iters":50,"scenario":"collection_churn","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":807467,"timed_iters":200,"result":75025,"runtime":"clojure","wall_ns_min":767224,"wall_ns_max":1689931,"warmup_iters":50,"scenario":"fib_recursive","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":559962,"timed_iters":200,"result":6965000,"runtime":"clojure","wall_ns_min":268846,"wall_ns_max":6222796,"warmup_iters":50,"scenario":"map_lookup_hot","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":90807,"timed_iters":200,"result":49995000,"runtime":"clojure","wall_ns_min":36361,"wall_ns_max":1247942,"warmup_iters":50,"scenario":"parallel_map_reduce","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":202742,"timed_iters":200,"result":303,"runtime":"clojure","wall_ns_min":177958,"wall_ns_max":535698,"warmup_iters":50,"scenario":"sieve_primes","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":525357,"timed_iters":200,"result":1275,"runtime":"clojure","wall_ns_min":405870,"wall_ns_max":964265,"warmup_iters":50,"scenario":"spawn_chain","git_sha":"a5c9b00"}
+{"clojure_version":"1.10.3","wall_ns_median":89435,"timed_iters":200,"result":501,"runtime":"clojure","wall_ns_min":71764,"wall_ns_max":241094,"warmup_iters":50,"scenario":"string_concat","git_sha":"a5c9b00"}
