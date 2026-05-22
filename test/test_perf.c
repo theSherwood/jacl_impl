@@ -190,14 +190,25 @@ static int run_scenario(const char* path, const char* name,
         uint64_t t0 = now_ns();
         runtime__submit_spawn_task(&rt, closure, completion, w0_ctx);
 
+        /* Busy-spin on future state for nanosecond timing resolution.
+         * SLEEP_MILLISECONDS(1) would impose a ~1ms floor (worse on
+         * Linux where nanosleep rounds up to the next jiffy), making
+         * sub-ms scenarios unmeasurable. The test thread has no other
+         * work between submit and resolve, so spinning is the right
+         * tradeoff for a perf bench. Clock is sampled every 1024 spins
+         * to keep clock_gettime out of the hot path. */
+        const uint64_t budget_ns = (uint64_t)COMPLETION_MS * 1000000ULL;
         int timed_out = 1;
-        for (int ms = 0; ms < COMPLETION_MS; ms++) {
+        uint64_t spin = 0;
+        for (;;) {
             uint32_t st = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
             if (st == FUTURE_RESOLVED || st == FUTURE_ERROR) {
                 timed_out = 0;
                 break;
             }
-            SLEEP_MILLISECONDS(1);
+            if (((spin++) & 1023) == 0) {
+                if (now_ns() - t0 > budget_ns) break;
+            }
         }
         uint64_t dt = now_ns() - t0;
 
