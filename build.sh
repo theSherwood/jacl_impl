@@ -443,11 +443,6 @@ else
     done
 fi
 
-# WIP modules (skipped)
-echo ""
-echo "--- WIP (skipped) ---"
-echo "  pvec"
-
 # Summary
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
