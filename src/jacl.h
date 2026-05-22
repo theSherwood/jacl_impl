@@ -1025,7 +1025,14 @@ typedef enum {
   OP_UNWATCH,              /* pop key, pop atom; remove watcher under key; push nil */
 
   /* --- Assertion --- */
-  OP_ASSERT                /* pop value, halt with runtime error if falsy, else push nil */
+  OP_ASSERT,                /* pop value, halt with runtime error if falsy, else push nil */
+
+  /* --- Late additions (kept at the end so test_bytecode's
+   *     numeric-stability asserts stay valid) --- */
+  OP_BOX_UNCHECKED          /* same as OP_BOX, skipping the jacl_is_error
+                               propagation check; emitted by the compiler
+                               when the operand provably cannot carry the
+                               error flag (see compiler__expr_is_error_free) */
 } OpCode;
 
 typedef struct {

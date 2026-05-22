@@ -332,6 +332,7 @@ static const Scenario SCENARIOS[] = {
     { "spawn_chain",         BENCH_DIR "/spawn_chain.jacl" },
     { "box_churn",           BENCH_DIR "/box_churn.jacl" },
     { "string_concat",       BENCH_DIR "/string_concat.jacl" },
+    { "box_literal_churn",   BENCH_DIR "/box_literal_churn.jacl" },
     { "fib_recursive",       BENCH_DIR "/fib_recursive.jacl" },
     { "sieve_primes",        BENCH_DIR "/sieve_primes.jacl" },
     { "map_lookup_hot",      BENCH_DIR "/map_lookup_hot.jacl" },

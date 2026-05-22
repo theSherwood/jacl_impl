@@ -2929,6 +2929,46 @@ static uint32_t compiler__top_level_scan(AstNode* node) {
   return 0;
 }
 
+/* --- Provable error-freeness ---
+ *
+ * Returns true iff the runtime value produced by `node` provably cannot
+ * carry the JACL_FLAG_ERROR flag bit. Used by HEAD_BOX to choose between
+ * OP_BOX (checked) and OP_BOX_UNCHECKED (skips the error-propagation
+ * branch in the VM dispatch).
+ *
+ * The error flag propagates through arithmetic only when an operand
+ * already carries it (see jacl_add_i32 et al. in value.c). So an
+ * arithmetic expression on recursively-error-free operands is itself
+ * error-free — except for div / mod, which produce a div-by-zero error
+ * even on clean operands.
+ *
+ * Var refs, function calls, collection accesses, and anything reading
+ * from the env conservatively return false: any of those could pull
+ * in an error-flagged value the typer can't see. */
+static bool compiler__expr_is_error_free(AstNode* node) {
+  if (!node) return false;
+  switch (node->type) {
+    case AST_LIT_INT:
+    case AST_LIT_FLOAT:
+    case AST_LIT_STRING:
+      return true;
+    case AST_COMMAND: {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      if (hid != HEAD_PLUS && hid != HEAD_MINUS && hid != HEAD_STAR) {
+        return false;
+      }
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        if (!compiler__expr_is_error_free(node->data.command.args[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 /* Forward declarations for module compilation (defined after compiler_compile) */
 bool compiler__compile_module(const char* canonical_path,
                                      Compiler* importer,
@@ -9685,6 +9725,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_BOX_STRUCT, line);
       compiler__emit_u16(c, (uint16_t)box_arg_struct_idx, line);
       c->inline_repr = INLINE_NONE;
+    } else if (compiler__expr_is_error_free(args[0])) {
+      compiler__emit_byte(c, OP_BOX_UNCHECKED, line);
     } else {
       compiler__emit_byte(c, OP_BOX, line);
     }

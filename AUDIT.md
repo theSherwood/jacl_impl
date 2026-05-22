@@ -229,16 +229,28 @@ Ranked by leverage:
    GC, root scanning, write barriers. Large work, large payoff for
    any alloc-heavy workload.
 
-3. **OP_BOX error-check elision** — `[box value]` unconditionally
-   runs `jacl_is_error(value)` even when the typer has proved the
-   operand can't be an error (e.g. result of `+ $i 1` on i32 operands).
-   Tiny per-op win; primarily an optimizer practice exercise. Add a
-   typer-driven OP_BOX_UNCHECKED variant.
-
 ## Closed items
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **OP_BOX error-check elision** — landed 2026-05-22. Added
+  `OP_BOX_UNCHECKED` (skips the `jacl_is_error` propagation branch
+  in OP_BOX's dispatch) and a `compiler__expr_is_error_free`
+  predicate that returns true for `AST_LIT_INT` / `AST_LIT_FLOAT`
+  / `AST_LIT_STRING` and for `HEAD_PLUS` / `HEAD_MINUS` / `HEAD_STAR`
+  whose every arg is recursively error-free. `HEAD_BOX` emits
+  the unchecked variant when the predicate fires; otherwise the
+  checked OP_BOX. New `box_literal_churn.jacl` bench scenario added
+  to exercise the path (boxes `[* 2 5]` per iter). Perf delta is
+  under the run-to-run noise floor on this 4×200-iter bench setup
+  (the elided branch is 1–2 cycles per box vs ~50 ns total cost of
+  the `gc_alloc` + push), which matches the original audit notes
+  ("Tiny per-op win; primarily an optimizer practice exercise").
+  Value is the typer-driven optimization scaffolding for future
+  use — e.g. if we ever extend the typer to track per-value error-
+  freeness, more sites become eligible automatically. The opcode
+  is kept at the end of `OpCode` (after `OP_ASSERT`) so existing
+  numeric-stability asserts in `test_bytecode` stay valid.
 - **Top-level mut/def → depth-0 local lowering** — landed 2026-05-22.
   A one-pass AST scan in `compiler_compile` sets two flags per chunk:
   `has_closure` (any proc, defmacro, spawn, parallel, race, await,

@@ -2370,6 +2370,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_SET_CELL_UPVALUE] = &&L_OP_SET_CELL_UPVALUE,
     [OP_SET_GLOBAL] = &&L_OP_SET_GLOBAL,
     [OP_BOX] = &&L_OP_BOX,
+    [OP_BOX_UNCHECKED] = &&L_OP_BOX_UNCHECKED,
     [OP_BOX_STRUCT] = &&L_OP_BOX_STRUCT,
     [OP_ATOM] = &&L_OP_ATOM,
     [OP_DEREF] = &&L_OP_DEREF,
@@ -5219,6 +5220,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          * (16 bytes total vs 24 for OBJ_MUTABLE_REF). Struct-typed
          * boxes (OP_BOX_STRUCT below) keep the OBJ_MUTABLE_REF layout
          * since they need type_idx + total_size + raw data tail. */
+        JaclVal* slot = (JaclVal*)gc_alloc(&vm->heap, OBJ_BOX_INLINE,
+                                            sizeof(JaclVal));
+        *slot = value;
+        result = vm__push(vm, jacl_box_ptr((JaclMutableRef*)slot));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_BOX_UNCHECKED): {
+        /* Same as OP_BOX with the error-propagation branch elided.
+         * The compiler emits this variant only when it can prove the
+         * operand cannot carry the error flag (literals; arithmetic
+         * on i32/i64/f32/f64 of recursively error-free operands —
+         * div/mod stay on the checked path since they can produce
+         * a div-by-zero error). See
+         * compiler__expr_is_error_free for the exact rule. */
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
         JaclVal* slot = (JaclVal*)gc_alloc(&vm->heap, OBJ_BOX_INLINE,
                                             sizeof(JaclVal));
         *slot = value;

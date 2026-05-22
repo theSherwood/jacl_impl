@@ -1,0 +1,17 @@
+# Bench scenario: box churn over literal-arg boxes (OP_BOX_UNCHECKED path)
+#
+# Mirrors box_churn.jacl but the operand to [box] is a literal-arithmetic
+# expression, so the compiler emits OP_BOX_UNCHECKED instead of OP_BOX.
+# Targets the same allocator / GC behaviour as box_churn; the only delta
+# is the saved jacl_is_error check per box.
+#
+# Output: sum of [* 2 5] across 2000 iters = 20000.
+
+mut acc 0
+mut i 0
+while [< $i 2000] {
+  def b [box [* 2 5]]
+  set acc [+ $acc [deref $b]]
+  set i [+ $i 1]
+}
+print $acc
