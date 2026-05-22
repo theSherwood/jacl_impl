@@ -2644,7 +2644,15 @@ typedef struct {
   uint32_t break_patch_count;
   uint32_t continue_patches[COMPILER_CONTINUE_PATCHES_MAX];
   uint32_t continue_patch_count;
-  uint32_t local_count_at_loop; /* local_count before loop locals were pushed */
+  /* Snapshot of c->local_count just before the loop pushed *any* of its
+   * own locals (iter-state hidden locals + init vars + body locals).
+   * Used by break to clean up ALL of them when exiting the loop. */
+  uint32_t local_count_at_loop;
+  /* Snapshot AFTER iter-state / init locals but BEFORE body-declared
+   * locals. Used by continue to clean up only body locals (iter state
+   * must persist across iterations). For while-loops where there is no
+   * separate iter-state phase, equals local_count_at_loop. */
+  uint32_t body_local_count;
   bool     is_for_loop;         /* true for inlined for-loops */
 } LoopContext;
 
@@ -8206,6 +8214,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     lctx->break_patch_count = 0;
     lctx->continue_patch_count = 0;
     lctx->local_count_at_loop = c->local_count;
+    /* while has no separate iter-state phase — body locals are
+     * everything declared inside, so the two snapshots coincide. */
+    lctx->body_local_count = c->local_count;
     lctx->is_for_loop = false;
 
     /* Loop-start label */
@@ -8284,19 +8295,32 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
 
-      /* Begin scope for init variable(s) — not visible after loop */
-      compiler__begin_scope(c);
+      /* Two scopes:
+       *   - OUTER (init): vars persist across iterations
+       *   - INNER (body): vars declared inside the body are popped each
+       *     iteration via OP_POP_N (compiler__end_scope), and again on
+       *     `continue` (mirrors the while-loop cleanup pattern).
+       * Without the inner scope, `def` / `mut` inside the body would
+       * accumulate stack slots forever — eventually overflowing or
+       * (worse) silently making later iterations read the FIRST iter's
+       * value through the same compile-time slot index. */
       uint32_t saved_local_count = c->local_count;
+      compiler__begin_scope(c);                /* OUTER (init) scope */
 
       /* Compile init (runs once before the loop) */
       compiler__compile_node(c, init_node);
       compiler__emit_check_error(c, line);
 
-      /* Push loop context — is_for_loop=true for forward-jump continue */
+      /* Push loop context — is_for_loop=true for forward-jump continue.
+       * local_count_at_loop snapshots count BEFORE init, used by break
+       * to clean up ALL loop locals on exit. body_local_count snapshots
+       * count AFTER init (before body), used by continue to clean up
+       * body locals only (init vars persist across iterations). */
       LoopContext* lctx = &c->loop_stack[c->loop_depth++];
       lctx->break_patch_count    = 0;
       lctx->continue_patch_count = 0;
       lctx->local_count_at_loop  = saved_local_count;
+      lctx->body_local_count     = c->local_count;
       lctx->is_for_loop          = true;
 
       /* Loop start: condition check */
@@ -8309,6 +8333,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* JUMP_IF_FALSE → exit */
       uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
+      /* INNER (body) scope: opened per iteration in the compiled bytecode
+       * (end_scope below emits OP_POP_N before the OP_LOOP back-edge). */
+      compiler__begin_scope(c);
+
       /* Compile body statements inline */
       uint32_t body_count = body_block->data.block.count;
       for (uint32_t i = 0; i < body_count; i++) {
@@ -8316,7 +8344,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_check_error(c, line);
       }
 
-      /* Continue target: patch all continue forward jumps here */
+      /* End INNER body scope — emits OP_POP_N for body-declared locals
+       * so they don't accumulate iter-over-iter. */
+      compiler__end_scope(c, line);
+
+      /* Continue target: patch all continue forward jumps here. Each
+       * continue site has already emitted its own OP_POP_N (see
+       * HEAD_CONTINUE for-loop branch) so the stack state matches the
+       * post-end_scope state. */
       for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
         compiler__patch_jump(c, lctx->continue_patches[i]);
       }
@@ -8334,7 +8369,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Exit: patch conditional jump */
       compiler__patch_jump(c, exit_jump);
 
-      /* End scope: pop init variable(s) */
+      /* End OUTER scope: pop init variable(s) */
       compiler__end_scope(c, line);
 
       /* Normal exit: push nil */
@@ -8435,11 +8470,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * the two needs an unboxing op on STREAM_NEXT — deferred
        * (see NOT_IMPLEMENTED.md §4). */
 
-      /* Push loop context */
+      /* Push loop context. local_count_at_loop is the count BEFORE
+       * any iter-state locals (used by break to clean all of them).
+       * body_local_count is the count AFTER __col + elem (used by
+       * continue to clean only body locals, leaving iter state). */
       LoopContext* lctx = &c->loop_stack[c->loop_depth++];
       lctx->break_patch_count = 0;
       lctx->continue_patch_count = 0;
       lctx->local_count_at_loop = saved_local_count;
+      lctx->body_local_count = c->local_count;
       lctx->is_for_loop = true;
 
       /* --- Loop start --- */
@@ -8566,11 +8605,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
     uint8_t elem_slot = (uint8_t)(saved_local_count + 3);
 
-    /* Push loop context */
+    /* Push loop context. local_count_at_loop is the count BEFORE any
+     * iter-state locals (used by break to clean them all on exit).
+     * body_local_count is the count AFTER all iter-state hidden locals
+     * (__col, __len, __idx, elem, any typed-vec padding) — used by
+     * continue to clean body-declared locals only. */
     LoopContext* lctx = &c->loop_stack[c->loop_depth++];
     lctx->break_patch_count = 0;
     lctx->continue_patch_count = 0;
     lctx->local_count_at_loop = saved_local_count;
+    lctx->body_local_count = c->local_count;
     lctx->is_for_loop = true;
 
     /* --- Condition check (loop start for OP_LOOP backward jumps) --- */
@@ -8702,7 +8746,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
     if (lctx->is_for_loop) {
-      /* For-loop: forward-jump to increment code (patched later) */
+      /* For-loop: pop any body-declared locals before forward-jumping
+       * to the continue landing. body_local_count is the snapshot AFTER
+       * iter-state locals (so we leave init/__col/elem/__idx alone) but
+       * BEFORE body locals (so any `def`/`mut` inside the body gets
+       * cleaned up). */
+      uint32_t cleanup = c->local_count - lctx->body_local_count;
+      if (cleanup > 0) {
+        compiler__emit_byte(c, OP_POP_N, line);
+        compiler__emit_byte(c, (uint8_t)cleanup, line);
+      }
       if (lctx->continue_patch_count < COMPILER_CONTINUE_PATCHES_MAX) {
         lctx->continue_patches[lctx->continue_patch_count++] =
             compiler__emit_jump(c, OP_JUMP, line);
@@ -12748,7 +12801,16 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       }
       LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
       if (lctx->is_for_loop) {
-        /* For-loop: forward-jump to increment code (patched later) */
+        /* For-loop: pop any body-declared locals before forward-jumping
+         * to the continue landing. body_local_count is the snapshot
+         * AFTER iter-state locals (so we leave init/__col/elem alone)
+         * but BEFORE body locals (so `def`/`mut` inside the body get
+         * cleaned up). */
+        uint32_t cleanup = c->local_count - lctx->body_local_count;
+        if (cleanup > 0) {
+          compiler__emit_byte(c, OP_POP_N, line);
+          compiler__emit_byte(c, (uint8_t)cleanup, line);
+        }
         if (lctx->continue_patch_count < COMPILER_CONTINUE_PATCHES_MAX) {
           lctx->continue_patches[lctx->continue_patch_count++] =
               compiler__emit_jump(c, OP_JUMP, line);

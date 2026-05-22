@@ -11,23 +11,17 @@
 # accumulates an i64 sum, so the surviving heap stays tiny and the
 # scenario is mostly an alloc/collect storm.
 #
-# Box is allocated and dereferenced inline rather than via an intermediate
-# `def b` binding because C-style for's body doesn't pop body-locals
-# between iterations (see compiler.c HEAD_FOR — `end_scope` lands after
-# OP_LOOP), so `def b` inside the body would accumulate stale slots and
-# overflow the operand stack. The bench shape (alloc + immediate deref)
-# is preserved.
-#
-# `i` is declared at top-level rather than in the for's init to keep it
-# in the global env — body access to a for-init local is measurably
-# slower than to a global on this scenario, and the bench targets the
-# allocator, not the env-lookup path.
+# `i` is declared at top-level rather than in the for's init so it stays
+# in the global env. Body access to a for-init local is measurably slower
+# than to a global on this scenario, and the bench targets the allocator,
+# not the env-lookup path.
 #
 # Output: sum 0..1999 = 1999000.
 
 mut acc 0
 mut i 0
 for {set i 0; < $i 2000; incr i} {
-  set acc [+ $acc [deref [box $i]]]
+  def b [box $i]
+  set acc [+ $acc [deref $b]]
 }
 print $acc

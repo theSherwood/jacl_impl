@@ -1411,6 +1411,7 @@ typedef struct {
   uint32_t continue_patches[COMPILER_CONTINUE_PATCHES_MAX];
   uint32_t continue_patch_count;
   uint32_t local_count_at_loop;
+  uint32_t body_local_count;
   bool     is_for_loop;
 } LoopContext;
 
