@@ -59,12 +59,21 @@ AST node.
 
 Any **fixed-width** type may be an element:
 
-- Scalars (`i8`/`i16`/`i32`/`i64`/`u8`/.../`f32`/`f64`/`bool`)
+- Scalars (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/`f32`/`f64`/`bool`)
 - `[Ptr T]` (8 bytes, raw machine pointer, not GC-traced)
 - Value-type structs (`is_value_type` true; inline byte layout)
 - Nested `[Buf M U]`
 - GC-traced reference types: `dyn`, `[Vec T]`, `[Map K V]`, closures,
   strings — all 8-byte tagged values
+
+### Small int types (u8/i8/u16/i16)
+
+These are **static-only** types with no NaN-box representation. They
+are valid as `[Buf N T]` elements and struct fields; at any boundary
+that would cross into `dyn`, the value widens to `i32` (signed) /
+`u32` (unsigned). Standalone-local form (`def u8 x 5`) is reserved
+for a later milestone — the typer currently routes it through the
+generic typed-binding path and the compiler will reject it.
 
 Disallowed: nothing currently — every JACL value is fixed-width on the
 stack/heap-cell. The distinction that *does* matter is **ABI

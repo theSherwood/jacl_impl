@@ -313,8 +313,16 @@ typedef enum {
   TYPE_FUTURE,
   TYPE_PTR,       /* typed pointer; pointee idx in inferred_struct_idx */
   TYPE_BOX,       /* mutable box (cell); element idx in inferred_struct_idx */
-  TYPE_BUF        /* fixed-size C-ABI array; elem idx in inferred_struct_idx,
+  TYPE_BUF,       /* fixed-size C-ABI array; elem idx in inferred_struct_idx,
                      N in inferred_buf_len. See BUFFER_DESIGN.md */
+  /* Static-only small int types. No NaN-box representation: valid as
+   * [Buf N T] elements and struct fields; at any boundary that would
+   * cross into dyn, the value widens to i32 (signed) / u32 (unsigned).
+   * Not usable as standalone locals/params/returns yet. */
+  TYPE_I8,
+  TYPE_U8,
+  TYPE_I16,
+  TYPE_U16
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -329,6 +337,10 @@ typedef enum {
 /* Single table for type keyword recognition — keeps is_type_keyword and
    type_from_keyword in sync automatically. */
 static const struct { const char* name; uint32_t len; JaclType type; } type_keyword_table[] = {
+  { "i8",     2, TYPE_I8 },
+  { "u8",     2, TYPE_U8 },
+  { "i16",    3, TYPE_I16 },
+  { "u16",    3, TYPE_U16 },
   { "i32",    3, TYPE_I32 },
   { "i64",    3, TYPE_I64 },
   { "u32",    3, TYPE_U32 },
@@ -385,6 +397,10 @@ const char* type_name(JaclType t) {
     case TYPE_PTR:       return "ptr";
     case TYPE_BOX:       return "box";
     case TYPE_BUF:       return "buf";
+    case TYPE_I8:        return "i8";
+    case TYPE_U8:        return "u8";
+    case TYPE_I16:       return "i16";
+    case TYPE_U16:       return "u16";
   }
   return "unknown";
 }

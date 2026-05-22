@@ -1036,7 +1036,7 @@ static void test_nested_proc_call_narrows(void) {
 static void test_buf_def_annotation(void) {
   current_test = "buf_def_annotation";
   arena_t a = {0};
-  ParseResult r = run_typer("def [Buf 256 i32] x 0\n$x", &a);
+  ParseResult r = run_typer("def [Buf 256 u8] x 0\n$x", &a);
   AstNode* var = find_var_ref(r.nodes[1], "x");
   ASSERT_NOT_NULL(var);
   ASSERT_TYPE(var, TYPE_BUF);
@@ -1048,7 +1048,7 @@ static void test_buf_def_annotation(void) {
     } else {
       passes++;
     }
-    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I32);
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_U8);
     if (var->inferred_struct_idx != want) {
       fprintf(stderr, "  FAIL %s: expected struct_idx=%u got %u\n",
               current_test, want, var->inferred_struct_idx);

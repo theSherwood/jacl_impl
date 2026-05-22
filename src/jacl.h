@@ -1204,8 +1204,14 @@ typedef enum {
   TYPE_FUTURE,
   TYPE_PTR,       /* typed pointer; pointee idx in inferred_struct_idx */
   TYPE_BOX,       /* mutable box (cell); element idx in inferred_struct_idx */
-  TYPE_BUF        /* fixed-size C-ABI array; elem idx in inferred_struct_idx,
+  TYPE_BUF,       /* fixed-size C-ABI array; elem idx in inferred_struct_idx,
                      N in inferred_buf_len. See BUFFER_DESIGN.md */
+  /* Static-only small int types (no NaN-box rep; widen to i32/u32 at
+   * dyn boundaries). Usable as [Buf N T] elements and struct fields. */
+  TYPE_I8,
+  TYPE_U8,
+  TYPE_I16,
+  TYPE_U16
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry

@@ -900,6 +900,10 @@ bool embed__val_matches_field_type(JaclVal val, int field_type) {
     case TYPE_PTR:     return jacl_is_u64(val);  /* pointer rep is u64 */
     case TYPE_BOX:     return jacl_is_box(val);
     case TYPE_BUF:     return false; /* buf fields are inline bytes, not first-class JaclVals */
+    case TYPE_I8: case TYPE_U8: case TYPE_I16: case TYPE_U16:
+      /* Static-only small ints widen at the boundary; not directly
+       * matchable as JaclVals. */
+      return false;
   }
   return false;
 }
