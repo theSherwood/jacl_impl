@@ -20,6 +20,13 @@ proc add {a, b} { + $a $b }
 proc greet {name} { concat "hi " $name }
 proc zero-arg {} { + 10 20 }
 
+# Typed proc: `proc <ret> <name> {<param-type> <param>, ...}`. Param
+# and return types are checked at call sites and arithmetic narrows
+# accordingly (no boxing, no dyn dispatch). Untyped params default
+# to `dyn`.
+proc i64 typed-add {i64 a, i64 b} { + $a $b }
+proc str shout {str s} { concat $s "!" }
+
 # Variadic: `..rest` in params collects trailing args into a vector.
 proc sum-all {..nums} {
   mut total 0
@@ -27,29 +34,28 @@ proc sum-all {..nums} {
   $total
 }
 
-# A suspending proc: contains `await` internally. Callers don't see
-# any async machinery — they just call it like a normal function and
-# get a value back. This is the direct-style payoff of CPS.
+# A suspending proc: contains `sleep` (unconditional suspension).
+# Callers don't see any async machinery — they just call it like a
+# normal function and get a value back. This is the direct-style
+# payoff of CPS. (`spawn`/`await` is shown explicitly further below.)
 proc double-async {n} {
-  def f [spawn { * $n 2 }]
-  await $f
+  sleep 0.001
+  * $n 2
 }
 
-# Suspending procs compose with each other. The intermediate bindings
-# are explicit — passing two suspending calls inline as args to the
-# same outer call currently hits a CPS arg-evaluation bug (the second
-# result corrupts the first). Workaround: bind first.
+# Suspending procs compose. Two suspending calls can appear inline as
+# args to the same outer call — the SM compiler spills the enclosing
+# operand stack across each suspension so siblings don't trample each
+# other's results.
 proc sum-async {a, b} {
-  def x [double-async $a]
-  def y [double-async $b]
-  + $x $y
+  + [double-async $a] [double-async $b]
 }
 
 proc main {} {
   # ----- values -----
   # Numbers, strings, booleans, vectors.
   assert [== 42 42]
-  assert [== "hi" "hi"]
+  assert [== "hi" hi]
   assert $true
   assert [not $false]
   assert [== [vec 1 2 3] [vec 1 2 3]]
@@ -85,8 +91,14 @@ proc main {} {
   # Params and body are both `{}` blocks. Type-before-name everywhere.
   # Procs are defined at module level (see above).
   assert ([add 20 30] == 50)
-  assert ([greet "bob"] == "hi bob")
+  assert ([greet bob] == "hi bob")
   assert ([zero-arg] == 30)
+
+  # ----- typed procs -----
+  # Typed params/return are checked at call sites; arithmetic on
+  # typed locals stays unboxed.
+  assert ([typed-add 3 4] == 7)
+  assert ([shout hello] == "hello!")
 
   # ----- variadic + splat -----
   # `..nums` in params collects trailing args. `..$vec` at a call site
@@ -137,9 +149,9 @@ proc main {} {
   def p [Pt 10 20]
   def {x, y} $p
   assert (($x == 10) && ($y == 20))
-  def [head ..tail] [vec "first" "second" "third"]
-  assert ($head == "first")
-  assert [== $tail [vec "second" "third"]]
+  def [head ..tail] [vec first second third]
+  assert ($head == first)
+  assert [== $tail [vec second third]]
 
   # ----- structs -----
   # `struct Name {type field, ...}` at module level. Constructor
@@ -151,9 +163,9 @@ proc main {} {
   # ----- maps -----
   # `[map "k" v "k2" v2 ...]`. `map-get` reads; `->` is sugar for
   # string keys.
-  def m [map "a" 1 "b" 2]
-  assert ([map-get $m "a"] == 1)
-  def cfg [map "port" 42]
+  def m [map a 1 b 2]
+  assert ([map-get $m a] == 1)
+  def cfg [map port 42]
   assert ($cfg->port == 42)
 
   # ----- typed collections -----
@@ -163,8 +175,8 @@ proc main {} {
   # / `[map ...]` still work for dyn-everything use.
   def [Vec i32] typed-nums [[Vec i32] 10 20 30]
   assert ([vec-get $typed-nums 1] == 20)
-  def [Map Pt] coords [[Map Pt] "origin" [Pt 0 0] "right" [Pt 1 0]]
-  assert ([map-get $coords "right"]->x == 1)
+  def [Map Pt] coords [[Map Pt] origin [Pt 0 0] right [Pt 1 0]]
+  assert ([map-get $coords right]->x == 1)
 
   # ----- mutable state -----
   # `box` is thread-local; `atom` is CAS-shared. `reset` stores;
@@ -178,12 +190,11 @@ proc main {} {
 
   # ----- atom watchers -----
   # `watch` registers a keyed listener that fires on every reset/swap
-  # with (old, new) in the writing thread. `$env` and `$pwd` are built
-  # on the same mechanism.
+  # with (old, new) in the writing thread.
   def witness [box 0]
   def counter [atom 0]
   tap = proc {old, new} { reset $witness $new }
-  watch $counter "tap" $tap
+  watch $counter tap $tap
   reset $counter 7
   assert ([deref $witness] == 7)
   swap $counter [\ + $it 5]
@@ -193,8 +204,8 @@ proc main {} {
   # `try {body} name {handler}`. Errors are values; pipes short-circuit.
   # `assert` halts the VM, but `error` produces an error VALUE that
   # propagates through pipes and can be caught.
-  assert ([try { error "bad" } e { concat "caught: " [error-val $e] }] == "caught: bad")
-  assert [error? [error "boom"]]
+  assert ([try { error bad } e { concat "caught: " [error-val $e] }] == "caught: bad")
+  assert [error? [error boom]]
 }
 
 main
@@ -220,8 +231,8 @@ assert ([await $fut] == 42)
 assert ([double-async 21] == 42)
 
 # Suspending procs compose like normal procs. `sum-async` calls
-# `double-async` twice inline; the arithmetic reads as sequential code
-# even though each call suspends to a worker.
+# `double-async` twice inline as args to `+`; the arithmetic reads as
+# sequential code even though each call suspends to a worker.
 assert ([sum-async 10 16] == 52)
 
 # ----- parallel -----
@@ -237,5 +248,5 @@ assert ([race { 7 } { 7 }] == 7)
 # ----- error in parallel -----
 # `parallel` runs every branch to completion; the result vector may
 # contain errors. Caller decides how to handle.
-def results [parallel { + 1 1 } { error "boom" }]
+def results [parallel { + 1 1 } { error boom }]
 assert [error? [vec-get $results 1]]

@@ -11193,6 +11193,34 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     const char* callee_name_str = NULL;
     uint32_t callee_name_len = 0;
 
+    /* Pre-resolve the callee name from the AST so we can detect a known
+       suspending-proc call *before* compiling the head/args. If it is one,
+       we must spill the enclosing operand-stack values into SM state fields
+       first — otherwise an inline call like `+ [susp 10] [susp 16]` loses
+       the first arg's result when the second call's OP_AWAIT_SM suspends.
+       Mirrors the spill/restore discipline used by HEAD_AWAIT / HEAD_SLEEP /
+       HEAD_YIELD / HEAD_PARALLEL / HEAD_RACE. */
+    if (head->type == AST_LIT_STRING) {
+      callee_name_str = head->data.lit_string.value;
+      callee_name_len = head->data.lit_string.length;
+    } else if (head->type == AST_VAR_REF) {
+      callee_name_str = head->data.var_ref.name;
+      callee_name_len = head->data.var_ref.length;
+    }
+    bool use_call_suspend = false;
+    uint16_t suspend_spill_depth = 0;
+    if (c->sm_analysis && c->suspension_map && callee_name_str &&
+        callee_name_len <= 128) {
+      JaclVal cname = compiler__name_val(c->heap, c->intern_table,
+                                          callee_name_str, callee_name_len);
+      if (suspension_map_lookup(c->suspension_map, cname) &&
+          !suspension_map_is_generator(c->suspension_map, cname)) {
+        use_call_suspend = true;
+        suspend_spill_depth = compiler__suspension_pre_stack_depth(c);
+        compiler__emit_spill_operand_stack(c, suspend_spill_depth, line);
+      }
+    }
+
     if (head->type == AST_LIT_STRING) {
       /* Look up bare word as a variable */
       uint32_t name_len = head->data.lit_string.length;
@@ -11430,16 +11458,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Check if callee is a known suspending proc in SM context */
-    bool use_call_suspend = false;
-    if (c->sm_analysis && c->suspension_map && callee_name_str && callee_name_len <= 128) {
-      JaclVal cname = compiler__name_val(c->heap, c->intern_table, callee_name_str, callee_name_len);
-      if (suspension_map_lookup(c->suspension_map, cname) &&
-          !suspension_map_is_generator(c->suspension_map, cname)) {
-        use_call_suspend = true;
-      }
-    }
-
+    /* `use_call_suspend` / `suspend_spill_depth` were computed up front so the
+       enclosing operand stack could be spilled before head/args compiled. */
     if (use_call_suspend) {
       /* SM call to suspending proc: emit OP_CALL_SUSPEND + SM await sequence.
          OP_CALL_SUSPEND spawns inner SM as a task (concurrent) or falls through
@@ -11453,15 +11473,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
       compiler__emit_byte(c, OP_AWAIT_SM, line);
-      /* Inline path: result already on stack; jump past resume value push */
+      /* Inline path: result on stack — restore spilled enclosing operand
+         stack below it via the scratch slot. */
+      compiler__emit_restore_operand_stack(c, suspend_spill_depth, line);
       uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
       /* Resume label: dispatch table backpatch lands here */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
-      /* Push resume value from slot 1 (__rv) onto stack */
+      /* Push resume value from slot 1 (__rv) onto stack, then restore. */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, 1, line);
+      compiler__emit_restore_operand_stack(c, suspend_spill_depth, line);
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
     } else {

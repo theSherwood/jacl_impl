@@ -1,0 +1,54 @@
+# mode: concurrent
+# expect: 52
+# expect: 64
+# expect: 30
+# expect: 144
+
+# Regression test for the CPS arg-evaluation-ordering bug where two
+# inline calls to a suspending proc as siblings under one outer call
+# corrupted each other's results. Before the fix, the SUSPEND_CALL
+# emission path did not spill/restore the enclosing operand stack
+# around its OP_AWAIT_SM, so the first call's value on the operand
+# stack was overwritten by the second call's resume value.
+#
+# Uses `sleep` rather than `spawn`+`await` so the suspension is
+# unconditional — spawn/await can take the inline-resolved path and
+# never actually suspend, which would silently weaken this test.
+
+proc double-async {n} {
+  sleep 0.001
+  * $n 2
+}
+
+proc add-async {n} {
+  sleep 0.001
+  + $n 1
+}
+
+proc sum-two {a, b} {
+  + [double-async $a] [double-async $b]
+}
+
+proc sum-three {a, b, c} {
+  + [double-async $a] [+ [double-async $b] [double-async $c]]
+}
+
+proc mixed {a, b} {
+  + [add-async $a] [double-async $b]
+}
+
+proc nested {a, b} {
+  * [add-async $a] [double-async $b]
+}
+
+proc main {} {
+  # 10*2 + 16*2 = 20 + 32 = 52
+  print [sum-two 10 16]
+  # 5*2 + 10*2 + 17*2 = 10 + 20 + 34 = 64
+  print [sum-three 5 10 17]
+  # (7+1) + (11*2) = 8 + 22 = 30
+  print [mixed 7 11]
+  # (11+1) * (6*2) = 12 * 12 = 144
+  print [nested 11 6]
+}
+main

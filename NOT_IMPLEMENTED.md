@@ -7,10 +7,15 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-05-19 (§4 annotation-driven `[Stream T]` typing
-landed; for-loop narrowing + yield-site inference deferred as a Phase 2
-unit. §3b generator-tail check landed and section removed; see
-compiler.c `find_disallowed_generator_tail`).
+Last refreshed: 2026-05-22 (§10 CPS arg-eval bug fixed — SM
+compiler's SUSPEND_CALL path now spills/restores the enclosing
+operand stack across `OP_AWAIT_SM`, matching the discipline already
+used by await/sleep/yield/parallel/race. Regression test:
+`test/jacl/suspending_call_inline_args.jacl`. §4 annotation-driven
+`[Stream T]` typing landed 2026-05-19; for-loop narrowing + yield-
+site inference deferred as a Phase 2 unit. §3b generator-tail check
+landed and section removed; see compiler.c
+`find_disallowed_generator_tail`).
 
 ---
 
@@ -298,18 +303,6 @@ via `COND_WAIT_FOR_MS`; see `AUDIT.md` §11). Remaining corners:
 
 From `DESIGN.md` § "Known Limitations".
 
-- **Two suspending calls as siblings in one outer call return wrong
-  values.** Discovered 2026-05-22 while writing `test/jacl/tour.jacl`.
-  When two calls to a suspending proc appear inline as args to the
-  same outer call — e.g. `+ [double-async 10] [double-async 16]` where
-  `double-async` does `spawn`+`await` internally — the second result
-  corrupts the first, and the outer call returns the wrong sum (got
-  64, expected 52). With explicit intermediate bindings (`def x [...];
-  def y [...]; + $x $y`) the same code works. Looks like a CPS
-  arg-evaluation-ordering bug in the SM compiler around back-to-back
-  suspension points where both values must be live on the operand
-  stack. Repro: see commented note in `test/jacl/tour.jacl` direct-style
-  section. No fix yet; tour uses the explicit-binding workaround.
 - **Escape analysis: boxes in collections are not tracked.** The
   escape pass detects direct mutable captures and transitive captures
   through closures, but does *not* track box/cell refs stored in
