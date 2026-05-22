@@ -80,6 +80,14 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_TYPED_VECTOR  ((uint64_t)0x18 << JACL_TAG_SHIFT)
 #define JACL_TAG_TYPED_MAP     ((uint64_t)0x19 << JACL_TAG_SHIFT)
 
+/* Bitmask of heap-managed tag indices (after >> JACL_TAG_SHIFT). Used by
+ * jacl_is_heap_type for an O(1) predicate instead of an 18-way `||` chain
+ * — gc_remembered_set_barrier sits on the hot path of every mutable-cell
+ * write. MUST stay in sync with the same constant in jacl.h. Bits set:
+ * STRING(0x05)..ATOM(0x0C), I64(0x0E)..STRUCT(0x12), ROPE_STRING(0x14),
+ * STATE_MACHINE(0x16)..TYPED_MAP(0x19). */
+#define JACL_HEAP_TAG_MASK     (0x03D7DFE0u)
+
 /* --- Heap structs for 64-bit numeric types --- */
 
 typedef struct { int64_t value; } JaclHeapI64;

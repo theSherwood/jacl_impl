@@ -88,25 +88,11 @@ GCHeader *gc_header_of(void *payload) {
 /* --- Heap type predicate --- */
 
 bool jacl_is_heap_type(JaclVal v) {
-    uint64_t tag = v & JACL_TYPE_MASK;
-    return tag == JACL_TAG_STRING
-        || tag == JACL_TAG_VECTOR
-        || tag == JACL_TAG_MAP
-        || tag == JACL_TAG_CLOSURE
-        || tag == JACL_TAG_BIGNUM
-        || tag == JACL_TAG_CELL
-        || tag == JACL_TAG_BOX
-        || tag == JACL_TAG_ATOM
-        || tag == JACL_TAG_I64
-        || tag == JACL_TAG_U64
-        || tag == JACL_TAG_F64
-        || tag == JACL_TAG_FUTURE
-        || tag == JACL_TAG_STRUCT
-        || tag == JACL_TAG_ROPE_STRING
-        || tag == JACL_TAG_STATE_MACHINE
-        || tag == JACL_TAG_SYNTAX
-        || tag == JACL_TAG_TYPED_VECTOR
-        || tag == JACL_TAG_TYPED_MAP;
+    /* Single-bitmask test — see JACL_HEAP_TAG_MASK in jacl.h. The previous
+     * 18-way `||` chain dominated gc_remembered_set_barrier in box_churn
+     * profiles since every immediate-int new_val walked the full chain. */
+    uint64_t tag_idx = (v & JACL_TYPE_MASK) >> JACL_TAG_SHIFT;
+    return ((JACL_HEAP_TAG_MASK >> tag_idx) & 1u) != 0;
 }
 
 /* ======================================================================
