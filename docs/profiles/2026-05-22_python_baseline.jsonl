@@ -1,0 +1,5 @@
+{"scenario": "box_churn", "git_sha": "fafdcb8", "runtime": "python", "python_version": "3.13.2", "warmup_iters": 2, "timed_iters": 20, "wall_ns_min": 181842, "wall_ns_median": 184500, "wall_ns_max": 190176, "result": 1999000}
+{"scenario": "collection_churn", "git_sha": "fafdcb8", "runtime": "python", "python_version": "3.13.2", "warmup_iters": 2, "timed_iters": 20, "wall_ns_min": 670461, "wall_ns_median": 698707, "wall_ns_max": 798515, "result": 79600}
+{"scenario": "collection_churn_mut", "git_sha": "fafdcb8", "runtime": "python", "python_version": "3.13.2", "warmup_iters": 2, "timed_iters": 20, "wall_ns_min": 63010, "wall_ns_median": 63399, "wall_ns_max": 69357, "result": 79600}
+{"scenario": "spawn_chain", "git_sha": "fafdcb8", "runtime": "python", "python_version": "3.13.2", "warmup_iters": 2, "timed_iters": 20, "wall_ns_min": 2629943, "wall_ns_median": 2962823, "wall_ns_max": 3518894, "result": 1275}
+{"scenario": "string_concat", "git_sha": "fafdcb8", "runtime": "python", "python_version": "3.13.2", "warmup_iters": 2, "timed_iters": 20, "wall_ns_min": 42780, "wall_ns_median": 43452, "wall_ns_max": 45119, "result": 501}

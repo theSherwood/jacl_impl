@@ -1,0 +1,88 @@
+bench-diff: fafdcb8 → fafdcb8
+  baseline: docs/profiles/2026-05-22_jacl_O2_bitmask_vs_python.jsonl
+  new:      /tmp/jacl_ascii.jsonl
+
+  [box_churn]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                234.00K        272.00K   +  16.2%
+    wall_ns_min                   216.00K        255.00K   +  18.1%
+    wall_ns_max                   314.00K        362.00K   +  15.3%
+    gc_cycles                           0              0          —
+    gc_total_ns                         0              0          —
+    gc_max_ns                           0              0          —
+    gc_mark_rounds                      0              0          —
+    bytes_allocated                 1.06M          1.06M       0.0%
+    allocs                         44.04K         44.04K       0.0%
+    slow_path_allocs                   16             16       0.0%
+    tasks_executed                     22             22       0.0%
+    steal_attempts                     23             23       0.0%
+    steal_successes                     0              0          —
+    idle_sleep_ns                   5.49M          6.29M   +  14.6%
+    inbox_pops                         22             22       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks                18             18       0.0%
+
+  [collection_churn]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                533.00K        562.00K   +   5.4%
+    wall_ns_min                   291.00K        303.00K   +   4.1%
+    wall_ns_max                     1.94M          1.92M      -0.9%
+    gc_cycles                           4              4       0.0%
+    gc_total_ns                     2.56M          2.59M   +   1.3%
+    gc_max_ns                       1.41M          1.36M      -3.1%
+    gc_mark_rounds                      4              4       0.0%
+    bytes_allocated                 8.73M          8.73M       0.0%
+    allocs                         53.39K         53.39K       0.0%
+    slow_path_allocs                  157            156      -0.6%
+    tasks_executed                     22             22       0.0%
+    steal_attempts                     24             24       0.0%
+    steal_successes                     0              0          —
+    idle_sleep_ns                  13.14M         14.09M   +   7.2%
+    inbox_pops                         22             22       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks                86             92   +   7.0%
+
+  [spawn_chain]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                292.00K        319.00K   +   9.2%
+    wall_ns_min                   145.00K        121.00K     -16.6%
+    wall_ns_max                   476.00K        480.00K   +   0.8%
+    gc_cycles                           0              0          —
+    gc_total_ns                         0              0          —
+    gc_max_ns                           0              0          —
+    gc_mark_rounds                      0              0          —
+    bytes_allocated               272.25K        272.25K       0.0%
+    allocs                          4.53K          4.53K       0.0%
+    slow_path_allocs                    3              3       0.0%
+    tasks_executed                  2.24K          2.24K       0.0%
+    steal_attempts                    820            488     -40.5%
+    steal_successes                   251            121     -51.8%
+    idle_sleep_ns                   5.94M          6.66M   +  12.0%
+    inbox_pops                         22             22       0.0%
+    pinned_inbox_pops               1.10K          1.10K       0.0%
+    current_heap_blocks                 5              5       0.0%
+
+  [string_concat]
+    metric                       baseline            new      delta
+    ---------------------- -------------- --------------  ---------
+    wall_ns_median                  1.74M        590.00K     -66.1%
+    wall_ns_min                     1.24M        300.00K     -75.8%
+    wall_ns_max                     3.61M          2.05M     -43.1%
+    gc_cycles                          13             17   +  30.8%
+    gc_total_ns                     7.30M          8.58M   +  17.6%
+    gc_max_ns                       1.40M          1.18M     -16.2%
+    gc_mark_rounds                     13             17   +  30.8%
+    bytes_allocated                28.12M         28.12M       0.0%
+    allocs                         32.71K         32.71K       0.0%
+    slow_path_allocs                  750            722      -3.7%
+    tasks_executed                     22             21      -4.5%
+    steal_attempts                     49             27     -44.9%
+    steal_successes                     0              0          —
+    idle_sleep_ns                  40.18M         17.57M     -56.3%
+    inbox_pops                         22             22       0.0%
+    pinned_inbox_pops                   0              0          —
+    current_heap_blocks               124            103     -16.9%
+

@@ -1,0 +1,33 @@
+bench-compare: jacl vs python
+  baseline (jacl): /tmp/jacl_O2.jsonl
+  other    (python): /tmp/py.jsonl
+
+  [box_churn]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            219.00µs     181.84µs     0.83x
+    wall_ns_median         271.00µs     184.50µs     0.68x
+    wall_ns_max            301.00µs     190.18µs     0.63x
+
+  [collection_churn]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            307.00µs     670.46µs     2.18x
+    wall_ns_median         535.00µs     698.71µs     1.31x
+    wall_ns_max              1.41ms     798.51µs     0.57x
+
+  [spawn_chain]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            135.00µs       2.63ms    19.48x
+    wall_ns_median         255.00µs       2.96ms    11.62x
+    wall_ns_max            414.00µs       3.52ms     8.50x
+
+  [string_concat]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min              2.01ms      42.78µs     0.02x
+    wall_ns_median           2.92ms      43.45µs     0.01x
+    wall_ns_max              4.74ms      45.12µs     0.01x
+
+  scenarios only in python: collection_churn_mut
