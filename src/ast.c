@@ -94,7 +94,7 @@ typedef enum {
   HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
 
   /* Errors */
-  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_ASSERT,
 
   /* Boxes / atoms / coercion */
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
@@ -210,6 +210,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "signal", 6) == 0) return HEAD_SIGNAL;
       if (memcmp(s, "cancel", 6) == 0) return HEAD_CANCEL;
       if (memcmp(s, "extern", 6) == 0) return HEAD_EXTERN;
+      if (memcmp(s, "assert", 6) == 0) return HEAD_ASSERT;
       return HEAD_NONE;
     case 7:
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;

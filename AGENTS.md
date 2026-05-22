@@ -23,6 +23,12 @@
   so it needs `[]`; `gen` is an arg to `collect`, same.
 - This applies to test sources (`.c` strings, `test/jacl/*.jacl`) and
   any sample code in docs.
+- For a single-file survey of working JACL syntax, see
+  `test/jacl/tour.jacl` — values, bindings, the three modes,
+  interpolation, procs, lambdas, if/while/for, streams,
+  destructuring, structs, maps, mutable state, errors, and
+  spawn/await/parallel/race. The test harness runs it, so it stays in
+  sync with the implementation. `SYNTAX.md` is the full reference.
 
 ## When writing C
 

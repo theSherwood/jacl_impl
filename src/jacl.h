@@ -632,7 +632,7 @@ typedef enum {
   HEAD_PRINT, HEAD_LENGTH, HEAD_BYTE_LENGTH,
   HEAD_INDEX, HEAD_SLICE, HEAD_CONCAT,
   HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
-  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_ASSERT,
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
   HEAD_WATCH, HEAD_UNWATCH,
@@ -1013,7 +1013,10 @@ typedef enum {
 
   /* --- Atom watchers (watch / unwatch) --- */
   OP_WATCH,                /* pop fn, pop key, pop atom; register fn under key; push nil */
-  OP_UNWATCH               /* pop key, pop atom; remove watcher under key; push nil */
+  OP_UNWATCH,              /* pop key, pop atom; remove watcher under key; push nil */
+
+  /* --- Assertion --- */
+  OP_ASSERT                /* pop value, halt with runtime error if falsy, else push nil */
 } OpCode;
 
 typedef struct {

@@ -266,7 +266,10 @@ typedef enum {
 
   /* --- Atom watchers (watch / unwatch) --- */
   OP_WATCH,                /* pop fn, pop key, pop atom; register fn under key; push nil */
-  OP_UNWATCH               /* pop key, pop atom; remove watcher under key; push nil */
+  OP_UNWATCH,              /* pop key, pop atom; remove watcher under key; push nil */
+
+  /* --- Assertion --- */
+  OP_ASSERT                /* pop value, halt with runtime error if falsy, else push nil */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -473,6 +476,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_CHECK_ERROR:     return "OP_CHECK_ERROR";
     case OP_JUMP_IF_ERROR:   return "OP_JUMP_IF_ERROR";
     case OP_STACK_TRACE:     return "OP_STACK_TRACE";
+    case OP_ASSERT:          return "OP_ASSERT";
     case OP_MAKE_CELL:       return "OP_MAKE_CELL";
     case OP_GET_CELL_LOCAL:  return "OP_GET_CELL_LOCAL";
     case OP_SET_CELL_LOCAL:  return "OP_SET_CELL_LOCAL";

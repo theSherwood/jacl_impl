@@ -5977,6 +5977,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* Assert builtin: 1 arg (condition). On falsy, OP_ASSERT halts the VM
+     with "assertion failed" at the source line of the assert call. */
+  if (hid == HEAD_ASSERT) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "assert", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ASSERT, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
   /* Print builtin */
   if (hid == HEAD_PRINT) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
@@ -13270,18 +13283,21 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     }
     c.ctx_pre_registered = true;
 
-    /* Phase 2: Hoist top-level proc definitions into the outer chunk so
-       they are defined via OP_SET_GLOBAL before the SM closure executes.
-       This ensures all workers have proc definitions in their env when
-       running in concurrent mode. */
+    /* Phase 2: Hoist top-level proc/defstruct/defmacro/use definitions
+       into the outer chunk so they are defined via OP_SET_GLOBAL before
+       the SM closure executes. proc/use ensure workers have definitions
+       in their env in concurrent mode; defstruct/defmacro must compile
+       at scope_depth==0 (the SM body runs at scope_depth==1). */
     uint32_t non_proc_count = 0;
     AstNode** non_proc_stmts = (AstNode**)arena_alloc(arena,
         parse.count * sizeof(AstNode*));
     for (uint32_t i = 0; i < parse.count; i++) {
       AstNode* node = parse.nodes[i];
-      if (node->type == AST_COMMAND &&
-          compiler__head_matches(node->data.command.head, "proc", 4)) {
-        /* Compile proc definition into outer (top-level) chunk */
+      if ((node->type == AST_COMMAND &&
+           compiler__head_matches(node->data.command.head, "proc", 4)) ||
+          node->type == AST_USE ||
+          node->type == AST_DEFSTRUCT ||
+          node->type == AST_DEFMACRO) {
         compiler__compile_node(&c, node);
         compiler__emit_check_error(&c, node->start.line);
       } else {
@@ -13869,7 +13885,9 @@ ProgramResult jacl_compile_program(const char* root_path,
       AstNode* node = parse.nodes[i];
       if ((node->type == AST_COMMAND &&
            compiler__head_matches(node->data.command.head, "proc", 4)) ||
-          node->type == AST_USE) {
+          node->type == AST_USE ||
+          node->type == AST_DEFSTRUCT ||
+          node->type == AST_DEFMACRO) {
         compiler__compile_node(&c, node);
         compiler__emit_check_error(&c, node->start.line);
       } else {

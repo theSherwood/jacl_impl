@@ -2360,6 +2360,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_ERROR_VAL] = &&L_OP_ERROR_VAL,
     [OP_CHECK_ERROR] = &&L_OP_CHECK_ERROR,
     [OP_JUMP_IF_ERROR] = &&L_OP_JUMP_IF_ERROR,
+    [OP_ASSERT] = &&L_OP_ASSERT,
     [OP_STACK_TRACE] = &&L_OP_STACK_TRACE,
     [OP_MAKE_CELL] = &&L_OP_MAKE_CELL,
     [OP_GET_CELL_LOCAL] = &&L_OP_GET_CELL_LOCAL,
@@ -4991,6 +4992,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         vm->stack[vm->stack_top - 1] = jacl_clear_error(vm->stack[vm->stack_top - 1]);
+        DISPATCH();
+      }
+
+      CASE(OP_ASSERT): {
+        /* Pop one value. If falsy, halt with runtime error. Otherwise
+           push nil so the assert call has a value in expression position. */
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        if (vm__is_falsy(val)) {
+          vm__set_error(vm, "assertion failed");
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
         DISPATCH();
       }
 

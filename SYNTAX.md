@@ -1271,6 +1271,7 @@ Features from this document compared against the current codebase. Last updated:
 | Line continuation (`\` at end of line) | yes |
 | Comments (`#`, `##`) | yes |
 | Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
+| `assert` builtin | `OP_ASSERT`: halts the VM with "assertion failed" on falsy, else returns nil |
 | Persistent collections (vectors, maps) | RRB-tree, HAMT |
 | Mutable state (`box`, `atom`, `swap`, `reset`) | thread-local boxes, CAS atoms |
 | Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS + SM transform; NxM scheduler |
