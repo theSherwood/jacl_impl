@@ -181,6 +181,55 @@ if a real-workload profile pins them.
   walker bodies stayed separate. Pure code health, no perf win, ~400
   LoC removable. Same for `gc_mark` / `gc_mark_minor`.
 
+### Next-session perf candidates (2026-05-22 cross-runtime bench)
+
+Pick-up hand-off. Current standing vs CPython 3.x at 60 iters
+(`docs/profiles/2026-05-22_jacl_O2_inline_box_vs_python_compare.txt`):
+spawn_chain JACL 6.5× faster · collection_churn JACL 1.6× faster ·
+box_churn 1.5× slower · string_concat 18× slower.
+
+Ranked by leverage:
+
+1. **string_concat algorithmic gap** — 18× slower than Python because
+   CPython's BINARY_ADD has a refcount==1 in-place realloc fast path
+   that turns the loop into amortized O(N) while JACL is honest O(N²).
+   To close most of this gap: add an "owner-1 in-place mutation" path
+   to JACL's concat — when the GC can cheaply prove the LHS isn't
+   shared (e.g. it just came off a local slot with no other
+   reachability), grow its buffer in place rather than allocating a
+   fresh rope. Invasive (needs uniqueness info from the GC), large
+   payoff.
+
+2. **box_churn remaining 1.5× gap** — `gc_alloc` fast path is already
+   at 0.6% self-time; the cost is downstream GC cycles from 385 MB
+   cumulative bytes_allocated and per-cycle mark/sweep. A per-thread
+   nursery / TLAB with bump-only allocation and cheap minor GC would
+   eliminate most of those cycles entirely (most boxes die before
+   they'd be collected anyway). Architectural — touches allocator,
+   GC, root scanning, write barriers. Large work, large payoff for
+   any alloc-heavy workload.
+
+3. **C-style `for` vs `while` dispatch overhead** — ~40% slower on
+   box_churn even with identical body shape (`while + def b` 244 µs vs
+   `for + def b` 385 µs at 8000 iters). Worth a focused profile of
+   the for prologue/step path; the C-style for adds a step-compile +
+   extra check_error + the inner-scope OP_POP_N, and `incr i` expands
+   to set + GET + add. Suspect: per-iter `incr` overhead and/or env
+   lookup pattern for the for-init local. Low-risk to investigate;
+   modest payoff would let the bench use the more-idiomatic for
+   without paying a measurement tax.
+
+4. **OP_BOX error-check elision** — `[box value]` unconditionally
+   runs `jacl_is_error(value)` even when the typer has proved the
+   operand can't be an error (e.g. result of `+ $i 1` on i32 operands).
+   Tiny per-op win; primarily an optimizer practice exercise. Add a
+   typer-driven OP_BOX_UNCHECKED variant.
+
+5. **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — current env
+   lookup is a linear scan over the env array. A 1-entry monomorphic
+   cache per call site (name → last-seen slot index) would hit ~100%
+   in counted loops. Modest VM dispatch win, low risk.
+
 ## Closed items
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
