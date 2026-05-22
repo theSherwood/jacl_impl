@@ -266,6 +266,18 @@ proc main {} {
   assert ($hit == 5)
   unless [== 1 1] { set hit 99 }
   assert ($hit == 5)
+
+  # ----- interpret / sandbox -----
+  # `[interpret SRC]` compiles and runs SRC in a child VM with the
+  # default prelude. `[interpret PRELUDE SRC]` restricts to the
+  # entries in PRELUDE, so an empty map yields a no-I/O sandbox.
+  # `[interpret-prelude]` returns the default prelude as a map, so
+  # you can derive subsets by `map-remove` / `map-set`.
+  assert ([interpret "[+ 1 [* 2 3]]"] == 7)
+  assert ([interpret [map] "[+ 10 20]"] == 30)
+  # Blocked primitives surface as error values rather than aborting.
+  def safe [map-remove [interpret-prelude] "spawn"]
+  assert [error? [interpret $safe "[spawn { 99 }]"]]
 }
 
 main
