@@ -2789,6 +2789,25 @@ struct Compiler {
   } narrowings[8];
   uint32_t             narrowing_count;
   CtxFieldList*        ctx_fields;       /* ctx field accumulator (root compiler owns) */
+  /* Top-level mut/def → depth-0 local lowering.
+   *
+   * When the chunk contains no closure-creating commands (proc, defmacro,
+   * spawn, parallel, race, interpret) a pre-scan sets `lower_top_level`
+   * true; in that mode, top-level `mut`/`def` skip OP_DEF_GLOBAL and add
+   * a depth-0 local instead. Reads ($name) and writes (set name VAL) at
+   * top-level then naturally resolve to OP_GET_LOCAL / OP_SET_LOCAL via
+   * compiler__resolve_local. The env-side OP_GET_GLOBAL/OP_SET_GLOBAL
+   * inline cache then has no work to do for these names (still needed
+   * for prelude callables and any unrecognised reference).
+   *
+   * Conservative single-flag analysis (vs per-name capture tracking)
+   * because procs that read top-level names would have to be captured
+   * as upvalues — possible in principle but a substantial refactor.
+   * For the existing JACL bench suite the no-closures case covers
+   * sieve_primes, box_churn, map_lookup_hot, collection_churn, and
+   * string_concat (the OP_GET_GLOBAL-bound scenarios); spawn_chain,
+   * fib_recursive, parallel_map_reduce keep the env path. */
+  bool                 lower_top_level;
 };
 
 /* --- Phase 2 helper: compile a typed-collection element argument.
@@ -2853,6 +2872,61 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_binding_count = 0;
   c->narrowing_count   = 0;
   c->ctx_fields        = NULL;
+  c->lower_top_level   = false;
+}
+
+/* --- Top-level lowering pre-scan ---
+ *
+ * For lowering, we need TWO things to be true about the chunk:
+ *   (a) no closure-creating / env-observing constructs anywhere
+ *       (proc, defmacro, spawn, parallel, race, await, yield,
+ *        interpret, use) — otherwise a callee could expect to read
+ *        the top-level name through the env;
+ *   (b) at least one loop construct (while, for) so the lowering
+ *       actually pays for itself.
+ *
+ * (b) is what protects the embed / REPL multi-eval flow: `def x 42`
+ * by itself doesn't loop, so the chunk falls back to OP_DEF_GLOBAL
+ * and a follow-up `$x` chunk can read it from env. Loop-heavy
+ * chunks (sieve_primes-style) get the local-slot fast path.
+ *
+ * Two scanners share the AST walk to keep compile-time cost flat. */
+typedef enum {
+  TL_SCAN_HAS_CLOSURE = 1 << 0,
+  TL_SCAN_HAS_LOOP    = 1 << 1,
+} TopLevelScanFlags;
+
+static uint32_t compiler__top_level_scan(AstNode* node) {
+  if (!node) return 0;
+  uint32_t flags = 0;
+  if (node->type == AST_COMMAND) {
+    HeadId hid = (HeadId)node->data.command.head_id;
+    if (hid == HEAD_PROC      || hid == HEAD_DEFMACRO ||
+        hid == HEAD_SPAWN     || hid == HEAD_PARALLEL ||
+        hid == HEAD_RACE      || hid == HEAD_AWAIT    ||
+        hid == HEAD_YIELD     ||
+        hid == HEAD_INTERPRET || hid == HEAD_INTERPRET_PRELUDE) {
+      flags |= TL_SCAN_HAS_CLOSURE;
+    }
+    if (hid == HEAD_WHILE || hid == HEAD_FOR) {
+      flags |= TL_SCAN_HAS_LOOP;
+    }
+    flags |= compiler__top_level_scan(node->data.command.head);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      flags |= compiler__top_level_scan(node->data.command.args[i]);
+    }
+    return flags;
+  }
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) {
+      flags |= compiler__top_level_scan(node->data.block.commands[i]);
+    }
+    return flags;
+  }
+  if (node->type == AST_USE) {
+    return TL_SCAN_HAS_CLOSURE;  /* imports inject names at chunk boundary */
+  }
+  return 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -7322,11 +7396,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         compiler__emit_byte(c, OP_NIL, line);
       }
-    } else if (c->scope_depth > 0) {
+    } else if (c->scope_depth > 0 ||
+               (c->lower_top_level && effective_type != TYPE_STRUCT &&
+                c->enclosing == NULL)) {
       /* Local variable: value is on stack as the local slot.
          US-013: use the name arg's scope mark (0 for ^caret, else the
          def command's stamped mark) so caret bindings land in the
-         caller's scope while normal macro bindings stay hygienic. */
+         caller's scope while normal macro bindings stay hygienic.
+
+         lower_top_level branch: top-level mut/def in chunks with no
+         closures (proc/spawn/parallel/race/await/interpret/use) skip
+         the env and live as stack locals on the chunk's frame. Reads
+         and writes flow through resolve_local → OP_GET_LOCAL /
+         OP_SET_LOCAL, bypassing the env lookup entirely. The
+         lower_top_level pre-scan in compiler_compile (see Compiler
+         struct docs) sets this flag only when no callee can observe
+         the name through the env. */
       {
         uint32_t prev_mark = c->current_scope_mark;
         c->current_scope_mark = bind_scope_mark;
@@ -13505,7 +13590,20 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
     result.suspending = true;
   } else {
-    /* Normal non-suspending top-level compilation */
+    /* Normal non-suspending top-level compilation.
+     *
+     * Pre-scan: lower top-level mut/def to depth-0 locals iff the chunk
+     * has no closure/suspend constructs AND has at least one loop
+     * (where the lowering actually pays off). The loop precondition
+     * also keeps the embed/REPL `jacl_eval` flow on the env path so
+     * follow-up evals can still read prior `def x 42` bindings. */
+    uint32_t scan = 0;
+    for (uint32_t i = 0; i < parse.count; i++) {
+      scan |= compiler__top_level_scan(parse.nodes[i]);
+    }
+    c.lower_top_level = !(scan & TL_SCAN_HAS_CLOSURE) &&
+                         (scan & TL_SCAN_HAS_LOOP);
+
     for (uint32_t i = 0; i < parse.count; i++) {
       compiler__compile_node(&c, parse.nodes[i]);
 
@@ -13515,8 +13613,26 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       }
     }
 
-    compiler__emit_byte(&c, OP_HALT,
-                        parse.count > 0 ? parse.nodes[parse.count - 1]->start.line : 1);
+    uint32_t halt_line =
+        parse.count > 0 ? parse.nodes[parse.count - 1]->start.line : 1;
+
+    /* If lowering pushed top-level mut/def values as depth-0 locals, those
+     * slots sit beneath the last statement's result. Strip them while
+     * preserving the result on top so direct vm_exec callers (tests,
+     * REPLs) see a clean stack — same semantics as the env path used
+     * to produce. OP_CLOSE_LOOP takes a uint8_t count; cap at 255 and
+     * fall back to no-lowering by erroring if exceeded. */
+    if (c.lower_top_level && c.local_count > 0) {
+      if (c.local_count > 255) {
+        compiler__error(&c, halt_line, 1,
+                        "too many top-level bindings to lower (limit 255)");
+      } else {
+        compiler__emit_byte(&c, OP_CLOSE_LOOP, halt_line);
+        compiler__emit_byte(&c, (uint8_t)c.local_count, halt_line);
+      }
+    }
+
+    compiler__emit_byte(&c, OP_HALT, halt_line);
   }
 
   /* Finalize ctx struct: register accumulated ctx fields as a StructTypeDef */

@@ -1486,6 +1486,10 @@ struct Compiler {
   } narrowings[8];
   uint32_t             narrowing_count;
   void*                ctx_fields;       /* CtxFieldList* (opaque in header) */
+  bool                 lower_top_level;  /* true when a closure-free chunk
+                                            allows top-level mut/def to be
+                                            stored as depth-0 locals; see
+                                            compiler.c for full rationale */
 };
 
 /* ========================================================================

@@ -193,13 +193,12 @@ string_concat 12×.
 
 The IC closed a notable chunk of the pure-arithmetic and HAMT-read
 gaps (spawn_chain pulled away by another factor of 4 as a byproduct
-of cheaper env access in the spawn machinery), but every per-iter
-linear-scan-bound scenario still has measurable env-lookup overhead
-even with 100 % hit rate — the JaclVal compare on `env.names[slot]
-== name` is a real load+compare in the hot path. A typer-driven
-pass that lowers OP_GET_GLOBAL to OP_GET_LOCAL (when the name
-resolves to a known top-level slot at compile time) would skip the
-runtime check entirely. Worth a follow-up bench.
+of cheaper env access in the spawn machinery). The follow-up pass
+that lowers top-level mut/def to depth-0 locals in chunks with a
+hot loop and no closures (see Closed items below) shaved another
+4 – 19 % off the env-bound scenarios:
+collection_churn -18.7 %, box_churn -13.5 %, string_concat -6.4 %,
+sieve_primes -4.1 %, map_lookup_hot ≈ tie.
 
 **TODO: add a Clojure column to the cross-runtime bench.** Python is a
 useful "what does a non-functional mainstream language do" baseline,
@@ -240,6 +239,33 @@ Ranked by leverage:
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **Top-level mut/def → depth-0 local lowering** — landed 2026-05-22.
+  A one-pass AST scan in `compiler_compile` sets two flags per chunk:
+  `has_closure` (any proc, defmacro, spawn, parallel, race, await,
+  yield, interpret, use anywhere) and `has_loop` (any while or for at
+  any depth). When `!has_closure && has_loop`, the compiler's
+  top-level `mut`/`def` branch routes through the existing
+  scope-depth-greater-than-zero local path: the value stays on the
+  stack as a depth-0 local, no `OP_DEF_GLOBAL` is emitted, and the
+  name lives in `c->locals`. Subsequent `$name` reads and `set name`
+  writes naturally resolve via `compiler__resolve_local` and emit
+  `OP_GET_LOCAL` / `OP_SET_LOCAL` — single u8 read, single load, no
+  env scan, no IC validation. The compiler then emits `OP_CLOSE_LOOP
+  <N>` before the trailing `OP_HALT` (N = number of depth-0 locals)
+  so direct `vm_exec` callers (tests, `jacl_eval`) still see a clean
+  stack with just the chunk's final value at slot 0. The loop
+  precondition keeps the embed/REPL `jacl_eval` flow on the env path
+  so a follow-up `$x` chunk can still read a prior `def x 42`. The
+  closure precondition keeps proc bodies, spawn continuations, and
+  interpret callees observing top-level state through env as before.
+  Min-of-min over 4×200-iter runs:
+  collection_churn -18.7 %, box_churn -13.5 %, string_concat -6.4 %,
+  sieve_primes -4.1 %, map_lookup_hot ≈ tie; fib_recursive,
+  parallel_map_reduce, spawn_chain all skipped (closures present)
+  and sit within machine-load variance of pre-lowering. Compounded
+  with the IC, sieve_primes is now ~19 % faster than the pre-IC
+  baseline. See
+  `docs/profiles/2026-05-22_jacl_lowered_vs_ic_compare.txt`.
 - **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — landed 2026-05-22.
   Each `OP_GET_GLOBAL` / `OP_SET_GLOBAL` site now carries a 2-byte
   inline-cache slot (initial value 0xFFFF). On first dispatch the VM

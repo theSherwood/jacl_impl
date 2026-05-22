@@ -1,0 +1,45 @@
+bench-compare: jacl (IC + endianness fix, HEAD before lowering)
+              vs jacl (top-level mut/def → depth-0 locals when chunk has
+                       a loop and no closures)
+
+  baseline: docs/profiles/2026-05-22_jacl_env_ic.jsonl (single 200-iter run)
+  other:    docs/profiles/2026-05-22_jacl_lowered.jsonl (single 200-iter run)
+
+  wall_ns_min, min-of-min across 4 measurement rounds at 200 timed iters each.
+  Median noise on this laptop runs 2-3x within a single round so min-of-min
+  is the noise-floor measurement. Scenarios where lowering does NOT activate
+  (procs/spawn/parallel present) sit within machine-load variance of HEAD.
+
+  scenario              lowering?  HEAD min   lowered min  delta
+  -------------------- ---------  ---------  -----------  -------
+  collection_churn     applies    508 µs     413 µs       -18.7%
+  box_churn            applies    431 µs     373 µs       -13.5%
+  string_concat        applies    533 µs     499 µs       -6.4%
+  sieve_primes         applies    11.36 ms   10.89 ms     -4.1%
+  map_lookup_hot       applies    3.12 ms    3.11 ms      tie
+
+  fib_recursive        skipped    29.83 ms   30.58 ms     within noise (proc)
+  parallel_map_reduce  skipped    590 µs     603 µs       within noise (parallel)
+  spawn_chain          skipped    248 µs     193 µs       within noise (spawn)
+
+  Mechanism: a one-pass scan of the chunk's AST sets two flags —
+  has_closure (proc, defmacro, spawn, parallel, race, await, yield,
+  interpret, use anywhere) and has_loop (while or for at any depth).
+  The compiler lowers top-level mut/def to depth-0 locals iff
+  !has_closure AND has_loop. The loop precondition keeps `jacl_eval`
+  (`def x 42`; later `$x`) on the env path so cross-eval persistence
+  works. The closure precondition keeps `proc fib` recursive lookups
+  and `spawn` continuation bodies on the env path so they can see
+  callers' top-level state.
+
+  Reads ($name) and writes (set name VAL) at top-level resolve through
+  the existing compiler__resolve_local; with the name registered as
+  a depth-0 local, they emit OP_GET_LOCAL / OP_SET_LOCAL — single u8
+  read, single load, single push. No env scan, no IC validation, no
+  cache-slot patch. Faster than even the warmed inline cache.
+
+  At chunk end the compiler emits OP_CLOSE_LOOP <N> before OP_HALT
+  (N = number of depth-0 locals) so the final expression's value
+  ends up alone on the stack — keeping direct vm_exec callers (tests,
+  jacl_eval) at the same stack discipline as the env path used to
+  produce.
