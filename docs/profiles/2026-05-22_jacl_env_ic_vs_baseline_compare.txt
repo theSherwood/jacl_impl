@@ -1,0 +1,29 @@
+bench-compare: jacl (pre-IC baseline) vs jacl (env inline cache landed)
+  baseline (jacl): docs/profiles/2026-05-22_jacl_pre_ic_200iter.jsonl
+  other    (jacl): docs/profiles/2026-05-22_jacl_env_ic.jsonl
+
+  Per-scenario wall_ns_min across 4 measurement runs at 200 timed iters.
+  min-of-min is the most noise-robust statistic on a noisy laptop; medians
+  are reported alongside for context.
+
+  scenario              base min   IC min    delta
+  -------------------- --------- --------- ---------
+  spawn_chain          298 µs    186 µs    -37.6 %  (heaviest OP_GET_GLOBAL load — spawn machinery)
+  parallel_map_reduce  756 µs    619 µs    -18.1 %  (sum-range proc + globals in driver)
+  map_lookup_hot       4.01 ms   3.39 ms   -15.6 %  (inner-loop $j, $acc, $m reads)
+  fib_recursive        36.69 ms  31.07 ms  -15.3 %  (proc-call + $n reads per call)
+  sieve_primes         13.40 ms  11.99 ms  -10.5 %  (the flagship target — pure arithmetic on muts)
+  string_concat        635 µs    573 µs    -9.8  %
+  box_churn            491 µs    480 µs    -2.2  %  (mostly alloc-bound; few env reads in hot path)
+  collection_churn     581 µs    571 µs    -1.7  %  (HAMT alloc dominates)
+
+  Mechanism: each OP_GET_GLOBAL / OP_SET_GLOBAL site carries a 2-byte
+  inline-cache slot (initially 0xFFFF). On first dispatch the VM does the
+  full env linear scan, then patches the resolved env-slot index into the
+  bytecode. Subsequent dispatches read the cached slot, validate that
+  env.names[slot] still equals the name constant (catches cross-VM cases
+  where different workers running the same chunk have differently-laid
+  envs), and skip the scan. env_set never reorders existing entries so
+  the (name, slot) pair, once cached, stays valid for the lifetime of
+  the env. IC hit rate is ~99.99% across all eight benches (verified by
+  temporary counters during development).

@@ -2908,7 +2908,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       CASE(OP_GET_GLOBAL): {
         uint16_t name_idx = vm__read_u16(vm);
+        uint8_t* ic_slot_ptr = vm->ip;     /* points at the IC u16 */
+        uint16_t cache_slot = vm__read_u16(vm);
         JaclVal name = vm->chunk->constants[name_idx];
+        if (cache_slot < vm->env.count &&
+            vm->env.names[cache_slot] == name) {
+          result = vm__push(vm, vm->env.values[cache_slot]);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        /* Miss — linear scan. */
         bool found;
         JaclVal value = vm__env_get(vm, name, &found);
         if (!found) {
@@ -2918,6 +2927,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           name_buf[nlen] = '\0';
           vm__set_error(vm, "undefined variable '$%s'", name_buf);
           return VM_RUNTIME_ERROR;
+        }
+        /* Patch the cache slot with the resolved env index. */
+        for (uint32_t k = 0; k < vm->env.count; k++) {
+          if (vm->env.names[k] == name) {
+            ic_slot_ptr[0] = (uint8_t)((k >> 8) & 0xFF);
+            ic_slot_ptr[1] = (uint8_t)(k & 0xFF);
+            break;
+          }
         }
         result = vm__push(vm, value); if (result != VM_OK) return result;
         DISPATCH();
@@ -5163,10 +5180,28 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       CASE(OP_SET_GLOBAL): {
         uint16_t name_idx = vm__read_u16(vm);
+        uint8_t* ic_slot_ptr = vm->ip;     /* points at the IC u16 */
+        uint16_t cache_slot = vm__read_u16(vm);
         JaclVal name = frame->chunk->constants[name_idx];
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
-        vm__env_set(vm, name, value);
+        if (cache_slot < vm->env.count &&
+            vm->env.names[cache_slot] == name) {
+          /* Release-store env_set uses on its update path so the GC root
+           * scanner observes a well-ordered write. */
+          ATOMIC_STORE_EXPLICIT(&vm->env.values[cache_slot], value, MEM_RELEASE);
+        } else {
+          /* Miss — env_set will update-in-place if name exists, else
+           * append. Then patch the IC for the next dispatch. */
+          vm__env_set(vm, name, value);
+          for (uint32_t k = 0; k < vm->env.count; k++) {
+            if (vm->env.names[k] == name) {
+              ic_slot_ptr[0] = (uint8_t)(k & 0xFF);
+              ic_slot_ptr[1] = (uint8_t)((k >> 8) & 0xFF);
+              break;
+            }
+          }
+        }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         DISPATCH();

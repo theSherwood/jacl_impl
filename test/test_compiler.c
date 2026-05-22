@@ -875,13 +875,15 @@ static int test_compile_var_ref(void) {
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
   ASSERT(jacl_is_inline_string(cr.chunk.constants[0]));
 
-  /* Bytecode: OP_GET_GLOBAL u16(0) OP_HALT
+  /* Bytecode: OP_GET_GLOBAL u16(name_idx=0) u16(ic_slot=0xFFFF) OP_HALT
      ($x at statement position is a value read, not a call) */
-  ASSERT_U32_EQ(cr.chunk.code_count, 4);
+  ASSERT_U32_EQ(cr.chunk.code_count, 6);
   ASSERT_INT_EQ(cr.chunk.code[0], OP_GET_GLOBAL);
   ASSERT_INT_EQ(cr.chunk.code[1], 0);
   ASSERT_INT_EQ(cr.chunk.code[2], 0);
-  ASSERT_INT_EQ(cr.chunk.code[3], OP_HALT);
+  ASSERT_INT_EQ(cr.chunk.code[3], 0xFF);
+  ASSERT_INT_EQ(cr.chunk.code[4], 0xFF);
+  ASSERT_INT_EQ(cr.chunk.code[5], OP_HALT);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);

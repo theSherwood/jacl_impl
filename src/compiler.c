@@ -2916,6 +2916,19 @@ void compiler__emit_constant(Compiler* c, JaclVal value, uint32_t line) {
   compiler__emit_u16(c, index, line);
 }
 
+/* Emit OP_GET_GLOBAL or OP_SET_GLOBAL with a trailing 2-byte inline-cache
+ * slot. The cache slot starts as 0xFFFF (invalid env index, never matches)
+ * and the VM patches it in-place on the first successful lookup. The IC
+ * lookup at runtime is a single compare against env.names[cached_slot];
+ * if it matches the name constant, the cache hits and skips the linear
+ * scan. See vm.c CASE(OP_GET_GLOBAL) for the read side. */
+void compiler__emit_global_op(Compiler* c, uint8_t op, uint16_t name_idx,
+                              uint32_t line) {
+  compiler__emit_byte(c, op, line);
+  compiler__emit_u16(c, name_idx, line);
+  compiler__emit_u16(c, 0xFFFF, line);
+}
+
 /* Look up the operand-stack depth recorded for the current suspension point.
    Peeks `c->sm_suspension_idx` without incrementing; the caller increments it
    when emitting the actual suspend op. Returns 0 when there is no suspension
@@ -5708,8 +5721,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclVal gkey = compiler__global_name_val(c,
             head->data.lit_string.value, name_len);
         uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
+        compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
       }
     } else {
       compiler__compile_node(c, head);
@@ -5790,8 +5802,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          * Runtime looks up the prelude-seeded env value and calls it. */
         JaclVal gkey = compiler__global_name_val(c, hname, hlen);
         uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
+        compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
         for (uint32_t i = 0; i < argc; i++) {
           compiler__compile_node(c, args[i]);
         }
@@ -6780,8 +6791,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
              Emit: GET_GLOBAL (push box), compile RHS, OP_RESET */
           JaclVal set_key = compiler__global_name_val(c, set_name_ptr, name_len);
           uint16_t name_idx = chunk_add_constant(c->chunk, set_key);
-          compiler__emit_byte(c, OP_GET_GLOBAL, line);
-          compiler__emit_u16(c, name_idx, line);
+          compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
           compiler__compile_node(c, args[1]);
           JaclType rhs_type = (JaclType)args[1]->inferred_type;
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
@@ -6836,8 +6846,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, (uint8_t)target_type, line);
           }
           uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
-          compiler__emit_byte(c, OP_SET_GLOBAL, line);
-          compiler__emit_u16(c, name_idx, line);
+          compiler__emit_global_op(c, OP_SET_GLOBAL, name_idx, line);
         }
         return;
       }
@@ -10677,8 +10686,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           dep_buf[dep_total] = '\0';
           JaclVal dep_key = jacl_intern(c->heap, c->intern_table, dep_buf, dep_total);
           uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
-          compiler__emit_byte(c, OP_GET_GLOBAL, line);
-          compiler__emit_u16(c, get_idx, line);
+          compiler__emit_global_op(c, OP_GET_GLOBAL, get_idx, line);
 
           /* Set type info from export */
           c->last_expr_type = found_export->type;
@@ -11407,8 +11415,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclVal gkey = compiler__global_name_val(c,
             head->data.lit_string.value, name_len);
         uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
+        compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
       }
     } else {
       /* Non-string head (e.g. $var, nested command): compile as expression */
@@ -12008,8 +12015,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           JaclVal gkey = compiler__global_name_val(c,
               node->data.var_ref.name, name_len);
           uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-          compiler__emit_byte(c, OP_GET_GLOBAL, line);
-          compiler__emit_u16(c, name_idx, line);
+          compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
           /* Unbox typed globals: globals store tagged JaclVal, convert to raw */
           if (is_unboxed_type(global_type)) {
             uint8_t to_op;
@@ -12211,8 +12217,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           JaclVal dep_key = jacl_intern(c->heap, c->intern_table,
                                          dep_buf, dep_total);
           uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
-          compiler__emit_byte(c, OP_GET_GLOBAL, line);
-          compiler__emit_u16(c, get_idx, line);
+          compiler__emit_global_op(c, OP_GET_GLOBAL, get_idx, line);
         }
 
         /* Emit OP_MAP with the pair count */
@@ -12325,8 +12330,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             JaclVal dep_key = jacl_intern(c->heap, c->intern_table,
                                            dep_buf, dep_total);
             uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
-            compiler__emit_byte(c, OP_GET_GLOBAL, line);
-            compiler__emit_u16(c, get_idx, line);
+            compiler__emit_global_op(c, OP_GET_GLOBAL, get_idx, line);
 
             /* Define under importing module's prefixed name */
             JaclVal self_key = compiler__global_name_val(c, imp_name, imp_len);
@@ -12901,8 +12905,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       if (!use_direct_opcode) {
         JaclVal gkey = compiler__global_name_val(c, "exec", 4);
         uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
+        compiler__emit_global_op(c, OP_GET_GLOBAL, name_idx, line);
       }
 
       /* US-014: Check if any args are spread */

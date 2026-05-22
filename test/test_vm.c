@@ -1390,6 +1390,7 @@ static int test_op_def_get_global(void) {
   /* get x */
   chunk_write(&chunk, OP_GET_GLOBAL, 2);
   chunk_write_u16(&chunk, name_idx, 2);
+  chunk_write_u16(&chunk, 0xFFFF, 2);
   chunk_write(&chunk, OP_HALT, 2);
 
   VM vm;
@@ -1463,6 +1464,7 @@ static int test_op_def_global_redefine(void) {
   /* get z -> should be 20 */
   chunk_write(&chunk, OP_GET_GLOBAL, 3);
   chunk_write_u16(&chunk, name_idx, 3);
+  chunk_write_u16(&chunk, 0xFFFF, 3);
   chunk_write(&chunk, OP_HALT, 3);
 
   VM vm;
@@ -1491,6 +1493,7 @@ static int test_op_get_global_undefined(void) {
 
   chunk_write(&chunk, OP_GET_GLOBAL, 1);
   chunk_write_u16(&chunk, name_idx, 1);
+  chunk_write_u16(&chunk, 0xFFFF, 1);
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
@@ -1520,10 +1523,13 @@ static int test_env_prepopulated(void) {
 
   chunk_write(&chunk, OP_GET_GLOBAL, 1);
   chunk_write_u16(&chunk, t_idx, 1);
+  chunk_write_u16(&chunk, 0xFFFF, 1);
   chunk_write(&chunk, OP_GET_GLOBAL, 1);
   chunk_write_u16(&chunk, f_idx, 1);
+  chunk_write_u16(&chunk, 0xFFFF, 1);
   chunk_write(&chunk, OP_GET_GLOBAL, 1);
   chunk_write_u16(&chunk, n_idx, 1);
+  chunk_write_u16(&chunk, 0xFFFF, 1);
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;

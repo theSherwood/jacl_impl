@@ -183,22 +183,23 @@ if a real-workload profile pins them.
 
 ### Next-session perf candidates (2026-05-22 cross-runtime bench)
 
-Pick-up hand-off. Current standing vs CPython 3.x at 60 timed iters,
-8 scenarios
-(`docs/profiles/2026-05-22_jacl_vs_python_8bench_compare.txt`).
-JACL faster: spawn_chain 4.2× · collection_churn 2.1× ·
-parallel_map_reduce ≈ tie at median, 1.83× at min. JACL slower:
-fib_recursive 1.4× · map_lookup_hot 1.45× · box_churn 1.5× ·
-sieve_primes 1.76× · string_concat 17×.
+Pick-up hand-off. After the env inline-cache landed (see Closed items)
+the standing vs CPython 3.x at 200 timed iters, 8 scenarios
+(`docs/profiles/2026-05-22_jacl_ic_vs_python_compare.txt`, min metric):
+JACL faster — spawn_chain ~16× · collection_churn ~1.7× ·
+parallel_map_reduce ~1.9×. JACL slower — box_churn 1.74× ·
+map_lookup_hot 1.56× · fib_recursive 1.62× · sieve_primes 2.0× ·
+string_concat 12×.
 
-The new four (`fib_recursive`, `sieve_primes`, `map_lookup_hot`,
-`parallel_map_reduce`) cover axes the prior 4-scenario suite didn't
-touch: function-call dispatch, pure-arithmetic inner loops, hashed
-read latency, and real cross-worker parallelism. The pure-arithmetic
-sieve being 1.76× slower than CPython is a notable finding —
-strongly suggests the OP_GET_GLOBAL linear-scan env lookup (candidate
-#4 below) is the dominant cost on counted loops over mut globals,
-since the inner body is otherwise just OP_LT, OP_MUL, OP_MOD, OP_ADD.
+The IC closed a notable chunk of the pure-arithmetic and HAMT-read
+gaps (spawn_chain pulled away by another factor of 4 as a byproduct
+of cheaper env access in the spawn machinery), but every per-iter
+linear-scan-bound scenario still has measurable env-lookup overhead
+even with 100 % hit rate — the JaclVal compare on `env.names[slot]
+== name` is a real load+compare in the hot path. A typer-driven
+pass that lowers OP_GET_GLOBAL to OP_GET_LOCAL (when the name
+resolves to a known top-level slot at compile time) would skip the
+runtime check entirely. Worth a follow-up bench.
 
 **TODO: add a Clojure column to the cross-runtime bench.** Python is a
 useful "what does a non-functional mainstream language do" baseline,
@@ -235,15 +236,28 @@ Ranked by leverage:
    Tiny per-op win; primarily an optimizer practice exercise. Add a
    typer-driven OP_BOX_UNCHECKED variant.
 
-4. **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — current env
-   lookup is a linear scan over the env array. A 1-entry monomorphic
-   cache per call site (name → last-seen slot index) would hit ~100%
-   in counted loops. Modest VM dispatch win, low risk.
-
 ## Closed items
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — landed 2026-05-22.
+  Each `OP_GET_GLOBAL` / `OP_SET_GLOBAL` site now carries a 2-byte
+  inline-cache slot (initial value 0xFFFF). On first dispatch the VM
+  does the full env linear scan and patches the resolved env-slot index
+  back into the bytecode; subsequent dispatches read the slot, validate
+  `env.names[slot] == name` (catches cross-VM cases where workers
+  running the same chunk have differently-laid envs), and skip the
+  scan. `env_set` never reorders existing entries, so the (name, slot)
+  pair is stable for the env's lifetime. IC hit rate ~99.99% across
+  all eight bench scenarios. Min-of-min over 4×200-iter runs:
+  spawn_chain -37.6 %, parallel_map_reduce -18.1 %, map_lookup_hot
+  -15.6 %, fib_recursive -15.3 %, sieve_primes -10.5 %,
+  string_concat -9.8 %, box_churn -2.2 %, collection_churn -1.7 %.
+  See `docs/profiles/2026-05-22_jacl_env_ic_vs_baseline_compare.txt`.
+  An earlier per-VM open-addressing cache attempt regressed all
+  scenarios 23–39 % — the per-site cache won by being monomorphic
+  (single dispatch site sees one name, hits 100 %) and by patching
+  the slot into the bytecode (no hash, no probe, single u16 read).
 - **C-style `for` vs `while` dispatch overhead** — investigated and
   closed 2026-05-22 as **not reproducing**. The prior "40% slower"
   claim pre-dated `be44681`'s inner-scope cleanup; matched-pair benches

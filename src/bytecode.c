@@ -32,7 +32,7 @@ typedef enum {
   OP_GE,          /* pop two, push greater-or-equal result */
   OP_PRINT,         /* pop one, print it */
   OP_DEF_GLOBAL,    /* define global: followed by uint16_t name index */
-  OP_GET_GLOBAL,    /* get global: followed by uint16_t name index */
+  OP_GET_GLOBAL,    /* get global: followed by uint16_t name index + uint16_t inline-cache slot (0xFFFF = unset; VM patches on first hit) */
   OP_GET_LOCAL,     /* push local: followed by uint8_t slot index */
   OP_SET_LOCAL,     /* set local: followed by uint8_t slot index */
   OP_GET_UPVALUE,   /* push upvalue: followed by uint8_t upvalue index */
@@ -81,7 +81,7 @@ typedef enum {
   OP_SET_CELL_LOCAL,    /* pop value, store in cell at local slot, push nil */
   OP_GET_CELL_UPVALUE,  /* read cell from upvalue, push inner value */
   OP_SET_CELL_UPVALUE,  /* pop value, store in cell at upvalue, push nil */
-  OP_SET_GLOBAL,    /* pop value, set global by name index, push nil */
+  OP_SET_GLOBAL,    /* pop value, set global by name index + uint16_t inline-cache slot, push nil */
   OP_BOX,           /* pop value, wrap in box, push box */
   OP_BOX_STRUCT,    /* uint16_t type_idx; pop struct, wrap in typed box, push box */
   OP_ATOM,          /* pop value, wrap in atom, push atom */
