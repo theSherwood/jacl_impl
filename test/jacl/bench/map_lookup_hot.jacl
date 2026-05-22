@@ -1,0 +1,29 @@
+# Bench scenario: read-heavy map workload.
+#
+# Build a 200-entry map (key i -> value i*7), then do 10 k lookups
+# against scattered keys (key = (i * 73 + 11) mod 200). Targets:
+#   - HAMT lookup hot path (map-get) at small N where every key fits
+#     in one trie level — cache-resident, pointer-chase + tag check
+#   - the env-lookup pattern for the outer mutable accumulator
+#
+# This complements collection_churn (which exercises the write path).
+# Most real map workloads are read-heavy, and the read path has very
+# different cache behavior from path-copy on set.
+#
+# Output: deterministic sum of looked-up values.
+
+mut m [map]
+mut i 0
+while [< $i 200] {
+  set m [map-set $m $i [* $i 7]]
+  set i [+ $i 1]
+}
+
+mut acc 0
+mut j 0
+while [< $j 10000] {
+  def k [% [+ [* $j 73] 11] 200]
+  set acc [+ $acc [map-get $m $k]]
+  set j [+ $j 1]
+}
+print $acc

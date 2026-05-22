@@ -1,0 +1,61 @@
+bench-compare: jacl vs python
+  baseline (jacl): docs/profiles/2026-05-22_jacl_8bench.jsonl
+  other    (python): docs/profiles/2026-05-22_python_8bench.jsonl
+
+  [box_churn]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            234.00µs     166.90µs     0.71x
+    wall_ns_median         256.00µs     168.73µs     0.66x
+    wall_ns_max              1.29ms     269.80µs     0.21x
+
+  [collection_churn]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            272.00µs     578.81µs     2.13x
+    wall_ns_median         325.00µs     675.52µs     2.08x
+    wall_ns_max              1.38ms       1.12ms     0.81x
+
+  [fib_recursive]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min             16.10ms      11.53ms     0.72x
+    wall_ns_median          17.17ms      12.10ms     0.70x
+    wall_ns_max             29.00ms      12.68ms     0.44x
+
+  [map_lookup_hot]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min              1.85ms       1.33ms     0.72x
+    wall_ns_median           1.98ms       1.37ms     0.69x
+    wall_ns_max              2.70ms       1.49ms     0.55x
+
+  [parallel_map_reduce]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            396.00µs     725.85µs     1.83x
+    wall_ns_median         741.00µs     784.73µs     1.06x
+    wall_ns_max            961.00µs     888.18µs     0.92x
+
+  [sieve_primes]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min              6.29ms       3.68ms     0.59x
+    wall_ns_median           6.71ms       3.81ms     0.57x
+    wall_ns_max              8.60ms       4.22ms     0.49x
+
+  [spawn_chain]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            251.00µs       2.21ms     8.82x
+    wall_ns_median         563.00µs       2.38ms     4.22x
+    wall_ns_max            947.00µs       3.20ms     3.37x
+
+  [string_concat]
+    metric                     jacl       python     ratio
+    ------------------ ------------ ------------  --------
+    wall_ns_min            286.00µs      30.35µs     0.11x
+    wall_ns_median         513.00µs      30.77µs     0.06x
+    wall_ns_max              1.90ms      77.46µs     0.04x
+
+  scenarios only in python: collection_churn_mut

@@ -328,10 +328,14 @@ typedef struct {
 } Scenario;
 
 static const Scenario SCENARIOS[] = {
-    { "collection_churn", BENCH_DIR "/collection_churn.jacl" },
-    { "spawn_chain",      BENCH_DIR "/spawn_chain.jacl" },
-    { "box_churn",        BENCH_DIR "/box_churn.jacl" },
-    { "string_concat",    BENCH_DIR "/string_concat.jacl" },
+    { "collection_churn",    BENCH_DIR "/collection_churn.jacl" },
+    { "spawn_chain",         BENCH_DIR "/spawn_chain.jacl" },
+    { "box_churn",           BENCH_DIR "/box_churn.jacl" },
+    { "string_concat",       BENCH_DIR "/string_concat.jacl" },
+    { "fib_recursive",       BENCH_DIR "/fib_recursive.jacl" },
+    { "sieve_primes",        BENCH_DIR "/sieve_primes.jacl" },
+    { "map_lookup_hot",      BENCH_DIR "/map_lookup_hot.jacl" },
+    { "parallel_map_reduce", BENCH_DIR "/parallel_map_reduce.jacl" },
 };
 
 int main(void) {

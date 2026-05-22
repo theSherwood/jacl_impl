@@ -1,0 +1,16 @@
+# Bench scenario: deep recursion via naive Fibonacci.
+#
+# fib(25) makes ~242 k calls with max stack depth 25. No allocation in
+# the hot path — every value is an i32. Targets:
+#   - OP_CALL / OP_RETURN dispatch
+#   - frame setup + arg passing
+#   - integer arithmetic in counted recursion
+#
+# Output: fib(25) = 75025.
+
+proc fib {n} {
+  if [< $n 2] { + $n 0 } else {
+    + [fib [- $n 1]] [fib [- $n 2]]
+  }
+}
+print [fib 25]

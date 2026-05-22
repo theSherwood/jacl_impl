@@ -1,0 +1,26 @@
+# Bench scenario: counting primes via trial division.
+#
+# For each n in 2..N, test divisibility by every i with i*i <= n. No
+# allocation, no collection access — just a doubly-nested integer loop
+# with branching and modulo. Targets:
+#   - VM dispatch on hot arithmetic ops (OP_LT, OP_LE, OP_MOD, OP_MUL, OP_ADD)
+#   - branch density in OP_JUMP_IF_FALSE
+#   - integer-only inner loop without GC participation
+#
+# N=2000 gives ~303 primes; the inner-loop body runs ~30k times in
+# total. Output: 303.
+
+mut n 2000
+mut count 0
+mut k 2
+while [< $k $n] {
+  mut is_p 1
+  mut i 2
+  while [<= [* $i $i] $k] {
+    if [== [% $k $i] 0] { set is_p 0 }
+    set i [+ $i 1]
+  }
+  if [== $is_p 1] { set count [+ $count 1] }
+  set k [+ $k 1]
+}
+print $count

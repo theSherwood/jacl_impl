@@ -183,10 +183,30 @@ if a real-workload profile pins them.
 
 ### Next-session perf candidates (2026-05-22 cross-runtime bench)
 
-Pick-up hand-off. Current standing vs CPython 3.x at 60 iters
-(`docs/profiles/2026-05-22_jacl_O2_inline_box_vs_python_compare.txt`):
-spawn_chain JACL 6.5× faster · collection_churn JACL 1.6× faster ·
-box_churn 1.5× slower · string_concat 18× slower.
+Pick-up hand-off. Current standing vs CPython 3.x at 60 timed iters,
+8 scenarios
+(`docs/profiles/2026-05-22_jacl_vs_python_8bench_compare.txt`).
+JACL faster: spawn_chain 4.2× · collection_churn 2.1× ·
+parallel_map_reduce ≈ tie at median, 1.83× at min. JACL slower:
+fib_recursive 1.4× · map_lookup_hot 1.45× · box_churn 1.5× ·
+sieve_primes 1.76× · string_concat 17×.
+
+The new four (`fib_recursive`, `sieve_primes`, `map_lookup_hot`,
+`parallel_map_reduce`) cover axes the prior 4-scenario suite didn't
+touch: function-call dispatch, pure-arithmetic inner loops, hashed
+read latency, and real cross-worker parallelism. The pure-arithmetic
+sieve being 1.76× slower than CPython is a notable finding —
+strongly suggests the OP_GET_GLOBAL linear-scan env lookup (candidate
+#4 below) is the dominant cost on counted loops over mut globals,
+since the inner body is otherwise just OP_LT, OP_MUL, OP_MOD, OP_ADD.
+
+**TODO: add a Clojure column to the cross-runtime bench.** Python is a
+useful "what does a non-functional mainstream language do" baseline,
+but JACL's persistent collections + spawn primitives are closer in
+intent to Clojure's. A Clojure mirror under `test/clojure/bench/`
+would give a fairer comparison on `collection_churn`, `map_lookup_hot`,
+and `parallel_map_reduce` (where Python's GIL and mutable dict
+distort the picture).
 
 Ranked by leverage:
 
@@ -209,23 +229,13 @@ Ranked by leverage:
    GC, root scanning, write barriers. Large work, large payoff for
    any alloc-heavy workload.
 
-3. **C-style `for` vs `while` dispatch overhead** — ~40% slower on
-   box_churn even with identical body shape (`while + def b` 244 µs vs
-   `for + def b` 385 µs at 8000 iters). Worth a focused profile of
-   the for prologue/step path; the C-style for adds a step-compile +
-   extra check_error + the inner-scope OP_POP_N, and `incr i` expands
-   to set + GET + add. Suspect: per-iter `incr` overhead and/or env
-   lookup pattern for the for-init local. Low-risk to investigate;
-   modest payoff would let the bench use the more-idiomatic for
-   without paying a measurement tax.
-
-4. **OP_BOX error-check elision** — `[box value]` unconditionally
+3. **OP_BOX error-check elision** — `[box value]` unconditionally
    runs `jacl_is_error(value)` even when the typer has proved the
    operand can't be an error (e.g. result of `+ $i 1` on i32 operands).
    Tiny per-op win; primarily an optimizer practice exercise. Add a
    typer-driven OP_BOX_UNCHECKED variant.
 
-5. **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — current env
+4. **Inline cache for OP_GET_GLOBAL / OP_SET_GLOBAL** — current env
    lookup is a linear scan over the env array. A 1-entry monomorphic
    cache per call site (name → last-seen slot index) would hit ~100%
    in counted loops. Modest VM dispatch win, low risk.
@@ -234,6 +244,20 @@ Ranked by leverage:
 
 Pointers only — full bodies live in `AUDIT_HISTORY.md`.
 
+- **C-style `for` vs `while` dispatch overhead** — investigated and
+  closed 2026-05-22 as **not reproducing**. The prior "40% slower"
+  claim pre-dated `be44681`'s inner-scope cleanup; matched-pair benches
+  added under `test/jacl/bench/{box,tight}_{for,while}_bench.jacl`
+  (reverted after the experiment) show `for` consistently within 1–3 %
+  of `while`, with `for` very slightly *faster* across `box`-shaped
+  (8 k inner, 500 timed iters: for 1205–1257 µs vs while 1229–1277 µs
+  wall-min) and arithmetic-only (100 k inner, 200 timed: for 11.46 ms
+  vs while 11.71 ms) workloads. Per-iter the C-style for emits the
+  same opcode sequence as the while except for one extra
+  `OP_CHECK_ERROR` after the step expression (compiler.c:8361) — ~2–3 ns,
+  consistent with what we see. Eliding that check_error when the step
+  is provably non-erroring would be a tiny micro-win; not worth a fix
+  on its own.
 - **§19 `rope_concat` cross-seam grapheme cluster join** — closed
   2026-05-19. The old `rope_concat` fix-up scanned only for
   Extend/ZWJ/SpacingMark at the start of right and migrated that
