@@ -648,6 +648,7 @@ typedef enum {
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF, HEAD_PTR_NULL,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
   HEAD_ADDR,
+  HEAD_BUF_LEN,
   HEAD_EXTERN,
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -1313,6 +1314,7 @@ typedef struct {
   uint32_t  scope_mark;
   uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;        /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
+  uint32_t  buf_len;          /* N for TYPE_BUF (in elements, not slots); 0 otherwise */
 } Local;
 
 typedef struct {

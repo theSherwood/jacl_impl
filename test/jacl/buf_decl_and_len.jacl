@@ -1,0 +1,14 @@
+# expect: 256
+# expect: 4
+# expect: 16
+# M2 first slice: declare [Buf N T] locals (zero-init implicit),
+# query length via [buf-len]. Confirms multi-slot frame allocation
+# and compile-time fold both work.
+def [Buf 256 u8] scratch
+print [buf-len $scratch]
+
+def [Buf 4 u8] magic
+print [buf-len $magic]
+
+def [Buf 16 i32] words
+print [buf-len $words]

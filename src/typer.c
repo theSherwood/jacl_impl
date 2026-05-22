@@ -442,6 +442,37 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
 
   uint32_t declared_struct_idx = UINT32_MAX;
   uint32_t declared_buf_len    = 0;
+
+  /* No-value buf form: `def [Buf N T] NAME` — argc==2 with args[0] a
+   * Buf type annotation and args[1] the bare name. Zero-init is
+   * implicit (the compiler emits OP_BUF_ZERO_LOCAL). See
+   * BUFFER_DESIGN.md M2. */
+  if (argc == 2 && args[1]->type == AST_LIT_STRING) {
+    uint32_t buf_sidx;
+    uint32_t buf_len;
+    if (typer__buf_type(tc, args[0], &buf_sidx, &buf_len)) {
+      char err[256];
+      if (buf_len == 0) {
+        jacl_format_buf_bad_len(err, sizeof(err));
+        typer__error(tc, args[0]->start.line, args[0]->start.column, err);
+      }
+      if (buf_sidx == UINT32_MAX) {
+        jacl_format_buf_bad_elem(err, sizeof(err));
+        typer__error(tc, args[0]->start.line, args[0]->start.column, err);
+      }
+      typer__scope_add(tc, args[1]->data.lit_string.value,
+                       args[1]->data.lit_string.length,
+                       args[1]->scope_mark,
+                       (uint8_t)TYPE_BUF, buf_sidx);
+      if (buf_len > 0 && tc->binding_count > 0) {
+        tc->bindings[tc->binding_count - 1].buf_len = buf_len;
+      }
+      node->inferred_type       = TYPE_NIL;
+      node->inferred_struct_idx = UINT32_MAX;
+      return true;
+    }
+  }
+
   if (argc == 3) {
     /* Keyword form: def TYPE NAME VALUE, or def StructName NAME VALUE,
      * or def [Vec T] / [Map K V] / [Buf N T] NAME VALUE for typed
@@ -2689,6 +2720,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COUNT,       TYPE_I32    },
       { HEAD_VEC_LEN,     TYPE_I32    },
       { HEAD_MAP_LEN,     TYPE_I32    },
+      { HEAD_BUF_LEN,     TYPE_I32    },
       /* Hash — OP_HASH always pushes an i32 (vm.c:6859). */
       { HEAD_HASH,        TYPE_I32    },
       /* String results. */

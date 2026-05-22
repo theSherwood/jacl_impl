@@ -2531,6 +2531,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_APPEND_FILE] = &&L_OP_APPEND_FILE,
     [OP_WATCH] = &&L_OP_WATCH,
     [OP_UNWATCH] = &&L_OP_UNWATCH,
+    [OP_BUF_ZERO_LOCAL] = &&L_OP_BUF_ZERO_LOCAL,
   };
 
   #define CASE(op)   L_##op
@@ -2951,6 +2952,21 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       CASE(OP_SET_LOCAL): {
         uint8_t slot = vm__read_byte(vm);
         vm->stack[frame->stack_base + slot] = vm->stack[vm->stack_top - 1];
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_ZERO_LOCAL): {
+        /* Zero-init a [Buf N T] local. Marks the spanned frame slots as
+         * inline (raw bytes) so the GC walker skips them. See
+         * BUFFER_DESIGN.md. */
+        uint8_t  base_slot  = vm__read_byte(vm);
+        uint16_t byte_count = vm__read_u16(vm);
+        uint32_t slot_count = (byte_count + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        memset(&vm->stack[frame->stack_base + base_slot], 0,
+               (size_t)slot_count * sizeof(JaclVal));
+        for (uint32_t si = 0; si < slot_count; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, frame->stack_base + base_slot + si);
+        }
         DISPATCH();
       }
 

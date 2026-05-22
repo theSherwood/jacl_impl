@@ -273,9 +273,14 @@ typedef enum {
 
   /* --- Late additions (kept at the end so test_bytecode's
    *     numeric-stability asserts stay valid) --- */
-  OP_BOX_UNCHECKED          /* pop value, wrap in box, push box;
+  OP_BOX_UNCHECKED,         /* pop value, wrap in box, push box;
                                skips error propagation (compiler-proven
                                non-error operand) */
+
+  /* --- [Buf N T] fixed-size C-ABI arrays (M2). See BUFFER_DESIGN.md. --- */
+  OP_BUF_ZERO_LOCAL         /* u8 base_slot, u16 byte_count;
+                               memset frame[base_slot..base_slot+byte_count) = 0.
+                               No stack effect. Used to zero-init a buf local. */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -491,6 +496,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SET_GLOBAL:      return "OP_SET_GLOBAL";
     case OP_BOX:             return "OP_BOX";
     case OP_BOX_UNCHECKED:   return "OP_BOX_UNCHECKED";
+    case OP_BUF_ZERO_LOCAL:  return "OP_BUF_ZERO_LOCAL";
     case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
     case OP_ATOM:            return "OP_ATOM";
     case OP_DEREF:           return "OP_DEREF";

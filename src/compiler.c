@@ -446,6 +446,10 @@ uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_
   switch (t) {
     case TYPE_BOOL:    return 1;
     case TYPE_NIL:     return 0;
+    case TYPE_I8:
+    case TYPE_U8:      return 1;
+    case TYPE_I16:
+    case TYPE_U16:     return 2;
     case TYPE_I32:
     case TYPE_U32:
     case TYPE_F32:     return 4;
@@ -463,14 +467,18 @@ uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_
         return reg->defs[struct_idx]->total_size;
       }
       return 8; /* fallback */
+    default:           return 8;
   }
-  return 8;
 }
 
 uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
   switch (t) {
     case TYPE_BOOL:    return 1;
     case TYPE_NIL:     return 1;
+    case TYPE_I8:
+    case TYPE_U8:      return 1;
+    case TYPE_I16:
+    case TYPE_U16:     return 2;
     case TYPE_I32:
     case TYPE_U32:
     case TYPE_F32:     return 4;
@@ -488,6 +496,7 @@ uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct
         return reg->defs[struct_idx]->alignment;
       }
       return 8;
+    default:           return 8;
   }
   return 8;
 }
@@ -910,6 +919,7 @@ typedef struct {
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
   uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;    /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
+  uint32_t  buf_len;      /* N for TYPE_BUF (in elements, not slots); 0 otherwise */
 } Local;
 
 /* --- Internal: Module binding tracking --- */
@@ -3174,6 +3184,7 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->scope_mark  = c->current_scope_mark;
   local->width       = 1;
   local->is_inline   = false;
+  local->buf_len     = 0;
 }
 
 /* Find module binding by local slot index */
@@ -6994,6 +7005,68 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], false, line, col);
       return;
     }
+    /* --- No-value Buf form: `def [Buf N T] NAME` --- */
+    if (argc == 2 && args[1]->type == AST_LIT_STRING &&
+        args[0]->type == AST_COMMAND &&
+        args[0]->data.command.head &&
+        args[0]->data.command.head->type == AST_LIT_STRING &&
+        args[0]->data.command.head->data.lit_string.length == 3 &&
+        memcmp(args[0]->data.command.head->data.lit_string.value, "Buf", 3) == 0 &&
+        args[0]->data.command.arg_count == 2) {
+      AstNode* tn   = args[0];
+      AstNode* nlen = tn->data.command.args[0];
+      AstNode* telt = tn->data.command.args[1];
+      if (nlen->type != AST_LIT_INT || nlen->data.lit_int.value <= 0) {
+        compiler__error(c, line, col,
+                        "[Buf N T] length must be a positive integer literal");
+        return;
+      }
+      JaclType elem_type;
+      if (telt->type != AST_LIT_STRING ||
+          !compiler__resolve_type(c, telt->data.lit_string.value,
+                                  telt->data.lit_string.length, &elem_type)) {
+        compiler__error(c, line, col,
+                        "[Buf N T] element type must be a scalar keyword");
+        return;
+      }
+      uint32_t n = (uint32_t)nlen->data.lit_int.value;
+      uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+      uint64_t byte_count = (uint64_t)n * (uint64_t)elem_sz;
+      if (byte_count > 0xFFFFu) {
+        compiler__error(c, line, col,
+                        "[Buf N T] byte size exceeds 65535 (M2 limit)");
+        return;
+      }
+      uint32_t slot_count = (uint32_t)((byte_count + sizeof(JaclVal) - 1) / sizeof(JaclVal));
+      if (slot_count == 0) slot_count = 1;
+      uint32_t base_slot = c->local_count;
+
+      JaclVal bind_val = compiler__name_val(c->heap, c->intern_table,
+          args[1]->data.lit_string.value, args[1]->data.lit_string.length);
+      /* Reserve runtime stack slots for the buf bytes. Each local needs
+       * a corresponding stack push so subsequent OP_BUF_ZERO_LOCAL can
+       * memset in place. */
+      compiler__emit_byte(c, OP_NIL, line);
+      compiler__add_local(c, bind_val, line, col);
+      c->locals[c->local_count - 1].type = TYPE_BUF;
+      c->locals[c->local_count - 1].struct_type_idx = JACL_SCALAR_TYPE_IDX(elem_type);
+      c->locals[c->local_count - 1].width = (uint16_t)slot_count;
+      c->locals[c->local_count - 1].is_inline = true;
+      c->locals[c->local_count - 1].buf_len = n;
+      for (uint32_t w = 1; w < slot_count; w++) {
+        compiler__emit_byte(c, OP_NIL, line);
+        compiler__add_local(c, jacl_inline_string("", 0), line, col);
+        c->locals[c->local_count - 1].depth = c->scope_depth;
+      }
+
+      compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)base_slot, line);
+      compiler__emit_u16(c, (uint16_t)byte_count, line);
+
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
+
     if (argc == 2 && args[0]->type == AST_COMMAND) {
       /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays
        * Also handles rest patterns: [def [head ..rest] expr] where ..rest
@@ -9172,6 +9245,38 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__emit_byte(c, OP_VEC_LEN, line);
+    c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* [buf-len $b] — compile-time fold. N is statically known on the
+   * buf local, so we emit an i32 constant and never evaluate the
+   * receiver at runtime. See BUFFER_DESIGN.md. */
+  if (hid == HEAD_BUF_LEN) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "buf-len", "1 argument", argc);
+      return;
+    }
+    AstNode* recv = args[0];
+    if (recv->type != AST_VAR_REF) {
+      compiler__error(c, line, col,
+          "buf-len requires a buf-typed variable reference");
+      return;
+    }
+    /* Look up the local by name in the current compiler's local table. */
+    JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+        recv->data.var_ref.name, recv->data.var_ref.length);
+    int found = -1;
+    for (int i = (int)c->local_count - 1; i >= 0; i--) {
+      if (c->locals[i].name == recv_name) { found = i; break; }
+    }
+    if (found < 0 || c->locals[found].type != TYPE_BUF) {
+      compiler__error(c, line, col,
+          "buf-len: argument is not a [Buf N T] local");
+      return;
+    }
+    uint32_t n = c->locals[found].buf_len;
+    compiler__emit_constant(c, jacl_i32((int32_t)n), line);
     c->last_expr_type = TYPE_I32;
     return;
   }

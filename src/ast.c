@@ -108,6 +108,9 @@ typedef enum {
   HEAD_ADDR,  /* [addr $p->field->...] — takes the address of a chain leaf */
   HEAD_PTR_NULL,  /* [ptr-null [Ptr T]] — typed null pointer literal */
 
+  /* Buffer ops (Stage 6 — see BUFFER_DESIGN.md) */
+  HEAD_BUF_LEN,
+
   /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
 
@@ -217,6 +220,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
+      if (memcmp(s, "buf-len", 7) == 0) return HEAD_BUF_LEN;
       if (memcmp(s, "vec-set", 7) == 0) return HEAD_VEC_SET;
       if (memcmp(s, "map-get", 7) == 0) return HEAD_MAP_GET;
       if (memcmp(s, "map-has", 7) == 0) return HEAD_MAP_HAS;
