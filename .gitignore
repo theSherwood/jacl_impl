@@ -13,4 +13,5 @@ a.out
 .token-savior/
 build/
 build_wasm/
-*.gch
+*.gch__pycache__/
+*.pyc
