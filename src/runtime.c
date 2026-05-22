@@ -649,9 +649,19 @@ void runtime__init_state(Runtime *rt, int num_workers) {
 }
 
 void runtime__start_threads(Runtime *rt) {
+    /* Worker threads need a generous stack — the compiler descent
+     * (compiler__compile_node, ...) can recurse deeply on user input,
+     * and -O0 builds use far more stack per frame than -O2. The pthread
+     * default on macOS is 512KB which is enough to overflow on a small
+     * interpret-sandbox call from within a worker task. 4MB matches what
+     * the main thread typically has available and leaves room for
+     * worst-case nesting. */
+    enum { WORKER_STACK_BYTES = 4 * 1024 * 1024 };
     for (int i = 0; i < rt->num_workers; i++) {
-        THREAD_CREATE(&rt->workers[i].thread, NULL,
-                      runtime__worker_loop, &rt->workers[i]);
+        THREAD_CREATE_WITH_STACK(&rt->workers[i].thread,
+                                 WORKER_STACK_BYTES,
+                                 runtime__worker_loop,
+                                 &rt->workers[i]);
     }
 }
 

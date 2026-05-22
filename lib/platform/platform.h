@@ -197,6 +197,8 @@ static inline void SLEEP_MILLISECONDS(long ms) {
 #define THREAD_PROC_TYPE
 typedef unsigned long thread_t;
 #define THREAD_CREATE(thread, attr, start_routine, arg) (*(thread) = 0, -1)
+#define THREAD_CREATE_WITH_STACK(thread, stack_bytes, start_routine, arg)     \
+    ((void)(stack_bytes), *(thread) = 0, -1)
 #define THREAD_JOIN(thread, retval)                     ((void)(thread), (void)(retval))
 #define THREAD_SELF()                                   ((thread_t)0)
 #define THREAD_EQUAL(a, b)                              ((a) == (b))
@@ -213,6 +215,14 @@ int            THREAD_CREATE(thread_t* thread, void* attr, LPTHREAD_START_ROUTIN
   *thread = CreateThread(NULL, 0, start_routine, arg, 0, NULL);
   return (*thread == NULL);
 }
+/* THREAD_CREATE_WITH_STACK: CreateThread's second arg is the initial commit
+ * (reservation is set by /STACK linker option). Passing stack_bytes makes
+ * sure the thread gets at least that committed up-front. */
+int THREAD_CREATE_WITH_STACK(thread_t* thread, size_t stack_bytes,
+                             LPTHREAD_START_ROUTINE start_routine, void* arg) {
+  *thread = CreateThread(NULL, (SIZE_T)stack_bytes, start_routine, arg, 0, NULL);
+  return (*thread == NULL);
+}
 void THREAD_JOIN(thread_t thread, void** retval) {
   WaitForSingleObject(thread, INFINITE);
   CloseHandle(thread);
@@ -225,6 +235,24 @@ void THREAD_JOIN(thread_t thread, void** retval) {
 #define THREAD_PROC_TYPE
 typedef pthread_t thread_t;
 #define THREAD_CREATE(thread, attr, start_routine, arg) pthread_create(thread, attr, start_routine, arg)
+/* THREAD_CREATE_WITH_STACK: create a thread with at least stack_bytes of
+ * stack space. The pthread default varies (512KB on macOS, 8MB on glibc),
+ * which leaves macOS workers vulnerable to stack overflow on recursive C
+ * code in -O0 builds (the compiler descent is the known case — see
+ * jacl_harness flake). */
+static inline int THREAD_CREATE_WITH_STACK(thread_t* thread, size_t stack_bytes,
+                                           void* (*start_routine)(void*),
+                                           void* arg) {
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0) return -1;
+  /* pthread_attr_setstacksize may round up to a multiple of PAGESIZE or fail
+   * if stack_bytes < PTHREAD_STACK_MIN. Both are fine — fall back to default
+   * (pass NULL attr) on failure rather than refusing to start the thread. */
+  pthread_attr_setstacksize(&attr, stack_bytes);
+  int rc = pthread_create(thread, &attr, start_routine, arg);
+  pthread_attr_destroy(&attr);
+  return rc;
+}
 #define THREAD_JOIN(thread, retval)                     pthread_join(thread, retval)
 #define THREAD_SELF()                                   pthread_self()
 #define THREAD_EQUAL(a, b)                              pthread_equal((a), (b))
