@@ -229,8 +229,10 @@ static inline rope rope_concat(rope left, rope right) {
     .summarize = rope_summary_summarize
   });
 
-  size_t lb = rope_byte_count(left);
-  size_t rb = rope_byte_count(right);
+  rope_summary lsum = rope_st_summary(left.root);
+  rope_summary rsum = rope_st_summary(right.root);
+  size_t lb = lsum.bytes;
+  size_t rb = rsum.bytes;
 
   if (lb == 0) return rope_ref(right);
   if (rb == 0) return rope_ref(left);
@@ -242,6 +244,18 @@ static inline rope rope_concat(rope left, rope right) {
     ln = ni->children[ni->n_children - 1];
   }
   rope_st_leaf* left_last = (rope_st_leaf*)ln;
+
+  /* ASCII fast path: when both ropes are pure ASCII (summary bytes == chars
+   * is the O(1) check, since `rope_summary_summarize` records chars=bytes for
+   * ASCII-only leaves and the monoid sums both), every byte is its own
+   * grapheme — except for the CR×LF rule (GB3). If left's last byte is not
+   * CR, plain structural concat is grapheme-safe and the summary stays
+   * exact. Skipping the UAX #29 walker here is a large win for append-heavy
+   * ASCII workloads (log lines, source text, JSON). */
+  if (lsum.bytes == lsum.chars && rsum.bytes == rsum.chars &&
+      left_last->elements[left_last->count - 1] != 0x0D) {
+    return (rope){.root = rope_st_concat(left.root, right.root)};
+  }
 
   /* Find the start of left's last grapheme cluster within left_last. Since
      rope_from_str only splits at grapheme-safe positions, the entire last
