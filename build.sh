@@ -36,6 +36,7 @@ CLEAN=0
 PARALLEL=0
 TSAN=0
 WASM=0
+RELEASE=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
@@ -45,6 +46,7 @@ for arg in "$@"; do
     --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
     --tsan) TSAN=1 ;;
     --wasm) WASM=1 ;;
+    --release) RELEASE=1 ;;
   esac
 done
 
@@ -76,8 +78,13 @@ fi
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-# TSAN mode uses a separate build cache so .build doesn't get poisoned with
-# instrumented binaries. The cache is keyed on the mode via the platform stamp.
+# TSAN and --release each use a separate build cache so .build doesn't get
+# poisoned with instrumented or differently-optimized binaries. Each variant
+# is keyed on the mode via the platform stamp.
+if [ "$TSAN" -eq 1 ] && [ "$RELEASE" -eq 1 ]; then
+  echo "error: --tsan and --release are mutually exclusive."
+  exit 2
+fi
 if [ "$TSAN" -eq 1 ]; then
   BUILD_DIR="${DIR}/.build-tsan"
   TSAN_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1"
@@ -88,6 +95,14 @@ if [ "$TSAN" -eq 1 ]; then
   export TSAN_OPTIONS="halt_on_error=1 exitcode=66 second_deadlock_stack=1${TSAN_OPTIONS:+ $TSAN_OPTIONS}"
   echo "TSAN mode: thread sanitizer enabled, build dir: $BUILD_DIR"
   echo "         TSAN_OPTIONS=$TSAN_OPTIONS"
+elif [ "$RELEASE" -eq 1 ]; then
+  # Release: -O2 for perf benchmarks and any runtime measurement. -g is kept
+  # so profilers (samply, instruments) can still resolve symbols and lines.
+  # Asserts stay enabled — strip them by hand if needed.
+  BUILD_DIR="${DIR}/.build-release"
+  TSAN_FLAGS=""
+  CFLAGS="$CFLAGS -O2"
+  echo "Release mode: -O2, build dir: $BUILD_DIR"
 else
   TSAN_FLAGS=""
   BUILD_DIR="${DIR}/.build"
