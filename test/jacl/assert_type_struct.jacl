@@ -1,0 +1,10 @@
+# expect: 7
+# Struct-name type assertion.
+struct Pt {i32 x, i32 y}
+
+proc main {} {
+  def p [Pt 3 4]
+  assert-type $p Pt
+  print [to-string (3 + 4)]
+}
+main

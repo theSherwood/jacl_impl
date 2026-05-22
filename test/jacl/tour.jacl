@@ -99,6 +99,11 @@ proc main {} {
   # typed locals stays unboxed.
   assert ([typed-add 3 4] == 7)
   assert ([shout hello] == "hello!")
+  # `assert-type` is a compile-time static check: the typer compares
+  # the expression's inferred type to the second arg. No runtime cost,
+  # no side effects (the expression itself is not evaluated).
+  assert-type [typed-add 3 4] i64
+  assert-type [shout hello] str
 
   # ----- variadic + splat -----
   # `..nums` in params collects trailing args. `..$vec` at a call site

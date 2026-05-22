@@ -95,6 +95,7 @@ typedef enum {
 
   /* Errors */
   HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_ASSERT,
+  HEAD_ASSERT_TYPE,  /* compile-time static type check; emits no runtime code */
 
   /* Boxes / atoms / coercion */
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
@@ -264,6 +265,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-args", 11) == 0) return HEAD_SYNTAX_ARGS;
       if (memcmp(s, "make-syntax", 11) == 0) return HEAD_MAKE_SYNTAX;
       if (memcmp(s, "append-file", 11) == 0) return HEAD_APPEND_FILE;
+      if (memcmp(s, "assert-type", 11) == 0) return HEAD_ASSERT_TYPE;
       return HEAD_NONE;
     case 12:
       if (memcmp(s, "syntax-quote", 12) == 0) return HEAD_SYNTAX_QUOTE;

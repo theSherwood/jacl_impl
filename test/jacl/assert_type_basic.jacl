@@ -1,0 +1,27 @@
+# expect: ok
+# `assert-type` is a compile-time static check: the typer compares the
+# expression's inferred type to the second arg and errors on mismatch.
+# No runtime evaluation — the expression is NOT compiled (no side
+# effects, no operand-stack cost).
+
+proc i64 typed-add {i64 a, i64 b} { + $a $b }
+proc str shout {str s} { concat $s "!" }
+
+proc main {} {
+  def i32 thirty-two 32
+  def i64 sixty-four 64
+  def f64 pi 3.14
+  def str s "hi"
+
+  assert-type $thirty-two i32
+  assert-type $sixty-four i64
+  assert-type $pi f64
+  assert-type $s str
+  assert-type [typed-add 1 2] i64
+  assert-type [shout "hello"] str
+  assert-type [+ 1 2] i32
+  assert-type [vec 1 2 3] vec
+  assert-type [== 1 1] bool
+  print "ok"
+}
+main

@@ -1789,6 +1789,80 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
       node->inferred_type = TYPE_DYN;
       return;
+    } else if (hid == HEAD_ASSERT_TYPE) {
+      /* [assert-type EXPR TYPE] — compile-time static type assertion.
+       * EXPR is typer-walked so its inferred_type lands on the node;
+       * the result is compared to TYPE (a bare type-keyword or a
+       * registered struct name). No runtime evaluation: the compiler
+       * emits a single OP_NIL and discards EXPR. Whole form has
+       * static type nil. */
+      AstNode** as = node->data.command.args;
+      uint32_t  ac = node->data.command.arg_count;
+      if (ac != 2) {
+        typer__error(tc, node->start.line, node->start.column,
+                     "assert-type expects 2 arguments");
+        node->inferred_type = TYPE_NIL;
+        return;
+      }
+      AstNode* expr_node = as[0];
+      AstNode* type_node = as[1];
+      JaclType saved_et = tc->expected_type;
+      tc->expected_type = TYPE_DYN;
+      typer__infer_node(tc, expr_node);
+      tc->expected_type = saved_et;
+      if (type_node->type != AST_LIT_STRING) {
+        typer__error(tc, type_node->start.line, type_node->start.column,
+                     "assert-type: second argument must be a type name");
+        node->inferred_type = TYPE_NIL;
+        return;
+      }
+      const char* tname = type_node->data.lit_string.value;
+      uint32_t    tlen  = type_node->data.lit_string.length;
+      JaclType actual_t = (JaclType)expr_node->inferred_type;
+      JaclType expected_t = TYPE_DYN;
+      bool expected_known = false;
+      uint32_t expected_struct_idx = UINT32_MAX;
+      if (is_type_keyword(tname, tlen)) {
+        expected_t = type_from_keyword(tname, tlen);
+        expected_known = true;
+      } else {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == tlen &&
+              memcmp(tc->structs[si].name, tname, tlen) == 0) {
+            expected_t = TYPE_STRUCT;
+            expected_struct_idx = si;
+            expected_known = true;
+            break;
+          }
+        }
+      }
+      if (!expected_known) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "assert-type: unknown type '%.*s'", (int)tlen, tname);
+        typer__error(tc, type_node->start.line, type_node->start.column, err);
+        node->inferred_type = TYPE_NIL;
+        return;
+      }
+      bool match = (actual_t == expected_t);
+      if (match && expected_t == TYPE_STRUCT &&
+          expected_struct_idx != UINT32_MAX) {
+        match = (expr_node->inferred_struct_idx == expected_struct_idx);
+      }
+      if (!match) {
+        char err[224];
+        const char* actual_name =
+            (actual_t == TYPE_STRUCT &&
+             expr_node->inferred_struct_idx < tc->struct_count)
+            ? tc->structs[expr_node->inferred_struct_idx].name
+            : type_name(actual_t);
+        snprintf(err, sizeof(err),
+                 "assert-type failed: expected %.*s, got %s",
+                 (int)tlen, tname, actual_name);
+        typer__error(tc, node->start.line, node->start.column, err);
+      }
+      node->inferred_type = TYPE_NIL;
+      return;
     }
   }
 

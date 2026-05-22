@@ -1,0 +1,7 @@
+# expect-error: assert-type failed: expected i64, got i32
+proc main {} {
+  def i32 x 7
+  assert-type $x i64
+  print "should not reach"
+}
+main

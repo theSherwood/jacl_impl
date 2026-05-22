@@ -1467,6 +1467,10 @@ static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
        as runtime values in the surrounding SM context. */
     case HEAD_QUOTE:
     case HEAD_SYNTAX_QUOTE:
+    /* Compile-time static type assertion — args are typer-only, never
+       compiled to bytecode, so they cannot contribute to the runtime
+       operand stack or generate suspension points. */
+    case HEAD_ASSERT_TYPE:
       return false;
     default:
       return true;
@@ -1503,6 +1507,10 @@ static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
         if (hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
       } else if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
         /* Separate closure scopes — don't recurse */
+        return;
+      } else if (hid == HEAD_ASSERT_TYPE) {
+        /* Compile-time-only — args are not emitted as bytecode, so any
+           suspension points inside them never execute. Don't recurse. */
         return;
       } else if (ctx->map) {
         /* Call to a known suspending proc is a suspension point */
@@ -5986,6 +5994,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_ASSERT, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* [assert-type EXPR TYPE] — compile-time static type check.
+   * The typer pass has already compared the expression's inferred type
+   * to TYPE and emitted any mismatch error. Here we just emit a nil
+   * placeholder so the form has a value at the bytecode level; the
+   * expression itself is intentionally NOT compiled (no runtime
+   * evaluation, no side effects, no operand-stack cost). */
+  if (hid == HEAD_ASSERT_TYPE) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "assert-type",
+                                     "2 arguments", argc);
+      return;
+    }
+    compiler__emit_byte(c, OP_NIL, line);
     c->last_expr_type = TYPE_NIL;
     return;
   }
