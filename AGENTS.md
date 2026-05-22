@@ -30,6 +30,22 @@
   spawn/await/parallel/race. The test harness runs it, so it stays in
   sync with the implementation. `SYNTAX.md` is the full reference.
 
+## When benchmarking
+
+- `./build.sh --release` builds with `-O2` in `.build-release/`. The
+  default debug build (no `-O`) is fine for correctness tests but a
+  poor baseline for any runtime measurement.
+- `./build.sh --test=perf` runs the in-process bench harness
+  (`test/test_perf.c`); set `BENCH_TIMED_ITERS=N` for sharper medians
+  and `BENCH_JSON_OUT=/path.jsonl` to capture results.
+- `tools/bench-python.py` runs the Python ports of the same scenarios
+  (`test/python/bench/*.py`), and `tools/bench-compare.sh A B` prints
+  a side-by-side ratio table between any two JSONL outputs (either
+  runtime).
+- Cross-runtime baselines and per-step diff snapshots live under
+  `docs/profiles/2026-05-22_*` — read those first before chasing a
+  perf regression.
+
 ## When writing C
 
 - Prefer arenas for memory management. This require organizing allocations by lifetime.

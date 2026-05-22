@@ -289,10 +289,11 @@ via `COND_WAIT_FOR_MS`; see `AUDIT.md` §11). Remaining corners:
   (`gc__current_heap`, `gc__thread_epoch`, etc.) instead of a threaded
   `JaclCtx*`. Larger refactor; not a sandbox prerequisite.
 - **Performance smells (deferred):** see `AUDIT.md` § "Performance
-  smells" — `jacl_is_heap_type` tag chain, HAMT/RRB TLS-heap-read,
-  steal-from-every-worker, `gc__find_fit_in_block` residual,
-  `gc_sweep_concurrent` rebuild, sweep/mark main-body dedup. None
-  concentrated enough to chase under current workloads.
+  smells" — HAMT/RRB TLS-heap-read, steal-from-every-worker,
+  `gc__find_fit_in_block` residual, `gc_sweep_concurrent` rebuild,
+  sweep/mark main-body dedup. None concentrated enough to chase
+  under current workloads.  (`jacl_is_heap_type` tag chain was
+  resolved 2026-05-22 — see commit `405932f`.)
 - **§9 read-side operand-stack rooting hole.** Theoretical UAF;
   no concrete bug observed. Convention (CPS-only concurrency)
   prevents it today. See `AUDIT.md` § "Known theoretical hole".

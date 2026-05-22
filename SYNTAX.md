@@ -464,7 +464,7 @@ get-status | if (== $it "ok") { proceed } else { abort }
 
 ```
 # C-style (mutable loop variable)
-for {mut i 0; ($i < 10); ++ i} {
+for {mut i 0; ($i < 10); incr i} {
   log $i
 }
 
@@ -1267,6 +1267,7 @@ Features from this document compared against the current codebase. Last updated:
 | `for` — all 4 forms | yes |
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
+| `incr name` — sugar for `set name [+ $name 1]` | prelude macro |
 | String interpolation (`$var`, `$[...]`, `$(...)`) | nested |
 | Line continuation (`\` at end of line) | yes |
 | Comments (`#`, `##`) | yes |

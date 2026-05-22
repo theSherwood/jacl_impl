@@ -147,7 +147,8 @@ Note: The `gen` and `_pad` fields from the original design were replaced by `all
 | OBJ_NUMERIC | none | skip |
 | OBJ_STRING | none | skip |
 | OBJ_CLOSURE | upvalues[] array | trace each upvalue |
-| OBJ_MUTABLE_REF | single JaclVal | trace the value |
+| OBJ_MUTABLE_REF | single JaclVal (when type_idx==0); raw struct bytes otherwise | trace the value when untyped, else skip |
+| OBJ_BOX_INLINE | single JaclVal — payload IS the value (compact untyped-box layout, 16 bytes vs 24) | trace the value |
 | OBJ_HAMT_INTERNAL | children[] array | trace each child pointer |
 | OBJ_HAMT_LEAF | key + value | trace both JaclVals |
 | OBJ_HAMT_COLLISION | items[] array | trace each leaf |

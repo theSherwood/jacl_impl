@@ -154,9 +154,12 @@ Profile after Phase H showed none of these are concentrated enough to
 chase under current workloads. Listed for completeness; revisit only
 if a real-workload profile pins them.
 
-- **`jacl_is_heap_type` tag chain (§13 sibling)** — 0.10% of mixed CPU.
-  Either already inlined or genuinely cheap. The originally-suggested
-  256-entry tag-byte LUT isn't worth it.
+- ~~**`jacl_is_heap_type` tag chain (§13 sibling)**~~ — resolved
+  2026-05-22 (commit `405932f`). Replaced the 18-way `||` chain with a
+  single 32-bit bitmask test (`JACL_HEAP_TAG_MASK >> tag_idx & 1`).
+  Box-churn bench wall-median improved 13.7%; string_concat improved
+  40% (compounded with the rope ASCII fast path that landed the same
+  day). Predicate now O(1) instead of O(18).
 - **HAMT/RRB template metaprogramming via TLS heap pointer** — every
   collection mutation reads `gc__current_heap` from TLS. TLS reads are
   cheap but inhibit inlining of the alloc fast path. Tied to §17.
