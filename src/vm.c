@@ -5192,12 +5192,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           ATOMIC_STORE_EXPLICIT(&vm->env.values[cache_slot], value, MEM_RELEASE);
         } else {
           /* Miss — env_set will update-in-place if name exists, else
-           * append. Then patch the IC for the next dispatch. */
+           * append. Then patch the IC for the next dispatch. Big-endian
+           * to match vm__read_u16's hi-then-lo decoding. */
           vm__env_set(vm, name, value);
           for (uint32_t k = 0; k < vm->env.count; k++) {
             if (vm->env.names[k] == name) {
-              ic_slot_ptr[0] = (uint8_t)(k & 0xFF);
-              ic_slot_ptr[1] = (uint8_t)((k >> 8) & 0xFF);
+              ic_slot_ptr[0] = (uint8_t)((k >> 8) & 0xFF);
+              ic_slot_ptr[1] = (uint8_t)(k & 0xFF);
               break;
             }
           }
