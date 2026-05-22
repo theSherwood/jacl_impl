@@ -16,6 +16,29 @@
 
 struct Pt {i32 x, i32 y}
 
+# `ctx <type> <name> = <value>` declares a field of `$ctx`, the dynamic
+# context object visible everywhere. Plain `ctx` is immutable; `ctx mut`
+# allows `with-ctx` overrides. Declarations live at module level.
+ctx mut i32 verbosity = 0
+
+# `defmacro` registers a compile-time rewrite. `syntax-quote [...]` is
+# a templating form for AST literals; `~name` splices a captured arg's
+# AST in. The macro fires at compile time and never appears at runtime.
+defmacro unless {cond body} {
+  syntax-quote [if ~cond {} ~body]
+}
+
+# A generator: any proc that contains `yield` is one. Each call returns
+# a fresh lazy stream; the compiler lowers the body to a state machine
+# that suspends/resumes across yield sites.
+proc count-up {start, stop} {
+  mut i $start
+  while [<= $i $stop] {
+    yield $i
+    set i [+ $i 1]
+  }
+}
+
 proc add {a, b} { + $a $b }
 proc greet {name} { concat "hi " $name }
 proc zero-arg {} { + 10 20 }
@@ -146,6 +169,13 @@ proc main {} {
   assert [== [collect [transform (1 ..= 5) [\ * $it 2]]] [vec 2 4 6 8 10]]
   assert [== [collect [transform [filter (1 ..= 6) [\ == 0 ($it % 2)]] [\ * $it $it]]] [vec 4 16 36]]
 
+  # ----- generators -----
+  # `count-up` (defined above) is a generator: each call returns a
+  # fresh stream that suspends at each `yield`. Streams compose with
+  # `transform` / `filter` / `take` like any other stream source.
+  assert [== [collect [count-up 1 5]] [vec 1 2 3 4 5]]
+  assert [== [collect [take [count-up 1 100] 3]] [vec 1 2 3]]
+
   # ----- destructuring -----
   # Positional `[]` for vectors; named `{}` for structs/maps;
   # `_` wildcard; `..rest` for trailing remainder.
@@ -211,6 +241,31 @@ proc main {} {
   # propagates through pipes and can be caught.
   assert ([try { error bad } e { concat "caught: " [error-val $e] }] == "caught: bad")
   assert [error? [error boom]]
+
+  # ----- $ctx (dynamic context) -----
+  # `$ctx` is the dynamic context object; fields declared with `ctx`
+  # at module level are visible everywhere. `with-ctx {field val ...}
+  # { body }` overrides for the dynamic extent of body; prior values
+  # restore on exit, including via error.
+  assert ($ctx->verbosity == 0)
+  with-ctx {verbosity 3} {
+    assert ($ctx->verbosity == 3)
+  }
+  assert ($ctx->verbosity == 0)
+  try {
+    with-ctx {verbosity 99} { error escape }
+  } _ {}
+  assert ($ctx->verbosity == 0)
+
+  # ----- macros -----
+  # `defmacro` (see top of file) rewrites at compile time. `unless` is
+  # implemented as a one-line macro; the expansion `[if cond {} body]`
+  # is what actually runs.
+  mut hit 0
+  unless [== 1 2] { set hit 5 }
+  assert ($hit == 5)
+  unless [== 1 1] { set hit 99 }
+  assert ($hit == 5)
 }
 
 main
