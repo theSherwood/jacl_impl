@@ -968,8 +968,9 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     JaclMutableRef* ref = jacl_as_cell(val);
     vm__fmt_value(buf, MREF_VAL(ref));
   } else if (jacl_is_box(val)) {
-    JaclMutableRef* ref = jacl_as_box(val);
-    if (ref->type_idx > 0 && buf->registry &&
+    void* payload = jacl_as_ptr(val);
+    JaclMutableRef* ref = (JaclMutableRef*)payload;
+    if (jacl_box_is_typed(payload) && buf->registry &&
         ref->type_idx < buf->registry->count) {
       /* Struct box: format with struct name and field values */
       StructTypeDef* sdef = buf->registry->defs[ref->type_idx];
@@ -1008,7 +1009,7 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       }
     } else {
       vm__fmt_append(buf, "<box: ", 6);
-      vm__fmt_value(buf, MREF_VAL(ref));
+      vm__fmt_value(buf, *jacl_box_untyped_val(payload));
       vm__fmt_append(buf, ">", 1);
     }
   } else if (jacl_is_atom(val)) {
@@ -5178,11 +5179,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           DISPATCH();
         }
-        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
-        ref->type_idx = 0;
-        ref->total_size = sizeof(JaclVal);
-        MREF_VAL(ref) = value;
-        result = vm__push(vm, jacl_box_ptr(ref));
+        /* Compact untyped-box layout: payload is the JaclVal directly
+         * (16 bytes total vs 24 for OBJ_MUTABLE_REF). Struct-typed
+         * boxes (OP_BOX_STRUCT below) keep the OBJ_MUTABLE_REF layout
+         * since they need type_idx + total_size + raw data tail. */
+        JaclVal* slot = (JaclVal*)gc_alloc(&vm->heap, OBJ_BOX_INLINE,
+                                            sizeof(JaclVal));
+        *slot = value;
+        result = vm__push(vm, jacl_box_ptr((JaclMutableRef*)slot));
         if (result != VM_OK) return result;
         DISPATCH();
       }
@@ -5268,8 +5272,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         bool match = false;
         if (jacl_is_box(value)) {
-          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
-          match = (ref->type_idx == type_idx);
+          void* payload = jacl_as_ptr(value);
+          uint32_t actual = jacl_box_is_typed(payload)
+                              ? ((JaclMutableRef*)payload)->type_idx : 0;
+          match = (actual == type_idx);
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
@@ -5281,8 +5287,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         bool match = false;
         if (jacl_is_box(value)) {
-          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
-          if (ref->type_idx == 0) match = jacl_is_typed_vector(MREF_VAL(ref));
+          void* payload = jacl_as_ptr(value);
+          if (!jacl_box_is_typed(payload)) {
+            match = jacl_is_typed_vector(*jacl_box_untyped_val(payload));
+          }
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
@@ -5294,8 +5302,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         bool match = false;
         if (jacl_is_box(value)) {
-          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
-          if (ref->type_idx == 0) match = jacl_is_typed_map(MREF_VAL(ref));
+          void* payload = jacl_as_ptr(value);
+          if (!jacl_box_is_typed(payload)) {
+            match = jacl_is_typed_map(*jacl_box_untyped_val(payload));
+          }
         }
         result = vm__push(vm, jacl_bool(match));
         if (result != VM_OK) return result;
@@ -5838,9 +5848,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "deref: expected box or atom, got %s",
                        vm__type_name(container));
         }
-        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        if (ref->type_idx > 0) {
+        void* payload = jacl_as_ptr(container);
+        /* jacl_box_is_typed handles both layouts; for atoms (always
+         * OBJ_ATOM_REF / type_idx == 0) it correctly returns false. */
+        if (jacl_box_is_typed(payload)) {
           /* Struct box: materialize data[] into a heap HeapRecord */
+          JaclMutableRef* ref = (JaclMutableRef*)payload;
           if (!vm->struct_registry || ref->type_idx >= vm->struct_registry->count) {
             VM_ERROR(vm, "deref: invalid struct type index %u", (unsigned)ref->type_idx);
           }
@@ -5854,11 +5867,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_heap_record_val(s));
           if (result != VM_OK) return result;
         } else {
+          JaclVal* slot = jacl_box_untyped_val(payload);
           JaclVal deref_val;
           if (jacl_is_atom(container)) {
-            deref_val = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
+            deref_val = ATOMIC_LOAD_EXPLICIT((uint64_t*)slot, MEM_ACQUIRE);
           } else {
-            deref_val = MREF_VAL(ref);
+            deref_val = *slot;
           }
           result = vm__push(vm, deref_val);
           if (result != VM_OK) return result;
@@ -5883,9 +5897,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "reset!: expected box or atom, got %s",
                        vm__type_name(container));
         }
-        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        if (ref->type_idx > 0) {
+        void* payload = jacl_as_ptr(container);
+        if (jacl_box_is_typed(payload)) {
           /* Struct box: copy new struct data into box */
+          JaclMutableRef* ref = (JaclMutableRef*)payload;
           HeapRecord* s = jacl_as_heap_record_ptr(new_val);
           if (!s || s->type_idx != ref->type_idx) {
             VM_ERROR(vm, "reset!: struct type mismatch in box");
@@ -5895,6 +5910,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* No GC write barrier needed — struct data has no GC references */
           result = vm__push(vm, new_val);
         } else if (jacl_is_atom(container)) {
+          /* Atoms always use OBJ_ATOM_REF (never OBJ_BOX_INLINE), so the
+           * JaclMutableRef cast is safe here. */
+          JaclMutableRef* ref = (JaclMutableRef*)payload;
           JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            reset_old, new_val);
@@ -5910,10 +5928,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           frame = &vm->frames[vm->frame_count - 1];
           result = vm__push(vm, new_val);
         } else {
+          JaclVal* slot = jacl_box_untyped_val(payload);
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                           MREF_VAL(ref), new_val);
+                           *slot, new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
-          MREF_VAL(ref) = new_val;
+          *slot = new_val;
           result = vm__push(vm, new_val);
         }
         if (result != VM_OK) return result;
@@ -5953,7 +5972,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                        vm__type_name(box_val));
           return VM_RUNTIME_ERROR;
         }
-        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(box_val);
+        void* reset_payload = jacl_as_ptr(box_val);
+        if (!jacl_box_is_typed(reset_payload)) {
+          vm__set_error(vm, "reset_inline: struct type mismatch in box");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)reset_payload;
         if (ref->type_idx != type_idx) {
           vm__set_error(vm, "reset_inline: struct type mismatch in box");
           return VM_RUNTIME_ERROR;
@@ -5998,7 +6022,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "swap!: expected closure as second argument, got %s",
                        vm__type_name(closure_val));
         }
-        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        void* payload = jacl_as_ptr(container);
+        JaclMutableRef* ref = (JaclMutableRef*)payload;
         JaclClosure* closure = jacl_as_closure(closure_val);
 
         if (closure->param_count != 1) {
@@ -6013,7 +6038,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal swap_result;
         JaclVal committed_old = JACL_NIL;  /* set by the atom CAS-success branch */
 
-        if (ref->type_idx > 0) {
+        if (jacl_box_is_typed(payload)) {
           /* Struct box swap: pass current value to closure, copy result back.
              Atoms cannot hold structs (compile error), so this is always non-atomic. */
           StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
@@ -6087,11 +6112,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
           }
         } else {
+          /* Untyped box or atom. Atoms always use OBJ_ATOM_REF (so MREF_VAL
+           * is correct); untyped boxes may use OBJ_BOX_INLINE — use the
+           * dispatch helper for both reads and writes. */
+          JaclVal* slot = swap_is_atom
+            ? &MREF_VAL(ref)
+            : jacl_box_untyped_val(payload);
           for (;;) {
             /* Read current value (atomic for atoms, plain for boxes) */
             JaclVal swap_old_val = swap_is_atom
-              ? ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE)
-              : MREF_VAL(ref);
+              ? ATOMIC_LOAD_EXPLICIT((uint64_t*)slot, MEM_ACQUIRE)
+              : *slot;
 
             /* Push closure as callee slot + current value as argument */
             result = vm__push(vm, closure_val);
@@ -6125,7 +6156,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (swap_is_atom) {
               /* CAS loop: try to store result, retry if value changed */
               JaclVal expected = swap_old_val;
-              if (ATOMIC_CAS(&MREF_VAL(ref), &expected, swap_result,
+              if (ATOMIC_CAS((uint64_t*)slot, &expected, swap_result,
                              MEM_ACQ_REL, MEM_ACQUIRE)) {
                 /* CAS succeeded — fire write barrier */
                 gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
@@ -6142,7 +6173,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                                swap_old_val, swap_result);
               gc_remembered_set_barrier(vm->remembered_set,
                                         container, swap_result);
-              MREF_VAL(ref) = swap_result;
+              *slot = swap_result;
               break; /* no retry for boxes */
             }
           }

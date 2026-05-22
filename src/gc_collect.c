@@ -197,6 +197,14 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- Compact untyped box: payload IS the JaclVal --- */
+    case OBJ_BOX_INLINE: {
+        JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+            (uint64_t *)payload, MEM_ACQUIRE);
+        gc__ms_push_val(ms, v);
+        break;
+    }
+
     /* --- Atom ref: same as plain mutable ref plus the trailing watcher
      * list pointer slot (NULL until first [watch ...]). --- */
     case OBJ_ATOM_REF: {

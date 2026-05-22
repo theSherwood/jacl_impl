@@ -139,12 +139,26 @@ uint32_t jacl_val_hash(JaclVal v) {
     return h;
   }
 
-  /* Box: hash type_idx + data bytes */
+  /* Box: hash type_idx + data bytes. For untyped boxes (including the
+   * compact OBJ_BOX_INLINE layout) type_idx is 0 and the contents are
+   * a single JaclVal — hash its raw bytes via the same loop. */
   if (tag == JACL_TAG_BOX) {
-    JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(v);
-    uint32_t h = ref->type_idx * 0x9E3779B9u;
-    const uint8_t* p = ref->data;
-    for (uint32_t i = 0; i < ref->total_size; i++) {
+    void* payload = jacl_as_ptr(v);
+    uint32_t type_idx;
+    const uint8_t* p;
+    uint32_t size;
+    if (jacl_box_is_typed(payload)) {
+      JaclMutableRef* ref = (JaclMutableRef*)payload;
+      type_idx = ref->type_idx;
+      p = ref->data;
+      size = ref->total_size;
+    } else {
+      type_idx = 0;
+      p = (const uint8_t*)jacl_box_untyped_val(payload);
+      size = sizeof(JaclVal);
+    }
+    uint32_t h = type_idx * 0x9E3779B9u;
+    for (uint32_t i = 0; i < size; i++) {
       h = h * 31 + p[i];
     }
     return h;
@@ -213,18 +227,26 @@ bool jacl_val_eq(JaclVal a, JaclVal b) {
     return memcmp(sa->data, sb->data, sa->total_size) == 0;
   }
 
-  /* Box equality: type_idx must match AND data[] must be byte-identical */
+  /* Box equality: untyped boxes compare contained JaclVal; struct boxes
+   * compare type_idx and raw bytes. Boxes carrying the compact
+   * OBJ_BOX_INLINE layout are always untyped (effective type_idx = 0). */
   if (tag_a == JACL_TAG_BOX) {
-    JaclMutableRef* ra = (JaclMutableRef*)jacl_as_ptr(a);
-    JaclMutableRef* rb = (JaclMutableRef*)jacl_as_ptr(b);
-    if (ra == rb) return true;
+    void* pa = jacl_as_ptr(a);
+    void* pb = jacl_as_ptr(b);
+    if (pa == pb) return true;
+    bool a_typed = jacl_box_is_typed(pa);
+    bool b_typed = jacl_box_is_typed(pb);
+    if (a_typed != b_typed) return false;
+    if (!a_typed) {
+      /* both untyped — compare the single JaclVal */
+      return jacl_val_eq(*jacl_box_untyped_val(pa),
+                        *jacl_box_untyped_val(pb));
+    }
+    /* both typed (struct box) — both must have OBJ_MUTABLE_REF layout */
+    JaclMutableRef* ra = (JaclMutableRef*)pa;
+    JaclMutableRef* rb = (JaclMutableRef*)pb;
     if (ra->type_idx != rb->type_idx) return false;
     if (ra->total_size != rb->total_size) return false;
-    if (ra->type_idx == 0) {
-      /* dyn box: compare contained JaclVal */
-      return jacl_val_eq(MREF_VAL(ra), MREF_VAL(rb));
-    }
-    /* struct box: memcmp raw bytes */
     return memcmp(ra->data, rb->data, ra->total_size) == 0;
   }
 

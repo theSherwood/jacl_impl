@@ -46,7 +46,8 @@ typedef enum {
     OBJ_TYPED_RRB_LEAF,
     OBJ_TYPED_HAMT_LEAF,
     OBJ_ATOM_REF,
-    OBJ_WATCHER_LIST
+    OBJ_WATCHER_LIST,
+    OBJ_BOX_INLINE          /* compact untyped box: payload is one JaclVal */
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -93,6 +94,33 @@ bool jacl_is_heap_type(JaclVal v) {
      * profiles since every immediate-int new_val walked the full chain. */
     uint64_t tag_idx = (v & JACL_TYPE_MASK) >> JACL_TAG_SHIFT;
     return ((JACL_HEAP_TAG_MASK >> tag_idx) & 1u) != 0;
+}
+
+/* --- Box layout dispatch ---
+ *
+ * Untyped boxes (the `[box x]` form) live in the compact OBJ_BOX_INLINE
+ * layout: payload is the single JaclVal directly, no JaclMutableRef header
+ * fields — 16 bytes total per box (GCHeader + JaclVal) vs 24 for the
+ * full OBJ_MUTABLE_REF layout. Struct-typed boxes (OP_BOX_STRUCT) still
+ * use OBJ_MUTABLE_REF since they need type_idx + total_size + raw data.
+ *
+ * Callers that touch box payloads must dispatch on obj_type via the
+ * helpers below. Cells and atoms always use OBJ_MUTABLE_REF /
+ * OBJ_ATOM_REF respectively — only TAG_BOX values can carry the inline
+ * layout. */
+
+static inline bool jacl_box_is_typed(void* payload) {
+    GCHeader* h = gc_header_of(payload);
+    if (h->obj_type == OBJ_BOX_INLINE) return false;
+    return ((JaclMutableRef*)payload)->type_idx > 0;
+}
+
+static inline JaclVal* jacl_box_untyped_val(void* payload) {
+    GCHeader* h = gc_header_of(payload);
+    if (h->obj_type == OBJ_BOX_INLINE) {
+        return (JaclVal*)payload;
+    }
+    return (JaclVal*)((JaclMutableRef*)payload)->data;
 }
 
 /* ======================================================================

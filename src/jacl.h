@@ -171,7 +171,8 @@ typedef enum {
     OBJ_TYPED_RRB_LEAF,     /* typed vec leaf: raw struct bytes, no GC tracing */
     OBJ_TYPED_HAMT_LEAF,    /* typed map leaf: trace dyn key only, skip struct value bytes */
     OBJ_ATOM_REF,           /* atom variant of JaclMutableRef with trailing watcher-list slot */
-    OBJ_WATCHER_LIST        /* per-atom watcher list: parallel keys/fns arrays + mutex */
+    OBJ_WATCHER_LIST,       /* per-atom watcher list: parallel keys/fns arrays + mutex */
+    OBJ_BOX_INLINE          /* compact untyped-box: payload is the JaclVal directly (no header fields) */
 } GCObjType;
 
 #define GC_BLOCK_SIZE       65536
