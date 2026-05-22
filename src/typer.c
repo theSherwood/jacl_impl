@@ -44,6 +44,7 @@ typedef struct {
   uint32_t    struct_idx;       /* UINT32_MAX if not a struct/typed-collection;
                                  * for typed-vec/map: element idx */
   uint32_t    key_struct_idx;   /* TYPE_TYPED_MAP key idx; UINT32_MAX otherwise */
+  uint32_t    buf_len;          /* TYPE_BUF N; 0 otherwise. See BUFFER_DESIGN.md */
   uint32_t    scope_depth;      /* depth at which this binding was pushed */
 } TyperBinding;
 
@@ -199,6 +200,7 @@ static void typer__scope_add(TyperCtx* tc, const char* name, uint32_t name_len,
   b->type           = type;
   b->struct_idx     = struct_idx;
   b->key_struct_idx = UINT32_MAX;
+  b->buf_len        = 0;
   b->scope_depth    = tc->scope_depth;
 }
 
@@ -351,6 +353,44 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
   return true;
 }
 
+/* Recognize [Buf N T] type-annotation expressions. Returns true and
+ * writes *out_struct_idx with the element encoding (scalar sentinel
+ * via JACL_SCALAR_TYPE_IDX) and *out_len with N. Returns false if
+ * the node isn't a [Buf ...] shape at all.
+ *
+ * Validation errors (zero/negative N, non-literal N, non-scalar T)
+ * still return true (recognized as a buf annotation) but write
+ * sentinel values so the caller can emit a precise diagnostic:
+ *   - *out_len = 0 means "N not a positive int literal"
+ *   - *out_struct_idx = UINT32_MAX means "T not a recognized scalar
+ *     keyword" (M1 restriction; broaden in M4)
+ *
+ * See BUFFER_DESIGN.md M1. */
+static bool typer__buf_type(TyperCtx* tc, AstNode* node,
+                            uint32_t* out_struct_idx, uint32_t* out_len) {
+  (void)tc;
+  *out_struct_idx = UINT32_MAX;
+  *out_len = 0;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
+      memcmp(h->data.lit_string.value, "Buf", 3) != 0) return false;
+  if (node->data.command.arg_count != 2) return true; /* shape error; caller reports */
+  AstNode* n_arg = node->data.command.args[0];
+  AstNode* t_arg = node->data.command.args[1];
+  if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0) {
+    *out_len = (uint32_t)n_arg->data.lit_int.value;
+  }
+  if (t_arg->type == AST_LIT_STRING) {
+    const char* nm = t_arg->data.lit_string.value;
+    uint32_t    nl = t_arg->data.lit_string.length;
+    if (is_type_keyword(nm, nl)) {
+      *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    }
+  }
+  return true;
+}
+
 /* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
  * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
  * keys), 0 if not a typed-collection expression. Mirrors
@@ -401,9 +441,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode*  value_node    = NULL;
 
   uint32_t declared_struct_idx = UINT32_MAX;
+  uint32_t declared_buf_len    = 0;
   if (argc == 3) {
     /* Keyword form: def TYPE NAME VALUE, or def StructName NAME VALUE,
-     * or def [Vec T] / [Map K V] NAME VALUE for typed collections. */
+     * or def [Vec T] / [Map K V] / [Buf N T] NAME VALUE for typed
+     * collections / buffers. */
     if (typer__node_as_type_keyword(args[0], &declared_type)) {
       /* type keyword */
     } else if (args[0]->type == AST_LIT_STRING) {
@@ -421,12 +463,27 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     } else {
       uint32_t fut_sidx;
       uint32_t ptr_sidx;
+      uint32_t buf_sidx;
+      uint32_t buf_len;
       if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
       } else if (typer__ptr_type(tc, args[0], &ptr_sidx)) {
         declared_type = TYPE_PTR;
         declared_struct_idx = ptr_sidx;
+      } else if (typer__buf_type(tc, args[0], &buf_sidx, &buf_len)) {
+        char err[256];
+        if (buf_len == 0) {
+          jacl_format_buf_bad_len(err, sizeof(err));
+          typer__error(tc, args[0]->start.line, args[0]->start.column, err);
+        }
+        if (buf_sidx == UINT32_MAX) {
+          jacl_format_buf_bad_elem(err, sizeof(err));
+          typer__error(tc, args[0]->start.line, args[0]->start.column, err);
+        }
+        declared_type = TYPE_BUF;
+        declared_struct_idx = buf_sidx;
+        declared_buf_len = buf_len;
       } else {
         int tcoll = typer__typed_collection_kind(args[0]);
         if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
@@ -684,10 +741,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t key_struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
       effective == TYPE_FUTURE || effective == TYPE_PTR ||
-      effective == TYPE_BOX) {
+      effective == TYPE_BOX || effective == TYPE_BUF) {
     /* Declared struct (def Point r ...) / typed-collection elem
      * (def [Vec Point] ps ...) / pointer pointee
-     * (def [Ptr Point] p ...) wins; otherwise inherit from RHS. */
+     * (def [Ptr Point] p ...) / buf elem (def [Buf N T] b ...) wins;
+     * otherwise inherit from RHS. */
     if (declared_struct_idx != UINT32_MAX) {
       struct_idx = declared_struct_idx;
     } else {
@@ -707,6 +765,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   /* scope_add doesn't take key_struct_idx as a param; patch in place. */
   if (key_struct_idx != UINT32_MAX && tc->binding_count > 0) {
     tc->bindings[tc->binding_count - 1].key_struct_idx = key_struct_idx;
+  }
+  /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md. */
+  if (effective == TYPE_BUF && declared_buf_len > 0 && tc->binding_count > 0) {
+    tc->bindings[tc->binding_count - 1].buf_len = declared_buf_len;
   }
 
   /* def/mut returns nil. (compiler.c's last_expr_type is sometimes left
@@ -3135,6 +3197,7 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
     node->inferred_type = b->type;
     node->inferred_struct_idx = b->struct_idx;
     node->inferred_key_struct_idx = b->key_struct_idx;
+    node->inferred_buf_len = b->buf_len;
   } else {
     node->inferred_type = TYPE_DYN;
   }

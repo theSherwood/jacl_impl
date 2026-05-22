@@ -1026,6 +1026,40 @@ static void test_nested_proc_call_narrows(void) {
   arena_destroy(&a);
 }
 
+/* --- Buffer types (M1: type plumbing only) ---------------------- */
+
+/* `def [Buf N T] x ...` binds x as TYPE_BUF with scalar-encoded
+ * element type and N stored in inferred_buf_len. The RHS will fail
+ * the type-mismatch check (no buf-producing form ships in M1), but
+ * the annotation must still annotate the binding correctly so the
+ * var-ref to $x picks up the buf shape. See BUFFER_DESIGN.md M1. */
+static void test_buf_def_annotation(void) {
+  current_test = "buf_def_annotation";
+  arena_t a = {0};
+  ParseResult r = run_typer("def [Buf 256 i32] x 0\n$x", &a);
+  AstNode* var = find_var_ref(r.nodes[1], "x");
+  ASSERT_NOT_NULL(var);
+  ASSERT_TYPE(var, TYPE_BUF);
+  if (var) {
+    if (var->inferred_buf_len != 256) {
+      fprintf(stderr, "  FAIL %s: expected buf_len=256 got %u\n",
+              current_test, var->inferred_buf_len);
+      failures++;
+    } else {
+      passes++;
+    }
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I32);
+    if (var->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: expected struct_idx=%u got %u\n",
+              current_test, want, var->inferred_struct_idx);
+      failures++;
+    } else {
+      passes++;
+    }
+  }
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -1094,6 +1128,8 @@ int main(void) {
   test_swap_box_narrows_to_element();
   test_deref_box_struct_narrows();
   test_nested_proc_call_narrows();
+
+  test_buf_def_annotation();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

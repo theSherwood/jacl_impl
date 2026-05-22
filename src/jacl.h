@@ -677,6 +677,7 @@ struct AstNode {
   uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
   uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT or typed-collection (elem idx), UINT32_MAX otherwise */
   uint32_t    inferred_key_struct_idx; /* key struct idx for TYPE_TYPED_MAP, UINT32_MAX otherwise */
+  uint32_t    inferred_buf_len; /* N for TYPE_BUF; 0 otherwise. See BUFFER_DESIGN.md */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
@@ -1202,7 +1203,9 @@ typedef enum {
   TYPE_TYPED_MAP,
   TYPE_FUTURE,
   TYPE_PTR,       /* typed pointer; pointee idx in inferred_struct_idx */
-  TYPE_BOX        /* mutable box (cell); element idx in inferred_struct_idx */
+  TYPE_BOX,       /* mutable box (cell); element idx in inferred_struct_idx */
+  TYPE_BUF        /* fixed-size C-ABI array; elem idx in inferred_struct_idx,
+                     N in inferred_buf_len. See BUFFER_DESIGN.md */
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry

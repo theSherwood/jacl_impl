@@ -267,4 +267,20 @@ int jacl_format_ptr_null_bad_arg(char* buf, size_t bufsz) {
                   "type error: ptr-null argument must be [Ptr T]");
 }
 
+/* "type error: [Buf N T] length must be a positive integer literal"
+ * Fires when N is missing, zero, negative, or not an int literal. */
+int jacl_format_buf_bad_len(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: [Buf N T] length must be a positive integer literal");
+}
+
+/* "type error: [Buf N T] element type must be a scalar (M1 restriction)"
+ * Fires when T is not a recognized scalar type keyword. Struct, nested
+ * buf, pointer, and ref-typed element support arrives in M4. */
+int jacl_format_buf_bad_elem(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: [Buf N T] element type must be a scalar "
+                  "(M1 restriction)");
+}
+
 #endif /* JACL_TYPE_ERROR_C */

@@ -386,6 +386,26 @@ static void run_all(void) {
     .expect_substrings = { "type error", "await", "future", "i32" },
   });
 
+  /* --- Stage 6: [Buf N T] buffer-type annotation rejections (M1) --- */
+
+  /* Zero length rejected. */
+  RUN("buf_zero_length", {
+    .source = "def [Buf 0 i32] x 0",
+    .expect_substrings = { "type error", "Buf", "positive" },
+  });
+
+  /* Non-literal N rejected. */
+  RUN("buf_non_literal_len", {
+    .source = "def i32 n 256\ndef [Buf $n i32] x 0",
+    .expect_substrings = { "type error", "Buf", "positive" },
+  });
+
+  /* Non-scalar element type rejected (M1 restriction). */
+  RUN("buf_non_scalar_elem", {
+    .source = "struct Point {i32 x i32 y}\ndef [Buf 8 Point] b 0",
+    .expect_substrings = { "type error", "Buf", "scalar" },
+  });
+
   /* Ctx-field-set arrow form: typer recognizes `set $ctx->field val`
    * pre-rewrite and applies the field-type check. */
   RUN("ctx_set_arrow_type_mismatch", {
