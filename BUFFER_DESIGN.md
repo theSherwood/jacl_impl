@@ -252,3 +252,41 @@ bytes back.
 - Constant-`N` polymorphic procs (`proc f [[Buf N u8]] {...}` where
   `N` is bound) — deferred; for now `N` must be a literal at each
   use site.
+
+### LHS type inference for typed RHS constructors (language-wide)
+
+Today `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` repeats
+`[Buf 8 i32]` on both sides. The RHS constructor already carries
+the full type — the LHS annotation is pure noise when the RHS is
+syntactically a typed constructor.
+
+Reduce to:
+
+```
+def hdr [[Buf 8 i32] 1024 2048]   ; type inferred from RHS
+```
+
+This is **not buffer-specific** — the same redundancy exists for
+every statically-typed RHS form already in the language:
+
+```
+def xs [[Vec i64] 1 2 3]           ; today repeats [Vec i64]
+def m  [[Map str i32] "a" 1 "b" 2] ; today repeats [Map str i32]
+def f  [spawn { …i32… }]           ; could infer [Future i32]
+def p  [ptr-null [Ptr Point]]      ; could infer [Ptr Point]
+def b  [box-i32 0]                 ; could infer [Box i32]
+```
+
+Recommended approach when this lands: a typer pass that, when `def
+NAME RHS` is encountered without an LHS annotation, takes the
+RHS's inferred_type / inferred_struct_idx / inferred_buf_len /
+inferred_key_struct_idx and adopts them onto the binding —
+provided the RHS is a *statically known* typed form (a recognized
+typed-constructor head, an extern call with a typed return, a
+typed proc call, etc.). The dyn-binding form `def dyn x …` stays
+the explicit "I want a dyn slot" marker (per `TYPE_SYSTEM.md`
+decision 2).
+
+This is one of those "do once, applies everywhere" wins — worth
+landing as a separate, focused milestone after M3/M4 so it's not
+entangled with the buffer feature delivery.
