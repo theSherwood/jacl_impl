@@ -2505,6 +2505,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
     } else {
+      /* [[Buf N T] v0 v1 ...] constructor — same shape as the typed-
+       * vec/map constructors above but with a value (N) in the head's
+       * second slot. The compiler integrates with the def site for
+       * codegen; the typer just stamps TYPE_BUF + element/len so the
+       * def-site type check sees a matching RHS. See BUFFER_DESIGN.md. */
+      uint32_t buf_sidx_ctor;
+      uint32_t buf_len_ctor;
+      if (typer__buf_type(tc, head, &buf_sidx_ctor, &buf_len_ctor) &&
+          buf_len_ctor > 0 && buf_sidx_ctor != UINT32_MAX) {
+        node->inferred_type       = TYPE_BUF;
+        node->inferred_struct_idx = buf_sidx_ctor;
+        node->inferred_buf_len    = buf_len_ctor;
+        return;
+      }
       node->inferred_type = TYPE_DYN;
     }
   } else if (head && head->type == AST_LIT_STRING) {

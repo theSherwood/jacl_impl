@@ -7005,8 +7005,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], false, line, col);
       return;
     }
-    /* --- No-value Buf form: `def [Buf N T] NAME` --- */
-    if (argc == 2 && args[1]->type == AST_LIT_STRING &&
+    /* --- Buf def: `def [Buf N T] NAME` (zero-init) or
+     *              `def [Buf N T] NAME [[Buf N T] v0 v1 ...]` (literal init).
+     * Both share the multi-slot allocation + OP_BUF_ZERO_LOCAL prelude;
+     * literal init adds per-element OP_BUF_SET_LOCAL stores. Partial
+     * fill is allowed (rest stays zero). See BUFFER_DESIGN.md M2. */
+    if ((argc == 2 || argc == 3) && args[1]->type == AST_LIT_STRING &&
         args[0]->type == AST_COMMAND &&
         args[0]->data.command.head &&
         args[0]->data.command.head->type == AST_LIT_STRING &&
@@ -7039,6 +7043,62 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       uint32_t slot_count = (uint32_t)((byte_count + sizeof(JaclVal) - 1) / sizeof(JaclVal));
       if (slot_count == 0) slot_count = 1;
+
+      /* For argc==3 literal init, validate the RHS constructor matches
+       * the LHS type. The RHS must be [[Buf N T] v0 v1 ...] where the
+       * inner [Buf N T] matches exactly. */
+      AstNode* init_ctor = NULL;
+      uint32_t init_count = 0;
+      AstNode** init_vals = NULL;
+      if (argc == 3) {
+        AstNode* rhs = args[2];
+        bool rhs_ok = rhs->type == AST_COMMAND &&
+                      rhs->data.command.head &&
+                      rhs->data.command.head->type == AST_COMMAND &&
+                      rhs->data.command.head->data.command.head &&
+                      rhs->data.command.head->data.command.head->type == AST_LIT_STRING &&
+                      rhs->data.command.head->data.command.head->data.lit_string.length == 3 &&
+                      memcmp(rhs->data.command.head->data.command.head->data.lit_string.value,
+                             "Buf", 3) == 0 &&
+                      rhs->data.command.head->data.command.arg_count == 2;
+        if (!rhs_ok) {
+          compiler__error(c, line, col,
+              "def [Buf N T]: RHS must be omitted (zero-init) or "
+              "[[Buf N T] v0 v1 ...] literal");
+          return;
+        }
+        AstNode* rhs_tn   = rhs->data.command.head;
+        AstNode* rhs_nlen = rhs_tn->data.command.args[0];
+        AstNode* rhs_telt = rhs_tn->data.command.args[1];
+        if (rhs_nlen->type != AST_LIT_INT ||
+            (uint32_t)rhs_nlen->data.lit_int.value != n) {
+          compiler__error(c, line, col,
+              "[[Buf N T] ...] constructor length must match LHS exactly");
+          return;
+        }
+        JaclType rhs_elem;
+        if (rhs_telt->type != AST_LIT_STRING ||
+            !compiler__resolve_type(c, rhs_telt->data.lit_string.value,
+                                    rhs_telt->data.lit_string.length, &rhs_elem) ||
+            rhs_elem != elem_type) {
+          compiler__error(c, line, col,
+              "[[Buf N T] ...] constructor element type must match LHS exactly");
+          return;
+        }
+        init_ctor  = rhs;
+        init_count = rhs->data.command.arg_count;
+        init_vals  = rhs->data.command.args;
+        if (init_count > n) {
+          char err[128];
+          snprintf(err, sizeof(err),
+              "[[Buf %u %s] ...]: %u values provided, max %u",
+              (unsigned)n, type_name(elem_type),
+              (unsigned)init_count, (unsigned)n);
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+
       uint32_t base_slot = c->local_count;
 
       JaclVal bind_val = compiler__name_val(c->heap, c->intern_table,
@@ -7062,6 +7122,26 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
       compiler__emit_byte(c, (uint8_t)base_slot, line);
       compiler__emit_u16(c, (uint16_t)byte_count, line);
+
+      /* Literal init: emit per-element OP_BUF_SET_LOCAL. Index is a
+       * compile-time constant so we push it via OP_CONST, then the
+       * value, then the store opcode. Element-type overflow checks on
+       * literal values are deferred to M5 (see BUFFER_DESIGN.md). */
+      if (init_ctor) {
+        (void)init_ctor;
+        for (uint32_t i = 0; i < init_count; i++) {
+          compiler__emit_constant(c, jacl_i32((int32_t)i), line);
+          compiler__compile_node(c, init_vals[i]);
+          /* All M2 element types accept i32 on the value-pop path
+           * (small ints narrow, i64/u64/f64 promote). The typer is
+           * responsible for rejecting incompatible kinds (e.g. a
+           * string literal in a u8 buf). */
+          compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)base_slot, line);
+          compiler__emit_byte(c, (uint8_t)elem_type, line);
+          compiler__emit_u16(c, (uint16_t)n, line);
+        }
+      }
 
       /* Statement value: top-level statements push exactly one result
        * that OP_CHECK_ERROR consumes between statements. Our N storage

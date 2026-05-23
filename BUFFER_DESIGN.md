@@ -15,15 +15,15 @@ when M4 lands).
 ```
 [Buf N T]                              ; type annotation; N is literal int, T is a type
 def [Buf 256 u8] scratch               ; zero-init local
-def [Buf 4 u8] magic [buf u8 [0x7f 0x45 0x4c 0x46]]   ; literal init
-$scratch.[$i]                          ; indexed access (i must be int)
-set $scratch.[$i] $byte                ; indexed mutation
+def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]   ; literal init
+[buf-get $scratch $i]                  ; indexed access (i must be i32)
+[buf-set $scratch $i $byte]            ; indexed mutation
 [buf-len $scratch]                     ; compile-time constant => 256
-[addr $scratch.[0]]                    ; returns [Ptr u8]
-[buf-unchecked-get $scratch $i]        ; skips bounds check (escape hatch)
-[buf-unchecked-set $scratch $i $byte]  ; skips bounds check
+[addr $scratch.[0]]                    ; returns [Ptr u8]                  (M3)
+[buf-unchecked-get $scratch $i]        ; skips bounds check                 (M5)
+[buf-unchecked-set $scratch $i $byte]  ; skips bounds check                 (M5)
 extern i32 read {i32 [Ptr u8] u64}
-[read 0 $scratch 256]                  ; implicit decay [Buf 256 u8] → [Ptr u8] at extern call
+[read 0 $scratch 256]                  ; implicit decay [Buf 256 u8] → [Ptr u8] (M3)
 ```
 
 ### Why `[Buf N T]` and not `[Buf T N]`
@@ -120,6 +120,24 @@ a type error). Runtime index → compile to a compare-and-trap.
 Escape hatch: `[buf-unchecked-get $buf $i]` / `[buf-unchecked-set $buf $i $v]`.
 Named to make audit grep-friendly.
 
+## Literal initialization
+
+`def [Buf N T] x [[Buf N T] v0 v1 ... vk]` initializes a buffer with
+a literal sequence of values. Matches the surface of typed-vec
+constructors (`[[Vec i64] 10 20 30]`).
+
+- The constructor type `[[Buf N T] ...]` must match the LHS
+  annotation exactly (same `N`, same `T`).
+- **Partial fill is allowed**: if `k < N`, the supplied values land
+  at indices `0..k-1` and the remaining slots stay zero-init. Useful
+  for "magic bytes at the start of a header" patterns.
+- `k > N` is a compile-time error.
+- Each value is checked against `T` at compile time; small ints are
+  narrowed via C-cast semantics (truncate without overflow trap).
+  **Deferred (M5)**: constant-overflow check on literal values, e.g.
+  `[[Buf 4 u8] 256]` should warn or error at compile time since 256
+  doesn't fit in u8.
+
 ## GC integration
 
 When `T` is a GC-traced reference type, the buffer's inline slots must
@@ -208,6 +226,11 @@ bytes back.
 
 - `[buf-unchecked-get]` / `[buf-unchecked-set]` escape hatches.
 - Print formatting (e.g. `Buf<u8, 256>`).
+- **Compile-time literal-value overflow check**: reject literal
+  initializers whose constant values don't fit in `T` (e.g.
+  `[[Buf 4 u8] 256]`). Today the VM truncates via C-cast
+  semantics; users only learn about the overflow at runtime when
+  the stored byte differs from what they wrote.
 - Documentation: update `TYPE_SYSTEM.md`, `SYNTAX.md`,
   `STRUCT_DESIGN.md`; remove buffer items from `NOT_IMPLEMENTED.md`.
 

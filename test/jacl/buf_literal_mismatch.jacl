@@ -1,0 +1,2 @@
+# expect-error: constructor length must match
+def [Buf 4 u8] x [[Buf 8 u8] 1 2 3 4]
