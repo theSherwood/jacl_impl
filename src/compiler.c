@@ -7063,6 +7063,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, (uint8_t)base_slot, line);
       compiler__emit_u16(c, (uint16_t)byte_count, line);
 
+      /* Statement value: top-level statements push exactly one result
+       * that OP_CHECK_ERROR consumes between statements. Our N storage
+       * slots must NOT be consumed, so emit one extra NIL as the
+       * disposable statement value. See vm.c:OP_CHECK_ERROR. */
+      compiler__emit_byte(c, OP_NIL, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
@@ -9246,6 +9251,86 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_VEC_LEN, line);
     c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* --- [buf-get $b $i] and [buf-set $b $i $v] for [Buf N T] locals ---
+   * Receiver must be a bare var-ref to a TYPE_BUF local; we read
+   * base_slot / elem_type / buf_len from the binding and bake them
+   * into the opcode operands. Bounds-check is in the opcode. See
+   * BUFFER_DESIGN.md M2. */
+  if (hid == HEAD_BUF_GET || hid == HEAD_BUF_SET) {
+    bool is_get = (hid == HEAD_BUF_GET);
+    uint32_t expected_argc = is_get ? 2 : 3;
+    if (argc != expected_argc) {
+      compiler__builtin_arity_error(c, line, col,
+          is_get ? "buf-get" : "buf-set",
+          is_get ? "2 arguments" : "3 arguments", argc);
+      return;
+    }
+    AstNode* recv = args[0];
+    if (recv->type != AST_VAR_REF) {
+      compiler__error(c, line, col,
+          is_get ? "buf-get requires a buf-typed variable reference"
+                 : "buf-set requires a buf-typed variable reference");
+      return;
+    }
+    JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+        recv->data.var_ref.name, recv->data.var_ref.length);
+    int found = -1;
+    for (int i = (int)c->local_count - 1; i >= 0; i--) {
+      if (c->locals[i].name == recv_name) { found = i; break; }
+    }
+    if (found < 0 || c->locals[found].type != TYPE_BUF) {
+      compiler__error(c, line, col,
+          "buf-get/buf-set: receiver is not a [Buf N T] local");
+      return;
+    }
+    uint32_t base_slot = (uint32_t)found;
+    uint32_t buf_len   = c->locals[found].buf_len;
+    if (!JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+      compiler__error(c, line, col,
+          "buf-get/buf-set: only scalar element types are supported (M2)");
+      return;
+    }
+    JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+
+    /* Compile index (must be i32). */
+    compiler__compile_node(c, args[1]);
+    if (c->last_expr_type != TYPE_I32) {
+      compiler__error(c, line, col,
+          "buf-get/buf-set: index must be i32");
+      return;
+    }
+
+    if (is_get) {
+      compiler__emit_byte(c, OP_BUF_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)base_slot, line);
+      compiler__emit_byte(c, (uint8_t)elem_type, line);
+      compiler__emit_u16(c, (uint16_t)buf_len, line);
+      /* Result type mirrors the typer rule: small ints widen to i32. */
+      switch (elem_type) {
+        case TYPE_I8: case TYPE_U8:
+        case TYPE_I16: case TYPE_U16:
+          c->last_expr_type = TYPE_I32; break;
+        default:
+          c->last_expr_type = elem_type; break;
+      }
+      return;
+    }
+
+    /* buf-set: compile value. Int literals default to TYPE_I32 from
+     * the typer; the VM widens / narrows at the store site. */
+    compiler__compile_node(c, args[2]);
+
+    compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)base_slot, line);
+    compiler__emit_byte(c, (uint8_t)elem_type, line);
+    compiler__emit_u16(c, (uint16_t)buf_len, line);
+    /* buf-set leaves nothing on TOS — but the statement-level model
+     * expects a value. Push NIL so the block cleanup balances. */
+    compiler__emit_byte(c, OP_NIL, line);
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 

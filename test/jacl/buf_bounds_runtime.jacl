@@ -1,0 +1,5 @@
+# expect-error: out of bounds
+# Runtime bounds-check fires when index is computed (not a literal).
+def [Buf 4 u8] b
+def i32 i 7
+print [buf-get $b $i]

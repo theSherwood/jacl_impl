@@ -2619,6 +2619,24 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             }
           }
           return;
+        case HEAD_BUF_GET:
+          /* Result type of [buf-get $b $i]. Small-int elements
+           * (u8/i8/u16/i16) widen to i32 at the dyn boundary —
+           * see BUFFER_DESIGN.md "Small int types". Other scalars
+           * surface as their declared type. */
+          if (recv_t == TYPE_BUF &&
+              recv->inferred_struct_idx != UINT32_MAX &&
+              JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+            JaclType elem = JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+            switch (elem) {
+              case TYPE_I8: case TYPE_U8:
+              case TYPE_I16: case TYPE_U16:
+                node->inferred_type = TYPE_I32; break;
+              default:
+                node->inferred_type = elem; break;
+            }
+          }
+          return;
         case HEAD_MAP_GET:
           if (recv_t == TYPE_TYPED_MAP &&
               recv->inferred_struct_idx != UINT32_MAX) {
@@ -2737,6 +2755,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COLLECT,     TYPE_VEC    },
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
+      { HEAD_BUF_SET,     TYPE_NIL    },
       /* File I/O — write/append produce nil on success, error value on
        * failure (catchable via try/catch).  read-file produces a string. */
       { HEAD_READ_FILE,   TYPE_STR    },
