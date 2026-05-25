@@ -10433,6 +10433,51 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     AstNode* expr = args[0];
+
+    /* [addr $buf->N]: push the address of buf element N as a tagged
+     * u64 (TYPE_PTR with the element's scalar type). Bounds-checked
+     * at compile time. See BUFFER_DESIGN.md M3. */
+    if (expr->type == AST_COMMAND &&
+        expr->data.command.head_id == HEAD_DOT &&
+        expr->data.command.arg_count == 2 &&
+        expr->data.command.args[0]->type == AST_VAR_REF &&
+        expr->data.command.args[1]->type == AST_LIT_INT) {
+      AstNode* recv = expr->data.command.args[0];
+      JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+          recv->data.var_ref.name, recv->data.var_ref.length);
+      int found = -1;
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].name == recv_name) { found = i; break; }
+      }
+      if (found >= 0 && c->locals[found].type == TYPE_BUF &&
+          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+        uint32_t base_slot = (uint32_t)found;
+        uint32_t buf_len   = c->locals[found].buf_len;
+        JaclType elem_type =
+            JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        int32_t  idx_lit = expr->data.command.args[1]->data.lit_int.value;
+        if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
+          char err[160];
+          snprintf(err, sizeof(err),
+              "addr: buf index %d out of bounds for [Buf %u %s]",
+              (int)idx_lit, (unsigned)buf_len, type_name(elem_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+        uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col, "addr: buf byte offset exceeds 65535");
+          return;
+        }
+        compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        c->last_expr_type = TYPE_U64; /* runtime rep of pointer */
+        return;
+      }
+    }
+
     if (expr->type != AST_COMMAND ||
         expr->data.command.head_id != HEAD_DOT ||
         expr->data.command.arg_count != 2 ||
@@ -11015,6 +11060,62 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (argc != 2 && argc != 3) {
       compiler__builtin_arity_error(c, line, col, ".", "2 or 3 arguments", argc);
       return;
+    }
+
+    /* Buf element access via arrow: `$buf->N` parses as `[. $buf N]`
+     * where the field is AST_LIT_INT. Compile as OP_BUF_GET_LOCAL (read)
+     * or OP_BUF_SET_LOCAL (write) with the index pushed via OP_CONST.
+     * See BUFFER_DESIGN.md M3. */
+    if (args[0]->type == AST_VAR_REF && args[1]->type == AST_LIT_INT) {
+      AstNode* recv = args[0];
+      JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+          recv->data.var_ref.name, recv->data.var_ref.length);
+      int found = -1;
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].name == recv_name) { found = i; break; }
+      }
+      if (found >= 0 && c->locals[found].type == TYPE_BUF &&
+          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+        uint32_t base_slot = (uint32_t)found;
+        uint32_t buf_len   = c->locals[found].buf_len;
+        JaclType elem_type =
+            JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        int32_t  idx_lit = args[1]->data.lit_int.value;
+        if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
+          char err[160];
+          snprintf(err, sizeof(err),
+              "buf index %d out of bounds for [Buf %u %s]",
+              (int)idx_lit, (unsigned)buf_len, type_name(elem_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+        /* Push the constant index */
+        compiler__emit_constant(c, jacl_i32(idx_lit), line);
+        if (is_set) {
+          /* `set $buf->N V` parses as HEAD_SET which rewrites to
+           * `[. $buf N V]`; compile the value then emit the store. */
+          compiler__compile_node(c, args[2]);
+          compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)base_slot, line);
+          compiler__emit_byte(c, (uint8_t)elem_type, line);
+          compiler__emit_u16(c, (uint16_t)buf_len, line);
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
+        compiler__emit_byte(c, OP_BUF_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_byte(c, (uint8_t)elem_type, line);
+        compiler__emit_u16(c, (uint16_t)buf_len, line);
+        switch (elem_type) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            c->last_expr_type = TYPE_I32; break;
+          default:
+            c->last_expr_type = elem_type; break;
+        }
+        return;
+      }
     }
 
     /* Check for module binding: $modname->field with literal field name

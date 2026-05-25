@@ -2534,6 +2534,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_ZERO_LOCAL] = &&L_OP_BUF_ZERO_LOCAL,
     [OP_BUF_GET_LOCAL]  = &&L_OP_BUF_GET_LOCAL,
     [OP_BUF_SET_LOCAL]  = &&L_OP_BUF_SET_LOCAL,
+    [OP_BUF_ADDR_LOCAL] = &&L_OP_BUF_ADDR_LOCAL,
   };
 
   #define CASE(op)   L_##op
@@ -3168,6 +3169,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                           (unsigned)elem_type);
             return VM_RUNTIME_ERROR;
         }
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_ADDR_LOCAL): {
+        /* Address of buf element: push &frame[base_slot] + byte_offset
+         * as a tagged u64. Compile-time bounds + alignment guaranteed
+         * the offset is in range. Used by [addr $buf->N]. See
+         * BUFFER_DESIGN.md M3. */
+        uint8_t  base_slot   = vm__read_byte(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        uint64_t addr = (uint64_t)(uintptr_t)(base + byte_offset);
+        result = vm__push(vm, jacl_u64(&vm->heap, addr));
+        if (result != VM_OK) return result;
         DISPATCH();
       }
 
@@ -7145,6 +7160,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal field_val;
         switch ((JaclType)field_type) {
           case TYPE_BOOL: field_val = jacl_bool(base[byte_offset]); break;
+          case TYPE_I8:  { int8_t   n; memcpy(&n, base + byte_offset, 1); field_val = jacl_i32((int32_t)n); break; }
+          case TYPE_U8:  { uint8_t  n = base[byte_offset]; field_val = jacl_i32((int32_t)n); break; }
+          case TYPE_I16: { int16_t  n; memcpy(&n, base + byte_offset, 2); field_val = jacl_i32((int32_t)n); break; }
+          case TYPE_U16: { uint16_t n; memcpy(&n, base + byte_offset, 2); field_val = jacl_i32((int32_t)n); break; }
           case TYPE_I32: { int32_t  n; memcpy(&n, base + byte_offset, 4); field_val = jacl_i32(n); break; }
           case TYPE_U32: { uint32_t n; memcpy(&n, base + byte_offset, 4); field_val = jacl_u32(n); break; }
           case TYPE_F32: { float    f; memcpy(&f, base + byte_offset, 4); field_val = jacl_f32(f); break; }
@@ -7193,6 +7212,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         switch ((JaclType)field_type) {
           case TYPE_BOOL: { base[byte_offset] = (uint8_t)(jacl_is_bool(new_val) ? jacl_as_bool(new_val) : 0); break; }
+          case TYPE_I8: case TYPE_U8: {
+            int32_t  n = jacl_is_i32(new_val) ? jacl_as_i32(new_val)
+                       : (jacl_is_u32(new_val) ? (int32_t)jacl_as_u32(new_val) : 0);
+            base[byte_offset] = (uint8_t)n;
+            break;
+          }
+          case TYPE_I16: case TYPE_U16: {
+            int32_t  n = jacl_is_i32(new_val) ? jacl_as_i32(new_val)
+                       : (jacl_is_u32(new_val) ? (int32_t)jacl_as_u32(new_val) : 0);
+            uint16_t w = (uint16_t)n;
+            memcpy(base + byte_offset, &w, 2);
+            break;
+          }
           case TYPE_I32: { int32_t  n = jacl_is_i32(new_val) ? jacl_as_i32(new_val) : 0;             memcpy(base + byte_offset, &n, 4); break; }
           case TYPE_U32: { uint32_t n = jacl_is_u32(new_val) ? jacl_as_u32(new_val) : 0;             memcpy(base + byte_offset, &n, 4); break; }
           case TYPE_F32: { float    f = jacl_is_f32(new_val) ? jacl_as_f32(new_val) : 0.0f;          memcpy(base + byte_offset, &f, 4); break; }

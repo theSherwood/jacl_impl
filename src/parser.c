@@ -512,19 +512,36 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
          parser__peek(p)->type == TOKEN_ARROW) {
     Token* arrow = parser__advance(p); /* consume '->' */
 
-    Token* field_tok = parser__peek(p);
-    if (field_tok->type != TOKEN_WORD) {
-      return parser__error(p, "expected field name after '->'", arrow);
+    Token* rhs_tok = parser__peek(p);
+    AstNode* rhs = NULL;
+    SourcePos rhs_end;
+    if (rhs_tok->type == TOKEN_WORD) {
+      /* Classic field access: $x->field — RHS is a string literal. */
+      parser__advance(p);
+      rhs = ast_alloc(p->arena);
+      rhs->type = AST_LIT_STRING;
+      rhs->start = parser__token_start(rhs_tok);
+      rhs->end   = parser__token_end(rhs_tok);
+      rhs->data.lit_string.value  = rhs_tok->payload.text;
+      rhs->data.lit_string.length = rhs_tok->length;
+      rhs_end = rhs->end;
+    } else if (rhs_tok->type == TOKEN_INT) {
+      /* Buf element access: $buf->N — RHS is an int literal. The
+       * typer/compiler dispatch on the receiver's type (TYPE_BUF →
+       * element access; other types → today the typer reports a
+       * field-not-found error, which is fine).  See BUFFER_DESIGN.md
+       * M3. */
+      parser__advance(p);
+      rhs = ast_alloc(p->arena);
+      rhs->type = AST_LIT_INT;
+      rhs->start = parser__token_start(rhs_tok);
+      rhs->end   = parser__token_end(rhs_tok);
+      rhs->data.lit_int.value = rhs_tok->payload.int_val;
+      rhs->inferred_type = TYPE_I32;
+      rhs_end = rhs->end;
+    } else {
+      return parser__error(p, "expected field name or integer index after '->'", arrow);
     }
-    parser__advance(p); /* consume field name */
-
-    /* Build field name as AST_LIT_STRING */
-    AstNode* field = ast_alloc(p->arena);
-    field->type = AST_LIT_STRING;
-    field->start = parser__token_start(field_tok);
-    field->end   = parser__token_end(field_tok);
-    field->data.lit_string.value  = field_tok->payload.text;
-    field->data.lit_string.length = field_tok->length;
 
     /* Build "." head */
     AstNode* dot_head = ast_alloc(p->arena);
@@ -534,15 +551,15 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
     dot_head->data.lit_string.value  = ".";
     dot_head->data.lit_string.length = 1;
 
-    /* Build [. expr field] command */
+    /* Build [. expr rhs] command */
     AstNode** args = ast_alloc_array(p->arena, 2);
     args[0] = expr;
-    args[1] = field;
+    args[1] = rhs;
 
     AstNode* node = ast_alloc(p->arena);
     node->type  = AST_COMMAND;
     node->start = expr->start;
-    node->end   = parser__token_end(field_tok);
+    node->end   = rhs_end;
     node->data.command.head      = dot_head;
     node->data.command.head_id   = HEAD_DOT;
     node->data.command.args      = args;

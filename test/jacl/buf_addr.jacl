@@ -1,0 +1,14 @@
+# expect: 127
+# expect: 69
+# expect: 1024
+# [addr $buf->N] returns [Ptr T] with the buf's declared element
+# type. We deref through the resulting pointer to verify the byte/word.
+def [Buf 4 u8] m [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+def [Ptr u8] p0 [addr $m->0]
+def [Ptr u8] p1 [addr $m->1]
+print [ptr-deref $p0]
+print [ptr-deref $p1]
+
+def [Buf 8 i32] words [[Buf 8 i32] 1024]
+def [Ptr i32] q [addr $words->0]
+print [ptr-deref $q]

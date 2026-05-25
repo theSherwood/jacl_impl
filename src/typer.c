@@ -2994,6 +2994,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * accessed field's type. The typer trusts the typer-set
        * inferred_type/struct_idx on the inner chain expression. */
       AstNode* inner = node->data.command.args[0];
+
+      /* [addr $buf->N]: result is [Ptr ElemType] using the buf's
+       * *declared* element type (not the widened i32 surfaced by the
+       * arrow-read). Detect `[. $varref $intlit]` whose receiver is a
+       * TYPE_BUF binding. See BUFFER_DESIGN.md M3. */
+      if (inner->type == AST_COMMAND &&
+          inner->data.command.head_id == HEAD_DOT &&
+          inner->data.command.arg_count == 2 &&
+          inner->data.command.args[0]->type == AST_VAR_REF &&
+          inner->data.command.args[1]->type == AST_LIT_INT) {
+        AstNode* recv = inner->data.command.args[0];
+        const TyperBinding* b = typer__scope_resolve(tc,
+            recv->data.var_ref.name, recv->data.var_ref.length,
+            recv->scope_mark);
+        if (b && b->type == TYPE_BUF &&
+            JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+          node->inferred_type       = TYPE_PTR;
+          node->inferred_struct_idx = b->struct_idx; /* scalar elem encoding */
+          return;
+        }
+      }
+
       JaclType inner_t = (JaclType)inner->inferred_type;
       uint32_t inner_sidx = inner->inferred_struct_idx;
       if (inner_t == TYPE_STRUCT && inner_sidx != UINT32_MAX) {
@@ -3179,6 +3201,37 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                                   : bound->return_type;
             return;
           }
+        }
+      }
+
+      /* Buf element access: `$buf->N` parses as `[. $buf N]` where the
+       * field is an AST_LIT_INT. Narrow to the element type, widening
+       * small ints to i32 (mirrors HEAD_BUF_GET). See BUFFER_DESIGN.md M3. */
+      if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_INT) {
+        const TyperBinding* b = typer__scope_resolve(tc,
+            tgt->data.var_ref.name, tgt->data.var_ref.length,
+            tgt->scope_mark);
+        if (b && b->type == TYPE_BUF &&
+            JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+          int32_t  idx_lit = fld->data.lit_int.value;
+          if (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                "type error: buf index %d out of bounds for [Buf %u T]",
+                (int)idx_lit, (unsigned)b->buf_len);
+            typer__error(tc, fld->start.line, fld->start.column, err);
+            node->inferred_type = TYPE_DYN;
+            return;
+          }
+          JaclType elem = JACL_TYPE_IDX_TO_SCALAR(b->struct_idx);
+          switch (elem) {
+            case TYPE_I8: case TYPE_U8:
+            case TYPE_I16: case TYPE_U16:
+              node->inferred_type = TYPE_I32; break;
+            default:
+              node->inferred_type = elem; break;
+          }
+          return;
         }
       }
 

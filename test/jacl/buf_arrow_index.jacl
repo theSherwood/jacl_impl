@@ -1,0 +1,11 @@
+# expect: 127
+# expect: 69
+# expect: 76
+# expect: 70
+# $buf->N arrow access: read element at constant index N. Same as
+# [buf-get $buf N] but cleaner syntax. See BUFFER_DESIGN.md M3.
+def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+print $magic->0
+print $magic->1
+print $magic->2
+print $magic->3
