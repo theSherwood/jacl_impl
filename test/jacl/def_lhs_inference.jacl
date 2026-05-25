@@ -1,0 +1,39 @@
+# expect: 3
+# expect: 2
+# expect: 3
+# expect: 0
+# expect: ptr ok
+# expect: box ok
+# expect: 42
+# LHS type inference extended beyond bufs to the rest of the typed-
+# constructor RHS forms. The LHS type annotation is dropped because the
+# RHS already carries the full type. See BUFFER_DESIGN.md
+# "LHS type inference".
+
+# Typed Vec — inferred type still enforces element type at vec-push etc.
+def xs [[Vec i64] 1 2 3]
+print [vec-len $xs]
+
+# Typed Map.
+def m [[Map i64 i64] 1 100 2 200]
+print [map-len $m]
+
+# Typed Vec narrowing on the binding — vec-len works through the
+# inferred TYPE_TYPED_VEC binding.
+def ys [[Vec i64] 1 2 3]
+print [vec-len $ys]
+
+# Typed pointer — ptr-null produces [Ptr Point] and the binding inherits.
+# Sanity: pointer var compiles and sits in a TYPE_PTR local.
+struct Point {i32 x, i32 y}
+def p [ptr-null [Ptr Point]]
+print [vec-len [vec]]
+print "ptr ok"
+
+# Box — binding inherits TYPE_BOX from the box constructor.
+def b [box 0]
+print "box ok"
+
+# Future — binding inherits TYPE_FUTURE from spawn, await works.
+def f [spawn {+ 40 2}]
+print [await $f]

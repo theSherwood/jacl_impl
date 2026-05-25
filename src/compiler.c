@@ -7680,13 +7680,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     JaclVal name_val = compiler__name_val(c->heap, c->intern_table, bind_name_ptr, name_len);
 
-    /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
+    /* Determine effective type: declared type wins, else infer typed
+     * forms from RHS. Mirrors typer.c handle_def_or_mut. Adds TYPE_PTR
+     * / TYPE_BOX / TYPE_FUTURE so `def p [ptr-null [Ptr T]]`,
+     * `def b [box-i32 0]`, `def f [spawn { ... }]` carry the proper
+     * binding type for downstream type-narrowing (arrow access,
+     * swap/reset, await). TYPE_BUF is handled by the LHS-inferred
+     * rewrite earlier in this handler. See BUFFER_DESIGN.md
+     * "LHS type inference". */
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
-               rhs_type == TYPE_STREAM || is_typed_collection(rhs_type)) {
-      /* Infer unboxed types, struct types, stream types, and typed collection types from RHS */
+               rhs_type == TYPE_STREAM || is_typed_collection(rhs_type) ||
+               rhs_type == TYPE_PTR || rhs_type == TYPE_BOX ||
+               rhs_type == TYPE_FUTURE) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;

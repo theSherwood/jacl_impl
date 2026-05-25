@@ -1,0 +1,5 @@
+# expect-error: element type does not match typed vec
+# LHS-inferred typed-vec binding still enforces the element type
+# downstream — vec-push with a wrong-type value errors at compile time.
+def xs [[Vec i64] 1 2 3]
+vec-push $xs "wrong"

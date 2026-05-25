@@ -773,9 +773,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
    * streams, and typed collections are inherited from the RHS; tagged
    * scalars (i32/u32/f32/bool/etc.) collapse to DYN.
    *
-   * TYPE_BUF is also inherited when the RHS is a `[[Buf N T] ...]`
-   * literal constructor, letting `def hdr [[Buf 8 i32] 1024 2048]`
-   * skip the redundant LHS annotation. See BUFFER_DESIGN.md "LHS type
+   * TYPE_BUF and TYPE_PTR are also inherited when the RHS is a typed-
+   * constructor form (`[[Buf N T] ...]`, `[ptr-null [Ptr T]]`,
+   * `[ptr-cast [Ptr T] $u]`, `[addr $p->field]`, etc.), letting users
+   * drop the redundant LHS annotation. See BUFFER_DESIGN.md "LHS type
    * inference". */
   JaclType effective;
   if (declared_type != TYPE_DYN) {
@@ -785,7 +786,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
         rhs_t == TYPE_STREAM || is_typed_collection(rhs_t) ||
         rhs_t == TYPE_FUTURE || rhs_t == TYPE_BOX ||
-        rhs_t == TYPE_BUF) {
+        rhs_t == TYPE_BUF || rhs_t == TYPE_PTR) {
       effective = rhs_t;
     } else {
       effective = TYPE_DYN;
