@@ -10493,22 +10493,31 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       for (int i = (int)c->local_count - 1; i >= 0; i--) {
         if (c->locals[i].name == recv_name) { found = i; break; }
       }
-      if (found >= 0 && c->locals[found].type == TYPE_BUF &&
-          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+      if (found >= 0 && c->locals[found].type == TYPE_BUF) {
         uint32_t base_slot = (uint32_t)found;
         uint32_t buf_len   = c->locals[found].buf_len;
-        JaclType elem_type =
-            JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        uint32_t sidx      = c->locals[found].struct_type_idx;
         int32_t  idx_lit = expr->data.command.args[1]->data.lit_int.value;
         if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
           char err[160];
           snprintf(err, sizeof(err),
-              "addr: buf index %d out of bounds for [Buf %u %s]",
-              (int)idx_lit, (unsigned)buf_len, type_name(elem_type));
+              "addr: buf index %d out of bounds for [Buf %u T]",
+              (int)idx_lit, (unsigned)buf_len);
           compiler__error(c, line, col, err);
           return;
         }
-        uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+        uint32_t elem_sz;
+        if (JACL_IS_SCALAR_TYPE_IDX(sidx)) {
+          JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(sidx);
+          elem_sz = struct__type_size(elem_type, NULL, 0);
+        } else {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          if (!reg || sidx >= reg->count) {
+            compiler__error(c, line, col, "addr: invalid struct type idx");
+            return;
+          }
+          elem_sz = reg->defs[sidx]->total_size;
+        }
         uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
         if (byte_offset > 0xFFFFu) {
           compiler__error(c, line, col, "addr: buf byte offset exceeds 65535");
@@ -11193,6 +11202,48 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           default:
             c->last_expr_type = elem_type; break;
         }
+        return;
+      }
+      /* Struct-element buf access (M4.1b): same shape but the buf's
+       * struct_type_idx is a real struct registry index (not the
+       * scalar sentinel). Emits OP_BUF_GET_STRUCT_LOCAL (push inline
+       * struct bytes onto TOS) or OP_BUF_SET_STRUCT_LOCAL (pop them
+       * and memcpy into the buf slot). */
+      if (found >= 0 && c->locals[found].type == TYPE_BUF &&
+          !JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+        uint32_t base_slot   = (uint32_t)found;
+        uint32_t buf_len     = c->locals[found].buf_len;
+        uint32_t struct_idx  = c->locals[found].struct_type_idx;
+        int32_t  idx_lit     = args[1]->data.lit_int.value;
+        if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
+          char err[160];
+          snprintf(err, sizeof(err),
+              "buf index %d out of bounds for [Buf %u Struct]",
+              (int)idx_lit, (unsigned)buf_len);
+          compiler__error(c, line, col, err);
+          return;
+        }
+        compiler__emit_constant(c, jacl_i32(idx_lit), line);
+        if (is_set) {
+          /* Value compile: must produce an inline struct of the right
+           * type on TOS. The typer's expected_type push usually makes
+           * struct constructors land inline already; we let the
+           * normal compile path handle it. */
+          compiler__compile_node(c, args[2]);
+          compiler__emit_byte(c, OP_BUF_SET_STRUCT_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)base_slot, line);
+          compiler__emit_u16(c, (uint16_t)struct_idx, line);
+          compiler__emit_u16(c, (uint16_t)buf_len, line);
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
+        compiler__emit_byte(c, OP_BUF_GET_STRUCT_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_u16(c, (uint16_t)struct_idx, line);
+        compiler__emit_u16(c, (uint16_t)buf_len, line);
+        c->last_expr_type = TYPE_STRUCT;
+        c->inline_repr = INLINE_STACK;
         return;
       }
       /* Same shape but receiver is [Ptr T] (scalar pointee): compile

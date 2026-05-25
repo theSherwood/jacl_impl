@@ -2535,6 +2535,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_GET_LOCAL]  = &&L_OP_BUF_GET_LOCAL,
     [OP_BUF_SET_LOCAL]  = &&L_OP_BUF_SET_LOCAL,
     [OP_BUF_ADDR_LOCAL] = &&L_OP_BUF_ADDR_LOCAL,
+    [OP_BUF_GET_STRUCT_LOCAL] = &&L_OP_BUF_GET_STRUCT_LOCAL,
+    [OP_BUF_SET_STRUCT_LOCAL] = &&L_OP_BUF_SET_STRUCT_LOCAL,
   };
 
   #define CASE(op)   L_##op
@@ -3183,6 +3185,91 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint64_t addr = (uint64_t)(uintptr_t)(base + byte_offset);
         result = vm__push(vm, jacl_u64(&vm->heap, addr));
         if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_GET_STRUCT_LOCAL): {
+        /* Pop i32 idx, bounds-check against buf_len, push N inline
+         * struct slots onto TOS from frame[base_slot] + idx*total_size.
+         * See BUFFER_DESIGN.md M4.1. */
+        uint8_t  base_slot = vm__read_byte(vm);
+        uint16_t type_idx  = vm__read_u16(vm);
+        uint16_t buf_len   = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for buf-get",
+                        (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        JaclVal idx_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "buf-get: index must be i32, got %s",
+                        vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0 || (uint32_t)idx >= buf_len) {
+          vm__set_error(vm, "buf-get: index %d out of bounds for [Buf %u Struct]",
+                        (int)idx, (unsigned)buf_len);
+          return VM_RUNTIME_ERROR;
+        }
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_operand_overflow(vm, "buf-get struct");
+          return VM_STACK_OVERFLOW;
+        }
+        uint8_t* src = (uint8_t*)&vm->stack[frame->stack_base + base_slot]
+                       + (uint32_t)idx * sdef->total_size;
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], src, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_SET_STRUCT_LOCAL): {
+        /* Pop N inline struct slots (TOS), pop i32 idx, bounds-check,
+         * memcpy bytes into frame[base_slot] + idx*total_size. See
+         * BUFFER_DESIGN.md M4.1. */
+        uint8_t  base_slot = vm__read_byte(vm);
+        uint16_t type_idx  = vm__read_u16(vm);
+        uint16_t buf_len   = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for buf-set",
+                        (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top < width + 1) {
+          vm__set_error(vm, "buf-set struct: stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* src = (uint8_t*)&vm->stack[vm->stack_top - width];
+        /* Index sits below the struct bytes. */
+        JaclVal idx_val = vm->stack[vm->stack_top - width - 1];
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "buf-set: index must be i32, got %s",
+                        vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0 || (uint32_t)idx >= buf_len) {
+          vm__set_error(vm, "buf-set: index %d out of bounds for [Buf %u Struct]",
+                        (int)idx, (unsigned)buf_len);
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* dst = (uint8_t*)&vm->stack[frame->stack_base + base_slot]
+                       + (uint32_t)idx * sdef->total_size;
+        memcpy(dst, src, sdef->total_size);
+        /* Clear inline bitmap for the consumed struct slots. */
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+        }
+        vm->stack_top -= (width + 1); /* struct bytes + index */
         DISPATCH();
       }
 

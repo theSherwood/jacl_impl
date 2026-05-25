@@ -3043,9 +3043,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             recv->data.var_ref.name, recv->data.var_ref.length,
             recv->scope_mark);
         if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
-            JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+            b->struct_idx != UINT32_MAX) {
           node->inferred_type       = TYPE_PTR;
-          node->inferred_struct_idx = b->struct_idx; /* scalar elem encoding */
+          node->inferred_struct_idx = b->struct_idx;
           return;
         }
       }
@@ -3251,7 +3251,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             tgt->data.var_ref.name, tgt->data.var_ref.length,
             tgt->scope_mark);
         if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
-            JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+            b->struct_idx != UINT32_MAX) {
           int32_t idx_lit = fld->data.lit_int.value;
           if (b->type == TYPE_BUF &&
               (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
@@ -3263,13 +3263,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = TYPE_DYN;
             return;
           }
-          JaclType elem = JACL_TYPE_IDX_TO_SCALAR(b->struct_idx);
-          switch (elem) {
-            case TYPE_I8: case TYPE_U8:
-            case TYPE_I16: case TYPE_U16:
-              node->inferred_type = TYPE_I32; break;
-            default:
-              node->inferred_type = elem; break;
+          if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+            JaclType elem = JACL_TYPE_IDX_TO_SCALAR(b->struct_idx);
+            switch (elem) {
+              case TYPE_I8: case TYPE_U8:
+              case TYPE_I16: case TYPE_U16:
+                node->inferred_type = TYPE_I32; break;
+              default:
+                node->inferred_type = elem; break;
+            }
+          } else {
+            /* Struct element: result is the inline struct value. */
+            node->inferred_type       = TYPE_STRUCT;
+            node->inferred_struct_idx = b->struct_idx;
           }
           return;
         }
