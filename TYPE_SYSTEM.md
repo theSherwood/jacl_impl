@@ -232,6 +232,32 @@ comparison, arithmetic via `+`, ptr-diff with mismatched pointees)
 errors at compile time via `jacl_format_ptr_*` formatters in
 `src/type_error.c`.
 
+## Buffer types (Stage 6)
+
+`TYPE_BUF` is a compile-time-sized, contiguous, ABI-flat array of `T` —
+fills the gap between `[Ptr T]` (single element) and `[Vec T]`
+(GC-owned, growable). The canonical reference is `BUFFER_DESIGN.md`.
+Surface highlights:
+
+- `[Buf N T]` annotation in def/mut/struct-field positions; `N` is a
+  positive literal, `T` is a scalar or value-struct.
+- Zero-init on declaration; literal init via `[[Buf N T] v0 v1 ...]`
+  (partial fill allowed, `k > N` rejected at compile time, literal
+  values out of `T`'s range rejected at compile time).
+- `[buf-get $b $i]` / `[buf-set $b $i $v]` — bounds-checked indexed
+  access. `[buf-unchecked-get]` / `[buf-unchecked-set]` skip the
+  runtime bounds check.
+- `[buf-len $b]` — compile-time constant fold.
+- `$b->N` — arrow indexing at a constant `N`; bounds-checked at the
+  typer. `[addr $b->N]` returns `[Ptr T]`.
+- `[Buf N T]` → `[Ptr T]` implicit decay at extern and JACL proc call
+  sites (pointee must match exactly).
+- Error messages render the type in source syntax — `[Buf 4 u8]`
+  rather than `buf` — for easy copy-paste back into code.
+
+Buf-related compile-time errors are formatted via the
+`jacl_format_buf_*` helpers in `src/type_error.c`.
+
 ## Deferred items
 
 See **`NOT_IMPLEMENTED.md` §4** for the canonical list of typer-side

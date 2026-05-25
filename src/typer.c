@@ -2687,10 +2687,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
           return;
         case HEAD_BUF_GET:
-          /* Result type of [buf-get $b $i]. Small-int elements
-           * (u8/i8/u16/i16) widen to i32 at the dyn boundary —
-           * see BUFFER_DESIGN.md "Small int types". Other scalars
-           * surface as their declared type. */
+        case HEAD_BUF_UGET:
+          /* Result type of [buf-get $b $i] / [buf-unchecked-get $b $i].
+           * Small-int elements (u8/i8/u16/i16) widen to i32 at the dyn
+           * boundary — see BUFFER_DESIGN.md "Small int types". Other
+           * scalars surface as their declared type. */
           if (recv_t == TYPE_BUF &&
               recv->inferred_struct_idx != UINT32_MAX &&
               JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
@@ -2823,6 +2824,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
       { HEAD_BUF_SET,     TYPE_NIL    },
+      { HEAD_BUF_USET,    TYPE_NIL    },
       /* File I/O — write/append produce nil on success, error value on
        * failure (catchable via try/catch).  read-file produces a string. */
       { HEAD_READ_FILE,   TYPE_STR    },
@@ -3275,10 +3277,24 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           int32_t idx_lit = fld->data.lit_int.value;
           if (b->type == TYPE_BUF &&
               (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
+            char buf_ty[64];
+            if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+              const char* en = type_name(
+                  JACL_TYPE_IDX_TO_SCALAR(b->struct_idx));
+              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                   b->buf_len, en, (uint32_t)strlen(en));
+            } else if (b->struct_idx < tc->struct_count) {
+              const TyperStruct* sd = &tc->structs[b->struct_idx];
+              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                   b->buf_len, sd->name, sd->name_len);
+            } else {
+              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                   b->buf_len, "T", 1);
+            }
             char err[160];
             snprintf(err, sizeof(err),
-                "type error: buf index %d out of bounds for [Buf %u T]",
-                (int)idx_lit, (unsigned)b->buf_len);
+                "type error: buf index %d out of bounds for %s",
+                (int)idx_lit, buf_ty);
             typer__error(tc, fld->start.line, fld->start.column, err);
             node->inferred_type = TYPE_DYN;
             return;

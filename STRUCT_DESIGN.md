@@ -27,15 +27,25 @@ Struct fields must be value types:
 
 | Allowed | Types |
 |---------|-------|
-| Integers | i32, u32, i64, u64 |
+| Integers | i8, u8, i16, u16, i32, u32, i64, u64 |
 | Floats | f32, f64 |
 | Boolean | bool |
 | Nested structs | inline (value, not pointer) |
+| Fixed-size buffer | `[Buf N T]` (inline, see `BUFFER_DESIGN.md`) |
 
 Reference types (`str`, `vec`, `map`, `closure`, `dyn`) are **rejected at
 compile time** in `defstruct`. The error directs the user to `[box $val]`
 to hold a reference. This eliminates GC scanning of struct instances —
 no write barriers, no tracing.
+
+Small int field types (`i8`/`u8`/`i16`/`u16`) are static-only — they
+have no NaN-box representation and widen to `i32`/`u32` at any dyn
+boundary. Valid as struct fields and `[Buf N T]` elements.
+
+`[Buf N T]` fields lay out as `N * sizeof(T)` inline bytes within the
+struct body. Constructors skip buf fields (auto-zero-init); field
+access (`$h->field`) returns `[Ptr T]` to the first byte. See
+`BUFFER_DESIGN.md` for the full surface.
 
 ## Storage
 

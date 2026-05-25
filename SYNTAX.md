@@ -1185,6 +1185,33 @@ proc first {v} { vec-get $v 0 }    # works on any vec
 
 The syntax is the same for both phases. Full parametric generics (type variables, constraints) remain a future possibility if needed.
 
+## Fixed-size C-ABI buffers (`[Buf N T]`)
+
+Compile-time-sized contiguous array of `T` — the FFI / "I need an
+`int[10]`" case. Sits between `[Ptr T]` (one element) and `[Vec T]`
+(GC-owned, growable). Full reference: `BUFFER_DESIGN.md`.
+
+```
+def [Buf 256 u8] scratch                                ; zero-init local
+def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]   ; literal init
+print $magic->0                                          ; 127 (arrow indexing)
+print [buf-get $magic 1]                                 ; 69
+[buf-set $magic 0 0xff]                                  ; bounds-checked write
+print [buf-len $magic]                                   ; 4 (compile-time fold)
+
+[buf-unchecked-get $magic $i]                            ; escape hatch — no bounds check
+[buf-unchecked-set $magic $i $v]
+
+struct ElfHeader { i32 version, [Buf 4 u8] magic }       ; buf as struct field
+extern i32 read {i32 fd [Ptr u8] dst u64 len}
+[read 0 $scratch 256]                                    ; implicit [Buf]→[Ptr] decay
+```
+
+`N` is a positive integer literal; `T` is any scalar
+(`i8`/`u8`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64`/`f32`/`f64`/`bool`),
+`[Ptr U]`, or value-type struct. `[Buf N T]` decays to `[Ptr T]` at
+extern and JACL proc call sites when the pointee matches.
+
 ## Open design questions
 
 ### Resolved in this document
@@ -1289,6 +1316,7 @@ Features from this document compared against the current codebase. Last updated:
 | `interpret` (sandboxed eval) | capability-based |
 | Implicit context (`$ctx`) | typed, dynamically-scoped, user-extensible; `with-ctx` |
 | Typed collections (`[Vec T]`, `[Map K V]`) | see `TYPE_SYSTEM.md` |
+| Fixed-size C-ABI buffers (`[Buf N T]`) | see `BUFFER_DESIGN.md`; nested bufs + GC-traced elements deferred |
 | Variadic procs (`proc log {level, ..msgs}`) | `..rest` in proc params |
 | Ranges (`(1 ..< 10)`, `(1 ..= 10)`) | infix in `()`; produce streams |
 | Multi-line strings (`"""..."""`) | with interpolation, Kotlin-style indent |

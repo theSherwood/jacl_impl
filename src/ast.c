@@ -112,6 +112,8 @@ typedef enum {
   HEAD_BUF_LEN,
   HEAD_BUF_GET,
   HEAD_BUF_SET,
+  HEAD_BUF_UGET,  /* buf-unchecked-get — bounds-check-elided escape hatch */
+  HEAD_BUF_USET,  /* buf-unchecked-set — bounds-check-elided escape hatch */
 
   /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
@@ -285,6 +287,8 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       return HEAD_NONE;
     case 17:
       if (memcmp(s, "interpret-prelude", 17) == 0) return HEAD_INTERPRET_PRELUDE;
+      if (memcmp(s, "buf-unchecked-get", 17) == 0) return HEAD_BUF_UGET;
+      if (memcmp(s, "buf-unchecked-set", 17) == 0) return HEAD_BUF_USET;
       return HEAD_NONE;
   }
   return HEAD_NONE;

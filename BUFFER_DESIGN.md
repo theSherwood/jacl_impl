@@ -22,7 +22,7 @@ when M4 lands).
 | **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ⏸ deferred | — |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
 | **M4.4** GC-traced element types | ⏸ deferred | — |
-| **M5** Polish (unchecked ops, print, overflow check) | pending | — |
+| **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | this commit |
 
 What works end-to-end today:
 
@@ -44,6 +44,9 @@ proc main {} {
 
   extern i32 sys_read {i32 fd [Ptr u8] dst u64 len}
   [sys_read 0 $scratch 256]                             ; implicit [Buf]→[Ptr] decay
+
+  [buf-unchecked-get $scratch 0]                        ; bounds-check elided
+  [buf-unchecked-set $scratch 0 0xff]
 }
 ```
 
@@ -57,22 +60,17 @@ What's deferred (the next session can pick from these):
    descriptor ("N contiguous tagged slots, stride S"), write barriers
    on indexed stores, and NIL zero-init for ref types. Highest-risk
    slice — touches concurrency-sensitive code.
-3. **M5 polish**:
-   - `[buf-unchecked-get]` / `[buf-unchecked-set]` escape hatches.
-   - Print formatting (e.g. `Buf<u8, 256>`).
-   - Compile-time literal-value overflow check (e.g. `[[Buf 4 u8] 256]`).
-   - Documentation: update `TYPE_SYSTEM.md`, `SYNTAX.md`, `STRUCT_DESIGN.md`.
-4. **Language-wide LHS type inference** (see "Open questions / deferred"
+3. **Language-wide LHS type inference** (see "Open questions / deferred"
    below) — independent of bufs; reduces
    `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to
    `def hdr [[Buf 8 i32] 1024 2048]` and similar across typed vecs,
    maps, futures, pointers, boxes.
-5. **Receiver-shape generalization** — currently `[buf-get $buf $i]`,
+4. **Receiver-shape generalization** — currently `[buf-get $buf $i]`,
    `[buf-set $buf $i $v]`, `$buf->N`, `[addr $buf->N]` all require the
    receiver to be a bare var-ref to a local. They don't yet work with
    proc params (other than the implicit field on a [Ptr T] param) or
    nested struct-field receivers.
-6. **Test harness native-fn registration** — would unblock a real C
+5. **Test harness native-fn registration** — would unblock a real C
    extern fixture (M3.6) and stress-test the decay path with an actual
    syscall.
 
@@ -315,17 +313,33 @@ cleanly (verified by `test/jacl/buf_ptr_round_trip.jacl`).
 
 **Exit:** all element types work in locals and struct fields.
 
-### M5 — Polish
+### M5 — Polish  ✅
 
-- `[buf-unchecked-get]` / `[buf-unchecked-set]` escape hatches.
-- Print formatting (e.g. `Buf<u8, 256>`).
-- **Compile-time literal-value overflow check**: reject literal
+- `[buf-unchecked-get]` / `[buf-unchecked-set]` escape hatches
+  (new `OP_BUF_UGET_LOCAL` / `OP_BUF_USET_LOCAL` opcodes; bounds
+  check elided).
+- **Error-message rendering**: bufs print in source syntax
+  (`[Buf 4 u8]`, `[Buf 10 Point]`) rather than the bare type name
+  `buf`, so the diagnostic copy-pastes back into code. Applies to
+  both compile-time bounds errors (typer + compiler) and runtime
+  OOB messages (VM). Helper: `jacl_format_buf_type` in
+  `src/type_error.c`.
+- **Compile-time literal-value overflow check**: rejects literal
   initializers whose constant values don't fit in `T` (e.g.
-  `[[Buf 4 u8] 256]`). Today the VM truncates via C-cast
-  semantics; users only learn about the overflow at runtime when
-  the stored byte differs from what they wrote.
-- Documentation: update `TYPE_SYSTEM.md`, `SYNTAX.md`,
-  `STRUCT_DESIGN.md`; remove buffer items from `NOT_IMPLEMENTED.md`.
+  `[[Buf 4 u8] 256]` now errors with
+  `"element 2 value 256 out of range for u8"` at compile time
+  instead of silently truncating to `0`). Handles direct
+  `AST_LIT_INT` and unary-minus shape `(- LIT_INT)`. Fixtures:
+  `test/jacl/buf_literal_value_overflow.jacl`,
+  `buf_literal_value_negative.jacl`.
+- Documentation: `TYPE_SYSTEM.md` (new "Buffer types" section),
+  `SYNTAX.md` (new `[Buf N T]` section + status row),
+  `STRUCT_DESIGN.md` (buf as struct field type, small-int field
+  note).
+
+**Exit:** the buffer feature has parity with the other typed
+collections for error messaging and constant-time safety; escape
+hatches are available for performance-critical paths.
 
 ## Risk concentration
 

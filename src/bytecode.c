@@ -297,10 +297,18 @@ typedef enum {
                                struct slots (the struct's total_size
                                bytes) onto TOS. Used by $buf->N when the
                                buf element is a value-type struct. */
-  OP_BUF_SET_STRUCT_LOCAL   /* u8 base_slot, u16 struct_idx, u16 buf_len;
+  OP_BUF_SET_STRUCT_LOCAL,  /* u8 base_slot, u16 struct_idx, u16 buf_len;
                                pop N inline struct slots, pop i32 index,
                                bounds-check, memcpy bytes into the buf
                                at idx * total_size. No push. */
+  OP_BUF_UGET_LOCAL,        /* u8 base_slot, u8 elem_type (JaclType);
+                               unchecked variant of OP_BUF_GET_LOCAL —
+                               same load/widen, no bounds check. Used by
+                               [buf-unchecked-get $b $i]. */
+  OP_BUF_USET_LOCAL         /* u8 base_slot, u8 elem_type (JaclType);
+                               unchecked variant of OP_BUF_SET_LOCAL —
+                               same narrow/store, no bounds check. Used by
+                               [buf-unchecked-set $b $i $v]. */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -522,6 +530,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_BUF_ADDR_LOCAL:  return "OP_BUF_ADDR_LOCAL";
     case OP_BUF_GET_STRUCT_LOCAL: return "OP_BUF_GET_STRUCT_LOCAL";
     case OP_BUF_SET_STRUCT_LOCAL: return "OP_BUF_SET_STRUCT_LOCAL";
+    case OP_BUF_UGET_LOCAL:  return "OP_BUF_UGET_LOCAL";
+    case OP_BUF_USET_LOCAL:  return "OP_BUF_USET_LOCAL";
     case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
     case OP_ATOM:            return "OP_ATOM";
     case OP_DEREF:           return "OP_DEREF";

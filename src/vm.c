@@ -2537,6 +2537,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_ADDR_LOCAL] = &&L_OP_BUF_ADDR_LOCAL,
     [OP_BUF_GET_STRUCT_LOCAL] = &&L_OP_BUF_GET_STRUCT_LOCAL,
     [OP_BUF_SET_STRUCT_LOCAL] = &&L_OP_BUF_SET_STRUCT_LOCAL,
+    [OP_BUF_UGET_LOCAL] = &&L_OP_BUF_UGET_LOCAL,
+    [OP_BUF_USET_LOCAL] = &&L_OP_BUF_USET_LOCAL,
   };
 
   #define CASE(op)   L_##op
@@ -2992,8 +2994,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         int32_t idx = jacl_as_i32(idx_val);
         if (idx < 0 || (uint32_t)idx >= buf_len) {
-          vm__set_error(vm, "buf-get: index %d out of bounds for [Buf %u T]",
-                        (int)idx, (unsigned)buf_len);
+          vm__set_error(vm, "buf-get: index %d out of bounds for [Buf %u %s]",
+                        (int)idx, (unsigned)buf_len,
+                        type_name((JaclType)elem_type));
           return VM_RUNTIME_ERROR;
         }
         uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
@@ -3082,8 +3085,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         int32_t idx = jacl_as_i32(idx_val);
         if (idx < 0 || (uint32_t)idx >= buf_len) {
-          vm__set_error(vm, "buf-set: index %d out of bounds for [Buf %u T]",
-                        (int)idx, (unsigned)buf_len);
+          vm__set_error(vm, "buf-set: index %d out of bounds for [Buf %u %s]",
+                        (int)idx, (unsigned)buf_len,
+                        type_name((JaclType)elem_type));
           return VM_RUNTIME_ERROR;
         }
         uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
@@ -3210,8 +3214,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         int32_t idx = jacl_as_i32(idx_val);
         if (idx < 0 || (uint32_t)idx >= buf_len) {
-          vm__set_error(vm, "buf-get: index %d out of bounds for [Buf %u Struct]",
-                        (int)idx, (unsigned)buf_len);
+          vm__set_error(vm, "buf-get: index %d out of bounds for [Buf %u %.*s]",
+                        (int)idx, (unsigned)buf_len,
+                        (int)sdef->name_len, sdef->name);
           return VM_RUNTIME_ERROR;
         }
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
@@ -3258,8 +3263,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         int32_t idx = jacl_as_i32(idx_val);
         if (idx < 0 || (uint32_t)idx >= buf_len) {
-          vm__set_error(vm, "buf-set: index %d out of bounds for [Buf %u Struct]",
-                        (int)idx, (unsigned)buf_len);
+          vm__set_error(vm, "buf-set: index %d out of bounds for [Buf %u %.*s]",
+                        (int)idx, (unsigned)buf_len,
+                        (int)sdef->name_len, sdef->name);
           return VM_RUNTIME_ERROR;
         }
         uint8_t* dst = (uint8_t*)&vm->stack[frame->stack_base + base_slot]
@@ -3270,6 +3276,175 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
         }
         vm->stack_top -= (width + 1); /* struct bytes + index */
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_UGET_LOCAL): {
+        /* Unchecked indexed read: same as OP_BUF_GET_LOCAL minus the
+         * bounds check. Out-of-range index is undefined behavior — the
+         * load is whatever bytes sit at frame[base_slot + idx*sizeof(T)].
+         * Caller is responsible for ensuring the index is in range.
+         * See BUFFER_DESIGN.md M5. */
+        uint8_t  base_slot = vm__read_byte(vm);
+        uint8_t  elem_type = vm__read_byte(vm);
+        JaclVal  idx_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "buf-unchecked-get: index must be i32, got %s",
+                        vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t idx = jacl_as_i32(idx_val);
+        uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        JaclVal  loaded;
+        switch ((JaclType)elem_type) {
+          case TYPE_BOOL: loaded = jacl_bool(base[(uint32_t)idx] != 0); break;
+          case TYPE_I8: {
+            int8_t v; memcpy(&v, base + (uint32_t)idx, 1);
+            loaded = jacl_i32((int32_t)v); break;
+          }
+          case TYPE_U8:  loaded = jacl_i32((int32_t)base[(uint32_t)idx]); break;
+          case TYPE_I16: {
+            int16_t v; memcpy(&v, base + (uint32_t)idx * 2, 2);
+            loaded = jacl_i32((int32_t)v); break;
+          }
+          case TYPE_U16: {
+            uint16_t v; memcpy(&v, base + (uint32_t)idx * 2, 2);
+            loaded = jacl_i32((int32_t)v); break;
+          }
+          case TYPE_I32: {
+            int32_t v; memcpy(&v, base + (uint32_t)idx * 4, 4);
+            loaded = jacl_i32(v); break;
+          }
+          case TYPE_U32: {
+            uint32_t v; memcpy(&v, base + (uint32_t)idx * 4, 4);
+            loaded = jacl_u32(v); break;
+          }
+          case TYPE_F32: {
+            float v; memcpy(&v, base + (uint32_t)idx * 4, 4);
+            loaded = jacl_f32(v); break;
+          }
+          case TYPE_I64: {
+            int64_t v; memcpy(&v, base + (uint32_t)idx * 8, 8);
+            loaded = jacl_i64(&vm->heap, v); break;
+          }
+          case TYPE_U64: {
+            uint64_t v; memcpy(&v, base + (uint32_t)idx * 8, 8);
+            loaded = jacl_u64(&vm->heap, v); break;
+          }
+          case TYPE_F64: {
+            double v; memcpy(&v, base + (uint32_t)idx * 8, 8);
+            loaded = jacl_f64(&vm->heap, v); break;
+          }
+          default:
+            vm__set_error(vm, "buf-unchecked-get: unsupported element type %u",
+                          (unsigned)elem_type);
+            return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, loaded); if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_USET_LOCAL): {
+        /* Unchecked indexed write: same as OP_BUF_SET_LOCAL minus the
+         * bounds check. See BUFFER_DESIGN.md M5. */
+        uint8_t  base_slot = vm__read_byte(vm);
+        uint8_t  elem_type = vm__read_byte(vm);
+        JaclVal  val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        JaclVal  idx_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "buf-unchecked-set: index must be i32, got %s",
+                        vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t idx = jacl_as_i32(idx_val);
+        uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        switch ((JaclType)elem_type) {
+          case TYPE_BOOL: {
+            if (!jacl_is_bool(val)) {
+              vm__set_error(vm, "buf-unchecked-set: expected bool, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            base[(uint32_t)idx] = jacl_as_bool(val) ? 1 : 0;
+            break;
+          }
+          case TYPE_I8: case TYPE_U8: case TYPE_I16: case TYPE_U16:
+          case TYPE_I32: case TYPE_U32: {
+            int32_t v;
+            if (jacl_is_i32(val)) v = jacl_as_i32(val);
+            else if (jacl_is_u32(val)) v = (int32_t)jacl_as_u32(val);
+            else {
+              vm__set_error(vm, "buf-unchecked-set: expected i32/u32, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            switch ((JaclType)elem_type) {
+              case TYPE_I8:  case TYPE_U8:  base[(uint32_t)idx] = (uint8_t)v; break;
+              case TYPE_I16: case TYPE_U16: {
+                uint16_t w = (uint16_t)v;
+                memcpy(base + (uint32_t)idx * 2, &w, 2);
+                break;
+              }
+              case TYPE_I32: case TYPE_U32: {
+                memcpy(base + (uint32_t)idx * 4, &v, 4);
+                break;
+              }
+              default: break;
+            }
+            break;
+          }
+          case TYPE_F32: {
+            float v;
+            if (jacl_is_f32(val)) v = jacl_as_f32(val);
+            else if (jacl_is_f64(val)) v = (float)jacl_as_f64(val);
+            else {
+              vm__set_error(vm, "buf-unchecked-set: expected f32/f64, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            memcpy(base + (uint32_t)idx * 4, &v, 4);
+            break;
+          }
+          case TYPE_I64: {
+            if (!jacl_is_i64(val) && !jacl_is_i32(val)) {
+              vm__set_error(vm, "buf-unchecked-set: expected i64, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            int64_t v = jacl_is_i64(val) ? jacl_as_i64(val)
+                                          : (int64_t)jacl_as_i32(val);
+            memcpy(base + (uint32_t)idx * 8, &v, 8);
+            break;
+          }
+          case TYPE_U64: {
+            if (!jacl_is_u64(val)) {
+              vm__set_error(vm, "buf-unchecked-set: expected u64, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            uint64_t v = jacl_as_u64(val);
+            memcpy(base + (uint32_t)idx * 8, &v, 8);
+            break;
+          }
+          case TYPE_F64: {
+            if (!jacl_is_f64(val) && !jacl_is_f32(val)) {
+              vm__set_error(vm, "buf-unchecked-set: expected f64, got %s",
+                            vm__type_name(val));
+              return VM_RUNTIME_ERROR;
+            }
+            double v = jacl_is_f64(val) ? jacl_as_f64(val)
+                                         : (double)jacl_as_f32(val);
+            memcpy(base + (uint32_t)idx * 8, &v, 8);
+            break;
+          }
+          default:
+            vm__set_error(vm, "buf-unchecked-set: unsupported element type %u",
+                          (unsigned)elem_type);
+            return VM_RUNTIME_ERROR;
+        }
         DISPATCH();
       }
 

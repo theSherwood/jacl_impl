@@ -1,0 +1,7 @@
+# expect-error: element 0 value -1 out of range for u8
+# Negative literal into an unsigned slot: rejected at compile time so
+# the bit pattern doesn't silently land as 0xff. Negative literals
+# inside [...] arg lists must be parenthesized — `[[Buf 2 u8] -1 5]`
+# parses as three positional args (-, 1, 5) and fails earlier with a
+# length mismatch. See BUFFER_DESIGN.md M5.
+def [Buf 2 u8] x [[Buf 2 u8] (-1) 5]

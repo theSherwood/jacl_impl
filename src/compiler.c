@@ -7126,10 +7126,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         init_vals  = rhs->data.command.args;
         if (init_count > n) {
           char err[128];
-          snprintf(err, sizeof(err),
-              "[[Buf %u %s] ...]: %u values provided, max %u",
-              (unsigned)n, type_name(elem_type),
-              (unsigned)init_count, (unsigned)n);
+          if (elem_type == TYPE_STRUCT) {
+            StructTypeRegistry* reg = compiler__get_struct_registry(c);
+            StructTypeDef* sd = reg->defs[elem_struct_idx];
+            snprintf(err, sizeof(err),
+                "[[Buf %u %.*s] ...]: %u values provided, max %u",
+                (unsigned)n, (int)sd->name_len, sd->name,
+                (unsigned)init_count, (unsigned)n);
+          } else {
+            snprintf(err, sizeof(err),
+                "[[Buf %u %s] ...]: %u values provided, max %u",
+                (unsigned)n, type_name(elem_type),
+                (unsigned)init_count, (unsigned)n);
+          }
           compiler__error(c, line, col, err);
           return;
         }
@@ -7164,12 +7173,56 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
       /* Literal init: emit per-element store. Index is a compile-time
        * constant so we push it via OP_CONST, then the value, then the
-       * store opcode. Element-type overflow checks on literal values
-       * are deferred to M5 (see BUFFER_DESIGN.md). */
+       * store opcode. */
       if (init_ctor) {
         (void)init_ctor;
         bool is_struct_elem = (elem_type == TYPE_STRUCT);
+        /* Compile-time overflow check for scalar literal values. The
+         * VM otherwise truncates via C-cast semantics (e.g. (u8)256 = 0),
+         * silently losing what the user wrote. Catches positive int
+         * literals and the [- LIT_INT] unary-minus shape. Float and
+         * non-literal exprs are passed through. See BUFFER_DESIGN.md M5. */
+        int64_t elo = 0, ehi = 0;
+        bool have_range = false;
+        if (!is_struct_elem) {
+          switch (elem_type) {
+            case TYPE_I8:  elo = -128;        ehi = 127;          have_range = true; break;
+            case TYPE_U8:  elo = 0;           ehi = 255;          have_range = true; break;
+            case TYPE_I16: elo = -32768;      ehi = 32767;        have_range = true; break;
+            case TYPE_U16: elo = 0;           ehi = 65535;        have_range = true; break;
+            case TYPE_I32: elo = INT32_MIN;   ehi = INT32_MAX;    have_range = true; break;
+            case TYPE_U32: elo = 0;           ehi = 4294967295LL; have_range = true; break;
+            case TYPE_I64: elo = INT64_MIN;   ehi = INT64_MAX;    have_range = true; break;
+            case TYPE_U64: elo = 0;           ehi = INT64_MAX;    have_range = true; break;
+            case TYPE_BOOL: elo = 0;          ehi = 1;            have_range = true; break;
+            default: break;
+          }
+        }
         for (uint32_t i = 0; i < init_count; i++) {
+          if (have_range) {
+            AstNode* iv = init_vals[i];
+            int64_t lv = 0;
+            bool is_int_lit = false;
+            if (iv->type == AST_LIT_INT) {
+              lv = (int64_t)iv->data.lit_int.value;
+              is_int_lit = true;
+            } else if (iv->type == AST_COMMAND &&
+                       iv->data.command.head_id == HEAD_MINUS &&
+                       iv->data.command.arg_count == 1 &&
+                       iv->data.command.args[0]->type == AST_LIT_INT) {
+              lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
+              is_int_lit = true;
+            }
+            if (is_int_lit && (lv < elo || lv > ehi)) {
+              char err[192];
+              snprintf(err, sizeof(err),
+                  "[[Buf %u %s] ...]: element %u value %lld out of range for %s",
+                  (unsigned)n, type_name(elem_type),
+                  (unsigned)i, (long long)lv, type_name(elem_type));
+              compiler__error(c, iv->start.line, iv->start.column, err);
+              return;
+            }
+          }
           compiler__emit_constant(c, jacl_i32((int32_t)i), line);
           compiler__compile_node(c, init_vals[i]);
           if (is_struct_elem) {
@@ -9405,20 +9458,26 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
    * base_slot / elem_type / buf_len from the binding and bake them
    * into the opcode operands. Bounds-check is in the opcode. See
    * BUFFER_DESIGN.md M2. */
-  if (hid == HEAD_BUF_GET || hid == HEAD_BUF_SET) {
-    bool is_get = (hid == HEAD_BUF_GET);
+  if (hid == HEAD_BUF_GET || hid == HEAD_BUF_SET ||
+      hid == HEAD_BUF_UGET || hid == HEAD_BUF_USET) {
+    bool is_get = (hid == HEAD_BUF_GET || hid == HEAD_BUF_UGET);
+    bool is_unchecked = (hid == HEAD_BUF_UGET || hid == HEAD_BUF_USET);
+    const char* head_name =
+        hid == HEAD_BUF_GET  ? "buf-get" :
+        hid == HEAD_BUF_SET  ? "buf-set" :
+        hid == HEAD_BUF_UGET ? "buf-unchecked-get" : "buf-unchecked-set";
     uint32_t expected_argc = is_get ? 2 : 3;
     if (argc != expected_argc) {
-      compiler__builtin_arity_error(c, line, col,
-          is_get ? "buf-get" : "buf-set",
+      compiler__builtin_arity_error(c, line, col, head_name,
           is_get ? "2 arguments" : "3 arguments", argc);
       return;
     }
     AstNode* recv = args[0];
     if (recv->type != AST_VAR_REF) {
-      compiler__error(c, line, col,
-          is_get ? "buf-get requires a buf-typed variable reference"
-                 : "buf-set requires a buf-typed variable reference");
+      char err[96];
+      snprintf(err, sizeof(err),
+               "%s requires a buf-typed variable reference", head_name);
+      compiler__error(c, line, col, err);
       return;
     }
     JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
@@ -9428,15 +9487,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (c->locals[i].name == recv_name) { found = i; break; }
     }
     if (found < 0 || c->locals[found].type != TYPE_BUF) {
-      compiler__error(c, line, col,
-          "buf-get/buf-set: receiver is not a [Buf N T] local");
+      char err[96];
+      snprintf(err, sizeof(err),
+               "%s: receiver is not a [Buf N T] local", head_name);
+      compiler__error(c, line, col, err);
       return;
     }
     uint32_t base_slot = (uint32_t)found;
     uint32_t buf_len   = c->locals[found].buf_len;
     if (!JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
-      compiler__error(c, line, col,
-          "buf-get/buf-set: only scalar element types are supported (M2)");
+      char err[96];
+      snprintf(err, sizeof(err),
+               "%s: only scalar element types are supported (M2)", head_name);
+      compiler__error(c, line, col, err);
       return;
     }
     JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
@@ -9444,16 +9507,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile index (must be i32). */
     compiler__compile_node(c, args[1]);
     if (c->last_expr_type != TYPE_I32) {
-      compiler__error(c, line, col,
-          "buf-get/buf-set: index must be i32");
+      char err[64];
+      snprintf(err, sizeof(err), "%s: index must be i32", head_name);
+      compiler__error(c, line, col, err);
       return;
     }
 
     if (is_get) {
-      compiler__emit_byte(c, OP_BUF_GET_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)base_slot, line);
-      compiler__emit_byte(c, (uint8_t)elem_type, line);
-      compiler__emit_u16(c, (uint16_t)buf_len, line);
+      if (is_unchecked) {
+        compiler__emit_byte(c, OP_BUF_UGET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_byte(c, (uint8_t)elem_type, line);
+      } else {
+        compiler__emit_byte(c, OP_BUF_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_byte(c, (uint8_t)elem_type, line);
+        compiler__emit_u16(c, (uint16_t)buf_len, line);
+      }
       /* Result type mirrors the typer rule: small ints widen to i32. */
       switch (elem_type) {
         case TYPE_I8: case TYPE_U8:
@@ -9465,14 +9535,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* buf-set: compile value. Int literals default to TYPE_I32 from
-     * the typer; the VM widens / narrows at the store site. */
+    /* buf-set / buf-unchecked-set: compile value. Int literals default to
+     * TYPE_I32 from the typer; the VM widens / narrows at the store site. */
     compiler__compile_node(c, args[2]);
 
-    compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
-    compiler__emit_byte(c, (uint8_t)base_slot, line);
-    compiler__emit_byte(c, (uint8_t)elem_type, line);
-    compiler__emit_u16(c, (uint16_t)buf_len, line);
+    if (is_unchecked) {
+      compiler__emit_byte(c, OP_BUF_USET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)base_slot, line);
+      compiler__emit_byte(c, (uint8_t)elem_type, line);
+    } else {
+      compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)base_slot, line);
+      compiler__emit_byte(c, (uint8_t)elem_type, line);
+      compiler__emit_u16(c, (uint16_t)buf_len, line);
+    }
     /* buf-set leaves nothing on TOS — but the statement-level model
      * expects a value. Push NIL so the block cleanup balances. */
     compiler__emit_byte(c, OP_NIL, line);
@@ -11240,10 +11316,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         uint32_t struct_idx  = c->locals[found].struct_type_idx;
         int32_t  idx_lit     = args[1]->data.lit_int.value;
         if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          StructTypeDef* sd = (reg && struct_idx < reg->count)
+                              ? reg->defs[struct_idx] : NULL;
           char err[160];
-          snprintf(err, sizeof(err),
-              "buf index %d out of bounds for [Buf %u Struct]",
-              (int)idx_lit, (unsigned)buf_len);
+          if (sd) {
+            snprintf(err, sizeof(err),
+                "buf index %d out of bounds for [Buf %u %.*s]",
+                (int)idx_lit, (unsigned)buf_len,
+                (int)sd->name_len, sd->name);
+          } else {
+            snprintf(err, sizeof(err),
+                "buf index %d out of bounds for [Buf %u Struct]",
+                (int)idx_lit, (unsigned)buf_len);
+          }
           compiler__error(c, line, col, err);
           return;
         }

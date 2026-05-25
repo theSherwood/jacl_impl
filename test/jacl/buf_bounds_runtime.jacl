@@ -1,4 +1,4 @@
-# expect-error: out of bounds
+# expect-error: index 7 out of bounds for [Buf 4 u8]
 # Runtime bounds-check fires when index is computed (not a literal).
 def [Buf 4 u8] b
 def i32 i 7

@@ -1,0 +1,5 @@
+# expect-error: element 2 value 256 out of range for u8
+# Compile-time check: literal init values must fit in T. Today the VM
+# silently truncates via C-cast (e.g. (u8)256 = 0); this catches the
+# bug at compile time. See BUFFER_DESIGN.md M5.
+def [Buf 4 u8] x [[Buf 4 u8] 1 2 256 4]

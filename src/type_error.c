@@ -283,4 +283,17 @@ int jacl_format_buf_bad_elem(char* buf, size_t bufsz) {
                   "(M1 restriction)");
 }
 
+/* "[Buf N T]" — copy-paste-back-into-code rendering of a buf type for
+ * use inside error messages. Callers supply N and the element type's
+ * source-level name (e.g. "u8" from type_name() for scalars, or the
+ * user-given struct name for struct-element buffers). Name + length
+ * are passed separately so struct names (not null-terminated) work
+ * alongside C string literals. */
+int jacl_format_buf_type(char* buf, size_t bufsz,
+                         uint32_t n,
+                         const char* elem_name, uint32_t elem_name_len) {
+  return snprintf(buf, bufsz, "[Buf %u %.*s]",
+                  (unsigned)n, (int)elem_name_len, elem_name);
+}
+
 #endif /* JACL_TYPE_ERROR_C */
