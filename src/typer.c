@@ -361,20 +361,20 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
 
 /* Recognize [Buf N T] type-annotation expressions. Returns true and
  * writes *out_struct_idx with the element encoding (scalar sentinel
- * via JACL_SCALAR_TYPE_IDX) and *out_len with N. Returns false if
- * the node isn't a [Buf ...] shape at all.
+ * via JACL_SCALAR_TYPE_IDX, or a real struct registry idx for struct
+ * elements) and *out_len with N. Returns false if the node isn't a
+ * [Buf ...] shape at all.
  *
- * Validation errors (zero/negative N, non-literal N, non-scalar T)
+ * Validation errors (zero/negative N, non-literal N, unrecognized T)
  * still return true (recognized as a buf annotation) but write
  * sentinel values so the caller can emit a precise diagnostic:
  *   - *out_len = 0 means "N not a positive int literal"
  *   - *out_struct_idx = UINT32_MAX means "T not a recognized scalar
- *     keyword" (M1 restriction; broaden in M4)
+ *     keyword or struct name"
  *
- * See BUFFER_DESIGN.md M1. */
+ * See BUFFER_DESIGN.md M1 / M4.1. */
 static bool typer__buf_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_struct_idx, uint32_t* out_len) {
-  (void)tc;
   *out_struct_idx = UINT32_MAX;
   *out_len = 0;
   if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
@@ -392,6 +392,17 @@ static bool typer__buf_type(TyperCtx* tc, AstNode* node,
     uint32_t    nl = t_arg->data.lit_string.length;
     if (is_type_keyword(nm, nl)) {
       *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    } else {
+      /* Struct element (M4.1): look up by name in the typer's struct
+       * registry. Real struct indices live below JACL_SCALAR_VEC_BASE
+       * so the encoding is unambiguous with the scalar sentinel. */
+      for (uint32_t si = 0; si < tc->struct_count; si++) {
+        if (tc->structs[si].name_len == nl &&
+            memcmp(tc->structs[si].name, nm, nl) == 0) {
+          *out_struct_idx = si;
+          break;
+        }
+      }
     }
   }
   return true;

@@ -7026,15 +7026,37 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       JaclType elem_type;
+      uint32_t elem_struct_idx = UINT32_MAX;
       if (telt->type != AST_LIT_STRING ||
           !compiler__resolve_type(c, telt->data.lit_string.value,
                                   telt->data.lit_string.length, &elem_type)) {
         compiler__error(c, line, col,
-                        "[Buf N T] element type must be a scalar keyword");
+                        "[Buf N T] element type must be a scalar keyword or struct name");
         return;
       }
+      /* For struct elements, look up the registry idx + verify it's a
+       * value-type struct (heap-managed structs can't sit inline in a
+       * buf). */
+      if (elem_type == TYPE_STRUCT) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        elem_struct_idx = reg ? struct_registry__find(reg,
+            telt->data.lit_string.value, telt->data.lit_string.length)
+            : UINT32_MAX;
+        if (elem_struct_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Buf N Struct] unknown struct type");
+          return;
+        }
+        if (!struct_def_is_user(reg->defs[elem_struct_idx], reg)) {
+          compiler__error(c, line, col,
+              "[Buf N Struct] element must be a value-type struct");
+          return;
+        }
+      }
       uint32_t n = (uint32_t)nlen->data.lit_int.value;
-      uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+      uint32_t elem_sz = struct__type_size(elem_type,
+          elem_type == TYPE_STRUCT ? compiler__get_struct_registry(c) : NULL,
+          elem_struct_idx);
       uint64_t byte_count = (uint64_t)n * (uint64_t)elem_sz;
       if (byte_count > 0xFFFFu) {
         compiler__error(c, line, col,
@@ -7109,7 +7131,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_NIL, line);
       compiler__add_local(c, bind_val, line, col);
       c->locals[c->local_count - 1].type = TYPE_BUF;
-      c->locals[c->local_count - 1].struct_type_idx = JACL_SCALAR_TYPE_IDX(elem_type);
+      c->locals[c->local_count - 1].struct_type_idx =
+          (elem_type == TYPE_STRUCT)
+              ? elem_struct_idx
+              : JACL_SCALAR_TYPE_IDX(elem_type);
       c->locals[c->local_count - 1].width = (uint16_t)slot_count;
       c->locals[c->local_count - 1].is_inline = true;
       c->locals[c->local_count - 1].buf_len = n;

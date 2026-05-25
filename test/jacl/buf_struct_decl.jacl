@@ -1,0 +1,8 @@
+# expect: 10
+# M4.1a: [Buf N Struct] declaration with zero-init. Verifies the
+# typer accepts struct element types and the compiler allocates
+# N * sizeof(Struct) bytes. Element access (M4.1b) lands next.
+struct Point {i32 x i32 y}
+
+def [Buf 10 Point] pts
+print [buf-len $pts]

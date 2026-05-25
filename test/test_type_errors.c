@@ -411,10 +411,12 @@ static void run_all(void) {
     .expect_substrings = { "type error", "Buf", "positive" },
   });
 
-  /* Non-scalar element type rejected (M1 restriction). */
-  RUN("buf_non_scalar_elem", {
-    .source = "struct Point {i32 x i32 y}\ndef [Buf 8 Point] b 0",
-    .expect_substrings = { "type error", "Buf", "scalar" },
+  /* Unknown element type rejected (not a scalar keyword, not a
+   * registered struct). M4.1 lifted the scalar-only restriction but
+   * the name still has to resolve. */
+  RUN("buf_unknown_elem_type", {
+    .source = "def [Buf 8 Widget] b",
+    .expect_substrings = { "Buf", "element type", "scalar" },
   });
 
   /* Ctx-field-set arrow form: typer recognizes `set $ctx->field val`
