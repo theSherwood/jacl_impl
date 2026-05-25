@@ -1304,6 +1304,56 @@ const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
   return result;
 }
 
+/* Parse [Buf N T] field-type annotation into a canonical string
+ * "Buf{N,T}". Consumes the four tokens [Buf, N, T, ]. See
+ * BUFFER_DESIGN.md M4.3. */
+static const char* parser__parse_buf_field_type(Parser* p, uint32_t* out_len) {
+  /* Consume TOKEN_LBRACKET */
+  parser__advance(p);
+  /* Expect TOKEN_WORD "Buf" */
+  Token* head = parser__peek(p);
+  if (head->type != TOKEN_WORD || head->length != 3 ||
+      memcmp(head->payload.text, "Buf", 3) != 0) {
+    parser__error(p, "expected 'Buf' after '[' in field type", head);
+    return NULL;
+  }
+  parser__advance(p);
+  /* N: int literal */
+  Token* n_tok = parser__peek(p);
+  if (n_tok->type != TOKEN_INT || n_tok->payload.int_val <= 0) {
+    parser__error(p, "[Buf N T] N must be a positive integer literal", n_tok);
+    return NULL;
+  }
+  parser__advance(p);
+  /* T: type keyword or struct name */
+  Token* t_tok = parser__peek(p);
+  if (t_tok->type != TOKEN_WORD) {
+    parser__error(p, "[Buf N T] T must be a type keyword or struct name", t_tok);
+    return NULL;
+  }
+  parser__advance(p);
+  /* Closing ']' */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACKET) {
+    parser__error(p, "expected ']' to close [Buf N T]", parser__peek(p));
+    return NULL;
+  }
+  parser__advance(p);
+  /* Build "Buf{N,T}" */
+  char buf[128];
+  int n = snprintf(buf, sizeof(buf), "Buf{%d,%.*s}",
+                   (int)n_tok->payload.int_val,
+                   (int)t_tok->length, t_tok->payload.text);
+  if (n < 0 || (uint32_t)n >= sizeof(buf)) {
+    parser__error(p, "[Buf N T] canonical form too long", head);
+    return NULL;
+  }
+  char* result = (char*)arena_alloc(p->arena, (uint32_t)n + 1);
+  memcpy(result, buf, (uint32_t)n);
+  result[n] = '\0';
+  *out_len = (uint32_t)n;
+  return result;
+}
+
 AstNode* parser__parse_defstruct(Parser* p) {
   Token* kw_tok = parser__advance(p); /* consume 'struct'/'defstruct' */
   SourcePos start = parser__token_start(kw_tok);
@@ -1374,6 +1424,15 @@ AstNode* parser__parse_defstruct(Parser* p) {
           return parser__error(p, "invalid inline struct type", type_tok);
         }
         type_len = inline_len;
+      } else if (type_tok->type == TOKEN_LBRACKET) {
+        /* Compound type annotation — currently [Buf N T] only.
+         * See BUFFER_DESIGN.md M4.3. */
+        uint32_t buf_len = 0;
+        type_str = parser__parse_buf_field_type(p, &buf_len);
+        if (!type_str) {
+          return parser__error(p, "invalid [Buf N T] field type", type_tok);
+        }
+        type_len = buf_len;
       } else {
         return parser__error(p, "expected field type", type_tok);
       }

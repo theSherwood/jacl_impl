@@ -190,11 +190,12 @@ typedef struct {
   const char* name;
   uint32_t    name_len;
   JaclType    type;
-  uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT */
+  uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT; for TYPE_BUF, the element encoding (scalar sentinel or struct idx) */
   uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
   uint32_t    size;            /* field size in bytes (C-ABI) */
   bool        is_mutable;      /* true if field can be written via set */
   JaclVal     default_val;     /* default value for ctx fields (JACL_NIL if none) */
+  uint32_t    buf_len;         /* TYPE_BUF: N (in elements). 0 otherwise. See BUFFER_DESIGN.md M4.3. */
 } StructTypeField;
 
 typedef struct {
@@ -11914,13 +11915,26 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (struct_idx != UINT32_MAX) {
       StructTypeDef* sdef = reg->defs[struct_idx];
 
-      /* Arity check */
-      if (argc != sdef->field_count) {
-        char err_msg[128];
-        snprintf(err_msg, sizeof(err_msg),
-                 "struct '%.*s' has %u fields but got %u arguments",
-                 (int)name_len, head->data.lit_string.value,
-                 sdef->field_count, argc);
+      /* Arity check: buf fields are implicitly zero-init at
+       * construction (no user arg needed). Count non-buf fields and
+       * compare. See BUFFER_DESIGN.md M4.3. */
+      uint32_t non_buf_count = 0;
+      for (uint32_t i = 0; i < sdef->field_count; i++) {
+        if (sdef->fields[i].type != TYPE_BUF) non_buf_count++;
+      }
+      if (argc != non_buf_count) {
+        char err_msg[160];
+        if (non_buf_count == sdef->field_count) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has %u fields but got %u arguments",
+                   (int)name_len, head->data.lit_string.value,
+                   sdef->field_count, argc);
+        } else {
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has %u non-buf fields (buf fields zero-init implicitly) but got %u arguments",
+                   (int)name_len, head->data.lit_string.value,
+                   non_buf_count, argc);
+        }
         compiler__error(c, line, col, err_msg);
         return;
       }
@@ -11929,18 +11943,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          the heap path. */
       bool use_inline = struct_def_is_user(sdef, reg);
 
-      /* Compile and type-check each field argument */
-      for (uint32_t i = 0; i < argc; i++) {
-        JaclType field_type = sdef->fields[i].type;
-        compiler__compile_node(c, args[i]);
-        JaclType arg_type = (JaclType)args[i]->inferred_type;
+      /* Compile and type-check each field argument. For each non-buf
+       * field in source order, consume the next user arg. Buf fields
+       * contribute no input; OP_STRUCT_NEW_INLINE leaves their
+       * scratch bytes zero. */
+      uint32_t user_idx = 0;
+      for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+        JaclType field_type = sdef->fields[fi].type;
+        if (field_type == TYPE_BUF) continue;  /* skipped in input */
+        compiler__compile_node(c, args[user_idx]);
+        JaclType arg_type = (JaclType)args[user_idx]->inferred_type;
 
         if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
             arg_type != field_type) {
           char err_msg[192];
           jacl_format_field_mismatch(err_msg, sizeof(err_msg),
               head->data.lit_string.value, name_len,
-              sdef->fields[i].name, sdef->fields[i].name_len,
+              sdef->fields[fi].name, sdef->fields[fi].name_len,
               field_type, arg_type);
           compiler__error(c, line, col, err_msg);
           return;
@@ -11949,14 +11968,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           char err_msg[192];
           snprintf(err_msg, sizeof(err_msg),
                    "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
-                   (int)sdef->fields[i].name_len, sdef->fields[i].name,
+                   (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
                    (int)name_len, head->data.lit_string.value,
                    type_name(field_type));
           compiler__error(c, line, col, err_msg);
           return;
         }
-        /* Nested struct field args stay inline — OP_STRUCT_NEW_INLINE
-           consumes them as inline bytes directly. */
+        user_idx++;
       }
 
       if (use_inline) {
@@ -13150,9 +13168,54 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         /* Resolve field type */
         JaclType ftype = TYPE_DYN;
         uint32_t f_struct_idx = 0;
+        uint32_t f_buf_len    = 0;
 
         if (is_type_keyword(ftype_str, ftype_len)) {
           ftype = type_from_keyword(ftype_str, ftype_len);
+        } else if (ftype_len > 4 && memcmp(ftype_str, "Buf{", 4) == 0 &&
+                   ftype_str[ftype_len - 1] == '}') {
+          /* Buf field: canonical form "Buf{N,T}". See BUFFER_DESIGN.md M4.3. */
+          const char* p = ftype_str + 4;
+          const char* end = ftype_str + ftype_len - 1;
+          /* Parse N */
+          uint32_t n = 0;
+          while (p < end && *p >= '0' && *p <= '9') {
+            n = n * 10 + (uint32_t)(*p - '0');
+            p++;
+          }
+          if (p >= end || *p != ',' || n == 0) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                "field '%.*s': malformed Buf type '%.*s'",
+                (int)fname_len, fname, (int)ftype_len, ftype_str);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          p++; /* skip ',' */
+          uint32_t tlen = (uint32_t)(end - p);
+          JaclType elem_t = TYPE_DYN;
+          uint32_t elem_sidx_local = UINT32_MAX;
+          if (is_type_keyword(p, tlen)) {
+            elem_t = type_from_keyword(p, tlen);
+            elem_sidx_local = JACL_SCALAR_TYPE_IDX(elem_t);
+          } else {
+            uint32_t sidx = struct_registry__find(reg, p, tlen);
+            if (sidx == UINT32_MAX) {
+              char err[160];
+              snprintf(err, sizeof(err),
+                  "field '%.*s': unknown buf element type '%.*s'",
+                  (int)fname_len, fname, (int)tlen, p);
+              compiler__error(c, line, node->start.column, err);
+              has_error = true;
+              break;
+            }
+            elem_t = TYPE_STRUCT;
+            elem_sidx_local = sidx;
+          }
+          ftype = TYPE_BUF;
+          f_struct_idx = elem_sidx_local;
+          f_buf_len = n;
         } else if (ftype_len > 7 && memcmp(ftype_str, "struct{", 7) == 0) {
           /* Inline anonymous struct type */
           uint32_t idx = compiler__register_inline_struct(reg, ftype_str, ftype_len);
@@ -13187,8 +13250,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
 
         /* Reject reference field types — structs hold value-type bytes only.
-           Use [box $val] to reference data through a struct. */
-        if (!is_struct_value_type(ftype)) {
+         * TYPE_BUF is also a value type (inline N*sizeof(T) bytes) so it
+         * is allowed in struct fields. Use [box $val] to reference data. */
+        if (ftype != TYPE_BUF && !is_struct_value_type(ftype)) {
           char err[192];
           snprintf(err, sizeof(err),
                    "struct field '%.*s' has reference type '%s' — "
@@ -13200,9 +13264,25 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           break;
         }
 
-        /* Compute C-ABI layout */
-        uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
-        uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
+        /* Compute C-ABI layout. For TYPE_BUF fields, fsize is
+         * N * sizeof(element); falign is the element's alignment. */
+        uint32_t fsize, falign;
+        if (ftype == TYPE_BUF) {
+          uint32_t elem_sz, elem_align;
+          if (JACL_IS_SCALAR_TYPE_IDX(f_struct_idx)) {
+            JaclType elem = JACL_TYPE_IDX_TO_SCALAR(f_struct_idx);
+            elem_sz    = struct__type_size(elem, NULL, 0);
+            elem_align = struct__type_align(elem, NULL, 0);
+          } else {
+            elem_sz    = struct__type_size(TYPE_STRUCT, reg, f_struct_idx);
+            elem_align = struct__type_align(TYPE_STRUCT, reg, f_struct_idx);
+          }
+          fsize  = f_buf_len * elem_sz;
+          falign = elem_align;
+        } else {
+          fsize  = struct__type_size(ftype, reg, f_struct_idx);
+          falign = struct__type_align(ftype, reg, f_struct_idx);
+        }
         offset = struct__align_up(offset, falign);
 
         tmp_fields[fi].name           = fname;
@@ -13213,6 +13293,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         tmp_fields[fi].size           = fsize;
         tmp_fields[fi].is_mutable     = node->data.defstruct.field_mutable[fi] != 0;
         tmp_fields[fi].default_val    = JACL_NIL;
+        tmp_fields[fi].buf_len        = f_buf_len;
 
         offset += fsize;
         if (falign > max_align) max_align = falign;

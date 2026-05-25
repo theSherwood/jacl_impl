@@ -1233,8 +1233,9 @@ typedef struct {
   uint32_t    struct_type_idx;
   uint32_t    offset;
   uint32_t    size;
-  bool        is_mutable;  /* true if field can be written via set */
-  JaclVal     default_val; /* default value for ctx fields (JACL_NIL if none) */
+  bool        is_mutable;
+  JaclVal     default_val;
+  uint32_t    buf_len;  /* TYPE_BUF field: N elements. 0 otherwise. */
 } StructTypeField;
 
 typedef struct {

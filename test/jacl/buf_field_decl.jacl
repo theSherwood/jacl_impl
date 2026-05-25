@@ -1,0 +1,14 @@
+# expect: 1
+# M4.3a: struct with [Buf N T] field. Constructor takes args only
+# for non-buf fields (buf field is implicitly zero-init).
+struct Header {
+  mut i32 version,
+  [Buf 4 u8] magic
+}
+
+proc show {} {
+  def h [Header 1]
+  print $h->version
+}
+
+show

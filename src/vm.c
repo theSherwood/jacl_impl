@@ -7745,10 +7745,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
 
         /* Compute total input slots and remember each field's stack-byte
-           offset within the input region. */
+           offset within the input region. TYPE_BUF fields consume no
+           input (auto-zero-init via scratch memset); their offset is
+           UINT32_MAX as a sentinel so the per-field switch below knows
+           to skip the input read. See BUFFER_DESIGN.md M4.3. */
         uint32_t total_input_slots = 0;
         uint32_t in_byte_offsets[256];
         for (uint32_t i = 0; i < field_count && i < 256; i++) {
+          if (sdef->fields[i].type == TYPE_BUF) {
+            in_byte_offsets[i] = UINT32_MAX;
+            continue;
+          }
           in_byte_offsets[i] = total_input_slots * sizeof(JaclVal);
           if (sdef->fields[i].type == TYPE_STRUCT) {
             StructTypeDef* sub = vm->struct_registry->defs[sdef->fields[i].struct_type_idx];
@@ -7772,6 +7779,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t* in = (uint8_t*)&vm->stack[vm->stack_top - total_input_slots];
 
         for (uint32_t i = 0; i < field_count; i++) {
+          if (in_byte_offsets[i] == UINT32_MAX) continue; /* buf field: scratch already zero */
           uint32_t off = sdef->fields[i].offset;
           uint8_t* src = in + in_byte_offsets[i];
           switch (sdef->fields[i].type) {
