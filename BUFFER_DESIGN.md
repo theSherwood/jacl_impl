@@ -10,6 +10,91 @@ Cross-references: `TYPE_SYSTEM.md` (typer pipeline & invariants),
 `NOT_IMPLEMENTED.md` §4 (typer deferred work — remove buffer items
 when M4 lands).
 
+## Status snapshot (for session handoff)
+
+| Milestone | Status | Commits |
+|---|---|---|
+| **M1** Type plumbing | ✅ done | `a9b92fc`, `c2802eb` (small ints) |
+| **M2** Scalar buffer MVP | ✅ done | `caff29f`, `79959e6`, `73e6b5e` |
+| **M3** C-ABI interop (extern decay, addr) | ✅ done | `00e7f18`, `35fabcf`, `aa91b0b`, `aac8f23` |
+| **M3.7** Pointer-arrow indexing (`$p->N`) | ✅ done | `fcd68eb` |
+| **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
+| **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ⏸ deferred | — |
+| **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
+| **M4.4** GC-traced element types | ⏸ deferred | — |
+| **M5** Polish (unchecked ops, print, overflow check) | pending | — |
+
+What works end-to-end today:
+
+```jacl
+struct ElfHeader { i32 version, [Buf 4 u8] magic }
+proc main {} {
+  def h [ElfHeader 1]              ; buf field zero-init implicitly
+  def [Ptr u8] m $h->magic         ; field access returns [Ptr T]
+  set $m->0 0x7f
+  set $m->1 0x45
+  print $m->0                       ; 127
+  print $h->version                 ; 1
+
+  def [Buf 256 u8] scratch                              ; zero-init local
+  def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46] ; literal init
+  set $scratch.[0] $magic->0                            ; (would need [buf-set])
+  [buf-set $scratch 0 0xff]                             ; explicit set
+  print [buf-len $scratch]                              ; 256
+
+  extern i32 sys_read {i32 fd [Ptr u8] dst u64 len}
+  [sys_read 0 $scratch 256]                             ; implicit [Buf]→[Ptr] decay
+}
+```
+
+What's deferred (the next session can pick from these):
+
+1. **M4.2 nested buffers** — needs encoding decisions for nested-buf
+   element types (probably register as synthetic struct in the registry)
+   and multi-dim access semantics (`$matrix->i->j` decomposition).
+2. **M4.4 GC-traced element types** — `[Buf N dyn]`, `[Buf N [Vec T]]`,
+   etc. Requires the concurrent collector to learn a new shape
+   descriptor ("N contiguous tagged slots, stride S"), write barriers
+   on indexed stores, and NIL zero-init for ref types. Highest-risk
+   slice — touches concurrency-sensitive code.
+3. **M5 polish**:
+   - `[buf-unchecked-get]` / `[buf-unchecked-set]` escape hatches.
+   - Print formatting (e.g. `Buf<u8, 256>`).
+   - Compile-time literal-value overflow check (e.g. `[[Buf 4 u8] 256]`).
+   - Documentation: update `TYPE_SYSTEM.md`, `SYNTAX.md`, `STRUCT_DESIGN.md`.
+4. **Language-wide LHS type inference** (see "Open questions / deferred"
+   below) — independent of bufs; reduces
+   `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to
+   `def hdr [[Buf 8 i32] 1024 2048]` and similar across typed vecs,
+   maps, futures, pointers, boxes.
+5. **Receiver-shape generalization** — currently `[buf-get $buf $i]`,
+   `[buf-set $buf $i $v]`, `$buf->N`, `[addr $buf->N]` all require the
+   receiver to be a bare var-ref to a local. They don't yet work with
+   proc params (other than the implicit field on a [Ptr T] param) or
+   nested struct-field receivers.
+6. **Test harness native-fn registration** — would unblock a real C
+   extern fixture (M3.6) and stress-test the decay path with an actual
+   syscall.
+
+The design decisions that landed (and *why*) — useful when reading the
+code:
+
+- **C-matching pointer-decay semantics** at call boundaries (both
+  extern and JACL-to-JACL). The user explicitly confirmed this matches
+  C arrays' actual behavior (`void foo(int arr[10])` is `int*`). See
+  the discussion before `aac8f23`.
+- **Small ints (u8/i8/u16/i16) are static-only** — no NaN-box rep.
+  Valid only as buf elements and struct fields. Widen to i32 at any
+  dyn boundary. See `c2802eb`.
+- **`[Buf N T]` (count first, then type)** — chosen over `[Buf T N]`
+  for multi-dim readability (`[Buf 3 [Buf 4 i32]]` matches C's
+  row-major `int arr[3][4]`).
+- **Struct constructors skip buf fields** (auto-zero-init). The user
+  passes args only for non-buf fields. M4.3a / `56d8a4d`.
+- **Buf fields produce `[Ptr T]` on access** (`$h->magic` →
+  `[Ptr u8]`) rather than buf-typed handles. Composes cleanly with
+  existing ptr-arrow machinery.
+
 ## Surface
 
 ```
@@ -168,7 +253,7 @@ Categories:
 
 Each milestone is independently shippable and testable.
 
-### M1 — Type plumbing (no runtime behavior)
+### M1 — Type plumbing (no runtime behavior)  ✅
 
 - `ast.c`: add `TYPE_BUF` to `JaclType`; add `uint32_t inferred_buf_len` to `AstNode`.
 - `parser.c`: recognize `[Buf N T]` in type-annotation positions
@@ -182,7 +267,7 @@ Each milestone is independently shippable and testable.
 
 **Exit:** `def [Buf 256 u8] x` parses and types but does not compile.
 
-### M2 — Scalar buffer MVP (locals only)
+### M2 — Scalar buffer MVP (locals only)  ✅
 
 - `bytecode.c`: opcodes for typed buffer get/set and `OP_BUF_LEN`.
 - `compiler.c`: local-frame layout extension reserving
@@ -217,7 +302,7 @@ scalar buffer local.
 **Exit:** the buf+pointer toolkit a C function would use round-trips
 cleanly (verified by `test/jacl/buf_ptr_round_trip.jacl`).
 
-### M4 — Element-type expansion
+### M4 — Element-type expansion  (partial: M4.1 + M4.3 ✅, M4.2 + M4.4 deferred)
 
 - Value-struct elements (real struct registry idx, struct-byte-size
   stride).
