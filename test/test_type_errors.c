@@ -386,6 +386,16 @@ static void run_all(void) {
     .expect_substrings = { "type error", "await", "future", "i32" },
   });
 
+  /* --- Stage 6 M4.1: struct-element buf rejections --- */
+
+  /* [[Buf N A] ...] constructor with element kind A but LHS uses B. */
+  RUN("buf_struct_constructor_mismatch", {
+    .source =
+      "struct A {i32 x}\nstruct B {i32 y}\n"
+      "def [Buf 2 A] xs [[Buf 2 B] [B 1]]",
+    .expect_substrings = { "constructor", "struct type" },
+  });
+
   /* --- Stage 6 M3: buf-to-ptr decay rejections --- */
 
   /* [Buf u8] passed to [Ptr i32] parameter — pointee mismatch. */

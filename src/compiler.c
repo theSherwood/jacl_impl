@@ -7107,6 +7107,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               "[[Buf N T] ...] constructor element type must match LHS exactly");
           return;
         }
+        /* For struct elements, also verify the registry idx matches
+         * (same struct kind, not just both TYPE_STRUCT). */
+        if (elem_type == TYPE_STRUCT) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          uint32_t rhs_sidx = reg ? struct_registry__find(reg,
+              rhs_telt->data.lit_string.value,
+              rhs_telt->data.lit_string.length) : UINT32_MAX;
+          if (rhs_sidx != elem_struct_idx) {
+            compiler__error(c, line, col,
+                "[[Buf N Struct] ...] constructor struct type must match LHS");
+            return;
+          }
+        }
         init_ctor  = rhs;
         init_count = rhs->data.command.arg_count;
         init_vals  = rhs->data.command.args;
@@ -7148,23 +7161,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, (uint8_t)base_slot, line);
       compiler__emit_u16(c, (uint16_t)byte_count, line);
 
-      /* Literal init: emit per-element OP_BUF_SET_LOCAL. Index is a
-       * compile-time constant so we push it via OP_CONST, then the
-       * value, then the store opcode. Element-type overflow checks on
-       * literal values are deferred to M5 (see BUFFER_DESIGN.md). */
+      /* Literal init: emit per-element store. Index is a compile-time
+       * constant so we push it via OP_CONST, then the value, then the
+       * store opcode. Element-type overflow checks on literal values
+       * are deferred to M5 (see BUFFER_DESIGN.md). */
       if (init_ctor) {
         (void)init_ctor;
+        bool is_struct_elem = (elem_type == TYPE_STRUCT);
         for (uint32_t i = 0; i < init_count; i++) {
           compiler__emit_constant(c, jacl_i32((int32_t)i), line);
           compiler__compile_node(c, init_vals[i]);
-          /* All M2 element types accept i32 on the value-pop path
-           * (small ints narrow, i64/u64/f64 promote). The typer is
-           * responsible for rejecting incompatible kinds (e.g. a
-           * string literal in a u8 buf). */
-          compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
-          compiler__emit_byte(c, (uint8_t)base_slot, line);
-          compiler__emit_byte(c, (uint8_t)elem_type, line);
-          compiler__emit_u16(c, (uint16_t)n, line);
+          if (is_struct_elem) {
+            /* Each init value must be a struct constructor producing
+             * inline bytes on TOS. OP_BUF_SET_STRUCT_LOCAL pops them
+             * and the index. */
+            compiler__emit_byte(c, OP_BUF_SET_STRUCT_LOCAL, line);
+            compiler__emit_byte(c, (uint8_t)base_slot, line);
+            compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+            compiler__emit_u16(c, (uint16_t)n, line);
+          } else {
+            /* All M2 element types accept i32 on the value-pop path
+             * (small ints narrow, i64/u64/f64 promote). The typer is
+             * responsible for rejecting incompatible kinds. */
+            compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+            compiler__emit_byte(c, (uint8_t)base_slot, line);
+            compiler__emit_byte(c, (uint8_t)elem_type, line);
+            compiler__emit_u16(c, (uint16_t)n, line);
+          }
         }
       }
 
