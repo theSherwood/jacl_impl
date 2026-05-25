@@ -7852,8 +7852,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
               elem->data.lit_string.value, elem->data.lit_string.length);
           param_types_arr[param_count] = TYPE_PTR;
-          /* pointee idx isn't tracked by the compiler today — the typer
-           * carries it on the AST node. Leave struct/key idxs sentinel. */
+          /* Encode the pointee on the local's struct_type_idx so
+           * compile-time ptr ops ($p->N, [addr $p->N]) can recover
+           * the element type without going back to the AST node. See
+           * BUFFER_DESIGN.md M3.7. */
+          uint32_t pointee_sidx = UINT32_MAX;
+          if (ptr_pointee && ptr_pointee->type == AST_LIT_STRING) {
+            const char* pn = ptr_pointee->data.lit_string.value;
+            uint32_t    pl = ptr_pointee->data.lit_string.length;
+            if (is_type_keyword(pn, pl)) {
+              pointee_sidx = JACL_SCALAR_TYPE_IDX(type_from_keyword(pn, pl));
+            } else {
+              StructTypeRegistry* reg = compiler__get_struct_registry(c);
+              if (reg) {
+                uint32_t sidx = struct_registry__find(reg, pn, pl);
+                if (sidx != UINT32_MAX) pointee_sidx = sidx;
+              }
+            }
+          }
+          param_struct_idxs[param_count] = pointee_sidx;
           param_scope_marks[param_count] = elem->scope_mark;
           param_count++;
           continue;
@@ -10434,9 +10451,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     AstNode* expr = args[0];
 
-    /* [addr $buf->N]: push the address of buf element N as a tagged
-     * u64 (TYPE_PTR with the element's scalar type). Bounds-checked
-     * at compile time. See BUFFER_DESIGN.md M3. */
+    /* [addr $buf->N] / [addr $p->N]: push the address of element N
+     * as a tagged u64 (TYPE_PTR with the element's scalar type).
+     * Buf case: bounds-checked at compile time; emits OP_BUF_ADDR_LOCAL.
+     * Ptr case: no bounds check; emits OP_PTR_ADD_OFFSET (same as
+     * [ptr-offset $p N] with cleaner syntax). See BUFFER_DESIGN.md M3 / M3.7. */
     if (expr->type == AST_COMMAND &&
         expr->data.command.head_id == HEAD_DOT &&
         expr->data.command.arg_count == 2 &&
@@ -10474,6 +10493,41 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)base_slot, line);
         compiler__emit_u16(c, (uint16_t)byte_offset, line);
         c->last_expr_type = TYPE_U64; /* runtime rep of pointer */
+        return;
+      }
+      /* Ptr-arrow case for [addr $p->N]: read pointee from AST
+       * annotation OR from local table (same dual-source logic as
+       * the read/set HEAD_DOT path). */
+      JaclType addr_ptype = (JaclType)recv->inferred_type;
+      uint32_t addr_psidx = recv->inferred_struct_idx;
+      if (addr_ptype != TYPE_PTR && found >= 0 &&
+          c->locals[found].type == TYPE_PTR) {
+        addr_ptype = TYPE_PTR;
+        addr_psidx = c->locals[found].struct_type_idx;
+      }
+      if (addr_ptype == TYPE_PTR && JACL_IS_SCALAR_TYPE_IDX(addr_psidx)) {
+        JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(addr_psidx);
+        int32_t  idx_lit = expr->data.command.args[1]->data.lit_int.value;
+        if (idx_lit < 0) {
+          char err[128];
+          snprintf(err, sizeof(err),
+              "addr: ptr index must be non-negative, got %d", (int)idx_lit);
+          compiler__error(c, line, col, err);
+          return;
+        }
+        uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col, "addr: ptr byte offset exceeds 65535");
+          return;
+        }
+        /* Push the pointer, then add the offset. */
+        compiler__compile_node(c, recv);
+        if (byte_offset != 0) {
+          compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+          compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        }
+        c->last_expr_type = TYPE_U64;
         return;
       }
     }
@@ -11113,6 +11167,62 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             c->last_expr_type = TYPE_I32; break;
           default:
             c->last_expr_type = elem_type; break;
+        }
+        return;
+      }
+      /* Same shape but receiver is [Ptr T] (scalar pointee): compile
+       * as OP_PTR_LOAD / OP_PTR_STORE at offset N*sizeof(T). No
+       * compile-time bounds check — pointer can target anything.
+       *
+       * For def-style locals (`def [Ptr T] p ...`), the compiler stores
+       * type=TYPE_U64 (runtime rep) but the typer puts TYPE_PTR + the
+       * pointee idx on the AST var-ref. For proc params we also populate
+       * c->locals[].struct_type_idx with the pointee. Read whichever has
+       * the info. See BUFFER_DESIGN.md M3.7. */
+      JaclType recv_ptype = (JaclType)recv->inferred_type;
+      uint32_t recv_psidx = recv->inferred_struct_idx;
+      if (recv_ptype != TYPE_PTR && found >= 0 &&
+          c->locals[found].type == TYPE_PTR) {
+        recv_ptype = TYPE_PTR;
+        recv_psidx = c->locals[found].struct_type_idx;
+      }
+      if (recv_ptype == TYPE_PTR && JACL_IS_SCALAR_TYPE_IDX(recv_psidx)) {
+        JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(recv_psidx);
+        int32_t idx_lit = args[1]->data.lit_int.value;
+        if (idx_lit < 0) {
+          char err[128];
+          snprintf(err, sizeof(err),
+              "ptr index must be non-negative, got %d", (int)idx_lit);
+          compiler__error(c, line, col, err);
+          return;
+        }
+        uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col, "ptr byte offset exceeds 65535");
+          return;
+        }
+        /* Push the pointer. */
+        compiler__compile_node(c, recv);
+        if (is_set) {
+          compiler__compile_node(c, args[2]);
+          compiler__emit_byte(c, OP_PTR_STORE, line);
+          compiler__emit_u16(c, (uint16_t)byte_offset, line);
+          compiler__emit_byte(c, (uint8_t)pointee, line);
+          compiler__emit_byte(c, OP_POP, line);   /* discard ptr */
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
+        compiler__emit_byte(c, OP_PTR_LOAD, line);
+        compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        compiler__emit_byte(c, (uint8_t)pointee, line);
+        switch (pointee) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            c->last_expr_type = TYPE_I32; break;
+          default:
+            c->last_expr_type = pointee; break;
         }
         return;
       }

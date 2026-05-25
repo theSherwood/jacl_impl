@@ -3017,10 +3017,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * inferred_type/struct_idx on the inner chain expression. */
       AstNode* inner = node->data.command.args[0];
 
-      /* [addr $buf->N]: result is [Ptr ElemType] using the buf's
-       * *declared* element type (not the widened i32 surfaced by the
-       * arrow-read). Detect `[. $varref $intlit]` whose receiver is a
-       * TYPE_BUF binding. See BUFFER_DESIGN.md M3. */
+      /* [addr $buf->N] / [addr $p->N]: result is [Ptr ElemType] using
+       * the buf or pointer's *declared* element/pointee type (not the
+       * widened i32 surfaced by the arrow-read). Detect
+       * `[. $varref $intlit]` whose receiver is a TYPE_BUF or TYPE_PTR
+       * binding. See BUFFER_DESIGN.md M3 / M3.7. */
       if (inner->type == AST_COMMAND &&
           inner->data.command.head_id == HEAD_DOT &&
           inner->data.command.arg_count == 2 &&
@@ -3030,7 +3031,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         const TyperBinding* b = typer__scope_resolve(tc,
             recv->data.var_ref.name, recv->data.var_ref.length,
             recv->scope_mark);
-        if (b && b->type == TYPE_BUF &&
+        if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
             JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
           node->inferred_type       = TYPE_PTR;
           node->inferred_struct_idx = b->struct_idx; /* scalar elem encoding */
@@ -3226,17 +3227,23 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
 
-      /* Buf element access: `$buf->N` parses as `[. $buf N]` where the
-       * field is an AST_LIT_INT. Narrow to the element type, widening
-       * small ints to i32 (mirrors HEAD_BUF_GET). See BUFFER_DESIGN.md M3. */
+      /* Buf or Ptr element access: `$x->N` parses as `[. $x N]` where
+       * the field is an AST_LIT_INT.
+       *   TYPE_BUF: bounds-checked at typer (N must be < buf_len).
+       *   TYPE_PTR: no bounds check (pointer can target anything);
+       *             pointee must be scalar.
+       * Result narrows to the element scalar, widening small ints to
+       * i32 (mirrors HEAD_BUF_GET / OP_PTR_LOAD widening). See
+       * BUFFER_DESIGN.md M3. */
       if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_INT) {
         const TyperBinding* b = typer__scope_resolve(tc,
             tgt->data.var_ref.name, tgt->data.var_ref.length,
             tgt->scope_mark);
-        if (b && b->type == TYPE_BUF &&
+        if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
             JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
-          int32_t  idx_lit = fld->data.lit_int.value;
-          if (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len) {
+          int32_t idx_lit = fld->data.lit_int.value;
+          if (b->type == TYPE_BUF &&
+              (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
             char err[160];
             snprintf(err, sizeof(err),
                 "type error: buf index %d out of bounds for [Buf %u T]",
