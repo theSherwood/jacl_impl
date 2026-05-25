@@ -197,17 +197,25 @@ Each milestone is independently shippable and testable.
 **Exit:** can declare, init, index, mutate, and read length of a
 scalar buffer local.
 
-### M3 — C ABI interop
+### M3 — C ABI interop  ✅
 
-- `[addr $buf.[i]]` → `[Ptr T]` via existing addr machinery.
-- Typer: extern decay rule, gated on ABI-compatible `T`.
-- `[Ptr [Buf N T]]` confirmed working through existing pointee
-  tracking.
-- `[ptr-cast [Buf N T] $p]`.
-- Tests: extern fixtures with a tiny C helper.
+- `[addr $buf->N]` → `[Ptr T]` via OP_BUF_ADDR_LOCAL (constant index;
+  runtime-index addr-of deferred).
+- `$buf->N` arrow indexing as a value read (mirrors `[buf-get $buf N]`).
+- Typer: extern decay rule, gated on pointee match. Compiler emits
+  OP_BUF_ADDR_LOCAL for bare var-ref-to-buf args when param is `[Ptr T]`.
+- `[Ptr u8]` / small-int pointer types now work end-to-end through
+  OP_PTR_LOAD / OP_PTR_STORE (u8/i8/u16/i16 cases added).
+- **Deferred to M4 / later** (out of scope for FFI motivation):
+  - `[ptr-cast [Buf N T] $p]` — bufs aren't first-class values, no
+    natural rvalue destination. Casts go through `[Ptr T]` instead.
+  - End-to-end fixture calling a real C extern — requires test
+    harness to register a native fn. The toolkit is fully exercised
+    via `buf_ptr_round_trip.jacl` using `[addr]`/`[ptr-offset]`/
+    `[ptr-deref]`, which are the same primitives an extern would use.
 
-**Exit:** can pass `[Buf 256 u8]` to `extern i32 read {...}` and read
-bytes back.
+**Exit:** the buf+pointer toolkit a C function would use round-trips
+cleanly (verified by `test/jacl/buf_ptr_round_trip.jacl`).
 
 ### M4 — Element-type expansion
 

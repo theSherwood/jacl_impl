@@ -1,0 +1,13 @@
+# expect: 127
+# expect: 69
+# expect: 76
+# expect: 70
+# End-to-end buf+pointer round-trip: write a buf, take its address,
+# walk through it with ptr-offset, deref each element. Demonstrates
+# the full toolkit a C extern would use to read the buf contents.
+def [Buf 4 u8] elf [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+def [Ptr u8] p [addr $elf->0]
+print [ptr-deref $p]
+print [ptr-deref [ptr-offset $p 1]]
+print [ptr-deref [ptr-offset $p 2]]
+print [ptr-deref [ptr-offset $p 3]]
