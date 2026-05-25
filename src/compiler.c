@@ -7006,6 +7006,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], false, line, col);
       return;
     }
+    /* LHS-inferred buf def: `def NAME [[Buf N T] v0 v1 ...]`. The RHS
+     * already carries the full [Buf N T] type in its constructor head,
+     * so the explicit LHS annotation is pure noise. Rewrite into the
+     * canonical 3-arg shape and fall through to the explicit-LHS code
+     * below. See BUFFER_DESIGN.md "LHS type inference". */
+    AstNode* synthetic_args[3];
+    if (argc == 2 && args[0]->type == AST_LIT_STRING &&
+        args[1]->type == AST_COMMAND &&
+        args[1]->data.command.head &&
+        args[1]->data.command.head->type == AST_COMMAND &&
+        args[1]->data.command.head->data.command.head &&
+        args[1]->data.command.head->data.command.head->type == AST_LIT_STRING &&
+        args[1]->data.command.head->data.command.head->data.lit_string.length == 3 &&
+        memcmp(args[1]->data.command.head->data.command.head->data.lit_string.value,
+               "Buf", 3) == 0 &&
+        args[1]->data.command.head->data.command.arg_count == 2) {
+      synthetic_args[0] = args[1]->data.command.head;  /* the [Buf N T] node */
+      synthetic_args[1] = args[0];                     /* the bare name */
+      synthetic_args[2] = args[1];                     /* the RHS constructor */
+      args = synthetic_args;
+      argc = 3;
+    }
+
     /* --- Buf def: `def [Buf N T] NAME` (zero-init) or
      *              `def [Buf N T] NAME [[Buf N T] v0 v1 ...]` (literal init).
      * Both share the multi-slot allocation + OP_BUF_ZERO_LOCAL prelude;

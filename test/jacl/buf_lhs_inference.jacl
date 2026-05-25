@@ -1,0 +1,36 @@
+# expect: 127
+# expect: 69
+# expect: 76
+# expect: 70
+# expect: 4
+# expect: 1024
+# expect: 2048
+# expect: 0
+# expect: 8
+# expect: 4
+# expect: 1
+# expect: 4
+# LHS-inferred buf def: `def NAME [[Buf N T] ...]` — the type annotation
+# on the LHS is dropped because the RHS constructor already carries the
+# full [Buf N T]. See BUFFER_DESIGN.md "LHS type inference".
+
+def magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+print [buf-get $magic 0]
+print [buf-get $magic 1]
+print [buf-get $magic 2]
+print [buf-get $magic 3]
+print [buf-len $magic]
+
+# Partial fill leaves the trailing slots zero.
+def hdr [[Buf 8 i32] 1024 2048]
+print [buf-get $hdr 0]
+print [buf-get $hdr 1]
+print [buf-get $hdr 7]
+print [buf-len $hdr]
+
+# Struct-element bufs also infer from the constructor.
+struct Point {i32 x, i32 y}
+def pts [[Buf 4 Point] [Point 1 2] [Point 3 4]]
+print [buf-len $pts]
+print $pts->0->x
+print $pts->1->y

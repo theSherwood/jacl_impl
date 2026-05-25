@@ -771,7 +771,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   /* Effective type: declared wins. For an untyped def/mut, mirror
    * compiler.c:7013-7019: only unboxed scalars (i64/u64/f64), structs,
    * streams, and typed collections are inherited from the RHS; tagged
-   * scalars (i32/u32/f32/bool/etc.) collapse to DYN. */
+   * scalars (i32/u32/f32/bool/etc.) collapse to DYN.
+   *
+   * TYPE_BUF is also inherited when the RHS is a `[[Buf N T] ...]`
+   * literal constructor, letting `def hdr [[Buf 8 i32] 1024 2048]`
+   * skip the redundant LHS annotation. See BUFFER_DESIGN.md "LHS type
+   * inference". */
   JaclType effective;
   if (declared_type != TYPE_DYN) {
     effective = declared_type;
@@ -779,7 +784,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     JaclType rhs_t = (JaclType)value_node->inferred_type;
     if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
         rhs_t == TYPE_STREAM || is_typed_collection(rhs_t) ||
-        rhs_t == TYPE_FUTURE || rhs_t == TYPE_BOX) {
+        rhs_t == TYPE_FUTURE || rhs_t == TYPE_BOX ||
+        rhs_t == TYPE_BUF) {
       effective = rhs_t;
     } else {
       effective = TYPE_DYN;
@@ -787,6 +793,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
   uint32_t struct_idx = UINT32_MAX;
   uint32_t key_struct_idx = UINT32_MAX;
+  uint32_t inherited_buf_len = 0;
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
       effective == TYPE_FUTURE || effective == TYPE_PTR ||
       effective == TYPE_BOX || effective == TYPE_BUF) {
@@ -803,6 +810,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     if (effective == TYPE_TYPED_MAP) {
       key_struct_idx = value_node->inferred_key_struct_idx;
     }
+    /* Buf: also inherit N from RHS when not declared. */
+    if (effective == TYPE_BUF && declared_buf_len == 0) {
+      inherited_buf_len = value_node->inferred_buf_len;
+    }
   }
 
   typer__scope_add(tc, name_node->data.lit_string.value,
@@ -814,9 +825,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   if (key_struct_idx != UINT32_MAX && tc->binding_count > 0) {
     tc->bindings[tc->binding_count - 1].key_struct_idx = key_struct_idx;
   }
-  /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md. */
-  if (effective == TYPE_BUF && declared_buf_len > 0 && tc->binding_count > 0) {
-    tc->bindings[tc->binding_count - 1].buf_len = declared_buf_len;
+  /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md.
+   * Picks the declared length when annotated; otherwise the length
+   * inferred from a typed-RHS constructor. */
+  if (effective == TYPE_BUF && tc->binding_count > 0) {
+    uint32_t bl = declared_buf_len > 0 ? declared_buf_len : inherited_buf_len;
+    if (bl > 0) tc->bindings[tc->binding_count - 1].buf_len = bl;
   }
 
   /* def/mut returns nil. (compiler.c's last_expr_type is sometimes left
