@@ -1,0 +1,16 @@
+# expect: 1024
+# expect: 2048
+# JACL proc taking a [Ptr T] receives the buf by pointer (same C-style
+# decay as extern calls). The proc reads through the pointer; address
+# identity is preserved across the call boundary.
+proc i32 read_first {[Ptr i32] p} {
+  [ptr-deref $p]
+}
+
+proc i32 read_second {[Ptr i32] p} {
+  [ptr-deref [ptr-offset $p 1]]
+}
+
+def [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]
+print [read_first $b]
+print [read_second $b]
