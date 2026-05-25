@@ -785,6 +785,22 @@ static void test_extern_with_params(void) {
   arena_destroy(&a);
 }
 
+static void test_extern_buf_to_ptr_decay(void) {
+  /* [Buf N T] passed to a [Ptr T] parameter at an extern call site
+   * type-checks (typer accepts the implicit decay). The compiler
+   * emits OP_BUF_ADDR_LOCAL for the arg. See BUFFER_DESIGN.md M3. */
+  current_test = "extern_buf_to_ptr_decay";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "extern i32 sys_read {i32 fd [Ptr u8] dst u64 len}\n"
+      "def [Buf 256 u8] buf\n"
+      "def r [sys_read 0 $buf 256]", &a);
+  AstNode* call = find_cmd(r.nodes[2], "sys_read");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_I32);
+  arena_destroy(&a);
+}
+
 /* --- Stage 5b: deref + field auto-deref --- */
 
 static void test_ptr_arrow_field_narrows(void) {
@@ -1115,6 +1131,7 @@ int main(void) {
   test_proc_future_return_compound();
   test_extern_ptr_return_call();
   test_extern_with_params();
+  test_extern_buf_to_ptr_decay();
   test_ptr_arrow_field_narrows();
   test_ptr_deref_scalar_narrows();
   test_ptr_offset_preserves_pointee();

@@ -386,6 +386,17 @@ static void run_all(void) {
     .expect_substrings = { "type error", "await", "future", "i32" },
   });
 
+  /* --- Stage 6 M3: buf-to-ptr decay rejections --- */
+
+  /* [Buf u8] passed to [Ptr i32] parameter — pointee mismatch. */
+  RUN("buf_to_ptr_pointee_mismatch", {
+    .source =
+      "extern i32 read32 {[Ptr i32] dst}\n"
+      "def [Buf 256 u8] b\n"
+      "def r [read32 $b]",
+    .expect_substrings = { "type error", "expected", "got" },
+  });
+
   /* --- Stage 6: [Buf N T] buffer-type annotation rejections (M1) --- */
 
   /* Zero length rejected. */

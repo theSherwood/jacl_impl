@@ -55,6 +55,12 @@ typedef struct {
   uint32_t    return_struct_idx;    /* UINT32_MAX if not struct */
   uint8_t     param_count;
   uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
+  /* For TYPE_PTR / TYPE_STRUCT params, the pointee/struct idx
+   * (scalar-encoded via JACL_SCALAR_TYPE_IDX or real struct registry
+   * idx). UINT32_MAX otherwise. Used by extern call sites to verify
+   * [Buf N T] → [Ptr T] decay matches the param's declared pointee
+   * exactly. See BUFFER_DESIGN.md M3. */
+  uint32_t    param_struct_idxs[TYPER_MAX_PROC_PARAMS];
 } TyperProc;
 
 typedef struct {
@@ -1631,11 +1637,11 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     JaclType pt[TYPER_MAX_PROC_PARAMS];
     uint32_t ps[TYPER_MAX_PROC_PARAMS];
     uint32_t pcount = typer__parse_params(tc, args[params_idx], &pn, &pt, &ps);
-    (void)ps;
     if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
     p->param_count = (uint8_t)pcount;
     for (uint32_t i = 0; i < pcount; i++) {
       p->param_types[i] = (uint8_t)pt[i];
+      p->param_struct_idxs[i] = ps[i];
     }
 
     /* Nested procs: recurse into the proc body so inner `proc`
@@ -2315,6 +2321,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       JaclType arg_t = (JaclType)as[i]->inferred_type;
       if (arg_t == param_t) continue;
       if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+      /* [Buf N T] → [Ptr T] implicit decay at call sites. The buf's
+       * element type must match the param's pointee type exactly, and
+       * the element must be C-ABI compatible (scalars / value-structs
+       * / [Ptr U] — currently all M2 element types qualify since we
+       * don't yet support GC-traced elements). See BUFFER_DESIGN.md M3. */
+      if (param_t == TYPE_PTR && arg_t == TYPE_BUF) {
+        uint32_t param_pointee = proc->param_struct_idxs[i];
+        uint32_t arg_elem      = as[i]->inferred_struct_idx;
+        if (param_pointee == arg_elem ||
+            param_pointee == UINT32_MAX) {
+          /* Either the param doesn't constrain pointee (rare) or the
+           * encoded element matches. Accept the decay; the compiler
+           * emits address-of at the call site. */
+          continue;
+        }
+      }
       char err[224];
       /* Read name from `proc` rather than `head`: for module-binding
        * calls (`[$mod->fn args]`) the head is an AST_COMMAND, not the

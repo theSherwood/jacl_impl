@@ -11965,6 +11965,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         expected_param_type = call_param_types[i];
       }
 
+      /* [Buf N T] → [Ptr T] implicit decay at call sites. When the
+       * param is TYPE_PTR and the arg is a bare var-ref to a buf
+       * local, emit OP_BUF_ADDR_LOCAL with byte_offset 0 in place of
+       * the normal var-ref load. See BUFFER_DESIGN.md M3. */
+      if (expected_param_type == TYPE_PTR &&
+          args[i]->type == AST_VAR_REF) {
+        JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+            args[i]->data.var_ref.name, args[i]->data.var_ref.length);
+        int found = -1;
+        for (int li = (int)c->local_count - 1; li >= 0; li--) {
+          if (c->locals[li].name == recv_name) { found = li; break; }
+        }
+        if (found >= 0 && c->locals[found].type == TYPE_BUF) {
+          compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)found, line);
+          compiler__emit_u16(c, 0, line);
+          c->last_expr_type = TYPE_U64;
+          total_arg_slots += 1;
+          continue;
+        }
+      }
+
       /* Set contextual type for argument.
          Phase 5a: request inline struct for struct-typed params so constructors
          produce inline bytes directly. */
