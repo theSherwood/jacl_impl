@@ -11545,6 +11545,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           uint16_t total_offset = inline_offset + (uint16_t)sdef->fields[fi].offset;
 
+          /* Buf field access (M4.3b): $h->magic returns a [Ptr T] to
+           * the field's first byte. Set form (mutate the buf as a
+           * whole) is rejected — use $h.magic->N for element writes
+           * or pointer-based mutation. */
+          if (sdef->fields[fi].type == TYPE_BUF) {
+            if (is_upvalue_inline) {
+              compiler__error(c, line, col,
+                  "buf field access through upvalue not supported yet");
+              return;
+            }
+            if (is_set) {
+              compiler__error(c, line, col,
+                  "cannot assign to a buf field as a whole — write elements via "
+                  "set $rec->field->N $v or through [addr $rec->field]");
+              return;
+            }
+            compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+            compiler__emit_byte(c, (uint8_t)inline_base, line);
+            compiler__emit_u16(c, total_offset, line);
+            c->last_expr_type = TYPE_U64;
+            return;
+          }
+
           /* US-008: select local vs upvalue variant of struct opcodes */
           uint8_t get_op = is_upvalue_inline ? OP_STRUCT_GET_UPVALUE : OP_STRUCT_GET_INLINE;
           uint8_t set_op = is_upvalue_inline ? OP_STRUCT_SET_UPVALUE : OP_STRUCT_SET_INLINE;

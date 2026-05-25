@@ -1,0 +1,20 @@
+# expect: 1
+# expect: 127
+# M4.3b: $h->magic returns [Ptr u8] to the buf field's bytes. We can
+# then mutate via the pointer and read back, all while the struct
+# lives inline in a local.
+struct Header {
+  i32 version,
+  [Buf 4 u8] magic
+}
+
+proc show {} {
+  def h [Header 1]
+  print $h->version
+
+  def [Ptr u8] mp $h->magic
+  set $mp->0 127
+  print [ptr-deref $mp]
+}
+
+show

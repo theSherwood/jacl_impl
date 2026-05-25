@@ -1486,8 +1486,28 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       const char* tn = node->data.defstruct.field_types[i];
       uint32_t    tl = node->data.defstruct.field_type_lens[i];
       JaclType ft;
+      uint32_t f_sidx = UINT32_MAX;
       if (is_type_keyword(tn, tl)) {
         ft = type_from_keyword(tn, tl);
+      } else if (tl > 4 && memcmp(tn, "Buf{", 4) == 0 &&
+                 tn[tl - 1] == '}') {
+        /* Buf field (M4.3): canonical "Buf{N,T}". Decode element
+         * encoding now; T must be a scalar keyword or already-
+         * registered struct (pass-2 resolution NYI for buf elem). */
+        ft = TYPE_BUF;
+        const char* p = tn + 4;
+        const char* end = tn + tl - 1;
+        while (p < end && *p >= '0' && *p <= '9') p++;
+        if (p < end && *p == ',') {
+          p++;
+          uint32_t elen = (uint32_t)(end - p);
+          if (is_type_keyword(p, elen)) {
+            f_sidx = JACL_SCALAR_TYPE_IDX(type_from_keyword(p, elen));
+          } else {
+            const TyperStruct* found = typer__find_struct(tc, p, elen);
+            if (found) f_sidx = (uint32_t)(found - tc->structs);
+          }
+        }
       } else {
         /* Nested struct — type set to TYPE_STRUCT here; struct_idx
          * resolved in pass 2 below. */
@@ -1496,7 +1516,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       s->field_types[i]        = (uint8_t)ft;
       s->field_names[i]        = node->data.defstruct.field_names[i];
       s->field_name_lens[i]    = node->data.defstruct.field_name_lens[i];
-      s->field_struct_idxs[i]  = UINT32_MAX;
+      s->field_struct_idxs[i]  = f_sidx;
     }
   }
   /* Pass 2: for each struct registered in pass 1, resolve struct-
@@ -3319,9 +3339,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         for (uint32_t fi = 0; fi < sd->field_count; fi++) {
           if (sd->field_name_lens[fi] == fnl &&
               memcmp(sd->field_names[fi], fn, fnl) == 0) {
-            node->inferred_type = (uint8_t)sd->field_types[fi];
-            if (sd->field_types[fi] == TYPE_STRUCT) {
+            JaclType ft = (JaclType)sd->field_types[fi];
+            if (ft == TYPE_BUF) {
+              /* Buf field access: $h->field returns [Ptr ElemType]
+               * pointing at the field's first byte. See
+               * BUFFER_DESIGN.md M4.3. */
+              node->inferred_type       = TYPE_PTR;
               node->inferred_struct_idx = sd->field_struct_idxs[fi];
+            } else {
+              node->inferred_type = (uint8_t)ft;
+              if (ft == TYPE_STRUCT) {
+                node->inferred_struct_idx = sd->field_struct_idxs[fi];
+              }
             }
             break;
           }

@@ -1,0 +1,28 @@
+# expect: 127
+# expect: 69
+# expect: 76
+# expect: 70
+# expect: 1
+# M4.3c: realistic FFI use case -- a struct with a buf field for
+# magic bytes plus a separate scalar field. Matches C layout:
+# struct { uint32_t version; uint8_t magic[4]; }.
+struct ElfHeader {
+  i32 version,
+  [Buf 4 u8] magic
+}
+
+proc main {} {
+  def h [ElfHeader 1]
+  def [Ptr u8] m $h->magic
+  set $m->0 0x7f
+  set $m->1 0x45
+  set $m->2 0x4c
+  set $m->3 0x46
+  print $m->0
+  print $m->1
+  print $m->2
+  print $m->3
+  print $h->version
+}
+
+main
