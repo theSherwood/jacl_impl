@@ -360,40 +360,53 @@ hatches are available for performance-critical paths.
   `N` is bound) — deferred; for now `N` must be a literal at each
   use site.
 
-### LHS type inference for typed RHS constructors (language-wide)
+### LHS type inference for typed RHS constructors (partial — bufs shipped)
 
-Today `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` repeats
-`[Buf 8 i32]` on both sides. The RHS constructor already carries
-the full type — the LHS annotation is pure noise when the RHS is
-syntactically a typed constructor.
+`def hdr [[Buf 8 i32] 1024 2048]` is now equivalent to the previously-
+required `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]`. The RHS
+constructor already carries the full type, so the explicit LHS
+annotation is pure noise and is now dropped for bufs (commit `0e4ba05`).
 
-Reduce to:
+Implementation:
+- **Typer** (`handle_def_or_mut`): TYPE_BUF added to the inherit-from-
+  RHS list (alongside structs/streams/typed collections/futures/boxes).
+  Inherits `inferred_struct_idx` and `inferred_buf_len`.
+- **Compiler** (`HEAD_DEF`): pre-process step rewrites `def NAME
+  [[Buf N T] ...]` into the canonical 3-arg `def [Buf N T] NAME RHS`
+  shape using a stack-local AstNode array, so the existing slot-
+  allocation / zero-init / per-element store path handles it
+  unchanged. See `compiler.c` HEAD_DEF "LHS-inferred buf def" comment.
+- Fixture: `test/jacl/buf_lhs_inference.jacl` covers both scalar and
+  struct element types and partial-fill.
+
+The same approach extends to the other typed-constructor forms —
+**deferred slices** (each its own follow-up):
 
 ```
-def hdr [[Buf 8 i32] 1024 2048]   ; type inferred from RHS
-```
-
-This is **not buffer-specific** — the same redundancy exists for
-every statically-typed RHS form already in the language:
-
-```
-def xs [[Vec i64] 1 2 3]           ; today repeats [Vec i64]
-def m  [[Map str i32] "a" 1 "b" 2] ; today repeats [Map str i32]
+def xs [[Vec i64] 1 2 3]           ; today still requires [Vec i64] LHS
+def m  [[Map str i32] "a" 1 "b" 2] ; today still requires [Map str i32] LHS
 def f  [spawn { …i32… }]           ; could infer [Future i32]
 def p  [ptr-null [Ptr Point]]      ; could infer [Ptr Point]
 def b  [box-i32 0]                 ; could infer [Box i32]
 ```
 
-Recommended approach when this lands: a typer pass that, when `def
-NAME RHS` is encountered without an LHS annotation, takes the
-RHS's inferred_type / inferred_struct_idx / inferred_buf_len /
-inferred_key_struct_idx and adopts them onto the binding —
+For Vec / Map the typer already inherits from RHS (see the existing
+`is_typed_collection` branch in `handle_def_or_mut`), so the
+remaining work is on the compiler side: typed-vec / typed-map
+constructors don't have the same multi-slot stack reservation as
+bufs, but the compiler still has bespoke def-handler logic per
+shape that needs the same `def NAME RHS` → synthetic-LHS rewrite
+to avoid dropping struct-idx / key-struct-idx on the floor.
+
+For Ptr / Box / Future the binding is a single tagged value and the
+typer-side inheritance is sufficient — the compiler is uniform.
+
+Approach when landing the rest: a typer pass that, for any untyped
+`def NAME RHS`, takes the RHS's `inferred_type` /
+`inferred_struct_idx` / `inferred_buf_len` /
+`inferred_key_struct_idx` and adopts them onto the binding —
 provided the RHS is a *statically known* typed form (a recognized
 typed-constructor head, an extern call with a typed return, a
 typed proc call, etc.). The dyn-binding form `def dyn x …` stays
 the explicit "I want a dyn slot" marker (per `TYPE_SYSTEM.md`
 decision 2).
-
-This is one of those "do once, applies everywhere" wins — worth
-landing as a separate, focused milestone after M3/M4 so it's not
-entangled with the buffer feature delivery.
