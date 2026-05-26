@@ -3332,6 +3332,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
 
+      /* Same shape but receiver is an arbitrary expression with
+       * inferred_type TYPE_PTR — covers field-access chains like
+       * `$h->magic->0` where `$h->magic` returns [Ptr u8]. Bufs
+       * aren't expression-result types in JACL, so only TYPE_PTR
+       * needs the generalization. No bounds check (TYPE_PTR
+       * branch above is also bounds-check-free). See
+       * BUFFER_DESIGN.md "Receiver-shape generalization". */
+      if (fld->type == AST_LIT_INT &&
+          (JaclType)tgt->inferred_type == TYPE_PTR &&
+          tgt->inferred_struct_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(tgt->inferred_struct_idx)) {
+        JaclType elem = JACL_TYPE_IDX_TO_SCALAR(tgt->inferred_struct_idx);
+        switch (elem) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            node->inferred_type = TYPE_I32; break;
+          default:
+            node->inferred_type = elem; break;
+        }
+        return;
+      }
+
       /* Resolve target struct type. Two shapes:
        *   - tgt was already typed as STRUCT (e.g. $ln var-ref or a
        *     nested dot expression).

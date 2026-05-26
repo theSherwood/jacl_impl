@@ -11445,6 +11445,57 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
+    /* Arrow indexing on a non-var-ref TYPE_PTR receiver: covers
+     * `$h->magic->0` where `$h->magic` returns [Ptr u8] (an
+     * AST_COMMAND, not a var-ref). The typer has already populated
+     * `inferred_type` / `inferred_struct_idx` on the receiver, so
+     * we can emit OP_PTR_LOAD / OP_PTR_STORE the same way as the
+     * var-ref branch above. See BUFFER_DESIGN.md
+     * "Receiver-shape generalization". */
+    if (args[1]->type == AST_LIT_INT &&
+        args[0]->type != AST_VAR_REF &&
+        (JaclType)args[0]->inferred_type == TYPE_PTR &&
+        args[0]->inferred_struct_idx != UINT32_MAX &&
+        JACL_IS_SCALAR_TYPE_IDX(args[0]->inferred_struct_idx)) {
+      JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(args[0]->inferred_struct_idx);
+      int32_t idx_lit = args[1]->data.lit_int.value;
+      if (idx_lit < 0) {
+        char err[128];
+        snprintf(err, sizeof(err),
+            "ptr index must be non-negative, got %d", (int)idx_lit);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
+      uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+      if (byte_offset > 0xFFFFu) {
+        compiler__error(c, line, col, "ptr byte offset exceeds 65535");
+        return;
+      }
+      compiler__compile_node(c, args[0]);
+      if (is_set) {
+        compiler__compile_node(c, args[2]);
+        compiler__emit_byte(c, OP_PTR_STORE, line);
+        compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        compiler__emit_byte(c, (uint8_t)pointee, line);
+        compiler__emit_byte(c, OP_POP, line);
+        compiler__emit_byte(c, OP_NIL, line);
+        c->last_expr_type = TYPE_NIL;
+        return;
+      }
+      compiler__emit_byte(c, OP_PTR_LOAD, line);
+      compiler__emit_u16(c, (uint16_t)byte_offset, line);
+      compiler__emit_byte(c, (uint8_t)pointee, line);
+      switch (pointee) {
+        case TYPE_I8: case TYPE_U8:
+        case TYPE_I16: case TYPE_U16:
+          c->last_expr_type = TYPE_I32; break;
+        default:
+          c->last_expr_type = pointee; break;
+      }
+      return;
+    }
+
     /* Check for module binding: $modname->field with literal field name
        This is resolved at compile time to a direct global access. */
     if (args[0]->type == AST_VAR_REF && args[1]->type == AST_LIT_STRING) {

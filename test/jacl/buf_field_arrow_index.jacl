@@ -1,0 +1,36 @@
+# expect: 0
+# expect: 127
+# expect: 69
+# expect: 0
+# expect: 255
+# expect: 1
+# Receiver-shape generalization (BUFFER_DESIGN.md): `$h->magic->0`
+# works even when the first arrow returns [Ptr T] from a struct-field
+# access (the receiver is an AST_COMMAND, not a bare var-ref). Same
+# for `set $h->magic->0 v` and deeply nested chains.
+
+struct ElfHeader { i32 ver, [Buf 4 u8] magic }
+proc main {} {
+  def h [ElfHeader 1]
+  # Read: $h->magic returns [Ptr u8], then ->0 indexes via OP_PTR_LOAD.
+  print $h->magic->0
+
+  # Write: set through the chained arrow.
+  set $h->magic->0 0x7f
+  set $h->magic->1 0x45
+  print $h->magic->0
+  print $h->magic->1
+}
+[main]
+
+# Deeply nested: $o->inner->data->0 chains three arrows.
+struct Inner { [Buf 2 u8] data }
+struct Outer { i32 tag, Inner inner }
+proc nested {} {
+  def o [Outer 1 [Inner]]
+  print $o->inner->data->0
+  set $o->inner->data->1 255
+  print $o->inner->data->1
+  print $o->tag
+}
+[nested]
