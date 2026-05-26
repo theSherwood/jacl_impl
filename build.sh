@@ -307,18 +307,39 @@ else
 fi
 
 # Phase 0: Build shared libjacl.a (compile the unity build once)
+#
+# Freshness check uses both (a) source mtimes and (b) a flag-fingerprint
+# file. The fingerprint catches the case where someone (a human running
+# `gcc -c src/jacl.c` by hand, or build.sh re-invoked with a different
+# flag mix) produces a libjacl.a whose mtime is newer than every src
+# file but whose compile flags differ from the ones build.sh would use
+# now. Without the fingerprint, the mtime check trusts that stale
+# artifact -- and tests fail in ways that look like flakes (e.g.
+# libffi disappears from libjacl.a while tests still expect it).
 LIBJACL="$BUILD_DIR/libjacl.a"
 JACL_OBJ="$BUILD_DIR/jacl.o"
+LIBJACL_FLAGS_FILE="$BUILD_DIR/libjacl.flags"
+LIBJACL_FLAGS_CURRENT="$CC|$CFLAGS|$LIBFFI_COMPILE_FLAGS"
 NEED_LIB=0
 if [ ! -f "$LIBJACL" ]; then
     NEED_LIB=1
 elif [ -n "$NEWEST_SRC" ] && [ "$LIBJACL" -ot "$NEWEST_SRC" ]; then
+    NEED_LIB=1
+elif [ ! -f "$LIBJACL_FLAGS_FILE" ]; then
+    NEED_LIB=1
+elif [ "$(cat "$LIBJACL_FLAGS_FILE")" != "$LIBJACL_FLAGS_CURRENT" ]; then
+    NEED_LIB=1
+elif [ "$LIBJACL_FLAGS_FILE" -ot "$LIBJACL" ]; then
+    # The .flags file is written *after* the .a, so under build.sh it is
+    # always at-or-newer. If the .a is newer, the .a was overwritten out
+    # of band (manual `gcc -c` / `ar rcs`) with unknown flags.
     NEED_LIB=1
 fi
 if [ "$NEED_LIB" -eq 1 ]; then
     echo -n "Building libjacl.a... "
     if $CC $CFLAGS $LIBFFI_COMPILE_FLAGS -c src/jacl.c -o "$JACL_OBJ" 2>"$BUILD_DIR/jacl.err"; then
         ar rcs "$LIBJACL" "$JACL_OBJ"
+        printf '%s' "$LIBJACL_FLAGS_CURRENT" > "$LIBJACL_FLAGS_FILE"
         echo "ok"
     else
         echo "FAIL"
