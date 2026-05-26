@@ -21,8 +21,11 @@ when M4 lands).
 | **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
 | **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write+literal-init+struct-inner; deeper nesting deferred) | `ddc7163` + `fcd4c48` + this |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
-| **M4.4** GC-traced element types | ⏸ deferred | — |
-| **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | this commit |
+| **M4.4** GC-traced element types | ⏸ deferred — **next slice** | — |
+| **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
+| **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
+| **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
+| **M5d** `[addr]` on chained-arrow buf-field leaf | ✅ done | `9992ae7` |
 
 What works end-to-end today:
 
@@ -33,30 +36,90 @@ proc main {} {
   def [Ptr u8] m $h->magic         ; field access returns [Ptr T]
   set $m->0 0x7f
   set $m->1 0x45
-  print $m->0                       ; 127
-  print $h->version                 ; 1
+  print $m->0                      ; 127
+  print $h->magic->1               ; chained-arrow: 0x45 = 69
+  print $h->version                ; 1
 
   def [Buf 256 u8] scratch                              ; zero-init local
   def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46] ; literal init
-  set $scratch.[0] $magic->0                            ; (would need [buf-set])
-  [buf-set $scratch 0 0xff]                             ; explicit set
+  def hdr [[Buf 8 i32] 1024 2048]                       ; LHS inferred from RHS
+  [buf-set $scratch 0 0xff]                             ; bounds-checked set
+  [buf-unchecked-set $scratch 1 0xfe]                   ; bounds-check elided
   print [buf-len $scratch]                              ; 256
 
   extern i32 sys_read {i32 fd [Ptr u8] dst u64 len}
   [sys_read 0 $scratch 256]                             ; implicit [Buf]→[Ptr] decay
 
-  [buf-unchecked-get $scratch 0]                        ; bounds-check elided
-  [buf-unchecked-set $scratch 0 0xff]
+  ; Nested bufs (M4.2): 2D matrix, scalar + struct inner element.
+  def [Buf 3 [Buf 4 i32]] grid
+  set $grid->1->2 42
+  print $grid->1->2                                     ; 42
+
+  struct Point {i32 x, i32 y}
+  def [Buf 3 [Buf 4 Point]] points
+  set $points->0->0 [Point 7 11]
+  print $points->0->0->x                                ; 7
 }
 ```
 
 What's deferred (the next session can pick from these):
 
 1. **M4.4 GC-traced element types** — `[Buf N dyn]`, `[Buf N [Vec T]]`,
-   etc. Requires the concurrent collector to learn a new shape
-   descriptor ("N contiguous tagged slots, stride S"), write barriers
-   on indexed stores, and NIL zero-init for ref types. Highest-risk
-   slice — touches concurrency-sensitive code.
+   `[Buf N [Map K V]]`, `[Buf N str]`, `[Buf N closure]`. Each
+   element is an 8-byte tagged `JaclVal`. **Highest-risk slice in
+   the buffer queue** — touches concurrency-sensitive collector code.
+   Concrete next-session pickup list:
+
+   - **Typer** (`src/typer.c`, `typer__buf_type_full` ~393): drop the
+     scalar-only check on the inner element when the element type
+     keyword resolves to a tagged-ref type (`dyn`, `str`, `vec`,
+     `map`, `closure`) or to a typed collection.
+   - **Compiler** (`src/compiler.c` HEAD_DEF buf branch ~7040):
+     element-size for tagged types is `sizeof(JaclVal)` = 8 bytes.
+     Stride math already works; the new piece is **NIL zero-init**
+     (the OP_BUF_ZERO_LOCAL memset of zero bytes happens to produce
+     `JACL_NIL` for the current tagged encoding — verify this still
+     holds, since `JACL_NIL` is a specific NaN-boxing bit pattern
+     and changing the encoding would break this).
+   - **VM** (`src/vm.c` OP_BUF_GET_LOCAL/SET_LOCAL ~3024 + ~3112):
+     add cases for the tagged-ref element types — load/store a
+     full `JaclVal` slot. The store path must call the write
+     barrier (`gc_write_barrier(...)`) so the concurrent collector
+     sees the new reference.
+   - **GC** (`src/gc.c` / `src/gc_collect.c`): extend the stack-
+     frame walker to recognise buf locals whose element type is a
+     tagged ref, then mark each of the N slots. Two options:
+     (a) **Shape descriptor**: record `(base_slot, N, element_type)`
+         somewhere the marker can find it (likely a new table on
+         the call frame, populated by the compiler at def time).
+     (b) **Bitmap extension**: extend `vm->inline_slot_bitmap` to
+         distinguish "raw inline bytes" (current usage for struct
+         locals) from "N tagged slots" (new for ref-elem bufs).
+     Pick one and stick to it; (a) is more honest but more
+     plumbing, (b) reuses infrastructure but conflates concepts.
+   - **Struct-field buf** (M4.3 path, same files): the struct
+     registry's `StructTypeField.type` for a buf field needs to
+     carry the element type too, so the struct-tracing walker can
+     descend into ref-elem buf fields.
+   - **Test fixtures**:
+     - `test/jacl/buf_traced_dyn.jacl` — `[Buf 4 dyn]` storing
+       strings and vectors; force a GC mid-walk and verify the
+       elements are still reachable.
+     - `test/jacl/buf_traced_vec.jacl` — `[Buf 3 [Vec i64]]`
+       holding typed vecs.
+     - A chaos-style stress test under `test/test_chaos_*.c` that
+       allocates many ref-elem bufs, mutates them while GC runs,
+       and verifies the heap stays consistent.
+
+   **Why this is the highest-risk slice**: the concurrent collector
+   has invariants around what's traced and how write barriers are
+   emitted. Indexed stores into a tagged-elem buf cross a barrier
+   the existing struct-store machinery never has to (struct fields
+   are statically known offsets; buf elements are runtime indices).
+   Land in small, tested commits — typer + compiler first (NIL
+   zero-init and store with barrier), then the GC walker, then the
+   stress fixtures. Run `test/test_chaos_*.c` aggressively between
+   each commit.
 2. **M4.2 deeper nesting** (`[Buf 2 [Buf 3 [Buf 4 i32]]]`): needs
    the encoding to grow from a single `inner_buf_len` to a variable-
    length dimension list (or a recursive synthetic-struct encoding).
