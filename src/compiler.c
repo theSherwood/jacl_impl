@@ -10697,6 +10697,45 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
+    /* [addr EXPR->N] where EXPR has TYPE_PTR -- covers chained-arrow
+     * leaves like `[addr $h->magic->0]`. Same codegen as the var-ref
+     * branch above (push pointer, add offset). The typer already
+     * recovered the un-widened pointee on `expr->inferred_struct_idx`.
+     * See BUFFER_DESIGN.md "Receiver-shape generalization". */
+    if (expr->type == AST_COMMAND &&
+        expr->data.command.head_id == HEAD_DOT &&
+        expr->data.command.arg_count == 2 &&
+        expr->data.command.args[0]->type != AST_VAR_REF &&
+        expr->data.command.args[1]->type == AST_LIT_INT) {
+      AstNode* recv = expr->data.command.args[0];
+      if ((JaclType)recv->inferred_type == TYPE_PTR &&
+          recv->inferred_struct_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+        JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+        int32_t  idx_lit = expr->data.command.args[1]->data.lit_int.value;
+        if (idx_lit < 0) {
+          char err[128];
+          snprintf(err, sizeof(err),
+              "addr: ptr index must be non-negative, got %d", (int)idx_lit);
+          compiler__error(c, line, col, err);
+          return;
+        }
+        uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col, "addr: ptr byte offset exceeds 65535");
+          return;
+        }
+        compiler__compile_node(c, recv);
+        if (byte_offset != 0) {
+          compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+          compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        }
+        c->last_expr_type = TYPE_U64;
+        return;
+      }
+    }
+
     if (expr->type != AST_COMMAND ||
         expr->data.command.head_id != HEAD_DOT ||
         expr->data.command.arg_count != 2 ||

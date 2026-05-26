@@ -4,6 +4,7 @@
 # expect: 0
 # expect: 255
 # expect: 1
+# expect: 69
 # Receiver-shape generalization (BUFFER_DESIGN.md): `$h->magic->0`
 # works even when the first arrow returns [Ptr T] from a struct-field
 # access (the receiver is an AST_COMMAND, not a bare var-ref). Same
@@ -34,3 +35,14 @@ proc nested {} {
   print $o->tag
 }
 [nested]
+
+# [addr] on a chained arrow leaf: must recover the un-widened pointee
+# type. `[addr $h->magic->1]` is [Ptr u8] (not [Ptr i32] from the
+# u8->i32 widening that the arrow-read surface uses).
+proc addr_chain {} {
+  def h [ElfHeader 0]
+  set $h->magic->1 0x45
+  def [Ptr u8] p [addr $h->magic->1]
+  print [ptr-deref $p]
+}
+[addr_chain]

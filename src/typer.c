@@ -3087,6 +3087,26 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
 
+      /* [addr EXPR->N] where EXPR has inferred_type TYPE_PTR (covers
+       * chained field access like `[addr $h->magic->0]`). The receiver
+       * isn't a bare var-ref here; the pointee idx must come from
+       * EXPR.inferred_struct_idx (the *un-widened* pointee), since
+       * inner->inferred_type is the widened scalar (i32 for u8/i16/etc.).
+       * See BUFFER_DESIGN.md "Receiver-shape generalization". */
+      if (inner->type == AST_COMMAND &&
+          inner->data.command.head_id == HEAD_DOT &&
+          inner->data.command.arg_count == 2 &&
+          inner->data.command.args[0]->type != AST_VAR_REF &&
+          inner->data.command.args[1]->type == AST_LIT_INT) {
+        AstNode* recv = inner->data.command.args[0];
+        if ((JaclType)recv->inferred_type == TYPE_PTR &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          node->inferred_type       = TYPE_PTR;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+          return;
+        }
+      }
+
       JaclType inner_t = (JaclType)inner->inferred_type;
       uint32_t inner_sidx = inner->inferred_struct_idx;
       if (inner_t == TYPE_STRUCT && inner_sidx != UINT32_MAX) {

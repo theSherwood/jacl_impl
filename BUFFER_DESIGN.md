@@ -65,15 +65,16 @@ What's deferred (the next session can pick from these):
    `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to
    `def hdr [[Buf 8 i32] 1024 2048]` and similar across typed vecs,
    maps, futures, pointers, boxes.
-4. **Receiver-shape generalization** — partially shipped (M5c).
-   `$h->magic->0` (and the `set` form) now works when the first arrow
-   returns a `[Ptr T]` from a struct-field access — the typer + compiler
-   accept any TYPE_PTR-typed receiver (not just bare local var-refs)
-   for arrow-int indexing, dispatching through OP_PTR_LOAD/OP_PTR_STORE.
-   Still deferred: `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`
-   builtin-head forms (use the arrow syntax instead), `[Buf N T]` proc
-   parameter syntax, and `[addr]` chains that bottom out in an
-   arrow-int leaf.
+4. **Receiver-shape generalization** — partially shipped (M5c / M5d).
+   `$h->magic->0` (and the `set` form), plus `[addr $h->magic->0]`,
+   now work when the first arrow returns a `[Ptr T]` from a struct-
+   field access — the typer + compiler accept any TYPE_PTR-typed
+   receiver (not just bare local var-refs) for arrow-int indexing
+   and for [addr] leaves. Codegen dispatches through OP_PTR_LOAD /
+   OP_PTR_STORE / OP_PTR_ADD_OFFSET on the typer-recovered
+   un-widened pointee. Still deferred: `[buf-get $h->field $i]` /
+   `[buf-set $h->field $i $v]` builtin-head forms (use the arrow
+   syntax instead) and `[Buf N T]` proc parameter syntax.
 5. **Test harness native-fn registration** — would unblock a real C
    extern fixture (M3.6) and stress-test the decay path with an actual
    syscall.
