@@ -1,0 +1,40 @@
+# expect: 3
+# expect: 0
+# expect: 0
+# expect: 42
+# expect: 99
+# expect: 0
+# expect: 1
+# expect: 4
+# expect: 9
+# M4.2 nested bufs: `[Buf N [Buf M T]]` lays out as row-major
+# N*M*sizeof(T) bytes. `$matrix->i` returns [Ptr T] to row i (decay
+# semantics, matches C `arr[i]`). `$matrix->i->j` chains through the
+# existing ptr-arrow path. See BUFFER_DESIGN.md M4.2.
+
+proc main {} {
+  def [Buf 3 [Buf 4 i32]] matrix
+  print [buf-len $matrix]
+  print $matrix->0->0
+  print $matrix->2->3
+
+  # Indexed write through the chain.
+  set $matrix->1->2 42
+  print $matrix->1->2
+
+  # Different row, different column.
+  set $matrix->0->0 99
+  print $matrix->0->0
+
+  # Untouched slots stay zero-init.
+  print $matrix->1->0
+
+  # Fill diagonal and read back.
+  set $matrix->0->1 1
+  set $matrix->1->1 4
+  set $matrix->2->1 9
+  print $matrix->0->1
+  print $matrix->1->1
+  print $matrix->2->1
+}
+[main]

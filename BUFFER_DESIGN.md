@@ -19,7 +19,7 @@ when M4 lands).
 | **M3** C-ABI interop (extern decay, addr) | ✅ done | `00e7f18`, `35fabcf`, `aa91b0b`, `aac8f23` |
 | **M3.7** Pointer-arrow indexing (`$p->N`) | ✅ done | `fcd68eb` |
 | **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
-| **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ⏸ deferred | — |
+| **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write; literal-init deferred) | this commit |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
 | **M4.4** GC-traced element types | ⏸ deferred | — |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | this commit |
@@ -52,14 +52,16 @@ proc main {} {
 
 What's deferred (the next session can pick from these):
 
-1. **M4.2 nested buffers** — needs encoding decisions for nested-buf
-   element types (probably register as synthetic struct in the registry)
-   and multi-dim access semantics (`$matrix->i->j` decomposition).
-2. **M4.4 GC-traced element types** — `[Buf N dyn]`, `[Buf N [Vec T]]`,
+1. **M4.4 GC-traced element types** — `[Buf N dyn]`, `[Buf N [Vec T]]`,
    etc. Requires the concurrent collector to learn a new shape
    descriptor ("N contiguous tagged slots, stride S"), write barriers
    on indexed stores, and NIL zero-init for ref types. Highest-risk
    slice — touches concurrency-sensitive code.
+2. **M4.2 follow-ups** — literal init for nested bufs
+   (`[[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2 3 4] ...]`), deeper
+   nesting (`[Buf 2 [Buf 3 [Buf 4 i32]]]`), struct as inner element
+   (`[Buf 3 [Buf 4 Point]]`). All are mechanical extensions of the
+   existing encoding (just thread `inner_buf_len` through more paths).
 3. **Language-wide LHS type inference** (see "Open questions / deferred"
    below) — independent of bufs; reduces
    `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to

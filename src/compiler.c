@@ -921,6 +921,7 @@ typedef struct {
   uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;    /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
   uint32_t  buf_len;      /* N for TYPE_BUF (in elements, not slots); 0 otherwise */
+  uint32_t  buf_inner_len; /* M for TYPE_BUF nested [Buf N [Buf M T]]; 0 for scalar/struct element. M4.2 */
 } Local;
 
 /* --- Internal: Module binding tracking --- */
@@ -3186,6 +3187,7 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->width       = 1;
   local->is_inline   = false;
   local->buf_len     = 0;
+  local->buf_inner_len = 0;
 }
 
 /* Find module binding by local slot index */
@@ -7051,11 +7053,46 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       JaclType elem_type;
       uint32_t elem_struct_idx = UINT32_MAX;
-      if (telt->type != AST_LIT_STRING ||
-          !compiler__resolve_type(c, telt->data.lit_string.value,
-                                  telt->data.lit_string.length, &elem_type)) {
+      uint32_t inner_buf_len   = 0;  /* M for nested [Buf N [Buf M T]] */
+      if (telt->type == AST_LIT_STRING) {
+        if (!compiler__resolve_type(c, telt->data.lit_string.value,
+                                    telt->data.lit_string.length, &elem_type)) {
+          compiler__error(c, line, col,
+                          "[Buf N T] element type must be a scalar keyword or struct name");
+          return;
+        }
+      } else if (telt->type == AST_COMMAND &&
+                 telt->data.command.head &&
+                 telt->data.command.head->type == AST_LIT_STRING &&
+                 telt->data.command.head->data.lit_string.length == 3 &&
+                 memcmp(telt->data.command.head->data.lit_string.value, "Buf", 3) == 0 &&
+                 telt->data.command.arg_count == 2) {
+        /* Nested buf element type: [Buf N [Buf M T]] (M4.2).
+         * Inner T must be a scalar; deeper nesting and struct inner
+         * elements are deferred. Encoded as flat element type T with
+         * inner_buf_len = M; the outer N stays in `n`. Indexing
+         * `$matrix->i` yields [Ptr T] via OP_BUF_ADDR_LOCAL at
+         * offset i*M*sizeof(T). */
+        AstNode* inner_mlen = telt->data.command.args[0];
+        AstNode* inner_telt = telt->data.command.args[1];
+        if (inner_mlen->type != AST_LIT_INT || inner_mlen->data.lit_int.value <= 0) {
+          compiler__error(c, line, col,
+                          "[Buf N [Buf M T]] inner length must be a positive integer literal");
+          return;
+        }
+        if (inner_telt->type != AST_LIT_STRING ||
+            !compiler__resolve_type(c, inner_telt->data.lit_string.value,
+                                    inner_telt->data.lit_string.length, &elem_type) ||
+            elem_type == TYPE_STRUCT) {
+          compiler__error(c, line, col,
+                          "[Buf N [Buf M T]] inner element type must be a scalar (M4.2)");
+          return;
+        }
+        inner_buf_len = (uint32_t)inner_mlen->data.lit_int.value;
+      } else {
         compiler__error(c, line, col,
-                        "[Buf N T] element type must be a scalar keyword or struct name");
+                        "[Buf N T] element type must be a scalar keyword, struct name, "
+                        "or nested [Buf M T]");
         return;
       }
       /* For struct elements, look up the registry idx + verify it's a
@@ -7081,7 +7118,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t elem_sz = struct__type_size(elem_type,
           elem_type == TYPE_STRUCT ? compiler__get_struct_registry(c) : NULL,
           elem_struct_idx);
-      uint64_t byte_count = (uint64_t)n * (uint64_t)elem_sz;
+      /* For nested bufs the per-outer-element stride is M*sizeof(T). */
+      uint64_t per_outer = inner_buf_len > 0
+                              ? (uint64_t)inner_buf_len * (uint64_t)elem_sz
+                              : (uint64_t)elem_sz;
+      uint64_t byte_count = (uint64_t)n * per_outer;
       if (byte_count > 0xFFFFu) {
         compiler__error(c, line, col,
                         "[Buf N T] byte size exceeds 65535 (M2 limit)");
@@ -7092,10 +7133,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
       /* For argc==3 literal init, validate the RHS constructor matches
        * the LHS type. The RHS must be [[Buf N T] v0 v1 ...] where the
-       * inner [Buf N T] matches exactly. */
+       * inner [Buf N T] matches exactly. Nested-buf literal init is
+       * deferred (M4.2 slice covers zero-init only). */
       AstNode* init_ctor = NULL;
       uint32_t init_count = 0;
       AstNode** init_vals = NULL;
+      if (argc == 3 && inner_buf_len > 0) {
+        compiler__error(c, line, col,
+                        "[Buf N [Buf M T]] literal init not supported yet "
+                        "(zero-init only; M4.2)");
+        return;
+      }
       if (argc == 3) {
         AstNode* rhs = args[2];
         bool rhs_ok = rhs->type == AST_COMMAND &&
@@ -7184,6 +7232,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].width = (uint16_t)slot_count;
       c->locals[c->local_count - 1].is_inline = true;
       c->locals[c->local_count - 1].buf_len = n;
+      c->locals[c->local_count - 1].buf_inner_len = inner_buf_len;
       for (uint32_t w = 1; w < slot_count; w++) {
         compiler__emit_byte(c, OP_NIL, line);
         compiler__add_local(c, jacl_inline_string("", 0), line, col);
@@ -11331,6 +11380,41 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       int found = -1;
       for (int i = (int)c->local_count - 1; i >= 0; i--) {
         if (c->locals[i].name == recv_name) { found = i; break; }
+      }
+      /* Nested buf [Buf N [Buf M T]]: $matrix->i pushes the address
+       * of row i as a [Ptr T] (decay-style). No load -- the chained
+       * ->j (if any) flows through the existing ptr-arrow path.
+       * Bounds-checked at compile time against the outer N. M4.2. */
+      if (found >= 0 && c->locals[found].type == TYPE_BUF &&
+          c->locals[found].buf_inner_len > 0 &&
+          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx) &&
+          !is_set) {
+        uint32_t base_slot      = (uint32_t)found;
+        uint32_t outer_N        = c->locals[found].buf_len;
+        uint32_t inner_M        = c->locals[found].buf_inner_len;
+        JaclType elem_type      = JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        int32_t  idx_lit        = args[1]->data.lit_int.value;
+        if (idx_lit < 0 || (uint32_t)idx_lit >= outer_N) {
+          char err[160];
+          snprintf(err, sizeof(err),
+              "buf index %d out of bounds for [Buf %u [Buf %u %s]]",
+              (int)idx_lit, (unsigned)outer_N, (unsigned)inner_M,
+              type_name(elem_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+        uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)inner_M * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col,
+              "addr: nested-buf byte offset exceeds 65535");
+          return;
+        }
+        compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        c->last_expr_type = TYPE_U64; /* runtime rep of pointer */
+        return;
       }
       if (found >= 0 && c->locals[found].type == TYPE_BUF &&
           JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {

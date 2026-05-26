@@ -1,0 +1,8 @@
+# expect-error: buf index 5 out of bounds for [Buf 3 [Buf 4 i32]]
+# Outer-index bounds check fires at compile time with the nested type
+# rendered in source syntax. M4.2.
+proc main {} {
+  def [Buf 3 [Buf 4 i32]] matrix
+  print $matrix->5->0
+}
+[main]

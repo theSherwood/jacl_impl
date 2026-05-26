@@ -681,6 +681,7 @@ struct AstNode {
   uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT or typed-collection (elem idx), UINT32_MAX otherwise */
   uint32_t    inferred_key_struct_idx; /* key struct idx for TYPE_TYPED_MAP, UINT32_MAX otherwise */
   uint32_t    inferred_buf_len; /* N for TYPE_BUF; 0 otherwise. See BUFFER_DESIGN.md */
+  uint32_t    inferred_buf_inner_len; /* M for TYPE_BUF nested form [Buf N [Buf M T]]; 0 otherwise (scalar/struct element). See BUFFER_DESIGN.md M4.2 */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
@@ -1318,6 +1319,7 @@ typedef struct {
   uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;        /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
   uint32_t  buf_len;          /* N for TYPE_BUF (in elements, not slots); 0 otherwise */
+  uint32_t  buf_inner_len;    /* M for TYPE_BUF nested [Buf N [Buf M T]]; 0 for scalar/struct element. M4.2 */
 } Local;
 
 typedef struct {
