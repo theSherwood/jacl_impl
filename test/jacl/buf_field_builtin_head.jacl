@@ -1,0 +1,38 @@
+# expect: 127
+# expect: 69
+# expect: 254
+# expect: hello
+# expect: 42
+# expect: ok
+# Builtin-head form `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`
+# (plus the unchecked variants) for buf-typed struct fields. Same
+# capability the arrow chain `$h->field->$i` already covers, but with
+# runtime bounds checking on dynamic indices (the arrow path loses the
+# buf-length once $h->field decays to [Ptr T]). The unchecked variants
+# are the only path to skip the check for struct buf fields. See
+# BUFFER_DESIGN.md Tier 2.
+
+struct ElfHeader { i32 ver, [Buf 4 u8] magic }
+struct Bag { i32 size, [Buf 4 dyn] items }
+
+proc scalar_field {} {
+  def h [ElfHeader 1]
+  [buf-set $h->magic 0 0x7f]
+  [buf-set $h->magic 1 0x45]
+  print [buf-get $h->magic 0]
+  print [buf-get $h->magic 1]
+  # Unchecked variant -- no bounds check at runtime.
+  [buf-unchecked-set $h->magic 3 0xfe]
+  print [buf-unchecked-get $h->magic 3]
+}
+[scalar_field]
+
+proc ref_field {} {
+  def b [Bag 0]
+  [buf-set $b->items 0 "hello"]
+  [buf-set $b->items 1 42]
+  print [buf-get $b->items 0]
+  print [buf-get $b->items 1]
+  print "ok"
+}
+[ref_field]

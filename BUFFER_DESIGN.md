@@ -115,9 +115,15 @@ Remaining:
   composes through the Phase 5 `TYPE_SHAPE_BOX` kind. Recognizers in
   `typer__box_type` (typer) + `compiler__box_type_expr` (compiler).
   Fixture: `box_annotation.jacl`.
-- **`[buf-get $h->field $i]` builtin-head forms** for buf-typed struct
-  fields (currently arrow syntax only). M5d only shipped the arrow
-  path.
+- ~~**`[buf-get $h->field $i]` builtin-head forms**~~ ✅ shipped this
+  session. Receiver shape extended to `$struct_local->field`; lowers
+  to `OP_BUF_ADDR_LOCAL` + `OP_PTR_OFFSET[_CHECKED]` + `OP_PTR_LOAD/STORE`.
+  Notably, the checked variants now bounds-check dynamic indices at
+  runtime -- the arrow path drops the buf length once `$h->field`
+  decays to `[Ptr T]`, so the builtin form is the only path with a
+  runtime check on struct-field bufs. The unchecked variants give an
+  explicit opt-out. Fixtures: `buf_field_builtin_head.jacl`,
+  `buf_field_builtin_head_oob.jacl`.
 - **`[Buf N T]` proc parameter syntax**. Bufs decay to `[Ptr T]` at
   call boundaries; declaring a param as `[Buf N T]` directly is
   rejected today. The new `[Ptr [Buf N T]]` slice-pass annotation

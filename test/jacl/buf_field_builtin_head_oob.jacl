@@ -1,0 +1,15 @@
+# expect-error: out of bounds for dimension size 4
+# [buf-get $h->field $i] bounds-checks dynamic indices at runtime --
+# something the arrow chain `$h->magic->$i` doesn't do today (the
+# field-access strips the buf length when it returns [Ptr T]). The
+# builtin form has the field's static length and emits
+# OP_PTR_OFFSET_CHECKED.
+
+struct ElfHeader { i32 ver, [Buf 4 u8] magic }
+
+proc main {} {
+  def h [ElfHeader 1]
+  def i32 i 7
+  print [buf-get $h->magic $i]
+}
+[main]

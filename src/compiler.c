@@ -10666,13 +10666,165 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     AstNode* recv = args[0];
-    if (recv->type != AST_VAR_REF) {
-      char err[96];
+    /* Receiver shape A: bare var-ref to a TYPE_BUF local. Existing M2
+     * path -- uses OP_BUF_{G,S,UG,US}ET_LOCAL directly. */
+    /* Receiver shape B: `$struct_local->field` where the field is a
+     * TYPE_BUF on a struct local. Lowers to
+     *   OP_BUF_ADDR_LOCAL(struct_base, field_offset)
+     *   <push idx>
+     *   OP_PTR_OFFSET[_CHECKED](elem_size[, buf_len])
+     *   OP_PTR_LOAD/STORE(0, elem_type)
+     * using opcodes already in the runtime. This closes the gap left
+     * by the arrow syntax: `$h->magic->$i` skips the bounds check at
+     * runtime (no buf_len on a [Ptr T] receiver), but the builtin form
+     * has the field's static length and emits the check. The unchecked
+     * variants give callers an explicit way to opt out. See
+     * BUFFER_DESIGN.md Tier 2. */
+    bool field_recv =
+        (recv->type == AST_COMMAND &&
+         recv->data.command.head_id == HEAD_DOT &&
+         recv->data.command.arg_count == 2 &&
+         recv->data.command.args[0]->type == AST_VAR_REF &&
+         recv->data.command.args[1]->type == AST_LIT_STRING);
+    if (recv->type != AST_VAR_REF && !field_recv) {
+      char err[160];
       snprintf(err, sizeof(err),
-               "%s requires a buf-typed variable reference", head_name);
+               "%s: receiver must be a [Buf N T] variable or a "
+               "buf-typed struct field ($s->field)", head_name);
       compiler__error(c, line, col, err);
       return;
     }
+
+    if (field_recv) {
+      /* Resolve the struct local. */
+      AstNode* sref = recv->data.command.args[0];
+      AstNode* fref = recv->data.command.args[1];
+      JaclVal sname = compiler__name_val(c->heap, c->intern_table,
+          sref->data.var_ref.name, sref->data.var_ref.length);
+      int sfound = -1;
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].name == sname) { sfound = i; break; }
+      }
+      if (sfound < 0 || c->locals[sfound].type != TYPE_STRUCT) {
+        char err[160];
+        snprintf(err, sizeof(err),
+            "%s: '%.*s' is not a struct local",
+            head_name, (int)sref->data.var_ref.length,
+            sref->data.var_ref.name);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      uint32_t sidx = c->locals[sfound].struct_type_idx;
+      if (!reg || sidx >= reg->count || !reg->defs[sidx]) {
+        compiler__error(c, line, col, "buf field receiver: unknown struct type");
+        return;
+      }
+      StructTypeDef* sdef = reg->defs[sidx];
+      const char* fname    = fref->data.lit_string.value;
+      uint32_t    fname_nl = fref->data.lit_string.length;
+      uint32_t fi = sdef->field_count;
+      for (uint32_t k = 0; k < sdef->field_count; k++) {
+        if (sdef->fields[k].name_len == fname_nl &&
+            memcmp(sdef->fields[k].name, fname, fname_nl) == 0) {
+          fi = k; break;
+        }
+      }
+      if (fi == sdef->field_count) {
+        char err[192];
+        snprintf(err, sizeof(err),
+            "%s: struct '%.*s' has no field '%.*s'",
+            head_name, (int)sdef->name_len, sdef->name,
+            (int)fname_nl, fname);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      if (sdef->fields[fi].type != TYPE_BUF) {
+        char err[192];
+        snprintf(err, sizeof(err),
+            "%s: field '%.*s' is not a [Buf N T]",
+            head_name, (int)fname_nl, fname);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      uint32_t field_offset = sdef->fields[fi].offset;
+      uint32_t field_buf_len = sdef->fields[fi].buf_len;
+      JaclType elem_type;
+      uint32_t elem_enc = sdef->fields[fi].struct_type_idx;
+      if (JACL_IS_SCALAR_TYPE_IDX(elem_enc)) {
+        elem_type = JACL_TYPE_IDX_TO_SCALAR(elem_enc);
+      } else {
+        char err[192];
+        snprintf(err, sizeof(err),
+            "%s: struct-typed buf elements not supported in this form yet",
+            head_name);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      uint32_t elem_size = struct__type_size(elem_type, NULL, 0);
+      if (elem_size == 0 || elem_size > 0xFFFFu) {
+        compiler__error(c, line, col, "buf field receiver: bad element size");
+        return;
+      }
+      if (field_offset > 0xFFFFu) {
+        compiler__error(c, line, col, "buf field receiver: field offset exceeds 65535");
+        return;
+      }
+      uint32_t struct_base_slot = (uint32_t)sfound;
+
+      /* Emit base pointer: &struct[field_offset]. */
+      compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)struct_base_slot, line);
+      compiler__emit_u16(c, (uint16_t)field_offset, line);
+
+      /* Push index. */
+      compiler__compile_node(c, args[1]);
+      if (c->last_expr_type != TYPE_I32) {
+        char err[96];
+        snprintf(err, sizeof(err), "%s: index must be i32", head_name);
+        compiler__error(c, line, col, err);
+        return;
+      }
+
+      /* Apply the per-element stride. Checked variant traps on
+       * idx < 0 || idx >= buf_len at runtime; unchecked variant
+       * trusts the caller. */
+      if (is_unchecked) {
+        compiler__emit_byte(c, OP_PTR_OFFSET, line);
+        compiler__emit_u16(c, (uint16_t)elem_size, line);
+      } else {
+        compiler__emit_byte(c, OP_PTR_OFFSET_CHECKED, line);
+        compiler__emit_u16(c, (uint16_t)elem_size, line);
+        compiler__emit_u16(c, (uint16_t)field_buf_len, line);
+      }
+
+      if (is_get) {
+        compiler__emit_byte(c, OP_PTR_LOAD, line);
+        compiler__emit_u16(c, 0, line);
+        compiler__emit_byte(c, (uint8_t)elem_type, line);
+        switch (elem_type) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            c->last_expr_type = TYPE_I32; break;
+          default:
+            c->last_expr_type = elem_type; break;
+        }
+        return;
+      }
+      /* set / unchecked-set: compile value then store. OP_PTR_STORE
+       * leaves the ptr on TOS; pop it and push NIL for the statement
+       * value. For ref-elem types it fires the GC write barrier (see
+       * the TYPE_DYN/STR/VEC/MAP/CLOSURE/STREAM cases in vm.c). */
+      compiler__compile_node(c, args[2]);
+      compiler__emit_byte(c, OP_PTR_STORE, line);
+      compiler__emit_u16(c, 0, line);
+      compiler__emit_byte(c, (uint8_t)elem_type, line);
+      compiler__emit_byte(c, OP_POP, line);
+      compiler__emit_byte(c, OP_NIL, line);
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
+
     JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
         recv->data.var_ref.name, recv->data.var_ref.length);
     int found = -1;
