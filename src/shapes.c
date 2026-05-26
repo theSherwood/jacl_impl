@@ -57,6 +57,14 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;      /* total size including trailing padding */
   uint32_t    alignment;       /* max alignment of all fields */
+  /* slot_ref_bitmap: bit k is 1 if JaclVal-sized slot k within the struct's
+   * inline bytes holds a GC-traced tagged JaclVal (the slot range of a
+   * ref-elem buf field). bit 0 (raw bytes) means the struct walker / inline
+   * pusher treats the slot like every other value-type struct slot. 32 bytes
+   * = 256 bits covers structs up to 2 KiB. Computed at decl time once all
+   * field offsets are known. See BUFFER_DESIGN.md (Tier 1: ref-elem bufs as
+   * struct fields). */
+  uint8_t     slot_ref_bitmap[32];
   StructTypeField fields[];    /* flexible array member */
 } StructTypeDef;
 

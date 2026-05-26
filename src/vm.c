@@ -621,6 +621,36 @@ static inline uint32_t vm__struct_width(StructTypeDef* sdef) {
   return (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
 }
 
+/* Mark `width` consecutive stack slots starting at `base` as belonging to
+ * an inline struct of type `sdef`. Slots covering ref-elem buf field bytes
+ * are cleared (so the GC marker scans the embedded JaclVal); the rest are
+ * set (raw bytes, marker skips). For value-type-only structs this is a
+ * plain "mark all slots as inline" loop -- the slot_ref_bitmap is all
+ * zero in that case. See BUFFER_DESIGN.md (ref-elem bufs as struct fields). */
+static inline void vm__mark_struct_inline_slots(VM* vm, uint32_t base,
+                                                StructTypeDef* sdef,
+                                                uint32_t width) {
+  for (uint32_t si = 0; si < width; si++) {
+    bool is_ref = (si < 256) &&
+                  ((sdef->slot_ref_bitmap[si >> 3] >> (si & 7)) & 1u);
+    if (is_ref) {
+      BITMAP_CLR(vm->inline_slot_bitmap, base + si);
+    } else {
+      BITMAP_SET(vm->inline_slot_bitmap, base + si);
+    }
+  }
+}
+
+/* Returns true if any JaclVal slot in `sdef`'s layout is a GC-traced ref
+ * slot (i.e. the struct has a ref-elem buf field). Used to decide whether
+ * to fall back to the selective-mark helper or just BITMAP_SET the range. */
+static inline bool vm__struct_has_ref_slots(StructTypeDef* sdef) {
+  for (uint32_t i = 0; i < sizeof(sdef->slot_ref_bitmap); i++) {
+    if (sdef->slot_ref_bitmap[i] != 0) return true;
+  }
+  return false;
+}
+
 /* Extract struct raw bytes into a JaclVal slot array for strided push/set.
    Caller must provide slots[] with at least vm__struct_width(sdef) elements. */
 static inline void vm__struct_to_slots(StructTypeDef* sdef, HeapRecord* s,
@@ -3265,9 +3295,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                        + (uint32_t)idx * sdef->total_size;
         memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
         memcpy(&vm->stack[vm->stack_top], src, sdef->total_size);
-        for (uint32_t si = 0; si < width; si++) {
-          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
-        }
+        vm__mark_struct_inline_slots(vm, vm->stack_top, sdef, width);
         vm->stack_top += width;
         DISPATCH();
       }
@@ -7500,6 +7528,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_I64: { int64_t  n; memcpy(&n, base + byte_offset, 8); field_val = jacl_i64(&vm->heap, n); break; }
           case TYPE_U64: { uint64_t n; memcpy(&n, base + byte_offset, 8); field_val = jacl_u64(&vm->heap, n); break; }
           case TYPE_F64: { double   d; memcpy(&d, base + byte_offset, 8); field_val = jacl_f64(&vm->heap, d); break; }
+          case TYPE_DYN: case TYPE_STR: case TYPE_VEC: case TYPE_MAP:
+          case TYPE_CLOSURE: case TYPE_STREAM: {
+            /* Ref-elem buf field slot: the byte range at base+offset
+             * holds a tagged JaclVal that the GC walker / inline-slot
+             * bitmap treat as live. Load it directly. See BUFFER_DESIGN.md
+             * (ref-elem bufs as struct fields). */
+            memcpy(&field_val, base + byte_offset, sizeof(JaclVal));
+            break;
+          }
           default:
             vm__set_error(vm, "ptr-load: unsupported field type %u", (unsigned)field_type);
             return VM_RUNTIME_ERROR;
@@ -7561,6 +7598,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_I64: { int64_t  n = jacl_is_i64(new_val) ? jacl_as_i64(new_val) : 0;             memcpy(base + byte_offset, &n, 8); break; }
           case TYPE_U64: { uint64_t n = jacl_is_u64(new_val) ? jacl_as_u64(new_val) : 0;             memcpy(base + byte_offset, &n, 8); break; }
           case TYPE_F64: { double   d = jacl_is_f64(new_val) ? jacl_as_f64(new_val) : 0.0;           memcpy(base + byte_offset, &d, 8); break; }
+          case TYPE_DYN: case TYPE_STR: case TYPE_VEC: case TYPE_MAP:
+          case TYPE_CLOSURE: case TYPE_STREAM: {
+            /* Ref-elem buf field slot store. Fire the SATB write barrier
+             * with the old slot value + new value before publishing the
+             * new pointer, then store via release to pair with the
+             * marker's acquire-load in gc__trace_object. See
+             * BUFFER_DESIGN.md (ref-elem bufs as struct fields). */
+            JaclVal old_val;
+            memcpy(&old_val, base + byte_offset, sizeof(JaclVal));
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_val, new_val);
+            ATOMIC_STORE_EXPLICIT((uint64_t*)(base + byte_offset),
+                                  (uint64_t)new_val, MEM_RELEASE);
+            break;
+          }
           default:
             vm__set_error(vm, "ptr-store: unsupported field type %u", (unsigned)field_type);
             return VM_RUNTIME_ERROR;
@@ -8145,9 +8196,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t base = vm->stack_top;
         memset(&vm->stack[base], 0, width * sizeof(JaclVal));
         memcpy(&vm->stack[base], scratch, sdef->total_size);
-        for (uint32_t si = base; si < base + width; si++) {
-          BITMAP_SET(vm->inline_slot_bitmap, si);
-        }
+        vm__mark_struct_inline_slots(vm, base, sdef, width);
         vm->stack_top = base + width;
         DISPATCH();
       }
@@ -8191,9 +8240,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                above stack_top and don't overlap with the source. */
             memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
             memcpy(&vm->stack[vm->stack_top], struct_base + byte_offset, sub_sdef->total_size);
-            for (uint32_t si = 0; si < sub_width; si++) {
-              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
-            }
+            vm__mark_struct_inline_slots(vm, vm->stack_top, sub_sdef, sub_width);
             vm->stack_top += sub_width;
             pushed_inline = true;
             break;
@@ -8255,15 +8302,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         HeapRecord* src = jacl_as_heap_record_ptr(heap_val);
-        /* Zero-fill N slots then copy raw struct bytes */
+        /* Zero-fill N slots then copy raw struct bytes. For structs whose
+         * layout includes ref-elem buf fields, the slot_ref_bitmap directs
+         * us to leave those slots as GC-traceable (the zeroed scratch gives
+         * them JACL_NIL, which the marker treats as no-op until a real
+         * value is written). */
         memset(&vm->stack[abs_base], 0, width * sizeof(JaclVal));
         memcpy(&vm->stack[abs_base], src->data, sdef->total_size);
-        /* Adjust stack_top to account for the N slots */
         vm->stack_top = abs_base + width;
-        /* US-014: mark these stack slots as raw struct bytes (not GC-traceable) */
-        for (uint32_t si = abs_base; si < abs_base + width; si++) {
-          BITMAP_SET(vm->inline_slot_bitmap, si);
-        }
+        vm__mark_struct_inline_slots(vm, abs_base, sdef, width);
         DISPATCH();
       }
 
@@ -8298,9 +8345,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
             memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
             memcpy(&vm->stack[vm->stack_top], struct_base + byte_offset, sub_sdef->total_size);
-            for (uint32_t si = 0; si < sub_width; si++) {
-              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
-            }
+            vm__mark_struct_inline_slots(vm, vm->stack_top, sub_sdef, sub_width);
             vm->stack_top += sub_width;
             pushed_inline = true;
             break;

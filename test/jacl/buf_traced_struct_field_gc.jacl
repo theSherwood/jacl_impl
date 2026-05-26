@@ -1,0 +1,44 @@
+# expect: hello
+# expect: world
+# expect: 3
+# expect: 7
+# expect: 100
+# GC stress for [Buf N dyn] field in a struct. Same shape as
+# buf_traced_dyn_gc.jacl but the buf lives at a field offset inside
+# a stack-inline struct. Verifies (a) the slot_ref_bitmap on the
+# struct keeps the inline_slot_bitmap clear for the embedded JaclVal
+# slots (so the marker treats them as roots, not raw bytes), and
+# (b) OP_PTR_STORE with TYPE_DYN fires the SATB write barrier so
+# concurrent mark sees the published references. See BUFFER_DESIGN.md
+# Tier 1 (ref-elem bufs as struct fields).
+
+struct Bag { i32 size, [Buf 4 dyn] items }
+
+proc main {} {
+  def b [Bag 0]
+  set $b->items->0 "hello"
+  set $b->items->1 "world"
+  def v [vec 1 2 3]
+  set $b->items->2 $v
+  def m [map "k" 7]
+  set $b->items->3 $m
+
+  # Churn the heap with throw-away allocations to encourage a GC
+  # cycle while the only roots for these values are the buf slots
+  # embedded in $b.
+  mut i 0
+  while [< $i 100] {
+    def junk_v [vec $i $i $i]
+    def junk_m [map "x" $i]
+    set i [+ $i 1]
+  }
+
+  print $b->items->0
+  print $b->items->1
+  def got_v $b->items->2
+  print [vec-get $got_v 2]
+  def got_m $b->items->3
+  print [map-get $got_m "k"]
+  print $i
+}
+[main]

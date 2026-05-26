@@ -1,0 +1,23 @@
+# expect: hello
+# expect: 42
+# Same Bag struct but boxed to a HeapRecord via [box ...]. Exercises
+# the OBJ_HEAP_RECORD walker's ref-elem-buf-field descent (Stage 3 of
+# BUFFER_DESIGN.md Tier 1).
+
+struct Bag { i32 size, [Buf 4 dyn] items }
+
+proc main {} {
+  def b [Bag 0]
+  set $b->items->0 "hello"
+  set $b->items->1 42
+  def boxed [box $b]
+  mut i 0
+  while [< $i 50] {
+    def junk [vec $i $i]
+    set i [+ $i 1]
+  }
+  def back [deref $boxed]
+  print $back->items->0
+  print $back->items->1
+}
+[main]

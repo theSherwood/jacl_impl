@@ -14643,24 +14643,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           uint32_t elem_sidx_local = UINT32_MAX;
           if (is_type_keyword(p, tlen)) {
             elem_t = type_from_keyword(p, tlen);
-            /* Reject GC-traced reference element types (M4.4 covers
-             * local ref-elem bufs only). A struct field is laid out as
-             * inline C-ABI bytes; embedding JaclVal slots in a struct
-             * would need the struct walker to know about them, which
-             * isn't wired up yet. */
-            if (elem_t == TYPE_DYN || elem_t == TYPE_STR ||
-                elem_t == TYPE_VEC || elem_t == TYPE_MAP ||
-                elem_t == TYPE_CLOSURE || elem_t == TYPE_STREAM) {
-              char err[192];
-              snprintf(err, sizeof(err),
-                  "field '%.*s': [Buf N %.*s] with reference element type "
-                  "is not yet supported as a struct field (M4.4 covers "
-                  "local bufs only)",
-                  (int)fname_len, fname, (int)tlen, p);
-              compiler__error(c, line, node->start.column, err);
-              has_error = true;
-              break;
-            }
+            /* Ref-elem types (dyn/str/vec/map/closure/stream) are now
+             * allowed: the struct's slot_ref_bitmap (computed below)
+             * marks JaclVal-sized slots inside the field as GC-traced,
+             * and the marker descends into them via the HeapRecord
+             * walker. See BUFFER_DESIGN.md Tier 1 + Path 2 design. */
             elem_sidx_local = JACL_SCALAR_TYPE_IDX(elem_t);
           } else {
             uint32_t sidx = struct_registry__find(reg, p, tlen);
@@ -14785,8 +14772,32 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       sdef->field_count = field_count;
       sdef->total_size  = struct__align_up(offset, max_align);
       sdef->alignment   = max_align;
-      /* Ref fields were already rejected at the per-field check above, so
-         all fields here are value types — no extra flag needed. */
+      /* Compute slot_ref_bitmap. For each TYPE_BUF field whose element type
+       * is a GC-traced reference type, mark each 8-byte JaclVal slot covering
+       * the field's bytes. Field offset + size are guaranteed 8-byte aligned
+       * for ref-elem bufs (struct__type_align returns 8 for ref types). For
+       * value-type-only structs the bitmap stays zero, matching today's
+       * behavior. */
+      memset(sdef->slot_ref_bitmap, 0, sizeof(sdef->slot_ref_bitmap));
+      for (uint32_t fi = 0; fi < field_count; fi++) {
+        if (tmp_fields[fi].type != TYPE_BUF) continue;
+        uint32_t enc = tmp_fields[fi].struct_type_idx;
+        JaclType elem_t = TYPE_DYN;
+        if (JACL_IS_SCALAR_TYPE_IDX(enc)) {
+          elem_t = JACL_TYPE_IDX_TO_SCALAR(enc);
+        }
+        bool elem_is_ref =
+            (elem_t == TYPE_DYN || elem_t == TYPE_STR ||
+             elem_t == TYPE_VEC || elem_t == TYPE_MAP ||
+             elem_t == TYPE_CLOSURE || elem_t == TYPE_STREAM);
+        if (!elem_is_ref) continue;
+        uint32_t start_slot = tmp_fields[fi].offset / sizeof(JaclVal);
+        uint32_t end_slot   =
+            (tmp_fields[fi].offset + tmp_fields[fi].size) / sizeof(JaclVal);
+        for (uint32_t s = start_slot; s < end_slot && s < 256; s++) {
+          sdef->slot_ref_bitmap[s >> 3] |= (uint8_t)(1u << (s & 7));
+        }
+      }
       memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
 
       /* Assign to reserved slot */

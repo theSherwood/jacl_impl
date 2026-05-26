@@ -1246,6 +1246,9 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;
   uint32_t    alignment;
+  /* See src/shapes.c for layout rationale -- 32 bytes = 256 bits.
+   * Must stay byte-for-byte in sync with shapes.c. */
+  uint8_t     slot_ref_bitmap[32];
   StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 

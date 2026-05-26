@@ -447,10 +447,13 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- HeapRecord: trace reference fields. The only HeapRecord type
-       in user-reachable code is ctx (the lone builtin). Struct-typed
-       fields store inline bytes (value-type only since ref fields are
-       rejected in defstruct), so they never need GC tracing. --- */
+    /* --- HeapRecord: trace reference fields. Used by ctx (the lone
+       builtin HeapRecord type) and by user structs boxed via `[box ...]`.
+       Scalar ref fields (str/vec/map/closure/dyn) live in a single
+       JaclVal-sized slot at the field offset. Ref-elem buf fields hold
+       buf_len consecutive tagged JaclVals starting at the field offset
+       and must be descended into individually. Non-ref fields hold raw
+       value-type bytes and are skipped. --- */
     case OBJ_HEAP_RECORD: {
         HeapRecord *s = (HeapRecord *)payload;
         if (gc__struct_registry) {
@@ -471,6 +474,29 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
                         (uint64_t*)(s->data + sdef->fields[i].offset),
                         MEM_ACQUIRE);
                     gc__ms_push_val(ms, val);
+                } else if (ft == TYPE_BUF) {
+                    /* Ref-elem buf field: scan buf_len consecutive
+                     * JaclVal slots starting at the field offset. The
+                     * elem encoding tells us whether this is a ref-elem
+                     * buf (dyn/str/vec/map/closure/stream) vs a raw-byte
+                     * buf (scalar/struct). Only ref-elem bufs need
+                     * scanning; raw-byte bufs carry no GC references. */
+                    uint32_t enc = sdef->fields[i].struct_type_idx;
+                    if (!JACL_IS_SCALAR_TYPE_IDX(enc)) continue;
+                    JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(enc);
+                    if (elem_t != TYPE_DYN && elem_t != TYPE_STR &&
+                        elem_t != TYPE_VEC && elem_t != TYPE_MAP &&
+                        elem_t != TYPE_CLOSURE && elem_t != TYPE_STREAM) {
+                        continue;
+                    }
+                    uint32_t off = sdef->fields[i].offset;
+                    uint32_t n   = sdef->fields[i].buf_len;
+                    for (uint32_t k = 0; k < n; k++) {
+                        JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                            (uint64_t*)(s->data + off + k * sizeof(JaclVal)),
+                            MEM_ACQUIRE);
+                        gc__ms_push_val(ms, val);
+                    }
                 }
             }
         }

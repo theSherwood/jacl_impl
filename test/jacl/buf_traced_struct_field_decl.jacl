@@ -1,0 +1,24 @@
+# expect: 0
+# expect: hello
+# expect: 42
+# expect: ok
+# Ref-elem bufs as struct fields: declaration, construction, write,
+# read. Stack-inline struct with a [Buf N dyn] field. Writes through
+# $bag->items->N fire the GC write barrier (OP_PTR_STORE with TYPE_DYN
+# field type); reads load the tagged JaclVal directly. The slot lives
+# at the struct's inline byte range; the slot_ref_bitmap on the
+# struct's StructTypeDef tells the inline-push helpers to leave that
+# slot GC-traceable. See BUFFER_DESIGN.md Tier 1.
+
+struct Bag { i32 size, [Buf 4 dyn] items }
+
+proc main {} {
+  def b [Bag 0]
+  print $b->size
+  set $b->items->0 "hello"
+  set $b->items->1 42
+  print $b->items->0
+  print $b->items->1
+  print "ok"
+}
+[main]
