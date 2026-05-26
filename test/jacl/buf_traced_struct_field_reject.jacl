@@ -1,0 +1,5 @@
+# expect-error: [Buf N dyn] with reference element type is not yet supported as a struct field
+# M4.4 covers local ref-elem bufs only. A struct with a ref-elem buf
+# field would require the struct walker to know about embedded
+# JaclVal slots, which isn't wired up yet.
+struct Bag { i32 size, [Buf 4 dyn] items }

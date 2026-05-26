@@ -3057,6 +3057,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             loaded = jacl_f64(&vm->heap, v);
             break;
           }
+          case TYPE_DYN:
+          case TYPE_STR:
+          case TYPE_VEC:
+          case TYPE_MAP:
+          case TYPE_CLOSURE:
+          case TYPE_STREAM: {
+            /* Ref-element buf (M4.4): one JaclVal slot per index. Each
+             * slot is GC-traced via the normal stack walker -- no inline-
+             * bitmap entry was set at zero-init, so the marker sees them. */
+            loaded = vm->stack[frame->stack_base + base_slot + (uint32_t)idx];
+            break;
+          }
           default:
             vm__set_error(vm, "buf-get: unsupported element type %u",
                           (unsigned)elem_type);
@@ -3168,6 +3180,22 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             double v = jacl_is_f64(val) ? jacl_as_f64(val)
                                          : (double)jacl_as_f32(val);
             memcpy(base + (uint32_t)idx * 8, &v, 8);
+            break;
+          }
+          case TYPE_DYN:
+          case TYPE_STR:
+          case TYPE_VEC:
+          case TYPE_MAP:
+          case TYPE_CLOSURE:
+          case TYPE_STREAM: {
+            /* Ref-element buf (M4.4): write a tagged JaclVal to slot [idx].
+             * Call gc_write_barrier so a concurrently-marking collector
+             * sees both the old value (SATB) and the new reference. The
+             * slot is a normal stack JaclVal -- the marker scans it. */
+            JaclVal* slot = &vm->stack[frame->stack_base + base_slot
+                                       + (uint32_t)idx];
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, *slot, val);
+            *slot = val;
             break;
           }
           default:
@@ -3336,6 +3364,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             double v; memcpy(&v, base + (uint32_t)idx * 8, 8);
             loaded = jacl_f64(&vm->heap, v); break;
           }
+          case TYPE_DYN:
+          case TYPE_STR:
+          case TYPE_VEC:
+          case TYPE_MAP:
+          case TYPE_CLOSURE:
+          case TYPE_STREAM: {
+            /* Ref-element buf (M4.4): one JaclVal slot per index. */
+            loaded = vm->stack[frame->stack_base + base_slot + (uint32_t)idx];
+            break;
+          }
           default:
             vm__set_error(vm, "buf-unchecked-get: unsupported element type %u",
                           (unsigned)elem_type);
@@ -3438,6 +3476,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             double v = jacl_is_f64(val) ? jacl_as_f64(val)
                                          : (double)jacl_as_f32(val);
             memcpy(base + (uint32_t)idx * 8, &v, 8);
+            break;
+          }
+          case TYPE_DYN:
+          case TYPE_STR:
+          case TYPE_VEC:
+          case TYPE_MAP:
+          case TYPE_CLOSURE:
+          case TYPE_STREAM: {
+            /* Ref-element buf (M4.4): tagged JaclVal store + write barrier. */
+            JaclVal* slot = &vm->stack[frame->stack_base + base_slot
+                                       + (uint32_t)idx];
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, *slot, val);
+            *slot = val;
             break;
           }
           default:

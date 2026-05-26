@@ -1,0 +1,10 @@
+# expect-error: [Buf N dyn] cannot decay to [Ptr dyn]
+# M4.4: ref-element bufs are NOT C-ABI compatible. Passing one where
+# a [Ptr T] is expected must error -- the alternative (silently passing
+# tagged JaclVals to C code) would corrupt anything that doesn't speak
+# the NaN-boxing encoding.
+proc takes_ptr {[Ptr dyn] data i32 len} {
+  return [+ $len 0]
+}
+def [Buf 4 dyn] xs
+[takes_ptr $xs 4]

@@ -7280,9 +7280,27 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->locals[c->local_count - 1].depth = c->scope_depth;
       }
 
-      compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)base_slot, line);
-      compiler__emit_u16(c, (uint16_t)byte_count, line);
+      /* Ref-element bufs (M4.4) hold N tagged JaclVal slots that the GC
+       * must walk. They're already NIL from the OP_NIL pushes above, and
+       * we must NOT set the inline-slot bitmap on them (that would tell
+       * the marker to skip the slots). Skip OP_BUF_ZERO_LOCAL in that
+       * case. Nested ref-elem bufs are not yet supported -- they would
+       * need an N*M slot-bitmap story; rejected just below. */
+      bool elem_is_ref =
+          (elem_type == TYPE_DYN || elem_type == TYPE_STR ||
+           elem_type == TYPE_VEC || elem_type == TYPE_MAP ||
+           elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM);
+      if (elem_is_ref && inner_buf_len > 0) {
+        compiler__error(c, line, col,
+            "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "
+            "not yet supported (M4.4 covers flat ref-elem bufs only)");
+        return;
+      }
+      if (!elem_is_ref) {
+        compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)base_slot, line);
+        compiler__emit_u16(c, (uint16_t)byte_count, line);
+      }
 
       /* Literal init: emit per-element store. Index is a compile-time
        * constant so we push it via OP_CONST, then the value, then the
@@ -13700,6 +13718,24 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           uint32_t elem_sidx_local = UINT32_MAX;
           if (is_type_keyword(p, tlen)) {
             elem_t = type_from_keyword(p, tlen);
+            /* Reject GC-traced reference element types (M4.4 covers
+             * local ref-elem bufs only). A struct field is laid out as
+             * inline C-ABI bytes; embedding JaclVal slots in a struct
+             * would need the struct walker to know about them, which
+             * isn't wired up yet. */
+            if (elem_t == TYPE_DYN || elem_t == TYPE_STR ||
+                elem_t == TYPE_VEC || elem_t == TYPE_MAP ||
+                elem_t == TYPE_CLOSURE || elem_t == TYPE_STREAM) {
+              char err[192];
+              snprintf(err, sizeof(err),
+                  "field '%.*s': [Buf N %.*s] with reference element type "
+                  "is not yet supported as a struct field (M4.4 covers "
+                  "local bufs only)",
+                  (int)fname_len, fname, (int)tlen, p);
+              compiler__error(c, line, node->start.column, err);
+              has_error = true;
+              break;
+            }
             elem_sidx_local = JACL_SCALAR_TYPE_IDX(elem_t);
           } else {
             uint32_t sidx = struct_registry__find(reg, p, tlen);

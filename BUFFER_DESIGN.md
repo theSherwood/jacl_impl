@@ -21,7 +21,7 @@ when M4 lands).
 | **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
 | **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write+literal-init+struct-inner; deeper nesting deferred) | `ddc7163` + `fcd4c48` + this |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
-| **M4.4** GC-traced element types | ⏸ deferred — **next slice** | — |
+| **M4.4** GC-traced element types | ✅ done (flat locals; struct-field + nested ref-elem deferred) | this |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
@@ -59,16 +59,70 @@ proc main {} {
   def [Buf 3 [Buf 4 Point]] points
   set $points->0->0 [Point 7 11]
   print $points->0->0->x                                ; 7
+
+  ; Ref-element bufs (M4.4): tagged JaclVal slots traced by the GC.
+  ; Supported element keywords: dyn, str, vec, map, stream.
+  def [Buf 4 dyn] tagged
+  [buf-set $tagged 0 "hello"]
+  [buf-set $tagged 1 [vec 1 2 3]]
+  print [buf-get $tagged 0]                             ; hello
+  def [Buf 3 dyn] mixed [[Buf 3 dyn] "a" 42 nil]        ; literal init OK
+  print [buf-get $mixed 1]                              ; 42
 }
 ```
 
 What's deferred (the next session can pick from these):
 
-1. **M4.4 GC-traced element types** — `[Buf N dyn]`, `[Buf N [Vec T]]`,
-   `[Buf N [Map K V]]`, `[Buf N str]`, `[Buf N closure]`. Each
-   element is an 8-byte tagged `JaclVal`. **Highest-risk slice in
-   the buffer queue** — touches concurrency-sensitive collector code.
-   Concrete next-session pickup list:
+1. **M4.4 follow-ups** — the flat-local form is done; remaining slices:
+
+   - **Ref-elem bufs as struct fields** (rejected with a clear error
+     today): `struct Bag {i32 size, [Buf 4 dyn] items}` needs the
+     struct walker to descend into embedded tagged-slot ranges. Plumb
+     either a per-field shape descriptor (offset/N/elem) or extend the
+     struct's `field_inline_bitmap` to distinguish "raw bytes" from
+     "N tagged slots". `compiler.c:13718` (struct field parse) is where
+     the rejection lives; lift it once the walker handles the new shape.
+   - **Nested ref-elem bufs** `[Buf N [Buf M dyn]]` — currently
+     rejected in `compiler.c:HEAD_DEF` buf branch. Same shape problem
+     scaled up; defer until there's a concrete need.
+   - **Typed-collection element types** `[Buf N [Vec T]]`,
+     `[Buf N [Map K V]]` — the typer's `typer__buf_type_full` only
+     recognizes string keywords and nested `Buf` for the T position;
+     extend to recognize typed-collection AST_COMMAND too, then
+     codegen treats them like `dyn` slots (still 8-byte tagged) but
+     the load-site can narrow the result type for downstream
+     `vec-get` / `map-get` chains.
+
+   What landed in M4.4 (flat-local form):
+
+   - **Typer**: `typer__buf_type_full` already encoded ref keywords
+     (`dyn`/`str`/`vec`/`map`/`stream`) via `JACL_SCALAR_TYPE_IDX`;
+     the existing buf-get / arrow-int narrowing returns the original
+     keyword type. Implicit `[Buf N T]` → `[Ptr T]` decay at call
+     sites is rejected for ref T with a message pointing at the
+     explicit `[addr]` escape hatch (see `src/typer.c` ~2440).
+   - **Compiler** (`src/compiler.c` HEAD_DEF buf branch): for ref
+     elements, skip `OP_BUF_ZERO_LOCAL`. The prior OP_NIL pushes
+     leave each slot at `JACL_NIL` (the all-zeros tag) and leaving
+     the `inline_slot_bitmap` clear means the existing stack walker
+     scans the slots as ordinary tagged JaclVals -- no new GC
+     machinery. Stride is `sizeof(JaclVal) = 8` via
+     `struct__type_size`.
+   - **VM** (`src/vm.c` OP_BUF_GET/SET_LOCAL + unchecked variants):
+     added a tagged-ref case set that loads/stores `vm->stack[base +
+     idx]` directly. The store path calls `gc_write_barrier` on the
+     old→new value so the concurrent marker observes both halves of
+     the swap.
+   - **GC**: no new walker code. Ref-elem slots are normal stack
+     slots that the existing `gc_mark` loop already scans.
+   - **Test fixtures**: `test/jacl/buf_traced_dyn.jacl`,
+     `buf_traced_vec.jacl`, `buf_traced_literal_init.jacl`,
+     `buf_traced_dyn_gc.jacl` (GC churn), `buf_traced_decay_reject.jacl`
+     (extern decay error), `buf_traced_struct_field_reject.jacl`
+     (struct-field error). Full chaos suite (`chaos_grey_buf`,
+     `chaos_satb_deref`, `chaos_soak`) still passes.
+
+   Original pickup notes (kept for the follow-up slices):
 
    - **Typer** (`src/typer.c`, `typer__buf_type_full` ~393): drop the
      scalar-only check on the inner element when the element type

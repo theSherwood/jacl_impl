@@ -2431,12 +2431,30 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
       /* [Buf N T] → [Ptr T] implicit decay at call sites. The buf's
        * element type must match the param's pointee type exactly, and
-       * the element must be C-ABI compatible (scalars / value-structs
-       * / [Ptr U] — currently all M2 element types qualify since we
-       * don't yet support GC-traced elements). See BUFFER_DESIGN.md M3. */
+       * the element must be C-ABI compatible: scalars, value-structs,
+       * [Ptr U]. Ref-element bufs (M4.4: dyn/str/vec/map/closure/stream)
+       * hold tagged JaclVals and are rejected -- nothing C-side
+       * understands the encoding. Use [addr $b->0] explicitly if you
+       * need a raw pointer into a tagged-slot buf. See BUFFER_DESIGN.md
+       * M3 / M4.4. */
       if (param_t == TYPE_PTR && arg_t == TYPE_BUF) {
+        uint32_t arg_elem = as[i]->inferred_struct_idx;
+        if (JACL_IS_SCALAR_TYPE_IDX(arg_elem)) {
+          JaclType et = JACL_TYPE_IDX_TO_SCALAR(arg_elem);
+          if (et == TYPE_DYN || et == TYPE_STR || et == TYPE_VEC ||
+              et == TYPE_MAP || et == TYPE_CLOSURE || et == TYPE_STREAM) {
+            char err[224];
+            snprintf(err, sizeof(err),
+                "type error: argument %u of %.*s: [Buf N %s] cannot decay "
+                "to [Ptr %s] -- reference-element bufs are not C-ABI "
+                "compatible; use [addr $b->0] for an explicit raw pointer",
+                i + 1, (int)proc->name_len, proc->name,
+                type_name(et), type_name(et));
+            typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+            break;
+          }
+        }
         uint32_t param_pointee = proc->param_struct_idxs[i];
-        uint32_t arg_elem      = as[i]->inferred_struct_idx;
         if (param_pointee == arg_elem ||
             param_pointee == UINT32_MAX) {
           /* Either the param doesn't constrain pointee (rare) or the

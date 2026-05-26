@@ -1,0 +1,34 @@
+# expect: hello
+# expect: world
+# expect: 3
+# expect: 7
+# expect: 100
+# M4.4: GC stress for [Buf N dyn]. Store heap-allocated strings and
+# vecs in the buf, churn the heap through many short-lived allocations
+# that may trigger a GC cycle, then verify the original references are
+# still reachable through the buf slots (i.e. the marker scanned them
+# as roots and the slot tagged values weren't mistaken for raw bytes).
+def [Buf 4 dyn] xs
+[buf-set $xs 0 "hello"]
+[buf-set $xs 1 "world"]
+def v [vec 1 2 3]
+[buf-set $xs 2 $v]
+def m [map "k" 7]
+[buf-set $xs 3 $m]
+
+# Churn: allocate a pile of throw-away vecs nobody else references,
+# encouraging a young-gen sweep while $xs is the sole root.
+mut i 0
+while [< $i 100] {
+  def junk_v [vec $i $i $i]
+  def junk_m [map "x" $i]
+  set i [+ $i 1]
+}
+
+print [buf-get $xs 0]
+print [buf-get $xs 1]
+def got_v [buf-get $xs 2]
+print [vec-get $got_v 2]
+def got_m [buf-get $xs 3]
+print [map-get $got_m "k"]
+print $i

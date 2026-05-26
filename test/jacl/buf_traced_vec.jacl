@@ -1,0 +1,17 @@
+# expect: 20
+# expect: 100
+# expect: nil
+# M4.4: [Buf N vec] -- ref-element bufs of plain vec values. Each
+# slot holds a tagged JaclVal pointing into the heap. Read back +
+# mutate, with NIL preserved on unset slots.
+def [Buf 3 vec] vs
+def v1 [vec 10 20 30]
+def v2 [vec 100 200]
+[buf-set $vs 0 $v1]
+[buf-set $vs 1 $v2]
+
+def got [buf-get $vs 0]
+print [vec-get $got 1]
+def got2 [buf-get $vs 1]
+print [vec-get $got2 0]
+print [buf-get $vs 2]

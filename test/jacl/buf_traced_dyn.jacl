@@ -1,0 +1,20 @@
+# expect: nil
+# expect: hello
+# expect: 42
+# expect: 4
+# expect: nil
+# expect: world
+# M4.4: [Buf N dyn] -- ref-element bufs hold tagged JaclVals.
+# The slots are GC-traced via the normal stack walker (not in the
+# inline-slot bitmap). Verifies zero-init = NIL, write+read of mixed
+# types, and buf-len.
+def [Buf 4 dyn] xs
+print [buf-get $xs 0]
+[buf-set $xs 0 "hello"]
+print [buf-get $xs 0]
+[buf-set $xs 1 42]
+print [buf-get $xs 1]
+print [buf-len $xs]
+print [buf-get $xs 3]
+set $xs->2 "world"
+print $xs->2

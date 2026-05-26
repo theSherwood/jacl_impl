@@ -1,0 +1,18 @@
+# expect: a
+# expect: 42
+# expect: nil
+# expect: hello
+# expect: nil
+# expect: nil
+# M4.4: literal init for ref-elem bufs. Each element value is stored
+# as a tagged JaclVal via OP_BUF_SET_LOCAL with elem_type=TYPE_DYN.
+# Partial fill leaves the trailing slots at their NIL init.
+def [Buf 3 dyn] xs [[Buf 3 dyn] "a" 42 nil]
+print [buf-get $xs 0]
+print [buf-get $xs 1]
+print [buf-get $xs 2]
+
+def [Buf 3 dyn] ys [[Buf 3 dyn] "hello"]
+print [buf-get $ys 0]
+print [buf-get $ys 1]
+print [buf-get $ys 2]
