@@ -480,6 +480,9 @@ static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
     case TYPE_PTR:
       ok = (vt == TYPE_PTR && val->inferred_struct_idx == inner_v);
       break;
+    case TYPE_FUTURE:
+      ok = (vt == TYPE_FUTURE && val->inferred_struct_idx == inner_v);
+      break;
     case TYPE_STR: ok = (vt == TYPE_STR); break;
     case TYPE_VEC:
       /* plain vec accepts both typed and untyped vec values */
@@ -488,7 +491,6 @@ static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
       ok = (vt == TYPE_MAP || vt == TYPE_TYPED_MAP); break;
     case TYPE_STREAM:  ok = (vt == TYPE_STREAM); break;
     case TYPE_CLOSURE: ok = (vt == TYPE_CLOSURE); break;
-    case TYPE_FUTURE:  ok = (vt == TYPE_FUTURE); break;
     case TYPE_BOX:     ok = (vt == TYPE_BOX); break;
     default: ok = true; break;  /* unknown elem encoding: defer to compiler */
   }
@@ -513,6 +515,10 @@ static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
       snprintf(err, sizeof(err),
           "type error: buf-set value is a pointer to a different type than "
           "the buf's [Ptr T]");
+    } else if (elem == TYPE_FUTURE && vt == TYPE_FUTURE) {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value is a future of a different type than "
+          "the buf's [Future T]");
     } else {
       snprintf(err, sizeof(err),
           "type error: buf-set value type %s does not match buf element type %s",
@@ -701,6 +707,15 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
     if (typer__ptr_type(tc, t_arg, &pointee_idx)) {
       uint32_t shape_idx = type_shape_intern_ptr(&tc->shape_reg, pointee_idx);
       if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+    } else {
+      /* Future element [Buf N [Future T]] (Phase 5 compose case).
+       * Same ref-elem storage pattern as Ptr; the resolved-to type T
+       * is carried by the shape entry. */
+      uint32_t fut_idx = UINT32_MAX;
+      if (typer__future_type(tc, t_arg, &fut_idx)) {
+        uint32_t shape_idx = type_shape_intern_future(&tc->shape_reg, fut_idx);
+        if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+      }
     }
   }
   return true;
@@ -3107,6 +3122,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->inferred_type = TYPE_PTR;
                 node->inferred_struct_idx = inner_v;
                 break;
+              case TYPE_FUTURE:
+                node->inferred_type = TYPE_FUTURE;
+                node->inferred_struct_idx = inner_v;
+                break;
               case TYPE_STRUCT:
                 node->inferred_type = TYPE_STRUCT;
                 node->inferred_struct_idx = recv->inferred_struct_idx;
@@ -3765,6 +3784,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 break;
               case TYPE_PTR:
                 node->inferred_type = TYPE_PTR;
+                node->inferred_struct_idx = inner_v;
+                break;
+              case TYPE_FUTURE:
+                node->inferred_type = TYPE_FUTURE;
                 node->inferred_struct_idx = inner_v;
                 break;
               case TYPE_STRUCT:

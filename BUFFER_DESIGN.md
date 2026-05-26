@@ -24,7 +24,8 @@ when M4 lands).
 | **M4.4** GC-traced element types | ✅ done (flat locals; struct-field + nested ref-elem deferred) | `26fa6b8` |
 | **M4.4 ext** Typed-collection elements `[Buf N [Vec T]]` | ✅ done | `0cf93f5` |
 | **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | `c1e9390` |
-| **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | this |
+| **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | `a783668` |
+| **M4.4 ext4** `[Buf N [Future T]]` | ✅ done | this |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
