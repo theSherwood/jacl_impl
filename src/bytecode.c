@@ -305,10 +305,20 @@ typedef enum {
                                unchecked variant of OP_BUF_GET_LOCAL —
                                same load/widen, no bounds check. Used by
                                [buf-unchecked-get $b $i]. */
-  OP_BUF_USET_LOCAL         /* u8 base_slot, u8 elem_type (JaclType);
+  OP_BUF_USET_LOCAL,        /* u8 base_slot, u8 elem_type (JaclType);
                                unchecked variant of OP_BUF_SET_LOCAL —
                                same narrow/store, no bounds check. Used by
                                [buf-unchecked-set $b $i $v]. */
+
+  /* Bounds-checked variant of OP_PTR_OFFSET. Pops i32 index and u64 ptr,
+   * traps with a runtime error if idx < 0 || idx >= dim_size, otherwise
+   * pushes ptr + idx*elem_size. Used by nested-buf dynamic-arrow chains
+   * (`$cube->$i->$j->$k`) to bounds-check each dimension at runtime.
+   * Literal-index chains stay on OP_PTR_OFFSET / folded base offsets
+   * since the typer/compiler validates them at compile time. */
+  OP_PTR_OFFSET_CHECKED     /* u16 elem_size, u16 dim_size; pop i32 n,
+                               pop u64 p, trap if n out of range, push
+                               p + n*elem_size. */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -532,6 +542,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_BUF_SET_STRUCT_LOCAL: return "OP_BUF_SET_STRUCT_LOCAL";
     case OP_BUF_UGET_LOCAL:  return "OP_BUF_UGET_LOCAL";
     case OP_BUF_USET_LOCAL:  return "OP_BUF_USET_LOCAL";
+    case OP_PTR_OFFSET_CHECKED: return "OP_PTR_OFFSET_CHECKED";
     case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
     case OP_ATOM:            return "OP_ATOM";
     case OP_DEREF:           return "OP_DEREF";

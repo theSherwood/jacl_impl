@@ -2539,6 +2539,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_SET_STRUCT_LOCAL] = &&L_OP_BUF_SET_STRUCT_LOCAL,
     [OP_BUF_UGET_LOCAL] = &&L_OP_BUF_UGET_LOCAL,
     [OP_BUF_USET_LOCAL] = &&L_OP_BUF_USET_LOCAL,
+    [OP_PTR_OFFSET_CHECKED] = &&L_OP_PTR_OFFSET_CHECKED,
   };
 
   #define CASE(op)   L_##op
@@ -7606,6 +7607,53 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         uint64_t base = jacl_as_u64(ptr_val);
         uint64_t out  = base + (uint64_t)(n * (int64_t)elem_size);
+        result = vm__push(vm, jacl_u64(&vm->heap, out));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_PTR_OFFSET_CHECKED): {
+        /* Bounds-checked typed pointer arithmetic. Pops i32 index, pops
+         * u64 ptr, traps if idx < 0 || idx >= dim_size, otherwise pushes
+         * ptr + idx*elem_size. Used by nested-buf dynamic-arrow chains
+         * to bounds-check each dimension at runtime. */
+        uint16_t elem_size = vm__read_u16(vm);
+        uint16_t dim_size  = vm__read_u16(vm);
+        JaclVal idx_val;
+        result = vm__pop(vm, &idx_val);
+        if (result != VM_OK) return result;
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        if (jacl_is_error(idx_val)) {
+          result = vm__push(vm, idx_val);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "buf arrow chain: expected pointer (u64) base");
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t n;
+        if      (jacl_is_i32(idx_val)) n = jacl_as_i32(idx_val);
+        else if (jacl_is_u32(idx_val)) n = (int32_t)jacl_as_u32(idx_val);
+        else {
+          vm__set_error(vm, "buf arrow chain: index must be i32");
+          return VM_RUNTIME_ERROR;
+        }
+        if (n < 0 || (uint32_t)n >= (uint32_t)dim_size) {
+          vm__set_error(vm,
+              "buf arrow chain: index %d out of bounds for dimension size %u",
+              (int)n, (unsigned)dim_size);
+          return VM_RUNTIME_ERROR;
+        }
+        uint64_t base = jacl_as_u64(ptr_val);
+        uint64_t out  = base + (uint64_t)n * (uint64_t)elem_size;
         result = vm__push(vm, jacl_u64(&vm->heap, out));
         if (result != VM_OK) return result;
         DISPATCH();

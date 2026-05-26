@@ -17,6 +17,10 @@ What works today (post most-recent session):
   dynamic indices.
 - Slice passing across proc boundaries via `[Ptr [Buf N T]]`
   param annotations.
+- Literal init at any nesting depth with scalar leaves (depth-3+ uses
+  the chain shape registry; emits flat `OP_BUF_USET_LOCAL` stores).
+- Runtime bounds checks for dynamic arrow indices via
+  `OP_PTR_OFFSET_CHECKED(elem_size, dim_size)`.
 
 What's still open: see ["Pickup for next session"](#pickup-for-next-session)
 below. The current top items are depth-3+ literal init and runtime
@@ -44,7 +48,10 @@ bounds checks for dynamic indices.
 - `buf_nested_depth3_chain.jacl` -- depth-3 arrow chains
   (`$cube->i->j->k`).
 - `buf_nested_depth3_decomp.jacl` -- decomposed chains via `def`.
+- `buf_nested_depth3_literal.jacl` -- depth-3+ literal init.
 - `buf_dynamic_chain.jacl` -- dynamic and mixed indices.
+- `buf_dynamic_chain_oob.jacl` -- runtime OOB trap, dynamic index.
+- `buf_dynamic_chain_oob_neg.jacl` -- runtime OOB trap, negative index.
 - `buf_slice_pass.jacl` -- `[Ptr [Buf N T]]` proc params.
 
 ## Why this exists
@@ -392,29 +399,24 @@ re-decoding on subsequent expressions.
 
 In rough order of payoff, the open items:
 
-### 1. Depth-3+ literal init
+### 1. Depth-3+ literal init  ✅ shipped (this session)
 
-Today errors with "literal init not yet supported for nesting depth >
-2" at `src/compiler.c` HEAD_DEF buf branch (the Phase 5b depth-3+
-path). Extend the literal-init emission to recurse into nested
-constructors. The existing depth-2 literal init in
-`compiler.c` (search for `inner_buf_len > 0` in the HEAD_DEF buf
-block) is the template -- one more level of recursion plus a per-row
-constructor parse.
+Depth-3+ literal init now lands flat stores via the shape registry.
+The HEAD_DEF buf branch in `src/compiler.c` walks the LHS chain into
+dims[] + leaf encoding, then `compiler__emit_buf_nested_literal_init`
+recurses through the RHS constructor validating each `[Buf N rest...]`
+head and emitting one `OP_BUF_USET_LOCAL` per leaf with the flat index.
+Scalar leaf types only — struct-leaf flat stores remain open. Fixture:
+`buf_nested_depth3_literal.jacl`.
 
-### 2. Runtime bounds checks for dynamic indices
+### 2. Runtime bounds checks for dynamic indices  ✅ shipped (this session)
 
-Dynamic arrow chains (`$cube->$i->$j->$k`) emit `OP_PTR_OFFSET`
-without bounds checking -- the runtime trusts the index is in range.
-Literal indices are still compile-time validated. To close the gap:
-
-- Add `OP_PTR_OFFSET_CHECKED` with `u16 elem_size, u16 dim_size`: pops
-  i32 idx, traps if `idx < 0 || idx >= dim_size`, otherwise multiplies
-  and adds.
-- Compiler dynamic-arrow loop swaps `OP_PTR_OFFSET(stride)` for
-  `OP_PTR_OFFSET_CHECKED(stride, dims[k])`.
-
-Cost: one new opcode, mechanical compiler change. ~half a day.
+`OP_PTR_OFFSET_CHECKED(u16 elem_size, u16 dim_size)` traps if the i32
+index is `< 0` or `>= dim_size`. Compiler chain helper emits it for
+every dynamic arrow step in `compiler__try_compile_nested_buf_chain`.
+Literal arrows continue to fold into prefix/pending byte offsets and
+stay validated at compile time. Fixtures:
+`buf_dynamic_chain_oob.jacl`, `buf_dynamic_chain_oob_neg.jacl`.
 
 ### 3. Ref-elem bufs as struct fields
 
@@ -533,6 +535,8 @@ already works, just point at the fixture.
 | 5b (decomposed chains `def p $cube->1; $p->2->3`) | shipped (this commit) |
 | 5b (dynamic arrow indices `$cube->$i->$j->$k`) | shipped (this commit) |
 | 5b (slice passing via `[Ptr [Buf N T]]` proc params) | shipped (this commit) |
+| 5b (depth-3+ literal init, scalar leaf) | shipped (this commit) |
+| 5b (runtime bounds checks for dynamic arrow indices) | shipped (this commit) |
 
 Mid-Phase-3 surprise that wasn't in the Phase 0 audit: the original
 shape registry lived in `src/compiler.c`, which is included **after**

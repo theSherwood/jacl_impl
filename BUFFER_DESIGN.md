@@ -31,6 +31,8 @@ when M4 lands).
 | **M4.4 ext7** Decomposed chains (`def p $cube->1; $p->2->3`) | ✅ done | this session |
 | **M4.4 ext8** Dynamic arrow indices (`$cube->$i->$j->$k`) | ✅ done | this session |
 | **M4.4 ext9** Slice passing via `[Ptr [Buf N T]]` proc params | ✅ done | this session |
+| **M4.4 ext10** Depth-3+ literal init | ✅ done (scalar leaf) | this session |
+| **M4.4 ext11** Runtime bounds checks for dynamic arrow indices | ✅ done (`OP_PTR_OFFSET_CHECKED`) | this session |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
@@ -95,19 +97,7 @@ notes and the fixture list.
 
 Remaining:
 
-1. **Depth-3+ literal init**. `def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
-   [[Buf 2 [Buf 3 [Buf 4 i32]]] ...]` currently errors at the compiler
-   with "literal init not yet supported for nesting depth > 2". Extend
-   the literal-init emission in `compiler.c` HEAD_DEF buf branch to
-   recurse into nested constructors. Same shape as depth-2 literal
-   init, just one more level.
-
-2. **Runtime bounds checks for dynamic indices**. Today's
-   `$cube->$i->$j->$k` emits `OP_PTR_OFFSET` without runtime checks.
-   See `docs/TYPE_REGISTRY_REFACTOR.md` pickup #2 for the proposed
-   `OP_PTR_OFFSET_CHECKED` opcode.
-
-3. **Ref-elem bufs as struct fields** (`struct Bag {i32 size, [Buf 4
+1. **Ref-elem bufs as struct fields** (`struct Bag {i32 size, [Buf 4
    dyn] items}`). Today rejected at `compiler.c` with a clear error.
    The struct-tracing walker (`gc_collect.c`) needs to descend into
    the embedded N-tagged-slot range. Two implementation choices
@@ -115,6 +105,11 @@ Remaining:
    `StructTypeField.type` with a kind discriminator, or attach a per-
    field shape pointer. Either way the field's GC trace becomes
    "scan N tagged slots starting at field offset".
+
+2. **Depth-3+ literal init with struct leaves**. Scalar leaves work
+   (`[[Buf 2 [Buf 3 [Buf 4 i32]]] ...]`); a struct leaf path would
+   need a flat-index OP_BUF_USET_STRUCT_LOCAL-style store. Rejected
+   at compile time today with a clear error.
 
 **Tier 2 — nice-to-haves, not blocking.**
 
