@@ -1,8 +1,10 @@
 # expect: 127
 # expect: 69
+# expect: 4
 # expect: 254
 # expect: hello
 # expect: 42
+# expect: 4
 # expect: ok
 # Builtin-head form `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`
 # (plus the unchecked variants) for buf-typed struct fields. Same
@@ -21,6 +23,7 @@ proc scalar_field {} {
   [buf-set $h->magic 1 0x45]
   print [buf-get $h->magic 0]
   print [buf-get $h->magic 1]
+  print [buf-len $h->magic]
   # Unchecked variant -- no bounds check at runtime.
   [buf-unchecked-set $h->magic 3 0xfe]
   print [buf-unchecked-get $h->magic 3]
@@ -33,6 +36,7 @@ proc ref_field {} {
   [buf-set $b->items 1 42]
   print [buf-get $b->items 0]
   print [buf-get $b->items 1]
+  print [buf-len $b->items]
   print "ok"
 }
 [ref_field]

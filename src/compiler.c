@@ -10906,31 +10906,66 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* [buf-len $b] — compile-time fold. N is statically known on the
    * buf local, so we emit an i32 constant and never evaluate the
-   * receiver at runtime. See BUFFER_DESIGN.md. */
+   * receiver at runtime. Receiver may also be `$struct_local->field`
+   * for a TYPE_BUF struct field; the field's static buf_len is read
+   * from the StructTypeDef. See BUFFER_DESIGN.md. */
   if (hid == HEAD_BUF_LEN) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "buf-len", "1 argument", argc);
       return;
     }
     AstNode* recv = args[0];
-    if (recv->type != AST_VAR_REF) {
+    uint32_t n = 0;
+    bool resolved = false;
+    if (recv->type == AST_VAR_REF) {
+      JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
+          recv->data.var_ref.name, recv->data.var_ref.length);
+      int found = -1;
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].name == recv_name) { found = i; break; }
+      }
+      if (found >= 0 && c->locals[found].type == TYPE_BUF) {
+        n = c->locals[found].buf_len;
+        resolved = true;
+      }
+    } else if (recv->type == AST_COMMAND &&
+               recv->data.command.head_id == HEAD_DOT &&
+               recv->data.command.arg_count == 2 &&
+               recv->data.command.args[0]->type == AST_VAR_REF &&
+               recv->data.command.args[1]->type == AST_LIT_STRING) {
+      /* Struct buf field receiver: same shape as [buf-get $h->field $i]. */
+      AstNode* sref = recv->data.command.args[0];
+      AstNode* fref = recv->data.command.args[1];
+      JaclVal sname = compiler__name_val(c->heap, c->intern_table,
+          sref->data.var_ref.name, sref->data.var_ref.length);
+      int sfound = -1;
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].name == sname) { sfound = i; break; }
+      }
+      if (sfound >= 0 && c->locals[sfound].type == TYPE_STRUCT) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        uint32_t sidx = c->locals[sfound].struct_type_idx;
+        if (reg && sidx < reg->count && reg->defs[sidx]) {
+          StructTypeDef* sdef = reg->defs[sidx];
+          const char* fname    = fref->data.lit_string.value;
+          uint32_t    fname_nl = fref->data.lit_string.length;
+          for (uint32_t k = 0; k < sdef->field_count; k++) {
+            if (sdef->fields[k].name_len == fname_nl &&
+                memcmp(sdef->fields[k].name, fname, fname_nl) == 0 &&
+                sdef->fields[k].type == TYPE_BUF) {
+              n = sdef->fields[k].buf_len;
+              resolved = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!resolved) {
       compiler__error(c, line, col,
-          "buf-len requires a buf-typed variable reference");
+          "buf-len: argument is not a [Buf N T] local or struct buf field");
       return;
     }
-    /* Look up the local by name in the current compiler's local table. */
-    JaclVal recv_name = compiler__name_val(c->heap, c->intern_table,
-        recv->data.var_ref.name, recv->data.var_ref.length);
-    int found = -1;
-    for (int i = (int)c->local_count - 1; i >= 0; i--) {
-      if (c->locals[i].name == recv_name) { found = i; break; }
-    }
-    if (found < 0 || c->locals[found].type != TYPE_BUF) {
-      compiler__error(c, line, col,
-          "buf-len: argument is not a [Buf N T] local");
-      return;
-    }
-    uint32_t n = c->locals[found].buf_len;
     compiler__emit_constant(c, jacl_i32((int32_t)n), line);
     c->last_expr_type = TYPE_I32;
     return;
