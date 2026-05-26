@@ -7054,6 +7054,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclType elem_type;
       uint32_t elem_struct_idx = UINT32_MAX;
       uint32_t inner_buf_len   = 0;  /* M for nested [Buf N [Buf M T]] */
+      uint32_t typed_elem_idx  = UINT32_MAX; /* T's idx for [Buf N [Vec T]] (M4.4 ext) */
       AstNode* struct_name_node = telt;  /* LIT_STRING node holding T's
                                           * name when elem_type==TYPE_STRUCT.
                                           * For nested with struct inner this
@@ -7099,6 +7100,42 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* For struct inner element, fall through to the shared struct
          * resolve block below; it looks up elem_struct_idx and checks
          * struct_def_is_user using struct_name_node. */
+      } else if (telt->type == AST_COMMAND &&
+                 telt->data.command.head &&
+                 telt->data.command.head->type == AST_LIT_STRING &&
+                 telt->data.command.head->data.lit_string.length == 3 &&
+                 memcmp(telt->data.command.head->data.lit_string.value, "Vec", 3) == 0 &&
+                 telt->data.command.arg_count == 1 &&
+                 telt->data.command.args[0]->type == AST_LIT_STRING) {
+        /* Typed-collection element [Buf N [Vec T]] (M4.4 ext). The
+         * outer buf is encoded as TYPE_TYPED_VEC at the element level
+         * (8-byte tagged slot, same GC story as [Buf N vec]); the
+         * inner T's encoding is stashed on the local's key_struct_idx
+         * so buf-get can narrow chained vec-get to T. */
+        AstNode* inner_t = telt->data.command.args[0];
+        JaclType inner_jt = TYPE_DYN;
+        uint32_t inner_idx = UINT32_MAX;
+        if (!compiler__resolve_type(c, inner_t->data.lit_string.value,
+                                    inner_t->data.lit_string.length, &inner_jt)) {
+          compiler__error(c, line, col,
+              "[Buf N [Vec T]] inner element type must be a scalar keyword or struct name");
+          return;
+        }
+        if (inner_jt == TYPE_STRUCT) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          inner_idx = reg ? struct_registry__find(reg,
+              inner_t->data.lit_string.value,
+              inner_t->data.lit_string.length) : UINT32_MAX;
+          if (inner_idx == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Vec Struct]] unknown struct type");
+            return;
+          }
+        } else {
+          inner_idx = JACL_SCALAR_TYPE_IDX(inner_jt);
+        }
+        elem_type = TYPE_TYPED_VEC;
+        typed_elem_idx = inner_idx;
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -7274,6 +7311,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].is_inline = true;
       c->locals[c->local_count - 1].buf_len = n;
       c->locals[c->local_count - 1].buf_inner_len = inner_buf_len;
+      /* M4.4 ext: stash inner T's idx on key_struct_idx for typed-vec
+       * element bufs so arrow/buf-get can narrow downstream chains. */
+      c->locals[c->local_count - 1].key_struct_idx = typed_elem_idx;
       for (uint32_t w = 1; w < slot_count; w++) {
         compiler__emit_byte(c, OP_NIL, line);
         compiler__add_local(c, jacl_inline_string("", 0), line, col);
@@ -7289,7 +7329,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bool elem_is_ref =
           (elem_type == TYPE_DYN || elem_type == TYPE_STR ||
            elem_type == TYPE_VEC || elem_type == TYPE_MAP ||
-           elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM);
+           elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM ||
+           elem_type == TYPE_TYPED_VEC);
       if (elem_is_ref && inner_buf_len > 0) {
         compiler__error(c, line, col,
             "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "

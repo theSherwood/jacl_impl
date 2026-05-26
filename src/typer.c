@@ -375,28 +375,35 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
  *     keyword or struct name"
  *
  * See BUFFER_DESIGN.md M1 / M4.1. */
-/* Recognize `[Buf N T]` -- and its nested form `[Buf N [Buf M T]]`.
+/* Recognize `[Buf N T]` -- and its nested form `[Buf N [Buf M T]]` --
+ * and the typed-collection element form `[Buf N [Vec T]]` (M4.4 ext).
  *
  *   *out_struct_idx: element T encoding -- JACL_SCALAR_TYPE_IDX(scalar)
  *                    for scalar T, or struct registry idx for value-
  *                    struct T (M4.1). For the nested form, the encoding
  *                    is the *inner* scalar T (M4.2 limits inner element
  *                    to scalars; deeper nesting / struct-inner are
- *                    deferred).
+ *                    deferred). For the typed-vec form, the encoding is
+ *                    JACL_SCALAR_TYPE_IDX(TYPE_TYPED_VEC).
  *   *out_len:        outer N.
- *   *out_inner_len:  M for the nested form; 0 for the flat form.
+ *   *out_inner_len:  M for the nested form; 0 for the flat / typed-vec forms.
+ *   *out_typed_elem_idx (NULL-tolerant): for the typed-vec form, the
+ *                    inner T's encoding (scalar sentinel or struct idx).
+ *                    UINT32_MAX otherwise.
  *
  * Returns true if the head is "Buf" (shape may still be invalid -- the
  * caller distinguishes via the sentinel out values for the precise
  * diagnostic).
  *
- * See BUFFER_DESIGN.md M1 / M4.1 / M4.2. */
+ * See BUFFER_DESIGN.md M1 / M4.1 / M4.2 / M4.4. */
 static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
                                  uint32_t* out_struct_idx, uint32_t* out_len,
-                                 uint32_t* out_inner_len) {
+                                 uint32_t* out_inner_len,
+                                 uint32_t* out_typed_elem_idx) {
   *out_struct_idx = UINT32_MAX;
   *out_len = 0;
   *out_inner_len = 0;
+  if (out_typed_elem_idx) *out_typed_elem_idx = UINT32_MAX;
   if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
@@ -436,7 +443,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
     uint32_t inner_M = 0;
     uint32_t inner_inner_M = 0;
     if (typer__buf_type_full(tc, t_arg, &inner_elem_sidx, &inner_M,
-                             &inner_inner_M) &&
+                             &inner_inner_M, NULL) &&
         inner_M > 0 && inner_inner_M == 0 &&
         inner_elem_sidx != UINT32_MAX) {
       *out_struct_idx = inner_elem_sidx;
@@ -445,18 +452,50 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
     /* If the inner form doesn't match the supported shape (deeper
      * nesting or malformed), leave *out_struct_idx as UINT32_MAX so
      * the caller's `bad_elem` diagnostic fires. */
+  } else if (t_arg->type == AST_COMMAND &&
+             t_arg->data.command.head &&
+             t_arg->data.command.head->type == AST_LIT_STRING &&
+             t_arg->data.command.head->data.lit_string.length == 3 &&
+             memcmp(t_arg->data.command.head->data.lit_string.value, "Vec", 3) == 0 &&
+             t_arg->data.command.arg_count == 1 &&
+             t_arg->data.command.args[0]->type == AST_LIT_STRING) {
+    /* Typed-collection element type: [Buf N [Vec T]] (M4.4 ext). Each
+     * slot is a tagged JaclVal pointing to a typed-vec value; T's
+     * encoding is returned via out_typed_elem_idx so the binding can
+     * narrow buf-get results to TYPE_TYPED_VEC + element T. [Map K V]
+     * is deferred -- two-dimensional encoding needs a richer slot. */
+    AstNode* t_inner = t_arg->data.command.args[0];
+    const char* nm = t_inner->data.lit_string.value;
+    uint32_t    nl = t_inner->data.lit_string.length;
+    uint32_t inner_idx = UINT32_MAX;
+    if (is_type_keyword(nm, nl)) {
+      inner_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    } else {
+      for (uint32_t si = 0; si < tc->struct_count; si++) {
+        if (tc->structs[si].name_len == nl &&
+            memcmp(tc->structs[si].name, nm, nl) == 0) {
+          inner_idx = si;
+          break;
+        }
+      }
+    }
+    if (inner_idx != UINT32_MAX) {
+      *out_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_TYPED_VEC);
+      if (out_typed_elem_idx) *out_typed_elem_idx = inner_idx;
+    }
   }
   return true;
 }
 
 /* Compatibility wrapper -- the same as typer__buf_type_full but
- * discards the inner-len out param. Existing callers that don't yet
- * care about nested bufs use this. */
+ * discards the inner-len + typed-elem out params. Existing callers
+ * that don't yet care about nested or typed-collection elements use
+ * this. */
 static bool typer__buf_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_struct_idx, uint32_t* out_len) {
   uint32_t inner_len_discard;
   return typer__buf_type_full(tc, node, out_struct_idx, out_len,
-                              &inner_len_discard);
+                              &inner_len_discard, NULL);
 }
 
 /* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
@@ -508,8 +547,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode*  name_node     = NULL;
   AstNode*  value_node    = NULL;
 
-  uint32_t declared_struct_idx = UINT32_MAX;
-  uint32_t declared_buf_len    = 0;
+  uint32_t declared_struct_idx        = UINT32_MAX;
+  uint32_t declared_buf_len           = 0;
+  uint32_t declared_buf_typed_elem_idx = UINT32_MAX;
 
   /* No-value buf form: `def [Buf N T] NAME` — argc==2 with args[0] a
    * Buf type annotation and args[1] the bare name. Zero-init is
@@ -519,7 +559,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     uint32_t buf_sidx;
     uint32_t buf_len;
     uint32_t buf_inner_len = 0;
-    if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len, &buf_inner_len)) {
+    uint32_t buf_typed_elem_idx = UINT32_MAX;
+    if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len,
+                             &buf_inner_len, &buf_typed_elem_idx)) {
       char err[256];
       if (buf_len == 0) {
         jacl_format_buf_bad_len(err, sizeof(err));
@@ -536,6 +578,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       if (buf_len > 0 && tc->binding_count > 0) {
         tc->bindings[tc->binding_count - 1].buf_len = buf_len;
         tc->bindings[tc->binding_count - 1].buf_inner_len = buf_inner_len;
+        /* For [Buf N [Vec T]] (M4.4 ext) the inner T idx is stashed in
+         * key_struct_idx so buf-get can narrow to TYPE_TYPED_VEC + T. */
+        tc->bindings[tc->binding_count - 1].key_struct_idx = buf_typed_elem_idx;
       }
       node->inferred_type       = TYPE_NIL;
       node->inferred_struct_idx = UINT32_MAX;
@@ -566,13 +611,16 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       uint32_t ptr_sidx;
       uint32_t buf_sidx;
       uint32_t buf_len;
+      uint32_t buf_inner_len_3 = 0;
+      uint32_t buf_typed_elem_idx_3 = UINT32_MAX;
       if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
       } else if (typer__ptr_type(tc, args[0], &ptr_sidx)) {
         declared_type = TYPE_PTR;
         declared_struct_idx = ptr_sidx;
-      } else if (typer__buf_type(tc, args[0], &buf_sidx, &buf_len)) {
+      } else if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len,
+                                      &buf_inner_len_3, &buf_typed_elem_idx_3)) {
         char err[256];
         if (buf_len == 0) {
           jacl_format_buf_bad_len(err, sizeof(err));
@@ -585,6 +633,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         declared_type = TYPE_BUF;
         declared_struct_idx = buf_sidx;
         declared_buf_len = buf_len;
+        declared_buf_typed_elem_idx = buf_typed_elem_idx_3;
+        (void)buf_inner_len_3;
       } else {
         int tcoll = typer__typed_collection_kind(args[0]);
         if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
@@ -890,6 +940,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   if (effective == TYPE_BUF && tc->binding_count > 0) {
     uint32_t bl = declared_buf_len > 0 ? declared_buf_len : inherited_buf_len;
     if (bl > 0) tc->bindings[tc->binding_count - 1].buf_len = bl;
+    /* [Buf N [Vec T]] typed-elem-T: stash on the binding's key_struct_idx
+     * so buf-get can narrow the result to TYPE_TYPED_VEC + T. M4.4 ext. */
+    if (declared_buf_typed_elem_idx != UINT32_MAX) {
+      tc->bindings[tc->binding_count - 1].key_struct_idx =
+          declared_buf_typed_elem_idx;
+    }
     if (value_node->inferred_buf_inner_len > 0) {
       tc->bindings[tc->binding_count - 1].buf_inner_len =
           value_node->inferred_buf_inner_len;
@@ -2663,7 +2719,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       uint32_t buf_len_ctor;
       uint32_t buf_inner_len_ctor = 0;
       if (typer__buf_type_full(tc, head, &buf_sidx_ctor, &buf_len_ctor,
-                               &buf_inner_len_ctor) &&
+                               &buf_inner_len_ctor, NULL) &&
           buf_len_ctor > 0 && buf_sidx_ctor != UINT32_MAX) {
         node->inferred_type           = TYPE_BUF;
         node->inferred_struct_idx     = buf_sidx_ctor;
@@ -2790,7 +2846,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           /* Result type of [buf-get $b $i] / [buf-unchecked-get $b $i].
            * Small-int elements (u8/i8/u16/i16) widen to i32 at the dyn
            * boundary — see BUFFER_DESIGN.md "Small int types". Other
-           * scalars surface as their declared type. */
+           * scalars surface as their declared type. For typed-vec
+           * elements [Buf N [Vec T]] (M4.4 ext) the inner T is on the
+           * binding's key_struct_idx; propagate it so chained vec-get
+           * narrows to T. */
           if (recv_t == TYPE_BUF &&
               recv->inferred_struct_idx != UINT32_MAX &&
               JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
@@ -2799,6 +2858,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               case TYPE_I8: case TYPE_U8:
               case TYPE_I16: case TYPE_U16:
                 node->inferred_type = TYPE_I32; break;
+              case TYPE_TYPED_VEC:
+                node->inferred_type = TYPE_TYPED_VEC;
+                node->inferred_struct_idx = recv->inferred_key_struct_idx;
+                break;
               default:
                 node->inferred_type = elem; break;
             }
