@@ -434,6 +434,87 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
   return TYPE_STRUCT;
 }
 
+/* Compile-time type check on a buf-set value. Decodes the buf's
+ * element type from `recv_encoded` (binding.struct_idx) and compares
+ * to the value's inferred type. Emits a typer error on mismatch.
+ * Lenient for dyn values (they may narrow at runtime and the compiler
+ * keeps its own runtime check) and for unknown buf encodings (the
+ * compiler will reject at codegen).
+ *
+ * Closes the soundness gap noted in BUFFER_DESIGN.md M4.4 ext
+ * follow-ups: without this, a `[Buf N [Vec i64]]` would silently
+ * accept a `[Vec str]` value, and a later vec-get on the buf-derived
+ * typed-vec would interpret bytes as the wrong type. */
+static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
+                                        AstNode* val) {
+  if (recv_encoded == UINT32_MAX) return;
+  JaclType vt = (JaclType)val->inferred_type;
+  if (vt == TYPE_DYN) return;  /* dyn always lenient */
+  uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
+  JaclType elem = typer__buf_elem_decode(tc, recv_encoded,
+                                          &inner_v, &inner_k);
+  bool ok = false;
+  switch (elem) {
+    case TYPE_BOOL: ok = (vt == TYPE_BOOL); break;
+    case TYPE_I8: case TYPE_U8:
+    case TYPE_I16: case TYPE_U16:
+    case TYPE_I32: case TYPE_U32:
+      ok = (vt == TYPE_I32 || vt == TYPE_U32); break;
+    case TYPE_I64: ok = (vt == TYPE_I64 || vt == TYPE_I32); break;
+    case TYPE_U64: ok = (vt == TYPE_U64); break;
+    case TYPE_F32:
+    case TYPE_F64: ok = (vt == TYPE_F32 || vt == TYPE_F64); break;
+    case TYPE_TYPED_VEC:
+      ok = (vt == TYPE_TYPED_VEC && val->inferred_struct_idx == inner_v);
+      break;
+    case TYPE_TYPED_MAP:
+      ok = (vt == TYPE_TYPED_MAP &&
+            val->inferred_struct_idx == inner_v &&
+            val->inferred_key_struct_idx == inner_k);
+      break;
+    case TYPE_STRUCT:
+      /* struct buf elements encode the struct idx in recv_encoded
+       * directly (not via a registry shape). Compare struct idx. */
+      ok = (vt == TYPE_STRUCT && val->inferred_struct_idx == recv_encoded);
+      break;
+    case TYPE_STR: ok = (vt == TYPE_STR); break;
+    case TYPE_VEC:
+      /* plain vec accepts both typed and untyped vec values */
+      ok = (vt == TYPE_VEC || vt == TYPE_TYPED_VEC); break;
+    case TYPE_MAP:
+      ok = (vt == TYPE_MAP || vt == TYPE_TYPED_MAP); break;
+    case TYPE_STREAM:  ok = (vt == TYPE_STREAM); break;
+    case TYPE_CLOSURE: ok = (vt == TYPE_CLOSURE); break;
+    case TYPE_FUTURE:  ok = (vt == TYPE_FUTURE); break;
+    case TYPE_BOX:     ok = (vt == TYPE_BOX); break;
+    default: ok = true; break;  /* unknown elem encoding: defer to compiler */
+  }
+  if (!ok) {
+    char err[256];
+    /* When both sides are the same outer kind (typed-vec / typed-map),
+     * the bare "X does not match X" is unhelpful. Distinguish by inner
+     * T when possible. */
+    if (elem == TYPE_TYPED_VEC && vt == TYPE_TYPED_VEC) {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value is a typed-vec with a different "
+          "element type than the buf's [Vec T]");
+    } else if (elem == TYPE_TYPED_MAP && vt == TYPE_TYPED_MAP) {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value is a typed-map with different K or V "
+          "than the buf's [Map K V]");
+    } else if (elem == TYPE_STRUCT && vt == TYPE_STRUCT) {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value is a different struct type than the "
+          "buf's element struct");
+    } else {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value type %s does not match buf element type %s",
+          type_name(vt), type_name(elem));
+    }
+    typer__error(tc, val->start.line, val->start.column, err);
+  }
+}
+
 /* Recognize `[Buf N T]` -- and its nested form `[Buf N [Buf M T]]` --
  * and the typed-collection element form `[Buf N [Vec T]]` (M4.4 ext).
  *
@@ -1165,6 +1246,11 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
         }
         break;
       }
+    } else if (recv_t == TYPE_BUF && recv_sidx != UINT32_MAX &&
+               field->type == AST_LIT_INT) {
+      /* `set $b->i val` -- arrow buf-set. Same value-vs-element type
+       * check as the [buf-set ...] builtin form above. */
+      typer__check_buf_set_value(tc, recv_sidx, value);
     }
     node->inferred_type = TYPE_NIL;
     return true;
@@ -2961,6 +3047,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             }
           }
           return;
+        case HEAD_BUF_SET:
+        case HEAD_BUF_USET:
+          /* [buf-set $b $i $v] / [buf-unchecked-set $b $i $v]:
+           * compile-time type check on $v against the buf's element
+           * type. Result type (TYPE_NIL) comes from fixed_returns
+           * below; we just emit any mismatch error here. */
+          if (recv_t == TYPE_BUF &&
+              recv->inferred_struct_idx != UINT32_MAX &&
+              node->data.command.arg_count == 3) {
+            typer__check_buf_set_value(tc, recv->inferred_struct_idx,
+                                        node->data.command.args[2]);
+          }
+          break;  /* fall through to fixed_returns for TYPE_NIL */
         case HEAD_BUF_GET:
         case HEAD_BUF_UGET:
           /* Result type of [buf-get $b $i] / [buf-unchecked-get $b $i].

@@ -87,19 +87,16 @@ What's deferred (the next session can pick from these):
    - **Nested ref-elem bufs** `[Buf N [Buf M dyn]]` — currently
      rejected in `compiler.c:HEAD_DEF` buf branch. Same shape problem
      scaled up; defer until there's a concrete need.
-   - **`[Buf N [Map K V]]`** — the [Vec T] form landed (M4.4 ext); the
-     two-dimensional map form is deferred because encoding K *and* V
-     on the binding needs more than one auxiliary slot. Pick: add a
-     second aux field or pack (K, V) into one with K's idx high-bits +
-     V's idx low-bits.
-   - **Strict typed-vec value check on `buf-set`** — today, the
-     typer only verifies the receiver is a TYPE_BUF; the stored value
-     is not checked against the element T at compile time. A bare
-     `vec` (plain) or a `[Vec str]` can be stored into a `[Buf N
-     [Vec i64]]` and the downstream `vec-get` would only crash when
-     the runtime tries to interpret it. Mirrors the typed-vec push
-     enforcement in `compiler.c` for HEAD_VEC_PUSH (M4.4 ext leaves
-     this as a soundness gap to close in a follow-up).
+   - ~~`[Buf N [Map K V]]`~~ — landed in TYPE_REGISTRY_REFACTOR.md
+     Phase 3+4 via a shared typed-shape registry (commit `c1e9390`).
+     Both K and V ride on one shape entry; no aux fields needed.
+   - ~~Strict typed-vec value check on `buf-set`~~ — closed via the
+     typer's new `typer__check_buf_set_value` helper. `[buf-set]` /
+     `[buf-unchecked-set]` / `set $b->i v` all reject mismatched
+     value types at compile time. See fixtures
+     `buf_set_value_type_mismatch.jacl`,
+     `buf_arrow_set_value_type_mismatch.jacl`,
+     `buf_set_typed_vec_mismatch.jacl`.
 
    What landed in M4.4 (flat-local form):
 
