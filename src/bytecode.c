@@ -316,9 +316,19 @@ typedef enum {
    * (`$cube->$i->$j->$k`) to bounds-check each dimension at runtime.
    * Literal-index chains stay on OP_PTR_OFFSET / folded base offsets
    * since the typer/compiler validates them at compile time. */
-  OP_PTR_OFFSET_CHECKED     /* u16 elem_size, u16 dim_size; pop i32 n,
+  OP_PTR_OFFSET_CHECKED,    /* u16 elem_size, u16 dim_size; pop i32 n,
                                pop u64 p, trap if n out of range, push
                                p + n*elem_size. */
+
+  /* Copy `width` consecutive JaclVal-sized slots from frame[src_slot] onto
+   * TOS, marking the destination slots as inline raw bytes. Used by
+   * by-value [Buf N T] proc-param call sites to push the caller's buf
+   * bytes as the argument region. The source slots are unmodified; the
+   * destination is logically a fresh copy. See BUFFER_DESIGN.md Tier 2
+   * (by-value buf proc params). */
+  OP_INLINE_COPY_LOCAL      /* u8 src_slot, u8 width; copy frame[src_slot
+                               .. src_slot+width) onto TOS, marking each
+                               destination slot as inline. */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -543,6 +553,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_BUF_UGET_LOCAL:  return "OP_BUF_UGET_LOCAL";
     case OP_BUF_USET_LOCAL:  return "OP_BUF_USET_LOCAL";
     case OP_PTR_OFFSET_CHECKED: return "OP_PTR_OFFSET_CHECKED";
+    case OP_INLINE_COPY_LOCAL: return "OP_INLINE_COPY_LOCAL";
     case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
     case OP_ATOM:            return "OP_ATOM";
     case OP_DEREF:           return "OP_DEREF";

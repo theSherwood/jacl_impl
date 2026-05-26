@@ -2570,6 +2570,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_UGET_LOCAL] = &&L_OP_BUF_UGET_LOCAL,
     [OP_BUF_USET_LOCAL] = &&L_OP_BUF_USET_LOCAL,
     [OP_PTR_OFFSET_CHECKED] = &&L_OP_PTR_OFFSET_CHECKED,
+    [OP_INLINE_COPY_LOCAL] = &&L_OP_INLINE_COPY_LOCAL,
   };
 
   #define CASE(op)   L_##op
@@ -7711,6 +7712,29 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint64_t out  = base + (uint64_t)n * (uint64_t)elem_size;
         result = vm__push(vm, jacl_u64(&vm->heap, out));
         if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_INLINE_COPY_LOCAL): {
+        /* Copy `width` consecutive frame slots onto TOS, marking the
+         * destination slots as inline raw bytes. Used by by-value
+         * [Buf N T] proc-param call sites: the caller's buf bytes are
+         * memcpy'd into the operand-stack argument region, the callee
+         * binds the param as a TYPE_BUF local backed by those slots.
+         * Source slots are unmodified. See BUFFER_DESIGN.md Tier 2. */
+        uint8_t src_slot = vm__read_byte(vm);
+        uint8_t width    = vm__read_byte(vm);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_operand_overflow(vm, "inline buf copy");
+          return VM_STACK_OVERFLOW;
+        }
+        memcpy(&vm->stack[vm->stack_top],
+               &vm->stack[frame->stack_base + src_slot],
+               (size_t)width * sizeof(JaclVal));
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
         DISPATCH();
       }
 

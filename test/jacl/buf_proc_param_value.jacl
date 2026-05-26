@@ -1,0 +1,37 @@
+# expect: 4
+# expect: 127
+# expect: 69
+# expect: 99
+# expect: 127
+# By-value [Buf N T] proc params. Caller's buf bytes are copied onto
+# the operand stack at the call site; the callee binds the slot range
+# as a TYPE_BUF local. The static N is preserved across the call --
+# [buf-len] inside the callee returns the param's declared length, and
+# mutations in the callee don't affect the caller's buf. See
+# BUFFER_DESIGN.md Tier 2 (by-value buf proc params).
+
+proc inspect {[Buf 4 u8] b} {
+  # Length is preserved by-value: callee sees N == 4.
+  print [buf-len $b]
+  print [buf-get $b 0]
+  print [buf-get $b 1]
+}
+
+proc bump {[Buf 4 u8] b} {
+  # Mutating the local-copy doesn't escape: the caller's bytes are
+  # untouched. Returns the modified byte so we can observe the local
+  # update succeeded.
+  [buf-set $b 0 99]
+  return [buf-get $b 0]
+}
+
+proc main {} {
+  def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+  [inspect $magic]
+  # Pass by-value: caller's $magic byte 0 stays 0x7f even after bump
+  # writes 99 into its local copy. bump returns 99 from its own copy;
+  # the caller's buf is unchanged.
+  print [bump $magic]
+  print [buf-get $magic 0]
+}
+[main]

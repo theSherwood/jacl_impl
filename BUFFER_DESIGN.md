@@ -124,12 +124,28 @@ Remaining:
   runtime check on struct-field bufs. The unchecked variants give an
   explicit opt-out. Fixtures: `buf_field_builtin_head.jacl`,
   `buf_field_builtin_head_oob.jacl`.
-- **`[Buf N T]` proc parameter syntax**. Bufs decay to `[Ptr T]` at
-  call boundaries; declaring a param as `[Buf N T]` directly is
-  rejected today. The new `[Ptr [Buf N T]]` slice-pass annotation
-  covers the common "pass a buf row to a proc" use case (see
-  `docs/TYPE_REGISTRY_REFACTOR.md`). Direct `[Buf N T]` params (with
-  whole-buf semantics, no decay) are still open if needed.
+- ~~**`[Buf N T]` proc parameter syntax**~~ ✅ shipped this session
+  with by-value semantics. The caller copies N*sizeof(T) bytes onto
+  the operand stack at the call site (`OP_INLINE_COPY_LOCAL`); the
+  callee binds the slot range as a TYPE_BUF local with `buf_len = N`,
+  so indexing inside the body folds bounds checks at compile time.
+  Three-way menu now: `[Ptr T]` (pointer, length lost - C interop),
+  `[Ptr [Buf N T]]` (pointer + length preserved - slice), `[Buf N T]`
+  (by-value copy - small fixed buffers, no aliasing). Hard cap at
+  2040 bytes (255 JaclVal slots, the u8 wire-width limit). Scalar
+  element types only for now. Fixtures: `buf_proc_param_value.jacl`,
+  `buf_proc_param_value_arity.jacl`.
+
+  **Size-cap follow-up.** The current cap is 2040 bytes (driven by
+  opcode operand width). A softer policy might warn or hard-error
+  much earlier -- say at 256 bytes -- to discourage by-value passing
+  of large buffers when `[Ptr [Buf N T]]` is the right tool. No
+  legitimate proc takes 4 KB by value. Surfacing options: a typer
+  warning (would need a new diagnostic channel since the typer
+  currently only errors), a compile-time hard error with a clear
+  redirect to `[Ptr [Buf N T]]`, or a runtime trap (unhelpful -- by
+  then the code has already shipped). Hard error at decl time is
+  probably the right answer. Not implemented yet.
 - **Test harness native-fn registration** — unblocks a real C extern
   fixture (M3.6) and stress-tests the decay path with an actual
   syscall.

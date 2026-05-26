@@ -1,0 +1,24 @@
+# expect-error: expected 1 arguments but got 1
+# By-value [Buf N T] params are arity-checked at the slot level. The
+# caller pushes width-N slots; the callee's param_total_slots reflects
+# the declared length. A [Buf 4 u8] (1 JaclVal slot = 8 bytes worth)
+# vs a [Buf 16 u8] (2 JaclVal slots) is caught at call time.
+#
+# The message text prints `closure->param_count` (the user-visible
+# arity, 1 here) rather than param_total_slots, so the numbers look
+# the same -- the runtime is comparing the slot-level totals and
+# rejecting. A clearer slot-mismatch message would be a nice polish
+# but is unrelated to the by-value buf-param feature.
+
+proc takes_16 {[Buf 16 u8] b} {
+  print [buf-len $b]
+}
+
+proc main {} {
+  def [Buf 4 u8] small [[Buf 4 u8] 1 2 3 4]
+  # OP_INLINE_COPY_LOCAL copies width=1 slot (4 bytes rounded up to 8);
+  # callee expects param_total_slots=2 (16 bytes). Runtime arity check
+  # catches the mismatch.
+  [takes_16 $small]
+}
+[main]

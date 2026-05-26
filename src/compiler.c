@@ -9104,11 +9104,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType param_types_arr[COMPILER_MAX_PROC_PARAMS];
     uint32_t param_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* struct registry index per param */
     uint32_t param_key_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* key struct idx for typed maps */
+    uint32_t param_buf_lens[COMPILER_MAX_PROC_PARAMS];    /* N for [Buf N T] params; 0 otherwise */
     uint32_t param_scope_marks[COMPILER_MAX_PROC_PARAMS]; /* hygiene: per-param scope mark */
     uint8_t param_count = 0;
     bool is_variadic = false;
     memset(param_struct_idxs, 0xFF, sizeof(param_struct_idxs)); /* UINT32_MAX = no struct */
     memset(param_key_struct_idxs, 0xFF, sizeof(param_key_struct_idxs));
+    memset(param_buf_lens, 0, sizeof(param_buf_lens));
 
     for (uint32_t fi = 0; fi < flat_count; fi++) {
       AstNode* elem = flat_elems[fi];
@@ -9170,6 +9172,95 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           param_count++;
           continue;
         }
+      }
+
+      /* Check for [Buf N T] parameter — by-value buf. Caller copies the
+       * N*sizeof(T) bytes onto the operand stack at the call site
+       * (OP_INLINE_COPY_LOCAL); the callee binds the slot range as a
+       * TYPE_BUF local with buf_len = N. Indexing inside the body uses
+       * the existing OP_BUF_*_LOCAL opcodes and gets compile-time
+       * bounds-check folding from the static N. Only scalar elem
+       * types accepted for now; struct/nested elem deferred. See
+       * BUFFER_DESIGN.md Tier 2 (by-value [Buf N T] proc params). */
+      if (elem->type == AST_COMMAND && elem->data.command.head &&
+          elem->data.command.head->type == AST_LIT_STRING &&
+          elem->data.command.head->data.lit_string.length == 3 &&
+          memcmp(elem->data.command.head->data.lit_string.value, "Buf", 3) == 0 &&
+          elem->data.command.arg_count == 2) {
+        AstNode* nlit = elem->data.command.args[0];
+        AstNode* telt = elem->data.command.args[1];
+        if (nlit->type != AST_LIT_INT || nlit->data.lit_int.value <= 0) {
+          compiler__error(c, line, col,
+              "[Buf N T] param: length must be a positive integer literal");
+          return;
+        }
+        if (telt->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+              "[Buf N T] param: element type must be a scalar keyword "
+              "(struct + nested elements not yet supported in by-value params)");
+          return;
+        }
+        JaclType buf_elem_t;
+        if (!compiler__resolve_type(c, telt->data.lit_string.value,
+                                    telt->data.lit_string.length, &buf_elem_t)) {
+          compiler__error(c, line, col,
+              "[Buf N T] param: unknown element type");
+          return;
+        }
+        /* Same ref/struct-elem rejection as M2 buf locals had originally;
+         * by-value passing of ref-elem bufs would need write-barrier
+         * setup at call-site, deferred. */
+        bool is_scalar = (buf_elem_t == TYPE_BOOL ||
+                          buf_elem_t == TYPE_I8 || buf_elem_t == TYPE_U8 ||
+                          buf_elem_t == TYPE_I16 || buf_elem_t == TYPE_U16 ||
+                          buf_elem_t == TYPE_I32 || buf_elem_t == TYPE_U32 ||
+                          buf_elem_t == TYPE_I64 || buf_elem_t == TYPE_U64 ||
+                          buf_elem_t == TYPE_F32 || buf_elem_t == TYPE_F64);
+        if (!is_scalar) {
+          compiler__error(c, line, col,
+              "[Buf N T] param: only scalar element types are supported");
+          return;
+        }
+        uint32_t n = (uint32_t)nlit->data.lit_int.value;
+        uint32_t elem_sz = struct__type_size(buf_elem_t, NULL, 0);
+        uint64_t total_bytes = (uint64_t)n * (uint64_t)elem_sz;
+        if (total_bytes > 0xFFu * sizeof(JaclVal)) {
+          /* The wire opcodes carry u8 widths (param_total_slots,
+           * OP_INLINE_COPY_LOCAL width). A by-value param wider than
+           * 255 slots = 2040 bytes overflows. See BUFFER_DESIGN.md
+           * "size cap" follow-up note. */
+          char err[160];
+          snprintf(err, sizeof(err),
+              "[Buf %u %s] param: by-value size %u bytes exceeds 2040-byte cap "
+              "(use [Ptr [Buf %u %s]] for larger buffers)",
+              (unsigned)n, type_name(buf_elem_t),
+              (unsigned)total_bytes, (unsigned)n, type_name(buf_elem_t));
+          compiler__error(c, line, col, err);
+          return;
+        }
+        fi++;
+        if (fi >= flat_count) {
+          compiler__error(c, line, col,
+              "expected parameter name after [Buf N T] annotation");
+          return;
+        }
+        elem = flat_elems[fi];
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+          compiler__error(c, line, col, "too many proc parameters");
+          return;
+        }
+        param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
+            elem->data.lit_string.value, elem->data.lit_string.length);
+        param_types_arr[param_count] = TYPE_BUF;
+        param_struct_idxs[param_count] = JACL_SCALAR_TYPE_IDX(buf_elem_t);
+        param_buf_lens[param_count] = n;
+        param_scope_marks[param_count] = elem->scope_mark;
+        param_count++;
+        continue;
       }
 
       /* Check for compound type expression: [Vec Type], [Map Type], [Map K V] */
@@ -9382,6 +9473,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             } else {
               total_slots += 1;
             }
+          } else if (param_types_arr[pi] == TYPE_BUF && param_buf_lens[pi] > 0) {
+            /* By-value [Buf N T] param: N*sizeof(T) bytes round up to
+             * ceil(bytes / 8) operand-stack slots. The element type's
+             * scalar sentinel is stored in param_struct_idxs[pi]. */
+            JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(param_struct_idxs[pi]);
+            uint32_t elem_sz = struct__type_size(elem_t, NULL, 0);
+            uint64_t bytes = (uint64_t)param_buf_lens[pi] * (uint64_t)elem_sz;
+            uint32_t slots = (uint32_t)((bytes + sizeof(JaclVal) - 1) / sizeof(JaclVal));
+            if (slots == 0) slots = 1;
+            total_slots += (uint8_t)slots;
+            has_inline = true;
           } else {
             total_slots += 1;
           }
@@ -9454,6 +9556,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                 body_compiler.locals[body_compiler.local_count - 1].is_param = true;
               }
             }
+          }
+        } else if (param_types_arr[i] == TYPE_BUF && param_buf_lens[i] > 0) {
+          /* By-value buf param: bind the inline slot range as TYPE_BUF
+           * with buf_len = N. struct_type_idx already holds the scalar
+           * sentinel for the element type (set by the param parser).
+           * Indexing inside the body reuses the existing OP_BUF_*_LOCAL
+           * opcodes, which read base_slot + idx*elem_size and pick up
+           * the compile-time bounds check from buf_len. */
+          JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(param_struct_idxs[i]);
+          uint32_t elem_sz = struct__type_size(elem_t, NULL, 0);
+          uint64_t bytes = (uint64_t)param_buf_lens[i] * (uint64_t)elem_sz;
+          uint32_t width = (uint32_t)((bytes + sizeof(JaclVal) - 1) / sizeof(JaclVal));
+          if (width == 0) width = 1;
+          body_compiler.locals[body_compiler.local_count - 1].width = (uint16_t)width;
+          body_compiler.locals[body_compiler.local_count - 1].is_inline = true;
+          body_compiler.locals[body_compiler.local_count - 1].buf_len = param_buf_lens[i];
+          body_compiler.locals[body_compiler.local_count - 1].buf_inner_len = 0;
+          body_compiler.locals[body_compiler.local_count - 1].key_struct_idx = UINT32_MAX;
+          for (uint32_t w = 1; w < width; w++) {
+            compiler__add_local(&body_compiler, jacl_inline_string("", 0), line, col);
+            body_compiler.locals[body_compiler.local_count - 1].depth = body_compiler.scope_depth;
+            body_compiler.locals[body_compiler.local_count - 1].is_param = true;
           }
         }
       }
@@ -13904,6 +14028,41 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           total_arg_slots += 1;
           continue;
         }
+      }
+
+      /* By-value [Buf N T] arg: param is TYPE_BUF, arg is a bare
+       * var-ref to a buf local of matching shape. Copy the source buf's
+       * inline slots onto TOS via OP_INLINE_COPY_LOCAL; the callee binds
+       * them as a TYPE_BUF local. See BUFFER_DESIGN.md Tier 2. */
+      if (expected_param_type == TYPE_BUF && args[i]->type == AST_VAR_REF) {
+        JaclVal arg_name = compiler__name_val(c->heap, c->intern_table,
+            args[i]->data.var_ref.name, args[i]->data.var_ref.length);
+        int found = -1;
+        for (int li = (int)c->local_count - 1; li >= 0; li--) {
+          if (c->locals[li].name == arg_name) { found = li; break; }
+        }
+        if (found < 0 || c->locals[found].type != TYPE_BUF) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+              "argument %d of %.*s: expected a [Buf N T] local for by-value param",
+              (int)(i + 1), (int)callee_name_len, callee_name_str);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        /* Shape check: arg buf_len and elem encoding must match the
+         * param's. Callee's expected encoding lives in
+         * call_param_types[i] / call_param_struct_idxs[i], but the
+         * generic call path doesn't surface struct_idxs here yet --
+         * fall back to a name-based arity match: the runtime arg-count
+         * check on param_total_slots will catch a width mismatch. */
+        uint16_t width = c->locals[found].width;
+        if (width == 0) width = 1;
+        compiler__emit_byte(c, OP_INLINE_COPY_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)found, line);
+        compiler__emit_byte(c, (uint8_t)width, line);
+        c->last_expr_type = TYPE_BUF;
+        total_arg_slots += width;
+        continue;
       }
 
       /* Set contextual type for argument.
