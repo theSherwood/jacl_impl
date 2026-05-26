@@ -1,0 +1,22 @@
+# expect: 127
+# expect: 69
+# Phase 5 compose case: [Buf N [Ptr T]] -- buf of pointers. Each slot
+# holds a tagged JaclVal carrying a [Ptr T]. Same GC + write-barrier
+# story as the M4.4 ref-elem path; new piece is the typer's recognition
+# of [Ptr T] as an inner buf-element type, interned as TYPE_SHAPE_PTR.
+proc main {} {
+  def [Buf 4 u8] elf [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+  def [Ptr u8] p0 [addr $elf->0]
+  def [Ptr u8] p1 [addr $elf->1]
+
+  def [Buf 2 [Ptr u8]] ptrs
+  [buf-set $ptrs 0 $p0]
+  [buf-set $ptrs 1 $p1]
+
+  # Retrieve via buf-get; result narrows to [Ptr u8] so ptr-deref works.
+  def [Ptr u8] g0 [buf-get $ptrs 0]
+  print [ptr-deref $g0]
+  def [Ptr u8] g1 [buf-get $ptrs 1]
+  print [ptr-deref $g1]
+}
+main

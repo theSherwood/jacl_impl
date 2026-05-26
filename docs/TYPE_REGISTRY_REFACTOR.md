@@ -236,7 +236,8 @@ on demand.
 | 2 (typed-vec intern; compiler-side migrate) | shipped `519fdd2` |
 | 3 (shared registry above typer.c; typed-map intern; typer + compiler migrate) | shipped (this commit) |
 | 4 (`[Buf N [Map K V]]` wire + test) | shipped (this commit) |
-| 5 (more kinds: BUF / PTR / FUTURE / BOX) | shipped (this commit) — foundation only |
+| 5 (more kinds: BUF / PTR / FUTURE / BOX) | shipped `5cf6a7a` — foundation only |
+| 5a (wire PTR compose: `[Buf N [Ptr T]]`) | shipped (this commit) |
 
 Mid-Phase-3 surprise that wasn't in the Phase 0 audit: the original
 shape registry lived in `src/compiler.c`, which is included **after**

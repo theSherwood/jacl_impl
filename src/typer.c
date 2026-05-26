@@ -477,6 +477,9 @@ static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
        * directly (not via a registry shape). Compare struct idx. */
       ok = (vt == TYPE_STRUCT && val->inferred_struct_idx == recv_encoded);
       break;
+    case TYPE_PTR:
+      ok = (vt == TYPE_PTR && val->inferred_struct_idx == inner_v);
+      break;
     case TYPE_STR: ok = (vt == TYPE_STR); break;
     case TYPE_VEC:
       /* plain vec accepts both typed and untyped vec values */
@@ -506,6 +509,10 @@ static void typer__check_buf_set_value(TyperCtx* tc, uint32_t recv_encoded,
       snprintf(err, sizeof(err),
           "type error: buf-set value is a different struct type than the "
           "buf's element struct");
+    } else if (elem == TYPE_PTR && vt == TYPE_PTR) {
+      snprintf(err, sizeof(err),
+          "type error: buf-set value is a pointer to a different type than "
+          "the buf's [Ptr T]");
     } else {
       snprintf(err, sizeof(err),
           "type error: buf-set value type %s does not match buf element type %s",
@@ -684,6 +691,17 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
     uint32_t shape_idx = type_shape_intern_typed_map(&tc->shape_reg,
                                                      key_idx, value_idx);
     if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+  } else if (t_arg->type == AST_COMMAND) {
+    /* Pointer element [Buf N [Ptr T]] (Phase 5 compose case). Each
+     * slot stores a tagged JaclVal (the [Ptr T] value -- runtime
+     * encoding is a heap-boxed u64). The pointee T is carried by the
+     * shape entry so buf-get narrows downstream pointer-arrow chains
+     * to T. */
+    uint32_t pointee_idx = UINT32_MAX;
+    if (typer__ptr_type(tc, t_arg, &pointee_idx)) {
+      uint32_t shape_idx = type_shape_intern_ptr(&tc->shape_reg, pointee_idx);
+      if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+    }
   }
   return true;
 }
@@ -3085,6 +3103,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->inferred_struct_idx = inner_v;
                 node->inferred_key_struct_idx = inner_k;
                 break;
+              case TYPE_PTR:
+                node->inferred_type = TYPE_PTR;
+                node->inferred_struct_idx = inner_v;
+                break;
               case TYPE_STRUCT:
                 node->inferred_type = TYPE_STRUCT;
                 node->inferred_struct_idx = recv->inferred_struct_idx;
@@ -3740,6 +3762,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->inferred_type = TYPE_TYPED_MAP;
                 node->inferred_struct_idx = inner_v;
                 node->inferred_key_struct_idx = inner_k;
+                break;
+              case TYPE_PTR:
+                node->inferred_type = TYPE_PTR;
+                node->inferred_struct_idx = inner_v;
                 break;
               case TYPE_STRUCT:
                 node->inferred_type = TYPE_STRUCT;

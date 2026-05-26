@@ -7188,6 +7188,47 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         elem_type = TYPE_TYPED_MAP;
         elem_struct_idx = shape_idx;
+      } else if (telt->type == AST_COMMAND &&
+                 telt->data.command.head &&
+                 telt->data.command.head->type == AST_LIT_STRING &&
+                 telt->data.command.head->data.lit_string.length == 3 &&
+                 memcmp(telt->data.command.head->data.lit_string.value, "Ptr", 3) == 0 &&
+                 telt->data.command.arg_count == 1 &&
+                 telt->data.command.args[0]->type == AST_LIT_STRING) {
+        /* Pointer element [Buf N [Ptr T]] (Phase 5 compose case).
+         * Each slot holds the tagged JaclVal for the pointer; same
+         * GC + write-barrier story as M4.4 ref-elem. */
+        AstNode* p_arg = telt->data.command.args[0];
+        JaclType p_jt;
+        if (!compiler__resolve_type(c, p_arg->data.lit_string.value,
+                                    p_arg->data.lit_string.length, &p_jt)) {
+          compiler__error(c, line, col,
+              "[Buf N [Ptr T]] pointee type must be a scalar keyword or struct name");
+          return;
+        }
+        uint32_t pointee_idx = UINT32_MAX;
+        if (p_jt == TYPE_STRUCT) {
+          StructTypeRegistry* preg3 = compiler__get_struct_registry(c);
+          pointee_idx = preg3 ? struct_registry__find(preg3,
+              p_arg->data.lit_string.value,
+              p_arg->data.lit_string.length) : UINT32_MAX;
+          if (pointee_idx == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Ptr Struct]] unknown pointee struct type");
+            return;
+          }
+        } else {
+          pointee_idx = JACL_SCALAR_TYPE_IDX(p_jt);
+        }
+        StructTypeRegistry* preg3 = compiler__get_struct_registry(c);
+        uint32_t shape_idx = type_shape_intern_ptr(preg3, pointee_idx);
+        if (shape_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Buf N [Ptr T]] failed to intern ptr shape");
+          return;
+        }
+        elem_type = TYPE_PTR;
+        elem_struct_idx = shape_idx;
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -7364,7 +7405,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].struct_type_idx =
           (elem_type == TYPE_STRUCT ||
            elem_type == TYPE_TYPED_VEC ||
-           elem_type == TYPE_TYPED_MAP)
+           elem_type == TYPE_TYPED_MAP ||
+           elem_type == TYPE_PTR)
               ? elem_struct_idx
               : JACL_SCALAR_TYPE_IDX(elem_type);
       c->locals[c->local_count - 1].width = (uint16_t)slot_count;
@@ -7391,7 +7433,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           (elem_type == TYPE_DYN || elem_type == TYPE_STR ||
            elem_type == TYPE_VEC || elem_type == TYPE_MAP ||
            elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM ||
-           elem_type == TYPE_TYPED_VEC || elem_type == TYPE_TYPED_MAP);
+           elem_type == TYPE_TYPED_VEC || elem_type == TYPE_TYPED_MAP ||
+           elem_type == TYPE_PTR);
       if (elem_is_ref && inner_buf_len > 0) {
         compiler__error(c, line, col,
             "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "

@@ -3064,7 +3064,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_CLOSURE:
           case TYPE_STREAM:
           case TYPE_TYPED_VEC:
-          case TYPE_TYPED_MAP: {
+          case TYPE_TYPED_MAP:
+          case TYPE_PTR: {
             /* Ref-element buf (M4.4): one JaclVal slot per index. Each
              * slot is GC-traced via the normal stack walker -- no inline-
              * bitmap entry was set at zero-init, so the marker sees them. */
@@ -3191,7 +3192,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_CLOSURE:
           case TYPE_STREAM:
           case TYPE_TYPED_VEC:
-          case TYPE_TYPED_MAP: {
+          case TYPE_TYPED_MAP:
+          case TYPE_PTR: {
             /* Ref-element buf (M4.4): write a tagged JaclVal to slot [idx].
              * Call gc_write_barrier so a concurrently-marking collector
              * sees both the old value (SATB) and the new reference. The
@@ -3375,7 +3377,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_CLOSURE:
           case TYPE_STREAM:
           case TYPE_TYPED_VEC:
-          case TYPE_TYPED_MAP: {
+          case TYPE_TYPED_MAP:
+          case TYPE_PTR: {
             /* Ref-element buf (M4.4): one JaclVal slot per index. */
             loaded = vm->stack[frame->stack_base + base_slot + (uint32_t)idx];
             break;
@@ -3491,7 +3494,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_CLOSURE:
           case TYPE_STREAM:
           case TYPE_TYPED_VEC:
-          case TYPE_TYPED_MAP: {
+          case TYPE_TYPED_MAP:
+          case TYPE_PTR: {
             /* Ref-element buf (M4.4): tagged JaclVal store + write barrier. */
             JaclVal* slot = &vm->stack[frame->stack_base + base_slot
                                        + (uint32_t)idx];
