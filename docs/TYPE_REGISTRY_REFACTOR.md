@@ -180,15 +180,36 @@ interns it, returns the registry idx. Compiler's HEAD_DEF buf path
 stores it on the local's `struct_type_idx`. VM's existing TYPE_TYPED_MAP
 load/store cases consult the registry. Add fixtures.
 
-### Phase 5 -- More kinds (optional, future)
+### Phase 5 -- More kinds (foundation done)
 
 `TYPE_SHAPE_BUF`, `TYPE_SHAPE_PTR`, `TYPE_SHAPE_FUTURE`,
-`TYPE_SHAPE_BOX`. `[Buf N [Buf M T]]` becomes one registry entry
-referencing another, and arbitrary nesting of parametric types falls
-out for free. Same story for the other parametric kinds.
+`TYPE_SHAPE_BOX` are all added to the registry as kinds with their
+natural params:
 
-Not required for the immediate `[Buf N [Map K V]]` goal but is the
-real "close the door on this class of problems" payoff.
+- BUF: `(len, elem_idx)` -- two params
+- PTR: `(pointee_idx)` -- one param
+- FUTURE: `(resolves_to_idx)` -- one param
+- BOX: `(boxes_idx)` -- one param
+
+Each has an `intern` helper and a decoder case. Composition is now
+*free at the registry level*: any inner `*_idx` can point at any
+other registry shape (struct, typed-vec, typed-map, buf, ptr, future,
+box) or a scalar sentinel.
+
+What's foundation-only: the *recognizers* haven't been extended to
+emit these for every annotation that could use them. Specifically:
+
+- `typer__buf_type_full` recognizes `[Vec T]` and `[Map K V]` as buf
+  elements; extending it to also recognize `[Buf M T]`, `[Ptr T]`,
+  `[Future T]`, `[Box T]` is a separate (small) PR per use case.
+- `[Vec T]` and `[Map K V]` annotation parsers accept scalar/struct
+  T today; allowing parametric T (`[Vec [Buf N U]]`) is similarly a
+  per-use-case extension.
+
+Each such extension is now a one-line `type_shape_intern_*` call --
+no schema growth, no aux fields, no encoding-out-of-slots problem.
+That's the architectural payoff; specific compose cases get wired up
+on demand.
 
 ## Risks & mitigations
 
@@ -215,7 +236,7 @@ real "close the door on this class of problems" payoff.
 | 2 (typed-vec intern; compiler-side migrate) | shipped `519fdd2` |
 | 3 (shared registry above typer.c; typed-map intern; typer + compiler migrate) | shipped (this commit) |
 | 4 (`[Buf N [Map K V]]` wire + test) | shipped (this commit) |
-| 5 (more kinds: BUF / PTR / FUTURE / BOX) | deferred |
+| 5 (more kinds: BUF / PTR / FUTURE / BOX) | shipped (this commit) — foundation only |
 
 Mid-Phase-3 surprise that wasn't in the Phase 0 audit: the original
 shape registry lived in `src/compiler.c`, which is included **after**

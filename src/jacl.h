@@ -1259,6 +1259,10 @@ typedef enum {
   TYPE_SHAPE_CTX,
   TYPE_SHAPE_TYPED_VEC,
   TYPE_SHAPE_TYPED_MAP,
+  TYPE_SHAPE_BUF,
+  TYPE_SHAPE_PTR,
+  TYPE_SHAPE_FUTURE,
+  TYPE_SHAPE_BOX,
 } TypeShapeKind;
 
 typedef struct {
@@ -1267,6 +1271,10 @@ typedef struct {
     StructTypeDef* struct_def;
     struct { uint32_t elem_idx; } tvec;
     struct { uint32_t key_idx; uint32_t value_idx; } tmap;
+    struct { uint32_t len; uint32_t elem_idx; } buf;
+    struct { uint32_t pointee_idx; } ptr;
+    struct { uint32_t resolves_to_idx; } future;
+    struct { uint32_t boxes_idx; } box;
   } u;
 } TypeShape;
 

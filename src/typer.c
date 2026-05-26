@@ -412,6 +412,20 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
         if (out_inner_value_idx) *out_inner_value_idx = shape->u.tmap.value_idx;
         if (out_inner_key_idx)   *out_inner_key_idx   = shape->u.tmap.key_idx;
         return TYPE_TYPED_MAP;
+      case TYPE_SHAPE_BUF:
+        /* T's encoding via out_inner_value_idx. N reachable via
+         * shape->u.buf.len (callers that need stride consult it). */
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.buf.elem_idx;
+        return TYPE_BUF;
+      case TYPE_SHAPE_PTR:
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.ptr.pointee_idx;
+        return TYPE_PTR;
+      case TYPE_SHAPE_FUTURE:
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.future.resolves_to_idx;
+        return TYPE_FUTURE;
+      case TYPE_SHAPE_BOX:
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.box.boxes_idx;
+        return TYPE_BOX;
       default:
         return TYPE_DYN;
     }

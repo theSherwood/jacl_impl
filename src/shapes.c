@@ -66,16 +66,25 @@ typedef enum {
   TYPE_SHAPE_CTX,              /* the lone HeapRecord builtin */
   TYPE_SHAPE_TYPED_VEC,        /* [Vec T] -- u.tvec.elem_idx */
   TYPE_SHAPE_TYPED_MAP,        /* [Map K V] -- u.tmap.{key,value}_idx */
+  TYPE_SHAPE_BUF,              /* [Buf N T] -- u.buf.{len,elem_idx} */
+  TYPE_SHAPE_PTR,              /* [Ptr T] -- u.ptr.pointee_idx */
+  TYPE_SHAPE_FUTURE,           /* [Future T] -- u.future.resolves_to_idx */
+  TYPE_SHAPE_BOX,              /* [Box T] -- u.box.boxes_idx */
 } TypeShapeKind;
 
 typedef struct {
   TypeShapeKind kind;
   union {
-    StructTypeDef* struct_def;         /* STRUCT, CTX */
+    StructTypeDef* struct_def;          /* STRUCT, CTX */
     struct { uint32_t elem_idx; } tvec; /* TYPED_VEC */
     struct { uint32_t key_idx;
              uint32_t value_idx; } tmap; /* TYPED_MAP. key_idx == UINT32_MAX
                                           * for [Map V] (dyn keys). */
+    struct { uint32_t len;
+             uint32_t elem_idx; } buf;   /* BUF */
+    struct { uint32_t pointee_idx; } ptr;        /* PTR */
+    struct { uint32_t resolves_to_idx; } future; /* FUTURE */
+    struct { uint32_t boxes_idx; } box;          /* BOX */
   } u;
 } TypeShape;
 
@@ -214,6 +223,84 @@ static uint32_t type_shape_intern_typed_map(StructTypeRegistry* reg,
   reg->shapes[idx].kind = TYPE_SHAPE_TYPED_MAP;
   reg->shapes[idx].u.tmap.key_idx   = key_idx;
   reg->shapes[idx].u.tmap.value_idx = value_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a buf shape [Buf N T]. Phase 5. */
+static uint32_t type_shape_intern_buf(StructTypeRegistry* reg,
+                                       uint32_t len, uint32_t elem_idx) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_BUF &&
+        reg->shapes[i].u.buf.len == len &&
+        reg->shapes[i].u.buf.elem_idx == elem_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_BUF;
+  reg->shapes[idx].u.buf.len      = len;
+  reg->shapes[idx].u.buf.elem_idx = elem_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a ptr shape [Ptr T]. Phase 5. */
+static uint32_t type_shape_intern_ptr(StructTypeRegistry* reg,
+                                       uint32_t pointee_idx) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_PTR &&
+        reg->shapes[i].u.ptr.pointee_idx == pointee_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_PTR;
+  reg->shapes[idx].u.ptr.pointee_idx = pointee_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a future shape [Future T]. Phase 5. */
+static uint32_t type_shape_intern_future(StructTypeRegistry* reg,
+                                          uint32_t resolves_to_idx) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_FUTURE &&
+        reg->shapes[i].u.future.resolves_to_idx == resolves_to_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_FUTURE;
+  reg->shapes[idx].u.future.resolves_to_idx = resolves_to_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a box shape [Box T]. Phase 5. */
+static uint32_t type_shape_intern_box(StructTypeRegistry* reg,
+                                       uint32_t boxes_idx) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_BOX &&
+        reg->shapes[i].u.box.boxes_idx == boxes_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_BOX;
+  reg->shapes[idx].u.box.boxes_idx = boxes_idx;
   reg->count++;
   return idx;
 }
