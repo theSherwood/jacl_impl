@@ -206,6 +206,34 @@ real "close the door on this class of problems" payoff.
 - **Migration drift across phases.** *Mitigation*: phase exits are
   full-suite-green gates; never merge a half-migrated reader.
 
+## Status (live)
+
+| Phase | State |
+|---|---|
+| 0 (audit) | done |
+| 1 (parallel TypeShape array) | shipped `3400ac5` |
+| 2 (typed-vec intern; compiler-side migrate) | shipped `519fdd2` |
+| 3 (shared registry above typer.c; typed-map intern; typer + compiler migrate) | shipped (this commit) |
+| 4 (`[Buf N [Map K V]]` wire + test) | shipped (this commit) |
+| 5 (more kinds: BUF / PTR / FUTURE / BOX) | deferred |
+
+Mid-Phase-3 surprise that wasn't in the Phase 0 audit: the original
+shape registry lived in `src/compiler.c`, which is included **after**
+`typer.c` in the unity build, so the typer couldn't reach the intern
+helpers. Resolved by extracting the registry types + helpers into a
+new `src/shapes.c` included between `ast.c` and `typer.c`. Both phases
+now hold their own `StructTypeRegistry` (typer-side bounded to one
+call to `typer_infer`; compiler-side travels to runtime as
+`vm->struct_registry`). Each registry interns shapes for the shapes
+it sees, independent of the other.
+
+Typer-side encoding uses an offset trick to keep shape indices disjoint
+from struct indices in `tc->structs[]`: shape registry counts from
+`TYPER_MAX_STRUCTS` (= 256), so a `binding.struct_idx < TYPER_MAX_STRUCTS`
+is a struct table idx, `>= TYPER_MAX_STRUCTS && < JACL_SCALAR_VEC_BASE`
+is a shape registry idx, `>= JACL_SCALAR_VEC_BASE` is a scalar
+sentinel. One field, three meanings, no aux clutter on the binding.
+
 ## Sizing
 
 | Phase | Estimate |

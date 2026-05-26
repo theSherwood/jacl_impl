@@ -44,6 +44,7 @@
 #include "ast.c"
 #include "type_error.c"
 #include "parser.c"
+#include "shapes.c"
 #include "typer.c"
 #include "bytecode.c"
 #include "collections.c"

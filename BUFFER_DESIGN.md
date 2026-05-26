@@ -22,7 +22,8 @@ when M4 lands).
 | **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write+literal-init+struct-inner; deeper nesting deferred) | `ddc7163` + `fcd4c48` + this |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
 | **M4.4** GC-traced element types | ✅ done (flat locals; struct-field + nested ref-elem deferred) | `26fa6b8` |
-| **M4.4 ext** Typed-collection elements `[Buf N [Vec T]]` | ✅ done | this |
+| **M4.4 ext** Typed-collection elements `[Buf N [Vec T]]` | ✅ done | `0cf93f5` |
+| **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | this |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |

@@ -1,0 +1,29 @@
+# expect: 100
+# expect: 200
+# expect: nil
+# expect: 7
+# expect: 11
+# Phase 3+4 of TYPE_REGISTRY_REFACTOR.md:
+# [Buf N [Map K V]] -- typed-map element type. The shape entry in
+# the type registry carries both K and V; the buf binding stores
+# one registry idx instead of growing aux fields per nesting depth.
+struct Point { i32 x, i32 y }
+proc main {} {
+  def [Buf 3 [Map i64 i64]] xs
+  def m1 [[Map i64 i64] 1 100 2 200]
+  [buf-set $xs 0 $m1]
+
+  def got [buf-get $xs 0]
+  print [map-get $got 1]
+  print [map-get $got 2]
+  print [buf-get $xs 2]
+
+  def [Buf 2 [Map i64 Point]] points
+  def pm [[Map i64 Point] 7 [Point 7 11]]
+  [buf-set $points 0 $pm]
+  def pgot [buf-get $points 0]
+  def p [map-get $pgot 7]
+  print $p->x
+  print $p->y
+}
+main

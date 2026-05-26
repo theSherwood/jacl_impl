@@ -1249,13 +1249,16 @@ typedef struct {
   StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 
-/* TypeShape: see compiler.c (TYPE_REGISTRY_REFACTOR.md). Phase 1
- * carries the kind tag alongside the existing defs[] pointer array. */
+/* TypeShape: see src/shapes.c (TYPE_REGISTRY_REFACTOR.md). The unity
+ * build's source-of-truth lives in shapes.c; this mirror is for
+ * external consumers (test binaries, embedders). Must stay byte-for-
+ * byte identical to shapes.c or external reads grab wrong offsets. */
 typedef enum {
   TYPE_SHAPE_NONE = 0,
   TYPE_SHAPE_STRUCT,
   TYPE_SHAPE_CTX,
-  TYPE_SHAPE_TYPED_VEC,        /* [Vec T] -- u.tvec.elem_idx (Phase 2) */
+  TYPE_SHAPE_TYPED_VEC,
+  TYPE_SHAPE_TYPED_MAP,
 } TypeShapeKind;
 
 typedef struct {
@@ -1263,6 +1266,7 @@ typedef struct {
   union {
     StructTypeDef* struct_def;
     struct { uint32_t elem_idx; } tvec;
+    struct { uint32_t key_idx; uint32_t value_idx; } tmap;
   } u;
 } TypeShape;
 

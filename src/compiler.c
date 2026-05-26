@@ -181,83 +181,9 @@ bool is_struct_value_type(JaclType t) {
 }
 
 
-/* --- Struct type registry --- */
-
-#define STRUCT_REGISTRY_INIT_CAP 32
-#define STRUCT_MAX_FIELDS   256   /* stack buffer limit for temp field arrays */
-
-typedef struct {
-  const char* name;
-  uint32_t    name_len;
-  JaclType    type;
-  uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT; for TYPE_BUF, the element encoding (scalar sentinel or struct idx) */
-  uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
-  uint32_t    size;            /* field size in bytes (C-ABI) */
-  bool        is_mutable;      /* true if field can be written via set */
-  JaclVal     default_val;     /* default value for ctx fields (JACL_NIL if none) */
-  uint32_t    buf_len;         /* TYPE_BUF: N (in elements). 0 otherwise. See BUFFER_DESIGN.md M4.3. */
-} StructTypeField;
-
-typedef struct {
-  const char* name;
-  uint32_t    name_len;
-  JaclVal     name_val;       /* inline string (for global_arities lookup) */
-  uint32_t    field_count;
-  uint32_t    total_size;     /* total size including trailing padding */
-  uint32_t    alignment;      /* max alignment of all fields */
-  StructTypeField fields[];   /* flexible array member — variable field count */
-} StructTypeDef;
-
-/* TypeShape: the unifying type-shape registry entry. Today every entry
- * is a struct shape (STRUCT or CTX); typed-vec / typed-map / ptr / buf
- * shapes get folded in by later phases of TYPE_REGISTRY_REFACTOR.md.
- *
- * Phase 1 keeps the existing `defs` array alive as a parallel view so
- * the 57 existing `reg->defs[idx]` readers keep working unchanged --
- * each writes both arrays at registration time. Phase 2 migrates the
- * readers to consult `shapes[idx]` directly with kind awareness once
- * non-struct entries (typed-vec) start landing. */
-typedef enum {
-  TYPE_SHAPE_NONE = 0,        /* reserved / slot 0 (dyn placeholder) */
-  TYPE_SHAPE_STRUCT,          /* user-declared struct -- u.struct_def */
-  TYPE_SHAPE_CTX,             /* the lone HeapRecord builtin */
-  TYPE_SHAPE_TYPED_VEC,       /* [Vec T] -- u.tvec.elem_idx (Phase 2) */
-  /* Phase 3: TYPE_SHAPE_TYPED_MAP */
-} TypeShapeKind;
-
-typedef struct {
-  TypeShapeKind kind;
-  union {
-    StructTypeDef* struct_def;        /* STRUCT, CTX */
-    struct { uint32_t elem_idx; } tvec; /* TYPED_VEC -- T's encoding
-                                         * (scalar sentinel or struct idx) */
-    /* Phase 3: tmap { uint32_t key_idx, value_idx; }; */
-  } u;
-} TypeShape;
-
-struct StructTypeRegistry {
-  StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved for dyn).
-                               * Parallel view of `shapes[]` for non-struct kinds: NULL.
-                               * Existing readers keep using this; Phase 2 migrates them. */
-  TypeShape* shapes;          /* shapes[type_idx] -- carries the kind tag + payload. */
-  uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
-  uint32_t capacity;          /* capacity of defs / shapes arrays */
-  arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
-  uint32_t ctx_type_idx;      /* type_idx of the ctx struct (0 = not yet registered) */
-};
-/* typedef already forward-declared above */
-
-/* Return the kind of the registry entry at idx. Callers that only care
- * "is this a struct" can stay on the legacy defs[] path; new code that
- * needs to discriminate kinds (Phase 2+) consults this helper. */
-static inline TypeShapeKind type_shape_kind(const StructTypeRegistry* reg,
-                                             uint32_t idx) {
-  if (!reg || idx >= reg->count) return TYPE_SHAPE_NONE;
-  return reg->shapes[idx].kind;
-}
-
-/* Forward decl for typed-vec interning -- grow lives further down. */
-static bool struct_registry__grow(StructTypeRegistry* reg);
+/* --- Struct type registry ---
+ * Definitions live in src/shapes.c, included earlier in the unity
+ * build so the typer can also reach the registry helpers. */
 
 /* Decode a buf-element encoding into the JaclType that downstream
  * codegen (OP_BUF_GET/SET_LOCAL elem-type byte, dispatch between
@@ -282,6 +208,11 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
     case TYPE_SHAPE_TYPED_VEC:
       if (out_inner_idx) *out_inner_idx = shape->u.tvec.elem_idx;
       return TYPE_TYPED_VEC;
+    case TYPE_SHAPE_TYPED_MAP:
+      /* V via out_inner_idx; K is reachable via shape->u.tmap.key_idx
+       * for callers that need it. */
+      if (out_inner_idx) *out_inner_idx = shape->u.tmap.value_idx;
+      return TYPE_TYPED_MAP;
     case TYPE_SHAPE_STRUCT:
     case TYPE_SHAPE_CTX:
       return TYPE_STRUCT;
@@ -290,106 +221,7 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
   }
 }
 
-/* Intern a typed-vec shape. Returns the registry idx of the entry, or
- * UINT32_MAX on allocation failure. Two identical (kind, elem_idx)
- * requests share an idx so equality checks reduce to integer compare.
- * Phase 2 of TYPE_REGISTRY_REFACTOR.md. */
-static uint32_t type_shape_intern_typed_vec(StructTypeRegistry* reg,
-                                            uint32_t elem_idx) {
-  if (!reg) return UINT32_MAX;
-  /* Linear scan over existing entries -- typed-vec shapes are rare
-   * (one per distinct [Vec T] textual occurrence) so a hash table is
-   * not warranted at the current scale. Revisit if profiles complain. */
-  for (uint32_t i = 1; i < reg->count; i++) {
-    if (reg->shapes[i].kind == TYPE_SHAPE_TYPED_VEC &&
-        reg->shapes[i].u.tvec.elem_idx == elem_idx) {
-      return i;
-    }
-  }
-  if (!struct_registry__grow(reg)) return UINT32_MAX;
-  uint32_t idx = reg->count;
-  reg->defs[idx] = NULL;                            /* no StructTypeDef */
-  reg->shapes[idx].kind = TYPE_SHAPE_TYPED_VEC;
-  reg->shapes[idx].u.tvec.elem_idx = elem_idx;
-  reg->count++;
-  return idx;
-}
-
-/* Allocate a StructTypeDef with N fields in the registry's arena */
-static StructTypeDef* struct_registry__alloc_def(StructTypeRegistry* reg, uint32_t field_count) {
-  size_t sz = sizeof(StructTypeDef) + field_count * sizeof(StructTypeField);
-  return (StructTypeDef*)arena_alloc(reg->arena, sz);
-}
-
-/* Ensure the defs pointer array has room for at least one more entry.
- * Returns false (without growing) if growing would push valid struct
- * indices into the COMPILER_SCALAR_VEC_BASE sentinel range used by
- * scalar-typed collections (see compiler.c near typed_collection_expr). */
-static bool struct_registry__grow(StructTypeRegistry* reg) {
-  if (reg->count < reg->capacity) return true;
-  uint32_t new_cap = reg->capacity * 2;
-  if (new_cap < STRUCT_REGISTRY_INIT_CAP) new_cap = STRUCT_REGISTRY_INIT_CAP;
-  if (new_cap >= COMPILER_SCALAR_VEC_BASE) return false; /* sentinel collision */
-  StructTypeDef** new_defs = (StructTypeDef**)realloc(reg->defs, new_cap * sizeof(StructTypeDef*));
-  if (!new_defs) return false;
-  TypeShape* new_shapes = (TypeShape*)realloc(reg->shapes, new_cap * sizeof(TypeShape));
-  if (!new_shapes) { reg->defs = new_defs; return false; }
-  /* Zero new slots in both views. */
-  for (uint32_t i = reg->capacity; i < new_cap; i++) {
-    new_defs[i] = NULL;
-    new_shapes[i].kind = TYPE_SHAPE_NONE;
-    new_shapes[i].u.struct_def = NULL;
-  }
-  reg->defs = new_defs;
-  reg->shapes = new_shapes;
-  reg->capacity = new_cap;
-  return true;
-}
-
-/* True for user-defined structs (which use the inline representation).
-   False for ctx, the lone HeapRecord builtin. With ref fields rejected at
-   defstruct, every user struct is value-type by construction; the only
-   non-inline struct is ctx, identified by reg->ctx_type_idx. */
-static inline bool struct_def_is_user(const StructTypeDef* sdef,
-                                      const StructTypeRegistry* reg) {
-  if (!sdef || !reg) return false;
-  /* ctx slot is fixed at index 1; reg->ctx_type_idx points at it.
-   * Compare by pointer so a NULL-placeholder ctx doesn't mis-classify. */
-  return sdef != reg->defs[reg->ctx_type_idx];
-}
-
-/* Initialize a struct type registry. Container is arena-allocated; defs array is heap-allocated.
-   arena: the arena used for StructTypeDef allocations (must outlive the registry). */
-static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
-  reg->arena = arena;
-  reg->capacity = STRUCT_REGISTRY_INIT_CAP;
-  reg->defs = (StructTypeDef**)calloc(reg->capacity, sizeof(StructTypeDef*));
-  reg->shapes = (TypeShape*)calloc(reg->capacity, sizeof(TypeShape));
-  /* slot 0 is reserved for plain dyn JaclVal boxes;
-   * slot 1 is reserved for the ctx struct (filled by
-   * ctx_field_list__finalize, which now patches in place). User
-   * structs register starting at slot 2. */
-  reg->count = 2;
-  reg->defs[0] = NULL;
-  reg->defs[1] = NULL;
-  /* shapes[] is calloc'd so slot 0/1 start with kind=TYPE_SHAPE_NONE.
-   * Slot 1 gets stamped TYPE_SHAPE_CTX when ctx_field_list__finalize
-   * fills it; user structs flip their slot to TYPE_SHAPE_STRUCT at
-   * registration. */
-  reg->ctx_type_idx = 1;
-}
-
-/* Free the heap-allocated defs pointer array. Does not free StructTypeDef entries
-   (those live in the arena and are freed when the arena is destroyed). */
-static void struct_registry__destroy(StructTypeRegistry* reg) {
-  if (!reg) return;
-  free(reg->defs);
-  free(reg->shapes);
-  reg->defs = NULL;
-  reg->shapes = NULL;
-  reg->count = 0;
-  reg->capacity = 0;
-}
+/* Registry lifecycle + intern helpers live in src/shapes.c. */
 
 /* --- Ctx field list: accumulates ctx declarations during compilation --- */
 
@@ -7266,6 +7098,82 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         elem_struct_idx = shape_idx;  /* registry idx, not scalar sentinel */
         typed_elem_idx = inner_idx;   /* legacy mirror, dropped below once
                                        * readers consult the registry. */
+      } else if (telt->type == AST_COMMAND &&
+                 telt->data.command.head &&
+                 telt->data.command.head->type == AST_LIT_STRING &&
+                 telt->data.command.head->data.lit_string.length == 3 &&
+                 memcmp(telt->data.command.head->data.lit_string.value, "Map", 3) == 0 &&
+                 (telt->data.command.arg_count == 1 ||
+                  telt->data.command.arg_count == 2)) {
+        /* Typed-map element [Buf N [Map V]] / [Buf N [Map K V]] (Phase 3
+         * of TYPE_REGISTRY_REFACTOR.md). Slot is a tagged JaclVal; the
+         * shape entry in the compiler registry carries K + V so the buf
+         * binding stores one idx -- aux fields stay at one (the legacy
+         * key_struct_idx slot) for all nesting depths. */
+        AstNode* k_arg = NULL;
+        AstNode* v_arg = NULL;
+        if (telt->data.command.arg_count == 1) {
+          v_arg = telt->data.command.args[0];
+        } else {
+          k_arg = telt->data.command.args[0];
+          v_arg = telt->data.command.args[1];
+        }
+        StructTypeRegistry* preg2 = compiler__get_struct_registry(c);
+        uint32_t key_idx = UINT32_MAX;
+        if (k_arg && k_arg->type == AST_LIT_STRING) {
+          JaclType k_jt;
+          if (!compiler__resolve_type(c, k_arg->data.lit_string.value,
+                                      k_arg->data.lit_string.length, &k_jt)) {
+            compiler__error(c, line, col,
+                "[Buf N [Map K V]] key type must be a scalar keyword or struct name");
+            return;
+          }
+          if (k_jt == TYPE_STRUCT) {
+            key_idx = preg2 ? struct_registry__find(preg2,
+                k_arg->data.lit_string.value,
+                k_arg->data.lit_string.length) : UINT32_MAX;
+            if (key_idx == UINT32_MAX) {
+              compiler__error(c, line, col,
+                  "[Buf N [Map Struct V]] unknown key struct type");
+              return;
+            }
+          } else {
+            key_idx = JACL_SCALAR_TYPE_IDX(k_jt);
+          }
+        }
+        if (!v_arg || v_arg->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+              "[Buf N [Map K V]] value type must be a scalar keyword or struct name");
+          return;
+        }
+        JaclType v_jt;
+        if (!compiler__resolve_type(c, v_arg->data.lit_string.value,
+                                    v_arg->data.lit_string.length, &v_jt)) {
+          compiler__error(c, line, col,
+              "[Buf N [Map K V]] value type must be a scalar keyword or struct name");
+          return;
+        }
+        uint32_t value_idx = UINT32_MAX;
+        if (v_jt == TYPE_STRUCT) {
+          value_idx = preg2 ? struct_registry__find(preg2,
+              v_arg->data.lit_string.value,
+              v_arg->data.lit_string.length) : UINT32_MAX;
+          if (value_idx == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Map K Struct]] unknown value struct type");
+            return;
+          }
+        } else {
+          value_idx = JACL_SCALAR_TYPE_IDX(v_jt);
+        }
+        uint32_t shape_idx = type_shape_intern_typed_map(preg2, key_idx, value_idx);
+        if (shape_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Buf N [Map K V]] failed to intern typed-map shape");
+          return;
+        }
+        elem_type = TYPE_TYPED_MAP;
+        elem_struct_idx = shape_idx;
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -7440,7 +7348,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        *     consult `reg->shapes[idx].u.tvec.elem_idx` for T.
        *   - everything else: scalar sentinel for the JaclType keyword. */
       c->locals[c->local_count - 1].struct_type_idx =
-          (elem_type == TYPE_STRUCT || elem_type == TYPE_TYPED_VEC)
+          (elem_type == TYPE_STRUCT ||
+           elem_type == TYPE_TYPED_VEC ||
+           elem_type == TYPE_TYPED_MAP)
               ? elem_struct_idx
               : JACL_SCALAR_TYPE_IDX(elem_type);
       c->locals[c->local_count - 1].width = (uint16_t)slot_count;
@@ -7467,7 +7377,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           (elem_type == TYPE_DYN || elem_type == TYPE_STR ||
            elem_type == TYPE_VEC || elem_type == TYPE_MAP ||
            elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM ||
-           elem_type == TYPE_TYPED_VEC);
+           elem_type == TYPE_TYPED_VEC || elem_type == TYPE_TYPED_MAP);
       if (elem_is_ref && inner_buf_len > 0) {
         compiler__error(c, line, col,
             "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "

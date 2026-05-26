@@ -3063,7 +3063,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_MAP:
           case TYPE_CLOSURE:
           case TYPE_STREAM:
-          case TYPE_TYPED_VEC: {
+          case TYPE_TYPED_VEC:
+          case TYPE_TYPED_MAP: {
             /* Ref-element buf (M4.4): one JaclVal slot per index. Each
              * slot is GC-traced via the normal stack walker -- no inline-
              * bitmap entry was set at zero-init, so the marker sees them. */
@@ -3189,7 +3190,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_MAP:
           case TYPE_CLOSURE:
           case TYPE_STREAM:
-          case TYPE_TYPED_VEC: {
+          case TYPE_TYPED_VEC:
+          case TYPE_TYPED_MAP: {
             /* Ref-element buf (M4.4): write a tagged JaclVal to slot [idx].
              * Call gc_write_barrier so a concurrently-marking collector
              * sees both the old value (SATB) and the new reference. The
@@ -3372,7 +3374,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_MAP:
           case TYPE_CLOSURE:
           case TYPE_STREAM:
-          case TYPE_TYPED_VEC: {
+          case TYPE_TYPED_VEC:
+          case TYPE_TYPED_MAP: {
             /* Ref-element buf (M4.4): one JaclVal slot per index. */
             loaded = vm->stack[frame->stack_base + base_slot + (uint32_t)idx];
             break;
@@ -3487,7 +3490,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_MAP:
           case TYPE_CLOSURE:
           case TYPE_STREAM:
-          case TYPE_TYPED_VEC: {
+          case TYPE_TYPED_VEC:
+          case TYPE_TYPED_MAP: {
             /* Ref-element buf (M4.4): tagged JaclVal store + write barrier. */
             JaclVal* slot = &vm->stack[frame->stack_base + base_slot
                                        + (uint32_t)idx];
@@ -12540,10 +12544,12 @@ interpret_done:
 
         /* Print NIL when the slot is uninitialized -- e.g. a [Buf N
          * [Vec T]] element that's been zero-init'd but never written.
-         * Without this, typed-vec narrowing on a ref-elem buf would
-         * trap on the first peek at an unset slot. */
+         * Must push NIL as the return value so the next op finds the
+         * right TOS (the non-nil path below pushes JACL_NIL too). */
         if (jacl_is_nil(tvec_val)) {
           vm->print_fn("nil\n", 4, vm->print_ctx);
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
           DISPATCH();
         }
         JACL_ASSERT_TAG(tvec_val, jacl_is_typed_vector);
@@ -12580,6 +12586,16 @@ interpret_done:
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
+        /* Print NIL when the slot is uninitialized -- e.g. a [Buf N
+         * [Map K V]] element that's been zero-init'd but never written.
+         * Mirrors OP_TYPED_VEC_PRINT (Phase 2). Must push NIL as the
+         * return value so the next op finds the right TOS. */
+        if (jacl_is_nil(tmap_val)) {
+          vm->print_fn("nil\n", 4, vm->print_ctx);
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
         JACL_ASSERT_TAG(tmap_val, jacl_is_typed_map);
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         bool val_is_scalar = (type_idx >= 0xFF00);
