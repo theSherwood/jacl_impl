@@ -208,14 +208,50 @@ typedef struct {
   StructTypeField fields[];   /* flexible array member — variable field count */
 } StructTypeDef;
 
+/* TypeShape: the unifying type-shape registry entry. Today every entry
+ * is a struct shape (STRUCT or CTX); typed-vec / typed-map / ptr / buf
+ * shapes get folded in by later phases of TYPE_REGISTRY_REFACTOR.md.
+ *
+ * Phase 1 keeps the existing `defs` array alive as a parallel view so
+ * the 57 existing `reg->defs[idx]` readers keep working unchanged --
+ * each writes both arrays at registration time. Phase 2 migrates the
+ * readers to consult `shapes[idx]` directly with kind awareness once
+ * non-struct entries (typed-vec) start landing. */
+typedef enum {
+  TYPE_SHAPE_NONE = 0,        /* reserved / slot 0 (dyn placeholder) */
+  TYPE_SHAPE_STRUCT,          /* user-declared struct -- u.struct_def */
+  TYPE_SHAPE_CTX,             /* the lone HeapRecord builtin */
+  /* Phase 2/3: TYPE_SHAPE_TYPED_VEC, TYPE_SHAPE_TYPED_MAP */
+} TypeShapeKind;
+
+typedef struct {
+  TypeShapeKind kind;
+  union {
+    StructTypeDef* struct_def;  /* STRUCT, CTX */
+    /* Phase 2/3: tvec { uint32_t elem_idx; }; tmap { uint32_t key_idx, value_idx; }; */
+  } u;
+} TypeShape;
+
 struct StructTypeRegistry {
-  StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved for dyn) */
+  StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved for dyn).
+                               * Parallel view of `shapes[]` for non-struct kinds: NULL.
+                               * Existing readers keep using this; Phase 2 migrates them. */
+  TypeShape* shapes;          /* shapes[type_idx] -- carries the kind tag + payload. */
   uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
-  uint32_t capacity;          /* capacity of defs pointer array */
+  uint32_t capacity;          /* capacity of defs / shapes arrays */
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
   uint32_t ctx_type_idx;      /* type_idx of the ctx struct (0 = not yet registered) */
 };
 /* typedef already forward-declared above */
+
+/* Return the kind of the registry entry at idx. Callers that only care
+ * "is this a struct" can stay on the legacy defs[] path; new code that
+ * needs to discriminate kinds (Phase 2+) consults this helper. */
+static inline TypeShapeKind type_shape_kind(const StructTypeRegistry* reg,
+                                             uint32_t idx) {
+  if (!reg || idx >= reg->count) return TYPE_SHAPE_NONE;
+  return reg->shapes[idx].kind;
+}
 
 /* Allocate a StructTypeDef with N fields in the registry's arena */
 static StructTypeDef* struct_registry__alloc_def(StructTypeRegistry* reg, uint32_t field_count) {
@@ -234,9 +270,16 @@ static bool struct_registry__grow(StructTypeRegistry* reg) {
   if (new_cap >= COMPILER_SCALAR_VEC_BASE) return false; /* sentinel collision */
   StructTypeDef** new_defs = (StructTypeDef**)realloc(reg->defs, new_cap * sizeof(StructTypeDef*));
   if (!new_defs) return false;
-  /* Zero new slots */
-  for (uint32_t i = reg->capacity; i < new_cap; i++) new_defs[i] = NULL;
+  TypeShape* new_shapes = (TypeShape*)realloc(reg->shapes, new_cap * sizeof(TypeShape));
+  if (!new_shapes) { reg->defs = new_defs; return false; }
+  /* Zero new slots in both views. */
+  for (uint32_t i = reg->capacity; i < new_cap; i++) {
+    new_defs[i] = NULL;
+    new_shapes[i].kind = TYPE_SHAPE_NONE;
+    new_shapes[i].u.struct_def = NULL;
+  }
   reg->defs = new_defs;
+  reg->shapes = new_shapes;
   reg->capacity = new_cap;
   return true;
 }
@@ -259,6 +302,7 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
   reg->arena = arena;
   reg->capacity = STRUCT_REGISTRY_INIT_CAP;
   reg->defs = (StructTypeDef**)calloc(reg->capacity, sizeof(StructTypeDef*));
+  reg->shapes = (TypeShape*)calloc(reg->capacity, sizeof(TypeShape));
   /* slot 0 is reserved for plain dyn JaclVal boxes;
    * slot 1 is reserved for the ctx struct (filled by
    * ctx_field_list__finalize, which now patches in place). User
@@ -266,6 +310,10 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
   reg->count = 2;
   reg->defs[0] = NULL;
   reg->defs[1] = NULL;
+  /* shapes[] is calloc'd so slot 0/1 start with kind=TYPE_SHAPE_NONE.
+   * Slot 1 gets stamped TYPE_SHAPE_CTX when ctx_field_list__finalize
+   * fills it; user structs flip their slot to TYPE_SHAPE_STRUCT at
+   * registration. */
   reg->ctx_type_idx = 1;
 }
 
@@ -274,7 +322,9 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
 static void struct_registry__destroy(StructTypeRegistry* reg) {
   if (!reg) return;
   free(reg->defs);
+  free(reg->shapes);
   reg->defs = NULL;
+  reg->shapes = NULL;
   reg->count = 0;
   reg->capacity = 0;
 }
@@ -439,6 +489,8 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
 
   reg->defs[type_idx] = sdef;
+  reg->shapes[type_idx].kind = TYPE_SHAPE_CTX;
+  reg->shapes[type_idx].u.struct_def = sdef;
   return type_idx;
 }
 
@@ -640,6 +692,8 @@ uint32_t compiler__register_inline_struct(
 
   uint32_t idx = reg->count;
   reg->defs[idx] = sdef;
+  reg->shapes[idx].kind = TYPE_SHAPE_STRUCT;
+  reg->shapes[idx].u.struct_def = sdef;
   reg->count++;
   return idx;
 }
@@ -13907,6 +13961,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
       /* Assign to reserved slot */
       reg->defs[this_idx] = sdef;
+      reg->shapes[this_idx].kind = TYPE_SHAPE_STRUCT;
+      reg->shapes[this_idx].u.struct_def = sdef;
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */

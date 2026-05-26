@@ -1249,8 +1249,24 @@ typedef struct {
   StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 
+/* TypeShape: see compiler.c (TYPE_REGISTRY_REFACTOR.md). Phase 1
+ * carries the kind tag alongside the existing defs[] pointer array. */
+typedef enum {
+  TYPE_SHAPE_NONE = 0,
+  TYPE_SHAPE_STRUCT,
+  TYPE_SHAPE_CTX,
+} TypeShapeKind;
+
+typedef struct {
+  TypeShapeKind kind;
+  union {
+    StructTypeDef* struct_def;
+  } u;
+} TypeShape;
+
 struct StructTypeRegistry {
   StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved) */
+  TypeShape*      shapes;     /* parallel view -- shapes[idx].kind + payload (Phase 1) */
   uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
   uint32_t capacity;
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
