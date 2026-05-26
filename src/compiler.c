@@ -7054,6 +7054,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclType elem_type;
       uint32_t elem_struct_idx = UINT32_MAX;
       uint32_t inner_buf_len   = 0;  /* M for nested [Buf N [Buf M T]] */
+      AstNode* struct_name_node = telt;  /* LIT_STRING node holding T's
+                                          * name when elem_type==TYPE_STRUCT.
+                                          * For nested with struct inner this
+                                          * is reset to inner_telt below. */
       if (telt->type == AST_LIT_STRING) {
         if (!compiler__resolve_type(c, telt->data.lit_string.value,
                                     telt->data.lit_string.length, &elem_type)) {
@@ -7067,12 +7071,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                  telt->data.command.head->data.lit_string.length == 3 &&
                  memcmp(telt->data.command.head->data.lit_string.value, "Buf", 3) == 0 &&
                  telt->data.command.arg_count == 2) {
-        /* Nested buf element type: [Buf N [Buf M T]] (M4.2).
-         * Inner T must be a scalar; deeper nesting and struct inner
-         * elements are deferred. Encoded as flat element type T with
-         * inner_buf_len = M; the outer N stays in `n`. Indexing
-         * `$matrix->i` yields [Ptr T] via OP_BUF_ADDR_LOCAL at
-         * offset i*M*sizeof(T). */
+        /* Nested buf element type: [Buf N [Buf M T]] (M4.2). Inner T
+         * may be a scalar or a value-type struct (M4.2.2). Encoded
+         * with the inner element T occupying struct_type_idx (scalar
+         * sentinel for scalars, real registry idx for structs) and
+         * inner_buf_len = M. The outer N stays in `n`. For scalar
+         * inner, `$matrix->i` yields [Ptr T] via OP_BUF_ADDR_LOCAL
+         * (M4.2 base). For struct inner, `$matrix->i->j` is compiled
+         * as a chain in HEAD_DOT that emits
+         * OP_BUF_GET_STRUCT_LOCAL with flat index i*M+j (M4.2.2). */
         AstNode* inner_mlen = telt->data.command.args[0];
         AstNode* inner_telt = telt->data.command.args[1];
         if (inner_mlen->type != AST_LIT_INT || inner_mlen->data.lit_int.value <= 0) {
@@ -7082,13 +7089,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         if (inner_telt->type != AST_LIT_STRING ||
             !compiler__resolve_type(c, inner_telt->data.lit_string.value,
-                                    inner_telt->data.lit_string.length, &elem_type) ||
-            elem_type == TYPE_STRUCT) {
+                                    inner_telt->data.lit_string.length, &elem_type)) {
           compiler__error(c, line, col,
-                          "[Buf N [Buf M T]] inner element type must be a scalar (M4.2)");
+                          "[Buf N [Buf M T]] inner element type must be a scalar keyword or struct name");
           return;
         }
         inner_buf_len = (uint32_t)inner_mlen->data.lit_int.value;
+        struct_name_node = inner_telt;
+        /* For struct inner element, fall through to the shared struct
+         * resolve block below; it looks up elem_struct_idx and checks
+         * struct_def_is_user using struct_name_node. */
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -7101,7 +7111,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (elem_type == TYPE_STRUCT) {
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         elem_struct_idx = reg ? struct_registry__find(reg,
-            telt->data.lit_string.value, telt->data.lit_string.length)
+            struct_name_node->data.lit_string.value,
+            struct_name_node->data.lit_string.length)
             : UINT32_MAX;
         if (elem_struct_idx == UINT32_MAX) {
           compiler__error(c, line, col,
@@ -11501,27 +11512,52 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       /* Nested buf [Buf N [Buf M T]]: $matrix->i pushes the address
        * of row i as a [Ptr T] (decay-style). No load -- the chained
-       * ->j (if any) flows through the existing ptr-arrow path.
-       * Bounds-checked at compile time against the outer N. M4.2. */
+       * ->j (if any) flows through the existing ptr-arrow path
+       * (scalar T -> OP_PTR_LOAD; struct T -> OP_PTR_LOAD_INLINE,
+       * M4.2.2). Bounds-checked at compile time against the outer N. */
       if (found >= 0 && c->locals[found].type == TYPE_BUF &&
           c->locals[found].buf_inner_len > 0 &&
-          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx) &&
           !is_set) {
         uint32_t base_slot      = (uint32_t)found;
         uint32_t outer_N        = c->locals[found].buf_len;
         uint32_t inner_M        = c->locals[found].buf_inner_len;
-        JaclType elem_type      = JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        uint32_t elem_sidx      = c->locals[found].struct_type_idx;
         int32_t  idx_lit        = args[1]->data.lit_int.value;
         if (idx_lit < 0 || (uint32_t)idx_lit >= outer_N) {
           char err[160];
-          snprintf(err, sizeof(err),
-              "buf index %d out of bounds for [Buf %u [Buf %u %s]]",
-              (int)idx_lit, (unsigned)outer_N, (unsigned)inner_M,
-              type_name(elem_type));
+          if (JACL_IS_SCALAR_TYPE_IDX(elem_sidx)) {
+            JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(elem_sidx);
+            snprintf(err, sizeof(err),
+                "buf index %d out of bounds for [Buf %u [Buf %u %s]]",
+                (int)idx_lit, (unsigned)outer_N, (unsigned)inner_M,
+                type_name(elem_type));
+          } else {
+            StructTypeRegistry* reg = compiler__get_struct_registry(c);
+            StructTypeDef* sd = (reg && elem_sidx < reg->count)
+                                ? reg->defs[elem_sidx] : NULL;
+            if (sd) {
+              snprintf(err, sizeof(err),
+                  "buf index %d out of bounds for [Buf %u [Buf %u %.*s]]",
+                  (int)idx_lit, (unsigned)outer_N, (unsigned)inner_M,
+                  (int)sd->name_len, sd->name);
+            } else {
+              snprintf(err, sizeof(err),
+                  "buf index %d out of bounds for [Buf %u [Buf %u Struct]]",
+                  (int)idx_lit, (unsigned)outer_N, (unsigned)inner_M);
+            }
+          }
           compiler__error(c, line, col, err);
           return;
         }
-        uint32_t elem_sz = struct__type_size(elem_type, NULL, 0);
+        uint32_t elem_sz;
+        if (JACL_IS_SCALAR_TYPE_IDX(elem_sidx)) {
+          elem_sz = struct__type_size(
+              JACL_TYPE_IDX_TO_SCALAR(elem_sidx), NULL, 0);
+        } else {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          elem_sz = (reg && elem_sidx < reg->count)
+                        ? reg->defs[elem_sidx]->total_size : 0;
+        }
         uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)inner_M * (uint64_t)elem_sz;
         if (byte_offset > 0xFFFFu) {
           compiler__error(c, line, col,
@@ -11691,14 +11727,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * AST_COMMAND, not a var-ref). The typer has already populated
      * `inferred_type` / `inferred_struct_idx` on the receiver, so
      * we can emit OP_PTR_LOAD / OP_PTR_STORE the same way as the
-     * var-ref branch above. See BUFFER_DESIGN.md
+     * var-ref branch above. For struct pointees we use the
+     * OP_PTR_LOAD_INLINE / OP_PTR_STORE_INLINE pair, which gives
+     * `$grid->i->j` for `[Buf N [Buf M Struct]]` once the outer
+     * arrow yields a `[Ptr Struct]` (M4.2.2). See BUFFER_DESIGN.md
      * "Receiver-shape generalization". */
     if (args[1]->type == AST_LIT_INT &&
         args[0]->type != AST_VAR_REF &&
         (JaclType)args[0]->inferred_type == TYPE_PTR &&
-        args[0]->inferred_struct_idx != UINT32_MAX &&
-        JACL_IS_SCALAR_TYPE_IDX(args[0]->inferred_struct_idx)) {
-      JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(args[0]->inferred_struct_idx);
+        args[0]->inferred_struct_idx != UINT32_MAX) {
+      uint32_t psidx = args[0]->inferred_struct_idx;
       int32_t idx_lit = args[1]->data.lit_int.value;
       if (idx_lit < 0) {
         char err[128];
@@ -11707,34 +11745,66 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
-      uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
-      if (byte_offset > 0xFFFFu) {
-        compiler__error(c, line, col, "ptr byte offset exceeds 65535");
-        return;
-      }
-      compiler__compile_node(c, args[0]);
-      if (is_set) {
-        compiler__compile_node(c, args[2]);
-        compiler__emit_byte(c, OP_PTR_STORE, line);
+      if (JACL_IS_SCALAR_TYPE_IDX(psidx)) {
+        JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(psidx);
+        uint32_t elem_sz = struct__type_size(pointee, NULL, 0);
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col, "ptr byte offset exceeds 65535");
+          return;
+        }
+        compiler__compile_node(c, args[0]);
+        if (is_set) {
+          compiler__compile_node(c, args[2]);
+          compiler__emit_byte(c, OP_PTR_STORE, line);
+          compiler__emit_u16(c, (uint16_t)byte_offset, line);
+          compiler__emit_byte(c, (uint8_t)pointee, line);
+          compiler__emit_byte(c, OP_POP, line);
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
+        compiler__emit_byte(c, OP_PTR_LOAD, line);
         compiler__emit_u16(c, (uint16_t)byte_offset, line);
         compiler__emit_byte(c, (uint8_t)pointee, line);
-        compiler__emit_byte(c, OP_POP, line);
-        compiler__emit_byte(c, OP_NIL, line);
-        c->last_expr_type = TYPE_NIL;
+        switch (pointee) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            c->last_expr_type = TYPE_I32; break;
+          default:
+            c->last_expr_type = pointee; break;
+        }
         return;
       }
-      compiler__emit_byte(c, OP_PTR_LOAD, line);
-      compiler__emit_u16(c, (uint16_t)byte_offset, line);
-      compiler__emit_byte(c, (uint8_t)pointee, line);
-      switch (pointee) {
-        case TYPE_I8: case TYPE_U8:
-        case TYPE_I16: case TYPE_U16:
-          c->last_expr_type = TYPE_I32; break;
-        default:
-          c->last_expr_type = pointee; break;
+      /* Struct pointee: load N inline slots via OP_PTR_LOAD_INLINE
+       * (read) or store via OP_PTR_STORE_INLINE (write). M4.2.2. */
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      if (reg && psidx < reg->count) {
+        StructTypeDef* sd = reg->defs[psidx];
+        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)sd->total_size;
+        if (byte_offset > 0xFFFFu) {
+          compiler__error(c, line, col,
+              "ptr byte offset exceeds 65535 for struct pointee");
+          return;
+        }
+        compiler__compile_node(c, args[0]);
+        if (is_set) {
+          compiler__compile_node(c, args[2]);
+          compiler__emit_byte(c, OP_PTR_STORE_INLINE, line);
+          compiler__emit_u16(c, (uint16_t)byte_offset, line);
+          compiler__emit_u16(c, (uint16_t)psidx, line);
+          compiler__emit_byte(c, OP_POP, line);   /* discard ptr */
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
+        compiler__emit_byte(c, OP_PTR_LOAD_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)byte_offset, line);
+        compiler__emit_u16(c, (uint16_t)psidx, line);
+        c->last_expr_type = TYPE_STRUCT;
+        c->inline_repr = INLINE_STACK;
+        return;
       }
-      return;
     }
 
     /* Check for module binding: $modname->field with literal field name

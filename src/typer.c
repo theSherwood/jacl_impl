@@ -430,22 +430,21 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
              t_arg->data.command.head->data.lit_string.length == 3 &&
              memcmp(t_arg->data.command.head->data.lit_string.value, "Buf", 3) == 0) {
     /* Nested buf element type: [Buf N [Buf M T]] -- recurse one level.
-     * Deeper nesting deferred; the inner T must itself be a scalar. */
+     * Deeper nesting deferred; inner T may be a scalar (M4.2 base) or
+     * a value-type struct (M4.2.2). */
     uint32_t inner_elem_sidx = UINT32_MAX;
     uint32_t inner_M = 0;
     uint32_t inner_inner_M = 0;
     if (typer__buf_type_full(tc, t_arg, &inner_elem_sidx, &inner_M,
                              &inner_inner_M) &&
         inner_M > 0 && inner_inner_M == 0 &&
-        inner_elem_sidx != UINT32_MAX &&
-        JACL_IS_SCALAR_TYPE_IDX(inner_elem_sidx)) {
+        inner_elem_sidx != UINT32_MAX) {
       *out_struct_idx = inner_elem_sidx;
       *out_inner_len  = inner_M;
     }
     /* If the inner form doesn't match the supported shape (deeper
-     * nesting, struct inner element, or malformed), leave
-     * *out_struct_idx as UINT32_MAX so the caller's `bad_elem`
-     * diagnostic fires. */
+     * nesting or malformed), leave *out_struct_idx as UINT32_MAX so
+     * the caller's `bad_elem` diagnostic fires. */
   }
   return true;
 }
@@ -3440,21 +3439,29 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * `$h->magic->0` where `$h->magic` returns [Ptr u8]. Bufs
        * aren't expression-result types in JACL, so only TYPE_PTR
        * needs the generalization. No bounds check (TYPE_PTR
-       * branch above is also bounds-check-free). See
+       * branch above is also bounds-check-free). For struct pointee
+       * (`$grid->i->j` against `[Buf N [Buf M Point]]`), the result
+       * is the inline struct value -- M4.2.2. See
        * BUFFER_DESIGN.md "Receiver-shape generalization". */
       if (fld->type == AST_LIT_INT &&
           (JaclType)tgt->inferred_type == TYPE_PTR &&
-          tgt->inferred_struct_idx != UINT32_MAX &&
-          JACL_IS_SCALAR_TYPE_IDX(tgt->inferred_struct_idx)) {
-        JaclType elem = JACL_TYPE_IDX_TO_SCALAR(tgt->inferred_struct_idx);
-        switch (elem) {
-          case TYPE_I8: case TYPE_U8:
-          case TYPE_I16: case TYPE_U16:
-            node->inferred_type = TYPE_I32; break;
-          default:
-            node->inferred_type = elem; break;
+          tgt->inferred_struct_idx != UINT32_MAX) {
+        if (JACL_IS_SCALAR_TYPE_IDX(tgt->inferred_struct_idx)) {
+          JaclType elem = JACL_TYPE_IDX_TO_SCALAR(tgt->inferred_struct_idx);
+          switch (elem) {
+            case TYPE_I8: case TYPE_U8:
+            case TYPE_I16: case TYPE_U16:
+              node->inferred_type = TYPE_I32; break;
+            default:
+              node->inferred_type = elem; break;
+          }
+          return;
         }
-        return;
+        if (tgt->inferred_struct_idx < tc->struct_count) {
+          node->inferred_type       = TYPE_STRUCT;
+          node->inferred_struct_idx = tgt->inferred_struct_idx;
+          return;
+        }
       }
 
       /* Resolve target struct type. Two shapes:

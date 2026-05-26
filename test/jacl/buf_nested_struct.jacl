@@ -1,0 +1,45 @@
+# expect: 3
+# expect: 0
+# expect: 0
+# expect: 7
+# expect: 11
+# expect: 0
+# expect: 0
+# expect: 1
+# expect: 2
+# expect: 3
+# expect: 4
+# M4.2.2: struct as inner element of a nested buf.
+# `[Buf N [Buf M Struct]]` lays out as N*M*sizeof(Struct) inline bytes.
+# `$grid->i` returns [Ptr Struct] to row i; the chained `->j` then
+# uses OP_PTR_LOAD_INLINE / OP_PTR_STORE_INLINE to read or write
+# the Struct value at byte offset j*sizeof(Struct).
+# See BUFFER_DESIGN.md "Receiver-shape generalization" / M4.2.2.
+
+struct Point {i32 x, i32 y}
+proc main {} {
+  def [Buf 3 [Buf 4 Point]] grid
+  print [buf-len $grid]
+
+  # Zero-init -- every Point starts at (0,0).
+  print $grid->1->2->x
+  print $grid->2->3->y
+
+  # Write a Point into cell (1,2) via the chained arrow.
+  set $grid->1->2 [Point 7 11]
+  print $grid->1->2->x
+  print $grid->1->2->y
+
+  # Other cells are still zero-init.
+  print $grid->0->0->x
+  print $grid->2->3->y
+
+  # Fill a small block and read back via the chain.
+  set $grid->0->0 [Point 1 2]
+  set $grid->0->1 [Point 3 4]
+  print $grid->0->0->x
+  print $grid->0->0->y
+  print $grid->0->1->x
+  print $grid->0->1->y
+}
+[main]
