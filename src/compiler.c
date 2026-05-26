@@ -221,14 +221,17 @@ typedef enum {
   TYPE_SHAPE_NONE = 0,        /* reserved / slot 0 (dyn placeholder) */
   TYPE_SHAPE_STRUCT,          /* user-declared struct -- u.struct_def */
   TYPE_SHAPE_CTX,             /* the lone HeapRecord builtin */
-  /* Phase 2/3: TYPE_SHAPE_TYPED_VEC, TYPE_SHAPE_TYPED_MAP */
+  TYPE_SHAPE_TYPED_VEC,       /* [Vec T] -- u.tvec.elem_idx (Phase 2) */
+  /* Phase 3: TYPE_SHAPE_TYPED_MAP */
 } TypeShapeKind;
 
 typedef struct {
   TypeShapeKind kind;
   union {
-    StructTypeDef* struct_def;  /* STRUCT, CTX */
-    /* Phase 2/3: tvec { uint32_t elem_idx; }; tmap { uint32_t key_idx, value_idx; }; */
+    StructTypeDef* struct_def;        /* STRUCT, CTX */
+    struct { uint32_t elem_idx; } tvec; /* TYPED_VEC -- T's encoding
+                                         * (scalar sentinel or struct idx) */
+    /* Phase 3: tmap { uint32_t key_idx, value_idx; }; */
   } u;
 } TypeShape;
 
@@ -251,6 +254,65 @@ static inline TypeShapeKind type_shape_kind(const StructTypeRegistry* reg,
                                              uint32_t idx) {
   if (!reg || idx >= reg->count) return TYPE_SHAPE_NONE;
   return reg->shapes[idx].kind;
+}
+
+/* Forward decl for typed-vec interning -- grow lives further down. */
+static bool struct_registry__grow(StructTypeRegistry* reg);
+
+/* Decode a buf-element encoding into the JaclType that downstream
+ * codegen (OP_BUF_GET/SET_LOCAL elem-type byte, dispatch between
+ * scalar / struct / tagged paths) consumes. The encoding lives in
+ * Local.struct_type_idx and is one of:
+ *   - JACL_SCALAR_TYPE_IDX(t)  -> scalar t
+ *   - registry idx + kind STRUCT/CTX -> TYPE_STRUCT
+ *   - registry idx + kind TYPED_VEC  -> TYPE_TYPED_VEC, *out_inner_idx = T
+ *
+ * Phase 2 unifies the readers behind this helper so kind awareness
+ * lives in one place. Phase 3 adds TYPED_MAP. */
+static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
+                                           uint32_t encoded,
+                                           uint32_t* out_inner_idx) {
+  if (out_inner_idx) *out_inner_idx = UINT32_MAX;
+  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
+    return JACL_TYPE_IDX_TO_SCALAR(encoded);
+  }
+  if (!reg || encoded >= reg->count) return TYPE_DYN;
+  TypeShape* shape = &reg->shapes[encoded];
+  switch (shape->kind) {
+    case TYPE_SHAPE_TYPED_VEC:
+      if (out_inner_idx) *out_inner_idx = shape->u.tvec.elem_idx;
+      return TYPE_TYPED_VEC;
+    case TYPE_SHAPE_STRUCT:
+    case TYPE_SHAPE_CTX:
+      return TYPE_STRUCT;
+    default:
+      return TYPE_DYN;
+  }
+}
+
+/* Intern a typed-vec shape. Returns the registry idx of the entry, or
+ * UINT32_MAX on allocation failure. Two identical (kind, elem_idx)
+ * requests share an idx so equality checks reduce to integer compare.
+ * Phase 2 of TYPE_REGISTRY_REFACTOR.md. */
+static uint32_t type_shape_intern_typed_vec(StructTypeRegistry* reg,
+                                            uint32_t elem_idx) {
+  if (!reg) return UINT32_MAX;
+  /* Linear scan over existing entries -- typed-vec shapes are rare
+   * (one per distinct [Vec T] textual occurrence) so a hash table is
+   * not warranted at the current scale. Revisit if profiles complain. */
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_TYPED_VEC &&
+        reg->shapes[i].u.tvec.elem_idx == elem_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;                            /* no StructTypeDef */
+  reg->shapes[idx].kind = TYPE_SHAPE_TYPED_VEC;
+  reg->shapes[idx].u.tvec.elem_idx = elem_idx;
+  reg->count++;
+  return idx;
 }
 
 /* Allocate a StructTypeDef with N fields in the registry's arena */
@@ -7189,7 +7251,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           inner_idx = JACL_SCALAR_TYPE_IDX(inner_jt);
         }
         elem_type = TYPE_TYPED_VEC;
-        typed_elem_idx = inner_idx;
+        /* Intern a typed-vec shape entry and use its registry idx as
+         * the buf-element encoding. This is the Phase 2 migration off
+         * the M4.4 ext aux-field stash on key_struct_idx -- the inner
+         * T now lives in the registry entry, freeing the same family
+         * of aux slots for [Buf N [Map K V]] in Phase 3. */
+        StructTypeRegistry* preg = compiler__get_struct_registry(c);
+        uint32_t shape_idx = type_shape_intern_typed_vec(preg, inner_idx);
+        if (shape_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Buf N [Vec T]] failed to intern typed-vec shape");
+          return;
+        }
+        elem_struct_idx = shape_idx;  /* registry idx, not scalar sentinel */
+        typed_elem_idx = inner_idx;   /* legacy mirror, dropped below once
+                                       * readers consult the registry. */
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -7357,17 +7433,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_NIL, line);
       compiler__add_local(c, bind_val, line, col);
       c->locals[c->local_count - 1].type = TYPE_BUF;
+      /* Element encoding rules:
+       *   - TYPE_STRUCT:    elem_struct_idx is the struct registry idx.
+       *   - TYPE_TYPED_VEC: elem_struct_idx is the typed-vec shape's
+       *     registry idx (Phase 2 of TYPE_REGISTRY_REFACTOR.md). Readers
+       *     consult `reg->shapes[idx].u.tvec.elem_idx` for T.
+       *   - everything else: scalar sentinel for the JaclType keyword. */
       c->locals[c->local_count - 1].struct_type_idx =
-          (elem_type == TYPE_STRUCT)
+          (elem_type == TYPE_STRUCT || elem_type == TYPE_TYPED_VEC)
               ? elem_struct_idx
               : JACL_SCALAR_TYPE_IDX(elem_type);
       c->locals[c->local_count - 1].width = (uint16_t)slot_count;
       c->locals[c->local_count - 1].is_inline = true;
       c->locals[c->local_count - 1].buf_len = n;
       c->locals[c->local_count - 1].buf_inner_len = inner_buf_len;
-      /* M4.4 ext: stash inner T's idx on key_struct_idx for typed-vec
-       * element bufs so arrow/buf-get can narrow downstream chains. */
-      c->locals[c->local_count - 1].key_struct_idx = typed_elem_idx;
+      /* key_struct_idx is no longer the canonical home for typed-vec
+       * inner T (the registry entry holds it); cleared for cleanliness. */
+      c->locals[c->local_count - 1].key_struct_idx = UINT32_MAX;
+      (void)typed_elem_idx; /* legacy mirror; readers now use the registry */
       for (uint32_t w = 1; w < slot_count; w++) {
         compiler__emit_byte(c, OP_NIL, line);
         compiler__add_local(c, jacl_inline_string("", 0), line, col);
@@ -9817,14 +9900,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     uint32_t base_slot = (uint32_t)found;
     uint32_t buf_len   = c->locals[found].buf_len;
-    if (!JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+    StructTypeRegistry* preg = compiler__get_struct_registry(c);
+    uint32_t inner_idx = UINT32_MAX;
+    JaclType elem_type = compiler__buf_elem_decode(preg,
+        c->locals[found].struct_type_idx, &inner_idx);
+    if (elem_type == TYPE_STRUCT) {
       char err[96];
       snprintf(err, sizeof(err),
                "%s: only scalar element types are supported (M2)", head_name);
       compiler__error(c, line, col, err);
       return;
     }
-    JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
 
     /* Compile index (must be i32). */
     compiler__compile_node(c, args[1]);
@@ -11683,12 +11769,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->last_expr_type = TYPE_U64; /* runtime rep of pointer */
         return;
       }
+      /* Scalar/tagged-elem buf path: matches both scalar-sentinel
+       * encodings (M2/M4.4 ref-elem) and registry-encoded typed-vec
+       * (M4.4 ext + Phase 2). Struct-elem bufs fall through to the
+       * struct path below. */
+      StructTypeRegistry* preg = (found >= 0) ?
+          compiler__get_struct_registry(c) : NULL;
+      uint32_t buf_inner = UINT32_MAX;
+      JaclType buf_elem_t = (found >= 0 && c->locals[found].type == TYPE_BUF)
+          ? compiler__buf_elem_decode(preg,
+              c->locals[found].struct_type_idx, &buf_inner)
+          : TYPE_DYN;
       if (found >= 0 && c->locals[found].type == TYPE_BUF &&
-          JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+          buf_elem_t != TYPE_STRUCT) {
         uint32_t base_slot = (uint32_t)found;
         uint32_t buf_len   = c->locals[found].buf_len;
-        JaclType elem_type =
-            JACL_TYPE_IDX_TO_SCALAR(c->locals[found].struct_type_idx);
+        JaclType elem_type = buf_elem_t;
         int32_t  idx_lit = args[1]->data.lit_int.value;
         if (idx_lit < 0 || (uint32_t)idx_lit >= buf_len) {
           char err[160];
@@ -11729,9 +11825,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * struct_type_idx is a real struct registry index (not the
        * scalar sentinel). Emits OP_BUF_GET_STRUCT_LOCAL (push inline
        * struct bytes onto TOS) or OP_BUF_SET_STRUCT_LOCAL (pop them
-       * and memcpy into the buf slot). */
+       * and memcpy into the buf slot). Phase 2: gate on the decoded
+       * kind so registry idxs for typed-vec shapes don't fall here. */
       if (found >= 0 && c->locals[found].type == TYPE_BUF &&
-          !JACL_IS_SCALAR_TYPE_IDX(c->locals[found].struct_type_idx)) {
+          buf_elem_t == TYPE_STRUCT) {
         uint32_t base_slot   = (uint32_t)found;
         uint32_t buf_len     = c->locals[found].buf_len;
         uint32_t struct_idx  = c->locals[found].struct_type_idx;

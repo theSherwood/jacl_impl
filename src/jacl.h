@@ -1255,12 +1255,14 @@ typedef enum {
   TYPE_SHAPE_NONE = 0,
   TYPE_SHAPE_STRUCT,
   TYPE_SHAPE_CTX,
+  TYPE_SHAPE_TYPED_VEC,        /* [Vec T] -- u.tvec.elem_idx (Phase 2) */
 } TypeShapeKind;
 
 typedef struct {
   TypeShapeKind kind;
   union {
     StructTypeDef* struct_def;
+    struct { uint32_t elem_idx; } tvec;
   } u;
 } TypeShape;
 
