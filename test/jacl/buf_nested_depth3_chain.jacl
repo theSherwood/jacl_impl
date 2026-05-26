@@ -1,0 +1,37 @@
+# expect: 2
+# expect: 0
+# expect: 0
+# expect: 42
+# expect: 7
+# expect: 99
+# expect: 0
+# Phase 5b pickup: depth-3+ arrow chains $cube->i->j->k.
+# The typer walks the AST chain inside-out and the compiler emits one
+# OP_BUF_ADDR_LOCAL with the cumulative byte offset (+ OP_PTR_LOAD at
+# the leaf), no decomposition into per-arrow steps.
+# See docs/TYPE_REGISTRY_REFACTOR.md.
+
+proc main {} {
+  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+  print [buf-len $cube]
+
+  # Zero-init: every cell starts at 0.
+  print $cube->0->0->0
+  print $cube->1->2->3
+
+  # Set via chained arrow set.
+  set $cube->1->2->3 42
+  print $cube->1->2->3
+
+  # Independent slot.
+  set $cube->0->1->2 7
+  print $cube->0->1->2
+
+  # Original slot at 1->2->3 still 42 — overwrite to 99.
+  set $cube->1->2->3 99
+  print $cube->1->2->3
+
+  # Untouched slot still 0.
+  print $cube->0->0->1
+}
+main

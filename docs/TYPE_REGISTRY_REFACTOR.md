@@ -1,5 +1,52 @@
 # Type-Shape Registry Refactor
 
+## Quick orientation (read first)
+
+If you're resuming this work, the current frontier is **nested
+buffers (`[Buf N T]`)**. The type-registry refactor that motivated
+this doc is largely complete; Phases 1-5 shipped, and Phase 5b is
+extending the *recognizer wiring* and *codegen* for nested buf access
+on top of the registry.
+
+What works today (post most-recent session):
+- Declaration, `[buf-len]`, `[addr]` at any nesting depth.
+- Arrow-chain read/set at any depth with literal or dynamic indices:
+  `$cube->i->j->k`, `$cube->$i->$j->$k`, mixed (`$cube->1->$j->3`).
+- Decomposed chains: `def p $cube->1` then `$p->2->3` (and further
+  decomposition: `def q $p->2` then `$q->3`). Both literal and
+  dynamic indices.
+- Slice passing across proc boundaries via `[Ptr [Buf N T]]`
+  param annotations.
+
+What's still open: see ["Pickup for next session"](#pickup-for-next-session)
+below. The current top items are depth-3+ literal init and runtime
+bounds checks for dynamic indices.
+
+**Where to look first:**
+- Chain helpers: `typer__nested_buf_chain_result` in `src/typer.c`,
+  `compiler__try_compile_nested_buf_chain` in `src/compiler.c`.
+- Slice-passing param annotation: `typer__ptr_type` (typer) +
+  `compiler__ptr_type_expr` (compiler), each accepts a `[Buf N T]`
+  pointee and interns the shape.
+- Dynamic-index parser: `parser__maybe_arrow_access` in
+  `src/parser.c`.
+- Architecture summary:
+  ["How the nested-buf access path works"](#how-the-nested-buf-access-path-works-current-architecture)
+  below.
+
+**Fixtures (in `test/jacl/`)**:
+- `buf_nested.jacl` -- depth-2 literal chain (read + set).
+- `buf_nested_literal.jacl` -- depth-2 literal init.
+- `buf_nested_struct.jacl` -- depth-2 with struct elements.
+- `buf_nested_oob.jacl` -- compile-time bounds errors.
+- `buf_nested_depth3.jacl` -- depth-3 declaration + `[addr]` + manual
+  pointer arithmetic.
+- `buf_nested_depth3_chain.jacl` -- depth-3 arrow chains
+  (`$cube->i->j->k`).
+- `buf_nested_depth3_decomp.jacl` -- decomposed chains via `def`.
+- `buf_dynamic_chain.jacl` -- dynamic and mixed indices.
+- `buf_slice_pass.jacl` -- `[Ptr [Buf N T]]` proc params.
+
 ## Why this exists
 
 Today's type-idx encoding is a two-headed beast:
@@ -211,84 +258,170 @@ no schema growth, no aux fields, no encoding-out-of-slots problem.
 That's the architectural payoff; specific compose cases get wired up
 on demand.
 
-### Phase 5a/5b -- Recognizer wiring (in progress)
+### Phase 5a/5b -- Recognizer wiring
+
+Completed:
 
 - ✅ **`[Buf N [Ptr T]]`** -- `a783668`.
 - ✅ **`[Buf N [Future T]]`** -- `eed8107`.
+- ✅ **Nested-buf depth lift via recursive `TYPE_SHAPE_BUF` interning**
+  -- `0ea5bff`. Declaration / `[buf-len]` / `[addr]` at any depth.
+- ✅ **Depth-3+ arrow chains (`$cube->i->j->k`, read + set)** -- this
+  commit. Two helpers (`typer__nested_buf_chain_result` /
+  `compiler__try_compile_nested_buf_chain`) walk the chain AST
+  inside-out and emit a single `OP_BUF_ADDR_LOCAL` plus leaf load/store.
+  Fixture `buf_nested_depth3_chain.jacl`.
+- ✅ **Decomposed nested-buf chains (`def p $cube->1; $p->2->3`)** --
+  this commit. The chain walker also accepts a TYPE_PTR base whose
+  pointee is a `TYPE_SHAPE_BUF`. Both sides patch the local's
+  remaining-shape idx at def-time by re-walking the RHS AST. Slice
+  aliases mutate the source buf as expected. Fixture
+  `buf_nested_depth3_decomp.jacl`.
+- ✅ **Dynamic arrow indices (`$cube->$i->$j->$k`)** -- this commit.
+  Parser accepts `TOKEN_VAR` (and any non-LIT_STRING expr) after `->`.
+  Chain helper folds prefix-literal arrows into the base op's offset,
+  emits `OP_PTR_OFFSET` per dynamic arrow, folds trailing literals into
+  the leaf op's u16 offset. Depth-2 chains with any dynamic index
+  route through this path; all-literal depth-2 stays on the existing
+  per-arrow codegen. Fixture `buf_dynamic_chain.jacl`.
+- ✅ **Slice passing via `[Ptr [Buf N T]]` proc params** -- this
+  commit. `typer__ptr_type` and `compiler__ptr_type_expr` accept a
+  `[Buf N T]` AST as the pointee and intern the whole shape as a
+  `TYPE_SHAPE_BUF`. Proc-param resolution stores the shape idx on the
+  param. Inside the body, `$param->...` re-enters the chain helper via
+  the TYPE_PTR-with-buf-shape branch. Fixture `buf_slice_pass.jacl`.
+
+Open:
+
 - ⚠ **`[Buf N [Box T]]`** -- shape kind ready, but `[Box T]` isn't a
   parser-recognized annotation today. Adding `[Box T]` would unblock
-  this with a one-line recognizer extension.
-- ✅ **Nested-buf depth lift via recursive `TYPE_SHAPE_BUF` interning**
-  -- `0ea5bff`. **Partial**: declaration / `[buf-len]` / `[addr]` work
-  at any depth; arrow chains beyond depth-2 still need codegen work
-  (see "Pickup for next session" below).
+  this with a one-line recognizer extension. See pickup #5.
 - ❌ **`[Vec [Buf N T]]`, `[Map K [Buf N V]]`** -- typed-vec/map
   annotation parsers need to accept parametric T at element positions.
-  Mechanical extension once a use case demands it.
+  See pickup #4.
+
+## How the nested-buf access path works (current architecture)
+
+This section documents the working pieces so the next session can
+extend them without re-deriving the design.
+
+### Parser: arrow RHS forms (`src/parser.c parser__maybe_arrow_access`)
+
+After `->` the parser accepts:
+
+- `TOKEN_WORD` -- name field access (`$obj->field`), produces an
+  `AST_LIT_STRING` arg. Routes to the existing field-access codepath.
+- `TOKEN_INT` -- literal buf index (`$buf->3`), produces an
+  `AST_LIT_INT`. Routes to the chain helper.
+- `TOKEN_VAR` -- dynamic buf index (`$slice->$i`), produces an
+  `AST_VAR_REF`. Routes to the chain helper's dynamic-arrow path.
+- Any other token -- parse error.
+
+To extend: `$expr->[expr]` or `$expr->$(expr)` aren't supported yet.
+If wanted, add the corresponding `TOKEN_DOLLAR_BRACKET` /
+`TOKEN_DOLLAR_PAREN` branches with a recursive expression parse.
+
+### Chain helper (typer + compiler)
+
+The chain helper is the heart of nested-buf access. Both sides have a
+mirror implementation that walks the AST chain inside-out:
+
+- **Typer** (`src/typer.c typer__nested_buf_chain_result`): yields the
+  chain's result type. For intermediate steps, also returns the
+  remaining typer-side `TYPE_SHAPE_BUF` idx so the def handler can
+  stash it on a binding when the user decomposes (`def p $cube->1`).
+- **Compiler** (`src/compiler.c compiler__try_compile_nested_buf_chain`):
+  emits the actual opcodes. Identical AST walk, identical shape chain
+  decode, but pulling strides from the compiler-side registry. Emits
+  one base op (`OP_BUF_ADDR_LOCAL` for TYPE_BUF base or `OP_GET_LOCAL`
+  for TYPE_PTR base) with prefix-literal offset folded in, then per
+  dynamic arrow emits `OP_PTR_OFFSET` (stride), folding trailing
+  literals into the leaf load/store's u16 byte offset.
+
+Bases supported:
+- `TYPE_BUF` local, depth-3+ (shape-registry encoding via
+  `local.struct_type_idx` chain).
+- `TYPE_BUF` local, depth-2 (legacy `buf_inner_len` encoding) -- only
+  when at least one index is dynamic. All-literal depth-2 still routes
+  through the older per-arrow code (line ~11875 in `compiler.c`) to
+  preserve well-tested emission for that common case.
+- `TYPE_PTR` (or `TYPE_U64`) local whose `struct_type_idx` points at a
+  `TYPE_SHAPE_BUF`. Covers decomposed slices (`def p $cube->1`) and
+  slice-passing params (`[Ptr [Buf N T]]`).
+
+### Decomposed-chain capture (def-time shape patching)
+
+When a chain expression is bound to a new name and lands at an
+intermediate level (`TYPE_PTR` with `UINT32_MAX` struct idx), each side
+re-walks the RHS AST at def-time and patches the local/binding with
+its own remaining buf-shape idx:
+
+- **Typer**: inside `typer__handle_def_or_mut`, the
+  `effective == TYPE_PTR && struct_idx == UINT32_MAX` branch calls
+  `typer__nested_buf_chain_result` with `out_remaining_shape_idx` and
+  stores it on the new binding's `struct_idx`.
+- **Compiler**: after `TYPEINFO_SAVE` in `HEAD_DEF`'s local-binding
+  path, the same condition triggers an inline AST walk that peels the
+  source binding's compiler-side shape chain by `chain_depth` levels
+  (TYPE_BUF base peels `chain_depth - 1`; TYPE_PTR base peels
+  `chain_depth`) and patches `local.struct_type_idx`.
+
+### Slice-passing annotation (`[Ptr [Buf N T]]`)
+
+Both `typer__ptr_type` and `compiler__ptr_type_expr` accept a
+`[Buf N T]` AST node as the pointee. Inner buf is interned as a
+`TYPE_SHAPE_BUF` (including the outer N) on the respective registry.
+The proc-param resolver then stores that shape idx on the param's
+binding/local just like a decomposed local. Inside the proc body,
+`$param->...` re-enters the chain helper via the TYPE_PTR-with-buf-shape
+branch -- no new code path.
+
+### The cross-registry rule (why the chain helper re-walks)
+
+Typer and compiler each own a `StructTypeRegistry` instance; shape
+indices are NOT interchangeable. Per the rule in "Implementation
+notes" below, the typer never propagates a typer-shape-idx through an
+AST node's `inferred_struct_idx`. So the compiler's chain helper
+can't trust any non-scalar/non-struct-idx number on the AST; it
+re-walks the chain inside-out from the AST and looks up shape info
+through the *compiler's* local table and registry. The typer's
+binding table separately carries typer-shape-idxes for its own
+re-decoding on subsequent expressions.
 
 ## Pickup for next session
 
-**Goal: close out the nested-buf depth lift.** Three deliverables, in
-order of payoff:
+In rough order of payoff, the open items:
 
-### 1. Depth-3+ arrow chains (`$cube->i->j->k`)
-
-The hard part. Current state: typer's HEAD_DOT for TYPE_BUF with a
-nested inner returns `[Ptr T_leaf]` for depth-2, and `TYPE_DYN` for
-depth-3+ (silent fallthrough, see `src/typer.c` HEAD_DOT). The
-codegen for `$cube->i` decays via `OP_BUF_ADDR_LOCAL` with byte offset
-`i * inner_byte_size`, but the result type's pointee is `T_leaf`, so
-the next arrow `->j` does `j * sizeof(T_leaf)` -- wrong for any depth.
-
-**Fix shape:** introduce an intermediate "pointer to remaining buf
-shape" type. Concretely:
-
-- Typer's HEAD_DOT arrow-int on a `[Buf N1 [Buf N2 [Buf N3 T]]]`
-  receiver: when the buf-elem decoder returns `TYPE_BUF` (inner is a
-  shape, depth-2+), yield `[Ptr <inner_shape_idx>]` rather than
-  `[Ptr T_leaf]`. The pointee is the inner buf shape; chaining `->j`
-  on this works the same way for the next dimension.
-- Typer's HEAD_DOT arrow-int on a `[Ptr <shape>]` receiver where the
-  pointee is a `TYPE_SHAPE_BUF`: peel one dimension. If the resulting
-  inner is another `TYPE_SHAPE_BUF`, yield `[Ptr <inner-inner shape>]`;
-  if scalar/struct, yield `[Ptr T_leaf]`.
-- Compiler mirrors: each arrow emits `OP_PTR_ADD_OFFSET` with byte
-  offset `idx * compiler__encoding_byte_size(reg, remaining_shape)`.
-  Helper already exists in `src/compiler.c`.
-- VM: no change. `OP_PTR_ADD_OFFSET` already does what we need.
-
-**Hazard from this session's dev**: when the typer propagates a
-binding's `struct_idx` (which is a typer-side shape idx for nested
-bufs) directly as the AST node's `inferred_struct_idx`, the compiler
-reads it as a *compiler*-side idx and crashes on a NULL `defs[]`
-entry. This bit me in the `[addr]` path and was fixed by walking the
-shape chain to the leaf encoding (a scalar sentinel or struct idx --
-those align between typer and compiler registries). Watch for the same
-trap when extending HEAD_DOT for depth-3+: any node-propagated idx
-must be a "common encoding" (scalar sentinel / struct idx), not a
-typer-shape idx. The decoder helpers already do this correctly; just
-don't bypass them.
-
-**Fixtures to add**: `buf_nested_depth3_chain.jacl` --
-`$cube->i->j->k` returns the correctly-strided element. Maybe also a
-`set $cube->i->j->k v` form to exercise the store path.
-
-### 2. Depth-3+ literal init
+### 1. Depth-3+ literal init
 
 Today errors with "literal init not yet supported for nesting depth >
 2" at `src/compiler.c` HEAD_DEF buf branch (the Phase 5b depth-3+
 path). Extend the literal-init emission to recurse into nested
-constructors. The existing depth-2 literal init at `compiler.c:7517`
-(approx, search for `inner_buf_len > 0` in the literal-init block) is
-the template -- one more level of recursion plus a per-row constructor
-parse.
+constructors. The existing depth-2 literal init in
+`compiler.c` (search for `inner_buf_len > 0` in the HEAD_DEF buf
+block) is the template -- one more level of recursion plus a per-row
+constructor parse.
+
+### 2. Runtime bounds checks for dynamic indices
+
+Dynamic arrow chains (`$cube->$i->$j->$k`) emit `OP_PTR_OFFSET`
+without bounds checking -- the runtime trusts the index is in range.
+Literal indices are still compile-time validated. To close the gap:
+
+- Add `OP_PTR_OFFSET_CHECKED` with `u16 elem_size, u16 dim_size`: pops
+  i32 idx, traps if `idx < 0 || idx >= dim_size`, otherwise multiplies
+  and adds.
+- Compiler dynamic-arrow loop swaps `OP_PTR_OFFSET(stride)` for
+  `OP_PTR_OFFSET_CHECKED(stride, dims[k])`.
+
+Cost: one new opcode, mechanical compiler change. ~half a day.
 
 ### 3. Ref-elem bufs as struct fields
 
-`struct Bag {i32 size, [Buf 4 dyn] items}` is rejected at
-`compiler.c:13718` with a clear error. The struct walker
-(`src/gc_collect.c`) needs to descend into the embedded N-tagged-slot
-range. Two options:
+`struct Bag {i32 size, [Buf 4 dyn] items}` is rejected in
+`compiler.c` (search for the M4.4-related error) with a clear error.
+The struct walker (`src/gc_collect.c`) needs to descend into the
+embedded N-tagged-slot range. Two options:
 
 - **Per-field shape**: extend `StructTypeField` with a `TypeShape*` (or
   shape idx) when the field is a buf, and have the struct walker
@@ -302,6 +435,44 @@ Recommend option 1. Touches typer (allow ref-elem field at decl),
 compiler (parse + register), `src/gc_collect.c` (walker descent),
 `src/gc.c` write barrier on indexed store (already wired through the
 existing M4.4 path -- no change needed).
+
+### 4. `[Vec [Buf N T]]` and `[Map K [Buf N V]]`
+
+The Phase 5 foundation supports composing `TYPE_SHAPE_BUF` under any
+other shape kind, but the typed-vec / typed-map annotation parsers
+still only accept scalar/struct element types. Extending them is a
+mechanical extension once a use case demands it:
+
+- `compiler.c`: in the `[Vec T]` and `[Map K V]` annotation parsers,
+  accept `AST_COMMAND` with "Buf" head and call
+  `compiler__intern_buf_shape_chain`.
+- `typer.c`: symmetric change to the typed-collection annotation
+  resolvers.
+
+### 5. `[Box T]` annotation
+
+`[Box T]` isn't a parser-recognized annotation, so `[Buf N [Box T]]`
+can't be expressed. The shape kind (`TYPE_SHAPE_BOX`) is ready. Adding
+the annotation would be a one-line recognizer extension on each side
+plus the wiring at the use sites.
+
+### 6. Decomposing across loops (already works, document)
+
+The current architecture lets users write loops like:
+
+```jacl
+proc each_row {[Ptr [Buf 3 [Buf 4 i32]]] p} {
+  mut i 0
+  while [< $i 3] {
+    set $p->$i->0 [+ $p->$i->0 1]
+    set i [+ $i 1]
+  }
+}
+```
+
+This works today (verified in `buf_slice_pass.jacl`). If a future
+session is asked for "loops over nested bufs," the answer is: it
+already works, just point at the fixture.
 
 ## Implementation notes (for future-me)
 
@@ -357,7 +528,11 @@ existing M4.4 path -- no change needed).
 | 5 (more kinds: BUF / PTR / FUTURE / BOX) | shipped `5cf6a7a` — foundation only |
 | 5a (wire PTR compose: `[Buf N [Ptr T]]`) | shipped `a783668` |
 | 5a (wire FUTURE compose: `[Buf N [Future T]]`) | shipped `eed8107` |
-| 5b (lift depth-2 nested-buf cap; declaration / [buf-len] / [addr] at any depth) | shipped (this commit) |
+| 5b (lift depth-2 nested-buf cap; declaration / [buf-len] / [addr] at any depth) | shipped `0ea5bff` |
+| 5b (depth-3+ arrow chains `$cube->i->j->k`, read + set) | shipped (this commit) |
+| 5b (decomposed chains `def p $cube->1; $p->2->3`) | shipped (this commit) |
+| 5b (dynamic arrow indices `$cube->$i->$j->$k`) | shipped (this commit) |
+| 5b (slice passing via `[Ptr [Buf N T]]` proc params) | shipped (this commit) |
 
 Mid-Phase-3 surprise that wasn't in the Phase 0 audit: the original
 shape registry lived in `src/compiler.c`, which is included **after**

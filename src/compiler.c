@@ -157,8 +157,18 @@ static bool compiler__ptr_type_expr(AstNode* cmd, AstNode** out_pointee) {
   if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3 ||
       memcmp(th->data.lit_string.value, "Ptr", 3) != 0) return false;
   if (cmd->data.command.arg_count != 1) return false;
-  if (cmd->data.command.args[0]->type != AST_LIT_STRING) return false;
-  if (out_pointee) *out_pointee = cmd->data.command.args[0];
+  AstNode* arg = cmd->data.command.args[0];
+  /* Accept AST_LIT_STRING (scalar keyword or struct name) or a nested
+   * `[Buf N T]` for slice-passing param types. Callers that need the
+   * pointee type resolve it themselves via the returned node. */
+  if (arg->type != AST_LIT_STRING &&
+      !(arg->type == AST_COMMAND && arg->data.command.head &&
+        arg->data.command.head->type == AST_LIT_STRING &&
+        arg->data.command.head->data.lit_string.length == 3 &&
+        memcmp(arg->data.command.head->data.lit_string.value, "Buf", 3) == 0)) {
+    return false;
+  }
+  if (out_pointee) *out_pointee = arg;
   return true;
 }
 
@@ -3445,6 +3455,312 @@ static bool compiler__resolve_ptr_chain_step(Compiler* c,
   }
 
   return false;
+}
+
+/* Atomic compile of a nested-buf arrow chain (depth >= 3). Handles
+ * both 2-arg read (`$cube->i->j->k`) and 3-arg set (`set
+ * $cube->i->j->k v`). Walks the AST chain inside-out to find a TYPE_BUF
+ * var-ref bound with a TYPE_SHAPE_BUF struct_type_idx, computes the
+ * cumulative byte offset, and emits one OP_BUF_ADDR_LOCAL (intermediate
+ * step) or OP_BUF_ADDR_LOCAL + OP_PTR_LOAD/STORE pair (leaf step).
+ *
+ * Returns true if handled (either successful emission or compile-time
+ * error reported). Returns false to fall through to existing
+ * per-arrow code paths -- specifically for depth-1/depth-2 bufs,
+ * non-buf receivers, or non-LIT_INT chain elements.
+ *
+ * Depth-2 nested bufs (`[Buf N [Buf M T]]`) are intentionally not
+ * intercepted here -- they're encoded via buf_inner_len > 0 and the
+ * existing per-arrow path emits correct code for them.
+ *
+ * Phase 5b pickup item from docs/TYPE_REGISTRY_REFACTOR.md. */
+static bool compiler__try_compile_nested_buf_chain(Compiler* c,
+                                                    AstNode** args,
+                                                    bool is_set,
+                                                    uint32_t line,
+                                                    uint32_t col) {
+  /* Field arg must be an index-arrow, not a name-field arrow. */
+  if (!args[1] || args[1]->type == AST_LIT_STRING) return false;
+
+  /* Walk inside-out, recording index-arrow arguments. Stop on
+   * AST_LIT_STRING (name field) or non-HEAD_DOT receivers. Innermost
+   * expression must be AST_VAR_REF (the buf or slice binding). */
+  AstNode* indices[16];
+  int chain_depth = 1;
+  indices[0] = args[1]; /* outermost arrow's index */
+  AstNode* cur = args[0];
+  while (cur && cur->type == AST_COMMAND &&
+         cur->data.command.head_id == HEAD_DOT &&
+         cur->data.command.arg_count == 2 &&
+         cur->data.command.args[1] &&
+         cur->data.command.args[1]->type != AST_LIT_STRING) {
+    if (chain_depth >= 16) return false;
+    indices[chain_depth++] = cur->data.command.args[1];
+    cur = cur->data.command.args[0];
+  }
+  if (!cur || cur->type != AST_VAR_REF) return false;
+  JaclVal name = compiler__name_val(c->heap, c->intern_table,
+      cur->data.var_ref.name, cur->data.var_ref.length);
+  int local_idx = -1;
+  for (int i = (int)c->local_count - 1; i >= 0; i--) {
+    if (c->locals[i].name == name) { local_idx = i; break; }
+  }
+  if (local_idx < 0) return false;
+  /* Two base kinds:
+   *   - TYPE_BUF: the local itself owns the inline byte range. Outer
+   *     dim = local.buf_len; remaining shape = local.struct_type_idx.
+   *   - TYPE_PTR with buf-shape pointee: a decomposed chain (e.g.
+   *     `let p = $cube->1`). The local holds a u64 pointer at runtime
+   *     and the binding's struct_type_idx is the TYPE_SHAPE_BUF for the
+   *     remaining region. */
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  bool base_is_buf = (c->locals[local_idx].type == TYPE_BUF);
+  bool base_is_ptr = (c->locals[local_idx].type == TYPE_PTR ||
+                      c->locals[local_idx].type == TYPE_U64);
+  if (!base_is_buf && !base_is_ptr) return false;
+
+  /* dims[i] for i in 1..num_dims = size of the i'th dimension. */
+  uint32_t dims[16];
+  int num_dims = 0;
+  uint32_t leaf_enc;
+  if (base_is_buf) {
+    dims[++num_dims] = c->locals[local_idx].buf_len;
+    /* Three encodings for the inner of a TYPE_BUF local:
+     *   - struct_type_idx is a TYPE_SHAPE_BUF (depth-3+ chain).
+     *   - flat depth-2 legacy: buf_inner_len encodes M; struct_type_idx
+     *     is the leaf scalar/struct encoding.
+     *   - flat depth-1 (single-dim buf): no nested structure. */
+    if (c->locals[local_idx].buf_inner_len > 0) {
+      /* Depth-2 legacy: synthesize dim 2 + leaf. */
+      dims[++num_dims] = c->locals[local_idx].buf_inner_len;
+      leaf_enc = c->locals[local_idx].struct_type_idx;
+    } else {
+      uint32_t cur_enc = c->locals[local_idx].struct_type_idx;
+      if (compiler__buf_elem_decode(reg, cur_enc, NULL) != TYPE_BUF) {
+        /* Flat depth-1 buf -- existing per-arrow path handles. */
+        return false;
+      }
+      while (reg && cur_enc < reg->count &&
+             reg->shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+        if (num_dims >= 15) return false;
+        dims[++num_dims] = reg->shapes[cur_enc].u.buf.len;
+        cur_enc = reg->shapes[cur_enc].u.buf.elem_idx;
+      }
+      leaf_enc = cur_enc;
+    }
+  } else {
+    /* TYPE_PTR base: struct_type_idx must point at a TYPE_SHAPE_BUF. */
+    uint32_t ptr_sidx = c->locals[local_idx].struct_type_idx;
+    if (!reg || ptr_sidx >= reg->count ||
+        reg->shapes[ptr_sidx].kind != TYPE_SHAPE_BUF) {
+      return false;
+    }
+    dims[++num_dims] = reg->shapes[ptr_sidx].u.buf.len;
+    uint32_t cur_enc = reg->shapes[ptr_sidx].u.buf.elem_idx;
+    while (reg && cur_enc < reg->count &&
+           reg->shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+      if (num_dims >= 15) return false;
+      dims[++num_dims] = reg->shapes[cur_enc].u.buf.len;
+      cur_enc = reg->shapes[cur_enc].u.buf.elem_idx;
+    }
+    leaf_enc = cur_enc;
+  }
+
+  /* For TYPE_BUF base at num_dims == 2 (depth-2 legacy): only intervene
+   * if at least one index is dynamic. All-literal depth-2 chains stay
+   * with the existing per-arrow path (well-tested for literal cases). */
+  if (base_is_buf && num_dims == 2) {
+    bool any_dyn = false;
+    for (int k = 0; k < chain_depth; k++) {
+      if (indices[k]->type != AST_LIT_INT) { any_dyn = true; break; }
+    }
+    if (!any_dyn) return false;
+  }
+  if (base_is_buf && num_dims < 2) return false;
+
+  if (chain_depth > num_dims) {
+    char err[160];
+    snprintf(err, sizeof(err),
+        "buf arrow chain over-indexes nested buf "
+        "(chain length %d, nesting depth %d)",
+        chain_depth, num_dims);
+    compiler__error(c, line, col, err);
+    return true;
+  }
+
+  /* indices[] was gathered outer-first (current arrow at [0],
+   * innermost at the back). Reverse so indices[i-1] corresponds to
+   * the i'th arrow (1-indexed) which consumes dim i. */
+  for (int i = 0, j = chain_depth - 1; i < j; i++, j--) {
+    AstNode* tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+  }
+
+  /* stride[k] = byte size of one element of dim k =
+   *   product(dims[k+1..num_dims]) * leaf_size. */
+  uint64_t leaf_size = compiler__encoding_byte_size(reg, leaf_enc);
+  if (leaf_size == 0) {
+    compiler__error(c, line, col,
+        "buf arrow chain: invalid leaf type size");
+    return true;
+  }
+  uint64_t strides[17];
+  strides[num_dims] = leaf_size;
+  for (int k = num_dims - 1; k >= 1; k--) {
+    strides[k] = strides[k + 1] * dims[k + 1];
+    if (strides[k] > 0xFFFFu) {
+      compiler__error(c, line, col,
+          "buf arrow chain: dimension stride exceeds 65535 bytes "
+          "(dynamic-index path requires stride <= 65535)");
+      return true;
+    }
+  }
+
+  /* Compile-time bounds check for LIT_INT indices only. Dynamic
+   * indices are unchecked at runtime today -- same gap as
+   * OP_PTR_OFFSET / OP_PTR_ADD_OFFSET on pointers from `[addr ...]`. */
+  for (int k = 1; k <= chain_depth; k++) {
+    if (indices[k - 1]->type != AST_LIT_INT) continue;
+    int32_t v = indices[k - 1]->data.lit_int.value;
+    if (v < 0 || (uint32_t)v >= dims[k]) {
+      char err[160];
+      snprintf(err, sizeof(err),
+          "buf arrow chain: index %d out of bounds for dim %d (size %u)",
+          (int)v, k - 1, (unsigned)dims[k]);
+      compiler__error(c, line, col, err);
+      return true;
+    }
+  }
+
+  /* Split the chain into:
+   *   - prefix_offset: cumulative offset from leading LIT_INT arrows
+   *     (folded into the base op).
+   *   - dyn_start: first non-LIT_INT arrow position (chain_depth+1 if
+   *     all literal).
+   * Subsequent arrows either accumulate into `pending` (LIT_INT) or
+   * flush + emit OP_PTR_OFFSET (dynamic). The trailing pending also
+   * folds into the leaf load/store's u16 byte_offset. */
+  uint64_t prefix_offset = 0;
+  int dyn_start = chain_depth + 1;
+  for (int k = 1; k <= chain_depth; k++) {
+    AstNode* idx = indices[k - 1];
+    if (idx->type == AST_LIT_INT) {
+      prefix_offset += (uint64_t)idx->data.lit_int.value * strides[k];
+    } else {
+      dyn_start = k;
+      break;
+    }
+  }
+  if (prefix_offset > 0xFFFFu) {
+    compiler__error(c, line, col,
+        "buf arrow chain byte offset exceeds 65535");
+    return true;
+  }
+
+  uint32_t base_slot = (uint32_t)local_idx;
+  bool at_leaf = (chain_depth == num_dims);
+  if (!at_leaf && is_set) {
+    compiler__error(c, line, col,
+        "cannot set an intermediate level of a nested-buf arrow chain "
+        "(only leaf elements are settable)");
+    return true;
+  }
+
+  /* Emit base pointer with prefix_offset folded in. */
+  if (base_is_buf) {
+    compiler__emit_byte(c, OP_BUF_ADDR_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)base_slot, line);
+    compiler__emit_u16(c, (uint16_t)prefix_offset, line);
+  } else {
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)base_slot, line);
+    if (prefix_offset > 0) {
+      compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+      compiler__emit_u16(c, (uint16_t)prefix_offset, line);
+    }
+  }
+
+  /* Emit remaining arrows. Literal arrows after the first dynamic one
+   * accumulate into `pending` and flush either before the next dynamic
+   * step or into the final load/store offset. */
+  uint64_t pending = 0;
+  for (int k = dyn_start; k <= chain_depth; k++) {
+    AstNode* idx = indices[k - 1];
+    if (idx->type == AST_LIT_INT) {
+      pending += (uint64_t)idx->data.lit_int.value * strides[k];
+      if (pending > 0xFFFFu) {
+        compiler__error(c, line, col,
+            "buf arrow chain interior offset exceeds 65535");
+        return true;
+      }
+      continue;
+    }
+    if (pending > 0) {
+      compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+      compiler__emit_u16(c, (uint16_t)pending, line);
+      pending = 0;
+    }
+    compiler__compile_node(c, idx);
+    compiler__emit_byte(c, OP_PTR_OFFSET, line);
+    compiler__emit_u16(c, (uint16_t)strides[k], line);
+  }
+
+  if (!at_leaf) {
+    if (pending > 0) {
+      compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+      compiler__emit_u16(c, (uint16_t)pending, line);
+    }
+    c->last_expr_type = TYPE_U64;
+    return true;
+  }
+
+  if (pending > 0xFFFFu) {
+    compiler__error(c, line, col,
+        "buf arrow chain leaf offset exceeds 65535");
+    return true;
+  }
+  uint16_t leaf_offset = (uint16_t)pending;
+
+  if (JACL_IS_SCALAR_TYPE_IDX(leaf_enc)) {
+    JaclType leaf_t = JACL_TYPE_IDX_TO_SCALAR(leaf_enc);
+    if (is_set) {
+      compiler__compile_node(c, args[2]);
+      compiler__emit_byte(c, OP_PTR_STORE, line);
+      compiler__emit_u16(c, leaf_offset, line);
+      compiler__emit_byte(c, (uint8_t)leaf_t, line);
+      compiler__emit_byte(c, OP_POP, line);
+      compiler__emit_byte(c, OP_NIL, line);
+      c->last_expr_type = TYPE_NIL;
+      return true;
+    }
+    compiler__emit_byte(c, OP_PTR_LOAD, line);
+    compiler__emit_u16(c, leaf_offset, line);
+    compiler__emit_byte(c, (uint8_t)leaf_t, line);
+    switch (leaf_t) {
+      case TYPE_I8: case TYPE_U8:
+      case TYPE_I16: case TYPE_U16:
+        c->last_expr_type = TYPE_I32; break;
+      default:
+        c->last_expr_type = leaf_t; break;
+    }
+    return true;
+  }
+  /* Struct leaf. */
+  if (is_set) {
+    compiler__compile_node(c, args[2]);
+    compiler__emit_byte(c, OP_PTR_STORE_INLINE, line);
+    compiler__emit_u16(c, leaf_offset, line);
+    compiler__emit_u16(c, (uint16_t)leaf_enc, line);
+    compiler__emit_byte(c, OP_POP, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    c->last_expr_type = TYPE_NIL;
+    return true;
+  }
+  compiler__emit_byte(c, OP_PTR_LOAD_INLINE, line);
+  compiler__emit_u16(c, leaf_offset, line);
+  compiler__emit_u16(c, (uint16_t)leaf_enc, line);
+  c->last_expr_type = TYPE_STRUCT;
+  c->inline_repr = INLINE_STACK;
+  return true;
 }
 
 /* --- Internal: emit struct-aware return --- */
@@ -8287,6 +8603,73 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+      /* Decomposed nested-buf chain: if the RHS is an intermediate
+       * arrow on a nested buf (e.g. `let p = $cube->1`), the AST node's
+       * inferred_struct_idx is UINT32_MAX by design (cross-registry
+       * rule). Re-walk the chain on the compiler side to find the
+       * remaining buf-shape idx in the compiler's registry and store
+       * it on the local so subsequent `$p->...` arrows can re-decode
+       * the shape. See docs/TYPE_REGISTRY_REFACTOR.md. */
+      if (effective_type == TYPE_PTR && rhs_struct_idx == UINT32_MAX) {
+        AstNode* rhs = args[value_arg_idx];
+        if (rhs && rhs->type == AST_COMMAND &&
+            rhs->data.command.head_id == HEAD_DOT &&
+            rhs->data.command.arg_count == 2 &&
+            rhs->data.command.args[1] &&
+            rhs->data.command.args[1]->type == AST_LIT_INT) {
+          int chain_depth_rhs = 1;
+          AstNode* walk = rhs->data.command.args[0];
+          while (walk && walk->type == AST_COMMAND &&
+                 walk->data.command.head_id == HEAD_DOT &&
+                 walk->data.command.arg_count == 2 &&
+                 walk->data.command.args[1] &&
+                 walk->data.command.args[1]->type == AST_LIT_INT) {
+            chain_depth_rhs++;
+            walk = walk->data.command.args[0];
+          }
+          if (walk && walk->type == AST_VAR_REF) {
+            JaclVal vname = compiler__name_val(c->heap, c->intern_table,
+                walk->data.var_ref.name, walk->data.var_ref.length);
+            int vidx = -1;
+            for (int i = (int)c->local_count - 2; i >= 0; i--) {
+              /* Skip the newly added local (count-1) itself. */
+              if (c->locals[i].name == vname) { vidx = i; break; }
+            }
+            if (vidx >= 0) {
+              StructTypeRegistry* reg2 = compiler__get_struct_registry(c);
+              uint32_t cur_enc = c->locals[vidx].struct_type_idx;
+              int peels_needed = 0;
+              bool walk_ok = false;
+              if (c->locals[vidx].type == TYPE_BUF &&
+                  c->locals[vidx].buf_inner_len == 0 && reg2 &&
+                  compiler__buf_elem_decode(reg2, cur_enc, NULL) == TYPE_BUF) {
+                /* TYPE_BUF base: first arrow consumes buf_len; remaining
+                 * peels go through the shape chain. */
+                peels_needed = chain_depth_rhs - 1;
+                walk_ok = true;
+              } else if ((c->locals[vidx].type == TYPE_PTR ||
+                          c->locals[vidx].type == TYPE_U64) && reg2 &&
+                         cur_enc < reg2->count &&
+                         reg2->shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+                /* TYPE_PTR base: every arrow peels one shape level. */
+                peels_needed = chain_depth_rhs;
+                walk_ok = true;
+              }
+              for (int k = 0; k < peels_needed && walk_ok; k++) {
+                if (cur_enc >= reg2->count ||
+                    reg2->shapes[cur_enc].kind != TYPE_SHAPE_BUF) {
+                  walk_ok = false; break;
+                }
+                cur_enc = reg2->shapes[cur_enc].u.buf.elem_idx;
+              }
+              if (walk_ok && cur_enc < reg2->count &&
+                  reg2->shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+                c->locals[c->local_count - 1].struct_type_idx = cur_enc;
+              }
+            }
+          }
+        }
+      }
       if (effective_type == TYPE_STRUCT) {
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         uint32_t width = struct__slot_width(reg, rhs_struct_idx);
@@ -8536,6 +8919,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                 uint32_t sidx = struct_registry__find(reg, pn, pl);
                 if (sidx != UINT32_MAX) pointee_sidx = sidx;
               }
+            }
+          } else if (ptr_pointee && ptr_pointee->type == AST_COMMAND) {
+            /* [Ptr [Buf N T]] slice param: intern the buf shape on the
+             * compiler's registry so chain access through the param
+             * can re-derive strides. */
+            StructTypeRegistry* reg = compiler__get_struct_registry(c);
+            uint64_t inner_bytes = 0;
+            uint32_t shape_idx = compiler__intern_buf_shape_chain(
+                reg, ptr_pointee, &inner_bytes);
+            if (shape_idx != UINT32_MAX) {
+              pointee_sidx = shape_idx;
             }
           }
           param_struct_idxs[param_count] = pointee_sidx;
@@ -11852,6 +12246,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     bool is_set = (argc == 3);
     if (argc != 2 && argc != 3) {
       compiler__builtin_arity_error(c, line, col, ".", "2 or 3 arguments", argc);
+      return;
+    }
+
+    /* Phase 5b pickup: atomic compile of nested-buf arrow chains
+     * (`$cube->i->j->k`) at depth >= 3. Bails (returns false) for
+     * depth-1 / depth-2 / non-buf receivers, leaving the existing
+     * per-arrow paths below untouched. */
+    if (compiler__try_compile_nested_buf_chain(c, args, is_set, line, col)) {
       return;
     }
 

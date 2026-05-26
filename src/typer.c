@@ -341,6 +341,13 @@ static bool typer__stream_type(TyperCtx* tc, AstNode* node,
  * keywords like *i32, real struct idx for *Point). Used everywhere a
  * [Ptr T] annotation appears (def/mut/set, proc params/return, extern).
  * Mirrors typer__future_type's shape — single type-name argument. */
+/* Forward declaration: defined further down. Used here to support
+ * [Ptr [Buf N T]] slice-passing param types -- the inner buf shape is
+ * interned via this helper. */
+static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
+                                 uint32_t* out_struct_idx, uint32_t* out_len,
+                                 uint32_t* out_inner_len,
+                                 uint32_t* out_typed_elem_idx);
 static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_struct_idx) {
   *out_struct_idx = UINT32_MAX;
@@ -350,23 +357,46 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
       memcmp(h->data.lit_string.value, "Ptr", 3) != 0) return false;
   if (node->data.command.arg_count != 1) return false;
   AstNode* arg = node->data.command.args[0];
-  if (arg->type != AST_LIT_STRING) return false;
-  const char* nm = arg->data.lit_string.value;
-  uint32_t    nl = arg->data.lit_string.length;
-  if (is_type_keyword(nm, nl)) {
-    *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
-    return true;
-  }
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0) {
-      *out_struct_idx = si;
+  if (arg->type == AST_LIT_STRING) {
+    const char* nm = arg->data.lit_string.value;
+    uint32_t    nl = arg->data.lit_string.length;
+    if (is_type_keyword(nm, nl)) {
+      *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
       return true;
     }
+    for (uint32_t si = 0; si < tc->struct_count; si++) {
+      if (tc->structs[si].name_len == nl &&
+          memcmp(tc->structs[si].name, nm, nl) == 0) {
+        *out_struct_idx = si;
+        return true;
+      }
+    }
+    /* Unknown pointee name — still recognize as Ptr. */
+    return true;
   }
-  /* Unknown pointee — still recognize as Ptr; the typer's pointee
-   * lookups will fail safely (UNKNOWN sentinel) without losing the
-   * annotation's type identity. */
+  /* [Ptr [Buf N T]] -- slice passing across proc boundaries. Intern
+   * the inner [Buf N T] as a TYPE_SHAPE_BUF in the typer's registry
+   * (including the outer N) and use its idx as the pointee. */
+  if (arg->type == AST_COMMAND && arg->data.command.head &&
+      arg->data.command.head->type == AST_LIT_STRING &&
+      arg->data.command.head->data.lit_string.length == 3 &&
+      memcmp(arg->data.command.head->data.lit_string.value, "Buf", 3) == 0) {
+    uint32_t inner_sidx;
+    uint32_t inner_len;
+    uint32_t inner_inner_len = 0;
+    if (typer__buf_type_full(tc, arg, &inner_sidx, &inner_len,
+                             &inner_inner_len, NULL) &&
+        inner_len > 0 && inner_sidx != UINT32_MAX) {
+      uint32_t shape_idx = type_shape_intern_buf(&tc->shape_reg,
+                                                  inner_len, inner_sidx);
+      if (shape_idx != UINT32_MAX) {
+        *out_struct_idx = shape_idx;
+        return true;
+      }
+    }
+    /* Recognized as Ptr but inner buf shape malformed -- still a Ptr. */
+    return true;
+  }
   return true;
 }
 
@@ -432,6 +462,155 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
   }
   /* Struct idx range. */
   return TYPE_STRUCT;
+}
+
+/* For a HEAD_DOT arrow `recv->lit_int_idx`, walk inside-out through
+ * consecutive HEAD_DOT(_, LIT_INT) arrows to find an innermost
+ * AST_VAR_REF bound to either:
+ *   - TYPE_BUF with nested-buf shape (depth >= 3, encoded via the
+ *     typer's TYPE_SHAPE_BUF chain), or
+ *   - TYPE_PTR whose pointee shape idx is a TYPE_SHAPE_BUF (decomposed
+ *     chain: `let p = $cube->1; $p->2->3`).
+ *
+ * Returns true with the result type for the chain segment up to and
+ * including this arrow: TYPE_PTR for intermediate steps; the leaf
+ * scalar/struct for the deepest arrow.
+ *
+ * For intermediate steps, also writes `*out_remaining_shape_idx` =
+ * the typer-side shape idx for the remaining buf-shape after this
+ * arrow. NULL-tolerant. Callers that bind a name to an intermediate
+ * pointer (e.g. typer__handle_def_or_mut) read it to keep the
+ * binding's shape live; callers that just need the result type pass
+ * NULL.
+ *
+ * Returns false for non-chains, depth-2 receivers (handled by the
+ * existing per-arrow path), or non-buf/non-ptr bases. Callers fall
+ * through to the existing handlers.
+ *
+ * The intermediate-step result's `inferred_struct_idx` stays
+ * UINT32_MAX on the AST node -- the cross-registry rule
+ * (docs/TYPE_REGISTRY_REFACTOR.md) forbids typer-side shape idxes
+ * from reaching the compiler via AST node fields. The compiler
+ * recovers the shape by re-walking the AST chain itself; only the
+ * typer's binding table carries the typer-side shape idx. */
+static bool typer__nested_buf_chain_result(TyperCtx* tc,
+                                            AstNode* outer_recv,
+                                            AstNode* outer_int,
+                                            JaclType* out_type,
+                                            uint32_t* out_sidx,
+                                            uint32_t* out_remaining_shape_idx) {
+  if (out_remaining_shape_idx) *out_remaining_shape_idx = UINT32_MAX;
+  /* Index-arrow check: anything other than a name field (LIT_STRING)
+   * counts as an index. Dynamic indices like `$slice->$i` parse with
+   * AST_VAR_REF here. */
+  if (!outer_int || outer_int->type == AST_LIT_STRING) return false;
+  AstNode* idx_nodes[16];
+  int chain_depth = 1;
+  idx_nodes[0] = outer_int;
+  AstNode* cur = outer_recv;
+  while (cur && cur->type == AST_COMMAND &&
+         cur->data.command.head_id == HEAD_DOT &&
+         cur->data.command.arg_count == 2 &&
+         cur->data.command.args[1] &&
+         cur->data.command.args[1]->type != AST_LIT_STRING) {
+    if (chain_depth >= 16) return false;
+    idx_nodes[chain_depth++] = cur->data.command.args[1];
+    cur = cur->data.command.args[0];
+  }
+  /* Validate that non-literal indices type as integer (i8..u64) or
+   * dyn. Anything else (struct, string, float, ...) means this isn't a
+   * buf chain after all -- bail so the existing handler reports it. */
+  for (int k = 0; k < chain_depth; k++) {
+    if (idx_nodes[k]->type == AST_LIT_INT) continue;
+    JaclType it = (JaclType)idx_nodes[k]->inferred_type;
+    if (it == TYPE_DYN) continue;
+    if (it != TYPE_I8 && it != TYPE_U8 &&
+        it != TYPE_I16 && it != TYPE_U16 &&
+        it != TYPE_I32 && it != TYPE_U32 &&
+        it != TYPE_I64 && it != TYPE_U64) {
+      return false;
+    }
+  }
+  if (!cur || cur->type != AST_VAR_REF) return false;
+  const TyperBinding* b = typer__scope_resolve(tc,
+      cur->data.var_ref.name, cur->data.var_ref.length, cur->scope_mark);
+  if (!b || b->struct_idx == UINT32_MAX) return false;
+
+  /* shape_after[k] = encoding visible after taking k arrows (1..num_dims).
+   * The encoding at index num_dims is the leaf (non-BUF). */
+  uint32_t shape_after[16];
+  int      num_dims = 1;
+  if (b->type == TYPE_BUF) {
+    /* TYPE_BUF binding: dim 0 = b->buf_len; shape after 1 arrow lives at
+     * b->struct_idx (a TYPE_SHAPE_BUF or a leaf encoding). */
+    shape_after[1] = b->struct_idx;
+  } else if (b->type == TYPE_PTR) {
+    /* TYPE_PTR binding with a buf-shape pointee: the pointer addresses
+     * the start of the shape entry's [Buf N T] region. Dim 0 = shape
+     * length; shape after 1 arrow = shape.elem_idx. */
+    if (b->struct_idx < TYPER_MAX_STRUCTS ||
+        b->struct_idx >= tc->shape_reg.count ||
+        tc->shape_reg.shapes[b->struct_idx].kind != TYPE_SHAPE_BUF) {
+      return false;
+    }
+    shape_after[1] = tc->shape_reg.shapes[b->struct_idx].u.buf.elem_idx;
+  } else {
+    return false;
+  }
+  uint32_t cur_enc = shape_after[1];
+  while (cur_enc >= TYPER_MAX_STRUCTS && cur_enc < tc->shape_reg.count &&
+         tc->shape_reg.shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+    if (num_dims >= 15) return false;
+    cur_enc = tc->shape_reg.shapes[cur_enc].u.buf.elem_idx;
+    num_dims++;
+    shape_after[num_dims] = cur_enc;
+  }
+  uint32_t leaf_enc = cur_enc;
+
+  /* Gate:
+   *   TYPE_BUF base, num_dims == 2 -- defer to existing per-arrow path
+   *     when ALL indices are LIT_INT (preserves the well-tested
+   *     depth-2 codegen). Intervene only if any index is dynamic.
+   *   TYPE_BUF base, num_dims >= 3 -- always intervene.
+   *   TYPE_PTR-with-buf-shape base -- always intervene; the existing
+   *     per-arrow handler doesn't recognize buf-shape pointees. */
+  if (b->type == TYPE_BUF && num_dims < 2) return false;
+  if (b->type == TYPE_BUF && num_dims == 2) {
+    bool any_dyn = false;
+    for (int k = 0; k < chain_depth; k++) {
+      if (idx_nodes[k]->type != AST_LIT_INT) { any_dyn = true; break; }
+    }
+    if (!any_dyn) return false;
+  }
+  if (chain_depth > num_dims) return false;
+
+  if (chain_depth == num_dims) {
+    if (JACL_IS_SCALAR_TYPE_IDX(leaf_enc)) {
+      JaclType t = JACL_TYPE_IDX_TO_SCALAR(leaf_enc);
+      switch (t) {
+        case TYPE_I8: case TYPE_U8:
+        case TYPE_I16: case TYPE_U16:
+          *out_type = TYPE_I32; break;
+        default:
+          *out_type = t; break;
+      }
+      *out_sidx = UINT32_MAX;
+    } else {
+      *out_type = TYPE_STRUCT;
+      *out_sidx = leaf_enc;
+    }
+  } else {
+    /* Intermediate: yield [Ptr <UINT32_MAX>] on the AST; the typer-side
+     * remaining-shape idx goes back via out_remaining_shape_idx so the
+     * def handler can store it on the binding (kept off the AST node by
+     * the cross-registry rule). */
+    *out_type = TYPE_PTR;
+    *out_sidx = UINT32_MAX;
+    if (out_remaining_shape_idx) {
+      *out_remaining_shape_idx = shape_after[chain_depth];
+    }
+  }
+  return true;
 }
 
 /* Compile-time type check on a buf-set value. Decodes the buf's
@@ -1150,6 +1329,28 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       struct_idx = declared_struct_idx;
     } else {
       struct_idx = value_node->inferred_struct_idx;
+    }
+    /* Decomposed nested-buf chain: when the RHS is an intermediate
+     * arrow on a nested buf chain (e.g. `let p = $cube->1`), the AST
+     * node's inferred_struct_idx is UINT32_MAX by design (cross-registry
+     * rule). Re-walk the chain here to get the typer-side remaining
+     * shape idx and store it on the binding so subsequent `$p->...`
+     * uses can re-decode the shape. */
+    if (effective == TYPE_PTR && struct_idx == UINT32_MAX &&
+        value_node->type == AST_COMMAND &&
+        value_node->data.command.head_id == HEAD_DOT &&
+        value_node->data.command.arg_count == 2) {
+      JaclType chain_t = TYPE_DYN;
+      uint32_t chain_sidx = UINT32_MAX;
+      uint32_t remaining_shape = UINT32_MAX;
+      AstNode* recv = value_node->data.command.args[0];
+      AstNode* fld  = value_node->data.command.args[1];
+      if (typer__nested_buf_chain_result(tc, recv, fld,
+                                         &chain_t, &chain_sidx,
+                                         &remaining_shape) &&
+          chain_t == TYPE_PTR && remaining_shape != UINT32_MAX) {
+        struct_idx = remaining_shape;
+      }
     }
     /* Typed-map: also inherit key idx from RHS. */
     if (effective == TYPE_TYPED_MAP) {
@@ -3730,6 +3931,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                                   : bound->return_type;
             return;
           }
+        }
+      }
+
+      /* Nested-buf chain at depth >= 3, or any depth-N chain rooted at
+       * a TYPE_PTR-with-buf-shape binding (decomposed chains). Walks
+       * the arrow chain inside-out and yields the chain's result type;
+       * bails on depth <= 2 TYPE_BUF receivers so the existing
+       * per-arrow handlers continue to drive those. */
+      if (fld->type == AST_LIT_INT) {
+        JaclType chain_t = TYPE_DYN;
+        uint32_t chain_sidx = UINT32_MAX;
+        if (typer__nested_buf_chain_result(tc, tgt, fld,
+                                           &chain_t, &chain_sidx, NULL)) {
+          node->inferred_type       = chain_t;
+          node->inferred_struct_idx = chain_sidx;
+          return;
         }
       }
 

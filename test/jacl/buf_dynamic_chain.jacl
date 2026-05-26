@@ -1,0 +1,36 @@
+# expect: 0
+# expect: 77
+# expect: 77
+# expect: 55
+# expect: 55
+# expect: 13
+# Phase 5b pickup: dynamic arrow indices (`$cube->$i->$j->$k`).
+# Indices after `->` can be integer literals (compile-time folded into
+# the byte offset) or var refs / expressions (emitted as OP_PTR_OFFSET
+# steps). Mixed chains work; leading literals fold into the base op,
+# trailing literals fold into the leaf load/store's u16 offset.
+# See docs/TYPE_REGISTRY_REFACTOR.md.
+
+proc main {} {
+  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+
+  # All-dynamic chain on a TYPE_BUF base.
+  mut i 1
+  mut j 2
+  mut k 3
+  print $cube->$i->$j->$k
+  set $cube->$i->$j->$k 77
+  print $cube->$i->$j->$k
+  print $cube->1->2->3
+
+  # Mixed literal/dynamic chain.
+  set $cube->1->$j->3 55
+  print $cube->1->$j->3
+  print $cube->1->2->3
+
+  # Depth-2 dynamic on a flat nested buf.
+  def [Buf 3 [Buf 4 i32]] matrix
+  set $matrix->$i->$j 13
+  print $matrix->1->2
+}
+main

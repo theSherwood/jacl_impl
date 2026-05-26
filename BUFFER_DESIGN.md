@@ -26,7 +26,11 @@ when M4 lands).
 | **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | `c1e9390` |
 | **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | `a783668` |
 | **M4.4 ext4** `[Buf N [Future T]]` | ✅ done | `eed8107` |
-| **M4.4 ext5** Nested-buf depth lift (`[Buf N1 [Buf N2 [Buf N3 T]]]`) | ✅ declaration / `[buf-len]` / `[addr]` work at any depth; arrow chain still depth-2 only | `0ea5bff` |
+| **M4.4 ext5** Nested-buf depth lift (`[Buf N1 [Buf N2 [Buf N3 T]]]`) | ✅ declaration / `[buf-len]` / `[addr]` work at any depth | `0ea5bff` |
+| **M4.4 ext6** Depth-3+ arrow chains (`$cube->i->j->k`, read + set) | ✅ done | this session |
+| **M4.4 ext7** Decomposed chains (`def p $cube->1; $p->2->3`) | ✅ done | this session |
+| **M4.4 ext8** Dynamic arrow indices (`$cube->$i->$j->$k`) | ✅ done | this session |
+| **M4.4 ext9** Slice passing via `[Ptr [Buf N T]]` proc params | ✅ done | this session |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
@@ -84,37 +88,29 @@ for the buffer feature.
 
 **Tier 1 — finishing the nested-buf depth lift (Phase 5b follow-up).**
 The depth cap was lifted at *declaration* time (commit `0ea5bff`).
-Three pieces still pending:
+This session closed out the major access-side items: depth-3+ arrow
+chains (read + set), decomposed chains, dynamic indices, and slice
+passing. See `docs/TYPE_REGISTRY_REFACTOR.md` for the architecture
+notes and the fixture list.
 
-1. **Depth-3+ arrow chains** (`$cube->i->j->k`). Today's `[Ptr T_leaf]`
-   decay drops the intermediate strides — the next arrow on the result
-   would do a flat `j * sizeof(T)` offset instead of `j * N3 * sizeof(T)`.
-   The fix is to introduce a "pointer to remaining buf shape"
-   intermediate: `$cube->i` would yield `[Ptr [Buf N2 [Buf N3 T]]]`
-   rather than `[Ptr T_leaf]`. The registry already supports this via
-   `TYPE_SHAPE_PTR` whose pointee is a `TYPE_SHAPE_BUF` idx. The work:
-   - Typer's HEAD_DOT arrow-int for TYPE_BUF receiver: when the inner
-     element is itself a `TYPE_SHAPE_BUF`, yield `[Ptr <inner shape>]`
-     (not `[Ptr T_leaf]`).
-   - Typer's HEAD_DOT arrow-int for TYPE_PTR receiver: when the pointee
-     decodes to `TYPE_SHAPE_BUF`, peel one dimension — yield
-     `[Ptr <inner-inner shape>]` or `[Ptr T_leaf]` (if peeled to leaf).
-   - Compiler mirrors: stride math walks one level of the chain per
-     arrow, emitting `OP_PTR_ADD_OFFSET` with `idx * remaining_size`.
-   - Fixture: extend `buf_nested_depth3.jacl` with a working
-     `$cube->i->j->k` access.
+Remaining:
 
-2. **Depth-3+ literal init**. `def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+1. **Depth-3+ literal init**. `def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
    [[Buf 2 [Buf 3 [Buf 4 i32]]] ...]` currently errors at the compiler
    with "literal init not yet supported for nesting depth > 2". Extend
    the literal-init emission in `compiler.c` HEAD_DEF buf branch to
    recurse into nested constructors. Same shape as depth-2 literal
    init, just one more level.
 
+2. **Runtime bounds checks for dynamic indices**. Today's
+   `$cube->$i->$j->$k` emits `OP_PTR_OFFSET` without runtime checks.
+   See `docs/TYPE_REGISTRY_REFACTOR.md` pickup #2 for the proposed
+   `OP_PTR_OFFSET_CHECKED` opcode.
+
 3. **Ref-elem bufs as struct fields** (`struct Bag {i32 size, [Buf 4
-   dyn] items}`). Today rejected at `compiler.c:13718` with a clear
-   error. The struct-tracing walker (`gc_collect.c`) needs to descend
-   into the embedded N-tagged-slot range. Two implementation choices
+   dyn] items}`). Today rejected at `compiler.c` with a clear error.
+   The struct-tracing walker (`gc_collect.c`) needs to descend into
+   the embedded N-tagged-slot range. Two implementation choices
    sketched in `docs/TYPE_REGISTRY_REFACTOR.md` — extend
    `StructTypeField.type` with a kind discriminator, or attach a per-
    field shape pointer. Either way the field's GC trace becomes
@@ -132,8 +128,10 @@ Three pieces still pending:
   path.
 - **`[Buf N T]` proc parameter syntax**. Bufs decay to `[Ptr T]` at
   call boundaries; declaring a param as `[Buf N T]` directly is
-  rejected today. Either lift the parser/typer gate (decay would still
-  apply) or document the workaround.
+  rejected today. The new `[Ptr [Buf N T]]` slice-pass annotation
+  covers the common "pass a buf row to a proc" use case (see
+  `docs/TYPE_REGISTRY_REFACTOR.md`). Direct `[Buf N T]` params (with
+  whole-buf semantics, no decay) are still open if needed.
 - **Test harness native-fn registration** — unblocks a real C extern
   fixture (M3.6) and stress-tests the decay path with an actual
   syscall.
@@ -142,11 +140,13 @@ Three pieces still pending:
 
 - **Language-wide LHS type inference** for typed-ctor RHS already
   landed (M5b). No remaining buffer-specific work here.
-- **Receiver-shape generalization** — partially shipped (M5c / M5d).
-  `$h->magic->0` (and the `set` form), plus `[addr $h->magic->0]`,
-  work when the first arrow returns a `[Ptr T]` from a struct-field
-  access. Builtin-head forms (`[buf-get $h->field $i]`) and `[Buf N T]`
-  proc-param syntax remain in Tier 2 above.
+- **Receiver-shape generalization** — substantively shipped. M5c / M5d
+  covered struct-field-derived `[Ptr T]` chains. M4.4 ext6..ext9 cover
+  the nested-buf chain receiver matrix (depth-3+ chains, decomposed
+  chains, dynamic indices, slice passing) -- see the chain helper
+  architecture documented in `docs/TYPE_REGISTRY_REFACTOR.md`.
+  Builtin-head forms (`[buf-get $h->field $i]`) and direct
+  whole-buf-value `[Buf N T]` proc-param syntax remain in Tier 2.
 
 The design decisions that landed (and *why*) — useful when reading the
 code:

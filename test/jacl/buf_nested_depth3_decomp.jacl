@@ -1,0 +1,41 @@
+# expect: 0
+# expect: 7
+# expect: 7
+# expect: 42
+# expect: 42
+# expect: 99
+# expect: 99
+# expect: 99
+# Phase 5b pickup: decomposed nested-buf chains. Storing an
+# intermediate arrow result in a `def`-bound name keeps the remaining
+# buf-shape alive on the local so chained access through the bound
+# name (`$slice->j->k`) re-derives the correct strides.
+#
+# The shape is recovered by re-walking the RHS AST at def-time on both
+# sides (typer + compiler). See docs/TYPE_REGISTRY_REFACTOR.md.
+
+proc main {} {
+  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+
+  # One-step decomp: p views row 1 of cube as [Ptr [Buf 3 [Buf 4 i32]]].
+  def p $cube->1
+  print $p->2->3
+
+  # Set via the original cube; read via the slice (aliasing).
+  set $cube->1->2->3 7
+  print $p->2->3
+  print $cube->1->2->3
+
+  # Set via the slice; read via the original.
+  set $p->0->1 42
+  print $cube->1->0->1
+  print $p->0->1
+
+  # Two-step decomp: q views row 1, column 2 as [Ptr [Buf 4 i32]].
+  def q $p->2
+  set $q->3 99
+  print $q->3
+  print $p->2->3
+  print $cube->1->2->3
+}
+main

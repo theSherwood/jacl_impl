@@ -539,8 +539,25 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
       rhs->data.lit_int.value = rhs_tok->payload.int_val;
       rhs->inferred_type = TYPE_I32;
       rhs_end = rhs->end;
+    } else if (rhs_tok->type == TOKEN_VAR) {
+      /* Dynamic buf element access: $buf->$idx — RHS is a var ref.
+       * The chain compiler computes a runtime byte offset via
+       * OP_PTR_OFFSET steps. The typer requires the var to type as an
+       * integer. See docs/TYPE_REGISTRY_REFACTOR.md. */
+      parser__advance(p);
+      rhs = ast_alloc(p->arena);
+      rhs->type = AST_VAR_REF;
+      rhs->start = parser__token_start(rhs_tok);
+      rhs->end   = parser__token_end(rhs_tok);
+      /* TOKEN_VAR's payload.text already skips the leading '$' (set
+       * in lexer at the TOKEN_VAR construction). The token length
+       * still counts the '$', so subtract 1 for the name length. */
+      rhs->data.var_ref.name   = rhs_tok->payload.text;
+      rhs->data.var_ref.length = rhs_tok->length - 1;
+      rhs_end = rhs->end;
     } else {
-      return parser__error(p, "expected field name or integer index after '->'", arrow);
+      return parser__error(p, "expected field name, integer index, or "
+                              "$var dynamic index after '->'", arrow);
     }
 
     /* Build "." head */

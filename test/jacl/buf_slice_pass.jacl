@@ -1,0 +1,49 @@
+# expect: 11
+# expect: 22
+# expect: 33
+# expect: 66
+# expect: 0
+# expect: 99
+# Phase 5b pickup: slice passing via [Ptr [Buf N T]] proc params.
+# A decomposed buf row (`def slice $cube->1`) can be passed to a proc
+# whose param is annotated [Ptr [Buf 3 [Buf 4 i32]]]. The param's
+# binding carries the inner buf shape, so chained access through the
+# param re-derives the correct strides at any depth and supports
+# dynamic indices (`$p->$i->$i`). See docs/TYPE_REGISTRY_REFACTOR.md.
+
+proc set_diag {[Ptr [Buf 3 [Buf 4 i32]]] p a b c} {
+  set $p->0->0 $a
+  set $p->1->1 $b
+  set $p->2->2 $c
+}
+
+proc sum_diag {[Ptr [Buf 3 [Buf 4 i32]]] p} {
+  mut total 0
+  mut i 0
+  while [< $i 3] {
+    set total [+ $total $p->$i->$i]
+    set i [+ $i 1]
+  }
+  return $total
+}
+
+proc bump {[Ptr [Buf 3 [Buf 4 i32]]] p row col v} {
+  set $p->$row->$col $v
+}
+
+proc main {} {
+  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+
+  def slice $cube->1
+  set_diag $slice 11 22 33
+  print $cube->1->0->0
+  print $cube->1->1->1
+  print $cube->1->2->2
+  print [sum_diag $slice]
+
+  # Slice mutation through proc param + dynamic indices.
+  print $cube->0->0->0
+  bump $cube->0 2 3 99
+  print $cube->0->2->3
+}
+main
