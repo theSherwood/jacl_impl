@@ -26,7 +26,7 @@ when M4 lands).
 | **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | `c1e9390` |
 | **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | `a783668` |
 | **M4.4 ext4** `[Buf N [Future T]]` | ✅ done | `eed8107` |
-| **M4.4 ext5** Nested-buf depth lift (`[Buf N1 [Buf N2 [Buf N3 T]]]`) | ✅ declaration / `[buf-len]` / `[addr]` work at any depth; arrow chain still depth-2 only | this |
+| **M4.4 ext5** Nested-buf depth lift (`[Buf N1 [Buf N2 [Buf N3 T]]]`) | ✅ declaration / `[buf-len]` / `[addr]` work at any depth; arrow chain still depth-2 only | `0ea5bff` |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |
@@ -76,136 +76,77 @@ proc main {} {
 }
 ```
 
-What's deferred (the next session can pick from these):
+## Session pickup — open work
 
-1. **M4.4 follow-ups** — the flat-local form is done; remaining slices:
+Cross-reference: `docs/TYPE_REGISTRY_REFACTOR.md` carries the full
+type-shape-registry history; this section lists what's still **open**
+for the buffer feature.
 
-   - **Ref-elem bufs as struct fields** (rejected with a clear error
-     today): `struct Bag {i32 size, [Buf 4 dyn] items}` needs the
-     struct walker to descend into embedded tagged-slot ranges. Plumb
-     either a per-field shape descriptor (offset/N/elem) or extend the
-     struct's `field_inline_bitmap` to distinguish "raw bytes" from
-     "N tagged slots". `compiler.c:13718` (struct field parse) is where
-     the rejection lives; lift it once the walker handles the new shape.
-   - **Nested ref-elem bufs** `[Buf N [Buf M dyn]]` — currently
-     rejected in `compiler.c:HEAD_DEF` buf branch. Same shape problem
-     scaled up; defer until there's a concrete need.
-   - ~~`[Buf N [Map K V]]`~~ — landed in TYPE_REGISTRY_REFACTOR.md
-     Phase 3+4 via a shared typed-shape registry (commit `c1e9390`).
-     Both K and V ride on one shape entry; no aux fields needed.
-   - ~~Strict typed-vec value check on `buf-set`~~ — closed via the
-     typer's new `typer__check_buf_set_value` helper. `[buf-set]` /
-     `[buf-unchecked-set]` / `set $b->i v` all reject mismatched
-     value types at compile time. See fixtures
-     `buf_set_value_type_mismatch.jacl`,
-     `buf_arrow_set_value_type_mismatch.jacl`,
-     `buf_set_typed_vec_mismatch.jacl`.
+**Tier 1 — finishing the nested-buf depth lift (Phase 5b follow-up).**
+The depth cap was lifted at *declaration* time (commit `0ea5bff`).
+Three pieces still pending:
 
-   What landed in M4.4 (flat-local form):
+1. **Depth-3+ arrow chains** (`$cube->i->j->k`). Today's `[Ptr T_leaf]`
+   decay drops the intermediate strides — the next arrow on the result
+   would do a flat `j * sizeof(T)` offset instead of `j * N3 * sizeof(T)`.
+   The fix is to introduce a "pointer to remaining buf shape"
+   intermediate: `$cube->i` would yield `[Ptr [Buf N2 [Buf N3 T]]]`
+   rather than `[Ptr T_leaf]`. The registry already supports this via
+   `TYPE_SHAPE_PTR` whose pointee is a `TYPE_SHAPE_BUF` idx. The work:
+   - Typer's HEAD_DOT arrow-int for TYPE_BUF receiver: when the inner
+     element is itself a `TYPE_SHAPE_BUF`, yield `[Ptr <inner shape>]`
+     (not `[Ptr T_leaf]`).
+   - Typer's HEAD_DOT arrow-int for TYPE_PTR receiver: when the pointee
+     decodes to `TYPE_SHAPE_BUF`, peel one dimension — yield
+     `[Ptr <inner-inner shape>]` or `[Ptr T_leaf]` (if peeled to leaf).
+   - Compiler mirrors: stride math walks one level of the chain per
+     arrow, emitting `OP_PTR_ADD_OFFSET` with `idx * remaining_size`.
+   - Fixture: extend `buf_nested_depth3.jacl` with a working
+     `$cube->i->j->k` access.
 
-   - **Typer**: `typer__buf_type_full` already encoded ref keywords
-     (`dyn`/`str`/`vec`/`map`/`stream`) via `JACL_SCALAR_TYPE_IDX`;
-     the existing buf-get / arrow-int narrowing returns the original
-     keyword type. Implicit `[Buf N T]` → `[Ptr T]` decay at call
-     sites is rejected for ref T with a message pointing at the
-     explicit `[addr]` escape hatch (see `src/typer.c` ~2440).
-   - **Compiler** (`src/compiler.c` HEAD_DEF buf branch): for ref
-     elements, skip `OP_BUF_ZERO_LOCAL`. The prior OP_NIL pushes
-     leave each slot at `JACL_NIL` (the all-zeros tag) and leaving
-     the `inline_slot_bitmap` clear means the existing stack walker
-     scans the slots as ordinary tagged JaclVals -- no new GC
-     machinery. Stride is `sizeof(JaclVal) = 8` via
-     `struct__type_size`.
-   - **VM** (`src/vm.c` OP_BUF_GET/SET_LOCAL + unchecked variants):
-     added a tagged-ref case set that loads/stores `vm->stack[base +
-     idx]` directly. The store path calls `gc_write_barrier` on the
-     old→new value so the concurrent marker observes both halves of
-     the swap.
-   - **GC**: no new walker code. Ref-elem slots are normal stack
-     slots that the existing `gc_mark` loop already scans.
-   - **Test fixtures**: `test/jacl/buf_traced_dyn.jacl`,
-     `buf_traced_vec.jacl`, `buf_traced_literal_init.jacl`,
-     `buf_traced_dyn_gc.jacl` (GC churn), `buf_traced_decay_reject.jacl`
-     (extern decay error), `buf_traced_struct_field_reject.jacl`
-     (struct-field error). Full chaos suite (`chaos_grey_buf`,
-     `chaos_satb_deref`, `chaos_soak`) still passes.
+2. **Depth-3+ literal init**. `def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
+   [[Buf 2 [Buf 3 [Buf 4 i32]]] ...]` currently errors at the compiler
+   with "literal init not yet supported for nesting depth > 2". Extend
+   the literal-init emission in `compiler.c` HEAD_DEF buf branch to
+   recurse into nested constructors. Same shape as depth-2 literal
+   init, just one more level.
 
-   Original pickup notes (kept for the follow-up slices):
+3. **Ref-elem bufs as struct fields** (`struct Bag {i32 size, [Buf 4
+   dyn] items}`). Today rejected at `compiler.c:13718` with a clear
+   error. The struct-tracing walker (`gc_collect.c`) needs to descend
+   into the embedded N-tagged-slot range. Two implementation choices
+   sketched in `docs/TYPE_REGISTRY_REFACTOR.md` — extend
+   `StructTypeField.type` with a kind discriminator, or attach a per-
+   field shape pointer. Either way the field's GC trace becomes
+   "scan N tagged slots starting at field offset".
 
-   - **Typer** (`src/typer.c`, `typer__buf_type_full` ~393): drop the
-     scalar-only check on the inner element when the element type
-     keyword resolves to a tagged-ref type (`dyn`, `str`, `vec`,
-     `map`, `closure`) or to a typed collection.
-   - **Compiler** (`src/compiler.c` HEAD_DEF buf branch ~7040):
-     element-size for tagged types is `sizeof(JaclVal)` = 8 bytes.
-     Stride math already works; the new piece is **NIL zero-init**
-     (the OP_BUF_ZERO_LOCAL memset of zero bytes happens to produce
-     `JACL_NIL` for the current tagged encoding — verify this still
-     holds, since `JACL_NIL` is a specific NaN-boxing bit pattern
-     and changing the encoding would break this).
-   - **VM** (`src/vm.c` OP_BUF_GET_LOCAL/SET_LOCAL ~3024 + ~3112):
-     add cases for the tagged-ref element types — load/store a
-     full `JaclVal` slot. The store path must call the write
-     barrier (`gc_write_barrier(...)`) so the concurrent collector
-     sees the new reference.
-   - **GC** (`src/gc.c` / `src/gc_collect.c`): extend the stack-
-     frame walker to recognise buf locals whose element type is a
-     tagged ref, then mark each of the N slots. Two options:
-     (a) **Shape descriptor**: record `(base_slot, N, element_type)`
-         somewhere the marker can find it (likely a new table on
-         the call frame, populated by the compiler at def time).
-     (b) **Bitmap extension**: extend `vm->inline_slot_bitmap` to
-         distinguish "raw inline bytes" (current usage for struct
-         locals) from "N tagged slots" (new for ref-elem bufs).
-     Pick one and stick to it; (a) is more honest but more
-     plumbing, (b) reuses infrastructure but conflates concepts.
-   - **Struct-field buf** (M4.3 path, same files): the struct
-     registry's `StructTypeField.type` for a buf field needs to
-     carry the element type too, so the struct-tracing walker can
-     descend into ref-elem buf fields.
-   - **Test fixtures**:
-     - `test/jacl/buf_traced_dyn.jacl` — `[Buf 4 dyn]` storing
-       strings and vectors; force a GC mid-walk and verify the
-       elements are still reachable.
-     - `test/jacl/buf_traced_vec.jacl` — `[Buf 3 [Vec i64]]`
-       holding typed vecs.
-     - A chaos-style stress test under `test/test_chaos_*.c` that
-       allocates many ref-elem bufs, mutates them while GC runs,
-       and verifies the heap stays consistent.
+**Tier 2 — nice-to-haves, not blocking.**
 
-   **Why this is the highest-risk slice**: the concurrent collector
-   has invariants around what's traced and how write barriers are
-   emitted. Indexed stores into a tagged-elem buf cross a barrier
-   the existing struct-store machinery never has to (struct fields
-   are statically known offsets; buf elements are runtime indices).
-   Land in small, tested commits — typer + compiler first (NIL
-   zero-init and store with barrier), then the GC walker, then the
-   stress fixtures. Run `test/test_chaos_*.c` aggressively between
-   each commit.
-2. **M4.2 deeper nesting** (`[Buf 2 [Buf 3 [Buf 4 i32]]]`): needs
-   the encoding to grow from a single `inner_buf_len` to a variable-
-   length dimension list (or a recursive synthetic-struct encoding).
-   Touches typer, compiler, error rendering, arrow chain. The scalar
-   and struct-inner forms at depth 2 work today; depth-N support is
-   a separate design slice.
-3. **Language-wide LHS type inference** (see "Open questions / deferred"
-   below) — independent of bufs; reduces
-   `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to
-   `def hdr [[Buf 8 i32] 1024 2048]` and similar across typed vecs,
-   maps, futures, pointers, boxes.
-4. **Receiver-shape generalization** — partially shipped (M5c / M5d).
-   `$h->magic->0` (and the `set` form), plus `[addr $h->magic->0]`,
-   now work when the first arrow returns a `[Ptr T]` from a struct-
-   field access — the typer + compiler accept any TYPE_PTR-typed
-   receiver (not just bare local var-refs) for arrow-int indexing
-   and for [addr] leaves. Codegen dispatches through OP_PTR_LOAD /
-   OP_PTR_STORE / OP_PTR_ADD_OFFSET on the typer-recovered
-   un-widened pointee. Still deferred: `[buf-get $h->field $i]` /
-   `[buf-set $h->field $i $v]` builtin-head forms (use the arrow
-   syntax instead) and `[Buf N T]` proc parameter syntax.
-5. **Test harness native-fn registration** — would unblock a real C
-   extern fixture (M3.6) and stress-test the decay path with an actual
-   syscall.
+- **`[Box T]` annotation surface**. `TYPE_BOX` exists at runtime
+  (created via `[box $val]`) but `[Box T]` isn't a recognized
+  annotation — no parser entry. Adding it would let `[Buf N [Box T]]`
+  ride the existing Phase 5 `TYPE_SHAPE_BOX` kind via a one-line
+  recognizer extension. Mechanical.
+- **`[buf-get $h->field $i]` builtin-head forms** for buf-typed struct
+  fields (currently arrow syntax only). M5d only shipped the arrow
+  path.
+- **`[Buf N T]` proc parameter syntax**. Bufs decay to `[Ptr T]` at
+  call boundaries; declaring a param as `[Buf N T]` directly is
+  rejected today. Either lift the parser/typer gate (decay would still
+  apply) or document the workaround.
+- **Test harness native-fn registration** — unblocks a real C extern
+  fixture (M3.6) and stress-tests the decay path with an actual
+  syscall.
+
+**Tier 3 — orthogonal cleanups.**
+
+- **Language-wide LHS type inference** for typed-ctor RHS already
+  landed (M5b). No remaining buffer-specific work here.
+- **Receiver-shape generalization** — partially shipped (M5c / M5d).
+  `$h->magic->0` (and the `set` form), plus `[addr $h->magic->0]`,
+  work when the first arrow returns a `[Ptr T]` from a struct-field
+  access. Builtin-head forms (`[buf-get $h->field $i]`) and `[Buf N T]`
+  proc-param syntax remain in Tier 2 above.
 
 The design decisions that landed (and *why*) — useful when reading the
 code:

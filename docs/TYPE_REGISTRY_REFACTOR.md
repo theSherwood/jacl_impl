@@ -211,6 +211,124 @@ no schema growth, no aux fields, no encoding-out-of-slots problem.
 That's the architectural payoff; specific compose cases get wired up
 on demand.
 
+### Phase 5a/5b -- Recognizer wiring (in progress)
+
+- ✅ **`[Buf N [Ptr T]]`** -- `a783668`.
+- ✅ **`[Buf N [Future T]]`** -- `eed8107`.
+- ⚠ **`[Buf N [Box T]]`** -- shape kind ready, but `[Box T]` isn't a
+  parser-recognized annotation today. Adding `[Box T]` would unblock
+  this with a one-line recognizer extension.
+- ✅ **Nested-buf depth lift via recursive `TYPE_SHAPE_BUF` interning**
+  -- `0ea5bff`. **Partial**: declaration / `[buf-len]` / `[addr]` work
+  at any depth; arrow chains beyond depth-2 still need codegen work
+  (see "Pickup for next session" below).
+- ❌ **`[Vec [Buf N T]]`, `[Map K [Buf N V]]`** -- typed-vec/map
+  annotation parsers need to accept parametric T at element positions.
+  Mechanical extension once a use case demands it.
+
+## Pickup for next session
+
+**Goal: close out the nested-buf depth lift.** Three deliverables, in
+order of payoff:
+
+### 1. Depth-3+ arrow chains (`$cube->i->j->k`)
+
+The hard part. Current state: typer's HEAD_DOT for TYPE_BUF with a
+nested inner returns `[Ptr T_leaf]` for depth-2, and `TYPE_DYN` for
+depth-3+ (silent fallthrough, see `src/typer.c` HEAD_DOT). The
+codegen for `$cube->i` decays via `OP_BUF_ADDR_LOCAL` with byte offset
+`i * inner_byte_size`, but the result type's pointee is `T_leaf`, so
+the next arrow `->j` does `j * sizeof(T_leaf)` -- wrong for any depth.
+
+**Fix shape:** introduce an intermediate "pointer to remaining buf
+shape" type. Concretely:
+
+- Typer's HEAD_DOT arrow-int on a `[Buf N1 [Buf N2 [Buf N3 T]]]`
+  receiver: when the buf-elem decoder returns `TYPE_BUF` (inner is a
+  shape, depth-2+), yield `[Ptr <inner_shape_idx>]` rather than
+  `[Ptr T_leaf]`. The pointee is the inner buf shape; chaining `->j`
+  on this works the same way for the next dimension.
+- Typer's HEAD_DOT arrow-int on a `[Ptr <shape>]` receiver where the
+  pointee is a `TYPE_SHAPE_BUF`: peel one dimension. If the resulting
+  inner is another `TYPE_SHAPE_BUF`, yield `[Ptr <inner-inner shape>]`;
+  if scalar/struct, yield `[Ptr T_leaf]`.
+- Compiler mirrors: each arrow emits `OP_PTR_ADD_OFFSET` with byte
+  offset `idx * compiler__encoding_byte_size(reg, remaining_shape)`.
+  Helper already exists in `src/compiler.c`.
+- VM: no change. `OP_PTR_ADD_OFFSET` already does what we need.
+
+**Hazard from this session's dev**: when the typer propagates a
+binding's `struct_idx` (which is a typer-side shape idx for nested
+bufs) directly as the AST node's `inferred_struct_idx`, the compiler
+reads it as a *compiler*-side idx and crashes on a NULL `defs[]`
+entry. This bit me in the `[addr]` path and was fixed by walking the
+shape chain to the leaf encoding (a scalar sentinel or struct idx --
+those align between typer and compiler registries). Watch for the same
+trap when extending HEAD_DOT for depth-3+: any node-propagated idx
+must be a "common encoding" (scalar sentinel / struct idx), not a
+typer-shape idx. The decoder helpers already do this correctly; just
+don't bypass them.
+
+**Fixtures to add**: `buf_nested_depth3_chain.jacl` --
+`$cube->i->j->k` returns the correctly-strided element. Maybe also a
+`set $cube->i->j->k v` form to exercise the store path.
+
+### 2. Depth-3+ literal init
+
+Today errors with "literal init not yet supported for nesting depth >
+2" at `src/compiler.c` HEAD_DEF buf branch (the Phase 5b depth-3+
+path). Extend the literal-init emission to recurse into nested
+constructors. The existing depth-2 literal init at `compiler.c:7517`
+(approx, search for `inner_buf_len > 0` in the literal-init block) is
+the template -- one more level of recursion plus a per-row constructor
+parse.
+
+### 3. Ref-elem bufs as struct fields
+
+`struct Bag {i32 size, [Buf 4 dyn] items}` is rejected at
+`compiler.c:13718` with a clear error. The struct walker
+(`src/gc_collect.c`) needs to descend into the embedded N-tagged-slot
+range. Two options:
+
+- **Per-field shape**: extend `StructTypeField` with a `TypeShape*` (or
+  shape idx) when the field is a buf, and have the struct walker
+  consult it to scan N tagged slots at the field offset. Honest, more
+  plumbing.
+- **Bitmap extension**: extend the struct's `field_inline_bitmap` to
+  distinguish "raw bytes" from "N tagged slots" for buf fields. Reuses
+  infrastructure but conflates concepts.
+
+Recommend option 1. Touches typer (allow ref-elem field at decl),
+compiler (parse + register), `src/gc_collect.c` (walker descent),
+`src/gc.c` write barrier on indexed store (already wired through the
+existing M4.4 path -- no change needed).
+
+## Implementation notes (for future-me)
+
+- **Typer shape registry** lives on `TyperCtx.shape_reg`. Initialized
+  via `struct_registry__init_at_offset(&tc.shape_reg, TYPER_MAX_STRUCTS)`
+  so its indices start at 256 -- disjoint from struct indices in
+  `tc.structs[]` (which fit in `[0, TYPER_MAX_STRUCTS)`). Decode via
+  `typer__buf_elem_decode`. Freed in `typer_infer` after the pass.
+- **Compiler shape registry** is `c->struct_registry` (same struct
+  type as the typer's, but a separate instance). Indices start at 2
+  (slot 0 = dyn placeholder, slot 1 = ctx). Decode via
+  `compiler__buf_elem_decode`. Survives compilation; the VM reads
+  through `vm->struct_registry` at runtime.
+- **Cross-registry rule**: indices in the **typer's** registry are
+  never propagated to runtime / bytecode. The typer translates to a
+  "common encoding" (scalar sentinel `JACL_SCALAR_TYPE_IDX(t)` or
+  struct idx aligned with the compiler's registry) when stamping AST
+  `inferred_struct_idx`. The compiler stamps its own shape idx on
+  `Local.struct_type_idx` for its runtime use. Don't mix.
+- **`StructTypeRegistry`, `StructTypeDef`, `StructTypeField`,
+  `TypeShape`, `TypeShapeKind`** are defined in **both** `src/shapes.c`
+  (unity-build internal) and `src/jacl.h` (external consumer view).
+  Any field change must sync both or external test consumers grab
+  wrong offsets silently. The duplication is intentional (unity build
+  doesn't include `jacl.h`); see `feedback_dual_struct_definitions`
+  memory.
+
 ## Risks & mitigations
 
 - **Silent type-confusion bugs.** A reader that assumes "idx in
