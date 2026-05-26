@@ -110,11 +110,11 @@ Remaining:
 
 **Tier 2 — nice-to-haves, not blocking.**
 
-- **`[Box T]` annotation surface**. `TYPE_BOX` exists at runtime
-  (created via `[box $val]`) but `[Box T]` isn't a recognized
-  annotation — no parser entry. Adding it would let `[Buf N [Box T]]`
-  ride the existing Phase 5 `TYPE_SHAPE_BOX` kind via a one-line
-  recognizer extension. Mechanical.
+- ~~**`[Box T]` annotation surface**~~ ✅ shipped this session.
+  `def [Box T] x [box ...]` types cleanly and `[Buf N [Box T]]`
+  composes through the Phase 5 `TYPE_SHAPE_BOX` kind. Recognizers in
+  `typer__box_type` (typer) + `compiler__box_type_expr` (compiler).
+  Fixture: `box_annotation.jacl`.
 - **`[buf-get $h->field $i]` builtin-head forms** for buf-typed struct
   fields (currently arrow syntax only). M5d only shipped the arrow
   path.

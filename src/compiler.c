@@ -147,6 +147,22 @@ static bool compiler__stream_type_expr(AstNode* cmd, AstNode** out_elem) {
   return true;
 }
 
+/* Recognize a [Box T] type-annotation expression. Returns true and sets
+ * *out_boxed to the inner type-name node. Mirrors compiler__ptr_type_expr
+ * for the [Box T] annotation surface. The runtime TYPE_BOX already exists
+ * (created via [box $val]); this recognizer just lets the parser accept
+ * [Box T] in annotation positions. */
+static bool compiler__box_type_expr(AstNode* cmd, AstNode** out_boxed) {
+  if (cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
+  AstNode* th = cmd->data.command.head;
+  if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3 ||
+      memcmp(th->data.lit_string.value, "Box", 3) != 0) return false;
+  if (cmd->data.command.arg_count != 1) return false;
+  if (cmd->data.command.args[0]->type != AST_LIT_STRING) return false;
+  if (out_boxed) *out_boxed = cmd->data.command.args[0];
+  return true;
+}
+
 /* Recognize a [Ptr T] type-annotation expression. Returns true and sets
  * *out_pointee to the pointee type-name node. The compiler doesn't drive
  * pointer typing — this is just a parser-shape recognizer so proc params
@@ -7911,6 +7927,48 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         elem_type = TYPE_FUTURE;
         elem_struct_idx = shape_idx;
+      } else if (telt->type == AST_COMMAND &&
+                 telt->data.command.head &&
+                 telt->data.command.head->type == AST_LIT_STRING &&
+                 telt->data.command.head->data.lit_string.length == 3 &&
+                 memcmp(telt->data.command.head->data.lit_string.value, "Box", 3) == 0 &&
+                 telt->data.command.arg_count == 1 &&
+                 telt->data.command.args[0]->type == AST_LIT_STRING) {
+        /* Box element [Buf N [Box T]] (Phase 5 compose case). Tagged
+         * slot, runtime is the same boxed-value rep produced by
+         * [box $val]; the boxed T is carried by the shape entry so
+         * downstream deref narrows correctly. */
+        AstNode* b_arg = telt->data.command.args[0];
+        JaclType b_jt;
+        if (!compiler__resolve_type(c, b_arg->data.lit_string.value,
+                                    b_arg->data.lit_string.length, &b_jt)) {
+          compiler__error(c, line, col,
+              "[Buf N [Box T]] boxed type must be a scalar keyword or struct name");
+          return;
+        }
+        uint32_t box_inner = UINT32_MAX;
+        if (b_jt == TYPE_STRUCT) {
+          StructTypeRegistry* preg5 = compiler__get_struct_registry(c);
+          box_inner = preg5 ? struct_registry__find(preg5,
+              b_arg->data.lit_string.value,
+              b_arg->data.lit_string.length) : UINT32_MAX;
+          if (box_inner == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Box Struct]] unknown boxed struct type");
+            return;
+          }
+        } else {
+          box_inner = JACL_SCALAR_TYPE_IDX(b_jt);
+        }
+        StructTypeRegistry* preg5 = compiler__get_struct_registry(c);
+        uint32_t shape_idx = type_shape_intern_box(preg5, box_inner);
+        if (shape_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Buf N [Box T]] failed to intern box shape");
+          return;
+        }
+        elem_type = TYPE_BOX;
+        elem_struct_idx = shape_idx;
       } else {
         compiler__error(c, line, col,
                         "[Buf N T] element type must be a scalar keyword, struct name, "
@@ -8117,7 +8175,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
            elem_type == TYPE_VEC || elem_type == TYPE_MAP ||
            elem_type == TYPE_CLOSURE || elem_type == TYPE_STREAM ||
            elem_type == TYPE_TYPED_VEC || elem_type == TYPE_TYPED_MAP ||
-           elem_type == TYPE_PTR || elem_type == TYPE_FUTURE);
+           elem_type == TYPE_PTR || elem_type == TYPE_FUTURE ||
+           elem_type == TYPE_BOX);
       if (elem_is_ref && inner_buf_len > 0) {
         compiler__error(c, line, col,
             "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "
@@ -8539,7 +8598,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           bool is_ptr_type = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
           bool is_compound_type =
               (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
-                           memcmp(hn, "Map", 3) == 0)) ||
+                           memcmp(hn, "Map", 3) == 0 ||
+                           memcmp(hn, "Box", 3) == 0)) ||
               is_ptr_type ||
               (hl == 6 && (memcmp(hn, "Future", 6) == 0 ||
                            memcmp(hn, "Stream", 6) == 0));

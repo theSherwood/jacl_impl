@@ -1,0 +1,40 @@
+# expect: 42
+# expect: hello
+# expect: 7
+# expect: 8
+# expect: 11
+# expect: 13
+# [Box T] type annotation: parser/typer/compiler accept it in def/mut
+# positions and as a [Buf N [Box T]] element type. Runtime TYPE_BOX is
+# unchanged; this adds the annotation surface so explicit declarations
+# can carry the boxed element type. See BUFFER_DESIGN.md Tier 2.
+
+proc main {} {
+  # Explicit annotation, scalar payload.
+  def [Box i32] bi [box 42]
+  print [deref $bi]
+
+  # Explicit annotation, string payload.
+  def [Box str] bs [box "hello"]
+  print [deref $bs]
+
+  # Compose: [Buf N [Box T]] via the Phase 5 TYPE_SHAPE_BOX kind.
+  def [Buf 4 [Box i32]] xs
+  [buf-set $xs 0 [box 7]]
+  [buf-set $xs 1 [box 8]]
+  print [deref [buf-get $xs 0]]
+  print [deref [buf-get $xs 1]]
+
+  # Churn the heap so the buf slots are the only roots holding the
+  # boxes alive; verify they survive a GC cycle.
+  mut i 0
+  [buf-set $xs 2 [box 11]]
+  [buf-set $xs 3 [box 13]]
+  while [< $i 100] {
+    def junk [vec $i $i $i]
+    set i [+ $i 1]
+  }
+  print [deref [buf-get $xs 2]]
+  print [deref [buf-get $xs 3]]
+}
+[main]

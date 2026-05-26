@@ -296,6 +296,40 @@ static bool typer__future_type(TyperCtx* tc, AstNode* node,
   return true;
 }
 
+/* Recognize [Box T] type-annotation expressions. Returns true and writes
+ * *out_struct_idx with the boxed-value encoding (scalar sentinel for
+ * type keywords like i64, real struct idx for Point). Used wherever a
+ * [Box T] annotation can appear (def/mut bindings, proc params/return,
+ * and as a [Buf N [Box T]] element type). Same shape as
+ * typer__future_type — single type-name argument. */
+static bool typer__box_type(TyperCtx* tc, AstNode* node,
+                            uint32_t* out_struct_idx) {
+  *out_struct_idx = UINT32_MAX;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
+      memcmp(h->data.lit_string.value, "Box", 3) != 0) return false;
+  if (node->data.command.arg_count != 1) return false;
+  AstNode* arg = node->data.command.args[0];
+  if (arg->type != AST_LIT_STRING) return false;
+  const char* nm = arg->data.lit_string.value;
+  uint32_t    nl = arg->data.lit_string.length;
+  if (is_type_keyword(nm, nl)) {
+    *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    return true;
+  }
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0) {
+      *out_struct_idx = si;
+      return true;
+    }
+  }
+  /* Unknown type name — still recognize as Box; element idx stays
+   * sentinel so downstream code treats it as box-of-dyn. */
+  return true;
+}
+
 /* Recognize [Stream T] type-annotation expressions. Returns true and
  * writes *out_struct_idx with the element encoding (scalar sentinel
  * for type keywords like i64, real struct idx for Point). Used on the
@@ -901,6 +935,15 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
       if (typer__future_type(tc, t_arg, &fut_idx)) {
         uint32_t shape_idx = type_shape_intern_future(&tc->shape_reg, fut_idx);
         if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+      } else {
+        /* Box element [Buf N [Box T]] (Phase 5 compose case). Tagged
+         * slot, runtime is OBJ_BOX_INLINE or OBJ_MUT_REF; the inner
+         * T rides on the shape entry. */
+        uint32_t box_idx = UINT32_MAX;
+        if (typer__box_type(tc, t_arg, &box_idx)) {
+          uint32_t shape_idx = type_shape_intern_box(&tc->shape_reg, box_idx);
+          if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
+        }
       }
     }
   }
@@ -1033,12 +1076,16 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       uint32_t buf_len;
       uint32_t buf_inner_len_3 = 0;
       uint32_t buf_typed_elem_idx_3 = UINT32_MAX;
+      uint32_t box_sidx;
       if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
       } else if (typer__ptr_type(tc, args[0], &ptr_sidx)) {
         declared_type = TYPE_PTR;
         declared_struct_idx = ptr_sidx;
+      } else if (typer__box_type(tc, args[0], &box_sidx)) {
+        declared_type = TYPE_BOX;
+        declared_struct_idx = box_sidx;
       } else if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len,
                                       &buf_inner_len_3, &buf_typed_elem_idx_3)) {
         char err[256];
@@ -1721,6 +1768,11 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
     }
     if (typer__future_type(tc, tn, &sidx)) {
       *out_type = TYPE_FUTURE;
+      *out_struct_idx = sidx;
+      return;
+    }
+    if (typer__box_type(tc, tn, &sidx)) {
+      *out_type = TYPE_BOX;
       *out_struct_idx = sidx;
       return;
     }
