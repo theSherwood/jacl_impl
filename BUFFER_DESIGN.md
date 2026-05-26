@@ -25,7 +25,8 @@ when M4 lands).
 | **M4.4 ext** Typed-collection elements `[Buf N [Vec T]]` | ✅ done | `0cf93f5` |
 | **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | `c1e9390` |
 | **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | `a783668` |
-| **M4.4 ext4** `[Buf N [Future T]]` | ✅ done | this |
+| **M4.4 ext4** `[Buf N [Future T]]` | ✅ done | `eed8107` |
+| **M4.4 ext5** Nested-buf depth lift (`[Buf N1 [Buf N2 [Buf N3 T]]]`) | ✅ declaration / `[buf-len]` / `[addr]` work at any depth; arrow chain still depth-2 only | this |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | `da5a953` |
 | **M5b** LHS type inference for typed-ctor RHS | ✅ done | `0e4ba05`, `3dca5cb` |
 | **M5c** Arrow indexing on non-var-ref TYPE_PTR receivers | ✅ done | `a2c81c9` |

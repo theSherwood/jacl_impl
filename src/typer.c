@@ -589,22 +589,29 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
              t_arg->data.command.head->type == AST_LIT_STRING &&
              t_arg->data.command.head->data.lit_string.length == 3 &&
              memcmp(t_arg->data.command.head->data.lit_string.value, "Buf", 3) == 0) {
-    /* Nested buf element type: [Buf N [Buf M T]] -- recurse one level.
-     * Deeper nesting deferred; inner T may be a scalar (M4.2 base) or
-     * a value-type struct (M4.2.2). */
+    /* Nested buf element type: [Buf N [Buf M ...]] -- recursively
+     * intern the inner buf as a TYPE_SHAPE_BUF entry (Phase 5b of
+     * TYPE_REGISTRY_REFACTOR.md). The outer buf binding's struct_idx
+     * holds the inner shape's registry idx; the inner shape itself
+     * carries len + elem (which may be another shape idx, allowing
+     * arbitrary nesting depth at declaration time). Arrow-chain
+     * indexing semantics for depth >= 3 are still being wired up;
+     * declarations type cleanly and [buf-len] / [addr] work today. */
     uint32_t inner_elem_sidx = UINT32_MAX;
     uint32_t inner_M = 0;
     uint32_t inner_inner_M = 0;
     if (typer__buf_type_full(tc, t_arg, &inner_elem_sidx, &inner_M,
                              &inner_inner_M, NULL) &&
-        inner_M > 0 && inner_inner_M == 0 &&
-        inner_elem_sidx != UINT32_MAX) {
-      *out_struct_idx = inner_elem_sidx;
-      *out_inner_len  = inner_M;
+        inner_M > 0 && inner_elem_sidx != UINT32_MAX) {
+      uint32_t inner_shape_idx =
+          type_shape_intern_buf(&tc->shape_reg, inner_M, inner_elem_sidx);
+      if (inner_shape_idx != UINT32_MAX) {
+        *out_struct_idx = inner_shape_idx;
+      }
     }
-    /* If the inner form doesn't match the supported shape (deeper
-     * nesting or malformed), leave *out_struct_idx as UINT32_MAX so
-     * the caller's `bad_elem` diagnostic fires. */
+    /* If the inner form is malformed (zero/missing N or unresolved
+     * T), leave *out_struct_idx as UINT32_MAX so the caller's
+     * `bad_elem` diagnostic fires. */
   } else if (t_arg->type == AST_COMMAND &&
              t_arg->data.command.head &&
              t_arg->data.command.head->type == AST_LIT_STRING &&
@@ -3496,8 +3503,24 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             recv->scope_mark);
         if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
             b->struct_idx != UINT32_MAX) {
+          /* For nested bufs (Phase 5b: struct_idx is a TYPE_SHAPE_BUF
+           * idx), walk the shape chain to the leaf element so the
+           * resulting [Ptr T_leaf] points at scalar / struct bytes the
+           * compiler can interpret. Without this peel, [addr $cube->0]
+           * propagates a typer-side shape idx as the pointee, which the
+           * compiler reads as a struct idx and either segfaults or
+           * mis-typed-errors. */
+          uint32_t pointee = b->struct_idx;
+          if (b->type == TYPE_BUF) {
+            uint32_t walk = pointee;
+            while (walk >= TYPER_MAX_STRUCTS && walk < tc->shape_reg.count &&
+                   tc->shape_reg.shapes[walk].kind == TYPE_SHAPE_BUF) {
+              walk = tc->shape_reg.shapes[walk].u.buf.elem_idx;
+            }
+            pointee = walk;
+          }
           node->inferred_type       = TYPE_PTR;
-          node->inferred_struct_idx = b->struct_idx;
+          node->inferred_struct_idx = pointee;
           return;
         }
       }
@@ -3728,14 +3751,31 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           if (b->type == TYPE_BUF &&
               (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
             char buf_ty[96];
-            if (b->buf_inner_len > 0 &&
-                JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
-              /* Nested form [Buf N [Buf M T]] -- M4.2. */
-              const char* en = type_name(
-                  JACL_TYPE_IDX_TO_SCALAR(b->struct_idx));
-              snprintf(buf_ty, sizeof(buf_ty),
-                       "[Buf %u [Buf %u %s]]",
-                       (unsigned)b->buf_len, (unsigned)b->buf_inner_len, en);
+            /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
+             * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
+             * and T from the shape. */
+            if (b->struct_idx >= TYPER_MAX_STRUCTS &&
+                b->struct_idx < tc->shape_reg.count &&
+                tc->shape_reg.shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
+              TypeShape* inner = &tc->shape_reg.shapes[b->struct_idx];
+              uint32_t inner_M = inner->u.buf.len;
+              uint32_t inner_t_enc = inner->u.buf.elem_idx;
+              if (JACL_IS_SCALAR_TYPE_IDX(inner_t_enc)) {
+                const char* en = type_name(JACL_TYPE_IDX_TO_SCALAR(inner_t_enc));
+                snprintf(buf_ty, sizeof(buf_ty),
+                         "[Buf %u [Buf %u %s]]",
+                         (unsigned)b->buf_len, (unsigned)inner_M, en);
+              } else if (inner_t_enc < tc->struct_count) {
+                const TyperStruct* sd = &tc->structs[inner_t_enc];
+                snprintf(buf_ty, sizeof(buf_ty),
+                         "[Buf %u [Buf %u %.*s]]",
+                         (unsigned)b->buf_len, (unsigned)inner_M,
+                         (int)sd->name_len, sd->name);
+              } else {
+                snprintf(buf_ty, sizeof(buf_ty),
+                         "[Buf %u [Buf %u ...]]",
+                         (unsigned)b->buf_len, (unsigned)inner_M);
+              }
             } else if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
               const char* en = type_name(
                   JACL_TYPE_IDX_TO_SCALAR(b->struct_idx));
@@ -3757,18 +3797,35 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = TYPE_DYN;
             return;
           }
-          /* Nested buf [Buf N [Buf M T]]: $matrix->i yields [Ptr T]
-           * (decay-style). The chained `->j` then goes through the
-           * existing TYPE_PTR arrow-int path. M4.2. */
-          if (b->type == TYPE_BUF && b->buf_inner_len > 0) {
-            node->inferred_type       = TYPE_PTR;
-            node->inferred_struct_idx = b->struct_idx;
-            return;
-          }
           if (b->type == TYPE_BUF) {
             uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
             JaclType elem = typer__buf_elem_decode(tc, b->struct_idx,
                                                    &inner_v, &inner_k);
+            /* Nested buf [Buf N [Buf M T]]: $matrix->i yields [Ptr T]
+             * (decay-style). Phase 5b moved the inner-M / T encoding
+             * into a TYPE_SHAPE_BUF registry entry; decode to spot
+             * the nested case via TYPE_BUF kind. For depth-3+, the
+             * leaf T isn't directly addressable through a single
+             * [Ptr T] decay -- error and point at the workaround. */
+            if (elem == TYPE_BUF) {
+              uint32_t leaf_inner_v = UINT32_MAX;
+              JaclType leaf_kind = typer__buf_elem_decode(tc, inner_v,
+                                                          &leaf_inner_v, NULL);
+              if (leaf_kind == TYPE_BUF) {
+                /* depth-3+ arrow chain: codegen isn't ready, but [addr]
+                 * intercepts before this path (see HEAD_ADDR handler).
+                 * Stay quiet here -- the compiler will catch any real
+                 * misuse (e.g. `$cube->i->j->k`) with a clearer error
+                 * at codegen time. Leaving as TYPE_DYN propagates to a
+                 * compile-time error rather than a typer error. */
+                node->inferred_type = TYPE_DYN;
+                return;
+              }
+              /* depth-2: yield [Ptr T_leaf] (existing semantic). */
+              node->inferred_type       = TYPE_PTR;
+              node->inferred_struct_idx = inner_v;
+              return;
+            }
             switch (elem) {
               case TYPE_I8: case TYPE_U8:
               case TYPE_I16: case TYPE_U16:

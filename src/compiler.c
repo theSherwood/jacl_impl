@@ -237,6 +237,100 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
 
 /* Registry lifecycle + intern helpers live in src/shapes.c. */
 
+/* Forward declarations for layout helpers + registry lookup used by
+ * compiler__intern_buf_shape_chain below. Definitions live further
+ * down in this file. */
+uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
+uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len);
+
+/* Byte size of a type encoding that may be a scalar sentinel, a
+ * struct registry idx, or a chained TYPE_SHAPE_BUF shape (Phase 5b).
+ * Other shape kinds (typed-vec/map/ptr/future/box) are 8 bytes each
+ * (tagged JaclVal slots), same as struct__type_size for those
+ * JaclTypes. */
+static uint64_t compiler__encoding_byte_size(StructTypeRegistry* reg,
+                                              uint32_t encoded) {
+  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
+    return struct__type_size(JACL_TYPE_IDX_TO_SCALAR(encoded), NULL, 0);
+  }
+  if (!reg || encoded >= reg->count) return 0;
+  TypeShape* shape = &reg->shapes[encoded];
+  switch (shape->kind) {
+    case TYPE_SHAPE_STRUCT:
+    case TYPE_SHAPE_CTX:
+      return shape->u.struct_def ? shape->u.struct_def->total_size : 0;
+    case TYPE_SHAPE_BUF:
+      return (uint64_t)shape->u.buf.len *
+             compiler__encoding_byte_size(reg, shape->u.buf.elem_idx);
+    case TYPE_SHAPE_TYPED_VEC:
+    case TYPE_SHAPE_TYPED_MAP:
+    case TYPE_SHAPE_PTR:
+    case TYPE_SHAPE_FUTURE:
+    case TYPE_SHAPE_BOX:
+      return 8; /* tagged JaclVal slot */
+    default:
+      return 0;
+  }
+}
+
+/* Recursively intern a [Buf N T] AST as a chain of TYPE_SHAPE_BUF
+ * entries on the given registry. Inner T may be a scalar keyword, a
+ * struct name (resolved via the registry), or another [Buf M U] (any
+ * depth). Returns the outermost shape's registry idx, or UINT32_MAX
+ * on parse / lookup failure. *out_byte_size receives the total flat
+ * byte size when non-NULL.
+ *
+ * Takes a bare StructTypeRegistry* (not the full Compiler*) so the
+ * helper can live alongside the other registry primitives -- the
+ * full Compiler struct is defined much later in this file and isn't
+ * in scope here. Phase 5b of TYPE_REGISTRY_REFACTOR.md. */
+static uint32_t compiler__intern_buf_shape_chain(StructTypeRegistry* reg,
+                                                  AstNode* buf_node,
+                                                  uint64_t* out_byte_size) {
+  if (out_byte_size) *out_byte_size = 0;
+  if (!reg || !buf_node || buf_node->type != AST_COMMAND ||
+      !buf_node->data.command.head ||
+      buf_node->data.command.head->type != AST_LIT_STRING ||
+      buf_node->data.command.head->data.lit_string.length != 3 ||
+      memcmp(buf_node->data.command.head->data.lit_string.value, "Buf", 3) != 0 ||
+      buf_node->data.command.arg_count != 2) {
+    return UINT32_MAX;
+  }
+  AstNode* nlen = buf_node->data.command.args[0];
+  AstNode* telt = buf_node->data.command.args[1];
+  if (nlen->type != AST_LIT_INT || nlen->data.lit_int.value <= 0) return UINT32_MAX;
+  uint32_t n = (uint32_t)nlen->data.lit_int.value;
+  uint32_t elem_idx = UINT32_MAX;
+  uint64_t elem_byte_size = 0;
+  if (telt->type == AST_LIT_STRING) {
+    const char* nm = telt->data.lit_string.value;
+    uint32_t    nl = telt->data.lit_string.length;
+    if (is_type_keyword(nm, nl)) {
+      JaclType t_jt = type_from_keyword(nm, nl);
+      elem_idx = JACL_SCALAR_TYPE_IDX(t_jt);
+      elem_byte_size = struct__type_size(t_jt, NULL, 0);
+    } else {
+      elem_idx = struct_registry__find(reg, nm, nl);
+      if (elem_idx == UINT32_MAX) return UINT32_MAX;
+      elem_byte_size = struct__type_size(TYPE_STRUCT, reg, elem_idx);
+    }
+  } else if (telt->type == AST_COMMAND &&
+             telt->data.command.head &&
+             telt->data.command.head->type == AST_LIT_STRING &&
+             telt->data.command.head->data.lit_string.length == 3 &&
+             memcmp(telt->data.command.head->data.lit_string.value, "Buf", 3) == 0) {
+    uint64_t inner_byte_size = 0;
+    elem_idx = compiler__intern_buf_shape_chain(reg, telt, &inner_byte_size);
+    if (elem_idx == UINT32_MAX) return UINT32_MAX;
+    elem_byte_size = inner_byte_size;
+  } else {
+    return UINT32_MAX;
+  }
+  uint32_t shape_idx = type_shape_intern_buf(reg, n, elem_idx);
+  if (out_byte_size) *out_byte_size = (uint64_t)n * elem_byte_size;
+  return shape_idx;
+}
+
 /* --- Ctx field list: accumulates ctx declarations during compilation --- */
 
 #define CTX_MAX_FIELDS 64
@@ -7050,6 +7144,66 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                           "[Buf N [Buf M T]] inner length must be a positive integer literal");
           return;
         }
+        /* Depth-3+ nested buf (Phase 5b of TYPE_REGISTRY_REFACTOR.md):
+         * inner_telt is itself a [Buf K U] AST_COMMAND. Intern the
+         * whole inner chain via the recursive helper, then emit a
+         * minimal buf-def: outer N slots of inner_byte_size each.
+         * Arrow-chain indexing at depth >= 3 is gated at the typer;
+         * [buf-len], [addr], and (flat-index) [buf-get] work today.
+         * Literal init isn't supported yet for depth >= 3. */
+        if (inner_telt->type == AST_COMMAND &&
+            inner_telt->data.command.head &&
+            inner_telt->data.command.head->type == AST_LIT_STRING &&
+            inner_telt->data.command.head->data.lit_string.length == 3 &&
+            memcmp(inner_telt->data.command.head->data.lit_string.value, "Buf", 3) == 0) {
+          uint64_t inner_byte_size = 0;
+          StructTypeRegistry* nest_reg = compiler__get_struct_registry(c);
+          uint32_t inner_shape_idx =
+              compiler__intern_buf_shape_chain(nest_reg, telt, &inner_byte_size);
+          if (inner_shape_idx == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Buf M [Buf K ...]]]: malformed inner nested buf");
+            return;
+          }
+          if (argc == 3) {
+            compiler__error(c, line, col,
+                "[Buf N [Buf M ...]] literal init not yet supported for nesting depth > 2");
+            return;
+          }
+          uint32_t outer_n = (uint32_t)nlen->data.lit_int.value;
+          uint64_t total_bytes = (uint64_t)outer_n * inner_byte_size;
+          if (total_bytes > 0xFFFFu) {
+            compiler__error(c, line, col,
+                "[Buf N [Buf M ...]] byte size exceeds 65535");
+            return;
+          }
+          uint32_t slot_count =
+              (uint32_t)((total_bytes + sizeof(JaclVal) - 1) / sizeof(JaclVal));
+          if (slot_count == 0) slot_count = 1;
+          uint32_t base_slot = c->local_count;
+          JaclVal bind_val = compiler__name_val(c->heap, c->intern_table,
+              args[1]->data.lit_string.value, args[1]->data.lit_string.length);
+          compiler__emit_byte(c, OP_NIL, line);
+          compiler__add_local(c, bind_val, line, col);
+          c->locals[c->local_count - 1].type = TYPE_BUF;
+          c->locals[c->local_count - 1].struct_type_idx = inner_shape_idx;
+          c->locals[c->local_count - 1].width = (uint16_t)slot_count;
+          c->locals[c->local_count - 1].is_inline = true;
+          c->locals[c->local_count - 1].buf_len = outer_n;
+          c->locals[c->local_count - 1].buf_inner_len = 0;
+          c->locals[c->local_count - 1].key_struct_idx = UINT32_MAX;
+          for (uint32_t w = 1; w < slot_count; w++) {
+            compiler__emit_byte(c, OP_NIL, line);
+            compiler__add_local(c, jacl_inline_string("", 0), line, col);
+            c->locals[c->local_count - 1].depth = c->scope_depth;
+          }
+          compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)base_slot, line);
+          compiler__emit_u16(c, (uint16_t)total_bytes, line);
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+          return;
+        }
         if (inner_telt->type != AST_LIT_STRING ||
             !compiler__resolve_type(c, inner_telt->data.lit_string.value,
                                     inner_telt->data.lit_string.length, &elem_type)) {
@@ -11021,19 +11175,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err);
           return;
         }
-        uint32_t elem_sz;
-        if (JACL_IS_SCALAR_TYPE_IDX(sidx)) {
-          JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(sidx);
-          elem_sz = struct__type_size(elem_type, NULL, 0);
-        } else {
-          StructTypeRegistry* reg = compiler__get_struct_registry(c);
-          if (!reg || sidx >= reg->count) {
-            compiler__error(c, line, col, "addr: invalid struct type idx");
-            return;
-          }
-          elem_sz = reg->defs[sidx]->total_size;
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        /* Walk any encoding via compiler__encoding_byte_size so
+         * chained TYPE_SHAPE_BUF entries (Phase 5b nested bufs)
+         * resolve to the correct per-element byte size. */
+        uint64_t elem_sz = compiler__encoding_byte_size(reg, sidx);
+        if (elem_sz == 0) {
+          compiler__error(c, line, col, "addr: invalid struct type idx");
+          return;
         }
-        uint64_t byte_offset = (uint64_t)idx_lit * (uint64_t)elem_sz;
+        uint64_t byte_offset = (uint64_t)idx_lit * elem_sz;
         if (byte_offset > 0xFFFFu) {
           compiler__error(c, line, col, "addr: buf byte offset exceeds 65535");
           return;
