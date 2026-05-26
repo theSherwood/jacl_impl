@@ -19,7 +19,7 @@ when M4 lands).
 | **M3** C-ABI interop (extern decay, addr) | ✅ done | `00e7f18`, `35fabcf`, `aa91b0b`, `aac8f23` |
 | **M3.7** Pointer-arrow indexing (`$p->N`) | ✅ done | `fcd68eb` |
 | **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
-| **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write; literal-init deferred) | this commit |
+| **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write+literal-init; deeper nesting and struct-inner deferred) | `ddc7163` + this |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
 | **M4.4** GC-traced element types | ⏸ deferred | — |
 | **M5** Polish (unchecked ops, print, overflow check, docs) | ✅ done | this commit |
@@ -57,11 +57,18 @@ What's deferred (the next session can pick from these):
    descriptor ("N contiguous tagged slots, stride S"), write barriers
    on indexed stores, and NIL zero-init for ref types. Highest-risk
    slice — touches concurrency-sensitive code.
-2. **M4.2 follow-ups** — literal init for nested bufs
-   (`[[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2 3 4] ...]`), deeper
-   nesting (`[Buf 2 [Buf 3 [Buf 4 i32]]]`), struct as inner element
-   (`[Buf 3 [Buf 4 Point]]`). All are mechanical extensions of the
-   existing encoding (just thread `inner_buf_len` through more paths).
+2. **M4.2 follow-ups** — two pieces left after the literal-init slice:
+   - **Deeper nesting** (`[Buf 2 [Buf 3 [Buf 4 i32]]]`): needs the
+     encoding to grow from a single `inner_buf_len` to a variable-
+     length dimension list (or a recursive synthetic-struct encoding).
+     Touches typer, compiler, error rendering, arrow chain.
+   - **Struct as inner element** (`[Buf 3 [Buf 4 Point]]`): scalar
+     inner is supported today via `$m->i->j` → OP_PTR_LOAD; struct
+     inner needs either an extended ptr-arrow rule (load inline struct
+     bytes from `[Ptr Struct]` at constant offset) or a dedicated
+     chain rewrite that recognises `$m->i->j` against a nested-buf
+     local with struct element and emits OP_BUF_GET_STRUCT_LOCAL
+     with flat index = `i*M + j`.
 3. **Language-wide LHS type inference** (see "Open questions / deferred"
    below) — independent of bufs; reduces
    `def [Buf 8 i32] hdr [[Buf 8 i32] 1024 2048]` to

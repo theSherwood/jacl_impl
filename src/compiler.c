@@ -7133,17 +7133,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
       /* For argc==3 literal init, validate the RHS constructor matches
        * the LHS type. The RHS must be [[Buf N T] v0 v1 ...] where the
-       * inner [Buf N T] matches exactly. Nested-buf literal init is
-       * deferred (M4.2 slice covers zero-init only). */
+       * inner [Buf N T] matches exactly. For the nested form, each
+       * outer init arg is itself a [[Buf M T] v0 v1 ...] inner ctor;
+       * see the nested-init emission block below. */
       AstNode* init_ctor = NULL;
       uint32_t init_count = 0;
       AstNode** init_vals = NULL;
-      if (argc == 3 && inner_buf_len > 0) {
-        compiler__error(c, line, col,
-                        "[Buf N [Buf M T]] literal init not supported yet "
-                        "(zero-init only; M4.2)");
-        return;
-      }
       if (argc == 3) {
         AstNode* rhs = args[2];
         bool rhs_ok = rhs->type == AST_COMMAND &&
@@ -7170,26 +7165,61 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               "[[Buf N T] ...] constructor length must match LHS exactly");
           return;
         }
-        JaclType rhs_elem;
-        if (rhs_telt->type != AST_LIT_STRING ||
-            !compiler__resolve_type(c, rhs_telt->data.lit_string.value,
-                                    rhs_telt->data.lit_string.length, &rhs_elem) ||
-            rhs_elem != elem_type) {
-          compiler__error(c, line, col,
-              "[[Buf N T] ...] constructor element type must match LHS exactly");
-          return;
-        }
-        /* For struct elements, also verify the registry idx matches
-         * (same struct kind, not just both TYPE_STRUCT). */
-        if (elem_type == TYPE_STRUCT) {
-          StructTypeRegistry* reg = compiler__get_struct_registry(c);
-          uint32_t rhs_sidx = reg ? struct_registry__find(reg,
-              rhs_telt->data.lit_string.value,
-              rhs_telt->data.lit_string.length) : UINT32_MAX;
-          if (rhs_sidx != elem_struct_idx) {
+        if (inner_buf_len > 0) {
+          /* Nested LHS: rhs_telt must be a [Buf M T] AST_COMMAND with
+           * matching M and inner T. Each outer init arg below must in
+           * turn be a [[Buf M T] ...] ctor. M4.2 literal init. */
+          if (rhs_telt->type != AST_COMMAND ||
+              !rhs_telt->data.command.head ||
+              rhs_telt->data.command.head->type != AST_LIT_STRING ||
+              rhs_telt->data.command.head->data.lit_string.length != 3 ||
+              memcmp(rhs_telt->data.command.head->data.lit_string.value,
+                     "Buf", 3) != 0 ||
+              rhs_telt->data.command.arg_count != 2) {
             compiler__error(c, line, col,
-                "[[Buf N Struct] ...] constructor struct type must match LHS");
+                "[[Buf N [Buf M T]] ...] constructor element type must be [Buf M T]");
             return;
+          }
+          AstNode* rhs_inner_mlen = rhs_telt->data.command.args[0];
+          AstNode* rhs_inner_telt = rhs_telt->data.command.args[1];
+          if (rhs_inner_mlen->type != AST_LIT_INT ||
+              (uint32_t)rhs_inner_mlen->data.lit_int.value != inner_buf_len) {
+            compiler__error(c, line, col,
+                "[[Buf N [Buf M T]] ...] constructor inner length must match LHS exactly");
+            return;
+          }
+          JaclType rhs_inner_t;
+          if (rhs_inner_telt->type != AST_LIT_STRING ||
+              !compiler__resolve_type(c, rhs_inner_telt->data.lit_string.value,
+                                      rhs_inner_telt->data.lit_string.length,
+                                      &rhs_inner_t) ||
+              rhs_inner_t != elem_type) {
+            compiler__error(c, line, col,
+                "[[Buf N [Buf M T]] ...] constructor inner element type must match LHS exactly");
+            return;
+          }
+        } else {
+          JaclType rhs_elem;
+          if (rhs_telt->type != AST_LIT_STRING ||
+              !compiler__resolve_type(c, rhs_telt->data.lit_string.value,
+                                      rhs_telt->data.lit_string.length, &rhs_elem) ||
+              rhs_elem != elem_type) {
+            compiler__error(c, line, col,
+                "[[Buf N T] ...] constructor element type must match LHS exactly");
+            return;
+          }
+          /* For struct elements, also verify the registry idx matches
+           * (same struct kind, not just both TYPE_STRUCT). */
+          if (elem_type == TYPE_STRUCT) {
+            StructTypeRegistry* reg = compiler__get_struct_registry(c);
+            uint32_t rhs_sidx = reg ? struct_registry__find(reg,
+                rhs_telt->data.lit_string.value,
+                rhs_telt->data.lit_string.length) : UINT32_MAX;
+            if (rhs_sidx != elem_struct_idx) {
+              compiler__error(c, line, col,
+                  "[[Buf N Struct] ...] constructor struct type must match LHS");
+              return;
+            }
           }
         }
         init_ctor  = rhs;
@@ -7270,49 +7300,137 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             default: break;
           }
         }
-        for (uint32_t i = 0; i < init_count; i++) {
-          if (have_range) {
-            AstNode* iv = init_vals[i];
-            int64_t lv = 0;
-            bool is_int_lit = false;
-            if (iv->type == AST_LIT_INT) {
-              lv = (int64_t)iv->data.lit_int.value;
-              is_int_lit = true;
-            } else if (iv->type == AST_COMMAND &&
-                       iv->data.command.head_id == HEAD_MINUS &&
-                       iv->data.command.arg_count == 1 &&
-                       iv->data.command.args[0]->type == AST_LIT_INT) {
-              lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
-              is_int_lit = true;
-            }
-            if (is_int_lit && (lv < elo || lv > ehi)) {
-              char err[192];
+        if (inner_buf_len > 0) {
+          /* Nested literal init: outer ctor holds up to N inner ctors,
+           * each `[[Buf M T] v0 v1 ...]`. Emit flat per-element stores
+           * with index = row*M + col, using OP_BUF_USET_LOCAL since the
+           * indices are provably in range (validated here at compile
+           * time). M4.2 follow-up. */
+          for (uint32_t row = 0; row < init_count; row++) {
+            AstNode* inner = init_vals[row];
+            if (inner->type != AST_COMMAND ||
+                !inner->data.command.head ||
+                inner->data.command.head->type != AST_COMMAND ||
+                inner->data.command.head->data.command.head == NULL ||
+                inner->data.command.head->data.command.head->type != AST_LIT_STRING ||
+                inner->data.command.head->data.command.head->data.lit_string.length != 3 ||
+                memcmp(inner->data.command.head->data.command.head->data.lit_string.value,
+                       "Buf", 3) != 0 ||
+                inner->data.command.head->data.command.arg_count != 2) {
+              char err[160];
               snprintf(err, sizeof(err),
-                  "[[Buf %u %s] ...]: element %u value %lld out of range for %s",
-                  (unsigned)n, type_name(elem_type),
-                  (unsigned)i, (long long)lv, type_name(elem_type));
-              compiler__error(c, iv->start.line, iv->start.column, err);
+                  "[[Buf %u [Buf %u %s]] ...]: row %u must be a "
+                  "[[Buf %u %s] v0 v1 ...] inner constructor",
+                  (unsigned)n, (unsigned)inner_buf_len, type_name(elem_type),
+                  (unsigned)row, (unsigned)inner_buf_len, type_name(elem_type));
+              compiler__error(c, inner->start.line, inner->start.column, err);
               return;
             }
+            AstNode* inner_tn   = inner->data.command.head;
+            AstNode* inner_mlen = inner_tn->data.command.args[0];
+            AstNode* inner_telt = inner_tn->data.command.args[1];
+            JaclType inner_t;
+            if (inner_mlen->type != AST_LIT_INT ||
+                (uint32_t)inner_mlen->data.lit_int.value != inner_buf_len ||
+                inner_telt->type != AST_LIT_STRING ||
+                !compiler__resolve_type(c, inner_telt->data.lit_string.value,
+                                        inner_telt->data.lit_string.length, &inner_t) ||
+                inner_t != elem_type) {
+              compiler__error(c, inner->start.line, inner->start.column,
+                  "inner [[Buf M T] ...] constructor must match the LHS inner type");
+              return;
+            }
+            uint32_t inner_count = inner->data.command.arg_count;
+            AstNode** inner_vals = inner->data.command.args;
+            if (inner_count > inner_buf_len) {
+              char err[160];
+              snprintf(err, sizeof(err),
+                  "[[Buf %u %s] ...]: row %u provides %u values, max %u",
+                  (unsigned)inner_buf_len, type_name(elem_type),
+                  (unsigned)row, (unsigned)inner_count, (unsigned)inner_buf_len);
+              compiler__error(c, inner->start.line, inner->start.column, err);
+              return;
+            }
+            for (uint32_t col = 0; col < inner_count; col++) {
+              AstNode* iv = inner_vals[col];
+              if (have_range) {
+                int64_t lv = 0;
+                bool is_int_lit = false;
+                if (iv->type == AST_LIT_INT) {
+                  lv = (int64_t)iv->data.lit_int.value;
+                  is_int_lit = true;
+                } else if (iv->type == AST_COMMAND &&
+                           iv->data.command.head_id == HEAD_MINUS &&
+                           iv->data.command.arg_count == 1 &&
+                           iv->data.command.args[0]->type == AST_LIT_INT) {
+                  lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
+                  is_int_lit = true;
+                }
+                if (is_int_lit && (lv < elo || lv > ehi)) {
+                  char err[192];
+                  snprintf(err, sizeof(err),
+                      "[[Buf %u [Buf %u %s]] ...]: row %u column %u value %lld "
+                      "out of range for %s",
+                      (unsigned)n, (unsigned)inner_buf_len, type_name(elem_type),
+                      (unsigned)row, (unsigned)col, (long long)lv,
+                      type_name(elem_type));
+                  compiler__error(c, iv->start.line, iv->start.column, err);
+                  return;
+                }
+              }
+              uint32_t flat_idx = row * inner_buf_len + col;
+              compiler__emit_constant(c, jacl_i32((int32_t)flat_idx), line);
+              compiler__compile_node(c, iv);
+              compiler__emit_byte(c, OP_BUF_USET_LOCAL, line);
+              compiler__emit_byte(c, (uint8_t)base_slot, line);
+              compiler__emit_byte(c, (uint8_t)elem_type, line);
+            }
           }
-          compiler__emit_constant(c, jacl_i32((int32_t)i), line);
-          compiler__compile_node(c, init_vals[i]);
-          if (is_struct_elem) {
-            /* Each init value must be a struct constructor producing
-             * inline bytes on TOS. OP_BUF_SET_STRUCT_LOCAL pops them
-             * and the index. */
-            compiler__emit_byte(c, OP_BUF_SET_STRUCT_LOCAL, line);
-            compiler__emit_byte(c, (uint8_t)base_slot, line);
-            compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
-            compiler__emit_u16(c, (uint16_t)n, line);
-          } else {
-            /* All M2 element types accept i32 on the value-pop path
-             * (small ints narrow, i64/u64/f64 promote). The typer is
-             * responsible for rejecting incompatible kinds. */
-            compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
-            compiler__emit_byte(c, (uint8_t)base_slot, line);
-            compiler__emit_byte(c, (uint8_t)elem_type, line);
-            compiler__emit_u16(c, (uint16_t)n, line);
+        } else {
+          for (uint32_t i = 0; i < init_count; i++) {
+            if (have_range) {
+              AstNode* iv = init_vals[i];
+              int64_t lv = 0;
+              bool is_int_lit = false;
+              if (iv->type == AST_LIT_INT) {
+                lv = (int64_t)iv->data.lit_int.value;
+                is_int_lit = true;
+              } else if (iv->type == AST_COMMAND &&
+                         iv->data.command.head_id == HEAD_MINUS &&
+                         iv->data.command.arg_count == 1 &&
+                         iv->data.command.args[0]->type == AST_LIT_INT) {
+                lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
+                is_int_lit = true;
+              }
+              if (is_int_lit && (lv < elo || lv > ehi)) {
+                char err[192];
+                snprintf(err, sizeof(err),
+                    "[[Buf %u %s] ...]: element %u value %lld out of range for %s",
+                    (unsigned)n, type_name(elem_type),
+                    (unsigned)i, (long long)lv, type_name(elem_type));
+                compiler__error(c, iv->start.line, iv->start.column, err);
+                return;
+              }
+            }
+            compiler__emit_constant(c, jacl_i32((int32_t)i), line);
+            compiler__compile_node(c, init_vals[i]);
+            if (is_struct_elem) {
+              /* Each init value must be a struct constructor producing
+               * inline bytes on TOS. OP_BUF_SET_STRUCT_LOCAL pops them
+               * and the index. */
+              compiler__emit_byte(c, OP_BUF_SET_STRUCT_LOCAL, line);
+              compiler__emit_byte(c, (uint8_t)base_slot, line);
+              compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+              compiler__emit_u16(c, (uint16_t)n, line);
+            } else {
+              /* All M2 element types accept i32 on the value-pop path
+               * (small ints narrow, i64/u64/f64 promote). The typer is
+               * responsible for rejecting incompatible kinds. */
+              compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
+              compiler__emit_byte(c, (uint8_t)base_slot, line);
+              compiler__emit_byte(c, (uint8_t)elem_type, line);
+              compiler__emit_u16(c, (uint16_t)n, line);
+            }
           }
         }
       }

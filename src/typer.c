@@ -882,10 +882,19 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
   /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md.
    * Picks the declared length when annotated; otherwise the length
-   * inferred from a typed-RHS constructor. */
+   * inferred from a typed-RHS constructor. inner_len M (for the
+   * nested [Buf N [Buf M T]] form) is always inherited from the RHS
+   * constructor when present -- the LHS-inferred form is the only
+   * way `inner_buf_len` gets populated here since the explicit
+   * `def [Buf N [Buf M T]] NAME` path goes through the buf-form
+   * branch above and stamps inner_len directly. M4.2. */
   if (effective == TYPE_BUF && tc->binding_count > 0) {
     uint32_t bl = declared_buf_len > 0 ? declared_buf_len : inherited_buf_len;
     if (bl > 0) tc->bindings[tc->binding_count - 1].buf_len = bl;
+    if (value_node->inferred_buf_inner_len > 0) {
+      tc->bindings[tc->binding_count - 1].buf_inner_len =
+          value_node->inferred_buf_inner_len;
+    }
   }
 
   /* def/mut returns nil. (compiler.c's last_expr_type is sometimes left
@@ -2631,14 +2640,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * vec/map constructors above but with a value (N) in the head's
        * second slot. The compiler integrates with the def site for
        * codegen; the typer just stamps TYPE_BUF + element/len so the
-       * def-site type check sees a matching RHS. See BUFFER_DESIGN.md. */
+       * def-site type check sees a matching RHS. Nested form
+       * `[[Buf N [Buf M T]] ...]` also tracked via inner_len (M4.2). */
       uint32_t buf_sidx_ctor;
       uint32_t buf_len_ctor;
-      if (typer__buf_type(tc, head, &buf_sidx_ctor, &buf_len_ctor) &&
+      uint32_t buf_inner_len_ctor = 0;
+      if (typer__buf_type_full(tc, head, &buf_sidx_ctor, &buf_len_ctor,
+                               &buf_inner_len_ctor) &&
           buf_len_ctor > 0 && buf_sidx_ctor != UINT32_MAX) {
-        node->inferred_type       = TYPE_BUF;
-        node->inferred_struct_idx = buf_sidx_ctor;
-        node->inferred_buf_len    = buf_len_ctor;
+        node->inferred_type           = TYPE_BUF;
+        node->inferred_struct_idx     = buf_sidx_ctor;
+        node->inferred_buf_len        = buf_len_ctor;
+        node->inferred_buf_inner_len  = buf_inner_len_ctor;
         return;
       }
       node->inferred_type = TYPE_DYN;

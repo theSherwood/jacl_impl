@@ -1,0 +1,47 @@
+# expect: 1
+# expect: 4
+# expect: 7
+# expect: 12
+# expect: 1
+# expect: 2
+# expect: 0
+# expect: 5
+# expect: 0
+# expect: 0
+# expect: 3
+# expect: 16
+# M4.2 follow-up: literal init for nested [Buf N [Buf M T]] bufs.
+# Outer ctor takes up to N inner ctors; each inner ctor takes up to M
+# values. Partial fill allowed at both levels (rest stays zero).
+# See BUFFER_DESIGN.md.
+
+proc full {} {
+  def [Buf 3 [Buf 4 i32]] m [[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2 3 4] [[Buf 4 i32] 5 6 7 8] [[Buf 4 i32] 9 10 11 12]]
+  print $m->0->0
+  print $m->0->3
+  print $m->1->2
+  print $m->2->3
+}
+[full]
+
+# Partial fill at both levels -- LHS annotation is also inferred from
+# the RHS constructor (M5b LHS inference combined with M4.2 nesting).
+proc partial {} {
+  def m [[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2] [[Buf 4 i32] 5]]
+  print $m->0->0
+  print $m->0->1
+  print $m->0->2
+  print $m->1->0
+  print $m->1->1
+  print $m->2->0
+  print [buf-len $m]
+}
+[partial]
+
+# Element-overflow check fires at compile time for nested too (M5
+# overflow check + M4.2 nesting).
+proc good {} {
+  def [Buf 2 [Buf 2 u8]] bytes [[Buf 2 [Buf 2 u8]] [[Buf 2 u8] 0x0f 0x10]]
+  print $bytes->0->1
+}
+[good]
