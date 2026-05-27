@@ -1,0 +1,14 @@
+# expect-error: by-value size 1024 bytes exceeds 256-byte cap
+# By-value [Buf N T] params are capped at 256 bytes per the
+# behaviour-shaping policy in BUFFER_DESIGN.md Tier 2. Anything
+# larger needs [Ptr [Buf N T]] to avoid a per-call memcpy.
+
+proc too_big {[Buf 256 i32] xs} {
+  print [buf-len $xs]
+}
+
+proc main {} {
+  def [Buf 256 i32] big
+  [too_big $big]
+}
+[main]

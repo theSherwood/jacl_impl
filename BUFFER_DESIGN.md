@@ -136,16 +136,14 @@ Remaining:
   element types only for now. Fixtures: `buf_proc_param_value.jacl`,
   `buf_proc_param_value_arity.jacl`.
 
-  **Size-cap follow-up.** The current cap is 2040 bytes (driven by
-  opcode operand width). A softer policy might warn or hard-error
-  much earlier -- say at 256 bytes -- to discourage by-value passing
-  of large buffers when `[Ptr [Buf N T]]` is the right tool. No
-  legitimate proc takes 4 KB by value. Surfacing options: a typer
-  warning (would need a new diagnostic channel since the typer
-  currently only errors), a compile-time hard error with a clear
-  redirect to `[Ptr [Buf N T]]`, or a runtime trap (unhelpful -- by
-  then the code has already shipped). Hard error at decl time is
-  probably the right answer. Not implemented yet.
+  **Size cap shipped.** By-value buf params are hard-error capped at
+  256 bytes per declaration (matches a single cache line on most arches
+  plus headroom for small structured headers: sha-256 = 32B,
+  IPv6 addr = 16B, ELF header = 64B). The error message points at
+  `[Ptr [Buf N T]]` and `[Ptr T]` as the alternatives. The wire-width
+  ceiling (2040 bytes) is still in place underneath as a sanity check
+  but few users will reach it. Fixture:
+  `buf_proc_param_value_size_cap.jacl`.
 - ~~**Test harness native-fn registration**~~ ✅ shipped this session.
   `test_jacl_harness.c` carries a small catalog (`t_fill`, `t_sumi`,
   `t_xor`) of test-only C functions registered on every harness VM.

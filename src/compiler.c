@@ -9319,17 +9319,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         uint32_t n = (uint32_t)nlit->data.lit_int.value;
         uint32_t elem_sz = struct__type_size(buf_elem_t, NULL, 0);
         uint64_t total_bytes = (uint64_t)n * (uint64_t)elem_sz;
-        if (total_bytes > 0xFFu * sizeof(JaclVal)) {
-          /* The wire opcodes carry u8 widths (param_total_slots,
-           * OP_INLINE_COPY_LOCAL width). A by-value param wider than
-           * 255 slots = 2040 bytes overflows. See BUFFER_DESIGN.md
-           * "size cap" follow-up note. */
-          char err[160];
+        /* By-value bufs pay a memcpy per call. There's no legitimate use
+         * case for passing kilobytes by value -- [Ptr [Buf N T]] is the
+         * right tool when the buf is bigger than a cache line or two.
+         * Cap at 256 bytes (matches a single cache line on most arches
+         * plus headroom for small structured headers; sha-256 = 32B,
+         * IPv6 addr = 16B, ELF header = 64B all fit). The opcode wire
+         * width tops out at 2040 bytes anyway (255 JaclVal slots), so
+         * the ceiling above 256 was already a sanity check that few
+         * users would hit -- 256 is a behaviour-shaping cap. */
+        if (total_bytes > 256) {
+          char err[224];
           snprintf(err, sizeof(err),
-              "[Buf %u %s] param: by-value size %u bytes exceeds 2040-byte cap "
-              "(use [Ptr [Buf %u %s]] for larger buffers)",
+              "[Buf %u %s] param: by-value size %u bytes exceeds 256-byte cap "
+              "(use [Ptr [Buf %u %s]] to pass by reference with length preserved, "
+              "or [Ptr %s] to decay to a raw pointer)",
               (unsigned)n, type_name(buf_elem_t),
-              (unsigned)total_bytes, (unsigned)n, type_name(buf_elem_t));
+              (unsigned)total_bytes, (unsigned)n, type_name(buf_elem_t),
+              type_name(buf_elem_t));
           compiler__error(c, line, col, err);
           return;
         }
