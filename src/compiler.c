@@ -8980,11 +8980,106 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "extern", "2 or 3 arguments", argc);
       return;
     }
-    uint32_t name_idx = (argc == 3) ? 1 : 0;
-    if (args[name_idx]->type != AST_LIT_STRING) {
+    uint32_t ext_name_idx   = (argc == 3) ? 1 : 0;
+    uint32_t ext_params_idx = (argc == 3) ? 2 : 1;
+    if (args[ext_name_idx]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "extern: name must be a string");
       return;
     }
+
+    /* Walk the params node to extract (type, name) pairs, mirroring the
+     * HEAD_PROC param parser. Only the type keywords matter here -- the
+     * compiler needs param types in GlobalArity so call sites can route
+     * [Buf N T] args through the decay path (M3) or by-value path
+     * (Tier 2) based on the declared param type. Without this, an
+     * extern call with a buf var-ref arg falls through to the var-ref
+     * compiler, which tries to push the inline bytes as a struct value
+     * and trips OP_LOAD_INLINE_LOCAL with a scalar sentinel. */
+    JaclType ext_param_types[COMPILER_MAX_PROC_PARAMS];
+    uint32_t ext_param_count = 0;
+    bool     ext_is_variadic = false;
+    if (args[ext_params_idx]->type == AST_COMMAND) {
+      AstNode* ep_node = args[ext_params_idx];
+      AstNode* ep_head = ep_node->data.command.head;
+      /* Flatten head + args into a single walk. The head is the first
+       * params element regardless of node kind -- mirrors HEAD_PROC's
+       * parser at line ~9180. The `length > 0` guard skips empty
+       * params lists (where the head's union happens to read zero). */
+      AstNode* ep_elems[COMPILER_MAX_PROC_PARAMS * 2 + 2];
+      uint32_t ep_flat = 0;
+      if (ep_head && ep_head->data.lit_string.length > 0) {
+        ep_elems[ep_flat++] = ep_head;
+        for (uint32_t k = 0; k < ep_node->data.command.arg_count; k++) {
+          if (ep_flat < sizeof(ep_elems)/sizeof(ep_elems[0])) {
+            ep_elems[ep_flat++] = ep_node->data.command.args[k];
+          }
+        }
+      }
+      for (uint32_t k = 0; k < ep_flat; k++) {
+        AstNode* el = ep_elems[k];
+        /* [Ptr T] / [Buf N T] / [Vec T] / [Map K V] / [Future T] /
+         * [Stream T] / [Box T] — compound annotations contribute a
+         * single typed param. */
+        if (el->type == AST_COMMAND && el->data.command.head &&
+            el->data.command.head->type == AST_LIT_STRING) {
+          const char* h = el->data.command.head->data.lit_string.value;
+          uint32_t    hl = el->data.command.head->data.lit_string.length;
+          JaclType cmt = TYPE_DYN;
+          bool matched = false;
+          if (hl == 3 && memcmp(h, "Ptr", 3) == 0) { cmt = TYPE_PTR; matched = true; }
+          else if (hl == 3 && memcmp(h, "Buf", 3) == 0) { cmt = TYPE_BUF; matched = true; }
+          else if (hl == 3 && memcmp(h, "Vec", 3) == 0) { cmt = TYPE_TYPED_VEC; matched = true; }
+          else if (hl == 3 && memcmp(h, "Map", 3) == 0) { cmt = TYPE_TYPED_MAP; matched = true; }
+          else if (hl == 3 && memcmp(h, "Box", 3) == 0) { cmt = TYPE_BOX; matched = true; }
+          else if (hl == 6 && memcmp(h, "Future", 6) == 0) { cmt = TYPE_FUTURE; matched = true; }
+          else if (hl == 6 && memcmp(h, "Stream", 6) == 0) { cmt = TYPE_STREAM; matched = true; }
+          if (matched) {
+            /* Consume the following bare name. */
+            if (k + 1 < ep_flat &&
+                ext_param_count < COMPILER_MAX_PROC_PARAMS) {
+              ext_param_types[ext_param_count++] = cmt;
+              k++;
+            }
+            continue;
+          }
+        }
+        if (el->type != AST_LIT_STRING) continue;
+        const char* w  = el->data.lit_string.value;
+        uint32_t    wl = el->data.lit_string.length;
+        /* Variadic marker -- treated like the proc parser. */
+        if ((wl == 1 && w[0] == '&') ||
+            (wl == 2 && w[0] == '.' && w[1] == '.')) {
+          ext_is_variadic = true;
+          continue;
+        }
+        JaclType pt;
+        if (compiler__resolve_type(c, w, wl, &pt) && k + 1 < ep_flat) {
+          if (ext_param_count < COMPILER_MAX_PROC_PARAMS) {
+            ext_param_types[ext_param_count++] = pt;
+          }
+          k++;
+        } else if (ext_param_count < COMPILER_MAX_PROC_PARAMS) {
+          /* Untyped name. */
+          ext_param_types[ext_param_count++] = TYPE_DYN;
+        }
+      }
+    }
+
+    /* Register the extern's signature in global_arities so call sites
+     * see the declared param types. The runtime binding (native fn
+     * value in env) is the host's responsibility. */
+    JaclVal ext_name_val = compiler__name_val(c->heap, c->intern_table,
+        args[ext_name_idx]->data.lit_string.value,
+        args[ext_name_idx]->data.lit_string.length);
+    compiler__set_global_arity(c, ext_name_val,
+        ext_is_variadic ? -1 : (int16_t)ext_param_count);
+    GlobalArity* ext_ga = compiler__find_global(c, ext_name_val);
+    if (ext_ga) {
+      for (uint8_t i = 0; i < ext_param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
+        ext_ga->param_types[i] = ext_param_types[i];
+      }
+    }
+
     compiler__emit_byte(c, OP_NIL, line);
     c->last_expr_type = TYPE_NIL;
     return;

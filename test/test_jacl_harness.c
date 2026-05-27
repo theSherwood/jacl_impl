@@ -4,6 +4,118 @@
 #include <dirent.h>
 #include <limits.h>
 
+/* ===== Native function catalog (for `extern` fixture coverage) =====
+ *
+ * Small library of test-only C functions registered as JACL externs.
+ * Lets fixtures exercise the [Buf N T] -> [Ptr T] decay path against
+ * actual C code -- the JACL-to-JACL fixtures cover the same opcodes,
+ * but only a real C extern verifies that `[addr $buf]` is a stable
+ * pointer the C side can dereference. See BUFFER_DESIGN.md Tier 2
+ * (test-harness native-fn registration).
+ *
+ * Names are kept to <=7 bytes so jacl_inline_string can encode them
+ * directly -- avoids the intern-table-coupling problem (jacl_run
+ * creates its own intern table inside the call, so a long name
+ * interned beforehand wouldn't compare equal at lookup time). */
+
+typedef JaclVal (*HarnessNativeFn)(VM* vm, JaclVal* args, int argc);
+
+typedef struct {
+  const char*     name;
+  HarnessNativeFn fn;
+  int8_t          arity;
+} HarnessNativeEntry;
+
+/* Fill `len` bytes at `buf` with `byte`. Tests caller->callee decay
+ * and the callee writing through the pointer. Returns `len`. */
+static JaclVal harness_native_t_fill(VM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)argc;
+  uint8_t* p   = (uint8_t*)(uintptr_t)jacl_as_u64(args[0]);
+  int32_t  len = jacl_as_i32(args[1]);
+  int32_t  byt = jacl_as_i32(args[2]);
+  for (int32_t i = 0; i < len; i++) p[i] = (uint8_t)byt;
+  return jacl_i32(len);
+}
+
+/* Sum `len` i32 elements starting at `buf`. Tests the callee reading
+ * the caller's buffer through the decayed pointer. */
+static JaclVal harness_native_t_sumi(VM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)argc;
+  int32_t* p   = (int32_t*)(uintptr_t)jacl_as_u64(args[0]);
+  int32_t  len = jacl_as_i32(args[1]);
+  int64_t  sum = 0;
+  for (int32_t i = 0; i < len; i++) sum += p[i];
+  return jacl_i32((int32_t)sum);
+}
+
+/* XOR-in-place: dst[i] ^= src[i] for `len` bytes. Two pointer args
+ * to verify both decay independently. Returns `len`. */
+static JaclVal harness_native_t_xor(VM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)argc;
+  uint8_t* dst = (uint8_t*)(uintptr_t)jacl_as_u64(args[0]);
+  uint8_t* src = (uint8_t*)(uintptr_t)jacl_as_u64(args[1]);
+  int32_t  len = jacl_as_i32(args[2]);
+  for (int32_t i = 0; i < len; i++) dst[i] ^= src[i];
+  return jacl_i32(len);
+}
+
+static const HarnessNativeEntry harness_native_catalog[] = {
+  { "t_fill", harness_native_t_fill, 3 },
+  { "t_sumi", harness_native_t_sumi, 2 },
+  { "t_xor",  harness_native_t_xor,  3 },
+};
+#define HARNESS_NATIVE_COUNT \
+    (sizeof(harness_native_catalog) / sizeof(harness_native_catalog[0]))
+
+static int8_t harness_native_arities[HARNESS_NATIVE_COUNT];
+
+static JaclVal harness_native_dispatch(void* ctx, uint32_t idx,
+                                        JaclVal* args, int argc) {
+  (void)ctx;
+  if (idx >= HARNESS_NATIVE_COUNT) return jacl_set_error(JACL_NIL);
+  return harness_native_catalog[idx].fn(NULL, args, argc);
+}
+
+static void harness__init_native_arities(void) {
+  static bool inited = false;
+  if (inited) return;
+  for (size_t i = 0; i < HARNESS_NATIVE_COUNT; i++) {
+    harness_native_arities[i] = harness_native_catalog[i].arity;
+  }
+  inited = true;
+}
+
+/* Wire the catalog into a VM: install dispatch hook + arity table,
+ * then add each catalog entry to the env so name lookup at OP_CALL
+ * time finds the native_fn value. Call once per VM after vm_init. */
+static void harness__setup_native_fns(VM* vm, arena_t* arena) {
+  harness__init_native_arities();
+  vm->call_native       = harness_native_dispatch;
+  vm->native_fn_ctx     = NULL;
+  vm->native_fn_arities = harness_native_arities;
+  vm->native_fn_count   = (uint32_t)HARNESS_NATIVE_COUNT;
+  for (size_t i = 0; i < HARNESS_NATIVE_COUNT; i++) {
+    const char* name = harness_native_catalog[i].name;
+    size_t nlen = strlen(name);
+    /* Catalog names are <= 7 bytes by construction (see comment above). */
+    JaclVal name_val = jacl_inline_string(name, nlen);
+    JaclVal fn_val   = jacl_native_fn((uint32_t)i);
+    if (vm->env.count >= vm->env.cap) {
+      uint32_t new_cap = vm->env.cap ? vm->env.cap * 2 : 16;
+      JaclVal* new_names  = (JaclVal*)arena_alloc(arena, new_cap * sizeof(JaclVal));
+      JaclVal* new_values = (JaclVal*)arena_alloc(arena, new_cap * sizeof(JaclVal));
+      memcpy(new_names,  vm->env.names,  vm->env.count * sizeof(JaclVal));
+      memcpy(new_values, vm->env.values, vm->env.count * sizeof(JaclVal));
+      vm->env.names  = new_names;
+      vm->env.values = new_values;
+      vm->env.cap    = new_cap;
+    }
+    vm->env.names[vm->env.count]  = name_val;
+    vm->env.values[vm->env.count] = fn_val;
+    vm->env.count++;
+  }
+}
+
 /* ===== Print capture helper ===== */
 
 typedef struct {
@@ -369,6 +481,7 @@ static int run_jacl_test(const char* filepath) {
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
+  harness__setup_native_fns(&vm, &arena);
 
   VMResult result = jacl_run(source, &vm, &arena);
   free(source);

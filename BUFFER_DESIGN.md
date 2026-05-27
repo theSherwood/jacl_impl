@@ -146,9 +146,19 @@ Remaining:
   redirect to `[Ptr [Buf N T]]`, or a runtime trap (unhelpful -- by
   then the code has already shipped). Hard error at decl time is
   probably the right answer. Not implemented yet.
-- **Test harness native-fn registration** — unblocks a real C extern
-  fixture (M3.6) and stress-tests the decay path with an actual
-  syscall.
+- ~~**Test harness native-fn registration**~~ ✅ shipped this session.
+  `test_jacl_harness.c` carries a small catalog (`t_fill`, `t_sumi`,
+  `t_xor`) of test-only C functions registered on every harness VM.
+  Fixtures declare `extern` with the catalog name and call through to
+  real C code that operates on the buffer's bytes via the decayed
+  `[Ptr T]`. As a side effect, the compiler's `HEAD_EXTERN` handler
+  now registers the declared param types in `global_arities` so call
+  sites route buf args through the M3 decay path (`[Buf N T]` -> 
+  `[Ptr T]`) instead of falling through the var-ref path and tripping
+  `OP_LOAD_INLINE_LOCAL` on a scalar sentinel. Fixture:
+  `buf_extern_c.jacl`. Catalog names capped at 7 bytes so they encode
+  as inline strings (avoids the intern-table-coupling problem with
+  `jacl_run`'s internally-created table).
 
 **Tier 3 — orthogonal cleanups.**
 
