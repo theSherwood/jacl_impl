@@ -918,9 +918,10 @@ static int test_compile_char_class_multi(void) {
     tracker_reset();
     nfa_program* prog;
     COMPILE_OK("[a-zA-Z]", prog);
-    /* SPLIT, RANGE[a-z], RANGE[A-Z], MATCH = 4 */
-    ASSERT_SIZE_EQ(prog->len, 4);
-    ASSERT_INT_EQ(prog->code[prog->start].type, NFA_INST_SPLIT);
+    /* CLASS{[a-z],[A-Z]} + MATCH = 2 */
+    ASSERT_SIZE_EQ(prog->len, 2);
+    ASSERT_INT_EQ(prog->code[prog->start].type, NFA_INST_CLASS);
+    ASSERT_SIZE_EQ(prog->code[prog->start].n_ranges, 2);
     nfa_program_free(prog);
     ASSERT(check_no_leaks());
     TEST_PASS();
@@ -930,16 +931,16 @@ static int test_compile_negated_class(void) {
     tracker_reset();
     nfa_program* prog;
     COMPILE_OK("[^a-z]", prog);
-    /* Complement of [a-z] = [0-96],[123-255] → SPLIT, RANGE, RANGE, MATCH = 4 */
-    ASSERT_SIZE_EQ(prog->len, 4);
-    ASSERT_INT_EQ(prog->code[prog->start].type, NFA_INST_SPLIT);
+    /* Complement of [a-z] = [0-96],[123-255] → CLASS{2 ranges} + MATCH = 2 */
+    ASSERT_SIZE_EQ(prog->len, 2);
+    ASSERT_INT_EQ(prog->code[prog->start].type, NFA_INST_CLASS);
+    ASSERT_SIZE_EQ(prog->code[prog->start].n_ranges, 2);
     /* Verify complement ranges are correct */
     bool found_low = false, found_high = false;
-    for (size_t i = 0; i < prog->len; i++) {
-        if (prog->code[i].type == NFA_INST_RANGE) {
-            if (prog->code[i].lo == 0 && prog->code[i].hi == 96) found_low = true;
-            if (prog->code[i].lo == 123 && prog->code[i].hi == 255) found_high = true;
-        }
+    nfa_inst* ci = &prog->code[prog->start];
+    for (size_t i = 0; i < ci->n_ranges; i++) {
+        if (ci->ranges[i].lo == 0 && ci->ranges[i].hi == 96) found_low = true;
+        if (ci->ranges[i].lo == 123 && ci->ranges[i].hi == 255) found_high = true;
     }
     ASSERT(found_low);
     ASSERT(found_high);
@@ -952,9 +953,11 @@ static int test_compile_negated_class_abc(void) {
     tracker_reset();
     nfa_program* prog;
     COMPILE_OK("[^abc]", prog);
-    /* abc (97-99) merge to [97-99] → complement: [0-96],[100-255] = 2 ranges */
-    /* SPLIT, RANGE, RANGE, MATCH = 4 */
-    ASSERT_SIZE_EQ(prog->len, 4);
+    /* abc (97-99) merge to [97-99] → complement: [0-96],[100-255]
+     * → CLASS{2 ranges} + MATCH = 2 */
+    ASSERT_SIZE_EQ(prog->len, 2);
+    ASSERT_INT_EQ(prog->code[prog->start].type, NFA_INST_CLASS);
+    ASSERT_SIZE_EQ(prog->code[prog->start].n_ranges, 2);
     nfa_program_free(prog);
     ASSERT(check_no_leaks());
     TEST_PASS();
@@ -2921,17 +2924,20 @@ static int test_compile_icase_literal(void) {
     TEST_PASS();
 }
 
-/* Compile: (?i)[a-z] produces RANGE that covers A-Z too */
+/* Compile: (?i)[a-z] produces a CLASS that covers a-z and A-Z */
 static int test_compile_icase_char_class(void) {
     tracker_reset();
     nfa_program* prog;
     COMPILE_OK("(?i)[a-z]", prog);
-    /* Should have RANGE covering a-z AND A-Z */
+    /* CLASS holding both [a-z] and [A-Z] */
     bool has_lower = false, has_upper = false;
     for (size_t i = 0; i < prog->len; i++) {
-        if (prog->code[i].type == NFA_INST_RANGE) {
-            if (prog->code[i].lo == 'a' && prog->code[i].hi == 'z') has_lower = true;
-            if (prog->code[i].lo == 'A' && prog->code[i].hi == 'Z') has_upper = true;
+        nfa_inst* ci = &prog->code[i];
+        if (ci->type == NFA_INST_CLASS) {
+            for (size_t k = 0; k < ci->n_ranges; k++) {
+                if (ci->ranges[k].lo == 'a' && ci->ranges[k].hi == 'z') has_lower = true;
+                if (ci->ranges[k].lo == 'A' && ci->ranges[k].hi == 'Z') has_upper = true;
+            }
         }
     }
     ASSERT(has_lower);

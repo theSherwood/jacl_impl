@@ -946,6 +946,7 @@ static int nfa_parse(const uint8_t* pattern, size_t len, nfa_ast** out_ast) {
 typedef enum {
     NFA_INST_LITERAL,    /* match specific byte */
     NFA_INST_RANGE,      /* match byte in [lo,hi] inclusive */
+    NFA_INST_CLASS,      /* match byte in any of n_ranges disjoint ranges */
     NFA_INST_ANY,        /* match any byte except \n */
     NFA_INST_ANY_ALL,    /* match any byte including \n (dot-all mode) */
     NFA_INST_MATCH,      /* accept */
@@ -965,6 +966,8 @@ typedef struct {
     size_t  out;        /* primary target */
     size_t  out1;       /* SPLIT: secondary target */
     size_t  slot;       /* SAVE: slot index */
+    nfa_range* ranges;  /* CLASS: heap-owned disjoint range list */
+    size_t  n_ranges;   /* CLASS: number of ranges */
 } nfa_inst;
 
 struct nfa_program {
@@ -974,6 +977,14 @@ struct nfa_program {
     size_t    n_captures; /* number of capture slots = 2 * group_count */
     bool      greedy_match; /* true if all quantifiers greedy (prefer longest) */
     uint8_t   flags;      /* global flag defaults (NFA_FLAG_*) */
+
+    /* Prefilter: bytes that could be the first consumed byte of a match,
+     * as a 256-bit bitmap (bit b set means byte b is a candidate). Computed
+     * by walking the epsilon-closure of `start` and OR-ing in every
+     * consuming instruction's byte set. When `can_match_empty` is false the
+     * matcher fast-skips bytes whose bit is unset, in a tight inner loop. */
+    uint8_t   first_byte_set[32];
+    bool      can_match_empty;
 };
 
 /* ── Compiler internals ─────────────────────────────────────────────── */
@@ -1346,39 +1357,29 @@ static _nfa_frag _nfa_compile_node(_nfa_compiler* c, nfa_ast* ast) {
             return f;
         }
 
-        /* Multiple ranges: SPLIT chain
-         * Layout: [SPLIT, RANGE, SPLIT, RANGE, ..., RANGE]
-         * Each SPLIT.out → adjacent RANGE, SPLIT.out1 → next SPLIT (or last RANGE) */
-        size_t base = c->len;
-        for (size_t i = 0; i < rcount - 1; i++) {
-            size_t sidx = _nfa_emit_inst(c, NFA_INST_SPLIT);
-            size_t ridx = _nfa_emit_inst(c, NFA_INST_RANGE);
-            if (c->error) { _nfa_range_vec_free(&icase_rv); return empty; }
-            c->code[ridx].lo  = ranges[i].lo;
-            c->code[ridx].hi  = ranges[i].hi;
-            c->code[sidx].out = ridx;
-        }
-        size_t last = _nfa_emit_inst(c, NFA_INST_RANGE);
+        /* Multiple ranges: one CLASS instruction holding the whole disjoint
+         * range list. The matcher tests `byte in any range` in a single
+         * thread step, avoiding the O(rcount)-threads blow-up that a SPLIT
+         * chain of single-byte RANGEs would cause. */
+        size_t idx = _nfa_emit_inst(c, NFA_INST_CLASS);
         if (c->error) { _nfa_range_vec_free(&icase_rv); return empty; }
-        c->code[last].lo = ranges[rcount - 1].lo;
-        c->code[last].hi = ranges[rcount - 1].hi;
-
-        /* Wire SPLIT.out1 → next SPLIT or last RANGE */
-        for (size_t i = 0; i < rcount - 1; i++) {
-            size_t sidx = base + i * 2;
-            c->code[sidx].out1 = (i + 1 < rcount - 1)
-                ? base + (i + 1) * 2   /* next SPLIT */
-                : last;                 /* last RANGE */
+        nfa_range* heap_ranges = (nfa_range*)NFA_MALLOC(rcount * sizeof(nfa_range));
+        if (!heap_ranges) {
+            c->error = NFA_ERR_ALLOC;
+            _nfa_range_vec_free(&icase_rv);
+            return empty;
         }
+        memcpy(heap_ranges, ranges, rcount * sizeof(nfa_range));
+        c->code[idx].ranges   = heap_ranges;
+        c->code[idx].n_ranges = rcount;
 
-        /* Build fragment: all RANGE.out fields are patchable exits */
-        _nfa_frag f = _nfa_frag_make(base, c->arena);
-        for (size_t i = 0; i < rcount - 1; i++) {
-            if (!_nfa_frag_add(&f, base + i * 2 + 1, 0))
-                { c->error = NFA_ERR_ALLOC; _nfa_frag_free(&f); _nfa_range_vec_free(&icase_rv); return empty; }
+        _nfa_frag f = _nfa_frag_make(idx, c->arena);
+        if (!_nfa_frag_add(&f, idx, 0)) {
+            c->error = NFA_ERR_ALLOC;
+            _nfa_frag_free(&f);
+            _nfa_range_vec_free(&icase_rv);
+            return empty;
         }
-        if (!_nfa_frag_add(&f, last, 0))
-            { c->error = NFA_ERR_ALLOC; _nfa_frag_free(&f); _nfa_range_vec_free(&icase_rv); return empty; }
         _nfa_range_vec_free(&icase_rv);
         return f;
     }
@@ -1738,8 +1739,107 @@ static _nfa_frag _nfa_compile_node(_nfa_compiler* c, nfa_ast* ast) {
 
 static void nfa_program_free(nfa_program* prog) {
     if (!prog) return;
+    if (prog->code) {
+        for (size_t i = 0; i < prog->len; i++) {
+            if (prog->code[i].type == NFA_INST_CLASS && prog->code[i].ranges) {
+                NFA_FREE(prog->code[i].ranges);
+            }
+        }
+    }
     NFA_FREE(prog->code);
     NFA_FREE(prog);
+}
+
+/* Compute prog->first_byte_set and prog->can_match_empty by walking the
+ * epsilon-closure from prog->start. A byte b is in the set iff some
+ * reachable consuming instruction (LITERAL/RANGE/CLASS/ANY/ANY_ALL) admits
+ * b as its first byte. `can_match_empty` is true iff the epsilon-walk
+ * reaches MATCH without consuming. */
+static void _nfa_compute_first_set(nfa_program* prog) {
+    memset(prog->first_byte_set, 0, sizeof(prog->first_byte_set));
+    prog->can_match_empty = false;
+
+    if (prog->len == 0) {
+        prog->can_match_empty = true;
+        return;
+    }
+
+    uint8_t* visited = (uint8_t*)NFA_MALLOC(prog->len);
+    size_t*  queue   = (size_t*)NFA_MALLOC(prog->len * sizeof(size_t));
+    if (!visited || !queue) {
+        /* Allocation failed: conservatively mark every byte as a candidate
+         * and disable the empty-match fast-path. The matcher still works,
+         * just without the prefilter speedup. */
+        memset(prog->first_byte_set, 0xff, sizeof(prog->first_byte_set));
+        NFA_FREE(visited);
+        NFA_FREE(queue);
+        return;
+    }
+    memset(visited, 0, prog->len);
+    size_t qh = 0, qt = 0;
+    queue[qt++] = prog->start;
+    visited[prog->start] = 1;
+
+    while (qh < qt) {
+        size_t pc = queue[qh++];
+        nfa_inst* inst = &prog->code[pc];
+        switch (inst->type) {
+        case NFA_INST_MATCH:
+            prog->can_match_empty = true;
+            break;
+        case NFA_INST_SPLIT:
+            if (!visited[inst->out])  { visited[inst->out]  = 1; queue[qt++] = inst->out;  }
+            if (!visited[inst->out1]) { visited[inst->out1] = 1; queue[qt++] = inst->out1; }
+            break;
+        /* Epsilon transitions: descend through, byte not yet consumed. The
+         * anchor instructions might fail at runtime depending on context,
+         * but our prefilter is a SUPER-set — anchor-gated branches that
+         * lead to consuming instructions still contribute their bytes. */
+        case NFA_INST_JMP:
+        case NFA_INST_SAVE:
+        case NFA_INST_ANCHOR_BOL:
+        case NFA_INST_ANCHOR_EOL:
+        case NFA_INST_ANCHOR_WORD:
+        case NFA_INST_ANCHOR_NON_WORD:
+            if (!visited[inst->out]) { visited[inst->out] = 1; queue[qt++] = inst->out; }
+            break;
+        case NFA_INST_LITERAL:
+            prog->first_byte_set[inst->byte >> 3] |= (uint8_t)(1u << (inst->byte & 7));
+            break;
+        case NFA_INST_RANGE:
+            for (int b = inst->lo; b <= inst->hi; b++)
+                prog->first_byte_set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        case NFA_INST_CLASS:
+            for (size_t k = 0; k < inst->n_ranges; k++)
+                for (int b = inst->ranges[k].lo; b <= inst->ranges[k].hi; b++)
+                    prog->first_byte_set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        case NFA_INST_ANY:
+            for (int b = 0; b < 256; b++)
+                if (b != '\n')
+                    prog->first_byte_set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        case NFA_INST_ANY_ALL:
+            memset(prog->first_byte_set, 0xff, sizeof(prog->first_byte_set));
+            break;
+        }
+    }
+    NFA_FREE(visited);
+    NFA_FREE(queue);
+}
+
+/* Free any CLASS-instruction ranges arrays in a code buffer. Used on
+ * compile-error paths that discard the in-progress code without handing
+ * ownership to an nfa_program. Safe to call on a partially-built code. */
+static void _nfa_free_class_ranges(nfa_inst* code, size_t len) {
+    if (!code) return;
+    for (size_t i = 0; i < len; i++) {
+        if (code[i].type == NFA_INST_CLASS && code[i].ranges) {
+            NFA_FREE(code[i].ranges);
+            code[i].ranges = NULL;
+        }
+    }
 }
 
 static int nfa_compile(nfa_ast* ast, nfa_program** out_prog) {
@@ -1750,6 +1850,7 @@ static int nfa_compile(nfa_ast* ast, nfa_program** out_prog) {
     _nfa_frag f = _nfa_compile_node(&c, ast);
     if (c.error) {
         _nfa_frag_free(&f);
+        _nfa_free_class_ranges(c.code, c.len);
         NFA_FREE(c.code);
         return c.error;
     }
@@ -1758,6 +1859,7 @@ static int nfa_compile(nfa_ast* ast, nfa_program** out_prog) {
     size_t match_idx = _nfa_emit_inst(&c, NFA_INST_MATCH);
     if (c.error) {
         _nfa_frag_free(&f);
+        _nfa_free_class_ranges(c.code, c.len);
         NFA_FREE(c.code);
         return c.error;
     }
@@ -1770,6 +1872,7 @@ static int nfa_compile(nfa_ast* ast, nfa_program** out_prog) {
     /* Build program */
     nfa_program* prog = (nfa_program*)NFA_MALLOC(sizeof(nfa_program));
     if (!prog) {
+        _nfa_free_class_ranges(c.code, c.len);
         NFA_FREE(c.code);
         return NFA_ERR_ALLOC;
     }
@@ -1779,6 +1882,7 @@ static int nfa_compile(nfa_ast* ast, nfa_program** out_prog) {
     prog->n_captures   = (size_t)(2 * _nfa_count_groups(ast));
     prog->greedy_match = _nfa_all_greedy(ast);
     prog->flags        = 0;
+    _nfa_compute_first_set(prog);
 
     *out_prog = prog;
     return NFA_OK;
@@ -1820,6 +1924,7 @@ static int nfa_compile_pattern(const uint8_t* pattern, size_t len, nfa_program**
 
     _nfa_frag f = _nfa_compile_node(&c, ast);
     if (c.error) {
+        _nfa_free_class_ranges(c.code, c.len);
         arena_reset(&arena);
         return c.error;
     }
@@ -1827,6 +1932,7 @@ static int nfa_compile_pattern(const uint8_t* pattern, size_t len, nfa_program**
     /* Emit MATCH at the end */
     size_t match_idx = _nfa_emit_inst(&c, NFA_INST_MATCH);
     if (c.error) {
+        _nfa_free_class_ranges(c.code, c.len);
         arena_reset(&arena);
         return c.error;
     }
@@ -1835,9 +1941,11 @@ static int nfa_compile_pattern(const uint8_t* pattern, size_t len, nfa_program**
     size_t start = f.start;
     _nfa_frag_patch(&c, &f, match_idx);
 
-    /* Copy code array to heap (outlives arena) */
+    /* Copy code array to heap (outlives arena). Class ranges arrays are
+     * already heap-allocated and the pointers travel with the memcpy. */
     nfa_inst* heap_code = (nfa_inst*)NFA_MALLOC(c.len * sizeof(nfa_inst));
     if (!heap_code) {
+        _nfa_free_class_ranges(c.code, c.len);
         arena_reset(&arena);
         return NFA_ERR_ALLOC;
     }
@@ -1850,6 +1958,7 @@ static int nfa_compile_pattern(const uint8_t* pattern, size_t len, nfa_program**
     /* Build program on heap */
     nfa_program* prog = (nfa_program*)NFA_MALLOC(sizeof(nfa_program));
     if (!prog) {
+        _nfa_free_class_ranges(heap_code, c.len);
         NFA_FREE(heap_code);
         arena_reset(&arena);
         return NFA_ERR_ALLOC;
@@ -1860,6 +1969,7 @@ static int nfa_compile_pattern(const uint8_t* pattern, size_t len, nfa_program**
     prog->n_captures   = n_captures;
     prog->greedy_match = greedy_match;
     prog->flags        = 0;
+    _nfa_compute_first_set(prog);
 
     /* Free all temporary data */
     arena_reset(&arena);
@@ -2031,6 +2141,7 @@ static void _nfa_addstate(_nfa_tlist* l, nfa_inst* code,
         return;
     case NFA_INST_LITERAL:
     case NFA_INST_RANGE:
+    case NFA_INST_CLASS:
     case NFA_INST_ANY:
     case NFA_INST_ANY_ALL:
     case NFA_INST_MATCH:
@@ -2039,10 +2150,54 @@ static void _nfa_addstate(_nfa_tlist* l, nfa_inst* code,
     }
 }
 
-/* Core: execute NFA from a given byte offset using pre-allocated buffers.
+/* Cursor: the input-position state carried into and out of _nfa_exec_core.
+ *
+ * `chunk` is the current input chunk (from `input->next_chunk`); `ci` is the
+ * read offset within it, so `chunk.data[ci]` is the next byte (when `ci <
+ * chunk.len`). `sp` is the absolute byte position == chunk_start + ci.
+ * `prev_b` / `has_prev` hold the byte immediately before `sp` for anchor
+ * (^ $ \b) context.
+ *
+ * Keeping all of this in a single struct lets the iterator cache it across
+ * `nfa_iter_next` calls — the next match's starting position is almost always
+ * exactly where the previous call exited, so we can avoid re-issuing seek +
+ * next_chunk every call. This matters most for non-trivial input adapters
+ * (e.g. rope) where each call into the adapter walks a tree. */
+typedef struct {
+    nfa_chunk chunk;
+    size_t    ci;
+    size_t    sp;
+    uint8_t   prev_b;
+    bool      has_prev;
+} _nfa_cursor;
+
+/* Position a cursor at `from` by issuing the appropriate seek + next_chunk
+ * calls into the input. Returns false if the input has nothing at `from`
+ * (caller should treat as no-match). */
+static bool _nfa_cursor_init(nfa_input* input, size_t from, _nfa_cursor* cur) {
+    cur->prev_b = 0;
+    cur->has_prev = false;
+    if (from > 0) {
+        input->seek(input->ctx, from - 1);
+        nfa_chunk peek = input->next_chunk(input->ctx);
+        if (peek.len == 0) return false;
+        cur->prev_b = peek.data[0];
+        cur->has_prev = true;
+    }
+    input->seek(input->ctx, from);
+    cur->chunk = input->next_chunk(input->ctx);
+    cur->ci    = 0;
+    cur->sp    = from;
+    return true;
+}
+
+/* Core: execute NFA starting from cursor `cur` using pre-allocated buffers.
  * cbuf/cseen/pending must be sized for prog->len.
- * arena is used for per-thread capture slot arrays (may be NULL if n_captures==0). */
-static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input, size_t from,
+ * arena is used for per-thread capture slot arrays (may be NULL if n_captures==0).
+ * On return, `cur` reflects where the matcher stopped — callers that want to
+ * resume scanning at the same position can reuse it. */
+static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input,
+                                 _nfa_cursor* cur,
                                  _nfa_thread* cbuf, uint8_t* cseen,
                                  _nfa_thread* pending, arena_t* arena) {
     nfa_match result = { false, 0, 0, NULL, 0 };
@@ -2052,26 +2207,13 @@ static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input, size_t from
     _nfa_tlist clist = { cbuf, 0, cseen, n };
     memset(cseen, 0, (n + 7) / 8);
 
-    /* Determine prev_b/has_prev for anchor context at starting position */
-    uint8_t  prev_b   = 0;
-    bool     has_prev = false;
-    if (from > 0) {
-        input->seek(input->ctx, from - 1);
-        nfa_chunk peek = input->next_chunk(input->ctx);
-        if (peek.len > 0) {
-            prev_b   = peek.data[0];
-            has_prev = true;
-        } else {
-            return result;
-        }
-    }
+    /* Pull cursor state into locals; on exit we write back. */
+    nfa_chunk chunk    = cur->chunk;
+    size_t    ci       = cur->ci;
+    size_t    sp       = cur->sp;
+    uint8_t   prev_b   = cur->prev_b;
+    bool      has_prev = cur->has_prev;
 
-    /* Seek to from and fetch first chunk */
-    input->seek(input->ctx, from);
-    nfa_chunk chunk = input->next_chunk(input->ctx);
-    size_t ci = 0;
-
-    size_t   sp       = from;
     size_t   pcount   = 0;
     bool     matched  = false;
     size_t   m_start  = 0;
@@ -2085,6 +2227,33 @@ static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input, size_t from
             chunk = input->next_chunk(input->ctx);
             if (chunk.len == 0) { at_end = true; break; }
             ci = 0;
+        }
+
+        /* First-byte prefilter: when no threads carry over and we haven't
+         * yet found a match, skip bytes that can't begin any match. This
+         * stays inside one chunk per inner iteration, refetching only when
+         * we walk off the end — so per-byte cost is a bitmap load + branch
+         * plus an increment, much cheaper than the matcher state machine.
+         *
+         * Disabled when the pattern can match empty (every position is a
+         * candidate then). Anchor-gated branches don't disqualify a byte
+         * from the set — the prefilter is a SUPER-set; addstate still
+         * verifies anchors at runtime. */
+        if (!at_end && pcount == 0 && !matched && !prog->can_match_empty) {
+            const uint8_t* fbs = prog->first_byte_set;
+            while (!at_end) {
+                uint8_t b = chunk.data[ci];
+                if (fbs[b >> 3] & (uint8_t)(1u << (b & 7))) break;
+                prev_b = b;
+                has_prev = true;
+                ci++;
+                sp++;
+                if (ci >= chunk.len) {
+                    chunk = input->next_chunk(input->ctx);
+                    if (chunk.len == 0) { at_end = true; break; }
+                    ci = 0;
+                }
+            }
         }
 
         uint8_t cur = at_end ? 0 : chunk.data[ci];
@@ -2136,6 +2305,14 @@ static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input, size_t from
             switch (inst->type) {
             case NFA_INST_LITERAL: m = (cur == inst->byte);                    break;
             case NFA_INST_RANGE:   m = (cur >= inst->lo && cur <= inst->hi);   break;
+            case NFA_INST_CLASS: {
+                for (size_t k = 0; k < inst->n_ranges; k++) {
+                    if (cur >= inst->ranges[k].lo && cur <= inst->ranges[k].hi) {
+                        m = true; break;
+                    }
+                }
+                break;
+            }
             case NFA_INST_ANY:     m = (cur != '\n');                           break;
             case NFA_INST_ANY_ALL: m = true;                                   break;
             default: break;
@@ -2154,6 +2331,14 @@ static nfa_match _nfa_exec_core(nfa_program* prog, nfa_input* input, size_t from
         ci++;
         sp++;
     }
+
+    /* Write cursor state back so callers (notably nfa_iter) can resume
+     * scanning at this position without re-issuing seek + next_chunk. */
+    cur->chunk    = chunk;
+    cur->ci       = ci;
+    cur->sp       = sp;
+    cur->prev_b   = prev_b;
+    cur->has_prev = has_prev;
 
     if (matched) {
         result.matched    = true;
@@ -2193,7 +2378,9 @@ static nfa_match _nfa_exec_from(nfa_program* prog, nfa_input* input, size_t from
     }
 
     arena_t arena = {0};
-    result = _nfa_exec_core(prog, input, from, cbuf, cseen, pending, &arena);
+    _nfa_cursor cur = {0};
+    if (_nfa_cursor_init(input, from, &cur))
+        result = _nfa_exec_core(prog, input, &cur, cbuf, cseen, pending, &arena);
     arena_reset(&arena);
 
     NFA_FREE(cbuf);
@@ -2225,6 +2412,8 @@ struct nfa_iter {
     uint8_t*     cseen;    /* pre-allocated dedup bitset */
     _nfa_thread* pending;  /* pre-allocated pending array */
     arena_t      arena;    /* arena for per-thread capture arrays */
+    _nfa_cursor  cursor;   /* carried across calls when cursor_valid */
+    bool         cursor_valid;
 };
 
 static nfa_iter nfa_iter_new(nfa_program* prog, nfa_input input) {
@@ -2252,7 +2441,20 @@ static nfa_match nfa_iter_next(nfa_iter* it) {
     if (it->done) return result;
 
     arena_reset(&it->arena); /* reset arena between calls */
-    result = _nfa_exec_core(it->prog, &it->input, it->pos,
+
+    /* Reuse the cached cursor when its sp matches our next-scan position;
+     * otherwise re-seek. The common case after a non-zero-length match is
+     * `it->pos == cursor.sp` (exec_core exits one byte past the match's
+     * last byte), so we typically skip the seek + next_chunk dance. */
+    if (!it->cursor_valid || it->cursor.sp != it->pos) {
+        if (!_nfa_cursor_init(&it->input, it->pos, &it->cursor)) {
+            it->done = true;
+            return result;
+        }
+        it->cursor_valid = true;
+    }
+
+    result = _nfa_exec_core(it->prog, &it->input, &it->cursor,
                             it->cbuf, it->cseen, it->pending, &it->arena);
 
     if (result.matched) {
