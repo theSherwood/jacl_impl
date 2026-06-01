@@ -120,6 +120,56 @@ static GCBlockSweepSummary gc__summarize_block_map(const uint8_t *line_map) {
     return s;
 }
 
+/* Recursively push every GC-traced JaclVal held in a struct's inline bytes.
+ * Mirrors the recursive layout descriptor (RECURSIVE_LAYOUT_REFACTOR.md):
+ * ref-scalar fields are a single traced slot; ref-elem bufs are buf_len
+ * traced slots; struct fields and struct-element bufs recurse. This descends
+ * into nested sub-structs, which the previous flat field loop did not -- a
+ * ref-elem buf reached through a struct field (or a buf of such structs) is
+ * now traced. ACQUIRE loads pair with release-stores into record fields. */
+static void gc__push_record_refs(GCMarkStack *ms, const uint8_t *base,
+                                  StructTypeRegistry *sreg, uint32_t struct_idx) {
+    if (!sreg || struct_idx >= sreg->count) return;
+    StructTypeDef *sdef = sreg->defs[struct_idx];
+    if (!sdef) return;
+    for (uint32_t i = 0; i < sdef->field_count; i++) {
+        JaclType ft = sdef->fields[i].type;
+        uint32_t off = sdef->fields[i].offset;
+        if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
+            ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STREAM) {
+            JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                (uint64_t*)(base + off), MEM_ACQUIRE);
+            gc__ms_push_val(ms, val);
+        } else if (ft == TYPE_STRUCT) {
+            gc__push_record_refs(ms, base + off, sreg,
+                                 sdef->fields[i].struct_type_idx);
+        } else if (ft == TYPE_BUF) {
+            uint32_t enc = sdef->fields[i].struct_type_idx;
+            uint32_t n   = sdef->fields[i].buf_len;
+            if (JACL_IS_SCALAR_TYPE_IDX(enc)) {
+                JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(enc);
+                bool elem_is_ref =
+                    (elem_t == TYPE_DYN || elem_t == TYPE_STR ||
+                     elem_t == TYPE_VEC || elem_t == TYPE_MAP ||
+                     elem_t == TYPE_CLOSURE || elem_t == TYPE_STREAM);
+                if (!elem_is_ref) continue;
+                for (uint32_t k = 0; k < n; k++) {
+                    JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
+                        (uint64_t*)(base + off + k * sizeof(JaclVal)),
+                        MEM_ACQUIRE);
+                    gc__ms_push_val(ms, val);
+                }
+            } else {
+                /* Buf of structs: recurse per element at its byte stride. */
+                uint32_t elem_sz = (uint32_t)compiler__encoding_byte_size(sreg, enc);
+                for (uint32_t k = 0; k < n; k++) {
+                    gc__push_record_refs(ms, base + off + k * elem_sz, sreg, enc);
+                }
+            }
+        }
+    }
+}
+
 /* ======================================================================
  * Object tracing: push an object's children onto the mark stack
  * ====================================================================== */
@@ -449,56 +499,14 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
 
     /* --- HeapRecord: trace reference fields. Used by ctx (the lone
        builtin HeapRecord type) and by user structs boxed via `[box ...]`.
-       Scalar ref fields (str/vec/map/closure/dyn) live in a single
-       JaclVal-sized slot at the field offset. Ref-elem buf fields hold
-       buf_len consecutive tagged JaclVals starting at the field offset
-       and must be descended into individually. Non-ref fields hold raw
-       value-type bytes and are skipped. --- */
+       The recursive push helper descends into nested struct fields and
+       struct-element bufs, so ref-elem bufs reached through a sub-struct
+       are traced (RECURSIVE_LAYOUT_REFACTOR.md, Step 2). --- */
     case OBJ_HEAP_RECORD: {
         HeapRecord *s = (HeapRecord *)payload;
         if (gc__struct_registry) {
             StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
-            StructTypeDef *sdef = sreg->defs[s->type_idx];
-            for (uint32_t i = 0; i < sdef->field_count; i++) {
-                JaclType ft = sdef->fields[i].type;
-                if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
-                    ft == TYPE_CLOSURE || ft == TYPE_DYN) {
-                    /* ACQUIRE pairs with any release-store into a
-                     * heap-record field (struct field assignments,
-                     * etc.). Ensures the trace sees fully-published
-                     * pointer values rather than torn writes.
-                     * (Originally added for ctx_pool_free's NIL writes;
-                     * the pool itself was removed in §18 but the
-                     * pairing remains valid for other paths.) */
-                    JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                        (uint64_t*)(s->data + sdef->fields[i].offset),
-                        MEM_ACQUIRE);
-                    gc__ms_push_val(ms, val);
-                } else if (ft == TYPE_BUF) {
-                    /* Ref-elem buf field: scan buf_len consecutive
-                     * JaclVal slots starting at the field offset. The
-                     * elem encoding tells us whether this is a ref-elem
-                     * buf (dyn/str/vec/map/closure/stream) vs a raw-byte
-                     * buf (scalar/struct). Only ref-elem bufs need
-                     * scanning; raw-byte bufs carry no GC references. */
-                    uint32_t enc = sdef->fields[i].struct_type_idx;
-                    if (!JACL_IS_SCALAR_TYPE_IDX(enc)) continue;
-                    JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(enc);
-                    if (elem_t != TYPE_DYN && elem_t != TYPE_STR &&
-                        elem_t != TYPE_VEC && elem_t != TYPE_MAP &&
-                        elem_t != TYPE_CLOSURE && elem_t != TYPE_STREAM) {
-                        continue;
-                    }
-                    uint32_t off = sdef->fields[i].offset;
-                    uint32_t n   = sdef->fields[i].buf_len;
-                    for (uint32_t k = 0; k < n; k++) {
-                        JaclVal val = (JaclVal)ATOMIC_LOAD_EXPLICIT(
-                            (uint64_t*)(s->data + off + k * sizeof(JaclVal)),
-                            MEM_ACQUIRE);
-                        gc__ms_push_val(ms, val);
-                    }
-                }
-            }
+            gc__push_record_refs(ms, s->data, sreg, s->type_idx);
         }
         break;
     }

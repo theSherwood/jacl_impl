@@ -112,14 +112,41 @@ type-system rewrite.
 
 ## Plan (sequenced, not big-bang)
 
-- [ ] **Step 1 — descriptor spike (reversible).** Build the recursive
+- [x] **Step 1 — descriptor spike (reversible).** Build the recursive
   layout descriptor (Part A). Wire it nowhere. Add a debug assertion
   that it agrees with existing `slot_ref_bitmap` / byte-size decisions
   across the full fixture suite. De-risks the cross-registry trap in
   isolation. **Decision gate:** does cross-registry consistency hold?
-- [ ] **Step 2 — route GC classification through it** (Part C),
+  **Done** (commit 73cc2ac): `compiler__encoding_align` +
+  `compiler__encoding_ref_map` added after `struct__slot_width`; an
+  env-guarded self-check confirmed the descriptor reproduces existing
+  `slot_ref_bitmap` / byte-size decisions across the suite with **zero
+  divergences** (435/435). Cross-registry consistency held.
+- [x] **Step 2 — route GC classification through it** (Part C),
   keeping the flat bitmap as a cache. Unblocks nested ref-elem bufs
   with no new opcodes. Benchmark the mark path.
+  **Done.** Struct registration now computes `slot_ref_bitmap` via
+  `compiler__encoding_ref_map` (replacing the hand-coded one-level loop
+  that `continue`d past `TYPE_STRUCT` fields — a genuine latent GC bug:
+  ref-elem bufs nested inside a sub-struct field were marked raw and
+  collected). Buf-field layout now uses the descriptor's recursive
+  `byte_size`/`align`. The `OBJ_HEAP_RECORD` GC walker is now recursive
+  (`gc__push_record_refs`) instead of a flat field loop. Proven via
+  stash-and-rebuild: `buf_traced_nested_struct_gc.jacl` crashes without
+  the fix, passes with it. Suite 87/87, harness 436/436.
+  - **Follow-ups discovered (not blocking Step 3):**
+    - `OBJ_MUTABLE_REF` with `type_idx>0` (boxed user struct) still
+      traces its bytes as **raw**, not via the descriptor. A ref-buf
+      inside a *boxed* struct would not be traced. The
+      `OBJ_HEAP_RECORD` path (ctx + heap structs) is hard to reach for
+      plain user structs (`[vec $o]` rejects bare structs; boxing routes
+      through `MUTABLE_REF`). Generalizing `MUTABLE_REF` struct boxes to
+      the recursive walker is the clean follow-up.
+    - **256-slot cap asymmetry:** the cached flat `slot_ref_bitmap[32]`
+      holds 256 slots; the recursive GC walker is uncapped. For very
+      large/deep inline bufs the cache would silently under-cover. The
+      walker is correct; the cache needs a "too big to cache → always
+      walk" guard before relying on it as the fast path everywhere.
 - [ ] **Step 3 — route literal init through it** (Part B). Add the one
   unchecked byte-offset store the leaf path needs. Closes depth-3+
   struct leaves AND the depth-2 struct-leaf gap for free.
