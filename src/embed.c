@@ -95,6 +95,10 @@ struct JaclVM_s {
   uint32_t        native_fn_cap;     /* capacity of native_fns array */
   /* Persistent struct registry — accumulates across all jacl_eval calls */
   StructTypeRegistry* persistent_struct_registry;
+  /* ctx pool — initialized lazily on first jacl_eval that compiles a
+     `ctx <type> <name>` declaration. Must live for the VM's lifetime. */
+  JaclCtxPool     ctx_pool;
+  uint8_t         ctx_initialized;
   /* Live trampolines — freed on jacl_vm_free */
   JaclTrampoline* trampoline_list;
 };
@@ -181,6 +185,12 @@ JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
 
   /* Initialize trampoline list */
   jvm->trampoline_list = NULL;
+
+  /* ctx pool lives in the JaclVM so it survives across jacl_eval calls;
+     ctx__init_vm is deferred until the registry actually knows about a
+     `ctx ... = ...` declaration. */
+  memset(&jvm->ctx_pool, 0, sizeof(jvm->ctx_pool));
+  jvm->ctx_initialized = 0;
 
   /* Initialize native function registry */
   jvm->native_fns = (NativeFnEntry*)malloc(NATIVE_FN_INIT_CAP * sizeof(NativeFnEntry));
@@ -326,9 +336,16 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
   vm->struct_registry = cr.struct_registry;
 
-  /* Reset stack for execution but preserve env (globals) */
-  vm->stack_top = 0;
-  vm->frame_count = 0;
+  /* Lazily initialize $ctx once the registry knows about a ctx type.
+     Without this, OP_GET_CTX pushes JACL_NIL and the very first
+     `ctx <type> <name> = ...` declaration trips OP_HEAP_RECORD_SET
+     with "field mutation on non-struct value". Parallels what
+     jacl_exec_program / jacl_run do for their entry paths. */
+  if (!jvm->ctx_initialized && cr.struct_registry &&
+      cr.struct_registry->ctx_type_idx > 0) {
+    ctx__init_vm(vm, &jvm->ctx_pool);
+    jvm->ctx_initialized = 1;
+  }
 
   /* Helper macro to restore VM state before returning */
   #define EVAL_RESTORE() do { \

@@ -1891,6 +1891,11 @@ struct JaclVM_s {
   uint32_t        native_fn_count;
   uint32_t        native_fn_cap;
   StructTypeRegistry* persistent_struct_registry;
+  /* ctx pool — initialized lazily on first jacl_eval that compiles a
+     `ctx <type> <name>` declaration. Must live for the VM's lifetime.
+     NOTE: keep in sync with struct JaclVM_s in src/embed.c. */
+  JaclCtxPool     ctx_pool;
+  uint8_t         ctx_initialized;
   JaclTrampoline* trampoline_list;
 };
 

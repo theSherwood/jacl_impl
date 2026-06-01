@@ -262,6 +262,31 @@ static int test_e2e_independent_vms(void) {
   return 1;
 }
 
+/* Test: ctx declarations work via jacl_eval. Without lazy ctx__init_vm
+   in embed.c, `ctx <type> <name> = ...` trips OP_HEAP_RECORD_SET with
+   "field mutation on non-struct value" because OP_GET_CTX returns nil.
+   Kept to a single eval call: typer's ctx-field pre-pass walks the
+   current source's AST_CTX_DECL nodes per compile, so splitting the
+   decl and read across two evals also fails (separate issue from the
+   runtime ctx-init covered here). */
+static int test_e2e_ctx_declaration(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal r = jacl_eval(vm,
+      "ctx mut i32 verbosity = 7\n"
+      "def baseline $ctx->verbosity\n"
+      "def overridden [with-ctx {verbosity 99} { $ctx->verbosity }]\n"
+      "def after $ctx->verbosity\n"
+      "[+ [+ $baseline $overridden] $after]");
+  ASSERT(!jacl_is_error(r));
+  ASSERT(jacl_is_i32(r));
+  ASSERT_INT_EQ(jacl_as_i32(r), 7 + 99 + 7);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -278,6 +303,7 @@ int main(void) {
   RUN(test_e2e_string_gc_handle);
   RUN(test_e2e_globals_persist);
   RUN(test_e2e_independent_vms);
+  RUN(test_e2e_ctx_declaration);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;
