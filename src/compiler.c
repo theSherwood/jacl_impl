@@ -593,6 +593,115 @@ uint32_t struct__slot_width(StructTypeRegistry* reg, uint32_t struct_idx) {
   return (reg->defs[struct_idx]->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
 }
 
+/* ---- Recursive layout descriptor (RECURSIVE_LAYOUT_REFACTOR.md) ----
+ *
+ * The descriptor for any type encoding (scalar sentinel or registry idx)
+ * is { size, align, ref_map } computed bottom-up. `compiler__encoding_byte_size`
+ * (above) is the size half. These two add align and the GC reference map.
+ *
+ * The ref map is the load-bearing piece: it is the set of 8-byte JaclVal
+ * slots, relative to a byte base, that hold a GC-traced tagged value. It is
+ * compositional -- a buf tiles its element's map N times; a struct unions its
+ * fields' maps at their offsets -- so it is correct by construction for
+ * arbitrary nesting, which is what eliminates the nested-buf / struct-leaf gap
+ * class. Step 1 builds it and self-checks it against the existing per-struct
+ * slot_ref_bitmap; later steps route GC + literal-init through it. */
+static uint32_t compiler__encoding_align(StructTypeRegistry* reg,
+                                         uint32_t encoded) {
+  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
+    return struct__type_align(JACL_TYPE_IDX_TO_SCALAR(encoded), NULL, 0);
+  }
+  if (!reg || encoded >= reg->count) return 1;
+  TypeShape* s = &reg->shapes[encoded];
+  switch (s->kind) {
+    case TYPE_SHAPE_STRUCT:
+    case TYPE_SHAPE_CTX:
+      return s->u.struct_def ? s->u.struct_def->alignment : 1;
+    case TYPE_SHAPE_BUF:
+      return compiler__encoding_align(reg, s->u.buf.elem_idx);
+    case TYPE_SHAPE_TYPED_VEC:
+    case TYPE_SHAPE_TYPED_MAP:
+    case TYPE_SHAPE_PTR:
+    case TYPE_SHAPE_FUTURE:
+    case TYPE_SHAPE_BOX:
+      return 8;
+    default:
+      return 1;
+  }
+}
+
+/* OR the GC-traced-slot map for `encoded` into `bitmap`, with slots numbered
+ * from `byte_base` (each slot is sizeof(JaclVal) bytes). `bitmap_slots` caps
+ * the writable range. Ref types are 8-byte sized + aligned, so they always
+ * land on a whole slot boundary; value scalars never mark. */
+static void compiler__encoding_ref_map(StructTypeRegistry* reg,
+                                        uint32_t encoded,
+                                        uint32_t byte_base,
+                                        uint8_t* bitmap,
+                                        uint32_t bitmap_slots) {
+  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
+    JaclType t = JACL_TYPE_IDX_TO_SCALAR(encoded);
+    bool is_ref = (t == TYPE_DYN || t == TYPE_STR || t == TYPE_VEC ||
+                   t == TYPE_MAP || t == TYPE_CLOSURE || t == TYPE_STREAM);
+    if (is_ref) {
+      uint32_t slot = byte_base / (uint32_t)sizeof(JaclVal);
+      if (slot < bitmap_slots) bitmap[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    }
+    return;
+  }
+  if (!reg || encoded >= reg->count) return;
+  TypeShape* s = &reg->shapes[encoded];
+  switch (s->kind) {
+    case TYPE_SHAPE_TYPED_VEC:
+    case TYPE_SHAPE_TYPED_MAP:
+    case TYPE_SHAPE_PTR:
+    case TYPE_SHAPE_FUTURE:
+    case TYPE_SHAPE_BOX: {
+      uint32_t slot = byte_base / (uint32_t)sizeof(JaclVal);
+      if (slot < bitmap_slots) bitmap[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+      return;
+    }
+    case TYPE_SHAPE_BUF: {
+      uint32_t elem_enc = s->u.buf.elem_idx;
+      uint64_t elem_sz = compiler__encoding_byte_size(reg, elem_enc);
+      for (uint32_t i = 0; i < s->u.buf.len; i++) {
+        compiler__encoding_ref_map(reg, elem_enc,
+            byte_base + (uint32_t)(i * elem_sz), bitmap, bitmap_slots);
+      }
+      return;
+    }
+    case TYPE_SHAPE_STRUCT:
+    case TYPE_SHAPE_CTX: {
+      StructTypeDef* sd = s->u.struct_def;
+      if (!sd) return;
+      for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+        StructTypeField* f = &sd->fields[fi];
+        uint32_t foff = byte_base + f->offset;
+        if (f->type == TYPE_BUF) {
+          /* Buf field: element encoding in struct_type_idx, N in buf_len. */
+          uint32_t elem_enc = f->struct_type_idx;
+          uint64_t elem_sz = compiler__encoding_byte_size(reg, elem_enc);
+          for (uint32_t i = 0; i < f->buf_len; i++) {
+            compiler__encoding_ref_map(reg, elem_enc,
+                foff + (uint32_t)(i * elem_sz), bitmap, bitmap_slots);
+          }
+        } else if (f->type == TYPE_STRUCT) {
+          compiler__encoding_ref_map(reg, f->struct_type_idx, foff,
+                                     bitmap, bitmap_slots);
+        } else {
+          /* Scalar field. Struct ref-scalar fields are rejected at decl,
+           * but recurse generically so the map stays a faithful descriptor. */
+          compiler__encoding_ref_map(reg, JACL_SCALAR_TYPE_IDX(f->type), foff,
+                                     bitmap, bitmap_slots);
+        }
+      }
+      return;
+    }
+    default:
+      return;
+  }
+}
+
 /* Look up a struct type by name in the registry. Returns type_idx or UINT32_MAX if not found.
    type_idx values start at 1 (0 is reserved for plain dyn JaclVal boxes). */
 uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
@@ -15312,6 +15421,39 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       reg->defs[this_idx] = sdef;
       reg->shapes[this_idx].kind = TYPE_SHAPE_STRUCT;
       reg->shapes[this_idx].u.struct_def = sdef;
+
+      /* Step 1 self-check (RECURSIVE_LAYOUT_REFACTOR.md): the recursive
+       * ref-map descriptor must reproduce the hand-coded slot_ref_bitmap.
+       * Opt-in via JACL_LAYOUT_SELFCHECK so normal builds are unaffected;
+       * reports divergences (does not abort) so the full suite can be
+       * surveyed in one run. */
+      if (getenv("JACL_LAYOUT_SELFCHECK")) {
+        uint32_t desc_align = compiler__encoding_align(reg, this_idx);
+        if (desc_align != sdef->alignment) {
+          fprintf(stderr,
+              "[layout-selfcheck] struct '%.*s' (idx %u): recursive align %u "
+              "!= recorded alignment %u\n",
+              (int)sdef->name_len, sdef->name, (unsigned)this_idx,
+              (unsigned)desc_align, (unsigned)sdef->alignment);
+        }
+        uint8_t mine[32];
+        memset(mine, 0, sizeof(mine));
+        compiler__encoding_ref_map(reg, this_idx, 0, mine, 256);
+        if (memcmp(mine, sdef->slot_ref_bitmap, sizeof(mine)) != 0) {
+          fprintf(stderr,
+              "[layout-selfcheck] struct '%.*s' (idx %u): recursive ref-map "
+              "diverges from slot_ref_bitmap\n",
+              (int)sdef->name_len, sdef->name, (unsigned)this_idx);
+          for (uint32_t s = 0; s < 256; s++) {
+            int m = (mine[s >> 3] >> (s & 7)) & 1;
+            int e = (sdef->slot_ref_bitmap[s >> 3] >> (s & 7)) & 1;
+            if (m != e) {
+              fprintf(stderr, "    slot %u: recursive=%d existing=%d\n",
+                      (unsigned)s, m, e);
+            }
+          }
+        }
+      }
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */

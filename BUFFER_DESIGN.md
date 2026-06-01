@@ -96,7 +96,9 @@ chains (read + set), decomposed chains, dynamic indices, and slice
 passing. See `docs/TYPE_REGISTRY_REFACTOR.md` for the architecture
 notes and the fixture list.
 
-Remaining:
+Remaining (both subsumed by the recursive-layout refactor -- see
+`docs/RECURSIVE_LAYOUT_REFACTOR.md`, which eliminates this whole class
+of gap rather than patching each cell):
 
 1. **Depth-3+ literal init with struct leaves**. Scalar leaves work
    (`[[Buf 2 [Buf 3 [Buf 4 i32]]] ...]`); a struct leaf path would
