@@ -7,9 +7,9 @@ buffer/struct nesting gaps by deriving byte layout and GC reference
 maps **recursively from the type**, instead of hand-coding them per
 shape.
 
-Status: **in progress** — Steps 1–3 done (both struct *and* ref-elem
-leaves landed). Only Step 4 cleanup remains. See **What's next** at
-the bottom.
+Status: **done** — all four steps landed. The descriptor walker is now
+the single source of truth for byte layout, GC ref maps, and literal
+init across every depth × leaf-kind combination.
 
 Commits so far (on `main`):
 - `73cc2ac` — Step 1: recursive layout descriptor spike (wired nowhere;
@@ -21,10 +21,15 @@ Commits so far (on `main`):
   `compiler__emit_buf_init_walk`; depth-2 and depth-3+ struct-leaf
   literal init now route through the walker. Closes BUFFER_DESIGN
   Tier-1 #1.
-- *pending commit* — Step 3 (ref-elem leaves): removed the def-site
-  rejection at `compiler.c:~8407` and extended the walker-routing
-  branch to fire for ref leaves too. Init + chained access + GC all
-  work for `[Buf N [Buf M dyn]]`. Closes BUFFER_DESIGN Tier-1 #2.
+- `3760304` — Step 3 (ref-elem leaves): removed the def-site rejection
+  and extended the walker-routing branch to fire for ref leaves too.
+  Init + chained access + GC all work for `[Buf N [Buf M dyn]]`.
+  Closes BUFFER_DESIGN Tier-1 #2.
+- *pending commit* — Step 4 (cleanup): rerouted depth-1, depth-2-flat,
+  and depth-3+ scalar literal init through the walker. Deleted
+  `compiler__emit_buf_nested_literal_init`. Walker now carries an
+  optional `BufInitPos` so the old "element I" / "row R column C"
+  range-check messages survive. Net –171 lines in compiler.c.
 
 ## The root cause (why this refactor exists)
 
@@ -216,10 +221,17 @@ type-system rewrite.
       struct leaves) through the walker + new opcode, with new
       fixtures. Leave the working scalar fast paths on their existing
       opcodes until Step 4 collapses them. Keeps each commit green.
-- [ ] **Step 4 — cleanup.** Collapse the now-redundant per-depth
-  emitters and per-leaf-kind store opcodes. Net line-count should drop.
-  **Step-by-step pickup in "What's next"** (note the
-  error-message-text trap).
+- [x] **Step 4 — cleanup.** Collapsed the per-depth init emitters
+  (depth-1 / depth-2-flat / depth-3+) through `compiler__emit_buf_init_walk`.
+  Walker took an optional `BufInitPos` (dim chain + leaf type + index
+  trail) so the old `"element I"` / `"row R column C"` range-check
+  messages are preserved verbatim where fixtures asserted them.
+  `compiler__emit_buf_nested_literal_init` deleted. The per-leaf store
+  opcodes (`OP_BUF_SET_LOCAL`, `OP_BUF_USET_LOCAL`,
+  `OP_BUF_SET_STRUCT_LOCAL`) are still used by the `buf-set` /
+  `buf-unchecked-set` builtins and the runtime-index arrow-access path
+  (`$buf->$i <- v`), so they stay. Net: –171 lines, suite 87/87,
+  harness 441/441.
 
 ## What this closes
 
@@ -263,33 +275,24 @@ Line numbers drift; the symbol names are the durable anchors.
 
 ## What's next (pickup point)
 
-One slice remains.
+Refactor is complete. The walker (`compiler__emit_buf_init_walk`) +
+the layout descriptor (`compiler__encoding_byte_size` /
+`compiler__encoding_align` / `compiler__encoding_ref_map`) cover every
+depth × leaf-kind combination that's shipped today. Future work in
+this area becomes "does the walker handle this node kind?" — there are
+only four (buf, struct, scalar leaf, ref leaf).
 
-### Step 4 cleanup — collapse the redundant emitters
+Open follow-ups noted under Step 2 (not blockers):
 
-Now that the walker exists, the per-depth/per-leaf machinery is
-redundant. Goal: net line-count drop.
-
-1. **Reroute the working scalar fast paths** (depth-1
-   `OP_BUF_SET_LOCAL`, depth-2 flat `OP_BUF_USET_LOCAL`, depth-3+
-   `compiler__emit_buf_nested_literal_init`) through
-   `compiler__emit_buf_init_walk`.
-2. **Then delete** `compiler__emit_buf_nested_literal_init` and any
-   per-leaf store opcodes left unused (`OP_BUF_SET_LOCAL` /
-   `OP_BUF_SET_STRUCT_LOCAL` / `OP_BUF_USET_LOCAL` — grep for remaining
-   emit sites first; the access/read paths may still use the GET
-   variants).
-3. **TRAP — error-message text.** The walker's range-check message is
-   `"...value X out of range at depth D index I"`. The old emitters say
-   `"row R column C value X out of range"` and `"element I value X out
-   of range for TYPE"`. Some fixtures assert on the old text. Before
-   rerouting, grep `test/jacl/*.jacl` for `out of range` expectations
-   and either (a) thread richer position context (row/col, type name)
-   into the walker to preserve the messages, or (b) update the fixtures
-   deliberately. Option (a) is preferred — the doc's Part B always
-   intended to "thread position context through the recursion."
-4. Benchmark nothing special here, but keep the full suite + harness
-   green at each reroute (one leaf kind at a time).
+- `OBJ_MUTABLE_REF` struct boxes still trace their bytes as raw, not
+  via the descriptor. A ref-buf inside a *boxed* struct would not be
+  traced. Generalizing `MUTABLE_REF` struct boxes to
+  `gc__push_record_refs` is the clean fix.
+- The cached flat `slot_ref_bitmap[32]` holds 256 slots; the recursive
+  GC walker is uncapped. Very large/deep inline bufs would silently
+  under-cover via the cache. Walker is correct; cache needs a "too big
+  to cache → always walk" guard before the bitmap is relied on as the
+  fast path everywhere.
 
 ## Related docs
 

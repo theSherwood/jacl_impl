@@ -3892,6 +3892,26 @@ static bool compiler__try_compile_nested_buf_chain(Compiler* c,
   return true;
 }
 
+/* Optional position context for rich range-check error messages. The
+ * walker uses `dims` (outermost-first dimensions of the top-level LHS
+ * chain) and `idx_path` (the indices taken at each depth so far, filled
+ * by the walker before recursing) to reconstruct the same diagnostic
+ * text the hand-written per-depth emitters used to produce:
+ *   - dim_count==1: "[[Buf N T] ...]: element I value V out of range for T"
+ *   - dim_count==2: "[[Buf N [Buf M T]] ...]: row R column C value V
+ *                    out of range for T"
+ *   - dim_count>=3: falls back to the walker's generic
+ *                   "at depth D index I" form.
+ * Pass NULL when the leaf is struct/ref (no range check fires) or when
+ * the dim chain isn't known (caller has nothing rich to say). */
+#define BUF_INIT_MAX_DEPTH 8
+typedef struct {
+  uint32_t dims[BUF_INIT_MAX_DEPTH];
+  uint8_t  dim_count;
+  JaclType leaf_type;
+  uint32_t idx_path[BUF_INIT_MAX_DEPTH];
+} BufInitPos;
+
 /* Descriptor-driven recursive buf literal-init walker (Step 3 of
  * RECURSIVE_LAYOUT_REFACTOR.md). Walks this buf level's element encoding
  * `elem_enc` (count `n`) and the AST constructor `ctor`
@@ -3900,11 +3920,12 @@ static bool compiler__try_compile_nested_buf_chain(Compiler* c,
  * value at the computed byte offset, which handles all three leaf kinds
  * (scalar, ref, struct) by encoding. `byte_base` is this buf's byte
  * offset within frame[base_slot]; `depth` is threaded for error context.
- * Subsumes the per-depth / per-leaf-kind emitters. */
+ * `pos` is optional; see BufInitPos comment above. Subsumes the
+ * per-depth / per-leaf-kind emitters. */
 static bool compiler__emit_buf_init_walk(
     Compiler* c, StructTypeRegistry* reg, AstNode* ctor,
     uint32_t elem_enc, uint32_t n, uint32_t byte_base,
-    uint8_t base_slot, uint32_t depth, uint16_t line) {
+    uint8_t base_slot, uint32_t depth, BufInitPos* pos, uint16_t line) {
   if (!ctor || ctor->type != AST_COMMAND ||
       !ctor->data.command.head ||
       ctor->data.command.head->type != AST_COMMAND) {
@@ -3967,11 +3988,13 @@ static bool compiler__emit_buf_init_walk(
   for (uint32_t i = 0; i < init_count; i++) {
     uint32_t off = byte_base + i * elem_sz;
     AstNode* vi = ctor->data.command.args[i];
+    if (pos && depth < BUF_INIT_MAX_DEPTH) pos->idx_path[depth] = i;
     if (elem_is_buf) {
       uint32_t inner_enc = reg->shapes[elem_enc].u.buf.elem_idx;
       uint32_t inner_n   = reg->shapes[elem_enc].u.buf.len;
       if (!compiler__emit_buf_init_walk(c, reg, vi, inner_enc, inner_n,
-                                        off, base_slot, depth + 1, line)) {
+                                        off, base_slot, depth + 1,
+                                        pos, line)) {
         return false;
       }
       continue;
@@ -3989,9 +4012,25 @@ static bool compiler__emit_buf_init_walk(
       }
       if (is_int_lit && (lv < lo || lv > hi)) {
         char err[192];
-        snprintf(err, sizeof(err),
-            "nested buf literal init: value %lld out of range at depth %u "
-            "index %u", (long long)lv, (unsigned)depth, (unsigned)i);
+        if (pos && pos->dim_count == 1) {
+          snprintf(err, sizeof(err),
+              "[[Buf %u %s] ...]: element %u value %lld out of range for %s",
+              (unsigned)pos->dims[0], type_name(pos->leaf_type),
+              (unsigned)pos->idx_path[0], (long long)lv,
+              type_name(pos->leaf_type));
+        } else if (pos && pos->dim_count == 2) {
+          snprintf(err, sizeof(err),
+              "[[Buf %u [Buf %u %s]] ...]: row %u column %u value %lld "
+              "out of range for %s",
+              (unsigned)pos->dims[0], (unsigned)pos->dims[1],
+              type_name(pos->leaf_type),
+              (unsigned)pos->idx_path[0], (unsigned)pos->idx_path[1],
+              (long long)lv, type_name(pos->leaf_type));
+        } else {
+          snprintf(err, sizeof(err),
+              "nested buf literal init: value %lld out of range at depth %u "
+              "index %u", (long long)lv, (unsigned)depth, (unsigned)i);
+        }
         compiler__error(c, vi->start.line, vi->start.column, err);
         return false;
       }
@@ -4001,113 +4040,6 @@ static bool compiler__emit_buf_init_walk(
     compiler__emit_byte(c, (uint8_t)base_slot, line);
     compiler__emit_u16(c, (uint16_t)off, line);
     compiler__emit_u16(c, (uint16_t)elem_enc, line);
-  }
-  return true;
-}
-
-/* Recursive emission for depth-3+ nested-buf literal init. `ctor` is a
- * [[Buf dims[dim_idx] inner...] v0 v1 ...] AST_COMMAND. At leaf level
- * each value is a scalar literal compiled directly via OP_BUF_USET_LOCAL
- * (indices are proven in range at compile time). At inner levels each
- * value must itself be a [[Buf ...] ...] inner constructor. Validates
- * each level's [Buf N rest...] head against the LHS chain. See
- * BUFFER_DESIGN.md (depth-3+ literal init follow-up). */
-static bool compiler__emit_buf_nested_literal_init(
-    Compiler* c, AstNode* ctor,
-    const uint32_t* dims, uint32_t dim_count,
-    uint32_t dim_idx, uint32_t base_flat_idx,
-    uint32_t base_slot, JaclType leaf_type,
-    int64_t lo, int64_t hi, bool have_range,
-    uint16_t line) {
-  if (!ctor || ctor->type != AST_COMMAND ||
-      !ctor->data.command.head ||
-      ctor->data.command.head->type != AST_COMMAND) {
-    compiler__error(c, ctor ? ctor->start.line : line,
-                    ctor ? ctor->start.column : 0,
-                    "nested buf literal init: expected [[Buf N ...] ...] "
-                    "inner constructor");
-    return false;
-  }
-  AstNode* ctor_head = ctor->data.command.head;
-  AstNode* head_name = ctor_head->data.command.head;
-  if (!head_name || head_name->type != AST_LIT_STRING ||
-      head_name->data.lit_string.length != 3 ||
-      memcmp(head_name->data.lit_string.value, "Buf", 3) != 0 ||
-      ctor_head->data.command.arg_count != 2) {
-    compiler__error(c, ctor->start.line, ctor->start.column,
-                    "nested buf literal init: expected [[Buf N ...] ...] "
-                    "inner constructor");
-    return false;
-  }
-  AstNode* nlit = ctor_head->data.command.args[0];
-  if (nlit->type != AST_LIT_INT ||
-      (uint32_t)nlit->data.lit_int.value != dims[dim_idx]) {
-    char err[160];
-    snprintf(err, sizeof(err),
-        "nested buf literal init: dimension at depth %u must be %u",
-        (unsigned)dim_idx, (unsigned)dims[dim_idx]);
-    compiler__error(c, ctor->start.line, ctor->start.column, err);
-    return false;
-  }
-  uint32_t init_count = ctor->data.command.arg_count;
-  if (init_count > dims[dim_idx]) {
-    char err[160];
-    snprintf(err, sizeof(err),
-        "nested buf literal init: %u values provided at depth %u, max %u",
-        (unsigned)init_count, (unsigned)dim_idx, (unsigned)dims[dim_idx]);
-    compiler__error(c, ctor->start.line, ctor->start.column, err);
-    return false;
-  }
-  /* Stride = product of dims[dim_idx+1..dim_count-1] (in elements, not
-   * bytes, since flat index addresses leaf elements). */
-  uint32_t stride = 1;
-  for (uint32_t d = dim_idx + 1; d < dim_count; d++) stride *= dims[d];
-
-  if (dim_idx == dim_count - 1) {
-    /* Leaf level (stride==1): each value is a scalar literal. */
-    for (uint32_t i = 0; i < init_count; i++) {
-      AstNode* iv = ctor->data.command.args[i];
-      if (have_range) {
-        int64_t lv = 0;
-        bool is_int_lit = false;
-        if (iv->type == AST_LIT_INT) {
-          lv = (int64_t)iv->data.lit_int.value;
-          is_int_lit = true;
-        } else if (iv->type == AST_COMMAND &&
-                   iv->data.command.head_id == HEAD_MINUS &&
-                   iv->data.command.arg_count == 1 &&
-                   iv->data.command.args[0]->type == AST_LIT_INT) {
-          lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
-          is_int_lit = true;
-        }
-        if (is_int_lit && (lv < lo || lv > hi)) {
-          char err[192];
-          snprintf(err, sizeof(err),
-              "nested buf literal init: value %lld out of range for %s",
-              (long long)lv, type_name(leaf_type));
-          compiler__error(c, iv->start.line, iv->start.column, err);
-          return false;
-        }
-      }
-      uint32_t flat_idx = base_flat_idx + i;
-      compiler__emit_constant(c, jacl_i32((int32_t)flat_idx), line);
-      compiler__compile_node(c, iv);
-      compiler__emit_byte(c, OP_BUF_USET_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)base_slot, line);
-      compiler__emit_byte(c, (uint8_t)leaf_type, line);
-    }
-    return true;
-  }
-  /* Inner level: each value must be a [[Buf ...] ...] inner ctor. */
-  for (uint32_t i = 0; i < init_count; i++) {
-    if (!compiler__emit_buf_nested_literal_init(
-            c, ctor->data.command.args[i],
-            dims, dim_count, dim_idx + 1,
-            base_flat_idx + i * stride,
-            base_slot, leaf_type,
-            lo, hi, have_range, line)) {
-      return false;
-    }
   }
   return true;
 }
@@ -7755,8 +7687,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* --- Buf def: `def [Buf N T] NAME` (zero-init) or
      *              `def [Buf N T] NAME [[Buf N T] v0 v1 ...]` (literal init).
      * Both share the multi-slot allocation + OP_BUF_ZERO_LOCAL prelude;
-     * literal init adds per-element OP_BUF_SET_LOCAL stores. Partial
-     * fill is allowed (rest stays zero). See BUFFER_DESIGN.md M2. */
+     * literal init routes through compiler__emit_buf_init_walk, which
+     * emits OP_BUF_STORE_OFF stores at byte offsets and handles all
+     * three leaf kinds (scalar/struct/ref) by descriptor encoding.
+     * Partial fill is allowed (rest stays zero). See BUFFER_DESIGN.md
+     * M2 and RECURSIVE_LAYOUT_REFACTOR.md Step 3/4. */
     if ((argc == 2 || argc == 3) && args[1]->type == AST_LIT_STRING &&
         args[0]->type == AST_COMMAND &&
         args[0]->data.command.head &&
@@ -7900,36 +7835,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)base_slot, line);
           compiler__emit_u16(c, (uint16_t)total_bytes, line);
           if (init_ctor) {
-            if (JACL_IS_SCALAR_TYPE_IDX(leaf_enc)) {
-              JaclType leaf_type = JACL_TYPE_IDX_TO_SCALAR(leaf_enc);
-              int64_t lo = 0, hi = 0;
-              bool have_range = false;
-              switch (leaf_type) {
-                case TYPE_I8:  lo = -128;        hi = 127;          have_range = true; break;
-                case TYPE_U8:  lo = 0;           hi = 255;          have_range = true; break;
-                case TYPE_I16: lo = -32768;      hi = 32767;        have_range = true; break;
-                case TYPE_U16: lo = 0;           hi = 65535;        have_range = true; break;
-                case TYPE_I32: lo = INT32_MIN;   hi = INT32_MAX;    have_range = true; break;
-                case TYPE_U32: lo = 0;           hi = 4294967295LL; have_range = true; break;
-                case TYPE_I64: lo = INT64_MIN;   hi = INT64_MAX;    have_range = true; break;
-                case TYPE_U64: lo = 0;           hi = INT64_MAX;    have_range = true; break;
-                case TYPE_BOOL: lo = 0;          hi = 1;            have_range = true; break;
-                default: break;
-              }
-              if (!compiler__emit_buf_nested_literal_init(
-                      c, init_ctor, dims, dim_count, 0, 0,
-                      base_slot, leaf_type, lo, hi, have_range, line)) {
-                return;
-              }
-            } else {
-              /* Struct (or ref) leaf: descriptor-driven walker. The outer
-               * buf's element is the interned inner chain (inner_shape_idx)
-               * with count outer_n. */
-              if (!compiler__emit_buf_init_walk(
-                      c, nest_reg, init_ctor, inner_shape_idx, outer_n,
-                      0, (uint8_t)base_slot, 0, line)) {
-                return;
-              }
+            /* Depth-3+ literal init via the descriptor walker, regardless
+             * of leaf kind. For scalar leaves we pass `pos` with the full
+             * dim chain so range-check errors carry depth/index context;
+             * struct/ref leaves don't range-check, so pos=NULL is fine. */
+            BufInitPos posN = {0};
+            BufInitPos* pos_ptr = NULL;
+            if (JACL_IS_SCALAR_TYPE_IDX(leaf_enc) && dim_count <= BUF_INIT_MAX_DEPTH) {
+              for (uint32_t d = 0; d < dim_count; d++) posN.dims[d] = dims[d];
+              posN.dim_count = (uint8_t)dim_count;
+              posN.leaf_type = JACL_TYPE_IDX_TO_SCALAR(leaf_enc);
+              pos_ptr = &posN;
+            }
+            if (!compiler__emit_buf_init_walk(
+                    c, nest_reg, init_ctor, inner_shape_idx, outer_n,
+                    0, (uint8_t)base_slot, 0, pos_ptr, line)) {
+              return;
             }
           }
           compiler__emit_byte(c, OP_NIL, line);
@@ -8457,140 +8378,51 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           if (!compiler__emit_buf_init_walk(
                   c, wreg, init_ctor, inner_buf_enc, n, 0,
-                  (uint8_t)base_slot, 0, line)) {
+                  (uint8_t)base_slot, 0, NULL, line)) {
             return;
           }
         } else if (inner_buf_len > 0) {
-          /* Nested literal init: outer ctor holds up to N inner ctors,
-           * each `[[Buf M T] v0 v1 ...]`. Emit flat per-element stores
-           * with index = row*M + col, using OP_BUF_USET_LOCAL since the
-           * indices are provably in range (validated here at compile
-           * time). M4.2 follow-up. */
-          for (uint32_t row = 0; row < init_count; row++) {
-            AstNode* inner = init_vals[row];
-            if (inner->type != AST_COMMAND ||
-                !inner->data.command.head ||
-                inner->data.command.head->type != AST_COMMAND ||
-                inner->data.command.head->data.command.head == NULL ||
-                inner->data.command.head->data.command.head->type != AST_LIT_STRING ||
-                inner->data.command.head->data.command.head->data.lit_string.length != 3 ||
-                memcmp(inner->data.command.head->data.command.head->data.lit_string.value,
-                       "Buf", 3) != 0 ||
-                inner->data.command.head->data.command.arg_count != 2) {
-              char err[160];
-              snprintf(err, sizeof(err),
-                  "[[Buf %u [Buf %u %s]] ...]: row %u must be a "
-                  "[[Buf %u %s] v0 v1 ...] inner constructor",
-                  (unsigned)n, (unsigned)inner_buf_len, type_name(elem_type),
-                  (unsigned)row, (unsigned)inner_buf_len, type_name(elem_type));
-              compiler__error(c, inner->start.line, inner->start.column, err);
-              return;
-            }
-            AstNode* inner_tn   = inner->data.command.head;
-            AstNode* inner_mlen = inner_tn->data.command.args[0];
-            AstNode* inner_telt = inner_tn->data.command.args[1];
-            JaclType inner_t;
-            if (inner_mlen->type != AST_LIT_INT ||
-                (uint32_t)inner_mlen->data.lit_int.value != inner_buf_len ||
-                inner_telt->type != AST_LIT_STRING ||
-                !compiler__resolve_type(c, inner_telt->data.lit_string.value,
-                                        inner_telt->data.lit_string.length, &inner_t) ||
-                inner_t != elem_type) {
-              compiler__error(c, inner->start.line, inner->start.column,
-                  "inner [[Buf M T] ...] constructor must match the LHS inner type");
-              return;
-            }
-            uint32_t inner_count = inner->data.command.arg_count;
-            AstNode** inner_vals = inner->data.command.args;
-            if (inner_count > inner_buf_len) {
-              char err[160];
-              snprintf(err, sizeof(err),
-                  "[[Buf %u %s] ...]: row %u provides %u values, max %u",
-                  (unsigned)inner_buf_len, type_name(elem_type),
-                  (unsigned)row, (unsigned)inner_count, (unsigned)inner_buf_len);
-              compiler__error(c, inner->start.line, inner->start.column, err);
-              return;
-            }
-            for (uint32_t col = 0; col < inner_count; col++) {
-              AstNode* iv = inner_vals[col];
-              if (have_range) {
-                int64_t lv = 0;
-                bool is_int_lit = false;
-                if (iv->type == AST_LIT_INT) {
-                  lv = (int64_t)iv->data.lit_int.value;
-                  is_int_lit = true;
-                } else if (iv->type == AST_COMMAND &&
-                           iv->data.command.head_id == HEAD_MINUS &&
-                           iv->data.command.arg_count == 1 &&
-                           iv->data.command.args[0]->type == AST_LIT_INT) {
-                  lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
-                  is_int_lit = true;
-                }
-                if (is_int_lit && (lv < elo || lv > ehi)) {
-                  char err[192];
-                  snprintf(err, sizeof(err),
-                      "[[Buf %u [Buf %u %s]] ...]: row %u column %u value %lld "
-                      "out of range for %s",
-                      (unsigned)n, (unsigned)inner_buf_len, type_name(elem_type),
-                      (unsigned)row, (unsigned)col, (long long)lv,
-                      type_name(elem_type));
-                  compiler__error(c, iv->start.line, iv->start.column, err);
-                  return;
-                }
-              }
-              uint32_t flat_idx = row * inner_buf_len + col;
-              compiler__emit_constant(c, jacl_i32((int32_t)flat_idx), line);
-              compiler__compile_node(c, iv);
-              compiler__emit_byte(c, OP_BUF_USET_LOCAL, line);
-              compiler__emit_byte(c, (uint8_t)base_slot, line);
-              compiler__emit_byte(c, (uint8_t)elem_type, line);
-            }
+          /* Depth-2 scalar leaf `[Buf N [Buf M T]]`: descriptor walker.
+           * Same shape as the struct/ref branch above, with dims=[n,M]
+           * and the scalar leaf type in `pos` so the range-check error
+           * uses the old "row R column C value V out of range for T"
+           * text. */
+          StructTypeRegistry* wreg = compiler__get_struct_registry(c);
+          uint32_t inner_buf_enc = type_shape_intern_buf(
+              wreg, inner_buf_len, (uint32_t)JACL_SCALAR_TYPE_IDX(elem_type));
+          if (inner_buf_enc == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "[Buf N [Buf M T]]: failed to intern inner buf shape");
+            return;
+          }
+          BufInitPos pos2 = {0};
+          pos2.dims[0]    = n;
+          pos2.dims[1]    = inner_buf_len;
+          pos2.dim_count  = 2;
+          pos2.leaf_type  = elem_type;
+          if (!compiler__emit_buf_init_walk(
+                  c, wreg, init_ctor, inner_buf_enc, n, 0,
+                  (uint8_t)base_slot, 0, &pos2, line)) {
+            return;
           }
         } else {
-          for (uint32_t i = 0; i < init_count; i++) {
-            if (have_range) {
-              AstNode* iv = init_vals[i];
-              int64_t lv = 0;
-              bool is_int_lit = false;
-              if (iv->type == AST_LIT_INT) {
-                lv = (int64_t)iv->data.lit_int.value;
-                is_int_lit = true;
-              } else if (iv->type == AST_COMMAND &&
-                         iv->data.command.head_id == HEAD_MINUS &&
-                         iv->data.command.arg_count == 1 &&
-                         iv->data.command.args[0]->type == AST_LIT_INT) {
-                lv = -(int64_t)iv->data.command.args[0]->data.lit_int.value;
-                is_int_lit = true;
-              }
-              if (is_int_lit && (lv < elo || lv > ehi)) {
-                char err[192];
-                snprintf(err, sizeof(err),
-                    "[[Buf %u %s] ...]: element %u value %lld out of range for %s",
-                    (unsigned)n, type_name(elem_type),
-                    (unsigned)i, (long long)lv, type_name(elem_type));
-                compiler__error(c, iv->start.line, iv->start.column, err);
-                return;
-              }
-            }
-            compiler__emit_constant(c, jacl_i32((int32_t)i), line);
-            compiler__compile_node(c, init_vals[i]);
-            if (is_struct_elem) {
-              /* Each init value must be a struct constructor producing
-               * inline bytes on TOS. OP_BUF_SET_STRUCT_LOCAL pops them
-               * and the index. */
-              compiler__emit_byte(c, OP_BUF_SET_STRUCT_LOCAL, line);
-              compiler__emit_byte(c, (uint8_t)base_slot, line);
-              compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
-              compiler__emit_u16(c, (uint16_t)n, line);
-            } else {
-              /* All M2 element types accept i32 on the value-pop path
-               * (small ints narrow, i64/u64/f64 promote). The typer is
-               * responsible for rejecting incompatible kinds. */
-              compiler__emit_byte(c, OP_BUF_SET_LOCAL, line);
-              compiler__emit_byte(c, (uint8_t)base_slot, line);
-              compiler__emit_byte(c, (uint8_t)elem_type, line);
-              compiler__emit_u16(c, (uint16_t)n, line);
-            }
+          /* Depth-1 init via the descriptor walker. Same dispatch as the
+           * depth-2 struct/ref branch above, with dims=[n] and the
+           * scalar-leaf type in `pos` so the range-check error matches
+           * the old "element I value V out of range for T" text that
+           * test/jacl fixtures assert on. */
+          StructTypeRegistry* wreg = compiler__get_struct_registry(c);
+          uint32_t leaf_enc = is_struct_elem
+              ? elem_struct_idx
+              : (uint32_t)JACL_SCALAR_TYPE_IDX(elem_type);
+          BufInitPos pos1 = {0};
+          pos1.dims[0]    = n;
+          pos1.dim_count  = 1;
+          pos1.leaf_type  = elem_type;
+          if (!compiler__emit_buf_init_walk(
+                  c, wreg, init_ctor, leaf_enc, n, 0,
+                  (uint8_t)base_slot, 0, &pos1, line)) {
+            return;
           }
         }
       }
