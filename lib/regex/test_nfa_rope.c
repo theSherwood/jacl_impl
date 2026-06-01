@@ -32,6 +32,57 @@ static nfa_program* compile_pattern(const char* pat) {
 }
 
 /*
+ * Reclaim a rope's backing sum-tree nodes.
+ *
+ * jacl_impl's rope (lib/sum_tree) is a persistent, structurally-shared,
+ * GC/arena-owned structure: rope_ref/rope_unref are no-ops and there is no
+ * public call that frees a rope's nodes — the GC normally reclaims them. This
+ * test was ported from a repo whose rope was reference-counted, and it asserts
+ * check_no_leaks(), which requires the nodes to be reclaimed. We reclaim them
+ * by walking the tree(s) and freeing each node through the same allocator the
+ * rope was built with (rope_st_allocator, wired to the tracker below).
+ *
+ * Because the rope is persistent, two ropes (e.g. r and rope_insert(r, ...))
+ * can share subtree nodes. Freeing must therefore visit each unique node once
+ * across ALL live ropes — exactly the liveness bookkeeping the GC does. We
+ * track freed nodes in a small set and skip any node already freed; the set is
+ * also consulted *before* dereferencing a node, so freeing shared trees in any
+ * order is safe (no double-free, no use-after-free). Callers that hold several
+ * ropes sharing structure must free them together via rope_free_deep_session.
+ */
+#define ROPE_FREED_MAX 4096
+static rope_st_node* g_rope_freed[ROPE_FREED_MAX];
+static size_t        g_rope_freed_n;
+
+static int rope_node_already_freed(rope_st_node* node) {
+    for (size_t i = 0; i < g_rope_freed_n; i++) {
+        if (g_rope_freed[i] == node) return 1;
+    }
+    return 0;
+}
+
+static void rope_free_walk(rope_st_node* node) {
+    if (!node || rope_node_already_freed(node)) return;
+    if (node->type == rope_st_NODE_INTERNAL) {
+        rope_st_internal* in = (rope_st_internal*)node;
+        for (size_t i = 0; i < in->n_children; i++) {
+            rope_free_walk(in->children[i]);
+        }
+    }
+    if (g_rope_freed_n < ROPE_FREED_MAX) g_rope_freed[g_rope_freed_n++] = node;
+    rope_st_allocator.free(rope_st_allocator.ctx, node);
+}
+
+/* Start a fresh free session: forget previously-freed pointers. */
+static void rope_free_deep_session(void) { g_rope_freed_n = 0; }
+
+/* Free one rope's tree in its own session (no sharing with other live ropes). */
+static void rope_free_deep(rope r) {
+    rope_free_deep_session();
+    rope_free_walk(r.root.node);
+}
+
+/*
  * Match a pattern against both a flat buffer and a rope built from the
  * same text. Assert both produce identical results (first match).
  */
@@ -52,6 +103,7 @@ static int assert_rope_buf_match(const char* pattern, const char* text) {
     nfa_match rope_m = nfa_exec(prog, &rope_inp);
     nfa_input_rope_free(&rope_inp);
     rope_unref(r);
+    rope_free_deep(r);
 
     /* Compare */
     if (buf_m.matched != rope_m.matched) {
@@ -112,6 +164,7 @@ static int assert_rope_buf_iter(const char* pattern, const char* text) {
             nfa_iter_free(&rope_it);
             nfa_iter_free(&buf_it);
             rope_unref(r);
+            rope_free_deep(r);
             nfa_program_free(prog);
             return 0;
         }
@@ -126,6 +179,7 @@ static int assert_rope_buf_iter(const char* pattern, const char* text) {
                 rope_it.input.ctx = NULL;
                 nfa_iter_free(&buf_it);
                 rope_unref(r);
+                rope_free_deep(r);
                 nfa_program_free(prog);
                 return 0;
             }
@@ -140,6 +194,7 @@ static int assert_rope_buf_iter(const char* pattern, const char* text) {
     nfa_iter_free(&rope_it);
     nfa_iter_free(&buf_it);
     rope_unref(r);
+    rope_free_deep(r);
     nfa_program_free(prog);
     return 1;
 }
@@ -150,6 +205,7 @@ static int assert_rope_buf_iter(const char* pattern, const char* text) {
 static int test_rope_literal_match(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("hello", "say hello world"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -157,6 +213,7 @@ static int test_rope_literal_match(void) {
 static int test_rope_alternation(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("cat|dog", "I have a dog"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -164,6 +221,7 @@ static int test_rope_alternation(void) {
 static int test_rope_char_class(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[a-z]+", "HELLO world 123"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -171,6 +229,7 @@ static int test_rope_char_class(void) {
 static int test_rope_negated_class(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[^0-9]+", "abc123def"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -178,6 +237,7 @@ static int test_rope_negated_class(void) {
 static int test_rope_star(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("ab*c", "xabbbc"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -186,6 +246,7 @@ static int test_rope_anchored(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("^hello", "hello world"));
     ASSERT(assert_rope_buf_match("^hello", "say hello"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -193,6 +254,7 @@ static int test_rope_anchored(void) {
 static int test_rope_eol_anchor(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("world$", "hello world"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -200,6 +262,7 @@ static int test_rope_eol_anchor(void) {
 static int test_rope_dot(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("h.llo", "hello"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -209,6 +272,7 @@ static int test_rope_shorthand(void) {
     ASSERT(assert_rope_buf_match("\\d+", "abc 123 def"));
     ASSERT(assert_rope_buf_match("\\w+", "hello world"));
     ASSERT(assert_rope_buf_match("\\s+", "hello   world"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -216,6 +280,7 @@ static int test_rope_shorthand(void) {
 static int test_rope_group(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("(ab)+", "xabababy"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -223,6 +288,7 @@ static int test_rope_group(void) {
 static int test_rope_plus(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[0-9]+", "abc 123 def 456"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -230,6 +296,7 @@ static int test_rope_plus(void) {
 static int test_rope_no_match(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("xyz", "abcdef"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -237,6 +304,7 @@ static int test_rope_no_match(void) {
 static int test_rope_iter_multiple(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_iter("[0-9]+", "abc 123 def 456 ghi 789"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -244,6 +312,7 @@ static int test_rope_iter_multiple(void) {
 static int test_rope_iter_words(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_iter("[a-z]+", "Hello World Foo Bar"));
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -292,8 +361,10 @@ static int test_rope_cross_leaf(void) {
     ASSERT_SIZE_EQ(rope_m.end, buf_m.end);
 
     rope_unref(r);
+    rope_free_deep(r);
     nfa_program_free(prog);
     free(text);
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -339,8 +410,15 @@ static int test_rope_multi_insert_boundary(void) {
     ASSERT_SIZE_EQ(rope_m.end, buf_m.end);
 
     rope_unref(r2);
+    /* r and r2 share subtree nodes (persistent rope_insert), and r2 was in use
+       until just now — so free both in one session, after r2's last read, with
+       a shared visited set that reclaims each shared node exactly once. */
+    rope_free_deep_session();
+    rope_free_walk(r2.root.node);
+    rope_free_walk(r.root.node);
     nfa_program_free(prog);
     free(flat);
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -360,6 +438,7 @@ static int test_rope_empty(void) {
 
     rope_unref(r);
     nfa_program_free(prog);
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -380,7 +459,9 @@ static int test_rope_single_char(void) {
     ASSERT_SIZE_EQ(m.end, 1);
 
     rope_unref(r);
+    rope_free_deep(r);
     nfa_program_free(prog);
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -409,7 +490,9 @@ static int test_rope_only_newlines(void) {
     }
 
     rope_unref(r);
+    rope_free_deep(r);
     nfa_program_free(prog);
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -440,6 +523,7 @@ static int test_rope_pattern_battery(void) {
         }
     }
 
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -463,6 +547,7 @@ static int test_rope_iter_battery(void) {
         }
     }
 
+    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
