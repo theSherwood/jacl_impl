@@ -96,19 +96,24 @@ chains (read + set), decomposed chains, dynamic indices, and slice
 passing. See `docs/TYPE_REGISTRY_REFACTOR.md` for the architecture
 notes and the fixture list.
 
-Remaining (both subsumed by the recursive-layout refactor -- see
+Both are subsumed by the recursive-layout refactor -- see
 `docs/RECURSIVE_LAYOUT_REFACTOR.md`, which eliminates this whole class
-of gap rather than patching each cell):
+of gap rather than patching each cell.
 
-1. **Depth-3+ literal init with struct leaves**. Scalar leaves work
-   (`[[Buf 2 [Buf 3 [Buf 4 i32]]] ...]`); a struct leaf path would
-   need a flat-index OP_BUF_USET_STRUCT_LOCAL-style store. Rejected
-   at compile time today with a clear error.
+1. ~~**Depth-3+ literal init with struct leaves**~~ ✅ closed (Step 3
+   of the recursive-layout refactor). Both `[Buf N [Buf M Struct]]`
+   (depth-2) and `[Buf N1 [Buf N2 [Buf N3 Struct]]]` (depth-3+) literal
+   init now route through the descriptor-driven walker
+   (`compiler__emit_buf_init_walk`) via the new byte-offset leaf store
+   `OP_BUF_STORE_OFF`. Fixtures: `buf_nested_struct_literal.jacl`,
+   `buf_nested_depth3_struct_literal.jacl`.
 
-2. **Nested ref-elem bufs** (e.g. `[Buf N [Buf M dyn]]`). Today
-   rejected at the compiler -- ref-elem bufs only work flat as locals
-   or as struct fields. The slot-bitmap story would need to extend
-   from "per struct" to "per nested layout".
+2. **Nested ref-elem bufs** (e.g. `[Buf N [Buf M dyn]]`). Still
+   rejected at the compiler def site -- ref-elem bufs only work flat as
+   locals or as struct fields. The init walker + `OP_BUF_STORE_OFF`
+   already handle ref leaves and Step 2 made the GC ref-map recursive,
+   so what remains is removing the def-site rejection and wiring the
+   chained ref-leaf *access* path.
 
 **Tier 2 — nice-to-haves, not blocking.**
 

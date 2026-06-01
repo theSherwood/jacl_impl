@@ -2569,6 +2569,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_BUF_SET_STRUCT_LOCAL] = &&L_OP_BUF_SET_STRUCT_LOCAL,
     [OP_BUF_UGET_LOCAL] = &&L_OP_BUF_UGET_LOCAL,
     [OP_BUF_USET_LOCAL] = &&L_OP_BUF_USET_LOCAL,
+    [OP_BUF_STORE_OFF]  = &&L_OP_BUF_STORE_OFF,
     [OP_PTR_OFFSET_CHECKED] = &&L_OP_PTR_OFFSET_CHECKED,
     [OP_INLINE_COPY_LOCAL] = &&L_OP_INLINE_COPY_LOCAL,
   };
@@ -3545,6 +3546,133 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__set_error(vm, "buf-unchecked-set: unsupported element type %u",
                           (unsigned)elem_type);
             return VM_RUNTIME_ERROR;
+        }
+        DISPATCH();
+      }
+
+      CASE(OP_BUF_STORE_OFF): {
+        /* Descriptor-driven leaf store for buf literal init. Addresses by
+         * byte offset within frame[base_slot]. leaf_enc is the recursive
+         * layout encoding (scalar sentinel or struct registry idx).
+         * Unchecked: the init walker proves the offset in range at compile
+         * time. See RECURSIVE_LAYOUT_REFACTOR.md Step 3. */
+        uint8_t  base_slot = vm__read_byte(vm);
+        uint16_t byte_off  = vm__read_u16(vm);
+        uint16_t leaf_enc  = vm__read_u16(vm);
+        uint8_t* base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        if (JACL_IS_SCALAR_TYPE_IDX(leaf_enc)) {
+          JaclType elem_type = JACL_TYPE_IDX_TO_SCALAR(leaf_enc);
+          JaclVal val;
+          result = vm__pop(vm, &val); if (result != VM_OK) return result;
+          uint8_t* dst = base + byte_off;
+          switch (elem_type) {
+            case TYPE_BOOL:
+              if (!jacl_is_bool(val)) {
+                vm__set_error(vm, "buf-store: expected bool, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              dst[0] = jacl_as_bool(val) ? 1 : 0;
+              break;
+            case TYPE_I8: case TYPE_U8: case TYPE_I16: case TYPE_U16:
+            case TYPE_I32: case TYPE_U32: {
+              int32_t v;
+              if (jacl_is_i32(val)) v = jacl_as_i32(val);
+              else if (jacl_is_u32(val)) v = (int32_t)jacl_as_u32(val);
+              else {
+                vm__set_error(vm, "buf-store: expected i32/u32, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              switch (elem_type) {
+                case TYPE_I8: case TYPE_U8: dst[0] = (uint8_t)v; break;
+                case TYPE_I16: case TYPE_U16: {
+                  uint16_t w = (uint16_t)v; memcpy(dst, &w, 2); break;
+                }
+                default: memcpy(dst, &v, 4); break;
+              }
+              break;
+            }
+            case TYPE_F32: {
+              float v;
+              if (jacl_is_f32(val)) v = jacl_as_f32(val);
+              else if (jacl_is_f64(val)) v = (float)jacl_as_f64(val);
+              else {
+                vm__set_error(vm, "buf-store: expected f32/f64, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              memcpy(dst, &v, 4);
+              break;
+            }
+            case TYPE_I64: {
+              if (!jacl_is_i64(val) && !jacl_is_i32(val)) {
+                vm__set_error(vm, "buf-store: expected i64, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              int64_t v = jacl_is_i64(val) ? jacl_as_i64(val)
+                                            : (int64_t)jacl_as_i32(val);
+              memcpy(dst, &v, 8);
+              break;
+            }
+            case TYPE_U64: {
+              if (!jacl_is_u64(val)) {
+                vm__set_error(vm, "buf-store: expected u64, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              uint64_t v = jacl_as_u64(val);
+              memcpy(dst, &v, 8);
+              break;
+            }
+            case TYPE_F64: {
+              if (!jacl_is_f64(val) && !jacl_is_f32(val)) {
+                vm__set_error(vm, "buf-store: expected f64, got %s",
+                              vm__type_name(val));
+                return VM_RUNTIME_ERROR;
+              }
+              double v = jacl_is_f64(val) ? jacl_as_f64(val)
+                                           : (double)jacl_as_f32(val);
+              memcpy(dst, &v, 8);
+              break;
+            }
+            case TYPE_DYN: case TYPE_STR: case TYPE_VEC: case TYPE_MAP:
+            case TYPE_CLOSURE: case TYPE_STREAM: case TYPE_TYPED_VEC:
+            case TYPE_TYPED_MAP: case TYPE_PTR: case TYPE_FUTURE:
+            case TYPE_BOX: {
+              /* Ref leaf: byte_off is 8-aligned by construction, so dst is
+               * a real frame slot. Tagged JaclVal store + write barrier. */
+              JaclVal* slot = (JaclVal*)dst;
+              gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, *slot, val);
+              *slot = val;
+              break;
+            }
+            default:
+              vm__set_error(vm, "buf-store: unsupported leaf type %u",
+                            (unsigned)elem_type);
+              return VM_RUNTIME_ERROR;
+          }
+        } else {
+          /* Struct leaf: ctor left total_size bytes (width slots) on TOS. */
+          if (!vm->struct_registry || leaf_enc >= vm->struct_registry->count) {
+            vm__set_error(vm, "buf-store: invalid struct type index %u",
+                          (unsigned)leaf_enc);
+            return VM_RUNTIME_ERROR;
+          }
+          StructTypeDef* sdef = vm->struct_registry->defs[leaf_enc];
+          uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1)
+                           / sizeof(JaclVal);
+          if (vm->stack_top < width) {
+            vm__set_error(vm, "buf-store struct: stack underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          uint8_t* src = (uint8_t*)&vm->stack[vm->stack_top - width];
+          memcpy(base + byte_off, src, sdef->total_size);
+          for (uint32_t si = 0; si < width; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+          }
+          vm->stack_top -= width;
         }
         DISPATCH();
       }

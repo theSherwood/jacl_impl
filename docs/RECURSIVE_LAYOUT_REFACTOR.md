@@ -147,9 +147,48 @@ type-system rewrite.
       large/deep inline bufs the cache would silently under-cover. The
       walker is correct; the cache needs a "too big to cache → always
       walk" guard before relying on it as the fast path everywhere.
-- [ ] **Step 3 — route literal init through it** (Part B). Add the one
+- [~] **Step 3 — route literal init through it** (Part B). Add the one
   unchecked byte-offset store the leaf path needs. Closes depth-3+
   struct leaves AND the depth-2 struct-leaf gap for free.
+  - **Done so far (struct leaves):** `OP_BUF_STORE_OFF` opcode added
+    (bytecode.c enum + name, vm.c jump-table entry + handler) and the
+    `compiler__emit_buf_init_walk` walker added. Depth-2
+    `[Buf N [Buf M Struct]]` and depth-3+ `[Buf N1 [Buf N2 [Buf N3
+    Struct]]]` literal init now route through the walker instead of
+    being rejected ("scalar leaf types only") or hitting an unsupported
+    USET element type. Fixtures: `buf_nested_struct_literal.jacl`,
+    `buf_nested_depth3_struct_literal.jacl`. Suite 87/87, harness
+    438/438. The working scalar fast paths still use the old per-depth
+    emitters (collapsed in Step 4).
+  - **Still pending in Step 3:** nested **ref-elem** bufs
+    (`[Buf N [Buf M dyn]]`, Tier-1 #2). The walker + opcode already
+    handle ref leaves, but the def site still rejects them
+    (`compiler.c`, "reference element T ... not yet supported") and the
+    *access* path (chained read/write of a ref leaf at depth) isn't
+    wired — so closing #2 is more than init and is its own slice.
+  - **Design (implemented):**
+    - New opcode `OP_BUF_STORE_OFF base_slot:u8 byte_offset:u16
+      leaf_enc:u16`. Addresses by **byte offset** (not element index),
+      because struct leaves sit at arbitrary offsets inside a tiled
+      struct — the element-stride `OP_BUF_USET_LOCAL` can't express
+      that. `leaf_enc` is the descriptor encoding (scalar sentinel or
+      registry idx), so one opcode covers all three leaf kinds:
+      - scalar-value leaf → pop val, narrow, memcpy width bytes at
+        `base_bytes + byte_offset` (same per-type narrowing as USET).
+      - ref leaf → pop val, store `JaclVal` at offset **with write
+        barrier** (offset is 8-aligned by construction).
+      - struct leaf → ctor leaves inline bytes on TOS; memcpy
+        `total_size` bytes at offset, clear consumed inline bitmap.
+    - New walker `compiler__emit_buf_init_walk(c, enc, byte_base,
+      ast_value, pos_ctx)` walks the layout encoding + AST ctor in
+      lockstep (buf node → loop+recurse; struct node → loop fields;
+      leaf → emit `OP_BUF_STORE_OFF`). Threads position context so the
+      "row R column C value X out of range" messages survive.
+    - **Sequencing inside Step 3:** first route only the currently
+      *rejected* gaps (depth-2 `[Buf N [Buf M Struct]]`, depth-3+
+      struct leaves) through the walker + new opcode, with new
+      fixtures. Leave the working scalar fast paths on their existing
+      opcodes until Step 4 collapses them. Keeps each commit green.
 - [ ] **Step 4 — cleanup.** Collapse the now-redundant per-depth
   emitters and per-leaf-kind store opcodes. Net line-count should drop.
 

@@ -1,0 +1,31 @@
+# expect: 1
+# expect: 2
+# expect: 7
+# expect: 8
+# expect: 11
+# expect: 12
+# expect: 0
+# expect: 0
+# Depth-3 struct-leaf literal init: [Buf N1 [Buf N2 [Buf N3 Struct]]].
+# Tier-1 item #1 of BUFFER_DESIGN.md. Before Step 3 of
+# RECURSIVE_LAYOUT_REFACTOR.md the depth-3+ path rejected non-scalar
+# leaves ("scalar leaf types only"); now struct leaves route through the
+# descriptor-driven walker (OP_BUF_STORE_OFF) which stores each struct's
+# inline bytes at its flat byte offset.
+
+struct Point {i32 x, i32 y}
+proc main {} {
+  def [Buf 2 [Buf 2 [Buf 2 Point]]] cube [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 1 2] [Point 3 4]] [[Buf 2 Point] [Point 5 6] [Point 7 8]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 9 10] [Point 11 12]] [[Buf 2 Point] [Point 13 14] [Point 15 16]]]]
+  print $cube->0->0->0->x
+  print $cube->0->0->0->y
+  print $cube->0->1->1->x
+  print $cube->0->1->1->y
+  print $cube->1->0->1->x
+  print $cube->1->0->1->y
+
+  # Partial fill leaves the rest zero.
+  def [Buf 2 [Buf 2 [Buf 2 Point]]] sparse [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 99 99]]]]
+  print $sparse->1->1->1->x
+  print $sparse->0->0->1->y
+}
+[main]

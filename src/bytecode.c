@@ -309,6 +309,18 @@ typedef enum {
                                unchecked variant of OP_BUF_SET_LOCAL —
                                same narrow/store, no bounds check. Used by
                                [buf-unchecked-set $b $i $v]. */
+  OP_BUF_STORE_OFF,         /* u8 base_slot, u16 byte_offset, u16 leaf_enc;
+                               descriptor-driven leaf store for buf literal
+                               init. Addresses by BYTE OFFSET (not element
+                               index). leaf_enc is the recursive-layout
+                               encoding: scalar sentinel => pop a value and
+                               narrow/store width bytes (or, for a ref
+                               scalar, store a JaclVal with write barrier)
+                               at base_slot bytes + byte_offset; a registry
+                               idx => pop the struct's inline bytes off TOS
+                               and memcpy total_size bytes at the offset.
+                               Unchecked: offsets are proven in range at
+                               compile time by the init walker. */
 
   /* Bounds-checked variant of OP_PTR_OFFSET. Pops i32 index and u64 ptr,
    * traps with a runtime error if idx < 0 || idx >= dim_size, otherwise
@@ -552,6 +564,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_BUF_SET_STRUCT_LOCAL: return "OP_BUF_SET_STRUCT_LOCAL";
     case OP_BUF_UGET_LOCAL:  return "OP_BUF_UGET_LOCAL";
     case OP_BUF_USET_LOCAL:  return "OP_BUF_USET_LOCAL";
+    case OP_BUF_STORE_OFF:   return "OP_BUF_STORE_OFF";
     case OP_PTR_OFFSET_CHECKED: return "OP_PTR_OFFSET_CHECKED";
     case OP_INLINE_COPY_LOCAL: return "OP_INLINE_COPY_LOCAL";
     case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
