@@ -116,10 +116,11 @@ whole class of gap rather than patching each cell.
   `gc__push_record_refs` so a `[Buf N dyn]` (or any ref-elem field)
   inside a boxed struct is traced. Fixture:
   `buf_boxed_struct_dyn_gc.jacl`.
-- The cached flat `slot_ref_bitmap[32]` (256 slots) can silently
-  under-cover a very large/deep inline buf; walker is correct, cache
-  needs a "too big → always walk" guard. Not yet exercised by any
-  fixture.
+- ~~Cached flat `slot_ref_bitmap[32]` (256 slots) can silently
+  under-cover a very large inline buf~~ ✅ closed. Struct definitions
+  are rejected if the recursive ref map would place any ref slot past
+  index 255 (cap enforced at registration time so the GC mark path
+  can trust the cache). Fixture: `struct_ref_slot_cap.jacl`.
 
 **Tier 2 — nice-to-haves, not blocking.**
 

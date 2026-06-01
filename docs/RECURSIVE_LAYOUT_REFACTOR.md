@@ -291,11 +291,13 @@ Open follow-ups noted under Step 2:
   `[Buf N dyn]`) get marked. Fixture: `buf_boxed_struct_dyn_gc.jacl`
   (proven via stash-and-rebuild — pre-fix the harness aborts on
   `jacl_vec_get` after the vecs are collected).
-- The cached flat `slot_ref_bitmap[32]` holds 256 slots; the recursive
-  GC walker is uncapped. Very large/deep inline bufs would silently
-  under-cover via the cache. Walker is correct; cache needs a "too big
-  to cache → always walk" guard before the bitmap is relied on as the
-  fast path everywhere.
+- ~~The cached flat `slot_ref_bitmap[32]` (256 slots) silently
+  under-covered very large/deep inline bufs~~ ✅ closed (*pending
+  commit*). Struct definitions are now rejected at registration time
+  if the descriptor would place a ref slot past index 255, so the
+  cache is always sufficient. The error message points at `[Vec T]` /
+  field-splitting as the alternatives. Fixture:
+  `struct_ref_slot_cap.jacl`.
 
 ## Related docs
 

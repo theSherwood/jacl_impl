@@ -15368,9 +15368,46 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
        * fields, so an Inner-with-ref-buf embedded in Outer left Outer's slots
        * unmarked and invisible to the GC. Runs after registration so the
        * recursion can reach this struct's own (now memcpy'd) fields via the
-       * registry. Slots past 256 are dropped (2 KiB cap, as before). */
+       * registry. */
       memset(sdef->slot_ref_bitmap, 0, sizeof(sdef->slot_ref_bitmap));
       compiler__encoding_ref_map(reg, this_idx, 0, sdef->slot_ref_bitmap, 256);
+      /* Cache overflow guard: the GC mark path reads the 256-slot cache
+       * (vm__mark_struct_inline_slots) and would silently miss ref slots
+       * past 255. Reject struct definitions that would land any ref in
+       * that range, so the cache is always sufficient. The buf size cap is
+       * 65535 bytes (~8191 JaclVal slots), so 1 KiB is enough scratch. */
+      {
+        uint8_t overflow_bitmap[1024];
+        memset(overflow_bitmap, 0, sizeof(overflow_bitmap));
+        compiler__encoding_ref_map(reg, this_idx, 0, overflow_bitmap,
+                                   (uint32_t)sizeof(overflow_bitmap) * 8u);
+        uint32_t overflow_slot = UINT32_MAX;
+        for (uint32_t b = sizeof(sdef->slot_ref_bitmap);
+             b < sizeof(overflow_bitmap); b++) {
+          if (overflow_bitmap[b] != 0) {
+            for (uint32_t bit = 0; bit < 8; bit++) {
+              if (overflow_bitmap[b] & (uint8_t)(1u << bit)) {
+                overflow_slot = b * 8u + bit; break;
+              }
+            }
+            break;
+          }
+        }
+        if (overflow_slot != UINT32_MAX) {
+          char err[256];
+          snprintf(err, sizeof(err),
+              "struct '%.*s': reference-typed slot %u exceeds the 256-slot "
+              "GC ref-map cache (slot index counts 8-byte JaclVal positions); "
+              "split large [Buf N <ref>] fields or use [Vec T] for collections "
+              "larger than 256 reference elements",
+              (int)struct_name_len, struct_name, (unsigned)overflow_slot);
+          compiler__error(c, line, node->start.column, err);
+          reg->defs[this_idx]   = NULL;
+          reg->shapes[this_idx].kind          = TYPE_SHAPE_NONE;
+          reg->shapes[this_idx].u.struct_def  = NULL;
+          break;
+        }
+      }
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */

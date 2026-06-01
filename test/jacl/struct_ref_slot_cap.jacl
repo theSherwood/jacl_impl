@@ -1,0 +1,8 @@
+# expect-error: struct 'Big': reference-typed slot 256 exceeds the 256-slot GC ref-map cache
+# A struct whose recursive ref-map would place any traced slot past index 255
+# is rejected at definition time. The GC's vm__mark_struct_inline_slots reads
+# the cached `slot_ref_bitmap[32]` (256 bits) — without this guard, ref slots
+# at index 256+ would be silently misclassified as raw bytes and the GC would
+# leak references at those positions. See RECURSIVE_LAYOUT_REFACTOR.md
+# "256-slot cap asymmetry" follow-up.
+struct Big { [Buf 257 dyn] items }
