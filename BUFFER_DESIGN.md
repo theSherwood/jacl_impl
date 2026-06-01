@@ -459,16 +459,53 @@ hatches are available for performance-critical paths.
   computation; check carefully.
 - M1–M3 are mechanical and low-risk.
 
-## Open questions / deferred
+## Open questions / deferred — analysis (decided not to pursue)
 
-- First-class heap buffers (`new [Buf N T]` returning
-  `[Ptr [Buf N T]]`) — deferred; current escape is manual via
-  `malloc` + `[ptr-cast]`.
-- Slicing (`[buf-slice $b 4 12]` → `[Buf 8 T]`) — deferred until
-  there's a concrete need.
-- Constant-`N` polymorphic procs (`proc f [[Buf N u8]] {...}` where
-  `N` is bound) — deferred; for now `N` must be a literal at each
-  use site.
+The original "deferred" list collapsed on review. Two of the three
+items are sugar over primitives that already ship; the third is a
+real feature but a deliberate scope decision, not session-end pickup.
+
+- **First-class heap buffers** (`new [Buf N T]` returning
+  `[Ptr [Buf N T]]`). Already expressible: wrap the buf in a struct
+  and box it. `struct Wrap { [Buf N T] data }` + `[box [Wrap]]` gives
+  a heap-stored buf with stable identity, and the boxed-struct GC
+  tracer (commit `042082d`) marks the contents correctly. `new [Buf N T]`
+  would be sugar that drops the wrapper struct — convenient, not
+  load-bearing. Picking this up only when there's a concrete
+  ergonomics complaint.
+
+- **Slicing** (`[buf-slice $b 4 12]` → `[Buf 8 T]`). Pointers into
+  bufs work today via `[addr $b->i]` (→ `[Ptr T]`), and the
+  `[Ptr [Buf N T]]` proc-param form (M4.4 ext9) carries the length
+  across call boundaries — that's the substantive "slice with length"
+  shape. What `[buf-slice]` would add over those is a first-class
+  *value* of type `[Buf M T]` with a static `M` in expression
+  position, so bounds-checking inside the slice folds at compile
+  time. Useful but mostly sugar: `[Ptr [Buf M T]]` already gives the
+  same compile-time fold. Picking this up only when there's a
+  concrete need.
+
+- **Constant-`N` polymorphic procs** (`proc f [[Buf N u8]] {...}`
+  where `N` is bound at each call site). This is the only genuinely
+  new feature on the list. Today every buf-typed proc param hardcodes
+  `N`; alternatives are one proc per size, or fall back to
+  `[Ptr T] + u64 len` (loses static length). Polymorphic-`N` would
+  let one proc accept any `[Buf N u8]` and either monomorphize per
+  call site or thread `N` as a hidden length parameter.
+
+  Cost: this is "generics-lite over a single integer parameter." It
+  touches the typer (type-variable substitution), the compiler
+  (monomorphization or length-parametric codegen), and the surface
+  (binding `N` somewhere). Once we have it for `N` we'll likely want
+  it for `T` too (typed-vec/map element types), and at that point
+  we're building parametric polymorphism — a multi-session project,
+  not a follow-up. **Deliberate non-goal** until there's a use case
+  worth the design investment.
+
+The buffer feature is otherwise considered complete: see the
+milestone table above, the closed Tier-1 items under "Session pickup
+— open work", and the boxed-struct / 256-slot follow-ups under
+"Remaining follow-ups". No known correctness gaps remain.
 
 ### LHS type inference for typed RHS constructors (shipped)
 
