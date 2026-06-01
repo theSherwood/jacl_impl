@@ -1,0 +1,19 @@
+# expect: hello
+# expect: world
+# expect: 42
+# expect: nil
+# Depth-2 ref-elem literal init: `[Buf N [Buf M dyn]]` filled with a
+# nested constructor. Slice A of RECURSIVE_LAYOUT_REFACTOR.md (Tier-1
+# #2). Before this slice the def site rejected nested ref-elem bufs
+# outright. Now it routes through the descriptor-driven walker, which
+# emits OP_BUF_STORE_OFF — the ref-leaf code path stores a tagged
+# JaclVal with a GC write barrier.
+
+proc main {} {
+  def [Buf 2 [Buf 2 dyn]] grid [[Buf 2 [Buf 2 dyn]] [[Buf 2 dyn] "hello" "world"] [[Buf 2 dyn] 42 nil]]
+  print $grid->0->0
+  print $grid->0->1
+  print $grid->1->0
+  print $grid->1->1
+}
+[main]

@@ -1,0 +1,38 @@
+# expect: 30
+# expect: 31
+# expect: 32
+# expect: 33
+# expect: 500
+# GC stress for a stack-inline `[Buf 2 [Buf 2 dyn]]` with vec leaves.
+# The four stored vecs are built inline (no local binding) so their
+# ONLY root is the tagged slot inside the nested buf. The recursive
+# layout descriptor (RECURSIVE_LAYOUT_REFACTOR.md Steps 1-2) tiles the
+# inner buf's ref map across the outer N, so vm__mark_struct_inline_slots
+# traces every inner ref slot as live. Heavy heap churn then forces
+# multiple GC cycles; if any slot were misclassified as raw the vecs
+# would be collected and the final reads would crash.
+
+proc main {} {
+  def [Buf 2 [Buf 2 dyn]] grid [[Buf 2 [Buf 2 dyn]] [[Buf 2 dyn] nil nil] [[Buf 2 dyn] nil nil]]
+  set $grid->0->0 [vec 30 0 0]
+  set $grid->0->1 [vec 31 0 0]
+  set $grid->1->0 [vec 32 0 0]
+  set $grid->1->1 [vec 33 0 0]
+
+  mut i 0
+  while [< $i 500] {
+    def junk [vec $i $i $i $i $i $i]
+    set i [+ $i 1]
+  }
+
+  def a $grid->0->0
+  def b $grid->0->1
+  def c $grid->1->0
+  def d $grid->1->1
+  print [vec-get $a 0]
+  print [vec-get $b 0]
+  print [vec-get $c 0]
+  print [vec-get $d 0]
+  print $i
+}
+[main]

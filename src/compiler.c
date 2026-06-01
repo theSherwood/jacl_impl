@@ -8404,12 +8404,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
            elem_type == TYPE_TYPED_VEC || elem_type == TYPE_TYPED_MAP ||
            elem_type == TYPE_PTR || elem_type == TYPE_FUTURE ||
            elem_type == TYPE_BOX);
-      if (elem_is_ref && inner_buf_len > 0) {
-        compiler__error(c, line, col,
-            "[Buf N [Buf M T]] with reference element T (dyn/str/vec/map/stream) "
-            "not yet supported (M4.4 covers flat ref-elem bufs only)");
-        return;
-      }
       if (!elem_is_ref) {
         compiler__emit_byte(c, OP_BUF_ZERO_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)base_slot, line);
@@ -8443,18 +8437,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             default: break;
           }
         }
-        if (inner_buf_len > 0 && is_struct_elem) {
-          /* Depth-2 struct leaf `[Buf N [Buf M Struct]]`: route through the
-           * descriptor-driven walker. The outer buf's element is the inner
-           * buf [Buf M Struct], which we intern on the fly to get its
-           * encoding; the walker recurses and emits OP_BUF_STORE_OFF struct
-           * stores at flat byte offsets. */
+        if (inner_buf_len > 0 && (is_struct_elem || elem_is_ref)) {
+          /* Depth-2 struct or ref leaf `[Buf N [Buf M T]]`: route through
+           * the descriptor-driven walker. Inner buf encoding's elem_idx is
+           * the struct registry idx for struct leaves, or the scalar
+           * sentinel for ref leaves (dyn/str/vec/...). The walker recurses
+           * and emits OP_BUF_STORE_OFF, which dispatches on leaf_enc to
+           * struct-bytes memcpy or barriered tagged-slot store. */
           StructTypeRegistry* wreg = compiler__get_struct_registry(c);
+          uint32_t inner_elem_enc = is_struct_elem
+              ? elem_struct_idx
+              : (uint32_t)JACL_SCALAR_TYPE_IDX(elem_type);
           uint32_t inner_buf_enc =
-              type_shape_intern_buf(wreg, inner_buf_len, elem_struct_idx);
+              type_shape_intern_buf(wreg, inner_buf_len, inner_elem_enc);
           if (inner_buf_enc == UINT32_MAX) {
             compiler__error(c, line, col,
-                "[Buf N [Buf M Struct]]: failed to intern inner buf shape");
+                "[Buf N [Buf M T]]: failed to intern inner buf shape");
             return;
           }
           if (!compiler__emit_buf_init_walk(

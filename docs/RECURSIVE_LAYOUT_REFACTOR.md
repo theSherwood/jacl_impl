@@ -7,10 +7,9 @@ buffer/struct nesting gaps by deriving byte layout and GC reference
 maps **recursively from the type**, instead of hand-coding them per
 shape.
 
-Status: **in progress** — Steps 1–2 done; Step 3 partially done
-(struct leaves landed, ref-elem leaves pending). Steps remaining: the
-ref-elem slice of Step 3 and the Step 4 cleanup. See **What's next**
-at the bottom for the precise pickup point.
+Status: **in progress** — Steps 1–3 done (both struct *and* ref-elem
+leaves landed). Only Step 4 cleanup remains. See **What's next** at
+the bottom.
 
 Commits so far (on `main`):
 - `73cc2ac` — Step 1: recursive layout descriptor spike (wired nowhere;
@@ -22,6 +21,10 @@ Commits so far (on `main`):
   `compiler__emit_buf_init_walk`; depth-2 and depth-3+ struct-leaf
   literal init now route through the walker. Closes BUFFER_DESIGN
   Tier-1 #1.
+- *pending commit* — Step 3 (ref-elem leaves): removed the def-site
+  rejection at `compiler.c:~8407` and extended the walker-routing
+  branch to fire for ref leaves too. Init + chained access + GC all
+  work for `[Buf N [Buf M dyn]]`. Closes BUFFER_DESIGN Tier-1 #2.
 
 ## The root cause (why this refactor exists)
 
@@ -50,8 +53,8 @@ Literal init splits on nesting depth × leaf kind:
 |              | scalar leaf | struct leaf | ref-elem leaf |
 |--------------|-------------|-------------|---------------|
 | depth-1 `[Buf N T]`        | done (`OP_BUF_SET_LOCAL`) | done (`OP_BUF_SET_STRUCT_LOCAL`) | done (flat local) |
-| depth-2 `[Buf N [Buf M T]]`| done (flat `row*M+col`) | **gap** | **gap** |
-| depth-3+                   | done (recursive emitter) | **gap** (rejected `compiler.c:~7638`) | **gap** (rejected `compiler.c:~8180`) |
+| depth-2 `[Buf N [Buf M T]]`| done (flat `row*M+col`) | done (walker) | done (walker) |
+| depth-3+                   | done (recursive emitter) | done (walker) | done (walker) |
 
 The empty cells are not hard problems — they are code nobody wrote,
 because each cell is a bespoke emitter.
@@ -160,26 +163,36 @@ type-system rewrite.
       large/deep inline bufs the cache would silently under-cover. The
       walker is correct; the cache needs a "too big to cache → always
       walk" guard before relying on it as the fast path everywhere.
-- [~] **Step 3 — route literal init through it** (Part B). Add the one
-  unchecked byte-offset store the leaf path needs. Closes depth-3+
-  struct leaves AND the depth-2 struct-leaf gap for free.
-  - **Done so far (struct leaves):** `OP_BUF_STORE_OFF` opcode added
-    (bytecode.c enum + name, vm.c jump-table entry + handler) and the
-    `compiler__emit_buf_init_walk` walker added. Depth-2
+- [x] **Step 3 — route literal init through it** (Part B). Add the one
+  unchecked byte-offset store the leaf path needs. Closed depth-3+
+  struct leaves AND the depth-2 struct-leaf gap, AND nested ref-elem
+  bufs (Tier-1 #2).
+  - **Struct leaves (commit `2013b9b`):** `OP_BUF_STORE_OFF` opcode
+    added (bytecode.c enum + name, vm.c jump-table entry + handler) and
+    the `compiler__emit_buf_init_walk` walker added. Depth-2
     `[Buf N [Buf M Struct]]` and depth-3+ `[Buf N1 [Buf N2 [Buf N3
     Struct]]]` literal init now route through the walker instead of
-    being rejected ("scalar leaf types only") or hitting an unsupported
-    USET element type. Fixtures: `buf_nested_struct_literal.jacl`,
-    `buf_nested_depth3_struct_literal.jacl`. Suite 87/87, harness
-    438/438. The working scalar fast paths still use the old per-depth
-    emitters (collapsed in Step 4).
-  - **Still pending in Step 3:** nested **ref-elem** bufs
-    (`[Buf N [Buf M dyn]]`, Tier-1 #2). The walker + opcode already
-    handle ref leaves, but the def site still rejects them
-    (`compiler.c`, "reference element T ... not yet supported") and the
-    *access* path (chained read/write of a ref leaf at depth) isn't
-    wired — so closing #2 is more than init and is its own slice.
-    **Step-by-step pickup in "What's next" → A.**
+    being rejected. Fixtures: `buf_nested_struct_literal.jacl`,
+    `buf_nested_depth3_struct_literal.jacl`.
+  - **Ref-elem leaves (slice A, *pending commit*):** removed the
+    def-site rejection (`if (elem_is_ref && inner_buf_len > 0)` at
+    `compiler.c:~8407`) and extended the walker-routing condition at
+    `~8446` from `is_struct_elem` to `(is_struct_elem || elem_is_ref)`,
+    computing the inner buf encoding with the scalar sentinel for ref
+    leaves. The walker's ref-leaf branch in `OP_BUF_STORE_OFF` already
+    fires the GC write barrier (vm.c:3640–3650).
+    - **Access path** turned out to be already wired: `$grid->i` at
+      `buf_inner_len > 0` emits `OP_BUF_ADDR_LOCAL` (no ref gating); the
+      outer `->j` flows through the ptr-arrow path, which routes through
+      `OP_PTR_LOAD` / `OP_PTR_STORE` — both already have ref-type
+      branches with the SATB write barrier (vm.c:7664, 7734). No
+      compiler or VM changes needed.
+    - **GC** is correct via Step 2's recursive ref-map; proven by a
+      stress fixture mirroring `buf_traced_nested_struct_gc.jacl`.
+    - Fixtures: `buf_nested_dyn_literal.jacl`, `buf_nested_dyn_access.jacl`,
+      `buf_nested_dyn_gc.jacl`. Suite 87/87, harness 441/441.
+  - The working scalar fast paths still use the old per-depth emitters
+    (collapsed in Step 4).
   - **Design (implemented):**
     - New opcode `OP_BUF_STORE_OFF base_slot:u8 byte_offset:u16
       leaf_enc:u16`. Addresses by **byte offset** (not element index),
@@ -205,7 +218,7 @@ type-system rewrite.
       opcodes until Step 4 collapses them. Keeps each commit green.
 - [ ] **Step 4 — cleanup.** Collapse the now-redundant per-depth
   emitters and per-leaf-kind store opcodes. Net line-count should drop.
-  **Step-by-step pickup in "What's next" → B** (note the
+  **Step-by-step pickup in "What's next"** (note the
   error-message-text trap).
 
 ## What this closes
@@ -214,10 +227,10 @@ type-system rewrite.
 
 1. Depth-3+ literal init with struct leaves — **✅ closed** (Step 3,
    `2013b9b`), plus the unlisted depth-2 struct-leaf gap.
-2. Nested ref-elem bufs (`[Buf N [Buf M dyn]]`) — **still open.** Init
-   is ready (the walker + `OP_BUF_STORE_OFF` already handle ref leaves,
-   and Step 2 made the GC ref-map recursive), but the def site still
-   rejects them and the chained ref-leaf *access* path isn't wired.
+2. Nested ref-elem bufs (`[Buf N [Buf M dyn]]`) — **✅ closed** (Step 3
+   slice A, *pending commit*). Init via the walker, chained access via
+   existing `OP_BUF_ADDR_LOCAL` + `OP_PTR_LOAD/STORE` ref-type branches,
+   GC via Step 2's recursive ref-map.
 
 The endgame: any future depth × leaf × kind combination becomes "does
 the walker handle this node kind?" — and there are only four node kinds
@@ -235,10 +248,8 @@ Line numbers drift; the symbol names are the durable anchors.
   scalar leaves: `compiler__emit_buf_nested_literal_init` (~4015).
 - Init dispatch sites (where the walker is wired in): depth-3+ struct
   branch (`compiler.c`, ~7900, inside the `inner_telt` is-a-Buf block);
-  depth-2 struct branch `if (inner_buf_len > 0 && is_struct_elem)`
-  (~8446).
-- Ref-elem rejection (the def-site block to remove for Tier-1 #2):
-  `if (elem_is_ref && inner_buf_len > 0)` (`compiler.c`, ~8407).
+  depth-2 struct/ref branch
+  `if (inner_buf_len > 0 && (is_struct_elem || elem_is_ref))` (~8440).
 - New leaf store opcode: `OP_BUF_STORE_OFF` — decl `src/bytecode.c`
   (~312) + name (~567); handler `CASE(OP_BUF_STORE_OFF)` (`src/vm.c`,
   ~3553); jump-table entry (~2572).
@@ -252,36 +263,9 @@ Line numbers drift; the symbol names are the durable anchors.
 
 ## What's next (pickup point)
 
-Two slices remain. They are independent — do them in either order.
+One slice remains.
 
-### A. Nested ref-elem bufs — `[Buf N [Buf M dyn]]` (Tier-1 #2)
-
-The init half is already built; this slice is mostly the **access**
-path plus removing one rejection.
-
-1. **Remove the def-site rejection** at `compiler.c:~8407`
-   (`if (elem_is_ref && inner_buf_len > 0)`). With it gone, the depth-2
-   path falls through to the init dispatch; route the ref-leaf case to
-   `compiler__emit_buf_init_walk` exactly like the struct-leaf branch
-   just above it (intern `[Buf M dyn]` via `type_shape_intern_buf`, call
-   the walker). The walker + `OP_BUF_STORE_OFF` already emit the
-   barriered ref store, so init should "just work."
-2. **Wire the chained ref-leaf read/write access path.** This is the
-   real work: `$m->i->j` where the leaf is a ref must load/store a
-   tagged `JaclVal` slot (with write barrier on store), not raw bytes.
-   Find the depth-2 struct access path (`OP_BUF_GET_STRUCT_LOCAL` /
-   the arrow-chain compile in `HEAD_DOT`) and add the ref-leaf analogue.
-3. **GC is already correct** for the *stack-inline* case (Step 2 made
-   the ref-map recursive; see `buf_traced_nested_struct_gc.jacl` for
-   the pattern). Add a GC-stress fixture for a nested ref-elem buf to
-   prove it, mirroring that fixture.
-4. **Watch the follow-ups from Step 2** (recorded under Step 2 above):
-   `OBJ_MUTABLE_REF` struct boxes still trace bytes as raw, and the
-   256-slot flat `slot_ref_bitmap` cache can under-cover a very large
-   inline buf. Neither blocks a small fixture, but a boxed nested
-   ref-elem buf would expose the first.
-
-### B. Step 4 cleanup — collapse the redundant emitters
+### Step 4 cleanup — collapse the redundant emitters
 
 Now that the walker exists, the per-depth/per-leaf machinery is
 redundant. Goal: net line-count drop.

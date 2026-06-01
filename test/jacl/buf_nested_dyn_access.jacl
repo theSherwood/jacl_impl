@@ -1,0 +1,26 @@
+# expect: hello
+# expect: world
+# expect: 42
+# expect: nil
+# expect: updated
+# expect: 99
+# Depth-2 ref-elem chained access: read and write of a tagged JaclVal
+# leaf at `$cube->i->j` in `[Buf N [Buf M dyn]]`. Slice A of
+# RECURSIVE_LAYOUT_REFACTOR.md (Tier-1 #2). The read flows through
+# OP_BUF_ADDR_LOCAL (push row Ptr) then OP_PTR_LOAD with field_type=dyn
+# (load tagged JaclVal). The write fires OP_PTR_STORE with the write
+# barrier already wired for ref types.
+
+proc main {} {
+  def [Buf 2 [Buf 2 dyn]] grid [[Buf 2 [Buf 2 dyn]] [[Buf 2 dyn] "hello" "world"] [[Buf 2 dyn] 42 nil]]
+  print $grid->0->0
+  print $grid->0->1
+  print $grid->1->0
+  print $grid->1->1
+
+  set $grid->0->0 "updated"
+  set $grid->1->1 99
+  print $grid->0->0
+  print $grid->1->1
+}
+[main]
