@@ -1,0 +1,45 @@
+# expect: 30
+# expect: 31
+# expect: 32
+# expect: 33
+# expect: 500
+# GC stress: a `[Buf N dyn]` field inside a *boxed* user struct must be
+# traced via the recursive layout descriptor. Before this fix the
+# OBJ_MUTABLE_REF tracer ignored type_idx>0 (boxed user structs), so
+# the inline buf's tagged slots were never marked. The boxed heap copy
+# holds the only persistent roots: after $b's slots are nil'd out, the
+# SATB barrier preserves the vecs through the current GC cycle, but the
+# heap churn drives several more cycles — those subsequent cycles see
+# the vecs only via the boxed struct's bytes. Without the fix the
+# tracer ignores those bytes and the vecs get collected.
+
+struct Bag { [Buf 4 dyn] items }
+
+proc main {} {
+  def b [Bag]
+  set $b->items->0 [vec 30 0 0]
+  set $b->items->1 [vec 31 0 0]
+  set $b->items->2 [vec 32 0 0]
+  set $b->items->3 [vec 33 0 0]
+  def boxed [box $b]
+
+  # Drop $b's references so the heap box is the only persistent root.
+  set $b->items->0 nil
+  set $b->items->1 nil
+  set $b->items->2 nil
+  set $b->items->3 nil
+
+  mut i 0
+  while [< $i 500] {
+    def junk [vec $i $i $i $i $i $i]
+    set i [+ $i 1]
+  }
+
+  def back [deref $boxed]
+  print [vec-get $back->items->0 0]
+  print [vec-get $back->items->1 0]
+  print [vec-get $back->items->2 0]
+  print [vec-get $back->items->3 0]
+  print $i
+}
+[main]

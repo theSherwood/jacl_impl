@@ -21,7 +21,7 @@ when M4 lands).
 | **M4.1** Value-struct buf elements | ✅ done | `c0059af`, `175b372`, `d7298f6` |
 | **M4.2** Nested buffers `[Buf 3 [Buf 4 i32]]` | ✅ done (read+write+literal-init+struct-inner; deeper nesting deferred) | `ddc7163` + `fcd4c48` + this |
 | **M4.3** Buf-typed struct fields | ✅ done | `56d8a4d`, `c22ecde` |
-| **M4.4** GC-traced element types | ✅ done (flat locals; struct-field shipped this session; nested ref-elem deferred) | `26fa6b8` + this |
+| **M4.4** GC-traced element types | ✅ done (flat locals, struct-field, and nested ref-elem) | `26fa6b8` + `3760304` |
 | **M4.4 ext** Typed-collection elements `[Buf N [Vec T]]` | ✅ done | `0cf93f5` |
 | **M4.4 ext2** `[Buf N [Map K V]]` via shared type-shape registry | ✅ done | `c1e9390` |
 | **M4.4 ext3** `[Buf N [Ptr T]]` via Phase 5 registry | ✅ done | `a783668` |
@@ -89,16 +89,9 @@ Cross-reference: `docs/TYPE_REGISTRY_REFACTOR.md` carries the full
 type-shape-registry history; this section lists what's still **open**
 for the buffer feature.
 
-**Tier 1 — finishing the nested-buf depth lift (Phase 5b follow-up).**
-The depth cap was lifted at *declaration* time (commit `0ea5bff`).
-This session closed out the major access-side items: depth-3+ arrow
-chains (read + set), decomposed chains, dynamic indices, and slice
-passing. See `docs/TYPE_REGISTRY_REFACTOR.md` for the architecture
-notes and the fixture list.
-
-Both are subsumed by the recursive-layout refactor -- see
-`docs/RECURSIVE_LAYOUT_REFACTOR.md`, which eliminates this whole class
-of gap rather than patching each cell.
+**Tier 1 — closed.** Both items subsumed by the recursive-layout
+refactor (`docs/RECURSIVE_LAYOUT_REFACTOR.md`), which eliminated the
+whole class of gap rather than patching each cell.
 
 1. ~~**Depth-3+ literal init with struct leaves**~~ ✅ closed (Step 3
    of the recursive-layout refactor). Both `[Buf N [Buf M Struct]]`
@@ -108,12 +101,25 @@ of gap rather than patching each cell.
    `OP_BUF_STORE_OFF`. Fixtures: `buf_nested_struct_literal.jacl`,
    `buf_nested_depth3_struct_literal.jacl`.
 
-2. **Nested ref-elem bufs** (e.g. `[Buf N [Buf M dyn]]`). Still
-   rejected at the compiler def site -- ref-elem bufs only work flat as
-   locals or as struct fields. The init walker + `OP_BUF_STORE_OFF`
-   already handle ref leaves and Step 2 made the GC ref-map recursive,
-   so what remains is removing the def-site rejection and wiring the
-   chained ref-leaf *access* path.
+2. ~~**Nested ref-elem bufs** (e.g. `[Buf N [Buf M dyn]]`)~~ ✅ closed
+   (`3760304`, Step 3 ref-elem slice of the recursive-layout refactor).
+   Removed the def-site rejection and extended the walker-routing
+   branch to fire for ref leaves. Init + chained access (`$grid->i->j`
+   reads/writes a tagged JaclVal with the write barrier) + GC all
+   work. Fixtures: `buf_nested_dyn_literal.jacl`,
+   `buf_nested_dyn_access.jacl`, `buf_nested_dyn_gc.jacl`.
+
+**Remaining follow-ups** (recorded in `RECURSIVE_LAYOUT_REFACTOR.md`):
+
+- ~~`OBJ_MUTABLE_REF` struct boxes trace bytes as raw~~ ✅ closed.
+  `MUTABLE_REF` with `type_idx > 0` now routes through
+  `gc__push_record_refs` so a `[Buf N dyn]` (or any ref-elem field)
+  inside a boxed struct is traced. Fixture:
+  `buf_boxed_struct_dyn_gc.jacl`.
+- The cached flat `slot_ref_bitmap[32]` (256 slots) can silently
+  under-cover a very large/deep inline buf; walker is correct, cache
+  needs a "too big → always walk" guard. Not yet exercised by any
+  fixture.
 
 **Tier 2 — nice-to-haves, not blocking.**
 

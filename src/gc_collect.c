@@ -233,16 +233,23 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     /* --- Mutable ref (cell/box): trace contained value --- */
     case OBJ_MUTABLE_REF: {
         JaclMutableRef *ref = (JaclMutableRef *)payload;
-        /* Only trace for plain JaclVal boxes (type_idx==0).
-           Struct boxes (type_idx>0) contain raw bytes — no GC references.
-           ACQUIRE load: pairs with the RELEASE store atom mutations use.
-           Without this pairing, the GC can read a fresh pointer but miss
-           the writes the writer made before the release (e.g. the
-           GCHeader fields of the newly-allocated value). */
+        /* ACQUIRE loads inside both branches pair with the RELEASE stores
+           mutations use. Without this pairing, the GC can read a fresh
+           pointer but miss the writes the writer made before the release
+           (e.g. the GCHeader fields of the newly-allocated value). */
         if (ref->type_idx == 0) {
+            /* Plain JaclVal box: data[] holds one tagged slot. */
             JaclVal v = (JaclVal)ATOMIC_LOAD_EXPLICIT(
                 (uint64_t *)&MREF_VAL(ref), MEM_ACQUIRE);
             gc__ms_push_val(ms, v);
+        } else if (gc__struct_registry) {
+            /* Struct box: data[] holds total_size raw struct bytes. Trace
+               the struct's recursive ref map so embedded ref-elem fields
+               (e.g. `[Buf N dyn]` or nested struct refs) get marked. Mirrors
+               OBJ_HEAP_RECORD's path through gc__push_record_refs. */
+            StructTypeRegistry *sreg =
+                (StructTypeRegistry *)gc__struct_registry;
+            gc__push_record_refs(ms, ref->data, sreg, ref->type_idx);
         }
         break;
     }

@@ -282,12 +282,15 @@ depth × leaf-kind combination that's shipped today. Future work in
 this area becomes "does the walker handle this node kind?" — there are
 only four (buf, struct, scalar leaf, ref leaf).
 
-Open follow-ups noted under Step 2 (not blockers):
+Open follow-ups noted under Step 2:
 
-- `OBJ_MUTABLE_REF` struct boxes still trace their bytes as raw, not
-  via the descriptor. A ref-buf inside a *boxed* struct would not be
-  traced. Generalizing `MUTABLE_REF` struct boxes to
-  `gc__push_record_refs` is the clean fix.
+- ~~`OBJ_MUTABLE_REF` struct boxes still trace their bytes as raw~~ ✅
+  closed (*pending commit*). The `OBJ_MUTABLE_REF` case now mirrors
+  `OBJ_HEAP_RECORD`: when `type_idx > 0` it routes the box's bytes
+  through `gc__push_record_refs`, so embedded ref-elem fields (e.g.
+  `[Buf N dyn]`) get marked. Fixture: `buf_boxed_struct_dyn_gc.jacl`
+  (proven via stash-and-rebuild — pre-fix the harness aborts on
+  `jacl_vec_get` after the vecs are collected).
 - The cached flat `slot_ref_bitmap[32]` holds 256 slots; the recursive
   GC walker is uncapped. Very large/deep inline bufs would silently
   under-cover via the cache. Walker is correct; cache needs a "too big
