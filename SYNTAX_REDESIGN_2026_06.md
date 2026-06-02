@@ -136,39 +136,46 @@ untyped return. Unambiguous.
 
 ---
 
-## 5. For-loop syntax
+## 5. For-loop syntax — collection-first (kept)
 
 Three forms, all keep:
 
 ```
 for $xs { … use $it … }                  # implicit
-for n $xs { … use $n … }                 # explicit (NEW: name first)
+for $xs n { … use $n … }                 # explicit (collection-first)
 for {set i 0; < $i 10; incr i} { … }     # C-style (Tcl-shaped)
 ```
 
-### Change from current
+### Decision: keep collection-first
 
-The explicit form reverses: today it's `for $xs n { … }` (collection
-first). New form is `for n $xs { … }` (name first). This matches the
-binding-target convention used everywhere else in JACL:
+Originally proposed reversing to `for n $xs { … }` to match the
+binding-target convention (`def name value`, `mut name value`,
+`set name value`). The swap was tried (commit `a8ef956`) and reverted
+(commit `4cd3d57`) because it breaks pipe threading.
+
+Pipes thread the piped value as the **first** argument:
+`coll | foo a b` → `[foo coll a b]`. With name-first explicit-for, the
+threaded collection would land in the *name* slot:
 
 ```
-def name value       mut name value       set name value
+$xs | for n { … }     # threads as [for $xs n { … }]
 ```
 
-Bare name on the left binds; `$`-prefixed thing on the right is the
-source. `for n $xs` fits the same shape.
+That's still collection-first form. The only way name-first survives
+is to forbid that idiom, which is a real ergonomic loss in a
+shell/glue language where piping into a loop is everyday work.
 
-### Parsing
+Collection-first preserves the natural pipe shape and is what the
+current implementation already does. The tour now documents the
+rationale at the for-loop section so future readers don't re-litigate.
+
+### Parsing (unchanged)
 
 - 2 args, first is `{}` block → C-style header.
 - 2 args, first is value/`$`-ref → implicit.
-- 3 args → explicit (name, source, body).
+- 3 args → explicit (collection, name, body).
 
-The implementation already disambiguates by first-arg shape; the
-swap doesn't add new ambiguity.
-
-### Tour update needed
+### Tour update
 
 The C-style form is currently undocumented in `tour.jacl`. Add a
 third example to the for-loop section:

@@ -155,6 +155,16 @@ proc main {} {
   # ----- for -----
   # Three relevant forms: implicit `$it`, explicit binding, C-style.
   # Works on vectors, streams, and ranges.
+  #
+  # Explicit binding is `for COLL NAME { body }` (collection first).
+  # This intentionally breaks the `def name value` / `mut name value` /
+  # `set name value` shape used by binding statements: a name-first
+  # form (`for n $xs`) conflicts with pipe threading, which inserts
+  # the piped value as the first argument. `$xs | for n { body }` would
+  # then mean `[for $xs n { body }]` — the threaded collection landing
+  # in the name slot — and the only fix is to forbid that idiom. We
+  # keep collection-first so `$xs | for n { body }` reads as
+  # `[for $xs n { body }]` and Just Works.
   mut seen 0
   for [vec 1 2 3] { set seen [+ $seen $it] }
   assert ($seen == 6)

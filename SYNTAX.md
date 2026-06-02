@@ -462,20 +462,20 @@ for {mut i 0; < $i 10; incr i} {
 # Collection + implicit binding ($it)
 for $items { log $it }
 
-# Collection + explicit binding — name first, source second
-for item $items { log $item }
+# Collection + explicit binding — collection first, name second
+for $items item { log $item }
 
 # Collection + callback (HOF form)
 for $items $callback
 ```
 
-The explicit form puts the binding name on the left and the source on the right, matching the convention used elsewhere in the language: `def name value`, `mut name value`, `set name value`. Bare name binds; `$`-prefixed thing is the source.
+The explicit form is **collection-first** so that pipe threading works naturally: `$items | for item { … }` threads the piped value as the first arg, which is the collection slot. A name-first form would put the threaded value in the name slot and break the pipe idiom — a real ergonomic loss in a shell/glue language. See `SYNTAX_REDESIGN_2026_06.md` §5 for the full discussion.
 
 Compiler distinguishes forms by argument shape:
 
 - First arg is `{}` block → C-style loop
 - First arg is a value, next is `{}` block → implicit binding (`$it`)
-- First arg is a bare word, next is a value, next is `{}` block → explicit binding
+- First arg is a value, next is bare word, next is `{}` block → explicit binding
 - First arg is a value, next is a proc/variable → HOF callback
 
 Works on both streams and vectors. `filter` and `transform` remain separate — they produce new collections, not side effects.
@@ -1263,7 +1263,7 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | Struct constructor — named-only (`[Pt x 30 y 15]`) | **(spec ahead of impl)** current constructor is positional (`[Pt 30 15]`); printer uses a third form. |
 | `if`/`elif`/`else` | expression-valued |
 | `while` loops | yes |
-| `for` — all 4 forms | **(spec ahead of impl)** explicit form is `for NAME COLL {body}` per spec; current order is `for COLL NAME {body}`. |
+| `for` — all 4 forms | implicit `for COLL {body}`, explicit `for COLL NAME {body}` (collection-first; see `SYNTAX_REDESIGN_2026_06.md` §5 for why this didn't flip to name-first), C-style `for {init;cond;step} {body}`, HOF `for COLL $cb`. |
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
 | `incr name` — sugar for `set name [+ $name 1]` | prelude macro |
