@@ -357,28 +357,23 @@ From `DESIGN.md` § "Known Limitations".
   boundary). No test today asserts `try`/`catch` semantics for
   overflow — add one when the design call is made.
 
-- **Cross-eval typed-proc signatures don't carry.** The struct
-  registry persists across `jacl_eval` (name pointers arena-copied),
-  `ctx__init_vm` is lazy-init'd in `embed.c`, and `typer_infer` is
-  now seeded from the persistent `StructTypeRegistry` so user
-  structs and ctx fields declared in a prior eval type-check in a
-  later one. The one remaining gap is **typed proc signatures**:
-  `compiler__find_global` returns `GlobalArity` entries from the
-  per-compile global-arity table, which is rebuilt each
-  `jacl_eval` from the current source's `AST_PROC` nodes. So a
-  `proc i32 sumpt {Pt p} { ... }` declared in eval #1, then called
-  as `[sumpt [Pt 3 4]]` in eval #2, loses the typed `Pt p` param
-  signature and the compiler reports "cannot pass struct value to
-  dyn parameter" at the call site. The runtime call itself would
-  succeed (proc body code lives in the persistent VM env and
-  resolves via `OP_GET_GLOBAL`); only the compile-time type check
-  on the caller is wrong. Fix shape: thread a persistent
-  `GlobalArity` table on the `JaclVM` and seed
-  `compiler__find_global` from it before the current source's
-  `AST_PROC` declarations populate it. Covering tests live in
-  `test/test_e2e_embed_basics.c` — `test_e2e_ctx_cross_eval`
-  exercises the ctx path (now passing), `test_e2e_struct_name_persists`
-  guards the registry name-copy memory safety.
+- **Multi-eval embedder state — limits.** The struct registry, ctx
+  field map, typer struct table, and now the `GlobalArity` proc
+  signature table all persist across `jacl_eval` calls
+  (`JaclVM_s::persistent_*` in `src/embed.c`, threaded through
+  `compiler_compile`'s `seed_*` params and `typer_infer`'s
+  `seed_registry`). Cross-eval `struct Pt {...}` → typed proc →
+  typed call now type-checks and runs (covered by
+  `test_e2e_proc_signature_cross_eval`). One soft cap remains: the
+  persistent `GlobalArity` array is fixed at
+  `COMPILER_GLOBAL_ARITIES_MAX` (64) entries to match the
+  per-compile table's existing cap. Embedders that declare more
+  than 64 typed top-level procs across the VM's lifetime would
+  silently drop the overflow on commit. Lifting needs a
+  heap-allocated, growable variant (allocate from `jvm->arena` on
+  first need) plus widening every consumer's iteration. Not
+  blocking any current workload; flagged here so it doesn't get
+  rediscovered as a "mystery type-mismatch" later.
 
 ---
 

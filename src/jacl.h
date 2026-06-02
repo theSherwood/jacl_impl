@@ -2418,7 +2418,12 @@ extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
 extern bool compiler__is_core_builtin (const char *name, uint32_t len);
 extern const char *jacl_non_core_builtins[];  /* NULL-terminated list */
-extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map);
+/* seed_arities + seed_arity_count_inout are NULL/NULL when there is
+ * no persistent embedder context. When non-NULL, they point to an
+ * array of size COMPILER_GLOBAL_ARITIES_MAX (and its current count);
+ * compiler_compile memcpy's the table in on entry and back out on
+ * success so typed proc signatures survive across jacl_eval calls. */
+extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map, GlobalArity *seed_arities, uint32_t *seed_arity_count_inout);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
 extern bool macro__is_special_form (const char *name, uint32_t len);

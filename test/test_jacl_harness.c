@@ -299,7 +299,7 @@ static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
   JaclInternTable intern_table;
   intern_table_init(&intern_table, &arena);
 
-  CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL, JACL_NIL);
+  CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL, JACL_NIL, NULL, NULL);
   if (cr.error_count > 0) {
     if (exp->expect_error) {
       int match = cr.error_message && strstr(cr.error_message, exp->error_substr);

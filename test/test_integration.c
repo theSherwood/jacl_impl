@@ -394,7 +394,8 @@ static int test_recursive_vm_exec(void) {
   ASSERT(parse_a.error_count == 0);
 
   CompileResult cr_a = compiler_compile(parse_a, &ctx_a->arena,
-      &ctx_a->intern_table, &ctx_a->vm.heap, NULL, &es_a, JACL_NIL);
+      &ctx_a->intern_table, &ctx_a->vm.heap, NULL, &es_a, JACL_NIL,
+      NULL, NULL);
   ASSERT(cr_a.error_count == 0);
 
   ctx_a->vm.struct_registry = cr_a.struct_registry;
@@ -423,7 +424,8 @@ static int test_recursive_vm_exec(void) {
   ASSERT(parse_b.error_count == 0);
 
   CompileResult cr_b = compiler_compile(parse_b, &ctx_b->arena,
-      &ctx_b->intern_table, &ctx_b->vm.heap, NULL, &es_b, JACL_NIL);
+      &ctx_b->intern_table, &ctx_b->vm.heap, NULL, &es_b, JACL_NIL,
+      NULL, NULL);
   ASSERT(cr_b.error_count == 0);
 
   ctx_b->vm.struct_registry = cr_b.struct_registry;

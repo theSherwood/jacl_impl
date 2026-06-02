@@ -362,6 +362,35 @@ static int test_e2e_struct_name_persists(void) {
   return 1;
 }
 
+/* Test: typed proc signatures survive across jacl_eval calls.
+   Pre-fix, the per-compile global_arities table forgot every proc's
+   typed-param shape between calls. eval #3's call site looked up
+   sumpt in a fresh global_arities, found nothing, defaulted
+   expected_param_type to TYPE_DYN, and the struct-arg vs
+   dyn-param mismatch tripped "cannot pass struct value to dyn
+   parameter" -- a compile-time check, even though the proc body
+   was alive in the VM env and would have executed correctly.
+   With the persistent_global_arities table, eval #3 sees sumpt's
+   declared Pt p signature and the call type-checks + runs. */
+static int test_e2e_proc_signature_cross_eval(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal r1 = jacl_eval(vm, "struct Pt {i32 x, i32 y}");
+  ASSERT(!jacl_is_error(r1));
+
+  JaclVal r2 = jacl_eval(vm, "proc i32 sumpt {Pt p} { [+ $p->x $p->y] }");
+  ASSERT(!jacl_is_error(r2));
+
+  JaclVal r3 = jacl_eval(vm, "[sumpt [Pt 3 4]]");
+  ASSERT(!jacl_is_error(r3));
+  ASSERT(jacl_is_i32(r3));
+  ASSERT_INT_EQ(jacl_as_i32(r3), 7);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -381,6 +410,7 @@ int main(void) {
   RUN(test_e2e_ctx_declaration);
   RUN(test_e2e_ctx_cross_eval);
   RUN(test_e2e_struct_name_persists);
+  RUN(test_e2e_proc_signature_cross_eval);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

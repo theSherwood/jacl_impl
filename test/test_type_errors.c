@@ -30,7 +30,7 @@ static CompileResult try_compile(const char* src, arena_t* arena,
   ParseResult parse = parser_parse(lex, arena);
   JaclInternTable intern;
   intern_table_init(&intern, arena);
-  return compiler_compile(parse, arena, &intern, heap, NULL, NULL, JACL_NIL);
+  return compiler_compile(parse, arena, &intern, heap, NULL, NULL, JACL_NIL, NULL, NULL);
 }
 
 /* Setup helper: build arena + heap + pool, call the inner test

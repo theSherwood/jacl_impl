@@ -60,13 +60,6 @@ typedef struct {
 
 /* --- API --- */
 
-CompileResult compiler_compile(ParseResult parse, arena_t* arena,
-                                      JaclInternTable* intern_table,
-                                      ThreadHeap* heap,
-                                      StructTypeRegistry* seed_registry,
-                                      ExpandState* es,
-                                      JaclVal prelude_map);
-
 /* jacl_compile_program forward-declared after ProgramResult (below) */
 
 /* Forward declarations for syntax.c functions used by the compiler
@@ -16083,7 +16076,9 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       ThreadHeap* heap,
                                       StructTypeRegistry* seed_registry,
                                       ExpandState* es,
-                                      JaclVal prelude_map) {
+                                      JaclVal prelude_map,
+                                      GlobalArity* seed_arities,
+                                      uint32_t* seed_arity_count_inout) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count   = parse.error_count;
@@ -16100,6 +16095,18 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
+
+  /* Seed the GlobalArity table from the persistent embedder state so
+     procs declared in prior jacl_eval calls are still typed at the
+     current call site. The per-compile global_arities array is the
+     only thing compiler__find_global reads at lookup time, so a copy
+     here is enough -- no later pass needs to know this happened. */
+  if (seed_arities && seed_arity_count_inout) {
+    uint32_t n = *seed_arity_count_inout;
+    if (n > COMPILER_GLOBAL_ARITIES_MAX) n = COMPILER_GLOBAL_ARITIES_MAX;
+    memcpy(c.global_arities, seed_arities, n * sizeof(GlobalArity));
+    c.global_arity_count = n;
+  }
 
   /* Prelude map: seed compile-time globals from caller-supplied map keys.
    * When a prelude is active, unresolved names produce compile errors
@@ -16497,6 +16504,17 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   result.error_message = c.first_error;
   result.struct_registry = c.struct_registry;
   result.macro_table     = c.macro_table;
+
+  /* Commit GlobalArity entries back to persistent embedder state on
+     a successful compile. Failed compiles leave the persistent table
+     untouched -- a half-finished proc shouldn't poison subsequent
+     evals' type info. */
+  if (seed_arities && seed_arity_count_inout && c.error_count == 0) {
+    uint32_t n = c.global_arity_count;
+    if (n > COMPILER_GLOBAL_ARITIES_MAX) n = COMPILER_GLOBAL_ARITIES_MAX;
+    memcpy(seed_arities, c.global_arities, n * sizeof(GlobalArity));
+    *seed_arity_count_inout = n;
+  }
 
   return result;
 }

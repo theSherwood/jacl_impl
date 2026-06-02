@@ -419,7 +419,7 @@ static CompileResult compile_with_intern(const char* source, arena_t* arena,
                                           ThreadHeap* heap) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
-  return compiler_compile(parse, arena, table, heap, NULL, NULL, JACL_NIL);
+  return compiler_compile(parse, arena, table, heap, NULL, NULL, JACL_NIL, NULL, NULL);
 }
 
 /* Test: short string literal (<=7 bytes) still produces inline constant */

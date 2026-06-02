@@ -124,7 +124,8 @@ static int run_scenario(const char* path, const char* name,
     JaclInternTable intern_table;
     intern_table_init(&intern_table, &arena);
     CompileResult cr = compiler_compile(parse, &arena, &intern_table,
-                                         &vm.heap, NULL, NULL, JACL_NIL);
+                                         &vm.heap, NULL, NULL, JACL_NIL,
+                                         NULL, NULL);
     if (cr.error_count > 0) {
         fprintf(stderr, "  %s: compile error: %s\n", name,
                 cr.error_message ? cr.error_message : "(unknown)");

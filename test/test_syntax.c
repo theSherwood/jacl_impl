@@ -1845,7 +1845,7 @@ static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
     memset(&es, 0, sizeof(es));
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     es.ctx = ctx;
-    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es, JACL_NIL);
+    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es, JACL_NIL, NULL, NULL);
     cr.error_count += parse.error_count;
     /* ctx intentionally leaked for test simplicity */
     return cr;

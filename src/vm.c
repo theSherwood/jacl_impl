@@ -13366,7 +13366,8 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
 
     /* Compile (macro expansion happens inside compiler_compile) */
     CompileResult cr = compiler_compile(parse, arena, intern_table,
-                                        heap, NULL, expand, prelude_map);
+                                        heap, NULL, expand, prelude_map,
+                                        NULL, NULL);
     if (cr.error_count > 0) {
         if (err_out) {
             err_out->kind = JACL_ERROR_COMPILE;
@@ -13434,7 +13435,7 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
     ctx->expand.ctx = ctx;
     CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
                                         &ctx->vm.heap, NULL, &ctx->expand,
-                                        JACL_NIL);
+                                        JACL_NIL, NULL, NULL);
     if (cr.error_count > 0) {
         if (err_out) {
             err_out->kind = JACL_ERROR_COMPILE;
@@ -13577,7 +13578,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 
-  CompileResult cr = compiler_compile(parse, arena, intern_table, &vm->heap, NULL, &es, JACL_NIL);
+  CompileResult cr = compiler_compile(parse, arena, intern_table, &vm->heap, NULL, &es, JACL_NIL, NULL, NULL);
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;

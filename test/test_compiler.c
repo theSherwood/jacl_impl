@@ -12,7 +12,7 @@ static CompileResult compile_source(const char* source, arena_t* arena, ThreadHe
   ParseResult parse = parser_parse(tokens, arena);
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
-  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL, JACL_NIL);
+  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL, JACL_NIL, NULL, NULL);
 }
 
 /* ===== US-003: Compiler skeleton and literal compilation ===== */
@@ -9998,7 +9998,7 @@ static CompileResult compile_with_prelude(const char* source, arena_t* arena,
   ParseResult parse = parser_parse(tokens, arena);
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
-  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL, prelude);
+  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL, prelude, NULL, NULL);
 }
 
 /* Test: !ls -la compiles without error (no prelude mode) */
