@@ -291,6 +291,40 @@ int lexer__is_operator_char(char c) {
          c == '^' || c == '|' || c == '~';
 }
 
+/* Negative numeric literal: '-' glued to a digit (no whitespace).
+ * Lex the magnitude via lexer__lex_number, then patch the just-pushed
+ * token to include the leading '-' in its source span and negate its
+ * value. Returns 1 if a negative literal was consumed, 0 otherwise.
+ *
+ * Limitation: INT32_MIN cannot be expressed — the positive magnitude
+ * 2147483648 overflows lexer__lex_number's i32 bound before we get a
+ * chance to negate. */
+int lexer__maybe_lex_neg_number(Lexer* lex, TokenArray* arr,
+                                uint32_t* error_count) {
+  if (lexer__peek(lex) != '-') return 0;
+  char next = lex->source[lex->pos + 1];
+  if (next < '0' || next > '9') return 0;
+  uint32_t start = lex->pos;
+  uint32_t sline = lex->line;
+  uint32_t scol  = lex->col;
+  lexer__advance(lex);  /* consume '-' */
+  uint32_t before = arr->count;
+  lexer__lex_number(lex, arr, error_count);
+  if (arr->count > before) {
+    Token* tok = &arr->tokens[arr->count - 1];
+    tok->offset = start;
+    tok->line   = sline;
+    tok->column = scol;
+    tok->length += 1;
+    if (tok->type == TOKEN_INT) {
+      tok->payload.int_val = -tok->payload.int_val;
+    } else if (tok->type == TOKEN_FLOAT) {
+      tok->payload.float_val = -tok->payload.float_val;
+    }
+  }
+  return 1;
+}
+
 /* -------------------------------------------------------------------------
  * Internal: Arena-allocated error message for unexpected characters
  * ------------------------------------------------------------------------- */
@@ -929,6 +963,11 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       continue;
     }
 
+    /* Negative number literal ('-' glued to a digit) */
+    if (lexer__maybe_lex_neg_number(lex, arr, error_count)) {
+      continue;
+    }
+
     /* Numbers */
     if (c >= '0' && c <= '9') {
       lexer__lex_number(lex, arr, error_count);
@@ -1128,6 +1167,11 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
       }
       Token tok = lexer__make_token(lex, type, s, sl, sc);
       lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Negative number literal ('-' glued to a digit) */
+    if (lexer__maybe_lex_neg_number(lex, arr, error_count)) {
       continue;
     }
 
@@ -1427,6 +1471,11 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
              && lexer__peek(&lex) != '\r') {
         lexer__advance(&lex);
       }
+      continue;
+    }
+
+    /* Negative number literal ('-' glued to a digit) */
+    if (lexer__maybe_lex_neg_number(&lex, &arr, &error_count)) {
       continue;
     }
 

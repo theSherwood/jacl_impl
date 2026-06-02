@@ -2189,6 +2189,7 @@ extern const char *lexer__unexpected_char_msg (Lexer *lex, char c);
 extern const char *lexer__handle_escape (Lexer *lex, StringBuf *sb);
 extern void lexer__skip_to_string_end (Lexer *lex);
 extern void lexer__lex_number (Lexer *lex, TokenArray *arr, uint32_t *error_count);
+extern int lexer__maybe_lex_neg_number (Lexer *lex, TokenArray *arr, uint32_t *error_count);
 extern void lexer__lex_string_body (Lexer *lex, TokenArray *arr, uint32_t *error_count, uint32_t str_start, uint32_t str_line, uint32_t str_col);
 extern void lexer__lex_interp_expr (Lexer *lex, TokenArray *arr, uint32_t *error_count);
 extern void lexer__lex_interp_infix (Lexer *lex, TokenArray *arr, uint32_t *error_count);

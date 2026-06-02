@@ -1,0 +1,25 @@
+# Negative numeric literals lex as single number tokens when '-' is
+# glued to a digit (no whitespace between). Workarounds like `(-1)` or
+# `(- 1)` are no longer needed.
+#
+# expect: -1
+# expect: 2
+# expect: -3
+# expect: -42
+# expect: -1.5
+
+# Bare arg position: -1 is a single int token.
+print -1
+
+# Inside a [] arg list: -3 is added to 5.
+print [+ 5 -3]
+
+# Subtraction still works when '-' has whitespace on both sides.
+print [- 5 8]
+
+# Negative bound to a name, then printed.
+def x -42
+print $x
+
+# Negative float.
+print -1.5

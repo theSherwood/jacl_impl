@@ -5,7 +5,7 @@
 
 proc main {} {
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
-  mut k (- 1)
+  mut k -1
   print $cube->0->0->$k
 }
 main
