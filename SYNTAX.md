@@ -1,60 +1,51 @@
 # JACL Syntax Reference
 
-JACL syntax is built around a three-mode delimiter system. This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
+JACL syntax is built around a two-mode delimiter system. This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
 
-**Why three modes:** earlier syntax overloaded `[]` for commands, param lists, struct fields, and import lists. The goal is a scrappy, pragmatic scripting language comfortable in a shell.
+**Why two modes:** the two surviving delimiters split along a real semantic axis — expression vs. command/pipeline — rather than offering multiple flavors of the same operation. An earlier `()` infix mode was cut; see `SYNTAX_REDESIGN_2026_06.md` for the rationale.
 
-## Three parsing modes (delimiter-determined)
+## Two parsing modes (delimiter-determined)
 
-- `[]` — **Juxtaposition**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]` and nesting `[foo [bar 3] 2]`.
-- `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). `|` pipes between commands. Used for code blocks, param lists, struct field declarations (same construct, differentiated by context).
-- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3 2]]`. Modeled on Tcl's `expr` — a sublanguage for arithmetic and predicates, not a full expression language. Operators have the same semantics here as in `{}`; the difference is only which form is ergonomic to invoke.
+- `[]` — **Prefix expression mode**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]`, value-producing expressions, and nesting `[foo [bar 3] 2]`. Pure value computation.
+- `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). Symbolic connectors live here: `|` pipes between commands, with `&&`/`||` and redirections in the same family. Used for code blocks, param lists, struct field declarations, and shell-pipeline composition (same construct, differentiated by context).
+
+## Key principle: print/parse symmetry
+
+Every value prints as a form the reader accepts. `[read [print v]] == v` for everything except first-class procs (whose printed form is deliberately non-readable, e.g. `#<proc add>`).
+
+Consequences:
+
+- Maps print as `[map a 1 b 2]`.
+- Vectors print as `[vec 1 2 3]`.
+- Errors print as `[error "msg"]`.
+- Structs print as `[Pt x 30 y 15]` — same form as the constructor (see Structs below).
+
+This principle constrains constructor design: every collection / record type has a single read-and-print form, no asymmetric "init one way, print another way" surface.
 
 ## Key syntax decisions
 
 - `proc foo {x, y} {+ $x $y}` — braces for both params and body
+- `proc add {i32 x, i32 y} i32 {+ $x $y}` — typed return goes after params (optional bare type token between the params block and the body block)
 - `struct Point {i32 x, i32 y}` — `defstruct` shortened to `struct`
-- Type-before-name everywhere: `{i64 a, i64 b}`, `proc i64 add ...`
+- `[Point x 30 y 15]` — struct constructor mirrors `[map …]`, named-only, no positional form
+- Type-before-name in params and fields: `{i64 a, i64 b}`, `struct Pt {i32 x, i32 y}`
 - `:type` prefix in struct fields replaced with type-before-name
-- `()` reserved for infix expressions, not declarations
 - Zero-arg procs: `proc greet {} {print "hello"}`
 - Block bodies use bare command syntax: `{* $n 2}` not `{[* $n 2]}`
 
-## Operator precedence in `()`
-
-No operator precedence. All operators are at the same level, evaluated left to right (left associative). Parenthesize for explicit grouping.
-
-```
-(1 + 2 * 3)             # → ((1 + 2) * 3) → 9
-(1 + (2 * 3))           # → 7 — explicit grouping
-(10 - 3 - 2)            # → ((10 - 3) - 2) → 5
-($price * $qty + $tax)  # → (($price * $qty) + $tax) — often correct naturally
-```
-
-This is the Smalltalk approach. Trade-off: no precedence table to memorize, but `*` doesn't bind tighter than `+`. Use nested parens or prefix `[* 2 3]` when needed.
-
-Unary prefix operators (`not`, `-`) bind tighter than binary operators:
-
-```
-(- $x + $y)             # → ((- $x) + $y)
-(not $a or $b)          # → ((not $a) or $b)
-```
-
 ## String interpolation
 
-The three-mode system applies uniformly inside strings. Each delimiter switches parsing mode:
+Interpolation inside `"…"` strings uses one non-trivial form for embedded expressions:
 
 ```
 "hello $name"                  # variable interpolation
-"result: $[+ 1 2]"            # juxtaposition mode — command call
-"total: $($price * $qty)"     # infix mode — arithmetic
+"result: $[+ 1 2]"            # embedded expression
 ```
 
 - `$name` — variable reference
-- `$[...]` — evaluates a juxtaposition (command call)
-- `$(...)` — evaluates an infix expression
+- `$[...]` — evaluates a `[]` expression and splices its string form
 - `\$` — escaped literal `$`
-- Modes nest: `"value: $($x + $[vec-len $v])"`
+- Forms nest: `"value: $[+ $x [vec-len $v]]"`
 
 ## Pipes
 
@@ -89,7 +80,7 @@ The three-mode system applies uniformly inside strings. Each delimiter switches 
 - `match $val { pattern { body } ... }`
 - Literals match, bare identifiers bind, `$var` pins against variable value
 - Type patterns: `Point {x, y} { ... }`
-- Guards use `()`: `n ($n > 0) { ... }`
+- Guards use `[]` predicates: `n [> $n 0] { ... }`
 - Composes with pipes: `get-shape | match { ... }`
 
 ## Shell interop
@@ -154,7 +145,7 @@ def result [exec "ls" "-la"]
 
 . $result stdout | split "\n"
 . $result stderr | print
-if (. $result exit != 0) { print "failed" }
+if [!= $result->exit 0] { print "failed" }
 ```
 
 ### Design rationale
@@ -447,13 +438,13 @@ if $cond { body } elif $cond2 { body } else { body }
 `if` is an expression — it returns the value of the taken branch:
 
 ```
-def x [if ($n > 0) { "positive" } else { "non-positive" }]
+def x [if [> $n 0] { "positive" } else { "non-positive" }]
 ```
 
 Composes with pipes:
 
 ```
-get-status | if (== $it "ok") { proceed } else { abort }
+get-status | if [== $it "ok"] { proceed } else { abort }
 ```
 
 ## Iteration and control flow
@@ -464,25 +455,27 @@ get-status | if (== $it "ok") { proceed } else { abort }
 
 ```
 # C-style (mutable loop variable)
-for {mut i 0; ($i < 10); incr i} {
+for {mut i 0; < $i 10; incr i} {
   log $i
 }
 
 # Collection + implicit binding ($it)
 for $items { log $it }
 
-# Collection + explicit binding
-for $items item { log $item }
+# Collection + explicit binding — name first, source second
+for item $items { log $item }
 
 # Collection + callback (HOF form)
 for $items $callback
 ```
 
+The explicit form puts the binding name on the left and the source on the right, matching the convention used elsewhere in the language: `def name value`, `mut name value`, `set name value`. Bare name binds; `$`-prefixed thing is the source.
+
 Compiler distinguishes forms by argument shape:
 
 - First arg is `{}` block → C-style loop
 - First arg is a value, next is `{}` block → implicit binding (`$it`)
-- First arg is a value, next is bare word, next is `{}` block → explicit binding
+- First arg is a bare word, next is a value, next is `{}` block → explicit binding
 - First arg is a value, next is a proc/variable → HOF callback
 
 Works on both streams and vectors. `filter` and `transform` remain separate — they produce new collections, not side effects.
@@ -526,7 +519,7 @@ Both forms coexist. Use blocks when you need control flow, lambdas for concise p
 ```
 # Block form — full control flow
 for $items item {
-  if ($item > 10) { return $item }
+  if [> $item 10] { return $item }
 }
 
 # Lambda form — concise in pipelines
@@ -582,19 +575,21 @@ log "INFO" "server started" "listening on 8080"
 
 ## Ranges
 
-Range operators in `()` infix mode:
+Ranges are named-prefix builtins:
 
 ```
-(1 ..< 10)     # exclusive: 1, 2, 3, ..., 9
-(1 ..= 10)     # inclusive: 1, 2, 3, ..., 10
+[range 1 10]            # exclusive: 1, 2, 3, ..., 9
+[range-inclusive 1 10]  # inclusive: 1, 2, 3, ..., 10
 ```
 
 Ranges produce streams. Work with `for`, `filter`, `transform`, etc:
 
 ```
-for (0 ..< 10) i { print $i }
-(1 ..= 100) | filter [\ == 0 ($it % 2)] | collect
+for i [range 0 10] { print $i }
+[range-inclusive 1 100] | filter [\ == 0 [% $it 2]] | collect
 ```
+
+Operator-prefix forms (`[..< 0 10]`) were considered but rejected for the same readability reasons that motivated the named-prefix decision: an operator token in head position reads awkwardly.
 
 ## Line continuation
 
@@ -650,12 +645,14 @@ def x 2          # error: x already defined in this scope
 
 ## Optional chaining
 
-`?.` operator in `()` infix mode for nil-safe field access:
+Nil-safe field access via the `?.` builtin (prefix form):
 
 ```
-($val ?. field)          # nil if $val is nil, otherwise field access
-($user ?. address ?. city)   # chains safely
+[?. $val field]                  # nil if $val is nil, otherwise field access
+[?. [?. $user address] city]     # chains via nesting
 ```
+
+The prefix form is verbose and is the current holding pattern. Mirroring `->` as a glued suffix (`$user?.address?.city`) is the eventual target; see `SYNTAX_REDESIGN_2026_06.md` §3.4.
 
 ## Module visibility
 
@@ -686,14 +683,14 @@ def sql """
 """
 ```
 
-- Interpolation works inside triple-quoted strings: `$var`, `$[expr]`, `$(expr)`
+- Interpolation works inside triple-quoted strings: `$var`, `$[expr]`
 - Leading whitespace stripped based on indentation of closing `"""` (Kotlin-style)
 - No delimiter name needed (unlike heredocs)
 
 ```
 def query """
   SELECT * FROM $table
-  WHERE id = $($id + 1)
+  WHERE id = $[+ $id 1]
 """
 ```
 
@@ -1013,67 +1010,37 @@ Pool sizing keeps `with-ctx` and concurrency forks cheap in practice. There is c
 
 ## Operators as macros
 
-Symbolic operators in `{}` command mode and `()` infix mode are macros — they receive unevaluated AST and produce transformed AST. The parser treats all operators uniformly; semantics are defined by the macro system.
+Symbolic operators live in `{}` command mode and connect commands in a shell-pipeline style. They are macros — they receive unevaluated AST and produce transformed AST. The parser treats all operators uniformly; semantics are defined by the macro system.
+
+Arithmetic, comparison, and logical operations are written in `[]` prefix form (`[+ 1 2]`, `[== $a 7]`, `[&& $p $q]`). There is no infix mode.
 
 ### Command-mode operators (`{}`)
 
-In `{}`, operators work between commands (not individual values):
+In `{}`, symbolic operators work between commands (not between individual values):
 
 ```
 foo a | bar b           # pipe: [bar [foo a] b]
 foo a && bar b          # and-then: run bar only if foo succeeded
 foo a || bar b          # or-else: run bar only if foo failed
-i64 x = 3              # immutable binding: def i64 x 3
-i64 y : 0              # mutable binding: mut i64 y 0
-y :: ($y + 1)           # reassignment: set y ($y + 1)
 ```
 
-No operator precedence in `{}` — left to right, same as `()`.
-
-### Binding operators
-
-Three operators corresponding to the three binding commands:
-
-| Operator | Command | Meaning           |
-| -------- | ------- | ----------------- |
-| `=`      | `def`   | Immutable binding |
-| `:`      | `mut`   | Mutable binding   |
-| `::`     | `set`   | Reassignment      |
-
-The command forms (`def`, `mut`, `set`) remain available. Operators are sugar:
-
-```
-# These pairs are equivalent:
-def i64 x 3         ↔  i64 x = 3
-mut i64 y 0         ↔  i64 y : 0
-set y ($y + 1)      ↔  y :: ($y + 1)
-
-# Untyped:
-def name "alice"    ↔  name = "alice"
-mut count 0         ↔  count : 0
-set count ($count + 1)  ↔  count :: ($count + 1)
-```
-
-### Infix-mode operators (`()`)
-
-In `()`, operators work between values/expressions. **An operator has the same semantics in every mode** — `|` is `|`, `+` is `+`. The difference between modes is whether infix invocation is ergonomic, not what the operator means. Bitwise operations needed in `()` go through named commands (`[bit-or $a $b]`, etc.) rather than reusing the pipe glyph.
+No operator precedence in `{}` — left to right.
 
 ### User-definable operators
 
 Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use.
 
 - **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; introspection/construction APIs are available for advanced macros. See DESIGN.md M15 for full details.
-- **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Binding operators (`=`, `:`, `::`) need no special treatment because the bound name comes from the caller's code (spliced via `~`, retains caller's scope). Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
-- One operator → one meaning. Mode-dependent operator semantics are explicitly rejected.
+- **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
 
 ### Prelude
 
 A prelude module is implicitly imported and pre-defines the core operators:
 
-- `|`, `&&`, `||` — command control flow
-- `=`, `:`, `::` — binding operators
+- `|`, `&&`, `||` — command-mode control flow
 - `\` — lambda shorthand
-- Arithmetic, comparison, and logical operators for `()` mode
+- Arithmetic, comparison, and logical operators as prefix builtins (`+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `not`)
+- `assert-eq`, `assert-ne`, `assert-lt`, `assert-le`, `assert-gt`, `assert-ge` — comparison-asserting builtins (test-code ergonomics; `assert <expr>` covers non-comparison predicates)
 
 ## Aliases
 
@@ -1216,7 +1183,7 @@ extern and JACL proc call sites when the pointee matches.
 
 ### Resolved in this document
 
-- Three-mode delimiter system — `[]` juxtaposition, `{}` command mode, `()` infix
+- Two-mode delimiter system — `[]` prefix expressions, `{}` command mode (shell-pipeline). The earlier `()` infix mode was cut; see `SYNTAX_REDESIGN_2026_06.md`.
 - Pipe threading (first-arg)
 - Destructuring with `{..}`
 - Match/case with guards
@@ -1258,9 +1225,9 @@ stay listed as historical record.
 7. ~~**Comments**~~ — resolved: `#` single-line, `##` doc comments, no multi-line syntax.
 8. ~~**Variadic procs**~~ — resolved: `..` in param lists, consistent with destructuring.
 9. ~~**Pragmas**~~ — resolved: `#{ ... }` syntax, avoids shebang collision.
-10. ~~**Ranges**~~ — resolved: `(1 ..< 10)` exclusive, `(1 ..= 10)` inclusive, produce streams.
+10. ~~**Ranges**~~ — resolved: `[range 1 10]` exclusive, `[range-inclusive 1 10]` inclusive, produce streams. (Originally infix `(1 ..< 10)`; revised June 2026.)
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
-12. ~~**Optional chaining**~~ — resolved: `($val ?. field)` in infix mode.
+12. ~~**Optional chaining**~~ — resolved (holding pattern): `[?. $val field]` prefix form. Glued-suffix mirror of `->` is the eventual target; see `SYNTAX_REDESIGN_2026_06.md` §3.4.
 13. ~~**Field access syntax**~~ — resolved: `->` only. `$user->name`, chained `$a->b->c`. `.` was rejected because bare words are strings (filenames/paths use `.` heavily). Implemented in lexer/parser; desugars to `[. expr field]`.
 14. **Regular expressions** — see `NOT_IMPLEMENTED.md` §1, §2, §6.
 15. **Operator overloading** — see `NOT_IMPLEMENTED.md` §6.
@@ -1276,30 +1243,35 @@ stay listed as historical record.
 
 ## Implementation status
 
-Features from this document compared against the current codebase. Last updated: 2026-05-15.
+Features from this document compared against the current codebase. Last updated: 2026-06-02.
+
+The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several decisions. The implementation has not yet caught up to the revised spec for those items; they are marked **(spec ahead of impl)** below.
 
 ### Implemented
 
 | Feature | Notes |
 |---------|-------|
-| Three-mode delimiter system (`[]`, `{}`, `()`) | yes |
-| Infix mode — no precedence, left-to-right | unary prefix binds tighter |
+| Three-mode delimiter system (`[]`, `{}`, `()`) | **(spec ahead of impl)** spec is now two modes: `[]` prefix + `{}` command. `()` infix is currently implemented and pending removal. |
+| Infix mode — no precedence, left-to-right | **(spec ahead of impl)** pending removal. |
 | Pipe threading (`\|` first-arg in command mode) | yes |
-| Binding operators (`=`, `:`, `::`) | prelude macros |
+| Binding operators (`=`, `:`, `::`) | **(spec ahead of impl)** removed from spec; prelude macros currently still in place. |
 | Arrow field access (`->`) | chained |
-| `proc` syntax (`{params} {body}`, type-before-name) | yes |
-| `struct` syntax (`struct Name {type field, ...}`) | C-ABI layout |
+| `proc` syntax (`{params} {body}`) | yes |
+| `proc` typed-return position — after params: `proc f {…} T {…}` | **(spec ahead of impl)** current form is `proc T f {…} {…}`. |
+| `struct` declaration (`struct Name {type field, ...}`) | C-ABI layout |
+| Struct constructor — named-only (`[Pt x 30 y 15]`) | **(spec ahead of impl)** current constructor is positional (`[Pt 30 15]`); printer uses a third form. |
 | `if`/`elif`/`else` | expression-valued |
 | `while` loops | yes |
-| `for` — all 4 forms | yes |
+| `for` — all 4 forms | **(spec ahead of impl)** explicit form is `for NAME COLL {body}` per spec; current order is `for COLL NAME {body}`. |
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
 | `incr name` — sugar for `set name [+ $name 1]` | prelude macro |
-| String interpolation (`$var`, `$[...]`, `$(...)`) | nested |
+| String interpolation (`$var`, `$[...]`) | **(spec ahead of impl)** `$(...)` form still accepted by the implementation; pending removal alongside `()`. |
 | Line continuation (`\` at end of line) | yes |
 | Comments (`#`, `##`) | yes |
 | Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
 | `assert` builtin | `OP_ASSERT`: halts the VM with "assertion failed" on falsy, else returns nil |
+| `assert-eq` family (`-ne`, `-lt`, `-le`, `-gt`, `-ge`) | **(spec ahead of impl)** not yet implemented; comparison-asserting builtins for ergonomic test code without `()` infix. |
 | Persistent collections (vectors, maps) | RRB-tree, HAMT |
 | Mutable state (`box`, `atom`, `swap`, `reset`) | thread-local boxes, CAS atoms |
 | Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS + SM transform; NxM scheduler |
@@ -1318,9 +1290,10 @@ Features from this document compared against the current codebase. Last updated:
 | Typed collections (`[Vec T]`, `[Map K V]`) | see `TYPE_SYSTEM.md` |
 | Fixed-size C-ABI buffers (`[Buf N T]`) | see `BUFFER_DESIGN.md`; nested bufs + GC-traced elements deferred |
 | Variadic procs (`proc log {level, ..msgs}`) | `..rest` in proc params |
-| Ranges (`(1 ..< 10)`, `(1 ..= 10)`) | infix in `()`; produce streams |
+| Ranges — `[range a b]`, `[range-inclusive a b]` | **(spec ahead of impl)** currently infix `(a ..< b)` / `(a ..= b)`. |
 | Multi-line strings (`"""..."""`) | with interpolation, Kotlin-style indent |
-| Optional chaining (`?.`) | in `()` mode |
+| Optional chaining (`?.`) | **(spec ahead of impl)** spec is `[?. $val field]` prefix (holding pattern); current implementation is `($val ?. field)` in `()` mode. |
+| Negative numeric literals (`-1`) | **(spec ahead of impl)** lexer currently requires `(-1)` workaround in argument position; spec is to accept `-1` directly. |
 | Module visibility (`_` prefix = private) | compiler-enforced at import |
 | Pragmas (`#{ ... }`) | yes |
 | Same-scope shadowing error | compile-time |
