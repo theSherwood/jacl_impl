@@ -1,0 +1,14 @@
+# expect: total: 3
+# expect: total: 30
+# expect: val: 10
+# §12 migration guard: `$[...]` (juxtaposition) interpolation must keep
+# working once `$(...)` (infix) interpolation is removed. Mirrors the
+# test_dollar_paren_compile_* coverage in C, but in jacl-fixture form so
+# it survives PR 2's deletion of the C-side $() tests.
+print "total: $[+ 1 2]"
+def price 10
+def qty 3
+print "total: $[* $price $qty]"
+def x 5
+def y [+ 2 3]
+print "val: $[+ $x $y]"

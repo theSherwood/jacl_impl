@@ -3,6 +3,6 @@
 struct Point {i32 x, i32 y}
 proc main {} {
   def p [Point x 10 y 20]
-  print ($p ?. x)
+  print [?. $p x]
 }
 main

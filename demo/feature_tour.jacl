@@ -161,17 +161,17 @@ def i32 small 7
 def i64 wide [to i64 $small]
 print [to-string $wide]
 
-# --- 5. Three parsing modes: [] juxtaposition, () infix, {} command --
-# In [], items are juxtaposed (no operators between them).
-# In (), symbolic operators parse infix, no precedence, left-assoc.
+# --- 5. Two parsing modes: [] juxtaposition, {} command -------------
+# `[]` is for value computation (head + args).
+# `{}` is for command/pipeline mode.
 # => 5
 print [+ 2 [- 5 2]]                  # juxtaposition + nested call
 # => 9
-print (1 + 2 * 3)                    # left-assoc: (1+2)*3 = 9
+print [* [+ 1 2] 3]                  # nested calls express precedence
 # => 7
-print (1 + (2 * 3))                  # explicit grouping
+print [+ 1 [* 2 3]]                  # explicit grouping
 # => 5
-print (10 - 3 - 2)                   # left-assoc subtract
+print [- [- 10 3] 2]                 # left-assoc subtract
 
 # --- 6. String interpolation -----------------------------------------
 # => hi alice, 1+2=3, total=42
@@ -239,17 +239,17 @@ print [== [vec 1 2 3] [vec 1 2 3]]
 # => positive
 # => zero
 def n 7
-if ($n > 0) {
+if [> $n 0] {
   print "positive"
-} elif ($n == 0) {
+} elif [== $n 0] {
   print "zero"
 } else {
   print "negative"
 }
 def z 0
-if ($z > 0) {
+if [> $z 0] {
   print "positive"
-} elif ($z == 0) {
+} elif [== $z 0] {
   print "zero"
 } else {
   print "negative"
@@ -260,7 +260,7 @@ if ($z > 0) {
 # => 55
 mut sum 0
 mut i 1
-while ($i <= 10) {
+while [<= $i 10] {
   sum :: [+ $sum $i]
   i :: [+ $i 1]
 }
@@ -285,8 +285,8 @@ for [vec "a" "b"] $dump
 # => 1
 # => 3
 for [vec 1 2 3 4] {
-  if ($it == 2) { continue }
-  if ($it == 4) { break }
+  if [== $it 2] { continue }
+  if [== $it 4] { break }
   print $it
 }
 
@@ -351,11 +351,11 @@ print [filter [vec 1 2 3 4 5] [\ > $it 2]]
 vec 1 2 3 4 5 6 7 | filter [\ > $it 3] | count | print
 
 # --- 15. Streams: ranges, yield, lazy ops, collect -------------------
-# Ranges produce streams in () infix mode.
+# `range` is exclusive; `range-inclusive` is inclusive. Both yield streams.
 # => [vec 1 2 3 4]
-print [collect (1 ..< 5)]
+print [collect [range 1 5]]
 # => [vec 1 2 3 4 5]
-print [collect (1 ..= 5)]
+print [collect [range-inclusive 1 5]]
 
 # Generator via yield.
 # => [vec 1 2 3]
@@ -450,8 +450,8 @@ demo-all
 # => hello
 # => nil
 def om [map "name" "hello"]
-print ($om ?. name)
-print ($om ?. missing)
+print [?. $om name]
+print [?. $om missing]
 
 # --- 19. Maps with chained `->` --------------------------------------
 # => deep
@@ -544,8 +544,8 @@ print $shadowed
 
 # --- 24. Pipes composing the whole tour ------------------------------
 # => [vec 4 16 36 64 100]
-1 ..= 10 \
-  | filter [\ == 0 ($it % 2)] \
+range-inclusive 1 10 \
+  | filter [\ == 0 [% $it 2]] \
   | transform [\ * $it $it] \
   | collect \
   | print

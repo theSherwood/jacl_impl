@@ -88,41 +88,41 @@ proc main {} {
   # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`
   # operators are command-mode sugar for these.
   def imm 7
-  assert ($imm == 7)
+  assert [== $imm 7]
   also = 11                       # `=` is `def` sugar
-  assert ($also == 11)
+  assert [== $also 11]
   mut counter 0
   set counter 2
-  assert ($counter == 2)
+  assert [== $counter 2]
   reassignable : 0                # `:` is `mut` sugar
   reassignable :: 5               # `::` is `set` sugar
-  assert ($reassignable == 5)
+  assert [== $reassignable 5]
 
-  # ----- three modes -----
-  # `[]` juxtaposition: head + args. `{}` command mode: bare commands.
-  # `()` infix: no precedence, left-to-right.
-  assert ([+ 1 [* 2 [+ 1 3]]] == 9)
-  assert ((1 + 2 + 4) == 7)
-  assert ((1 + 2 * 2) == 6)       # ((1+2)*2) — no precedence
+  # ----- two modes -----
+  # `[]` juxtaposition: head + args (value computation).
+  # `{}` command mode: bare commands and pipelines.
+  assert [== [+ 1 [* 2 [+ 1 3]]] 9]
+  assert [== [+ [+ 1 2] 4] 7]
+  assert [== [* [+ 1 2] 2] 6]
 
   # ----- string interpolation -----
-  # `$var`, `$[...]` (juxtaposition), `$(...)` (infix) all nest in "".
+  # `$var` and `$[...]` (juxtaposition) both nest in "".
   def who "alice"
   def yrs 31
-  assert ("name=$who age=$yrs sum=$(2 + 3)" == "name=alice age=31 sum=5")
+  assert [== "name=$who age=$yrs sum=$[+ 2 3]" "name=alice age=31 sum=5"]
 
   # ----- procs -----
   # Params and body are both `{}` blocks. Type-before-name everywhere.
   # Procs are defined at module level (see above).
-  assert ([add 20 30] == 50)
-  assert ([greet bob] == "hi bob")
-  assert ([zero-arg] == 30)
+  assert [== [add 20 30] 50]
+  assert [== [greet bob] "hi bob"]
+  assert [== [zero-arg] 30]
 
   # ----- typed procs -----
   # Typed params/return are checked at call sites; arithmetic on
   # typed locals stays unboxed.
-  assert ([typed-add 3 4] == 7)
-  assert ([shout hello] == "hello!")
+  assert [== [typed-add 3 4] 7]
+  assert [== [shout hello] "hello!"]
   # `assert-type` is a compile-time static check: the typer compares
   # the expression's inferred type to the second arg. No runtime cost,
   # no side effects (the expression itself is not evaluated).
@@ -132,26 +132,26 @@ proc main {} {
   # ----- variadic + splat -----
   # `..nums` in params collects trailing args. `..$vec` at a call site
   # spreads a collection into separate args.
-  assert ([sum-all 1 2 3 4] == 10)
+  assert [== [sum-all 1 2 3 4] 10]
   def xs [vec 5 10 15]
-  assert ([sum-all ..$xs] == 30)
+  assert [== [sum-all ..$xs] 30]
 
   # ----- lambdas -----
   # `[\ body ]` is shorthand for a one-arg proc with `$it` as the param.
   def square [\ * $it $it]
-  assert ([square 10] == 100)
+  assert [== [square 10] 100]
   assert [== [collect [transform [vec 1 2 3] [\ * $it 2]]] [vec 2 4 6]]
 
   # ----- if / while -----
   # `if` is an expression. `while [cond] {body}`.
-  assert ([if (5 > 0) { "positive" } { "non-positive" }] == "positive")
+  assert [== [if [> 5 0] { "positive" } { "non-positive" }] "positive"]
   mut sum 0
   mut i 1
   while [<= $i 10] {
     set sum [+ $sum $i]
     set i [+ $i 1]
   }
-  assert ($sum == 55)
+  assert [== $sum 55]
 
   # ----- for -----
   # Three relevant forms: implicit `$it`, explicit binding, C-style.
@@ -168,10 +168,10 @@ proc main {} {
   # `[for $xs n { body }]` and Just Works.
   mut seen 0
   for [vec 1 2 3] { set seen [+ $seen $it] }
-  assert ($seen == 6)
+  assert [== $seen 6]
   mut range-sum 0
-  for (0 ..< 3) n { set range-sum [+ $range-sum $n] }
-  assert ($range-sum == 3)
+  for [range 0 3] n { set range-sum [+ $range-sum $n] }
+  assert [== $range-sum 3]
 
   # C-style `for {init; cond; step} { body }` — Tcl-shaped, falls out
   # of the language for free: `for` taking a header-block plus a
@@ -180,14 +180,14 @@ proc main {} {
   # both the condition and the body.
   mut product 1
   for {mut i 1; <= $i 4; incr i} { set product [* $product $i] }
-  assert ($product == 24)
+  assert [== $product 24]
 
   # ----- streams -----
   # Lazy sequences from generators (`yield`), ranges, or `lines`.
   # `collect` materializes; `filter`/`transform` work on either.
-  assert [== [collect (1 ..= 5)] [vec 1 2 3 4 5]]
-  assert [== [collect [transform (1 ..= 5) [\ * $it 2]]] [vec 2 4 6 8 10]]
-  assert [== [collect [transform [filter (1 ..= 6) [\ == 0 ($it % 2)]] [\ * $it $it]]] [vec 4 16 36]]
+  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]
+  assert [== [collect [transform [range-inclusive 1 5] [\ * $it 2]]] [vec 2 4 6 8 10]]
+  assert [== [collect [transform [filter [range-inclusive 1 6] [\ == 0 [% $it 2]]] [\ * $it $it]]] [vec 4 16 36]]
 
   # ----- generators -----
   # `count-up` (defined above) is a generator: each call returns a
@@ -200,28 +200,28 @@ proc main {} {
   # Positional `[]` for vectors; named `{}` for structs/maps;
   # `_` wildcard; `..rest` for trailing remainder.
   def [a b c] [vec 1 2 3]
-  assert (($a == 1) && (($b == 2) && ($c == 3)))
+  assert [&& [== $a 1] [&& [== $b 2] [== $c 3]]]
   def p [Pt x 10 y 20]
   def {x, y} $p
-  assert (($x == 10) && ($y == 20))
+  assert [&& [== $x 10] [== $y 20]]
   def [head ..tail] [vec first second third]
-  assert ($head == first)
+  assert [== $head first]
   assert [== $tail [vec second third]]
 
   # ----- structs -----
   # `struct Name {type field, ...}` at module level. Constructor
   # `[Name vals...]`. Field access via `->`.
   def pt [Pt x 3 y 4]
-  assert ($pt->x == 3)
-  assert ($pt->y == 4)
+  assert [== $pt->x 3]
+  assert [== $pt->y 4]
 
   # ----- maps -----
   # `[map "k" v "k2" v2 ...]`. `map-get` reads; `->` is sugar for
   # string keys.
   def m [map a 1 b 2]
-  assert ([map-get $m a] == 1)
+  assert [== [map-get $m a] 1]
   def cfg [map port 42]
-  assert ($cfg->port == 42)
+  assert [== $cfg->port 42]
 
   # ----- typed collections -----
   # `[Vec T]` / `[Map V]` parameterize element / value type. The typed
@@ -229,19 +229,19 @@ proc main {} {
   # compiler checks element types at push/set sites. Untyped `[vec ...]`
   # / `[map ...]` still work for dyn-everything use.
   def [Vec i32] typed-nums [[Vec i32] 10 20 30]
-  assert ([vec-get $typed-nums 1] == 20)
+  assert [== [vec-get $typed-nums 1] 20]
   def [Map Pt] coords [[Map Pt] origin [Pt x 0 y 0] right [Pt x 1 y 0]]
-  assert ([map-get $coords right]->x == 1)
+  assert [== [map-get $coords right]->x 1]
 
   # ----- mutable state -----
   # `box` is thread-local; `atom` is CAS-shared. `reset` stores;
   # `swap` applies a fn. `deref` reads.
   def cell [box 0]
-  assert ([deref $cell] == 0)
+  assert [== [deref $cell] 0]
   reset $cell 1
-  assert ([deref $cell] == 1)
+  assert [== [deref $cell] 1]
   swap $cell [\ + $it 5]
-  assert ([deref $cell] == 6)
+  assert [== [deref $cell] 6]
 
   # ----- atom watchers -----
   # `watch` registers a keyed listener that fires on every reset/swap
@@ -251,15 +251,15 @@ proc main {} {
   tap = proc {old, new} { reset $witness $new }
   watch $counter tap $tap
   reset $counter 7
-  assert ([deref $witness] == 7)
+  assert [== [deref $witness] 7]
   swap $counter [\ + $it 5]
-  assert ([deref $witness] == 12)
+  assert [== [deref $witness] 12]
 
   # ----- errors -----
   # `try {body} name {handler}`. Errors are values; pipes short-circuit.
   # `assert` halts the VM, but `error` produces an error VALUE that
   # propagates through pipes and can be caught.
-  assert ([try { error bad } e { concat "caught: " [error-val $e] }] == "caught: bad")
+  assert [== [try { error bad } e { concat "caught: " [error-val $e] }] "caught: bad"]
   assert [error? [error boom]]
 
   # ----- $ctx (dynamic context) -----
@@ -267,15 +267,15 @@ proc main {} {
   # at module level are visible everywhere. `with-ctx {field val ...}
   # { body }` overrides for the dynamic extent of body; prior values
   # restore on exit, including via error.
-  assert ($ctx->verbosity == 0)
+  assert [== $ctx->verbosity 0]
   with-ctx {verbosity 3} {
-    assert ($ctx->verbosity == 3)
+    assert [== $ctx->verbosity 3]
   }
-  assert ($ctx->verbosity == 0)
+  assert [== $ctx->verbosity 0]
   try {
     with-ctx {verbosity 99} { error escape }
   } _ {}
-  assert ($ctx->verbosity == 0)
+  assert [== $ctx->verbosity 0]
 
   # ----- macros -----
   # `defmacro` (see top of file) rewrites at compile time. `unless` is
@@ -283,9 +283,9 @@ proc main {} {
   # is what actually runs.
   mut hit 0
   unless [== 1 2] { set hit 5 }
-  assert ($hit == 5)
+  assert [== $hit 5]
   unless [== 1 1] { set hit 99 }
-  assert ($hit == 5)
+  assert [== $hit 5]
 
   # ----- interpret / sandbox -----
   # `[interpret SRC]` compiles and runs SRC in a child VM with the
@@ -293,8 +293,8 @@ proc main {} {
   # entries in PRELUDE, so an empty map yields a no-I/O sandbox.
   # `[interpret-prelude]` returns the default prelude as a map, so
   # you can derive subsets by `map-remove` / `map-set`.
-  assert ([interpret "[+ 1 [* 2 3]]"] == 7)
-  assert ([interpret [map] "[+ 10 20]"] == 30)
+  assert [== [interpret "[+ 1 [* 2 3]]"] 7]
+  assert [== [interpret [map] "[+ 10 20]"] 30]
   # Blocked primitives surface as error values rather than aborting.
   def safe [map-remove [interpret-prelude] "spawn"]
   assert [error? [interpret $safe "[spawn { 99 }]"]]
@@ -314,19 +314,19 @@ main
 # `spawn { block }` returns a future. `await` blocks until it resolves.
 # Spawned tasks run on the NxM worker pool and snapshot `$ctx`.
 def fut [spawn { + 20 22 }]
-assert ([await $fut] == 42)
+assert [== [await $fut] 42]
 
 # ----- direct-style: calling suspending procs -----
 # Procs that internally await are themselves suspending — but the
 # CPS transform makes that invisible at the call site. `double-async`
 # is defined above using `spawn`/`await`; here we just call it like a
 # plain function. No `await` keyword, no `.then()`, no async coloring.
-assert ([double-async 21] == 42)
+assert [== [double-async 21] 42]
 
 # Suspending procs compose like normal procs. `sum-async` calls
 # `double-async` twice inline as args to `+`; the arithmetic reads as
 # sequential code even though each call suspends to a worker.
-assert ([sum-async 10 16] == 52)
+assert [== [sum-async 10 16] 52]
 
 # ----- parallel -----
 # `parallel { } { } ...` runs all blocks concurrently and returns a
@@ -336,7 +336,7 @@ assert [== [parallel { 10 } { 20 } { 30 }] [vec 10 20 30]]
 # ----- race -----
 # `race { } { } ...` returns the first to complete. Bodies should be
 # deterministic for testability — both branches return the same value.
-assert ([race { 7 } { 7 }] == 7)
+assert [== [race { 7 } { 7 }] 7]
 
 # ----- error in parallel -----
 # `parallel` runs every branch to completion; the result vector may

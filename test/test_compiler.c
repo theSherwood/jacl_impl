@@ -9217,7 +9217,7 @@ static int test_bind_typed_colon(void) {
   TEST_PASS();
 }
 
-/* x :: ($x + 1) → set x (+ $x 1) — reassignment via :: */
+/* x :: [+ $x 1] → set x [+ $x 1] — reassignment via :: */
 static int test_bind_double_colon_set(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -9231,7 +9231,7 @@ static int test_bind_double_colon_set(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "x : 10\n"
-    "x :: ($x + 5)\n"
+    "x :: [+ $x 5]\n"
     "[print $x]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -9264,7 +9264,7 @@ static int test_bind_mixed_with_commands(void) {
     "mut d 0\n"
     "c :: 3\n"
     "set d 4\n"
-    "[print (($a + $b) + ($c + $d))]\n", &vm, &arena);
+    "[print [+ [+ $a $b] [+ $c $d]]]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n");
@@ -9293,7 +9293,7 @@ static int test_bind_in_block(void) {
     "proc test {} {\n"
     "  x = 10\n"
     "  y = 20\n"
-    "  print ($x + $y)\n"
+    "  print [+ $x $y]\n"
     "}\n"
     "[test]\n", &vm, &arena);
 
@@ -9322,7 +9322,7 @@ static int test_bind_expr_values(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "x = [+ 1 2]\n"
-    "y = ($x * 3)\n"
+    "y = [* $x 3]\n"
     "[print $y]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -9443,7 +9443,7 @@ static int test_arrow_in_infix_mode(void) {
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
       "  p = [Point x 10 y 20]\n"
-      "  print ($p->x + $p->y)\n"
+      "  print [+ $p->x $p->y]\n"
       "}\n"
       "main",
       &vm, &arena);

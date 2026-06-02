@@ -1,4 +1,4 @@
 # expect: nil
 # Test: optional chaining on nil returns nil
 def x $nil
-print ($x ?. name)
+print [?. $x name]
