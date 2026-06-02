@@ -51,6 +51,16 @@ From `DESIGN.md` "Project Layout" and `DESIGN_CRITIQUE.md` §3.2, §3.4.
   `bigfloat y`). Projected wiring add: +500–1,000 LOC. `rational.h`
   and `test_rational.c` deleted 2026-05-16 — rationals were cut from
   the integration plan per `DESIGN_CRITIQUE.md` §3.2 / §4.4.
+- **`lib/segment_array/`** (~320 LOC) — segmented growable array.
+  Backs JACL's **`arr` / `[Arr T]`** type: a mutable ref type that
+  parallels `[Vec T]`'s shape (dyn by default with `[arr ...]` /
+  `[$arr]`, explicitly typed via `[Arr T]` and `[[Arr T] ...]`),
+  complementing the existing immutable `[Vec T]` (RRB) and
+  fixed-size `[Buf N T]`. Needs a GC object kind + tracing for
+  ref-element segments, write-barrier integration on mutating ops,
+  typer rules mirroring `[Vec T]`'s element-type machinery, and a
+  builtin set (push / pop / get / set / len / iter). Projected
+  wiring add: not yet scoped.
 
 ---
 
