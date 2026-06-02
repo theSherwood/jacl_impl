@@ -1,0 +1,24 @@
+# mode: concurrent
+# Explicit-binding for-loops inside SM-compiled procs.
+# Regression for the bug where the loop binding was stored to a stack
+# local while body reads went through the SM state field (uninitialized).
+#
+# expect: 9
+# expect: 6
+
+proc sum-vec {} {
+  def fut [spawn { + 1 2 }]
+  mut total 0
+  for [vec 1 2 3] n { set total [+ $total $n] }
+  + $total [await $fut]
+}
+
+proc count-stream {} {
+  def fut [spawn { 0 }]
+  mut total 0
+  for [range 1 4] n { set total [+ $total $n] }
+  + $total [await $fut]
+}
+
+print [sum-vec]
+print [count-stream]

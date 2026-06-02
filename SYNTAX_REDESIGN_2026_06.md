@@ -225,74 +225,61 @@ exact ratios should be taken to no more than two significant figures.
 
 ---
 
-## 7. SM-compiler bugs still live
+## 7. SM-compiler bugs — fixed
 
-The apology comment at `test/jacl/tour.jacl:285–290` is **accurate
-and current** as of HEAD. Two bugs in the state-machine transform are
-unfixed:
+Both bugs that were live when this doc was drafted are now closed.
+Regression tests at `test/jacl/sm_for_explicit_binding.jacl` and
+`test/jacl/sm_destructure_vec.jacl`.
 
-### Bug 1 — `for COLL VAR` inside SM-compiled proc
+### Root cause
 
-Repro:
+For SM-compiled procs containing `await`/`parallel`/`race`, the
+liveness optimization that prunes non-crossing locals from the state
+layout is skipped (the inline-vs-resume diamond control flow makes
+stack-slot numbering inconsistent for some forms — see
+`compiler.c::sm__optimize_state_layout`). So **every** local declared
+in such a proc gets a state-field slot, and `$var` reads go through
+`OP_GET_STATE_FIELD`.
 
-```jacl
-# mode: concurrent
-proc inner {} {
-  def fut [spawn { + 1 2 }]
-  mut total 0
-  for [vec 1 2 3] n { set total [+ $total $n] }
-  + $total [await $fut]
-}
-print [inner]                # expect 6, gets: runtime error: (unknown)
-```
+The bugs were in the **bind sites**: the for-loop's element-binding
+step and the destructure paths wrote values to stack locals via
+`OP_SET_LOCAL` (the existing path), while body reads went to the
+state field (uninitialized). The values were on the stack but the
+state field was nil.
 
-Without the `spawn`/`await` the same `for` passes — the bug is in
-the SM transform's handling of locals declared by the explicit-binding
-form crossing suspension boundaries.
+### Bug 1 fix — for-loop element binding
 
-### Bug 2 — positional destructure of suspending-primitive result inside SM-compiled proc
+In `compile_command`'s HEAD_FOR branch, when the binding is in the SM
+state layout, emit `OP_SET_STATE_FIELD` after computing the element
+value instead of `OP_SET_LOCAL` + `OP_POP`. Applies to both the
+stream-loop and vector-loop paths. The typed-vec path still uses
+`OP_INLINE_TO_LOCAL` (would need `OP_SET_STATE_FIELD_WIDE` wiring;
+follow-up).
 
-Repro:
+### Bug 2 fix — destructure binding
 
-```jacl
-# mode: concurrent
-proc inner {} {
-  def [a b c] [parallel { 10 } { 20 } { 30 }]
-  + $a [+ $b $c]
-}
-print [inner]
-# expect 60, gets: type error in '+': expected matching numeric types,
-# got nil and nil
-```
+A new helper `compiler__sync_destructure_to_sm` runs at the end of
+`compile_destructure_vec` and `compile_destructure_named` in SM
+mode. For each binding name that appears in the state layout, it
+emits `OP_GET_LOCAL slot` + `OP_SET_STATE_FIELD field` — copying
+the value the existing destructure code put on the stack into the
+state field. Mutable cell-locals work naturally: `OP_GET_LOCAL`
+pushes the cell pointer, `OP_SET_STATE_FIELD` stores it, and reads
+via `OP_GET_STATE_FIELD_CELL` deref the same shared cell.
 
-All three destructure positions bind to nil. Without the suspension
-(`def [a b c] [vec 10 20 30]` instead) the destructure passes. The SM
-transform is not spilling/restoring the vector result across the
-suspension in a form the destructure can read.
+### Remaining sharp edge: name shadowing in SM-compiled procs
 
-### Not the same bug as the recent fixes
+The tour's `main` redefines `counter` as both `mut counter 0` (i32)
+and `def counter [atom 0]` later in the same scope. With the proc
+SM-compiled, both names share a single state-field slot, and the
+field metadata (mutable cell-wrapped i32) doesn't match the second
+binding's value (an atom). Reads of `$counter` after the second
+definition try to deref a non-cell value as a cell.
 
-Three SM/operand-stack fixes landed in May:
-- `8669f5d` — initial operand-stack-loss fix (await/sleep).
-- `4f885bb` — extended spill to yield/parallel/race.
-- `30d4bdd` — audit + 6 more spill special-form entries.
-- `4c329a0` — **inline-suspending-siblings fix**: `+ [susp 10] [susp 16]`
-  no longer corrupts. This is the most prominent recent SM fix and
-  reads superficially close to the apology, but it's a different bug
-  class.
-
-The apology bugs are about **specific syntactic forms** (`for COLL VAR`,
-positional vector destructure) crossing the SM boundary, not about
-operand-stack spilling for inline expressions.
-
-### Implication for the redesign
-
-- The for-loop reversal (§5) **does not dodge Bug 1**. Whatever shape
-  the explicit form takes, the SM transform needs the same fix.
-- Bug 2 is the more painful one. With the struct/print-symmetry
-  changes (§1, §2) destructuring becomes more important than ever, and
-  `def [a b c] [parallel …]` is a core concurrent idiom. Worth
-  prioritizing.
+This is a pre-existing issue, not caused by the bug fixes here.
+Moving the tour's concurrency block inside `main` would expose it.
+For now `main` stays without concurrency; the redesigned apology
+comment in the tour notes the remaining edge.
 
 ---
 

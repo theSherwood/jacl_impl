@@ -302,12 +302,13 @@ proc main {} {
 
 main
 
-# Concurrency lives at top level rather than inside `main` because
-# putting a suspending call (spawn/parallel/race) inside a proc body
-# routes that proc through state-machine compilation, which currently
-# has open bugs around `for` explicit-binding and positional
-# destructuring of vector results. Top-level SM compilation is robust
-# for these primitives, so we exercise them here.
+# Concurrency lives at top level rather than inside `main` because the
+# tour's `main` redefines a few names across sections (e.g. `counter`
+# as both `mut` and `atom`) and SM compilation routes both shadows
+# through a single state field. The for-loop and positional-vector-
+# destructure bugs the apology used to mention are fixed (see
+# sm_for_explicit_binding.jacl and sm_destructure_vec.jacl); the
+# remaining sharp edge is name-shadowing across SM state fields.
 
 # ----- spawn / await -----
 # `spawn { block }` returns a future. `await` blocks until it resolves.

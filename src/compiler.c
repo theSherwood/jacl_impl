@@ -5240,6 +5240,48 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
  * For globals (scope_depth==0): each element stored with OP_DEF_GLOBAL.
  * rest_name/rest_name_len: if non-NULL, collects remaining elements into a vector.
  */
+/* SM-mode helper: after a destructure has populated local slots, copy
+ * each binding's value into its state field. Without this, an SM-
+ * compiled proc whose body references the destructured names through
+ * the SM state-field path (sm__walk_locals adds destructured names
+ * unconditionally; the liveness optimization skips await/parallel/
+ * race) reads uninitialized state and returns nil.
+ *
+ * For mutable cell-locals, OP_GET_LOCAL pushes the cell pointer and
+ * OP_SET_STATE_FIELD stores it — subsequent OP_GET_STATE_FIELD_CELL
+ * shares the same cell, so writes round-trip correctly. */
+static void compiler__sync_destructure_to_sm(
+    Compiler* c, const char** d_names, uint32_t* d_name_lens, uint32_t d_count,
+    const char* rest_name, uint32_t rest_name_len, uint32_t line)
+{
+  if (!c->sm_analysis) return;
+  for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] == 1 && d_names[i][0] == '_') continue;
+    JaclVal nm = compiler__name_val(c->heap, c->intern_table,
+                                      d_names[i], d_name_lens[i]);
+    int field = sm__find_field(&c->sm_analysis->state_layout, nm);
+    if (field < 0) continue;
+    int slot = compiler__resolve_local(c, nm);
+    if (slot < 0) continue;
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)slot, line);
+    compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+    compiler__emit_byte(c, (uint8_t)field, line);
+  }
+  if (rest_name && rest_name_len > 0) {
+    JaclVal nm = compiler__name_val(c->heap, c->intern_table,
+                                      rest_name, rest_name_len);
+    int field = sm__find_field(&c->sm_analysis->state_layout, nm);
+    int slot = compiler__resolve_local(c, nm);
+    if (field >= 0 && slot >= 0) {
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)slot, line);
+      compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+      compiler__emit_byte(c, (uint8_t)field, line);
+    }
+  }
+}
+
 void compiler__compile_destructure_vec(
     Compiler* c,
     const char** d_names, uint32_t* d_name_lens,
@@ -5344,6 +5386,8 @@ void compiler__compile_destructure_vec(
         c->locals[c->local_count - 1].is_mutable = true;
         c->locals[c->local_count - 1].type = TYPE_VEC;
       }
+      compiler__sync_destructure_to_sm(c, d_names, d_name_lens, d_count,
+                                         rest_name, rest_name_len, line);
       compiler__emit_byte(c, OP_NIL, line);
     } else {
       /* --- Global scope with rest --- */
@@ -5427,6 +5471,8 @@ void compiler__compile_destructure_vec(
           compiler__apply_destructure_type(c, d_types, d_type_lens, i);
         }
       }
+      compiler__sync_destructure_to_sm(c, d_names, d_name_lens, d_count,
+                                         NULL, 0, line);
       /* def/mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -5751,6 +5797,8 @@ void compiler__compile_destructure_named(
       }
     }
 
+    compiler__sync_destructure_to_sm(c, d_names, d_name_lens, d_count,
+                                       rest_name, rest_name_len, line);
     /* def/mut returns nil */
     compiler__emit_byte(c, OP_NIL, line);
   } else {
@@ -10572,10 +10620,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* US-005: Check if pulled value is an error — if so, exit loop with error */
       uint32_t error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
 
-      /* Bind element: SET_LOCAL + POP */
-      compiler__emit_byte(c, OP_SET_LOCAL, line);
-      compiler__emit_byte(c, elem_slot, line);
-      compiler__emit_byte(c, OP_POP, line);
+      /* Bind element. In SM mode the binding may live in a state field
+       * (sm__walk_locals adds for-loop bindings unconditionally; the
+       * liveness optimization is skipped for await/parallel/race procs).
+       * If so, write through OP_SET_STATE_FIELD to keep the state-field
+       * read path in sync. */
+      int sm_bind_field = -1;
+      if (c->sm_analysis) {
+        JaclVal bn = compiler__name_val(c->heap, c->intern_table,
+                                          bind_name, bind_name_len);
+        sm_bind_field = sm__find_field(&c->sm_analysis->state_layout, bn);
+      }
+      if (sm_bind_field >= 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
+      } else {
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, elem_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
 
       /* Compile body statements inline */
       uint32_t body_count = body_block->data.block.count;
@@ -10695,7 +10758,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Exit if false */
     uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
-    /* Update element: $it = __col[__idx] */
+    /* Update element: $it = __col[__idx]. In SM mode the binding may
+     * live in a state field — see the stream-loop branch above for the
+     * full rationale. */
+    int sm_bind_field = -1;
+    if (c->sm_analysis) {
+      JaclVal bn = compiler__name_val(c->heap, c->intern_table,
+                                        bind_name, bind_name_len);
+      sm_bind_field = sm__find_field(&c->sm_analysis->state_layout, bn);
+    }
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, col_slot, line);
     compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -10703,14 +10774,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (is_typed_vec_loop) {
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+      /* Typed-vec binding into a state field would need OP_SET_STATE_
+       * FIELD_WIDE; that path is not yet wired here. Fall back to the
+       * local-slot path — for-loops over [Vec Struct] inside SM procs
+       * are still subject to the same state-vs-local mismatch this
+       * branch handles for scalar elements. Tracked as a follow-up. */
       compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
       compiler__emit_byte(c, elem_slot, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
     } else {
       compiler__emit_byte(c, OP_VEC_GET, line);
-      compiler__emit_byte(c, OP_SET_LOCAL, line);
-      compiler__emit_byte(c, elem_slot, line);
-      compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
+      if (sm_bind_field >= 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
+      } else {
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, elem_slot, line);
+        compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
+      }
     }
 
     /* Compile body statements inline */
