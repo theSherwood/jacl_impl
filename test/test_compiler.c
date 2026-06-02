@@ -5148,9 +5148,9 @@ static int test_sm_state_field_width_default(void) {
   JaclVal a = jacl_inline_string("a", 1);
   JaclVal b = jacl_inline_string("b", 1);
   JaclVal c = jacl_inline_string("c", 1);
-  sm__add_state_field(&layout, a, false, false, 1, 0);
-  sm__add_state_field(&layout, b, true,  false, 1, 0);
-  sm__add_state_field(&layout, c, false, true,  1, 0);
+  sm__add_state_field(&layout, a, false, false, 1, 0, 0, 0);
+  sm__add_state_field(&layout, b, true,  false, 1, 0, 0, 0);
+  sm__add_state_field(&layout, c, false, true,  1, 0, 0, 0);
 
   ASSERT_U32_EQ(layout.field_count, 3);
   ASSERT_U32_EQ(layout.total_slots, 3);
@@ -5187,11 +5187,11 @@ static int test_sm_state_field_width_struct(void) {
   JaclVal c = jacl_inline_string("c", 1);
 
   /* a: width 1 (scalar) */
-  sm__add_state_field(&layout, a, false, false, 1, 0);
+  sm__add_state_field(&layout, a, false, false, 1, 0, 0, 0);
   /* s: width 3 (struct like Vec3 {f64 x, f64 y, f64 z}) */
-  sm__add_state_field(&layout, s, false, false, 3, 1);
+  sm__add_state_field(&layout, s, false, false, 3, 1, 0, 0);
   /* c: width 1 (scalar) */
-  sm__add_state_field(&layout, c, false, false, 1, 0);
+  sm__add_state_field(&layout, c, false, false, 1, 0, 0, 0);
 
   ASSERT_U32_EQ(layout.field_count, 3);
   ASSERT_U32_EQ(layout.total_slots, 5);  /* 1 + 3 + 1 */
@@ -5252,7 +5252,7 @@ static int test_sm_walk_locals_struct_width(void) {
   SuspensionMap map;
   memset(&map, 0, sizeof(map));
   SuspensionAnalysis analysis = compiler__analyze_suspensions(
-      body, NULL, 0, false, &map, &heap, &intern, cr.struct_registry);
+      NULL, body, NULL, 0, false, &map, &heap, &intern, cr.struct_registry);
 
   /* Should have fields: v (width 3 for Vec3 = 24 bytes / 8 = 3 slots) */
   JaclVal v_name = jacl_inline_string("v", 1);
@@ -5286,9 +5286,9 @@ static int test_sm_optimize_atomic_wide_field(void) {
   JaclVal p = jacl_inline_string("p", 1);
   JaclVal s = jacl_inline_string("s", 1);
   JaclVal t = jacl_inline_string("t", 1);
-  sm__add_state_field(&layout, p, false, true,  1, 0);  /* param, width 1 */
-  sm__add_state_field(&layout, s, false, false, 3, 1);  /* struct, width 3 */
-  sm__add_state_field(&layout, t, false, false, 1, 0);  /* scalar, width 1 */
+  sm__add_state_field(&layout, p, false, true,  1, 0, 0, 0);  /* param, width 1 */
+  sm__add_state_field(&layout, s, false, false, 3, 1, 0, 0);  /* struct, width 3 */
+  sm__add_state_field(&layout, t, false, false, 1, 0, 0, 0);  /* scalar, width 1 */
 
   ASSERT_U32_EQ(layout.total_slots, 5);
 

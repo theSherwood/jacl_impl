@@ -1,0 +1,12 @@
+# expect-error: redeclared with different storage shape
+# §8c: re-binding `counter` in a suspending proc with a different storage
+# shape (mut→def changes is_mutable) used to silently share the original
+# field slot and miscompile reads as cell-derefs of an atom. The compiler
+# now rejects the second declaration at the layout-collection pass.
+proc race-shadow {} {
+  mut counter 0
+  def counter [atom 0]
+  reset $counter 7
+  await [spawn { 0 }]
+}
+race-shadow

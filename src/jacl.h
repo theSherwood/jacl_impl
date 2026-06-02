@@ -1453,6 +1453,14 @@ typedef struct {
   StateField       fields[SM_MAX_STATE_FIELDS];
   ThreadHeap*      heap;          /* for interning names > 7 bytes */
   JaclInternTable* intern_table;  /* for interning names > 7 bytes */
+  /* §8c shape-collision sink. Set by sm__add_state_field when the same
+     name is re-added with a different storage shape (is_mutable / width
+     / struct_type_idx / is_param). Surfaced as a compile error by
+     compiler__analyze_suspensions. Only the first collision is recorded. */
+  bool             has_collision;
+  JaclVal          collision_name;
+  uint32_t         collision_line;
+  uint32_t         collision_col;
 } StateLayout;
 
 typedef struct {
@@ -2364,7 +2372,7 @@ extern void analyze__walk_body (AstNode *node, ProcSuspendInfo *info, ThreadHeap
 extern void analyze__collect_procs (AstNode *node, ProcSuspendInfoList *list, ThreadHeap *heap, JaclInternTable *intern_table);
 extern SuspensionMap compiler__analyze_suspension (AstNode **nodes, uint32_t count, ThreadHeap *heap, JaclInternTable *intern_table);
 extern void sm__walk_suspensions (AstNode *node, SuspensionAnalysis *analysis, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table);
-extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param, uint16_t width, uint32_t struct_type_idx);
+extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param, uint16_t width, uint32_t struct_type_idx, uint32_t line, uint32_t col);
 extern const StateField* sm__get_field (const StateLayout *layout, JaclVal name);
 extern int sm__find_field (const StateLayout *layout, JaclVal name);
 extern bool sm__is_field_mutable (const StateLayout *layout, JaclVal name);
@@ -2380,7 +2388,7 @@ extern void sm__liveness_mark_binding_names (AstNode *pattern, const StateLayout
 extern bool sm__loop_body_suspends (AstNode *body);
 extern void sm__liveness_walk (AstNode *node, const StateLayout *layout, FieldLiveness *liveness, int32_t *segment);
 extern void sm__optimize_state_layout (SuspensionAnalysis *analysis, AstNode *body);
-extern SuspensionAnalysis compiler__analyze_suspensions (AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table, StructTypeRegistry *struct_reg);
+extern SuspensionAnalysis compiler__analyze_suspensions (Compiler *c, AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table, StructTypeRegistry *struct_reg);
 extern bool ast__contains_suspension (AstNode *node, SuspensionMap *map);
 extern void ast__collect_local_muts (AstNode *node, JaclVal *names, uint32_t *count);
 extern bool ast__contains_nonlocal_set_impl (AstNode *node, JaclVal *local_muts, uint32_t local_mut_count);
