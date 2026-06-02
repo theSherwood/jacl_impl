@@ -60,7 +60,7 @@ typedef enum {
 
   /* Operators */
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
-  HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ,
+  HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
   HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_DOTDOT_LT, HEAD_DOTDOT_EQ,
@@ -155,6 +155,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       return HEAD_NONE;
     case 2:
       if (s[0] == '=' && s[1] == '=') return HEAD_EQ_EQ;
+      if (s[0] == '!' && s[1] == '=') return HEAD_BANG_EQ;
       if (s[0] == '<' && s[1] == '=') return HEAD_LE;
       if (s[0] == '>' && s[1] == '=') return HEAD_GE;
       if (s[0] == ':' && s[1] == ':') return HEAD_COLON_COLON;

@@ -1,0 +1,17 @@
+# `!=` as a prefix builtin: `[!= a b]` == `[~ [== a b]]`.
+#
+# expect: ok
+
+proc check {} {
+  assert [!= 1 2]
+  assert [!= "foo" "bar"]
+  assert [not [!= 1 1]]
+  assert [not [!= "x" "x"]]
+
+  # Composable in predicate form via the assert macro.
+  [assert != 1 2]
+
+  "ok"
+}
+
+print [check]

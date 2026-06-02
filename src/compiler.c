@@ -6817,6 +6817,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
     return;
   }
+  /* != — equivalent to [~ [== a b]]. Skips the struct-eq inline
+     optimization that HEAD_EQ_EQ has; struct != is uncommon enough
+     that the extra bool-flip is not worth the complexity duplication. */
+  if (hid == HEAD_BANG_EQ) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "!=", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
+    uint32_t false_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+    compiler__emit_byte(c, OP_FALSE, line);
+    uint32_t end_jump = compiler__emit_jump(c, OP_JUMP, line);
+    compiler__patch_jump(c, false_jump);
+    compiler__emit_byte(c, OP_TRUE, line);
+    compiler__patch_jump(c, end_jump);
+    c->last_expr_type = TYPE_BOOL;
+    return;
+  }
   /* Range operators: ..< (exclusive) and ..= (inclusive) */
   if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ) {
     const char* rname = (hid == HEAD_DOTDOT_LT) ? "..<" : "..=";
