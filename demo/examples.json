@@ -91,9 +91,16 @@
     "description": ""
   },
   {
+    "name": "assert_predicate_form",
+    "category": "assert",
+    "code": "# `assert` is a prelude macro. Two forms:\n#   assert EXPR              — single-arg truthy check.\n#   [assert OP arg1 arg2..]  — predicate form: evaluates [OP arg1 ..],\n#                              halts on falsy.\n#\n# expect: ok\n\nproc is-positive? {n} {\n  > $n 0\n}\n\nproc check {} {\n  # Single-arg form (today's behavior, preserved).\n  assert $true\n  assert [== 42 42]\n  assert [not [== 1 2]]\n\n  # Predicate form (new): operator in head position via [].\n  [assert == 7 7]\n  [assert < 1 2]\n  [assert <= 2 2]\n  [assert > 5 2]\n  [assert >= 5 5]\n\n  # User-defined predicate works the same way.\n  [assert is-positive? 5]\n\n  \"ok\"\n}\n\nprint [check]\n",
+    "concurrent": false,
+    "description": "`assert` is a prelude macro. Two forms:"
+  },
+  {
     "name": "assert_type_basic",
     "category": "assert",
-    "code": "# expect: ok\n# `assert-type` is a compile-time static check: the typer compares the\n# expression's inferred type to the second arg and errors on mismatch.\n# No runtime evaluation — the expression is NOT compiled (no side\n# effects, no operand-stack cost).\n\nproc i64 typed-add {i64 a, i64 b} { + $a $b }\nproc str shout {str s} { concat $s \"!\" }\n\nproc main {} {\n  def i32 thirty-two 32\n  def i64 sixty-four 64\n  def f64 pi 3.14\n  def str s \"hi\"\n\n  assert-type $thirty-two i32\n  assert-type $sixty-four i64\n  assert-type $pi f64\n  assert-type $s str\n  assert-type [typed-add 1 2] i64\n  assert-type [shout \"hello\"] str\n  assert-type [+ 1 2] i32\n  assert-type [vec 1 2 3] vec\n  assert-type [== 1 1] bool\n  print \"ok\"\n}\nmain\n",
+    "code": "# expect: ok\n# `assert-type` is a compile-time static check: the typer compares the\n# expression's inferred type to the second arg and errors on mismatch.\n# No runtime evaluation — the expression is NOT compiled (no side\n# effects, no operand-stack cost).\n\nproc typed-add {i64 a, i64 b} i64 { + $a $b }\nproc shout {str s} str { concat $s \"!\" }\n\nproc main {} {\n  def i32 thirty-two 32\n  def i64 sixty-four 64\n  def f64 pi 3.14\n  def str s \"hi\"\n\n  assert-type $thirty-two i32\n  assert-type $sixty-four i64\n  assert-type $pi f64\n  assert-type $s str\n  assert-type [typed-add 1 2] i64\n  assert-type [shout \"hello\"] str\n  assert-type [+ 1 2] i32\n  assert-type [vec 1 2 3] vec\n  assert-type [== 1 1] bool\n  print \"ok\"\n}\nmain\n",
     "concurrent": false,
     "description": "`assert-type` is a compile-time static check: the typer compares the"
   },
@@ -107,14 +114,14 @@
   {
     "name": "assert_type_no_runtime",
     "category": "assert",
-    "code": "# expect: only-this\n# assert-type does NOT evaluate its expression at runtime. If it did,\n# the embedded `print \"side-effect\"` would fire and the body of\n# `compute` would run too.\nproc i32 compute {} {\n  print \"side-effect\"\n  42\n}\nproc main {} {\n  assert-type [compute] i32\n  print \"only-this\"\n}\nmain\n",
+    "code": "# expect: only-this\n# assert-type does NOT evaluate its expression at runtime. If it did,\n# the embedded `print \"side-effect\"` would fire and the body of\n# `compute` would run too.\nproc compute {} i32 {\n  print \"side-effect\"\n  42\n}\nproc main {} {\n  assert-type [compute] i32\n  print \"only-this\"\n}\nmain\n",
     "concurrent": false,
     "description": "assert-type does NOT evaluate its expression at runtime. If it did,"
   },
   {
     "name": "assert_type_struct",
     "category": "assert",
-    "code": "# expect: 7\n# Struct-name type assertion.\nstruct Pt {i32 x, i32 y}\n\nproc main {} {\n  def p [Pt 3 4]\n  assert-type $p Pt\n  print [to-string (3 + 4)]\n}\nmain\n",
+    "code": "# expect: 7\n# Struct-name type assertion.\nstruct Pt {i32 x, i32 y}\n\nproc main {} {\n  def p [Pt x 3 y 4]\n  assert-type $p Pt\n  print [to-string [+ 3 4]]\n}\nmain\n",
     "concurrent": false,
     "description": "Struct-name type assertion."
   },
@@ -254,7 +261,7 @@
   {
     "name": "box_struct_deref",
     "category": "box",
-    "code": "# expect: 42\n# expect: 99\n# Stage 1 long-tail: deref of a struct-element box narrows to TYPE_STRUCT\n# with the pointee's struct registry idx. Compiler emits OP_DEREF_INLINE so\n# inline struct bytes flow directly to the binding without a heap round-trip.\nstruct Point {i32 x i32 y}\nproc main {} {\n  def b [box [Point 42 99]]\n  def p [deref $b]\n  print $p->x\n  print $p->y\n}\nmain\n",
+    "code": "# expect: 42\n# expect: 99\n# Stage 1 long-tail: deref of a struct-element box narrows to TYPE_STRUCT\n# with the pointee's struct registry idx. Compiler emits OP_DEREF_INLINE so\n# inline struct bytes flow directly to the binding without a heap round-trip.\nstruct Point {i32 x i32 y}\nproc main {} {\n  def b [box [Point x 42 y 99]]\n  def p [deref $b]\n  print $p->x\n  print $p->y\n}\nmain\n",
     "concurrent": false,
     "description": "Stage 1 long-tail: deref of a struct-element box narrows to TYPE_STRUCT"
   },
@@ -296,14 +303,14 @@
   {
     "name": "buf_boxed_struct_dyn_gc",
     "category": "buf",
-    "code": "# expect: 30\n# expect: 31\n# expect: 32\n# expect: 33\n# expect: 500\n# GC stress: a `[Buf N dyn]` field inside a *boxed* user struct must be\n# traced via the recursive layout descriptor. Before this fix the\n# OBJ_MUTABLE_REF tracer ignored type_idx>0 (boxed user structs), so\n# the inline buf's tagged slots were never marked. The boxed heap copy\n# holds the only persistent roots: after $b's slots are nil'd out, the\n# SATB barrier preserves the vecs through the current GC cycle, but the\n# heap churn drives several more cycles — those subsequent cycles see\n# the vecs only via the boxed struct's bytes. Without the fix the\n# tracer ignores those bytes and the vecs get collected.\n\nstruct Bag { [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag]\n  set $b->items->0 [vec 30 0 0]\n  set $b->items->1 [vec 31 0 0]\n  set $b->items->2 [vec 32 0 0]\n  set $b->items->3 [vec 33 0 0]\n  def boxed [box $b]\n\n  # Drop $b's references so the heap box is the only persistent root.\n  set $b->items->0 nil\n  set $b->items->1 nil\n  set $b->items->2 nil\n  set $b->items->3 nil\n\n  mut i 0\n  while [< $i 500] {\n    def junk [vec $i $i $i $i $i $i]\n    set i [+ $i 1]\n  }\n\n  def back [deref $boxed]\n  print [vec-get $back->items->0 0]\n  print [vec-get $back->items->1 0]\n  print [vec-get $back->items->2 0]\n  print [vec-get $back->items->3 0]\n  print $i\n}\n[main]\n",
+    "code": "# expect: 30\n# expect: 31\n# expect: 32\n# expect: 33\n# expect: 500\n# GC stress: a `[Buf N dyn]` field inside a *boxed* user struct must be\n# traced via the recursive layout descriptor. Before this fix the\n# OBJ_MUTABLE_REF tracer ignored type_idx>0 (boxed user structs), so\n# the inline buf's tagged slots were never marked. The boxed heap copy\n# holds the only persistent roots: after $b's slots are nil'd out, the\n# SATB barrier preserves the vecs through the current GC cycle, but the\n# heap churn drives several more cycles — those subsequent cycles see\n# the vecs only via the boxed struct's bytes. Without the fix the\n# tracer ignores those bytes and the vecs get collected.\n\nstruct Bag { [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag ]\n  set $b->items->0 [vec 30 0 0]\n  set $b->items->1 [vec 31 0 0]\n  set $b->items->2 [vec 32 0 0]\n  set $b->items->3 [vec 33 0 0]\n  def boxed [box $b]\n\n  # Drop $b's references so the heap box is the only persistent root.\n  set $b->items->0 nil\n  set $b->items->1 nil\n  set $b->items->2 nil\n  set $b->items->3 nil\n\n  mut i 0\n  while [< $i 500] {\n    def junk [vec $i $i $i $i $i $i]\n    set i [+ $i 1]\n  }\n\n  def back [deref $boxed]\n  print [vec-get $back->items->0 0]\n  print [vec-get $back->items->1 0]\n  print [vec-get $back->items->2 0]\n  print [vec-get $back->items->3 0]\n  print $i\n}\n[main]\n",
     "concurrent": false,
     "description": "GC stress: a `[Buf N dyn]` field inside a *boxed* user struct must be"
   },
   {
     "name": "buf_decay_jacl_proc",
     "category": "buf",
-    "code": "# expect: 1024\n# expect: 2048\n# JACL proc taking a [Ptr T] receives the buf by pointer (same C-style\n# decay as extern calls). The proc reads through the pointer; address\n# identity is preserved across the call boundary.\nproc i32 read_first {[Ptr i32] p} {\n  [ptr-deref $p]\n}\n\nproc i32 read_second {[Ptr i32] p} {\n  [ptr-deref [ptr-offset $p 1]]\n}\n\ndef [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]\nprint [read_first $b]\nprint [read_second $b]\n",
+    "code": "# expect: 1024\n# expect: 2048\n# JACL proc taking a [Ptr T] receives the buf by pointer (same C-style\n# decay as extern calls). The proc reads through the pointer; address\n# identity is preserved across the call boundary.\nproc read_first {[Ptr i32] p} i32 {\n  [ptr-deref $p]\n}\n\nproc read_second {[Ptr i32] p} i32 {\n  [ptr-deref [ptr-offset $p 1]]\n}\n\ndef [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]\nprint [read_first $b]\nprint [read_second $b]\n",
     "concurrent": false,
     "description": "JACL proc taking a [Ptr T] receives the buf by pointer (same C-style"
   },
@@ -331,56 +338,56 @@
   {
     "name": "buf_dynamic_chain_oob_neg",
     "category": "buf",
-    "code": "# expect-error: out of bounds for dimension size 4\n# OP_PTR_OFFSET_CHECKED rejects negative dynamic indices too (the cast\n# to uint32_t in the VM trap makes -1 a huge unsigned number, but the\n# `n < 0` guard fires first).\n\nproc main {} {\n  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube\n  mut k (- 1)\n  print $cube->0->0->$k\n}\nmain\n",
+    "code": "# expect-error: out of bounds for dimension size 4\n# OP_PTR_OFFSET_CHECKED rejects negative dynamic indices too (the cast\n# to uint32_t in the VM trap makes -1 a huge unsigned number, but the\n# `n < 0` guard fires first).\n\nproc main {} {\n  def [Buf 2 [Buf 3 [Buf 4 i32]]] cube\n  mut k -1\n  print $cube->0->0->$k\n}\nmain\n",
     "concurrent": false,
     "description": "expect-error: out of bounds for dimension size 4"
   },
   {
     "name": "buf_extern_c",
     "category": "buf",
-    "code": "# expect: 21\n# expect: 4\n# expect: 170\n# expect: 170\n# expect: 170\n# expect: 170\n# expect: 4\n# expect: 102\n# expect: 102\n# expect: 102\n# expect: 102\n# Real C extern calls operating on JACL buffers. Verifies that\n# `[addr $buf]` produces a stable pointer the C side can dereference,\n# that the GC doesn't move buffer-local bytes during the call, and\n# that the [Buf N T] -> [Ptr T] decay at call boundaries matches the\n# C ABI. The catalog functions live in test_jacl_harness.c\n# (harness_native_t_*); fixture names are kept <=7 bytes so they encode\n# as inline strings without the intern table. See BUFFER_DESIGN.md\n# Tier 2 (test-harness native-fn registration).\n\nextern i32 t_sumi {[Ptr i32] buf i32 len}\nextern i32 t_fill {[Ptr u8] buf i32 len i32 byte}\nextern i32 t_xor  {[Ptr u8] dst [Ptr u8] src i32 len}\n\nproc sum {} {\n  # Callee reads back the i32 elements the caller stored. Decayed\n  # pointer is the actual byte address of the caller's frame slot.\n  def [Buf 3 i32] xs [[Buf 3 i32] 6 7 8]\n  print [t_sumi $xs 3]\n}\n[sum]\n\nproc fill {} {\n  # Callee writes through the decayed pointer; caller observes the\n  # mutation by reading the buf back through buf-get.\n  def [Buf 4 u8] scratch\n  print [t_fill $scratch 4 0xaa]\n  print [buf-get $scratch 0]\n  print [buf-get $scratch 1]\n  print [buf-get $scratch 2]\n  print [buf-get $scratch 3]\n}\n[fill]\n\nproc xor {} {\n  # Two buf args decay independently; both pointer values reach C\n  # alongside one another. dst gets dst ^ src in-place.\n  def [Buf 4 u8] dst [[Buf 4 u8] 0xaa 0xaa 0xaa 0xaa]\n  def [Buf 4 u8] src [[Buf 4 u8] 0xcc 0xcc 0xcc 0xcc]\n  print [t_xor $dst $src 4]\n  print [buf-get $dst 0]\n  print [buf-get $dst 1]\n  print [buf-get $dst 2]\n  print [buf-get $dst 3]\n}\n[xor]\n",
+    "code": "# expect: 21\n# expect: 4\n# expect: 170\n# expect: 170\n# expect: 170\n# expect: 170\n# expect: 4\n# expect: 102\n# expect: 102\n# expect: 102\n# expect: 102\n# Real C extern calls operating on JACL buffers. Verifies that\n# `[addr $buf]` produces a stable pointer the C side can dereference,\n# that the GC doesn't move buffer-local bytes during the call, and\n# that the [Buf N T] -> [Ptr T] decay at call boundaries matches the\n# C ABI. The catalog functions live in test_jacl_harness.c\n# (harness_native_t_*); fixture names are kept <=7 bytes so they encode\n# as inline strings without the intern table. See BUFFER_DESIGN.md\n# Tier 2 (test-harness native-fn registration).\n\nextern t_sumi {[Ptr i32] buf i32 len} i32\nextern t_fill {[Ptr u8] buf i32 len i32 byte} i32\nextern t_xor {[Ptr u8] dst [Ptr u8] src i32 len} i32\n\nproc sum {} {\n  # Callee reads back the i32 elements the caller stored. Decayed\n  # pointer is the actual byte address of the caller's frame slot.\n  def [Buf 3 i32] xs [[Buf 3 i32] 6 7 8]\n  print [t_sumi $xs 3]\n}\n[sum]\n\nproc fill {} {\n  # Callee writes through the decayed pointer; caller observes the\n  # mutation by reading the buf back through buf-get.\n  def [Buf 4 u8] scratch\n  print [t_fill $scratch 4 0xaa]\n  print [buf-get $scratch 0]\n  print [buf-get $scratch 1]\n  print [buf-get $scratch 2]\n  print [buf-get $scratch 3]\n}\n[fill]\n\nproc xor {} {\n  # Two buf args decay independently; both pointer values reach C\n  # alongside one another. dst gets dst ^ src in-place.\n  def [Buf 4 u8] dst [[Buf 4 u8] 0xaa 0xaa 0xaa 0xaa]\n  def [Buf 4 u8] src [[Buf 4 u8] 0xcc 0xcc 0xcc 0xcc]\n  print [t_xor $dst $src 4]\n  print [buf-get $dst 0]\n  print [buf-get $dst 1]\n  print [buf-get $dst 2]\n  print [buf-get $dst 3]\n}\n[xor]\n",
     "concurrent": false,
     "description": "Real C extern calls operating on JACL buffers. Verifies that"
   },
   {
     "name": "buf_field_access",
     "category": "buf",
-    "code": "# expect: 1\n# expect: 127\n# M4.3b: $h->magic returns [Ptr u8] to the buf field's bytes. We can\n# then mutate via the pointer and read back, all while the struct\n# lives inline in a local.\nstruct Header {\n  i32 version,\n  [Buf 4 u8] magic\n}\n\nproc show {} {\n  def h [Header 1]\n  print $h->version\n\n  def [Ptr u8] mp $h->magic\n  set $mp->0 127\n  print [ptr-deref $mp]\n}\n\nshow\n",
+    "code": "# expect: 1\n# expect: 127\n# M4.3b: $h->magic returns [Ptr u8] to the buf field's bytes. We can\n# then mutate via the pointer and read back, all while the struct\n# lives inline in a local.\nstruct Header {\n  i32 version,\n  [Buf 4 u8] magic\n}\n\nproc show {} {\n  def h [Header version 1]\n  print $h->version\n\n  def [Ptr u8] mp $h->magic\n  set $mp->0 127\n  print [ptr-deref $mp]\n}\n\nshow\n",
     "concurrent": false,
     "description": "M4.3b: $h->magic returns [Ptr u8] to the buf field's bytes. We can"
   },
   {
     "name": "buf_field_arrow_index",
     "category": "buf",
-    "code": "# expect: 0\n# expect: 127\n# expect: 69\n# expect: 0\n# expect: 255\n# expect: 1\n# expect: 69\n# Receiver-shape generalization (BUFFER_DESIGN.md): `$h->magic->0`\n# works even when the first arrow returns [Ptr T] from a struct-field\n# access (the receiver is an AST_COMMAND, not a bare var-ref). Same\n# for `set $h->magic->0 v` and deeply nested chains.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\nproc main {} {\n  def h [ElfHeader 1]\n  # Read: $h->magic returns [Ptr u8], then ->0 indexes via OP_PTR_LOAD.\n  print $h->magic->0\n\n  # Write: set through the chained arrow.\n  set $h->magic->0 0x7f\n  set $h->magic->1 0x45\n  print $h->magic->0\n  print $h->magic->1\n}\n[main]\n\n# Deeply nested: $o->inner->data->0 chains three arrows.\nstruct Inner { [Buf 2 u8] data }\nstruct Outer { i32 tag, Inner inner }\nproc nested {} {\n  def o [Outer 1 [Inner]]\n  print $o->inner->data->0\n  set $o->inner->data->1 255\n  print $o->inner->data->1\n  print $o->tag\n}\n[nested]\n\n# [addr] on a chained arrow leaf: must recover the un-widened pointee\n# type. `[addr $h->magic->1]` is [Ptr u8] (not [Ptr i32] from the\n# u8->i32 widening that the arrow-read surface uses).\nproc addr_chain {} {\n  def h [ElfHeader 0]\n  set $h->magic->1 0x45\n  def [Ptr u8] p [addr $h->magic->1]\n  print [ptr-deref $p]\n}\n[addr_chain]\n",
+    "code": "# expect: 0\n# expect: 127\n# expect: 69\n# expect: 0\n# expect: 255\n# expect: 1\n# expect: 69\n# Receiver-shape generalization (BUFFER_DESIGN.md): `$h->magic->0`\n# works even when the first arrow returns [Ptr T] from a struct-field\n# access (the receiver is an AST_COMMAND, not a bare var-ref). Same\n# for `set $h->magic->0 v` and deeply nested chains.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\nproc main {} {\n  def h [ElfHeader ver 1]\n  # Read: $h->magic returns [Ptr u8], then ->0 indexes via OP_PTR_LOAD.\n  print $h->magic->0\n\n  # Write: set through the chained arrow.\n  set $h->magic->0 0x7f\n  set $h->magic->1 0x45\n  print $h->magic->0\n  print $h->magic->1\n}\n[main]\n\n# Deeply nested: $o->inner->data->0 chains three arrows.\nstruct Inner { [Buf 2 u8] data }\nstruct Outer { i32 tag, Inner inner }\nproc nested {} {\n  def o [Outer tag 1 inner [Inner ]]\n  print $o->inner->data->0\n  set $o->inner->data->1 255\n  print $o->inner->data->1\n  print $o->tag\n}\n[nested]\n\n# [addr] on a chained arrow leaf: must recover the un-widened pointee\n# type. `[addr $h->magic->1]` is [Ptr u8] (not [Ptr i32] from the\n# u8->i32 widening that the arrow-read surface uses).\nproc addr_chain {} {\n  def h [ElfHeader ver 0]\n  set $h->magic->1 0x45\n  def [Ptr u8] p [addr $h->magic->1]\n  print [ptr-deref $p]\n}\n[addr_chain]\n",
     "concurrent": false,
     "description": "Receiver-shape generalization (BUFFER_DESIGN.md): `$h->magic->0`"
   },
   {
     "name": "buf_field_builtin_head",
     "category": "buf",
-    "code": "# expect: 127\n# expect: 69\n# expect: 4\n# expect: 254\n# expect: hello\n# expect: 42\n# expect: 4\n# expect: ok\n# Builtin-head form `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`\n# (plus the unchecked variants) for buf-typed struct fields. Same\n# capability the arrow chain `$h->field->$i` already covers, but with\n# runtime bounds checking on dynamic indices (the arrow path loses the\n# buf-length once $h->field decays to [Ptr T]). The unchecked variants\n# are the only path to skip the check for struct buf fields. See\n# BUFFER_DESIGN.md Tier 2.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc scalar_field {} {\n  def h [ElfHeader 1]\n  [buf-set $h->magic 0 0x7f]\n  [buf-set $h->magic 1 0x45]\n  print [buf-get $h->magic 0]\n  print [buf-get $h->magic 1]\n  print [buf-len $h->magic]\n  # Unchecked variant -- no bounds check at runtime.\n  [buf-unchecked-set $h->magic 3 0xfe]\n  print [buf-unchecked-get $h->magic 3]\n}\n[scalar_field]\n\nproc ref_field {} {\n  def b [Bag 0]\n  [buf-set $b->items 0 \"hello\"]\n  [buf-set $b->items 1 42]\n  print [buf-get $b->items 0]\n  print [buf-get $b->items 1]\n  print [buf-len $b->items]\n  print \"ok\"\n}\n[ref_field]\n",
+    "code": "# expect: 127\n# expect: 69\n# expect: 4\n# expect: 254\n# expect: hello\n# expect: 42\n# expect: 4\n# expect: ok\n# Builtin-head form `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`\n# (plus the unchecked variants) for buf-typed struct fields. Same\n# capability the arrow chain `$h->field->$i` already covers, but with\n# runtime bounds checking on dynamic indices (the arrow path loses the\n# buf-length once $h->field decays to [Ptr T]). The unchecked variants\n# are the only path to skip the check for struct buf fields. See\n# BUFFER_DESIGN.md Tier 2.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc scalar_field {} {\n  def h [ElfHeader ver 1]\n  [buf-set $h->magic 0 0x7f]\n  [buf-set $h->magic 1 0x45]\n  print [buf-get $h->magic 0]\n  print [buf-get $h->magic 1]\n  print [buf-len $h->magic]\n  # Unchecked variant -- no bounds check at runtime.\n  [buf-unchecked-set $h->magic 3 0xfe]\n  print [buf-unchecked-get $h->magic 3]\n}\n[scalar_field]\n\nproc ref_field {} {\n  def b [Bag size 0]\n  [buf-set $b->items 0 \"hello\"]\n  [buf-set $b->items 1 42]\n  print [buf-get $b->items 0]\n  print [buf-get $b->items 1]\n  print [buf-len $b->items]\n  print \"ok\"\n}\n[ref_field]\n",
     "concurrent": false,
     "description": "Builtin-head form `[buf-get $h->field $i]` / `[buf-set $h->field $i $v]`"
   },
   {
     "name": "buf_field_builtin_head_oob",
     "category": "buf",
-    "code": "# expect-error: out of bounds for dimension size 4\n# [buf-get $h->field $i] bounds-checks dynamic indices at runtime --\n# something the arrow chain `$h->magic->$i` doesn't do today (the\n# field-access strips the buf length when it returns [Ptr T]). The\n# builtin form has the field's static length and emits\n# OP_PTR_OFFSET_CHECKED.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\n\nproc main {} {\n  def h [ElfHeader 1]\n  def i32 i 7\n  print [buf-get $h->magic $i]\n}\n[main]\n",
+    "code": "# expect-error: out of bounds for dimension size 4\n# [buf-get $h->field $i] bounds-checks dynamic indices at runtime --\n# something the arrow chain `$h->magic->$i` doesn't do today (the\n# field-access strips the buf length when it returns [Ptr T]). The\n# builtin form has the field's static length and emits\n# OP_PTR_OFFSET_CHECKED.\n\nstruct ElfHeader { i32 ver, [Buf 4 u8] magic }\n\nproc main {} {\n  def h [ElfHeader ver 1]\n  def i32 i 7\n  print [buf-get $h->magic $i]\n}\n[main]\n",
     "concurrent": false,
     "description": "expect-error: out of bounds for dimension size 4"
   },
   {
     "name": "buf_field_decl",
     "category": "buf",
-    "code": "# expect: 1\n# M4.3a: struct with [Buf N T] field. Constructor takes args only\n# for non-buf fields (buf field is implicitly zero-init).\nstruct Header {\n  mut i32 version,\n  [Buf 4 u8] magic\n}\n\nproc show {} {\n  def h [Header 1]\n  print $h->version\n}\n\nshow\n",
+    "code": "# expect: 1\n# M4.3a: struct with [Buf N T] field. Constructor takes args only\n# for non-buf fields (buf field is implicitly zero-init).\nstruct Header {\n  mut i32 version,\n  [Buf 4 u8] magic\n}\n\nproc show {} {\n  def h [Header version 1]\n  print $h->version\n}\n\nshow\n",
     "concurrent": false,
     "description": "M4.3a: struct with [Buf N T] field. Constructor takes args only"
   },
   {
     "name": "buf_field_elf_header",
     "category": "buf",
-    "code": "# expect: 127\n# expect: 69\n# expect: 76\n# expect: 70\n# expect: 1\n# M4.3c: realistic FFI use case -- a struct with a buf field for\n# magic bytes plus a separate scalar field. Matches C layout:\n# struct { uint32_t version; uint8_t magic[4]; }.\nstruct ElfHeader {\n  i32 version,\n  [Buf 4 u8] magic\n}\n\nproc main {} {\n  def h [ElfHeader 1]\n  def [Ptr u8] m $h->magic\n  set $m->0 0x7f\n  set $m->1 0x45\n  set $m->2 0x4c\n  set $m->3 0x46\n  print $m->0\n  print $m->1\n  print $m->2\n  print $m->3\n  print $h->version\n}\n\nmain\n",
+    "code": "# expect: 127\n# expect: 69\n# expect: 76\n# expect: 70\n# expect: 1\n# M4.3c: realistic FFI use case -- a struct with a buf field for\n# magic bytes plus a separate scalar field. Matches C layout:\n# struct { uint32_t version; uint8_t magic[4]; }.\nstruct ElfHeader {\n  i32 version,\n  [Buf 4 u8] magic\n}\n\nproc main {} {\n  def h [ElfHeader version 1]\n  def [Ptr u8] m $h->magic\n  set $m->0 0x7f\n  set $m->1 0x45\n  set $m->2 0x4c\n  set $m->3 0x46\n  print $m->0\n  print $m->1\n  print $m->2\n  print $m->3\n  print $h->version\n}\n\nmain\n",
     "concurrent": false,
     "description": "M4.3c: realistic FFI use case -- a struct with a buf field for"
   },
@@ -394,7 +401,7 @@
   {
     "name": "buf_lhs_inference",
     "category": "buf",
-    "code": "# expect: 127\n# expect: 69\n# expect: 76\n# expect: 70\n# expect: 4\n# expect: 1024\n# expect: 2048\n# expect: 0\n# expect: 8\n# expect: 4\n# expect: 1\n# expect: 4\n# LHS-inferred buf def: `def NAME [[Buf N T] ...]` — the type annotation\n# on the LHS is dropped because the RHS constructor already carries the\n# full [Buf N T]. See BUFFER_DESIGN.md \"LHS type inference\".\n\ndef magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]\nprint [buf-get $magic 0]\nprint [buf-get $magic 1]\nprint [buf-get $magic 2]\nprint [buf-get $magic 3]\nprint [buf-len $magic]\n\n# Partial fill leaves the trailing slots zero.\ndef hdr [[Buf 8 i32] 1024 2048]\nprint [buf-get $hdr 0]\nprint [buf-get $hdr 1]\nprint [buf-get $hdr 7]\nprint [buf-len $hdr]\n\n# Struct-element bufs also infer from the constructor.\nstruct Point {i32 x, i32 y}\ndef pts [[Buf 4 Point] [Point 1 2] [Point 3 4]]\nprint [buf-len $pts]\nprint $pts->0->x\nprint $pts->1->y\n",
+    "code": "# expect: 127\n# expect: 69\n# expect: 76\n# expect: 70\n# expect: 4\n# expect: 1024\n# expect: 2048\n# expect: 0\n# expect: 8\n# expect: 4\n# expect: 1\n# expect: 4\n# LHS-inferred buf def: `def NAME [[Buf N T] ...]` — the type annotation\n# on the LHS is dropped because the RHS constructor already carries the\n# full [Buf N T]. See BUFFER_DESIGN.md \"LHS type inference\".\n\ndef magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]\nprint [buf-get $magic 0]\nprint [buf-get $magic 1]\nprint [buf-get $magic 2]\nprint [buf-get $magic 3]\nprint [buf-len $magic]\n\n# Partial fill leaves the trailing slots zero.\ndef hdr [[Buf 8 i32] 1024 2048]\nprint [buf-get $hdr 0]\nprint [buf-get $hdr 1]\nprint [buf-get $hdr 7]\nprint [buf-len $hdr]\n\n# Struct-element bufs also infer from the constructor.\nstruct Point {i32 x, i32 y}\ndef pts [[Buf 4 Point] [Point x 1 y 2] [Point x 3 y 4]]\nprint [buf-len $pts]\nprint $pts->0->x\nprint $pts->1->y\n",
     "concurrent": false,
     "description": "LHS-inferred buf def: `def NAME [[Buf N T] ...]` — the type annotation"
   },
@@ -422,7 +429,7 @@
   {
     "name": "buf_literal_value_negative",
     "category": "buf",
-    "code": "# expect-error: element 0 value -1 out of range for u8\n# Negative literal into an unsigned slot: rejected at compile time so\n# the bit pattern doesn't silently land as 0xff. Negative literals\n# inside [...] arg lists must be parenthesized — `[[Buf 2 u8] -1 5]`\n# parses as three positional args (-, 1, 5) and fails earlier with a\n# length mismatch. See BUFFER_DESIGN.md M5.\ndef [Buf 2 u8] x [[Buf 2 u8] (-1) 5]\n",
+    "code": "# expect-error: element 0 value -1 out of range for u8\n# Negative literal into an unsigned slot: rejected at compile time so\n# the bit pattern doesn't silently land as 0xff. See BUFFER_DESIGN.md M5.\ndef [Buf 2 u8] x [[Buf 2 u8] -1 5]\n",
     "concurrent": false,
     "description": "expect-error: element 0 value -1 out of range for u8"
   },
@@ -471,7 +478,7 @@
   {
     "name": "buf_nested_depth3_struct_literal",
     "category": "buf",
-    "code": "# expect: 1\n# expect: 2\n# expect: 7\n# expect: 8\n# expect: 11\n# expect: 12\n# expect: 0\n# expect: 0\n# Depth-3 struct-leaf literal init: [Buf N1 [Buf N2 [Buf N3 Struct]]].\n# Tier-1 item #1 of BUFFER_DESIGN.md. Before Step 3 of\n# RECURSIVE_LAYOUT_REFACTOR.md the depth-3+ path rejected non-scalar\n# leaves (\"scalar leaf types only\"); now struct leaves route through the\n# descriptor-driven walker (OP_BUF_STORE_OFF) which stores each struct's\n# inline bytes at its flat byte offset.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 2 [Buf 2 [Buf 2 Point]]] cube [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 1 2] [Point 3 4]] [[Buf 2 Point] [Point 5 6] [Point 7 8]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 9 10] [Point 11 12]] [[Buf 2 Point] [Point 13 14] [Point 15 16]]]]\n  print $cube->0->0->0->x\n  print $cube->0->0->0->y\n  print $cube->0->1->1->x\n  print $cube->0->1->1->y\n  print $cube->1->0->1->x\n  print $cube->1->0->1->y\n\n  # Partial fill leaves the rest zero.\n  def [Buf 2 [Buf 2 [Buf 2 Point]]] sparse [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 99 99]]]]\n  print $sparse->1->1->1->x\n  print $sparse->0->0->1->y\n}\n[main]\n",
+    "code": "# expect: 1\n# expect: 2\n# expect: 7\n# expect: 8\n# expect: 11\n# expect: 12\n# expect: 0\n# expect: 0\n# Depth-3 struct-leaf literal init: [Buf N1 [Buf N2 [Buf N3 Struct]]].\n# Tier-1 item #1 of BUFFER_DESIGN.md. Before Step 3 of\n# RECURSIVE_LAYOUT_REFACTOR.md the depth-3+ path rejected non-scalar\n# leaves (\"scalar leaf types only\"); now struct leaves route through the\n# descriptor-driven walker (OP_BUF_STORE_OFF) which stores each struct's\n# inline bytes at its flat byte offset.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 2 [Buf 2 [Buf 2 Point]]] cube [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 1 y 2] [Point x 3 y 4]] [[Buf 2 Point] [Point x 5 y 6] [Point x 7 y 8]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 9 y 10] [Point x 11 y 12]] [[Buf 2 Point] [Point x 13 y 14] [Point x 15 y 16]]]]\n  print $cube->0->0->0->x\n  print $cube->0->0->0->y\n  print $cube->0->1->1->x\n  print $cube->0->1->1->y\n  print $cube->1->0->1->x\n  print $cube->1->0->1->y\n\n  # Partial fill leaves the rest zero.\n  def [Buf 2 [Buf 2 [Buf 2 Point]]] sparse [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 99 y 99]]]]\n  print $sparse->1->1->1->x\n  print $sparse->0->0->1->y\n}\n[main]\n",
     "concurrent": false,
     "description": "Depth-3 struct-leaf literal init: [Buf N1 [Buf N2 [Buf N3 Struct]]]."
   },
@@ -513,14 +520,14 @@
   {
     "name": "buf_nested_struct",
     "category": "buf",
-    "code": "# expect: 3\n# expect: 0\n# expect: 0\n# expect: 7\n# expect: 11\n# expect: 0\n# expect: 0\n# expect: 1\n# expect: 2\n# expect: 3\n# expect: 4\n# M4.2.2: struct as inner element of a nested buf.\n# `[Buf N [Buf M Struct]]` lays out as N*M*sizeof(Struct) inline bytes.\n# `$grid->i` returns [Ptr Struct] to row i; the chained `->j` then\n# uses OP_PTR_LOAD_INLINE / OP_PTR_STORE_INLINE to read or write\n# the Struct value at byte offset j*sizeof(Struct).\n# See BUFFER_DESIGN.md \"Receiver-shape generalization\" / M4.2.2.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 3 [Buf 4 Point]] grid\n  print [buf-len $grid]\n\n  # Zero-init -- every Point starts at (0,0).\n  print $grid->1->2->x\n  print $grid->2->3->y\n\n  # Write a Point into cell (1,2) via the chained arrow.\n  set $grid->1->2 [Point 7 11]\n  print $grid->1->2->x\n  print $grid->1->2->y\n\n  # Other cells are still zero-init.\n  print $grid->0->0->x\n  print $grid->2->3->y\n\n  # Fill a small block and read back via the chain.\n  set $grid->0->0 [Point 1 2]\n  set $grid->0->1 [Point 3 4]\n  print $grid->0->0->x\n  print $grid->0->0->y\n  print $grid->0->1->x\n  print $grid->0->1->y\n}\n[main]\n",
+    "code": "# expect: 3\n# expect: 0\n# expect: 0\n# expect: 7\n# expect: 11\n# expect: 0\n# expect: 0\n# expect: 1\n# expect: 2\n# expect: 3\n# expect: 4\n# M4.2.2: struct as inner element of a nested buf.\n# `[Buf N [Buf M Struct]]` lays out as N*M*sizeof(Struct) inline bytes.\n# `$grid->i` returns [Ptr Struct] to row i; the chained `->j` then\n# uses OP_PTR_LOAD_INLINE / OP_PTR_STORE_INLINE to read or write\n# the Struct value at byte offset j*sizeof(Struct).\n# See BUFFER_DESIGN.md \"Receiver-shape generalization\" / M4.2.2.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 3 [Buf 4 Point]] grid\n  print [buf-len $grid]\n\n  # Zero-init -- every Point starts at (0,0).\n  print $grid->1->2->x\n  print $grid->2->3->y\n\n  # Write a Point into cell (1,2) via the chained arrow.\n  set $grid->1->2 [Point x 7 y 11]\n  print $grid->1->2->x\n  print $grid->1->2->y\n\n  # Other cells are still zero-init.\n  print $grid->0->0->x\n  print $grid->2->3->y\n\n  # Fill a small block and read back via the chain.\n  set $grid->0->0 [Point x 1 y 2]\n  set $grid->0->1 [Point x 3 y 4]\n  print $grid->0->0->x\n  print $grid->0->0->y\n  print $grid->0->1->x\n  print $grid->0->1->y\n}\n[main]\n",
     "concurrent": false,
     "description": "M4.2.2: struct as inner element of a nested buf."
   },
   {
     "name": "buf_nested_struct_literal",
     "category": "buf",
-    "code": "# expect: 1\n# expect: 2\n# expect: 3\n# expect: 4\n# expect: 5\n# expect: 6\n# expect: 7\n# expect: 8\n# expect: 0\n# expect: 0\n# Depth-2 struct-leaf literal init: `[Buf N [Buf M Struct]]` filled with\n# a nested constructor. Before Step 3 of RECURSIVE_LAYOUT_REFACTOR.md the\n# depth-2 nested-init path only emitted scalar (OP_BUF_USET_LOCAL) stores,\n# so a struct leaf hit \"unsupported element type\". Now the init routes\n# through the descriptor-driven walker (OP_BUF_STORE_OFF), which stores\n# the struct's inline bytes at the flat byte offset row*M*sizeof + col*sizeof.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 2 [Buf 2 Point]] grid [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 1 2] [Point 3 4]] [[Buf 2 Point] [Point 5 6] [Point 7 8]]]\n  print $grid->0->0->x\n  print $grid->0->0->y\n  print $grid->0->1->x\n  print $grid->0->1->y\n  print $grid->1->0->x\n  print $grid->1->0->y\n  print $grid->1->1->x\n  print $grid->1->1->y\n\n  # A partially-filled grid leaves the rest zero.\n  def [Buf 2 [Buf 2 Point]] partial [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 9 9]]]\n  print $partial->1->1->x\n  print $partial->0->1->y\n}\n[main]\n",
+    "code": "# expect: 1\n# expect: 2\n# expect: 3\n# expect: 4\n# expect: 5\n# expect: 6\n# expect: 7\n# expect: 8\n# expect: 0\n# expect: 0\n# Depth-2 struct-leaf literal init: `[Buf N [Buf M Struct]]` filled with\n# a nested constructor. Before Step 3 of RECURSIVE_LAYOUT_REFACTOR.md the\n# depth-2 nested-init path only emitted scalar (OP_BUF_USET_LOCAL) stores,\n# so a struct leaf hit \"unsupported element type\". Now the init routes\n# through the descriptor-driven walker (OP_BUF_STORE_OFF), which stores\n# the struct's inline bytes at the flat byte offset row*M*sizeof + col*sizeof.\n\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def [Buf 2 [Buf 2 Point]] grid [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 1 y 2] [Point x 3 y 4]] [[Buf 2 Point] [Point x 5 y 6] [Point x 7 y 8]]]\n  print $grid->0->0->x\n  print $grid->0->0->y\n  print $grid->0->1->x\n  print $grid->0->1->y\n  print $grid->1->0->x\n  print $grid->1->0->y\n  print $grid->1->1->x\n  print $grid->1->1->y\n\n  # A partially-filled grid leaves the rest zero.\n  def [Buf 2 [Buf 2 Point]] partial [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 9 y 9]]]\n  print $partial->1->1->x\n  print $partial->0->1->y\n}\n[main]\n",
     "concurrent": false,
     "description": "Depth-2 struct-leaf literal init: `[Buf N [Buf M Struct]]` filled with"
   },
@@ -604,7 +611,7 @@
   {
     "name": "buf_struct_addr",
     "category": "buf",
-    "code": "# expect: Point{x: 10, y: 20}\n# expect: Point{x: 99, y: 20}\n# M4.1b: [addr $buf->N] returns [Ptr Struct]; field-set through\n# the pointer modifies the buf in place.\nstruct Point {mut i32 x, mut i32 y}\n\ndef [Buf 4 Point] pts\nset $pts->0 [Point 10 20]\nprint $pts->0\n\ndef [Ptr Point] p [addr $pts->0]\nset $p->x 99\nprint $pts->0\n",
+    "code": "# expect: [Point x 10 y 20]\n# expect: [Point x 99 y 20]\n# M4.1b: [addr $buf->N] returns [Ptr Struct]; field-set through\n# the pointer modifies the buf in place.\nstruct Point {mut i32 x, mut i32 y}\n\ndef [Buf 4 Point] pts\nset $pts->0 [Point x 10 y 20]\nprint $pts->0\n\ndef [Ptr Point] p [addr $pts->0]\nset $p->x 99\nprint $pts->0\n",
     "concurrent": false,
     "description": "M4.1b: [addr $buf->N] returns [Ptr Struct]; field-set through"
   },
@@ -618,14 +625,14 @@
   {
     "name": "buf_struct_get_set",
     "category": "buf",
-    "code": "# expect: Point{x: 0, y: 0}\n# expect: Point{x: 3, y: 4}\n# expect: Point{x: 5, y: 6}\n# M4.1b: $buf->N read/write for struct-element bufs. Zero-init\n# shows up as Point{x: 0, y: 0}. Stores via struct constructor\n# round-trip cleanly.\nstruct Point {i32 x i32 y}\n\ndef [Buf 4 Point] pts\nprint $pts->0\n\nset $pts->0 [Point 3 4]\nprint $pts->0\n\nset $pts->2 [Point 5 6]\nprint $pts->2\n",
+    "code": "# expect: [Point x 0 y 0]\n# expect: [Point x 3 y 4]\n# expect: [Point x 5 y 6]\n# M4.1b: $buf->N read/write for struct-element bufs. Zero-init\n# shows up as [Point x 0 y 0]. Stores via struct constructor\n# round-trip cleanly.\nstruct Point {i32 x i32 y}\n\ndef [Buf 4 Point] pts\nprint $pts->0\n\nset $pts->0 [Point x 3 y 4]\nprint $pts->0\n\nset $pts->2 [Point x 5 y 6]\nprint $pts->2\n",
     "concurrent": false,
     "description": "M4.1b: $buf->N read/write for struct-element bufs. Zero-init"
   },
   {
     "name": "buf_struct_literal_init",
     "category": "buf",
-    "code": "# expect: Point{x: 1, y: 2}\n# expect: Point{x: 3, y: 4}\n# expect: Point{x: 5, y: 6}\n# expect: Point{x: 0, y: 0}\n# M4.1c: literal init for struct-element bufs. Exact fill plus\n# partial fill (4th slot stays zero-init).\nstruct Point {i32 x, i32 y}\n\ndef [Buf 4 Point] pts [[Buf 4 Point] [Point 1 2] [Point 3 4] [Point 5 6]]\nprint $pts->0\nprint $pts->1\nprint $pts->2\nprint $pts->3\n",
+    "code": "# expect: [Point x 1 y 2]\n# expect: [Point x 3 y 4]\n# expect: [Point x 5 y 6]\n# expect: [Point x 0 y 0]\n# M4.1c: literal init for struct-element bufs. Exact fill plus\n# partial fill (4th slot stays zero-init).\nstruct Point {i32 x, i32 y}\n\ndef [Buf 4 Point] pts [[Buf 4 Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]\nprint $pts->0\nprint $pts->1\nprint $pts->2\nprint $pts->3\n",
     "concurrent": false,
     "description": "M4.1c: literal init for struct-element bufs. Exact fill plus"
   },
@@ -660,28 +667,28 @@
   {
     "name": "buf_traced_nested_struct_gc",
     "category": "buf",
-    "code": "# expect: 30\n# expect: 31\n# expect: 32\n# expect: 33\n# expect: 500\n# GC stress for a [Buf N dyn] field inside a NESTED struct field. The\n# four stored vecs are built inline (no local binding) so their ONLY\n# root is the buf slot embedded in the nested `bag` struct. Before the\n# recursive layout descriptor (RECURSIVE_LAYOUT_REFACTOR.md Step 2), the\n# outer struct's slot_ref_bitmap was computed by a loop that skipped\n# sub-struct fields, so these slots were marked raw and the GC collected\n# the vecs out from under us. Now the descriptor unions the sub-struct's\n# ref map at the field offset, so the stack-inline marker traces them.\n\nstruct Inner { i32 n, [Buf 4 dyn] items }\nstruct Outer { i32 tag, Inner bag }\n\nproc main {} {\n  def o [Outer 1 [Inner 2]]\n  set $o->bag->items->0 [vec 30 0 0]\n  set $o->bag->items->1 [vec 31 0 0]\n  set $o->bag->items->2 [vec 32 0 0]\n  set $o->bag->items->3 [vec 33 0 0]\n\n  # Heavy heap churn to force GC cycles. The junk vecs are unrooted the\n  # instant the next iteration overwrites the binding.\n  mut i 0\n  while [< $i 500] {\n    def junk [vec $i $i $i $i $i $i]\n    set i [+ $i 1]\n  }\n\n  def a $o->bag->items->0\n  def b $o->bag->items->1\n  def c $o->bag->items->2\n  def d $o->bag->items->3\n  print [vec-get $a 0]\n  print [vec-get $b 0]\n  print [vec-get $c 0]\n  print [vec-get $d 0]\n  print $i\n}\n[main]\n",
+    "code": "# expect: 30\n# expect: 31\n# expect: 32\n# expect: 33\n# expect: 500\n# GC stress for a [Buf N dyn] field inside a NESTED struct field. The\n# four stored vecs are built inline (no local binding) so their ONLY\n# root is the buf slot embedded in the nested `bag` struct. Before the\n# recursive layout descriptor (RECURSIVE_LAYOUT_REFACTOR.md Step 2), the\n# outer struct's slot_ref_bitmap was computed by a loop that skipped\n# sub-struct fields, so these slots were marked raw and the GC collected\n# the vecs out from under us. Now the descriptor unions the sub-struct's\n# ref map at the field offset, so the stack-inline marker traces them.\n\nstruct Inner { i32 n, [Buf 4 dyn] items }\nstruct Outer { i32 tag, Inner bag }\n\nproc main {} {\n  def o [Outer tag 1 bag [Inner n 2]]\n  set $o->bag->items->0 [vec 30 0 0]\n  set $o->bag->items->1 [vec 31 0 0]\n  set $o->bag->items->2 [vec 32 0 0]\n  set $o->bag->items->3 [vec 33 0 0]\n\n  # Heavy heap churn to force GC cycles. The junk vecs are unrooted the\n  # instant the next iteration overwrites the binding.\n  mut i 0\n  while [< $i 500] {\n    def junk [vec $i $i $i $i $i $i]\n    set i [+ $i 1]\n  }\n\n  def a $o->bag->items->0\n  def b $o->bag->items->1\n  def c $o->bag->items->2\n  def d $o->bag->items->3\n  print [vec-get $a 0]\n  print [vec-get $b 0]\n  print [vec-get $c 0]\n  print [vec-get $d 0]\n  print $i\n}\n[main]\n",
     "concurrent": false,
     "description": "GC stress for a [Buf N dyn] field inside a NESTED struct field. The"
   },
   {
     "name": "buf_traced_struct_field_box",
     "category": "buf",
-    "code": "# expect: hello\n# expect: 42\n# Same Bag struct but boxed to a HeapRecord via [box ...]. Exercises\n# the OBJ_HEAP_RECORD walker's ref-elem-buf-field descent (Stage 3 of\n# BUFFER_DESIGN.md Tier 1).\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag 0]\n  set $b->items->0 \"hello\"\n  set $b->items->1 42\n  def boxed [box $b]\n  mut i 0\n  while [< $i 50] {\n    def junk [vec $i $i]\n    set i [+ $i 1]\n  }\n  def back [deref $boxed]\n  print $back->items->0\n  print $back->items->1\n}\n[main]\n",
+    "code": "# expect: hello\n# expect: 42\n# Same Bag struct but boxed to a HeapRecord via [box ...]. Exercises\n# the OBJ_HEAP_RECORD walker's ref-elem-buf-field descent (Stage 3 of\n# BUFFER_DESIGN.md Tier 1).\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag size 0]\n  set $b->items->0 \"hello\"\n  set $b->items->1 42\n  def boxed [box $b]\n  mut i 0\n  while [< $i 50] {\n    def junk [vec $i $i]\n    set i [+ $i 1]\n  }\n  def back [deref $boxed]\n  print $back->items->0\n  print $back->items->1\n}\n[main]\n",
     "concurrent": false,
     "description": "Same Bag struct but boxed to a HeapRecord via [box ...]. Exercises"
   },
   {
     "name": "buf_traced_struct_field_decl",
     "category": "buf",
-    "code": "# expect: 0\n# expect: hello\n# expect: 42\n# expect: ok\n# Ref-elem bufs as struct fields: declaration, construction, write,\n# read. Stack-inline struct with a [Buf N dyn] field. Writes through\n# $bag->items->N fire the GC write barrier (OP_PTR_STORE with TYPE_DYN\n# field type); reads load the tagged JaclVal directly. The slot lives\n# at the struct's inline byte range; the slot_ref_bitmap on the\n# struct's StructTypeDef tells the inline-push helpers to leave that\n# slot GC-traceable. See BUFFER_DESIGN.md Tier 1.\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag 0]\n  print $b->size\n  set $b->items->0 \"hello\"\n  set $b->items->1 42\n  print $b->items->0\n  print $b->items->1\n  print \"ok\"\n}\n[main]\n",
+    "code": "# expect: 0\n# expect: hello\n# expect: 42\n# expect: ok\n# Ref-elem bufs as struct fields: declaration, construction, write,\n# read. Stack-inline struct with a [Buf N dyn] field. Writes through\n# $bag->items->N fire the GC write barrier (OP_PTR_STORE with TYPE_DYN\n# field type); reads load the tagged JaclVal directly. The slot lives\n# at the struct's inline byte range; the slot_ref_bitmap on the\n# struct's StructTypeDef tells the inline-push helpers to leave that\n# slot GC-traceable. See BUFFER_DESIGN.md Tier 1.\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag size 0]\n  print $b->size\n  set $b->items->0 \"hello\"\n  set $b->items->1 42\n  print $b->items->0\n  print $b->items->1\n  print \"ok\"\n}\n[main]\n",
     "concurrent": false,
     "description": "Ref-elem bufs as struct fields: declaration, construction, write,"
   },
   {
     "name": "buf_traced_struct_field_gc",
     "category": "buf",
-    "code": "# expect: hello\n# expect: world\n# expect: 3\n# expect: 7\n# expect: 100\n# GC stress for [Buf N dyn] field in a struct. Same shape as\n# buf_traced_dyn_gc.jacl but the buf lives at a field offset inside\n# a stack-inline struct. Verifies (a) the slot_ref_bitmap on the\n# struct keeps the inline_slot_bitmap clear for the embedded JaclVal\n# slots (so the marker treats them as roots, not raw bytes), and\n# (b) OP_PTR_STORE with TYPE_DYN fires the SATB write barrier so\n# concurrent mark sees the published references. See BUFFER_DESIGN.md\n# Tier 1 (ref-elem bufs as struct fields).\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag 0]\n  set $b->items->0 \"hello\"\n  set $b->items->1 \"world\"\n  def v [vec 1 2 3]\n  set $b->items->2 $v\n  def m [map \"k\" 7]\n  set $b->items->3 $m\n\n  # Churn the heap with throw-away allocations to encourage a GC\n  # cycle while the only roots for these values are the buf slots\n  # embedded in $b.\n  mut i 0\n  while [< $i 100] {\n    def junk_v [vec $i $i $i]\n    def junk_m [map \"x\" $i]\n    set i [+ $i 1]\n  }\n\n  print $b->items->0\n  print $b->items->1\n  def got_v $b->items->2\n  print [vec-get $got_v 2]\n  def got_m $b->items->3\n  print [map-get $got_m \"k\"]\n  print $i\n}\n[main]\n",
+    "code": "# expect: hello\n# expect: world\n# expect: 3\n# expect: 7\n# expect: 100\n# GC stress for [Buf N dyn] field in a struct. Same shape as\n# buf_traced_dyn_gc.jacl but the buf lives at a field offset inside\n# a stack-inline struct. Verifies (a) the slot_ref_bitmap on the\n# struct keeps the inline_slot_bitmap clear for the embedded JaclVal\n# slots (so the marker treats them as roots, not raw bytes), and\n# (b) OP_PTR_STORE with TYPE_DYN fires the SATB write barrier so\n# concurrent mark sees the published references. See BUFFER_DESIGN.md\n# Tier 1 (ref-elem bufs as struct fields).\n\nstruct Bag { i32 size, [Buf 4 dyn] items }\n\nproc main {} {\n  def b [Bag size 0]\n  set $b->items->0 \"hello\"\n  set $b->items->1 \"world\"\n  def v [vec 1 2 3]\n  set $b->items->2 $v\n  def m [map \"k\" 7]\n  set $b->items->3 $m\n\n  # Churn the heap with throw-away allocations to encourage a GC\n  # cycle while the only roots for these values are the buf slots\n  # embedded in $b.\n  mut i 0\n  while [< $i 100] {\n    def junk_v [vec $i $i $i]\n    def junk_m [map \"x\" $i]\n    set i [+ $i 1]\n  }\n\n  print $b->items->0\n  print $b->items->1\n  def got_v $b->items->2\n  print [vec-get $got_v 2]\n  def got_m $b->items->3\n  print [map-get $got_m \"k\"]\n  print $i\n}\n[main]\n",
     "concurrent": false,
     "description": "GC stress for [Buf N dyn] field in a struct. Same shape as"
   },
@@ -695,7 +702,7 @@
   {
     "name": "buf_typed_map_elem",
     "category": "buf",
-    "code": "# expect: 100\n# expect: 200\n# expect: nil\n# expect: 7\n# expect: 11\n# Phase 3+4 of TYPE_REGISTRY_REFACTOR.md:\n# [Buf N [Map K V]] -- typed-map element type. The shape entry in\n# the type registry carries both K and V; the buf binding stores\n# one registry idx instead of growing aux fields per nesting depth.\nstruct Point { i32 x, i32 y }\nproc main {} {\n  def [Buf 3 [Map i64 i64]] xs\n  def m1 [[Map i64 i64] 1 100 2 200]\n  [buf-set $xs 0 $m1]\n\n  def got [buf-get $xs 0]\n  print [map-get $got 1]\n  print [map-get $got 2]\n  print [buf-get $xs 2]\n\n  def [Buf 2 [Map i64 Point]] points\n  def pm [[Map i64 Point] 7 [Point 7 11]]\n  [buf-set $points 0 $pm]\n  def pgot [buf-get $points 0]\n  def p [map-get $pgot 7]\n  print $p->x\n  print $p->y\n}\nmain\n",
+    "code": "# expect: 100\n# expect: 200\n# expect: nil\n# expect: 7\n# expect: 11\n# Phase 3+4 of TYPE_REGISTRY_REFACTOR.md:\n# [Buf N [Map K V]] -- typed-map element type. The shape entry in\n# the type registry carries both K and V; the buf binding stores\n# one registry idx instead of growing aux fields per nesting depth.\nstruct Point { i32 x, i32 y }\nproc main {} {\n  def [Buf 3 [Map i64 i64]] xs\n  def m1 [[Map i64 i64] 1 100 2 200]\n  [buf-set $xs 0 $m1]\n\n  def got [buf-get $xs 0]\n  print [map-get $got 1]\n  print [map-get $got 2]\n  print [buf-get $xs 2]\n\n  def [Buf 2 [Map i64 Point]] points\n  def pm [[Map i64 Point] 7 [Point x 7 y 11]]\n  [buf-set $points 0 $pm]\n  def pgot [buf-get $points 0]\n  def p [map-get $pgot 7]\n  print $p->x\n  print $p->y\n}\nmain\n",
     "concurrent": false,
     "description": "Phase 3+4 of TYPE_REGISTRY_REFACTOR.md:"
   },
@@ -709,7 +716,7 @@
   {
     "name": "buf_typed_vec_elem_struct",
     "category": "buf",
-    "code": "# expect: 7\n# expect: 11\n# expect: 22\n# M4.4 ext: [Buf N [Vec Struct]] -- typed-vec elements of value-type\n# structs. The struct T's registry idx is stashed on the buf local's\n# key_struct_idx; vec-get on the returned typed-vec narrows to TYPE_STRUCT\n# with the right registry idx so $point->x chains type-check.\nstruct Point { i32 x, i32 y }\nproc main {} {\n  def [Buf 2 [Vec Point]] grid\n  def row0 [[Vec Point] [Point 7 11] [Point 22 33]]\n  [buf-set $grid 0 $row0]\n\n  def fetched [buf-get $grid 0]\n  def p0 [vec-get $fetched 0]\n  print $p0->x\n  print $p0->y\n  def p1 [vec-get $fetched 1]\n  print $p1->x\n}\nmain\n",
+    "code": "# expect: 7\n# expect: 11\n# expect: 22\n# M4.4 ext: [Buf N [Vec Struct]] -- typed-vec elements of value-type\n# structs. The struct T's registry idx is stashed on the buf local's\n# key_struct_idx; vec-get on the returned typed-vec narrows to TYPE_STRUCT\n# with the right registry idx so $point->x chains type-check.\nstruct Point { i32 x, i32 y }\nproc main {} {\n  def [Buf 2 [Vec Point]] grid\n  def row0 [[Vec Point] [Point x 7 y 11] [Point x 22 y 33]]\n  [buf-set $grid 0 $row0]\n\n  def fetched [buf-get $grid 0]\n  def p0 [vec-get $fetched 0]\n  print $p0->x\n  print $p0->y\n  def p1 [vec-get $fetched 1]\n  print $p1->x\n}\nmain\n",
     "concurrent": false,
     "description": "M4.4 ext: [Buf N [Vec Struct]] -- typed-vec elements of value-type"
   },
@@ -835,7 +842,7 @@
   {
     "name": "ctx_chained_access",
     "category": "ctx",
-    "code": "# expect: 10\n# expect: 20\n# Test: chained access on struct-typed ctx field works\nstruct Point {i32 x, i32 y}\nctx Point origin = [Point 10 20]\nprint $ctx->origin->x\nprint $ctx->origin->y\n",
+    "code": "# expect: 10\n# expect: 20\n# Test: chained access on struct-typed ctx field works\nstruct Point {i32 x, i32 y}\nctx Point origin = [Point x 10 y 20]\nprint $ctx->origin->x\nprint $ctx->origin->y\n",
     "concurrent": false,
     "description": "Test: chained access on struct-typed ctx field works"
   },
@@ -926,7 +933,7 @@
   {
     "name": "ctx_e2e_struct_field",
     "category": "ctx",
-    "code": "# expect: 10\n# expect: 20\n# expect: 100\n# expect: 10\n# Test: ctx field that holds a struct value\nstruct Point {i32 x, i32 y}\nctx mut Point pos = [Point 10 20]\n\nprint $ctx->pos->x\nprint $ctx->pos->y\n\nwith-ctx {pos [Point 100 200]} {\n  print $ctx->pos->x\n}\nprint $ctx->pos->x\n",
+    "code": "# expect: 10\n# expect: 20\n# expect: 100\n# expect: 10\n# Test: ctx field that holds a struct value\nstruct Point {i32 x, i32 y}\nctx mut Point pos = [Point x 10 y 20]\n\nprint $ctx->pos->x\nprint $ctx->pos->y\n\nwith-ctx {pos [Point x 100 y 200]} {\n  print $ctx->pos->x\n}\nprint $ctx->pos->x\n",
     "concurrent": false,
     "description": "Test: ctx field that holds a struct value"
   },
@@ -1136,7 +1143,7 @@
   {
     "name": "destructure_named",
     "category": "destructure",
-    "code": "# expect: 10\n# expect: 20\n# named struct destructuring\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  def {x, y} $p\n  print $x\n  print $y\n}\nmain\n",
+    "code": "# expect: 10\n# expect: 20\n# named struct destructuring\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  def {x, y} $p\n  print $x\n  print $y\n}\nmain\n",
     "concurrent": false,
     "description": "named struct destructuring"
   },
@@ -1160,6 +1167,13 @@
     "code": "# expect: 1\n# expect: 3\n# wildcard _ skips elements in destructuring\ndef [a _ c] [vec 1 2 3]\nprint $a\nprint $c\n",
     "concurrent": false,
     "description": "wildcard _ skips elements in destructuring"
+  },
+  {
+    "name": "dollar_paren_removed_error",
+    "category": "dollar",
+    "code": "# expect-error: `$(...)` infix interpolation was removed\n# §12 PR 2: surfacing the helpful \"use `$[...]`\" message when source\n# still contains the removed `$(...)` string interpolation form.\nprint \"sum: $(1 + 2)\"\n",
+    "concurrent": false,
+    "description": "expect-error: `$(...)` infix interpolation was removed"
   },
   {
     "name": "each_arity",
@@ -1617,6 +1631,13 @@
     "description": "write-file surfaces open()/write() failures as error values (try/catch-able)"
   },
   {
+    "name": "lex_negative_literal",
+    "category": "lex",
+    "code": "# Negative numeric literals lex as single number tokens when '-' is\n# glued to a digit (no whitespace between). Workarounds like `(-1)` or\n# `(- 1)` are no longer needed.\n#\n# expect: -1\n# expect: 2\n# expect: -3\n# expect: -42\n# expect: -1.5\n\n# Bare arg position: -1 is a single int token.\nprint -1\n\n# Inside a [] arg list: -3 is added to 5.\nprint [+ 5 -3]\n\n# Subtraction still works when '-' has whitespace on both sides.\nprint [- 5 8]\n\n# Negative bound to a name, then printed.\ndef x -42\nprint $x\n\n# Negative float.\nprint -1.5\n",
+    "concurrent": false,
+    "description": "Negative numeric literals lex as single number tokens when '-' is"
+  },
+  {
     "name": "line_continuation",
     "category": "line",
     "code": "# expect: 42\n# expect: 7\n# backslash continuation joins the next line\ndef x \\\n42\nprint [+ $x 0]\n# continuation in command\nprint [+ \\\n3 4]\n",
@@ -1862,23 +1883,30 @@
     "description": "Nested closure with box used in spawn — correct result (US-003)"
   },
   {
+    "name": "neq_prefix",
+    "category": "neq",
+    "code": "# `!=` as a prefix builtin: `[!= a b]` == `[~ [== a b]]`.\n#\n# expect: ok\n\nproc check {} {\n  assert [!= 1 2]\n  assert [!= \"foo\" \"bar\"]\n  assert [not [!= 1 1]]\n  assert [not [!= \"x\" \"x\"]]\n\n  # Composable in predicate form via the assert macro.\n  [assert != 1 2]\n\n  \"ok\"\n}\n\nprint [check]\n",
+    "concurrent": false,
+    "description": "`!=` as a prefix builtin: `[!= a b]` == `[~ [== a b]]`."
+  },
+  {
     "name": "optional_chain_map",
     "category": "optional",
-    "code": "# expect: hello\n# expect: nil\n# Test: optional chaining on map returns value or nil for missing key\ndef m [map \"name\" \"hello\"]\nprint ($m ?. name)\nprint ($m ?. missing)\n",
+    "code": "# expect: hello\n# expect: nil\n# Test: optional chaining on map returns value or nil for missing key\ndef m [map \"name\" \"hello\"]\nprint [?. $m name]\nprint [?. $m missing]\n",
     "concurrent": false,
     "description": "Test: optional chaining on map returns value or nil for missing key"
   },
   {
     "name": "optional_chain_nil",
     "category": "optional",
-    "code": "# expect: nil\n# Test: optional chaining on nil returns nil\ndef x $nil\nprint ($x ?. name)\n",
+    "code": "# expect: nil\n# Test: optional chaining on nil returns nil\ndef x $nil\nprint [?. $x name]\n",
     "concurrent": false,
     "description": "Test: optional chaining on nil returns nil"
   },
   {
     "name": "optional_chain_struct",
     "category": "optional",
-    "code": "# expect-error: ?. cannot be used on struct 'Point'; use -> for struct field access\n# Test: optional chaining on a struct is a compile error\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  print ($p ?. x)\n}\nmain\n",
+    "code": "# expect-error: ?. cannot be used on struct 'Point'; use -> for struct field access\n# Test: optional chaining on a struct is a compile error\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  print [?. $p x]\n}\nmain\n",
     "concurrent": false,
     "description": "expect-error: ?. cannot be used on struct 'Point'; use -> for struct field access"
   },
@@ -1951,6 +1979,13 @@
     "code": "# mode: concurrent\n# expect: 100\n# expect: 200\n# parallel bodies that internally use spawn+await\nproc main {} {\n  def r [parallel { def f [spawn { 100 }]; await $f } { def g [spawn { 200 }]; await $g }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
     "concurrent": true,
     "description": "parallel bodies that internally use spawn+await"
+  },
+  {
+    "name": "parens_removed_error",
+    "category": "parens",
+    "code": "# expect-error: `()` infix mode was removed\n# §12 PR 2: surfacing the helpful \"use `[]` for value expressions\" message\n# when source still contains `()` infix expressions.\nprint ($x + 1)\n",
+    "concurrent": false,
+    "description": "expect-error: `()` infix mode was removed"
   },
   {
     "name": "pragma_ignored",
@@ -2079,16 +2114,23 @@
     "description": "race as a non-last operand in an enclosing expression — same operand-stack"
   },
   {
+    "name": "range_builtins",
+    "category": "range",
+    "code": "# [range a b] and [range-inclusive a b] — named-prefix range builtins.\n# Replace the infix `(a ..< b)` / `(a ..= b)` forms; produce streams.\n#\n# expect: ok\n\nproc check {} {\n  assert [== [collect [range 1 5]] [vec 1 2 3 4]]\n  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]\n  assert [== [collect [range 0 0]] [vec]]\n  assert [== [collect [range-inclusive 5 5]] [vec 5]]\n\n  # Composes with transform / filter like the infix form did.\n  assert [== [collect [transform [range 0 3] [\\ * $it 10]]] [vec 0 10 20]]\n\n  # Element type stamps i64 so the for binding narrows.\n  mut sum 0\n  for [range-inclusive 1 4] n { set sum [+ $sum $n] }\n  assert [== $sum 10]\n\n  \"ok\"\n}\n\nprint [check]\n",
+    "concurrent": false,
+    "description": "[range a b] and [range-inclusive a b] — named-prefix range builtins."
+  },
+  {
     "name": "range_exclusive",
     "category": "range",
-    "code": "# expect: [vec 1 2 3 4]\n# Test: exclusive range collected to vector\nprint [collect (1 ..< 5)]\n",
+    "code": "# expect: [vec 1 2 3 4]\n# Test: exclusive range collected to vector\nprint [collect [range 1 5]]\n",
     "concurrent": false,
     "description": "Test: exclusive range collected to vector"
   },
   {
     "name": "range_inclusive",
     "category": "range",
-    "code": "# expect: [vec 1 2 3 4 5]\n# Test: inclusive range collected to vector\nprint [collect (1 ..= 5)]\n",
+    "code": "# expect: [vec 1 2 3 4 5]\n# Test: inclusive range collected to vector\nprint [collect [range-inclusive 1 5]]\n",
     "concurrent": false,
     "description": "Test: inclusive range collected to vector"
   },
@@ -2210,6 +2252,34 @@
     "code": "# expect: ok\n# sleep 0 should evaluate to nil immediately (or near-immediately) and\n# continue execution. Acts as a yield point in concurrent contexts.\nproc main {} {\n  sleep 0\n  print \"ok\"\n}\nmain\n",
     "concurrent": false,
     "description": "sleep 0 should evaluate to nil immediately (or near-immediately) and"
+  },
+  {
+    "name": "sm_destructure_vec",
+    "category": "sm",
+    "code": "# mode: concurrent\n# Positional vec destructuring inside SM-compiled procs.\n# Regression for the bug where OP_DESTRUCTURE_VEC pushed elements as\n# stack locals while body reads went through the SM state field.\n#\n# expect: 60\n# expect: 6\n\nproc from-parallel {} {\n  def [a b c] [parallel { 10 } { 20 } { 30 }]\n  + $a [+ $b $c]\n}\n\nproc from-vec {} {\n  def fut [spawn { 0 }]\n  def [a b c] [vec 1 2 3]\n  + $a [+ $b [+ $c [await $fut]]]\n}\n\nprint [from-parallel]\nprint [from-vec]\n",
+    "concurrent": true,
+    "description": "Positional vec destructuring inside SM-compiled procs."
+  },
+  {
+    "name": "sm_field_same_shape_rebind",
+    "category": "sm",
+    "code": "# mode: concurrent\n# expect: 7\n# §8c regression guard: identical-shape re-add in a suspending proc must\n# remain silent. The conservative `sm__walk_locals` walker reaches the\n# same name from multiple AST branches (here, both arms of the if write\n# to `n`) and dedup is intentional. Only differing storage shapes error.\nproc choose {} {\n  def fut [spawn { 0 }]\n  mut n 0\n  if [== 1 1] {\n    mut n 7\n  } else {\n    mut n 99\n  }\n  + $n [await $fut]\n}\nprint [choose]\n",
+    "concurrent": true,
+    "description": "§8c regression guard: identical-shape re-add in a suspending proc must"
+  },
+  {
+    "name": "sm_field_shadow_repro",
+    "category": "sm",
+    "code": "# expect-error: redeclared with different storage shape\n# §8c: re-binding `counter` in a suspending proc with a different storage\n# shape (mut→def changes is_mutable) used to silently share the original\n# field slot and miscompile reads as cell-derefs of an atom. The compiler\n# now rejects the second declaration at the layout-collection pass.\nproc race-shadow {} {\n  mut counter 0\n  def counter [atom 0]\n  reset $counter 7\n  await [spawn { 0 }]\n}\nrace-shadow\n",
+    "concurrent": true,
+    "description": "expect-error: redeclared with different storage shape"
+  },
+  {
+    "name": "sm_for_explicit_binding",
+    "category": "sm",
+    "code": "# mode: concurrent\n# Explicit-binding for-loops inside SM-compiled procs.\n# Regression for the bug where the loop binding was stored to a stack\n# local while body reads went through the SM state field (uninitialized).\n#\n# expect: 9\n# expect: 6\n\nproc sum-vec {} {\n  def fut [spawn { + 1 2 }]\n  mut total 0\n  for [vec 1 2 3] n { set total [+ $total $n] }\n  + $total [await $fut]\n}\n\nproc count-stream {} {\n  def fut [spawn { 0 }]\n  mut total 0\n  for [range 1 4] n { set total [+ $total $n] }\n  + $total [await $fut]\n}\n\nprint [sum-vec]\nprint [count-stream]\n",
+    "concurrent": true,
+    "description": "Explicit-binding for-loops inside SM-compiled procs."
   },
   {
     "name": "spawn_basic",
@@ -2345,6 +2415,13 @@
     "description": "transform stream lazily (double each element)"
   },
   {
+    "name": "string_interp_bracket",
+    "category": "string",
+    "code": "# expect: total: 3\n# expect: total: 30\n# expect: val: 10\n# §12 migration guard: `$[...]` (juxtaposition) interpolation must keep\n# working once `$(...)` (infix) interpolation is removed. Mirrors the\n# test_dollar_paren_compile_* coverage in C, but in jacl-fixture form so\n# it survives PR 2's deletion of the C-side $() tests.\nprint \"total: $[+ 1 2]\"\ndef price 10\ndef qty 3\nprint \"total: $[* $price $qty]\"\ndef x 5\ndef y [+ 2 3]\nprint \"val: $[+ $x $y]\"\n",
+    "concurrent": false,
+    "description": "§12 migration guard: `$[...]` (juxtaposition) interpolation must keep"
+  },
+  {
     "name": "strings",
     "category": "strings",
     "code": "# expect: hello world\n# expect: hello JACL\n# expect: hello world\n# expect: 5\n# expect: h\n# expect: world\n# string literal\nprint \"hello world\"\n# string interpolation\ndef name \"JACL\"\nprint \"hello $name\"\n# concat\nprint [concat \"hello \" \"world\"]\n# length\nprint [length \"hello\"]\n# index\nprint [index \"hello\" 0]\n# slice\nprint [slice \"hello world\" 6 11]\n",
@@ -2354,126 +2431,133 @@
   {
     "name": "struct_all_types",
     "category": "struct",
-    "code": "# expect: 42\n# expect: 1000000\n# expect: 7\n# expect: 9999999\n# expect: 3\n# expect: 2.71828\n# expect: 99\n# Test struct with all supported value-type fields (no reference types)\nstruct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, i32 g}\n\nproc main {} {\n  def s [All 42 1000000 7 9999999 3.0 2.71828 99]\n  print $s->a\n  print $s->b\n  print $s->c\n  print $s->d\n  print $s->e\n  print $s->f\n  print $s->g\n}\nmain\n",
+    "code": "# expect: 42\n# expect: 1000000\n# expect: 7\n# expect: 9999999\n# expect: 3\n# expect: 2.71828\n# expect: 99\n# Test struct with all supported value-type fields (no reference types)\nstruct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, i32 g}\n\nproc main {} {\n  def s [All a 42 b 1000000 c 7 d 9999999 e 3.0 f 2.71828 g 99]\n  print $s->a\n  print $s->b\n  print $s->c\n  print $s->d\n  print $s->e\n  print $s->f\n  print $s->g\n}\nmain\n",
     "concurrent": false,
     "description": "Test struct with all supported value-type fields (no reference types)"
   },
   {
     "name": "struct_basic",
     "category": "struct",
-    "code": "# expect: Point{x: 1, y: 2}\n# Test basic struct definition and instantiation\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point 1 2]\n  print $p\n}\nmain\n",
+    "code": "# expect: [Point x 1 y 2]\n# Test basic struct definition and instantiation\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point x 1 y 2]\n  print $p\n}\nmain\n",
     "concurrent": false,
     "description": "Test basic struct definition and instantiation"
   },
   {
     "name": "struct_closure_capture_error",
     "category": "struct",
-    "code": "# expect-error: cannot capture bare struct 'p' in closure; use [box ...] to box it first\nstruct Point {i32 x, i32 y}\nproc test {} {\n  def p [Point 10 20]\n  proc inner {} {\n    print $p->x\n  }\n  [inner]\n}\n[test]\n",
+    "code": "# expect-error: cannot capture bare struct 'p' in closure; use [box ...] to box it first\nstruct Point {i32 x, i32 y}\nproc test {} {\n  def p [Point x 10 y 20]\n  proc inner {} {\n    print $p->x\n  }\n  [inner]\n}\n[test]\n",
     "concurrent": false,
     "description": "expect-error: cannot capture bare struct 'p' in closure; use [box ...] to box it first"
   },
   {
+    "name": "struct_default_nested",
+    "category": "struct",
+    "code": "# Missing struct-typed fields zero-init recursively. The constructor\n# emits the same op sequence as an empty inner-constructor would, so\n# every leaf scalar comes out 0/false/\"\"/nil.\n#\n# expect: 0\n# expect: 0\n# expect: 1\n# expect: 0\n# expect: 7\n# expect: 0\n# expect: 0\n# expect: 0\n# expect: 0\n\nstruct Pt {i32 x, i32 y}\nstruct Line {Pt start, Pt end}\nstruct Body {i32 tag, Line bounds}\n\nproc main {} {\n  # Both nested Pts default to {0, 0}.\n  def ln [Line]\n  print $ln->start->x\n  print $ln->end->y\n\n  # Outer field provided, inner Pt defaults.\n  def ln2 [Line start [Pt x 1 y 2]]\n  print $ln2->start->x\n  print $ln2->end->x\n\n  # Two levels deep: Body { tag, Line { Pt start, Pt end } }\n  def b [Body tag 7]\n  print $b->tag\n  print $b->bounds->start->x\n  print $b->bounds->start->y\n  print $b->bounds->end->x\n  print $b->bounds->end->y\n}\nmain\n",
+    "concurrent": false,
+    "description": "Missing struct-typed fields zero-init recursively. The constructor"
+  },
+  {
     "name": "struct_field_access",
     "category": "struct",
-    "code": "# expect: 10\n# expect: 20\n# Test struct field access with dot command\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  print $p->x\n  print $p->y\n}\nmain\n",
+    "code": "# expect: 10\n# expect: 20\n# Test struct field access with dot command\nstruct Point {i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  print $p->x\n  print $p->y\n}\nmain\n",
     "concurrent": false,
     "description": "Test struct field access with dot command"
   },
   {
     "name": "struct_field_nested",
     "category": "struct",
-    "code": "# expect: 5\n# Test nested struct field access\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\nproc main {} {\n  def ln [Line [Point 5 6] [Point 10 20]]\n  print $ln->start->x\n}\nmain\n",
+    "code": "# expect: 5\n# Test nested struct field access\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\nproc main {} {\n  def ln [Line start [Point x 5 y 6] end [Point x 10 y 20]]\n  print $ln->start->x\n}\nmain\n",
     "concurrent": false,
     "description": "Test nested struct field access"
   },
   {
     "name": "struct_gc_nested",
     "category": "struct",
-    "code": "# expect: 42\n# expect: 99\n# Test: nested struct survives after outer struct is no longer referenced.\n# Extract inner struct, let outer become garbage, verify inner is still valid.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc Point getpt {} {\n  def ln [Line [Point 42 99] [Point 0 0]]\n  $ln->start\n}\n\nproc main {} {\n  def pt [getpt]\n  # ln is now garbage — only pt (the inner Point) is still live\n  # Allocate more to trigger GC\n  def a [Point 1 1]\n  def b [Point 2 2]\n  def c [Point 3 3]\n  def d [Line $a $b]\n  def e [Line $b $c]\n  print $pt->x\n  print $pt->y\n}\nmain\n",
+    "code": "# expect: 42\n# expect: 99\n# Test: nested struct survives after outer struct is no longer referenced.\n# Extract inner struct, let outer become garbage, verify inner is still valid.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc getpt {} Point {\n  def ln [Line start [Point x 42 y 99] end [Point x 0 y 0]]\n  $ln->start\n}\n\nproc main {} {\n  def pt [getpt]\n  # ln is now garbage — only pt (the inner Point) is still live\n  # Allocate more to trigger GC\n  def a [Point x 1 y 1]\n  def b [Point x 2 y 2]\n  def c [Point x 3 y 3]\n  def d [Line start $a end $b]\n  def e [Line start $b end $c]\n  print $pt->x\n  print $pt->y\n}\nmain\n",
     "concurrent": false,
     "description": "Test: nested struct survives after outer struct is no longer referenced."
   },
   {
     "name": "struct_gc_stress",
     "category": "struct",
-    "code": "# expect: done\n# Stress test: allocate many structs in a loop, verify memory is reclaimed.\n# Each iteration creates structs that become garbage, triggering GC.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc batch {} {\n  def p1 [Point 1 2]\n  def p2 [Point 3 4]\n  def ln [Line $p1 $p2]\n  def p3 [Point 5 6]\n  def p4 [Point 7 8]\n  def l2 [Line $p3 $p4]\n  + $ln->start->x $l2->end->y\n}\n\nproc loop {i, n} {\n  if [< $i $n] {\n    batch\n    batch\n    batch\n    loop [+ $i 1] $n\n  } else { 0 }\n}\n\n[loop 0 50]\nprint \"done\"\n",
+    "code": "# expect: done\n# Stress test: allocate many structs in a loop, verify memory is reclaimed.\n# Each iteration creates structs that become garbage, triggering GC.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc batch {} {\n  def p1 [Point x 1 y 2]\n  def p2 [Point x 3 y 4]\n  def ln [Line start $p1 end $p2]\n  def p3 [Point x 5 y 6]\n  def p4 [Point x 7 y 8]\n  def l2 [Line start $p3 end $p4]\n  + $ln->start->x $l2->end->y\n}\n\nproc loop {i, n} {\n  if [< $i $n] {\n    batch\n    batch\n    batch\n    loop [+ $i 1] $n\n  } else { 0 }\n}\n\n[loop 0 50]\nprint \"done\"\n",
     "concurrent": false,
     "description": "Stress test: allocate many structs in a loop, verify memory is reclaimed."
   },
   {
     "name": "struct_immutable_error",
     "category": "struct",
-    "code": "# expect-error: cannot mutate immutable field 'y' on struct 'Point'\n# Test: immutable field write produces compile error\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  . $p y 99\n}\nmain\n",
+    "code": "# expect-error: cannot mutate immutable field 'y' on struct 'Point'\n# Test: immutable field write produces compile error\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  . $p y 99\n}\nmain\n",
     "concurrent": false,
     "description": "expect-error: cannot mutate immutable field 'y' on struct 'Point'"
   },
   {
     "name": "struct_in_map",
     "category": "struct",
-    "code": "# expect: Point{x: 0, y: 0}\n# Test boxed structs stored as map values\nstruct Point {i32 x, i32 y}\ndef m [map \"origin\" [box [Point 0 0]]]\ndef p [deref [map-get $m \"origin\"]]\nprint $p\n",
+    "code": "# expect: [Point x 0 y 0]\n# Test boxed structs stored as map values\nstruct Point {i32 x, i32 y}\ndef m [map \"origin\" [box [Point x 0 y 0]]]\ndef p [deref [map-get $m \"origin\"]]\nprint $p\n",
     "concurrent": false,
     "description": "Test boxed structs stored as map values"
   },
   {
     "name": "struct_in_map_error",
     "category": "struct",
-    "code": "# expect-error: cannot store bare struct in dyn map; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef m [map \"origin\" [Point 0 0]]\n",
+    "code": "# expect-error: cannot store bare struct in dyn map; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef m [map \"origin\" [Point x 0 y 0]]\n",
     "concurrent": false,
     "description": "expect-error: cannot store bare struct in dyn map; use [box ...] to box it"
   },
   {
     "name": "struct_in_vec",
     "category": "struct",
-    "code": "# expect: Point{x: 3, y: 4}\n# expect: 3\n# Test boxed structs stored in vec\nstruct Point {i32 x, i32 y}\ndef v [vec [box [Point 1 2]] [box [Point 3 4]]]\ndef p [deref [vec-get $v 1]]\nprint $p\nprint $p->x\n",
+    "code": "# expect: [Point x 3 y 4]\n# expect: 3\n# Test boxed structs stored in vec\nstruct Point {i32 x, i32 y}\ndef v [vec [box [Point x 1 y 2]] [box [Point x 3 y 4]]]\ndef p [deref [vec-get $v 1]]\nprint $p\nprint $p->x\n",
     "concurrent": false,
     "description": "Test boxed structs stored in vec"
   },
   {
     "name": "struct_in_vec_error",
     "category": "struct",
-    "code": "# expect-error: cannot store bare struct in dyn vec; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef v [vec [Point 1 2]]\n",
+    "code": "# expect-error: cannot store bare struct in dyn vec; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef v [vec [Point x 1 y 2]]\n",
     "concurrent": false,
     "description": "expect-error: cannot store bare struct in dyn vec; use [box ...] to box it"
   },
   {
     "name": "struct_inline",
     "category": "struct",
-    "code": "# expect: 42\n# Test inline anonymous struct type in defstruct field\nstruct Point {i32 x, i32 y}\nstruct Wrapper {struct{x:i32,y:i32} pos}\nproc main {} {\n  def w [Wrapper [Point 42 10]]\n  print $w->pos->x\n}\nmain\n",
+    "code": "# expect: 42\n# Test inline anonymous struct type in defstruct field\nstruct Point {i32 x, i32 y}\nstruct Wrapper {struct{x:i32,y:i32} pos}\nproc main {} {\n  def w [Wrapper pos [Point x 42 y 10]]\n  print $w->pos->x\n}\nmain\n",
     "concurrent": false,
     "description": "Test inline anonymous struct type in defstruct field"
   },
   {
     "name": "struct_map_set_error",
     "category": "struct",
-    "code": "# expect-error: cannot store bare struct in dyn map; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef m [map]\ndef m2 [map-set $m \"pt\" [Point 1 2]]\n",
+    "code": "# expect-error: cannot store bare struct in dyn map; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef m [map]\ndef m2 [map-set $m \"pt\" [Point x 1 y 2]]\n",
     "concurrent": false,
     "description": "expect-error: cannot store bare struct in dyn map; use [box ...] to box it"
   },
   {
     "name": "struct_mutable_field",
     "category": "struct",
-    "code": "# expect: 99\n# expect: 20\n# Test: mutable field write compiles and executes correctly\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  . $p x 99\n  print $p->x\n  print $p->y\n}\nmain\n",
+    "code": "# expect: 99\n# expect: 20\n# Test: mutable field write compiles and executes correctly\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  . $p x 99\n  print $p->x\n  print $p->y\n}\nmain\n",
     "concurrent": false,
     "description": "Test: mutable field write compiles and executes correctly"
   },
   {
     "name": "struct_nested_set",
     "category": "struct",
-    "code": "# expect: 99\n# expect: 6\n# Test nested struct field mutation\nstruct Point {mut i32 x, i32 y}\nstruct Line {mut Point start, Point end}\nproc main {} {\n  def ln [Line [Point 5 6] [Point 10 20]]\n  . $ln->start x 99\n  print $ln->start->x\n  print $ln->start->y\n}\nmain\n",
+    "code": "# expect: 99\n# expect: 6\n# Test nested struct field mutation\nstruct Point {mut i32 x, i32 y}\nstruct Line {mut Point start, Point end}\nproc main {} {\n  def ln [Line start [Point x 5 y 6] end [Point x 10 y 20]]\n  . $ln->start x 99\n  print $ln->start->x\n  print $ln->start->y\n}\nmain\n",
     "concurrent": false,
     "description": "Test nested struct field mutation"
   },
   {
     "name": "struct_proc",
     "category": "struct",
-    "code": "# expect: 30\n# expect: Point{x: 100, y: 200}\n# Test struct as proc parameter and return value\nstruct Point {i32 x, i32 y}\n\nproc sum {Point, p} {\n  + $p->x $p->y\n}\n\nproc Point mk {i32 a, i32 b} {\n  Point $a $b\n}\n\nproc main {} {\n  def p [Point 10 20]\n  print [sum $p]\n  print [mk 100 200]\n}\nmain\n",
+    "code": "# expect: 30\n# expect: [Point x 100 y 200]\n# Test struct as proc parameter and return value\nstruct Point {i32 x, i32 y}\n\nproc sum {Point, p} {\n  + $p->x $p->y\n}\n\nproc mk {i32 a, i32 b} Point {\n  [Point x $a y $b]\n}\n\nproc main {} {\n  def p [Point x 10 y 20]\n  print [sum $p]\n  print [mk 100 200]\n}\nmain\n",
     "concurrent": false,
     "description": "Test struct as proc parameter and return value"
   },
   {
     "name": "struct_proc_return_error",
     "category": "struct",
-    "code": "# expect-error: proc mk returns a struct but has no return type; add a return type annotation\nstruct Point {i32 x, i32 y}\nproc mk {i32 a, i32 b} {\n  Point $a $b\n}\n[mk 1 2]\n",
+    "code": "# expect-error: proc mk returns a struct but has no return type; add a return type annotation\nstruct Point {i32 x, i32 y}\nproc mk {i32 a, i32 b} {\n  [Point x $a y $b]\n}\n[mk 1 2]\n",
     "concurrent": false,
     "description": "expect-error: proc mk returns a struct but has no return type; add a return type annotation"
   },
@@ -2487,21 +2571,21 @@
   {
     "name": "struct_set",
     "category": "struct",
-    "code": "# expect: 99\n# expect: 20\n# Test struct field mutation via 3-arg dot syntax\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point 10 20]\n  . $p x 99\n  print $p->x\n  print $p->y\n}\nmain\n",
+    "code": "# expect: 99\n# expect: 20\n# Test struct field mutation via 3-arg dot syntax\nstruct Point {mut i32 x, i32 y}\nproc main {} {\n  def p [Point x 10 y 20]\n  . $p x 99\n  print $p->x\n  print $p->y\n}\nmain\n",
     "concurrent": false,
     "description": "Test struct field mutation via 3-arg dot syntax"
   },
   {
     "name": "struct_types",
     "category": "struct",
-    "code": "# expect: Pair{a: 10, b: 20}\n# Test struct with i32 fields\nstruct Pair {i32 a, i32 b}\nproc main {} {\n  def r [Pair 10 20]\n  print $r\n}\nmain\n",
+    "code": "# expect: [Pair a 10 b 20]\n# Test struct with i32 fields\nstruct Pair {i32 a, i32 b}\nproc main {} {\n  def r [Pair a 10 b 20]\n  print $r\n}\nmain\n",
     "concurrent": false,
     "description": "Test struct with i32 fields"
   },
   {
     "name": "struct_vec_push_error",
     "category": "struct",
-    "code": "# expect-error: cannot store bare struct in dyn vec; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef v [vec]\ndef v2 [vec-push $v [Point 1 2]]\n",
+    "code": "# expect-error: cannot store bare struct in dyn vec; use [box ...] to box it\nstruct Point {i32 x, i32 y}\ndef v [vec]\ndef v2 [vec-push $v [Point x 1 y 2]]\n",
     "concurrent": false,
     "description": "expect-error: cannot store bare struct in dyn vec; use [box ...] to box it"
   },
@@ -2557,7 +2641,7 @@
   {
     "name": "tour",
     "category": "tour",
-    "code": "# mode: concurrent\n\n##\n## tour.jacl — a survey of JACL syntax. Linked from AGENTS.md.\n## Each section exercises one feature area with `assert` calls.\n## A failing assert halts the VM with \"assertion failed\" pointing at\n## the source line, so a regression in any feature shows up directly.\n## See SYNTAX.md for the full reference.\n##\n## Tagged `# mode: concurrent` so the harness runs the full scheduler\n## (required for the spawn / parallel / race section at the end).\n##\n## Struct-valued bindings must live inside a proc, so the body of\n## this tour is wrapped in `main`.\n##\n\nstruct Pt {i32 x, i32 y}\n\n# `ctx <type> <name> = <value>` declares a field of `$ctx`, the dynamic\n# context object visible everywhere. Plain `ctx` is immutable; `ctx mut`\n# allows `with-ctx` overrides. Declarations live at module level.\nctx mut i32 verbosity = 0\n\n# `defmacro` registers a compile-time rewrite. `syntax-quote [...]` is\n# a templating form for AST literals; `~name` splices a captured arg's\n# AST in. The macro fires at compile time and never appears at runtime.\ndefmacro unless {cond body} {\n  syntax-quote [if ~cond {} ~body]\n}\n\n# A generator: any proc that contains `yield` is one. Each call returns\n# a fresh lazy stream; the compiler lowers the body to a state machine\n# that suspends/resumes across yield sites.\nproc count-up {start, stop} {\n  mut i $start\n  while [<= $i $stop] {\n    yield $i\n    set i [+ $i 1]\n  }\n}\n\nproc add {a, b} { + $a $b }\nproc greet {name} { concat \"hi \" $name }\nproc zero-arg {} { + 10 20 }\n\n# Typed proc: `proc <ret> <name> {<param-type> <param>, ...}`. Param\n# and return types are checked at call sites and arithmetic narrows\n# accordingly (no boxing, no dyn dispatch). Untyped params default\n# to `dyn`.\nproc i64 typed-add {i64 a, i64 b} { + $a $b }\nproc str shout {str s} { concat $s \"!\" }\n\n# Variadic: `..rest` in params collects trailing args into a vector.\nproc sum-all {..nums} {\n  mut total 0\n  for $nums n { set total [+ $total $n] }\n  $total\n}\n\n# A suspending proc: contains `sleep` (unconditional suspension).\n# Callers don't see any async machinery — they just call it like a\n# normal function and get a value back. This is the direct-style\n# payoff of CPS. (`spawn`/`await` is shown explicitly further below.)\nproc double-async {n} {\n  sleep 0.001\n  * $n 2\n}\n\n# Suspending procs compose. Two suspending calls can appear inline as\n# args to the same outer call — the SM compiler spills the enclosing\n# operand stack across each suspension so siblings don't trample each\n# other's results.\nproc sum-async {a, b} {\n  + [double-async $a] [double-async $b]\n}\n\nproc main {} {\n  # ----- values -----\n  # Numbers, strings, booleans, vectors.\n  assert [== 42 42]\n  assert [== \"hi\" hi]\n  assert $true\n  assert [not $false]\n  assert [== [vec 1 2 3] [vec 1 2 3]]\n\n  # ----- bindings -----\n  # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`\n  # operators are command-mode sugar for these.\n  def imm 7\n  assert ($imm == 7)\n  also = 11                       # `=` is `def` sugar\n  assert ($also == 11)\n  mut counter 0\n  set counter 2\n  assert ($counter == 2)\n  reassignable : 0                # `:` is `mut` sugar\n  reassignable :: 5               # `::` is `set` sugar\n  assert ($reassignable == 5)\n\n  # ----- three modes -----\n  # `[]` juxtaposition: head + args. `{}` command mode: bare commands.\n  # `()` infix: no precedence, left-to-right.\n  assert ([+ 1 [* 2 [+ 1 3]]] == 9)\n  assert ((1 + 2 + 4) == 7)\n  assert ((1 + 2 * 2) == 6)       # ((1+2)*2) — no precedence\n\n  # ----- string interpolation -----\n  # `$var`, `$[...]` (juxtaposition), `$(...)` (infix) all nest in \"\".\n  def who \"alice\"\n  def yrs 31\n  assert (\"name=$who age=$yrs sum=$(2 + 3)\" == \"name=alice age=31 sum=5\")\n\n  # ----- procs -----\n  # Params and body are both `{}` blocks. Type-before-name everywhere.\n  # Procs are defined at module level (see above).\n  assert ([add 20 30] == 50)\n  assert ([greet bob] == \"hi bob\")\n  assert ([zero-arg] == 30)\n\n  # ----- typed procs -----\n  # Typed params/return are checked at call sites; arithmetic on\n  # typed locals stays unboxed.\n  assert ([typed-add 3 4] == 7)\n  assert ([shout hello] == \"hello!\")\n  # `assert-type` is a compile-time static check: the typer compares\n  # the expression's inferred type to the second arg. No runtime cost,\n  # no side effects (the expression itself is not evaluated).\n  assert-type [typed-add 3 4] i64\n  assert-type [shout hello] str\n\n  # ----- variadic + splat -----\n  # `..nums` in params collects trailing args. `..$vec` at a call site\n  # spreads a collection into separate args.\n  assert ([sum-all 1 2 3 4] == 10)\n  def xs [vec 5 10 15]\n  assert ([sum-all ..$xs] == 30)\n\n  # ----- lambdas -----\n  # `[\\ body ]` is shorthand for a one-arg proc with `$it` as the param.\n  def square [\\ * $it $it]\n  assert ([square 10] == 100)\n  assert [== [collect [transform [vec 1 2 3] [\\ * $it 2]]] [vec 2 4 6]]\n\n  # ----- if / while -----\n  # `if` is an expression. `while [cond] {body}`.\n  assert ([if (5 > 0) { \"positive\" } { \"non-positive\" }] == \"positive\")\n  mut sum 0\n  mut i 1\n  while [<= $i 10] {\n    set sum [+ $sum $i]\n    set i [+ $i 1]\n  }\n  assert ($sum == 55)\n\n  # ----- for -----\n  # Three relevant forms: implicit `$it`, explicit binding, C-style.\n  # Works on vectors, streams, and ranges.\n  mut seen 0\n  for [vec 1 2 3] { set seen [+ $seen $it] }\n  assert ($seen == 6)\n  mut range-sum 0\n  for (0 ..< 3) n { set range-sum [+ $range-sum $n] }\n  assert ($range-sum == 3)\n\n  # ----- streams -----\n  # Lazy sequences from generators (`yield`), ranges, or `lines`.\n  # `collect` materializes; `filter`/`transform` work on either.\n  assert [== [collect (1 ..= 5)] [vec 1 2 3 4 5]]\n  assert [== [collect [transform (1 ..= 5) [\\ * $it 2]]] [vec 2 4 6 8 10]]\n  assert [== [collect [transform [filter (1 ..= 6) [\\ == 0 ($it % 2)]] [\\ * $it $it]]] [vec 4 16 36]]\n\n  # ----- generators -----\n  # `count-up` (defined above) is a generator: each call returns a\n  # fresh stream that suspends at each `yield`. Streams compose with\n  # `transform` / `filter` / `take` like any other stream source.\n  assert [== [collect [count-up 1 5]] [vec 1 2 3 4 5]]\n  assert [== [collect [take [count-up 1 100] 3]] [vec 1 2 3]]\n\n  # ----- destructuring -----\n  # Positional `[]` for vectors; named `{}` for structs/maps;\n  # `_` wildcard; `..rest` for trailing remainder.\n  def [a b c] [vec 1 2 3]\n  assert (($a == 1) && (($b == 2) && ($c == 3)))\n  def p [Pt 10 20]\n  def {x, y} $p\n  assert (($x == 10) && ($y == 20))\n  def [head ..tail] [vec first second third]\n  assert ($head == first)\n  assert [== $tail [vec second third]]\n\n  # ----- structs -----\n  # `struct Name {type field, ...}` at module level. Constructor\n  # `[Name vals...]`. Field access via `->`.\n  def pt [Pt 3 4]\n  assert ($pt->x == 3)\n  assert ($pt->y == 4)\n\n  # ----- maps -----\n  # `[map \"k\" v \"k2\" v2 ...]`. `map-get` reads; `->` is sugar for\n  # string keys.\n  def m [map a 1 b 2]\n  assert ([map-get $m a] == 1)\n  def cfg [map port 42]\n  assert ($cfg->port == 42)\n\n  # ----- typed collections -----\n  # `[Vec T]` / `[Map V]` parameterize element / value type. The typed\n  # binding requires the typed constructor (`[[Vec i32] ...]`), and the\n  # compiler checks element types at push/set sites. Untyped `[vec ...]`\n  # / `[map ...]` still work for dyn-everything use.\n  def [Vec i32] typed-nums [[Vec i32] 10 20 30]\n  assert ([vec-get $typed-nums 1] == 20)\n  def [Map Pt] coords [[Map Pt] origin [Pt 0 0] right [Pt 1 0]]\n  assert ([map-get $coords right]->x == 1)\n\n  # ----- mutable state -----\n  # `box` is thread-local; `atom` is CAS-shared. `reset` stores;\n  # `swap` applies a fn. `deref` reads.\n  def cell [box 0]\n  assert ([deref $cell] == 0)\n  reset $cell 1\n  assert ([deref $cell] == 1)\n  swap $cell [\\ + $it 5]\n  assert ([deref $cell] == 6)\n\n  # ----- atom watchers -----\n  # `watch` registers a keyed listener that fires on every reset/swap\n  # with (old, new) in the writing thread.\n  def witness [box 0]\n  def counter [atom 0]\n  tap = proc {old, new} { reset $witness $new }\n  watch $counter tap $tap\n  reset $counter 7\n  assert ([deref $witness] == 7)\n  swap $counter [\\ + $it 5]\n  assert ([deref $witness] == 12)\n\n  # ----- errors -----\n  # `try {body} name {handler}`. Errors are values; pipes short-circuit.\n  # `assert` halts the VM, but `error` produces an error VALUE that\n  # propagates through pipes and can be caught.\n  assert ([try { error bad } e { concat \"caught: \" [error-val $e] }] == \"caught: bad\")\n  assert [error? [error boom]]\n\n  # ----- $ctx (dynamic context) -----\n  # `$ctx` is the dynamic context object; fields declared with `ctx`\n  # at module level are visible everywhere. `with-ctx {field val ...}\n  # { body }` overrides for the dynamic extent of body; prior values\n  # restore on exit, including via error.\n  assert ($ctx->verbosity == 0)\n  with-ctx {verbosity 3} {\n    assert ($ctx->verbosity == 3)\n  }\n  assert ($ctx->verbosity == 0)\n  try {\n    with-ctx {verbosity 99} { error escape }\n  } _ {}\n  assert ($ctx->verbosity == 0)\n\n  # ----- macros -----\n  # `defmacro` (see top of file) rewrites at compile time. `unless` is\n  # implemented as a one-line macro; the expansion `[if cond {} body]`\n  # is what actually runs.\n  mut hit 0\n  unless [== 1 2] { set hit 5 }\n  assert ($hit == 5)\n  unless [== 1 1] { set hit 99 }\n  assert ($hit == 5)\n\n  # ----- interpret / sandbox -----\n  # `[interpret SRC]` compiles and runs SRC in a child VM with the\n  # default prelude. `[interpret PRELUDE SRC]` restricts to the\n  # entries in PRELUDE, so an empty map yields a no-I/O sandbox.\n  # `[interpret-prelude]` returns the default prelude as a map, so\n  # you can derive subsets by `map-remove` / `map-set`.\n  assert ([interpret \"[+ 1 [* 2 3]]\"] == 7)\n  assert ([interpret [map] \"[+ 10 20]\"] == 30)\n  # Blocked primitives surface as error values rather than aborting.\n  def safe [map-remove [interpret-prelude] \"spawn\"]\n  assert [error? [interpret $safe \"[spawn { 99 }]\"]]\n}\n\nmain\n\n# Concurrency lives at top level rather than inside `main` because\n# putting a suspending call (spawn/parallel/race) inside a proc body\n# routes that proc through state-machine compilation, which currently\n# has open bugs around `for` explicit-binding and positional\n# destructuring of vector results. Top-level SM compilation is robust\n# for these primitives, so we exercise them here.\n\n# ----- spawn / await -----\n# `spawn { block }` returns a future. `await` blocks until it resolves.\n# Spawned tasks run on the NxM worker pool and snapshot `$ctx`.\ndef fut [spawn { + 20 22 }]\nassert ([await $fut] == 42)\n\n# ----- direct-style: calling suspending procs -----\n# Procs that internally await are themselves suspending — but the\n# CPS transform makes that invisible at the call site. `double-async`\n# is defined above using `spawn`/`await`; here we just call it like a\n# plain function. No `await` keyword, no `.then()`, no async coloring.\nassert ([double-async 21] == 42)\n\n# Suspending procs compose like normal procs. `sum-async` calls\n# `double-async` twice inline as args to `+`; the arithmetic reads as\n# sequential code even though each call suspends to a worker.\nassert ([sum-async 10 16] == 52)\n\n# ----- parallel -----\n# `parallel { } { } ...` runs all blocks concurrently and returns a\n# vector of results in argument order, regardless of finish order.\nassert [== [parallel { 10 } { 20 } { 30 }] [vec 10 20 30]]\n\n# ----- race -----\n# `race { } { } ...` returns the first to complete. Bodies should be\n# deterministic for testability — both branches return the same value.\nassert ([race { 7 } { 7 }] == 7)\n\n# ----- error in parallel -----\n# `parallel` runs every branch to completion; the result vector may\n# contain errors. Caller decides how to handle.\ndef results [parallel { + 1 1 } { error boom }]\nassert [error? [vec-get $results 1]]\n",
+    "code": "# mode: concurrent\n\n##\n## tour.jacl — a survey of JACL syntax. Linked from AGENTS.md.\n## Each section exercises one feature area with `assert` calls.\n## A failing assert halts the VM with \"assertion failed\" pointing at\n## the source line, so a regression in any feature shows up directly.\n## See SYNTAX.md for the full reference.\n##\n## Tagged `# mode: concurrent` so the harness runs the full scheduler\n## (required for the spawn / parallel / race section at the end).\n##\n## Struct-valued bindings must live inside a proc, so the body of\n## this tour is wrapped in `main`.\n##\n\nstruct Pt {i32 x, i32 y}\n\n# `ctx <type> <name> = <value>` declares a field of `$ctx`, the dynamic\n# context object visible everywhere. Plain `ctx` is immutable; `ctx mut`\n# allows `with-ctx` overrides. Declarations live at module level.\nctx mut i32 verbosity = 0\n\n# `defmacro` registers a compile-time rewrite. `syntax-quote [...]` is\n# a templating form for AST literals; `~name` splices a captured arg's\n# AST in. The macro fires at compile time and never appears at runtime.\ndefmacro unless {cond body} {\n  syntax-quote [if ~cond {} ~body]\n}\n\n# A generator: any proc that contains `yield` is one. Each call returns\n# a fresh lazy stream; the compiler lowers the body to a state machine\n# that suspends/resumes across yield sites.\nproc count-up {start, stop} {\n  mut i $start\n  while [<= $i $stop] {\n    yield $i\n    set i [+ $i 1]\n  }\n}\n\nproc add {a, b} { + $a $b }\nproc greet {name} { concat \"hi \" $name }\nproc zero-arg {} { + 10 20 }\n\n# Typed proc: `proc <name> {<param-type> <param>, ...} <ret> {body}`.\n# Return type comes after the params block, before the body. Param\n# and return types are checked at call sites and arithmetic narrows\n# accordingly (no boxing, no dyn dispatch). Untyped params default\n# to `dyn`.\nproc typed-add {i64 a, i64 b} i64 { + $a $b }\nproc shout {str s} str { concat $s \"!\" }\n\n# Variadic: `..rest` in params collects trailing args into a vector.\nproc sum-all {..nums} {\n  mut total 0\n  for $nums n { set total [+ $total $n] }\n  $total\n}\n\n# A suspending proc: contains `sleep` (unconditional suspension).\n# Callers don't see any async machinery — they just call it like a\n# normal function and get a value back. This is the direct-style\n# payoff of CPS. (`spawn`/`await` is shown explicitly further below.)\nproc double-async {n} {\n  sleep 0.001\n  * $n 2\n}\n\n# Suspending procs compose. Two suspending calls can appear inline as\n# args to the same outer call — the SM compiler spills the enclosing\n# operand stack across each suspension so siblings don't trample each\n# other's results.\nproc sum-async {a, b} {\n  + [double-async $a] [double-async $b]\n}\n\nproc main {} {\n  # ----- values -----\n  # Numbers, strings, booleans, vectors.\n  assert [== 42 42]\n  assert [== \"hi\" hi]\n  assert $true\n  assert [not $false]\n  assert [== [vec 1 2 3] [vec 1 2 3]]\n\n  # ----- bindings -----\n  # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`\n  # operators are command-mode sugar for these.\n  def imm 7\n  assert [== $imm 7]\n  also = 11                       # `=` is `def` sugar\n  assert [== $also 11]\n  mut counter 0\n  set counter 2\n  assert [== $counter 2]\n  reassignable : 0                # `:` is `mut` sugar\n  reassignable :: 5               # `::` is `set` sugar\n  assert [== $reassignable 5]\n\n  # ----- two modes -----\n  # `[]` juxtaposition: head + args (value computation).\n  # `{}` command mode: bare commands and pipelines.\n  assert [== [+ 1 [* 2 [+ 1 3]]] 9]\n  assert [== [+ [+ 1 2] 4] 7]\n  assert [== [* [+ 1 2] 2] 6]\n\n  # ----- string interpolation -----\n  # `$var` and `$[...]` (juxtaposition) both nest in \"\".\n  def who \"alice\"\n  def yrs 31\n  assert [== \"name=$who age=$yrs sum=$[+ 2 3]\" \"name=alice age=31 sum=5\"]\n\n  # ----- procs -----\n  # Params and body are both `{}` blocks. Type-before-name everywhere.\n  # Procs are defined at module level (see above).\n  assert [== [add 20 30] 50]\n  assert [== [greet bob] \"hi bob\"]\n  assert [== [zero-arg] 30]\n\n  # ----- typed procs -----\n  # Typed params/return are checked at call sites; arithmetic on\n  # typed locals stays unboxed.\n  assert [== [typed-add 3 4] 7]\n  assert [== [shout hello] \"hello!\"]\n  # `assert-type` is a compile-time static check: the typer compares\n  # the expression's inferred type to the second arg. No runtime cost,\n  # no side effects (the expression itself is not evaluated).\n  assert-type [typed-add 3 4] i64\n  assert-type [shout hello] str\n\n  # ----- variadic + splat -----\n  # `..nums` in params collects trailing args. `..$vec` at a call site\n  # spreads a collection into separate args.\n  assert [== [sum-all 1 2 3 4] 10]\n  def xs [vec 5 10 15]\n  assert [== [sum-all ..$xs] 30]\n\n  # ----- lambdas -----\n  # `[\\ body ]` is shorthand for a one-arg proc with `$it` as the param.\n  def square [\\ * $it $it]\n  assert [== [square 10] 100]\n  assert [== [collect [transform [vec 1 2 3] [\\ * $it 2]]] [vec 2 4 6]]\n\n  # ----- if / while -----\n  # `if` is an expression. `while [cond] {body}`.\n  assert [== [if [> 5 0] { \"positive\" } { \"non-positive\" }] \"positive\"]\n  mut sum 0\n  mut i 1\n  while [<= $i 10] {\n    set sum [+ $sum $i]\n    set i [+ $i 1]\n  }\n  assert [== $sum 55]\n\n  # ----- for -----\n  # Three relevant forms: implicit `$it`, explicit binding, C-style.\n  # Works on vectors, streams, and ranges.\n  #\n  # Explicit binding is `for COLL NAME { body }` (collection first).\n  # This intentionally breaks the `def name value` / `mut name value` /\n  # `set name value` shape used by binding statements: a name-first\n  # form (`for n $xs`) conflicts with pipe threading, which inserts\n  # the piped value as the first argument. `$xs | for n { body }` would\n  # then mean `[for $xs n { body }]` — the threaded collection landing\n  # in the name slot — and the only fix is to forbid that idiom. We\n  # keep collection-first so `$xs | for n { body }` reads as\n  # `[for $xs n { body }]` and Just Works.\n  mut seen 0\n  for [vec 1 2 3] { set seen [+ $seen $it] }\n  assert [== $seen 6]\n  mut range-sum 0\n  for [range 0 3] n { set range-sum [+ $range-sum $n] }\n  assert [== $range-sum 3]\n\n  # C-style `for {init; cond; step} { body }` — Tcl-shaped, falls out\n  # of the language for free: `for` taking a header-block plus a\n  # body-block, the implementation inspects the header. Useful for\n  # counted loops where you want a single mutable index visible in\n  # both the condition and the body.\n  mut product 1\n  for {mut i 1; <= $i 4; incr i} { set product [* $product $i] }\n  assert [== $product 24]\n\n  # ----- streams -----\n  # Lazy sequences from generators (`yield`), ranges, or `lines`.\n  # `collect` materializes; `filter`/`transform` work on either.\n  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]\n  assert [== [collect [transform [range-inclusive 1 5] [\\ * $it 2]]] [vec 2 4 6 8 10]]\n  assert [== [collect [transform [filter [range-inclusive 1 6] [\\ == 0 [% $it 2]]] [\\ * $it $it]]] [vec 4 16 36]]\n\n  # ----- generators -----\n  # `count-up` (defined above) is a generator: each call returns a\n  # fresh stream that suspends at each `yield`. Streams compose with\n  # `transform` / `filter` / `take` like any other stream source.\n  assert [== [collect [count-up 1 5]] [vec 1 2 3 4 5]]\n  assert [== [collect [take [count-up 1 100] 3]] [vec 1 2 3]]\n\n  # ----- destructuring -----\n  # Positional `[]` for vectors; named `{}` for structs/maps;\n  # `_` wildcard; `..rest` for trailing remainder.\n  def [a b c] [vec 1 2 3]\n  assert [&& [== $a 1] [&& [== $b 2] [== $c 3]]]\n  def p [Pt x 10 y 20]\n  def {x, y} $p\n  assert [&& [== $x 10] [== $y 20]]\n  def [head ..tail] [vec first second third]\n  assert [== $head first]\n  assert [== $tail [vec second third]]\n\n  # ----- structs -----\n  # `struct Name {type field, ...}` at module level. Constructor\n  # `[Name vals...]`. Field access via `->`.\n  def pt [Pt x 3 y 4]\n  assert [== $pt->x 3]\n  assert [== $pt->y 4]\n\n  # ----- maps -----\n  # `[map \"k\" v \"k2\" v2 ...]`. `map-get` reads; `->` is sugar for\n  # string keys.\n  def m [map a 1 b 2]\n  assert [== [map-get $m a] 1]\n  def cfg [map port 42]\n  assert [== $cfg->port 42]\n\n  # ----- typed collections -----\n  # `[Vec T]` / `[Map V]` parameterize element / value type. The typed\n  # binding requires the typed constructor (`[[Vec i32] ...]`), and the\n  # compiler checks element types at push/set sites. Untyped `[vec ...]`\n  # / `[map ...]` still work for dyn-everything use.\n  def [Vec i32] typed-nums [[Vec i32] 10 20 30]\n  assert [== [vec-get $typed-nums 1] 20]\n  def [Map Pt] coords [[Map Pt] origin [Pt x 0 y 0] right [Pt x 1 y 0]]\n  assert [== [map-get $coords right]->x 1]\n\n  # ----- mutable state -----\n  # `box` is thread-local; `atom` is CAS-shared. `reset` stores;\n  # `swap` applies a fn. `deref` reads.\n  def cell [box 0]\n  assert [== [deref $cell] 0]\n  reset $cell 1\n  assert [== [deref $cell] 1]\n  swap $cell [\\ + $it 5]\n  assert [== [deref $cell] 6]\n\n  # ----- atom watchers -----\n  # `watch` registers a keyed listener that fires on every reset/swap\n  # with (old, new) in the writing thread.\n  def witness [box 0]\n  def counter [atom 0]\n  tap = proc {old, new} { reset $witness $new }\n  watch $counter tap $tap\n  reset $counter 7\n  assert [== [deref $witness] 7]\n  swap $counter [\\ + $it 5]\n  assert [== [deref $witness] 12]\n\n  # ----- errors -----\n  # `try {body} name {handler}`. Errors are values; pipes short-circuit.\n  # `assert` halts the VM, but `error` produces an error VALUE that\n  # propagates through pipes and can be caught.\n  assert [== [try { error bad } e { concat \"caught: \" [error-val $e] }] \"caught: bad\"]\n  assert [error? [error boom]]\n\n  # ----- $ctx (dynamic context) -----\n  # `$ctx` is the dynamic context object; fields declared with `ctx`\n  # at module level are visible everywhere. `with-ctx {field val ...}\n  # { body }` overrides for the dynamic extent of body; prior values\n  # restore on exit, including via error.\n  assert [== $ctx->verbosity 0]\n  with-ctx {verbosity 3} {\n    assert [== $ctx->verbosity 3]\n  }\n  assert [== $ctx->verbosity 0]\n  try {\n    with-ctx {verbosity 99} { error escape }\n  } _ {}\n  assert [== $ctx->verbosity 0]\n\n  # ----- macros -----\n  # `defmacro` (see top of file) rewrites at compile time. `unless` is\n  # implemented as a one-line macro; the expansion `[if cond {} body]`\n  # is what actually runs.\n  mut hit 0\n  unless [== 1 2] { set hit 5 }\n  assert [== $hit 5]\n  unless [== 1 1] { set hit 99 }\n  assert [== $hit 5]\n\n  # ----- interpret / sandbox -----\n  # `[interpret SRC]` compiles and runs SRC in a child VM with the\n  # default prelude. `[interpret PRELUDE SRC]` restricts to the\n  # entries in PRELUDE, so an empty map yields a no-I/O sandbox.\n  # `[interpret-prelude]` returns the default prelude as a map, so\n  # you can derive subsets by `map-remove` / `map-set`.\n  assert [== [interpret \"[+ 1 [* 2 3]]\"] 7]\n  assert [== [interpret [map] \"[+ 10 20]\"] 30]\n  # Blocked primitives surface as error values rather than aborting.\n  def safe [map-remove [interpret-prelude] \"spawn\"]\n  assert [error? [interpret $safe \"[spawn { 99 }]\"]]\n}\n\nmain\n\n# Concurrency lives at top level rather than inside `main` because the\n# tour's `main` redefines a few names across sections (e.g. `counter`\n# as both `mut` and `atom`) and SM compilation routes both shadows\n# through a single state field. The for-loop and positional-vector-\n# destructure bugs the apology used to mention are fixed (see\n# sm_for_explicit_binding.jacl and sm_destructure_vec.jacl); the\n# remaining sharp edge is name-shadowing across SM state fields.\n\n# ----- spawn / await -----\n# `spawn { block }` returns a future. `await` blocks until it resolves.\n# Spawned tasks run on the NxM worker pool and snapshot `$ctx`.\ndef fut [spawn { + 20 22 }]\nassert [== [await $fut] 42]\n\n# ----- direct-style: calling suspending procs -----\n# Procs that internally await are themselves suspending — but the\n# CPS transform makes that invisible at the call site. `double-async`\n# is defined above using `spawn`/`await`; here we just call it like a\n# plain function. No `await` keyword, no `.then()`, no async coloring.\nassert [== [double-async 21] 42]\n\n# Suspending procs compose like normal procs. `sum-async` calls\n# `double-async` twice inline as args to `+`; the arithmetic reads as\n# sequential code even though each call suspends to a worker.\nassert [== [sum-async 10 16] 52]\n\n# ----- parallel -----\n# `parallel { } { } ...` runs all blocks concurrently and returns a\n# vector of results in argument order, regardless of finish order.\nassert [== [parallel { 10 } { 20 } { 30 }] [vec 10 20 30]]\n\n# ----- race -----\n# `race { } { } ...` returns the first to complete. Bodies should be\n# deterministic for testability — both branches return the same value.\nassert [== [race { 7 } { 7 }] 7]\n\n# ----- error in parallel -----\n# `parallel` runs every branch to completion; the result vector may\n# contain errors. Caller decides how to handle.\ndef results [parallel { + 1 1 } { error boom }]\nassert [error? [vec-get $results 1]]\n",
     "concurrent": true,
     "description": ""
   },
@@ -2655,7 +2739,7 @@
   {
     "name": "typed_closure",
     "category": "typed",
-    "code": "# expect: 150\n# expect: 200\n# expect: 25\ndef i64 base 100\nproc i64 addto {i64 n} { + $base $n }\nprint [to-string [addto 50]]\nprint [to-string [addto 100]]\nproc i64 half {i64 n} { / $n 2 }\nprint [to-string [half 50]]\n",
+    "code": "# expect: 150\n# expect: 200\n# expect: 25\ndef i64 base 100\nproc addto {i64 n} i64 { + $base $n }\nprint [to-string [addto 50]]\nprint [to-string [addto 100]]\nproc half {i64 n} i64 { / $n 2 }\nprint [to-string [half 50]]\n",
     "concurrent": false,
     "description": ""
   },
@@ -2725,14 +2809,14 @@
   {
     "name": "typed_proc",
     "category": "typed",
-    "code": "# expect: 7\nproc i64 add {i64 a, i64 b} { + $a $b }\nprint [to-string [add 3 4]]\n",
+    "code": "# expect: 7\nproc add {i64 a, i64 b} i64 { + $a $b }\nprint [to-string [add 3 4]]\n",
     "concurrent": false,
     "description": ""
   },
   {
     "name": "typed_proc_error",
     "category": "typed",
-    "code": "# expect-error: type error: argument 1 of add expected i64, got str\nproc i64 add {i64 a, i64 b} { + $a $b }\n[add \"x\" 2]\n",
+    "code": "# expect-error: type error: argument 1 of add expected i64, got str\nproc add {i64 a, i64 b} i64 { + $a $b }\n[add \"x\" 2]\n",
     "concurrent": false,
     "description": "expect-error: type error: argument 1 of add expected i64, got str"
   },
