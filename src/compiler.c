@@ -515,6 +515,16 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
      not subject to the no-ref-fields rule that applies to user defstructs.
      The struct_def_is_user helper distinguishes ctx via reg->ctx_type_idx. */
   memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
+  /* Copy field name bytes into the registry arena. CtxField->name points
+     into source-buffer token text (parser stamps name_tok->payload.text);
+     the persistent ctx StructTypeDef outlives the eval that registered
+     it, so the raw pointer dangles once the caller frees the source. */
+  for (uint32_t fi = 0; fi < list->count; fi++) {
+    char* fc = (char*)arena_alloc(reg->arena, sdef->fields[fi].name_len + 1);
+    memcpy(fc, sdef->fields[fi].name, sdef->fields[fi].name_len);
+    fc[sdef->fields[fi].name_len] = '\0';
+    sdef->fields[fi].name = fc;
+  }
 
   reg->defs[type_idx] = sdef;
   reg->shapes[type_idx].kind = TYPE_SHAPE_CTX;
@@ -15342,7 +15352,18 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
                         "struct registry allocation failure");
         break;
       }
-      sdef->name     = struct_name;
+      /* Copy struct + field names into the registry arena. Token text
+         points into the source buffer, which the embedding caller may
+         free after jacl_eval returns -- but the persistent struct
+         registry survives across evals, so storing the raw token
+         pointer leaves struct_registry__find scanning freed memory on
+         the next compile. */
+      {
+        char* nc = (char*)arena_alloc(reg->arena, struct_name_len + 1);
+        memcpy(nc, struct_name, struct_name_len);
+        nc[struct_name_len] = '\0';
+        sdef->name = nc;
+      }
       sdef->name_len = struct_name_len;
       if (struct_name_len <= 128) {
         sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
@@ -15353,6 +15374,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       sdef->total_size  = struct__align_up(offset, max_align);
       sdef->alignment   = max_align;
       memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
+      for (uint32_t fi = 0; fi < field_count; fi++) {
+        char* fc = (char*)arena_alloc(reg->arena, sdef->fields[fi].name_len + 1);
+        memcpy(fc, sdef->fields[fi].name, sdef->fields[fi].name_len);
+        fc[sdef->fields[fi].name_len] = '\0';
+        sdef->fields[fi].name = fc;
+      }
 
       /* Assign to reserved slot */
       reg->defs[this_idx] = sdef;

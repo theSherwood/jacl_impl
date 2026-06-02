@@ -357,21 +357,31 @@ From `DESIGN.md` § "Known Limitations".
   boundary). No test today asserts `try`/`catch` semantics for
   overflow — add one when the design call is made.
 
-- **`ctx` field declarations don't survive across `jacl_eval` calls.**
-  `typer__register_ctx_struct` (`src/typer.c:1979`) rebuilds the ctx
-  struct each compile from the current source's `AST_CTX_DECL` nodes.
-  A `ctx mut T name = v` in one `jacl_eval`, then `$ctx->name` in a
-  second, fails the typer with "no field 'name' on ctx". The runtime
-  side (lazy `ctx__init_vm` in `embed.c`) is fixed — the persistent
-  ctx struct and pool both survive — so the field is *there*, just
-  invisible to the typer on subsequent compiles. Single-script
-  invocations (playground, `jacl_eval` of a whole file) are
-  unaffected; the gap shows up only when an embedder splits a ctx
-  declaration and its consumer into separate `jacl_eval` calls. Fix
-  needs the typer's ctx pre-pass to read from the persistent struct
-  registry too, not just the current AST. Covering test (currently
-  exercises the single-call path):
-  `test/test_e2e_embed_basics.c::test_e2e_ctx_declaration`.
+- **Typer state doesn't survive across `jacl_eval` calls.** The
+  runtime side is fully wired now — the persistent struct registry
+  outlives every `jacl_eval`, name pointers are arena-copied (no
+  dangling tokens), `$ctx` and its pool are lazy-init'd in `embed.c`,
+  and `struct_registry__find` correctly resolves prior-call names —
+  but `typer_infer` rebuilds `tc->structs[]` and the ctx-field map
+  from scratch each compile by walking only the current source's
+  `AST_STRUCT_DECL` / `AST_CTX_DECL` nodes (`src/typer.c:1979`,
+  `:2102`). Effects on multi-eval embedders:
+  - `ctx mut T name = v` in eval #1, `$ctx->name` in eval #2 → typer
+    rejects with "no field 'name' on ctx" even though the runtime
+    ctx struct still holds it.
+  - `struct Pt {...}` in eval #1, any *use of Pt as a type* in eval
+    #2 (typed binding, typed proc param, field access) → typer
+    rejects. Bare `[Pt ...]` constructor calls work because the
+    compiler's struct ctor path resolves through the registry
+    independently of the typer.
+  Single-script invocations (playground, `jacl_eval` of a whole
+  file) hit none of this. Fix needs the typer's pre-passes to seed
+  from the persistent `StructTypeRegistry` (`seed_registry` param
+  threaded through `typer_infer`) before walking the current AST.
+  Covering tests:
+  `test/test_e2e_embed_basics.c::test_e2e_ctx_declaration`
+  (single-call ctx), `::test_e2e_struct_name_persists` (memory
+  safety of the registry name copies).
 
 ---
 

@@ -287,6 +287,47 @@ static int test_e2e_ctx_declaration(void) {
   return 1;
 }
 
+/* Test: the persistent struct registry retains usable names across
+   jacl_eval calls. Pre-fix, StructTypeDef.name and StructTypeField.name
+   stored raw token pointers into the caller's source buffer; once the
+   caller's source memory was freed (or just reused for the next eval),
+   struct_registry__find on the second eval scanned garbage and either
+   missed the entry or compared against random bytes.
+
+   Test strategy: declare Pt in eval #1 from a heap buffer, free the
+   buffer, then redeclare Pt in eval #2. The duplicate-struct check at
+   compile time goes through struct_registry__find on the registry's
+   stored name -- if that pointer dangles, the lookup misses and the
+   second declaration is silently accepted; if the fix copies names
+   into the registry arena, the duplicate is detected. Asserting on
+   the "duplicate" error path is the cleanest memory-safety probe that
+   doesn't require cross-eval typer state (a separate gap tracked in
+   NOT_IMPLEMENTED.md §10). */
+static int test_e2e_struct_name_persists(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  char* src1 = strdup("struct Pt {i32 x, i32 y}");
+  ASSERT(src1 != NULL);
+  JaclVal r1 = jacl_eval(vm, src1);
+  ASSERT(!jacl_is_error(r1));
+  /* Scribble before freeing so any dangling pointer reads something
+     other than "Pt" (some allocators reuse freed blocks immediately
+     without changing the contents). */
+  memset(src1, 'X', strlen(src1));
+  free(src1);
+
+  JaclVal r2 = jacl_eval(vm, "struct Pt {i32 x, i32 y}");
+  ASSERT(jacl_is_error(r2));
+  const char* msg = jacl_error_message_str(vm, r2);
+  ASSERT(msg != NULL);
+  ASSERT(strstr(msg, "duplicate struct definition") != NULL);
+  ASSERT(strstr(msg, "Pt") != NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -304,6 +345,7 @@ int main(void) {
   RUN(test_e2e_globals_persist);
   RUN(test_e2e_independent_vms);
   RUN(test_e2e_ctx_declaration);
+  RUN(test_e2e_struct_name_persists);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;
