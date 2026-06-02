@@ -47,11 +47,17 @@ interface JaclState {
   /** Single-line string interpolation depth — we color the `[expr]` or
    *  `(expr)` payload as code, not string. Stack of close chars. */
   interpStack: string[];
+  /** Count of unclosed `{` braces. Used to detect when we're inside a
+   *  multi-line `{..}` block: at SOL with braceDepth > 0, an indented
+   *  line whose first non-whitespace char is a bareword still gets
+   *  its first identifier marked as a call head. For single-line
+   *  `{ a, b }` the depth goes +1 then -1 on the same line, so the
+   *  content never benefits from the brace-block SOL rule -- matching
+   *  the "don't mark inside single-line {..}" expectation. */
+  braceDepth: number;
   /** True when the next identifier we tokenize should be styled as a
-   *  call head ("callee"). Per the call-position rules below, gets
-   *  set after `[`, `{`, `|`, and at the start of a line that starts
-   *  with a bareword character (no leading whitespace). Reset to
-   *  false on consuming any identifier or value. */
+   *  call head ("callee"). Set by the SOL / `[` / `|` rules below;
+   *  reset on consuming any identifier or value. */
   expectingHead: boolean;
 }
 
@@ -83,6 +89,7 @@ const startState = (): JaclState => ({
   inPragma: false,
   tripleString: null,
   interpStack: [],
+  braceDepth: 0,
   expectingHead: false,
 });
 
@@ -90,6 +97,7 @@ const copyState = (s: JaclState): JaclState => ({
   inPragma: s.inPragma,
   tripleString: s.tripleString,
   interpStack: s.interpStack.slice(),
+  braceDepth: s.braceDepth,
   expectingHead: s.expectingHead,
 });
 
@@ -150,15 +158,19 @@ const jaclMode = StreamLanguage.define<JaclState>({
   copyState,
   tokenTable: TOKEN_TABLE,
   token(stream, state) {
-    // Call-position rule 3: "the first bare word in a line that starts
-    // with a bare word." We're at SOL when the very first character of
-    // this line is about to be read; if that character starts an
-    // identifier (letter or underscore -- NOT whitespace, `[`, `{`,
-    // `#`, `$`, ...) the line opens at top-of-statement and the next
-    // identifier we tokenize is a call head. Indented continuation
-    // lines start with whitespace, so this naturally skips them.
-    if (stream.sol() && /^[A-Za-z_]/.test(stream.string)) {
-      state.expectingHead = true;
+    // Call-position SOL rules:
+    //   - Top level (braceDepth == 0): line must start with a bareword
+    //     at column 0. Indented continuation lines of multi-line `[..]`
+    //     args don't qualify and stay plain.
+    //   - Inside a multi-line `{..}` block (braceDepth > 0): any line
+    //     whose first non-whitespace char is a bareword qualifies.
+    //     Indented body lines of `proc main { ... }` get their lead
+    //     identifier marked; a single-line `{ a, b }` never sees a
+    //     depth-elevated SOL because `{` and `}` open and close on
+    //     the same line, so its params stay plain.
+    if (stream.sol()) {
+      const pattern = state.braceDepth > 0 ? /^\s*[A-Za-z_]/ : /^[A-Za-z_]/;
+      if (pattern.test(stream.string)) state.expectingHead = true;
     }
 
     // Continue a triple-quoted string spanning lines.
@@ -242,17 +254,28 @@ const jaclMode = StreamLanguage.define<JaclState>({
       if (stream.match(/[0-9_]+/))                            { state.expectingHead = false; return "number"; }
     }
 
-    // Brackets / parens / braces. Call-position rules 1 and 2: the
-    // first identifier after `[` or `{` is a call head. `[` is
-    // unambiguous (juxtaposition mode); `{` is overloaded with param /
-    // struct-field / destructuring lists where the first token ISN'T
-    // a callable, but per the user's spec we accept that false
-    // positive in exchange for catching the common one-liner block
-    // case like `{ print $it }`. `(` opens infix mode -- no head.
+    // Brackets / parens / braces.
+    //   - `[` opens juxtaposition mode: the first token IS a call
+    //     head. Set expectingHead unconditionally.
+    //   - `{` is overloaded -- single-line `{a, b}` is a param /
+    //     destructure / struct-field list (NO call head), multi-line
+    //     `{ body }` is a command block where each line's first
+    //     bareword IS a head. We can't tell which it is until we see
+    //     the closing `}`, so we don't mark the immediate next ident
+    //     after `{`. Instead, the SOL rule (above) consults
+    //     braceDepth and marks indented bareword line starts when
+    //     we're inside an unclosed brace.
+    //   - `(` opens infix mode -- no head.
     const ch = stream.peek();
-    if (ch === "[" || ch === "{") {
+    if (ch === "[") {
       stream.next();
       state.expectingHead = true;
+      return "punctuation";
+    }
+    if (ch === "{") {
+      stream.next();
+      state.braceDepth++;
+      state.expectingHead = false;
       return "punctuation";
     }
     if (ch === "(") {
@@ -260,15 +283,20 @@ const jaclMode = StreamLanguage.define<JaclState>({
       state.expectingHead = false;
       return "punctuation";
     }
-    if (ch === "]" || ch === "}" || ch === ")") {
+    if (ch === "]" || ch === ")") {
       stream.next();
       state.expectingHead = false;
       // String interpolation close: `$[..]` or `$(..)` pops here.
-      if ((ch === "]" || ch === ")") &&
-          state.interpStack.length > 0 &&
+      if (state.interpStack.length > 0 &&
           state.interpStack[state.interpStack.length - 1] === ch) {
         state.interpStack.pop();
       }
+      return "punctuation";
+    }
+    if (ch === "}") {
+      stream.next();
+      if (state.braceDepth > 0) state.braceDepth--;
+      state.expectingHead = false;
       return "punctuation";
     }
 
