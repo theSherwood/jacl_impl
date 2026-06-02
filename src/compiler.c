@@ -16164,6 +16164,27 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     ctx_field_list__init(ctx);
     /* Built-in: mut str pwd (default = process CWD) */
     ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true, c.struct_registry, JACL_NIL);
+    /* Seed prior-eval ctx fields. The persistent struct registry's
+       ctx StructTypeDef has every field declared across earlier
+       jacl_eval calls; rebuilding the per-compile CtxFieldList from
+       just the current source's AST_CTX_DECL would lose them, and
+       $ctx->name in eval #2 would compile-error "no field 'name'
+       on ctx" even though the runtime ctx struct still holds it. */
+    if (c.struct_registry && c.struct_registry->ctx_type_idx < c.struct_registry->count) {
+      StructTypeDef* csd = c.struct_registry->defs[c.struct_registry->ctx_type_idx];
+      if (csd) {
+        for (uint32_t fi = 0; fi < csd->field_count; fi++) {
+          if (ctx_field_list__has(ctx, csd->fields[fi].name, csd->fields[fi].name_len))
+            continue;
+          ctx_field_list__add(ctx,
+              csd->fields[fi].name, csd->fields[fi].name_len,
+              /* type_name string is unused after registration; pass empty */ "", 0,
+              csd->fields[fi].type, csd->fields[fi].struct_type_idx,
+              csd->fields[fi].is_mutable, c.struct_registry,
+              csd->fields[fi].default_val);
+        }
+      }
+    }
     c.ctx_fields = ctx;
   }
 
@@ -16208,7 +16229,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     /* compiler_compile is the single-file entry; no module cache here.
      * AST_USE nodes will error out during codegen ("use declaration
      * requires module context"), which is the existing behavior. */
-    typer_infer(parse.nodes, parse.count, &tr, NULL, 0);
+    typer_infer(parse.nodes, parse.count, &tr, NULL, 0, c.struct_registry);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -16720,7 +16741,7 @@ bool compiler__compile_module(const char* canonical_path,
    * inferred_type don't fall back unnecessarily. */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr, imports, import_count);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count, mc.struct_registry);
     if (tr.error_count > 0) {
       compiler__error(&mc, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -16853,11 +16874,28 @@ ProgramResult jacl_compile_program(const char* root_path,
     c.struct_registry = reg;
   }
 
-  /* Allocate ctx field list and pre-populate built-in pwd field */
+  /* Allocate ctx field list and pre-populate built-in pwd field.
+     Multi-module programs use the same seed-from-persistent-registry
+     pattern as compiler_compile (see comment there). */
   {
     CtxFieldList* ctx = (CtxFieldList*)arena_alloc(arena, sizeof(CtxFieldList));
     ctx_field_list__init(ctx);
     ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true, c.struct_registry, JACL_NIL);
+    if (c.struct_registry && c.struct_registry->ctx_type_idx < c.struct_registry->count) {
+      StructTypeDef* csd = c.struct_registry->defs[c.struct_registry->ctx_type_idx];
+      if (csd) {
+        for (uint32_t fi = 0; fi < csd->field_count; fi++) {
+          if (ctx_field_list__has(ctx, csd->fields[fi].name, csd->fields[fi].name_len))
+            continue;
+          ctx_field_list__add(ctx,
+              csd->fields[fi].name, csd->fields[fi].name_len,
+              "", 0,
+              csd->fields[fi].type, csd->fields[fi].struct_type_idx,
+              csd->fields[fi].is_mutable, c.struct_registry,
+              csd->fields[fi].default_val);
+        }
+      }
+    }
     c.ctx_fields = ctx;
   }
 
@@ -16872,7 +16910,7 @@ ProgramResult jacl_compile_program(const char* root_path,
    * compiler__compile_module). */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr, imports, import_count);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count, c.struct_registry);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);

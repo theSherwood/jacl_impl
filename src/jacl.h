@@ -2272,10 +2272,15 @@ struct TyperImportProc;
 typedef struct TyperImportProc TyperImportProc;
 
 /* imports/import_count are NULL/0 when there is no module context
- * (single-file compile, macro pre-typing, typer-only test harness). */
+ * (single-file compile, macro pre-typing, typer-only test harness).
+ * seed_registry is NULL for first-compile / single-shot use; pass a
+ * persistent StructTypeRegistry to surface prior compiles' struct +
+ * ctx-field declarations to the typer (required for multi-eval
+ * embedders so cross-call struct/ctx use type-checks). */
 extern void typer_infer (AstNode **nodes, uint32_t count,
                          TyperResult *result_or_null,
-                         TyperImportProc *imports, uint32_t import_count);
+                         TyperImportProc *imports, uint32_t import_count,
+                         StructTypeRegistry *seed_registry);
 
 /* --- type_error.c — shared formatters used by both compiler and typer.
  * Each writes to a caller buffer in snprintf style; the reporting

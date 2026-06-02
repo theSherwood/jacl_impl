@@ -123,7 +123,7 @@ static ParseResult run_typer(const char* src, arena_t* arena) {
     fprintf(stderr, "  %s: parse error\n", current_test);
     return parse;
   }
-  typer_infer(parse.nodes, parse.count, NULL, NULL, 0);
+  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL);
   return parse;
 }
 

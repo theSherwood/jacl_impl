@@ -1132,7 +1132,7 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
      * var-refs, etc. carry inferred_type before compile_block_expr's
      * dual-track checks fire. Without this the macro body's nodes
      * default to TYPE_DYN and produce typer gaps during compile. */
-    typer_infer(&entry->body, 1, NULL, NULL, 0);
+    typer_infer(&entry->body, 1, NULL, NULL, 0, body_compiler.struct_registry);
 
     compiler__compile_block_expr(&body_compiler, entry->body);
     compiler__emit_byte(&body_compiler, OP_RETURN, 0);
@@ -1236,7 +1236,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
              * template nodes carry inferred_type when later instantiated
              * into user code. Without this, literals/var-refs inside
              * prelude macro bodies remain TYPE_DYN by arena zero-init. */
-            typer_infer(ppre.nodes, ppre.count, NULL, NULL, 0);
+            typer_infer(ppre.nodes, ppre.count, NULL, NULL, 0, NULL);
 
             gc__current_heap = prev_heap;
             expand__prelude_ready = true;

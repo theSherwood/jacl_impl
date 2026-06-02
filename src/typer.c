@@ -1977,7 +1977,8 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
  * the struct index of the ctx entry, or UINT32_MAX if no ctx fields
  * were declared. */
 static uint32_t typer__register_ctx_struct(TyperCtx* tc,
-                                            AstNode** nodes, uint32_t count) {
+                                            AstNode** nodes, uint32_t count,
+                                            StructTypeRegistry* seed) {
   /* Ctx always has at least the built-in `pwd` field (see compiler.c
    * ctx_field_list__init), so always register the ctx struct in the
    * pre-reserved slot 1. User AST_CTX_DECL nodes append more fields. */
@@ -1993,6 +1994,33 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
   s->field_name_lens[s->field_count]  = 3;
   s->field_struct_idxs[s->field_count] = UINT32_MAX;
   s->field_count++;
+
+  /* Seed from prior-compile ctx fields. The persistent struct
+   * registry's ctx StructTypeDef has every field declared by a
+   * `ctx <type> <name>` in any prior jacl_eval; without this, eval
+   * #2's `$ctx->name` fails the typer with "no field 'name' on
+   * ctx" even though the runtime ctx struct still holds it. */
+  if (seed && seed->ctx_type_idx < seed->count && seed->defs[seed->ctx_type_idx]) {
+    StructTypeDef* csd = seed->defs[seed->ctx_type_idx];
+    for (uint32_t fi = 0; fi < csd->field_count &&
+                       s->field_count < TYPER_MAX_STRUCT_FIELDS; fi++) {
+      const char* fn  = csd->fields[fi].name;
+      uint32_t    fnl = csd->fields[fi].name_len;
+      bool exists = false;
+      for (uint32_t exf = 0; exf < s->field_count; exf++) {
+        if (s->field_name_lens[exf] == fnl &&
+            memcmp(s->field_names[exf], fn, fnl) == 0) {
+          exists = true; break;
+        }
+      }
+      if (exists) continue;
+      s->field_types[s->field_count]       = (uint8_t)csd->fields[fi].type;
+      s->field_names[s->field_count]       = fn;
+      s->field_name_lens[s->field_count]   = fnl;
+      s->field_struct_idxs[s->field_count] = csd->fields[fi].struct_type_idx;
+      s->field_count++;
+    }
+  }
 
   for (uint32_t ni = 0; ni < count && s->field_count < TYPER_MAX_STRUCT_FIELDS; ni++) {
     AstNode* node = nodes[ni];
@@ -4396,7 +4424,8 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
 }
 
 void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
-                 TyperImportProc* imports, uint32_t import_count) {
+                 TyperImportProc* imports, uint32_t import_count,
+                 StructTypeRegistry* seed_registry) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
@@ -4418,6 +4447,41 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
    * values than the compiler for the same Point/Line/etc. */
   tc.struct_count  = 2;
   memset(&tc.structs[0], 0, sizeof(tc.structs[0]) * 2);
+
+  /* Seed user structs from the persistent registry so cross-eval
+   * references to structs declared in a prior jacl_eval type-check
+   * (the runtime / compiler side already resolves them; without this
+   * the typer reports "unknown type Pt" or stamps DYN, which then
+   * trips downstream type checks). Mirrors what
+   * typer__register_structs does for AST_DEFSTRUCT, but populates
+   * from the registry's StructTypeDef instead of the AST. Slot
+   * indices are preserved 1:1 with the compiler's registry so
+   * struct_idx values stamped on AST nodes agree across passes. */
+  if (seed_registry) {
+    for (uint32_t i = 2; i < seed_registry->count && i < TYPER_MAX_STRUCTS; i++) {
+      StructTypeDef* sd = seed_registry->defs[i];
+      while (tc.struct_count < i && tc.struct_count < TYPER_MAX_STRUCTS) {
+        memset(&tc.structs[tc.struct_count++], 0, sizeof(tc.structs[0]));
+      }
+      if (tc.struct_count >= TYPER_MAX_STRUCTS) break;
+      if (!sd) {  /* shape-only slot (e.g. [Vec T] interned shape) */
+        memset(&tc.structs[tc.struct_count++], 0, sizeof(tc.structs[0]));
+        continue;
+      }
+      TyperStruct* s = &tc.structs[tc.struct_count++];
+      s->name     = sd->name;
+      s->name_len = sd->name_len;
+      uint32_t fc = sd->field_count;
+      if (fc > TYPER_MAX_STRUCT_FIELDS) fc = TYPER_MAX_STRUCT_FIELDS;
+      s->field_count = (uint8_t)fc;
+      for (uint32_t fi = 0; fi < fc; fi++) {
+        s->field_types[fi]       = (uint8_t)sd->fields[fi].type;
+        s->field_names[fi]       = sd->fields[fi].name;
+        s->field_name_lens[fi]   = sd->fields[fi].name_len;
+        s->field_struct_idxs[fi] = sd->fields[fi].struct_type_idx;
+      }
+    }
+  }
   tc.expected_type = TYPE_DYN;
   tc.yield_elem_struct_idx = UINT32_MAX;
   tc.narrowing_count = 0;
@@ -4463,7 +4527,7 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
     }
   }
   typer__register_structs(&tc, nodes, count);
-  uint32_t ctx_struct_idx = typer__register_ctx_struct(&tc, nodes, count);
+  uint32_t ctx_struct_idx = typer__register_ctx_struct(&tc, nodes, count, seed_registry);
 
   /* Builtin: $ctx is always a struct (the ctx record). Bind it after
    * the ctx struct is registered so $ctx.field resolves through the

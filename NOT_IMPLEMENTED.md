@@ -357,31 +357,28 @@ From `DESIGN.md` § "Known Limitations".
   boundary). No test today asserts `try`/`catch` semantics for
   overflow — add one when the design call is made.
 
-- **Typer state doesn't survive across `jacl_eval` calls.** The
-  runtime side is fully wired now — the persistent struct registry
-  outlives every `jacl_eval`, name pointers are arena-copied (no
-  dangling tokens), `$ctx` and its pool are lazy-init'd in `embed.c`,
-  and `struct_registry__find` correctly resolves prior-call names —
-  but `typer_infer` rebuilds `tc->structs[]` and the ctx-field map
-  from scratch each compile by walking only the current source's
-  `AST_STRUCT_DECL` / `AST_CTX_DECL` nodes (`src/typer.c:1979`,
-  `:2102`). Effects on multi-eval embedders:
-  - `ctx mut T name = v` in eval #1, `$ctx->name` in eval #2 → typer
-    rejects with "no field 'name' on ctx" even though the runtime
-    ctx struct still holds it.
-  - `struct Pt {...}` in eval #1, any *use of Pt as a type* in eval
-    #2 (typed binding, typed proc param, field access) → typer
-    rejects. Bare `[Pt ...]` constructor calls work because the
-    compiler's struct ctor path resolves through the registry
-    independently of the typer.
-  Single-script invocations (playground, `jacl_eval` of a whole
-  file) hit none of this. Fix needs the typer's pre-passes to seed
-  from the persistent `StructTypeRegistry` (`seed_registry` param
-  threaded through `typer_infer`) before walking the current AST.
-  Covering tests:
-  `test/test_e2e_embed_basics.c::test_e2e_ctx_declaration`
-  (single-call ctx), `::test_e2e_struct_name_persists` (memory
-  safety of the registry name copies).
+- **Cross-eval typed-proc signatures don't carry.** The struct
+  registry persists across `jacl_eval` (name pointers arena-copied),
+  `ctx__init_vm` is lazy-init'd in `embed.c`, and `typer_infer` is
+  now seeded from the persistent `StructTypeRegistry` so user
+  structs and ctx fields declared in a prior eval type-check in a
+  later one. The one remaining gap is **typed proc signatures**:
+  `compiler__find_global` returns `GlobalArity` entries from the
+  per-compile global-arity table, which is rebuilt each
+  `jacl_eval` from the current source's `AST_PROC` nodes. So a
+  `proc i32 sumpt {Pt p} { ... }` declared in eval #1, then called
+  as `[sumpt [Pt 3 4]]` in eval #2, loses the typed `Pt p` param
+  signature and the compiler reports "cannot pass struct value to
+  dyn parameter" at the call site. The runtime call itself would
+  succeed (proc body code lives in the persistent VM env and
+  resolves via `OP_GET_GLOBAL`); only the compile-time type check
+  on the caller is wrong. Fix shape: thread a persistent
+  `GlobalArity` table on the `JaclVM` and seed
+  `compiler__find_global` from it before the current source's
+  `AST_PROC` declarations populate it. Covering tests live in
+  `test/test_e2e_embed_basics.c` — `test_e2e_ctx_cross_eval`
+  exercises the ctx path (now passing), `test_e2e_struct_name_persists`
+  guards the registry name-copy memory safety.
 
 ---
 
