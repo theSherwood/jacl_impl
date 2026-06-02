@@ -279,7 +279,57 @@ via `COND_WAIT_FOR_MS`; see `AUDIT.md` §11). Remaining corners:
 
 ---
 
-## 9. GC / concurrency — deferred (already indexed)
+## 8c. SM state-field name shadowing
+
+Surfaced while landing the for-loop + destructure SM fixes (commit
+`74939a3`). When an SM-compiled proc declares the same name twice in
+the same scope with different storage shapes, both bindings collide
+on a single state-field slot and the slot's metadata locks to the
+first declaration. Subsequent reads through the second declaration
+deref the wrong shape.
+
+Minimal repro (compile/run inside a proc that also contains
+`spawn` / `await` / `parallel` / `race` to force SM compilation):
+
+```jacl
+mut counter 0              ; allocates state field, is_mutable=true,
+                           ; storage = cell-wrapped i32
+def counter [atom 0]       ; stores atom into the same slot; field
+                           ; metadata still says "cell"
+reset $counter 7           ; runtime error: "watch/reset: first
+                           ; argument must be an atom, got i32"
+                           ; (OP_GET_STATE_FIELD_CELL tries to deref
+                           ; the atom as a cell)
+```
+
+Root cause: `sm__add_state_field` (`compiler.c:1773`) dedups by name
+and returns silently on collision, so the second binding's storage
+hints (mutable, struct_type_idx, width) never reach the layout. Both
+`def` and `mut` in SM mode then re-use the original field via
+`sm__find_field` and emit ops for the wrong storage shape.
+
+Why it didn't bite the tour before: `main` wasn't SM-compiled —
+concurrency lived at top level. Once both for-loop and destructure
+SM bugs were fixed (§7), the tour's `main` becomes a candidate for
+hosting concurrency, which is the shape that exposes the collision.
+Tour keeps concurrency at top level for now and the apology comment
+points at this edge.
+
+Fix sketches:
+- **Detect + reject at compile time.** Treat "binding name reused
+  with a different storage shape" as a compile error in SM mode,
+  mirroring the same-scope shadowing error non-SM mode already
+  produces (`SYNTAX.md` § Scoping). Smallest surface; consistent
+  with the language's "shadowing in the same scope is a compile
+  error" rule.
+- **Allocate a fresh slot per declaration.** Drop the dedup in
+  `sm__add_state_field` and let each binding own its slot. Solves
+  shadowing across nested scopes too, but inflates state-field
+  count for the common case where the same name is rewritten
+  identically.
+
+Bug 1 / Bug 2 fixes (§7) closed the for-loop and destructure cases
+but did not touch this shadowing path.
 
 `AUDIT.md` is the canonical home for runtime open items. Pointers only:
 
