@@ -62,11 +62,13 @@ prn "three: $[add 1 2] five: $[add 2 3]"
 Three pre-merge baselines:
 
 ```
-./build.sh                  # full normal-mode test sweep (88/0 today)
+./build.sh                  # full normal-mode test sweep (90/0 today)
 ./build.sh --tsan           # ThreadSanitizer sweep (86/2 baseline; the
                             #   two failures are documented known-and-safe)
-./build.sh --wasm           # Emscripten compile-only check; skips with a
-                            #   clear notice when emcc isn't on PATH
+./build.sh --wasm           # builds via Emscripten and runs the WASM
+                            #   suite (test/test_wasm.mjs, including
+                            #   tour.jacl end-to-end). Skips with a clear
+                            #   notice when emcc or node isn't on PATH.
 ```
 
 Filter to one test:
@@ -93,3 +95,22 @@ GCC/Clang non-WASM targets and falls back to a switch on Emscripten
 and other compilers. See `AUDIT.md` for the per-baseline rationale and
 `AUDIT_HISTORY.md` for the audit campaign and §13 implementation
 notes.
+
+## Playground
+
+A browser playground for JACL lives in `demo/` — CodeMirror 6 editor
+with a position-aware JACL syntax mode, optional vim keybindings, a
+draggable panel divider, and the WASM build of the VM. To run it
+locally:
+
+```
+bash build_wasm.sh           # produces build_wasm/jacl.{js,wasm}
+cd demo && bash build_demo.sh   # symlinks wasm/, regenerates examples.json,
+                                # bundles src/ → dist/playground.js
+python3 -m http.server 8080  # or any static server
+# open http://localhost:8080
+```
+
+The bundle (`demo/dist/playground.js`, ~425 KB minified) is committed
+so the playground works from a clone without a Node toolchain;
+`build_demo.sh` only re-bundles when you edit `demo/src/`.

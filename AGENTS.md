@@ -46,6 +46,46 @@
   `docs/profiles/2026-05-22_*` — read those first before chasing a
   perf regression.
 
+## When working on the playground
+
+- The WASM playground lives in `demo/`. It's a TypeScript app
+  (CodeMirror 6 + the `@replit/codemirror-vim` plugin + a JACL
+  StreamLanguage syntax mode) bundled by esbuild. There is no
+  frontend framework yet — Solid is the preferred default if
+  reactivity warrants one later.
+- `cd demo && bash build_demo.sh` does the whole pipeline: symlinks
+  `wasm/`, regenerates `examples.json` from `test/jacl/*.jacl`, runs
+  `npm ci` (one-time) on a fresh clone, then `npm run build` to
+  produce `dist/playground.js`. The npm registry is reachable from
+  the sandbox; the browser running the playground on the host is
+  not, so the editor must be bundled to a local file the dev server
+  serves directly.
+- Source layout: `src/playground.ts` (entry — editor wiring, run
+  pipeline, example picker, splitter, vim toggle), `src/jacl-mode.ts`
+  (StreamLanguage tokenizer), `src/jacl-wasm.ts` (typed wrapper over
+  `jacl_eval`), `src/splitter.ts` (drag-to-resize divider, persisted
+  to localStorage). The bundle (`dist/playground.js`, ~425 KB
+  minified) is committed so the playground works from a clone
+  without a Node toolchain.
+- `./node_modules/.bin/tsc --noEmit` typechecks; `npm run build` only
+  runs esbuild and ignores types, so always typecheck separately when
+  changing TS surfaces.
+- Each Run click discards the previous JaclVM and spins up a fresh
+  one. The cross-eval persistence work in `embed.c` (struct registry,
+  ctx pool, GlobalArity table) is for embedders sharing one VM
+  across calls — the playground intentionally doesn't want that, so
+  Run is hermetic.
+- Highlighting in `jacl-mode.ts` is position-driven, not just
+  keyword-based:
+    - first identifier after `[` → call head
+    - first identifier after `|` → call head (pipe stage)
+    - column-0 line that starts with a bareword → first ident is head
+    - lines inside a multi-line `{..}` whose first non-whitespace
+      char is a bareword → first ident is head
+    - single-line `{..}` is treated as a list (params /
+      destructuring / struct fields), heads inside stay plain
+  See the demo commit history for the reasoning behind each case.
+
 ## When writing C
 
 - Prefer arenas for memory management. This require organizing allocations by lifetime.

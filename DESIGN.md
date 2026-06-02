@@ -130,6 +130,16 @@ lib/           Infrastructure (single-header libraries)
   regex/       Thompson NFA (not currently wired in)
   segment_array/   Segment array
 test/          JACL test files + test_helpers.h
+demo/          WASM playground (CodeMirror 6 + vim + JACL syntax mode)
+  index.html       static shell + styles
+  src/             TypeScript sources (esbuild-bundled into dist/)
+    playground.ts  entry: editor wiring, run pipeline, example picker, splitter
+    jacl-mode.ts   StreamLanguage tokenizer with position-aware call highlighting
+    jacl-wasm.ts   typed wrapper around the Emscripten JaclVM
+    splitter.ts    draggable panel splitter, persisted to localStorage
+  build_demo.sh    builds wasm/, regenerates examples.json, bundles src/ → dist/
+  wasm/            symlinks into ../build_wasm/ (jacl.js + jacl.wasm)
+build_wasm/    Emscripten build artifacts (built by build_wasm.sh)
 ```
 
 Tests link against `libjacl.a` (built once from `jacl.c`) and include `../src/jacl.h` — historically tests `#include`d `jacl.c` directly, but the unity-include path survives only in two legacy tests.
