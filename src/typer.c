@@ -3532,8 +3532,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_SLICE,       TYPE_STR    },
       { HEAD_CONCAT,      TYPE_STR    },
       /* Stream constructors. */
-      { HEAD_DOTDOT_LT,   TYPE_STREAM },
-      { HEAD_DOTDOT_EQ,   TYPE_STREAM },
+      { HEAD_DOTDOT_LT,        TYPE_STREAM },
+      { HEAD_DOTDOT_EQ,        TYPE_STREAM },
+      { HEAD_RANGE,            TYPE_STREAM },
+      { HEAD_RANGE_INCLUSIVE,  TYPE_STREAM },
       { HEAD_LINES,       TYPE_STREAM },
       /* Constructors that always produce dyn collections. */
       { HEAD_VEC,         TYPE_VEC    },
@@ -3590,7 +3592,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * narrows the loop binding (parallel to TYPE_TYPED_VEC's idx).
        * Range operators yield i64 (vm.c OP_RANGE/RANGE_EQ produce i64
        * via jacl_i64), `lines` yields str. */
-      if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ) {
+      if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ ||
+          hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_I64);
       } else if (hid == HEAD_LINES) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);

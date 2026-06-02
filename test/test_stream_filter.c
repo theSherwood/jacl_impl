@@ -186,7 +186,7 @@ static int test_filter_for_inline(void) {
 static int test_filter_loop_generator(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    yield $i\n"
@@ -194,7 +194,7 @@ static int test_filter_loop_generator(void) {
     "  }\n"
     "}\n"
     "proc even {x} { == [% $x 2] 0 }\n"
-    "def v [collect [filter [range 8] $even]]\n"
+    "def v [collect [filter [gen 8] $even]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

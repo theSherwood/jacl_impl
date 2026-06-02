@@ -1291,7 +1291,7 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | Typed collections (`[Vec T]`, `[Map K V]`) | see `TYPE_SYSTEM.md` |
 | Fixed-size C-ABI buffers (`[Buf N T]`) | see `BUFFER_DESIGN.md`; nested bufs + GC-traced elements deferred |
 | Variadic procs (`proc log {level, ..msgs}`) | `..rest` in proc params |
-| Ranges — `[range a b]`, `[range-inclusive a b]` | **(spec ahead of impl)** currently infix `(a ..< b)` / `(a ..= b)`. |
+| Ranges — `[range a b]`, `[range-inclusive a b]` | both prefix forms emit `OP_RANGE`. The infix `(a ..< b)` / `(a ..= b)` forms still compile to the same opcode for now; they go away when `()` is removed. |
 | Multi-line strings (`"""..."""`) | with interpolation, Kotlin-style indent |
 | Optional chaining (`?.`) | **(spec ahead of impl)** spec is `[?. $val field]` prefix (holding pattern); current implementation is `($val ?. field)` in `()` mode. |
 | Negative numeric literals (`-1`) | **(spec ahead of impl)** lexer currently requires `(-1)` workaround in argument position; spec is to accept `-1` directly. |

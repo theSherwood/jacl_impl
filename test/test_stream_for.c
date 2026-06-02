@@ -144,14 +144,14 @@ static int test_for_stream_return(void) {
 static int test_for_stream_loop_generator(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    yield $i\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "for [range 5] {\n"
+    "for [gen 5] {\n"
     "  print $it\n"
     "}\n",
     &cap);
@@ -214,14 +214,14 @@ static int test_for_stream_hof_callback(void) {
 static int test_for_stream_empty(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    yield $i\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "for [range 0] {\n"
+    "for [gen 0] {\n"
     "  print $it\n"
     "}\n"
     "[print \"done\"]\n",

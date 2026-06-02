@@ -118,14 +118,14 @@ static int test_yield_lazy(void) {
 static int test_yield_with_args(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {start, end} {\n"
+    "proc gen {start, end} {\n"
     "  mut i $start\n"
     "  while [< $i $end] {\n"
     "    [yield $i]\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def s [range 3 6]\n"
+    "def s [gen 3 6]\n"
     "[print [stream_next $s]]\n"
     "[print [stream_next $s]]\n"
     "[print [stream_next $s]]\n"
@@ -688,14 +688,14 @@ static int test_sm_while_collect(void) {
 static int test_sm_while_range(void) {
   PrintCapture cap;
   VMResult r = run_capture_sm(
-    "proc range {start, end} {\n"
+    "proc gen {start, end} {\n"
     "  mut i $start\n"
     "  while [< $i $end] {\n"
     "    [yield $i]\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "[print [collect [range 3 7]]]\n",
+    "[print [collect [gen 3 7]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 3 4 5 6]\n");

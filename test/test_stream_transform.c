@@ -182,14 +182,14 @@ static int test_transform_then_filter(void) {
 static int test_transform_loop_generator(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    [yield $i]\n"
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [transform [range 5] [\\ * $it $it]]]\n"
+    "def v [collect [transform [gen 5] [\\ * $it $it]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

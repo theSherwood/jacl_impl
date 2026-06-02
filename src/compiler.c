@@ -6835,9 +6835,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->last_expr_type = TYPE_BOOL;
     return;
   }
-  /* Range operators: ..< (exclusive) and ..= (inclusive) */
-  if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ) {
-    const char* rname = (hid == HEAD_DOTDOT_LT) ? "..<" : "..=";
+  /* Range builtins: `[range a b]` (exclusive) and
+     `[range-inclusive a b]` (inclusive). The infix forms `..<` / `..=`
+     remain accepted for now and compile to the same opcode; they go
+     away when `()` is removed (SYNTAX_REDESIGN_2026_06.md §3). */
+  if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ ||
+      hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
+    const char* rname;
+    bool inclusive;
+    switch (hid) {
+      case HEAD_DOTDOT_LT:        rname = "..<";              inclusive = false; break;
+      case HEAD_DOTDOT_EQ:        rname = "..=";              inclusive = true;  break;
+      case HEAD_RANGE:            rname = "range";            inclusive = false; break;
+      case HEAD_RANGE_INCLUSIVE:  rname = "range-inclusive";  inclusive = true;  break;
+      default: rname = "range"; inclusive = false; break;  /* unreachable */
+    }
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, rname, "2 arguments", argc);
       return;
@@ -6845,7 +6857,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_RANGE, line);
-    compiler__emit_byte(c, (hid == HEAD_DOTDOT_EQ) ? 1 : 0, line);
+    compiler__emit_byte(c, inclusive ? 1 : 0, line);
     c->last_expr_type = TYPE_STREAM;
     return;
   }

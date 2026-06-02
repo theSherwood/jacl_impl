@@ -88,14 +88,14 @@ static int test_collect_order(void) {
 static int test_collect_empty_stream(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    [yield $i]\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [range 0]]\n"
+    "def v [collect [gen 0]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -130,14 +130,14 @@ static int test_collect_string_error(void) {
 static int test_collect_loop_generator(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc range {n} {\n"
+    "proc gen {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
     "    [yield $i]\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [range 6]]\n"
+    "def v [collect [gen 6]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

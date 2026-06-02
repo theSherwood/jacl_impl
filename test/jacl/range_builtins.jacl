@@ -1,0 +1,25 @@
+# [range a b] and [range-inclusive a b] — named-prefix range builtins.
+# Replace the infix `(a ..< b)` / `(a ..= b)` forms; produce streams.
+#
+# expect: ok
+
+proc check {} {
+  assert [== [collect [range 1 5]] [vec 1 2 3 4]]
+  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]
+  assert [== [collect [range 0 0]] [vec]]
+  assert [== [collect [range-inclusive 5 5]] [vec 5]]
+
+  # Composes with transform / filter like the infix form did.
+  assert [== [collect [transform [range 0 3] [\ * $it 10]]] [vec 0 10 20]]
+
+  # Element type stamps i64 so the for binding narrows.
+  # (Current explicit-for order is `for COLL NAME { body }` — name
+  # moves to the front once redesign §5 lands.)
+  mut sum 0
+  for [range-inclusive 1 4] n { set sum [+ $sum $n] }
+  assert [== $sum 10]
+
+  "ok"
+}
+
+print [check]
