@@ -7,5 +7,6 @@ static const struct { const char *name; uint32_t len; } jacl_prelude_macro_names
     { "not", 3 },
     { "incr", 4 },
     { "timeout", 7 },
+    { "assert", 6 },
 };
 #define JACL_PRELUDE_MACRO_NAMES_COUNT (sizeof(jacl_prelude_macro_names) / sizeof(jacl_prelude_macro_names[0]))

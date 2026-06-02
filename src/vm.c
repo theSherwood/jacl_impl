@@ -2391,7 +2391,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_ERROR_VAL] = &&L_OP_ERROR_VAL,
     [OP_CHECK_ERROR] = &&L_OP_CHECK_ERROR,
     [OP_JUMP_IF_ERROR] = &&L_OP_JUMP_IF_ERROR,
-    [OP_ASSERT] = &&L_OP_ASSERT,
+    [OP_PANIC] = &&L_OP_PANIC,
     [OP_STACK_TRACE] = &&L_OP_STACK_TRACE,
     [OP_MAKE_CELL] = &&L_OP_MAKE_CELL,
     [OP_GET_CELL_LOCAL] = &&L_OP_GET_CELL_LOCAL,
@@ -5737,17 +5737,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         DISPATCH();
       }
 
-      CASE(OP_ASSERT): {
-        /* Pop one value. If falsy, halt with runtime error. Otherwise
-           push nil so the assert call has a value in expression position. */
-        JaclVal val;
-        result = vm__pop(vm, &val); if (result != VM_OK) return result;
-        if (vm__is_falsy(val)) {
-          vm__set_error(vm, "assertion failed");
-          return VM_RUNTIME_ERROR;
+      CASE(OP_PANIC): {
+        /* Pop one value (the message). Halt unconditionally with the
+           provided message. If the value isn't a string, fall back to
+           the value's type name. */
+        JaclVal msg;
+        result = vm__pop(vm, &msg); if (result != VM_OK) return result;
+        if (jacl_is_string(msg)) {
+          uint32_t mlen = jacl_string_len(msg);
+          char mbuf[256];
+          uint32_t copy = mlen < sizeof(mbuf) - 1 ? mlen : (uint32_t)(sizeof(mbuf) - 1);
+          jacl_string_data(msg, mbuf, copy);
+          mbuf[copy] = '\0';
+          vm__set_error(vm, "%s", mbuf);
+        } else {
+          vm__set_error(vm, "panic (non-string message: %s)",
+                        vm__type_name(msg));
         }
-        result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
-        DISPATCH();
+        return VM_RUNTIME_ERROR;
       }
 
       CASE(OP_CHECK_ERROR): {

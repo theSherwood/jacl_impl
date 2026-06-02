@@ -94,7 +94,7 @@ typedef enum {
   HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
 
   /* Errors */
-  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_ASSERT,
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_PANIC,
   HEAD_ASSERT_TYPE,  /* compile-time static type check; emits no runtime code */
 
   /* Boxes / atoms / coercion */
@@ -208,6 +208,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "lines", 5) == 0) return HEAD_LINES;
       if (memcmp(s, "count", 5) == 0) return HEAD_COUNT;
       if (memcmp(s, "quote", 5) == 0) return HEAD_QUOTE;
+      if (memcmp(s, "panic", 5) == 0) return HEAD_PANIC;
       return HEAD_NONE;
     case 6:
       if (memcmp(s, "return", 6) == 0) return HEAD_RETURN;
@@ -218,7 +219,6 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "signal", 6) == 0) return HEAD_SIGNAL;
       if (memcmp(s, "cancel", 6) == 0) return HEAD_CANCEL;
       if (memcmp(s, "extern", 6) == 0) return HEAD_EXTERN;
-      if (memcmp(s, "assert", 6) == 0) return HEAD_ASSERT;
       return HEAD_NONE;
     case 7:
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;

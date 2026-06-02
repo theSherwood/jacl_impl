@@ -1040,7 +1040,8 @@ A prelude module is implicitly imported and pre-defines the core operators:
 - `|`, `&&`, `||` — command-mode control flow
 - `\` — lambda shorthand
 - Arithmetic, comparison, and logical operators as prefix builtins (`+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `not`)
-- `assert-eq`, `assert-ne`, `assert-lt`, `assert-le`, `assert-gt`, `assert-ge` — comparison-asserting builtins (test-code ergonomics; `assert <expr>` covers non-comparison predicates)
+- `assert` — prelude macro covering both `assert <expr>` (truthy check) and `[assert <op> arg1 arg2 …]` (predicate form) — both expand to `[if <pred> {} { panic "<source>" }]`
+- `panic` — builtin: halt unconditionally with an optional string message; underlying primitive for `assert` on failure
 
 ## Aliases
 
@@ -1270,8 +1271,8 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | Line continuation (`\` at end of line) | yes |
 | Comments (`#`, `##`) | yes |
 | Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
-| `assert` builtin | `OP_ASSERT`: halts the VM with "assertion failed" on falsy, else returns nil |
-| `assert-eq` family (`-ne`, `-lt`, `-le`, `-gt`, `-ge`) | **(spec ahead of impl)** not yet implemented; comparison-asserting builtins for ergonomic test code without `()` infix. |
+| `panic` builtin | `OP_PANIC`: pops a string message, halts with that message. Zero-arg form emits the default literal `"panic"`. |
+| `assert` prelude macro | Two forms: `assert <expr>` (truthy check) and `[assert <op> arg1 arg2 …]` (predicate form). Both expand to `[if <pred> {} { panic "<source>" }]`. Bare command-mode `assert <op> arg1 arg2 …` is currently blocked by the parser treating operators as command-arg terminators; use the bracketed form. |
 | Persistent collections (vectors, maps) | RRB-tree, HAMT |
 | Mutable state (`box`, `atom`, `swap`, `reset`) | thread-local boxes, CAS atoms |
 | Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS + SM transform; NxM scheduler |

@@ -640,7 +640,7 @@ typedef enum {
   HEAD_PRINT, HEAD_LENGTH, HEAD_BYTE_LENGTH,
   HEAD_INDEX, HEAD_SLICE, HEAD_CONCAT,
   HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
-  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_ASSERT,
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_PANIC,
   HEAD_ASSERT_TYPE,
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
@@ -1030,7 +1030,7 @@ typedef enum {
   OP_UNWATCH,              /* pop key, pop atom; remove watcher under key; push nil */
 
   /* --- Assertion --- */
-  OP_ASSERT,                /* pop value, halt with runtime error if falsy, else push nil */
+  OP_PANIC,                 /* pop string message, halt unconditionally with that message */
 
   /* --- Late additions (kept at the end so test_bytecode's
    *     numeric-stability asserts stay valid) --- */

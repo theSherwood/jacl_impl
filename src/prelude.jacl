@@ -60,3 +60,33 @@ defmacro incr {x} {
 defmacro timeout {n body} {
   syntax-quote [race ~body { sleep ~n; error "timeout" }]
 }
+
+# assert — predicate check; on failure, format a source-context message
+# and call panic.
+#
+# Two forms:
+#   [assert EXPR]            single arg; halt if EXPR is falsy.
+#   [assert OP arg1 arg2..]  predicate form; evaluate [OP arg1 ..] and
+#                            halt if the result is falsy.
+#
+# The predicate form is the natural replacement for the old infix
+# `assert ($a == 7)` once `()` is gone: write `assert == $a 7`.
+#
+# Expansion:
+#   [if <pred> {} { panic "assertion failed: <source>" }]
+# where <source> is the syntax-str of the original predicate, captured
+# at macro-expansion time. `panic` halts unconditionally.
+defmacro assert {head ..rest} {
+  if [== [vec-len $rest] 0] {
+    # Single-arg form: $head is the expression to test for truthiness.
+    def msg-str [concat "assertion failed: " [syntax-str $head]]
+    def msg [make-syntax "lit-string" $msg-str]
+    syntax-quote [if ~head {} { panic ~msg }]
+  } {
+    # Predicate form: $head is the operator, $rest collects its operands.
+    def pred [make-syntax "command" $head $rest]
+    def msg-str [concat "assertion failed: " [syntax-str $pred]]
+    def msg [make-syntax "lit-string" $msg-str]
+    syntax-quote [if ~pred {} { panic ~msg }]
+  }
+}

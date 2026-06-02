@@ -1,0 +1,31 @@
+# `assert` is a prelude macro. Two forms:
+#   assert EXPR              — single-arg truthy check.
+#   [assert OP arg1 arg2..]  — predicate form: evaluates [OP arg1 ..],
+#                              halts on falsy.
+#
+# expect: ok
+
+proc is-positive? {n} {
+  > $n 0
+}
+
+proc check {} {
+  # Single-arg form (today's behavior, preserved).
+  assert $true
+  assert [== 42 42]
+  assert [not [== 1 2]]
+
+  # Predicate form (new): operator in head position via [].
+  [assert == 7 7]
+  [assert < 1 2]
+  [assert <= 2 2]
+  [assert > 5 2]
+  [assert >= 5 5]
+
+  # User-defined predicate works the same way.
+  [assert is-positive? 5]
+
+  "ok"
+}
+
+print [check]

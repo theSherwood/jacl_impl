@@ -6832,15 +6832,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Assert builtin: 1 arg (condition). On falsy, OP_ASSERT halts the VM
-     with "assertion failed" at the source line of the assert call. */
-  if (hid == HEAD_ASSERT) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "assert", "1 argument", argc);
+  /* Panic builtin: 0 or 1 args. With no args, halts with the default
+     message "panic". With one arg, evaluates it (expected to be a
+     string) and halts with that message. Sugar `assert` lives in
+     prelude.jacl as a macro that expands to [panic ...] on failure. */
+  if (hid == HEAD_PANIC) {
+    if (argc > 1) {
+      compiler__builtin_arity_error(c, line, col, "panic",
+                                    "0 or 1 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_ASSERT, line);
+    if (argc == 0) {
+      JaclVal default_msg =
+          jacl_string_new(c->heap, c->intern_table, "panic", 5);
+      compiler__emit_constant(c, default_msg, line);
+    } else {
+      compiler__compile_node(c, args[0]);
+    }
+    compiler__emit_byte(c, OP_PANIC, line);
     c->last_expr_type = TYPE_NIL;
     return;
   }
