@@ -176,7 +176,7 @@ static void run_all(void) {
   /* Proc declared return type doesn't match body. */
   RUN("proc_return_type_mismatch", {
     .source =
-      "proc i32 f {i32 x} { \"not an int\" }\n"
+      "proc f {i32 x} i32 { \"not an int\" }\n"
       "[f 1]",
     .expect_substrings = { "return", "i32", "str" },
   });
@@ -210,7 +210,7 @@ static void run_all(void) {
   /* Proc with typed return whose body tail is dyn — commitment-site rule. */
   RUN("proc_return_dyn_into_typed", {
     .source =
-      "proc i32 f {x} { $x }\n"
+      "proc f {x} i32 { $x }\n"
       "[f 1]",
     .expect_substrings = { "type error", "i32", "dyn", "to i32" },
   });

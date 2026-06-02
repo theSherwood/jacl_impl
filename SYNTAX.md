@@ -1258,7 +1258,7 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | Binding operators (`=`, `:`, `::`) | **(spec ahead of impl)** removed from spec; prelude macros currently still in place. |
 | Arrow field access (`->`) | chained |
 | `proc` syntax (`{params} {body}`) | yes |
-| `proc` typed-return position — after params: `proc f {…} T {…}` | **(spec ahead of impl)** current form is `proc T f {…} {…}`. |
+| `proc` typed-return position — after params: `proc f {…} T {…}` | parser produces `[name params (ret_type)? body]`; compiler / typer / SM analysis all read the new shape. `extern` still uses the old `extern T name {params}` layout (unchanged). |
 | `struct` declaration (`struct Name {type field, ...}`) | C-ABI layout |
 | Struct constructor — named-only (`[Pt x 30 y 15]`) | **(spec ahead of impl)** current constructor is positional (`[Pt 30 15]`); printer uses a third form. |
 | `if`/`elif`/`else` | expression-valued |

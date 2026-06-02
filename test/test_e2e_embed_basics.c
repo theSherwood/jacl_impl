@@ -379,7 +379,7 @@ static int test_e2e_proc_signature_cross_eval(void) {
   JaclVal r1 = jacl_eval(vm, "struct Pt {i32 x, i32 y}");
   ASSERT(!jacl_is_error(r1));
 
-  JaclVal r2 = jacl_eval(vm, "proc i32 sumpt {Pt p} { [+ $p->x $p->y] }");
+  JaclVal r2 = jacl_eval(vm, "proc sumpt {Pt p} i32 { [+ $p->x $p->y] }");
   ASSERT(!jacl_is_error(r2));
 
   JaclVal r3 = jacl_eval(vm, "[sumpt [Pt 3 4]]");
@@ -407,7 +407,7 @@ static int test_e2e_proc_signature_growth(void) {
   char buf[128];
   for (int i = 0; i < 100; i++) {
     snprintf(buf, sizeof(buf),
-             "proc i32 p%d {i32 x} { [+ $x %d] }", i, i);
+             "proc p%d {i32 x} i32 { [+ $x %d] }", i, i);
     JaclVal r = jacl_eval(vm, buf);
     ASSERT(!jacl_is_error(r));
   }

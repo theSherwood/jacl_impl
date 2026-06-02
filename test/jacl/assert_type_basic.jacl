@@ -4,8 +4,8 @@
 # No runtime evaluation — the expression is NOT compiled (no side
 # effects, no operand-stack cost).
 
-proc i64 typed-add {i64 a, i64 b} { + $a $b }
-proc str shout {str s} { concat $s "!" }
+proc typed-add {i64 a, i64 b} i64 { + $a $b }
+proc shout {str s} str { concat $s "!" }
 
 proc main {} {
   def i32 thirty-two 32

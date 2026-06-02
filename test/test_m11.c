@@ -733,7 +733,7 @@ static int test_to_arity_error(void) {
 static int test_proc_i64_return(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "proc add {i64 a, i64 b} i64 { + $a $b }\n"
     "[print [to-string [add 3 4]]]",
     &cap, "7\n"));
   TEST_PASS();
@@ -742,7 +742,7 @@ static int test_proc_i64_return(void) {
 static int test_proc_f64_return(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc f64 avg {f64 a, f64 b} { / [+ $a $b] 2.0 }\n"
+    "proc avg {f64 a, f64 b} f64 { / [+ $a $b] 2.0 }\n"
     "[print [to-string [avg 10.0 20.0]]]",
     &cap, "15\n"));
   TEST_PASS();
@@ -752,7 +752,7 @@ static int test_proc_callsite_contextual_typing(void) {
   PrintCapture cap;
   /* Literals at call site adopt param types */
   ASSERT(run_ok(
-    "proc i64 dbl {i64 n} { + $n $n }\n"
+    "proc dbl {i64 n} i64 { + $n $n }\n"
     "[print [to-string [dbl 21]]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -760,7 +760,7 @@ static int test_proc_callsite_contextual_typing(void) {
 
 static int test_proc_callsite_type_error(void) {
   ASSERT(run_err(
-    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "proc add {i64 a, i64 b} i64 { + $a $b }\n"
     "[add \"x\" 2]",
     "type error: argument 1 of add expected i64, got str"));
   TEST_PASS();
@@ -768,7 +768,7 @@ static int test_proc_callsite_type_error(void) {
 
 static int test_proc_callsite_dyn_error(void) {
   ASSERT(run_err(
-    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "proc add {i64 a, i64 b} i64 { + $a $b }\n"
     "def x 42\n"
     "[add $x 2]",
     "type error:"));
@@ -777,7 +777,7 @@ static int test_proc_callsite_dyn_error(void) {
 
 static int test_proc_return_type_error(void) {
   ASSERT(run_err(
-    "proc i64 bad {} { \"hello\" }",
+    "proc bad {} i64 { \"hello\" }",
     "type error: proc bad declared return type i64, but body returns str"));
   TEST_PASS();
 }
@@ -786,7 +786,7 @@ static int test_proc_return_type_at_callsite(void) {
   PrintCapture cap;
   /* Return type propagates: def y [add 1 2] where add returns i64 -> y is i64 */
   ASSERT(run_ok(
-    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "proc add {i64 a, i64 b} i64 { + $a $b }\n"
     "def y [add 1 2]\n"
     "[print [to-string $y]]",
     &cap, "3\n"));
@@ -868,7 +868,7 @@ static int test_type_inference_from_typed_proc(void) {
   PrintCapture cap;
   /* Inferred type from proc return type */
   ASSERT(run_ok(
-    "proc i64 f {} { 42 }\n"
+    "proc f {} i64 { 42 }\n"
     "def r [f]\n"
     "[print [to-string [+ $r 8]]]",
     &cap, "50\n"));
@@ -885,7 +885,7 @@ static int test_typed_closure_capture(void) {
     "proc test {} {\n"
     "  mut i64 n 0\n"
     "  proc inc {} { set n [+ $n 1] }\n"
-    "  proc i64 get {} { + $n 0 }\n"
+    "  proc get {} i64 { + $n 0 }\n"
     "  inc\n"
     "  inc\n"
     "  print [to-string [get]]\n"
@@ -900,7 +900,7 @@ static int test_typed_closure_param(void) {
   /* Closure with typed params */
   ASSERT(run_ok(
     "proc test {} {\n"
-    "  proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "  proc add {i64 a, i64 b} i64 { + $a $b }\n"
     "  print [to-string [add 10 20]]\n"
     "}\n"
     "[test]",
@@ -1085,8 +1085,8 @@ static int test_proc_chain_typed(void) {
   PrintCapture cap;
   /* Typed proc calling another typed proc — return type propagates */
   ASSERT(run_ok(
-    "proc i64 dbl {i64 n} { * $n 2 }\n"
-    "proc i64 quad {i64 n} { dbl [dbl $n] }\n"
+    "proc dbl {i64 n} i64 { * $n 2 }\n"
+    "proc quad {i64 n} i64 { dbl [dbl $n] }\n"
     "[print [to-string [quad 5]]]",
     &cap, "20\n"));
   TEST_PASS();

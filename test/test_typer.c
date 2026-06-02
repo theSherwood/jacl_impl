@@ -514,7 +514,7 @@ static void test_proc_stream_return_compound(void) {
    * i64 element idx; for-loop binding narrows to i64. Mirrors the
    * [Future T] roundtrip — element idx encoded via JACL_SCALAR_TYPE_IDX. */
   ParseResult r = run_typer(
-      "proc [Stream i64] gen {} { yield 1 }\n"
+      "proc gen {} [Stream i64] { yield 1 }\n"
       "def s [gen]", &a);
   AstNode* call = find_cmd(r.nodes[1], "gen");
   ASSERT_NOT_NULL(call);
@@ -731,7 +731,7 @@ static void test_proc_ptr_return(void) {
    * with Point's pointee idx. */
   ParseResult r = run_typer(
       "struct Point {i32 x i32 y}\n"
-      "proc [Ptr Point] make {} {\n"
+      "proc make {} [Ptr Point] {\n"
       "  def u64 a 0\n"
       "  ptr-cast [Ptr Point] $a\n"
       "}\n"
@@ -749,7 +749,7 @@ static void test_proc_future_return_compound(void) {
   /* proc with [Future i64] return type — call returns TYPE_FUTURE
    * with i64 element idx; await unwraps to i64. */
   ParseResult r = run_typer(
-      "proc [Future i64] mk {} { spawn { 42 } }\n"
+      "proc mk {} [Future i64] { spawn { 42 } }\n"
       "def f [mk]\n"
       "def x [await $f]", &a);
   AstNode* aw = find_cmd(r.nodes[2], "await");
@@ -1018,7 +1018,7 @@ static void test_nested_proc_call_narrows(void) {
    * narrow to inner's declared return type (i32), not dyn. */
   ParseResult r = run_typer(
       "proc outer {} {\n"
-      "  proc i32 inner {} { 42 }\n"
+      "  proc inner {} i32 { 42 }\n"
       "  inner\n"
       "}", &a);
   AstNode* outer = r.nodes[0];

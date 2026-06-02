@@ -1852,9 +1852,10 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   uint32_t  name_idx, params_idx, body_idx;
   JaclType  return_type = TYPE_DYN;
   uint32_t  return_struct_idx = UINT32_MAX;
+  /* New layout: [name params (ret_type)? body]. */
   if (argc == 4) {
-    typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
-    name_idx = 1; params_idx = 2; body_idx = 3;
+    typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+    name_idx = 0; params_idx = 1; body_idx = 3;
   } else if (argc == 3) {
     name_idx = 0; params_idx = 1; body_idx = 2;
   } else return false;
@@ -2281,14 +2282,12 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     uint32_t  name_idx, params_idx;
     JaclType  return_type = TYPE_DYN;
     uint32_t  return_struct_idx = UINT32_MAX;
-    /* Layout differs by form:
-     *   proc TYPE name params body          (argc==4)
-     *   proc      name params body          (argc==3)
-     *   extern TYPE name params             (argc==3, no body)
+    /* Layout:
+     *   proc   name params (TYPE)? body     (argc==3 or 4; TYPE at [2])
+     *   extern TYPE name params             (argc==3, no body — old layout)
      *   extern      name params             (argc==2, no body)
-     * Disambiguate by head and arg shape: an extern's params arg is
-     * always last; for argc==3 we look at args[0] to tell extern's
-     * "type, name, params" apart from proc's "name, params, body". */
+     * Extern still uses the old type-first layout; only `proc` was
+     * swapped in the June 2026 redesign. */
     if (is_extern) {
       if (argc == 3) {
         typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
@@ -2298,8 +2297,8 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
       } else continue;
     } else {
       if (argc == 4) {
-        typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
-        name_idx = 1; params_idx = 2;
+        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+        name_idx = 0; params_idx = 1;
       } else if (argc == 3) {
         name_idx = 0; params_idx = 1;
       } else continue;

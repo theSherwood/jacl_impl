@@ -2,7 +2,7 @@
 # assert-type does NOT evaluate its expression at runtime. If it did,
 # the embedded `print "side-effect"` would fire and the body of
 # `compute` would run too.
-proc i32 compute {} {
+proc compute {} i32 {
   print "side-effect"
   42
 }

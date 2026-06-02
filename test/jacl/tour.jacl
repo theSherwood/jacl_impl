@@ -43,12 +43,13 @@ proc add {a, b} { + $a $b }
 proc greet {name} { concat "hi " $name }
 proc zero-arg {} { + 10 20 }
 
-# Typed proc: `proc <ret> <name> {<param-type> <param>, ...}`. Param
+# Typed proc: `proc <name> {<param-type> <param>, ...} <ret> {body}`.
+# Return type comes after the params block, before the body. Param
 # and return types are checked at call sites and arithmetic narrows
 # accordingly (no boxing, no dyn dispatch). Untyped params default
 # to `dyn`.
-proc i64 typed-add {i64 a, i64 b} { + $a $b }
-proc str shout {str s} { concat $s "!" }
+proc typed-add {i64 a, i64 b} i64 { + $a $b }
+proc shout {str s} str { concat $s "!" }
 
 # Variadic: `..rest` in params collects trailing args into a vector.
 proc sum-all {..nums} {
@@ -171,6 +172,15 @@ proc main {} {
   mut range-sum 0
   for (0 ..< 3) n { set range-sum [+ $range-sum $n] }
   assert ($range-sum == 3)
+
+  # C-style `for {init; cond; step} { body }` — Tcl-shaped, falls out
+  # of the language for free: `for` taking a header-block plus a
+  # body-block, the implementation inspects the header. Useful for
+  # counted loops where you want a single mutable index visible in
+  # both the condition and the body.
+  mut product 1
+  for {mut i 1; <= $i 4; incr i} { set product [* $product $i] }
+  assert ($product == 24)
 
   # ----- streams -----
   # Lazy sequences from generators (`yield`), ranges, or `lines`.

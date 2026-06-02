@@ -1400,7 +1400,9 @@ static void analyze__collect_procs__visit(AstNode* node, void* vctx) {
     if (node->data.command.head_id == HEAD_PROC) {
       uint32_t name_idx, body_idx;
       bool ok = false;
-      if (argc == 4)      { name_idx = 1; body_idx = 3; ok = true; }
+      /* New layout: [name params (ret_type)? body]. Name is always 0,
+         body is always argc - 1, ret_type (if present) is at argc - 2. */
+      if (argc == 4)      { name_idx = 0; body_idx = 3; ok = true; }
       else if (argc == 3) { name_idx = 0; body_idx = 2; ok = true; }
 
       if (ok && args[name_idx]->type == AST_LIT_STRING &&
@@ -2057,9 +2059,9 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
 
         /* proc — named proc creates a binding; do NOT recurse into body */
         if (hid == HEAD_PROC) {
+          /* New layout: name is always args[0]. */
           uint32_t name_idx;
-          if (argc == 3) name_idx = 0;
-          else if (argc == 4) name_idx = 1;
+          if (argc == 3 || argc == 4) name_idx = 0;
           else return;
           if (args[name_idx]->type == AST_LIT_STRING) {
             const char* pn = args[name_idx]->data.lit_string.value;
@@ -2431,9 +2433,9 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
 
         /* --- proc: named proc = write; don't recurse into body --- */
         if (hid == HEAD_PROC) {
+          /* New layout: name is always args[0]. */
           uint32_t name_idx;
-          if (argc == 3) name_idx = 0;
-          else if (argc == 4) name_idx = 1;
+          if (argc == 3 || argc == 4) name_idx = 0;
           else return;
           if (args[name_idx]->type == AST_LIT_STRING) {
             sm__liveness_mark_write(liveness, layout,
@@ -9249,20 +9251,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* proc definition */
   if (hid == HEAD_PROC) {
-    /* Disambiguate: 4 args + first is type keyword → has return type.
-       3 args → no return type (existing). */
+    /* New layout (June 2026): [name params (ret_type)? body].
+       Name is always args[0], params is args[1], body is args[argc-1].
+       For 4-arg form, args[2] is the optional return-type annotation. */
     JaclType proc_return_type = TYPE_DYN;
     uint32_t proc_return_struct_idx = UINT32_MAX;
     uint32_t name_arg_idx, params_arg_idx, body_arg_idx;
 
     if (argc == 4) {
-      /* [proc TYPE name params body]. TYPE may be a keyword, struct
+      /* [proc name params TYPE body]. TYPE may be a keyword, struct
        * name, or a compound AST_COMMAND ([Ptr T], [Future T], [Vec T],
        * [Map K V]). For compound forms we route storage analogously to
        * the def path: [Ptr T] → TYPE_U64 storage (typer carries pointee
        * identity); other compound types → TYPE_DYN storage (typer is
        * the source of truth for the static return type). */
-      AstNode* tn = args[0];
+      AstNode* tn = args[2];
       bool resolved = false;
       if (tn->type == AST_LIT_STRING &&
           compiler__resolve_type(c, tn->data.lit_string.value,
@@ -9302,11 +9305,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       if (!resolved) {
         compiler__error(c, line, col,
-            "proc with 4 arguments requires a type annotation as first argument");
+            "proc with 4 arguments requires a type annotation as third argument");
         return;
       }
-      name_arg_idx   = 1;
-      params_arg_idx = 2;
+      name_arg_idx   = 0;
+      params_arg_idx = 1;
       body_arg_idx   = 3;
     } else if (argc == 3) {
       name_arg_idx   = 0;

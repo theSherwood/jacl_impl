@@ -5,7 +5,7 @@
 struct Point {i32 x, i32 y}
 struct Line {Point start, Point end}
 
-proc Point getpt {} {
+proc getpt {} Point {
   def ln [Line [Point 42 99] [Point 0 0]]
   $ln->start
 }

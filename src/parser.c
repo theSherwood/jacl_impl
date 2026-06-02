@@ -1940,16 +1940,17 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   NodeArray args;
   parser__arr_init(&args, p->arena);
 
-  /* Detect pattern:
-     { ...                 → anonymous proc (current token is already '{')
-     word { ...            → proc name {params} {body}
-     word word { ...       → proc type name {params} {body}
-     [ ... ] word { ...    → proc [CompoundType] name {params} {body}
-                             (compound returns: [Vec T], [Map K V], [Ptr T],
-                              [Future T], [Stream T])
+  /* New syntax (June 2026 redesign §4): return type comes AFTER the
+     params block, before the body block.
+       proc name {params} {body}              — untyped return
+       proc name {params} type {body}         — typed return (word)
+       proc name {params} [CompoundType] {body} — typed return (bracketed)
+       proc {params} {body}                   — anonymous, untyped
+       proc {params} type {body}              — anonymous, typed
      p->pos points to the first token after 'proc'. */
+
+  /* 1) Name (or synthesized empty for anonymous). */
   if (p->tokens[p->pos].type == TOKEN_LBRACE) {
-    /* Anonymous proc: proc {params} {body} — synthesize empty name */
     AstNode* name = ast_alloc(p->arena);
     name->type = AST_LIT_STRING;
     name->start = proc_head->start;
@@ -1957,38 +1958,16 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
     name->data.lit_string.value  = "";
     name->data.lit_string.length = 0;
     parser__arr_push(&args, name);
-  } else if (p->tokens[p->pos].type == TOKEN_LBRACKET) {
-    /* proc [CompoundType] name {params} {body} — bracketed return type. */
-    AstNode* ret_type = parser__parse_expr(p);
-    if (ret_type == NULL || ret_type->type == AST_ERROR) {
-      return parser__error(p, "expected return type after 'proc'", parser__peek(p));
-    }
-    parser__arr_push(&args, ret_type);
-    if (parser__peek(p)->type != TOKEN_WORD &&
-        parser__peek(p)->type != TOKEN_STRUCT) {
-      return parser__error(p, "expected proc name after bracketed return type",
-                           parser__peek(p));
-    }
-    AstNode* name = parser__parse_atom(p);
-    parser__arr_push(&args, name);
-  } else if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-    /* proc name {params} {body} — no return type */
-    AstNode* name = parser__parse_atom(p);
-    parser__arr_push(&args, name);
-  } else if ((p->tokens[p->pos + 1].type == TOKEN_WORD ||
-              p->tokens[p->pos + 1].type == TOKEN_STRUCT) &&
-             p->tokens[p->pos + 2].type == TOKEN_LBRACE) {
-    /* proc type name {params} {body} — with return type */
-    AstNode* ret_type = parser__parse_atom(p);
-    parser__arr_push(&args, ret_type);
+  } else if (p->tokens[p->pos].type == TOKEN_WORD ||
+             p->tokens[p->pos].type == TOKEN_STRUCT) {
     AstNode* name = parser__parse_atom(p);
     parser__arr_push(&args, name);
   } else {
-    return parser__error(p, "expected proc name followed by '{' parameter list",
+    return parser__error(p, "expected proc name or '{' parameter list",
                          parser__peek(p));
   }
 
-  /* Parse {params} */
+  /* 2) {params} */
   if (parser__peek(p)->type != TOKEN_LBRACE) {
     return parser__error(p, "expected '{' for proc parameters", parser__peek(p));
   }
@@ -1996,7 +1975,28 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   if (params->type == AST_ERROR) return params;
   parser__arr_push(&args, params);
 
-  /* Parse {body} */
+  /* 3) Optional return type, before the body block. Detected by
+        whatever follows the params block: another '{' → body
+        (no return type); anything else → return type, then body. */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    AstNode* ret_type;
+    if (parser__peek(p)->type == TOKEN_LBRACKET) {
+      ret_type = parser__parse_expr(p);
+    } else if (parser__peek(p)->type == TOKEN_WORD ||
+               parser__peek(p)->type == TOKEN_STRUCT) {
+      ret_type = parser__parse_atom(p);
+    } else {
+      return parser__error(p,
+          "expected return type or '{' for proc body", parser__peek(p));
+    }
+    if (ret_type == NULL || ret_type->type == AST_ERROR) {
+      return parser__error(p, "expected return type after proc params",
+                           parser__peek(p));
+    }
+    parser__arr_push(&args, ret_type);
+  }
+
+  /* 4) {body} */
   if (parser__peek(p)->type != TOKEN_LBRACE) {
     return parser__error(p, "expected '{' for proc body", parser__peek(p));
   }
@@ -2004,7 +2004,8 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   if (body->type == AST_ERROR) return body;
   parser__arr_push(&args, body);
 
-  /* Build AST_COMMAND: [proc name params body] or [proc type name params body] */
+  /* Build AST_COMMAND: 3 args [name params body] or 4 args
+     [name params ret_type body]. */
   AstNode* node = ast_alloc(p->arena);
   node->type  = AST_COMMAND;
   node->start = start;

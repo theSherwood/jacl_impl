@@ -236,7 +236,7 @@ static int test_spread_stream_generator(void) {
 /* yielding a wrong typed value into [Stream i64] is a compile error. */
 static int test_yield_str_into_stream_i64_errors(void) {
   ASSERT(run_err(
-    "proc [Stream i64] gen {} { yield \"oops\" }\n"
+    "proc gen {} [Stream i64] { yield \"oops\" }\n"
     "gen\n",
     "yield expected i64"));
   TEST_PASS();
@@ -247,7 +247,7 @@ static int test_yield_str_into_stream_i64_errors(void) {
  * explicit [to T $val] cast, parallel to typed-vec push). */
 static int test_yield_dyn_into_stream_i64_errors(void) {
   ASSERT(run_err(
-    "proc [Stream i64] gen {x} { yield $x }\n"
+    "proc gen {x} [Stream i64] { yield $x }\n"
     "gen 1\n",
     "yield expected i64"));
   TEST_PASS();
@@ -258,7 +258,7 @@ static int test_yield_dyn_into_stream_i64_errors(void) {
 static int test_yield_literal_narrows_into_stream_i64(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc [Stream i64] gen {} { yield 42 }\n"
+    "proc gen {} [Stream i64] { yield 42 }\n"
     "print [collect [gen]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -271,7 +271,7 @@ static int test_yield_literal_narrows_into_stream_i64(void) {
 static int test_yield_mixed_into_stream_dyn_ok(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc [Stream dyn] gen {} {\n"
+    "proc gen {} [Stream dyn] {\n"
     "  yield 1\n"
     "  yield \"two\"\n"
     "}\n"
@@ -290,7 +290,7 @@ static int test_yield_mixed_into_stream_dyn_ok(void) {
 static int test_for_in_annotated_stream_iterates(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc [Stream i64] gen {} {\n"
+    "proc gen {} [Stream i64] {\n"
     "  yield 1\n"
     "  yield 2\n"
     "  yield 3\n"

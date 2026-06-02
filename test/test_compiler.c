@@ -2193,7 +2193,7 @@ static int test_proc_new_syntax_typed(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc i64 add {i64 a, i64 b} { + $a $b }\n[add 1 2]", &vm, &arena);
+    "proc add {i64 a, i64 b} i64 { + $a $b }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -3508,7 +3508,7 @@ static int test_compile_module_typed_exports(void) {
   const char* dir = "/tmp/jacl_test_m14e";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "math.jacl",
-                  "proc i64 add {i64 a, i64 b} { + $a $b }\n");
+                  "proc add {i64 a, i64 b} i64 { + $a $b }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3745,7 +3745,7 @@ static int test_import_typed_propagation(void) {
   char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
-                   "proc i64 add {i64 a, i64 b} { + $a $b }\n",
+                   "proc add {i64 a, i64 b} i64 { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3826,7 +3826,7 @@ static int test_import_type_check(void) {
   char real_importer[PATH_MAX];
 
   setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
-                   "proc i64 add {i64 a, i64 b} { + $a $b }\n",
+                   "proc add {i64 a, i64 b} i64 { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -5713,7 +5713,7 @@ static int test_struct_pass_by_value_recursive(void) {
 
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
-      "proc Point bump {Point p} {\n"
+      "proc bump {Point p} Point {\n"
       "  . $p x [+ $p->x 10]\n"
       "  $p\n"
       "}\n"
@@ -5801,7 +5801,7 @@ static int test_struct_return_basic(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc Point mkpt {} {\n"
+      "proc mkpt {} Point {\n"
       "  Point 42 99\n"
       "}\n"
       "proc test {} {\n"
@@ -5837,7 +5837,7 @@ static int test_struct_return_nested_calls(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc Point mkpt {i32 a, i32 b} {\n"
+      "proc mkpt {i32 a, i32 b} Point {\n"
       "  Point $a $b\n"
       "}\n"
       "proc test {} {\n"
@@ -5877,7 +5877,7 @@ static int test_struct_return_value_isolation(void) {
 
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
-      "proc Point dup {Point p} {\n"
+      "proc dup {Point p} Point {\n"
       "  Point $p->x $p->y\n"
       "}\n"
       "proc test {} {\n"
@@ -6002,7 +6002,7 @@ static int test_struct_closure_capture_materialize(void) {
       /* deref of a struct-element box now narrows to TYPE_STRUCT;
        * the wrapping proc therefore needs an explicit return type
        * (struct returns require a wide-return annotation). */
-      "  proc Point getter {} { deref $b }\n"
+      "  proc getter {} Point { deref $b }\n"
       "  def q [getter]\n"
       "  print $q->x\n"
       "  print $q->y\n"
@@ -6330,7 +6330,7 @@ static int test_struct_box_swap(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc Point swapper {dyn old} { Point 99 88 }\n"
+      "proc swapper {dyn old} Point { Point 99 88 }\n"
       "proc main {} {\n"
       "  def p [Point 10 20]\n"
       "  def b [box $p]\n"
@@ -6880,7 +6880,7 @@ static int test_struct_heap_equality(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc Point mkpt {i32 a, i32 b} {\n"
+      "proc mkpt {i32 a, i32 b} Point {\n"
       "  return [Point $a $b]\n"
       "}\n"
       "proc test {} {\n"
@@ -9414,7 +9414,7 @@ static int test_arrow_on_expr_result(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc Point mkpt {} { Point 42 99 }\n"
+      "proc mkpt {} Point { Point 42 99 }\n"
       "print [mkpt]->x",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);

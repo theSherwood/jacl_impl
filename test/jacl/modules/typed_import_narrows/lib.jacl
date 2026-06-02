@@ -1,1 +1,1 @@
-proc i32 mul {i32 a, i32 b} { * $a $b }
+proc mul {i32 a, i32 b} i32 { * $a $b }

@@ -2455,26 +2455,26 @@ static int test_proc_basic_new_syntax(void) {
 
 static int test_proc_typed_params(void) {
   setup();
-  /* proc i64 add {i64 a, i64 b} {+ $a $b} → 4 args (type, name, params, body) */
-  ParseResult r = parse("proc i64 add {i64 a, i64 b} { + $a $b }");
+  /* proc add {i64 a, i64 b} i64 { + $a $b } → 4 args
+     New layout (June 2026 redesign §4): [name, params, ret_type, body] */
+  ParseResult r = parse("proc add {i64 a, i64 b} i64 { + $a $b }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(assert_proc_head(n));
-  ASSERT_U32_EQ(n->data.command.arg_count, 4); /* type, name, params, body */
-  /* arg[0]: return type "i64" */
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
-  /* arg[1]: name "add" */
-  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "add", 3) == 0);
-  /* arg[2]: params flat list [i64 a i64 b] */
-  AstNode* params = n->data.command.args[2];
+  ASSERT_U32_EQ(n->data.command.arg_count, 4); /* name, params, ret_type, body */
+  /* arg[0]: name "add" */
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "add", 3) == 0);
+  /* arg[1]: params flat list */
+  AstNode* params = n->data.command.args[1];
   ASSERT(params->type == AST_COMMAND);
-  /* head = "i64", args = ["a", "i64", "b"] */
   ASSERT(memcmp(params->data.command.head->data.lit_string.value, "i64", 3) == 0);
   ASSERT_U32_EQ(params->data.command.arg_count, 3);
   ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
   ASSERT(memcmp(params->data.command.args[1]->data.lit_string.value, "i64", 3) == 0);
   ASSERT(memcmp(params->data.command.args[2]->data.lit_string.value, "b", 1) == 0);
+  /* arg[2]: return type "i64" */
+  ASSERT(memcmp(n->data.command.args[2]->data.lit_string.value, "i64", 3) == 0);
   /* arg[3]: body AST_BLOCK */
   ASSERT(n->data.command.args[3]->type == AST_BLOCK);
   teardown();

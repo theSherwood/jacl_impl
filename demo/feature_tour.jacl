@@ -298,7 +298,7 @@ print [double 10]
 
 # Typed proc with type-before-name everywhere.
 # => 7
-proc i64 add {i64 a, i64 b} { + $a $b }
+proc add {i64 a, i64 b} i64 { + $a $b }
 print [to-string [add 3 4]]
 
 # Recursion.
