@@ -27,12 +27,15 @@ import { jacl as jaclMode } from "./jacl-mode";
 //   - function(variableName) → call heads, painted distinct blue. The
 //     wrapped tag comes via the JACL mode's tokenTable; see jacl-mode.
 //   - variableName → `$var` refs. The default style doesn't give plain
-//     variableName a color; we pick a teal so user-level data flow is
-//     visually traceable without competing with calls (blue) or types
-//     (dark green).
+//     variableName a color; teal keeps data flow traceable without
+//     competing with calls (blue) or types (dark green).
+//   - operator → arithmetic / comparison / arrow ops. The default
+//     style also has no rule here. A muted magenta gives them visual
+//     weight without overpowering identifiers.
 const jaclHighlight = HighlightStyle.define([
   { tag: t.function(t.variableName), color: "#22d", fontWeight: "500" },
   { tag: t.variableName,             color: "#178" },
+  { tag: t.operator,                 color: "#905" },
 ]);
 import { JaclVM, RunResult } from "./jacl-wasm";
 import { initSplitter } from "./splitter";
