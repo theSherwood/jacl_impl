@@ -1,0 +1,15 @@
+# Bench scenario: tight reset loop on a long-lived atom
+#
+# Mirror of box_reset_hot.jacl but with atom in place of box.
+# Compares OP_RESET cost: box uses a plain store + barriers; atom adds
+# acquire-load of the prior value, release-store of the new value, and
+# a (no-op) watcher dispatch.
+#
+# Output: 999999 (final reset value).
+
+mut i 0
+def cell [atom 0]
+for {set i 0; < $i 1000000; incr i} {
+  reset $cell $i
+}
+print [deref $cell]

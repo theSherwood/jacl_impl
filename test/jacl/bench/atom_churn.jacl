@@ -1,0 +1,14 @@
+# Bench scenario: tight small-object allocation (atom variant)
+#
+# Mirror of box_churn.jacl but allocates atoms instead of boxes.
+# Used to compare the cost of atom vs box construction.
+#
+# Output: sum 0..1999 = 1999000.
+
+mut acc 0
+mut i 0
+for {set i 0; < $i 2000; incr i} {
+  def a [atom $i]
+  set acc [+ $acc [deref $a]]
+}
+print $acc

@@ -1,0 +1,17 @@
+# Bench scenario: tight reset loop on a long-lived box
+#
+# Allocates one box, then performs 1_000_000 resets on it. Isolates the
+# OP_RESET store path (and its GC write/remembered-set barriers) without
+# the noise of fresh allocation each iteration.
+#
+# Paired with atom_reset_hot to measure atom's per-reset overhead vs
+# box (atomic load/store, watcher dispatch).
+#
+# Output: 999999 (final reset value).
+
+mut i 0
+def cell [box 0]
+for {set i 0; < $i 1000000; incr i} {
+  reset $cell $i
+}
+print [deref $cell]
