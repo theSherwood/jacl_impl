@@ -196,9 +196,30 @@ body {
 /* --- Main panels --- */
 .panels {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Editor | splitter | output. The fr values get rewritten by
+     playground.ts as the user drags; defaults to 1fr / 6px / 1fr
+     (50/50 with a thin draggable gutter between). */
+  grid-template-columns: 1fr 6px 1fr;
   flex: 1;
   min-height: 0;
+}
+
+.splitter {
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+  /* Widen the hit-target a few px on either side without changing
+     visual width — the ::before pseudo extends mouse capture. */
+  position: relative;
+}
+.splitter::before {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
+.splitter:hover,
+.splitter.dragging {
+  background: var(--accent);
 }
 
 .panel {
@@ -300,6 +321,7 @@ body {
     border-right: none;
     border-bottom: 1px solid var(--border);
   }
+  .splitter { display: none; }
   .example-picker { max-width: none; }
   .shortcut-hint { display: none; }
 }
@@ -337,6 +359,7 @@ body {
     <div class="panel-label">Editor</div>
     <div id="editor-host"></div>
   </div>
+  <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" title="Drag to resize · double-click to reset"></div>
   <div class="panel">
     <div class="panel-label">Output</div>
     <pre id="output"><span class="placeholder">Loading WASM module...</span></pre>

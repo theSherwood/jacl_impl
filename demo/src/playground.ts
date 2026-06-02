@@ -21,6 +21,7 @@ import { vim } from "@replit/codemirror-vim";
 
 import { jacl as jaclMode } from "./jacl-mode";
 import { JaclVM, RunResult } from "./jacl-wasm";
+import { initSplitter } from "./splitter";
 
 // --- DOM refs ---
 // The editor *host* is a plain div; CodeMirror mounts inside it.
@@ -292,6 +293,10 @@ function highlightItem(index: number) {
 // --- Wire it up ---
 const view = buildEditor(DEFAULT_CODE);
 setVim(vimEnabled, view);
+
+const panelsEl   = document.querySelector(".panels") as HTMLElement;
+const splitterEl = document.getElementById("splitter") as HTMLElement;
+if (panelsEl && splitterEl) initSplitter(panelsEl, splitterEl);
 
 runBtn.addEventListener("click", handleRun);
 clearBtn.addEventListener("click", () => {
