@@ -159,7 +159,7 @@ static int test_named_destructure_long_name(void) {
   ASSERT(run_ok(
     "struct PersonInfo {i64 user_id, i32 user_age}\n"
     "proc t {} {\n"
-    "  def {user_id, user_age} [PersonInfo 12345 30]\n"
+    "  def {user_id, user_age} [PersonInfo user_id 12345 user_age 30]\n"
     "  print $user_id\n"
     "  print $user_age\n"
     "}\n"

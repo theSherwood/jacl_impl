@@ -3,7 +3,7 @@
 # named struct destructuring
 struct Point {i32 x, i32 y}
 proc main {} {
-  def p [Point 10 20]
+  def p [Point x 10 y 20]
   def {x, y} $p
   print $x
   print $y

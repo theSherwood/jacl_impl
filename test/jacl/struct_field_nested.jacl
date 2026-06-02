@@ -3,7 +3,7 @@
 struct Point {i32 x, i32 y}
 struct Line {Point start, Point end}
 proc main {} {
-  def ln [Line [Point 5 6] [Point 10 20]]
+  def ln [Line start [Point x 5 y 6] end [Point x 10 y 20]]
   print $ln->start->x
 }
 main

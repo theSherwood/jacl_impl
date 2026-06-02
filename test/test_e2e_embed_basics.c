@@ -382,7 +382,7 @@ static int test_e2e_proc_signature_cross_eval(void) {
   JaclVal r2 = jacl_eval(vm, "proc sumpt {Pt p} i32 { [+ $p->x $p->y] }");
   ASSERT(!jacl_is_error(r2));
 
-  JaclVal r3 = jacl_eval(vm, "[sumpt [Pt 3 4]]");
+  JaclVal r3 = jacl_eval(vm, "[sumpt [Pt x 3 y 4]]");
   ASSERT(!jacl_is_error(r3));
   ASSERT(jacl_is_i32(r3));
   ASSERT_INT_EQ(jacl_as_i32(r3), 7);

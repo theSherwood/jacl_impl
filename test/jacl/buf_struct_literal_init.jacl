@@ -1,12 +1,12 @@
-# expect: Point{x: 1, y: 2}
-# expect: Point{x: 3, y: 4}
-# expect: Point{x: 5, y: 6}
-# expect: Point{x: 0, y: 0}
+# expect: [Point x 1 y 2]
+# expect: [Point x 3 y 4]
+# expect: [Point x 5 y 6]
+# expect: [Point x 0 y 0]
 # M4.1c: literal init for struct-element bufs. Exact fill plus
 # partial fill (4th slot stays zero-init).
 struct Point {i32 x, i32 y}
 
-def [Buf 4 Point] pts [[Buf 4 Point] [Point 1 2] [Point 3 4] [Point 5 6]]
+def [Buf 4 Point] pts [[Buf 4 Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]
 print $pts->0
 print $pts->1
 print $pts->2

@@ -3,7 +3,7 @@
 struct Pt {i32 x, i32 y}
 
 proc main {} {
-  def p [Pt 3 4]
+  def p [Pt x 3 y 4]
   assert-type $p Pt
   print [to-string (3 + 4)]
 }

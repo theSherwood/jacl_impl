@@ -8,7 +8,7 @@
 struct ElfHeader { i32 ver, [Buf 4 u8] magic }
 
 proc main {} {
-  def h [ElfHeader 1]
+  def h [ElfHeader ver 1]
   def i32 i 7
   print [buf-get $h->magic $i]
 }

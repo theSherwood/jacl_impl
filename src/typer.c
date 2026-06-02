@@ -2856,8 +2856,25 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     JaclType saved_et = tc->expected_type;
     if (proc && i < proc->param_count) {
       tc->expected_type = (JaclType)proc->param_types[i];
-    } else if (sdef && i < sdef->field_count) {
-      tc->expected_type = (JaclType)sdef->field_types[i];
+    } else if (sdef) {
+      /* Named struct constructor: args are field/value pairs. The
+       * value position is at odd `i`; the preceding even-position arg
+       * carries the field name. Look up the field and push its type
+       * so literal narrowing fires. (Per SYNTAX_REDESIGN_2026_06.md §2,
+       * positional struct constructors are gone.) */
+      if ((i & 1u) == 1) {
+        AstNode* fname_node = node->data.command.args[i - 1];
+        if (fname_node->type == AST_LIT_STRING) {
+          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+            if (sdef->field_name_lens[fi] == fname_node->data.lit_string.length &&
+                memcmp(sdef->field_names[fi], fname_node->data.lit_string.value,
+                       fname_node->data.lit_string.length) == 0) {
+              tc->expected_type = (JaclType)sdef->field_types[fi];
+              break;
+            }
+          }
+        }
+      }
     } else if (ctor_kind == 1 && ctor_elem_t != TYPE_DYN) {
       tc->expected_type = ctor_elem_t;
     } else if ((ctor_kind == 2 || ctor_kind == 3) &&
@@ -3065,39 +3082,53 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   } else if (sdef) {
     node->inferred_type = TYPE_STRUCT;
     node->inferred_struct_idx = sdef_idx;
-    /* Check positional struct-constructor args against declared field
-     * types. Mirrors compiler.c:10094-10113. */
+    /* Named struct constructor: args are field/value pairs. The
+     * compiler enforces uniqueness, unknown-name, and buf-vs-value
+     * arity errors; the typer's job here is to type-check each
+     * provided value against the declared field type so call-site
+     * narrowing produces the right diagnostics. */
     uint32_t argc = node->data.command.arg_count;
     AstNode** as = node->data.command.args;
-    uint32_t check_n = argc < sdef->field_count ? argc : sdef->field_count;
-    for (uint32_t i = 0; i < check_n; i++) {
-      JaclType field_t = (JaclType)sdef->field_types[i];
-      if (field_t == TYPE_DYN) continue;
-      JaclType arg_t = (JaclType)as[i]->inferred_type;
-      if (arg_t == field_t) continue;
-      if (field_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
-      if (arg_t == TYPE_DYN) {
-        /* Bespoke message (matches compiler.c:10106-10110): the
-         * shared field formatters embed "binding" wording, but the
-         * struct-ctor context calls these "args" of a struct, not
-         * named bindings. Keep the wording until a dedicated
-         * formatter exists. */
-        char err[224];
-        snprintf(err, sizeof(err),
-                 "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
-                 (int)sdef->field_name_lens[i], sdef->field_names[i],
-                 (int)sdef->name_len, sdef->name,
-                 type_name(field_t));
-        typer__error(tc, as[i]->start.line, as[i]->start.column, err);
-      } else {
-        char err[224];
-        jacl_format_field_mismatch(err, sizeof(err),
-            sdef->name, sdef->name_len,
-            sdef->field_names[i], sdef->field_name_lens[i],
-            field_t, arg_t);
-        typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+    if ((argc & 1u) == 0) {
+      uint32_t pair_count = argc / 2;
+      for (uint32_t p = 0; p < pair_count; p++) {
+        AstNode* name_node = as[p * 2];
+        AstNode* val_node  = as[p * 2 + 1];
+        if (name_node->type != AST_LIT_STRING) continue;
+        const char* fname = name_node->data.lit_string.value;
+        uint32_t    fname_len = name_node->data.lit_string.length;
+        uint32_t found = UINT32_MAX;
+        for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->field_name_lens[fi] == fname_len &&
+              memcmp(sdef->field_names[fi], fname, fname_len) == 0) {
+            found = fi;
+            break;
+          }
+        }
+        if (found == UINT32_MAX) continue;  /* compiler reports */
+        JaclType field_t = (JaclType)sdef->field_types[found];
+        if (field_t == TYPE_DYN) continue;
+        JaclType arg_t = (JaclType)val_node->inferred_type;
+        if (arg_t == field_t) continue;
+        if (field_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+        if (arg_t == TYPE_DYN) {
+          char err[224];
+          snprintf(err, sizeof(err),
+                   "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
+                   (int)sdef->field_name_lens[found], sdef->field_names[found],
+                   (int)sdef->name_len, sdef->name,
+                   type_name(field_t));
+          typer__error(tc, val_node->start.line, val_node->start.column, err);
+        } else {
+          char err[224];
+          jacl_format_field_mismatch(err, sizeof(err),
+              sdef->name, sdef->name_len,
+              sdef->field_names[found], sdef->field_name_lens[found],
+              field_t, arg_t);
+          typer__error(tc, val_node->start.line, val_node->start.column, err);
+        }
+        break;
       }
-      break;
     }
   } else if (head && head->type == AST_COMMAND) {
     /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].

@@ -4,12 +4,12 @@
 # expect: 10
 # Test: ctx field that holds a struct value
 struct Point {i32 x, i32 y}
-ctx mut Point pos = [Point 10 20]
+ctx mut Point pos = [Point x 10 y 20]
 
 print $ctx->pos->x
 print $ctx->pos->y
 
-with-ctx {pos [Point 100 200]} {
+with-ctx {pos [Point x 100 y 200]} {
   print $ctx->pos->x
 }
 print $ctx->pos->x

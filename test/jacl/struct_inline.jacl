@@ -3,7 +3,7 @@
 struct Point {i32 x, i32 y}
 struct Wrapper {struct{x:i32,y:i32} pos}
 proc main {} {
-  def w [Wrapper [Point 42 10]]
+  def w [Wrapper pos [Point x 42 y 10]]
   print $w->pos->x
 }
 main

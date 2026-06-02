@@ -4084,7 +4084,7 @@ static int test_ctx_decl_nested_in_bare_block(void) {
 static int test_ctx_decl_struct_constructor_default(void) {
   setup();
   /* Struct constructor with literal args is a valid constant default */
-  ParseResult r = parse("ctx Point origin = [Point 0 0]");
+  ParseResult r = parse("ctx Point origin = [Point x 0 y 0]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];

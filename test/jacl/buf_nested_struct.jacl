@@ -26,7 +26,7 @@ proc main {} {
   print $grid->2->3->y
 
   # Write a Point into cell (1,2) via the chained arrow.
-  set $grid->1->2 [Point 7 11]
+  set $grid->1->2 [Point x 7 y 11]
   print $grid->1->2->x
   print $grid->1->2->y
 
@@ -35,8 +35,8 @@ proc main {} {
   print $grid->2->3->y
 
   # Fill a small block and read back via the chain.
-  set $grid->0->0 [Point 1 2]
-  set $grid->0->1 [Point 3 4]
+  set $grid->0->0 [Point x 1 y 2]
+  set $grid->0->1 [Point x 3 y 4]
   print $grid->0->0->x
   print $grid->0->0->y
   print $grid->0->1->x

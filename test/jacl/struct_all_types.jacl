@@ -9,7 +9,7 @@
 struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, i32 g}
 
 proc main {} {
-  def s [All 42 1000000 7 9999999 3.0 2.71828 99]
+  def s [All a 42 b 1000000 c 7 d 9999999 e 3.0 f 2.71828 g 99]
   print $s->a
   print $s->b
   print $s->c

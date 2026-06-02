@@ -148,7 +148,7 @@ static int test_named_rest_struct(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y, i32 z}\n"
     "proc main {} {\n"
-    "  p = [Point 10 20 30]\n"
+    "  p = [Point x 10 y 20 z 30]\n"
     "  [def {x, ..rest} $p]\n"
     "}\n"
     "main\n",

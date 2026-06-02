@@ -17,7 +17,7 @@
 
 struct Point {i32 x, i32 y}
 proc main {} {
-  def [Buf 2 [Buf 2 Point]] grid [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 1 2] [Point 3 4]] [[Buf 2 Point] [Point 5 6] [Point 7 8]]]
+  def [Buf 2 [Buf 2 Point]] grid [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 1 y 2] [Point x 3 y 4]] [[Buf 2 Point] [Point x 5 y 6] [Point x 7 y 8]]]
   print $grid->0->0->x
   print $grid->0->0->y
   print $grid->0->1->x
@@ -28,7 +28,7 @@ proc main {} {
   print $grid->1->1->y
 
   # A partially-filled grid leaves the rest zero.
-  def [Buf 2 [Buf 2 Point]] partial [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point 9 9]]]
+  def [Buf 2 [Buf 2 Point]] partial [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 9 y 9]]]
   print $partial->1->1->x
   print $partial->0->1->y
 }

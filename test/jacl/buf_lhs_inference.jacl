@@ -30,7 +30,7 @@ print [buf-len $hdr]
 
 # Struct-element bufs also infer from the constructor.
 struct Point {i32 x, i32 y}
-def pts [[Buf 4 Point] [Point 1 2] [Point 3 4]]
+def pts [[Buf 4 Point] [Point x 1 y 2] [Point x 3 y 4]]
 print [buf-len $pts]
 print $pts->0->x
 print $pts->1->y

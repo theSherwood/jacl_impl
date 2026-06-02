@@ -13995,7 +13995,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Struct constructor: [StructName field1 field2 ...] */
+  /* Struct constructor: [StructName field val field val …]
+   *
+   * Named-only construction (SYNTAX_REDESIGN_2026_06.md §2). Args are
+   * field/value pairs in any order. Missing scalar/dyn fields get
+   * zero-equivalent defaults (0 / nil / "" / false). Missing struct-
+   * typed fields are a compile error in v1 — recursive zero-init for
+   * nested structs is left as a follow-up. Buf fields are zero-init by
+   * OP_STRUCT_NEW_INLINE and accept no user input. */
   if (head->type == AST_LIT_STRING) {
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t name_len = head->data.lit_string.length;
@@ -14004,66 +14011,169 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (struct_idx != UINT32_MAX) {
       StructTypeDef* sdef = reg->defs[struct_idx];
 
-      /* Arity check: buf fields are implicitly zero-init at
-       * construction (no user arg needed). Count non-buf fields and
-       * compare. See BUFFER_DESIGN.md M4.3. */
-      uint32_t non_buf_count = 0;
-      for (uint32_t i = 0; i < sdef->field_count; i++) {
-        if (sdef->fields[i].type != TYPE_BUF) non_buf_count++;
-      }
-      if (argc != non_buf_count) {
+      if ((argc & 1u) != 0) {
         char err_msg[160];
-        if (non_buf_count == sdef->field_count) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "struct '%.*s' has %u fields but got %u arguments",
-                   (int)name_len, head->data.lit_string.value,
-                   sdef->field_count, argc);
-        } else {
-          snprintf(err_msg, sizeof(err_msg),
-                   "struct '%.*s' has %u non-buf fields (buf fields zero-init implicitly) but got %u arguments",
-                   (int)name_len, head->data.lit_string.value,
-                   non_buf_count, argc);
-        }
+        snprintf(err_msg, sizeof(err_msg),
+                 "struct '%.*s' constructor requires field/value pairs (got %u argument%s)",
+                 (int)name_len, head->data.lit_string.value,
+                 argc, argc == 1 ? "" : "s");
         compiler__error(c, line, col, err_msg);
         return;
+      }
+
+      /* Build field_idx → value-arg-index map by scanning the pairs.
+       * Bounded array sized for the practical struct field cap. */
+      uint32_t provided[256];
+      if (sdef->field_count > 256) {
+        compiler__error(c, line, col,
+            "struct exceeds named-constructor field cap of 256");
+        return;
+      }
+      for (uint32_t i = 0; i < sdef->field_count; i++) provided[i] = UINT32_MAX;
+
+      uint32_t pair_count = argc / 2;
+      for (uint32_t p = 0; p < pair_count; p++) {
+        AstNode* name_node = args[p * 2];
+        if (name_node->type != AST_LIT_STRING) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' constructor: field name at position %u must be a bare word",
+                   (int)name_len, head->data.lit_string.value, p);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        const char* fname     = name_node->data.lit_string.value;
+        uint32_t    fname_len = name_node->data.lit_string.length;
+        uint32_t found = UINT32_MAX;
+        for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == fname_len &&
+              memcmp(sdef->fields[fi].name, fname, fname_len) == 0) {
+            found = fi;
+            break;
+          }
+        }
+        if (found == UINT32_MAX) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)name_len, head->data.lit_string.value,
+                   (int)fname_len, fname);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (sdef->fields[found].type == TYPE_BUF) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' field '%.*s' is a buf — buf fields are zero-init implicitly and accept no user value",
+                   (int)name_len, head->data.lit_string.value,
+                   (int)fname_len, fname);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (provided[found] != UINT32_MAX) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' field '%.*s' specified more than once",
+                   (int)name_len, head->data.lit_string.value,
+                   (int)fname_len, fname);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        provided[found] = p * 2 + 1;
       }
 
       /* User defstructs are always inline; ctx (the lone HeapRecord) uses
          the heap path. */
       bool use_inline = struct_def_is_user(sdef, reg);
 
-      /* Compile and type-check each field argument. For each non-buf
-       * field in source order, consume the next user arg. Buf fields
-       * contribute no input; OP_STRUCT_NEW_INLINE leaves their
-       * scratch bytes zero. */
-      uint32_t user_idx = 0;
+      /* Emit each non-buf field in declaration order. If the user
+       * supplied a value, compile + type-check; otherwise emit a
+       * default of the field's static type. */
       for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
         JaclType field_type = sdef->fields[fi].type;
         if (field_type == TYPE_BUF) continue;  /* skipped in input */
-        compiler__compile_node(c, args[user_idx]);
-        JaclType arg_type = (JaclType)args[user_idx]->inferred_type;
 
-        if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
-            arg_type != field_type) {
-          char err_msg[192];
-          jacl_format_field_mismatch(err_msg, sizeof(err_msg),
-              head->data.lit_string.value, name_len,
-              sdef->fields[fi].name, sdef->fields[fi].name_len,
-              field_type, arg_type);
-          compiler__error(c, line, col, err_msg);
-          return;
+        if (provided[fi] != UINT32_MAX) {
+          AstNode* val = args[provided[fi]];
+          compiler__compile_node(c, val);
+          JaclType arg_type = (JaclType)val->inferred_type;
+          if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
+              arg_type != field_type) {
+            char err_msg[192];
+            jacl_format_field_mismatch(err_msg, sizeof(err_msg),
+                head->data.lit_string.value, name_len,
+                sdef->fields[fi].name, sdef->fields[fi].name_len,
+                field_type, arg_type);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (field_type != TYPE_DYN && arg_type == TYPE_DYN) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
+                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                     (int)name_len, head->data.lit_string.value,
+                     type_name(field_type));
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          continue;
         }
-        if (field_type != TYPE_DYN && arg_type == TYPE_DYN) {
-          char err_msg[192];
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
-                   (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
-                   (int)name_len, head->data.lit_string.value,
-                   type_name(field_type));
-          compiler__error(c, line, col, err_msg);
-          return;
+
+        /* Default emission for missing fields. */
+        switch (field_type) {
+          case TYPE_I32:
+            compiler__emit_constant(c, jacl_i32(0), line);
+            break;
+          case TYPE_U32:
+            compiler__emit_constant(c, jacl_u32(0), line);
+            break;
+          case TYPE_F32:
+            compiler__emit_constant(c, jacl_f32(0.0f), line);
+            break;
+          case TYPE_I64: {
+            uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)0);
+            compiler__emit_byte(c, OP_CONST_I64, line);
+            compiler__emit_u16(c, idx, line);
+            break;
+          }
+          case TYPE_U64: {
+            uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)0);
+            compiler__emit_byte(c, OP_CONST_U64, line);
+            compiler__emit_u16(c, idx, line);
+            break;
+          }
+          case TYPE_F64: {
+            double d = 0.0;
+            uint64_t raw;
+            memcpy(&raw, &d, sizeof(raw));
+            uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)raw);
+            compiler__emit_byte(c, OP_CONST_F64, line);
+            compiler__emit_u16(c, idx, line);
+            break;
+          }
+          case TYPE_BOOL:
+            compiler__emit_byte(c, OP_FALSE, line);
+            break;
+          case TYPE_STR:
+            compiler__emit_constant(c, jacl_inline_string("", 0), line);
+            break;
+          case TYPE_DYN:
+            compiler__emit_byte(c, OP_NIL, line);
+            break;
+          default: {
+            /* Struct-typed (and other compound) fields can't be
+             * zero-defaulted without recursively constructing the
+             * field's type. Defer until we have a real use case. */
+            char err_msg[224];
+            snprintf(err_msg, sizeof(err_msg),
+                     "struct '%.*s' field '%.*s' has no default — must be provided",
+                     (int)name_len, head->data.lit_string.value,
+                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
         }
-        user_idx++;
       }
 
       if (use_inline) {

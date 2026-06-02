@@ -12,7 +12,7 @@ struct ElfHeader {
 }
 
 proc main {} {
-  def h [ElfHeader 1]
+  def h [ElfHeader version 1]
   def [Ptr u8] m $h->magic
   set $m->0 0x7f
   set $m->1 0x45

@@ -333,7 +333,7 @@ static int test_struct_field_set_from_dyn_rejected(void) {
     "struct Point {mut i32 x, i32 y}\n"
     "proc dyn_src {} { 99 }\n"
     "proc t {} {\n"
-    "  def p [Point 1 2]\n"
+    "  def p [Point x 1 y 2]\n"
     "  . $p x [dyn_src]\n"
     "}\n"
     "[t]",
@@ -347,7 +347,7 @@ static int test_struct_field_set_with_explicit_cast_ok(void) {
     "struct Point {mut i32 x, i32 y}\n"
     "proc dyn_src {} { 99 }\n"
     "proc t {} {\n"
-    "  def p [Point 1 2]\n"
+    "  def p [Point x 1 y 2]\n"
     "  . $p x [to i32 [dyn_src]]\n"
     "  print $p->x\n"
     "}\n"

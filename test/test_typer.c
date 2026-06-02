@@ -994,7 +994,7 @@ static void test_deref_box_struct_narrows(void) {
    * round-trip. */
   ParseResult r = run_typer(
       "struct Point {i32 x i32 y}\n"
-      "def b [box [Point 1 2]]\n"
+      "def b [box [Point x 1 y 2]]\n"
       "def p [deref $b]", &a);
   AstNode* d = find_cmd(r.nodes[2], "deref");
   ASSERT_NOT_NULL(d);

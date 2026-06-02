@@ -1,8 +1,8 @@
-# expect: Pair{a: 10, b: 20}
+# expect: [Pair a 10 b 20]
 # Test struct with i32 fields
 struct Pair {i32 a, i32 b}
 proc main {} {
-  def r [Pair 10 20]
+  def r [Pair a 10 b 20]
   print $r
 }
 main

@@ -1,7 +1,7 @@
 # expect: 42
 use "./shapes.jacl" {Point}
 proc main {} {
-  def p [Point 42 10]
+  def p [Point x 42 y 10]
   print $p->x
 }
 main

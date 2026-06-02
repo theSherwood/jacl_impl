@@ -1,5 +1,5 @@
 # expect: 30
-# expect: Point{x: 100, y: 200}
+# expect: [Point x 100 y 200]
 # Test struct as proc parameter and return value
 struct Point {i32 x, i32 y}
 
@@ -8,11 +8,11 @@ proc sum {Point, p} {
 }
 
 proc mk {i32 a, i32 b} Point {
-  Point $a $b
+  [Point x $a y $b]
 }
 
 proc main {} {
-  def p [Point 10 20]
+  def p [Point x 10 y 20]
   print [sum $p]
   print [mk 100 200]
 }

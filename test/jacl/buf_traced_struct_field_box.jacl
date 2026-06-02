@@ -7,7 +7,7 @@
 struct Bag { i32 size, [Buf 4 dyn] items }
 
 proc main {} {
-  def b [Bag 0]
+  def b [Bag size 0]
   set $b->items->0 "hello"
   set $b->items->1 42
   def boxed [box $b]

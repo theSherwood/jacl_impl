@@ -1,6 +1,6 @@
-# expect: Point{x: 0, y: 0}
+# expect: [Point x 0 y 0]
 # Test boxed structs stored as map values
 struct Point {i32 x, i32 y}
-def m [map "origin" [box [Point 0 0]]]
+def m [map "origin" [box [Point x 0 y 0]]]
 def p [deref [map-get $m "origin"]]
 print $p

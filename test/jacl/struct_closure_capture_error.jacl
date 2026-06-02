@@ -1,7 +1,7 @@
 # expect-error: cannot capture bare struct 'p' in closure; use [box ...] to box it first
 struct Point {i32 x, i32 y}
 proc test {} {
-  def p [Point 10 20]
+  def p [Point x 10 y 20]
   proc inner {} {
     print $p->x
   }

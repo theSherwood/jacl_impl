@@ -1,3 +1,3 @@
 # expect-error: cannot store bare struct in dyn vec; use [box ...] to box it
 struct Point {i32 x, i32 y}
-def v [vec [Point 1 2]]
+def v [vec [Point x 1 y 2]]

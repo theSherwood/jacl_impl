@@ -3,7 +3,7 @@
 # Test struct field access with dot command
 struct Point {i32 x, i32 y}
 proc main {} {
-  def p [Point 10 20]
+  def p [Point x 10 y 20]
   print $p->x
   print $p->y
 }

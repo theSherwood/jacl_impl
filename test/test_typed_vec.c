@@ -18,7 +18,7 @@ static int test_typed_vec_construct_elements(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "[print [vec-len [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]]]",
+    "[print [vec-len [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]]]",
     &cap, "3\n"));
   TEST_PASS();
 }
@@ -30,7 +30,7 @@ static int test_typed_vec_get(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "  def p [vec-get $points 0]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -46,7 +46,7 @@ static int test_typed_vec_get(void) {
 static int test_typed_vec_get_oob(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
+    "def points [[Vec Point] [Point x 1 y 2]]\n"
     "[print [vec-get $points 99]]",
     "out of bounds"));
   TEST_PASS();
@@ -59,8 +59,8 @@ static int test_typed_vec_push(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 1 2]]\n"
-    "  def points2 [vec-push $points [Point 3 4]]\n"
+    "  def points [[Vec Point] [Point x 1 y 2]]\n"
+    "  def points2 [vec-push $points [Point x 3 y 4]]\n"
     "  [print [vec-len $points2]]\n"
     "  def p [vec-get $points2 1]\n"
     "  [print $p->x]\n"
@@ -78,8 +78,8 @@ static int test_typed_vec_set(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
-    "  def points2 [vec-set $points 0 [Point 99 88]]\n"
+    "  def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
+    "  def points2 [vec-set $points 0 [Point x 99 y 88]]\n"
     "  def p [vec-get $points2 0]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -99,8 +99,8 @@ static int test_typed_vec_len(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "[print [vec-len [[Vec Point]]]]\n"
-    "[print [vec-len [[Vec Point] [Point 1 2]]]]\n"
-    "[print [vec-len [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6] [Point 7 8] [Point 9 10]]]]",
+    "[print [vec-len [[Vec Point] [Point x 1 y 2]]]]\n"
+    "[print [vec-len [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6] [Point x 7 y 8] [Point x 9 y 10]]]]",
     &cap, "0\n1\n5\n"));
   TEST_PASS();
 }
@@ -112,14 +112,14 @@ static int test_typed_vec_get_field_access(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 100 200]]\n"
+    "  def points [[Vec Point] [Point x 100 y 200]]\n"
     "  def p [vec-get $points 0]\n"
     "  [print $p]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
     "}\n"
     "main",
-    &cap, "Point{x: 100, y: 200}\n100\n200\n"));
+    &cap, "[Point x 100 y 200]\n100\n200\n"));
   TEST_PASS();
 }
 
@@ -130,7 +130,7 @@ static int test_typed_vec_get_inline_local(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "  def p [vec-get $points 0]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -149,7 +149,7 @@ static int test_typed_vec_get_inline_wide(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc test {} {\n"
-    "  def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8]]\n"
+    "  def rects [[Vec Rect] [Rect x 1 y 2 w 3 h 4] [Rect x 5 y 6 w 7 h 8]]\n"
     "  def r [vec-get $rects 0]\n"
     "  [print $r->x]\n"
     "  [print $r->h]\n"
@@ -169,7 +169,7 @@ static int test_typed_vec_wide_struct(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc main {} {\n"
-    "  def rects [[Vec Rect] [Rect 10 20 100 200] [Rect 30 40 300 400]]\n"
+    "  def rects [[Vec Rect] [Rect x 10 y 20 w 100 h 200] [Rect x 30 y 40 w 300 h 400]]\n"
     "  [print [vec-len $rects]]\n"
     "  def r [vec-get $rects 0]\n"
     "  [print $r->x]\n"
@@ -189,8 +189,8 @@ static int test_typed_vec_persistence(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
-    "def b [vec-push $a [Point 3 4]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
+    "def b [vec-push $a [Point x 3 y 4]]\n"
     "# a should still have length 1\n"
     "[print [vec-len $a]]\n"
     "[print [vec-len $b]]",
@@ -206,11 +206,11 @@ static int test_typed_vec_gc_safety(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def a [[Vec Point] [Point 1 2]]\n"
-    "  def b [vec-push $a [Point 3 4]]\n"
-    "  def c [vec-push $b [Point 5 6]]\n"
-    "  def d [vec-push $c [Point 7 8]]\n"
-    "  def e [vec-push $d [Point 9 10]]\n"
+    "  def a [[Vec Point] [Point x 1 y 2]]\n"
+    "  def b [vec-push $a [Point x 3 y 4]]\n"
+    "  def c [vec-push $b [Point x 5 y 6]]\n"
+    "  def d [vec-push $c [Point x 7 y 8]]\n"
+    "  def e [vec-push $d [Point x 9 y 10]]\n"
     "  [print [vec-len $e]]\n"
     "  def p [vec-get $e 0]\n"
     "  [print $p->x]\n"
@@ -232,7 +232,7 @@ static int test_typed_vec_closure_capture(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc make-counter {} {\n"
-    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "  proc count {} { [vec-len $points] }\n"
     "  $count\n"
     "}\n"
@@ -248,9 +248,9 @@ static int test_typed_vec_print(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "[print $points]",
-    &cap, "[Point{x: 1, y: 2}, Point{x: 3, y: 4}]\n"));
+    &cap, "[[Point x 1 y 2], [Point x 3 y 4]]\n"));
   TEST_PASS();
 }
 
@@ -269,8 +269,8 @@ static int test_typed_vec_eq_same(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
-    "def b [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def a [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
+    "def b [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "[print [== $a $b]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -280,8 +280,8 @@ static int test_typed_vec_eq_different(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
-    "def b [[Vec Point] [Point 3 4]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
+    "def b [[Vec Point] [Point x 3 y 4]]\n"
     "[print [== $a $b]]",
     &cap, "false\n"));
   TEST_PASS();
@@ -291,8 +291,8 @@ static int test_typed_vec_eq_different_length(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
-    "def b [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
+    "def b [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "[print [== $a $b]]",
     &cap, "false\n"));
   TEST_PASS();
@@ -302,7 +302,7 @@ static int test_typed_vec_eq_identity(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
     "[print [== $a $a]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -324,7 +324,7 @@ static int test_typed_vec_eq_empty(void) {
 static int test_typed_vec_reject_in_dyn_vec(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
+    "def points [[Vec Point] [Point x 1 y 2]]\n"
     "[vec $points]",
     "cannot store bare"));
   TEST_PASS();
@@ -333,7 +333,7 @@ static int test_typed_vec_reject_in_dyn_vec(void) {
 static int test_typed_vec_reject_in_dyn_map(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
+    "def points [[Vec Point] [Point x 1 y 2]]\n"
     "[map \"k\" $points]",
     "cannot store bare"));
   TEST_PASS();
@@ -343,7 +343,7 @@ static int test_typed_vec_reject_dyn_proc_param(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
     "proc show-len {v} { [print [vec-len $v]] }\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
+    "def points [[Vec Point] [Point x 1 y 2]]\n"
     "[show-len $points]",
     "cannot pass bare"));
   TEST_PASS();
@@ -356,7 +356,7 @@ static int test_typed_vec_proc_param(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc get-len {[Vec Point] pts} { [vec-len $pts] }\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "[print [get-len $points]]",
     &cap, "2\n"));
   TEST_PASS();
@@ -370,7 +370,7 @@ static int test_typed_vec_proc_param_get(void) {
     "  def p [vec-get $pts 0]\n"
     "  $p->x\n"
     "}\n"
-    "def points [[Vec Point] [Point 42 99]]\n"
+    "def points [[Vec Point] [Point x 42 y 99]]\n"
     "[print [first-x $points]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -393,7 +393,7 @@ static int test_typed_vec_for_loop(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "for $points p {\n"
     "  [print $p->x]\n"
     "}",
@@ -406,7 +406,7 @@ static int test_typed_vec_for_loop_field_access(void) {
   /* Print each element's y field */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]\n"
     "for $points p {\n"
     "  [print $p->y]\n"
     "}",
@@ -418,7 +418,7 @@ static int test_typed_vec_for_loop_wide_struct(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
-    "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8]]\n"
+    "def rects [[Vec Rect] [Rect x 1 y 2 w 3 h 4] [Rect x 5 y 6 w 7 h 8]]\n"
     "for $rects r {\n"
     "  [print $r->w]\n"
     "}",
@@ -444,7 +444,7 @@ static int test_typed_vec_for_loop_accumulate(void) {
   /* Accumulate sum of y fields using mut + set inside for loop */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
+    "def points [[Vec Point] [Point x 1 y 10] [Point x 2 y 20] [Point x 3 y 30]]\n"
     "mut sum 0\n"
     "for $points p {\n"
     "  set sum [+ $sum $p->y]\n"
@@ -460,7 +460,7 @@ static int test_typed_vec_for_loop_break(void) {
    * inline padding locals and bitmap bits correctly. */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
+    "def points [[Vec Point] [Point x 1 y 10] [Point x 2 y 20] [Point x 3 y 30]]\n"
     "def result [for $points p {\n"
     "  if [== $p->x 2] { [break $p->y] }\n"
     "}]\n"
@@ -474,7 +474,7 @@ static int test_typed_vec_for_loop_break_wide(void) {
   /* Break with wide struct (2 slots) — padding locals must be cleaned up */
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
-    "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8] [Rect 9 10 11 12]]\n"
+    "def rects [[Vec Rect] [Rect x 1 y 2 w 3 h 4] [Rect x 5 y 6 w 7 h 8] [Rect x 9 y 10 w 11 h 12]]\n"
     "def result [for $rects r {\n"
     "  if [== $r->w 7] { [break $r->h] }\n"
     "}]\n"
@@ -491,7 +491,7 @@ static int test_typed_vec_box_roundtrip(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "  def boxed [box $points]\n"
     "  if [box? [Vec Point] $boxed] {\n"
     "    def pts [unbox $boxed]\n"
@@ -512,7 +512,7 @@ static int test_typed_vec_box_wrong_type(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def points [[Vec Point] [Point 1 2]]\n"
+    "  def points [[Vec Point] [Point x 1 y 2]]\n"
     "  def boxed [box $points]\n"
     "  if [box? [Map Point] $boxed] {\n"
     "    [print yes]\n"
@@ -528,7 +528,7 @@ static int test_typed_vec_box_in_dyn_vec(void) {
   /* boxed typed vec CAN be stored in a dyn vec */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
+    "def points [[Vec Point] [Point x 1 y 2]]\n"
     "def v [vec [box $points]]\n"
     "[print [vec-len $v]]",
     &cap, "1\n"));
@@ -542,8 +542,8 @@ static int test_typed_vec_concat(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
-    "  def b [[Vec Point] [Point 5 6]]\n"
+    "  def a [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
+    "  def b [[Vec Point] [Point x 5 y 6]]\n"
     "  def c [vec-concat $a $b]\n"
     "  [print [vec-len $c]]\n"
     "  def p [vec-get $c 2]\n"
@@ -559,7 +559,7 @@ static int test_typed_vec_concat_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
     "def b [[Vec Point]]\n"
     "def c [vec-concat $a $b]\n"
     "[print [vec-len $c]]",
@@ -571,8 +571,8 @@ static int test_typed_vec_concat_preserves_original(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
-    "def b [[Vec Point] [Point 3 4]]\n"
+    "def a [[Vec Point] [Point x 1 y 2]]\n"
+    "def b [[Vec Point] [Point x 3 y 4]]\n"
     "def c [vec-concat $a $b]\n"
     "[print [vec-len $a]]\n"
     "[print [vec-len $c]]",
@@ -587,7 +587,7 @@ static int test_typed_vec_slice(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6] [Point 7 8]]\n"
+    "  def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6] [Point x 7 y 8]]\n"
     "  def s [vec-slice $points 1 3]\n"
     "  [print [vec-len $s]]\n"
     "  def p [vec-get $s 0]\n"
@@ -604,7 +604,7 @@ static int test_typed_vec_slice_empty_range(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "def s [vec-slice $points 1 1]\n"
     "[print [vec-len $s]]",
     &cap, "0\n"));
@@ -615,7 +615,7 @@ static int test_typed_vec_slice_clamp(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "def s [vec-slice $points 0 99]\n"
     "[print [vec-len $s]]",
     &cap, "2\n"));
@@ -629,7 +629,7 @@ static int test_typed_vec_each_hof(void) {
   /* HOF form of for with typed proc callback */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "proc show {Point p} { [print $p->x] }\n"
     "[for $points $show]",
     &cap, "10\n30\n"));
@@ -641,9 +641,9 @@ static int test_typed_vec_each_lambda(void) {
   /* HOF form of for with lambda — $it is materialized struct */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]\n"
     "[for $points [\\ print $it]]",
-    &cap, "Point{x: 1, y: 2}\nPoint{x: 3, y: 4}\nPoint{x: 5, y: 6}\n"));
+    &cap, "[Point x 1 y 2]\n[Point x 3 y 4]\n[Point x 5 y 6]\n"));
   TEST_PASS();
 }
 
@@ -667,7 +667,7 @@ static int test_typed_vec_transform(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc getx {Point p} { $p->x }\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "def xs [transform $points $getx]\n"
     "[print $xs]",
     &cap, "[vec 1 3]\n"));
@@ -692,7 +692,7 @@ static int test_typed_vec_transform_to_sum(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc psum {Point p} { [+ $p->x $p->y] }\n"
-    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40]]\n"
     "def sums [transform $points $psum]\n"
     "[print $sums]",
     &cap, "[vec 30 70]\n"));
@@ -707,7 +707,7 @@ static int test_typed_vec_filter(void) {
     "struct Point {i32 x, i32 y}\n"
     "proc isbig {Point p} { [> $p->x 2] }\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "  def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]\n"
     "  def big [filter $points $isbig]\n"
     "  [print [vec-len $big]]\n"
     "  def p [vec-get $big 0]\n"
@@ -725,7 +725,7 @@ static int test_typed_vec_filter_none(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc ishuge {Point p} { [> $p->x 99] }\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "def result [filter $points $ishuge]\n"
     "[print [vec-len $result]]",
     &cap, "0\n"));
@@ -737,7 +737,7 @@ static int test_typed_vec_filter_all(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc yes {Point p} { [>= $p->x 0] }\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4]]\n"
     "def result [filter $points $yes]\n"
     "[print [vec-len $result]]",
     &cap, "2\n"));
@@ -751,7 +751,7 @@ static int test_typed_vec_filter_preserves_type(void) {
     "struct Point {i32 x, i32 y}\n"
     "proc bigy {Point p} { [> $p->y 25] }\n"
     "proc main {} {\n"
-    "  def points [[Vec Point] [Point 10 20] [Point 30 40] [Point 50 60]]\n"
+    "  def points [[Vec Point] [Point x 10 y 20] [Point x 30 y 40] [Point x 50 y 60]]\n"
     "  def big [filter $points $bigy]\n"
     "  def p [vec-get $big 0]\n"
     "  [print $p->x]\n"
@@ -768,7 +768,7 @@ static int test_typed_vec_filter_wide_struct(void) {
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc iswide {Rect r} { [> $r->w 15] }\n"
     "proc main {} {\n"
-    "  def rects [[Vec Rect] [Rect 1 2 10 20] [Rect 3 4 30 40] [Rect 5 6 50 60]]\n"
+    "  def rects [[Vec Rect] [Rect x 1 y 2 w 10 h 20] [Rect x 3 y 4 w 30 h 40] [Rect x 5 y 6 w 50 h 60]]\n"
     "  def big [filter $rects $iswide]\n"
     "  [print [vec-len $big]]\n"
     "  def r [vec-get $big 0]\n"

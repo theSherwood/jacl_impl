@@ -9,7 +9,7 @@ struct Header {
 }
 
 proc show {} {
-  def h [Header 1]
+  def h [Header version 1]
   print $h->version
 
   def [Ptr u8] mp $h->magic

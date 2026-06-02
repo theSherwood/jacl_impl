@@ -19,7 +19,7 @@ proc main {} {
   print [buf-get $xs 2]
 
   def [Buf 2 [Map i64 Point]] points
-  def pm [[Map i64 Point] 7 [Point 7 11]]
+  def pm [[Map i64 Point] 7 [Point x 7 y 11]]
   [buf-set $points 0 $pm]
   def pgot [buf-get $points 0]
   def p [map-get $pgot 7]

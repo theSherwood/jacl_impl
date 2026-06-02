@@ -101,7 +101,7 @@ static int test_wildcard_named_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point { i32 x, i32 y }\n"
-    "p = [Point 1 2]\n"
+    "p = [Point x 1 y 2]\n"
     "{x, _} = $p\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);

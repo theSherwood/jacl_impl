@@ -127,8 +127,8 @@ static void run_all(void) {
       "struct A {i32 x}\n"
       "struct B {i32 y}\n"
       "proc test {} {\n"
-      "  def a [A 1]\n"
-      "  def b [B 2]\n"
+      "  def a [A x 1]\n"
+      "  def b [B y 2]\n"
       "  if ($a == $b) { print \"eq\" }\n"
       "}",
     .expect_substrings = { "type error", "struct" },
@@ -140,7 +140,7 @@ static void run_all(void) {
     .source =
       "struct P {mut i32 x}\n"
       "proc test {} {\n"
-      "  def p [P 1]\n"
+      "  def p [P x 1]\n"
       "  . $p x \"bad\"\n"
       "}",
     .expect_substrings = { "type error", "i32", "str" },
@@ -151,7 +151,7 @@ static void run_all(void) {
     .source =
       "struct P {i32 x}\n"
       "proc test {} {\n"
-      "  def p [P \"oops\"]\n"
+      "  def p [P x \"oops\"]\n"
       "}",
     .expect_substrings = { "type error", "i32", "str" },
   });
@@ -326,7 +326,7 @@ static void run_all(void) {
     .source =
       "struct P {i32 x}\n"
       "proc f {} {\n"
-      "  def p [P 1]\n"
+      "  def p [P x 1]\n"
       "  addr $p->x\n"
       "}",
     .expect_substrings = { "addr", "[Ptr T]", "base" },
@@ -392,7 +392,7 @@ static void run_all(void) {
   RUN("buf_struct_constructor_mismatch", {
     .source =
       "struct A {i32 x}\nstruct B {i32 y}\n"
-      "def [Buf 2 A] xs [[Buf 2 B] [B 1]]",
+      "def [Buf 2 A] xs [[Buf 2 B] [B y 1]]",
     .expect_substrings = { "constructor", "struct type" },
   });
 

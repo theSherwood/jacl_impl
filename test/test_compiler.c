@@ -4637,12 +4637,12 @@ static int test_defstruct_type_annotation(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  /* def Point p [Point 0 0] — struct name as type annotation.
+  /* def Point p [Point x 0 y 0] — struct name as type annotation.
      Verifies that 'Point' is accepted as a type keyword after struct.
      Wrapped in a proc since struct values cannot live at top level. */
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "proc test {} { def Point p [Point 0 0] }",
+      "proc test {} { def Point p [Point x 0 y 0] }",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4741,7 +4741,7 @@ static int test_struct_new_basic(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "proc main {} { def p [Point 1 2] }\n"
+      "proc main {} { def p [Point x 1 y 2] }\n"
       "main", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4778,7 +4778,7 @@ static int test_struct_new_type_error(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "[Point 1 \"hello\"]", &arena, &heap);
+      "[Point x 1 y \"hello\"]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4799,7 +4799,7 @@ static int test_struct_new_runtime(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p\n"
       "}\n"
       "main",
@@ -4826,7 +4826,7 @@ static int test_struct_width_tracking(void) {
   /* Point {i32, i32} = 8 bytes → width 1 */
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "proc main {} { def p [Point 1 2] }\n"
+      "proc main {} { def p [Point x 1 y 2] }\n"
       "main", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   /* struct_registry should exist and have the Point type */
@@ -5112,7 +5112,7 @@ static int test_struct_new_heap_path_unchanged(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -5236,7 +5236,7 @@ static int test_sm_walk_locals_struct_width(void) {
   /* Now parse a proc body that declares a Vec3 local */
   LexResult tokens = lexer_lex(
       "proc gen {} {\n"
-      "  def Vec3 v [Vec3 1.0 2.0 3.0]\n"
+      "  def Vec3 v [Vec3 x 1.0 y 2.0 z 3.0]\n"
       "  yield $v\n"
       "}", &arena);
   ParseResult parse = parser_parse(tokens, &arena);
@@ -5413,7 +5413,7 @@ static int test_sm_struct_generator_heap_path(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc gen {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  [yield $p->x]\n"
       "  [yield $p->y]\n"
       "}\n"
@@ -5473,7 +5473,7 @@ static int test_struct_inline_get_basic(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -5506,7 +5506,7 @@ static int test_struct_inline_set_basic(void) {
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  . $p x 99\n"
       "  print $p->x\n"
       "  print $p->y\n"
@@ -5541,7 +5541,7 @@ static int test_struct_inline_nested_get(void) {
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}\n"
       "proc test {} {\n"
-      "  def ln [Line [Point 5 6] [Point 10 20]]\n"
+      "  def ln [Line start [Point x 5 y 6] end [Point x 10 y 20]]\n"
       "  print $ln->start->x\n"
       "  print $ln->start->y\n"
       "  print $ln->end->x\n"
@@ -5573,7 +5573,7 @@ static int test_struct_inline_materialize(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 1 2]\n"
+      "  def p [Point x 1 y 2]\n"
       "  print $p\n"
       "}\n"
       "[test]",
@@ -5604,7 +5604,7 @@ static int test_struct_inline_wide_field_types(void) {
   VMResult r = jacl_run(
       "struct Vec3 {f64 x, f64 y, f64 z}\n"
       "proc test {} {\n"
-      "  def v [Vec3 1.5 2.5 3.5]\n"
+      "  def v [Vec3 x 1.5 y 2.5 z 3.5]\n"
       "  print $v->x\n"
       "  print $v->y\n"
       "  print $v->z\n"
@@ -5639,7 +5639,7 @@ static int test_struct_inline_preserves_other_locals(void) {
       "struct Vec3 {f64 x, f64 y, f64 z}\n"
       "proc test {} {\n"
       "  def i32 before 42\n"
-      "  def v [Vec3 1.5 2.5 3.5]\n"
+      "  def v [Vec3 x 1.5 y 2.5 z 3.5]\n"
       "  def i32 after 99\n"
       "  print $before\n"
       "  print $v->y\n"
@@ -5680,7 +5680,7 @@ static int test_struct_pass_by_value_basic(void) {
       "  print $p->x\n"
       "}\n"
       "proc test {} {\n"
-      "  def pt [Point 1 2]\n"
+      "  def pt [Point x 1 y 2]\n"
       "  [mutate $pt]\n"
       "  print $pt->x\n"
       "}\n"
@@ -5718,7 +5718,7 @@ static int test_struct_pass_by_value_recursive(void) {
       "  $p\n"
       "}\n"
       "proc test {} {\n"
-      "  def pt [Point 0 0]\n"
+      "  def pt [Point x 0 y 0]\n"
       "  def Point r1 [bump $pt]\n"
       "  def Point r2 [bump $r1]\n"
       "  def Point r3 [bump $r2]\n"
@@ -5766,7 +5766,7 @@ static int test_struct_pass_by_value_chain(void) {
       "  print $p->x\n"
       "}\n"
       "proc test {} {\n"
-      "  def pt [Point 1 2]\n"
+      "  def pt [Point x 1 y 2]\n"
       "  [outer $pt]\n"
       "  print $pt->x\n"
       "}\n"
@@ -5802,7 +5802,7 @@ static int test_struct_return_basic(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc mkpt {} Point {\n"
-      "  Point 42 99\n"
+      "  [Point x 42 y 99]\n"
       "}\n"
       "proc test {} {\n"
       "  def Point p [mkpt]\n"
@@ -5838,7 +5838,7 @@ static int test_struct_return_nested_calls(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc mkpt {i32 a, i32 b} Point {\n"
-      "  Point $a $b\n"
+      "  [Point x $a y $b]\n"
       "}\n"
       "proc test {} {\n"
       "  def Point p1 [mkpt 10 20]\n"
@@ -5878,10 +5878,10 @@ static int test_struct_return_value_isolation(void) {
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
       "proc dup {Point p} Point {\n"
-      "  Point $p->x $p->y\n"
+      "  [Point x $p->x y $p->y]\n"
       "}\n"
       "proc test {} {\n"
-      "  def pt [Point 1 2]\n"
+      "  def pt [Point x 1 y 2]\n"
       "  def Point copy [dup $pt]\n"
       "  . $copy x 99\n"
       "  print $pt->x\n"
@@ -5919,7 +5919,7 @@ static int test_struct_closure_capture_basic(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b [box [Point 10 20]]\n"
+      "  def b [box [Point x 10 y 20]]\n"
       "  proc inner {Point p} {\n"
       "    print $p->x\n"
       "    print $p->y\n"
@@ -5957,7 +5957,7 @@ static int test_struct_closure_capture_isolation(void) {
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 1 2]\n"
+      "  def p [Point x 1 y 2]\n"
       "  def b [box $p]\n"
       "  proc reader {Point q} {\n"
       "    print $q->x\n"
@@ -5998,7 +5998,7 @@ static int test_struct_closure_capture_materialize(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b [box [Point 42 99]]\n"
+      "  def b [box [Point x 42 y 99]]\n"
       /* deref of a struct-element box now narrows to TYPE_STRUCT;
        * the wrapping proc therefore needs an explicit return type
        * (struct returns require a wide-return annotation). */
@@ -6033,7 +6033,7 @@ static int test_struct_get_basic(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -6057,7 +6057,7 @@ static int test_struct_get_unknown_field(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 1 2]\n"
+      "def p [Point x 1 y 2]\n"
       "print $p->z", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -6080,7 +6080,7 @@ static int test_struct_get_nested(void) {
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}\n"
       "proc main {} {\n"
-      "  def ln [Line [Point 5 6] [Point 10 20]]\n"
+      "  def ln [Line start [Point x 5 y 6] end [Point x 10 y 20]]\n"
       "  print $ln->start->x\n"
       "}\n"
       "main",
@@ -6108,7 +6108,7 @@ static int test_struct_set_basic(void) {
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  . $p x 99\n"
       "  print $p->x\n"
       "  print $p->y\n"
@@ -6133,7 +6133,7 @@ static int test_struct_set_unknown_field(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 1 2]\n"
+      "def p [Point x 1 y 2]\n"
       ". $p z 99", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -6152,7 +6152,7 @@ static int test_struct_set_type_mismatch(void) {
 
   CompileResult cr = compile_source(
       "struct Point {mut i32 x, i32 y}\n"
-      "def p [Point 1 2]\n"
+      "def p [Point x 1 y 2]\n"
       ". $p x \"hello\"", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -6174,7 +6174,7 @@ static int test_struct_set_preserves_other_fields(void) {
   VMResult r = jacl_run(
       "struct Pair {mut i32 a, i32 b}\n"
       "proc main {} {\n"
-      "  def p [Pair 1 2]\n"
+      "  def p [Pair a 1 b 2]\n"
       "  . $p a 42\n"
       "  print $p->b\n"
       "}\n"
@@ -6202,7 +6202,7 @@ static int test_struct_dyn_rejected(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def dyn d [Point 1 2]\n"
+      "def dyn d [Point x 1 y 2]\n"
       "print $d",
       &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6225,7 +6225,7 @@ static int test_struct_in_vec(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def v [vec [box [Point 1 2]] [box [Point 3 4]]]\n"
+      "  def v [vec [box [Point x 1 y 2]] [box [Point x 3 y 4]]]\n"
       "  def p [deref [vec-get $v 1]]\n"
       "  print $p->x\n"
       "}\n"
@@ -6259,7 +6259,7 @@ static int test_struct_box_roundtrip(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  def b [box $p]\n"
       "  def q [deref $b]\n"
       "  print $q->x\n"
@@ -6294,9 +6294,9 @@ static int test_struct_box_reset(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  def b [box $p]\n"
-      "  def q [Point 30 40]\n"
+      "  def q [Point x 30 y 40]\n"
       "  reset $b $q\n"
       "  def r [deref $b]\n"
       "  print $r->x\n"
@@ -6330,9 +6330,9 @@ static int test_struct_box_swap(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc swapper {dyn old} Point { Point 99 88 }\n"
+      "proc swapper {dyn old} Point { [Point x 99 y 88] }\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  def b [box $p]\n"
       "  swap $b $swapper\n"
       "  def r [deref $b]\n"
@@ -6368,10 +6368,10 @@ static int test_struct_box_deref_isolation(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  def b [box $p]\n"
       "  def q [deref $b]\n"
-      "  reset $b [Point 99 88]\n"
+      "  reset $b [Point x 99 y 88]\n"
       "  print $q->x\n"
       "  print $q->y\n"
       "}\n"
@@ -6397,7 +6397,7 @@ static int test_struct_atom_rejected(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
+      "def p [Point x 10 y 20]\n"
       "atom $p",
       &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6427,7 +6427,7 @@ static int test_box_typed_check_struct(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b1 [box [Point 10 20]]\n"
+      "  def b1 [box [Point x 10 y 20]]\n"
       "  def b2 [box 42]\n"
       "  print [box? Point $b1]\n"
       "  print [box? Point $b2]\n"
@@ -6462,7 +6462,7 @@ static int test_box_typed_check_dyn(void) {
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def b1 [box 42]\n"
-      "  def b2 [box [Point 10 20]]\n"
+      "  def b2 [box [Point x 10 y 20]]\n"
       "  print [box? dyn $b1]\n"
       "  print [box? dyn $b2]\n"
       "}\n"
@@ -6495,7 +6495,7 @@ static int test_box_flow_typing_unbox(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b [box [Point 10 20]]\n"
+      "  def b [box [Point x 10 y 20]]\n"
       "  if [box? Point $b] {\n"
       "    def p [unbox $b]\n"
       "    print $p->x\n"
@@ -6525,7 +6525,7 @@ static int test_unbox_outside_guard_rejected(void) {
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b [box [Point 10 20]]\n"
+      "  def b [box [Point x 10 y 20]]\n"
       "  unbox $b\n"
       "}\n",
       &arena, &heap);
@@ -6576,9 +6576,9 @@ static int test_struct_box_equality(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b1 [box [Point 10 20]]\n"
-      "  def b2 [box [Point 10 20]]\n"
-      "  def b3 [box [Point 10 99]]\n"
+      "  def b1 [box [Point x 10 y 20]]\n"
+      "  def b2 [box [Point x 10 y 20]]\n"
+      "  def b3 [box [Point x 10 y 99]]\n"
       "  def b4 [box 42]\n"
       "  print [== $b1 $b2]\n"
       "  print [== $b1 $b3]\n"
@@ -6613,8 +6613,8 @@ static int test_struct_box_hashing(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b1 [box [Point 10 20]]\n"
-      "  def b2 [box [Point 10 20]]\n"
+      "  def b1 [box [Point x 10 y 20]]\n"
+      "  def b2 [box [Point x 10 y 20]]\n"
       "  def m [map $b1 hello]\n"
       "  print [map-get $m $b2]\n"
       "}\n"
@@ -6647,7 +6647,7 @@ static int test_struct_box_stringify(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def b [box [Point 10 20]]\n"
+      "  def b [box [Point x 10 y 20]]\n"
       "  print [to-string $b]\n"
       "}\n"
       "test",
@@ -6710,9 +6710,9 @@ static int test_struct_box_map_key(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def k1 [box [Point 1 2]]\n"
-      "  def k2 [box [Point 3 4]]\n"
-      "  def k3 [box [Point 1 2]]\n"
+      "  def k1 [box [Point x 1 y 2]]\n"
+      "  def k2 [box [Point x 3 y 4]]\n"
+      "  def k3 [box [Point x 1 y 2]]\n"
       "  def m [map $k1 alpha $k2 beta]\n"
       "  print [map-get $m $k3]\n"
       "  print [map-get $m $k2]\n"
@@ -6749,8 +6749,8 @@ static int test_struct_inline_eq_same(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def Point a [Point 10 20]\n"
-      "  def Point b [Point 10 20]\n"
+      "  def Point a [Point x 10 y 20]\n"
+      "  def Point b [Point x 10 y 20]\n"
       "  print [== $a $b]\n"
       "}\n"
       "test",
@@ -6782,8 +6782,8 @@ static int test_struct_inline_eq_different(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def Point a [Point 10 20]\n"
-      "  def Point b [Point 10 99]\n"
+      "  def Point a [Point x 10 y 20]\n"
+      "  def Point b [Point x 10 y 99]\n"
       "  print [== $a $b]\n"
       "}\n"
       "test",
@@ -6815,8 +6815,8 @@ static int test_struct_inline_hash_equal(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def Point a [Point 10 20]\n"
-      "  def Point b [Point 10 20]\n"
+      "  def Point a [Point x 10 y 20]\n"
+      "  def Point b [Point x 10 y 20]\n"
       "  print [== [hash $a] [hash $b]]\n"
       "}\n"
       "test",
@@ -6848,8 +6848,8 @@ static int test_struct_inline_hash_different(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def Point a [Point 10 20]\n"
-      "  def Point b [Point 10 99]\n"
+      "  def Point a [Point x 10 y 20]\n"
+      "  def Point b [Point x 10 y 99]\n"
       "  print [== [hash $a] [hash $b]]\n"
       "}\n"
       "test",
@@ -6881,7 +6881,7 @@ static int test_struct_heap_equality(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc mkpt {i32 a, i32 b} Point {\n"
-      "  return [Point $a $b]\n"
+      "  return [Point x $a y $b]\n"
       "}\n"
       "proc test {} {\n"
       "  def Point p1 [mkpt 5 10]\n"
@@ -6922,8 +6922,8 @@ static int test_struct_eq_padding_zeroed(void) {
   VMResult r = jacl_run(
       "struct Small {i32 val}\n"
       "proc test {} {\n"
-      "  def Small a [Small 42]\n"
-      "  def Small b [Small 42]\n"
+      "  def Small a [Small val 42]\n"
+      "  def Small b [Small val 42]\n"
       "  print [== $a $b]\n"
       "}\n"
       "test",
@@ -6989,7 +6989,7 @@ static int test_dual_path_value_type_inline(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -7022,7 +7022,7 @@ static int test_set_arrow_inline(void) {
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  set p->x 99\n"
       "  print $p->x\n"
       "  print $p->y\n"
@@ -7057,7 +7057,7 @@ static int test_set_arrow_chained(void) {
       "struct Point {mut i32 x, i32 y}\n"
       "struct Line {mut Point start, Point end}\n"
       "proc test {} {\n"
-      "  def ln [Line [Point 1 2] [Point 3 4]]\n"
+      "  def ln [Line start [Point x 1 y 2] end [Point x 3 y 4]]\n"
       "  set ln->start->x 77\n"
       "  print $ln->start->x\n"
       "  print $ln->end->y\n"
@@ -7089,7 +7089,7 @@ static int test_inline_struct_runtime(void) {
       "struct Point {i32 x, i32 y}\n"
       "struct Wrapper {struct{x:i32,y:i32} pos}\n"
       "proc main {} {\n"
-      "  def w [Wrapper [Point 42 10]]\n"
+      "  def w [Wrapper pos [Point x 42 y 10]]\n"
       "  print $w->pos->x\n"
       "}\n"
       "main",
@@ -7188,7 +7188,7 @@ static int test_struct_module_import(void) {
   write_temp_jacl(dir, "main.jacl",
     "use \"shapes.jacl\" {Point}\n"
     "proc main {} {\n"
-    "  def p [Point 42 10]\n"
+    "  def p [Point x 42 y 10]\n"
     "  print $p->x\n"
     "}\n"
     "main\n");
@@ -7254,7 +7254,7 @@ static int test_struct_new_syntax_runtime(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def p [Point x 10 y 20]\n"
       "  print $p->x\n"
       "}\n"
       "main",
@@ -7321,7 +7321,7 @@ static int test_struct_new_syntax_construct_and_access(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  def p [Point 3 7]\n"
+      "  def p [Point x 3 y 7]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -9352,7 +9352,7 @@ static int test_arrow_basic_get(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  p = [Point 10 20]\n"
+      "  p = [Point x 10 y 20]\n"
       "  print $p->x\n"
       "  print $p->y\n"
       "}\n"
@@ -9384,7 +9384,7 @@ static int test_arrow_chained_get(void) {
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}\n"
       "proc main {} {\n"
-      "  ln = [Line [Point 5 6] [Point 10 20]]\n"
+      "  ln = [Line start [Point x 5 y 6] end [Point x 10 y 20]]\n"
       "  print $ln->start->x\n"
       "  print $ln->end->y\n"
       "}\n"
@@ -9414,7 +9414,7 @@ static int test_arrow_on_expr_result(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc mkpt {} Point { Point 42 99 }\n"
+      "proc mkpt {} Point { [Point x 42 y 99] }\n"
       "print [mkpt]->x",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
@@ -9442,7 +9442,7 @@ static int test_arrow_in_infix_mode(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  p = [Point 10 20]\n"
+      "  p = [Point x 10 y 20]\n"
       "  print ($p->x + $p->y)\n"
       "}\n"
       "main",
@@ -9472,7 +9472,7 @@ static int test_arrow_in_bracket_cmd(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc main {} {\n"
-      "  p = [Point 10 20]\n"
+      "  p = [Point x 10 y 20]\n"
       "  print [+ $p->x $p->y]\n"
       "}\n"
       "main",
@@ -9497,7 +9497,7 @@ static int test_arrow_old_dot_compat(void) {
   /* [. $p x] inside brackets is now a parse error — use $p->x instead */
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "p = [Point 10 20]\n"
+      "p = [Point x 10 y 20]\n"
       "print [. $p x]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 

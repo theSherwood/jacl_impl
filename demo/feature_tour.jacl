@@ -77,7 +77,7 @@
 # expect: [vec 2 3 4]
 # expect: 10
 # expect: 20
-# expect: Point{x: 1, y: 2}
+# expect: [Point x 1 y 2]
 # expect: 99
 # expect: 20
 # expect: 42
@@ -403,7 +403,7 @@ print $head; print $rest
 # => 20
 struct Pt {i32 x, i32 y}
 proc demo-destructure {} {
-  def pt [Pt 10 20]
+  def pt [Pt x 10 y 20]
   def {x, y} $pt
   print $x; print $y
 }
@@ -411,10 +411,10 @@ demo-destructure
 
 # --- 17. Structs -----------------------------------------------------
 # Definition with type-before-name, optional `mut` on fields.
-# => Point{x: 1, y: 2}
+# => [Point x 1 y 2]
 struct Point {i32 x, i32 y}
 proc demo-struct {} {
-  def p [Point 1 2]
+  def p [Point x 1 y 2]
   print $p
 }
 demo-struct
@@ -428,7 +428,7 @@ demo-struct
 # => 20
 struct Mp {mut i32 x, i32 y}
 proc demo-mut {} {
-  def p [Mp 10 20]
+  def p [Mp x 10 y 20]
   . $p x 99
   print $p->x
   print $p->y
@@ -440,7 +440,7 @@ demo-mut
 # => 1000000
 struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f}
 proc demo-all {} {
-  def s [All 42 1000000 7 9999999 1.5 2.5]
+  def s [All a 42 b 1000000 c 7 d 9999999 e 1.5 f 2.5]
   print $s->a; print $s->b
 }
 demo-all
@@ -589,7 +589,7 @@ proc demo-buf {} {
   print $grid->1->2
 
   # Buf as struct field: $h->magic decays to [Ptr u8].
-  def h [ElfHeader 1]
+  def h [ElfHeader version 1]
   def [Ptr u8] m $h->magic
   set $m->0 0x7f
   # => 127

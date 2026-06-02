@@ -5,7 +5,7 @@
 # inline struct bytes flow directly to the binding without a heap round-trip.
 struct Point {i32 x i32 y}
 proc main {} {
-  def b [box [Point 42 99]]
+  def b [box [Point x 42 y 99]]
   def p [deref $b]
   print $p->x
   print $p->y

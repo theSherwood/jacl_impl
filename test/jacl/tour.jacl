@@ -201,7 +201,7 @@ proc main {} {
   # `_` wildcard; `..rest` for trailing remainder.
   def [a b c] [vec 1 2 3]
   assert (($a == 1) && (($b == 2) && ($c == 3)))
-  def p [Pt 10 20]
+  def p [Pt x 10 y 20]
   def {x, y} $p
   assert (($x == 10) && ($y == 20))
   def [head ..tail] [vec first second third]
@@ -211,7 +211,7 @@ proc main {} {
   # ----- structs -----
   # `struct Name {type field, ...}` at module level. Constructor
   # `[Name vals...]`. Field access via `->`.
-  def pt [Pt 3 4]
+  def pt [Pt x 3 y 4]
   assert ($pt->x == 3)
   assert ($pt->y == 4)
 
@@ -230,7 +230,7 @@ proc main {} {
   # / `[map ...]` still work for dyn-everything use.
   def [Vec i32] typed-nums [[Vec i32] 10 20 30]
   assert ([vec-get $typed-nums 1] == 20)
-  def [Map Pt] coords [[Map Pt] origin [Pt 0 0] right [Pt 1 0]]
+  def [Map Pt] coords [[Map Pt] origin [Pt x 0 y 0] right [Pt x 1 y 0]]
   assert ([map-get $coords right]->x == 1)
 
   # ----- mutable state -----

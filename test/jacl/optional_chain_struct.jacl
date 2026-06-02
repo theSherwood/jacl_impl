@@ -2,7 +2,7 @@
 # Test: optional chaining on a struct is a compile error
 struct Point {i32 x, i32 y}
 proc main {} {
-  def p [Point 10 20]
+  def p [Point x 10 y 20]
   print ($p ?. x)
 }
 main

@@ -6,7 +6,7 @@ struct Point {i32 x, i32 y}
 struct Line {Point start, Point end}
 
 proc getpt {} Point {
-  def ln [Line [Point 42 99] [Point 0 0]]
+  def ln [Line start [Point x 42 y 99] end [Point x 0 y 0]]
   $ln->start
 }
 
@@ -14,11 +14,11 @@ proc main {} {
   def pt [getpt]
   # ln is now garbage — only pt (the inner Point) is still live
   # Allocate more to trigger GC
-  def a [Point 1 1]
-  def b [Point 2 2]
-  def c [Point 3 3]
-  def d [Line $a $b]
-  def e [Line $b $c]
+  def a [Point x 1 y 1]
+  def b [Point x 2 y 2]
+  def c [Point x 3 y 3]
+  def d [Line start $a end $b]
+  def e [Line start $b end $c]
   print $pt->x
   print $pt->y
 }

@@ -12,7 +12,7 @@
 
 struct ElfHeader { i32 ver, [Buf 4 u8] magic }
 proc main {} {
-  def h [ElfHeader 1]
+  def h [ElfHeader ver 1]
   # Read: $h->magic returns [Ptr u8], then ->0 indexes via OP_PTR_LOAD.
   print $h->magic->0
 
@@ -28,7 +28,7 @@ proc main {} {
 struct Inner { [Buf 2 u8] data }
 struct Outer { i32 tag, Inner inner }
 proc nested {} {
-  def o [Outer 1 [Inner]]
+  def o [Outer tag 1 inner [Inner ]]
   print $o->inner->data->0
   set $o->inner->data->1 255
   print $o->inner->data->1
@@ -40,7 +40,7 @@ proc nested {} {
 # type. `[addr $h->magic->1]` is [Ptr u8] (not [Ptr i32] from the
 # u8->i32 widening that the arrow-read surface uses).
 proc addr_chain {} {
-  def h [ElfHeader 0]
+  def h [ElfHeader ver 0]
   set $h->magic->1 0x45
   def [Ptr u8] p [addr $h->magic->1]
   print [ptr-deref $p]

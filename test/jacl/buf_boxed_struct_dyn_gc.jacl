@@ -16,7 +16,7 @@
 struct Bag { [Buf 4 dyn] items }
 
 proc main {} {
-  def b [Bag]
+  def b [Bag ]
   set $b->items->0 [vec 30 0 0]
   set $b->items->1 [vec 31 0 0]
   set $b->items->2 [vec 32 0 0]

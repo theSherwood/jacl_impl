@@ -841,15 +841,17 @@ void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
 /* Forward declarations for unity-build / wasm strict-prototype mode. */
 void vm__fmt_value(VMFormatBuf* buf, JaclVal val);
 
-/* Format a struct (Name{f1: v1, ...}) from raw C-ABI bytes.
+/* Format a struct ([Name field val field val …]) from raw C-ABI bytes.
+ * Reader-symmetric form per SYNTAX_REDESIGN_2026_06.md §2: the printed
+ * shape matches the named constructor.
  * Used by both heap-struct OP_PRINT path and inline OP_PRINT_STRUCT. */
 void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* data) {
+  vm__fmt_append(buf, "[", 1);
   vm__fmt_append(buf, sdef->name, sdef->name_len);
-  vm__fmt_append(buf, "{", 1);
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-    if (fi > 0) vm__fmt_append(buf, ", ", 2);
+    vm__fmt_append(buf, " ", 1);
     vm__fmt_append(buf, sdef->fields[fi].name, sdef->fields[fi].name_len);
-    vm__fmt_append(buf, ": ", 2);
+    vm__fmt_append(buf, " ", 1);
     uint32_t off = sdef->fields[fi].offset;
     char fbuf[64];
     int flen;
@@ -890,7 +892,7 @@ void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* 
       }
     }
   }
-  vm__fmt_append(buf, "}", 1);
+  vm__fmt_append(buf, "]", 1);
 }
 
 /* Format a single scalar slot from a typed collection (typed vec/map
@@ -1161,17 +1163,19 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   }
 }
 
-/* Format struct fields from raw data bytes using type def */
+/* Format struct fields from raw data bytes using type def.
+ * Reader-symmetric form: [Name field val field val …] — matches the
+ * named struct constructor (SYNTAX_REDESIGN_2026_06.md §2). */
 static void vm__fmt_struct_data(VMFormatBuf* buf, StructTypeDef* sdef,
                                 const uint8_t* data) {
   char fbuf[32];
   int flen;
+  vm__fmt_append(buf, "[", 1);
   vm__fmt_append(buf, sdef->name, sdef->name_len);
-  vm__fmt_append(buf, "{", 1);
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-    if (fi > 0) vm__fmt_append(buf, ", ", 2);
+    vm__fmt_append(buf, " ", 1);
     vm__fmt_append(buf, sdef->fields[fi].name, sdef->fields[fi].name_len);
-    vm__fmt_append(buf, ": ", 2);
+    vm__fmt_append(buf, " ", 1);
     switch (sdef->fields[fi].type) {
       case TYPE_I32: {
         int32_t n; memcpy(&n, data + sdef->fields[fi].offset, 4);
@@ -1213,7 +1217,7 @@ static void vm__fmt_struct_data(VMFormatBuf* buf, StructTypeDef* sdef,
       }
     }
   }
-  vm__fmt_append(buf, "}", 1);
+  vm__fmt_append(buf, "]", 1);
 }
 
 /* --- Deep structural equality for collections --- */

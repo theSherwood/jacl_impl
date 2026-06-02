@@ -18,7 +18,7 @@ struct ElfHeader { i32 ver, [Buf 4 u8] magic }
 struct Bag { i32 size, [Buf 4 dyn] items }
 
 proc scalar_field {} {
-  def h [ElfHeader 1]
+  def h [ElfHeader ver 1]
   [buf-set $h->magic 0 0x7f]
   [buf-set $h->magic 1 0x45]
   print [buf-get $h->magic 0]
@@ -31,7 +31,7 @@ proc scalar_field {} {
 [scalar_field]
 
 proc ref_field {} {
-  def b [Bag 0]
+  def b [Bag size 0]
   [buf-set $b->items 0 "hello"]
   [buf-set $b->items 1 42]
   print [buf-get $b->items 0]
