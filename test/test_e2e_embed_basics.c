@@ -391,6 +391,41 @@ static int test_e2e_proc_signature_cross_eval(void) {
   return 1;
 }
 
+/* Test: persistent GlobalArity table grows past the old 64-entry cap.
+   Pre-fix, embed.c stored a fixed GlobalArity[COMPILER_GLOBAL_ARITIES_MAX]
+   array on JaclVM and silently dropped commits beyond entry 64; an
+   embedder declaring N typed procs across N jacl_eval calls would lose
+   the typed param signature for everything past the cap, and downstream
+   call sites would compile-error "cannot pass struct value to dyn
+   parameter". This test declares 100 typed procs (one per eval), then
+   calls the first, the middle, and the last to exercise lookups across
+   the doubled-capacity growth boundary (16 -> 32 -> 64 -> 128). */
+static int test_e2e_proc_signature_growth(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  char buf[128];
+  for (int i = 0; i < 100; i++) {
+    snprintf(buf, sizeof(buf),
+             "proc i32 p%d {i32 x} { [+ $x %d] }", i, i);
+    JaclVal r = jacl_eval(vm, buf);
+    ASSERT(!jacl_is_error(r));
+  }
+
+  static const int probe[] = {0, 50, 99};
+  for (int k = 0; k < 3; k++) {
+    int i = probe[k];
+    snprintf(buf, sizeof(buf), "[p%d 1000]", i);
+    JaclVal r = jacl_eval(vm, buf);
+    ASSERT(!jacl_is_error(r));
+    ASSERT(jacl_is_i32(r));
+    ASSERT_INT_EQ(jacl_as_i32(r), 1000 + i);
+  }
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -411,6 +446,7 @@ int main(void) {
   RUN(test_e2e_ctx_cross_eval);
   RUN(test_e2e_struct_name_persists);
   RUN(test_e2e_proc_signature_cross_eval);
+  RUN(test_e2e_proc_signature_growth);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

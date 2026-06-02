@@ -357,23 +357,20 @@ From `DESIGN.md` § "Known Limitations".
   boundary). No test today asserts `try`/`catch` semantics for
   overflow — add one when the design call is made.
 
-- **Multi-eval embedder state — limits.** The struct registry, ctx
-  field map, typer struct table, and now the `GlobalArity` proc
+- **Multi-eval embedder state — fully wired.** The struct registry,
+  ctx field map, typer struct table, and `GlobalArity` proc
   signature table all persist across `jacl_eval` calls
   (`JaclVM_s::persistent_*` in `src/embed.c`, threaded through
-  `compiler_compile`'s `seed_*` params and `typer_infer`'s
+  `compiler_compile`'s persistent-state params and `typer_infer`'s
   `seed_registry`). Cross-eval `struct Pt {...}` → typed proc →
-  typed call now type-checks and runs (covered by
-  `test_e2e_proc_signature_cross_eval`). One soft cap remains: the
-  persistent `GlobalArity` array is fixed at
-  `COMPILER_GLOBAL_ARITIES_MAX` (64) entries to match the
-  per-compile table's existing cap. Embedders that declare more
-  than 64 typed top-level procs across the VM's lifetime would
-  silently drop the overflow on commit. Lifting needs a
-  heap-allocated, growable variant (allocate from `jvm->arena` on
-  first need) plus widening every consumer's iteration. Not
-  blocking any current workload; flagged here so it doesn't get
-  rediscovered as a "mystery type-mismatch" later.
+  typed call type-checks and runs. The `GlobalArity` table is now
+  arena-backed and grows by doubling — no fixed cap (was 64 until
+  this session). Covering tests in `test/test_e2e_embed_basics.c`:
+  `test_e2e_struct_name_persists`,
+  `test_e2e_ctx_cross_eval`,
+  `test_e2e_proc_signature_cross_eval`,
+  `test_e2e_proc_signature_growth` (declares 100 typed procs across
+  100 evals to exercise the growth path).
 
 ---
 

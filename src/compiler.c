@@ -1147,6 +1147,15 @@ typedef struct {
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
 } GlobalArity;
 
+/* Mirrors GlobalArityTable in jacl.h; the dual-struct pattern in this
+ * project (see project_dual_struct_definitions memory) means external
+ * consumers see jacl.h's copy while the unity build uses this one. */
+typedef struct {
+  GlobalArity *entries;
+  uint32_t     count;
+  uint32_t     capacity;
+} GlobalArityTable;
+
 typedef struct {
   uint8_t   index;    /* local slot (if is_local) or parent upvalue index */
   uint8_t   is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
@@ -2948,8 +2957,16 @@ struct Compiler {
   Upvalue          upvalues[COMPILER_UPVALUES_MAX];
   uint32_t         upvalue_count;
   Compiler*        enclosing;  /* parent compiler for upvalue resolution */
-  GlobalArity      global_arities[COMPILER_GLOBAL_ARITIES_MAX];
+  /* Arena-backed growable table of global arities. Was a fixed
+   * [COMPILER_GLOBAL_ARITIES_MAX] array; grew dynamically once the
+   * embedder use case needed unbounded cross-eval proc accumulation.
+   * Allocated by compiler__init, grown via
+   * compiler__grow_global_arities (doubles to fit). Old buffers
+   * become dead space in the arena -- bounded by O(N) total since
+   * each grow doubles. */
+  GlobalArity*     global_arities;
   uint32_t         global_arity_count;
+  uint32_t         global_arity_capacity;
   uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
   uint32_t         try_patch_count;
   bool             in_try_body;
@@ -3045,7 +3062,12 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->scope_depth   = 0;
   c->upvalue_count = 0;
   c->enclosing     = NULL;
-  c->global_arity_count = 0;
+  c->global_arities         = NULL;
+  c->global_arity_count     = 0;
+  c->global_arity_capacity  = 0;
+  /* Lazy-grow on first append; initial alloc happens in
+   * compiler__grow_global_arities so we don't pay 16 * sizeof(GA)
+   * up front for compiles that declare no top-level procs. */
   c->try_patch_count = 0;
   c->in_try_body     = false;
   c->in_non_suspending_callback = false;
@@ -3428,6 +3450,27 @@ GlobalArity* compiler__find_global(Compiler* c, JaclVal name) {
   return NULL;
 }
 
+/* Ensure the compiler's global-arity table can hold at least `need`
+ * entries. Doubles capacity until it fits, allocating the new buffer
+ * from c->arena and copying existing entries over. Returns false on
+ * allocator failure (extremely unlikely with the libc-backed arena
+ * but checked so callers don't write past the buffer on OOM). */
+static bool compiler__grow_global_arities(Compiler* c, uint32_t need) {
+  if (need <= c->global_arity_capacity) return true;
+  uint32_t cap = c->global_arity_capacity ? c->global_arity_capacity : 16;
+  while (cap < need) cap *= 2;
+  GlobalArity* fresh = (GlobalArity*)arena_alloc(c->arena,
+                                                 (uint32_t)(cap * sizeof(GlobalArity)));
+  if (!fresh) return false;
+  if (c->global_arity_count) {
+    memcpy(fresh, c->global_arities,
+           c->global_arity_count * sizeof(GlobalArity));
+  }
+  c->global_arities         = fresh;
+  c->global_arity_capacity  = cap;
+  return true;
+}
+
 void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
   for (uint32_t i = 0; i < c->global_arity_count; i++) {
     if (c->global_arities[i].name == name) {
@@ -3435,19 +3478,18 @@ void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
       return;
     }
   }
-  if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
-    GlobalArity* ga = &c->global_arities[c->global_arity_count];
-    ga->name = name;
-    ga->known_arity = arity;
-    ga->is_mutable = false;
-    ga->suspends = false;
-    ga->captures_mutable = false;
-    ga->prelude_is_native_fn = false;
-    ga->type = TYPE_DYN;
-    ga->return_type = TYPE_DYN;
-    memset(ga->param_types, 0, sizeof(ga->param_types));
-    c->global_arity_count++;
-  }
+  if (!compiler__grow_global_arities(c, c->global_arity_count + 1)) return;
+  GlobalArity* ga = &c->global_arities[c->global_arity_count];
+  ga->name = name;
+  ga->known_arity = arity;
+  ga->is_mutable = false;
+  ga->suspends = false;
+  ga->captures_mutable = false;
+  ga->prelude_is_native_fn = false;
+  ga->type = TYPE_DYN;
+  ga->return_type = TYPE_DYN;
+  memset(ga->param_types, 0, sizeof(ga->param_types));
+  c->global_arity_count++;
 }
 
 /* Mark a global as having a native fn ref prelude value (for compile-time resolution) */
@@ -4765,9 +4807,11 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   {
     Compiler* root = c;
     while (root->enclosing) root = root->enclosing;
-    memcpy(body_compiler.global_arities, root->global_arities,
-           sizeof(GlobalArity) * root->global_arity_count);
-    body_compiler.global_arity_count = root->global_arity_count;
+    if (compiler__grow_global_arities(&body_compiler, root->global_arity_count)) {
+      memcpy(body_compiler.global_arities, root->global_arities,
+             sizeof(GlobalArity) * root->global_arity_count);
+      body_compiler.global_arity_count = root->global_arity_count;
+    }
   }
 
   if (body_suspends) {
@@ -9697,9 +9741,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     {
       Compiler* root = c;
       while (root->enclosing) root = root->enclosing;
-      memcpy(body_compiler.global_arities, root->global_arities,
-             sizeof(GlobalArity) * root->global_arity_count);
-      body_compiler.global_arity_count = root->global_arity_count;
+      if (compiler__grow_global_arities(&body_compiler, root->global_arity_count)) {
+        memcpy(body_compiler.global_arities, root->global_arities,
+               sizeof(GlobalArity) * root->global_arity_count);
+        body_compiler.global_arity_count = root->global_arity_count;
+      }
     }
 
     if (use_sm_path) {
@@ -12911,9 +12957,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     {
       Compiler* root = c;
       while (root->enclosing) root = root->enclosing;
-      memcpy(body_compiler.global_arities, root->global_arities,
-             sizeof(GlobalArity) * root->global_arity_count);
-      body_compiler.global_arity_count = root->global_arity_count;
+      if (compiler__grow_global_arities(&body_compiler, root->global_arity_count)) {
+        memcpy(body_compiler.global_arities, root->global_arities,
+               sizeof(GlobalArity) * root->global_arity_count);
+        body_compiler.global_arity_count = root->global_arity_count;
+      }
     }
 
     if (spawn_suspends) {
@@ -15074,7 +15122,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           }
 
           /* Register the import as a GlobalArity with full type info */
-          if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
+          if (compiler__grow_global_arities(c, c->global_arity_count + 1)) {
             GlobalArity* ga = &c->global_arities[c->global_arity_count++];
             ga->name              = name_val;
             ga->known_arity       = found_export->arity;
@@ -16077,8 +16125,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       StructTypeRegistry* seed_registry,
                                       ExpandState* es,
                                       JaclVal prelude_map,
-                                      GlobalArity* seed_arities,
-                                      uint32_t* seed_arity_count_inout) {
+                                      GlobalArityTable* persistent_arities,
+                                      arena_t* persistent_arena) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count   = parse.error_count;
@@ -16101,11 +16149,12 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
      current call site. The per-compile global_arities array is the
      only thing compiler__find_global reads at lookup time, so a copy
      here is enough -- no later pass needs to know this happened. */
-  if (seed_arities && seed_arity_count_inout) {
-    uint32_t n = *seed_arity_count_inout;
-    if (n > COMPILER_GLOBAL_ARITIES_MAX) n = COMPILER_GLOBAL_ARITIES_MAX;
-    memcpy(c.global_arities, seed_arities, n * sizeof(GlobalArity));
-    c.global_arity_count = n;
+  if (persistent_arities && persistent_arities->count) {
+    if (compiler__grow_global_arities(&c, persistent_arities->count)) {
+      memcpy(c.global_arities, persistent_arities->entries,
+             persistent_arities->count * sizeof(GlobalArity));
+      c.global_arity_count = persistent_arities->count;
+    }
   }
 
   /* Prelude map: seed compile-time globals from caller-supplied map keys.
@@ -16402,9 +16451,11 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     body.force_global_procs = true;
 
     /* Copy global arities */
-    memcpy(body.global_arities, c.global_arities,
-           sizeof(GlobalArity) * c.global_arity_count);
-    body.global_arity_count = c.global_arity_count;
+    if (compiler__grow_global_arities(&body, c.global_arity_count)) {
+      memcpy(body.global_arities, c.global_arities,
+             sizeof(GlobalArity) * c.global_arity_count);
+      body.global_arity_count = c.global_arity_count;
+    }
 
     /* Add __sm and __rv as local slots 0 and 1 */
     compiler__add_local(&body, jacl_inline_string("__sm", 4), 1, 0);
@@ -16508,12 +16559,28 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   /* Commit GlobalArity entries back to persistent embedder state on
      a successful compile. Failed compiles leave the persistent table
      untouched -- a half-finished proc shouldn't poison subsequent
-     evals' type info. */
-  if (seed_arities && seed_arity_count_inout && c.error_count == 0) {
-    uint32_t n = c.global_arity_count;
-    if (n > COMPILER_GLOBAL_ARITIES_MAX) n = COMPILER_GLOBAL_ARITIES_MAX;
-    memcpy(seed_arities, c.global_arities, n * sizeof(GlobalArity));
-    *seed_arity_count_inout = n;
+     evals' type info. Growing reallocates from persistent_arena and
+     leaves the old buffer as dead space; bounded by O(N log N) since
+     each grow doubles. */
+  if (persistent_arities && persistent_arena && c.error_count == 0) {
+    uint32_t need = c.global_arity_count;
+    if (need > persistent_arities->capacity) {
+      uint32_t cap = persistent_arities->capacity ? persistent_arities->capacity : 16;
+      while (cap < need) cap *= 2;
+      GlobalArity* fresh = (GlobalArity*)arena_alloc(persistent_arena,
+                                                     (uint32_t)(cap * sizeof(GlobalArity)));
+      if (fresh) {
+        persistent_arities->entries  = fresh;
+        persistent_arities->capacity = cap;
+      } else {
+        need = persistent_arities->capacity;  /* OOM: write only what fits */
+      }
+    }
+    if (need) {
+      memcpy(persistent_arities->entries, c.global_arities,
+             need * sizeof(GlobalArity));
+    }
+    persistent_arities->count = need;
   }
 
   return result;
@@ -17052,9 +17119,11 @@ ProgramResult jacl_compile_program(const char* root_path,
     body.current_module    = root_mod;
     body.import_stack      = &istack;
 
-    memcpy(body.global_arities, c.global_arities,
-           sizeof(GlobalArity) * c.global_arity_count);
-    body.global_arity_count = c.global_arity_count;
+    if (compiler__grow_global_arities(&body, c.global_arity_count)) {
+      memcpy(body.global_arities, c.global_arities,
+             sizeof(GlobalArity) * c.global_arity_count);
+      body.global_arity_count = c.global_arity_count;
+    }
 
     compiler__add_local(&body, jacl_inline_string("__sm", 4), 1, 0);
     body.locals[body.local_count - 1].is_param = true;

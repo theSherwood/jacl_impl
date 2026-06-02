@@ -103,10 +103,9 @@ struct JaclVM_s {
      declared across all jacl_eval calls. Without this, a `proc T name
      {T1 a, T2 b}` declared in one eval loses its typed param shape
      by the next compile, and the call-site type check at the use
-     site falls back to TYPE_DYN. Layout mirrors the per-compile
-     Compiler::global_arities[] table so we can memcpy in/out. */
-  GlobalArity     persistent_global_arities[COMPILER_GLOBAL_ARITIES_MAX];
-  uint32_t        persistent_global_arity_count;
+     site falls back to TYPE_DYN. Grown lazily by compiler_compile
+     allocating from jvm->arena -- no fixed cap. */
+  GlobalArityTable persistent_arities;
   /* Live trampolines — freed on jacl_vm_free */
   JaclTrampoline* trampoline_list;
 };
@@ -200,10 +199,11 @@ JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   memset(&jvm->ctx_pool, 0, sizeof(jvm->ctx_pool));
   jvm->ctx_initialized = 0;
 
-  /* Persistent GlobalArity table starts empty; populated by each
-     jacl_eval that declares a proc. */
-  memset(jvm->persistent_global_arities, 0, sizeof(jvm->persistent_global_arities));
-  jvm->persistent_global_arity_count = 0;
+  /* Persistent GlobalArity table starts empty; populated + grown
+     lazily by each jacl_eval that declares a proc. */
+  jvm->persistent_arities.entries  = NULL;
+  jvm->persistent_arities.count    = 0;
+  jvm->persistent_arities.capacity = 0;
 
   /* Initialize native function registry */
   jvm->native_fns = (NativeFnEntry*)malloc(NATIVE_FN_INIT_CAP * sizeof(NativeFnEntry));
@@ -317,8 +317,8 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
                                       &jvm->intern_table, &vm->heap,
                                       jvm->persistent_struct_registry, &es,
                                       JACL_NIL,
-                                      jvm->persistent_global_arities,
-                                      &jvm->persistent_global_arity_count);
+                                      &jvm->persistent_arities,
+                                      &jvm->arena);
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;

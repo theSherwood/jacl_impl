@@ -1370,6 +1370,16 @@ typedef struct {
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
 } GlobalArity;
 
+/* Arena-backed growable table of GlobalArity entries. Embedders that
+ * call jacl_eval more than once stash one of these on their JaclVM so
+ * proc declarations accumulate across calls; grown lazily by
+ * compiler_compile when the per-compile table outpaces capacity. */
+typedef struct {
+  GlobalArity *entries;
+  uint32_t     count;
+  uint32_t     capacity;
+} GlobalArityTable;
+
 typedef struct {
   uint8_t   index;
   uint8_t   is_local;
@@ -1498,8 +1508,10 @@ struct Compiler {
   Upvalue          upvalues[COMPILER_UPVALUES_MAX];
   uint32_t         upvalue_count;
   Compiler*        enclosing;
-  GlobalArity      global_arities[COMPILER_GLOBAL_ARITIES_MAX];
+  /* Arena-backed growable; see comment in compiler.c definition. */
+  GlobalArity*     global_arities;
   uint32_t         global_arity_count;
+  uint32_t         global_arity_capacity;
   uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
   uint32_t         try_patch_count;
   bool             in_try_body;
@@ -2418,12 +2430,14 @@ extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
 extern bool compiler__is_core_builtin (const char *name, uint32_t len);
 extern const char *jacl_non_core_builtins[];  /* NULL-terminated list */
-/* seed_arities + seed_arity_count_inout are NULL/NULL when there is
- * no persistent embedder context. When non-NULL, they point to an
- * array of size COMPILER_GLOBAL_ARITIES_MAX (and its current count);
- * compiler_compile memcpy's the table in on entry and back out on
- * success so typed proc signatures survive across jacl_eval calls. */
-extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map, GlobalArity *seed_arities, uint32_t *seed_arity_count_inout);
+/* persistent_arities is NULL when there is no persistent embedder
+ * context. When non-NULL, compiler_compile reads its (entries, count)
+ * on entry to seed the per-compile table, and on a successful commit
+ * grows the persistent buffer (allocating from persistent_arena) if
+ * the compiler accumulated more entries than the persistent capacity
+ * holds. Typed proc signatures declared in earlier jacl_eval calls
+ * stay visible to later compiles via this mechanism. */
+extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map, GlobalArityTable *persistent_arities, arena_t *persistent_arena);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
 extern bool macro__is_special_form (const char *name, uint32_t len);
