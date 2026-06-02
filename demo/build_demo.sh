@@ -1,7 +1,13 @@
 #!/bin/bash
 #
-# Build the JACL playground demo assets.
-# Generates examples.json from test/jacl/*.jacl and symlinks WASM artifacts.
+# Build the JACL playground demo assets:
+#   1. Symlinks the WASM artifacts produced by build_wasm.sh.
+#   2. Generates examples.json from test/jacl/*.jacl + the demo tours.
+#   3. Bundles the TypeScript editor (src/playground.ts) into
+#      dist/playground.js via esbuild, pulling CodeMirror 6 + the vim
+#      plugin in from node_modules. Runs `npm ci` first if
+#      node_modules is missing, so a fresh clone can build with
+#      `bash build_demo.sh` alone.
 #
 # Usage: cd demo && bash build_demo.sh
 #
@@ -16,6 +22,17 @@ mkdir -p "$DIR/wasm"
 ln -sfn "../../build_wasm/jacl.js"   "$DIR/wasm/jacl.js"
 ln -sfn "../../build_wasm/jacl.wasm" "$DIR/wasm/jacl.wasm"
 echo "Linked wasm/ -> build_wasm/"
+
+# --- Editor bundle (CodeMirror 6 + vim + JACL mode) ---
+cd "$DIR"
+if [ ! -d node_modules ]; then
+  echo "Installing editor deps (one-time)…"
+  npm ci --no-audit --no-fund >/dev/null 2>&1 || npm install --no-audit --no-fund
+fi
+echo "Bundling editor (esbuild)…"
+npm run build --silent
+echo "Bundled -> dist/playground.js ($(wc -c < dist/playground.js) bytes)"
+cd "$ROOT"
 
 # --- Generate examples.json ---
 node -e '

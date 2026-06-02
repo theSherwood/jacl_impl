@@ -1,0 +1,23 @@
+{
+  "name": "jacl-playground",
+  "version": "0.1.0",
+  "description": "JACL WASM playground — CodeMirror 6 + vim mode.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/playground.ts --bundle --format=esm --minify --target=es2020 --outfile=dist/playground.js",
+    "build:dev": "esbuild src/playground.ts --bundle --format=esm --target=es2020 --sourcemap --outfile=dist/playground.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.7.0",
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.34.0",
+    "@replit/codemirror-vim": "^6.2.0"
+  }
+}
