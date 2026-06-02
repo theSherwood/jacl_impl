@@ -357,6 +357,22 @@ From `DESIGN.md` § "Known Limitations".
   boundary). No test today asserts `try`/`catch` semantics for
   overflow — add one when the design call is made.
 
+- **`ctx` field declarations don't survive across `jacl_eval` calls.**
+  `typer__register_ctx_struct` (`src/typer.c:1979`) rebuilds the ctx
+  struct each compile from the current source's `AST_CTX_DECL` nodes.
+  A `ctx mut T name = v` in one `jacl_eval`, then `$ctx->name` in a
+  second, fails the typer with "no field 'name' on ctx". The runtime
+  side (lazy `ctx__init_vm` in `embed.c`) is fixed — the persistent
+  ctx struct and pool both survive — so the field is *there*, just
+  invisible to the typer on subsequent compiles. Single-script
+  invocations (playground, `jacl_eval` of a whole file) are
+  unaffected; the gap shows up only when an embedder splits a ctx
+  declaration and its consumer into separate `jacl_eval` calls. Fix
+  needs the typer's ctx pre-pass to read from the persistent struct
+  registry too, not just the current AST. Covering test (currently
+  exercises the single-call path):
+  `test/test_e2e_embed_basics.c::test_e2e_ctx_declaration`.
+
 ---
 
 ## 11. Build-flag / scope cuts considered, not committed

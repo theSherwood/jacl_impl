@@ -8,9 +8,11 @@
 
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { readFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const wasmDir = join(__dirname, '..', 'build_wasm');
+const tourPath = join(__dirname, 'jacl', 'tour.jacl');
 
 // Dynamic import of the Emscripten-generated module
 const createJACL = (await import(join(wasmDir, 'jacl.js'))).default;
@@ -110,6 +112,25 @@ async function run() {
   assert(r1 === 100 && r2 === 200, `VMs independent: vm1.a=${r1}, vm2.a=${r2}`);
   _vm_free(vm1);
   _vm_free(vm2);
+
+  // Test 9: test/jacl/tour.jacl — the assert-based syntax survey.
+  // Validates the WASM build against the same script the playground
+  // serves by default. Asserts inside the tour fail the VM with a
+  // runtime error, so a passing run means every section worked.
+  // This is the regression net for embed-layer divergences from the
+  // native harness (e.g. the ctx-init bug fixed in d36e86a).
+  console.log('Test 9: tour.jacl end-to-end');
+  const tourSrc = readFileSync(tourPath, 'utf8');
+  const tourVm = _vm_new();
+  const tourResult = withCString(tourSrc, (s) => _eval(tourVm, s));
+  if (_is_error(tourResult)) {
+    const msgPtr = jacl._jacl_error_message_str(tourVm, tourResult);
+    const msg = msgPtr ? jacl.UTF8ToString(msgPtr) : '(no message)';
+    assert(false, `tour.jacl failed in WASM: ${msg}`);
+  } else {
+    assert(true, 'tour.jacl runs to completion in WASM');
+  }
+  _vm_free(tourVm);
 
   // Summary
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

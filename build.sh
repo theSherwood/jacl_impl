@@ -50,10 +50,11 @@ for arg in "$@"; do
   esac
 done
 
-# --wasm mode: compile-only check that the unity build still produces a
-# WASM module via emscripten. No tests are run (emcc output is a .wasm/.js
-# pair; there's no native test harness for it). Skips with a clear notice
-# when emcc is missing instead of silently passing. Exclusive with --tsan.
+# --wasm mode: build the unity tree via emscripten and exercise the
+# resulting .wasm/.js pair through test/test_wasm.mjs (which now also
+# runs test/jacl/tour.jacl end-to-end — the same script the playground
+# serves by default). Skips with a clear notice when emcc or node is
+# missing instead of silently passing. Exclusive with --tsan.
 if [ "$WASM" -eq 1 ]; then
   if [ "$TSAN" -eq 1 ]; then
     echo "error: --wasm and --tsan are mutually exclusive."
@@ -66,11 +67,22 @@ if [ "$WASM" -eq 1 ]; then
   fi
   DIR="$(cd "$(dirname "$0")" && pwd)"
   echo "=== WASM build check (emcc) ==="
-  if bash "$DIR/build_wasm.sh"; then
-    echo "WASM build: PASS"
+  if ! bash "$DIR/build_wasm.sh"; then
+    echo "WASM build: FAIL"
+    exit 1
+  fi
+  echo "WASM build: PASS"
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "WASM run: SKIPPED (node not on PATH; build-only check)."
+    exit 0
+  fi
+  echo "=== WASM run check (node test/test_wasm.mjs) ==="
+  if node "$DIR/test/test_wasm.mjs"; then
+    echo "WASM run: PASS"
     exit 0
   else
-    echo "WASM build: FAIL"
+    echo "WASM run: FAIL"
     exit 1
   fi
 fi
