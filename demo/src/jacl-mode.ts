@@ -41,6 +41,11 @@ interface JaclState {
   /** Set when inside a `#{ ... }` pragma block, so we keep coloring
    *  the body as comment across line breaks. */
   inPragma: boolean;
+  /** Regular single-line string in progress (broken across multiple
+   *  tokens by an interpolation), or null. After we tokenize
+   *  `"foo "` then `$bar`, this stays set so ` baz"` keeps painting
+   *  as string. Cleared when the closing quote is consumed. */
+  inString: '"' | "'" | null;
   /** Triple-quoted string in progress, or null. Tracks the quote
    *  char ('"' or "'") so we know when to close. */
   tripleString: '"' | "'" | null;
@@ -87,6 +92,7 @@ const TYPE_NAMES = new Set([
 
 const startState = (): JaclState => ({
   inPragma: false,
+  inString: null,
   tripleString: null,
   interpStack: [],
   braceDepth: 0,
@@ -95,6 +101,7 @@ const startState = (): JaclState => ({
 
 const copyState = (s: JaclState): JaclState => ({
   inPragma: s.inPragma,
+  inString: s.inString,
   tripleString: s.tripleString,
   interpStack: s.interpStack.slice(),
   braceDepth: s.braceDepth,
@@ -118,8 +125,12 @@ function tokenizeStringBody(
       return "string";
     }
   } else {
-    // Single-quoted: closing single char ends string.
-    if (stream.eat(closeChar)) return "string";
+    // Single-quoted: closing single char ends string and clears the
+    // `we're mid-string between interpolations` flag.
+    if (stream.eat(closeChar)) {
+      state.inString = null;
+      return "string";
+    }
   }
 
   // Interpolation: $ followed by ident, [, (
@@ -173,6 +184,13 @@ const jaclMode = StreamLanguage.define<JaclState>({
       if (pattern.test(stream.string)) state.expectingHead = true;
     }
 
+    // Continue a regular string that was interrupted by an
+    // interpolation (` baz"` in `"foo $bar baz"`). Must come before
+    // the SOL/whitespace/comment checks: a partial string body
+    // shouldn't be mistakenly treated as start-of-line code.
+    if (state.inString) {
+      return tokenizeStringBody(stream, state, state.inString, false);
+    }
     // Continue a triple-quoted string spanning lines.
     if (state.tripleString) {
       return tokenizeStringBody(stream, state, state.tripleString, true);
@@ -214,13 +232,17 @@ const jaclMode = StreamLanguage.define<JaclState>({
         return "string";
       }
       stream.next();
-      // Tokenize body up to matching quote on this same line.
+      // Tokenize body up to matching quote on this same line. If we
+      // hit `$` for interpolation, we set state.inString so the next
+      // tokenizer call routes the `$ident` through tokenizeStringBody
+      // and continues painting the trailing string body until the
+      // closing quote.
       while (!stream.eol()) {
         const ch = stream.peek();
         if (ch === q) { stream.next(); return "string"; }
         if (ch === "$") {
-          // Stop — let next call handle interpolation as a single token.
-          break;
+          state.inString = q;
+          return "string";
         }
         if (ch === "\\") { stream.next(); stream.next(); continue; }
         stream.next();
