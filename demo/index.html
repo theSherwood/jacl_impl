@@ -205,6 +205,10 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Without min-width:0 the grid item's intrinsic min-content (driven
+     by the editor's longest line) prevents the column from honoring
+     its 1fr share, so a stray wide line nudges the split. */
+  min-width: 0;
 }
 
 .panel-label {

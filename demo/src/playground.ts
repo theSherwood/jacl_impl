@@ -61,6 +61,9 @@ function buildEditor(initial: string): EditorView {
     extensions: [
       lineNumbers(),
       highlightActiveLine(),
+      // Soft-wrap long lines so the editor's column never overflows
+      // the 50% panel split and we don't get a horizontal scrollbar.
+      EditorView.lineWrapping,
       history(),
       bracketMatching(),
       indentOnInput(),
