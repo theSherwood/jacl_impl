@@ -20,8 +20,14 @@
 #define BIGINT_FREE(p)    free(p)
 #endif
 
+/* Karatsuba is dispatched only when both operands have >= this many 64-bit
+ * limbs. Measured on this implementation (gcc -O3 / Apple Silicon), Karatsuba
+ * does not beat schoolbook until ~4096 limbs (262 Kbit) — the gap is dominated
+ * by per-recursion arena allocation and bookkeeping in _bigint_karatsuba.
+ * Override with -DBIGINT_KARATSUBA_THRESHOLD=N before including. See
+ * bench/bench_bignum.c for the measurements. */
 #ifndef BIGINT_KARATSUBA_THRESHOLD
-#define BIGINT_KARATSUBA_THRESHOLD 32
+#define BIGINT_KARATSUBA_THRESHOLD 4096
 #endif
 
 /* --- Arena setup --- */
@@ -264,7 +270,10 @@ static BigInt bigint_shift_left(arena_t* arena, const BigInt* x, uint32_t bits) 
             rl[i + limb_shift] = val;
         }
     }
-    if (carry > 0) {
+    /* The extra top limb only exists when bit_shift > 0 (new_len was
+     * sized that way). Always write it — when carry==0 we still need to
+     * land a defined value since arena_alloc no longer zeroes. */
+    if (bit_shift > 0) {
         rl[x->len + limb_shift] = carry;
     }
 
