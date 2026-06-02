@@ -2,7 +2,7 @@
 
 JACL syntax is built around a two-mode delimiter system. This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
 
-**Why two modes:** the two surviving delimiters split along a real semantic axis — expression vs. command/pipeline — rather than offering multiple flavors of the same operation. An earlier `()` infix mode was cut; see `SYNTAX_REDESIGN_2026_06.md` for the rationale.
+**Why two modes:** the two surviving delimiters split along a real semantic axis — expression vs. command/pipeline — rather than offering multiple flavors of the same operation. An earlier `()` infix mode was cut for being a redundant third flavor of operations already covered by `[]` and `{}`; remaining cleanup is tracked in `NOT_IMPLEMENTED.md` §12.
 
 ## Two parsing modes (delimiter-determined)
 
@@ -469,7 +469,7 @@ for $items item { log $item }
 for $items $callback
 ```
 
-The explicit form is **collection-first** so that pipe threading works naturally: `$items | for item { … }` threads the piped value as the first arg, which is the collection slot. A name-first form would put the threaded value in the name slot and break the pipe idiom — a real ergonomic loss in a shell/glue language. See `SYNTAX_REDESIGN_2026_06.md` §5 for the full discussion.
+The explicit form is **collection-first** so that pipe threading works naturally: `$items | for item { … }` threads the piped value as the first arg, which is the collection slot. A name-first form would put the threaded value in the name slot and break the pipe idiom — a real ergonomic loss in a shell/glue language.
 
 Compiler distinguishes forms by argument shape:
 
@@ -652,7 +652,7 @@ Nil-safe field access via the `?.` builtin (prefix form):
 [?. [?. $user address] city]     # chains via nesting
 ```
 
-The prefix form is verbose and is the current holding pattern. Mirroring `->` as a glued suffix (`$user?.address?.city`) is the eventual target; see `SYNTAX_REDESIGN_2026_06.md` §3.4.
+The prefix form is verbose and is the current holding pattern. Mirroring `->` as a glued suffix (`$user?.address?.city`) is the eventual target; the choice will get made when `()` is cleaned up (`NOT_IMPLEMENTED.md` §12).
 
 ## Module visibility
 
@@ -1184,7 +1184,7 @@ extern and JACL proc call sites when the pointee matches.
 
 ### Resolved in this document
 
-- Two-mode delimiter system — `[]` prefix expressions, `{}` command mode (shell-pipeline). The earlier `()` infix mode was cut; see `SYNTAX_REDESIGN_2026_06.md`.
+- Two-mode delimiter system — `[]` prefix expressions, `{}` command mode (shell-pipeline). The earlier `()` infix mode was cut; remaining cleanup in `NOT_IMPLEMENTED.md` §12.
 - Pipe threading (first-arg)
 - Destructuring with `{..}`
 - Match/case with guards
@@ -1228,7 +1228,7 @@ stay listed as historical record.
 9. ~~**Pragmas**~~ — resolved: `#{ ... }` syntax, avoids shebang collision.
 10. ~~**Ranges**~~ — resolved: `[range 1 10]` exclusive, `[range-inclusive 1 10]` inclusive, produce streams. (Originally infix `(1 ..< 10)`; revised June 2026.)
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
-12. ~~**Optional chaining**~~ — resolved (holding pattern): `[?. $val field]` prefix form. Glued-suffix mirror of `->` is the eventual target; see `SYNTAX_REDESIGN_2026_06.md` §3.4.
+12. ~~**Optional chaining**~~ — resolved (holding pattern): `[?. $val field]` prefix form. Glued-suffix mirror of `->` is the eventual target; the choice gets made during the `()` cleanup tracked in `NOT_IMPLEMENTED.md` §12.
 13. ~~**Field access syntax**~~ — resolved: `->` only. `$user->name`, chained `$a->b->c`. `.` was rejected because bare words are strings (filenames/paths use `.` heavily). Implemented in lexer/parser; desugars to `[. expr field]`.
 14. **Regular expressions** — see `NOT_IMPLEMENTED.md` §1, §2, §6.
 15. **Operator overloading** — see `NOT_IMPLEMENTED.md` §6.
@@ -1246,7 +1246,7 @@ stay listed as historical record.
 
 Features from this document compared against the current codebase. Last updated: 2026-06-02.
 
-The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several decisions. The implementation has not yet caught up to the revised spec for those items; they are marked **(spec ahead of impl)** below.
+The June 2026 syntax redesign revised several decisions; remaining work (just the `()` cleanup) is tracked in `NOT_IMPLEMENTED.md` §12.
 
 ### Implemented
 
@@ -1261,10 +1261,10 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | `proc` / `extern` typed-return position — after params: `proc f {…} T {…}`, `extern f {…} T` | parser produces `[name params (ret_type)? body?]`; compiler / typer / SM analysis all read the new shape. Same layout for both forms. |
 | `struct` declaration (`struct Name {type field, ...}`) | C-ABI layout |
 | Struct constructor — named-only (`[Pt x 30 y 15]`) | constructor accepts field/value pairs in any order. Missing scalar/dyn fields default to 0/false/""/nil; missing struct-typed fields zero-init recursively. Buf fields are zero-init implicitly and reject user values. |
-| Struct printer | emits `[Name field val field val …]` — same shape the constructor accepts (reader-symmetric, per `SYNTAX_REDESIGN_2026_06.md` §1). |
+| Struct printer | emits `[Name field val field val …]` — same shape the constructor accepts (every value prints as a form the reader accepts). |
 | `if`/`elif`/`else` | expression-valued |
 | `while` loops | yes |
-| `for` — all 4 forms | implicit `for COLL {body}`, explicit `for COLL NAME {body}` (collection-first; see `SYNTAX_REDESIGN_2026_06.md` §5 for why this didn't flip to name-first), C-style `for {init;cond;step} {body}`, HOF `for COLL $cb`. |
+| `for` — all 4 forms | implicit `for COLL {body}`, explicit `for COLL NAME {body}` (collection-first — pipe threading puts the piped value at position 0, which is the collection slot), C-style `for {init;cond;step} {body}`, HOF `for COLL $cb`. |
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
 | `incr name` — sugar for `set name [+ $name 1]` | prelude macro |

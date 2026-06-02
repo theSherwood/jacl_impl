@@ -842,8 +842,8 @@ void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
 void vm__fmt_value(VMFormatBuf* buf, JaclVal val);
 
 /* Format a struct ([Name field val field val …]) from raw C-ABI bytes.
- * Reader-symmetric form per SYNTAX_REDESIGN_2026_06.md §2: the printed
- * shape matches the named constructor.
+ * Reader-symmetric form — the printed shape matches the named
+ * constructor.
  * Used by both heap-struct OP_PRINT path and inline OP_PRINT_STRUCT. */
 void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* data) {
   vm__fmt_append(buf, "[", 1);
@@ -1165,7 +1165,7 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
 
 /* Format struct fields from raw data bytes using type def.
  * Reader-symmetric form: [Name field val field val …] — matches the
- * named struct constructor (SYNTAX_REDESIGN_2026_06.md §2). */
+ * named struct constructor. */
 static void vm__fmt_struct_data(VMFormatBuf* buf, StructTypeDef* sdef,
                                 const uint8_t* data) {
   char fbuf[32];

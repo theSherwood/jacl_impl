@@ -2860,8 +2860,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       /* Named struct constructor: args are field/value pairs. The
        * value position is at odd `i`; the preceding even-position arg
        * carries the field name. Look up the field and push its type
-       * so literal narrowing fires. (Per SYNTAX_REDESIGN_2026_06.md §2,
-       * positional struct constructors are gone.) */
+       * so literal narrowing fires. Positional struct constructors
+       * are no longer accepted — only the named form. */
       if ((i & 1u) == 1) {
         AstNode* fname_node = node->data.command.args[i - 1];
         if (fname_node->type == AST_LIT_STRING) {

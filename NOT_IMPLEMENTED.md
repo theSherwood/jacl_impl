@@ -458,6 +458,90 @@ visible.
 
 ---
 
+## 12. Drop `()` infix mode
+
+Carry-over from the June 2026 syntax redesign. Every other item from
+that redesign has either landed or filed elsewhere; this one is the
+only remaining piece. Captured here so it can be picked up in a
+future session without keeping the whole redesign doc around.
+
+### Why
+
+The redesign reduced JACL to two parsing modes — `[]` prefix
+expressions and `{}` command/pipeline mode — split along a real
+semantic axis (value computation vs shell-pipeline composition). The
+old `()` infix mode was a third flavor of the same operations
+(`(1 + 2)` vs `[+ 1 2]` vs `{+ 1 2}`) with no precedence, paying
+ambiguity and learnability cost without earning back ergonomics.
+Bare-word strings remain (they're the whole point of a shell/glue
+language); `()` is the redundant mode that goes.
+
+### What already landed
+
+Most of the migration is done because each replacement form was
+shipped independently:
+
+- `[+ 1 2]` prefix arithmetic — always worked.
+- `[assert-eq $a 7]` etc. — landed as a single `assert` prelude macro
+  over `panic` (commit `3ba9fa9`); reads `[assert == $a 7]` directly
+  inside `[]`.
+- `$[expr]` string interpolation — keeps. `$(...)` form is what gets
+  cut.
+- `[range a b]` / `[range-inclusive a b]` — landed (commit `6e31449`).
+  The `(a ..< b)` / `(a ..= b)` infix forms still compile to the
+  same opcode for now and disappear with `()`.
+- `-1` numeric literals — lexer landed (commit `c5289fd`); the
+  `(-1)` / `(- 1)` workarounds are removed.
+- `!=` as a prefix builtin — landed (commit `a50f14f`); was
+  previously only reachable through `()` infix.
+
+### What's still pending
+
+1. **Lexer.** Stop emitting `TOKEN_LPAREN`/`TOKEN_RPAREN` (or keep
+   them but make the parser reject them outside an explicit
+   parens-allowed context — see SHELL_API question below). Decide
+   whether `()` should error or be silently ignored when a script
+   uses them (probably error — silent ignore would mask bugs).
+2. **Parser.** Remove the infix-mode AST builders. Remove `$(...)`
+   string-interpolation handling (the `$[...]` path stays).
+3. **Optional chaining `?.`.** The redesign moved this to prefix
+   `[?. $val field]` as a holding pattern; the long-term target is
+   a glued suffix mirroring `->` (`$val?.field`). Either way, the
+   `($val ?. field)` infix form goes when `()` does. Pick the
+   long-term form before removal so the user-visible churn is one
+   cycle, not two.
+4. **Migration sites.** Remaining `()` uses in the test corpus and
+   examples (tour, demo, NOT_IMPLEMENTED examples, SHELL_API_DESIGN
+   examples, etc.). Each needs a `[]`-prefix rewrite. The
+   transformation is mechanical but the count is moderate — grep
+   for `(\$` and `^\s*\(` patterns in `.jacl` and embedded JACL
+   inside `test/*.c`.
+5. **`..<` / `..=` heads.** Once nothing reaches them they can be
+   deleted from `ast.c` / `compiler.c` / `typer.c`. Same OP_RANGE
+   stays; only the keyword routing goes.
+6. **SHELL_API question.** The shell-pipeline mode (`{}`) sometimes
+   wants `(cmd | other)` as a sub-pipeline group (Bash-style). This
+   doesn't conflict with the infix-mode removal — group-parens in
+   `{}` would be a separate construct — but worth deciding the
+   group-paren story in the same pass so we don't ship two
+   incompatible `()` interpretations later.
+
+### Cross-references
+
+- `SYNTAX.md` § "Implementation status" — the table flags each
+  spec-ahead-of-impl item; once `()` is dropped, those entries can
+  retire.
+- `tour.jacl` and `demo/feature_tour.jacl` — most surviving `()`
+  examples live here.
+- `SHELL_API_DESIGN.md` — pipeline grouping question lives here.
+
+Estimated size: ~200-400 LOC of removals in the parser + lexer, plus
+mechanical migration across ~20-30 files. The trickiest bit is
+deciding `?.`'s long-term form (#3) before removing the holding
+pattern.
+
+---
+
 ## How to use this file
 
 - **Adding an item:** add it both here (one paragraph) and in the

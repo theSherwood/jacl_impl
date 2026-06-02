@@ -6953,7 +6953,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* Range builtins: `[range a b]` (exclusive) and
      `[range-inclusive a b]` (inclusive). The infix forms `..<` / `..=`
      remain accepted for now and compile to the same opcode; they go
-     away when `()` is removed (SYNTAX_REDESIGN_2026_06.md §3). */
+     away when `()` is removed (NOT_IMPLEMENTED.md §12). */
   if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ ||
       hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
     const char* rname;
@@ -14143,7 +14143,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* Struct constructor: [StructName field val field val …]
    *
-   * Named-only construction (SYNTAX_REDESIGN_2026_06.md §2). Args are
+   * Named-only construction. Args are
    * field/value pairs in any order. Missing scalar/dyn fields get
    * zero-equivalent defaults (0 / nil / "" / false). Missing
    * struct-typed fields are zero-initialized recursively — same op
