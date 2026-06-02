@@ -2282,16 +2282,13 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     uint32_t  name_idx, params_idx;
     JaclType  return_type = TYPE_DYN;
     uint32_t  return_struct_idx = UINT32_MAX;
-    /* Layout:
+    /* Layout (June 2026 redesign §4):
      *   proc   name params (TYPE)? body     (argc==3 or 4; TYPE at [2])
-     *   extern TYPE name params             (argc==3, no body — old layout)
-     *   extern      name params             (argc==2, no body)
-     * Extern still uses the old type-first layout; only `proc` was
-     * swapped in the June 2026 redesign. */
+     *   extern name params (TYPE)?          (argc==2 or 3; TYPE at [2]) */
     if (is_extern) {
       if (argc == 3) {
-        typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
-        name_idx = 1; params_idx = 2;
+        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+        name_idx = 0; params_idx = 1;
       } else if (argc == 2) {
         name_idx = 0; params_idx = 1;
       } else continue;

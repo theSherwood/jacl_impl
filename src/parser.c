@@ -1880,35 +1880,21 @@ AstNode* parser__parse_extern_form(Parser* p, AstNode* extern_head) {
   NodeArray args;
   parser__arr_init(&args, p->arena);
 
-  /* Disambiguate: word { → name (no return type); word(/[) word { →
-   * return-type then name. Compound type returns ([Ptr T], [Future T])
-   * use TOKEN_LBRACKET as the leading token. */
-  if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-    /* extern name {params} */
-    AstNode* name = parser__parse_atom(p);
-    parser__arr_push(&args, name);
-  } else {
-    /* extern <type-expr> name {params}. type-expr is either a single
-     * word (TOKEN_WORD/TOKEN_STRUCT) or a bracketed compound
-     * ([Ptr T], etc.) parsed as an expression. */
-    AstNode* ret_type;
-    if (parser__peek(p)->type == TOKEN_LBRACKET) {
-      ret_type = parser__parse_expr(p);
-    } else {
-      ret_type = parser__parse_atom(p);
-    }
-    if (ret_type == NULL || ret_type->type == AST_ERROR) {
-      return parser__error(p, "expected return type after 'extern'", parser__peek(p));
-    }
-    parser__arr_push(&args, ret_type);
-    AstNode* name = parser__parse_atom(p);
-    if (name == NULL || name->type == AST_ERROR) {
-      return parser__error(p, "expected name after extern return type",
-                           parser__peek(p));
-    }
-    parser__arr_push(&args, name);
-  }
+  /* New syntax (June 2026 redesign §4): return type comes AFTER the
+     params block, matching `proc`. Forms:
+       extern name {params}              — untyped (2 args)
+       extern name {params} type         — typed return (3 args, word)
+       extern name {params} [Compound]   — typed return (3 args, bracketed) */
 
+  /* 1) Name. */
+  if (parser__peek(p)->type != TOKEN_WORD &&
+      parser__peek(p)->type != TOKEN_STRUCT) {
+    return parser__error(p, "expected extern name", parser__peek(p));
+  }
+  AstNode* name = parser__parse_atom(p);
+  parser__arr_push(&args, name);
+
+  /* 2) {params} */
   if (parser__peek(p)->type != TOKEN_LBRACE) {
     return parser__error(p, "expected '{' for extern parameters", parser__peek(p));
   }
@@ -1916,10 +1902,32 @@ AstNode* parser__parse_extern_form(Parser* p, AstNode* extern_head) {
   if (params->type == AST_ERROR) return params;
   parser__arr_push(&args, params);
 
+  /* 3) Optional return type. Extern has no body, so the statement just
+        ends after the params block — unless the next token starts a
+        return-type expression (word, struct, or bracketed compound). */
+  SourcePos end = params->end;
+  Token* next = parser__peek(p);
+  if (next->type == TOKEN_WORD ||
+      next->type == TOKEN_STRUCT ||
+      next->type == TOKEN_LBRACKET) {
+    AstNode* ret_type;
+    if (next->type == TOKEN_LBRACKET) {
+      ret_type = parser__parse_expr(p);
+    } else {
+      ret_type = parser__parse_atom(p);
+    }
+    if (ret_type == NULL || ret_type->type == AST_ERROR) {
+      return parser__error(p, "expected return type after extern params",
+                           parser__peek(p));
+    }
+    parser__arr_push(&args, ret_type);
+    end = ret_type->end;
+  }
+
   AstNode* node = ast_alloc(p->arena);
   node->type  = AST_COMMAND;
   node->start = start;
-  node->end   = params->end;
+  node->end   = end;
   node->data.command.head      = extern_head;
   node->data.command.head_id   = HEAD_EXTERN;
   node->data.command.args      = args.nodes;

@@ -18,9 +18,9 @@
 # as inline strings without the intern table. See BUFFER_DESIGN.md
 # Tier 2 (test-harness native-fn registration).
 
-extern i32 t_sumi {[Ptr i32] buf i32 len}
-extern i32 t_fill {[Ptr u8] buf i32 len i32 byte}
-extern i32 t_xor  {[Ptr u8] dst [Ptr u8] src i32 len}
+extern t_sumi {[Ptr i32] buf i32 len} i32
+extern t_fill {[Ptr u8] buf i32 len i32 byte} i32
+extern t_xor {[Ptr u8] dst [Ptr u8] src i32 len} i32
 
 proc sum {} {
   # Callee reads back the i32 elements the caller stored. Decayed

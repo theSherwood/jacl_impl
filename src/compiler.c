@@ -9144,8 +9144,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "extern", "2 or 3 arguments", argc);
       return;
     }
-    uint32_t ext_name_idx   = (argc == 3) ? 1 : 0;
-    uint32_t ext_params_idx = (argc == 3) ? 2 : 1;
+    /* New layout: [name params (ret_type)?]. Name is always args[0],
+       params is always args[1], ret_type (when present) is args[2]. */
+    uint32_t ext_name_idx   = 0;
+    uint32_t ext_params_idx = 1;
     if (args[ext_name_idx]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "extern: name must be a string");
       return;

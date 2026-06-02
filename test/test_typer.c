@@ -765,7 +765,7 @@ static void test_extern_ptr_return_call(void) {
    * Subsequent calls narrow to the declared return type. */
   ParseResult r = run_typer(
       "struct Point {i32 x i32 y}\n"
-      "extern [Ptr Point] get_pt {}\n"
+      "extern get_pt {} [Ptr Point]\n"
       "def p [get_pt]", &a);
   AstNode* call = find_cmd(r.nodes[2], "get_pt");
   ASSERT_NOT_NULL(call);
@@ -777,7 +777,7 @@ static void test_extern_with_params(void) {
   current_test = "extern_with_params";
   arena_t a = {0};
   ParseResult r = run_typer(
-      "extern u64 add_one {u64 x}\n"
+      "extern add_one {u64 x} u64\n"
       "def r [add_one 41]", &a);
   AstNode* call = find_cmd(r.nodes[1], "add_one");
   ASSERT_NOT_NULL(call);
@@ -792,7 +792,7 @@ static void test_extern_buf_to_ptr_decay(void) {
   current_test = "extern_buf_to_ptr_decay";
   arena_t a = {0};
   ParseResult r = run_typer(
-      "extern i32 sys_read {i32 fd [Ptr u8] dst u64 len}\n"
+      "extern sys_read {i32 fd [Ptr u8] dst u64 len} i32\n"
       "def [Buf 256 u8] buf\n"
       "def r [sys_read 0 $buf 256]", &a);
   AstNode* call = find_cmd(r.nodes[2], "sys_read");

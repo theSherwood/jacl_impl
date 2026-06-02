@@ -357,7 +357,7 @@ static void run_all(void) {
    * type fires the same dyn/typed barrier as a JACL proc call would. */
   RUN("extern_call_wrong_arg_type", {
     .source =
-      "extern u64 add_one {u64 x}\n"
+      "extern add_one {u64 x} u64\n"
       "[add_one \"oops\"]",
     .expect_substrings = { "type error", "u64", "str" },
   });
@@ -368,7 +368,7 @@ static void run_all(void) {
     .source =
       "struct Point {i32 x i32 y}\n"
       "struct Circle {i32 r}\n"
-      "extern [Ptr Point] make_pt {}\n"
+      "extern make_pt {} [Ptr Point]\n"
       "def [Ptr Circle] c [make_pt]",
     .expect_substrings = { "type error", "pointer", "pointee" },
   });
@@ -401,7 +401,7 @@ static void run_all(void) {
   /* [Buf u8] passed to [Ptr i32] parameter — pointee mismatch. */
   RUN("buf_to_ptr_pointee_mismatch", {
     .source =
-      "extern i32 read32 {[Ptr i32] dst}\n"
+      "extern read32 {[Ptr i32] dst} i32\n"
       "def [Buf 256 u8] b\n"
       "def r [read32 $b]",
     .expect_substrings = { "type error", "expected", "got" },

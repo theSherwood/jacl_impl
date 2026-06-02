@@ -1393,7 +1393,7 @@ static int test_extern_typed_ptr_native(void) {
   embed__register_native(vm, "fake_addr", native_fake_addr, 0);
 
   JaclVal result = jacl_eval(vm,
-      "extern [Ptr i32] fake_addr {}\n"
+      "extern fake_addr {} [Ptr i32]\n"
       "def [Ptr i32] p [fake_addr]\n"
       "ptr-addr $p");
   ASSERT(!jacl_is_error(result));
@@ -1411,7 +1411,7 @@ static int test_extern_u64_return(void) {
   embed__register_native(vm, "fake_addr", native_fake_addr, 0);
 
   JaclVal result = jacl_eval(vm,
-      "extern u64 fake_addr {}\n"
+      "extern fake_addr {} u64\n"
       "fake_addr");
   ASSERT(!jacl_is_error(result));
   ASSERT(jacl_is_u64(result));
@@ -1446,7 +1446,7 @@ static int test_ptr_field_read(void) {
   g_test_point.y = 11;
   JaclVal result = jacl_eval(vm,
       "struct CPoint {i32 x i32 y}\n"
-      "extern [Ptr CPoint] cp_addr {}\n"
+      "extern cp_addr {} [Ptr CPoint]\n"
       "def [Ptr CPoint] p [cp_addr]\n"
       "$p->x");
   ASSERT(!jacl_is_error(result));
@@ -1467,7 +1467,7 @@ static int test_ptr_field_write(void) {
   g_test_point.y = 0;
   JaclVal result = jacl_eval(vm,
       "struct CPoint {i32 x i32 y}\n"
-      "extern [Ptr CPoint] cp_addr {}\n"
+      "extern cp_addr {} [Ptr CPoint]\n"
       "def [Ptr CPoint] p [cp_addr]\n"
       "set $p->x 42\n"
       "set $p->y 99");
@@ -1496,7 +1496,7 @@ static int test_ptr_deref_scalar(void) {
 
   g_test_scalar = 12345;
   JaclVal result = jacl_eval(vm,
-      "extern [Ptr i32] scalar_addr {}\n"
+      "extern scalar_addr {} [Ptr i32]\n"
       "def [Ptr i32] p [scalar_addr]\n"
       "ptr-deref $p");
   ASSERT(!jacl_is_error(result));
@@ -1531,7 +1531,7 @@ static int test_nested_ptr_field_read(void) {
   JaclVal result = jacl_eval(vm,
       "struct CInner {i32 a i32 b}\n"
       "struct COuter {CInner inner i32 tag}\n"
-      "extern [Ptr COuter] outer_addr {}\n"
+      "extern outer_addr {} [Ptr COuter]\n"
       "def [Ptr COuter] o [outer_addr]\n"
       "$o->inner->a");
   ASSERT(!jacl_is_error(result));
@@ -1554,7 +1554,7 @@ static int test_nested_ptr_field_write(void) {
   JaclVal result = jacl_eval(vm,
       "struct CInner {i32 a i32 b}\n"
       "struct COuter {CInner inner i32 tag}\n"
-      "extern [Ptr COuter] outer_addr {}\n"
+      "extern outer_addr {} [Ptr COuter]\n"
       "def [Ptr COuter] o [outer_addr]\n"
       "set $o->inner->a 100\n"
       "set $o->inner->b 200\n"
@@ -1584,7 +1584,7 @@ static int test_addr_of_nested_field(void) {
   JaclVal result = jacl_eval(vm,
       "struct CInner {i32 a i32 b}\n"
       "struct COuter {CInner inner i32 tag}\n"
-      "extern [Ptr COuter] outer_addr {}\n"
+      "extern outer_addr {} [Ptr COuter]\n"
       "def [Ptr COuter] o [outer_addr]\n"
       "ptr-addr [addr $o->inner->a]");
   ASSERT(!jacl_is_error(result));
@@ -1609,7 +1609,7 @@ static int test_addr_of_embedded_struct(void) {
   JaclVal result = jacl_eval(vm,
       "struct CInner {i32 a i32 b}\n"
       "struct COuter {CInner inner i32 tag}\n"
-      "extern [Ptr COuter] outer_addr {}\n"
+      "extern outer_addr {} [Ptr COuter]\n"
       "def [Ptr COuter] o [outer_addr]\n"
       "def [Ptr CInner] ip [addr $o->inner]\n"
       "$ip->b");
@@ -1643,7 +1643,7 @@ static int test_ptr_offset_walk_array(void) {
   /* Sum the x fields of all three elements. */
   JaclVal result = jacl_eval(vm,
       "struct CPoint {i32 x i32 y}\n"
-      "extern [Ptr CPoint] arr_addr {}\n"
+      "extern arr_addr {} [Ptr CPoint]\n"
       "def [Ptr CPoint] base [arr_addr]\n"
       "def [Ptr CPoint] e1 [ptr-offset $base 1]\n"
       "def [Ptr CPoint] e2 [ptr-offset $base 2]\n"
@@ -1665,7 +1665,7 @@ static int test_ptr_diff_array_elements(void) {
 
   JaclVal result = jacl_eval(vm,
       "struct CPoint {i32 x i32 y}\n"
-      "extern [Ptr CPoint] arr_addr {}\n"
+      "extern arr_addr {} [Ptr CPoint]\n"
       "def [Ptr CPoint] base [arr_addr]\n"
       "def [Ptr CPoint] e2 [ptr-offset $base 2]\n"
       "ptr-diff $e2 $base");
