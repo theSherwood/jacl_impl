@@ -7,19 +7,28 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-06-02 (§8c SM state-field shadowing fix —
-`sm__add_state_field` now records storage-shape collisions and
-`compiler__analyze_suspensions` emits a compile error pointing at the
-offending re-declaration, mirroring non-SM same-scope shadowing.
-Tests: `test/jacl/sm_field_shadow_repro.jacl` (expect-error) and
-`sm_field_same_shape_rebind.jacl` (positive control). §10 CPS
-arg-eval bug fixed 2026-05-22 — SM compiler's SUSPEND_CALL path now
-spills/restores the enclosing operand stack across `OP_AWAIT_SM`,
-matching the discipline already used by await/sleep/yield/parallel/
-race. Regression test: `test/jacl/suspending_call_inline_args.jacl`.
-§4 annotation-driven `[Stream T]` typing landed 2026-05-19; for-loop
-narrowing + yield-site inference deferred as a Phase 2 unit. §3b
-generator-tail check landed and section removed; see compiler.c
+Last refreshed: 2026-06-02 (§12 `()` infix mode removed — parser's
+infix surface deleted (`parser__parse_infix*`, `parser__sync_paren`,
+the `$(...)` interp branch), `TOKEN_LPAREN` now fires a "use `[]`"
+diagnostic, `TOKEN_DOLLAR_PAREN` fires a "use `$[...]`" diagnostic,
+and the `HEAD_DOTDOT_LT` / `HEAD_DOTDOT_EQ` heads were pulled from
+`ast.c` / `jacl.h` / `typer.c` / `compiler.c` now that nothing
+reaches them. Migration of in-repo `()` sites landed as PR 1
+(commit `be1696b`). Tests: `parens_removed_error.jacl` and
+`dollar_paren_removed_error.jacl` lock down the error messages.
+§8c SM state-field shadowing fix — `sm__add_state_field` now records
+storage-shape collisions and `compiler__analyze_suspensions` emits a
+compile error pointing at the offending re-declaration, mirroring
+non-SM same-scope shadowing. Tests: `sm_field_shadow_repro.jacl`
+(expect-error) and `sm_field_same_shape_rebind.jacl` (positive
+control). §10 CPS arg-eval bug fixed 2026-05-22 — SM compiler's
+SUSPEND_CALL path now spills/restores the enclosing operand stack
+across `OP_AWAIT_SM`, matching the discipline already used by
+await/sleep/yield/parallel/race. Regression test:
+`test/jacl/suspending_call_inline_args.jacl`. §4 annotation-driven
+`[Stream T]` typing landed 2026-05-19; for-loop narrowing + yield-
+site inference deferred as a Phase 2 unit. §3b generator-tail check
+landed and section removed; see compiler.c
 `find_disallowed_generator_tail`).
 
 ---
@@ -410,90 +419,6 @@ visible.
 - **`vm.c` split.** 12,200 lines in one TU. Splitting by category
   (keeping the dispatch table central) could halve it. No runtime
   cost change; cognitive-load only.
-
----
-
-## 12. Drop `()` infix mode
-
-Carry-over from the June 2026 syntax redesign. Every other item from
-that redesign has either landed or filed elsewhere; this one is the
-only remaining piece. Captured here so it can be picked up in a
-future session without keeping the whole redesign doc around.
-
-### Why
-
-The redesign reduced JACL to two parsing modes — `[]` prefix
-expressions and `{}` command/pipeline mode — split along a real
-semantic axis (value computation vs shell-pipeline composition). The
-old `()` infix mode was a third flavor of the same operations
-(`(1 + 2)` vs `[+ 1 2]` vs `{+ 1 2}`) with no precedence, paying
-ambiguity and learnability cost without earning back ergonomics.
-Bare-word strings remain (they're the whole point of a shell/glue
-language); `()` is the redundant mode that goes.
-
-### What already landed
-
-Most of the migration is done because each replacement form was
-shipped independently:
-
-- `[+ 1 2]` prefix arithmetic — always worked.
-- `[assert-eq $a 7]` etc. — landed as a single `assert` prelude macro
-  over `panic` (commit `3ba9fa9`); reads `[assert == $a 7]` directly
-  inside `[]`.
-- `$[expr]` string interpolation — keeps. `$(...)` form is what gets
-  cut.
-- `[range a b]` / `[range-inclusive a b]` — landed (commit `6e31449`).
-  The `(a ..< b)` / `(a ..= b)` infix forms still compile to the
-  same opcode for now and disappear with `()`.
-- `-1` numeric literals — lexer landed (commit `c5289fd`); the
-  `(-1)` / `(- 1)` workarounds are removed.
-- `!=` as a prefix builtin — landed (commit `a50f14f`); was
-  previously only reachable through `()` infix.
-
-### What's still pending
-
-1. **Lexer.** Stop emitting `TOKEN_LPAREN`/`TOKEN_RPAREN` (or keep
-   them but make the parser reject them outside an explicit
-   parens-allowed context — see SHELL_API question below). Decide
-   whether `()` should error or be silently ignored when a script
-   uses them (probably error — silent ignore would mask bugs).
-2. **Parser.** Remove the infix-mode AST builders. Remove `$(...)`
-   string-interpolation handling (the `$[...]` path stays).
-3. **Optional chaining `?.`.** The redesign moved this to prefix
-   `[?. $val field]` as a holding pattern; the long-term target is
-   a glued suffix mirroring `->` (`$val?.field`). Either way, the
-   `($val ?. field)` infix form goes when `()` does. Pick the
-   long-term form before removal so the user-visible churn is one
-   cycle, not two.
-4. **Migration sites.** Remaining `()` uses in the test corpus and
-   examples (tour, demo, NOT_IMPLEMENTED examples, SHELL_API_DESIGN
-   examples, etc.). Each needs a `[]`-prefix rewrite. The
-   transformation is mechanical but the count is moderate — grep
-   for `(\$` and `^\s*\(` patterns in `.jacl` and embedded JACL
-   inside `test/*.c`.
-5. **`..<` / `..=` heads.** Once nothing reaches them they can be
-   deleted from `ast.c` / `compiler.c` / `typer.c`. Same OP_RANGE
-   stays; only the keyword routing goes.
-6. **SHELL_API question.** The shell-pipeline mode (`{}`) sometimes
-   wants `(cmd | other)` as a sub-pipeline group (Bash-style). This
-   doesn't conflict with the infix-mode removal — group-parens in
-   `{}` would be a separate construct — but worth deciding the
-   group-paren story in the same pass so we don't ship two
-   incompatible `()` interpretations later.
-
-### Cross-references
-
-- `SYNTAX.md` § "Implementation status" — the table flags each
-  spec-ahead-of-impl item; once `()` is dropped, those entries can
-  retire.
-- `tour.jacl` and `demo/feature_tour.jacl` — most surviving `()`
-  examples live here.
-- `SHELL_API_DESIGN.md` — pipeline grouping question lives here.
-
-Estimated size: ~200-400 LOC of removals in the parser + lexer, plus
-mechanical migration across ~20-30 files. The trickiest bit is
-deciding `?.`'s long-term form (#3) before removing the holding
-pattern.
 
 ---
 

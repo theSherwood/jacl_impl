@@ -1252,8 +1252,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 
 | Feature | Notes |
 |---------|-------|
-| Three-mode delimiter system (`[]`, `{}`, `()`) | **(spec ahead of impl)** spec is now two modes: `[]` prefix + `{}` command. `()` infix is currently implemented and pending removal. |
-| Infix mode — no precedence, left-to-right | **(spec ahead of impl)** pending removal. |
+| Two-mode delimiter system (`[]`, `{}`) | yes — `[]` prefix expressions + `{}` command mode. Earlier `()` infix mode removed (NOT_IMPLEMENTED.md §12). |
 | Pipe threading (`\|` first-arg in command mode) | yes |
 | Binding operators (`=`, `:`, `::`) | **(spec ahead of impl)** removed from spec; prelude macros currently still in place. |
 | Arrow field access (`->`) | chained |
@@ -1268,7 +1267,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
 | `incr name` — sugar for `set name [+ $name 1]` | prelude macro |
-| String interpolation (`$var`, `$[...]`) | **(spec ahead of impl)** `$(...)` form still accepted by the implementation; pending removal alongside `()`. |
+| String interpolation (`$var`, `$[...]`) | yes — `$(...)` was removed alongside `()` infix mode (NOT_IMPLEMENTED.md §12). |
 | Line continuation (`\` at end of line) | yes |
 | Comments (`#`, `##`) | yes |
 | Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
@@ -1292,10 +1291,10 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Typed collections (`[Vec T]`, `[Map K V]`) | see `TYPE_SYSTEM.md` |
 | Fixed-size C-ABI buffers (`[Buf N T]`) | see `BUFFER_DESIGN.md`; nested bufs + GC-traced elements deferred |
 | Variadic procs (`proc log {level, ..msgs}`) | `..rest` in proc params |
-| Ranges — `[range a b]`, `[range-inclusive a b]` | both prefix forms emit `OP_RANGE`. The infix `(a ..< b)` / `(a ..= b)` forms still compile to the same opcode for now; they go away when `()` is removed. |
+| Ranges — `[range a b]`, `[range-inclusive a b]` | both prefix forms emit `OP_RANGE`. The infix `(a ..< b)` / `(a ..= b)` forms were removed alongside `()` infix mode (NOT_IMPLEMENTED.md §12). |
 | Multi-line strings (`"""..."""`) | with interpolation, Kotlin-style indent |
-| Optional chaining (`?.`) | **(spec ahead of impl)** spec is `[?. $val field]` prefix (holding pattern); current implementation is `($val ?. field)` in `()` mode. |
-| Negative numeric literals (`-1`) | **(spec ahead of impl)** lexer currently requires `(-1)` workaround in argument position; spec is to accept `-1` directly. |
+| Optional chaining (`?.`) | `[?. $val field]` prefix (holding pattern). The long-term target is a glued suffix `$val?.field` mirroring `->`; not pursued yet. |
+| Negative numeric literals (`-1`) | yes — lexer accepts `-1` directly (commit `c5289fd`). |
 | Module visibility (`_` prefix = private) | compiler-enforced at import |
 | Pragmas (`#{ ... }`) | yes |
 | Same-scope shadowing error | compile-time |

@@ -115,7 +115,7 @@ static void run_all(void) {
 
   /* Negation of unsigned 64-bit — explicit reject. */
   RUN("negate_u64", {
-    .source = "def u64 x 1\ndef y (- $x)",
+    .source = "def u64 x 1\ndef y [- $x]",
     .expect_substrings = { "negate", "u64" },
   });
 
@@ -129,7 +129,7 @@ static void run_all(void) {
       "proc test {} {\n"
       "  def a [A x 1]\n"
       "  def b [B y 2]\n"
-      "  if ($a == $b) { print \"eq\" }\n"
+      "  if [== $a $b] { print \"eq\" }\n"
       "}",
     .expect_substrings = { "type error", "struct" },
   });

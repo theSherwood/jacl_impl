@@ -221,8 +221,8 @@ static void test_to_string_returns_str(void) {
 static void test_range_returns_stream(void) {
   current_test = "range_returns_stream";
   arena_t a = {0};
-  ParseResult r = run_typer("def s [..< 0 10]", &a);
-  AstNode* rng = find_cmd(r.nodes[0], "..<");
+  ParseResult r = run_typer("def s [range 0 10]", &a);
+  AstNode* rng = find_cmd(r.nodes[0], "range");
   ASSERT_NOT_NULL(rng);
   ASSERT_TYPE(rng, TYPE_STREAM);
   arena_destroy(&a);
@@ -533,10 +533,10 @@ static void test_proc_stream_return_compound(void) {
 static void test_range_stream_elem_i64(void) {
   current_test = "range_stream_elem_i64";
   arena_t a = {0};
-  /* Range operators ..< / ..= produce TYPE_STREAM with i64 element idx
-   * (matches the runtime — OP_RANGE emits jacl_i64 values). */
-  ParseResult r = run_typer("def s [..< 0 10]", &a);
-  AstNode* rng = find_cmd(r.nodes[0], "..<");
+  /* `range` builtin produces TYPE_STREAM with i64 element idx (matches
+     the runtime — OP_RANGE emits jacl_i64 values). */
+  ParseResult r = run_typer("def s [range 0 10]", &a);
+  AstNode* rng = find_cmd(r.nodes[0], "range");
   ASSERT_NOT_NULL(rng);
   ASSERT_TYPE(rng, TYPE_STREAM);
   if (rng) {

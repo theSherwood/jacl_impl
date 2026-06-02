@@ -7013,20 +7013,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
   /* Range builtins: `[range a b]` (exclusive) and
-     `[range-inclusive a b]` (inclusive). The infix forms `..<` / `..=`
-     remain accepted for now and compile to the same opcode; they go
-     away when `()` is removed (NOT_IMPLEMENTED.md §12). */
-  if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ ||
-      hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
-    const char* rname;
-    bool inclusive;
-    switch (hid) {
-      case HEAD_DOTDOT_LT:        rname = "..<";              inclusive = false; break;
-      case HEAD_DOTDOT_EQ:        rname = "..=";              inclusive = true;  break;
-      case HEAD_RANGE:            rname = "range";            inclusive = false; break;
-      case HEAD_RANGE_INCLUSIVE:  rname = "range-inclusive";  inclusive = true;  break;
-      default: rname = "range"; inclusive = false; break;  /* unreachable */
-    }
+     `[range-inclusive a b]` (inclusive). Both compile to OP_RANGE with
+     a one-byte inclusive flag. */
+  if (hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
+    bool inclusive = (hid == HEAD_RANGE_INCLUSIVE);
+    const char* rname = inclusive ? "range-inclusive" : "range";
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, rname, "2 arguments", argc);
       return;

@@ -13543,6 +13543,14 @@ static const char* jacl__find_parse_error(AstNode* node) {
       if (msg) return msg;
     }
   }
+  /* Search inside interpolated string segments — a `$[...]` / removed
+     `$(...)` failure lives here, not at the top level. */
+  if (node->type == AST_INTERP_STRING) {
+    for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
+      const char* msg = jacl__find_parse_error(node->data.interp_string.segments[i]);
+      if (msg) return msg;
+    }
+  }
   return NULL;
 }
 

@@ -1,0 +1,4 @@
+# expect-error: `()` infix mode was removed
+# §12 PR 2: surfacing the helpful "use `[]` for value expressions" message
+# when source still contains `()` infix expressions.
+print ($x + 1)

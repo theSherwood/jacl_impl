@@ -63,7 +63,7 @@ typedef enum {
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
   HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
-  HEAD_DOTDOT_LT, HEAD_DOTDOT_EQ, HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
+  HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
   HEAD_DOT, HEAD_QDOT,
 
   /* Bindings & defs */
@@ -166,8 +166,6 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (s[0] == 't' && s[1] == 'o') return HEAD_TO;
       return HEAD_NONE;
     case 3:
-      if (memcmp(s, "..<", 3) == 0) return HEAD_DOTDOT_LT;
-      if (memcmp(s, "..=", 3) == 0) return HEAD_DOTDOT_EQ;
       if (memcmp(s, "def", 3) == 0) return HEAD_DEF;
       if (memcmp(s, "mut", 3) == 0) return HEAD_MUT;
       if (memcmp(s, "set", 3) == 0) return HEAD_SET;

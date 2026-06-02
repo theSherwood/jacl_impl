@@ -1,0 +1,4 @@
+# expect-error: `$(...)` infix interpolation was removed
+# §12 PR 2: surfacing the helpful "use `$[...]`" message when source
+# still contains the removed `$(...)` string interpolation form.
+print "sum: $(1 + 2)"

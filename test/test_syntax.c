@@ -1734,12 +1734,13 @@ static int test_parse_syntax_quote_unquote_splicing(void) {
 /* Test: ~ outside syntax-quote still works as logical NOT (not an error) */
 static int test_tilde_outside_syntax_quote_error(void) {
     arena_t arena = {0};
-    /* ~ outside syntax-quote is the logical NOT operator in infix context */
-    const char *src = "(~$x)";
+    /* ~ outside syntax-quote is the logical NOT operator. After §12
+       removed `()` infix, the prefix form `[~ $x]` is the surviving
+       way to express it. */
+    const char *src = "[~ $x]";
     ParseResult pr = parse_source(src, &arena);
     ASSERT(pr.error_count == 0);
     ASSERT(pr.count >= 1);
-    /* Should parse as [~ $x] command */
     AstNode *node = pr.nodes[0];
     ASSERT_INT_EQ(node->type, AST_COMMAND);
     arena_destroy(&arena);
