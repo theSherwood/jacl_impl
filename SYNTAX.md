@@ -1260,7 +1260,7 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | `proc` syntax (`{params} {body}`) | yes |
 | `proc` / `extern` typed-return position — after params: `proc f {…} T {…}`, `extern f {…} T` | parser produces `[name params (ret_type)? body?]`; compiler / typer / SM analysis all read the new shape. Same layout for both forms. |
 | `struct` declaration (`struct Name {type field, ...}`) | C-ABI layout |
-| Struct constructor — named-only (`[Pt x 30 y 15]`) | constructor accepts field/value pairs in any order. Missing scalar/dyn fields default to 0/false/""/nil; missing struct-typed fields are a compile error (recursive zero-init is a follow-up). Buf fields are zero-init implicitly and reject user values. |
+| Struct constructor — named-only (`[Pt x 30 y 15]`) | constructor accepts field/value pairs in any order. Missing scalar/dyn fields default to 0/false/""/nil; missing struct-typed fields zero-init recursively. Buf fields are zero-init implicitly and reject user values. |
 | Struct printer | emits `[Name field val field val …]` — same shape the constructor accepts (reader-symmetric, per `SYNTAX_REDESIGN_2026_06.md` §1). |
 | `if`/`elif`/`else` | expression-valued |
 | `while` loops | yes |

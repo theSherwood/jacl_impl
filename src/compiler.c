@@ -6172,6 +6172,71 @@ bool compiler__is_core_builtin(const char *name, uint32_t len) {
   return true;
 }
 
+/* Emit a zero-initialized struct value of the given type, leaving the
+ * inline bytes on the operand stack so an enclosing OP_STRUCT_NEW_INLINE
+ * can consume them. Recursive — nested struct fields zero-init by walking
+ * into their own field list. Used for the missing-field default path in
+ * the named struct constructor. */
+static bool compiler__emit_zero_struct(Compiler* c, uint32_t struct_idx,
+                                         uint32_t line, uint32_t col) {
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg || struct_idx >= reg->count || !reg->defs[struct_idx]) {
+    compiler__error(c, line, col,
+        "internal: cannot zero-init unresolved struct");
+    return false;
+  }
+  StructTypeDef* sdef = reg->defs[struct_idx];
+  for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+    JaclType ft = sdef->fields[fi].type;
+    if (ft == TYPE_BUF) continue;
+    switch (ft) {
+      case TYPE_I32: compiler__emit_constant(c, jacl_i32(0), line); break;
+      case TYPE_U32: compiler__emit_constant(c, jacl_u32(0), line); break;
+      case TYPE_F32: compiler__emit_constant(c, jacl_f32(0.0f), line); break;
+      case TYPE_I64: {
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)0);
+        compiler__emit_byte(c, OP_CONST_I64, line);
+        compiler__emit_u16(c, idx, line);
+        break;
+      }
+      case TYPE_U64: {
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)0);
+        compiler__emit_byte(c, OP_CONST_U64, line);
+        compiler__emit_u16(c, idx, line);
+        break;
+      }
+      case TYPE_F64: {
+        double d = 0.0; uint64_t raw; memcpy(&raw, &d, sizeof(raw));
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)raw);
+        compiler__emit_byte(c, OP_CONST_F64, line);
+        compiler__emit_u16(c, idx, line);
+        break;
+      }
+      case TYPE_BOOL: compiler__emit_byte(c, OP_FALSE, line); break;
+      case TYPE_STR:
+        compiler__emit_constant(c, jacl_inline_string("", 0), line); break;
+      case TYPE_DYN: compiler__emit_byte(c, OP_NIL, line); break;
+      case TYPE_STRUCT:
+        if (!compiler__emit_zero_struct(c, sdef->fields[fi].struct_type_idx,
+                                          line, col)) return false;
+        break;
+      default: {
+        char err_msg[192];
+        snprintf(err_msg, sizeof(err_msg),
+                 "struct '%.*s' field '%.*s' has no zero-default for this type",
+                 (int)sdef->name_len, sdef->name,
+                 (int)sdef->fields[fi].name_len, sdef->fields[fi].name);
+        compiler__error(c, line, col, err_msg);
+        return false;
+      }
+    }
+  }
+  /* Build the struct from the bytes we just pushed. */
+  compiler__emit_byte(c, OP_STRUCT_NEW_INLINE, line);
+  compiler__emit_u16(c, (uint16_t)struct_idx, line);
+  return true;
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -13999,10 +14064,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
    *
    * Named-only construction (SYNTAX_REDESIGN_2026_06.md §2). Args are
    * field/value pairs in any order. Missing scalar/dyn fields get
-   * zero-equivalent defaults (0 / nil / "" / false). Missing struct-
-   * typed fields are a compile error in v1 — recursive zero-init for
-   * nested structs is left as a follow-up. Buf fields are zero-init by
-   * OP_STRUCT_NEW_INLINE and accept no user input. */
+   * zero-equivalent defaults (0 / nil / "" / false). Missing
+   * struct-typed fields are zero-initialized recursively — same op
+   * sequence as an empty constructor for that nested type. Buf fields
+   * are zero-init by OP_STRUCT_NEW_INLINE and accept no user input. */
   if (head->type == AST_LIT_STRING) {
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t name_len = head->data.lit_string.length;
@@ -14161,10 +14226,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           case TYPE_DYN:
             compiler__emit_byte(c, OP_NIL, line);
             break;
+          case TYPE_STRUCT:
+            if (!compiler__emit_zero_struct(c,
+                    sdef->fields[fi].struct_type_idx, line, col)) {
+              return;
+            }
+            break;
           default: {
-            /* Struct-typed (and other compound) fields can't be
-             * zero-defaulted without recursively constructing the
-             * field's type. Defer until we have a real use case. */
             char err_msg[224];
             snprintf(err_msg, sizeof(err_msg),
                      "struct '%.*s' field '%.*s' has no default — must be provided",

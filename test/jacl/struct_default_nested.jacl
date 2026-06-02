@@ -1,0 +1,38 @@
+# Missing struct-typed fields zero-init recursively. The constructor
+# emits the same op sequence as an empty inner-constructor would, so
+# every leaf scalar comes out 0/false/""/nil.
+#
+# expect: 0
+# expect: 0
+# expect: 1
+# expect: 0
+# expect: 7
+# expect: 0
+# expect: 0
+# expect: 0
+# expect: 0
+
+struct Pt {i32 x, i32 y}
+struct Line {Pt start, Pt end}
+struct Body {i32 tag, Line bounds}
+
+proc main {} {
+  # Both nested Pts default to {0, 0}.
+  def ln [Line]
+  print $ln->start->x
+  print $ln->end->y
+
+  # Outer field provided, inner Pt defaults.
+  def ln2 [Line start [Pt x 1 y 2]]
+  print $ln2->start->x
+  print $ln2->end->x
+
+  # Two levels deep: Body { tag, Line { Pt start, Pt end } }
+  def b [Body tag 7]
+  print $b->tag
+  print $b->bounds->start->x
+  print $b->bounds->start->y
+  print $b->bounds->end->x
+  print $b->bounds->end->y
+}
+main
