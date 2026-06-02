@@ -318,7 +318,7 @@ def listing {!ls -la | collect}
 
 # Pipeline ending in JACL
 def files {!find . -name "*.jacl" | lines | collect}
-for f $files { print $f }
+for $files f { print $f }
 
 # Pipeline of externals (OS pipe, no JACL value between)
 def count {!grep ERROR access.log | !wc -l | collect}
@@ -352,7 +352,7 @@ def count {await $fut}
 def {ch-w ch-r} {channel}
 
 spawn {
-  for w $words { write $ch-w $w }
+  for $words w { write $ch-w $w }
   close $ch-w
 }
 
@@ -377,7 +377,7 @@ processes), drop to `create-process` (§10).
 def ch {channel}
 def j {create-process "cmd" args {stderr: $ch}}
 spawn {
-  for line $ch { if {is-fatal $line} { signal $j SIGTERM } }
+  for $ch line { if {is-fatal $line} { signal $j SIGTERM } }
 }
 await $j
 ```

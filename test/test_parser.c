@@ -3044,19 +3044,19 @@ static int test_for_implicit_it(void) {
   TEST_PASS();
 }
 
-/* for name $items { body } — explicit binding (name first): parses as 3-arg command */
+/* for $items name { body } — explicit binding: parses as 3-arg command */
 static int test_for_explicit_binding(void) {
   setup();
-  ParseResult r = parse("for item $v { print $item }");
+  ParseResult r = parse("for $v item { print $item }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 3);
-  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "item", 4) == 0);
-  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "item", 4) == 0);
   ASSERT(n->data.command.args[2]->type == AST_BLOCK);
   teardown();
   ASSERT(check_no_leaks());

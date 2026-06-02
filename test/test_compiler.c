@@ -7714,7 +7714,7 @@ static int test_for_implicit_it(void) {
   TEST_PASS();
 }
 
-/* for item $items { body } — explicit binding variable (name first) */
+/* for $items item { body } — explicit binding variable */
 static int test_for_explicit_binding(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -7727,7 +7727,7 @@ static int test_for_explicit_binding(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "for x [vec 1 2 3] {\n"
+    "for [vec 1 2 3] x {\n"
     "  print $x\n"
     "}\n", &vm, &arena);
 
@@ -8274,8 +8274,8 @@ static int test_continue_nested_loops(void) {
   /* Outer: 1,2  Inner: skip 20, print 10,30
      Expected: 10 30 10 30 */
   VMResult result = jacl_run(
-    "for x [vec 1 2] {\n"
-    "  for y [vec 10 20 30] {\n"
+    "for [vec 1 2] x {\n"
+    "  for [vec 10 20 30] y {\n"
     "    if [== $y 20] { continue }\n"
     "    print $y\n"
     "  }\n"
@@ -8444,7 +8444,7 @@ static int test_return_value_from_for_block(void) {
   VMResult result = jacl_run(
     "proc sumto {items limit} {\n"
     "  acc : 0\n"
-    "  for x $items {\n"
+    "  for $items x {\n"
     "    if [> $x $limit] { return $acc }\n"
     "    set acc [+ $acc $x]\n"
     "  }\n"
@@ -8769,8 +8769,8 @@ static int test_break_nested_for_loops(void) {
   /* Outer for runs over 1,2. Inner for breaks at 20.
      Expected: 10 10 */
   VMResult result = jacl_run(
-    "for x [vec 1 2] {\n"
-    "  for y [vec 10 20 30] {\n"
+    "for [vec 1 2] x {\n"
+    "  for [vec 10 20 30] y {\n"
     "    if [== $y 20] { break }\n"
     "    print $y\n"
     "  }\n"
