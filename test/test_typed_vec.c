@@ -394,7 +394,7 @@ static int test_typed_vec_for_loop(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
-    "for $points p {\n"
+    "for p $points {\n"
     "  [print $p->x]\n"
     "}",
     &cap, "10\n30\n"));
@@ -407,7 +407,7 @@ static int test_typed_vec_for_loop_field_access(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
-    "for $points p {\n"
+    "for p $points {\n"
     "  [print $p->y]\n"
     "}",
     &cap, "2\n4\n6\n"));
@@ -419,7 +419,7 @@ static int test_typed_vec_for_loop_wide_struct(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8]]\n"
-    "for $rects r {\n"
+    "for r $rects {\n"
     "  [print $r->w]\n"
     "}",
     &cap, "3\n7\n"));
@@ -431,7 +431,7 @@ static int test_typed_vec_for_loop_empty(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point]]\n"
-    "for $points p {\n"
+    "for p $points {\n"
     "  [print $p->x]\n"
     "}\n"
     "[print done]",
@@ -446,7 +446,7 @@ static int test_typed_vec_for_loop_accumulate(void) {
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
     "mut sum 0\n"
-    "for $points p {\n"
+    "for p $points {\n"
     "  set sum [+ $sum $p->y]\n"
     "}\n"
     "[print $sum]",
@@ -461,7 +461,7 @@ static int test_typed_vec_for_loop_break(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
-    "def result [for $points p {\n"
+    "def result [for p $points {\n"
     "  if [== $p->x 2] { [break $p->y] }\n"
     "}]\n"
     "[print $result]",
@@ -475,7 +475,7 @@ static int test_typed_vec_for_loop_break_wide(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8] [Rect 9 10 11 12]]\n"
-    "def result [for $rects r {\n"
+    "def result [for r $rects {\n"
     "  if [== $r->w 7] { [break $r->h] }\n"
     "}]\n"
     "[print $result]",

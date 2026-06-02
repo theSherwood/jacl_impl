@@ -2022,13 +2022,13 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
         /* for — creates loop bindings */
         if (hid == HEAD_FOR) {
           /* C-style for: [for {init; cond; step} { body }] — init handled by recursion */
-          if (argc == 3 && args[1]->type == AST_LIT_STRING &&
+          if (argc == 3 && args[0]->type == AST_LIT_STRING &&
               args[2]->type == AST_BLOCK) {
-            /* [for coll name { body }] */
+            /* [for name coll { body }] — explicit binding, name first */
             sm__add_state_field(layout,
                 compiler__name_val(layout->heap, layout->intern_table,
-                                   args[1]->data.lit_string.value,
-                                   args[1]->data.lit_string.length),
+                                   args[0]->data.lit_string.value,
+                                   args[0]->data.lit_string.length),
                 false, false, 1, 0);
           } else if (argc == 2 && args[1]->type == AST_BLOCK &&
                      !(args[0]->type == AST_BLOCK)) {
@@ -2384,13 +2384,18 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
                                  sm__loop_body_suspends(body);
             int32_t loop_start = *segment;
 
+            /* Collection arg index: 0 for implicit form, 1 for explicit
+               (name-first) form. */
+            uint32_t lc_col_idx =
+                (argc == 3 && args[0]->type == AST_LIT_STRING) ? 1 : 0;
+
             /* Walk collection expression */
-            sm__liveness_walk__visit(args[0], ctx);
+            sm__liveness_walk__visit(args[lc_col_idx], ctx);
 
             /* Mark for-loop binding variable */
-            if (argc == 3 && args[1]->type == AST_LIT_STRING) {
+            if (argc == 3 && args[0]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
-                  sm__lit_string_name(layout, args[1]), *segment);
+                  sm__lit_string_name(layout, args[0]), *segment);
             } else if (argc == 2 && body->type == AST_BLOCK &&
                        !(args[0]->type == AST_BLOCK)) {
               sm__liveness_mark_write(liveness, layout,
@@ -10391,28 +10396,37 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Determine binding name and body block */
+    /* Determine binding name and body block.
+       Forms (post-redesign §5):
+         [for COLL { body }]           implicit $it
+         [for NAME COLL { body }]      explicit binding — name first
+         [for COLL $callback]          HOF callback
+       The collection is always the LAST non-block / non-name argument
+       before the body; remember its index for the compile step below. */
     const char* bind_name = "it";
     uint32_t bind_name_len = 2;
     AstNode* body_block = NULL;
+    uint32_t col_arg_idx = 0;
 
     if (argc == 2 && args[1]->type == AST_BLOCK) {
-      /* [for $collection { body }] — implicit $it */
+      /* [for COLL { body }] — implicit $it */
       body_block = args[1];
-    } else if (argc == 3 && args[1]->type == AST_LIT_STRING &&
+      col_arg_idx = 0;
+    } else if (argc == 3 && args[0]->type == AST_LIT_STRING &&
                args[2]->type == AST_BLOCK) {
-      /* [for $collection name { body }] — explicit binding */
-      bind_name = args[1]->data.lit_string.value;
-      bind_name_len = args[1]->data.lit_string.length;
+      /* [for NAME COLL { body }] — explicit binding, name first */
+      bind_name = args[0]->data.lit_string.value;
+      bind_name_len = args[0]->data.lit_string.length;
       body_block = args[2];
+      col_arg_idx = 1;
     } else if (argc == 2 && args[1]->type == AST_COMMAND) {
-      /* [for $collection [\ body]] — lambda callback via OP_EACH */
+      /* [for COLL [\ body]] — lambda callback via OP_EACH */
       compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
       return;
     } else {
       compiler__error(c, line, col,
-          "for requires: $collection { body }, $collection name { body }, "
-          "or $collection $callback");
+          "for requires: COLL { body }, NAME COLL { body }, "
+          "or COLL $callback");
       return;
     }
 
@@ -10440,8 +10454,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t saved_local_count = c->local_count;
 
     /* Compile collection → local __col */
-    compiler__compile_node(c, args[0]);
-    JaclType col_type = (JaclType)args[0]->inferred_type;
+    compiler__compile_node(c, args[col_arg_idx]);
+    JaclType col_type = (JaclType)args[col_arg_idx]->inferred_type;
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
 
     uint8_t col_slot = (uint8_t)(saved_local_count);
@@ -10564,7 +10578,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Track typed vec element type for the loop binding */
     bool is_typed_vec_loop = (col_type == TYPE_TYPED_VEC);
-    uint32_t elem_struct_idx = args[0]->inferred_struct_idx;
+    uint32_t elem_struct_idx = args[col_arg_idx]->inferred_struct_idx;
 
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);

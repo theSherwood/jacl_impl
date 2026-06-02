@@ -2513,7 +2513,7 @@ static int test_shell_exec_error_pipe_compose(void) {
     /* If for runs on error stream, it would print "ran"
      * Since the stream returns an error value, the for should not iterate */
     VMResult result = jacl_run(
-        "def result {!false | for x { [print ran] }}\n"
+        "def result {!false | for { [print ran] }}\n"
         "[print [error? $result]]",
         &vm, &arena);
 

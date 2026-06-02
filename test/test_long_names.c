@@ -173,7 +173,7 @@ static int test_for_binding_long_name(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "proc t {} {\n"
-    "  for [vec 1 2 3] current_element {\n"
+    "  for current_element [vec 1 2 3] {\n"
     "    print $current_element\n"
     "  }\n"
     "}\n"

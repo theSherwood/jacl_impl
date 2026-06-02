@@ -274,7 +274,7 @@ for [vec 1 2 3] { print $it }
 
 # => 10
 # => 20
-for [vec 10 20] item { print $item }
+for item [vec 10 20] { print $item }
 
 # => a
 # => b

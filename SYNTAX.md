@@ -492,14 +492,14 @@ Works on both streams and vectors. `filter` and `transform` remain separate — 
 
 ```
 proc find-first {items, pred} {
-  for $items item {
+  for item $items {
     if [$pred $item] { return $item }    # exits find-first
   }
   $nil
 }
 
 proc process {items} {
-  for $items item {
+  for item $items {
     if [skip? $item] { continue }        # next iteration
     if [done? $item] { break }           # exit for loop
     print $item
@@ -511,14 +511,14 @@ proc process {items} {
 
 The distinction between blocks and lambdas determines how `return`/`break`/`continue` behave:
 
-- **Block form** `for $items item { body }` — block is inlined, `return` exits enclosing proc, `break`/`continue` work
+- **Block form** `for item $items { body }` — block is inlined, `return` exits enclosing proc, `break`/`continue` work
 - **Lambda form** `for $items [\ do-thing $it]` — lambda is a separate proc, `return` exits the lambda, `break`/`continue` are errors
 
 Both forms coexist. Use blocks when you need control flow, lambdas for concise pipelines:
 
 ```
 # Block form — full control flow
-for $items item {
+for item $items {
   if [> $item 10] { return $item }
 }
 
@@ -567,7 +567,7 @@ proc wrapper {..args} {
 
 ```
 proc log {level, ..msgs} {
-  for $msgs msg { print "[$level] $msg" }
+  for msg $msgs { print "[$level] $msg" }
 }
 
 log "INFO" "server started" "listening on 8080"
@@ -1263,7 +1263,7 @@ The June 2026 syntax redesign (see `SYNTAX_REDESIGN_2026_06.md`) revised several
 | Struct constructor — named-only (`[Pt x 30 y 15]`) | **(spec ahead of impl)** current constructor is positional (`[Pt 30 15]`); printer uses a third form. |
 | `if`/`elif`/`else` | expression-valued |
 | `while` loops | yes |
-| `for` — all 4 forms | **(spec ahead of impl)** explicit form is `for NAME COLL {body}` per spec; current order is `for COLL NAME {body}`. |
+| `for` — all 4 forms | implicit `for COLL {body}`, explicit `for NAME COLL {body}` (name-first), C-style `for {init;cond;step} {body}`, HOF `for COLL $cb`. |
 | `break`, `continue`, `return` | block-inlined; lambda-separate |
 | Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
 | `incr name` — sugar for `set name [+ $name 1]` | prelude macro |

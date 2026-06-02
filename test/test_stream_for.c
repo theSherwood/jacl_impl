@@ -60,7 +60,7 @@ static int test_for_stream_explicit_binding(void) {
     "  yield 2\n"
     "  yield 3\n"
     "}\n"
-    "for [gen] x {\n"
+    "for x [gen] {\n"
     "  print $x\n"
     "}\n",
     &cap);

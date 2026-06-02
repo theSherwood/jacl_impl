@@ -12,11 +12,10 @@ proc check {} {
   # Composes with transform / filter like the infix form did.
   assert [== [collect [transform [range 0 3] [\ * $it 10]]] [vec 0 10 20]]
 
-  # Element type stamps i64 so the for binding narrows.
-  # (Current explicit-for order is `for COLL NAME { body }` — name
-  # moves to the front once redesign §5 lands.)
+  # Element type stamps i64 so the for binding narrows. Explicit-for
+  # is name-first per redesign §5.
   mut sum 0
-  for [range-inclusive 1 4] n { set sum [+ $sum $n] }
+  for n [range-inclusive 1 4] { set sum [+ $sum $n] }
   assert [== $sum 10]
 
   "ok"

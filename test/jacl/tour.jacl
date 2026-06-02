@@ -53,7 +53,7 @@ proc str shout {str s} { concat $s "!" }
 # Variadic: `..rest` in params collects trailing args into a vector.
 proc sum-all {..nums} {
   mut total 0
-  for $nums n { set total [+ $total $n] }
+  for n $nums { set total [+ $total $n] }
   $total
 }
 
@@ -159,7 +159,7 @@ proc main {} {
   for [vec 1 2 3] { set seen [+ $seen $it] }
   assert ($seen == 6)
   mut range-sum 0
-  for (0 ..< 3) n { set range-sum [+ $range-sum $n] }
+  for n (0 ..< 3) { set range-sum [+ $range-sum $n] }
   assert ($range-sum == 3)
 
   # ----- streams -----
