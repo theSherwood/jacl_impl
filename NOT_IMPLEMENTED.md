@@ -215,9 +215,6 @@ listed (resolved ones are in the source doc).
 
 From `STRUCT_DESIGN.md` § "Open Questions".
 
-- **Fixed-size arrays in structs** (e.g. `[u8; 16]`). Layout system
-  can accommodate; not yet wired. Useful for byte buffers without
-  strings.
 - **Wide cells / globals.** Mut bindings and globals store `JaclVal`
   slots; structs must go through `[box]`. A wide-cell architecture
   could allow inline mut struct bindings; not pursued.

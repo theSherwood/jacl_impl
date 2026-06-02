@@ -235,5 +235,10 @@ coordination — see `TYPE_SYSTEM.md` for the typer-side perspective.
 
 ## Open Questions
 
-See **`NOT_IMPLEMENTED.md` §7** — fixed-size arrays in structs,
-stack-size constants, wide cells / globals.
+See **`NOT_IMPLEMENTED.md` §7** — wide cells / globals (mut bindings
+holding inline struct values without going through `[box]`).
+
+Fixed-size byte arrays in structs are covered by `[Buf N T]` fields
+(see `BUFFER_DESIGN.md`); the `[u8; 16]` Rust-style syntax was a
+hypothetical placeholder for the same feature the Buf integration
+already delivers.
