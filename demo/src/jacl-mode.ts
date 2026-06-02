@@ -21,6 +21,29 @@
  */
 
 import { StreamLanguage, StringStream } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
+
+// CodeMirror's StreamLanguage looks token names up directly in
+// @lezer/highlight `tags`; bare strings like "function" don't resolve
+// because `tags.function` is a wrapper (Tag(Tag) -> Tag), not a plain
+// Tag. We pre-build the wrapped forms here and hand them to
+// StreamLanguage via `tokenTable`. Names that are already plain tags
+// (keyword, string, ...) we re-list so the table is the single source
+// of truth.
+const TOKEN_TABLE = {
+  function:     t.function(t.variableName),  // call heads
+  keyword:      t.keyword,
+  typeName:     t.typeName,
+  string:       t.string,
+  number:       t.number,
+  comment:      t.comment,
+  operator:     t.operator,
+  punctuation:  t.punctuation,
+  variableName: t.variableName,
+  macroName:    t.macroName,
+};
+
+type Bracket = "[" | "(" | "{";
 
 interface JaclState {
   /** Set when inside a `#{ ... }` pragma block, so we keep coloring
@@ -32,6 +55,16 @@ interface JaclState {
   /** Single-line string interpolation depth — we color the `[expr]` or
    *  `(expr)` payload as code, not string. Stack of close chars. */
   interpStack: string[];
+  /** Bracket nesting so we know which JACL parse mode is active:
+   *  `[` juxtaposition (head position), `(` infix (no head), `{` command
+   *  block (each statement starts with a head). Top of stack drives
+   *  head-detection at statement boundaries. */
+  bracketStack: Bracket[];
+  /** True when the next identifier we tokenize should be styled as a
+   *  call head ("function"). Reset to false once an identifier or
+   *  value is consumed. Set after `[`, `{`, `|`, `;`, and newlines
+   *  whose enclosing mode isn't `(`. */
+  expectingHead: boolean;
 }
 
 const KEYWORDS = new Set([
@@ -62,13 +95,26 @@ const startState = (): JaclState => ({
   inPragma: false,
   tripleString: null,
   interpStack: [],
+  bracketStack: [],
+  // The very first token of the document is at "top of statement",
+  // which we treat as a call-head position (matches the top-level {}
+  // command mode JACL implies).
+  expectingHead: true,
 });
 
 const copyState = (s: JaclState): JaclState => ({
   inPragma: s.inPragma,
   tripleString: s.tripleString,
   interpStack: s.interpStack.slice(),
+  bracketStack: s.bracketStack.slice(),
+  expectingHead: s.expectingHead,
 });
+
+/** Top-of-stack helper. Empty stack is treated as `{` (top-level
+ *  command mode) for head-position purposes. */
+function topMode(stack: Bracket[]): Bracket {
+  return stack.length === 0 ? "{" : stack[stack.length - 1];
+}
 
 /** Match the inside of a string from the current position, handling
  *  `$ident`, `$[expr]`, and `$(expr)` interpolation forms by either
@@ -125,7 +171,17 @@ const jaclMode = StreamLanguage.define<JaclState>({
   name: "jacl",
   startState,
   copyState,
+  tokenTable: TOKEN_TABLE,
   token(stream, state) {
+    // At the start of a new physical line, reset expectingHead if the
+    // enclosing parse mode is statement-oriented (top level or `{}`
+    // command block). Inside `[]` juxtaposition or `()` infix a newline
+    // is just whitespace -- no implicit statement break.
+    if (stream.sol()) {
+      const mode = topMode(state.bracketStack);
+      if (mode === "{") state.expectingHead = true;
+    }
+
     // Continue a triple-quoted string spanning lines.
     if (state.tripleString) {
       return tokenizeStringBody(stream, state, state.tripleString, true);
@@ -160,6 +216,7 @@ const jaclMode = StreamLanguage.define<JaclState>({
     // Strings.
     const q = stream.peek();
     if (q === '"' || q === "'") {
+      state.expectingHead = false;
       // Look for triple-quoted opener.
       if (stream.match(q.repeat(3))) {
         state.tripleString = q;
@@ -183,12 +240,15 @@ const jaclMode = StreamLanguage.define<JaclState>({
     // Variable reference: $identifier.
     if (stream.eat("$")) {
       stream.eatWhile(/[A-Za-z0-9_\-?!]/);
+      state.expectingHead = false;
       return "variableName";
     }
 
-    // Shell external: !cmd.
+    // Shell external: !cmd. The cmd name IS the call head, so this
+    // token's also the act of invocation -- consume the head slot.
     if (stream.eat("!")) {
       stream.eatWhile(/[A-Za-z0-9_\-./]/);
+      state.expectingHead = false;
       return "macroName";
     }
 
@@ -196,20 +256,42 @@ const jaclMode = StreamLanguage.define<JaclState>({
     if (/[0-9]/.test(q ?? "") || (q === "-" && /[0-9]/.test(stream.string.charAt(stream.pos + 1) ?? ""))) {
       // Optional leading minus
       stream.eat("-");
-      if (stream.match(/0x[0-9a-fA-F_]+/)) return "number";
-      if (stream.match(/0b[01_]+/)) return "number";
-      if (stream.match(/[0-9_]+\.[0-9_]+([eE][-+]?[0-9]+)?/)) return "number";
-      if (stream.match(/[0-9_]+[eE][-+]?[0-9]+/)) return "number";
-      if (stream.match(/[0-9_]+/)) return "number";
+      if (stream.match(/0x[0-9a-fA-F_]+/)) { state.expectingHead = false; return "number"; }
+      if (stream.match(/0b[01_]+/))         { state.expectingHead = false; return "number"; }
+      if (stream.match(/[0-9_]+\.[0-9_]+([eE][-+]?[0-9]+)?/)) { state.expectingHead = false; return "number"; }
+      if (stream.match(/[0-9_]+[eE][-+]?[0-9]+/))             { state.expectingHead = false; return "number"; }
+      if (stream.match(/[0-9_]+/))                            { state.expectingHead = false; return "number"; }
     }
 
     // Brackets / parens / braces.
     const ch = stream.peek();
-    if (ch === "[" || ch === "]" ||
-        ch === "{" || ch === "}" ||
-        ch === "(" || ch === ")") {
+    if (ch === "[" || ch === "{" || ch === "(") {
       stream.next();
-      // Close-paren / close-brace pops an interpolation level.
+      state.bracketStack.push(ch as Bracket);
+      // `[head args]` always puts the first token in call position.
+      // `{}` is ambiguous: command block in `proc main {} { body }`
+      // (body's first token IS a head), but destructuring / param /
+      // struct-field list in `proc add {a b}` / `def {x, y} val` /
+      // `struct Pt {i32 x, i32 y}` (first token is NOT a head). The
+      // stream tokenizer can't tell these apart without real syntax
+      // context, so we don't auto-set head here; the statement-start
+      // rules (SOL, `;`, `|`) catch the common multi-line block
+      // pattern at the next line break. The cost is a one-liner like
+      // `{ print $it }` not painting `print` as a call.
+      // `(` opens infix mode where the first token isn't a callable.
+      state.expectingHead = ch === "[";
+      return "punctuation";
+    }
+    if (ch === "]" || ch === "}" || ch === ")") {
+      stream.next();
+      const top = state.bracketStack[state.bracketStack.length - 1];
+      const expectedClose = top === "[" ? "]" : top === "{" ? "}" : top === "(" ? ")" : null;
+      if (expectedClose === ch) state.bracketStack.pop();
+      // After closing, we're back in the parent mode; conservatively
+      // assume this token was an argument/value -- the next thing is
+      // not a head unless a pipe / newline / `;` resets it.
+      state.expectingHead = false;
+      // String interpolation close: `$[..]` or `$(..)` pops here too.
       if ((ch === "]" || ch === ")") &&
           state.interpStack.length > 0 &&
           state.interpStack[state.interpStack.length - 1] === ch) {
@@ -219,24 +301,63 @@ const jaclMode = StreamLanguage.define<JaclState>({
     }
 
     // Standalone operators.
-    if (stream.match(/->/)) return "operator";
-    if (stream.match(/=>/)) return "operator";
-    if (stream.match(/\?\./)) return "operator";
-    if (stream.match(/::/)) return "operator";
-    if (stream.match(/\.\.</)) return "operator";
-    if (stream.match(/\.\.=/)) return "operator";
-    if (stream.match(/\.\./)) return "operator";
-    if (stream.match(/[+\-*/%<>=!|&^~]/)) return "operator";
-    if (stream.match(/[:,;]/)) return "punctuation";
-    if (stream.match(/[.@]/)) return "punctuation";
+    // Pipe `|` between commands resets head-expectation: the next
+    // identifier starts a new pipeline stage.
+    if (stream.match(/\|/)) { state.expectingHead = true; return "operator"; }
+    if (stream.match(/->/)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/=>/)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/\?\./)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/::/)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/\.\.</)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/\.\.=/)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/\.\./)) { state.expectingHead = false; return "operator"; }
+    if (stream.match(/[+\-*/%<>=!&^~]/)) {
+      // Operators in head position (e.g. `[+ 1 2]`) are themselves the
+      // call -- don't disturb expectingHead semantics for the args.
+      state.expectingHead = false;
+      return "operator";
+    }
+    // `;` ends a statement; `,` separates items but in `{}` mode also
+    // separates statements.
+    if (stream.eat(";")) {
+      const mode = topMode(state.bracketStack);
+      if (mode === "{") state.expectingHead = true;
+      return "punctuation";
+    }
+    if (stream.eat(",")) {
+      // `,` is overloaded: statement separator in `{}` blocks AND list
+      // separator in param lists / destructuring / struct fields /
+      // typed-vec elements. We can't distinguish without parsing, so
+      // treat it as a non-resetting list separator. The cost is that
+      // `def p 1, def q 2` won't paint the second statement's head;
+      // newline-separated statements (the common case) work fine.
+      return "punctuation";
+    }
+    if (stream.eat(":")) { state.expectingHead = false; return "punctuation"; }
+    if (stream.eat(".")) { state.expectingHead = false; return "punctuation"; }
+    if (stream.eat("@")) { state.expectingHead = false; return "punctuation"; }
 
     // Identifiers — keywords, type names, or generic.
     if (stream.match(/[A-Za-z_][A-Za-z0-9_\-?!]*/)) {
       const ident = stream.current();
-      if (KEYWORDS.has(ident)) return "keyword";
-      if (TYPE_NAMES.has(ident)) return "typeName";
-      // Capitalized → likely a struct constructor or type ref.
-      if (/^[A-Z]/.test(ident)) return "typeName";
+      // Keywords always win, regardless of position. A keyword "consumes"
+      // the head slot (we don't want `n` in `def n 7` painted as a call).
+      if (KEYWORDS.has(ident)) {
+        state.expectingHead = false;
+        return "keyword";
+      }
+      if (TYPE_NAMES.has(ident) || /^[A-Z]/.test(ident)) {
+        state.expectingHead = false;
+        return "typeName";
+      }
+      // Position-driven: identifier in call-head position is "function".
+      if (state.expectingHead) {
+        state.expectingHead = false;
+        return "function";
+      }
+      // Otherwise it's an argument-position bareword (binding name,
+      // field name, atom-style identifier, ...).
+      state.expectingHead = false;
       return null;
     }
 

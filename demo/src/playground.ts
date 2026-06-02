@@ -16,10 +16,21 @@
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
 import { vim } from "@replit/codemirror-vim";
 
 import { jacl as jaclMode } from "./jacl-mode";
+
+// JACL-specific overlay style: call heads get a distinct color so the
+// "thing in invocation position" reads at a glance. Layered on top of
+// defaultHighlightStyle (which still handles keywords, strings,
+// numbers, types, ...). function(variableName) is the wrapped tag the
+// JACL mode emits via its tokenTable for any identifier that lands in
+// a [head args] / [{commands}] / pipe-stage / top-of-statement slot.
+const jaclHighlight = HighlightStyle.define([
+  { tag: t.function(t.variableName), color: "#22d", fontWeight: "500" },
+]);
 import { JaclVM, RunResult } from "./jacl-wasm";
 import { initSplitter } from "./splitter";
 
@@ -69,6 +80,7 @@ function buildEditor(initial: string): EditorView {
       bracketMatching(),
       indentOnInput(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      syntaxHighlighting(jaclHighlight),
       jaclMode(),
       keymap.of([
         ...defaultKeymap,
