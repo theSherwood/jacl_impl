@@ -107,6 +107,10 @@ async function loadExamples() {
     const resp = await fetch('examples.json');
     examples = await resp.json();
     searchInput.placeholder = `Search ${examples.length} examples...`;
+    const tour = examples.find(ex => ex.name === 'tour');
+    if (tour && editor.value === DEFAULT_CODE) {
+      editor.value = tour.code;
+    }
   } catch (e) {
     searchInput.placeholder = 'Examples unavailable';
     searchInput.disabled = true;

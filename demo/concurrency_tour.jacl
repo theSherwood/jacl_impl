@@ -2,6 +2,7 @@
 # expect: true
 # expect: [vec 10 20]
 # expect: 7
+# expect: slept
 # expect: tour complete
 
 ## Concurrency companion to demo/feature_tour.jacl.
@@ -30,6 +31,12 @@ proc main {} {
   # `race` runs N blocks, returns the first to complete.
   def r2 [race { 7 } { 7 }]
   print $r2                       # → 7
+
+  # `sleep` suspends the calling proc and resumes after the deadline.
+  # Argument is seconds (float); sub-millisecond rounds up to the
+  # worker idle-park granularity.
+  sleep 0.01
+  print "slept"                   # → slept
 
   print "tour complete"
 }

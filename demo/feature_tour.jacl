@@ -103,6 +103,15 @@
 # expect: 2
 # expect: 1
 # expect: [vec 4 16 36 64 100]
+# expect: 256
+# expect: 69
+# expect: 42
+# expect: 127
+# expect: 1
+# expect: 42
+# expect: hello
+# expect: changed: 0 -> 1
+# expect: changed: 1 -> 5
 # expect: tour complete
 
 # --- 1. Comments and pragmas ------------------------------------------
@@ -555,6 +564,65 @@ print $shadowed
 #     print [race { 7 } { 7 }]        # → 7
 #   }
 #   main
+
+# --- 26. Buffers: [Buf N T] fixed-size flat array -------------------
+# Compile-time-sized, contiguous, ABI-flat. Fills the gap between
+# [Ptr T] (single element, raw) and [Vec T] (GC-owned, growable).
+# Buf fields produce [Ptr T] on access; nested bufs read/write via
+# arrow chains.
+struct ElfHeader {i32 version, [Buf 4 u8] magic}
+proc demo-buf {} {
+  # Zero-init scalar buffer; length is a compile-time constant.
+  def [Buf 256 u8] scratch
+  # => 256
+  print [buf-len $scratch]
+
+  # Literal init must match LHS annotation exactly.
+  def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
+  # => 69
+  print [buf-get $magic 1]                              # 0x45 = 69
+
+  # Nested buffer: 2D grid, arrow-chain set/get at any depth.
+  def [Buf 3 [Buf 4 i32]] grid
+  set $grid->1->2 42
+  # => 42
+  print $grid->1->2
+
+  # Buf as struct field: $h->magic decays to [Ptr u8].
+  def h [ElfHeader 1]
+  def [Ptr u8] m $h->magic
+  set $m->0 0x7f
+  # => 127
+  print $m->0
+  # => 1
+  print $h->version
+}
+demo-buf
+
+# --- 27. [Box T] typed annotation -----------------------------------
+# Explicit boxed-type binding; composes inside [Buf N T] and structs.
+proc demo-box {} {
+  def [Box i32] bi [box 42]
+  # => 42
+  print [deref $bi]
+  def [Box str] bs [box "hello"]
+  # => hello
+  print [deref $bs]
+}
+demo-box
+
+# --- 28. Atom listeners: watch / unwatch ----------------------------
+# Registered closure fires synchronously after each commit, receives
+# (old, new), and runs on the thread that committed the change.
+# => changed: 0 -> 1
+# => changed: 1 -> 5
+def acounter [atom 0]
+logger = proc {old, new} { print "changed: $old -> $new" }
+watch $acounter "log" $logger
+reset $acounter 1
+swap $acounter [\ + $it 4]
+unwatch $acounter "log"
+reset $acounter 999                     # silent — listener removed
 
 print "tour complete"
 # => tour complete
