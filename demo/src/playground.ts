@@ -22,14 +22,17 @@ import { vim } from "@replit/codemirror-vim";
 
 import { jacl as jaclMode } from "./jacl-mode";
 
-// JACL-specific overlay style: call heads get a distinct color so the
-// "thing in invocation position" reads at a glance. Layered on top of
-// defaultHighlightStyle (which still handles keywords, strings,
-// numbers, types, ...). function(variableName) is the wrapped tag the
-// JACL mode emits via its tokenTable for any identifier that lands in
-// a [head args] / [{commands}] / pipe-stage / top-of-statement slot.
+// JACL-specific overlay style. Layered on top of defaultHighlightStyle
+// (which handles keywords, strings, numbers, types, comments, ...).
+//   - function(variableName) → call heads, painted distinct blue. The
+//     wrapped tag comes via the JACL mode's tokenTable; see jacl-mode.
+//   - variableName → `$var` refs. The default style doesn't give plain
+//     variableName a color; we pick a teal so user-level data flow is
+//     visually traceable without competing with calls (blue) or types
+//     (dark green).
 const jaclHighlight = HighlightStyle.define([
   { tag: t.function(t.variableName), color: "#22d", fontWeight: "500" },
+  { tag: t.variableName,             color: "#178" },
 ]);
 import { JaclVM, RunResult } from "./jacl-wasm";
 import { initSplitter } from "./splitter";
@@ -79,7 +82,13 @@ function buildEditor(initial: string): EditorView {
       history(),
       bracketMatching(),
       indentOnInput(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      // Both highlighters are registered as *main* (no `fallback: true`).
+      // With fallback, defaultHighlightStyle was demoted to "only used
+      // if no main highlighter is registered"; my jaclHighlight then
+      // suppressed it for every tag it didn't itself style, killing
+      // string/number/comment/keyword colors. Both as main → CM unions
+      // the classes they emit (per syntaxHighlighting docstring).
+      syntaxHighlighting(defaultHighlightStyle),
       syntaxHighlighting(jaclHighlight),
       jaclMode(),
       keymap.of([
