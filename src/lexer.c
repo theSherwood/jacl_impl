@@ -291,6 +291,11 @@ int lexer__is_operator_char(char c) {
          c == '^' || c == '|' || c == '~';
 }
 
+/* Forward declaration: lexer__lex_number is defined further down but
+ * called from the negative-literal helper below. Required for the strict
+ * `-Werror=implicit-function-declaration` flag the wasm build uses. */
+void lexer__lex_number(Lexer* lex, TokenArray* arr, uint32_t* error_count);
+
 /* Negative numeric literal: '-' glued to a digit (no whitespace).
  * Lex the magnitude via lexer__lex_number, then patch the just-pushed
  * token to include the leading '-' in its source span and negate its
