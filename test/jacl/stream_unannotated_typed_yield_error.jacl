@@ -1,0 +1,8 @@
+# expect-error: yield of typed value (i64) in an unannotated generator
+# §4 Phase 2: unannotated generator is `[Stream dyn]`; yielding a
+# concretely-typed value forces explicit `[Stream T]` annotation
+# (no inference). Literal yields stay dyn (see
+# stream_unannotated_literal_yield.jacl for the positive control).
+proc gen {} { def i64 a 1; yield $a }
+proc main {} { for [gen] i { print $i } }
+main

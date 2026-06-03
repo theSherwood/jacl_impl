@@ -1,0 +1,9 @@
+# expect: 1
+# expect: 2
+# expect: 3
+# §4 Phase 2 positive control: literal yields in an unannotated
+# generator stay dyn (literal-flex exemption), so the stream is
+# `[Stream dyn]` and the yields are accepted.
+proc gen {} { yield 1; yield 2; yield 3 }
+proc main {} { for [gen] i { print $i } }
+main

@@ -5412,7 +5412,7 @@ static int test_sm_struct_generator_heap_path(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc gen {} {\n"
+      "proc gen {} [Stream i32] {\n"
       "  def p [Point x 10 y 20]\n"
       "  [yield $p->x]\n"
       "  [yield $p->y]\n"

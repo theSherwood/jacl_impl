@@ -9117,7 +9117,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
     if (c->sm_analysis) {
-      /* SM mode: write value to state object field instead of local slot. */
+      /* SM mode: write value to state object field instead of local slot.
+         §4 Phase 2: typed scalars (i64 / u64 / f64) compile to unboxed
+         raw 64-bit bits on the stack (OP_CONST_I64 etc.). State-field
+         slots are tagged JaclVal storage, so the raw bits must be boxed
+         before SET_STATE_FIELD or they round-trip as nil/garbage on
+         later reads. The fall-through path (sf=NULL, local goes onto
+         the stack instead) needs the same treatment because the local
+         slot defaults to TYPE_DYN — a raw-i64 bit pattern in a dyn slot
+         reads back as nil (NaN-box tag bits collide). */
       const StateField* sf = sm__get_field(&c->sm_analysis->state_layout, name_val);
       if (sf) {
         if (sf->struct_type_idx != 0) {
@@ -9126,13 +9134,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)sf->field_index, line);
           compiler__emit_byte(c, (uint8_t)sf->width, line);
         } else {
+          compiler__ensure_boxed(c, line);
           compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
           compiler__emit_byte(c, (uint8_t)sf->field_index, line);
         }
         /* def returns nil */
         compiler__emit_byte(c, OP_NIL, line);
       } else {
-        /* Name not in state layout — shouldn't happen, but fall through */
+        /* Name not in state layout (e.g. liveness pass culled it because
+           the binding doesn't cross a suspension). Fall through to a
+           regular stack local. Box typed scalars first since the local
+           slot defaults to dyn. */
+        compiler__ensure_boxed(c, line);
         {
           uint32_t prev_mark = c->current_scope_mark;
           c->current_scope_mark = bind_scope_mark;
@@ -12871,10 +12884,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* SM yield: spill enclosing operand stack, compile value,
          set resume_point, emit OP_YIELD_SM. After resume, push nil
          (yield's value) and restore spilled values below it. See
-         SuspensionPoint::pre_stack_depth. */
+         SuspensionPoint::pre_stack_depth.
+         §4 Phase 2: if the compiled value is in unboxed wide-cell
+         form (i64/u64/f64 — typed scalars), box it back to a tagged
+         JaclVal before OP_YIELD_SM. Without this bridge,
+         `def i64 a 42; yield $a` lands raw 64-bit bits in stream
+         storage and pulls back as nil. */
       uint16_t depth = compiler__suspension_pre_stack_depth(c);
       compiler__emit_spill_operand_stack(c, depth, line);
       compiler__compile_node(c, args[0]);
+      compiler__ensure_boxed(c, line);
       uint32_t sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);

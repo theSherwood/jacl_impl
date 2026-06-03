@@ -2927,6 +2927,29 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     typer__infer_node(tc, arg);
     tc->expected_type = saved_et;
   }
+  /* §4 Phase 2: `yield $typed` in an unannotated generator (proc
+   * has no `[Stream T]` return type, so the stream is implicitly
+   * `[Stream dyn]`) is a compile error. Literals stay flex/dyn and
+   * are allowed. The user must annotate the proc with `[Stream T]`
+   * to yield typed values — no inference, mirroring proc return
+   * types. */
+  if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
+      tc->yield_elem_struct_idx == UINT32_MAX) {
+    AstNode* arg = node->data.command.args[0];
+    bool is_literal = (arg->type == AST_LIT_INT ||
+                       arg->type == AST_LIT_FLOAT ||
+                       arg->type == AST_LIT_STRING);
+    JaclType arg_t = (JaclType)arg->inferred_type;
+    if (!is_literal && arg_t != TYPE_DYN && arg_t != TYPE_NIL) {
+      char err[224];
+      snprintf(err, sizeof(err),
+               "type error: yield of typed value (%s) in an unannotated "
+               "generator; annotate the proc with `[Stream %s]` or "
+               "convert the value to dyn",
+               type_name(arg_t), type_name(arg_t));
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    }
+  }
   /* [yield X] inside `[Stream T]` (T != dyn): verify the yielded
    * expression's type matches T. Yield-into-[Stream dyn] stays lenient
    * (typed→dyn widens implicitly, parallel to proc returns/dyn args).
