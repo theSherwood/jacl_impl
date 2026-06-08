@@ -34,7 +34,9 @@
 #define SA_FREE         SA_NS(_free)
 #define SA_COUNT        SA_NS(_count)
 #define SA_PUSH         SA_NS(_push)
+#define SA_POP          SA_NS(_pop)
 #define SA_GET          SA_NS(_get)
+#define SA_SET          SA_NS(_set)
 #define SA_SWAP_REMOVE  SA_NS(_swap_remove)
 #define SA_SORT         SA_NS(_sort)
 #define SA_ITER_T       SA_NS(_iter_t)
@@ -169,6 +171,35 @@ static inline SEG_ARRAY_T* SA_PUSH(SA_T* sa, SEG_ARRAY_T value) {
   *ptr = value;
   sa->count++;
   return ptr;
+}
+
+/* In-place write of an existing element. Returns a pointer to the slot, or
+ * NULL if index is out of bounds. Does NOT grow — growth past the end is the
+ * caller's concern (the VM's lenient arr-set fills the gap with pushes). */
+static inline SEG_ARRAY_T* SA_SET(SA_T* sa, uint32_t index, SEG_ARRAY_T value) {
+  SEG_ARRAY_T* slot = SA_GET(sa, index);
+  if (slot) *slot = value;
+  return slot;
+}
+
+/* Order-preserving tail remove. Writes the removed element to *out (if
+ * non-NULL) and returns 0; returns -1 if the array is empty. Unlike
+ * swap_remove this keeps element order — it only ever touches the last
+ * element, addressing it directly via the cached cursor and sliding the
+ * cursor down with the same logic swap_remove uses for its last-segment
+ * empty case. */
+static inline int SA_POP(SA_T* sa, SEG_ARRAY_T* out) {
+  if (!sa || sa->count == 0) return -1;
+  uint32_t     last_slot = (sa->count - 1) - sa->last_seg_base;
+  SEG_ARRAY_T* src       = (SEG_ARRAY_T*)(sa->segments[sa->last_seg] + last_slot * sizeof(SEG_ARRAY_T));
+  if (out) *out = *src;
+  sa->count--;
+  if (sa->last_seg > 0 && sa->count == sa->last_seg_base) {
+    sa->next_grow_at  = sa->last_seg_base;
+    sa->last_seg--;
+    sa->last_seg_base = SA_NS(_capacity_for_segments)(sa->last_seg);
+  }
+  return 0;
 }
 
 static inline int SA_SWAP_REMOVE(SA_T* sa, uint32_t index) {
@@ -310,7 +341,9 @@ static inline SEG_ARRAY_T* SA_ITER_NEXT(SA_ITER_T* it) {
 #undef SA_FREE
 #undef SA_COUNT
 #undef SA_PUSH
+#undef SA_POP
 #undef SA_GET
+#undef SA_SET
 #undef SA_SWAP_REMOVE
 #undef SA_SORT
 #undef SA_ITER_T

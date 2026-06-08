@@ -588,6 +588,77 @@ int test_sort_stress_all_equal(void) {
   TEST_PASS();
 }
 
+int test_set(void) {
+  printf("test_set: ");
+  tracker_reset();
+
+  int_seg_t* arr = int_seg_create(&tracked_allocator);
+  int* p0 = int_seg_push(arr, 10);
+  int_seg_push(arr, 20);
+  int_seg_push(arr, 30);
+
+  /* In-bounds set returns the (stable) slot pointer and updates in place. */
+  int* sp = int_seg_set(arr, 1, 99);
+  ASSERT(sp != NULL);
+  ASSERT_INT_EQ(*int_seg_get(arr, 1), 99);
+  ASSERT_INT_EQ(int_seg_count(arr), 3);          /* count unchanged */
+  ASSERT_PTR_EQ(int_seg_set(arr, 0, 11), p0);    /* stable pointer */
+  ASSERT_INT_EQ(*int_seg_get(arr, 0), 11);
+
+  /* Out-of-bounds set is a no-op that returns NULL. */
+  ASSERT(int_seg_set(arr, 3, 123) == NULL);
+  ASSERT(int_seg_set(arr, 999, 123) == NULL);
+  ASSERT_INT_EQ(int_seg_count(arr), 3);
+
+  int_seg_free(arr);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+int test_pop(void) {
+  printf("test_pop: ");
+  tracker_reset();
+
+  int_seg_t* arr = int_seg_create(&tracked_allocator);
+
+  /* Pop on empty returns -1 and leaves count at 0. */
+  int out = -777;
+  ASSERT_INT_EQ(int_seg_pop(arr, &out), -1);
+  ASSERT_INT_EQ(out, -777);                       /* out untouched */
+  ASSERT_INT_EQ(int_seg_count(arr), 0);
+
+  /* Push past the first two segment boundaries (64, then 192) so pop has to
+   * slide the cursor back across segments. */
+  for (int i = 0; i < 300; i++) int_seg_push(arr, i);
+  ASSERT_INT_EQ(int_seg_count(arr), 300);
+
+  /* Order-preserving: pops come back 299, 298, ... and remaining order holds. */
+  for (int i = 299; i >= 0; i--) {
+    out = -1;
+    ASSERT_INT_EQ(int_seg_pop(arr, &out), 0);
+    ASSERT_INT_EQ(out, i);
+    ASSERT_INT_EQ((int)int_seg_count(arr), i);
+    if (i > 0) ASSERT_INT_EQ(*int_seg_get(arr, i - 1), i - 1);
+  }
+  ASSERT_INT_EQ(int_seg_count(arr), 0);
+
+  /* Empty again after draining. */
+  ASSERT_INT_EQ(int_seg_pop(arr, &out), -1);
+
+  /* Refill after full drain still works (segments were retained). */
+  int_seg_push(arr, 42);
+  ASSERT_INT_EQ(*int_seg_get(arr, 0), 42);
+  ASSERT_INT_EQ(int_seg_count(arr), 1);
+
+  /* Pop with NULL out is allowed (discards the value). */
+  ASSERT_INT_EQ(int_seg_pop(arr, NULL), 0);
+  ASSERT_INT_EQ(int_seg_count(arr), 0);
+
+  int_seg_free(arr);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 int main(void) {
   int passed = 0;
   int total  = 0;
@@ -595,6 +666,8 @@ int main(void) {
   total++; passed += test_create_free();
   total++; passed += test_push_get();
   total++; passed += test_stable_pointers_across_segments();
+  total++; passed += test_set();
+  total++; passed += test_pop();
   total++; passed += test_swap_remove();
   total++; passed += test_swap_remove_across_segments();
   total++; passed += test_iterator_after_swap_remove_to_empty();
