@@ -115,8 +115,11 @@ From `DESIGN.md` "Project Layout" and `DESIGN_CRITIQUE.md` §3.2, §3.4.
   fixed-size `[Buf N T]`. Needs a GC object kind + tracing for
   ref-element segments, write-barrier integration on mutating ops,
   typer rules mirroring `[Vec T]`'s element-type machinery, and a
-  builtin set (push / pop / get / set / len / iter). Projected
-  wiring add: not yet scoped.
+  builtin set (push / pop / get / set / len / iter). **Scoped in
+  `ARR_DESIGN.md`** (2026-06-08): four gating decisions settled
+  (identity-eq reference semantics, builtins-then-arrow indexing,
+  single-owner-unsynchronized concurrency, lenient vec-style bounds);
+  M1–M6 milestones laid out. Remove this item when M5 lands.
 
 ---
 
