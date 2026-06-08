@@ -182,11 +182,14 @@ pulling on them; revisit when one shows up.
   `inferred_struct_idx`. Two pieces of the original §4 stream item
   remain deferred:
 
-  1. **For-loop binding narrowing.** Landed for `arr`, all scalars
-     (2026-06-08): `for [a] x { }` over `[Arr i32/u32/f32/bool]` AND
-     `[Arr i64/u64/f64]` narrows the binding to the element scalar (typer
-     `HEAD_FOR` case + compiler arr branch), and struct-element arrs
-     narrow to the struct. Wide scalars work in **both** plain and
+  1. **For-loop binding narrowing.** Landed for `arr` AND `vec`, all
+     scalars (2026-06-08): `for [a] x { }` over `[Arr T]` / `[Vec T]`
+     narrows the binding to the element scalar (typer `HEAD_FOR` case +
+     compiler arr/vec branches), incl. wide `i64/u64/f64`; struct-element
+     arrs/vecs narrow to the struct. (The vec scalar path also fixed a
+     pre-existing **segfault**: scalar `[Vec i64]` for-loops ran
+     `struct__slot_width` on a scalar sentinel — `vec_for_scalar.jacl`.)
+     Wide scalars work in **both** plain and
      suspending (SM) procs: non-SM loops store the wide binding in a typed
      local; SM loops store it **boxed** in the GC-traced state field and
      the var-ref read unboxes via `node->inferred_type`. This was part of
@@ -197,7 +200,7 @@ pulling on them; revisit when one shows up.
      `nil` bug is fixed, and wide scalars returned from a dyn-return proc
      are boxed at the return boundary (`compiler__emit_return` +
      `compile_sm_stmts` tail). Tests: `arr_for_wide`, `sm_wide_scalar`,
-     `wide_proc_return`.
+     `wide_proc_return`, `vec_for_scalar`.
 
      **Still deferred: stream for-bindings.** `for $it in [gen]` where the
      stream is `[Stream i64]` keeps `$it` dyn — streams store tagged

@@ -2713,14 +2713,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (body) {
         typer__infer_node(tc, as[0]);
         JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
-        if ((JaclType)as[0]->inferred_type == TYPE_TYPED_ARR &&
+        JaclType coll_t = (JaclType)as[0]->inferred_type;
+        if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC) &&
             as[0]->inferred_struct_idx != UINT32_MAX) {
           uint32_t eidx = as[0]->inferred_struct_idx;
           if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
             /* Narrow to the element scalar — all scalars, including wide
              * i64/u64/f64. Non-SM loops store the wide binding in a typed
              * local; SM loops store it boxed in a state field and the
-             * var-ref read unboxes via the node's inferred_type. */
+             * var-ref read unboxes via the node's inferred_type. Applies to
+             * both [Arr T] and [Vec T] element bindings. */
             bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
           } else if (eidx < tc->struct_count) {
             bt = TYPE_STRUCT; bsi = eidx;

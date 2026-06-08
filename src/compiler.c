@@ -11046,9 +11046,35 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* ====== Vector-based inlined for loop (original path) ======
        Hidden locals: __col, __len, __idx, $it/name */
 
-    /* Track typed vec element type for the loop binding */
+    /* Track typed vec element type for the loop binding. A TYPE_TYPED_VEC is
+     * either struct-element (elem_struct_idx is a registry idx → inline-width
+     * binding) or scalar-element ([Vec i32]/[Vec i64]… → elem_struct_idx is a
+     * scalar sentinel). The scalar case mirrors the arr branch: tagged
+     * scalars narrow in a local; wide scalars (i64/u64/f64) store boxed in an
+     * SM state field and read back via node->inferred_type, or raw in a
+     * non-SM local. (Treating every typed-vec as struct used to crash on
+     * scalar vecs — struct__slot_width on a scalar sentinel.) */
     bool is_typed_vec_loop = (col_type == TYPE_TYPED_VEC);
     uint32_t elem_struct_idx = args[0]->inferred_struct_idx;
+    bool vec_struct_elem = is_typed_vec_loop &&
+                           !COMPILER_IS_SCALAR_TYPE_IDX(elem_struct_idx);
+    JaclType vec_scalar_t = TYPE_DYN;
+    if (is_typed_vec_loop && COMPILER_IS_SCALAR_TYPE_IDX(elem_struct_idx))
+      vec_scalar_t = COMPILER_TYPE_IDX_TO_SCALAR(elem_struct_idx);
+    bool vec_elem_wide = (vec_scalar_t == TYPE_I64 ||
+                          vec_scalar_t == TYPE_U64 ||
+                          vec_scalar_t == TYPE_F64);
+
+    /* Is the binding an SM state field? Computed up front to gate the
+     * non-SM local narrowing (mirrors the arr branch). */
+    int vec_sm_field = -1;
+    if (c->sm_analysis) {
+      JaclVal vbn = compiler__name_val(c->heap, c->intern_table,
+                                       bind_name, bind_name_len);
+      vec_sm_field = sm__find_field(&c->sm_analysis->state_layout, vbn);
+    }
+    bool vec_narrow_local = is_typed_vec_loop && !vec_struct_elem &&
+                            vec_scalar_t != TYPE_DYN && vec_sm_field < 0;
 
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -11064,7 +11090,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_NIL, line);
     JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
-    if (is_typed_vec_loop) {
+    if (vec_struct_elem) {
       c->locals[c->local_count - 1].type = TYPE_STRUCT;
       c->locals[c->local_count - 1].struct_type_idx = elem_struct_idx;
       /* Mark as inline and add padding locals for width > 1 */
@@ -11077,6 +11103,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__add_local(c, jacl_inline_string("", 0), line, col);
         c->locals[c->local_count - 1].depth = c->scope_depth;
       }
+    } else if (vec_narrow_local) {
+      c->locals[c->local_count - 1].type = vec_scalar_t;
     }
 
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
@@ -11112,17 +11140,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Update element: $it = __col[__idx]. In SM mode the binding may
      * live in a state field — see the stream-loop branch above for the
      * full rationale. */
-    int sm_bind_field = -1;
-    if (c->sm_analysis) {
-      JaclVal bn = compiler__name_val(c->heap, c->intern_table,
-                                        bind_name, bind_name_len);
-      sm_bind_field = sm__find_field(&c->sm_analysis->state_layout, bn);
-    }
+    int sm_bind_field = vec_sm_field;
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, col_slot, line);
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, idx_slot, line);
-    if (is_typed_vec_loop) {
+    if (vec_struct_elem) {
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
       /* Typed-vec binding into a state field would need OP_SET_STATE_
@@ -11133,6 +11156,26 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
       compiler__emit_byte(c, elem_slot, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+    } else if (is_typed_vec_loop) {
+      /* Scalar typed-vec ([Vec i32]/[Vec i64]…): OP_TYPED_VEC_GET_INLINE's
+       * scalar path (type_idx >= 0xFF00) pushes a single slot — tagged for
+       * i32/u32/f32/bool, raw wide bits for i64/u64/f64. Store like the arr
+       * scalar path: box a wide value into an SM state field; otherwise store
+       * the narrowed rep directly into the local. */
+      compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+      compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+      if (sm_bind_field >= 0) {
+        if (vec_elem_wide) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)vec_scalar_t, line);
+        }
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
+      } else {
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, elem_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
     } else {
       compiler__emit_byte(c, OP_VEC_GET, line);
       if (sm_bind_field >= 0) {

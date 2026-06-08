@@ -1,0 +1,34 @@
+# expect: 1
+# expect: 2
+# expect: 3
+# expect: 60
+# expect: 15
+# expect: ok
+# Scalar typed-vec for-loops ([Vec i32], [Vec i64], ...). Regression for a
+# segfault: the for-loop's typed-vec branch used to treat ALL [Vec T] as
+# struct-element (struct__slot_width on a scalar sentinel → crash). Now it
+# discriminates scalar vs struct and narrows the binding like the arr branch:
+# tagged scalars in a typed local, wide scalars boxed in SM state fields.
+proc sum-sm {} {
+  def fut [spawn { 0 }]          # SM proc
+  def v [[Vec i64] 5 5 5]
+  mut i64 t 0
+  for $v n { set t [+ $t $n] }   # wide binding across the proc (state field)
+  await $fut
+  $t
+}
+proc main {} {
+  def a [[Vec i32] 1 2 3]
+  for $a x { print $x }          # 1 2 3 (was a segfault)
+
+  def b [[Vec i64] 10 20 30]
+  mut i64 total 0
+  for $b y { set total [+ $total $y] }   # narrowed wide accumulation
+  print $total                   # 60
+
+  print [sum-sm]                 # 15 (wide vec binding in an SM proc)
+
+  for $b z { assert-type $z i64 }        # binding statically narrows
+  print "ok"
+}
+main
