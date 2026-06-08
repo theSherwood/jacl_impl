@@ -1,16 +1,16 @@
-# expect: Point{x: 0, y: 0}
-# expect: Point{x: 3, y: 4}
-# expect: Point{x: 5, y: 6}
+# expect: [Point x 0 y 0]
+# expect: [Point x 3 y 4]
+# expect: [Point x 5 y 6]
 # M4.1b: $buf->N read/write for struct-element bufs. Zero-init
-# shows up as Point{x: 0, y: 0}. Stores via struct constructor
+# shows up as [Point x 0 y 0]. Stores via struct constructor
 # round-trip cleanly.
 struct Point {i32 x i32 y}
 
 def [Buf 4 Point] pts
 print $pts->0
 
-set $pts->0 [Point 3 4]
+set $pts->0 [Point x 3 y 4]
 print $pts->0
 
-set $pts->2 [Point 5 6]
+set $pts->2 [Point x 5 y 6]
 print $pts->2
