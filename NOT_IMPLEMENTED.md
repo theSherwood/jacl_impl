@@ -7,7 +7,10 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-Last refreshed: 2026-06-02 (§12 `()` infix mode removed — parser's
+Last refreshed: 2026-06-08 (§1b added — the shell / external-command
+API redesign in `SHELL_API_DESIGN.md` is now indexed here as a
+planned-but-unimplemented target; current behavior is still the
+tempfile-based `OP_EXEC` path). 2026-06-02 (§12 `()` infix mode removed — parser's
 infix surface deleted (`parser__parse_infix*`, `parser__sync_paren`,
 the `$(...)` interp branch), `TOKEN_LPAREN` now fires a "use `[]`"
 diagnostic, `TOKEN_DOLLAR_PAREN` fires a "use `$[...]`" diagnostic,
@@ -48,6 +51,45 @@ Status snapshot:
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |
 | **Regular expressions** | Medium | Lib exists (see §2) | Literal syntax (`/regex/`) + capture-group bindings + VM bridge. |
 | **Bignum / numeric tower** | Medium | Lib exists (see §2) | `JACL_TAG_BIGNUM` exists; no VM arithmetic dispatch. Plan is bigint+bigfloat with implicit promotion in `dyn`. Rationals dropped. |
+
+---
+
+## 1b. Shell / external-command API redesign
+
+Full target design: `SHELL_API_DESIGN.md` (working notes from the
+2026-05-20 conversation). It re-shapes `SYNTAX.md` §"Shell interop"
+and §"Jobs" — those describe *today's* behavior; the doc describes
+the *target* and supersedes the Job/`await` decisions sketched in
+`CHANNELS_DESIGN.md`.
+
+Motivation: today's `!cmd` API has eight concrete holes audited
+against `vm.c`/`bytecode.c` — no live stdin to a running process,
+background stdout dead until exit, second-class stderr, no exit-code
+without throwing, no tee/fan-out, no per-stream redirection at the
+call site, unspecified pipeline exit-code propagation, and
+fake stdin-from-stream streaming (buffers to tempfile first).
+
+The model is settled in broad strokes (Job as the universal
+foreground value; uniform running/finished Job shape; `&` as postfix
+sugar for `spawn`; pipe-operator family; GC-driven lifetime with a
+detached opt-out; non-zero-exit propagation with a `complete`-style
+inspection opt-out; an explicit `create-process` low-level
+primitive). **Not implemented** — current behavior is still the
+tempfile-based `OP_EXEC` path (`vm.c` ~10204–10610).
+
+Gating open question before any spike: **#4, `create-process`'s
+fd-record shape** (field names + accepted value types — channel /
+path / fd int / `discard`), since it's the primitive everything else
+lowers to. Other open questions (cancel/SIGTERM→SIGKILL escalation
+ladder, error-opt-out combinator name, per-call env override,
+per-stage stderr attribution, `.pid` convention for pipeline Jobs,
+migration from string-returning `!cmd`, `exec` vs `create-process`)
+shape ergonomics but don't gate the core path. The doc's suggested
+first spike: replace `EXEC_FLAG_BG`'s tempfile redirection
+(`vm.c:10359-10384`) with `pipe2(O_NONBLOCK)` + worker-idle-loop fd
+polling (the §8b idle loop is the natural home), exposed via a
+minimal `create-process` that attaches a channel to stdout.
+Projected wiring: not yet scoped.
 
 ---
 
