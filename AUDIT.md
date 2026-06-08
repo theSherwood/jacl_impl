@@ -106,6 +106,26 @@ the OS scheduler from migrating a worker that's holding the lock —
 preempted holder leads to all other waiters spinning until reschedule.
 Not observed in any chaos test. Consider parking after N spins.
 
+### §22. `gc__trace_object` OBJ_FUTURE trace race — *TSAN-flagged, schedule-dependent, not observed as a bug*
+
+A `--tsan` run on 2026-06-08 flagged a data race at `gc_collect.c:415`
+in the `OBJ_FUTURE` case of `gc__trace_object` — the concurrent marker
+walks the future's waiter list (`w = w->next`, line 415) and reads
+`fut->result` (line 410) while the resolving thread writes the result
+and mutates the waiter list. Schedule-dependent: it did **not** appear
+in an earlier `--tsan` run on the same tree, only surfacing under a
+different thread interleaving. The `fut->state` load is `MEM_ACQUIRE`
+(line 408) but the `fut->waiters` load is `MEM_RELAXED` (line 412) and
+the subsequent `w->next` traversal is a plain read, so the list walk is
+not ordered against concurrent waiter insertion/removal. **Not observed
+as a wrong-result or crash** — the marker conservatively pushes whatever
+it reads, and a stale waiter pointer is still a live GC object. Likely
+fix: `MEM_ACQUIRE` the `waiters` head and confirm waiter-node `next`
+links are published with release ordering by the inserting side (and
+that `result` is release-ordered before `state`). Low priority;
+investigate alongside §12 (both are `JaclFuture` concurrency). Unrelated
+to the `[Arr T]` work that surfaced it (arr paths touch no future code).
+
 ### §11. Worker idle CV-park timeout — *architectural, deferred*
 
 Phase 10/11 landed a real CV-based wake-up path. Residual: workers park
