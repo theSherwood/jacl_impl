@@ -37,6 +37,36 @@ store).
 | ⮑ **M4c** Type-position + typer | ✅ done | `typer__arr_type`; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; `[[Arr T] ...]` constructor; get narrows, push/set type-check; element-literal flex. |
 | ⮑ **M4d** Typed byte ops | 🟡 scalar done | `OP_TYPED_ARR` construct + get/set/push/pop/len byte path for scalar elements (i32/i64/u32/u64/f32/f64/bool) via `vm__arr_scalar_{store,load}`. **Struct elements (`[Arr Point]`) deferred (M4d-2)** — constructor/ops error clearly. |
 | ⮑ **M4e** GC trace + tests | 🟡 scalar done | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip (no refs). Struct recursion deferred (M4e-2). Tests: typed_scalar/i64/oob/mismatch. TSAN race-clean in arr paths. |
+| ⮑ **M4d-2/e-2** Struct-element typed arrays | ⬜ todo | `[Arr Point]`: flat `width*8`-byte slots. See "Struct-element ops" below. |
+
+### Struct-element typed arrays (M4d-2 design)
+
+Store each struct element as `vm__struct_width(sdef) * sizeof(JaclVal)`
+bytes (the wide inline form, matching typed-vec). `elem_size` is set
+accordingly; `elem_idx` is the **compiler/runtime struct registry idx**
+(`struct_registry__find`, not the typer's — sidesteps the cross-registry
+hazard, exactly as the typed-vec struct constructor does).
+
+Op split (the key constraint): a struct element occupies `width` stack
+slots *above* the receiver, so `push`/`set` must know `width` **before**
+popping — which the unified `OP_ARR_PUSH`/`OP_ARR_SET` can't (they pop a
+single `elem` slot first). So struct arrays need **`OP_TYPED_ARR_PUSH`
+/ `OP_TYPED_ARR_SET`** carrying `u16 type_idx` (mirroring
+`OP_TYPED_VEC_PUSH`). `get` / `pop` / construct (`OP_TYPED_ARR`) / `len`
+stay unified — they pop the receiver first, then derive `width` from the
+object's `elem_idx`:
+- construct: `vm__pop_struct` each element into a scratch buffer, then
+  `sa_var_push` the `width*8` bytes.
+- get: bounds-**checked** (OOB errors — a missing struct can't be `nil`
+  inline, unlike scalar/dyn get; matches `OP_TYPED_VEC_GET_INLINE`);
+  push `width` inline slots (`memset` + `memcpy total_size` + set
+  `inline_slot_bitmap`).
+- pop: `sa_var_pop` into a temp, push `width` inline slots.
+
+GC (M4e-2): `OBJ_ARR` trace's struct branch recurses
+`gc__push_record_refs(ms, base + i*elem_size, sreg, elem_idx)` per live
+element (the buf struct-element walker). Ref-store barriers fire only
+when the struct contains ref fields.
 | **M5** Identity & polish | ⬜ todo | `to-string`, error messages, tour + broader tests (identity eq + print landed in M3). |
 | **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration. |
 
