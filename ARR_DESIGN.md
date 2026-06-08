@@ -30,7 +30,7 @@ store).
 | **M0** Design (this doc) | ✅ done | Four gating decisions settled 2026-06-08 (see Decisions) |
 | **M1** Library gaps | ⬜ todo | Add `set` (in-place index write) + order-preserving `pop` to `segment_array.h` |
 | **M2** Type plumbing | ⬜ todo | `TYPE_ARR` / `TYPE_TYPED_ARR`, `TYPE_SHAPE_TYPED_ARR`, heads, parser type-position |
-| **M3** Dyn `[arr ...]` MVP | ⬜ todo | Construct / get / set / push / pop / len for tagged-JaclVal elements; GC object kind + trace + finalizer |
+| **M3** Dyn `[arr ...]` MVP | ✅ done | Construct / get / set / push / pop / len for tagged-JaclVal elements; `OBJ_ARR` GC object kind + trace + finalizer; SATB + generational write barriers; identity eq; print. Main build 90/90, TSAN race-clean (only the known chase_lev_stress flake). |
 | **M4** Typed `[[Arr T] ...]` | ⬜ todo | Struct + scalar element encodings, raw-byte leaves, typer narrowing mirroring typed-vec |
 | **M5** Identity & polish | ⬜ todo | Identity `eq`, `print`/`to-string`, error messages, tour + tests |
 | **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration |

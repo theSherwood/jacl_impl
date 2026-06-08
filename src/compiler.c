@@ -11253,6 +11253,88 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* --- Mutable arr (M3: dyn [arr ...] only; typed [[Arr T] ...] is M4) ---
+   * See ARR_DESIGN.md. arr ops mutate in place; the receiver is a reference,
+   * so unlike vec the mutating ops do not return a fresh collection. */
+
+  /* arr constructor (variadic: 0+ args) */
+  if (hid == HEAD_ARR) {
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      if (compiler__reject_bare_typed(c, args[i], line, col, "dyn arr")) return;
+    }
+    compiler__emit_byte(c, OP_ARR, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    c->last_expr_type = TYPE_ARR;
+    return;
+  }
+
+  /* arr-get builtin (exactly 2 args): OOB -> nil */
+  if (hid == HEAD_ARR_GET) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "arr-get", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_ARR_GET, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* arr-len builtin (exactly 1 arg) */
+  if (hid == HEAD_ARR_LEN) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "arr-len", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ARR_LEN, line);
+    c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* arr-push builtin (exactly 2 args): in-place append, returns new length */
+  if (hid == HEAD_ARR_PUSH) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "arr-push", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
+    compiler__emit_byte(c, OP_ARR_PUSH, line);
+    c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* arr-set builtin (exactly 3 args): in-place set, grows on OOB, returns arr */
+  if (hid == HEAD_ARR_SET) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "arr-set", "3 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__compile_node(c, args[2]);
+    if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
+    compiler__emit_byte(c, OP_ARR_SET, line);
+    c->last_expr_type = TYPE_ARR;
+    return;
+  }
+
+  /* arr-pop builtin (exactly 1 arg): remove + return last, nil if empty */
+  if (hid == HEAD_ARR_POP) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "arr-pop", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ARR_POP, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
   /* --- [buf-get $b $i] and [buf-set $b $i $v] for [Buf N T] locals ---
    * Receiver must be a bare var-ref to a TYPE_BUF local; we read
    * base_slot / elem_type / buf_len from the binding and bake them

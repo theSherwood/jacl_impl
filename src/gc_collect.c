@@ -84,7 +84,11 @@ void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
  * ====================================================================== */
 
 void gc__finalize_dead(GCHeader *hdr) {
-    (void)hdr;
+    /* OBJ_ARR owns a malloc'd segment backing store outside GC memory; free
+     * it before sweep reclaims the header. See ARR_DESIGN.md / collections.c. */
+    if (hdr->obj_type == OBJ_ARR) {
+        jacl_arr_free_segments((JaclArr *)(void *)(hdr + 1));
+    }
 }
 
 /* ======================================================================
@@ -355,6 +359,24 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         jacl_vec_root *root = (jacl_vec_root *)payload;
         if (root->root) gc__ms_push(ms, root->root);
         if (root->tail) gc__ms_push(ms, root->tail);
+        break;
+    }
+
+    /* --- Mutable [Arr T]: trace live element values in the segment backing
+     * store. count is read once; push only allocates a segment + writes the
+     * element before bumping count, so every index < count has a fully
+     * written, stably-addressed slot. A concurrent push beyond count is
+     * covered by the SATB insertion barrier on arr-set/arr-push, not here.
+     * M3 = dyn arrays (every slot is a tagged JaclVal). M4 will branch on
+     * a->elem_idx: skip raw-scalar elements, recurse into struct elements.
+     * Segments are malloc'd and freed in gc__finalize_dead. */
+    case OBJ_ARR: {
+        JaclArr *a = (JaclArr *)payload;
+        uint32_t n = a->sa.count;
+        for (uint32_t i = 0; i < n; i++) {
+            JaclVal *slot = jacl_arr_seg_get(&a->sa, i);
+            if (slot) gc__ms_push_val(ms, *slot);
+        }
         break;
     }
 

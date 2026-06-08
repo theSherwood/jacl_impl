@@ -3575,6 +3575,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_VEC_LEN,     TYPE_I32    },
       { HEAD_MAP_LEN,     TYPE_I32    },
       { HEAD_BUF_LEN,     TYPE_I32    },
+      { HEAD_ARR_LEN,     TYPE_I32    },
+      /* arr-push mutates in place and returns the new length (i32). */
+      { HEAD_ARR_PUSH,    TYPE_I32    },
       /* Hash — OP_HASH always pushes an i32 (vm.c:6859). */
       { HEAD_HASH,        TYPE_I32    },
       /* String results. */
@@ -3589,6 +3592,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_VEC,         TYPE_VEC    },
       { HEAD_MAP,         TYPE_MAP    },
       { HEAD_COLLECT,     TYPE_VEC    },
+      /* Mutable arr: constructor + in-place set (returns the arr). arr-get
+       * and arr-pop stay dyn (fall through to the default). See ARR_DESIGN.md. */
+      { HEAD_ARR,         TYPE_ARR    },
+      { HEAD_ARR_SET,     TYPE_ARR    },
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
       { HEAD_BUF_SET,     TYPE_NIL    },

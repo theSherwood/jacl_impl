@@ -1,0 +1,14 @@
+# expect: 4
+# expect: 99
+# expect: true
+# expect: false
+# M3: [Arr T] is a mutable reference type — def b $a aliases the same
+# object, and eq is identity (not structural). See ARR_DESIGN.md.
+def a [arr 1 2 3]
+def b $a
+arr-push $b 4
+print [arr-len $a]
+arr-set $a 0 99
+print [arr-get $b 0]
+print [== $a $b]
+print [== $a [arr 99 2 3 4]]

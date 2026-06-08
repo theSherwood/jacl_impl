@@ -47,7 +47,10 @@ typedef enum {
     OBJ_TYPED_HAMT_LEAF,
     OBJ_ATOM_REF,
     OBJ_WATCHER_LIST,
-    OBJ_BOX_INLINE          /* compact untyped box: payload is one JaclVal */
+    OBJ_BOX_INLINE,         /* compact untyped box: payload is one JaclVal */
+    OBJ_ARR                 /* mutable [Arr T]: JaclArr header (segment_array
+                             * inline) + malloc'd segments freed at finalize.
+                             * See ARR_DESIGN.md. */
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---

@@ -416,6 +416,7 @@ const char* vm__type_name(JaclVal v) {
   if (jacl_is_string(v))        return "string";
   if (jacl_is_closure(v))       return "closure";
   if (jacl_is_vector(v))        return "vector";
+  if (jacl_is_arr(v))           return "arr";
   if (jacl_is_map(v))           return "map";
   if (jacl_is_future(v))        return "future";
   if (jacl_is_stream(v))       return "stream";
@@ -961,6 +962,18 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_append(buf, " ", 1);
       jacl_vec_get_result gr = jacl_vec_get(vec, i);
       vm__fmt_value(buf, gr.value);
+    }
+    vm__fmt_append(buf, "]", 1);
+  } else if (jacl_is_arr(val)) {
+    /* Mutable arr renders its contents like vec ([arr ...]) even though its
+     * eq is identity-based (see ARR_DESIGN.md). */
+    JaclArr* a = (JaclArr*)jacl_as_ptr(val);
+    uint32_t count = a->sa.count;
+    vm__fmt_append(buf, "[arr", 4);
+    for (uint32_t i = 0; i < count; i++) {
+      vm__fmt_append(buf, " ", 1);
+      JaclVal* slot = jacl_arr_seg_get(&a->sa, i);
+      vm__fmt_value(buf, slot ? *slot : JACL_NIL);
     }
     vm__fmt_append(buf, "]", 1);
   } else if (jacl_is_map(val)) {
@@ -2379,6 +2392,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_VEC_CONCAT] = &&L_OP_VEC_CONCAT,
     [OP_VEC_SLICE] = &&L_OP_VEC_SLICE,
     [OP_VEC_SPREAD] = &&L_OP_VEC_SPREAD,
+    [OP_ARR] = &&L_OP_ARR,
+    [OP_ARR_GET] = &&L_OP_ARR_GET,
+    [OP_ARR_SET] = &&L_OP_ARR_SET,
+    [OP_ARR_PUSH] = &&L_OP_ARR_PUSH,
+    [OP_ARR_POP] = &&L_OP_ARR_POP,
+    [OP_ARR_LEN] = &&L_OP_ARR_LEN,
     [OP_MAP] = &&L_OP_MAP,
     [OP_MAP_GET] = &&L_OP_MAP_GET,
     [OP_MAP_HAS] = &&L_OP_MAP_HAS,
@@ -2920,7 +2939,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           DISPATCH();
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_arr(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
@@ -4697,7 +4716,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_arr(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
@@ -4787,6 +4806,139 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         vm->stack_top = base;
         result = vm__push(vm, jacl_vector_ptr(vec));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      /* --- Mutable arr (M3: dyn elements). See ARR_DESIGN.md. Reference
+       * semantics: ops mutate the receiver in place. Bounds are lenient
+       * (vec-style): get OOB -> nil, set OOB -> grow with nils, pop empty
+       * -> nil. Ref stores fire the SATB + generational write barriers,
+       * mirroring vm__slot_set / the buf ref-element store path. --- */
+      CASE(OP_ARR): {
+        uint32_t saved_stack_top = vm->stack_top;
+        uint8_t count = vm__read_byte(vm);
+        gc__current_heap = &vm->heap;
+        JaclArr* a = jacl_arr_new(JACL_SCALAR_TYPE_IDX(TYPE_DYN));
+        if (!a) VM_ERROR(vm, "out of memory constructing arr");
+        for (uint8_t i = 0; i < count; i++) {
+          JaclVal elem = vm->stack[vm->stack_top - count + i];
+          if (!jacl_arr_seg_push(&a->sa, elem))
+            VM_ERROR(vm, "out of memory constructing arr");
+        }
+        vm->stack_top -= count;
+        result = vm__push(vm, jacl_arr_ptr(a));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_ARR_GET): {
+        uint32_t saved_stack_top = vm->stack_top;
+        JaclVal idx_val, arr_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (jacl_is_error(arr_val)) { result = vm__push(vm, arr_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-get': expected arr, got %s", vm__type_name(arr_val));
+        if (!jacl_is_i32(idx_val))
+          VM_ERROR(vm, "type error in 'arr-get': expected i32 index, got %s", vm__type_name(idx_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        int32_t idx = jacl_as_i32(idx_val);
+        JaclVal out = JACL_NIL;
+        if (idx >= 0) {
+          JaclVal* slot = jacl_arr_seg_get(&a->sa, (uint32_t)idx);
+          if (slot) out = *slot;
+        }
+        result = vm__push(vm, out);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_ARR_LEN): {
+        uint32_t saved_stack_top = vm->stack_top;
+        JaclVal arr_val;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (jacl_is_error(arr_val)) { result = vm__push(vm, arr_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-len': expected arr, got %s", vm__type_name(arr_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        result = vm__push(vm, jacl_i32((int32_t)a->sa.count));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_ARR_PUSH): {
+        uint32_t saved_stack_top = vm->stack_top;
+        JaclVal elem, arr_val;
+        result = vm__pop(vm, &elem); if (result != VM_OK) return result;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (jacl_is_error(arr_val)) { result = vm__push(vm, arr_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; DISPATCH(); }
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-push': expected arr, got %s", vm__type_name(arr_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        /* Insertion-side SATB (no old value on append) + generational tracking. */
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
+        gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
+        if (!jacl_arr_seg_push(&a->sa, elem))
+          VM_ERROR(vm, "out of memory in 'arr-push'");
+        result = vm__push(vm, jacl_i32((int32_t)a->sa.count));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_ARR_SET): {
+        uint32_t saved_stack_top = vm->stack_top;
+        JaclVal elem, idx_val, arr_val;
+        result = vm__pop(vm, &elem); if (result != VM_OK) return result;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (jacl_is_error(arr_val)) { result = vm__push(vm, arr_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; DISPATCH(); }
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-set': expected arr, got %s", vm__type_name(arr_val));
+        if (!jacl_is_i32(idx_val))
+          VM_ERROR(vm, "type error in 'arr-set': expected i32 index, got %s", vm__type_name(idx_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0)
+          VM_ERROR(vm, "arr-set: negative index %d", idx);
+        uint32_t uidx = (uint32_t)idx;
+        gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
+        if (uidx < a->sa.count) {
+          JaclVal* slot = jacl_arr_seg_get(&a->sa, uidx);
+          vm__slot_set(vm, slot, elem);   /* SATB old=*slot + store */
+        } else {
+          /* Lenient grow: fill the gap with nil, then store elem. */
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
+          while (a->sa.count < uidx) {
+            if (!jacl_arr_seg_push(&a->sa, JACL_NIL))
+              VM_ERROR(vm, "out of memory in 'arr-set'");
+          }
+          if (!jacl_arr_seg_push(&a->sa, elem))
+            VM_ERROR(vm, "out of memory in 'arr-set'");
+        }
+        result = vm__push(vm, arr_val);   /* return the arr for chaining */
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_ARR_POP): {
+        uint32_t saved_stack_top = vm->stack_top;
+        JaclVal arr_val;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (jacl_is_error(arr_val)) { result = vm__push(vm, arr_val); if (result != VM_OK) return result; DISPATCH(); }
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-pop': expected arr, got %s", vm__type_name(arr_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        JaclVal out = JACL_NIL;
+        if (jacl_arr_seg_pop(&a->sa, &out) == 0) {
+          /* Deletion-side SATB: the removed value leaves the container. */
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
+        }
+        result = vm__push(vm, out);
         if (result != VM_OK) return result;
         DISPATCH();
       }

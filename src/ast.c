@@ -83,6 +83,10 @@ typedef enum {
   HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
   HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
 
+  /* Arr ops (mutable [Arr T]; see ARR_DESIGN.md) */
+  HEAD_ARR,
+  HEAD_ARR_GET, HEAD_ARR_SET, HEAD_ARR_PUSH, HEAD_ARR_POP, HEAD_ARR_LEN,
+
   /* Map ops */
   HEAD_MAP,
   HEAD_MAP_GET, HEAD_MAP_HAS, HEAD_MAP_LEN, HEAD_MAP_SET,
@@ -172,6 +176,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "for", 3) == 0) return HEAD_FOR;
       if (memcmp(s, "try", 3) == 0) return HEAD_TRY;
       if (memcmp(s, "vec", 3) == 0) return HEAD_VEC;
+      if (memcmp(s, "arr", 3) == 0) return HEAD_ARR;
       if (memcmp(s, "map", 3) == 0) return HEAD_MAP;
       if (memcmp(s, "box", 3) == 0) return HEAD_BOX;
       return HEAD_NONE;
@@ -224,6 +229,10 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
+      if (memcmp(s, "arr-get", 7) == 0) return HEAD_ARR_GET;
+      if (memcmp(s, "arr-set", 7) == 0) return HEAD_ARR_SET;
+      if (memcmp(s, "arr-pop", 7) == 0) return HEAD_ARR_POP;
+      if (memcmp(s, "arr-len", 7) == 0) return HEAD_ARR_LEN;
       if (memcmp(s, "buf-len", 7) == 0) return HEAD_BUF_LEN;
       if (memcmp(s, "buf-get", 7) == 0) return HEAD_BUF_GET;
       if (memcmp(s, "buf-set", 7) == 0) return HEAD_BUF_SET;
@@ -240,6 +249,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "with-ctx", 8) == 0) return HEAD_WITH_CTX;
       if (memcmp(s, "parallel", 8) == 0) return HEAD_PARALLEL;
       if (memcmp(s, "vec-push", 8) == 0) return HEAD_VEC_PUSH;
+      if (memcmp(s, "arr-push", 8) == 0) return HEAD_ARR_PUSH;
       if (memcmp(s, "map-keys", 8) == 0) return HEAD_MAP_KEYS;
       if (memcmp(s, "map-vals", 8) == 0) return HEAD_MAP_VALS;
       if (memcmp(s, "defmacro", 8) == 0) return HEAD_DEFMACRO;

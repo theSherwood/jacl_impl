@@ -88,13 +88,14 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_SYNTAX        ((uint64_t)0x17 << JACL_TAG_SHIFT)
 #define JACL_TAG_TYPED_VECTOR  ((uint64_t)0x18 << JACL_TAG_SHIFT)
 #define JACL_TAG_TYPED_MAP     ((uint64_t)0x19 << JACL_TAG_SHIFT)
+#define JACL_TAG_ARR           ((uint64_t)0x1A << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed tag indices (after >> JACL_TAG_SHIFT). Used by
  * jacl_is_heap_type for an O(1) predicate instead of an 18-way `||` chain
  * — gc_remembered_set_barrier sits on the hot path of every mutable-cell
  * write. Bits set: STRING(0x05) .. ATOM(0x0C), I64(0x0E) .. STRUCT(0x12),
- * ROPE_STRING(0x14), STATE_MACHINE(0x16) .. TYPED_MAP(0x19). */
-#define JACL_HEAP_TAG_MASK     (0x03D7DFE0u)
+ * ROPE_STRING(0x14), STATE_MACHINE(0x16) .. TYPED_MAP(0x19), ARR(0x1A). */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u)
 
 typedef struct { int64_t value; } JaclHeapI64;
 typedef struct { uint64_t value; } JaclHeapU64;
@@ -634,6 +635,9 @@ typedef enum {
   HEAD_VEC,
   HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
   HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
+  /* Arr ops (mutable [Arr T]; see ARR_DESIGN.md). Must mirror ast.c. */
+  HEAD_ARR,
+  HEAD_ARR_GET, HEAD_ARR_SET, HEAD_ARR_PUSH, HEAD_ARR_POP, HEAD_ARR_LEN,
   HEAD_MAP,
   HEAD_MAP_GET, HEAD_MAP_HAS, HEAD_MAP_LEN, HEAD_MAP_SET,
   HEAD_MAP_REMOVE, HEAD_MAP_KEYS, HEAD_MAP_VALS,
@@ -1034,10 +1038,19 @@ typedef enum {
 
   /* --- Late additions (kept at the end so test_bytecode's
    *     numeric-stability asserts stay valid) --- */
-  OP_BOX_UNCHECKED          /* same as OP_BOX, skipping the jacl_is_error
+  OP_BOX_UNCHECKED,         /* same as OP_BOX, skipping the jacl_is_error
                                propagation check; emitted by the compiler
                                when the operand provably cannot carry the
                                error flag (see compiler__expr_is_error_free) */
+
+  /* Mutable [Arr T] ops (see ARR_DESIGN.md), at the end for numeric
+   * stability. Mirror of the same tail in bytecode.c. */
+  OP_ARR,
+  OP_ARR_GET,
+  OP_ARR_SET,
+  OP_ARR_PUSH,
+  OP_ARR_POP,
+  OP_ARR_LEN
 } OpCode;
 
 typedef struct {
@@ -1970,12 +1983,14 @@ extern bool jacl_is_f64 (JaclVal v);
 extern JaclVal jacl_string_ptr (void *p);
 extern JaclVal jacl_vector_ptr (void *p);
 extern JaclVal jacl_map_ptr (void *p);
+extern JaclVal jacl_arr_ptr (void *p);
 extern JaclVal jacl_closure_ptr (void *p);
 extern JaclVal jacl_bignum_ptr (void *p);
 extern void *jacl_as_ptr (JaclVal v);
 extern bool jacl_is_string (JaclVal v);
 extern bool jacl_is_vector (JaclVal v);
 extern bool jacl_is_map (JaclVal v);
+extern bool jacl_is_arr (JaclVal v);
 extern bool jacl_is_closure (JaclVal v);
 extern bool jacl_is_bignum (JaclVal v);
 extern JaclVal jacl_cell_ptr (JaclMutableRef *p);

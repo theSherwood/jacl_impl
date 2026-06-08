@@ -1,0 +1,17 @@
+# expect: 3
+# expect: 20
+# expect: 4
+# expect: 40
+# expect: 99
+# expect: 40
+# expect: 3
+# M3: dyn [arr ...] construct + len/get/push/set/pop. See ARR_DESIGN.md.
+def a [arr 10 20 30]
+print [arr-len $a]
+print [arr-get $a 1]
+print [arr-push $a 40]
+print [arr-get $a 3]
+arr-set $a 0 99
+print [arr-get $a 0]
+print [arr-pop $a]
+print [arr-len $a]

@@ -338,9 +338,18 @@ typedef enum {
    * bytes as the argument region. The source slots are unmodified; the
    * destination is logically a fresh copy. See BUFFER_DESIGN.md Tier 2
    * (by-value buf proc params). */
-  OP_INLINE_COPY_LOCAL      /* u8 src_slot, u8 width; copy frame[src_slot
+  OP_INLINE_COPY_LOCAL,     /* u8 src_slot, u8 width; copy frame[src_slot
                                .. src_slot+width) onto TOS, marking each
                                destination slot as inline. */
+
+  /* Mutable [Arr T] ops (see ARR_DESIGN.md). Appended at the end of the
+   * enum to keep existing opcode numbering stable (test_bytecode pins it). */
+  OP_ARR,                   /* construct mutable arr: followed by uint8_t element count */
+  OP_ARR_GET,               /* pop index + arr, push element or nil (OOB) */
+  OP_ARR_SET,               /* pop elem + index + arr; in-place set (grows on OOB); push arr */
+  OP_ARR_PUSH,              /* pop elem + arr; in-place append; push new i32 length */
+  OP_ARR_POP,               /* pop arr; remove + push last element, or nil if empty */
+  OP_ARR_LEN                /* pop arr, push i32 count */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -530,6 +539,12 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_VEC_CONCAT:      return "OP_VEC_CONCAT";
     case OP_VEC_SLICE:       return "OP_VEC_SLICE";
     case OP_VEC_SPREAD:      return "OP_VEC_SPREAD";
+    case OP_ARR:             return "OP_ARR";
+    case OP_ARR_GET:         return "OP_ARR_GET";
+    case OP_ARR_SET:         return "OP_ARR_SET";
+    case OP_ARR_PUSH:        return "OP_ARR_PUSH";
+    case OP_ARR_POP:         return "OP_ARR_POP";
+    case OP_ARR_LEN:         return "OP_ARR_LEN";
     case OP_MAP:             return "OP_MAP";
     case OP_MAP_GET:         return "OP_MAP_GET";
     case OP_MAP_HAS:         return "OP_MAP_HAS";

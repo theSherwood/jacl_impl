@@ -1,0 +1,19 @@
+# expect: nil
+# expect: nil
+# expect: 6
+# expect: nil
+# expect: 100
+# expect: nil
+# expect: 0
+# M3: lenient (vec-style) bounds — get OOB -> nil, set OOB grows with
+# nil gaps, pop empty -> nil. See ARR_DESIGN.md decision 4.
+def a [arr 1 2 3]
+print [arr-get $a 9]
+print [arr-get $a -1]
+arr-set $a 5 100
+print [arr-len $a]
+print [arr-get $a 4]
+print [arr-get $a 5]
+def e [arr]
+print [arr-pop $e]
+print [arr-len $e]

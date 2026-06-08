@@ -1,0 +1,10 @@
+# expect: [arr 1 2 3]
+# expect: [arr]
+# expect: [arr "a" "b"]
+# M3: print renders arr contents (reader-ish [arr ...]) even though eq
+# is identity-based. See ARR_DESIGN.md.
+def a [arr 1 2 3]
+print $a
+print [arr]
+def s [arr "a" "b"]
+print $s
