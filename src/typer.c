@@ -2858,6 +2858,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                   ? typer__typed_collection_kind(head) : 0;
   JaclType ctor_elem_t = TYPE_DYN;
   JaclType ctor_key_t  = TYPE_DYN;
+  /* [[Arr T] ...] flexes element literals just like [[Vec T] ...]; detect it
+   * separately since typed_collection_kind only knows vec/map. */
+  bool ctor_is_arr = false;
+  if (ctor_kind == 0 && head && head->type == AST_COMMAND) {
+    uint32_t arr_ctor_ei;
+    if (typer__arr_type(tc, head, &arr_ctor_ei)) {
+      ctor_is_arr = true;
+      AstNode* elem_node = head->data.command.args[0];
+      if (elem_node && elem_node->type == AST_LIT_STRING &&
+          is_type_keyword(elem_node->data.lit_string.value,
+                          elem_node->data.lit_string.length)) {
+        ctor_elem_t = type_from_keyword(elem_node->data.lit_string.value,
+                                        elem_node->data.lit_string.length);
+      }
+    }
+  }
   if (ctor_kind == 1 || ctor_kind == 2 || ctor_kind == 3) {
     AstNode* elem_node = (ctor_kind == 3)
         ? head->data.command.args[1]
@@ -2911,7 +2927,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
         }
       }
-    } else if (ctor_kind == 1 && ctor_elem_t != TYPE_DYN) {
+    } else if ((ctor_kind == 1 || ctor_is_arr) && ctor_elem_t != TYPE_DYN) {
       tc->expected_type = ctor_elem_t;
     } else if ((ctor_kind == 2 || ctor_kind == 3) &&
                (ctor_elem_t != TYPE_DYN || ctor_key_t != TYPE_DYN)) {
@@ -2919,6 +2935,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       tc->expected_type = (i % 2 == 0) ? ctor_key_t : ctor_elem_t;
     } else if (i > 0 && (mutator_hid == HEAD_VEC_PUSH ||
                          mutator_hid == HEAD_VEC_SET ||
+                         mutator_hid == HEAD_ARR_PUSH ||
+                         mutator_hid == HEAD_ARR_SET ||
                          mutator_hid == HEAD_MAP_SET ||
                          mutator_hid == HEAD_MAP_REMOVE ||
                          mutator_hid == HEAD_MAP_GET ||
@@ -2928,6 +2946,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       uint32_t e_idx = recv->inferred_struct_idx;
       uint32_t k_idx = recv->inferred_key_struct_idx;
       JaclType target = TYPE_DYN;
+      /* arr-push i=1 → elem; arr-set i=1 → idx (dyn), i=2 → elem. */
+      if (recv_t == TYPE_TYPED_ARR) {
+        if (mutator_hid == HEAD_ARR_PUSH ||
+            (mutator_hid == HEAD_ARR_SET && i == 2)) {
+          if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+            target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+          }
+        }
+      }
       /* Pick the right slot:
        *   vec-push i=1 → elem
        *   vec-set  i=1 → idx (DYN), i=2 → elem
@@ -3314,8 +3341,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           char err[224];
           uint32_t pair_or_elem_idx = is_map ? (i / 2) : i;
           if (tc_kind == 1) {
-            jacl_format_typed_vec_elem(err, sizeof(err),
-                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+            if (is_arr_ctor)
+              jacl_format_typed_arr_elem(err, sizeof(err),
+                  elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+            else
+              jacl_format_typed_vec_elem(err, sizeof(err),
+                  elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
           } else if (tc_kind == 2) {
             jacl_format_typed_map_value(err, sizeof(err),
                 elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);

@@ -1,0 +1,12 @@
+# expect: 3
+# expect: 10
+# expect: 40
+# expect: [arr 10 20 30 40]
+# M4d: flat [Arr i64] — 8-byte raw element storage; integer literals
+# flex to i64. arr-pop/get reconstruct the heap-boxed i64.
+def a [[Arr i64] 10 20 30]
+print [arr-len $a]
+print [arr-get $a 0]
+arr-push $a 40
+print [arr-get $a 3]
+print $a

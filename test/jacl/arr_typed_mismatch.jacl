@@ -1,0 +1,5 @@
+# expect-error: is not a i32 value
+# M4d: typed-arr constructor rejects an element of the wrong type at
+# compile time (mirrors [[Vec i32] ...]).
+def a [[Arr i32] 1 "oops" 3]
+print [arr-len $a]

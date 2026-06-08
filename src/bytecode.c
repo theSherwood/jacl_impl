@@ -349,7 +349,8 @@ typedef enum {
   OP_ARR_SET,               /* pop elem + index + arr; in-place set (grows on OOB); push arr */
   OP_ARR_PUSH,              /* pop elem + arr; in-place append; push new i32 length */
   OP_ARR_POP,               /* pop arr; remove + push last element, or nil if empty */
-  OP_ARR_LEN                /* pop arr, push i32 count */
+  OP_ARR_LEN,               /* pop arr, push i32 count */
+  OP_TYPED_ARR              /* u16 elem_idx, u8 count; construct flat typed arr */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -545,6 +546,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_ARR_PUSH:        return "OP_ARR_PUSH";
     case OP_ARR_POP:         return "OP_ARR_POP";
     case OP_ARR_LEN:         return "OP_ARR_LEN";
+    case OP_TYPED_ARR:       return "OP_TYPED_ARR";
     case OP_MAP:             return "OP_MAP";
     case OP_MAP_GET:         return "OP_MAP_GET";
     case OP_MAP_HAS:         return "OP_MAP_HAS";

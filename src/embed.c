@@ -928,6 +928,8 @@ bool embed__val_matches_field_type(JaclVal val, int field_type) {
     case TYPE_STREAM:  return jacl_is_stream(val);
     case TYPE_TYPED_VEC: return jacl_is_vector(val);
     case TYPE_TYPED_MAP: return jacl_is_map(val);
+    case TYPE_ARR:
+    case TYPE_TYPED_ARR: return jacl_is_arr(val);
     case TYPE_FUTURE:  return jacl_is_future(val);
     case TYPE_PTR:     return jacl_is_u64(val);  /* pointer rep is u64 */
     case TYPE_BOX:     return jacl_is_box(val);

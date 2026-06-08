@@ -122,6 +122,20 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
   return kind;
 }
 
+/* Recognize an [Arr T] type-annotation / constructor head. Returns true and
+ * sets *out_elem to the element type-name node. Single type-name argument,
+ * like [Box T]. See ARR_DESIGN.md. */
+static bool compiler__arr_type_expr(AstNode* cmd, AstNode** out_elem) {
+  if (!cmd || cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
+  AstNode* th = cmd->data.command.head;
+  if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3 ||
+      memcmp(th->data.lit_string.value, "Arr", 3) != 0) return false;
+  if (cmd->data.command.arg_count != 1 ||
+      cmd->data.command.args[0]->type != AST_LIT_STRING) return false;
+  if (out_elem) *out_elem = cmd->data.command.args[0];
+  return true;
+}
+
 /* Recognize a [Stream T] type-annotation expression. Returns true and
  * sets *out_elem to the element type-name node. Same shape as
  * [Future T] / [Ptr T] — single type-name argument. The compiler
@@ -6363,6 +6377,47 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (args[i]->type == AST_SPREAD) { has_spread = 1; break; }
   }
 
+  /* --- Typed arr constructor: [[Arr Type] e1 e2 ...] (flat). M4d.
+   * Scalar elements only for now; struct elements are M4d-2. --- */
+  AstNode* _arr_elem = NULL;
+  if (compiler__arr_type_expr(head, &_arr_elem)) {
+    const char* tn = _arr_elem->data.lit_string.value;
+    uint32_t    tl = _arr_elem->data.lit_string.length;
+    if (is_type_keyword(tn, tl)) {
+      JaclType et = type_from_keyword(tn, tl);
+      if (!compiler__is_typed_collection_scalar(et)) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Arr %.*s]: only value-type scalars supported "
+                 "(i32, i64, u32, u64, f32, f64, bool)", (int)tl, tn);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      if (argc > 255) {
+        compiler__error(c, line, col, "[Arr ...] too many initial elements (max 255)");
+        return;
+      }
+      for (uint32_t i = 0; i < argc; i++) {
+        compiler__compile_node(c, args[i]);
+        JaclType arg_t = (JaclType)args[i]->inferred_type;
+        if (arg_t != et) {
+          char err[160];
+          jacl_format_typed_arr_elem(err, sizeof(err), tn, tl, i, true, arg_t);
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+      compiler__emit_byte(c, OP_TYPED_ARR, line);
+      compiler__emit_u16(c, (uint16_t)COMPILER_SCALAR_TYPE_IDX(et), line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      c->last_expr_type = TYPE_TYPED_ARR;
+      return;
+    }
+    compiler__error(c, line, col,
+                    "[Arr Struct]: typed struct arrays not yet supported");
+    return;
+  }
+
   /* --- Typed vec constructor: [[Vec Type] elem1 elem2 ...] --- */
   AstNode* _coll_elem = NULL;
   AstNode* _coll_key_elem = NULL;
@@ -11301,8 +11356,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
-    if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
+      /* Typed element: coerce/type-check at compile time (runtime stores
+       * the coerced value as raw bytes). */
+      if (!compiler__compile_typed_elem_arg(c, args[1], args[0]->inferred_struct_idx)) {
+        compiler__error(c, line, col, "arr-push: element type does not match typed arr element type");
+        return;
+      }
+    } else {
+      compiler__compile_node(c, args[1]);
+      if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
+    }
     compiler__emit_byte(c, OP_ARR_PUSH, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -11315,9 +11379,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
-    compiler__compile_node(c, args[2]);
-    if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
+    compiler__compile_node(c, args[1]);   /* index */
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
+      if (!compiler__compile_typed_elem_arg(c, args[2], args[0]->inferred_struct_idx)) {
+        compiler__error(c, line, col, "arr-set: element type does not match typed arr element type");
+        return;
+      }
+    } else {
+      compiler__compile_node(c, args[2]);
+      if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
+    }
     compiler__emit_byte(c, OP_ARR_SET, line);
     c->last_expr_type = TYPE_ARR;
     return;

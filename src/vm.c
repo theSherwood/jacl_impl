@@ -402,6 +402,70 @@ static inline void vm__slot_set(VM *vm, JaclVal *slot, JaclVal new_val) {
     ATOMIC_STORE_EXPLICIT(slot, new_val, MEM_RELAXED);
 }
 
+/* --- Flat typed-arr scalar element conversions (see ARR_DESIGN.md M4d) ---
+ * Typed arrays store raw element bytes; these convert between the packed
+ * representation and a tagged JaclVal, mirroring the buf get/set per-type
+ * switches. Only the typed-collection scalars are supported (the typer/
+ * compiler reject others). */
+
+static inline uint32_t vm__arr_scalar_size(JaclType t) {
+    switch (t) {
+        case TYPE_BOOL: return 1;
+        case TYPE_I32: case TYPE_U32: case TYPE_F32: return 4;
+        case TYPE_I64: case TYPE_U64: case TYPE_F64: return 8;
+        default: return 0;
+    }
+}
+
+/* Pack a tagged scalar into elem_size raw bytes at dst. Tolerant of literal
+ * flex (an i32 literal stored into an i64 array, etc.), like the buf store. */
+static inline void vm__arr_scalar_store(JaclType t, JaclVal v, uint8_t *dst) {
+    switch (t) {
+        case TYPE_BOOL: { uint8_t b = jacl_as_bool(v) ? 1 : 0; memcpy(dst, &b, 1); break; }
+        case TYPE_I32: { int32_t x = jacl_is_i32(v) ? jacl_as_i32(v)
+                                                     : (int32_t)jacl_as_u32(v);
+                         memcpy(dst, &x, 4); break; }
+        case TYPE_U32: { uint32_t x = jacl_is_u32(v) ? jacl_as_u32(v)
+                                                     : (uint32_t)jacl_as_i32(v);
+                         memcpy(dst, &x, 4); break; }
+        case TYPE_F32: { float x = jacl_is_f32(v) ? jacl_as_f32(v)
+                                                  : (float)jacl_as_f64(v);
+                         memcpy(dst, &x, 4); break; }
+        case TYPE_I64: { int64_t x = jacl_is_i64(v) ? jacl_as_i64(v)
+                                                    : (int64_t)jacl_as_i32(v);
+                         memcpy(dst, &x, 8); break; }
+        case TYPE_U64: { uint64_t x = jacl_is_u64(v) ? jacl_as_u64(v)
+                                                     : (uint64_t)jacl_as_i32(v);
+                         memcpy(dst, &x, 8); break; }
+        case TYPE_F64: { double x = jacl_is_f64(v) ? jacl_as_f64(v)
+                                    : jacl_is_f32(v) ? (double)jacl_as_f32(v)
+                                                     : (double)jacl_as_i32(v);
+                         memcpy(dst, &x, 8); break; }
+        default: break;
+    }
+}
+
+/* Read elem_size raw bytes at src and rebuild the tagged scalar. i64/u64/f64
+ * heap-box (allocate a cell), matching the buf load. */
+static inline JaclVal vm__arr_scalar_load(VM *vm, JaclType t, const uint8_t *src) {
+    switch (t) {
+        case TYPE_BOOL: return jacl_bool(src[0] != 0);
+        case TYPE_I32: { int32_t v; memcpy(&v, src, 4); return jacl_i32(v); }
+        case TYPE_U32: { uint32_t v; memcpy(&v, src, 4); return jacl_u32(v); }
+        case TYPE_F32: { float v; memcpy(&v, src, 4); return jacl_f32(v); }
+        case TYPE_I64: { int64_t v; memcpy(&v, src, 8); return jacl_i64(&vm->heap, v); }
+        case TYPE_U64: { uint64_t v; memcpy(&v, src, 8); return jacl_u64(&vm->heap, v); }
+        case TYPE_F64: { double v; memcpy(&v, src, 8); return jacl_f64(&vm->heap, v); }
+        default: return JACL_NIL;
+    }
+}
+
+/* True if the arr's element encoding is the dyn sentinel (tagged-JaclVal
+ * storage, the M3 path). */
+static inline bool vm__arr_is_dyn(uint32_t elem_idx) {
+    return elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_DYN);
+}
+
 /* --- Type name helper for error messages --- */
 
 const char* vm__type_name(JaclVal v) {
@@ -969,11 +1033,40 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
      * eq is identity-based (see ARR_DESIGN.md). */
     JaclArr* a = (JaclArr*)jacl_as_ptr(val);
     uint32_t count = a->sa.count;
+    bool arr_dyn = (a->elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_DYN));
+    bool arr_scalar = !arr_dyn && JACL_IS_SCALAR_TYPE_IDX(a->elem_idx);
+    JaclType arr_et = arr_scalar ? JACL_TYPE_IDX_TO_SCALAR(a->elem_idx) : TYPE_DYN;
     vm__fmt_append(buf, "[arr", 4);
     for (uint32_t i = 0; i < count; i++) {
       vm__fmt_append(buf, " ", 1);
-      JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, i);
-      vm__fmt_value(buf, slot ? *slot : JACL_NIL);
+      uint8_t* slot = sa_var_get(&a->sa, i);
+      if (arr_dyn) {
+        vm__fmt_value(buf, slot ? *(JaclVal*)slot : JACL_NIL);
+      } else if (arr_scalar && slot) {
+        /* Format raw scalar bytes directly (vm__fmt_value can't heap-box an
+         * i64/f64 here). Format strings mirror vm__fmt_value exactly. */
+        char nb[64]; int nn = 0;
+        switch (arr_et) {
+          case TYPE_BOOL: vm__fmt_append(buf, slot[0] ? "true" : "false",
+                                         slot[0] ? 4 : 5); break;
+          case TYPE_I32: { int32_t v; memcpy(&v, slot, 4);
+                           nn = snprintf(nb, sizeof(nb), "%d", (int)v); break; }
+          case TYPE_U32: { uint32_t v; memcpy(&v, slot, 4);
+                           nn = snprintf(nb, sizeof(nb), "%u", (unsigned)v); break; }
+          case TYPE_F32: { float v; memcpy(&v, slot, 4);
+                           nn = snprintf(nb, sizeof(nb), "%g", (double)v); break; }
+          case TYPE_I64: { int64_t v; memcpy(&v, slot, 8);
+                           nn = snprintf(nb, sizeof(nb), "%" PRIi64, v); break; }
+          case TYPE_U64: { uint64_t v; memcpy(&v, slot, 8);
+                           nn = snprintf(nb, sizeof(nb), "%" PRIu64, v); break; }
+          case TYPE_F64: { double v; memcpy(&v, slot, 8);
+                           nn = snprintf(nb, sizeof(nb), "%g", v); break; }
+          default: break;
+        }
+        if (nn > 0) vm__fmt_append(buf, nb, (uint32_t)nn);
+      } else {
+        vm__fmt_value(buf, JACL_NIL);   /* struct elements (M4d-2) TBD */
+      }
     }
     vm__fmt_append(buf, "]", 1);
   } else if (jacl_is_map(val)) {
@@ -2398,6 +2491,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_ARR_PUSH] = &&L_OP_ARR_PUSH,
     [OP_ARR_POP] = &&L_OP_ARR_POP,
     [OP_ARR_LEN] = &&L_OP_ARR_LEN,
+    [OP_TYPED_ARR] = &&L_OP_TYPED_ARR,
     [OP_MAP] = &&L_OP_MAP,
     [OP_MAP_GET] = &&L_OP_MAP_GET,
     [OP_MAP_HAS] = &&L_OP_MAP_HAS,
@@ -4832,6 +4926,35 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         DISPATCH();
       }
 
+      CASE(OP_TYPED_ARR): {
+        /* Flat typed-arr constructor: u16 elem_idx, u8 count. Elements are
+         * tagged scalars on the stack (the compiler coerced them); store
+         * each as raw bytes. Struct elements are M4d-2. See ARR_DESIGN.md. */
+        uint32_t saved_stack_top = vm->stack_top;
+        uint16_t elem_idx = vm__read_u16(vm);
+        uint8_t  count    = vm__read_byte(vm);
+        gc__current_heap = &vm->heap;
+        if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx))
+          VM_ERROR(vm, "typed struct arrays not yet supported");
+        JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
+        uint32_t esize  = vm__arr_scalar_size(elem_t);
+        if (esize == 0)
+          VM_ERROR(vm, "unsupported typed-arr element type %s", type_name(elem_t));
+        JaclArr* a = jacl_arr_new(elem_idx, esize);
+        if (!a) VM_ERROR(vm, "out of memory constructing arr");
+        uint8_t tmp[8];
+        for (uint8_t i = 0; i < count; i++) {
+          JaclVal elem = vm->stack[vm->stack_top - count + i];
+          vm__arr_scalar_store(elem_t, elem, tmp);
+          if (!sa_var_push(&a->sa, tmp))
+            VM_ERROR(vm, "out of memory constructing arr");
+        }
+        vm->stack_top -= count;
+        result = vm__push(vm, jacl_arr_ptr(a));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
       CASE(OP_ARR_GET): {
         uint32_t saved_stack_top = vm->stack_top;
         JaclVal idx_val, arr_val;
@@ -4846,9 +4969,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
         int32_t idx = jacl_as_i32(idx_val);
         JaclVal out = JACL_NIL;
-        if (idx >= 0) {
-          JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, (uint32_t)idx);
-          if (slot) out = *slot;
+        if (idx >= 0 && (uint32_t)idx < a->sa.count) {
+          uint8_t* slot = sa_var_get(&a->sa, (uint32_t)idx);
+          if (vm__arr_is_dyn(a->elem_idx)) {
+            out = *(JaclVal*)slot;
+          } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+            out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), slot);
+          } else {
+            VM_ERROR(vm, "typed struct arrays not yet supported");
+          }
         }
         result = vm__push(vm, out);
         if (result != VM_OK) return result;
@@ -4878,11 +5007,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (!jacl_is_arr(arr_val))
           VM_ERROR(vm, "type error in 'arr-push': expected arr, got %s", vm__type_name(arr_val));
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
-        /* Insertion-side SATB (no old value on append) + generational tracking. */
-        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
-        gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
-        if (!sa_var_push(&a->sa, &elem))
-          VM_ERROR(vm, "out of memory in 'arr-push'");
+        if (vm__arr_is_dyn(a->elem_idx)) {
+          /* Insertion-side SATB (no old on append) + generational tracking. */
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
+          gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
+          if (!sa_var_push(&a->sa, &elem))
+            VM_ERROR(vm, "out of memory in 'arr-push'");
+        } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+          uint8_t tmp[8];
+          vm__arr_scalar_store(JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), elem, tmp);
+          if (!sa_var_push(&a->sa, tmp))   /* scalar bytes hold no heap refs */
+            VM_ERROR(vm, "out of memory in 'arr-push'");
+        } else {
+          VM_ERROR(vm, "typed struct arrays not yet supported");
+        }
         result = vm__push(vm, jacl_i32((int32_t)a->sa.count));
         if (result != VM_OK) return result;
         DISPATCH();
@@ -4906,20 +5044,37 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (idx < 0)
           VM_ERROR(vm, "arr-set: negative index %d", idx);
         uint32_t uidx = (uint32_t)idx;
-        gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
-        if (uidx < a->sa.count) {
-          JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, uidx);
-          vm__slot_set(vm, slot, elem);   /* SATB old=*slot + store */
-        } else {
-          /* Lenient grow: fill the gap with nil (zero == JACL_NIL for the
-           * 8-byte dyn slot), then store elem. */
-          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
-          while (a->sa.count < uidx) {
-            if (!sa_var_push_zero(&a->sa))
+        if (vm__arr_is_dyn(a->elem_idx)) {
+          gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
+          if (uidx < a->sa.count) {
+            JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, uidx);
+            vm__slot_set(vm, slot, elem);   /* SATB old=*slot + store */
+          } else {
+            /* Lenient grow: fill the gap with nil (zero == JACL_NIL for the
+             * 8-byte dyn slot), then store elem. */
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
+            while (a->sa.count < uidx) {
+              if (!sa_var_push_zero(&a->sa))
+                VM_ERROR(vm, "out of memory in 'arr-set'");
+            }
+            if (!sa_var_push(&a->sa, &elem))
               VM_ERROR(vm, "out of memory in 'arr-set'");
           }
-          if (!sa_var_push(&a->sa, &elem))
-            VM_ERROR(vm, "out of memory in 'arr-set'");
+        } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+          uint8_t tmp[8];
+          vm__arr_scalar_store(JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), elem, tmp);
+          if (uidx < a->sa.count) {
+            sa_var_set(&a->sa, uidx, tmp);   /* in-place raw bytes, no barrier */
+          } else {
+            while (a->sa.count < uidx) {     /* gap zero-fills (not nil) */
+              if (!sa_var_push_zero(&a->sa))
+                VM_ERROR(vm, "out of memory in 'arr-set'");
+            }
+            if (!sa_var_push(&a->sa, tmp))
+              VM_ERROR(vm, "out of memory in 'arr-set'");
+          }
+        } else {
+          VM_ERROR(vm, "typed struct arrays not yet supported");
         }
         result = vm__push(vm, arr_val);   /* return the arr for chaining */
         if (result != VM_OK) return result;
@@ -4935,9 +5090,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "type error in 'arr-pop': expected arr, got %s", vm__type_name(arr_val));
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
         JaclVal out = JACL_NIL;
-        if (sa_var_pop(&a->sa, &out) == 0) {
-          /* Deletion-side SATB: the removed value leaves the container. */
-          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
+        if (vm__arr_is_dyn(a->elem_idx)) {
+          if (sa_var_pop(&a->sa, &out) == 0) {
+            /* Deletion-side SATB: the removed value leaves the container. */
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
+          }
+        } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+          uint8_t tmp[8];
+          if (sa_var_pop(&a->sa, tmp) == 0)
+            out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), tmp);
+        } else {
+          VM_ERROR(vm, "typed struct arrays not yet supported");
         }
         result = vm__push(vm, out);
         if (result != VM_OK) return result;

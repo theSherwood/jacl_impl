@@ -372,10 +372,18 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
      * Segments are malloc'd and freed in gc__finalize_dead. */
     case OBJ_ARR: {
         JaclArr *a = (JaclArr *)payload;
-        uint32_t n = a->sa.count;
-        for (uint32_t i = 0; i < n; i++) {
-            JaclVal *slot = (JaclVal *)sa_var_get(&a->sa, i);
-            if (slot) gc__ms_push_val(ms, *slot);
+        if (a->elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_DYN)) {
+            /* dyn: every 8-byte slot is a tagged JaclVal. */
+            uint32_t n = a->sa.count;
+            for (uint32_t i = 0; i < n; i++) {
+                JaclVal *slot = (JaclVal *)sa_var_get(&a->sa, i);
+                if (slot) gc__ms_push_val(ms, *slot);
+            }
+        } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+            /* flat typed scalar bytes — no heap references, nothing to trace. */
+        } else {
+            /* struct-element typed arrays — M4e-2: recurse per element via
+             * the struct ref bitmap. Not reachable yet (constructor errors). */
         }
         break;
     }

@@ -34,9 +34,9 @@ store).
 | **M4** Typed `[[Arr T] ...]` — **flat bytes** | ⬜ in progress | Decision 2026-06-08: typed arrays store **raw element bytes** (not boxed), matching `[Buf N T]` / typed-vec. Broken into M4a–M4e below. |
 | ⮑ **M4a** Runtime-stride segment array | ⬜ todo | `segment_array.h` is element-type-templated (fixed stride); typed arrays need a runtime element size. Add a runtime-stride variant (`sa_var`). |
 | ⮑ **M4b** Unify `JaclArr` on `sa_var` | ⬜ todo | Refactor the dyn path onto the byte backing (elem_size = 8, JaclVal slots). M3 tests guard the refactor. |
-| ⮑ **M4c** Type-position + typer | ⬜ todo | Parse `[Arr T]` in type position; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; constructor `[[Arr T] ...]`; get narrows, push/set type-check. |
-| ⮑ **M4d** Typed byte ops | ⬜ todo | `OP_TYPED_ARR` construct; get/set/push reconstruct/store scalar bytes or inline struct bytes per elem_idx (mirrors `OP_TYPED_VEC_GET_INLINE` / buf element rw). |
-| ⮑ **M4e** GC trace + tests | ⬜ todo | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip, struct → recurse via ref bitmap. Typed-arr test suite. |
+| ⮑ **M4c** Type-position + typer | ✅ done | `typer__arr_type`; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; `[[Arr T] ...]` constructor; get narrows, push/set type-check; element-literal flex. |
+| ⮑ **M4d** Typed byte ops | 🟡 scalar done | `OP_TYPED_ARR` construct + get/set/push/pop/len byte path for scalar elements (i32/i64/u32/u64/f32/f64/bool) via `vm__arr_scalar_{store,load}`. **Struct elements (`[Arr Point]`) deferred (M4d-2)** — constructor/ops error clearly. |
+| ⮑ **M4e** GC trace + tests | 🟡 scalar done | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip (no refs). Struct recursion deferred (M4e-2). Tests: typed_scalar/i64/oob/mismatch. TSAN race-clean in arr paths. |
 | **M5** Identity & polish | ⬜ todo | `to-string`, error messages, tour + broader tests (identity eq + print landed in M3). |
 | **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration. |
 

@@ -140,6 +140,22 @@ int jacl_format_typed_vec_elem(char* buf, size_t bufsz,
                   (int)elem_name_len, elem_name);
 }
 
+/* Mutable [Arr T] element mismatch — same shape as the vec formatter. */
+int jacl_format_typed_arr_elem(char* buf, size_t bufsz,
+                               const char* elem_name, uint32_t elem_name_len,
+                               uint32_t idx, bool is_scalar, JaclType actual) {
+  if (is_scalar) {
+    return snprintf(buf, bufsz,
+                    "[Arr %.*s]: element %u is not a %.*s value (got %s)",
+                    (int)elem_name_len, elem_name, idx,
+                    (int)elem_name_len, elem_name, type_name(actual));
+  }
+  return snprintf(buf, bufsz,
+                  "[Arr %.*s]: element %u is not a %.*s struct",
+                  (int)elem_name_len, elem_name, idx,
+                  (int)elem_name_len, elem_name);
+}
+
 /* "[Map T]: value <idx> is not a T value (got <actual>)" / "is not a T struct"
  * Used by [Map T] (single-type, dyn-key) constructor value-type checks. */
 int jacl_format_typed_map_value(char* buf, size_t bufsz,

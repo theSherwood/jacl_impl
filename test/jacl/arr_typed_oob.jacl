@@ -1,0 +1,12 @@
+# expect: nil
+# expect: 6
+# expect: 0
+# expect: 100
+# M4d: typed-scalar lenient bounds — get OOB -> nil, set OOB grows
+# with ZERO-filled elements (0, not nil, for a typed scalar arr).
+def a [[Arr i32] 1 2 3]
+print [arr-get $a 9]
+arr-set $a 5 100
+print [arr-len $a]
+print [arr-get $a 4]
+print [arr-get $a 5]

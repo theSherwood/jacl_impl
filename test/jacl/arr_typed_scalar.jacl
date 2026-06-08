@@ -1,0 +1,20 @@
+# expect: 3
+# expect: 20
+# expect: 4
+# expect: 40
+# expect: 99
+# expect: [arr 99 20 30 40]
+# expect: 40
+# expect: 3
+# M4d: flat typed [Arr i32] — raw 4-byte element storage; get/push/set/
+# pop go through the byte path. See ARR_DESIGN.md.
+def a [[Arr i32] 10 20 30]
+print [arr-len $a]
+print [arr-get $a 1]
+print [arr-push $a 40]
+print [arr-get $a 3]
+arr-set $a 0 99
+print [arr-get $a 0]
+print $a
+print [arr-pop $a]
+print [arr-len $a]
