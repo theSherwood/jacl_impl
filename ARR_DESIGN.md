@@ -28,12 +28,47 @@ store).
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0** Design (this doc) | ✅ done | Four gating decisions settled 2026-06-08 (see Decisions) |
-| **M1** Library gaps | ⬜ todo | Add `set` (in-place index write) + order-preserving `pop` to `segment_array.h` |
-| **M2** Type plumbing | ⬜ todo | `TYPE_ARR` / `TYPE_TYPED_ARR`, `TYPE_SHAPE_TYPED_ARR`, heads, parser type-position |
+| **M1** Library gaps | ✅ done | `SA_SET` (in-place index write) + order-preserving `SA_POP` added to `segment_array.h` (25/25 lib tests). |
+| **M2** Type plumbing | ✅ done | `TYPE_ARR` / `TYPE_TYPED_ARR`, `TYPE_SHAPE_TYPED_ARR` + `tarr` union, `type_shape_intern_typed_arr`. |
 | **M3** Dyn `[arr ...]` MVP | ✅ done | Construct / get / set / push / pop / len for tagged-JaclVal elements; `OBJ_ARR` GC object kind + trace + finalizer; SATB + generational write barriers; identity eq; print. Main build 90/90, TSAN race-clean (only the known chase_lev_stress flake). |
-| **M4** Typed `[[Arr T] ...]` | ⬜ todo | Struct + scalar element encodings, raw-byte leaves, typer narrowing mirroring typed-vec |
-| **M5** Identity & polish | ⬜ todo | Identity `eq`, `print`/`to-string`, error messages, tour + tests |
-| **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration |
+| **M4** Typed `[[Arr T] ...]` — **flat bytes** | ⬜ in progress | Decision 2026-06-08: typed arrays store **raw element bytes** (not boxed), matching `[Buf N T]` / typed-vec. Broken into M4a–M4e below. |
+| ⮑ **M4a** Runtime-stride segment array | ⬜ todo | `segment_array.h` is element-type-templated (fixed stride); typed arrays need a runtime element size. Add a runtime-stride variant (`sa_var`). |
+| ⮑ **M4b** Unify `JaclArr` on `sa_var` | ⬜ todo | Refactor the dyn path onto the byte backing (elem_size = 8, JaclVal slots). M3 tests guard the refactor. |
+| ⮑ **M4c** Type-position + typer | ⬜ todo | Parse `[Arr T]` in type position; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; constructor `[[Arr T] ...]`; get narrows, push/set type-check. |
+| ⮑ **M4d** Typed byte ops | ⬜ todo | `OP_TYPED_ARR` construct; get/set/push reconstruct/store scalar bytes or inline struct bytes per elem_idx (mirrors `OP_TYPED_VEC_GET_INLINE` / buf element rw). |
+| ⮑ **M4e** GC trace + tests | ⬜ todo | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip, struct → recurse via ref bitmap. Typed-arr test suite. |
+| **M5** Identity & polish | ⬜ todo | `to-string`, error messages, tour + broader tests (identity eq + print landed in M3). |
+| **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration. |
+
+### Flat-bytes typed-array storage (M4 design)
+
+`segment_array.h` fixes element size at instantiation via `sizeof(T)`.
+Typed arrays need a stride known only at runtime (`[Arr i32]` → 4,
+`[Arr Point]` → `sizeof(Point)`), so M4a adds a **runtime-stride
+segment array** (`sa_var`): identical index math, but segments are
+sized in *elements of `elem_size` bytes* (segment k holds
+`2^(6+k)` elements of `elem_size` each), so an element never straddles
+a segment boundary. get/set/push/pop `memcpy` `elem_size` bytes.
+
+**Unified backing (M4b).** `JaclArr` switches to a single `sa_var`
+with `elem_size` set per array: dyn arrays use `elem_size = 8` storing
+tagged `JaclVal`s (so M3 behavior is preserved); `[Arr i32]` uses 4;
+`[Arr Point]` uses `sizeof(Point)`. `elem_idx` (the existing field)
+distinguishes them and drives ops + GC.
+
+**Ops (M4d).** Mirroring typed-vec / buf element access:
+- get: dyn → read the `JaclVal`; scalar → read raw bytes, rebuild the
+  tagged scalar; struct → push inline struct bytes (`INLINE_STACK`).
+- set/push: dyn → store `JaclVal` (+ barriers); scalar → write raw
+  bytes from the popped value; struct → `memcpy` inline struct bytes.
+- Bounds stay lenient; OOB grow zero-fills (typed scalars/structs get
+  zero bytes, not `nil`).
+
+**GC (M4e).** The `OBJ_ARR` trace branches on `elem_idx`: dyn → push
+every 8-byte slot as a `JaclVal` (M3 behavior); typed scalar → no
+tracing (raw bytes); typed struct → walk each element at `elem_size`
+stride via `gc__push_record_refs` (the buf struct-element walker).
+Ref-store barriers fire only on the dyn / ref-containing-struct paths.
 
 What should work end-to-end when M5 lands:
 

@@ -145,6 +145,7 @@ TESTS=(
     "lib/bignum/test_bigint_pbt.c|bigint_pbt|"
     "lib/bignum/test_bigfloat_pbt.c|bigfloat_pbt|"
     "lib/segment_array/test_segment_array.c|segment_array|"
+    "lib/segment_array/test_segment_array_var.c|segment_array_var|"
     "test/test_value.c|value|"
     "test/test_lexer.c|lexer|"
     "test/test_parser.c|parser|"
