@@ -67,8 +67,29 @@ GC (M4e-2): `OBJ_ARR` trace's struct branch recurses
 `gc__push_record_refs(ms, base + i*elem_size, sreg, elem_idx)` per live
 element (the buf struct-element walker). Ref-store barriers fire only
 when the struct contains ref fields.
-| **M5** Identity & polish | ⬜ todo | `to-string`, error messages, tour + broader tests (identity eq + print landed in M3). |
-| **M6** Arrow ergonomics | ⬜ todo (Phase 2) | `$a->i` / `set $a->i x` heap-deref lowering; for-loop / `iter` integration. |
+| **M5** Identity & polish | ✅ done | `to-string` (wired), tour.jacl `[Arr T]` section, nested-arr + to-string tests (identity eq + print landed in M3). |
+| **M6** Iteration + arrow | ⬜ todo (Phase 2) | `for $x in $a`, `$a->i` / `set $a->i x`. See notes below. |
+
+### M6 remaining (iteration + arrow ergonomics)
+
+Both deferred — sizable changes to the compiler's most complex/shared
+codegen, warranting their own session:
+
+- **for-loop** (`for $x in $a`): the for-loop desugars to a
+  length + indexed-get loop (`compiler.c` ~10845, the "vector-based
+  inlined for loop"). Adding arr means emitting `OP_ARR_LEN` /
+  `OP_ARR_GET` when `col_type` is `TYPE_ARR` / `TYPE_TYPED_ARR`. The
+  dyn/scalar case mirrors the `OP_VEC_GET` + `OP_SET_LOCAL` path;
+  struct-element arrays need the inline-width local setup the
+  `is_typed_vec_loop` branch uses (`OP_INLINE_TO_LOCAL`) plus SM-mode
+  state-field handling. This path is shared by vec/stream/range loops,
+  so changes need care to avoid regressing them. `each`/`transform`/
+  `filter` over arr (vm.c ~5623+) are a parallel follow-up. Until then,
+  iterate with `while` + `arr-len`/`arr-get`.
+- **arrow** (`$a->i` / `set $a->i x`): buf's arrow lowering assumes an
+  inline base-slot + fixed stride; arr needs a new heap-deref path that
+  lowers to `arr-get` / `arr-set`. Builtins are the supported surface
+  for now.
 
 ### Flat-bytes typed-array storage (M4 design)
 
