@@ -9549,6 +9549,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        For 4-arg form, args[2] is the optional return-type annotation. */
     JaclType proc_return_type = TYPE_DYN;
     uint32_t proc_return_struct_idx = UINT32_MAX;
+    /* For a [Stream T] generator: the element type encoding (scalar sentinel
+     * or struct idx), copied to the closure's gen_elem_idx so typed streams
+     * know their element type at runtime. Dyn sentinel for [Stream dyn] /
+     * unannotated generators. */
+    uint32_t proc_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
     uint32_t name_arg_idx, params_arg_idx, body_arg_idx;
 
     if (argc == 4) {
@@ -9593,6 +9598,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
            * onto call-site nodes via inferred_struct_idx, which is
            * where for-loop narrowing reads it. */
           proc_return_type = is_ptr ? TYPE_U64 : TYPE_DYN;
+          /* Capture the [Stream T] element type for the closure so the
+           * runtime stream is strictly typed. Scalar keyword → scalar
+           * sentinel; struct name → registry idx; anything else stays dyn. */
+          AstNode* strm_elem = NULL;
+          if (is_stream && compiler__stream_type_expr(tn, &strm_elem)) {
+            const char* en = strm_elem->data.lit_string.value;
+            uint32_t    el = strm_elem->data.lit_string.length;
+            if (is_type_keyword(en, el)) {
+              JaclType et = type_from_keyword(en, el);
+              if (et != TYPE_DYN)
+                proc_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(et);
+            } else {
+              StructTypeRegistry* sreg = compiler__get_struct_registry(c);
+              uint32_t sidx = sreg ? struct_registry__find(sreg, en, el) : UINT32_MAX;
+              if (sidx != UINT32_MAX) proc_stream_elem_idx = sidx;
+            }
+          }
           resolved = true;
         }
       }
@@ -10240,6 +10262,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Set upvalue count and generator flag on the closure */
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
     closure->is_generator  = body_compiler.has_yield;
+    /* Strict-stream element type: a [Stream T] generator carries T to the
+     * runtime stream; unannotated generators stay [Stream dyn]. */
+    closure->gen_elem_idx  = body_compiler.has_yield
+                             ? proc_stream_elem_idx
+                             : COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
 
     /* US-008: compute upvalue_total_slots (sum of all upvalue widths) */
     {
@@ -10747,18 +10774,43 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          Hidden locals: __col (stream), elem
          Loop: STREAM_NEXT → check exhausted → bind → body → LOOP */
 
+      /* Strict-stream narrowing (for-loop consumer, incremental cut). The
+       * typer stamps the element type on the stream node (range→i64,
+       * lines→str, [Stream T] generators→T). OP_STREAM_NEXT still delivers a
+       * TAGGED value (the producer rep is unchanged in this cut), so for a
+       * wide scalar binding in a plain local we unbox the pulled value to the
+       * wide rep below. In SM mode the binding is a state field: store the
+       * tagged value as-is and let the var-ref read unbox via
+       * node->inferred_type (same path as arr/vec). */
+      uint32_t strm_elem_enc = args[0]->inferred_struct_idx;
+      bool     strm_scalar   = (strm_elem_enc != UINT32_MAX) &&
+                               COMPILER_IS_SCALAR_TYPE_IDX(strm_elem_enc);
+      JaclType strm_scalar_t = strm_scalar
+                               ? COMPILER_TYPE_IDX_TO_SCALAR(strm_elem_enc)
+                               : TYPE_DYN;
+      bool strm_elem_wide = (strm_scalar_t == TYPE_I64 ||
+                             strm_scalar_t == TYPE_U64 ||
+                             strm_scalar_t == TYPE_F64);
+
+      /* Is the binding an SM state field? Computed up front to gate the
+       * non-SM local narrowing. */
+      int sm_bind_field = -1;
+      if (c->sm_analysis) {
+        JaclVal bn = compiler__name_val(c->heap, c->intern_table,
+                                          bind_name, bind_name_len);
+        sm_bind_field = sm__find_field(&c->sm_analysis->state_layout, bn);
+      }
+      bool strm_narrow_local = strm_scalar && strm_scalar_t != TYPE_DYN &&
+                               sm_bind_field < 0;
+
       /* Element placeholder → local $it/name (starts as nil) */
       compiler__emit_byte(c, OP_NIL, line);
       JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
       compiler__add_local(c, bind_val, line, col);
       uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
-      /* Note: we don't narrow the loop binding's static type from the
-       * stream's element idx here. The stream stores tagged JaclVals
-       * (yield emits jacl_i32 / jacl_str / ...), but a narrowed local
-       * type causes downstream codegen to expect the unboxed wide
-       * representation used by typed-vec / OP_CONST_I64. Decoupling
-       * the two needs an unboxing op on STREAM_NEXT — deferred
-       * (see NOT_IMPLEMENTED.md §4). */
+      if (strm_narrow_local) {
+        c->locals[c->local_count - 1].type = strm_scalar_t;
+      }
 
       /* Push loop context. local_count_at_loop is the count BEFORE
        * any iter-state locals (used by break to clean all of them).
@@ -10798,21 +10850,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* US-005: Check if pulled value is an error — if so, exit loop with error */
       uint32_t error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
 
-      /* Bind element. In SM mode the binding may live in a state field
-       * (sm__walk_locals adds for-loop bindings unconditionally; the
-       * liveness optimization is skipped for await/parallel/race procs).
-       * If so, write through OP_SET_STATE_FIELD to keep the state-field
-       * read path in sync. */
-      int sm_bind_field = -1;
-      if (c->sm_analysis) {
-        JaclVal bn = compiler__name_val(c->heap, c->intern_table,
-                                          bind_name, bind_name_len);
-        sm_bind_field = sm__find_field(&c->sm_analysis->state_layout, bn);
-      }
+      /* Bind element. In SM mode the binding lives in a state field
+       * (sm__walk_locals adds for-loop bindings unconditionally); store the
+       * tagged pulled value as-is and let the var-ref read unbox a wide
+       * scalar via node->inferred_type. In a plain local, unbox a wide
+       * scalar to its wide rep here (the pulled value is tagged); tagged
+       * scalars and dyn elements store as-is. */
       if (sm_bind_field >= 0) {
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
       } else {
+        if (strm_narrow_local && strm_elem_wide) {
+          uint8_t to_op = (strm_scalar_t == TYPE_I64) ? OP_TO_I64
+                        : (strm_scalar_t == TYPE_U64) ? OP_TO_U64 : OP_TO_F64;
+          compiler__emit_byte(c, to_op, line);
+          compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+        }
         compiler__emit_byte(c, OP_SET_LOCAL, line);
         compiler__emit_byte(c, elem_slot, line);
         compiler__emit_byte(c, OP_POP, line);

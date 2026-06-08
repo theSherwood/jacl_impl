@@ -2714,7 +2714,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__infer_node(tc, as[0]);
         JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
         JaclType coll_t = (JaclType)as[0]->inferred_type;
-        if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC) &&
+        if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
+             coll_t == TYPE_STREAM) &&
             as[0]->inferred_struct_idx != UINT32_MAX) {
           uint32_t eidx = as[0]->inferred_struct_idx;
           if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
@@ -2722,9 +2723,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
              * i64/u64/f64. Non-SM loops store the wide binding in a typed
              * local; SM loops store it boxed in a state field and the
              * var-ref read unboxes via the node's inferred_type. Applies to
-             * both [Arr T] and [Vec T] element bindings. */
+             * [Arr T], [Vec T], and [Stream T] element bindings. */
             bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
-          } else if (eidx < tc->struct_count) {
+          } else if (coll_t != TYPE_STREAM && eidx < tc->struct_count) {
+            /* Struct-element narrowing: arr/vec only. Struct-element streams
+             * stay dyn in this cut (the stream for-loop branch handles only
+             * scalar elements). */
             bt = TYPE_STRUCT; bsi = eidx;
           }
         }

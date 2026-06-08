@@ -12,8 +12,8 @@ proc check {} {
   # Composes with transform / filter like the infix form did.
   assert [== [collect [transform [range 0 3] [\ * $it 10]]] [vec 0 10 20]]
 
-  # Element type stamps i64 so the for binding narrows.
-  mut sum 0
+  # Element type stamps i64 so the for binding narrows — accumulate in i64.
+  mut i64 sum 0
   for [range-inclusive 1 4] n { set sum [+ $sum $n] }
   assert [== $sum 10]
 

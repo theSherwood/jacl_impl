@@ -187,7 +187,7 @@ proc main {} {
   mut seen 0
   for [vec 1 2 3] { set seen [+ $seen $it] }
   assert [== $seen 6]
-  mut range-sum 0
+  mut i64 range-sum 0              # range yields i64; binding narrows, so accumulate in i64
   for [range 0 3] n { set range-sum [+ $range-sum $n] }
   assert [== $range-sum 3]
 

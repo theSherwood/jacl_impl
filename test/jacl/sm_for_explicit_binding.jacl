@@ -15,9 +15,10 @@ proc sum-vec {} {
 
 proc count-stream {} {
   def fut [spawn { 0 }]
-  mut total 0
+  mut i64 total 0                 # [range] yields i64; binding narrows to i64
   for [range 1 4] n { set total [+ $total $n] }
-  + $total [await $fut]
+  await $fut                      # await for SM ordering; result (0) unused
+  $total
 }
 
 print [sum-vec]

@@ -3880,6 +3880,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           JaclVal stream_val = jacl_stream(&vm->heap);
           JaclStream* stream = jacl_as_stream(stream_val);
+          stream->elem_idx = closure->gen_elem_idx;  /* strict-stream element type */
           vm__slot_set(vm, &stream->next_fn, callee);
 
           if (closure->is_sm_compiled) {
@@ -10413,6 +10414,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal lines_stream_val = jacl_stream(&vm->heap);
         JaclStream* ls = jacl_as_stream(lines_stream_val);
         ls->kind      = STREAM_KIND_LINES;
+        ls->elem_idx  = JACL_SCALAR_TYPE_IDX(TYPE_STR);  /* lines yields str */
         ls->args[0]   = str_val;       /* source string */
         ls->args[1]   = jacl_i32(0);   /* current byte index */
         ls->arg_count  = 2;
@@ -12248,6 +12250,7 @@ interpret_done:
         JaclVal range_stream = jacl_stream(&vm->heap);
         JaclStream* rs = jacl_as_stream(range_stream);
         rs->kind      = STREAM_KIND_RANGE;
+        rs->elem_idx  = JACL_SCALAR_TYPE_IDX(TYPE_I64);  /* range yields i64 */
         rs->args[0]   = jacl_i64(&vm->heap, start_i);  /* current value */
         rs->args[1]   = jacl_i64(&vm->heap, end_i);    /* end bound */
         rs->args[2]   = jacl_i32((int32_t)inclusive); /* 0=excl, 1=incl */

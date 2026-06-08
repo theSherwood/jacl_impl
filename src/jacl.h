@@ -336,6 +336,12 @@ typedef struct {
     JaclVal   state_machine;
     JaclVal   args[STREAM_MAX_ARGS];
     uint8_t   arg_count;
+    /* Element type, encoded like tvec/tarr: JACL_SCALAR_TYPE_IDX(t) for a
+     * scalar element, a struct registry idx for struct elements, or
+     * JACL_SCALAR_TYPE_IDX(TYPE_DYN) for an untyped [Stream dyn]. Drives
+     * typed-yield value rep, GC tracing of cached_value, and consumer
+     * narrowing. (Definition mirrored in gc.c — keep in sync.) */
+    uint32_t  elem_idx;
 } JaclStream;
 
 typedef struct {
@@ -1086,6 +1092,12 @@ typedef struct {
   bool          is_sm_compiled;
   uint8_t       sm_field_count;
   uint8_t       upvalue_inline_bitmap[32]; /* US-014: marks which upvalue slots hold raw struct bytes */
+  /* For generators: the declared [Stream T] element type, encoded like
+   * JaclStream.elem_idx (scalar sentinel / struct idx / dyn sentinel).
+   * Copied to the stream at creation so typed streams know their element
+   * type at runtime. JACL_SCALAR_TYPE_IDX(TYPE_DYN) for [Stream dyn] /
+   * non-generators. */
+  uint32_t      gen_elem_idx;
 } JaclClosure;
 
 /* ========================================================================

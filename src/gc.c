@@ -1254,6 +1254,7 @@ typedef struct {
     /* Deferred first-call arguments (saved at generator creation, used on first pull) */
     JaclVal   args[STREAM_MAX_ARGS];
     uint8_t   arg_count;
+    uint32_t  elem_idx;      /* element type encoding; see jacl.h JaclStream */
 } JaclStream;
 
 JaclStream *jacl_as_stream(JaclVal v) {
@@ -1268,6 +1269,11 @@ JaclVal jacl_stream(ThreadHeap *heap) {
     s->cached_value  = JACL_NIL;
     s->state_machine = JACL_NIL;
     s->arg_count     = 0;
+    /* Dyn sentinel: JACL_SCALAR_TYPE_IDX(TYPE_DYN) == JACL_SCALAR_VEC_BASE
+     * (0xFF00) + TYPE_DYN (0) == 0xFF00. jacl.h's enum/macros aren't visible
+     * this early in the unity build, so use the literal. Overridden at
+     * typed-stream creation sites (generator/range/lines). */
+    s->elem_idx      = 0xFF00u;  /* untyped [Stream dyn] until set */
     return jacl_stream_ptr(s);
 }
 

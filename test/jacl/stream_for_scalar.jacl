@@ -1,0 +1,31 @@
+# expect: 10
+# expect: 300
+# expect: ok
+# Strict-stream for-loop binding narrowing (for-loop consumer, incremental
+# cut). A typed stream's for-binding narrows to the element type: range/
+# range-inclusive -> i64, lines -> str, [Stream T] generators -> T. The
+# producer still yields tagged values, so the for-loop unboxes a wide scalar
+# to its wide rep at the bind (non-SM) or stores boxed in a state field and
+# unboxes on read (SM). [Stream dyn] / unannotated generators stay dyn.
+proc gen {} [Stream i64] {
+  yield 100
+  yield 200
+}
+proc main {} {
+  # range -> i64 binding: typed accumulation type-checks
+  mut i64 s 0
+  for [range 1 5] x { set s [+ $s $x] }
+  print $s                          # 1+2+3+4 = 10
+  for [range 1 5] y { assert-type $y i64 }
+
+  # typed generator -> i64 binding
+  mut i64 g 0
+  for [gen] v { set g [+ $g $v] }
+  print $g                          # 100 + 200 = 300
+  for [gen] w { assert-type $w i64 }
+
+  # lines -> str binding
+  for [lines "ab\ncd"] ln { assert-type $ln str }
+  print "ok"
+}
+main
