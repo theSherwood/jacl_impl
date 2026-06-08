@@ -2422,6 +2422,61 @@ static const TyperImportProc* typer__find_bound_export(TyperCtx* tc,
   return NULL;
 }
 
+/* Infer the return type of a `[\ body]` lambda with its implicit $it param
+ * bound to a known element type. Used by `transform` to type the output stream
+ * by the lambda's return type (a scoped case of anon-closure return typing).
+ *
+ * A lambda `[\ * $it 10]` parses as a HEAD_NONE command with head "\" and args
+ * [*, $it, 10]; its body is the application reconstructed as {head: args[0],
+ * args: args[1..]}. We bind $it to it_enc's type, type that body, and read its
+ * inferred type. Returns the element encoding (scalar sentinel / struct idx)
+ * or UINT32_MAX (dyn) when the lambda isn't a recognizable single-expression
+ * form. */
+static uint32_t typer__lambda_ret_enc(TyperCtx* tc, AstNode* lam,
+                                      uint32_t it_enc) {
+  /* A `[\ body]` lambda desugars to an anonymous proc command (head "proc",
+   * empty name). Layout: args = [name, params, (rettype)?, body]. */
+  if (!lam || lam->type != AST_COMMAND) return UINT32_MAX;
+  if (lam->data.command.head_id != HEAD_PROC) return UINT32_MAX;
+  uint32_t ac = lam->data.command.arg_count;
+  if (ac != 3 && ac != 4) return UINT32_MAX;
+  AstNode* body = lam->data.command.args[ac == 4 ? 3 : 2];
+  if (!body || body->type != AST_BLOCK) return UINT32_MAX;
+  uint32_t bc = body->data.block.count;
+  if (bc == 0) return UINT32_MAX;
+
+  uint8_t it_type = (uint8_t)TYPE_DYN; uint32_t it_sidx = UINT32_MAX;
+  if (it_enc != UINT32_MAX) {
+    if (JACL_IS_SCALAR_TYPE_IDX(it_enc))
+      it_type = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(it_enc);
+    else { it_type = (uint8_t)TYPE_STRUCT; it_sidx = it_enc; }
+  }
+
+  /* Type the body block with the implicit $it param bound to the element
+   * type; the tail statement's type is the lambda's return type. */
+  typer__scope_push(tc);
+  typer__scope_add(tc, "it", 2, body->scope_mark, it_type, it_sidx);
+  for (uint32_t i = 0; i < bc; i++)
+    typer__infer_node(tc, body->data.block.commands[i]);
+  AstNode* tail = body->data.block.commands[bc - 1];
+  JaclType rt = (JaclType)tail->inferred_type;
+  uint32_t rsidx = tail->inferred_struct_idx;
+  typer__scope_pop(tc);
+
+  /* Restore the body's annotations to the it:dyn typing the compiler expects
+   * (lambda params are untyped at runtime), so this inference doesn't leak a
+   * narrowed $it into the body's codegen. */
+  typer__scope_push(tc);
+  typer__scope_add(tc, "it", 2, body->scope_mark, (uint8_t)TYPE_DYN, UINT32_MAX);
+  for (uint32_t i = 0; i < bc; i++)
+    typer__infer_node(tc, body->data.block.commands[i]);
+  typer__scope_pop(tc);
+
+  if (rt == TYPE_STRUCT && rsidx != UINT32_MAX) return rsidx;
+  if (rt != TYPE_DYN && rt != TYPE_NIL) return JACL_SCALAR_TYPE_IDX(rt);
+  return UINT32_MAX;
+}
+
 /* --- Generic walkers --- */
 
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node);
@@ -3680,6 +3735,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           } else if (recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
                      recv_t == TYPE_STREAM) {
             node->inferred_type = recv_t;
+            /* transform over a typed stream → a stream of the lambda's return
+             * type: bind the lambda's $it to the source element type and infer
+             * its body. (Output element falls back to dyn when the lambda
+             * return type can't be inferred.) */
+            if (recv_t == TYPE_STREAM &&
+                node->data.command.arg_count == 2 &&
+                recv->inferred_struct_idx != UINT32_MAX) {
+              node->inferred_struct_idx = typer__lambda_ret_enc(
+                  tc, node->data.command.args[1], recv->inferred_struct_idx);
+            }
           }
           return;
         case HEAD_TAKE:
