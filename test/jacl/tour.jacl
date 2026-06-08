@@ -95,6 +95,12 @@ proc main {} {
   def alias $nums                 # a reference — shares storage
   arr-push $alias 99
   assert [== [arr-len $nums] 4]   # mutation visible through both
+  # `for` iterates an arr; over a flat-typed [Arr i32] the binding narrows
+  # to i32, so typed accumulation type-checks.
+  def scores [[Arr i32] 1 2 3 4]
+  mut i32 total 0
+  for $scores s { set total [+ $total $s] }
+  assert [== $total 10]
 
   # ----- bindings -----
   # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`

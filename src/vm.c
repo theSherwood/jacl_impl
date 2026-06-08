@@ -445,17 +445,26 @@ static inline void vm__arr_scalar_store(JaclType t, JaclVal v, uint8_t *dst) {
     }
 }
 
-/* Read elem_size raw bytes at src and rebuild the tagged scalar. i64/u64/f64
- * heap-box (allocate a cell), matching the buf load. */
+/* Read elem_size raw bytes at src and produce the on-stack scalar.
+ *
+ * i32/u32/f32/bool are tagged JaclVals (their only representation). i64/u64/f64
+ * are pushed as UNBOXED WIDE bits (raw 8 bytes reinterpreted as a JaclVal),
+ * mirroring OP_TYPED_VEC_GET_INLINE's `*ptr` push — NOT heap-boxed. This lets
+ * the compiler/typer narrow arr-get/arr-pop on [Arr i64/u64/f64] to the wide
+ * scalar type and bridge to dyn via OP_TO_DYN (ensure_boxed) at dyn sinks,
+ * exactly as typed-vec does. The `vm` param is unused but kept for call-site
+ * symmetry with the boxing builtins. */
 static inline JaclVal vm__arr_scalar_load(VM *vm, JaclType t, const uint8_t *src) {
+    (void)vm;
     switch (t) {
         case TYPE_BOOL: return jacl_bool(src[0] != 0);
         case TYPE_I32: { int32_t v; memcpy(&v, src, 4); return jacl_i32(v); }
         case TYPE_U32: { uint32_t v; memcpy(&v, src, 4); return jacl_u32(v); }
         case TYPE_F32: { float v; memcpy(&v, src, 4); return jacl_f32(v); }
-        case TYPE_I64: { int64_t v; memcpy(&v, src, 8); return jacl_i64(&vm->heap, v); }
-        case TYPE_U64: { uint64_t v; memcpy(&v, src, 8); return jacl_u64(&vm->heap, v); }
-        case TYPE_F64: { double v; memcpy(&v, src, 8); return jacl_f64(&vm->heap, v); }
+        /* Unboxed wide: raw 8 bytes straight into the JaclVal slot. */
+        case TYPE_I64:
+        case TYPE_U64:
+        case TYPE_F64: { JaclVal v; memcpy(&v, src, 8); return v; }
         default: return JACL_NIL;
     }
 }

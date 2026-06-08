@@ -26,24 +26,28 @@ store).
 ## Status snapshot (for session handoff)
 
 **Pickup for the next session (as of 2026-06-08):** `[Arr T]` is
-functionally complete — **M0–M5 done**, all committed to `main` and
+functionally complete — **M0–M5 done + M6 for-loop done**, on `main` and
 green. Dyn (`[arr ...]`), flat typed-scalar (`[Arr i32]`…), and flat
 typed-struct (`[Arr Point]`) arrays all work: construct / get / set /
-push / pop / len, plus print / to-string / identity-eq / nesting.
+push / pop / len, plus print / to-string / identity-eq / nesting /
+`for`-loop iteration. Scalar get/pop narrowing is complete (all scalars,
+incl. wide i64/u64/f64 — Phase 1 carve-out removed). The `[[Arr T] …]`
+constructor + push/set now box wide float/large-int literals (pre-existing
+zero-store bug, fixed Phase 1).
 
-- **Verify state:** `timeout 240 ./build.sh` → 91/91. TSAN
-  (`./build.sh --tsan`) is race-clean in arr paths; the only failures
-  are the pre-existing known-safe `chase_lev_stress` + `OP_GET_GLOBAL`
-  inline-cache races (and a `box_reset_hot` perf-timeout flake under
-  tsan) — none arr-related.
+- **Verify state:** `timeout 240 ./build.sh` → 91/91 binaries; full jacl
+  suite 474/474. TSAN (`./build.sh --tsan`) race-clean in arr paths; only
+  the pre-existing known-safe `chase_lev` test-helper race remains (not
+  arr-related).
 - **Tests:** `test/jacl/arr_*.jacl` (basic, alias, oob, print,
-  to_string, nested, typed_scalar, typed_i64, typed_oob, typed_mismatch,
-  typed_struct) + `lib/segment_array/test_segment_array{,_var}.c` +
-  the `[Arr T]` block in `tour.jacl`.
-- **Start here:** **M6** — `for $x in $a` iteration, then `$a->i` /
-  `set $a->i x` arrow indexing (see "M6 remaining" below). Both are
-  ergonomic; arrays are fully usable today via the builtins +
-  `while`/`arr-len`/`arr-get`.
+  to_string, nested, typed_scalar, typed_i64, typed_i64_narrow,
+  typed_f64, typed_oob, typed_mismatch, typed_struct, for_scalar,
+  for_struct, for_wide) + `lib/segment_array/test_segment_array{,_var}.c`
+  + the `[Arr T]` block in `tour.jacl`.
+- **Start here:** **M6 arrow** — `$a->i` / `set $a->i x` heap-deref
+  indexing (the for-loop half of M6 is done). Also optional: `each`/
+  `transform`/`filter` over arr, and the deferred wide for-binding
+  narrowing (needs the wide-cell + SM state-field work, §4).
 - **Gotchas to know before editing:**
   - `JaclType` / `OpCode` / `HeadId` are each **dual-defined**
     (jacl.h + ast.c / bytecode.c). Edit both; append new opcodes at the
@@ -52,11 +56,22 @@ push / pop / len, plus print / to-string / identity-eq / nesting.
   - **Cross-registry idx hazard:** struct element idx for opcode
     operands comes from the *compiler* registry (`struct_registry__find`),
     not the typer's.
-  - **Two intentional carve-outs** (don't "fix" without reading why):
-    `arr-get`/`arr-pop` on `[Arr i64/u64/f64]` return `dyn` not the
-    narrowed wide scalar (wide-cell rep, mirrors §4); struct arrays are
-    pure value types (JACL structs can't hold ref fields) so the GC
-    recursion / ref-store barriers are kept-for-correctness no-ops.
+  - **One intentional carve-out** (don't "fix" without reading why):
+    struct arrays are pure value types (JACL structs can't hold ref
+    fields) so the GC recursion / ref-store barriers are
+    kept-for-correctness no-ops.
+  - **Scalar narrowing now complete (2026-06-08, Phase 1).** The former
+    i64/u64/f64 "return dyn" carve-out is **removed** — `arr-get`/`arr-pop`
+    on `[Arr i64/u64/f64]` now narrow to the unboxed **wide** scalar,
+    matching `vec-get`. `vm__arr_scalar_load` pushes raw 8-byte bits for
+    i64/u64/f64 (was heap-boxing); the typer/compiler narrow all scalars
+    and rely on the existing `ensure_boxed` (`OP_TO_DYN`) bridges at dyn
+    sinks. Same change fixed a **pre-existing construct/push/set bug**:
+    unboxed wide float literals (`OP_CONST_F64`) and large i64/u64
+    literals fell through `vm__arr_scalar_store`'s tagged-only branches
+    and stored `0`; the scalar `[[Arr T] …]` constructor + `arr-push`/
+    `arr-set` now `ensure_boxed` each element before the byte-packed
+    store. Tests: `arr_typed_i64_narrow.jacl`, `arr_typed_f64.jacl`.
 
 | Milestone | Status | Notes |
 |---|---|---|
@@ -70,7 +85,7 @@ push / pop / len, plus print / to-string / identity-eq / nesting.
 | ⮑ **M4c** Type-position + typer | ✅ done | `typer__arr_type`; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; `[[Arr T] ...]` constructor; get narrows, push/set type-check; element-literal flex. |
 | ⮑ **M4d** Typed byte ops | 🟡 scalar done | `OP_TYPED_ARR` construct + get/set/push/pop/len byte path for scalar elements (i32/i64/u32/u64/f32/f64/bool) via `vm__arr_scalar_{store,load}`. **Struct elements (`[Arr Point]`) deferred (M4d-2)** — constructor/ops error clearly. |
 | ⮑ **M4e** GC trace + tests | 🟡 scalar done | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip (no refs). Struct recursion deferred (M4e-2). Tests: typed_scalar/i64/oob/mismatch. TSAN race-clean in arr paths. |
-| ⮑ **M4d-2/e-2** Struct-element typed arrays | ✅ done | `[Arr Point]`: flat `width*8`-byte slots; `OP_TYPED_ARR_PUSH/SET`; inline-struct get/pop/construct; GC ref-bitmap recursion. JACL structs are pure value types (no ref fields), so the recursion/barriers are effectively no-ops but kept for correctness. Build 91/91, TSAN race-clean in arr paths. **Caveat:** `arr-get`/`arr-pop` on `[Arr i64/u64/f64]` return `dyn` (correct value), not the narrowed wide scalar — wide-cell stack-rep narrowing deferred, mirroring §4. |
+| ⮑ **M4d-2/e-2** Struct-element typed arrays | ✅ done | `[Arr Point]`: flat `width*8`-byte slots; `OP_TYPED_ARR_PUSH/SET`; inline-struct get/pop/construct; GC ref-bitmap recursion. JACL structs are pure value types (no ref fields), so the recursion/barriers are effectively no-ops but kept for correctness. Build 91/91, TSAN race-clean in arr paths. **Update (Phase 1, 2026-06-08):** the wide-cell caveat is **resolved** — `arr-get`/`arr-pop` on `[Arr i64/u64/f64]` now narrow to the unboxed wide scalar (see the "Scalar narrowing now complete" note in the Pickup block). |
 
 ### Struct-element typed arrays (M4d-2 design)
 
@@ -101,28 +116,37 @@ GC (M4e-2): `OBJ_ARR` trace's struct branch recurses
 element (the buf struct-element walker). Ref-store barriers fire only
 when the struct contains ref fields.
 | **M5** Identity & polish | ✅ done | `to-string` (wired), tour.jacl `[Arr T]` section, nested-arr + to-string tests (identity eq + print landed in M3). |
-| **M6** Iteration + arrow | ⬜ todo (Phase 2) | `for $x in $a`, `$a->i` / `set $a->i x`. See notes below. |
+| **M6** Iteration + arrow | 🟡 for-loop done | `for [a] x { }` iteration shipped (dyn/scalar/struct elements, binding narrowing for tagged scalars + struct; wide scalars stay dyn — see below). `$a->i` / `set $a->i x` arrow still todo. |
 
-### M6 remaining (iteration + arrow ergonomics)
+### M6 status (iteration + arrow ergonomics)
 
-Both deferred — sizable changes to the compiler's most complex/shared
-codegen, warranting their own session:
+**for-loop — done (2026-06-08).** `for [a] x { }` / `for [a] { ... $it }`
+is a dedicated branch in the inlined for-loop (`compiler.c`, right before
+the "Vector-based" branch) using `OP_ARR_LEN` / `OP_ARR_GET` (both read
+element size/ref-ness off the object's `elem_idx`, so no per-kind opcode).
+Three element kinds, two binding shapes:
+- **dyn `[arr ...]`** → dyn binding, `OP_ARR_GET` + `OP_SET_LOCAL`.
+- **tagged scalar `[Arr i32/u32/f32/bool]`** → binding **narrows** to the
+  scalar (typer + compiler), enabling typed body math / `assert-type`.
+- **wide scalar `[Arr i64/u64/f64]`** → binding stays **dyn** (value
+  correct: `OP_ARR_GET` pushes raw wide bits, boxed via `OP_TO_DYN`
+  before the store). Narrowing a wide for-binding is the deferred
+  wide-cell + SM work (`NOT_IMPLEMENTED §4`): in an SM proc the binding
+  becomes a GC-traced state field where raw wide bits mis-trace as a
+  pointer. Phase 1 already narrows the direct `arr-get`/`arr-pop` wide
+  case, so `while` + `arr-get` gives typed wide iteration today.
+- **struct `[Arr Point]`** → inline-width binding (`OP_INLINE_TO_LOCAL`,
+  mirroring `is_typed_vec_loop`); `$p->field` works in the body.
 
-- **for-loop** (`for $x in $a`): the for-loop desugars to a
-  length + indexed-get loop (`compiler.c` ~10845, the "vector-based
-  inlined for loop"). Adding arr means emitting `OP_ARR_LEN` /
-  `OP_ARR_GET` when `col_type` is `TYPE_ARR` / `TYPE_TYPED_ARR`. The
-  dyn/scalar case mirrors the `OP_VEC_GET` + `OP_SET_LOCAL` path;
-  struct-element arrays need the inline-width local setup the
-  `is_typed_vec_loop` branch uses (`OP_INLINE_TO_LOCAL`) plus SM-mode
-  state-field handling. This path is shared by vec/stream/range loops,
-  so changes need care to avoid regressing them. `each`/`transform`/
-  `filter` over arr (vm.c ~5623+) are a parallel follow-up. Until then,
-  iterate with `while` + `arr-len`/`arr-get`.
-- **arrow** (`$a->i` / `set $a->i x`): buf's arrow lowering assumes an
-  inline base-slot + fixed stride; arr needs a new heap-deref path that
-  lowers to `arr-get` / `arr-set`. Builtins are the supported surface
-  for now.
+Break/continue/break-value and suspending (SM) for-loops all work; the
+typer narrows the binding via a `HEAD_FOR` case (tagged scalars + struct).
+Tests: `arr_for_scalar.jacl`, `arr_for_struct.jacl`, `arr_for_wide.jacl`,
+plus a tour.jacl line. `each`/`transform`/`filter` over arr (vm.c ~5623+)
+remain a parallel follow-up.
+
+**arrow — todo.** `$a->i` / `set $a->i x`: buf's arrow lowering assumes an
+inline base-slot + fixed stride; arr needs a new heap-deref path that
+lowers to `arr-get` / `arr-set`. Builtins are the supported surface for now.
 
 ### Flat-bytes typed-array storage (M4 design)
 

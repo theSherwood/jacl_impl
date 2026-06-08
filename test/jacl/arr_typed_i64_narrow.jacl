@@ -1,0 +1,27 @@
+# expect: 100
+# expect: 300
+# expect: 400
+# expect: ok
+# Phase 1 (ARR_DESIGN §M4 carve-out removal): arr-get/arr-pop on
+# [Arr i64/u64/f64] now narrow to the wide scalar type (not dyn), matching
+# vec-get. Proves BOTH the static narrowing (assert-type) and wide-rep
+# correctness — typed i64 arithmetic on the result yields the real value, not
+# the NaN-box tag bits the old heap-boxed path would have leaked.
+proc main {} {
+  def a [[Arr i64] 100 200 300]
+
+  def i64 x [arr-get $a 0]
+  print $x                      # 100
+
+  def i64 last [arr-pop $a]     # pops 300; a is now [100 200]
+  print $last                   # 300
+
+  def i64 sum [+ $x $last]      # wide i64 add: 100 + 300
+  print $sum                    # 400
+
+  # static narrowing, compile-time only; not evaluated so no extra pop
+  assert-type [arr-get $a 0] i64
+  assert-type [arr-pop $a] i64
+  print "ok"
+}
+main

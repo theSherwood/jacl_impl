@@ -2687,6 +2687,58 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
       node->inferred_type = TYPE_NIL;
       return;
+    } else if (hid == HEAD_FOR &&
+               (node->data.command.arg_count == 2 ||
+                node->data.command.arg_count == 3)) {
+      /* for [coll] { body }  /  for [coll] name { body } — narrow the loop
+       * binding to the collection's element type so typed body operations
+       * (typed arithmetic, assigning to a typed local, assert-type) see the
+       * right type. Currently only typed arr narrows; dyn arr / vec / stream
+       * keep a dyn binding (stream/vec for-binding narrowing is deferred —
+       * NOT_IMPLEMENTED §4 wide-cell note), preserving existing behavior.
+       * The callback/each form (args[1] is a var-ref or command) and any
+       * malformed shape fall through to the generic walker. */
+      AstNode** as = node->data.command.args;
+      uint32_t  ac = node->data.command.arg_count;
+      const char* bn = "it"; uint32_t bnl = 2;
+      AstNode* body = NULL; uint32_t bmark = 0;
+      if (ac == 2 && as[1]->type == AST_BLOCK) {
+        body = as[1]; bmark = as[1]->scope_mark;
+      } else if (ac == 3 && as[1]->type == AST_LIT_STRING &&
+                 as[2]->type == AST_BLOCK) {
+        bn = as[1]->data.lit_string.value;
+        bnl = as[1]->data.lit_string.length;
+        body = as[2]; bmark = as[1]->scope_mark;
+      }
+      if (body) {
+        typer__infer_node(tc, as[0]);
+        JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
+        if ((JaclType)as[0]->inferred_type == TYPE_TYPED_ARR &&
+            as[0]->inferred_struct_idx != UINT32_MAX) {
+          uint32_t eidx = as[0]->inferred_struct_idx;
+          if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+            JaclType st = JACL_TYPE_IDX_TO_SCALAR(eidx);
+            /* Narrow tagged scalars (i32/u32/f32/bool) only. Wide scalars
+             * (i64/u64/f64) stay dyn: in an SM proc the compiler stores the
+             * for-binding in a GC-traced state field, where raw wide bits
+             * would be mis-traced as a pointer. Matches the dyn for-bindings
+             * of stream/vec loops; the wide for-binding case is the deferred
+             * wide-cell + SM work (NOT_IMPLEMENTED §4). Phase 1 already
+             * narrows the direct arr-get/arr-pop wide case. */
+            bool st_wide = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64);
+            if (!st_wide) bt = st;
+          } else if (eidx < tc->struct_count) {
+            bt = TYPE_STRUCT; bsi = eidx;
+          }
+        }
+        typer__scope_push(tc);
+        typer__scope_add(tc, bn, bnl, bmark, (uint8_t)bt, bsi);
+        typer__infer_node(tc, body);
+        typer__scope_pop(tc);
+        node->inferred_type = TYPE_NIL;
+        return;
+      }
+      /* else: callback/each or malformed — fall through to generic. */
     }
   }
 
@@ -3505,13 +3557,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               recv->inferred_struct_idx != UINT32_MAX) {
             uint32_t eidx = recv->inferred_struct_idx;
             if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              JaclType st = JACL_TYPE_IDX_TO_SCALAR(eidx);
-              /* i64/u64/f64 use an unboxed wide stack rep when statically
-               * typed, but the unified arr-get/pop op returns a tagged value
-               * — so leave the result dyn (still a correct i64 value) rather
-               * than narrow. Wide-cell narrowing deferred, mirrors §4. */
-              if (st != TYPE_I64 && st != TYPE_U64 && st != TYPE_F64)
-                node->inferred_type = st;
+              /* Narrow to the element scalar for ALL scalars. i64/u64/f64 come
+               * back as unboxed wide bits (vm__arr_scalar_load), matching
+               * typed-vec; OP_TO_DYN bridges them at dyn sinks. */
+              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
             } else if (eidx < tc->struct_count) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;

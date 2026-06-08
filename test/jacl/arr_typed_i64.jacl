@@ -3,7 +3,9 @@
 # expect: 40
 # expect: [arr 10 20 30 40]
 # M4d: flat [Arr i64] — 8-byte raw element storage; integer literals
-# flex to i64. arr-pop/get reconstruct the heap-boxed i64.
+# flex to i64. arr-get/arr-pop return the element as an UNBOXED WIDE i64
+# (narrowed, not dyn — see arr_typed_i64_narrow.jacl); print bridges via
+# ensure_boxed, so the rendered values here are unchanged.
 def a [[Arr i64] 10 20 30]
 print [arr-len $a]
 print [arr-get $a 0]

@@ -6406,6 +6406,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err);
           return;
         }
+        /* OP_TYPED_ARR's vm__arr_scalar_store expects a TAGGED scalar (it packs
+         * the value into elem_size bytes via jacl_is_f64/i64/...). Unboxed wide
+         * elements (f64/f32 float literals, large i64/u64 literals via
+         * OP_CONST_F64/I64) would otherwise fall through to jacl_as_i32 and
+         * store 0. Box them back to tagged form first — matches the store's
+         * documented contract and typed-vec's verbatim-slot behavior. */
+        compiler__ensure_boxed(c, line);
       }
       compiler__emit_byte(c, OP_TYPED_ARR, line);
       compiler__emit_u16(c, (uint16_t)COMPILER_SCALAR_TYPE_IDX(et), line);
@@ -10842,6 +10849,175 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    if (col_type == TYPE_ARR || col_type == TYPE_TYPED_ARR) {
+      /* ====== Arr-based inlined for loop ======
+         Hidden locals: __col, __len, __idx, $it/name. Mirrors the vec
+         branch but uses OP_ARR_LEN / OP_ARR_GET (which read element size and
+         ref-ness off the object's elem_idx at runtime) and narrows the loop
+         binding to the element scalar type:
+           - dyn arr [arr ...]            -> binding dyn (tagged elements)
+           - [Arr i32/u32/f32/bool]       -> binding narrowed (tagged scalar)
+           - [Arr i64/u64/f64]            -> binding narrowed (unboxed wide;
+                                             OP_ARR_GET pushes raw bits)
+           - [Arr Struct]                 -> inline-width binding (like the
+                                             is_typed_vec_loop path)
+         Narrowing is suppressed when the binding lives in an SM state field
+         (a wide scalar can't round-trip a JaclVal state slot cleanly); the
+         element is boxed and the binding stays dyn there, matching the
+         stream-loop's conservatism. */
+      uint32_t arr_elem_enc = args[0]->inferred_struct_idx;
+      bool arr_is_typed   = (col_type == TYPE_TYPED_ARR);
+      bool arr_struct_elem = arr_is_typed &&
+                             !COMPILER_IS_SCALAR_TYPE_IDX(arr_elem_enc);
+      JaclType arr_scalar_t = TYPE_DYN;
+      if (arr_is_typed && COMPILER_IS_SCALAR_TYPE_IDX(arr_elem_enc))
+        arr_scalar_t = COMPILER_TYPE_IDX_TO_SCALAR(arr_elem_enc);
+      bool arr_elem_wide = (arr_scalar_t == TYPE_I64 ||
+                            arr_scalar_t == TYPE_U64 ||
+                            arr_scalar_t == TYPE_F64);
+
+      /* Is the binding an SM state field? */
+      int arr_sm_field = -1;
+      if (c->sm_analysis) {
+        JaclVal bn = compiler__name_val(c->heap, c->intern_table,
+                                          bind_name, bind_name_len);
+        arr_sm_field = sm__find_field(&c->sm_analysis->state_layout, bn);
+      }
+      /* Narrow the binding for TAGGED scalars (i32/u32/f32/bool) only — they
+       * are a single tagged JaclVal in any slot (local or state field), so
+       * narrowing is always safe and matches the typer. WIDE scalars
+       * (i64/u64/f64) stay dyn: OP_ARR_GET yields raw wide bits, which are
+       * boxed below before storing, so a dyn-typed binding round-trips
+       * correctly and never lands raw wide bits in a GC-traced state field.
+       * Wide for-binding narrowing is the deferred wide-cell + SM work
+       * (NOT_IMPLEMENTED §4); Phase 1 covers the direct arr-get/pop case. */
+      bool arr_narrow_scalar = arr_is_typed && !arr_struct_elem &&
+                               arr_scalar_t != TYPE_DYN && !arr_elem_wide;
+
+      /* Compute length -> local __len */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
+      compiler__emit_byte(c, OP_ARR_LEN, line);
+      compiler__add_local(c, jacl_inline_string("__len", 5), line, col);
+
+      /* Counter -> local __idx (starts at 0) */
+      compiler__emit_constant(c, jacl_i32(0), line);
+      compiler__add_local(c, jacl_inline_string("__idx", 5), line, col);
+
+      /* Element placeholder -> local $it/name (starts as nil) */
+      compiler__emit_byte(c, OP_NIL, line);
+      JaclVal arr_bind_val = compiler__name_val(c->heap, c->intern_table,
+                                                bind_name, bind_name_len);
+      compiler__add_local(c, arr_bind_val, line, col);
+      if (arr_struct_elem) {
+        c->locals[c->local_count - 1].type = TYPE_STRUCT;
+        c->locals[c->local_count - 1].struct_type_idx = arr_elem_enc;
+        StructTypeRegistry* areg = compiler__get_struct_registry(c);
+        uint32_t arr_elem_width = struct__slot_width(areg, arr_elem_enc);
+        c->locals[c->local_count - 1].width = (uint16_t)arr_elem_width;
+        c->locals[c->local_count - 1].is_inline = true;
+        for (uint32_t w = 1; w < arr_elem_width; w++) {
+          compiler__emit_byte(c, OP_NIL, line);
+          compiler__add_local(c, jacl_inline_string("", 0), line, col);
+          c->locals[c->local_count - 1].depth = c->scope_depth;
+        }
+      } else if (arr_narrow_scalar) {
+        c->locals[c->local_count - 1].type = arr_scalar_t;
+      }
+
+      uint8_t arr_len_slot  = (uint8_t)(saved_local_count + 1);
+      uint8_t arr_idx_slot  = (uint8_t)(saved_local_count + 2);
+      uint8_t arr_elem_slot = (uint8_t)(saved_local_count + 3);
+
+      LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+      lctx->break_patch_count = 0;
+      lctx->continue_patch_count = 0;
+      lctx->local_count_at_loop = saved_local_count;
+      lctx->body_local_count = c->local_count;
+      lctx->is_for_loop = true;
+
+      uint32_t loop_start = c->chunk->code_count;
+      lctx->loop_start = loop_start;
+
+      /* __idx < __len */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, arr_idx_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, arr_len_slot, line);
+      compiler__emit_byte(c, OP_LT, line);
+      uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* $it = __col[__idx] */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, arr_idx_slot, line);
+      compiler__emit_byte(c, OP_ARR_GET, line);
+      if (arr_struct_elem) {
+        /* Inline-width binding (state-field-wide not wired; falls back to the
+         * local slot, mirroring the typed-vec branch). */
+        compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
+        compiler__emit_byte(c, arr_elem_slot, line);
+        compiler__emit_u16(c, (uint16_t)arr_elem_enc, line);
+      } else {
+        /* Wide scalars (i64/u64/f64) come back from OP_ARR_GET as unboxed
+         * wide bits but the binding stays dyn, so box them to a tagged value
+         * before the store. (Tagged scalars and dyn arrays already yield
+         * tagged elements; arr_narrow_scalar is never set for wide.) */
+        if (!arr_narrow_scalar && arr_elem_wide) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)arr_scalar_t, line);
+        }
+        if (arr_sm_field >= 0) {
+          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)arr_sm_field, line);
+        } else {
+          compiler__emit_byte(c, OP_SET_LOCAL, line);
+          compiler__emit_byte(c, arr_elem_slot, line);
+          compiler__emit_byte(c, OP_POP, line);
+        }
+      }
+
+      /* Body */
+      uint32_t body_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < body_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* Continue target */
+      for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+        compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+
+      /* __idx = __idx + 1 */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, arr_idx_slot, line);
+      compiler__emit_constant(c, jacl_i32(1), line);
+      compiler__emit_byte(c, OP_ADD, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, arr_idx_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* Loop back */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t back_offset = c->chunk->code_count - loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((back_offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(back_offset & 0xFF), line);
+
+      /* Exit */
+      compiler__patch_jump(c, exit_jump);
+      compiler__end_scope(c, line);
+      compiler__emit_byte(c, OP_NIL, line);
+      uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+      for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+        compiler__patch_jump(c, lctx->break_patches[i]);
+      }
+      compiler__patch_jump(c, skip_break);
+      c->loop_depth--;
+      return;
+    }
+
     /* ====== Vector-based inlined for loop (original path) ======
        Hidden locals: __col, __len, __idx, $it/name */
 
@@ -11367,11 +11543,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
       uint32_t eidx = args[0]->inferred_struct_idx;
       if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
-        JaclType st = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
-        /* i64/u64/f64: keep dyn (wide-cell narrowing deferred, see §4 /
-         * the typer's matching guard). The runtime value is still correct. */
-        c->last_expr_type = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64)
-                            ? TYPE_DYN : st;
+        /* Narrow to the element scalar for ALL scalars. OP_ARR_GET pushes
+         * i64/u64/f64 as unboxed wide bits (vm__arr_scalar_load), so the
+         * result is an is_unboxed_type — existing ensure_boxed bridges box it
+         * back at dyn sinks, exactly as for vec-get. */
+        c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
       } else {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;
@@ -11411,6 +11587,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        /* Box unboxed wide scalars (i64/u64/f64) — OP_ARR_PUSH's byte-packed
+         * store expects a tagged value (see OP_TYPED_ARR ctor note). */
+        compiler__ensure_boxed(c, line);
         compiler__emit_byte(c, OP_ARR_PUSH, line);
       } else {
         compiler__emit_byte(c, OP_TYPED_ARR_PUSH, line);
@@ -11441,6 +11620,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        /* Box unboxed wide scalars — OP_ARR_SET's byte-packed store expects a
+         * tagged value (see OP_TYPED_ARR ctor note). */
+        compiler__ensure_boxed(c, line);
         compiler__emit_byte(c, OP_ARR_SET, line);
       } else {
         compiler__emit_byte(c, OP_TYPED_ARR_SET, line);
@@ -11467,9 +11649,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
       uint32_t eidx = args[0]->inferred_struct_idx;
       if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
-        JaclType st = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
-        c->last_expr_type = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64)
-                            ? TYPE_DYN : st;
+        /* Narrow to the element scalar for ALL scalars; i64/u64/f64 come back
+         * unboxed wide (vm__arr_scalar_load) and bridge via ensure_boxed. */
+        c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
       } else {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;

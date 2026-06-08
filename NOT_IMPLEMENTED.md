@@ -112,12 +112,18 @@ From `DESIGN.md` "Project Layout" and `DESIGN_CRITIQUE.md` §3.2, §3.4.
   **Mostly implemented** as of 2026-06-08 — M0–M5 shipped (full builtin
   set get/set/push/pop/len, `OBJ_ARR` GC kind + trace + finalizer, SATB +
   generational barriers, identity eq, print/to-string, typer narrowing,
-  runtime-stride `sa_var` backing). See `ARR_DESIGN.md` (the source of
-  truth + handoff). **Remaining (M6, ergonomic):** `for $x in $a`
-  iteration and `$a->i` / `set $a->i x` arrow indexing; plus two
-  documented carve-outs (i64/u64/f64 get/pop return dyn not the narrowed
-  wide scalar; struct arrays are pure-value so GC recursion is a no-op).
-  Remove this item when M6 lands.
+  runtime-stride `sa_var` backing). Scalar get/pop narrowing is now
+  complete — i64/u64/f64 narrow to the unboxed wide scalar (Phase 1,
+  2026-06-08; the former carve-out is gone), and the scalar constructor /
+  `arr-push` / `arr-set` box wide float/large-int literals before the
+  byte-packed store (pre-existing zero-store bug, fixed same change). See
+  `ARR_DESIGN.md` (the source of truth + handoff). `for [a] x { }`
+  iteration shipped (2026-06-08) — dyn/scalar/struct elements, binding
+  narrowing for tagged scalars + struct; wide-scalar (i64/u64/f64)
+  for-bindings stay dyn (deferred wide-cell + SM work, §4). **Remaining
+  (M6, ergonomic):** `$a->i` / `set $a->i x` arrow indexing; plus one
+  carve-out (struct arrays are pure-value so GC recursion is a no-op).
+  Remove this item when arrow lands.
 
 ---
 
@@ -176,7 +182,16 @@ pulling on them; revisit when one shows up.
   `inferred_struct_idx`. Two pieces of the original §4 stream item
   remain deferred:
 
-  1. **For-loop binding narrowing.** `for $it in [gen]` where the
+  1. **For-loop binding narrowing.** Partially landed for `arr`
+     (2026-06-08): `for [a] x { }` over `[Arr i32/u32/f32/bool]` narrows
+     the binding to the tagged scalar (typer `HEAD_FOR` case + compiler
+     arr branch), and struct-element arrs narrow to the struct. **Wide
+     scalars (i64/u64/f64) still stay dyn** for for-bindings — the same
+     wide-cell concern below, compounded by SM: the compiler stores a
+     suspending-loop binding in a GC-traced state field, where raw wide
+     bits mis-trace as a pointer (segfault). Streams/vecs keep dyn
+     for-bindings entirely. The general fix is unchanged:
+     `for $it in [gen]` where the
      stream is `[Stream i64]` would naively narrow `$it` to i64, but
      the stream stores tagged `JaclVal`s (yield emits `jacl_i32` /
      `jacl_str` / ...) while typed-i64 locals expect the unboxed

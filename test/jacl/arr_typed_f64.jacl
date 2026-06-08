@@ -1,0 +1,30 @@
+# expect: [arr 2.5 3.5]
+# expect: 2.5
+# expect: 4.5
+# expect: 11.5
+# expect: ok
+# [Arr f64]: construction, narrowed get/pop, push/set, and wide f64 arithmetic.
+# Regression for the pre-existing construct/push/set bug where unboxed wide
+# float literals (OP_CONST_F64) fell through vm__arr_scalar_store's tagged-only
+# branches and stored 0. Fixed by boxing wide scalar elements before the
+# byte-packed store (compiler__ensure_boxed). Also exercises Phase 1 narrowing:
+# arr-get/arr-pop on [Arr f64] now infer f64 (wide), not dyn.
+proc main {} {
+  def c [[Arr f64] 2.5 3.5]
+  print $c                     # [arr 2.5 3.5]  (construct stores real bits)
+
+  def f64 f [arr-get $c 0]
+  print $f                     # 2.5  (narrowed wide f64)
+
+  arr-push $c 4.5              # push a wide f64 literal -> [2.5 3.5 4.5]
+  print [arr-get $c 2]         # 4.5
+
+  arr-set $c 0 9.0            # set a wide f64 literal -> [9.0 3.5 4.5]
+  def f64 g [arr-get $c 0]
+  print [+ $f $g]              # 2.5 + 9.0 = 11.5  (wide f64 add)
+
+  assert-type [arr-get $c 0] f64
+  assert-type [arr-pop $c] f64
+  print "ok"
+}
+main

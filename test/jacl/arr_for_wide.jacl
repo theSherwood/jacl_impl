@@ -1,0 +1,18 @@
+# expect: 100
+# expect: 200
+# expect: 300
+# expect: dyn
+# expect: ok
+# Phase 2: for-loop over [Arr i64] (a wide scalar). The binding stays DYN
+# (not narrowed) — wide for-binding narrowing is the deferred wide-cell + SM
+# work (NOT_IMPLEMENTED §4). Iteration still yields correct values (OP_ARR_GET
+# pushes raw wide bits, which are boxed before binding). For typed wide
+# arithmetic, use a while loop + arr-get, which narrows via Phase 1.
+proc main {} {
+  def a [[Arr i64] 100 200 300]
+  for $a x { print $x }              # 100 200 300 (correct values, boxed)
+  for $a y { assert-type $y dyn }    # binding is dyn, not i64
+  print "dyn"
+  print "ok"
+}
+main
