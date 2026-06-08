@@ -1,0 +1,21 @@
+# expect: 2
+# expect: [Point x 1 y 2]
+# expect: [Point x 5 y 6]
+# expect: [Point x 9 y 9]
+# expect: [Point x 5 y 6]
+# expect: 2
+# expect: [arr [Point x 9 y 9] [Point x 3 y 4]]
+# M4d-2: flat struct-element typed array [Arr Point]. Elements stored as
+# wide inline bytes; get/pop push inline struct slots, push/set via the
+# dedicated OP_TYPED_ARR_PUSH/SET opcodes. See ARR_DESIGN.md.
+struct Point {i32 x, i32 y}
+def a [[Arr Point] [Point x 1 y 2] [Point x 3 y 4]]
+print [arr-len $a]
+print [arr-get $a 0]
+arr-push $a [Point x 5 y 6]
+print [arr-get $a 2]
+arr-set $a 0 [Point x 9 y 9]
+print [arr-get $a 0]
+print [arr-pop $a]
+print [arr-len $a]
+print $a

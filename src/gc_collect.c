@@ -382,8 +382,14 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
             /* flat typed scalar bytes — no heap references, nothing to trace. */
         } else {
-            /* struct-element typed arrays — M4e-2: recurse per element via
-             * the struct ref bitmap. Not reachable yet (constructor errors). */
+            /* struct elements: recurse per element over its wide bytes via the
+             * struct ref-field walker (same as buf struct-element fields). */
+            StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
+            uint32_t n = a->sa.count;
+            for (uint32_t i = 0; i < n; i++) {
+                uint8_t *slot = sa_var_get(&a->sa, i);
+                if (slot) gc__push_record_refs(ms, slot, sreg, a->elem_idx);
+            }
         }
         break;
     }

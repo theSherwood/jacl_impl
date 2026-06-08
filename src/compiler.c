@@ -6413,8 +6413,37 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_TYPED_ARR;
       return;
     }
-    compiler__error(c, line, col,
-                    "[Arr Struct]: typed struct arrays not yet supported");
+    /* Struct element type: [[Arr Point] [Point ...] ...]. Mirrors the typed-
+     * vec struct constructor — resolve the struct via the COMPILER registry
+     * (its idx is the opcode operand), check each element, leave inline
+     * struct bytes on the stack for OP_TYPED_ARR to consume. */
+    StructTypeRegistry* areg = compiler__get_struct_registry(c);
+    uint32_t atype_idx = struct_registry__find(areg, tn, tl);
+    if (atype_idx == UINT32_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err), "[Arr %.*s]: unknown struct type '%.*s'",
+               (int)tl, tn, (int)tl, tn);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    if (argc > 255) {
+      compiler__error(c, line, col, "[Arr ...] too many initial elements (max 255)");
+      return;
+    }
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      if ((JaclType)args[i]->inferred_type != TYPE_STRUCT ||
+          args[i]->inferred_struct_idx != atype_idx) {
+        char err[160];
+        jacl_format_typed_arr_elem(err, sizeof(err), tn, tl, i, false, TYPE_DYN);
+        compiler__error(c, line, col, err);
+        return;
+      }
+    }
+    compiler__emit_byte(c, OP_TYPED_ARR, line);
+    compiler__emit_u16(c, (uint16_t)atype_idx, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    c->last_expr_type = TYPE_TYPED_ARR;
     return;
   }
 
@@ -11333,7 +11362,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_ARR_GET, line);
-    c->last_expr_type = TYPE_DYN;
+    /* Typed receiver: narrow the result. Struct elements come back as inline
+     * stack bytes (INLINE_STACK), scalars as that scalar type. */
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
+      uint32_t eidx = args[0]->inferred_struct_idx;
+      if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        JaclType st = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
+        /* i64/u64/f64: keep dyn (wide-cell narrowing deferred, see §4 /
+         * the typer's matching guard). The runtime value is still correct. */
+        c->last_expr_type = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64)
+                            ? TYPE_DYN : st;
+      } else {
+        c->inline_repr = INLINE_STACK;
+        c->last_expr_type = TYPE_STRUCT;
+      }
+    } else {
+      c->last_expr_type = TYPE_DYN;
+    }
     return;
   }
 
@@ -11357,16 +11402,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
-      /* Typed element: coerce/type-check at compile time (runtime stores
-       * the coerced value as raw bytes). */
-      if (!compiler__compile_typed_elem_arg(c, args[1], args[0]->inferred_struct_idx)) {
+      /* Typed element: coerce/type-check at compile time. Scalar elements are
+       * single-slot (unified OP_ARR_PUSH branches at runtime); struct elements
+       * are multi-slot and need OP_TYPED_ARR_PUSH (width known via type_idx). */
+      uint32_t eidx = args[0]->inferred_struct_idx;
+      if (!compiler__compile_typed_elem_arg(c, args[1], eidx)) {
         compiler__error(c, line, col, "arr-push: element type does not match typed arr element type");
         return;
       }
-    } else {
-      compiler__compile_node(c, args[1]);
-      if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
+      if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        compiler__emit_byte(c, OP_ARR_PUSH, line);
+      } else {
+        compiler__emit_byte(c, OP_TYPED_ARR_PUSH, line);
+        compiler__emit_u16(c, (uint16_t)eidx, line);
+      }
+      c->last_expr_type = TYPE_I32;
+      return;
     }
+    compiler__compile_node(c, args[1]);
+    if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
     compiler__emit_byte(c, OP_ARR_PUSH, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -11381,14 +11435,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);   /* index */
     if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
-      if (!compiler__compile_typed_elem_arg(c, args[2], args[0]->inferred_struct_idx)) {
+      uint32_t eidx = args[0]->inferred_struct_idx;
+      if (!compiler__compile_typed_elem_arg(c, args[2], eidx)) {
         compiler__error(c, line, col, "arr-set: element type does not match typed arr element type");
         return;
       }
-    } else {
-      compiler__compile_node(c, args[2]);
-      if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
+      if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        compiler__emit_byte(c, OP_ARR_SET, line);
+      } else {
+        compiler__emit_byte(c, OP_TYPED_ARR_SET, line);
+        compiler__emit_u16(c, (uint16_t)eidx, line);
+      }
+      c->last_expr_type = TYPE_TYPED_ARR;
+      return;
     }
+    compiler__compile_node(c, args[2]);
+    if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
     compiler__emit_byte(c, OP_ARR_SET, line);
     c->last_expr_type = TYPE_ARR;
     return;
@@ -11402,7 +11464,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_ARR_POP, line);
-    c->last_expr_type = TYPE_DYN;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_ARR) {
+      uint32_t eidx = args[0]->inferred_struct_idx;
+      if (COMPILER_IS_SCALAR_TYPE_IDX(eidx)) {
+        JaclType st = COMPILER_TYPE_IDX_TO_SCALAR(eidx);
+        c->last_expr_type = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64)
+                            ? TYPE_DYN : st;
+      } else {
+        c->inline_repr = INLINE_STACK;
+        c->last_expr_type = TYPE_STRUCT;
+      }
+    } else {
+      c->last_expr_type = TYPE_DYN;
+    }
     return;
   }
 

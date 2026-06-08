@@ -37,7 +37,7 @@ store).
 | ⮑ **M4c** Type-position + typer | ✅ done | `typer__arr_type`; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; `[[Arr T] ...]` constructor; get narrows, push/set type-check; element-literal flex. |
 | ⮑ **M4d** Typed byte ops | 🟡 scalar done | `OP_TYPED_ARR` construct + get/set/push/pop/len byte path for scalar elements (i32/i64/u32/u64/f32/f64/bool) via `vm__arr_scalar_{store,load}`. **Struct elements (`[Arr Point]`) deferred (M4d-2)** — constructor/ops error clearly. |
 | ⮑ **M4e** GC trace + tests | 🟡 scalar done | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip (no refs). Struct recursion deferred (M4e-2). Tests: typed_scalar/i64/oob/mismatch. TSAN race-clean in arr paths. |
-| ⮑ **M4d-2/e-2** Struct-element typed arrays | ⬜ todo | `[Arr Point]`: flat `width*8`-byte slots. See "Struct-element ops" below. |
+| ⮑ **M4d-2/e-2** Struct-element typed arrays | ✅ done | `[Arr Point]`: flat `width*8`-byte slots; `OP_TYPED_ARR_PUSH/SET`; inline-struct get/pop/construct; GC ref-bitmap recursion. JACL structs are pure value types (no ref fields), so the recursion/barriers are effectively no-ops but kept for correctness. Build 91/91, TSAN race-clean in arr paths. **Caveat:** `arr-get`/`arr-pop` on `[Arr i64/u64/f64]` return `dyn` (correct value), not the narrowed wide scalar — wide-cell stack-rep narrowing deferred, mirroring §4. |
 
 ### Struct-element typed arrays (M4d-2 design)
 

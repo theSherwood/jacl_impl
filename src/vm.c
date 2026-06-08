@@ -1064,8 +1064,10 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
           default: break;
         }
         if (nn > 0) vm__fmt_append(buf, nb, (uint32_t)nn);
-      } else {
-        vm__fmt_value(buf, JACL_NIL);   /* struct elements (M4d-2) TBD */
+      } else if (slot && buf->registry && a->elem_idx < buf->registry->count) {
+        /* struct element: format the inline bytes directly */
+        StructTypeDef* esdef = buf->registry->defs[a->elem_idx];
+        if (esdef) vm__fmt_struct_bytes(buf, esdef, slot);
       }
     }
     vm__fmt_append(buf, "]", 1);
@@ -2492,6 +2494,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_ARR_POP] = &&L_OP_ARR_POP,
     [OP_ARR_LEN] = &&L_OP_ARR_LEN,
     [OP_TYPED_ARR] = &&L_OP_TYPED_ARR,
+    [OP_TYPED_ARR_PUSH] = &&L_OP_TYPED_ARR_PUSH,
+    [OP_TYPED_ARR_SET] = &&L_OP_TYPED_ARR_SET,
     [OP_MAP] = &&L_OP_MAP,
     [OP_MAP_GET] = &&L_OP_MAP_GET,
     [OP_MAP_HAS] = &&L_OP_MAP_HAS,
@@ -4934,25 +4938,48 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint16_t elem_idx = vm__read_u16(vm);
         uint8_t  count    = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
-        if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx))
-          VM_ERROR(vm, "typed struct arrays not yet supported");
-        JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
-        uint32_t esize  = vm__arr_scalar_size(elem_t);
-        if (esize == 0)
-          VM_ERROR(vm, "unsupported typed-arr element type %s", type_name(elem_t));
-        JaclArr* a = jacl_arr_new(elem_idx, esize);
-        if (!a) VM_ERROR(vm, "out of memory constructing arr");
-        uint8_t tmp[8];
-        for (uint8_t i = 0; i < count; i++) {
-          JaclVal elem = vm->stack[vm->stack_top - count + i];
-          vm__arr_scalar_store(elem_t, elem, tmp);
-          if (!sa_var_push(&a->sa, tmp))
-            VM_ERROR(vm, "out of memory constructing arr");
+        if (JACL_IS_SCALAR_TYPE_IDX(elem_idx)) {
+          JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
+          uint32_t esize  = vm__arr_scalar_size(elem_t);
+          if (esize == 0)
+            VM_ERROR(vm, "unsupported typed-arr element type %s", type_name(elem_t));
+          JaclArr* a = jacl_arr_new(elem_idx, esize);
+          if (!a) VM_ERROR(vm, "out of memory constructing arr");
+          uint8_t tmp[8];
+          for (uint8_t i = 0; i < count; i++) {
+            JaclVal elem = vm->stack[vm->stack_top - count + i];
+            vm__arr_scalar_store(elem_t, elem, tmp);
+            if (!sa_var_push(&a->sa, tmp))
+              VM_ERROR(vm, "out of memory constructing arr");
+          }
+          vm->stack_top -= count;
+          result = vm__push(vm, jacl_arr_ptr(a));
+          if (result != VM_OK) return result;
+          DISPATCH();
+        } else {
+          /* Struct elements: each occupies `width` inline slots on the stack.
+           * Store the wide (width*8-byte) form per element. See ARR_DESIGN.md
+           * M4d-2. */
+          StructTypeDef* sdef = vm->struct_registry->defs[elem_idx];
+          uint32_t width = vm__struct_width(sdef);
+          uint32_t esize = width * (uint32_t)sizeof(JaclVal);
+          JaclArr* a = jacl_arr_new(elem_idx, esize);
+          if (!a) VM_ERROR(vm, "out of memory constructing arr");
+          /* Pop elements right-to-left into scratch, then store left-to-right. */
+          JaclVal scratch[VM_MAX_STRUCT_SLOTS * 256];
+          if ((size_t)count * width > sizeof(scratch) / sizeof(JaclVal))
+            VM_ERROR(vm, "typed-arr literal too large");
+          for (int32_t i = (int32_t)count - 1; i >= 0; i--) {
+            vm__pop_struct(vm, elem_idx, &scratch[(uint32_t)i * width]);
+          }
+          for (uint8_t i = 0; i < count; i++) {
+            if (!sa_var_push(&a->sa, &scratch[(uint32_t)i * width]))
+              VM_ERROR(vm, "out of memory constructing arr");
+          }
+          result = vm__push(vm, jacl_arr_ptr(a));
+          if (result != VM_OK) return result;
+          DISPATCH();
         }
-        vm->stack_top -= count;
-        result = vm__push(vm, jacl_arr_ptr(a));
-        if (result != VM_OK) return result;
-        DISPATCH();
       }
 
       CASE(OP_ARR_GET): {
@@ -4968,19 +4995,37 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "type error in 'arr-get': expected i32 index, got %s", vm__type_name(idx_val));
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
         int32_t idx = jacl_as_i32(idx_val);
-        JaclVal out = JACL_NIL;
-        if (idx >= 0 && (uint32_t)idx < a->sa.count) {
-          uint8_t* slot = sa_var_get(&a->sa, (uint32_t)idx);
-          if (vm__arr_is_dyn(a->elem_idx)) {
-            out = *(JaclVal*)slot;
-          } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
-            out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), slot);
-          } else {
-            VM_ERROR(vm, "typed struct arrays not yet supported");
+        if (vm__arr_is_dyn(a->elem_idx) || JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+          /* dyn / scalar: lenient OOB -> nil, single-slot result. */
+          JaclVal out = JACL_NIL;
+          if (idx >= 0 && (uint32_t)idx < a->sa.count) {
+            uint8_t* slot = sa_var_get(&a->sa, (uint32_t)idx);
+            if (vm__arr_is_dyn(a->elem_idx))
+              out = *(JaclVal*)slot;
+            else
+              out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), slot);
           }
+          result = vm__push(vm, out);
+          if (result != VM_OK) return result;
+          DISPATCH();
         }
-        result = vm__push(vm, out);
-        if (result != VM_OK) return result;
+        /* Struct elements: bounds-CHECKED (a missing struct can't be nil
+         * inline), push `width` inline slots. Mirrors OP_TYPED_VEC_GET_INLINE. */
+        if (idx < 0 || (uint32_t)idx >= a->sa.count)
+          VM_ERROR(vm, "arr-get: index %d out of bounds (length %u)",
+                   (int)idx, a->sa.count);
+        StructTypeDef* sdef = vm->struct_registry->defs[a->elem_idx];
+        uint32_t width = vm__struct_width(sdef);
+        uint8_t* slot = sa_var_get(&a->sa, (uint32_t)idx);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_operand_overflow(vm, "arr get inline");
+          return VM_RUNTIME_ERROR;
+        }
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], slot, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++)
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        vm->stack_top += width;
         DISPATCH();
       }
 
@@ -5089,20 +5134,120 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (!jacl_is_arr(arr_val))
           VM_ERROR(vm, "type error in 'arr-pop': expected arr, got %s", vm__type_name(arr_val));
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
-        JaclVal out = JACL_NIL;
-        if (vm__arr_is_dyn(a->elem_idx)) {
-          if (sa_var_pop(&a->sa, &out) == 0) {
-            /* Deletion-side SATB: the removed value leaves the container. */
-            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
+        if (vm__arr_is_dyn(a->elem_idx) || JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
+          JaclVal out = JACL_NIL;
+          if (vm__arr_is_dyn(a->elem_idx)) {
+            if (sa_var_pop(&a->sa, &out) == 0) {
+              /* Deletion-side SATB: the removed value leaves the container. */
+              gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
+            }
+          } else {
+            uint8_t tmp[8];
+            if (sa_var_pop(&a->sa, tmp) == 0)
+              out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), tmp);
           }
-        } else if (JACL_IS_SCALAR_TYPE_IDX(a->elem_idx)) {
-          uint8_t tmp[8];
-          if (sa_var_pop(&a->sa, tmp) == 0)
-            out = vm__arr_scalar_load(vm, JACL_TYPE_IDX_TO_SCALAR(a->elem_idx), tmp);
-        } else {
-          VM_ERROR(vm, "typed struct arrays not yet supported");
+          result = vm__push(vm, out);
+          if (result != VM_OK) return result;
+          DISPATCH();
         }
-        result = vm__push(vm, out);
+        /* Struct elements: pop the wide bytes, push `width` inline slots.
+         * Empty -> error (a missing struct can't be nil inline). */
+        StructTypeDef* sdef = vm->struct_registry->defs[a->elem_idx];
+        uint32_t width = vm__struct_width(sdef);
+        JaclVal scratch[VM_MAX_STRUCT_SLOTS];
+        if (sa_var_pop(&a->sa, scratch) != 0)
+          VM_ERROR(vm, "arr-pop: array is empty");
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_operand_overflow(vm, "arr pop inline");
+          return VM_RUNTIME_ERROR;
+        }
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], scratch, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++)
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        vm->stack_top += width;
+        DISPATCH();
+      }
+
+      /* Struct-element arr-push: u16 type_idx. Stack [arr, struct-slots].
+       * The element width must be known before popping (it sits above the
+       * receiver), hence the dedicated opcode. See ARR_DESIGN.md M4d-2. */
+      CASE(OP_TYPED_ARR_PUSH): {
+        uint32_t saved_stack_top = vm->stack_top;
+        uint16_t type_idx = vm__read_u16(vm);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+        JaclVal scratch[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, scratch);
+        JaclVal arr_val;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-push': expected arr, got %s", vm__type_name(arr_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        /* Insertion-side barriers for any ref fields in the new struct. */
+        for (uint32_t si = 0; si < width; si++) {
+          if (sdef->slot_ref_bitmap[si >> 3] & (uint8_t)(1u << (si & 7))) {
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, scratch[si]);
+            gc_remembered_set_barrier(vm->remembered_set, arr_val, scratch[si]);
+          }
+        }
+        if (!sa_var_push(&a->sa, scratch))
+          VM_ERROR(vm, "out of memory in 'arr-push'");
+        result = vm__push(vm, jacl_i32((int32_t)a->sa.count));
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      /* Struct-element arr-set: u16 type_idx. Stack [arr, idx, struct-slots].
+       * Lenient grow zero-fills (zero struct = nil ref fields). */
+      CASE(OP_TYPED_ARR_SET): {
+        uint32_t saved_stack_top = vm->stack_top;
+        uint16_t type_idx = vm__read_u16(vm);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+        JaclVal scratch[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, scratch);
+        JaclVal idx_val, arr_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &arr_val); if (result != VM_OK) return result;
+        if (!jacl_is_arr(arr_val))
+          VM_ERROR(vm, "type error in 'arr-set': expected arr, got %s", vm__type_name(arr_val));
+        if (!jacl_is_i32(idx_val))
+          VM_ERROR(vm, "type error in 'arr-set': expected i32 index, got %s", vm__type_name(idx_val));
+        JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0)
+          VM_ERROR(vm, "arr-set: negative index %d", (int)idx);
+        uint32_t uidx = (uint32_t)idx;
+        /* SATB deletion-side: grey the overwritten struct's ref fields. */
+        if (uidx < a->sa.count) {
+          uint8_t* oldslot = sa_var_get(&a->sa, uidx);
+          for (uint32_t si = 0; si < width; si++) {
+            if (sdef->slot_ref_bitmap[si >> 3] & (uint8_t)(1u << (si & 7))) {
+              JaclVal oldref;
+              memcpy(&oldref, oldslot + (size_t)si * sizeof(JaclVal), sizeof(JaclVal));
+              gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, oldref, JACL_NIL);
+            }
+          }
+        }
+        /* Insertion-side barriers for the new struct's ref fields. */
+        for (uint32_t si = 0; si < width; si++) {
+          if (sdef->slot_ref_bitmap[si >> 3] & (uint8_t)(1u << (si & 7))) {
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, scratch[si]);
+            gc_remembered_set_barrier(vm->remembered_set, arr_val, scratch[si]);
+          }
+        }
+        if (uidx < a->sa.count) {
+          sa_var_set(&a->sa, uidx, scratch);
+        } else {
+          while (a->sa.count < uidx) {   /* gap = zero structs (nil refs) */
+            if (!sa_var_push_zero(&a->sa))
+              VM_ERROR(vm, "out of memory in 'arr-set'");
+          }
+          if (!sa_var_push(&a->sa, scratch))
+            VM_ERROR(vm, "out of memory in 'arr-set'");
+        }
+        result = vm__push(vm, arr_val);
         if (result != VM_OK) return result;
         DISPATCH();
       }

@@ -1051,7 +1051,9 @@ typedef enum {
   OP_ARR_PUSH,
   OP_ARR_POP,
   OP_ARR_LEN,
-  OP_TYPED_ARR
+  OP_TYPED_ARR,
+  OP_TYPED_ARR_PUSH,
+  OP_TYPED_ARR_SET
 } OpCode;
 
 typedef struct {

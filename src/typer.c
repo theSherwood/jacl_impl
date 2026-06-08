@@ -1392,7 +1392,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
         rhs_t == TYPE_STREAM || is_typed_collection(rhs_t) ||
         rhs_t == TYPE_FUTURE || rhs_t == TYPE_BOX ||
-        rhs_t == TYPE_BUF || rhs_t == TYPE_PTR) {
+        rhs_t == TYPE_BUF || rhs_t == TYPE_PTR ||
+        rhs_t == TYPE_ARR || rhs_t == TYPE_TYPED_ARR) {
       effective = rhs_t;
     } else {
       effective = TYPE_DYN;
@@ -1403,7 +1404,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t inherited_buf_len = 0;
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
       effective == TYPE_FUTURE || effective == TYPE_PTR ||
-      effective == TYPE_BOX || effective == TYPE_BUF) {
+      effective == TYPE_BOX || effective == TYPE_BUF ||
+      effective == TYPE_TYPED_ARR) {
     /* Declared struct (def Point r ...) / typed-collection elem
      * (def [Vec Point] ps ...) / pointer pointee
      * (def [Ptr Point] p ...) / buf elem (def [Buf N T] b ...) wins;
@@ -3495,11 +3497,21 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         /* arr ops mirror vec: get narrows to the element type for a typed
          * receiver; set returns the (reference) arr. See ARR_DESIGN.md M4c. */
         case HEAD_ARR_GET:
+        case HEAD_ARR_POP:
+          /* Both narrow to the element type for a typed receiver. arr-pop on a
+           * struct array pushes inline struct slots, so the result type MUST
+           * be TYPE_STRUCT or the compiler under-counts the stack. */
           if (recv_t == TYPE_TYPED_ARR &&
               recv->inferred_struct_idx != UINT32_MAX) {
             uint32_t eidx = recv->inferred_struct_idx;
             if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+              JaclType st = JACL_TYPE_IDX_TO_SCALAR(eidx);
+              /* i64/u64/f64 use an unboxed wide stack rep when statically
+               * typed, but the unified arr-get/pop op returns a tagged value
+               * — so leave the result dyn (still a correct i64 value) rather
+               * than narrow. Wide-cell narrowing deferred, mirrors §4. */
+              if (st != TYPE_I64 && st != TYPE_U64 && st != TYPE_F64)
+                node->inferred_type = st;
             } else if (eidx < tc->struct_count) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;
