@@ -3691,6 +3691,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_struct_idx = recv->inferred_struct_idx;
           } else if (recv_t == TYPE_VEC || recv_t == TYPE_STREAM) {
             node->inferred_type = recv_t;
+            /* Preserve the element type for typed streams/vecs so a for-loop
+             * over `take N <typed stream>` still narrows. Mirrors filter. */
+            node->inferred_struct_idx = recv->inferred_struct_idx;
           }
           return;
         case HEAD_FIRST:
