@@ -330,6 +330,38 @@ static bool typer__box_type(TyperCtx* tc, AstNode* node,
   return true;
 }
 
+/* Recognize [Arr T] type-annotation expressions (mutable array). Returns
+ * true and writes *out_elem_idx with the element encoding (scalar sentinel
+ * for type keywords like i32, real struct idx for Point). Same shape as
+ * typer__box_type. See ARR_DESIGN.md. */
+static bool typer__arr_type(TyperCtx* tc, AstNode* node,
+                            uint32_t* out_elem_idx) {
+  *out_elem_idx = UINT32_MAX;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
+      memcmp(h->data.lit_string.value, "Arr", 3) != 0) return false;
+  if (node->data.command.arg_count != 1) return false;
+  AstNode* arg = node->data.command.args[0];
+  if (arg->type != AST_LIT_STRING) return false;
+  const char* nm = arg->data.lit_string.value;
+  uint32_t    nl = arg->data.lit_string.length;
+  if (is_type_keyword(nm, nl)) {
+    *out_elem_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    return true;
+  }
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0) {
+      *out_elem_idx = si;
+      return true;
+    }
+  }
+  /* Unknown element type name — still recognize as Arr; elem idx stays
+   * sentinel so downstream treats it as arr-of-dyn. */
+  return true;
+}
+
 /* Recognize [Stream T] type-annotation expressions. Returns true and
  * writes *out_struct_idx with the element encoding (scalar sentinel
  * for type keywords like i64, real struct idx for Point). Used on the
@@ -1077,6 +1109,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       uint32_t buf_inner_len_3 = 0;
       uint32_t buf_typed_elem_idx_3 = UINT32_MAX;
       uint32_t box_sidx;
+      uint32_t arr_elem_idx;
       if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
@@ -1086,6 +1119,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       } else if (typer__box_type(tc, args[0], &box_sidx)) {
         declared_type = TYPE_BOX;
         declared_struct_idx = box_sidx;
+      } else if (typer__arr_type(tc, args[0], &arr_elem_idx)) {
+        declared_type = TYPE_TYPED_ARR;
+        declared_struct_idx = arr_elem_idx;
       } else if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len,
                                       &buf_inner_len_3, &buf_typed_elem_idx_3)) {
         char err[256];
@@ -3161,8 +3197,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
      * (i32/i64/etc.) use the shared JACL_SCALAR_TYPE_IDX sentinel
      * encoding so the compiler can read the same idx. */
     int tc_kind = typer__typed_collection_kind(head);
+    /* [[Arr T] ...] constructor: element semantics are identical to vec
+     * (single element type, one element per arg), so reuse the kind==1
+     * machinery below but stamp TYPE_TYPED_ARR. See ARR_DESIGN.md M4c. */
+    uint32_t arr_ctor_ei;
+    bool is_arr_ctor = (tc_kind == 0) && typer__arr_type(tc, head, &arr_ctor_ei);
+    if (is_arr_ctor) tc_kind = 1;
     if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
-      node->inferred_type = (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+      node->inferred_type = is_arr_ctor ? TYPE_TYPED_ARR
+                          : (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
       AstNode* elem_node = (tc_kind == 3)
           ? head->data.command.args[1]
           : head->data.command.args[0];
@@ -3416,6 +3459,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;
             }
+          }
+          return;
+        /* arr ops mirror vec: get narrows to the element type for a typed
+         * receiver; set returns the (reference) arr. See ARR_DESIGN.md M4c. */
+        case HEAD_ARR_GET:
+          if (recv_t == TYPE_TYPED_ARR &&
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t eidx = recv->inferred_struct_idx;
+            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+            } else if (eidx < tc->struct_count) {
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = eidx;
+            }
+          }
+          return;
+        case HEAD_ARR_SET:
+          if (recv_t == TYPE_TYPED_ARR) {
+            node->inferred_type = TYPE_TYPED_ARR;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          } else if (recv_t == TYPE_ARR) {
+            node->inferred_type = TYPE_ARR;
           }
           return;
         case HEAD_BUF_SET:
