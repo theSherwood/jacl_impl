@@ -65,56 +65,46 @@ bool jacl_val_eq(JaclVal a, JaclVal b);
 #define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
 #include "../lib/hamt/hamt.h"
 
-/* --- Instantiate segment array template: jacl_arr_seg (JaclVal elements) ---
+/* --- Mutable [Arr T] backing: runtime-stride segment array (sa_var) ---
  *
  * Backs the mutable [Arr T] reference type. Unlike vec/map (whose tree nodes
  * are each GC objects), the segment backing store is malloc'd via this
  * allocator and freed at finalize time; the JaclArr header is the single GC
- * object. See ARR_DESIGN.md. */
+ * object. A single sa_var backs every arr: dyn arrays set elem_size = 8 and
+ * store tagged JaclVals; typed arrays set elem_size to the element's byte
+ * width and store raw bytes (M4c+). See ARR_DESIGN.md. */
 
-#define SEG_ARRAY_T    JaclVal
-#define SEG_ARRAY_NAME jacl_arr_seg
-#include "../lib/segment_array/segment_array.h"
+#include "../lib/segment_array/segment_array_var.h"
 
-/* Stable malloc-backed allocator for arr segments. Referenced by SA_T's
+/* Stable malloc-backed allocator for arr segments. Referenced by sa_var's
  * allocator field and used by the GC finalizer at sweep, so it must outlive
  * every arr — hence file-scope constant. */
 static const Allocator jacl_arr_seg_allocator = JACL_COLL_ALLOCATOR;
 
 /* The single GC object for an [Arr T]. elem_idx carries the element-type
  * encoding (JACL_SCALAR_TYPE_IDX(TYPE_DYN) for the dyn [arr ...] form;
- * scalar sentinel / registry idx for typed arrays in M4). The segment_array
- * header is inline. */
+ * scalar sentinel / registry idx for typed arrays). The runtime-stride
+ * backing (sa.elem_size = element bytes) is inline. */
 typedef struct {
-  uint32_t       elem_idx;
-  jacl_arr_seg_t sa;
+  uint32_t elem_idx;
+  sa_var_t sa;
 } JaclArr;
 
-/* Allocate + initialize an empty arr (in-place SA init mirrors SA_CREATE,
- * which we can't use since the header lives in GC memory, not the allocator's). */
-JaclArr* jacl_arr_new(uint32_t elem_idx) {
+/* Allocate + initialize an empty arr. elem_size is the per-element byte width
+ * (sizeof(JaclVal) for dyn / scalar-as-tagged; element byte size for flat
+ * typed arrays). */
+JaclArr* jacl_arr_new(uint32_t elem_idx, uint32_t elem_size) {
   JaclArr* a = (JaclArr*)gc_alloc(gc__current_heap, OBJ_ARR, sizeof(JaclArr));
   if (!a) return NULL;
-  a->elem_idx         = elem_idx;
-  a->sa.allocator     = &jacl_arr_seg_allocator;
-  a->sa.count         = 0;
-  a->sa.used_segments = 0;
-  a->sa.last_seg      = -1;
-  a->sa.last_seg_base = 0;
-  a->sa.next_grow_at  = 0;
-  memset(a->sa.segments, 0, sizeof(a->sa.segments));
+  a->elem_idx = elem_idx;
+  sa_var_init(&a->sa, &jacl_arr_seg_allocator, elem_size);
   return a;
 }
 
 /* Free only the malloc'd segment backing store; the JaclArr header itself is
  * GC memory, reclaimed by sweep. Called from gc__finalize_dead on OBJ_ARR. */
 void jacl_arr_free_segments(JaclArr* a) {
-  if (!a) return;
-  for (int i = 0; i < a->sa.used_segments; i++) {
-    a->sa.allocator->free(a->sa.allocator->ctx, a->sa.segments[i]);
-    a->sa.segments[i] = NULL;
-  }
-  a->sa.used_segments = 0;
+  if (a) sa_var_free_segments(&a->sa);
 }
 
 /* --- JaclVal hash function (dispatches on type tag) --- */

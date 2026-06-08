@@ -374,7 +374,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         JaclArr *a = (JaclArr *)payload;
         uint32_t n = a->sa.count;
         for (uint32_t i = 0; i < n; i++) {
-            JaclVal *slot = jacl_arr_seg_get(&a->sa, i);
+            JaclVal *slot = (JaclVal *)sa_var_get(&a->sa, i);
             if (slot) gc__ms_push_val(ms, *slot);
         }
         break;

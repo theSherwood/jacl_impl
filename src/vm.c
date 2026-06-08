@@ -972,7 +972,7 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     vm__fmt_append(buf, "[arr", 4);
     for (uint32_t i = 0; i < count; i++) {
       vm__fmt_append(buf, " ", 1);
-      JaclVal* slot = jacl_arr_seg_get(&a->sa, i);
+      JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, i);
       vm__fmt_value(buf, slot ? *slot : JACL_NIL);
     }
     vm__fmt_append(buf, "]", 1);
@@ -4819,11 +4819,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t saved_stack_top = vm->stack_top;
         uint8_t count = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
-        JaclArr* a = jacl_arr_new(JACL_SCALAR_TYPE_IDX(TYPE_DYN));
+        JaclArr* a = jacl_arr_new(JACL_SCALAR_TYPE_IDX(TYPE_DYN), sizeof(JaclVal));
         if (!a) VM_ERROR(vm, "out of memory constructing arr");
         for (uint8_t i = 0; i < count; i++) {
           JaclVal elem = vm->stack[vm->stack_top - count + i];
-          if (!jacl_arr_seg_push(&a->sa, elem))
+          if (!sa_var_push(&a->sa, &elem))
             VM_ERROR(vm, "out of memory constructing arr");
         }
         vm->stack_top -= count;
@@ -4847,7 +4847,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         int32_t idx = jacl_as_i32(idx_val);
         JaclVal out = JACL_NIL;
         if (idx >= 0) {
-          JaclVal* slot = jacl_arr_seg_get(&a->sa, (uint32_t)idx);
+          JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, (uint32_t)idx);
           if (slot) out = *slot;
         }
         result = vm__push(vm, out);
@@ -4881,7 +4881,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Insertion-side SATB (no old value on append) + generational tracking. */
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
         gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
-        if (!jacl_arr_seg_push(&a->sa, elem))
+        if (!sa_var_push(&a->sa, &elem))
           VM_ERROR(vm, "out of memory in 'arr-push'");
         result = vm__push(vm, jacl_i32((int32_t)a->sa.count));
         if (result != VM_OK) return result;
@@ -4908,16 +4908,17 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t uidx = (uint32_t)idx;
         gc_remembered_set_barrier(vm->remembered_set, arr_val, elem);
         if (uidx < a->sa.count) {
-          JaclVal* slot = jacl_arr_seg_get(&a->sa, uidx);
+          JaclVal* slot = (JaclVal*)sa_var_get(&a->sa, uidx);
           vm__slot_set(vm, slot, elem);   /* SATB old=*slot + store */
         } else {
-          /* Lenient grow: fill the gap with nil, then store elem. */
+          /* Lenient grow: fill the gap with nil (zero == JACL_NIL for the
+           * 8-byte dyn slot), then store elem. */
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, JACL_NIL, elem);
           while (a->sa.count < uidx) {
-            if (!jacl_arr_seg_push(&a->sa, JACL_NIL))
+            if (!sa_var_push_zero(&a->sa))
               VM_ERROR(vm, "out of memory in 'arr-set'");
           }
-          if (!jacl_arr_seg_push(&a->sa, elem))
+          if (!sa_var_push(&a->sa, &elem))
             VM_ERROR(vm, "out of memory in 'arr-set'");
         }
         result = vm__push(vm, arr_val);   /* return the arr for chaining */
@@ -4934,7 +4935,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VM_ERROR(vm, "type error in 'arr-pop': expected arr, got %s", vm__type_name(arr_val));
         JaclArr* a = (JaclArr*)jacl_as_ptr(arr_val);
         JaclVal out = JACL_NIL;
-        if (jacl_arr_seg_pop(&a->sa, &out) == 0) {
+        if (sa_var_pop(&a->sa, &out) == 0) {
           /* Deletion-side SATB: the removed value leaves the container. */
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, out, JACL_NIL);
         }
