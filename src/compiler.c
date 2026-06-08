@@ -4191,6 +4191,14 @@ static void compiler__emit_return(Compiler* c, uint32_t line) {
       }
     }
   }
+  /* Box an unboxed wide tail value (i64/u64/f64) when the proc's declared
+   * return type is dyn — the caller reads the result as a tagged JaclVal, so
+   * raw wide bits would round-trip as nil. Declared-wide-return procs box at
+   * the call site instead, so those are left wide here. */
+  if (c->return_type == TYPE_DYN && is_unboxed_type(c->last_expr_type)) {
+    compiler__emit_byte(c, OP_TO_DYN, line);
+    compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
+  }
   compiler__emit_byte(c, OP_RETURN, line);
 }
 
@@ -4787,6 +4795,10 @@ void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
     }
     /* Last statement: keep result on stack */
     compiler__compile_node(c, stmts[count - 1]);
+    /* Box an unboxed wide tail (i64/u64/f64) — an SM proc completes through a
+     * future that stores a tagged JaclVal, so raw wide bits would round-trip
+     * as nil. Mirrors compiler__emit_return's dyn-return boxing. */
+    compiler__ensure_boxed(c, line);
   } else {
     for (uint32_t i = 0; i < count; i++) {
       compiler__compile_node(c, stmts[i]);
@@ -7649,6 +7661,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          closures capture the cell pointer, not a snapshot. */
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
+        /* Box unboxed wide scalars (i64/u64/f64) before wrapping in the cell —
+         * the cell stores a tagged JaclVal, and raw wide bits would round-trip
+         * as nil/garbage and mis-trace under GC. Mirrors the non-SM mut path
+         * (OP_TO_DYN before OP_MAKE_CELL) and the def SM path's ensure_boxed. */
+        compiler__ensure_boxed(c, line);
         compiler__emit_byte(c, OP_MAKE_CELL, line);
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)field_idx, line);
@@ -7805,6 +7822,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (field_idx >= 0) {
         bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
         compiler__compile_node(c, args[1]);
+        /* Box unboxed wide scalars before storing — state fields (and the
+         * cells they hold) store tagged JaclVals; the matching var-ref read
+         * unboxes via node->inferred_type. Mirrors the def/mut SM store. */
+        compiler__ensure_boxed(c, line);
         if (is_mut) {
           /* Write through cell with barrier; pushes NIL internally */
           compiler__emit_byte(c, OP_SET_STATE_FIELD_CELL, line);
@@ -10883,16 +10904,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                                           bind_name, bind_name_len);
         arr_sm_field = sm__find_field(&c->sm_analysis->state_layout, bn);
       }
-      /* Narrow the binding for TAGGED scalars (i32/u32/f32/bool) only — they
-       * are a single tagged JaclVal in any slot (local or state field), so
-       * narrowing is always safe and matches the typer. WIDE scalars
-       * (i64/u64/f64) stay dyn: OP_ARR_GET yields raw wide bits, which are
-       * boxed below before storing, so a dyn-typed binding round-trips
-       * correctly and never lands raw wide bits in a GC-traced state field.
-       * Wide for-binding narrowing is the deferred wide-cell + SM work
-       * (NOT_IMPLEMENTED §4); Phase 1 covers the direct arr-get/pop case. */
-      bool arr_narrow_scalar = arr_is_typed && !arr_struct_elem &&
-                               arr_scalar_t != TYPE_DYN && !arr_elem_wide;
+      /* Narrow the binding to its scalar type. Two storage regimes:
+       *  - Non-SM (binding is a plain local): narrow ALL scalars. Tagged
+       *    scalars store as a tagged JaclVal; wide scalars (i64/u64/f64)
+       *    store raw wide bits in the local and read back wide via the
+       *    local's type. arr_narrow_local drives the local-type set + the
+       *    no-box store below.
+       *  - SM (binding is a GC-traced state field): the typer still narrows
+       *    the binding (so body ops are typed), but wide values are stored
+       *    BOXED (OP_TO_DYN before SET_STATE_FIELD) and the var-ref read
+       *    unboxes via node->inferred_type — raw wide bits must never land
+       *    in a state field. Tagged scalars store as-is. */
+      bool arr_narrow_local = arr_is_typed && !arr_struct_elem &&
+                              arr_scalar_t != TYPE_DYN && arr_sm_field < 0;
 
       /* Compute length -> local __len */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -10921,7 +10945,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__add_local(c, jacl_inline_string("", 0), line, col);
           c->locals[c->local_count - 1].depth = c->scope_depth;
         }
-      } else if (arr_narrow_scalar) {
+      } else if (arr_narrow_local) {
         c->locals[c->local_count - 1].type = arr_scalar_t;
       }
 
@@ -10959,23 +10983,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
         compiler__emit_byte(c, arr_elem_slot, line);
         compiler__emit_u16(c, (uint16_t)arr_elem_enc, line);
-      } else {
-        /* Wide scalars (i64/u64/f64) come back from OP_ARR_GET as unboxed
-         * wide bits but the binding stays dyn, so box them to a tagged value
-         * before the store. (Tagged scalars and dyn arrays already yield
-         * tagged elements; arr_narrow_scalar is never set for wide.) */
-        if (!arr_narrow_scalar && arr_elem_wide) {
+      } else if (arr_sm_field >= 0) {
+        /* SM: store into the GC-traced state field. Wide scalars come back
+         * from OP_ARR_GET as raw bits — box them so the field holds a tagged
+         * JaclVal (the var-ref read unboxes via node->inferred_type). Tagged
+         * scalars / dyn elements are already tagged. */
+        if (arr_elem_wide) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)arr_scalar_t, line);
         }
-        if (arr_sm_field >= 0) {
-          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)arr_sm_field, line);
-        } else {
-          compiler__emit_byte(c, OP_SET_LOCAL, line);
-          compiler__emit_byte(c, arr_elem_slot, line);
-          compiler__emit_byte(c, OP_POP, line);
-        }
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)arr_sm_field, line);
+      } else {
+        /* Non-SM local: store with the binding's narrowed representation —
+         * wide bits for i64/u64/f64 (local typed accordingly), tagged for
+         * everything else. No boxing. */
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, arr_elem_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
       }
 
       /* Body */
@@ -15535,7 +15560,21 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, sf->is_mutable ? OP_GET_STATE_FIELD_CELL
                                                   : OP_GET_STATE_FIELD, line);
             compiler__emit_byte(c, (uint8_t)sf->field_index, line);
-            c->last_expr_type = TYPE_DYN;
+            /* Wide scalars (i64/u64/f64) are stored BOXED in the state field
+             * (def/mut/for box on store), so a raw read yields a tagged value
+             * (dyn). Unbox to the narrowed wide rep using the typer's type on
+             * this var-ref node — mirrors the cell-local unbox path so typed
+             * scalars keep their type across a suspension. */
+            JaclType vt = (JaclType)node->inferred_type;
+            if (vt == TYPE_I64 || vt == TYPE_U64 || vt == TYPE_F64) {
+              uint8_t to_op = (vt == TYPE_I64) ? OP_TO_I64
+                            : (vt == TYPE_U64) ? OP_TO_U64 : OP_TO_F64;
+              compiler__emit_byte(c, to_op, line);
+              compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+              c->last_expr_type = vt;
+            } else {
+              c->last_expr_type = TYPE_DYN;
+            }
           }
           break;
         }

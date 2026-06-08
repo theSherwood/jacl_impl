@@ -116,7 +116,7 @@ GC (M4e-2): `OBJ_ARR` trace's struct branch recurses
 element (the buf struct-element walker). Ref-store barriers fire only
 when the struct contains ref fields.
 | **M5** Identity & polish | ✅ done | `to-string` (wired), tour.jacl `[Arr T]` section, nested-arr + to-string tests (identity eq + print landed in M3). |
-| **M6** Iteration + arrow | 🟡 for-loop done | `for [a] x { }` iteration shipped (dyn/scalar/struct elements, binding narrowing for tagged scalars + struct; wide scalars stay dyn — see below). `$a->i` / `set $a->i x` arrow still todo. |
+| **M6** Iteration + arrow | 🟡 for-loop done | `for [a] x { }` iteration shipped (dyn/scalar/struct elements, binding narrowing for ALL scalars incl. wide i64/u64/f64, in plain + suspending procs — see below). `$a->i` / `set $a->i x` arrow still todo. |
 
 ### M6 status (iteration + arrow ergonomics)
 
@@ -128,21 +128,24 @@ Three element kinds, two binding shapes:
 - **dyn `[arr ...]`** → dyn binding, `OP_ARR_GET` + `OP_SET_LOCAL`.
 - **tagged scalar `[Arr i32/u32/f32/bool]`** → binding **narrows** to the
   scalar (typer + compiler), enabling typed body math / `assert-type`.
-- **wide scalar `[Arr i64/u64/f64]`** → binding stays **dyn** (value
-  correct: `OP_ARR_GET` pushes raw wide bits, boxed via `OP_TO_DYN`
-  before the store). Narrowing a wide for-binding is the deferred
-  wide-cell + SM work (`NOT_IMPLEMENTED §4`): in an SM proc the binding
-  becomes a GC-traced state field where raw wide bits mis-trace as a
-  pointer. Phase 1 already narrows the direct `arr-get`/`arr-pop` wide
-  case, so `while` + `arr-get` gives typed wide iteration today.
+- **wide scalar `[Arr i64/u64/f64]`** → binding **narrows** too, in both
+  plain and suspending procs. Non-SM loops store the wide binding in a
+  typed local (raw bits); SM loops store it **boxed** in the GC-traced
+  state field and the var-ref read unboxes via `node->inferred_type`.
+  This rides on a general **wide-cell + SM fix** (same session): `def`/
+  `mut` wide locals keep their narrowed type across a suspension (boxed on
+  store, unboxed on read), the `mut i64`-across-suspension `nil` bug is
+  fixed, and wide scalars returned from a dyn-return proc are boxed at the
+  return boundary. See `NOT_IMPLEMENTED §4`.
 - **struct `[Arr Point]`** → inline-width binding (`OP_INLINE_TO_LOCAL`,
   mirroring `is_typed_vec_loop`); `$p->field` works in the body.
 
 Break/continue/break-value and suspending (SM) for-loops all work; the
-typer narrows the binding via a `HEAD_FOR` case (tagged scalars + struct).
+typer narrows the binding via a `HEAD_FOR` case (all scalars + struct).
 Tests: `arr_for_scalar.jacl`, `arr_for_struct.jacl`, `arr_for_wide.jacl`,
-plus a tour.jacl line. `each`/`transform`/`filter` over arr (vm.c ~5623+)
-remain a parallel follow-up.
+`sm_wide_scalar.jacl`, `wide_proc_return.jacl`, plus a tour.jacl line.
+`each`/`transform`/`filter` over arr (vm.c ~5623+) remain a parallel
+follow-up.
 
 **arrow — todo.** `$a->i` / `set $a->i x`: buf's arrow lowering assumes an
 inline base-slot + fixed stride; arr needs a new heap-deref path that

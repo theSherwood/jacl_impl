@@ -2717,16 +2717,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             as[0]->inferred_struct_idx != UINT32_MAX) {
           uint32_t eidx = as[0]->inferred_struct_idx;
           if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-            JaclType st = JACL_TYPE_IDX_TO_SCALAR(eidx);
-            /* Narrow tagged scalars (i32/u32/f32/bool) only. Wide scalars
-             * (i64/u64/f64) stay dyn: in an SM proc the compiler stores the
-             * for-binding in a GC-traced state field, where raw wide bits
-             * would be mis-traced as a pointer. Matches the dyn for-bindings
-             * of stream/vec loops; the wide for-binding case is the deferred
-             * wide-cell + SM work (NOT_IMPLEMENTED §4). Phase 1 already
-             * narrows the direct arr-get/arr-pop wide case. */
-            bool st_wide = (st == TYPE_I64 || st == TYPE_U64 || st == TYPE_F64);
-            if (!st_wide) bt = st;
+            /* Narrow to the element scalar — all scalars, including wide
+             * i64/u64/f64. Non-SM loops store the wide binding in a typed
+             * local; SM loops store it boxed in a state field and the
+             * var-ref read unboxes via the node's inferred_type. */
+            bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
           } else if (eidx < tc->struct_count) {
             bt = TYPE_STRUCT; bsi = eidx;
           }

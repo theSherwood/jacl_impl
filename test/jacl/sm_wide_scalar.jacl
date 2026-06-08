@@ -1,0 +1,24 @@
+# expect: 8
+# expect: 15
+# expect: 23
+# expect: ok
+# Wide scalars (i64/u64/f64) keep their narrowed type across a suspension.
+# def and mut wide locals become SM state fields; they are stored BOXED and
+# unboxed on read (via the var-ref's typer type), so typed arithmetic works
+# after the await. Regression for the mut-i64-SM `nil` bug and the wide
+# state-field type-loss (NOT_IMPLEMENTED §4).
+proc f {} {
+  def fut [spawn { 0 }]
+  def i64 a [arr-get [[Arr i64] 7 8 9] 1]   # 8 (computed wide, immutable)
+  mut i64 b 10
+  set b [+ $b 5]                            # 15 (wide mut + typed arith)
+  await $fut                                # suspension: a, b cross it
+  def i64 c [+ $a $b]                       # 8 + 15 = 23 (both still i64)
+  print $a
+  print $b
+  print $c
+  assert-type $a i64
+  assert-type $b i64
+  print "ok"
+}
+f

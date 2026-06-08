@@ -119,11 +119,11 @@ From `DESIGN.md` "Project Layout" and `DESIGN_CRITIQUE.md` §3.2, §3.4.
   byte-packed store (pre-existing zero-store bug, fixed same change). See
   `ARR_DESIGN.md` (the source of truth + handoff). `for [a] x { }`
   iteration shipped (2026-06-08) — dyn/scalar/struct elements, binding
-  narrowing for tagged scalars + struct; wide-scalar (i64/u64/f64)
-  for-bindings stay dyn (deferred wide-cell + SM work, §4). **Remaining
-  (M6, ergonomic):** `$a->i` / `set $a->i x` arrow indexing; plus one
-  carve-out (struct arrays are pure-value so GC recursion is a no-op).
-  Remove this item when arrow lands.
+  narrowing for ALL scalars incl. wide i64/u64/f64 (both plain and
+  suspending procs, via the general wide-cell + SM fix; see §4).
+  **Remaining (M6, ergonomic):** `$a->i` / `set $a->i x` arrow indexing;
+  plus one carve-out (struct arrays are pure-value so GC recursion is a
+  no-op). Remove this item when arrow lands.
 
 ---
 
@@ -182,30 +182,31 @@ pulling on them; revisit when one shows up.
   `inferred_struct_idx`. Two pieces of the original §4 stream item
   remain deferred:
 
-  1. **For-loop binding narrowing.** Partially landed for `arr`
-     (2026-06-08): `for [a] x { }` over `[Arr i32/u32/f32/bool]` narrows
-     the binding to the tagged scalar (typer `HEAD_FOR` case + compiler
-     arr branch), and struct-element arrs narrow to the struct. **Wide
-     scalars (i64/u64/f64) still stay dyn** for for-bindings — the same
-     wide-cell concern below, compounded by SM: the compiler stores a
-     suspending-loop binding in a GC-traced state field, where raw wide
-     bits mis-trace as a pointer (segfault). Streams/vecs keep dyn
-     for-bindings entirely. The general fix is unchanged:
-     `for $it in [gen]` where the
-     stream is `[Stream i64]` would naively narrow `$it` to i64, but
-     the stream stores tagged `JaclVal`s (yield emits `jacl_i32` /
-     `jacl_str` / ...) while typed-i64 locals expect the unboxed
-     wide representation used by `OP_CONST_I64` / typed-vec slots.
-     Narrowing without an unboxing step on `OP_STREAM_NEXT` produces
-     `144115188075855873` (the NaN-boxing tag bits leaking out) where
-     the user expects `1`. Fix needs a per-element unbox op on stream
-     pull, parallel to typed-vec's inline-load path. Estimated
-     +150-250 LOC. Same wide-cell concern blocks yielding an
-     already-typed-i64 value (`def i64 x 42; yield $x` produces nil
-     because `OP_CONST_I64`-style values can't survive
-     `OP_YIELD_SM`'s `vm__pop` — currently masked by the typer's
-     literal-flex exemption, which keeps literals at their default
-     scalar tag).
+  1. **For-loop binding narrowing.** Landed for `arr`, all scalars
+     (2026-06-08): `for [a] x { }` over `[Arr i32/u32/f32/bool]` AND
+     `[Arr i64/u64/f64]` narrows the binding to the element scalar (typer
+     `HEAD_FOR` case + compiler arr branch), and struct-element arrs
+     narrow to the struct. Wide scalars work in **both** plain and
+     suspending (SM) procs: non-SM loops store the wide binding in a typed
+     local; SM loops store it **boxed** in the GC-traced state field and
+     the var-ref read unboxes via `node->inferred_type`. This was part of
+     a general **wide-cell + SM fix** (same session): `def`/`mut` wide
+     locals now keep their narrowed type across a suspension (boxed on
+     store via `ensure_boxed` in the def/mut/set SM paths; unboxed on read
+     at the state-field var-ref site), the `mut i64`-across-suspension
+     `nil` bug is fixed, and wide scalars returned from a dyn-return proc
+     are boxed at the return boundary (`compiler__emit_return` +
+     `compile_sm_stmts` tail). Tests: `arr_for_wide`, `sm_wide_scalar`,
+     `wide_proc_return`.
+
+     **Still deferred: stream for-bindings.** `for $it in [gen]` where the
+     stream is `[Stream i64]` keeps `$it` dyn — streams store tagged
+     `JaclVal`s (yield emits `jacl_i32` / ...) and there is no per-element
+     unbox on `OP_STREAM_NEXT` (parallel to the now-landed state-field
+     unbox). Narrowing without it produces `144115188075855873` (NaN-box
+     tag bits leaking). Fix needs a per-element unbox op on stream pull;
+     est. +150-250 LOC. The related yield path (`def i64 x 42; yield $x`)
+     is handled by `ensure_boxed` at the yield site (compiler.c ~13123).
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding
