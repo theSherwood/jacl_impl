@@ -25,15 +25,48 @@ store).
 
 ## Status snapshot (for session handoff)
 
+**Pickup for the next session (as of 2026-06-08):** `[Arr T]` is
+functionally complete — **M0–M5 done**, all committed to `main` and
+green. Dyn (`[arr ...]`), flat typed-scalar (`[Arr i32]`…), and flat
+typed-struct (`[Arr Point]`) arrays all work: construct / get / set /
+push / pop / len, plus print / to-string / identity-eq / nesting.
+
+- **Verify state:** `timeout 240 ./build.sh` → 91/91. TSAN
+  (`./build.sh --tsan`) is race-clean in arr paths; the only failures
+  are the pre-existing known-safe `chase_lev_stress` + `OP_GET_GLOBAL`
+  inline-cache races (and a `box_reset_hot` perf-timeout flake under
+  tsan) — none arr-related.
+- **Tests:** `test/jacl/arr_*.jacl` (basic, alias, oob, print,
+  to_string, nested, typed_scalar, typed_i64, typed_oob, typed_mismatch,
+  typed_struct) + `lib/segment_array/test_segment_array{,_var}.c` +
+  the `[Arr T]` block in `tour.jacl`.
+- **Start here:** **M6** — `for $x in $a` iteration, then `$a->i` /
+  `set $a->i x` arrow indexing (see "M6 remaining" below). Both are
+  ergonomic; arrays are fully usable today via the builtins +
+  `while`/`arr-len`/`arr-get`.
+- **Gotchas to know before editing:**
+  - `JaclType` / `OpCode` / `HeadId` are each **dual-defined**
+    (jacl.h + ast.c / bytecode.c). Edit both; append new opcodes at the
+    enum END (`test_bytecode` pins opcode numbers). See the memory note
+    `project_jacltype_multidef`.
+  - **Cross-registry idx hazard:** struct element idx for opcode
+    operands comes from the *compiler* registry (`struct_registry__find`),
+    not the typer's.
+  - **Two intentional carve-outs** (don't "fix" without reading why):
+    `arr-get`/`arr-pop` on `[Arr i64/u64/f64]` return `dyn` not the
+    narrowed wide scalar (wide-cell rep, mirrors §4); struct arrays are
+    pure value types (JACL structs can't hold ref fields) so the GC
+    recursion / ref-store barriers are kept-for-correctness no-ops.
+
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0** Design (this doc) | ✅ done | Four gating decisions settled 2026-06-08 (see Decisions) |
 | **M1** Library gaps | ✅ done | `SA_SET` (in-place index write) + order-preserving `SA_POP` added to `segment_array.h` (25/25 lib tests). |
 | **M2** Type plumbing | ✅ done | `TYPE_ARR` / `TYPE_TYPED_ARR`, `TYPE_SHAPE_TYPED_ARR` + `tarr` union, `type_shape_intern_typed_arr`. |
 | **M3** Dyn `[arr ...]` MVP | ✅ done | Construct / get / set / push / pop / len for tagged-JaclVal elements; `OBJ_ARR` GC object kind + trace + finalizer; SATB + generational write barriers; identity eq; print. Main build 90/90, TSAN race-clean (only the known chase_lev_stress flake). |
-| **M4** Typed `[[Arr T] ...]` — **flat bytes** | ⬜ in progress | Decision 2026-06-08: typed arrays store **raw element bytes** (not boxed), matching `[Buf N T]` / typed-vec. Broken into M4a–M4e below. |
-| ⮑ **M4a** Runtime-stride segment array | ⬜ todo | `segment_array.h` is element-type-templated (fixed stride); typed arrays need a runtime element size. Add a runtime-stride variant (`sa_var`). |
-| ⮑ **M4b** Unify `JaclArr` on `sa_var` | ⬜ todo | Refactor the dyn path onto the byte backing (elem_size = 8, JaclVal slots). M3 tests guard the refactor. |
+| **M4** Typed `[[Arr T] ...]` — **flat bytes** | ✅ done | Decision 2026-06-08: typed arrays store **raw element bytes** (not boxed), matching `[Buf N T]` / typed-vec. Delivered across M4a–M4e below. |
+| ⮑ **M4a** Runtime-stride segment array | ✅ done | `sa_var` (`lib/segment_array/segment_array_var.h`) — runtime `elem_size`; 5/5 lib tests. |
+| ⮑ **M4b** Unify `JaclArr` on `sa_var` | ✅ done | Dyn path refactored onto the byte backing (elem_size = 8, JaclVal slots); M3 tests intact. |
 | ⮑ **M4c** Type-position + typer | ✅ done | `typer__arr_type`; `def [Arr T]` → `TYPE_TYPED_ARR` + elem_idx; `[[Arr T] ...]` constructor; get narrows, push/set type-check; element-literal flex. |
 | ⮑ **M4d** Typed byte ops | 🟡 scalar done | `OP_TYPED_ARR` construct + get/set/push/pop/len byte path for scalar elements (i32/i64/u32/u64/f32/f64/bool) via `vm__arr_scalar_{store,load}`. **Struct elements (`[Arr Point]`) deferred (M4d-2)** — constructor/ops error clearly. |
 | ⮑ **M4e** GC trace + tests | 🟡 scalar done | Trace branches on elem_idx: dyn → push JaclVals, scalar → skip (no refs). Struct recursion deferred (M4e-2). Tests: typed_scalar/i64/oob/mismatch. TSAN race-clean in arr paths. |
