@@ -335,7 +335,12 @@ typedef enum {
   TYPE_I8,
   TYPE_U8,
   TYPE_I16,
-  TYPE_U16
+  TYPE_U16,
+  /* Mutable, growable, heap reference array (segment_array-backed). Sibling
+   * to TYPE_VEC/TYPE_TYPED_VEC but mutable + reference-identity. elem idx
+   * (typed form) in inferred_struct_idx. See ARR_DESIGN.md. */
+  TYPE_ARR,
+  TYPE_TYPED_ARR
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -414,6 +419,8 @@ const char* type_name(JaclType t) {
     case TYPE_U8:        return "u8";
     case TYPE_I16:       return "i16";
     case TYPE_U16:       return "u16";
+    case TYPE_ARR:       return "arr";
+    case TYPE_TYPED_ARR: return "typed-arr";
   }
   return "unknown";
 }

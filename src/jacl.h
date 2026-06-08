@@ -1215,7 +1215,12 @@ typedef enum {
   TYPE_I8,
   TYPE_U8,
   TYPE_I16,
-  TYPE_U16
+  TYPE_U16,
+  /* Mutable, growable, heap-allocated reference array (segment_array-backed).
+   * Sibling to TYPE_VEC/TYPE_TYPED_VEC but mutable + reference-identity.
+   * See ARR_DESIGN.md. elem idx (typed form) in inferred_struct_idx. */
+  TYPE_ARR,
+  TYPE_TYPED_ARR
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -1266,6 +1271,7 @@ typedef enum {
   TYPE_SHAPE_PTR,
   TYPE_SHAPE_FUTURE,
   TYPE_SHAPE_BOX,
+  TYPE_SHAPE_TYPED_ARR,
 } TypeShapeKind;
 
 typedef struct {
@@ -1278,6 +1284,7 @@ typedef struct {
     struct { uint32_t pointee_idx; } ptr;
     struct { uint32_t resolves_to_idx; } future;
     struct { uint32_t boxes_idx; } box;
+    struct { uint32_t elem_idx; } tarr;
   } u;
 } TypeShape;
 

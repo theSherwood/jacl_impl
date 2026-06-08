@@ -78,6 +78,7 @@ typedef enum {
   TYPE_SHAPE_PTR,              /* [Ptr T] -- u.ptr.pointee_idx */
   TYPE_SHAPE_FUTURE,           /* [Future T] -- u.future.resolves_to_idx */
   TYPE_SHAPE_BOX,              /* [Box T] -- u.box.boxes_idx */
+  TYPE_SHAPE_TYPED_ARR,        /* [Arr T] -- u.tarr.elem_idx. See ARR_DESIGN.md */
 } TypeShapeKind;
 
 typedef struct {
@@ -93,6 +94,7 @@ typedef struct {
     struct { uint32_t pointee_idx; } ptr;        /* PTR */
     struct { uint32_t resolves_to_idx; } future; /* FUTURE */
     struct { uint32_t boxes_idx; } box;          /* BOX */
+    struct { uint32_t elem_idx; } tarr;          /* TYPED_ARR */
   } u;
 } TypeShape;
 
@@ -208,6 +210,27 @@ static uint32_t type_shape_intern_typed_vec(StructTypeRegistry* reg,
   reg->defs[idx] = NULL;
   reg->shapes[idx].kind = TYPE_SHAPE_TYPED_VEC;
   reg->shapes[idx].u.tvec.elem_idx = elem_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a typed-arr shape (mutable [Arr T]). Mirrors typed-vec: returns
+ * the registry idx, or UINT32_MAX on allocation failure; identical
+ * (elem_idx) requests share an idx. See ARR_DESIGN.md. */
+static uint32_t type_shape_intern_typed_arr(StructTypeRegistry* reg,
+                                            uint32_t elem_idx) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind == TYPE_SHAPE_TYPED_ARR &&
+        reg->shapes[i].u.tarr.elem_idx == elem_idx) {
+      return i;
+    }
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_TYPED_ARR;
+  reg->shapes[idx].u.tarr.elem_idx = elem_idx;
   reg->count++;
   return idx;
 }
