@@ -1,0 +1,6 @@
+# expect: [arr 1 2 3]
+# expect: [arr 10 20]
+# M5: to-string renders an arr like print does.
+def a [arr 1 2 3]
+print [to-string $a]
+print [to-string [[Arr i32] 10 20]]

@@ -84,6 +84,18 @@ proc main {} {
   assert [not $false]
   assert [== [vec 1 2 3] [vec 1 2 3]]
 
+  # `[Vec T]` is an immutable value; `[Arr T]` is a mutable *reference*
+  # array (segment-array backed). Ops mutate in place; `==` is identity.
+  def nums [arr 1 2 3]            # dyn; `[[Arr i32] ...]` for flat-typed
+  arr-push $nums 4
+  arr-set $nums 0 10
+  assert [== [arr-len $nums] 4]
+  assert [== [arr-get $nums 0] 10]
+  assert [== [arr-pop $nums] 4]
+  def alias $nums                 # a reference — shares storage
+  arr-push $alias 99
+  assert [== [arr-len $nums] 4]   # mutation visible through both
+
   # ----- bindings -----
   # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`
   # operators are command-mode sugar for these.

@@ -1,0 +1,10 @@
+# expect: 2
+# expect: 1
+# expect: 20
+# M5: dyn arr holding arr references (arrays are reference values, so
+# they nest in a dyn arr directly — no boxing).
+def inner [arr 1 2]
+def outer [arr $inner [arr 10 20]]
+print [arr-len $outer]
+print [arr-get [arr-get $outer 0] 0]
+print [arr-get [arr-get $outer 1] 1]
