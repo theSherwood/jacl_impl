@@ -11,11 +11,21 @@ decision the user explicitly wants rethought before more code lands.**
 
 ---
 
-## 1. OPEN DESIGN DECISION — `transform` lambda-return inference (rethink requested)
+## 1. RESOLVED — `transform` lambda-return inference → see `LAMBDA_TYPING_PLAN.md`
 
-**Status: the user said the special-casing was the wrong call and wants this
-rethought before continuing.** The last commit (`79c78b5`) ships it; the
-decision is whether to keep / generalize / revert it.
+**Status: RESOLVED (2026-06-09). `LAMBDA_TYPING_PLAN.md` is the authoritative
+doc for this thread.** Outcome: the macro layering leak was killed
+(`typer__lambda_ret_enc` → general `typer__proc_result_enc` reading the proc's
+real params; `\` is pure sugar again — `120fc1f`), and the i64 producer-wide
+rep flip landed (`c338b99`), so the restore-pass is dropped for i64 mappers and
+i64 stream values flow wide through lazy composition. Open follow-up: u64/f64
+wide (scoped out — a wide-f64 mapper param mis-coerces in the binary-op
+compiler; details in `LAMBDA_TYPING_PLAN.md`). The historical analysis below is
+kept for context.
+
+---
+
+### Historical (pre-resolution) framing
 
 What `79c78b5` does: `transform` over a typed stream is typed as a stream of
 the lambda's return type (`transform [range 1 4] [\ * $it 10]` → `[Stream
