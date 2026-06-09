@@ -1,5 +1,8 @@
 # Plan — clean lambda result-type inference
 
+> Issues/pitfalls retrospective for this whole effort: **`STREAM_TYPING_ISSUES.md`**.
+
+
 Last updated: 2026-06-09. Supersedes HANDOFF.md §1 (the `transform`
 lambda-return probe). Tracked as tasks #1–#4.
 
