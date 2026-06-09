@@ -2479,7 +2479,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       if (JACL_IS_SCALAR_TYPE_IDX(arg_encs[i])) {
         bt = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(arg_encs[i]);
         bs = UINT32_MAX;
-        if (bt == TYPE_I64) body_wide = true;
+        if (bt == TYPE_I64) body_wide = true;  /* i64-scoped; see vm__elem_idx_is_wide */
       } else {
         bt = (uint8_t)TYPE_STRUCT;
         bs = arg_encs[i];

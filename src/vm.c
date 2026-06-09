@@ -1503,13 +1503,14 @@ typedef enum {
 static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
     if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx)) return false;
     JaclType t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
-    /* Scoped to i64 for now: i64 is the dominant integer stream element
-     * (range, most numeric generators) and is fully exercised. u64/f64 wide
-     * streams are a documented follow-up — a wide-f64 mapper param currently
-     * mis-coerces in the binary-op compiler (no [Stream f64] tests today). So
-     * u64/f64 streams stay tagged end-to-end (status quo). See
-     * LAMBDA_TYPING_PLAN.md. The conversion helpers below keep u64/f64 arms so
-     * widening to them is a one-line change once that coercion is fixed. */
+    /* Scoped to i64. u64/f64 are blocked on a value-tagging issue exposed when
+     * widening: float literals are f32, so a [Stream f64] that yields `1.5`
+     * carries an f32-tagged value; the wide flip's box-back (vm__stream_to_tagged)
+     * re-tags it as f64, breaking a predicate comparison against an f32 literal
+     * (`filter [fs] [\ > $it 3.5]`). u64 has an analogous large-value box-back
+     * tag risk. Fixing this needs the f32/f64 (and large-u64) tagging settled
+     * first — see LAMBDA_TYPING_PLAN.md. i64 is unaffected (small ints tag as
+     * i32 either way, matching). */
     return t == TYPE_I64;
 }
 
@@ -4264,6 +4265,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->pinned       = template->pinned;
         cl->is_generator  = template->is_generator;
         cl->is_sm_compiled = template->is_sm_compiled;
+        cl->gen_elem_idx  = template->gen_elem_idx;  /* strict-stream elem type */
         cl->sm_field_count = template->sm_field_count;
         /* US-014: initialize upvalue inline bitmap */
         memset(cl->upvalue_inline_bitmap, 0, sizeof(cl->upvalue_inline_bitmap));

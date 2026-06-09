@@ -176,13 +176,31 @@ original recipe:
    the body stays it:dyn over the tagged pipeline. The conversion helpers keep
    u64/f64 arms, so widening is a small change once the follow-up below lands.
 
-**Follow-up (u64/f64 wide):** a wide-f64 mapper param currently mis-coerces in
-the binary-op compiler — a non-mutable scalar local load (compiler.c ~15721)
-sets last_expr_type from the local's declared type (dyn for `^it`), and the
-f64 operand-coercion path unboxes the raw wide bits as if tagged → 0. The i64
-path reads the raw wide bits correctly. Fix that coercion, then flip
-`vm__elem_idx_is_wide` (+ the `body_wide` check) to include u64/f64. No
-`[Stream f64]` tests exist today; add them with the fix.
+**Fixed since: `gen_elem_idx` not reaching runtime closures.** `OP_CLOSURE`
+(vm.c) copied `is_generator`/`is_sm_compiled`/… from the closure template but
+NOT `gen_elem_idx`, so every runtime generator stream had `elem_idx=0`. This
+was dormant ("foundation in place, not read") until `transform`-over-generator
+became the first reader — and it was a latent bug in the *committed i64* work:
+`transform`/`filter` over an i64 GENERATOR produced garbage (a tagged value
+read as wide), while range-sourced transform worked, so the suite missed it.
+Fixed by copying `gen_elem_idx` in OP_CLOSURE; regression test
+`stream_transform_generator.jacl`.
+
+**Follow-up (u64/f64 wide) — blocked on value tagging, NOT the rep mechanics.**
+Enabling f64/u64 in `vm__elem_idx_is_wide` + `body_wide` makes the transform
+mapper body work (verified: `collect [transform [fs] [\ * $it 2.0]]` →
+`[vec 3 10]`), BUT breaks `filter [fs] [\ > $it 3.5]` with a *runtime* type
+error "f64 and f32". Root cause: **float literals are f32**, so a `[Stream f64]`
+that does `yield 1.5` actually carries an f32-tagged value. Tagged, that f32
+flows to the predicate and compares f32-vs-f32 (the f32 literal) — fine. Under
+the wide flip, the value is widened to f64 and `vm__stream_to_tagged` re-tags
+the box-back as **f64** (the original f32 tag is unrecoverable from raw bits),
+so the predicate compares f64-vs-f32-literal → mismatch. u64 has an analogous
+large-value box-back tag risk (small u64 tags as i32, large as u64). Unblocking
+needs the f32/f64 (and large-u64) literal/element tagging settled first — a
+float-typing concern separate from the stream rep flip. The conversion helpers
+keep u64/f64 arms; widening is then a one-line flip of `vm__elem_idx_is_wide`
++ `body_wide`. No `[Stream f64]`/`[Stream u64]` tests exist — add with the fix.
 
 ## Net result
 

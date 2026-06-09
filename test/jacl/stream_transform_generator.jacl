@@ -1,0 +1,27 @@
+# expect: 320
+# expect: 200
+# expect: ok
+# Regression: transform/filter over a typed i64 GENERATOR (not range). The
+# generator's element type must reach the runtime stream (closure gen_elem_idx
+# copied in OP_CLOSURE) so the producer-wide pull yields wide i64 into the
+# wide-compiled mapper body. Before the fix the generator stream's elem_idx was
+# 0, so the mapper read a tagged value as wide -> garbage. range-sourced
+# transform worked, so this gap was uncaught.
+proc gen {} [Stream i64] {
+  yield 100
+  yield 200
+}
+proc main {} {
+  # transform over an i64 generator: (100*?+... ) wide mapper body
+  mut i64 s 0
+  for [transform [gen] [\ + $it 10]] v { set s [+ $s $v] }   # 110 + 210 = 320? -> 330 below
+  print $s                                                    # (100+10)+(200+10) = 320
+  # filter over an i64 generator: element type preserved, wide pull
+  mut i64 f 0
+  for [filter [gen] [\ > $it 150]] z { set f [+ $f $z] }      # 200
+  print $f
+  # narrowing holds through transform-over-generator
+  for [transform [gen] [\ * $it 2]] y { assert-type $y i64 }
+  print "ok"
+}
+main
