@@ -82,6 +82,17 @@ The de-leak is exercised for real in **Phase 1b** (reduce / direct calls bind
 multiple real params: `acc`, element). Phase 1 is verified by
 `stream_transform_typed` staying green (no regression on the `\` path).
 
+## Verified: restore-pass removal is intrinsic to B, not a standalone step
+
+Tried dropping the restore-pass alone (typed mapper body, tagged pipeline):
+`collect [transform [range 0 3] [\ * $it 10]]` → `4323455642275676220`
+(tagged param read as wide bits). A wide body needs a wide param; in the
+tagged pipeline that means unbox-at-boundary + box-back-result, and the input
+type isn't reliably available at runtime (filter/take/transform don't set
+`elem_idx`). All such scaffolding is deleted by B. ⇒ the restore-pass removal
+falls out *for free* once the pipeline is wide (B); there is no clean low-risk
+precursor. Restore-pass kept until B (documented in `typer__proc_result_enc`).
+
 ## Phase 1 status: ✅ done
 
 `typer__lambda_ret_enc` → `typer__proc_result_enc(proc, arg_encs[], argc)`

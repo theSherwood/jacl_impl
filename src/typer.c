@@ -2495,7 +2495,11 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   typer__scope_pop(tc);
 
   /* INTERIM restore: re-type with params at their declared types so the
-   * probe's narrowing doesn't leak into the body's codegen. */
+   * probe's narrowing doesn't leak into the body's codegen. The body must
+   * stay it:dyn while the stream pipeline is tagged — a wide-typed body over
+   * a tagged param produces garbage (verified). Dropping this belongs in the
+   * producer-wide flip (task B), where the whole pipeline is wide and the
+   * mapper param arrives wide. See LAMBDA_TYPING_PLAN.md. */
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pcount; i++)
     typer__scope_add(tc, pn[i]->data.lit_string.value,
