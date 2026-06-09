@@ -100,6 +100,59 @@ precursor. Restore-pass kept until B (documented in `typer__proc_result_enc`).
 params to call-site arg encodings; interim restore-pass kept and documented.
 `transform` rewired. Suite 480/480.
 
+## B implementation recipe (validated, resumable)
+
+Contract: `vm__pull_stream_one` yields **wide** raw bits iff the stream's
+`elem_idx` decodes to a wide scalar (i64/u64/f64); else tagged. Wide rep = raw
+64-bit value in the `JaclVal` slot (as `OP_TO_I64` produces: `vm__push(vm,
+(uint64_t)i)`). Validated facts: `range` elem_idx=i64 (vm.c:12253); generators
+set elem_idx=`gen_elem_idx` (vm.c:3883) and yield **tagged** via
+`vm->yield_value` (proven by stream_for_scalar summing a [Stream i64] generator
+to 300 through the existing tagged→wide unbox); lines=str, exec=str/bytes.
+
+Strategy = normalization wrapper to minimize wide-aware consumers:
+- Add `vm__pull_stream_dyn(vm, s, out)` = `pull_stream_one` then box wide→tagged
+  if `elem_idx` is wide-scalar. Point **tagged-wanting** consumers at it with
+  ZERO logic change: collect (vm.c ~9477), spread, each (~5759), exec-stdin
+  (~2157), and userland `stream_next` (see below). They keep seeing tagged.
+- **range** (vm.c:1967): emit wide `(JaclVal)(uint64_t)current` (drop the
+  i32/boxed-i64 split) — gated on `elem_idx` wide (always i64 here).
+- **generator pull** (vm.c:2031, `*out_value = vm->yield_value`): if elem_idx
+  wide-scalar, unbox yield_value (tagged) → wide before returning.
+- **filter** (vm.c:1512): source already yields per-contract; BOX elem→tagged
+  before pushing to the predicate (dyn param); yield the elem in source rep
+  (wide passthrough). Set fs->elem_idx = source elem_idx at construction (6167).
+- **take** (vm.c:1677): pure passthrough (already correct); set elem_idx =
+  source elem_idx at construction (10333).
+- **transform** (vm.c:1572): source yields wide (if wide-elem); push wide to
+  the mapper whose body is now compiled wide (DROP the typer restore-pass in
+  `typer__proc_result_enc`); mapper returns wide; yield wide. Set ts->elem_idx
+  at construction (5992) from a compile-baked u16 operand on OP_TRANSFORM (the
+  transform node's output elem enc; dyn for the vec path). For non-wide elems
+  (i32/bool/struct/str) nothing changes — tagged stays.
+- **for-loop** (compiler.c:10863): DROP the OP_TO_I64/U64/F64 unbox — the value
+  arrives wide. SM-field path already stores+reads via inferred_type; leave it.
+- **OP_STREAM_NEXT** (vm.c:9730): pushes whatever pull returns (wide for
+  wide-elem). For-loop reads wide (unbox dropped). **userland `stream_next`**
+  (compiler.c:7266, returns dyn): after the opcode, emit a box when the arg's
+  static elem is wide — or route it through a dyn variant. Must not leak wide
+  to a dyn sink.
+- **GC** (gc_collect.c:452): in OBJ_STREAM trace, skip `cached_value` when
+  `elem_idx` is a wide scalar (a wide value must not be traced as a pointer).
+  gc.c sees no jacl.h macros — use the literal sentinel as elsewhere.
+- **typer** (`typer__proc_result_enc`): drop the restore-pass (body stays typed
+  it:<elem>; the wide pipeline makes it correct). This is where restore removal
+  finally lands.
+
+Validate: full 480 suite, all-or-nothing. No green intermediate exists (the
+for-loop unbox is keyed on shared static type), so build once at the end and
+debug from there. grep -E "error:" the FULL build log (HANDOFF §5).
+
+Risks to watch: u64/f64 wide variants (range is i64-only, but generators can
+yield u64/f64 — handle all three in the generator-pull unbox); the OP_TRANSFORM
+operand wiring (vec path must emit a dyn sentinel so it still works); structs/
+str streams must be untouched (only i64/u64/f64 flip).
+
 ## Deliberately out of scope
 
 Named lambdas **reused across different element types** stay `dyn` (would need
