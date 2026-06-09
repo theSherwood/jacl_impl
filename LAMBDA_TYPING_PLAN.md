@@ -50,8 +50,16 @@ they don't escape the box-vs-monomorphize runtime choice anyway); annotations
   `typer__proc_result_enc(proc_node, arg_encs[], argc)` using real params
   (`typer__parse_params`). **Keeps** the restore pass for now (codegen
   unchanged) — interim, documented. Fixes the layering leak immediately.
-- **Phase 1b (#2)** — Wire the general facility into `reduce` and direct
-  `[$f $x]` application. Kills the "only transform" arbitrariness.
+- **Phase 1b (#2)** — ✅ RESOLVED, not applicable. Current JACL has **no**
+  reduce/fold; `map` is the hashmap constructor (not a HOF); `each` → nil;
+  `filter` → bool predicate (element unchanged); direct `[$f $x]` is a var-ref
+  to a named closure (needs deferred closure-signature work); typed-vec/map
+  `transform` produces a **plain boxed** vec/map at runtime, so the typer can't
+  claim `[Vec R]` without rep changes. ⇒ `transform` over a typed **stream**
+  is the only safe lambda-return consumer today (done in Phase 1). The general
+  facility is ready to wire into those sites if/when they gain runtime support.
+  No "only transform" arbitrariness remains — transform is the sole applicable
+  case, not a privileged one.
 - **Phase 2 (#3)** — Type-once + unbox-at-param: drive body compilation from
   the call site with the param typed, **drop the restore pass**, insert one
   unbox at the param prologue, memoize the node result. Removes the wart with
