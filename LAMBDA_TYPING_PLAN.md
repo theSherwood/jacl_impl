@@ -153,6 +153,44 @@ yield u64/f64 — handle all three in the generator-pull unbox); the OP_TRANSFOR
 operand wiring (vec path must emit a dyn sentinel so it still works); structs/
 str streams must be untouched (only i64/u64/f64 flip).
 
+## B as landed (differs from the recipe above — read this)
+
+Landed green (480/480, 91/91 binaries). Two deliberate design choices vs the
+original recipe:
+
+1. **`OP_STREAM_NEXT` is a tagged-normalizing terminal**, not a wide bind.
+   It pulls via `vm__pull_stream_dyn` (boxes wide→tagged), and the for-loop
+   keeps its existing tagged→wide unbox. So the wide rep flows through the
+   *lazy composition* (range→filter→transform→take, incl. the wide mapper
+   body), and ALL terminal consumers (for-loop, collect, each, spread, userland
+   `stream_next`) normalize to tagged uniformly. This removed the need to touch
+   the for-loop codegen, the SM-field boxing, the userland `stream_next` box,
+   AND the GC (cached_value stays tagged — generators cache `yield_value` which
+   is tagged, so no OBJ_STREAM skip is needed; adding one would've been a bug).
+
+2. **Scoped to i64.** `vm__elem_idx_is_wide` returns true only for i64 (the
+   dominant, fully-tested integer stream element — `range`, numeric
+   generators). u64/f64 streams stay tagged end-to-end (status quo). The
+   restore-pass in `typer__proc_result_enc` is dropped ONLY when a mapper param
+   is bound to i64 (`body_wide`); for every other element type it is kept, so
+   the body stays it:dyn over the tagged pipeline. The conversion helpers keep
+   u64/f64 arms, so widening is a small change once the follow-up below lands.
+
+**Follow-up (u64/f64 wide):** a wide-f64 mapper param currently mis-coerces in
+the binary-op compiler — a non-mutable scalar local load (compiler.c ~15721)
+sets last_expr_type from the local's declared type (dyn for `^it`), and the
+f64 operand-coercion path unboxes the raw wide bits as if tagged → 0. The i64
+path reads the raw wide bits correctly. Fix that coercion, then flip
+`vm__elem_idx_is_wide` (+ the `body_wide` check) to include u64/f64. No
+`[Stream f64]` tests exist today; add them with the fix.
+
+## Net result
+
+`\` is pure sugar (Phase 1); lambda result inference is general; for i64
+streams the value flows wide through lazy composition, the transform mapper
+body compiles and runs wide, and the restore-pass is gone — the clean end
+state for i64. Terminals re-tag uniformly. u64/f64 wide is a scoped follow-up.
+
 ## Deliberately out of scope
 
 Named lambdas **reused across different element types** stay `dyn` (would need

@@ -5251,7 +5251,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
 
 void compiler__compile_hof_builtin(Compiler* c, const char* name,
                                            AstNode** args, uint32_t argc,
-                                           uint8_t opcode,
+                                           uint8_t opcode, uint32_t out_elem_enc,
                                            uint32_t line, uint32_t col) {
   if (argc != 2) {
     compiler__builtin_arity_error(c, line, col, name, "2 arguments", argc);
@@ -5314,6 +5314,15 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   compiler__emit_byte(c, opcode, line);
+  if (opcode == OP_TRANSFORM) {
+    /* Producer-wide (B): bake the output element-type encoding so the lazy
+     * transform stream is built with a correct elem_idx (drives wide-rep
+     * unbox of the mapper result). 0xFF00 = dyn sentinel (matches
+     * jacl_stream() init) when the mapper return type is unknown. */
+    uint16_t enc = (out_elem_enc == UINT32_MAX) ? 0xFF00u
+                                                : (uint16_t)out_elem_enc;
+    compiler__emit_u16(c, enc, line);
+  }
   /* Preserve collection type: stream→stream, vec→vec */
   c->last_expr_type = col_type;
 }
@@ -10710,7 +10719,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Detect HOF callback form: [for $collection $callback] */
     if (argc == 2 && args[1]->type == AST_VAR_REF) {
-      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
+      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, UINT32_MAX, line, col);
       return;
     }
 
@@ -10730,7 +10739,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       body_block = args[2];
     } else if (argc == 2 && args[1]->type == AST_COMMAND) {
       /* [for $collection [\ body]] — lambda callback via OP_EACH */
-      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
+      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, UINT32_MAX, line, col);
       return;
     } else {
       compiler__error(c, line, col,
@@ -10860,6 +10869,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
       } else {
+        /* OP_STREAM_NEXT normalizes to TAGGED (it pulls via the dyn wrapper),
+         * so a wide-scalar binding unboxes the pulled tagged value to its wide
+         * rep here, as before the producer-wide flip. The wide rep flows
+         * through the lazy pipeline; terminals like this one re-tag. */
         if (strm_narrow_local && strm_elem_wide) {
           uint8_t to_op = (strm_scalar_t == TYPE_I64) ? OP_TO_I64
                         : (strm_scalar_t == TYPE_U64) ? OP_TO_U64 : OP_TO_F64;
@@ -12415,14 +12428,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* transform builtin (exactly 2 args — non-suspending callback) */
   if (hid == HEAD_TRANSFORM) {
-    compiler__compile_hof_builtin(c, "transform", args, argc, OP_TRANSFORM, line, col);
+    compiler__compile_hof_builtin(c, "transform", args, argc, OP_TRANSFORM, node->inferred_struct_idx, line, col);
     return;
   }
 
 
   /* filter builtin (exactly 2 args — non-suspending callback) */
   if (hid == HEAD_FILTER) {
-    compiler__compile_hof_builtin(c, "filter", args, argc, OP_FILTER, line, col);
+    compiler__compile_hof_builtin(c, "filter", args, argc, OP_FILTER, UINT32_MAX, line, col);
     return;
   }
 

@@ -2466,7 +2466,7 @@ extern void compiler__builtin_arity_error (Compiler *c, uint32_t line, uint32_t 
 extern void compiler__ensure_boxed (Compiler *c, uint32_t line);
 extern uint8_t compiler__typed_op (uint8_t dyn_op, JaclType type);
 extern void compiler__compile_binary (Compiler *c, AstNode **args, uint8_t op, const char *op_verb, uint32_t line, uint32_t col);
-extern void compiler__compile_hof_builtin (Compiler *c, const char *name, AstNode **args, uint32_t argc, uint8_t opcode, uint32_t line, uint32_t col);
+extern void compiler__compile_hof_builtin (Compiler *c, const char *name, AstNode **args, uint32_t argc, uint8_t opcode, uint32_t out_elem_enc, uint32_t line, uint32_t col);
 extern void compiler__compile_destructure_vec (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
 extern void compiler__compile_destructure_named (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, int spread_all, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
 extern void compiler__rewrite_binding_op (Compiler *c, AstNode *node, const char *target, uint32_t target_len);

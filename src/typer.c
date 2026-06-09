@@ -2471,6 +2471,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    * untyped (dyn — the lambda case) and an arg type was supplied; otherwise
    * keep its declared type. Type the body; the tail's type is the result. */
   typer__scope_push(tc);
+  bool body_wide = false;  /* a param was bound to the flip-enabled wide type */
   for (uint32_t i = 0; i < pcount; i++) {
     uint8_t  bt = (uint8_t)pt[i];
     uint32_t bs = ps[i];
@@ -2478,6 +2479,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       if (JACL_IS_SCALAR_TYPE_IDX(arg_encs[i])) {
         bt = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(arg_encs[i]);
         bs = UINT32_MAX;
+        if (bt == TYPE_I64) body_wide = true;
       } else {
         bt = (uint8_t)TYPE_STRUCT;
         bs = arg_encs[i];
@@ -2494,20 +2496,23 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   uint32_t rsidx = tail->inferred_struct_idx;
   typer__scope_pop(tc);
 
-  /* INTERIM restore: re-type with params at their declared types so the
-   * probe's narrowing doesn't leak into the body's codegen. The body must
-   * stay it:dyn while the stream pipeline is tagged — a wide-typed body over
-   * a tagged param produces garbage (verified). Dropping this belongs in the
-   * producer-wide flip (task B), where the whole pipeline is wide and the
-   * mapper param arrives wide. See LAMBDA_TYPING_PLAN.md. */
-  typer__scope_push(tc);
-  for (uint32_t i = 0; i < pcount; i++)
-    typer__scope_add(tc, pn[i]->data.lit_string.value,
-                     pn[i]->data.lit_string.length,
-                     pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
-  for (uint32_t i = 0; i < bc; i++)
-    typer__infer_node(tc, body->data.block.commands[i]);
-  typer__scope_pop(tc);
+  /* Drop the restore pass ONLY when a param was bound to the flip-enabled wide
+   * type (i64): then the producer-wide flip (task B) makes the source yield
+   * wide and transform push it straight into this wide-compiled body — static
+   * and runtime rep agree. For every other param type (i32/struct/str, and the
+   * not-yet-flipped u64/f64) restore the body to it:dyn, because the pipeline
+   * still hands the mapper a tagged value (a wide-typed body over a tagged
+   * param produces garbage — verified). Mirror of vm__elem_idx_is_wide. */
+  if (!body_wide) {
+    typer__scope_push(tc);
+    for (uint32_t i = 0; i < pcount; i++)
+      typer__scope_add(tc, pn[i]->data.lit_string.value,
+                       pn[i]->data.lit_string.length,
+                       pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
+    for (uint32_t i = 0; i < bc; i++)
+      typer__infer_node(tc, body->data.block.commands[i]);
+    typer__scope_pop(tc);
+  }
 
   if (rt == TYPE_STRUCT && rsidx != UINT32_MAX) return rsidx;
   if (rt != TYPE_DYN && rt != TYPE_NIL) return JACL_SCALAR_TYPE_IDX(rt);

@@ -1503,7 +1503,14 @@ typedef enum {
 static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
     if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx)) return false;
     JaclType t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
-    return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
+    /* Scoped to i64 for now: i64 is the dominant integer stream element
+     * (range, most numeric generators) and is fully exercised. u64/f64 wide
+     * streams are a documented follow-up — a wide-f64 mapper param currently
+     * mis-coerces in the binary-op compiler (no [Stream f64] tests today). So
+     * u64/f64 streams stay tagged end-to-end (status quo). See
+     * LAMBDA_TYPING_PLAN.md. The conversion helpers below keep u64/f64 arms so
+     * widening to them is a one-line change once that coercion is fixed. */
+    return t == TYPE_I64;
 }
 
 /* Tagged scalar -> wide raw-bits, mirroring OP_TO_I64/U64/F64 with src=dyn. */
@@ -1533,8 +1540,19 @@ static inline JaclVal vm__stream_to_wide(JaclVal v, JaclType t) {
 
 /* Wide raw-bits -> tagged scalar (boxes at a dyn sink). */
 static inline JaclVal vm__stream_to_tagged(VM* vm, JaclVal wide, JaclType t) {
-    if (t == TYPE_I64) return jacl_i64(&vm->heap, (int64_t)(uint64_t)wide);
-    if (t == TYPE_U64) return jacl_u64(&vm->heap, (uint64_t)wide);
+    /* Small integers tag as i32 — the canonical small-int dyn rep, and what
+     * range/yield emitted pre-flip (so `collect [range 1 5]` stays a vec of
+     * i32, matching i32 literals). */
+    if (t == TYPE_I64) {
+        int64_t i = (int64_t)(uint64_t)wide;
+        if (i >= INT32_MIN && i <= INT32_MAX) return jacl_i32((int32_t)i);
+        return jacl_i64(&vm->heap, i);
+    }
+    if (t == TYPE_U64) {
+        uint64_t u = (uint64_t)wide;
+        if (u <= (uint64_t)INT32_MAX) return jacl_i32((int32_t)u);
+        return jacl_u64(&vm->heap, u);
+    }
     double d; memcpy(&d, &wide, sizeof(double));
     return jacl_f64(&vm->heap, d);
 }
@@ -1571,11 +1589,17 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             }
             if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
 
-            /* Call predicate closure with elem */
+            /* Call predicate closure with elem. The predicate's param is dyn,
+             * so box a wide element back to tagged for the call; the element
+             * yielded downstream (*out_value below) stays in wide rep. */
             VMResult r;
             r = vm__push(vm, predicate_val);
             if (r != VM_OK) return STREAM_PULL_ERROR;
-            r = vm__push(vm, elem);
+            JaclVal elem_for_pred = elem;
+            if (vm__elem_idx_is_wide(stream->elem_idx))
+                elem_for_pred = vm__stream_to_tagged(vm, elem,
+                                  JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
+            r = vm__push(vm, elem_for_pred);
             if (r != VM_OK) return STREAM_PULL_ERROR;
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
@@ -1666,6 +1690,12 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         vm->ip    = save_ip;
         vm->chunk = save_chunk;
 
+        /* The mapper has a dyn return, so it boxes a wide tail before
+         * returning; unbox back to wide when this transform stream's element
+         * is a wide scalar, so the wide rep flows downstream. */
+        if (vm__elem_idx_is_wide(stream->elem_idx))
+            transformed = vm__stream_to_wide(transformed,
+                            JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
         *out_value = transformed;
         return STREAM_PULL_VALUE;
     }
@@ -2027,8 +2057,12 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         gc__current_heap = &vm->heap;
         stream->args[0] = jacl_i64(&vm->heap, current + 1);
 
-        /* Return current as i64 (or i32 if it fits) */
-        if (current >= INT32_MIN && current <= INT32_MAX) {
+        /* Producer-wide: range elements are i64 -> yield wide raw bits (no
+         * heap-alloc for large values). Falls back to tagged only if the
+         * stream is somehow not wide-typed (defensive). */
+        if (vm__elem_idx_is_wide(stream->elem_idx)) {
+            *out_value = (JaclVal)(uint64_t)current;
+        } else if (current >= INT32_MIN && current <= INT32_MAX) {
             *out_value = jacl_i32((int32_t)current);
         } else {
             *out_value = jacl_i64(&vm->heap, current);
@@ -2075,7 +2109,14 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         vm->frame_count = caller_frame_count;
         vm->ip          = caller_ip;
         vm->chunk       = caller_chunk;
-        *out_value = vm->yield_value;
+        /* Producer-wide: generators yield tagged (cached_value above stays
+         * tagged and GC-safe); hand a wide value to the consumer for a
+         * wide-scalar element stream. */
+        if (vm__elem_idx_is_wide(stream->elem_idx))
+            *out_value = vm__stream_to_wide(vm->yield_value,
+                            JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
+        else
+            *out_value = vm->yield_value;
         return STREAM_PULL_VALUE;
     } else if (inner == VM_OK) {
         /* Check if SM function returned an error value */
@@ -2102,6 +2143,20 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         stream->state = STREAM_ERROR;
         return STREAM_PULL_ERROR;
     }
+}
+
+/* Pull one element and normalize to TAGGED rep. For consumers that feed a
+ * dyn/tagged sink (collect/spread/each/exec-stdin) — they keep their existing
+ * tagged logic; the producer-wide flip is transparent to them. */
+static StreamPullResult vm__pull_stream_dyn(VM* vm, JaclVal stream_val,
+                                            JaclVal* out_value) {
+    JaclStream* stream = jacl_as_stream(stream_val);
+    uint32_t eidx = stream->elem_idx;
+    StreamPullResult pr = vm__pull_stream_one(vm, stream_val, out_value);
+    if (pr == STREAM_PULL_VALUE && vm__elem_idx_is_wide(eidx))
+        *out_value = vm__stream_to_tagged(vm, *out_value,
+                          JACL_TYPE_IDX_TO_SCALAR(eidx));
+    return pr;
 }
 
 /* Helper: Build shell command string from args vector.
@@ -2201,7 +2256,7 @@ static int vm__exec_collect_stdin(VM* vm, JaclVal stdin_val, char** out_buf, siz
 
     while (src_stream->state != STREAM_EXHAUSTED) {
       JaclVal elem;
-      StreamPullResult pr = vm__pull_stream_one(vm, stdin_val, &elem);
+      StreamPullResult pr = vm__pull_stream_dyn(vm, stdin_val, &elem);
       if (pr == STREAM_PULL_ERROR) return -1;
       if (pr == STREAM_PULL_EXHAUSTED) break;
 
@@ -5803,7 +5858,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Use unified pull helper for all stream kinds */
           while (stream->state != STREAM_EXHAUSTED) {
             JaclVal elem;
-            StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &elem);
+            StreamPullResult pr = vm__pull_stream_dyn(vm, coll_val, &elem);
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) break;
 
@@ -5864,6 +5919,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       CASE(OP_TRANSFORM): {
+        /* Operand: output element-type encoding for the lazy stream case
+         * (the mapper's return type; 0xFF00 dyn sentinel when unknown / for
+         * the eager vec path). Read unconditionally so ip advances. */
+        uint16_t transform_out_elem = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
@@ -6040,6 +6099,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           ts->args[0]   = coll_val;     /* source stream */
           ts->args[1]   = closure_val;  /* transform closure */
           ts->arg_count = 2;
+          ts->elem_idx  = transform_out_elem; /* mapper return type (B) */
           result = vm__push(vm, transform_stream_val);
           if (result != VM_OK) return result;
 
@@ -6217,6 +6277,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           fs->args[0]   = coll_val;     /* source stream */
           fs->args[1]   = closure_val;  /* predicate closure */
           fs->arg_count = 2;
+          /* filter preserves the element type — copy source's elem_idx so the
+           * producer-wide rep flows through (B). */
+          if (jacl_is_stream(coll_val))
+            fs->elem_idx = jacl_as_stream(coll_val)->elem_idx;
           result = vm__push(vm, filter_stream_val);
           if (result != VM_OK) return result;
 
@@ -9521,7 +9585,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             jacl_vec_root* tmp_vec = jacl_vec_empty();
             while (stream->state != STREAM_EXHAUSTED) {
               JaclVal elem;
-              StreamPullResult pr = vm__pull_stream_one(vm, spread_val, &elem);
+              StreamPullResult pr = vm__pull_stream_dyn(vm, spread_val, &elem);
               if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
               if (pr == STREAM_PULL_EXHAUSTED) break;
               gc__current_heap = &vm->heap;
@@ -9795,7 +9859,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Derived streams (filter, etc.) use the unified helper */
         if (stream->kind != STREAM_KIND_GENERATOR) {
           JaclVal pulled;
-          StreamPullResult pr = vm__pull_stream_one(vm, stream_val, &pulled);
+          StreamPullResult pr = vm__pull_stream_dyn(vm, stream_val, &pulled);
           if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
           result = vm__push(vm, pulled);
           if (result != VM_OK) return result;
@@ -10179,7 +10243,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           jacl_vec_root* collect_vec = jacl_vec_empty();
           while (stream->state != STREAM_EXHAUSTED) {
             JaclVal elem;
-            StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &elem);
+            StreamPullResult pr = vm__pull_stream_dyn(vm, coll_val, &elem);
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) break;
             gc__current_heap = &vm->heap;
@@ -10383,6 +10447,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           ts->args[0]   = coll_val;     /* source stream */
           ts->args[1]   = jacl_i32(n);  /* remaining count */
           ts->arg_count  = 2;
+          /* take preserves the element type — copy source's elem_idx (B). */
+          if (jacl_is_stream(coll_val))
+            ts->elem_idx = jacl_as_stream(coll_val)->elem_idx;
           result = vm__push(vm, take_stream_val);
           if (result != VM_OK) return result;
           DISPATCH();
@@ -10427,7 +10494,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Use unified pull helper for all stream kinds */
           {
             JaclVal pulled;
-            StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &pulled);
+            StreamPullResult pr = vm__pull_stream_dyn(vm, coll_val, &pulled);
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) pulled = JACL_NIL;
             frame = &vm->frames[vm->frame_count - 1];
