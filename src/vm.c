@@ -1493,10 +1493,57 @@ typedef enum {
     STREAM_PULL_ERROR      /* Error occurred (vm->error_msg set) */
 } StreamPullResult;
 
+/* --- Producer-wide stream rep (task B) ---------------------------------
+ * Contract: vm__pull_stream_one yields a WIDE (raw 64-bit) value iff the
+ * stream's elem_idx decodes to a wide scalar (i64/u64/f64); otherwise the
+ * value is tagged (i32/bool/str/struct/dyn have no wide form). Wide rep is
+ * raw bits in the JaclVal slot, exactly as OP_TO_I64 produces. Consumers that
+ * feed a dyn/tagged sink use vm__pull_stream_dyn (boxes wide back); consumers
+ * that want wide (for-loop, transform mapper body) read the raw value. */
+static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
+    if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx)) return false;
+    JaclType t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
+    return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
+}
+
+/* Tagged scalar -> wide raw-bits, mirroring OP_TO_I64/U64/F64 with src=dyn. */
+static inline JaclVal vm__stream_to_wide(JaclVal v, JaclType t) {
+    if (t == TYPE_I64) {
+        int64_t i;
+        if (jacl_is_i32(v))      i = (int64_t)jacl_as_i32(v);
+        else if (jacl_is_u32(v)) i = (int64_t)(uint32_t)jacl_as_u32(v);
+        else if (jacl_is_f32(v)) i = (int64_t)jacl_as_f32(v);
+        else                     i = jacl_as_i64(v);
+        return (JaclVal)(uint64_t)i;
+    } else if (t == TYPE_U64) {
+        uint64_t u;
+        if (jacl_is_i32(v))      u = (uint64_t)(int64_t)jacl_as_i32(v);
+        else if (jacl_is_u32(v)) u = (uint64_t)jacl_as_u32(v);
+        else                     u = jacl_as_u64(v);
+        return (JaclVal)u;
+    } else { /* TYPE_F64 */
+        double d;
+        if (jacl_is_f32(v))      d = (double)jacl_as_f32(v);
+        else if (jacl_is_i32(v)) d = (double)jacl_as_i32(v);
+        else                     d = jacl_as_f64(v);
+        JaclVal out; memcpy(&out, &d, sizeof(double));
+        return out;
+    }
+}
+
+/* Wide raw-bits -> tagged scalar (boxes at a dyn sink). */
+static inline JaclVal vm__stream_to_tagged(VM* vm, JaclVal wide, JaclType t) {
+    if (t == TYPE_I64) return jacl_i64(&vm->heap, (int64_t)(uint64_t)wide);
+    if (t == TYPE_U64) return jacl_u64(&vm->heap, (uint64_t)wide);
+    double d; memcpy(&d, &wide, sizeof(double));
+    return jacl_f64(&vm->heap, d);
+}
+
 /**
  * Pull one element from any stream kind (generator, filter, etc.).
  * Saves and restores VM caller context internally.
- * On STREAM_PULL_VALUE: *out_value = yielded element.
+ * On STREAM_PULL_VALUE: *out_value = yielded element (WIDE if the stream's
+ *   elem_idx is a wide scalar — see the producer-wide contract above).
  * On STREAM_PULL_EXHAUSTED: *out_value = JACL_NIL.
  */
 StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
