@@ -1503,15 +1503,12 @@ typedef enum {
 static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
     if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx)) return false;
     JaclType t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
-    /* Scoped to i64. u64/f64 are blocked on a value-tagging issue exposed when
-     * widening: float literals are f32, so a [Stream f64] that yields `1.5`
-     * carries an f32-tagged value; the wide flip's box-back (vm__stream_to_tagged)
-     * re-tags it as f64, breaking a predicate comparison against an f32 literal
-     * (`filter [fs] [\ > $it 3.5]`). u64 has an analogous large-value box-back
-     * tag risk. Fixing this needs the f32/f64 (and large-u64) tagging settled
-     * first — see LAMBDA_TYPING_PLAN.md. i64 is unaffected (small ints tag as
-     * i32 either way, matching). */
-    return t == TYPE_I64;
+    /* i64/u64/f64 all flow wide. The earlier f64/u64 blocker (a tagged element
+     * comparing against a differently-tagged literal in a dyn-context predicate)
+     * is handled by runtime mixed-numeric promotion in the ordering opcodes
+     * (vm__numeric_order) plus yield-time literal narrowing — see
+     * LAMBDA_TYPING_PLAN.md. */
+    return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
 /* Tagged scalar -> wide raw-bits, mirroring OP_TO_I64/U64/F64 with src=dyn. */
@@ -1556,6 +1553,52 @@ static inline JaclVal vm__stream_to_tagged(VM* vm, JaclVal wide, JaclType t) {
     }
     double d; memcpy(&d, &wide, sizeof(double));
     return jacl_f64(&vm->heap, d);
+}
+
+/* --- Mixed-numeric ordering comparison (hybrid contextual-literal support) ---
+ * When ordering operands are both numeric but differently tagged (i32/i64/
+ * u32/u64/f32/f64), promote and compare rather than erroring. This makes a
+ * comparison like `> $it 3.5` work when $it is a tagged f64 stream element and
+ * 3.5 is an f32 literal (the dyn-context case where compile-time literal
+ * narrowing can't reach), and makes the existing i64-vs-i32 filter comparison
+ * principled rather than reliant on i32-for-small box coincidence. Integers
+ * compare exactly as int64; any float operand compares as double. */
+static inline bool vm__is_numeric_tag(JaclVal v) {
+    return jacl_is_i32(v) || jacl_is_u32(v) || jacl_is_f32(v) ||
+           jacl_is_i64(v) || jacl_is_u64(v) || jacl_is_f64(v);
+}
+static inline double vm__as_double_any(JaclVal v) {
+    if (jacl_is_f32(v)) return (double)jacl_as_f32(v);
+    if (jacl_is_f64(v)) return jacl_as_f64(v);
+    if (jacl_is_i32(v)) return (double)jacl_as_i32(v);
+    if (jacl_is_u32(v)) return (double)jacl_as_u32(v);
+    if (jacl_is_i64(v)) return (double)jacl_as_i64(v);
+    return (double)jacl_as_u64(v);
+}
+static inline int64_t vm__as_i64_any(JaclVal v) {
+    if (jacl_is_i32(v)) return (int64_t)jacl_as_i32(v);
+    if (jacl_is_u32(v)) return (int64_t)(uint32_t)jacl_as_u32(v);
+    if (jacl_is_i64(v)) return jacl_as_i64(v);
+    if (jacl_is_u64(v)) return (int64_t)jacl_as_u64(v);
+    if (jacl_is_f32(v)) return (int64_t)jacl_as_f32(v);
+    return (int64_t)jacl_as_f64(v);
+}
+/* cmp: 0='>', 1='<', 2='>=', 3='<='. Returns false (caller errors) if either
+ * operand is not a numeric scalar. */
+static inline bool vm__numeric_order(JaclVal a, JaclVal b, int cmp, JaclVal* out) {
+    if (!vm__is_numeric_tag(a) || !vm__is_numeric_tag(b)) return false;
+    int c;
+    if (jacl_is_f32(a) || jacl_is_f64(a) || jacl_is_f32(b) || jacl_is_f64(b)) {
+        double x = vm__as_double_any(a), y = vm__as_double_any(b);
+        c = (x < y) ? -1 : (x > y) ? 1 : 0;
+    } else {
+        int64_t x = vm__as_i64_any(a), y = vm__as_i64_any(b);
+        c = (x < y) ? -1 : (x > y) ? 1 : 0;
+    }
+    bool r = (cmp == 0) ? (c > 0) : (cmp == 1) ? (c < 0)
+           : (cmp == 2) ? (c >= 0) : (c <= 0);
+    *out = jacl_bool(r);
+    return true;
 }
 
 /**
@@ -2951,6 +2994,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_u32_lt(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) < 0);
+        } else if (vm__numeric_order(a, b, 1, &res)) {
+          /* mixed numeric tags: promoted compare */
         } else {
           VM_ERROR(vm,
             "type error in '<': expected matching types, got %s and %s",
@@ -2974,6 +3019,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_u32_gt(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) > 0);
+        } else if (vm__numeric_order(a, b, 0, &res)) {
+          /* mixed numeric tags: promoted compare */
         } else {
           VM_ERROR(vm,
             "type error in '>': expected matching types, got %s and %s",
@@ -2997,6 +3044,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_u32_le(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) <= 0);
+        } else if (vm__numeric_order(a, b, 3, &res)) {
+          /* mixed numeric tags: promoted compare */
         } else {
           VM_ERROR(vm,
             "type error in '<=': expected matching types, got %s and %s",
@@ -3020,6 +3069,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_u32_ge(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) >= 0);
+        } else if (vm__numeric_order(a, b, 2, &res)) {
+          /* mixed numeric tags: promoted compare */
         } else {
           VM_ERROR(vm,
             "type error in '>=': expected matching types, got %s and %s",

@@ -1051,8 +1051,11 @@ static int test_op_gt_f32(void) {
   TEST_PASS();
 }
 
-/* Test: comparison with mismatched numeric types produces runtime error with message */
-static int test_op_lt_mixed_type_error(void) {
+/* Test: ordering comparison across mixed numeric tags PROMOTES and compares
+ * (1 < 2.0 -> true), rather than erroring. This is the runtime side of
+ * contextual numeric handling: a dynamic-dispatch ordering op promotes mixed
+ * numeric operands (any float -> double, else int64). See vm__numeric_order. */
+static int test_op_lt_mixed_numeric_promotes(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BytecodeChunk chunk;
@@ -1071,10 +1074,8 @@ static int test_op_lt_mixed_type_error(void) {
   vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
-  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
-  ASSERT(vm.error_message != NULL);
-  ASSERT(strstr(vm.error_message, "i32") != NULL);
-  ASSERT(strstr(vm.error_message, "f32") != NULL);
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);  /* 1 < 2.0 */
 
   vm_destroy(&vm);
   arena_destroy(&arena);
@@ -2578,7 +2579,7 @@ int main(void) {
     { "op_ge_i32",                test_op_ge_i32 },
     { "op_lt_f32",                test_op_lt_f32 },
     { "op_gt_f32",                test_op_gt_f32 },
-    { "op_lt_mixed_type_error",   test_op_lt_mixed_type_error },
+    { "op_lt_mixed_numeric_promotes", test_op_lt_mixed_numeric_promotes },
     { "op_eq_f32",                test_op_eq_f32 },
     /* US-006: Print builtin (VM) */
     { "op_print_i32",             test_op_print_i32 },

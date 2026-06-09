@@ -186,7 +186,23 @@ read as wide), while range-sourced transform worked, so the suite missed it.
 Fixed by copying `gen_elem_idx` in OP_CLOSURE; regression test
 `stream_transform_generator.jacl`.
 
-**Follow-up (u64/f64 wide) — blocked on value tagging, NOT the rep mechanics.**
+**u64/f64 wide — DONE (contextual literals + runtime promotion).** Resolved the
+tagging blocker two ways: (a) `yield X` now narrows a numeric literal to the
+generator's `[Stream T]` element type (yield-time `expected_type`), so a
+`[Stream f64]` genuinely carries f64 (typer.c, the yield branch of the
+mutator-arg expected_type loop); (b) the four ordering opcodes (GT/LT/GE/LE)
+**promote mixed numeric tags** at runtime (`vm__numeric_order`: any float →
+double, else int64) instead of erroring — so a dyn-context predicate like
+`filter [fs] [\ > $it 3.5]` (tagged-f64 element vs f32 literal) just works, and
+the previously-coincidental i64-vs-i32 filter becomes principled. With those,
+`vm__elem_idx_is_wide` + the `body_wide` check now include u64/f64. Tests:
+`stream_wide_f64_u64.jacl`; unit test `op_lt_mixed_numeric_promotes` (was
+`op_lt_mixed_type_error`). The pure compile-time predicate-narrowing path was
+rejected as too coupled (it needs wide values pushed into wide-compiled
+predicate bodies). NOTE: `OP_EQ` was already permissive (cross-type allowed);
+arithmetic dyn ops weren't touched (transform mappers use typed wide ops).
+
+**(historical) Earlier f64/u64 blocker write-up:**
 Enabling f64/u64 in `vm__elem_idx_is_wide` + `body_wide` makes the transform
 mapper body work (verified: `collect [transform [fs] [\ * $it 2.0]]` →
 `[vec 3 10]`), BUT breaks `filter [fs] [\ > $it 3.5]` with a *runtime* type

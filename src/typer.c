@@ -2479,7 +2479,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       if (JACL_IS_SCALAR_TYPE_IDX(arg_encs[i])) {
         bt = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(arg_encs[i]);
         bs = UINT32_MAX;
-        if (bt == TYPE_I64) body_wide = true;  /* i64-scoped; see vm__elem_idx_is_wide */
+        if (bt == TYPE_I64 || bt == TYPE_U64 || bt == TYPE_F64) body_wide = true;
       } else {
         bt = (uint8_t)TYPE_STRUCT;
         bs = arg_encs[i];
@@ -3136,6 +3136,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
       tc->expected_type = target;
+    } else if (mutator_hid == HEAD_YIELD && i == 0 &&
+               tc->yield_elem_struct_idx != UINT32_MAX &&
+               JACL_IS_SCALAR_TYPE_IDX(tc->yield_elem_struct_idx)) {
+      /* yield X in a [Stream T] generator: narrow a numeric literal X to the
+       * element type T (yield 1.5 in [Stream f64] -> f64; yield 100 in
+       * [Stream i64] -> i64). Mirrors typed def/mut/push expected_type
+       * propagation. The yield codegen boxes a wide tail before OP_YIELD_SM. */
+      tc->expected_type = JACL_TYPE_IDX_TO_SCALAR(tc->yield_elem_struct_idx);
     } else {
       tc->expected_type = TYPE_DYN;
     }
