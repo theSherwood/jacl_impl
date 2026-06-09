@@ -7,6 +7,11 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
+> **Active work-in-progress:** see `HANDOFF.md` (2026-06-09) for the
+> scalar-narrowing / typed-stream effort — what landed, the open
+> `transform` lambda-inference design decision, and the remaining
+> typed-stream work. Resume there.
+
 Last refreshed: 2026-06-08 (§1b added — the shell / external-command
 API redesign in `SHELL_API_DESIGN.md` is now indexed here as a
 planned-but-unimplemented target; current behavior is still the
@@ -202,14 +207,20 @@ pulling on them; revisit when one shows up.
      `compile_sm_stmts` tail). Tests: `arr_for_wide`, `sm_wide_scalar`,
      `wide_proc_return`, `vec_for_scalar`.
 
-     **Still deferred: stream for-bindings.** `for $it in [gen]` where the
-     stream is `[Stream i64]` keeps `$it` dyn — streams store tagged
-     `JaclVal`s (yield emits `jacl_i32` / ...) and there is no per-element
-     unbox on `OP_STREAM_NEXT` (parallel to the now-landed state-field
-     unbox). Narrowing without it produces `144115188075855873` (NaN-box
-     tag bits leaking). Fix needs a per-element unbox op on stream pull;
-     est. +150-250 LOC. The related yield path (`def i64 x 42; yield $x`)
-     is handled by `ensure_boxed` at the yield site (compiler.c ~13123).
+     **Stream for-bindings now narrow too (2026-06-09).** `for x in [gen]` /
+     `[range …]` / `[lines …]` narrows the binding to the element type via
+     the **option-1 mechanism**: the producer still yields tagged values, and
+     the for-loop **unboxes the pulled value to the wide rep based on the
+     static type** (no per-element unbox *op* needed — it reuses
+     `OP_TO_I64/U64/F64`). `take`/`filter` propagate the element type so
+     derived-stream for-loops narrow; `transform` infers the output element
+     from the lambda's return type. **Caveat:** the producer-rep stays tagged
+     (the full "option A" producer-wide flip is still pending), and the
+     `transform` lambda-return inference is a one-off special case the user
+     has flagged for a rethink. **The active design decision + the remaining
+     typed-stream work (typed `collect`, consumer-untyped errors,
+     struct-element streams, producer-wide rep) live in `HANDOFF.md` §1–§2 —
+     start there.**
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding
