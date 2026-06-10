@@ -1,0 +1,12 @@
+# expect-error: collect is not yet supported
+# Struct stream elements are inline value bytes — they cannot be collected
+# into a plain (dyn) vec without the forbidden auto-box. Typed collect ->
+# [Vec T] is the planned path (NOT_IMPLEMENTED.md §4.1b).
+struct Pt { i32 x, i32 y }
+proc pts {} [Stream Pt] {
+  yield [Pt x 1 y 2]
+}
+proc main {} {
+  print [collect [pts]]
+}
+main

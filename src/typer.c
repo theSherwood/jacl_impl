@@ -2846,10 +2846,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
              * var-ref read unboxes via the node's inferred_type. Applies to
              * [Arr T], [Vec T], and [Stream T] element bindings. */
             bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
-          } else if (coll_t != TYPE_STREAM && eidx < tc->struct_count) {
-            /* Struct-element narrowing: arr/vec only. Struct-element streams
-             * stay dyn in this cut (the stream for-loop branch handles only
-             * scalar elements). */
+          } else if (eidx < tc->struct_count) {
+            /* Struct-element narrowing: arr/vec, and now streams too — the
+             * multi-slot stream channel (OP_STREAM_NEXT_INLINE) delivers the
+             * element as inline value bytes and the for-loop binds it in an
+             * N-slot inline local (NOT_IMPLEMENTED.md §4.1b). */
             bt = TYPE_STRUCT; bsi = eidx;
           }
         }

@@ -352,7 +352,18 @@ typedef enum {
   OP_ARR_LEN,               /* pop arr, push i32 count */
   OP_TYPED_ARR,             /* u16 elem_idx, u8 count; construct flat typed arr */
   OP_TYPED_ARR_PUSH,        /* u16 type_idx; pop inline struct + arr; in-place append; push i32 len */
-  OP_TYPED_ARR_SET          /* u16 type_idx; pop inline struct + idx + arr; in-place set; push arr */
+  OP_TYPED_ARR_SET,         /* u16 type_idx; pop inline struct + idx + arr; in-place set; push arr */
+
+  /* --- Multi-slot stream channel for struct elements (NOT_IMPLEMENTED.md
+   * §4.1b). Struct stream elements ride the channel as raw inline value
+   * bytes — never auto-boxed (STRUCT_DESIGN.md forbids structs in dyn
+   * slots). --- */
+  OP_YIELD_SM_WIDE,         /* u16 type_idx; pop struct (inline N slots or heap
+                               ptr, via vm__pop_struct) into vm->yield_wide,
+                               set yield_value=nil, return VM_YIELD */
+  OP_STREAM_NEXT_INLINE     /* u16 type_idx; pop stream, pull one struct elem:
+                               value → push N inline slots (bitmap-marked);
+                               exhausted → push nil (1 slot) */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -749,6 +760,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_MAP_GET_INLINE: return "OP_TYPED_MAP_GET_INLINE";
     case OP_INLINE_TO_LOCAL:   return "OP_INLINE_TO_LOCAL";
     case OP_DEREF_INLINE:      return "OP_DEREF_INLINE";
+    case OP_YIELD_SM_WIDE:     return "OP_YIELD_SM_WIDE";
+    case OP_STREAM_NEXT_INLINE: return "OP_STREAM_NEXT_INLINE";
   }
   return "OP_UNKNOWN";
 }

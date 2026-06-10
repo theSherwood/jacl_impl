@@ -1575,6 +1575,7 @@ struct Compiler {
   JaclType         return_type;
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   uint32_t         hof_mapper_ret_enc; /* see compiler.c for documentation */
+  uint32_t         gen_stream_elem_idx; /* see compiler.c for documentation */
   ModuleCache*     module_cache;
   Module*          current_module;
   ImportStack*     import_stack;
@@ -1715,6 +1716,8 @@ typedef struct {
   uint32_t   spread_counts[32];
   uint32_t   spread_count_top;
   JaclVal    yield_value;
+  JaclVal    yield_wide[16];     /* multi-slot struct yield channel; see vm.c */
+  uint32_t   yield_wide_width;
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
   /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
   uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */

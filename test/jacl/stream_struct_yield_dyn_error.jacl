@@ -1,0 +1,13 @@
+# expect-error: yield of typed value (struct) in an unannotated generator
+# A struct yielded into an unannotated ([Stream dyn]) generator has nowhere
+# legal to go (structs cannot live in dyn slots) — used to silently yield nil.
+# The typer catches this; the compiler HEAD_YIELD guard is a second line of
+# defense for paths the typer can't see.
+struct Pt { i32 x, i32 y }
+proc pts {} {
+  yield [Pt x 1 y 2]
+}
+proc main {} {
+  for [pts] p { print $p }
+}
+main

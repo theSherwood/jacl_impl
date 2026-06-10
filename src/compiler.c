@@ -3067,6 +3067,12 @@ struct Compiler {
    * box. UINT32_MAX = none (the default for every other proc, which keeps the
    * dyn-return box). Consumed (reset) once read. */
   uint32_t         hof_mapper_ret_enc;
+  /* Generator [Stream T] element-type encoding for the proc body being
+   * compiled (scalar sentinel / struct registry idx / 0xFF00 dyn). Set on the
+   * body compiler by the HEAD_PROC path; read by HEAD_YIELD to route a
+   * struct-element yield through OP_YIELD_SM_WIDE (multi-slot channel,
+   * NOT_IMPLEMENTED.md §4.1b). */
+  uint32_t         gen_stream_elem_idx;
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
@@ -3166,6 +3172,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->return_type     = TYPE_DYN;
   c->return_struct_idx = UINT32_MAX;
   c->hof_mapper_ret_enc = UINT32_MAX;
+  c->gen_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -5296,6 +5303,19 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   JaclType col_type = (JaclType)args[0]->inferred_type;
   uint32_t col_struct_idx = args[0]->inferred_struct_idx;
   uint32_t col_key_struct_idx = args[0]->inferred_key_struct_idx;
+  /* Struct-element STREAMS: the HOF pulls are single-slot; multi-slot
+   * composition is not yet wired (NOT_IMPLEMENTED.md §4.1b). The runtime
+   * guards at stream construction catch the dyn-flow case; this catches the
+   * statically-typed case with a compile error. */
+  if (col_type == TYPE_STREAM && col_struct_idx != UINT32_MAX &&
+      !COMPILER_IS_SCALAR_TYPE_IDX(col_struct_idx)) {
+    char hof_err[128];
+    snprintf(hof_err, sizeof(hof_err),
+             "%s over struct-element streams is not yet supported "
+             "(use a for-loop)", name);
+    compiler__error(c, line, col, hof_err);
+    return;
+  }
   /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): when this is a
    * `transform` over a typed *stream* whose mapper return type infers to a
    * wide scalar (i64/u64/f64), tell the inline mapper proc to compile with a
@@ -10161,6 +10181,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
     body_compiler.return_struct_idx = proc_return_struct_idx;
+    body_compiler.gen_stream_elem_idx = proc_stream_elem_idx;
     body_compiler.suspension_map = c->suspension_map;
     body_compiler.current_scope_mark = c->current_scope_mark;
 
@@ -10861,6 +10882,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bool strm_elem_wide = (strm_scalar_t == TYPE_I64 ||
                              strm_scalar_t == TYPE_U64 ||
                              strm_scalar_t == TYPE_F64);
+      /* Struct-element stream: the element arrives as N inline value-byte
+       * slots through the multi-slot channel (OP_STREAM_NEXT_INLINE), bound
+       * via OP_INLINE_TO_LOCAL — mirrors the typed-vec struct loop below.
+       * See NOT_IMPLEMENTED.md §4.1b. */
+      bool strm_struct = (strm_elem_enc != UINT32_MAX) &&
+                         !COMPILER_IS_SCALAR_TYPE_IDX(strm_elem_enc);
+      uint32_t strm_struct_width = 1;
+      if (strm_struct) {
+        StructTypeRegistry* sreg = compiler__get_struct_registry(c);
+        strm_struct_width = struct__slot_width(sreg, strm_elem_enc);
+      }
 
       /* Is the binding an SM state field? Computed up front to gate the
        * non-SM local narrowing. */
@@ -10873,6 +10905,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bool strm_narrow_local = strm_scalar && strm_scalar_t != TYPE_DYN &&
                                sm_bind_field < 0;
 
+      /* Struct-element bindings live in N inline stack slots; an SM state
+       * field is a single GC-traced slot, so suspending bodies are not yet
+       * supported (the struct would need WIDE state-field wiring). */
+      if (strm_struct && sm_bind_field >= 0) {
+        compiler__error(c, line, col,
+            "for over a struct-element stream inside a suspending proc is "
+            "not yet supported");
+        return;
+      }
+
       /* Element placeholder → local $it/name (starts as nil) */
       compiler__emit_byte(c, OP_NIL, line);
       JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
@@ -10880,6 +10922,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
       if (strm_narrow_local) {
         c->locals[c->local_count - 1].type = strm_scalar_t;
+      } else if (strm_struct) {
+        /* Mirror the typed-vec struct binding: inline local of N slots. */
+        c->locals[c->local_count - 1].type = TYPE_STRUCT;
+        c->locals[c->local_count - 1].struct_type_idx = strm_elem_enc;
+        c->locals[c->local_count - 1].width = (uint16_t)strm_struct_width;
+        c->locals[c->local_count - 1].is_inline = true;
+        for (uint32_t w = 1; w < strm_struct_width; w++) {
+          compiler__emit_byte(c, OP_NIL, line);
+          compiler__add_local(c, jacl_inline_string("", 0), line, col);
+          c->locals[c->local_count - 1].depth = c->scope_depth;
+        }
       }
 
       /* Push loop context. local_count_at_loop is the count BEFORE
@@ -10897,10 +10950,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t loop_start = c->chunk->code_count;
       lctx->loop_start = loop_start;
 
-      /* Pull next element: push stream, OP_STREAM_NEXT */
+      /* Pull next element: push stream, OP_STREAM_NEXT (or the typed
+       * multi-slot pull for struct elements). */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, col_slot, line);
-      compiler__emit_byte(c, OP_STREAM_NEXT, line);
+      if (strm_struct) {
+        compiler__emit_byte(c, OP_STREAM_NEXT_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)strm_elem_enc, line);
+      } else {
+        compiler__emit_byte(c, OP_STREAM_NEXT, line);
+      }
 
       /* Check exhaustion: push stream, OP_IS_STREAM_EXHAUSTED */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -10917,16 +10976,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* --- Body start (not exhausted) --- */
       compiler__patch_jump(c, not_done_jump);
 
-      /* US-005: Check if pulled value is an error — if so, exit loop with error */
-      uint32_t error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
+      /* US-005: Check if pulled value is an error — if so, exit loop with
+       * error. Skipped for struct elements: TOS is raw inline value bytes,
+       * which must never be inspected as a tagged value (a bit pattern could
+       * spuriously match the error tag); generator errors surface as
+       * VM_RUNTIME_ERROR from the pull instead. */
+      uint32_t error_exit_jump = 0;
+      if (!strm_struct)
+        error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
 
       /* Bind element. In SM mode the binding lives in a state field
        * (sm__walk_locals adds for-loop bindings unconditionally); store the
        * tagged pulled value as-is and let the var-ref read unbox a wide
        * scalar via node->inferred_type. In a plain local, unbox a wide
        * scalar to its wide rep here (the pulled value is tagged); tagged
-       * scalars and dyn elements store as-is. */
-      if (sm_bind_field >= 0) {
+       * scalars and dyn elements store as-is. Struct elements: N inline
+       * slots are on TOS — OP_INLINE_TO_LOCAL pops them into the binding's
+       * slot range and marks the bitmap. */
+      if (strm_struct) {
+        compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
+        compiler__emit_byte(c, elem_slot, line);
+        compiler__emit_u16(c, (uint16_t)strm_elem_enc, line);
+      } else if (sm_bind_field >= 0) {
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
       } else {
@@ -10975,13 +11046,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Jump over break/error landing zone */
       uint32_t skip_landing = compiler__emit_jump(c, OP_JUMP, line);
 
-      /* US-005: Error exit path — error value is on stack */
-      compiler__patch_jump(c, error_exit_jump);
-      /* Pop hidden locals under top, preserving error value */
-      compiler__emit_byte(c, OP_CLOSE_LOOP, line);
-      compiler__emit_byte(c, 2, line);  /* __col and elem */
-      /* Jump to convergence (error value remains on stack) */
-      uint32_t error_done_jump = compiler__emit_jump(c, OP_JUMP, line);
+      /* US-005: Error exit path — error value is on stack. Not emitted for
+       * struct elements (no OP_JUMP_IF_ERROR above — raw bytes). */
+      uint32_t error_done_jump = 0;
+      if (!strm_struct) {
+        compiler__patch_jump(c, error_exit_jump);
+        /* Pop hidden locals under top, preserving error value */
+        compiler__emit_byte(c, OP_CLOSE_LOOP, line);
+        compiler__emit_byte(c, 2, line);  /* __col and elem */
+        /* Jump to convergence (error value remains on stack) */
+        error_done_jump = compiler__emit_jump(c, OP_JUMP, line);
+      }
 
       /* Break landing zone */
       for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
@@ -10990,7 +11065,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
       /* Convergence */
       compiler__patch_jump(c, skip_landing);
-      compiler__patch_jump(c, error_done_jump);
+      if (!strm_struct) compiler__patch_jump(c, error_done_jump);
 
       /* Pop loop context */
       c->loop_depth--;
@@ -13497,11 +13572,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint16_t depth = compiler__suspension_pre_stack_depth(c);
       compiler__emit_spill_operand_stack(c, depth, line);
       compiler__compile_node(c, args[0]);
-      compiler__ensure_boxed(c, line);
+      /* Struct-element generators ([Stream <Struct>]): route through the
+       * multi-slot yield (OP_YIELD_SM_WIDE pops the struct — inline N slots
+       * or heap pointer — into vm->yield_wide). NO ensure_boxed: structs are
+       * never auto-boxed (STRUCT_DESIGN.md). A struct value yielded into a
+       * non-struct stream has nowhere legal to go — error (it used to
+       * silently deliver nil). See NOT_IMPLEMENTED.md §4.1b. */
+      bool yield_struct_elem =
+          !COMPILER_IS_SCALAR_TYPE_IDX(c->gen_stream_elem_idx);
+      if (yield_struct_elem) {
+        StructTypeRegistry* yreg = compiler__get_struct_registry(c);
+        if (struct__slot_width(yreg, c->gen_stream_elem_idx) >
+            16 /* VM_MAX_STRUCT_SLOTS */) {
+          compiler__error(c, line, col,
+              "yield: struct element exceeds the 16-slot stream channel");
+          return;
+        }
+      } else if (c->last_expr_type == TYPE_STRUCT) {
+        compiler__error(c, line, col,
+            "yield of a struct requires a [Stream <StructName>] return "
+            "annotation on the generator");
+        return;
+      } else {
+        compiler__ensure_boxed(c, line);
+      }
       uint32_t sp_idx = c->sm_suspension_idx++;
       compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
       compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
-      compiler__emit_byte(c, OP_YIELD_SM, line);
+      if (yield_struct_elem) {
+        compiler__emit_byte(c, OP_YIELD_SM_WIDE, line);
+        compiler__emit_u16(c, (uint16_t)c->gen_stream_elem_idx, line);
+      } else {
+        compiler__emit_byte(c, OP_YIELD_SM, line);
+      }
       /* Dispatch table label lands here after resume */
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);

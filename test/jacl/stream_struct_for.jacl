@@ -1,0 +1,44 @@
+# expect: 1
+# expect: 3
+# expect: 4
+# expect: 150
+# expect: ok
+# Multi-slot stream channel (NOT_IMPLEMENTED.md §4.1b): [Stream <Struct>]
+# generators yield inline value bytes through OP_YIELD_SM_WIDE; the for-loop
+# pulls via OP_STREAM_NEXT_INLINE and binds an N-slot inline local — same
+# shape as the arr/vec struct loops. Previously `yield [Pt ...]` silently
+# delivered nil.
+#
+# C5 (5 x i32 = 20 bytes = 3 slots) exercises a genuinely multi-slot element.
+# NOTE: wide (i64/u64/f64) COMPUTED constructor fields inside generator bodies
+# hit a PRE-EXISTING mis-packing bug (tagged values byte-packed — see
+# NOT_IMPLEMENTED.md §4.1c, verified on the commit before this channel
+# landed), so this test uses i32 fields for the multi-slot case.
+struct Point { i32 x, i32 y }
+struct C5 { i32 a, i32 b, i32 c, i32 d, i32 e }
+proc pts {} [Stream Point] {
+  yield [Point x 1 y 2]
+  yield [Point x 3 y 4]
+}
+proc cs {} [Stream C5] {
+  yield [C5 a 10 b 20 c 30 d 40 e 50]
+}
+proc main {} {
+  for [pts] p { print $p->x }          # 1 3
+
+  mut i32 xsum 0
+  for [pts] q { set xsum [+ $xsum $q->x] }
+  print $xsum                          # 1 + 3 = 4
+
+  # All five fields across the 3-slot element — a slot-copy bug (short
+  # memcpy, wrong base) corrupts d/e.
+  mut i32 csum 0
+  for [cs] v {
+    set csum [+ $csum [+ [+ $v->a $v->b] [+ [+ $v->c $v->d] $v->e]]]
+  }
+  print $csum                          # 10+20+30+40+50 = 150
+
+  for [pts] r { assert-type $r Point }
+  print "ok"
+}
+main

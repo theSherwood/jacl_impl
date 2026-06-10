@@ -214,6 +214,12 @@ typedef struct {
   uint32_t   spread_count_top;  /* top index in spread_counts */
   /* Generator/yield support */
   JaclVal    yield_value;        /* yielded value (set by OP_YIELD_SM) */
+  /* Multi-slot yield channel for struct stream elements (OP_YIELD_SM_WIDE).
+   * Raw inline value bytes — user structs hold no heap refs, so this buffer
+   * is never GC-traced. Valid until the next yield; every pull consumer
+   * copies out immediately. 16 = VM_MAX_STRUCT_SLOTS (defined below). */
+  JaclVal    yield_wide[16];
+  uint32_t   yield_wide_width;   /* slots valid in yield_wide (0 = none) */
   /* US-009: scope mark for hygiene in staged macro expansion */
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
   /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
@@ -617,6 +623,7 @@ void vm_init(VM* vm, arena_t* arena) {
   vm->native_fn_count   = 0;
   vm->spread_count_top  = 0;
   vm->yield_value        = JACL_NIL;
+  vm->yield_wide_width   = 0;
   memset(vm->inline_slot_bitmap, 0, sizeof(vm->inline_slot_bitmap));
 
   /* Initialize GC heap and make it available for collection templates */
@@ -1500,6 +1507,14 @@ typedef enum {
  * raw bits in the JaclVal slot, exactly as OP_TO_I64 produces. Consumers that
  * feed a dyn/tagged sink use vm__pull_stream_dyn (boxes wide back); consumers
  * that want wide (for-loop, transform mapper body) read the raw value. */
+/* A struct-element stream: elem_idx is a struct registry index (below the
+ * scalar-sentinel base). Such elements ride the channel as raw inline value
+ * bytes (multi-slot) and may only reach typed consumers — see
+ * NOT_IMPLEMENTED.md §4.1b. */
+static inline bool vm__elem_idx_is_struct(uint32_t elem_idx) {
+    return !JACL_IS_SCALAR_TYPE_IDX(elem_idx);
+}
+
 static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
     if (!JACL_IS_SCALAR_TYPE_IDX(elem_idx)) return false;
     JaclType t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
@@ -2160,8 +2175,17 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         vm->chunk       = caller_chunk;
         /* Producer-wide: generators yield tagged (cached_value above stays
          * tagged and GC-safe); hand a wide value to the consumer for a
-         * wide-scalar element stream. */
-        if (vm__elem_idx_is_wide(stream->elem_idx))
+         * wide-scalar element stream. Struct elements: OP_YIELD_SM_WIDE
+         * parked the raw inline bytes in vm->yield_wide (yield_value is nil,
+         * so the cached_value set above is a harmless nil) — copy them into
+         * the caller's buffer (out_value must hold the struct's slot width;
+         * the only struct-pulling caller is OP_STREAM_NEXT_INLINE, which
+         * passes a VM_MAX_STRUCT_SLOTS buffer). Pure value bytes — no GC
+         * rooting needed. */
+        if (vm__elem_idx_is_struct(stream->elem_idx)) {
+            memcpy(out_value, vm->yield_wide,
+                   vm->yield_wide_width * sizeof(JaclVal));
+        } else if (vm__elem_idx_is_wide(stream->elem_idx))
             *out_value = vm__stream_to_wide(vm->yield_value,
                             JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
         else
@@ -2201,6 +2225,16 @@ static StreamPullResult vm__pull_stream_dyn(VM* vm, JaclVal stream_val,
                                             JaclVal* out_value) {
     JaclStream* stream = jacl_as_stream(stream_val);
     uint32_t eidx = stream->elem_idx;
+    /* Struct elements cannot be normalized to a dyn slot — auto-boxing is
+     * forbidden (STRUCT_DESIGN.md) and out_value is a single slot. Typed
+     * consumers (for-loop via OP_STREAM_NEXT_INLINE) are the only legal
+     * sinks; everything else errors here (NOT_IMPLEMENTED.md §4.1b). */
+    if (vm__elem_idx_is_struct(eidx)) {
+        vm__set_error(vm, "struct-element streams require a typed consumer "
+                          "(for-loop); collect/spread/each/stream_next are "
+                          "not yet supported");
+        return STREAM_PULL_ERROR;
+    }
     StreamPullResult pr = vm__pull_stream_one(vm, stream_val, out_value);
     if (pr == STREAM_PULL_VALUE && vm__elem_idx_is_wide(eidx))
         *out_value = vm__stream_to_tagged(vm, *out_value,
@@ -2829,6 +2863,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_TYPED_MAP_GET_INLINE] = &&L_OP_TYPED_MAP_GET_INLINE,
     [OP_INLINE_TO_LOCAL] = &&L_OP_INLINE_TO_LOCAL,
     [OP_DEREF_INLINE] = &&L_OP_DEREF_INLINE,
+    [OP_YIELD_SM_WIDE] = &&L_OP_YIELD_SM_WIDE,
+    [OP_STREAM_NEXT_INLINE] = &&L_OP_STREAM_NEXT_INLINE,
     [OP_PTR_LOAD] = &&L_OP_PTR_LOAD,
     [OP_PTR_STORE] = &&L_OP_PTR_STORE,
     [OP_PTR_OFFSET] = &&L_OP_PTR_OFFSET,
@@ -6167,6 +6203,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
+          /* Struct elements: the transform pull pushes single-slot elements
+           * to the mapper; multi-slot HOF composition is not yet wired
+           * (§4.1b). */
+          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
+            vm__set_error(vm, "transform over struct-element streams is not "
+                              "yet supported (use a for-loop)");
+            return VM_RUNTIME_ERROR;
+          }
           JaclVal transform_stream_val = jacl_stream(&vm->heap);
           JaclStream* ts = jacl_as_stream(transform_stream_val);
           ts->kind      = STREAM_KIND_TRANSFORM;
@@ -6348,6 +6392,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__set_error(vm,
               "filter on stream requires a proc with 1 parameter, got %d",
               (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          /* Struct elements: the filter pull reads single-slot elements;
+           * multi-slot HOF composition is not yet wired (§4.1b). */
+          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
+            vm__set_error(vm, "filter over struct-element streams is not yet "
+                              "supported (use a for-loop)");
             return VM_RUNTIME_ERROR;
           }
           JaclVal filter_stream_val = jacl_stream(&vm->heap);
@@ -9661,6 +9712,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Eagerly consume stream, collect into vector, then push elements */
           JaclStream* stream = jacl_as_stream(spread_val);
 
+          /* Struct elements are inline value bytes — they cannot be spread
+           * into dyn slots (NOT_IMPLEMENTED.md §4.1b). */
+          if (vm__elem_idx_is_struct(stream->elem_idx)) {
+            vm__set_error(vm, "struct-element streams require a typed "
+                              "consumer (for-loop); spread is not yet "
+                              "supported");
+            return VM_RUNTIME_ERROR;
+          }
+
           if (stream->kind != STREAM_KIND_GENERATOR) {
             /* Derived stream: use pull helper */
             gc__current_heap = &vm->heap;
@@ -9936,6 +9996,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           DISPATCH();
+        }
+
+        /* Struct elements: only the typed for-loop (OP_STREAM_NEXT_INLINE)
+         * may pull them — this dyn-returning path cannot (§4.1b). */
+        if (vm__elem_idx_is_struct(stream->elem_idx)) {
+          vm__set_error(vm, "struct-element streams require a typed consumer "
+                            "(for-loop); stream_next is not yet supported");
+          return VM_RUNTIME_ERROR;
         }
 
         /* Derived streams (filter, etc.) use the unified helper */
@@ -10319,6 +10387,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           DISPATCH();
         }
 
+        /* Struct elements are inline value bytes — collecting into a plain
+         * vec would need the forbidden auto-box; typed collect → [Vec T] is
+         * the planned path (§4.1b / STREAM_TYPING_DEBT item 2). */
+        if (vm__elem_idx_is_struct(stream->elem_idx)) {
+          vm__set_error(vm, "struct-element streams require a typed consumer "
+                            "(for-loop); collect is not yet supported");
+          return VM_RUNTIME_ERROR;
+        }
+
         /* Derived streams (filter, etc.) use the unified pull helper */
         if (stream->kind != STREAM_KIND_GENERATOR) {
           gc__current_heap = &vm->heap;
@@ -10523,6 +10600,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         if (jacl_is_stream(coll_val)) {
+          /* Struct elements: take's pull is single-slot passthrough (§4.1b). */
+          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
+            vm__set_error(vm, "take over struct-element streams is not yet "
+                              "supported (use a for-loop)");
+            return VM_RUNTIME_ERROR;
+          }
           JaclVal take_stream_val = jacl_stream(&vm->heap);
           JaclStream* ts = jacl_as_stream(take_stream_val);
           ts->kind      = STREAM_KIND_TAKE;
@@ -10762,6 +10845,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &value);
         if (result != VM_OK) return result;
         vm->yield_value = value;
+        return VM_YIELD;
+      }
+
+      CASE(OP_YIELD_SM_WIDE): {
+        /* Struct-element yield (multi-slot stream channel). Pop the struct —
+         * inline N slots or heap pointer, vm__pop_struct dispatches — into
+         * the VM yield buffer as raw value bytes. yield_value is set to nil
+         * so any dyn reader (guarded collect/spread loops) sees nil, never
+         * garbage. The generator pull copies yield_wide to the consumer. */
+        uint16_t type_idx = vm__read_u16(vm);
+        vm->yield_wide_width = vm__pop_struct(vm, type_idx, vm->yield_wide);
+        vm->yield_value = JACL_NIL;
         return VM_YIELD;
       }
 
@@ -12552,6 +12647,49 @@ interpret_done:
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
+        DISPATCH();
+      }
+
+      CASE(OP_STREAM_NEXT_INLINE): {
+        /* Typed pull of one STRUCT element (multi-slot stream channel).
+         * Emitted only by the for-loop over a struct-element stream — the
+         * loop knows the element type statically. On a value: push the
+         * struct's width inline slots (bitmap-marked raw value bytes). On
+         * exhaustion: push a single nil (the loop's exhausted arm pops 1),
+         * mirroring OP_STREAM_NEXT. */
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal stream_val;
+        result = vm__pop(vm, &stream_val); if (result != VM_OK) return result;
+        if (jacl_is_error(stream_val)) {
+          result = vm__push(vm, stream_val);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        if (!jacl_is_stream(stream_val)) {
+          vm__set_error(vm, "for: expected stream, got %s",
+                        vm__type_name(stream_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal buf[VM_MAX_STRUCT_SLOTS];
+        StreamPullResult pr = vm__pull_stream_one(vm, stream_val, buf);
+        frame = &vm->frames[vm->frame_count - 1];
+        if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+        if (pr == STREAM_PULL_EXHAUSTED) {
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        StructTypeDef* sni_sdef = vm->struct_registry->defs[type_idx];
+        uint32_t sni_width = vm__struct_width(sni_sdef);
+        if (vm->stack_top + sni_width > VM_STACK_MAX) {
+          vm__set_operand_overflow(vm, "stream next inline");
+          return VM_RUNTIME_ERROR;
+        }
+        memcpy(&vm->stack[vm->stack_top], buf, sni_width * sizeof(JaclVal));
+        for (uint32_t si = 0; si < sni_width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += sni_width;
         DISPATCH();
       }
 

@@ -223,32 +223,41 @@ pulling on them; revisit when one shows up.
      struct-element streams) live in `LAMBDA_TYPING_PLAN.md` + the next-step
      design `TYPED_CLOSURES_DESIGN.md` — start there. (Producer-wide rep for
      i64/u64/f64 has since landed.)**
-  1b. **Struct-element streams — broken at the yield/pull layer; typed-closure
-     monomorphization for struct (and the §4-debt restore-pass drop) deferred
-     behind it.** Verified empirically 2026-06-10: `yield [Pt …]` inside a
-     `proc pts {} [Stream Pt]` generator delivers **nil** to the consumer —
-     the generator's `yield_value` is a single `JaclVal` slot and a multi-slot
-     inline struct doesn't survive it (silent data loss, not an error). So
-     `[Stream <Struct>]` is unusable today regardless of typing. **Direction
-     (settled 2026-06-10): make the stream channel multi-slot for struct
-     elements**, NOT box-at-yield — auto-boxing would reintroduce exactly what
-     `STRUCT_DESIGN.md` eliminates ("auto-heap-allocation when a struct value
-     crosses a typed boundary") and violate "structs cannot live in a dyn
-     slot." The width-aware machinery already exists on the compiled-code side
-     (by-value N-slot params, `OP_RETURN_WIDE`, SM `OP_GET/SET_STATE_FIELD_WIDE`
-     + `field_inline_bitmap`, typed-vec flat storage, and user structs are pure
-     value bytes — no GC interior tracing); what is single-slot is the runtime
-     stream *channel*: `vm->yield_value`, `JaclStream.cached_value`, the
-     `vm__pull_stream_one(&elem)` out-param, and the operand handoff in the
-     ~16 HOF pull sites. Those need width plumbing, the GC must skip a
-     raw-bytes cache when `elem_idx` is a struct idx (gc.c mirror sync), and
-     it force-couples two open items — typed `collect` → `[Vec T]` (debt 2)
-     and consumer-untyped → compile error — because inline value bytes have
-     nowhere legal to go in a dyn terminal. Owning doc:
-     `TYPED_CLOSURES_DESIGN.md` ("Still open in Phase A"). Related cheap
-     follow-up that does NOT wait for this: dropping the typer restore-pass
-     for tagged-fit scalars (i32/u32/f32/bool — rep already agrees; typed-op
-     codegen win) per `STREAM_TYPING_DEBT.md` item 4a.
+  1b. **Struct-element streams — multi-slot channel LANDED (for-loop path,
+     2026-06-10); HOF composition + typed collect still open.** What shipped:
+     `OP_YIELD_SM_WIDE` (yield pops the struct — inline N slots or heap ptr,
+     via `vm__pop_struct` — into `vm->yield_wide`, raw value bytes, never
+     GC-traced), the generator pull copies it to the consumer's buffer, and
+     the for-loop pulls via `OP_STREAM_NEXT_INLINE` + binds an N-slot inline
+     local (`OP_INLINE_TO_LOCAL`, same shape as the arr/vec struct loops);
+     typer narrows stream struct bindings (the old "streams stay dyn" carve-
+     out is gone). Box-at-yield was rejected (would violate STRUCT_DESIGN's
+     no-auto-box rule); `yield_value` stays nil for struct yields. **Guarded
+     (error instead of the old silent nil):** collect/spread/userland
+     `stream_next`/each-callback (runtime guards in `vm__pull_stream_dyn` +
+     the inline SM loops), transform/filter/take/each over struct streams
+     (compile error in `compiler__compile_hof_builtin` + runtime guards at
+     stream construction), struct-element for-loops inside suspending procs
+     (needs WIDE state-field wiring), struct yield into an unannotated
+     generator (typer + compiler errors). Still open: HOF pulls (multi-slot
+     handoff to monomorphized callbacks), typed `collect` → `[Vec T]` (debt
+     2), SM-body for-loop bindings. Tests: `stream_struct_for.jacl` (incl. a
+     3-slot element), `stream_struct_{collect,transform,yield_dyn}_error`.
+  1c. **PRE-EXISTING generator-body struct bugs (found while landing 1b,
+     both verified on the commit BEFORE the channel work — eba0b0c+3):**
+     (a) **Struct construction with COMPUTED wide (i64/u64/f64) fields inside
+     a generator body mis-packs tagged values** — `print [V3 x [* $b 3] …]`
+     inside a `[Stream i64]` generator prints `x 3026702434620567600`
+     (tagged bits byte-packed as raw i64), while the same constructor in a
+     plain proc or an await-SM proc is correct. Likely cause: generator-body
+     var-ref reads of boxed state fields don't unbox (typer stamp missing in
+     generator bodies?) → dyn arithmetic → tagged result → `OP_STRUCT_NEW_
+     INLINE` byte-packs it verbatim. (b) **`def v [V3 …]` of an inline
+     struct local inside an SM generator segfaults** (no streams involved).
+     Both need a fix in the SM-generator compile path, not the stream
+     channel. Related cheap follow-up that does NOT wait for any of this:
+     dropping the typer restore-pass for tagged-fit scalars (i32/u32/f32/
+     bool) per `STREAM_TYPING_DEBT.md` item 4a.
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

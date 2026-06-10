@@ -57,23 +57,22 @@ tiered by rep (2026-06-10):**
   distinct static type, but its runtime rep is identical to a boxed string
   (tagged heap pointer), so dropping the restore is rep-safe yet buys nothing
   unless string ops have typed codegen. Check first; skip if cosmetic.
-- **struct — DEFERRED behind the multi-slot stream channel.**
-  `[Stream <Struct>]` is broken below this layer: `yield` of an inline struct
-  delivers **nil** (single-slot `yield_value` can't carry multi-slot inline
-  bytes — verified 2026-06-10). **Direction settled: widen the stream channel
-  to N slots for struct elements; box-at-yield is REJECTED** — auto-boxing per
-  element would reintroduce what `STRUCT_DESIGN.md` explicitly eliminates
-  (auto-heap-allocation at typed boundaries / structs in dyn slots). The
-  width-aware storage and calling conventions already exist (by-value N-slot
-  params, `OP_RETURN_WIDE`, SM wide state fields, typed-vec flat storage;
-  user structs are pure value bytes so no GC interior tracing) — the gap is
-  purely the runtime channel: `yield_value`, `cached_value`, the
-  `vm__pull_stream_one` out-param, and the ~16 pull-site handoffs, plus a GC
-  skip for raw-bytes caches and the forced coupling to typed `collect` (debt
-  2) and consumer-untyped → type error. Once the channel is wide, struct
-  callback monomorphization falls out of the SAME mechanism as the scalar
-  flip (params bound to the element type, body compiled against inline
-  slots). Indexed in `NOT_IMPLEMENTED.md` §4.1b.
+- **struct — multi-slot channel LANDED for the for-loop path (2026-06-10);
+  HOF monomorphization still open.** The channel: `OP_YIELD_SM_WIDE` parks
+  the struct's raw value bytes in `vm->yield_wide` (no GC tracing — user
+  structs are pure value bytes; box-at-yield rejected per STRUCT_DESIGN);
+  the generator pull copies to the caller's buffer; the for-loop pulls via
+  `OP_STREAM_NEXT_INLINE` and binds an N-slot inline local. Every consumer
+  that can't take inline bytes errors instead of silently losing data
+  (compile guards in `compiler__compile_hof_builtin`, runtime guards in
+  `vm__pull_stream_dyn` / the inline SM loops / HOF stream construction).
+  Remaining for struct HOF monomorphization: the transform/filter/each pulls
+  must hand N slots to a callback compiled with a by-value struct param —
+  the same mechanism as the scalar flip, now unblocked. Also still open:
+  typed `collect` → `[Vec T]` (debt 2), SM-body struct for-bindings, and two
+  PRE-EXISTING generator-body struct bugs found en route (computed-wide-field
+  constructor mis-packing; `def` inline-struct-local segfault) — see
+  `NOT_IMPLEMENTED.md` §4.1b/§4.1c.
 
 The unifying gate for all tiers: drop the restore-pass exactly when *the rep
 the VM hands the body equals the rep a typed-body read expects*. Wide scalars
