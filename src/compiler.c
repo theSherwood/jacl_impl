@@ -6606,11 +6606,41 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * OP_TYPED_VEC handler dispatches struct vs scalar via this range. */
     if (is_type_keyword(type_name_str, type_name_len)) {
       JaclType elem_t = type_from_keyword(type_name_str, type_name_len);
+      /* Ref-element [Vec T] (T = str or dyn): `vec` is shorthand for
+       * [Vec dyn]. Ref elements are tagged heap values — there is no
+       * strided-rep win, so they use the PLAIN traced vec rep; the element
+       * type is static only (typer stamp; element checks here). [Vec dyn]
+       * compiles to exactly a plain vec literal. */
+      if (elem_t == TYPE_DYN || elem_t == TYPE_STR) {
+        if (argc > 255) {
+          compiler__error(c, line, col,
+              "[Vec ...] too many initial elements (max 255)");
+          return;
+        }
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+          if (elem_t == TYPE_STR) {
+            JaclType arg_t = (JaclType)args[i]->inferred_type;
+            if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
+              char err[160];
+              jacl_format_typed_vec_elem(err, sizeof(err),
+                  type_name_str, type_name_len, i, true, arg_t);
+              compiler__error(c, line, col, err);
+              return;
+            }
+          }
+        }
+        compiler__emit_byte(c, OP_VEC, line);
+        compiler__emit_byte(c, (uint8_t)argc, line);
+        c->last_expr_type = TYPE_VEC;
+        return;
+      }
       if (!compiler__is_typed_collection_scalar(elem_t)) {
         char err[128];
         snprintf(err, sizeof(err),
                  "[Vec %.*s]: only value-type scalars supported "
-                 "(i32, i64, u32, u64, f32, f64, bool)",
+                 "(i32, i64, u32, u64, f32, f64, bool — str/dyn use the "
+                 "plain-vec rep; nested collections not yet supported)",
                  (int)type_name_len, type_name_str);
         compiler__error(c, line, col, err);
         return;

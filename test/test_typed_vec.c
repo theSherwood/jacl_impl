@@ -856,9 +856,17 @@ static int test_typed_vec_scalar_type_error(void) {
 }
 
 static int test_typed_vec_scalar_unsupported_str(void) {
+  /* Ref-element [Vec str] is now legal: it uses the PLAIN traced vec rep
+   * (str is a tagged heap value — no strided rep win) with the element
+   * type tracked statically. Mixing a non-str element stays an error. */
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def v [[Vec str] \"hi\" \"there\"]\n"
+    "print $v\n",
+    &cap, "[vec \"hi\" \"there\"]\n"));
   ASSERT(run_err(
-    "def v [[Vec str] \"hi\"]\n",
-    "only value-type scalars supported"));
+    "def v [[Vec str] \"hi\" 42]\n",
+    "is not a str value"));
   TEST_PASS();
 }
 

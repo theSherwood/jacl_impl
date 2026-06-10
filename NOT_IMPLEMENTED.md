@@ -176,6 +176,26 @@ pulling on them; revisit when one shows up.
   parallel to `OP_DEREF_INLINE`. +50–100 LOC.
 - **`match` arm-walk.** Typer rules for `match` patterns. Dead code
   until the feature itself lands.
+- **Vector type unification — `vec` ≡ `[Vec dyn]` (decided 2026-06-10;
+  foundation landed).** The `[Vec T]` family is the fundamental concept and
+  plain `vec` is shorthand for `[Vec dyn]`. The element type is static; the
+  REP is an implementation detail chosen per element kind: value types
+  (numeric scalars/bool/structs) keep the strided GC-opaque rep (the rep
+  win); ref kinds (str, dyn, and eventually nested collections) use the
+  plain traced vec rep with the element type carried statically (TYPE_VEC +
+  elem stamp — the same scheme typed streams use). Ref-element vecs widen
+  to [Vec dyn] through dyn slots (like scalars); value-element vecs stay
+  opaque typed-vector values through dyn (inherent to the rep split).
+  **Landed:** `[[Vec str] …]` / `[[Vec dyn] …]` constructors (plain OP_VEC +
+  compile-time element checks), def-binding stamp propagation, for-binding
+  narrowing over stamped vecs, `collect [Stream str]` stamped `[Vec str]`
+  (runtime rep unchanged — lines tests untouched). Tests:
+  `vec_ref_elems.jacl`, `vec_ref_elem_error.jacl`. **Still open:** nested
+  compound element types (`[Vec [Vec T]]`, `[Vec [Map K V]]` — needs
+  type-expression parsing into the shape registry + narrowing on get),
+  explicit `def [Vec str] v` annotations, vec-push/vec-set element checks on
+  stamped vecs, the same generalization for [Map K V] keys/values
+  ([Map str V]!), and [Arr T]. Same erasure/widening semantics should apply.
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

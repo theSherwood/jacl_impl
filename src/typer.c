@@ -1402,6 +1402,17 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t struct_idx = UINT32_MAX;
   uint32_t key_struct_idx = UINT32_MAX;
   uint32_t inherited_buf_len = 0;
+  /* Ref-element [Vec T] (e.g. [Vec str]): plain-vec rep carrying a static
+   * element stamp — propagate it into the binding so var-ref reads keep the
+   * element type and for-loops over the binding narrow. */
+  if (effective == TYPE_DYN && (JaclType)value_node->inferred_type == TYPE_VEC &&
+      value_node->inferred_struct_idx != UINT32_MAX) {
+    effective = TYPE_VEC;
+  }
+  if (effective == TYPE_VEC &&
+      value_node->inferred_struct_idx != UINT32_MAX) {
+    struct_idx = value_node->inferred_struct_idx;
+  }
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
       effective == TYPE_FUTURE || effective == TYPE_PTR ||
       effective == TYPE_BOX || effective == TYPE_BUF ||
@@ -2843,7 +2854,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
         JaclType coll_t = (JaclType)as[0]->inferred_type;
         if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
-             coll_t == TYPE_STREAM) &&
+             coll_t == TYPE_STREAM ||
+             /* Ref-element [Vec T] (e.g. [Vec str]): plain-vec rep with a
+              * static element stamp — narrow the binding like any typed
+              * collection. Only tagged-fit ref elements can be stamped on
+              * TYPE_VEC, so the tagged binding rep is always correct. */
+             coll_t == TYPE_VEC) &&
             as[0]->inferred_struct_idx != UINT32_MAX) {
           uint32_t eidx = as[0]->inferred_struct_idx;
           if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
@@ -3474,6 +3490,41 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     bool is_arr_ctor = (tc_kind == 0) && typer__arr_type(tc, head, &arr_ctor_ei);
     if (is_arr_ctor) tc_kind = 1;
     if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
+      /* Ref-element [Vec T] (T = str or dyn): `vec` is shorthand for
+       * [Vec dyn] — the whole family is legal. Ref elements share the
+       * plain traced vec REP (no strided rep win exists for tagged heap
+       * values); the element type lives statically as TYPE_VEC + elem
+       * stamp, exactly the scheme typed streams use. [Vec dyn] IS the
+       * plain vec (no stamp). Through a dyn slot the element type widens
+       * to dyn — same as scalars. */
+      if (tc_kind == 1 && !is_arr_ctor) {
+        AstNode* en = head->data.command.args[0];
+        if (en && en->type == AST_LIT_STRING &&
+            is_type_keyword(en->data.lit_string.value,
+                            en->data.lit_string.length)) {
+          JaclType ref_et = type_from_keyword(en->data.lit_string.value,
+                                              en->data.lit_string.length);
+          if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
+            node->inferred_type = TYPE_VEC;
+            node->inferred_struct_idx = (ref_et == TYPE_STR)
+                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+            if (ref_et == TYPE_STR) {
+              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+                JaclType at =
+                    (JaclType)node->data.command.args[ei]->inferred_type;
+                if (at != TYPE_STR && at != TYPE_DYN) {
+                  char err[160];
+                  jacl_format_typed_vec_elem(err, sizeof(err),
+                      en->data.lit_string.value, en->data.lit_string.length,
+                      ei, true, at);
+                  typer__error(tc, node->start.line, node->start.column, err);
+                }
+              }
+            }
+            return;
+          }
+        }
+      }
       node->inferred_type = is_arr_ctor ? TYPE_TYPED_ARR
                           : (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
       AstNode* elem_node = (tc_kind == 3)
@@ -4071,6 +4122,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           if (ce_ok) {
             node->inferred_type = TYPE_TYPED_VEC;
             node->inferred_struct_idx = ce;
+            node->inferred_key_struct_idx = UINT32_MAX;
+          } else if (JACL_IS_SCALAR_TYPE_IDX(ce) &&
+                     JACL_TYPE_IDX_TO_SCALAR(ce) == TYPE_STR) {
+            /* str elements: ref-element [Vec str] — plain traced vec REP
+             * (the VM keeps the plain-vec collect path), element type
+             * carried statically so for-loops over the result narrow. */
+            node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
             node->inferred_key_struct_idx = UINT32_MAX;
           }
         }
