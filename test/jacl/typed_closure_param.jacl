@@ -1,0 +1,27 @@
+# expect: 10
+# expect: 6000000000
+# expect: 6000000001
+# expect: hi!
+# expect: 35
+# User-defined higher-order procs via [Proc [P…] R] closure PARAMS
+# (TYPED_CLOSURES_DESIGN.md Phase B3a). An inline closure literal arg is
+# monomorphized to the param's declared signature and called through the typed
+# (unboxed) convention — no boxing across the closure boundary.
+proc apply {[Proc [i64] i64] f  i64 x} i64 { [f $x] }
+proc apply_str {[Proc [str] str] f  str s} str { [f $s] }
+# Two closure params: only the second is called; the first still passes cleanly.
+proc second {[Proc [i64] i64] g  [Proc [i64] i64] h  i64 n} i64 { [h $n] }
+
+proc main {} {
+  print [apply [proc {n} {* $n 2}] 5]              # 10
+  # Wide i64: the closure runs unboxed; result > INT32_MAX.
+  print [apply [proc {n} {* $n 1000000000}] 6]     # 6_000_000_000
+  # The call narrows to the declared i64 return — strict-i64 consumer proves it.
+  def i64 y [apply [proc {n} {* $n 1000000000}] 6]
+  print [+ $y 1]                                   # 6_000_000_001
+  # str closure param.
+  print [apply_str [proc {s} {concat $s "!"}] "hi"] # hi!
+  # Second of two closure params is the one invoked.
+  print [second [proc {a} {* $a 100}] [proc {b} {* $b 7}] 5]  # 35
+}
+main

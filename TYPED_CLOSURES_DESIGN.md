@@ -1,10 +1,46 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A COMPLETE (2026-06-10). Phase B B1+B2 LANDED (2026-06-10):
-`[Proc [P…] R]` type syntax + typed closure VALUES bound at a `def` site +
-typed (unboxed) calling convention. Next: Phase B3 (higher-order — closure
-params, closures-returning-closures, `[Arr [Proc …]]`, named-closure
-conformance).** Resolved the lambda-boundary technical
+Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. Phase B3a LANDED
+(2026-06-10): closure PARAMS — user-defined higher-order procs
+(`proc apply {[Proc [i64] i64] f  i64 x} { [f $x] }`) via a registry
+`TYPE_SHAPE_PROC`. Next: B3b (closures-returning-closures), B3c
+(`[Arr/Vec [Proc …]]`), B3d (named-closure VALUES — conformance + the
+closure-value-read rep).**
+
+**Phase B3a — closure params as landed (2026-06-10):**
+- **`TYPE_SHAPE_PROC` registry encoding** (shapes.c + jacl.h mirror): a proc
+  signature interned as a shape (param idxs in a registry-owned side
+  `proc_param_pool`, + return idx) so a proc type can be referenced by a single
+  idx *inside another type* — the encoding B1+B2 deferred. `type_shape_intern_proc`
+  dedups; decode → `TYPE_CLOSURE` (size/align/refmap treat it as one tagged
+  traced slot).
+- **`[Proc …]` closure params** (`typer__parse_params` + the compiler param
+  loop): the param binds as a `TYPE_CLOSURE` local carrying the shape; its
+  signature is decoded onto the body local (`compiler__stamp_closure_param_local`
+  / the typer `TyperBinding` stamp) so a body call `[f …]` reuses the B1+B2
+  typed-call path. `GlobalArity` gained `param_struct_idxs[]` (dual-def synced)
+  so a call site can recover a closure param's shape.
+- **Caller monomorphization + conformance**: at `[apply <lit> …]`, an inline
+  closure-literal arg is monomorphized to the param's declared signature — on
+  BOTH sides: the compiler activates the `annot_proc` context from the shape
+  (`compiler__activate_annot_proc_from_shape`), and the typer runs a tail-typed
+  body walk (`typer__monomorphize_proc_literal`, mirroring the def-site walk).
+  **Both are required** — without the typer walk the body stays dyn (literal
+  narrowing + param reads tagged) and the typed call reads a tagged param as
+  nil (the bug found + fixed during B3a). Arity/param conformance reuses the
+  HEAD_PROC checks. Tests: `typed_closure_param.jacl` (wide-i64 unboxed proof,
+  multi closure params, str), `typed_closure_param_{arity,named_arg}_error`.
+  Suite 587/587, 91/91 binaries.
+
+**B3a scope / debt → B3b–d:**
+- **Named/bound-closure ARG** (`[apply $g …]`) is a clear compile error
+  (Phase B3d) — supporting it needs conformance-checking a stored closure's
+  signature AND the closure-value-read rep (a `[Proc …]` binding currently reads
+  as `dyn` when used as a value, only as typed when *called*). Not the cheap
+  add it first looked — it's its own slice.
+- Closure params only resolve their shape via `GlobalArity` (global procs); a
+  closure param on a *local* proc binding has no shape at the call site yet.
+- Struct/compound param/return inside `[Proc …]` still B3b (clear error). Resolved the lambda-boundary technical
 debt in `STREAM_TYPING_DEBT.md` (items 1, 3, 4, and 5-by-deletion); pairs with
 typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
 (`c338b99`, `aa81bef`), which is already a partial monomorphization.

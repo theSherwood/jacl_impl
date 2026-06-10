@@ -620,6 +620,9 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
       case TYPE_SHAPE_BOX:
         if (out_inner_value_idx) *out_inner_value_idx = shape->u.box.boxes_idx;
         return TYPE_BOX;
+      case TYPE_SHAPE_PROC:
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.proc.return_idx;
+        return TYPE_CLOSURE;
       default:
         return TYPE_DYN;
     }
@@ -2115,6 +2118,88 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
   return true;
 }
 
+/* Phase B3a: intern a [Proc [P…] R] annotation as a TYPE_SHAPE_PROC in the
+ * typer's shape registry; returns the shape idx (or UINT32_MAX). *out_supported
+ * is false for struct/compound param/return types (B3b). Param/return idxs are
+ * scalar sentinels, consistent with the compiler's intern. */
+static uint32_t typer__intern_proc_shape(TyperCtx* tc, AstNode* node,
+                                         bool* out_supported) {
+  uint8_t  pcount;
+  JaclType pts[TYPER_MAX_PROC_PARAMS];
+  uint32_t pidxs[TYPER_MAX_PROC_PARAMS];
+  JaclType rt; uint32_t ridx;
+  if (!typer__proc_type(tc, node, &pcount, pts, pidxs, &rt, &ridx, out_supported))
+    return UINT32_MAX;
+  if (!*out_supported) return UINT32_MAX;
+  uint32_t pool[TYPER_MAX_PROC_PARAMS];
+  for (uint8_t k = 0; k < pcount; k++) pool[k] = JACL_SCALAR_TYPE_IDX(pts[k]);
+  return type_shape_intern_proc(&tc->shape_reg, pool, pcount,
+                                JACL_SCALAR_TYPE_IDX(rt));
+}
+
+/* Phase B3a: decode a TYPE_SHAPE_PROC shape idx into a flat signature for
+ * stamping a TyperBinding (so a body call `[f …]` narrows via the proxy). */
+static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
+                                     uint8_t* out_pcount, uint8_t* out_ptypes,
+                                     uint8_t* out_rtype) {
+  StructTypeRegistry* reg = &tc->shape_reg;
+  if (shape_idx >= reg->count || reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC)
+    return false;
+  TypeShape* s = &reg->shapes[shape_idx];
+  uint16_t pc = s->u.proc.param_count;
+  if (pc > TYPER_MAX_PROC_PARAMS) pc = TYPER_MAX_PROC_PARAMS;
+  *out_pcount = (uint8_t)pc;
+  for (uint16_t k = 0; k < pc; k++) {
+    uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
+    out_ptypes[k] = JACL_IS_SCALAR_TYPE_IDX(pidx)
+                      ? (uint8_t)JACL_TYPE_IDX_TO_SCALAR(pidx) : (uint8_t)TYPE_DYN;
+  }
+  uint32_t rid = s->u.proc.return_idx;
+  *out_rtype = JACL_IS_SCALAR_TYPE_IDX(rid)
+                 ? (uint8_t)JACL_TYPE_IDX_TO_SCALAR(rid) : (uint8_t)TYPE_DYN;
+  return true;
+}
+
+/* Phase B3a: monomorphize an inline proc literal against a declared param-type
+ * list (a closure ARG to a [Proc …] closure param). Types the body ONCE with
+ * untyped params bound to the declared types and the declared return pushed on
+ * the tail — so body nodes carry typed stamps the compiler's monomorphization
+ * agrees with (literal narrowing, typed param reads). Mirrors the def-site
+ * monomorphization walk in handle_def_or_mut. */
+static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
+                                             const uint8_t* ptypes,
+                                             uint8_t pcount, uint8_t rtype) {
+  if (!literal || literal->type != AST_COMMAND ||
+      literal->data.command.head_id != HEAD_PROC) return;
+  uint32_t ac = literal->data.command.arg_count;
+  AstNode* params = (ac == 3 || ac == 4) ? literal->data.command.args[1] : NULL;
+  AstNode* body   = (ac == 4) ? literal->data.command.args[3]
+                  : (ac == 3) ? literal->data.command.args[2] : NULL;
+  if (!params || !body || body->type != AST_BLOCK ||
+      body->data.block.count == 0) return;
+  AstNode* pn[TYPER_MAX_PROC_PARAMS];
+  JaclType pt[TYPER_MAX_PROC_PARAMS];
+  uint32_t ps[TYPER_MAX_PROC_PARAMS];
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  typer__scope_push(tc);
+  for (uint32_t i = 0; i < pc; i++) {
+    uint8_t bt = (uint8_t)pt[i];
+    if (pt[i] == TYPE_DYN && i < pcount) bt = ptypes[i];
+    typer__scope_add(tc, pn[i]->data.lit_string.value,
+                     pn[i]->data.lit_string.length, pn[i]->scope_mark,
+                     bt, UINT32_MAX);
+  }
+  uint32_t bc = body->data.block.count;
+  for (uint32_t i = 0; i + 1 < bc; i++)
+    typer__infer_node(tc, body->data.block.commands[i]);
+  JaclType saved = tc->expected_type;
+  if ((JaclType)rtype != TYPE_DYN) tc->expected_type = (JaclType)rtype;
+  typer__infer_node(tc, body->data.block.commands[bc - 1]);
+  tc->expected_type = saved;
+  typer__scope_pop(tc);
+  literal->inferred_type = TYPE_CLOSURE;
+}
+
 /* Walk a proc's params node and emit (name, type) pairs to the caller's
  * callback via the out-arrays. Mirrors compiler.c:7100-7180 simple cases:
  * plain name → TYPE_DYN, "TYPE name" pair → that type, "Struct name"
@@ -2160,6 +2245,28 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
         (*name_nodes_out)[count]   = nameelem;
         (*types_out)[count]        = TYPE_PTR;
         (*struct_idxs_out)[count]  = ptr_sidx;
+        count++;
+        continue;
+      }
+      /* Phase B3a: [Proc [P…] R] closure param → TYPE_CLOSURE + interned shape
+       * idx (so the body call narrows). Unsupported (struct/compound) types are
+       * errored at the compiler; here they fall back to dyn so the typer won't
+       * false-narrow. */
+      if (elem->data.command.head &&
+          elem->data.command.head->type == AST_LIT_STRING &&
+          elem->data.command.head->data.lit_string.length == 4 &&
+          memcmp(elem->data.command.head->data.lit_string.value, "Proc", 4) == 0) {
+        bool sup = true;
+        uint32_t shape_idx = typer__intern_proc_shape(tc, elem, &sup);
+        fi++;
+        if (fi >= flat_n) break;
+        AstNode* nameelem = flat[fi];
+        if (nameelem->type != AST_LIT_STRING) continue;
+        (*name_nodes_out)[count]  = nameelem;
+        (*types_out)[count]       = (sup && shape_idx != UINT32_MAX)
+                                      ? TYPE_CLOSURE : TYPE_DYN;
+        (*struct_idxs_out)[count] = (sup && shape_idx != UINT32_MAX)
+                                      ? shape_idx : UINT32_MAX;
         count++;
         continue;
       }
@@ -2459,6 +2566,21 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
     typer__scope_add(tc, pn[i]->data.lit_string.value,
                      pn[i]->data.lit_string.length,
                      pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
+    /* Phase B3a: a [Proc …] closure param carries a shape idx — decode it onto
+     * the binding so a body call `[f …]` narrows to the declared return (via
+     * the typed-closure bound_proxy at the call dispatch). */
+    if (pt[i] == TYPE_CLOSURE && ps[i] != UINT32_MAX && tc->binding_count > 0) {
+      TyperBinding* b = &tc->bindings[tc->binding_count - 1];
+      uint8_t pc2, rt2; uint8_t ptypes2[TYPER_MAX_PROC_PARAMS];
+      if (typer__decode_proc_shape(tc, ps[i], &pc2, ptypes2, &rt2)) {
+        b->is_typed_closure = true;
+        b->proc_param_count = pc2;
+        for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
+          b->proc_param_types[k] = ptypes2[k];
+        b->proc_return_type = rt2;
+        b->proc_return_struct_idx = UINT32_MAX;
+      }
+    }
   }
 
   /* Stash the enclosing generator's stream-element idx so [yield X] in
@@ -3893,6 +4015,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       tc->expected_type = JACL_TYPE_IDX_TO_SCALAR(tc->yield_elem_struct_idx);
     } else {
       tc->expected_type = TYPE_DYN;
+    }
+    /* Phase B3a: an inline closure literal passed to a [Proc …] closure param
+     * is monomorphized against the param's signature, so its body types with
+     * the declared param/return (mirrors the def-site walk). Otherwise the body
+     * stays dyn and the typed call at the callee reads a tagged param. */
+    if (proc && i < proc->param_count &&
+        (JaclType)proc->param_types[i] == TYPE_CLOSURE &&
+        proc->param_struct_idxs[i] != UINT32_MAX &&
+        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+      uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+      if (typer__decode_proc_shape(tc, proc->param_struct_idxs[i],
+                                   &pc2, pts2, &rt2)) {
+        typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
+        tc->expected_type = saved_et;
+        continue;
+      }
     }
     typer__infer_node(tc, arg);
     tc->expected_type = saved_et;

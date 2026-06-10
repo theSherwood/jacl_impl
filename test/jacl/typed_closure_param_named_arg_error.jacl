@@ -1,0 +1,11 @@
+# expect-error: B3d
+# A [Proc …] closure param currently requires an INLINE closure-literal arg;
+# passing a named/bound closure value needs conformance-checking of a stored
+# closure's signature, which is Phase B3d. Locked here as a clear error (safe —
+# no silent rep mismatch) rather than a confusing runtime fault.
+proc apply {[Proc [i64] i64] f  i64 x} i64 { [f $x] }
+proc main {} {
+  def [Proc [i64] i64] g [proc {n} {* $n 2}]
+  print [apply $g 5]
+}
+main

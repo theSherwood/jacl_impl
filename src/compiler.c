@@ -283,6 +283,10 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
     case TYPE_SHAPE_STRUCT:
     case TYPE_SHAPE_CTX:
       return TYPE_STRUCT;
+    case TYPE_SHAPE_PROC:
+      /* return_idx reachable via shape->u.proc.return_idx for callers. */
+      if (out_inner_idx) *out_inner_idx = shape->u.proc.return_idx;
+      return TYPE_CLOSURE;
     default:
       return TYPE_DYN;
   }
@@ -320,7 +324,8 @@ static uint64_t compiler__encoding_byte_size(StructTypeRegistry* reg,
     case TYPE_SHAPE_PTR:
     case TYPE_SHAPE_FUTURE:
     case TYPE_SHAPE_BOX:
-      return 8; /* tagged JaclVal slot */
+    case TYPE_SHAPE_PROC:
+      return 8; /* tagged JaclVal slot (closure is a heap pointer) */
     default:
       return 0;
   }
@@ -661,6 +666,7 @@ static uint32_t compiler__encoding_align(StructTypeRegistry* reg,
     case TYPE_SHAPE_PTR:
     case TYPE_SHAPE_FUTURE:
     case TYPE_SHAPE_BOX:
+    case TYPE_SHAPE_PROC:
       return 8;
     default:
       return 1;
@@ -693,7 +699,8 @@ static void compiler__encoding_ref_map(StructTypeRegistry* reg,
     case TYPE_SHAPE_TYPED_MAP:
     case TYPE_SHAPE_PTR:
     case TYPE_SHAPE_FUTURE:
-    case TYPE_SHAPE_BOX: {
+    case TYPE_SHAPE_BOX:
+    case TYPE_SHAPE_PROC: {
       uint32_t slot = byte_base / (uint32_t)sizeof(JaclVal);
       if (slot < bitmap_slots) bitmap[slot >> 3] |= (uint8_t)(1u << (slot & 7));
       return;
@@ -1179,6 +1186,11 @@ typedef struct {
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
+  /* Per-param struct/shape idx: struct registry idx for TYPE_STRUCT params,
+   * TYPE_SHAPE_PROC shape idx for TYPE_CLOSURE params ([Proc …]), UINT32_MAX
+   * otherwise. Lets a call site recover a closure param's signature to
+   * monomorphize/conformance-check the arg. Phase B3a. */
+  uint32_t  param_struct_idxs[COMPILER_MAX_PROC_PARAMS];
 } GlobalArity;
 
 /* Mirrors GlobalArityTable in jacl.h; the dual-struct pattern in this
@@ -3757,6 +3769,7 @@ void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
   ga->type = TYPE_DYN;
   ga->return_type = TYPE_DYN;
   memset(ga->param_types, 0, sizeof(ga->param_types));
+  memset(ga->param_struct_idxs, 0xFF, sizeof(ga->param_struct_idxs)); /* UINT32_MAX */
   c->global_arity_count++;
 }
 
@@ -4522,6 +4535,106 @@ static void compiler__stamp_closure_local(Compiler* c) {
   } else {
     L->param_types = NULL;
   }
+}
+
+/* Phase B3: intern a [Proc [P…] R] annotation as a TYPE_SHAPE_PROC in the
+ * compiler's registry; returns the shape idx (or UINT32_MAX). *out_supported
+ * is false for struct/compound param/return types (deferred). Param/return
+ * idxs are stored as scalar sentinels (decodable by compiler__decode_proc_sig).
+ * The annotation shape was already validated by compiler__proc_annotation at
+ * the recognition site; this re-walks it to build the registry encoding. */
+static uint32_t compiler__intern_proc_shape(Compiler* c, AstNode* node,
+                                            bool* out_supported) {
+  *out_supported = true;
+  if (!node || node->type != AST_COMMAND) { *out_supported = false; return UINT32_MAX; }
+  uint32_t ac = node->data.command.arg_count;
+  if (ac != 1 && ac != 2) { *out_supported = false; return UINT32_MAX; }
+  AstNode* plist = node->data.command.args[0];
+  if (!plist || plist->type != AST_COMMAND) { *out_supported = false; return UINT32_MAX; }
+  uint32_t pidx[COMPILER_MAX_PROC_PARAMS];
+  uint16_t pc = 0;
+  AstNode* phead = plist->data.command.head;
+  bool empty_head = (phead && phead->type == AST_LIT_STRING &&
+                     phead->data.lit_string.length == 0);
+  bool sup; uint32_t dummy;
+  if (phead && !empty_head) {
+    if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
+    JaclType t = compiler__proc_sig_elem(phead, &dummy, &sup);
+    if (!sup) *out_supported = false;
+    pidx[pc++] = JACL_SCALAR_TYPE_IDX(t);
+  }
+  for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
+    if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
+    JaclType t = compiler__proc_sig_elem(plist->data.command.args[i], &dummy, &sup);
+    if (!sup) *out_supported = false;
+    pidx[pc++] = JACL_SCALAR_TYPE_IDX(t);
+  }
+  uint32_t rid = JACL_SCALAR_TYPE_IDX(TYPE_DYN);
+  if (ac == 2) {
+    JaclType t = compiler__proc_sig_elem(node->data.command.args[1], &dummy, &sup);
+    if (!sup) *out_supported = false;
+    rid = JACL_SCALAR_TYPE_IDX(t);
+  }
+  if (!*out_supported) return UINT32_MAX;
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  return type_shape_intern_proc(reg, pidx, pc, rid);
+}
+
+/* Phase B3: decode a TYPE_SHAPE_PROC into a Local's closure signature so a
+ * body call `[f args]` uses the typed (unboxed) convention. Param/return idxs
+ * are scalar sentinels (B3a scope); a struct/compound idx (B3b+) decodes the
+ * return to TYPE_DYN for now. No-ops on a non-proc shape idx. */
+static void compiler__stamp_closure_param_local(Compiler* bc, Compiler* c,
+                                                uint32_t local_idx,
+                                                uint32_t shape_idx) {
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg || shape_idx >= reg->count ||
+      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return;
+  TypeShape* s = &reg->shapes[shape_idx];
+  uint16_t pc = s->u.proc.param_count;
+  Local* L = &bc->locals[local_idx];
+  L->known_arity = (int16_t)pc;
+  uint32_t rid = s->u.proc.return_idx;
+  L->return_type = COMPILER_IS_SCALAR_TYPE_IDX(rid)
+                     ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
+  L->return_struct_idx = UINT32_MAX;
+  if (pc > 0) {
+    JaclType* pts = (JaclType*)arena_alloc(c->arena, sizeof(JaclType) * pc);
+    for (uint16_t k = 0; k < pc; k++) {
+      uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
+      pts[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
+                 ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
+    }
+    L->param_types = pts;
+  } else {
+    L->param_types = NULL;
+  }
+}
+
+/* Phase B3a: decode a TYPE_SHAPE_PROC into the annot_proc monomorphization
+ * context + activate it, so compiling an inline proc-literal ARG to a closure
+ * param monomorphizes it to the param's declared signature (reuses the same
+ * HEAD_PROC adoption + arity/param conformance as a [Proc …] def annotation). */
+static void compiler__activate_annot_proc_from_shape(Compiler* c,
+                                                     uint32_t shape_idx) {
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg || shape_idx >= reg->count ||
+      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return;
+  TypeShape* s = &reg->shapes[shape_idx];
+  uint16_t pc = s->u.proc.param_count;
+  if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
+  c->annot_proc_param_count = (uint8_t)pc;
+  for (uint16_t k = 0; k < pc; k++) {
+    uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
+    c->annot_proc_param_types[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
+                                     ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
+    c->annot_proc_param_struct_idxs[k] = UINT32_MAX; /* scalars (B3a) */
+  }
+  uint32_t rid = s->u.proc.return_idx;
+  c->annot_proc_return_type = COMPILER_IS_SCALAR_TYPE_IDX(rid)
+                                ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
+  c->annot_proc_return_struct_idx = UINT32_MAX;
+  c->annot_proc_active = true;
 }
 
 /* --- Internal: Upvalue resolution --- */
@@ -10611,6 +10724,45 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         continue;
       }
 
+      /* Phase B3a: [Proc [P…] R] closure param. Intern a shape; bind the param
+       * as a TYPE_CLOSURE local carrying the shape idx so a body call `[f …]`
+       * uses the typed convention (stamped onto the body local below). */
+      if (elem->type == AST_COMMAND && elem->data.command.head &&
+          elem->data.command.head->type == AST_LIT_STRING &&
+          elem->data.command.head->data.lit_string.length == 4 &&
+          memcmp(elem->data.command.head->data.lit_string.value, "Proc", 4) == 0) {
+        bool sup = true;
+        uint32_t shape_idx = compiler__intern_proc_shape(c, elem, &sup);
+        if (!sup || shape_idx == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "typed-closure [Proc …] struct/compound param or return types are "
+              "not yet supported (Phase B3b) — use scalar types or `dyn`");
+          return;
+        }
+        fi++;
+        if (fi >= flat_count) {
+          compiler__error(c, line, col,
+              "expected parameter name after [Proc …] annotation");
+          return;
+        }
+        elem = flat_elems[fi];
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+          compiler__error(c, line, col, "too many proc parameters");
+          return;
+        }
+        param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
+            elem->data.lit_string.value, elem->data.lit_string.length);
+        param_types_arr[param_count] = TYPE_CLOSURE;
+        param_struct_idxs[param_count] = shape_idx;
+        param_scope_marks[param_count] = elem->scope_mark;
+        param_count++;
+        continue;
+      }
+
       /* Check for compound type expression: [Vec Type], [Map Type], [Map K V] */
       {
         AstNode* ct_elem = NULL;
@@ -11026,6 +11178,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             body_compiler.locals[body_compiler.local_count - 1].depth = body_compiler.scope_depth;
             body_compiler.locals[body_compiler.local_count - 1].is_param = true;
           }
+        } else if (param_types_arr[i] == TYPE_CLOSURE &&
+                   param_struct_idxs[i] != UINT32_MAX) {
+          /* Phase B3a: closure param — decode its [Proc …] shape onto the body
+           * local so a call `[f …]` in the body uses the typed convention. */
+          compiler__stamp_closure_param_local(&body_compiler, c,
+              body_compiler.local_count - 1, param_struct_idxs[i]);
         }
       }
     }
@@ -11238,6 +11396,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           ga->captures_mutable = proc_captures_mutable;
           for (uint8_t i = 0; i < user_param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
             ga->param_types[i] = param_types_arr[i];
+            /* B3a: carry struct/shape idx so call sites can recover a closure
+             * param's [Proc …] signature (and struct params' idx). */
+            ga->param_struct_idxs[i] = param_struct_idxs[i];
           }
         }
       }
@@ -16216,6 +16377,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   {
     /* Resolve callee param types for call-site type checking */
     JaclType* call_param_types = NULL;
+    uint32_t* call_param_struct_idxs = NULL; /* B3a: per-param shape/struct idx
+                                              * (GlobalArity path only) */
     JaclType call_return_type = TYPE_DYN;
     uint32_t call_return_struct_idx = UINT32_MAX;
     int16_t call_param_count = -1;
@@ -16283,6 +16446,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (ga) {
             head_arity = ga->known_arity;
             call_param_types = ga->param_types;
+            call_param_struct_idxs = ga->param_struct_idxs;
             call_return_type = ga->return_type;
             call_return_struct_idx = ga->return_struct_idx;
             call_param_count = head_arity;
@@ -16391,6 +16555,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             GlobalArity* ga = compiler__find_global(c, vname);
             if (ga) {
               call_param_types = ga->param_types;
+              call_param_struct_idxs = ga->param_struct_idxs;
               call_return_type = ga->return_type;
               call_return_struct_idx = ga->return_struct_idx;
               call_param_count = ga->known_arity;
@@ -16464,6 +16629,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)width, line);
         c->last_expr_type = TYPE_BUF;
         total_arg_slots += width;
+        continue;
+      }
+
+      /* Phase B3a: closure ARG to a [Proc …] closure param. An inline proc
+       * literal is monomorphized to the param's declared signature (the same
+       * HEAD_PROC adoption + arity/param conformance as a def annotation); a
+       * non-literal closure (named binding) is left for B3d conformance and a
+       * dyn one errors. The closure rides one tagged slot. */
+      if (expected_param_type == TYPE_CLOSURE && call_param_struct_idxs &&
+          call_param_count > 0 && (int32_t)i < call_param_count &&
+          call_param_struct_idxs[i] != UINT32_MAX) {
+        AstNode* a = args[i];
+        if (a->type == AST_COMMAND && a->data.command.head_id == HEAD_PROC) {
+          compiler__activate_annot_proc_from_shape(c, call_param_struct_idxs[i]);
+          compiler__compile_node(c, a);    /* HEAD_PROC consumes + checks */
+          c->annot_proc_active = false;
+        } else {
+          compiler__error(c, line, col,
+              "a [Proc …] closure param needs an inline closure literal "
+              "argument — passing a named/bound closure is Phase B3d");
+          return;
+        }
+        total_arg_slots += 1;
         continue;
       }
 

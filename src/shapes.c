@@ -79,6 +79,9 @@ typedef enum {
   TYPE_SHAPE_FUTURE,           /* [Future T] -- u.future.resolves_to_idx */
   TYPE_SHAPE_BOX,              /* [Box T] -- u.box.boxes_idx */
   TYPE_SHAPE_TYPED_ARR,        /* [Arr T] -- u.tarr.elem_idx. See ARR_DESIGN.md */
+  TYPE_SHAPE_PROC,             /* [Proc [P…] R] -- u.proc.{params_off into the
+                                * registry's proc_param_pool, param_count,
+                                * return_idx}. TYPED_CLOSURES_DESIGN.md Phase B3. */
 } TypeShapeKind;
 
 typedef struct {
@@ -95,6 +98,10 @@ typedef struct {
     struct { uint32_t resolves_to_idx; } future; /* FUTURE */
     struct { uint32_t boxes_idx; } box;          /* BOX */
     struct { uint32_t elem_idx; } tarr;          /* TYPED_ARR */
+    struct { uint32_t params_off;                /* PROC: offset into
+                                                  * proc_param_pool */
+             uint16_t param_count;
+             uint32_t return_idx; } proc;
   } u;
 } TypeShape;
 
@@ -110,6 +117,12 @@ struct StructTypeRegistry {
   uint32_t capacity;
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
   uint32_t ctx_type_idx;      /* idx of the ctx struct (0 = not yet registered) */
+  /* Side pool for TYPE_SHAPE_PROC param-idx lists (variable arity). Each proc
+   * shape's u.proc.params_off indexes here. malloc-backed (not arena), grown
+   * by doubling, freed in destroy. See TYPED_CLOSURES_DESIGN.md Phase B3. */
+  uint32_t* proc_param_pool;
+  uint32_t  proc_param_count;
+  uint32_t  proc_param_cap;
 };
 
 /* --- Helpers --- */
@@ -164,6 +177,9 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
   reg->defs[0] = NULL;
   reg->defs[1] = NULL;
   reg->ctx_type_idx = 1;
+  reg->proc_param_pool = NULL;
+  reg->proc_param_count = 0;
+  reg->proc_param_cap = 0;
 }
 
 /* Initialize a shape registry whose entries occupy a specific index
@@ -182,14 +198,21 @@ static void struct_registry__init_at_offset(StructTypeRegistry* reg,
    * a struct-index range returns TYPE_SHAPE_NONE rather than garbage. */
   reg->count = start_count;
   reg->ctx_type_idx = 0;
+  reg->proc_param_pool = NULL;
+  reg->proc_param_count = 0;
+  reg->proc_param_cap = 0;
 }
 
 static void struct_registry__destroy(StructTypeRegistry* reg) {
   if (!reg) return;
   free(reg->defs);
   free(reg->shapes);
+  free(reg->proc_param_pool);
   reg->defs = NULL;
   reg->shapes = NULL;
+  reg->proc_param_pool = NULL;
+  reg->proc_param_count = 0;
+  reg->proc_param_cap = 0;
   reg->count = 0;
   reg->capacity = 0;
 }
@@ -332,6 +355,52 @@ static uint32_t type_shape_intern_box(StructTypeRegistry* reg,
   reg->defs[idx] = NULL;
   reg->shapes[idx].kind = TYPE_SHAPE_BOX;
   reg->shapes[idx].u.box.boxes_idx = boxes_idx;
+  reg->count++;
+  return idx;
+}
+
+/* Intern a [Proc [P…] R] shape. param_idxs[0..count) are portable encodings
+ * (scalar sentinel / struct idx / nested shape idx); return_idx likewise.
+ * Identical signatures share an idx. Returns UINT32_MAX on allocation
+ * failure. TYPED_CLOSURES_DESIGN.md Phase B3. */
+static uint32_t type_shape_intern_proc(StructTypeRegistry* reg,
+                                       const uint32_t* param_idxs,
+                                       uint16_t param_count,
+                                       uint32_t return_idx) {
+  if (!reg) return UINT32_MAX;
+  /* Dedup: same return, same arity, same param idxs. */
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->shapes[i].kind != TYPE_SHAPE_PROC) continue;
+    if (reg->shapes[i].u.proc.param_count != param_count) continue;
+    if (reg->shapes[i].u.proc.return_idx != return_idx) continue;
+    uint32_t off = reg->shapes[i].u.proc.params_off;
+    bool same = true;
+    for (uint16_t k = 0; k < param_count; k++) {
+      if (reg->proc_param_pool[off + k] != param_idxs[k]) { same = false; break; }
+    }
+    if (same) return i;
+  }
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
+  /* Append the param list to the pool (grow by doubling). */
+  uint32_t off = reg->proc_param_count;
+  if (reg->proc_param_count + param_count > reg->proc_param_cap) {
+    uint32_t new_cap = reg->proc_param_cap ? reg->proc_param_cap * 2 : 16;
+    while (new_cap < reg->proc_param_count + param_count) new_cap *= 2;
+    uint32_t* np = (uint32_t*)realloc(reg->proc_param_pool,
+                                      new_cap * sizeof(uint32_t));
+    if (!np) return UINT32_MAX;
+    reg->proc_param_pool = np;
+    reg->proc_param_cap = new_cap;
+  }
+  for (uint16_t k = 0; k < param_count; k++)
+    reg->proc_param_pool[off + k] = param_idxs[k];
+  reg->proc_param_count += param_count;
+  uint32_t idx = reg->count;
+  reg->defs[idx] = NULL;
+  reg->shapes[idx].kind = TYPE_SHAPE_PROC;
+  reg->shapes[idx].u.proc.params_off = off;
+  reg->shapes[idx].u.proc.param_count = param_count;
+  reg->shapes[idx].u.proc.return_idx = return_idx;
   reg->count++;
   return idx;
 }

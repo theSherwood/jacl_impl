@@ -1307,6 +1307,7 @@ typedef enum {
   TYPE_SHAPE_FUTURE,
   TYPE_SHAPE_BOX,
   TYPE_SHAPE_TYPED_ARR,
+  TYPE_SHAPE_PROC,            /* [Proc [P…] R]. See shapes.c / TYPED_CLOSURES_DESIGN B3. */
 } TypeShapeKind;
 
 typedef struct {
@@ -1320,6 +1321,7 @@ typedef struct {
     struct { uint32_t resolves_to_idx; } future;
     struct { uint32_t boxes_idx; } box;
     struct { uint32_t elem_idx; } tarr;
+    struct { uint32_t params_off; uint16_t param_count; uint32_t return_idx; } proc;
   } u;
 } TypeShape;
 
@@ -1330,6 +1332,10 @@ struct StructTypeRegistry {
   uint32_t capacity;
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
   uint32_t ctx_type_idx;      /* type_idx of the ctx struct (0 = not yet registered) */
+  /* TYPE_SHAPE_PROC param-idx side pool — see shapes.c. Must stay in sync. */
+  uint32_t* proc_param_pool;
+  uint32_t  proc_param_count;
+  uint32_t  proc_param_cap;
 };
 
 typedef struct {
@@ -1410,6 +1416,7 @@ typedef struct {
   JaclType  return_type;
   uint32_t  return_struct_idx;
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
+  uint32_t  param_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* see compiler.c (B3a) */
 } GlobalArity;
 
 /* Arena-backed growable table of GlobalArity entries. Embedders that

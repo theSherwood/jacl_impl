@@ -9,19 +9,19 @@
 > wide-rep boundary fixes. See the git log around `64e8d6c` and
 > `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
 >
-> **Phase B B1+B2 is COMPLETE** (2026-06-10): `[Proc [P…] R]` type syntax
-> at the `def` site + typed closure VALUES (inline-literal binding,
-> monomorphized, typed unboxed call) + invariant arity/param conformance.
-> No VM change (OP_CALL already caller-prepares-rep). **The active next
-> step is Phase B3** (higher-order: closure params, closures-returning-
-> closures, `[Arr [Proc …]]`, named-closure conformance — needs a registry
-> `TYPE_SHAPE_PROC` so a proc type can be referenced by idx inside another
-> type). See the `TYPED_CLOSURES_DESIGN.md` Phase B status block for exactly
-> what landed and the scoped debt.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3**
->    (`[Proc …]` in param/return/array positions, higher-order typed procs
->    — §3/§5 of that doc). The Phase B status block records what B1+B2
->    shipped and the deferred items.
+> **Phase B B1+B2 + B3a are COMPLETE** (2026-06-10): `[Proc [P…] R]` type
+> syntax + typed closure VALUES at a `def` site (B1+B2) AND closure PARAMS —
+> user-defined higher-order procs `proc apply {[Proc [i64] i64] f i64 x}` (B3a,
+> via a registry `TYPE_SHAPE_PROC`). Inline-literal closure args are
+> monomorphized (typer + compiler) and called unboxed; invariant conformance.
+> No VM change (OP_CALL already caller-prepares-rep). **The active next step is
+> B3b** (closures-returning-closures, case 5.1), then B3c (`[Arr/Vec [Proc …]]`)
+> and B3d (named-closure VALUES — conformance + the closure-value-read rep; a
+> named-closure arg is a clear error today). See the `TYPED_CLOSURES_DESIGN.md`
+> Phase B3a status block for exactly what landed and the scoped debt.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3b–d**
+>    (closures-returning-closures, `[Proc …]` array elements, named-closure
+>    values — §5 of that doc). The Phase B status blocks record what shipped.
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).
