@@ -6544,11 +6544,42 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t    tl = _arr_elem->data.lit_string.length;
     if (is_type_keyword(tn, tl)) {
       JaclType et = type_from_keyword(tn, tl);
+      /* Ref-element [Arr T] (T = str or dyn): `arr` is shorthand for
+       * [Arr dyn]. Ref elements are tagged heap values — no flat-bytes
+       * rep win — so they use the DYN arr rep (OP_ARR: tagged traced
+       * slots); the element type is static only (typer stamp; element
+       * checks here). [Arr dyn] compiles to exactly a plain arr literal. */
+      if (et == TYPE_DYN || et == TYPE_STR) {
+        if (argc > 255) {
+          compiler__error(c, line, col,
+              "[Arr ...] too many initial elements (max 255)");
+          return;
+        }
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+          if (compiler__reject_bare_typed(c, args[i], line, col, "dyn arr")) return;
+          compiler__ensure_boxed(c, line);
+          if (et == TYPE_STR) {
+            JaclType arg_t = (JaclType)args[i]->inferred_type;
+            if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
+              char err[160];
+              jacl_format_typed_arr_elem(err, sizeof(err), tn, tl, i, true, arg_t);
+              compiler__error(c, line, col, err);
+              return;
+            }
+          }
+        }
+        compiler__emit_byte(c, OP_ARR, line);
+        compiler__emit_byte(c, (uint8_t)argc, line);
+        c->last_expr_type = TYPE_ARR;
+        return;
+      }
       if (!compiler__is_typed_collection_scalar(et)) {
         char err[128];
         snprintf(err, sizeof(err),
                  "[Arr %.*s]: only value-type scalars supported "
-                 "(i32, i64, u32, u64, f32, f64, bool)", (int)tl, tn);
+                 "(i32, i64, u32, u64, f32, f64, bool — str/dyn use the "
+                 "dyn-arr rep)", (int)tl, tn);
         compiler__error(c, line, col, err);
         return;
       }
@@ -9275,6 +9306,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           bool is_compound_type =
               (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                            memcmp(hn, "Map", 3) == 0 ||
+                           memcmp(hn, "Arr", 3) == 0 ||
                            memcmp(hn, "Box", 3) == 0)) ||
               is_ptr_type ||
               (hl == 6 && (memcmp(hn, "Future", 6) == 0 ||
@@ -12020,6 +12052,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (compiler__reject_bare_typed(c, args[i], line, col, "dyn arr")) return;
+      compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
     }
     compiler__emit_byte(c, OP_ARR, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -12050,6 +12083,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;
       }
+    } else if ((JaclType)args[0]->inferred_type == TYPE_ARR &&
+               args[0]->inferred_struct_idx ==
+                   JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+      /* Stamped ref-element arr ([Arr str]): result is statically str. */
+      c->last_expr_type = TYPE_STR;
     } else {
       c->last_expr_type = TYPE_DYN;
     }
@@ -12098,6 +12136,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
+    compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
     compiler__emit_byte(c, OP_ARR_PUSH, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -12131,6 +12170,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
+    compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
     compiler__emit_byte(c, OP_ARR_SET, line);
     c->last_expr_type = TYPE_ARR;
     return;
@@ -12154,6 +12194,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;
       }
+    } else if ((JaclType)args[0]->inferred_type == TYPE_ARR &&
+               args[0]->inferred_struct_idx ==
+                   JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+      /* Stamped ref-element arr ([Arr str]): popped value is str (tagged)
+       * — or nil when empty, which str-typed sinks treat as dyn flow. */
+      c->last_expr_type = TYPE_STR;
     } else {
       c->last_expr_type = TYPE_DYN;
     }

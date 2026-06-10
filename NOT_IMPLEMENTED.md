@@ -243,10 +243,20 @@ pulling on them; revisit when one shows up.
   str ...]` annotations + typer__resolve_return_type, for-loop narrowing
   over stamped maps, and cross-width numeric key identity (an i32-tagged
   dyn key never matches a stored boxed-i64 key — same-tag identity only;
-  belongs to the numeric-tower work). **Still open (vec):** [Arr T] (arr ≡
-  [Arr dyn] mirror), hard vec-push element CHECKS (currently expected-type
-  narrowing only), proc-param [Vec str] annotations, and vec-get narrowing
-  through nested (shape-carried) bindings.
+  belongs to the numeric-tower work). **[Arr T] ref-kind mirror LANDED
+  (2026-06-10):** `arr` ≡ `[Arr dyn]`; `[Arr str]` uses the DYN arr rep
+  (tagged traced slots) with the element type static as TYPE_ARR + stamp:
+  ctor checks, `def [Arr str]` annotations (the compiler def path now
+  recognizes `[Arr …]` as a compound annotation at all — it errored
+  "def type must be a keyword" before), def propagation, arr-get/arr-pop
+  narrowing, push/set expected-type + stamp persistence, for-binding
+  narrowing. The plain `[arr …]` ctor and dyn arr-push/arr-set now
+  ensure_boxed wide values (raw wide bits could land in tagged dyn slots
+  before). Tests: `arr_ref_elems.jacl`, `arr_ref_elem_error.jacl`.
+  **Still open (vec/arr):** hard vec-push element CHECKS (currently
+  expected-type narrowing only), proc-param [Vec str]/[Arr str]
+  annotations, and vec-get narrowing through nested (shape-carried)
+  bindings.
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

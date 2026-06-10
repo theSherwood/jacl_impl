@@ -1190,8 +1190,19 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         declared_type = TYPE_BOX;
         declared_struct_idx = box_sidx;
       } else if (typer__arr_type(tc, args[0], &arr_elem_idx)) {
-        declared_type = TYPE_TYPED_ARR;
-        declared_struct_idx = arr_elem_idx;
+        /* Ref-element [Arr T] annotations (def [Arr str] / [Arr dyn] a):
+         * dyn arr rep — resolve to TYPE_ARR (+ str stamp), mirroring the
+         * [Vec str] annotation arm. */
+        if (arr_elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR) ||
+            arr_elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_DYN)) {
+          declared_type = TYPE_ARR;
+          declared_struct_idx =
+              (arr_elem_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR))
+                  ? arr_elem_idx : UINT32_MAX;
+        } else {
+          declared_type = TYPE_TYPED_ARR;
+          declared_struct_idx = arr_elem_idx;
+        }
       } else if (typer__buf_type_full(tc, args[0], &buf_sidx, &buf_len,
                                       &buf_inner_len_3, &buf_typed_elem_idx_3)) {
         char err[256];
@@ -1558,6 +1569,19 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       struct_idx = value_node->inferred_struct_idx;
     if (value_node->inferred_key_struct_idx != UINT32_MAX)
       key_struct_idx = value_node->inferred_key_struct_idx;
+  }
+  /* Ref-element [Arr T] ([Arr str]): dyn-arr rep with a static element
+   * stamp — propagate into the binding (mirrors the [Vec str] arm). */
+  if (effective == TYPE_DYN &&
+      (JaclType)value_node->inferred_type == TYPE_ARR &&
+      value_node->inferred_struct_idx != UINT32_MAX) {
+    effective = TYPE_ARR;
+  }
+  if (effective == TYPE_ARR) {
+    if (declared_struct_idx != UINT32_MAX)
+      struct_idx = declared_struct_idx;  /* def [Arr str] annotation wins */
+    else if (value_node->inferred_struct_idx != UINT32_MAX)
+      struct_idx = value_node->inferred_struct_idx;
   }
   /* Nested compound element ([Vec [Vec i64]] …): the AST stamp is
    * UINT32_MAX by the cross-registry rule, so re-derive the TYPER-SIDE
@@ -3067,11 +3091,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         JaclType coll_t = (JaclType)as[0]->inferred_type;
         if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
              coll_t == TYPE_STREAM ||
-             /* Ref-element [Vec T] (e.g. [Vec str]): plain-vec rep with a
-              * static element stamp — narrow the binding like any typed
-              * collection. Only tagged-fit ref elements can be stamped on
-              * TYPE_VEC, so the tagged binding rep is always correct. */
-             coll_t == TYPE_VEC)) {
+             /* Ref-element [Vec T] / [Arr T] (e.g. [Vec str], [Arr str]):
+              * plain (dyn) rep with a static element stamp — narrow the
+              * binding like any typed collection. Only tagged-fit ref
+              * elements can be stamped on TYPE_VEC/TYPE_ARR, so the tagged
+              * binding rep is always correct. */
+             coll_t == TYPE_VEC || coll_t == TYPE_ARR)) {
           uint32_t eidx = as[0]->inferred_struct_idx;
           /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
            * suppressed by the cross-registry rule, so resolve the TYPER-SIDE
@@ -3468,8 +3493,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       uint32_t e_idx = recv->inferred_struct_idx;
       uint32_t k_idx = recv->inferred_key_struct_idx;
       JaclType target = TYPE_DYN;
-      /* arr-push i=1 → elem; arr-set i=1 → idx (dyn), i=2 → elem. */
-      if (recv_t == TYPE_TYPED_ARR) {
+      /* arr-push i=1 → elem; arr-set i=1 → idx (dyn), i=2 → elem.
+       * TYPE_ARR with a stamp = ref-element [Arr str]: same narrowing. */
+      if (recv_t == TYPE_TYPED_ARR || recv_t == TYPE_ARR) {
         if (mutator_hid == HEAD_ARR_PUSH ||
             (mutator_hid == HEAD_ARR_SET && i == 2)) {
           if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
@@ -3876,6 +3902,39 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
         }
       }
+      /* Ref-element [Arr T] (T = str or dyn): `arr` is shorthand for
+       * [Arr dyn]. Ref elements use the DYN arr rep (tagged traced slots,
+       * elem_size 8) — no flat-bytes rep win exists for tagged heap
+       * values; the element type lives statically as TYPE_ARR + stamp.
+       * [Arr dyn] IS the plain arr (no stamp). Mirrors [Vec str]. */
+      if (tc_kind == 1 && is_arr_ctor) {
+        AstNode* en = head->data.command.args[0];
+        if (en && en->type == AST_LIT_STRING &&
+            is_type_keyword(en->data.lit_string.value,
+                            en->data.lit_string.length)) {
+          JaclType ref_et = type_from_keyword(en->data.lit_string.value,
+                                              en->data.lit_string.length);
+          if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
+            node->inferred_type = TYPE_ARR;
+            node->inferred_struct_idx = (ref_et == TYPE_STR)
+                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+            if (ref_et == TYPE_STR) {
+              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+                JaclType at =
+                    (JaclType)node->data.command.args[ei]->inferred_type;
+                if (at != TYPE_STR && at != TYPE_DYN) {
+                  char err[160];
+                  jacl_format_typed_arr_elem(err, sizeof(err),
+                      en->data.lit_string.value, en->data.lit_string.length,
+                      ei, true, at);
+                  typer__error(tc, node->start.line, node->start.column, err);
+                }
+              }
+            }
+            return;
+          }
+        }
+      }
       /* Ref-kind VALUE [Map K V] forms ([Map K str] / [Map K dyn]):
        * plain traced map rep; the key/value types live statically as
        * TYPE_MAP + stamps (value on inferred_struct_idx, key on
@@ -4241,6 +4300,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;
             }
+          } else if (recv_t == TYPE_ARR &&
+                     recv->inferred_struct_idx != UINT32_MAX &&
+                     JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+            /* Stamped ref-element arr ([Arr str]): element narrows. */
+            node->inferred_type =
+                JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
           }
           return;
         case HEAD_ARR_SET:
@@ -4248,7 +4313,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = TYPE_TYPED_ARR;
             node->inferred_struct_idx = recv->inferred_struct_idx;
           } else if (recv_t == TYPE_ARR) {
+            /* Stamped ref-element arrs keep their element type. */
             node->inferred_type = TYPE_ARR;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
           }
           return;
         case HEAD_BUF_SET:

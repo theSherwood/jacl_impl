@@ -25,7 +25,7 @@ store).
 
 ## Status snapshot (for session handoff)
 
-**Pickup for the next session (as of 2026-06-08):** `[Arr T]` is
+**Pickup for the next session (as of 2026-06-10):** `[Arr T]` is
 functionally complete — **M0–M5 done + M6 for-loop done**, on `main` and
 green. Dyn (`[arr ...]`), flat typed-scalar (`[Arr i32]`…), and flat
 typed-struct (`[Arr Point]`) arrays all work: construct / get / set /
@@ -33,7 +33,18 @@ push / pop / len, plus print / to-string / identity-eq / nesting /
 `for`-loop iteration. Scalar get/pop narrowing is complete (all scalars,
 incl. wide i64/u64/f64 — Phase 1 carve-out removed). The `[[Arr T] …]`
 constructor + push/set now box wide float/large-int literals (pre-existing
-zero-store bug, fixed Phase 1).
+zero-store bug, fixed Phase 1). **Ref-kind mirror landed (2026-06-10):**
+`arr` ≡ `[Arr dyn]`, and `[Arr str]` / `[Arr dyn]` are legal — ref
+elements use the DYN arr rep (tagged traced slots; no flat-bytes rep win)
+with the element type carried statically as TYPE_ARR + stamp (the
+`[Vec str]` erasure scheme): ctor element checks, `def [Arr str]`
+annotations (the compiler def path now recognizes `[Arr …]` as a compound
+annotation — it errored "def type must be a keyword" before), def-binding
+propagation, arr-get/arr-pop narrowing, push/set expected-type + stamp
+persistence, for-binding narrowing. The plain `[arr …]` ctor and dyn
+push/set also ensure_boxed wide VALUES now (raw wide bits could land in
+tagged dyn slots before). Tests: `arr_ref_elems.jacl`,
+`arr_ref_elem_error.jacl`.
 
 - **Verify state:** `timeout 240 ./build.sh` → 91/91 binaries; full jacl
   suite 474/474. TSAN (`./build.sh --tsan`) race-clean in arr paths; only
