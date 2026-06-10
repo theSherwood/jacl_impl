@@ -1901,8 +1901,11 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
       int tcoll = typer__typed_collection_kind(elem);
       JaclType t = TYPE_DYN;
       uint32_t elem_sidx = UINT32_MAX;
+      uint32_t arr_p_idx = UINT32_MAX;
+      bool is_arr_param = (tcoll == 0) && typer__arr_type(tc, elem, &arr_p_idx);
       if (tcoll == 1) t = TYPE_TYPED_VEC;
       else if (tcoll == 2 || tcoll == 3) t = TYPE_TYPED_MAP;
+      else if (is_arr_param) { t = TYPE_TYPED_ARR; elem_sidx = arr_p_idx; }
       if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
         AstNode* type_arg = (tcoll == 3)
             ? elem->data.command.args[1]
@@ -1921,6 +1924,20 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
               }
             }
           }
+        }
+      }
+      /* Ref-kind element/value types resolve to the PLAIN rep (the
+       * erasure scheme): [Vec str] param → TYPE_VEC + str stamp,
+       * [Vec dyn] → plain vec, [Arr str/dyn] → TYPE_ARR (+stamp),
+       * [Map K str/dyn] → TYPE_MAP + value stamp. Mirrors the def
+       * annotation resolvers. */
+      if (elem_sidx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(elem_sidx)) {
+        JaclType es = JACL_TYPE_IDX_TO_SCALAR(elem_sidx);
+        if (es == TYPE_STR || es == TYPE_DYN) {
+          if (t == TYPE_TYPED_VEC)      t = TYPE_VEC;
+          else if (t == TYPE_TYPED_MAP) t = TYPE_MAP;
+          else if (t == TYPE_TYPED_ARR) t = TYPE_ARR;
+          if (es == TYPE_DYN) elem_sidx = UINT32_MAX;
         }
       }
       fi++;
@@ -3680,6 +3697,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       JaclType arg_t = (JaclType)as[i]->inferred_type;
       if (arg_t == param_t) continue;
       if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+      /* Plain-rep collection params accept their typed siblings (a typed
+       * vec/map/arr IS a vec/map/arr value through dyn; mirrors the
+       * def-annotation acceptance). */
+      if ((param_t == TYPE_VEC && arg_t == TYPE_TYPED_VEC) ||
+          (param_t == TYPE_MAP && arg_t == TYPE_TYPED_MAP) ||
+          (param_t == TYPE_ARR && arg_t == TYPE_TYPED_ARR)) continue;
       /* [Buf N T] → [Ptr T] implicit decay at call sites. The buf's
        * element type must match the param's pointee type exactly, and
        * the element must be C-ABI compatible: scalars, value-structs,

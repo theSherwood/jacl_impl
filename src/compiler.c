@@ -10255,13 +10255,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         AstNode* ct_elem = NULL;
         AstNode* ct_key_elem = NULL;
         int ct_kind = compiler__typed_collection_expr(elem, &ct_elem, &ct_key_elem);
+        /* [Arr T] params share the same shape (single element type +
+         * name); reuse the kind-1 handling below with an arr flag. */
+        AstNode* ct_arr_elem = NULL;
+        bool ct_is_arr = (ct_kind == 0) &&
+                         compiler__arr_type_expr(elem, &ct_arr_elem) &&
+                         ct_arr_elem->type == AST_LIT_STRING;
+        if (ct_is_arr) { ct_kind = 1; ct_elem = ct_arr_elem; }
         if (ct_kind > 0) {
           const char* ename = ct_elem->data.lit_string.value;
           uint32_t elen = ct_elem->data.lit_string.length;
-          uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
-          if (elem_idx == UINT32_MAX) {
-            compiler__error(c, line, col, "unknown element type in typed collection parameter");
-            return;
+          /* Element type: keyword (scalar OR ref kind) or struct name.
+           * Ref kinds (str/dyn) select the PLAIN rep param type with the
+           * element static as a stamp — the erasure scheme; numeric
+           * scalars use the sentinel on the typed rep. */
+          uint32_t elem_idx;
+          bool elem_ref = false;
+          if (is_type_keyword(ename, elen)) {
+            JaclType ekw = type_from_keyword(ename, elen);
+            elem_ref = (ekw == TYPE_STR || ekw == TYPE_DYN);
+            elem_idx = (ekw == TYPE_DYN) ? UINT32_MAX
+                       : COMPILER_SCALAR_TYPE_IDX(ekw);
+          } else {
+            elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
+            if (elem_idx == UINT32_MAX) {
+              compiler__error(c, line, col, "unknown element type in typed collection parameter");
+              return;
+            }
           }
           uint32_t key_idx = UINT32_MAX;
           if (ct_kind == 3) {
@@ -10298,7 +10318,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
               elem->data.lit_string.value, elem->data.lit_string.length);
-          param_types_arr[param_count] = (ct_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+          {
+            JaclType pt;
+            if (elem_ref) {
+              /* Ref-kind element/value → plain-rep param type. */
+              pt = ct_is_arr ? TYPE_ARR : (ct_kind == 1) ? TYPE_VEC : TYPE_MAP;
+            } else {
+              pt = ct_is_arr ? TYPE_TYPED_ARR
+                 : (ct_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+            }
+            param_types_arr[param_count] = pt;
+          }
           param_struct_idxs[param_count] = elem_idx;
           param_key_struct_idxs[param_count] = key_idx;
           param_scope_marks[param_count] = elem->scope_mark;
