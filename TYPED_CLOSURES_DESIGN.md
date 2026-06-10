@@ -1,9 +1,31 @@
 # Design — typed / monomorphized closures
 
-Status: **design, not yet implemented.** Resolves the lambda-boundary technical
+Status: **Phase A in progress.** Resolves the lambda-boundary technical
 debt in `STREAM_TYPING_DEBT.md` (items 1, 3, 4, and 5-by-deletion); pairs with
 typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
 (`c338b99`, `aa81bef`), which is already a partial monomorphization.
+
+**Landed so far (Phase A):**
+1. **Parser** — inline anonymous `proc` literals now parse inside `[...]`
+   (`[proc {x} {…}]`, `[proc {x} type {body}]`); the old `parser.c:373`
+   rejection is lifted. `\` is now demonstrably pure sugar for this shape.
+   Test: `test/jacl/inline_proc_literal.jacl`.
+2. **Transform typed return** — an inline `transform` mapper over a wide
+   (i64/u64/f64) stream is compiled with a **typed return**, not a dyn return:
+   `compiler__compile_hof_builtin` stashes the typer-inferred wide return enc in
+   `c->hof_mapper_ret_enc` just around compiling the mapper; the `HEAD_PROC`
+   path adopts it as `proc_return_type` when no return is declared. So
+   `compiler__emit_return` no longer boxes the wide tail (its box branch is
+   gated on `return_type == TYPE_DYN`), and the matching unbox in the
+   `STREAM_KIND_TRANSFORM` pull (`vm.c`) is removed in lockstep. This kills the
+   per-element box→unbox round-trip (**debt item 3, transform half**) for the
+   dominant numeric idiom. Tests: `stream_transform_wide_return.jacl` (values
+   past INT32_MAX), plus the existing `stream_transform_typed` /
+   `stream_wide_f64_u64` stay green. Suite 484/484, 91/91 binaries.
+
+**Still open in Phase A:** `filter`/`each` monomorphization (filter keeps
+**truthiness** semantics — §5 decided), and full restore-pass removal (debt 4)
+for non-wide element bodies (i32/struct/str); the wide path already drops it.
 
 ---
 
@@ -153,13 +175,14 @@ bound to i64, body compiled wide, HOF pushes wide). Completing it:
    calling convention fixes arity (transform/filter/each = 1); a 2-param literal
    is an arity error via conformance.
 
-### Open sub-question (not yet decided)
+### Resolved sub-question
 
-- **`filter` predicate return type:** with typed predicates we *could* require
-  `[Proc [T] bool]` (strict — a non-bool predicate is an error), or keep the
-  current **truthiness** semantics (`[Proc [T] dyn]` accepted, runtime falsy
-  check). Strict-bool is more in line with the direction but more breaking.
-  Decide before implementing `filter` monomorphization.
+- **`filter` predicate return type:** **DECIDED — keep truthiness.** The
+  predicate stays `[Proc [T] dyn]` with the current runtime falsy check; a
+  non-bool predicate is *not* an error. (Strict `[Proc [T] bool]` was
+  considered and rejected as too breaking for now.) `filter` monomorphization
+  will still type the *input* param (dropping the box-for-call), independent of
+  this return-side policy.
 
 ---
 

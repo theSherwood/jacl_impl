@@ -326,6 +326,7 @@ AstNode* parser__parse_atom(Parser* p) {
 AstNode* parser__parse_expr(Parser* p);
 AstNode* parser__parse_block(Parser* p);
 AstNode* parser__parse_interp_string(Parser* p);
+AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -369,11 +370,27 @@ AstNode* parser__parse_command(Parser* p) {
     return err;
   }
 
-  /* Reject old-syntax forms inside brackets */
+  /* Inline anonymous proc literal: [proc {params} {body}] or
+   * [proc {params} type {body}]. This is an expression position, so only the
+   * ANONYMOUS form is meaningful (a single-use closure value); a named proc is
+   * a definition and belongs at statement level. `\` desugars to exactly this
+   * shape, so allowing it here makes `\` demonstrably pure sugar (TYPED_CLOSURES_DESIGN.md). */
   if (head_token_type == TOKEN_PROC) {
-    AstNode* err = parser__error(p, "proc must use command syntax: proc name {params} {body}", open);
-    parser__sync_bracket(p);
-    return err;
+    if (parser__peek(p)->type != TOKEN_LBRACE) {
+      AstNode* err = parser__error(p,
+          "inline proc must be anonymous: [proc {params} {body}]", open);
+      parser__sync_bracket(p);
+      return err;
+    }
+    AstNode* proc = parser__parse_proc_form(p, head);
+    if (proc->type == AST_ERROR) { parser__sync_bracket(p); return proc; }
+    if (parser__peek(p)->type != TOKEN_RBRACKET) {
+      AstNode* err = parser__error(p, "expected ']' to close inline proc", open);
+      parser__sync_bracket(p);
+      return err;
+    }
+    parser__advance(p); /* consume ']' */
+    return proc;
   }
   if (head_token_type == TOKEN_EXTERN) {
     AstNode* err = parser__error(p, "extern must be used at top level: extern [type] name {params}", open);

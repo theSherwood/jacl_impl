@@ -3059,6 +3059,14 @@ struct Compiler {
                                        (declared types live on AstNode) */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
+  /* Scopes the typed-closure-return optimization (TYPED_CLOSURES_DESIGN.md
+   * Phase A) to inline transform mappers. Set to a wide scalar type-idx enc
+   * (i64/u64/f64) by compiler__compile_hof_builtin just around compiling an
+   * inline `[proc …]`/`\` transform mapper; the HEAD_PROC compile path reads
+   * it to give that mapper a TYPED return so emit_return skips the wide→dyn
+   * box. UINT32_MAX = none (the default for every other proc, which keeps the
+   * dyn-return box). Consumed (reset) once read. */
+  uint32_t         hof_mapper_ret_enc;
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
@@ -3157,6 +3165,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->last_expr_type = TYPE_DYN;
   c->return_type     = TYPE_DYN;
   c->return_struct_idx = UINT32_MAX;
+  c->hof_mapper_ret_enc = UINT32_MAX;
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -5287,12 +5296,28 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   JaclType col_type = (JaclType)args[0]->inferred_type;
   uint32_t col_struct_idx = args[0]->inferred_struct_idx;
   uint32_t col_key_struct_idx = args[0]->inferred_key_struct_idx;
+  /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): when this is a
+   * `transform` over a typed *stream* whose mapper return type infers to a
+   * wide scalar (i64/u64/f64), tell the inline mapper proc to compile with a
+   * TYPED return. Then emit_return won't box the wide tail and the transform
+   * stream-pull won't unbox it — the box/unbox round-trip (STREAM_TYPING_DEBT
+   * item 3) disappears. The condition matches exactly when the transform
+   * stream's elem_idx is wide (out_elem_enc == the OP_TRANSFORM operand), so
+   * the vm-side unbox removal stays sound. Only inline procs reach a wide
+   * out_elem_enc (typer__proc_result_enc returns dyn for var-ref closures). */
+  if (opcode == OP_TRANSFORM && col_type == TYPE_STREAM &&
+      COMPILER_IS_SCALAR_TYPE_IDX(out_elem_enc)) {
+    JaclType rt = COMPILER_TYPE_IDX_TO_SCALAR(out_elem_enc);
+    if (rt == TYPE_I64 || rt == TYPE_U64 || rt == TYPE_F64)
+      c->hof_mapper_ret_enc = out_elem_enc;
+  }
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
     compiler__compile_node(c, args[1]);
     c->in_non_suspending_callback = saved;
   }
+  c->hof_mapper_ret_enc = UINT32_MAX; /* consumed; never leak to later compiles */
   /* Typed collection dispatch: emit typed HOF opcode with type_idx */
   if ((col_type == TYPE_TYPED_VEC || col_type == TYPE_TYPED_MAP) &&
       (opcode == OP_EACH || opcode == OP_TRANSFORM || opcode == OP_FILTER)) {
@@ -9643,6 +9668,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "proc", "3 or 4 arguments", argc);
       return;
     }
+
+    /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): an inline
+     * transform mapper with no DECLARED return adopts the typer-inferred wide
+     * return type stashed by compiler__compile_hof_builtin. This makes
+     * emit_return leave the wide tail unboxed; the matching transform-pull
+     * unbox in vm.c is removed in lockstep. Consume the marker so it can't
+     * affect any sibling proc. The body-tail/return mismatch check below stays
+     * the guard that the inferred return actually equals the body's tail. */
+    if (proc_return_type == TYPE_DYN &&
+        c->hof_mapper_ret_enc != UINT32_MAX &&
+        COMPILER_IS_SCALAR_TYPE_IDX(c->hof_mapper_ret_enc)) {
+      proc_return_type = COMPILER_TYPE_IDX_TO_SCALAR(c->hof_mapper_ret_enc);
+    }
+    c->hof_mapper_ret_enc = UINT32_MAX;
 
     if (args[name_arg_idx]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "proc name must be a string");

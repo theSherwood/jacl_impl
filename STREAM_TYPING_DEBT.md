@@ -53,6 +53,12 @@ the items below are the localized compromises.
 
 ## 3. Per-element box/unbox round-trips at HOF boundaries
 
+- **Status:** ✅ **transform half resolved** (TYPED_CLOSURES_DESIGN.md Phase A).
+  An inline `transform` mapper over a wide (i64/u64/f64) stream now compiles
+  with a typed return, so `emit_return` no longer boxes the wide tail and the
+  transform pull no longer unboxes it — round-trip gone for that path. The
+  **filter half remains** (still boxes the wide element to call the dyn
+  predicate); resolved when `filter` input-param monomorphization lands.
 - **Where:**
   - `transform` branch in `src/vm.c`: the mapper (dyn return) boxes its wide
     result via `compiler__emit_return`, then `transform` immediately unboxes it

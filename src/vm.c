@@ -1734,12 +1734,13 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         vm->ip    = save_ip;
         vm->chunk = save_chunk;
 
-        /* The mapper has a dyn return, so it boxes a wide tail before
-         * returning; unbox back to wide when this transform stream's element
-         * is a wide scalar, so the wide rep flows downstream. */
-        if (vm__elem_idx_is_wide(stream->elem_idx))
-            transformed = vm__stream_to_wide(transformed,
-                            JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
+        /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): an inline
+         * mapper over a wide-element stream is now compiled with a TYPED wide
+         * return (compiler__compile_hof_builtin stashes the enc, HEAD_PROC
+         * adopts it), so emit_return leaves the wide tail unboxed and the
+         * mapper hands back wide bits directly — no box→unbox round-trip. A
+         * wide elem_idx only ever arises from such an inline mapper (var-ref
+         * closures infer dyn), so no re-widening is needed here. */
         *out_value = transformed;
         return STREAM_PULL_VALUE;
     }

@@ -1567,6 +1567,7 @@ struct Compiler {
   JaclType         last_expr_type; /* see compiler.c for documentation */
   JaclType         return_type;
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
+  uint32_t         hof_mapper_ret_enc; /* see compiler.c for documentation */
   ModuleCache*     module_cache;
   Module*          current_module;
   ImportStack*     import_stack;

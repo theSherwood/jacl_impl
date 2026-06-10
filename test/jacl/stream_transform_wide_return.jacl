@@ -1,0 +1,17 @@
+# expect: 6000000000
+# expect: ok
+# Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): an inline transform
+# mapper over a wide i64 stream now compiles with a TYPED i64 return, so the
+# mapper hands back wide bits directly (no wide->dyn box, no transform-pull
+# unbox). This test pushes values past INT32_MAX so a regression to the old
+# i32-for-small box-back (STREAM_TYPING_DEBT item 2) — or any tag confusion at
+# the mapper boundary — would corrupt the result instead of silently matching.
+proc main {} {
+  mut i64 s 0
+  # range 1 4 -> 1,2,3 ; *1000000000 -> 1e9, 2e9, 3e9 (two exceed INT32_MAX).
+  for [transform [range 1 4] [\ * $it 1000000000]] x { set s [+ $s $x] }
+  print $s                                  # 6_000_000_000
+  for [transform [range 1 4] [\ * $it 1000000000]] y { assert-type $y i64 }
+  print "ok"
+}
+main
