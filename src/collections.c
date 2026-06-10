@@ -159,6 +159,28 @@ uint32_t jacl_val_hash(JaclVal v) {
     JaclRopeString* rs = jacl_as_rope_string(v);
     return rs->hash;
   }
+  /* Boxed wide scalars (heap-allocated i64/u64/f64): hash the VALUE, not
+   * the pointer — two separately boxed i64(1)s must collide so they work
+   * as map keys (jacl_val_eq compares them by value, below). */
+  if (tag == JACL_TAG_I64 || tag == JACL_TAG_U64) {
+    uint64_t x = (tag == JACL_TAG_I64)
+        ? (uint64_t)jacl_as_i64(v) : jacl_as_u64(v);
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDull;
+    x ^= x >> 33;
+    return (uint32_t)x;
+  }
+  if (tag == JACL_TAG_F64) {
+    double d = jacl_as_f64(v);
+    if (d == 0.0) d = 0.0;  /* normalize -0.0 to +0.0 */
+    uint64_t x;
+    memcpy(&x, &d, sizeof(x));
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDull;
+    x ^= x >> 33;
+    return (uint32_t)x;
+  }
+
   if (tag == JACL_TAG_VECTOR) {
     /* O(1) cached structural hash from RRB root */
     jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(v);
@@ -224,6 +246,13 @@ bool jacl_val_eq(JaclVal a, JaclVal b) {
 
   /* Different type tags → not equal */
   if (tag_a != tag_b) return false;
+
+  /* Boxed wide scalars: compare by VALUE (the payload is a heap pointer;
+   * pointer identity would make every boxed i64/u64/f64 unequal to every
+   * other, breaking them as map keys). */
+  if (tag_a == JACL_TAG_I64) return jacl_as_i64(a) == jacl_as_i64(b);
+  if (tag_a == JACL_TAG_U64) return jacl_as_u64(a) == jacl_as_u64(b);
+  if (tag_a == JACL_TAG_F64) return jacl_as_f64(a) == jacl_as_f64(b);
 
   /* Vector structural equality */
   if (tag_a == JACL_TAG_VECTOR) {

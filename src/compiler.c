@@ -6753,6 +6753,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Scalar value type: [Map i64], [Map f64] etc. — dyn keys, scalar values. */
     if (is_type_keyword(type_name_str, type_name_len)) {
       JaclType val_t = type_from_keyword(type_name_str, type_name_len);
+      /* Ref-kind value type: [Map str] / [Map dyn] — dyn keys, ref values.
+       * Tagged heap values have no raw-bytes rep win, so these use the PLAIN
+       * traced map rep; the value type is static only (typer stamp + element
+       * checks here). [Map dyn] compiles to exactly a plain map literal. */
+      if (val_t == TYPE_DYN || val_t == TYPE_STR) {
+        if (argc % 2 != 0) {
+          compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
+          return;
+        }
+        if (argc / 2 > 255) {
+          compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
+          return;
+        }
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+          if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
+          compiler__ensure_boxed(c, line);
+          if (val_t == TYPE_STR && (i % 2 == 1)) {
+            JaclType arg_t = (JaclType)args[i]->inferred_type;
+            if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
+              char err[160];
+              jacl_format_typed_map_value(err, sizeof(err),
+                  type_name_str, type_name_len, i / 2, true, arg_t);
+              compiler__error(c, line, col, err);
+              return;
+            }
+          }
+        }
+        compiler__emit_byte(c, OP_MAP, line);
+        compiler__emit_byte(c, (uint8_t)(argc / 2), line);
+        c->last_expr_type = TYPE_MAP;
+        return;
+      }
       if (!compiler__is_typed_collection_scalar(val_t)) {
         char err[160];
         snprintf(err, sizeof(err),
@@ -6846,23 +6879,97 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t key_name_len = _coll_key_elem->data.lit_string.length;
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
 
-    /* Resolve key type: scalar keyword OR struct name. */
-    JaclType key_t = TYPE_DYN;
-    uint32_t key_type_idx;
-    bool key_is_scalar = false;
-    if (is_type_keyword(key_name_str, key_name_len)) {
-      key_t = type_from_keyword(key_name_str, key_name_len);
-      if (!compiler__is_typed_collection_scalar(key_t)) {
-        char err[160];
+    /* Ref-kind VALUE type ([Map K str] / [Map K dyn]): tagged heap values
+     * have no raw-bytes rep win, so the map uses the PLAIN traced rep; the
+     * key/value types are static only (typer stamps + checks here). Keys on
+     * the plain rep are one tagged slot, so numeric scalars, str, and dyn
+     * keys all work; bare struct keys have no tagged rep and stay a typed-
+     * map-only feature. [Map dyn dyn] IS the plain map. */
+    bool _k3_key_kw = is_type_keyword(key_name_str, key_name_len);
+    bool _k3_val_kw = is_type_keyword(val_name_str, val_name_len);
+    JaclType _k3_key_t = _k3_key_kw
+        ? type_from_keyword(key_name_str, key_name_len) : TYPE_DYN;
+    JaclType _k3_val_t = _k3_val_kw
+        ? type_from_keyword(val_name_str, val_name_len) : TYPE_DYN;
+    if (_k3_val_kw && (_k3_val_t == TYPE_STR || _k3_val_t == TYPE_DYN)) {
+      bool key_ref = _k3_key_kw &&
+                     (_k3_key_t == TYPE_STR || _k3_key_t == TYPE_DYN);
+      bool key_num = _k3_key_kw &&
+                     compiler__is_typed_collection_scalar(_k3_key_t);
+      if (!key_ref && !key_num) {
+        char err[192];
         snprintf(err, sizeof(err),
-                 "[Map %.*s %.*s]: only numeric value-type scalars supported as keys",
+                 "[Map %.*s %.*s]: a ref-kind value type (str/dyn) uses the "
+                 "plain map rep; keys must be a numeric scalar, str, or dyn",
                  (int)key_name_len, key_name_str,
                  (int)val_name_len, val_name_str);
         compiler__error(c, line, col, err);
         return;
       }
-      key_type_idx = COMPILER_SCALAR_TYPE_IDX(key_t);
-      key_is_scalar = true;
+      if (argc % 2 != 0) {
+        compiler__error(c, line, col, "[Map K V ...] requires an even number of arguments (key-value pairs)");
+        return;
+      }
+      if (argc / 2 > 255) {
+        compiler__error(c, line, col, "[Map K V ...] too many initial pairs (max 255)");
+        return;
+      }
+      for (uint32_t i = 0; i < argc; i++) {
+        bool is_key = (i % 2 == 0);
+        compiler__compile_node(c, args[i]);
+        if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
+        compiler__ensure_boxed(c, line);
+        JaclType arg_t = (JaclType)args[i]->inferred_type;
+        bool ok = true;
+        if (is_key) {
+          if (_k3_key_t != TYPE_DYN)
+            ok = (arg_t == _k3_key_t || arg_t == TYPE_DYN);
+        } else {
+          if (_k3_val_t == TYPE_STR)
+            ok = (arg_t == TYPE_STR || arg_t == TYPE_DYN);
+        }
+        if (!ok) {
+          char err[160];
+          jacl_format_typed_map_kv(err, sizeof(err),
+              key_name_str, key_name_len,
+              val_name_str, val_name_len, i / 2, !is_key);
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+      compiler__emit_byte(c, OP_MAP, line);
+      compiler__emit_byte(c, (uint8_t)(argc / 2), line);
+      c->last_expr_type = TYPE_MAP;
+      return;
+    }
+
+    /* Resolve key type: scalar keyword (numeric, str, or explicit dyn) OR
+     * struct name. str keys are rep-free on the typed map: keys are one
+     * tagged GC-traced slot (vm__pop_typed_elem pops tagged for scalar
+     * sentinels; gc_collect traces key_stride==1 slots). Explicit dyn keys
+     * are exactly the [Map V] dyn-key form (0xFFFF). */
+    JaclType key_t = TYPE_DYN;
+    uint32_t key_type_idx;
+    bool key_is_scalar = false;
+    if (_k3_key_kw) {
+      key_t = _k3_key_t;
+      if (key_t == TYPE_DYN) {
+        key_type_idx = 0xFFFF;
+      } else if (key_t == TYPE_STR) {
+        key_type_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_STR);
+        key_is_scalar = true;
+      } else if (!compiler__is_typed_collection_scalar(key_t)) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s %.*s]: only numeric scalars, str, or dyn supported as keys",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      } else {
+        key_type_idx = COMPILER_SCALAR_TYPE_IDX(key_t);
+        key_is_scalar = true;
+      }
     } else {
       key_type_idx = struct_registry__find(reg, key_name_str, key_name_len);
       if (key_type_idx == UINT32_MAX) {
@@ -6919,10 +7026,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* key */
       compiler__compile_node(c, args[i * 2]);
       AstNode* k_node = args[i * 2];
-      bool k_ok = key_is_scalar
-        ? ((JaclType)k_node->inferred_type == key_t)
-        : ((JaclType)k_node->inferred_type == TYPE_STRUCT &&
-           k_node->inferred_struct_idx == key_type_idx);
+      bool k_ok;
+      if (key_type_idx == 0xFFFF) {
+        k_ok = true;  /* explicit dyn keys: any tagged value */
+      } else if (key_is_scalar) {
+        JaclType kt = (JaclType)k_node->inferred_type;
+        /* str keys are stored tagged — dyn flow-in is rep-safe. */
+        k_ok = (kt == key_t) || (key_t == TYPE_STR && kt == TYPE_DYN);
+      } else {
+        k_ok = ((JaclType)k_node->inferred_type == TYPE_STRUCT &&
+                k_node->inferred_struct_idx == key_type_idx);
+      }
       if (!k_ok) {
         char err[160];
         jacl_format_typed_map_kv(err, sizeof(err),
@@ -12604,8 +12718,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
+    /* Plain-rep maps key on tagged values: box a wide key so the lookup tag
+     * matches the (boxed) ctor-stored key (stamped [Map i64 str] keys). */
+    compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_MAP_GET, line);
     c->last_expr_type = TYPE_DYN;
+    if ((JaclType)args[0]->inferred_type == TYPE_MAP &&
+        args[0]->inferred_struct_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+      /* Stamped ref-value map ([Map K str]): result is statically str. */
+      c->last_expr_type = TYPE_STR;
+    }
     return;
   }
 
@@ -12632,6 +12754,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
     compiler__emit_byte(c, OP_MAP_HAS, line);
     c->last_expr_type = TYPE_BOOL;
     return;
@@ -12683,8 +12806,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn map")) return;
+    compiler__ensure_boxed(c, line);  /* tagged value */
     compiler__emit_byte(c, OP_MAP_SET, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -12714,6 +12839,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
     compiler__emit_byte(c, OP_MAP_REMOVE, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -12730,10 +12856,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       compiler__emit_byte(c, OP_TYPED_MAP_KEYS, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      if (key_type_idx != UINT32_MAX) {
-        c->last_expr_type = TYPE_TYPED_VEC;  /* struct keys → typed vec */
+      if (key_type_idx == UINT32_MAX ||
+          key_type_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+        /* dyn or str keys → plain traced vec (str keys can't live in
+         * GC-opaque typed-vec storage; static type is [Vec str]). */
+        c->last_expr_type = TYPE_VEC;
       } else {
-        c->last_expr_type = TYPE_VEC;  /* dyn keys → dyn vec */
+        c->last_expr_type = TYPE_TYPED_VEC;  /* struct/numeric keys → typed vec */
       }
       return;
     }

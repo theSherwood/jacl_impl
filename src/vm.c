@@ -13669,8 +13669,12 @@ interpret_done:
         jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
         jacl_typed_map_iter_result ir;
 
-        if (key_type_idx == 0xFFFF) {
-          /* Dyn keys → return dyn vec */
+        if (key_type_idx == 0xFFFF ||
+            key_type_idx == (uint16_t)(0xFF00 + TYPE_STR)) {
+          /* Dyn or str keys → plain traced vec. Keys are one tagged slot;
+           * str pointers must live in traced leaves (typed-vec storage is
+           * GC-opaque), so a str-keyed map's keys vec is a plain vec — the
+           * static type is [Vec str] via the typer stamp. */
           jacl_vec_root* vec = jacl_vec_empty();
           for (;;) {
             ir = jacl_typed_map_next_leaf(&it);

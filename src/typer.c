@@ -1219,6 +1219,26 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
             vec_ref_ann = true;
           }
         }
+        /* Ref-kind VALUE [Map ...] annotations (def [Map str] m /
+         * def [Map K str] m / def [Map str dyn] m): plain-map rep —
+         * resolve to TYPE_MAP; stamps inherit from the RHS ctor via the
+         * TYPE_MAP def arm (declared value stamp wins below). */
+        if (!vec_ref_ann && (tcoll == 2 || tcoll == 3)) {
+          AstNode* vn = (tcoll == 3) ? args[0]->data.command.args[1]
+                                     : args[0]->data.command.args[0];
+          if (vn && vn->type == AST_LIT_STRING &&
+              is_type_keyword(vn->data.lit_string.value,
+                              vn->data.lit_string.length)) {
+            JaclType avt = type_from_keyword(vn->data.lit_string.value,
+                                             vn->data.lit_string.length);
+            if (avt == TYPE_STR || avt == TYPE_DYN) {
+              declared_type = TYPE_MAP;
+              declared_struct_idx = (avt == TYPE_STR)
+                  ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+              vec_ref_ann = true;  /* reuse the skip-typed-resolution gate */
+            }
+          }
+        }
         if (!vec_ref_ann) {
           if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
           else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
@@ -1495,6 +1515,23 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   if (effective == TYPE_VEC &&
       value_node->inferred_struct_idx != UINT32_MAX) {
     struct_idx = value_node->inferred_struct_idx;
+  }
+  /* Ref-kind [Map ...] forms ([Map str], [Map K str], [Map str dyn]):
+   * plain-map rep carrying static key/value stamps — propagate both into
+   * the binding so var-ref reads keep them (mirrors the [Vec str] arm). */
+  if (effective == TYPE_DYN &&
+      (JaclType)value_node->inferred_type == TYPE_MAP &&
+      (value_node->inferred_struct_idx != UINT32_MAX ||
+       value_node->inferred_key_struct_idx != UINT32_MAX)) {
+    effective = TYPE_MAP;
+  }
+  if (effective == TYPE_MAP) {
+    if (declared_struct_idx != UINT32_MAX)
+      struct_idx = declared_struct_idx;  /* def [Map K str] annotation wins */
+    else if (value_node->inferred_struct_idx != UINT32_MAX)
+      struct_idx = value_node->inferred_struct_idx;
+    if (value_node->inferred_key_struct_idx != UINT32_MAX)
+      key_struct_idx = value_node->inferred_key_struct_idx;
   }
   /* Nested compound element ([Vec [Vec i64]] …): the AST stamp is
    * UINT32_MAX by the cross-registry rule, so re-derive the TYPER-SIDE
@@ -3427,7 +3464,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
           }
         }
-      } else if (recv_t == TYPE_TYPED_MAP) {
+      } else if (recv_t == TYPE_TYPED_MAP || recv_t == TYPE_MAP) {
+        /* TYPE_MAP with stamps = ref-kind [Map ...] form on the plain rep
+         * ([Map str], [Map i64 str]): same static key/value narrowing as
+         * the typed rep. Unstamped plain maps have UINT32_MAX idxs and
+         * fall through to dyn. */
         bool is_key_slot =
             (mutator_hid == HEAD_MAP_REMOVE ||
              mutator_hid == HEAD_MAP_GET ||
@@ -3794,6 +3835,65 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
         }
       }
+      /* Ref-kind VALUE [Map ...] forms ([Map str], [Map K str], [Map K dyn]):
+       * plain traced map rep; the key/value types live statically as
+       * TYPE_MAP + stamps (value on inferred_struct_idx, key on
+       * inferred_key_struct_idx) — the [Vec str] scheme. [Map dyn dyn] IS
+       * the plain map (no stamps). Mirrors the compiler's plain-rep route. */
+      if (tc_kind == 2 || tc_kind == 3) {
+        AstNode* vn = (tc_kind == 3) ? head->data.command.args[1]
+                                     : head->data.command.args[0];
+        AstNode* kn = (tc_kind == 3) ? head->data.command.args[0] : NULL;
+        if (vn && vn->type == AST_LIT_STRING &&
+            is_type_keyword(vn->data.lit_string.value,
+                            vn->data.lit_string.length)) {
+          JaclType ref_vt = type_from_keyword(vn->data.lit_string.value,
+                                              vn->data.lit_string.length);
+          if (ref_vt == TYPE_STR || ref_vt == TYPE_DYN) {
+            node->inferred_type = TYPE_MAP;
+            node->inferred_struct_idx = (ref_vt == TYPE_STR)
+                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+            JaclType ref_kt = TYPE_DYN;
+            if (kn && kn->type == AST_LIT_STRING &&
+                is_type_keyword(kn->data.lit_string.value,
+                                kn->data.lit_string.length)) {
+              ref_kt = type_from_keyword(kn->data.lit_string.value,
+                                         kn->data.lit_string.length);
+              if (ref_kt != TYPE_DYN)
+                node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(ref_kt);
+            }
+            /* Per-pair checks (dyn flow-in left to the compiler's mirror). */
+            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+              bool is_key = (ei % 2 == 0);
+              JaclType at = (JaclType)node->data.command.args[ei]->inferred_type;
+              if (at == TYPE_DYN) continue;
+              bool ok = true;
+              if (is_key) {
+                if (ref_kt != TYPE_DYN) ok = (at == ref_kt);
+              } else {
+                if (ref_vt == TYPE_STR) ok = (at == TYPE_STR);
+              }
+              if (!ok) {
+                char err[224];
+                if (tc_kind == 3) {
+                  jacl_format_typed_map_kv(err, sizeof(err),
+                      kn->data.lit_string.value, kn->data.lit_string.length,
+                      vn->data.lit_string.value, vn->data.lit_string.length,
+                      ei / 2, !is_key);
+                } else {
+                  jacl_format_typed_map_value(err, sizeof(err),
+                      vn->data.lit_string.value, vn->data.lit_string.length,
+                      ei / 2, true, at);
+                }
+                typer__error(tc, node->data.command.args[ei]->start.line,
+                             node->data.command.args[ei]->start.column, err);
+                break;
+              }
+            }
+            return;
+          }
+        }
+      }
       node->inferred_type = is_arr_ctor ? TYPE_TYPED_ARR
                           : (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
       AstNode* elem_node = (tc_kind == 3)
@@ -3822,8 +3922,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           const char* nm = key_node->data.lit_string.value;
           uint32_t    nl = key_node->data.lit_string.length;
           if (is_type_keyword(nm, nl)) {
-            node->inferred_key_struct_idx =
-                JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+            /* Explicit dyn keys ([Map dyn V]) are the [Map V] dyn-key form:
+             * no key stamp (UINT32_MAX ≡ the VM's 0xFFFF convention). */
+            JaclType kkw = type_from_keyword(nm, nl);
+            if (kkw != TYPE_DYN)
+              node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(kkw);
           } else {
             for (uint32_t si = 0; si < tc->struct_count; si++) {
               if (tc->structs[si].name_len == nl &&
@@ -3869,8 +3972,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           key_t = key_is_scalar
                   ? type_from_keyword(key_nm, key_nl) : TYPE_DYN;
           key_sidx = node->inferred_key_struct_idx;
+          /* str keys are first-class on the typed rep (1 tagged traced
+           * slot) — include them in the static key checks. Explicit dyn
+           * keys have no stamp and skip checks. */
           key_known = key_is_scalar
-              ? typer__is_typed_collection_scalar(key_t)
+              ? (typer__is_typed_collection_scalar(key_t) ||
+                 key_t == TYPE_STR)
               : (key_sidx != UINT32_MAX &&
                  !JACL_IS_SCALAR_TYPE_IDX(key_sidx));
         }
@@ -4017,19 +4124,30 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_struct_idx = recv->inferred_struct_idx;
             node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
           } else if (recv_t == TYPE_MAP) {
+            /* Stamped ref-kind maps keep their static key/value types
+             * through set/remove (the result is the same plain map rep). */
             node->inferred_type = TYPE_MAP;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
           }
           return;
         case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
           if (recv_t == TYPE_TYPED_MAP) {
             /* keys: dyn-keyed maps return a plain vec (matches the
              * runtime path in OP_TYPED_MAP_KEYS keyed on
-             * key_type_idx == 0xFFFF); only struct/scalar-typed keys
-             * yield a typed vec. vals on a TYPE_TYPED_MAP always have
-             * a declared value type, so they're always typed-vec. */
+             * key_type_idx == 0xFFFF); str keys return a PLAIN vec too
+             * (str can't live in GC-opaque typed-vec storage) but carry
+             * the [Vec str] stamp. Struct/numeric keys yield a typed
+             * vec. vals on a TYPE_TYPED_MAP always have a declared
+             * value type, so they're always typed-vec. */
             if (hid == HEAD_MAP_KEYS &&
                 recv->inferred_key_struct_idx == UINT32_MAX) {
               node->inferred_type = TYPE_VEC;
+            } else if (hid == HEAD_MAP_KEYS &&
+                       recv->inferred_key_struct_idx ==
+                           JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+              node->inferred_type = TYPE_VEC;
+              node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
             } else {
               node->inferred_type = TYPE_TYPED_VEC;
               node->inferred_struct_idx =
@@ -4037,7 +4155,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                                          : recv->inferred_struct_idx;
             }
           } else if (recv_t == TYPE_MAP) {
+            /* Plain rep: result is a plain vec; a str stamp on the
+             * relevant side ([Map str V] keys / [Map K str] vals)
+             * propagates as [Vec str]. Other stamps (numeric plain-rep
+             * keys) stay unstamped — the vec holds tagged values. */
             node->inferred_type = TYPE_VEC;
+            uint32_t side_idx =
+                (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
+                                       : recv->inferred_struct_idx;
+            if (side_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR))
+              node->inferred_struct_idx = side_idx;
           }
           return;
         case HEAD_VEC_GET:
@@ -4155,6 +4282,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;
             }
+          } else if (recv_t == TYPE_MAP &&
+                     recv->inferred_struct_idx ==
+                         JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+            /* Stamped ref-value map ([Map K str]): the value narrows. */
+            node->inferred_type = TYPE_STR;
           }
           return;
         case HEAD_RESET:

@@ -209,13 +209,34 @@ pulling on them; revisit when one shows up.
   [Vec T]] v` annotations (both typer annotation resolvers patched — the
   def-handler site at ~typer.c:1190 AND typer__resolve_return_type),
   vec-get narrowing on stamped vecs, vec-push/vec-set element expected-type
-  on stamped vecs. Test: `vec_ref_tail.jacl`. **Still open:** the same
-  generalization for [Map K V] keys/values ([Map str V] — string keys! the
-  typed-map HAMT already traces 1-slot keys, so the erasure model applies
-  directly), [Arr T] (arr ≡ [Arr dyn] mirror), hard vec-push element
-  CHECKS (currently expected-type narrowing only), proc-param [Vec str]
-  annotations, and vec-get narrowing through nested (shape-carried)
-  bindings.
+  on stamped vecs. Test: `vec_ref_tail.jacl`. **[Map K V] ref-kind
+  generalization LANDED (2026-06-10, foundation):** str (and explicit dyn)
+  KEYS are first-class on the TYPED map rep — keys are one tagged GC-traced
+  slot, so the lift was static-only (`[Map str i64]`, key checks, map-keys →
+  plain `[Vec str]` both reps — VM OP_TYPED_MAP_KEYS routes str-sentinel
+  keys to the traced vec). Ref-kind VALUES (`[Map K str]` / `[Map K dyn]` /
+  `[Map str]`) select the PLAIN traced map rep with key/value stamps
+  (TYPE_MAP + inferred_key_struct_idx/inferred_struct_idx — the [Vec str]
+  erasure scheme): ctor checks both reps, def propagation + `def [Map K
+  str]` annotations, map-get value narrowing, set/remove stamp persistence,
+  keys/vals `[Vec str]` stamps, key/value expected-type narrowing. Numeric
+  plain-rep keys box consistently (i64 literal keys at ctor and lookup
+  sites); en route two latent runtime bugs were fixed: OP_TYPED_MAP_EQ
+  scalar-sentinel OOB (segfault on `== [Map i64] ...`, prior commit) and
+  jacl_val_hash/jacl_val_eq comparing boxed wide scalars (i64/u64/f64) by
+  POINTER — they now hash/compare by value, making boxed wide ints work as
+  dyn-map keys everywhere. Tests: `map_ref_kinds.jacl`,
+  `map_ref_kind_error.jacl`, `typed_map_scalar_eq.jacl`. **Map tail still
+  open:** struct keys with ref values (no tagged rep for bare structs —
+  compile error), nested compound VALUES (`[Map str [Vec i64]]` — needs the
+  typer-side shape scheme HEAD_FOR uses for vecs), proc-param/extern `[Map
+  str ...]` annotations + typer__resolve_return_type, for-loop narrowing
+  over stamped maps, and cross-width numeric key identity (an i32-tagged
+  dyn key never matches a stored boxed-i64 key — same-tag identity only;
+  belongs to the numeric-tower work). **Still open (vec):** [Arr T] (arr ≡
+  [Arr dyn] mirror), hard vec-push element CHECKS (currently expected-type
+  narrowing only), proc-param [Vec str] annotations, and vec-get narrowing
+  through nested (shape-carried) bindings.
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

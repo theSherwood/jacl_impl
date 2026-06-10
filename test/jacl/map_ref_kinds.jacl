@@ -1,0 +1,77 @@
+# expect: 1
+# expect: 3
+# expect: true
+# expect: 3
+# expect: true
+# expect: ex
+# expect: zed
+# expect: 3
+# expect: one
+# expect: 1
+# expect: seven
+# expect: 9
+# expect: b
+# expect: 5
+# expect: 3
+# expect: ok
+# Ref-kind [Map K V] generalization. str KEYS are first-class on the TYPED
+# map rep (keys are one tagged GC-traced slot — rep-free); ref-kind VALUES
+# (str/dyn) select the PLAIN traced map rep with the key/value types carried
+# statically as stamps (the [Vec str] erasure scheme). [Map dyn dyn] IS the
+# plain map.
+proc main {} {
+  # 1. str keys on the typed rep: [Map str i64]
+  def m [[Map str i64] "a" 1 "b" 2]
+  print [map-get $m "a"]
+  def m2 [map-set $m "c" 3]
+  print [map-get $m2 "c"]
+  print [map-has $m2 "b"]
+  print [map-len $m2]
+  print [== $m [[Map str i64] "a" 1 "b" 2]]
+
+  # 2. ref values -> plain rep: [Map str str]; map-get narrows to str
+  def s [[Map str str] "x" "ex" "y" "why"]
+  [assert-type [map-get $s "x"] str]
+  print [map-get $s "x"]
+  def s2 [map-set $s "z" "zed"]
+  print [map-get $s2 "z"]
+  print [map-len $s2]
+
+  # 3. numeric keys + ref values ([Map i64 str]) -> plain rep
+  def n [[Map i64 str] 1 "one" 2 "two"]
+  [assert-type [map-get $n 1] str]
+  print [map-get $n 1]
+
+  # 4. [Map dyn dyn] is the plain map
+  def d [[Map dyn dyn] "k" 1]
+  print [map-get $d "k"]
+
+  # 5. [Map str] (kind 2: dyn keys, str values) -> plain rep
+  def v [[Map str] 7 "seven"]
+  print [map-get $v 7]
+
+  # 6. explicit dyn keys with a value-type value ([Map dyn i64]) == [Map i64]
+  def t [[Map dyn i64] "q" 9]
+  print [map-get $t "q"]
+
+  # 7. annotation: def [Map str str] resolves to the plain rep
+  def [Map str str] am [[Map str str] "a" "b"]
+  print [map-get $am "a"]
+
+  # 8. map-keys of a str-keyed TYPED map -> plain [Vec str]; for narrows
+  def km [[Map str i64] "hello" 5]
+  for [map-keys $km] k {
+    [assert-type $k str]
+    print [length $k]
+  }
+
+  # 9. map-vals of [Map K str] (plain rep) -> [Vec str]; for narrows
+  def vm [[Map i64 str] 1 "abc"]
+  for [map-vals $vm] vv {
+    [assert-type $vv str]
+    print [length $vv]
+  }
+
+  print "ok"
+}
+[main]

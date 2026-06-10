@@ -921,9 +921,18 @@ static int test_typed_map_scalar_value_type_error(void) {
 }
 
 static int test_typed_map_scalar_unsupported_str(void) {
+  /* Ref-kind value types ([Map str] / [Map dyn]) are legal since the
+   * [Map K V] ref-kind generalization: they use the PLAIN traced map rep
+   * with the value type carried statically. Construction + get work; a
+   * concrete non-str value is a compile-time element error. */
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def m [[Map str] \"a\" \"hi\"]\n"
+    "print [map-get $m \"a\"]",
+    &cap, "hi\n"));
   ASSERT(run_err(
-    "def m [[Map str] \"a\" \"hi\"]\n",
-    "only value-type scalars supported"));
+    "def m [[Map str] \"a\" 42]\n",
+    "value 0 is not a str"));
   TEST_PASS();
 }
 

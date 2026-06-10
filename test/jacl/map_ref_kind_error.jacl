@@ -1,0 +1,8 @@
+# expect-error: value 1 is not a
+# Ref-kind map ctor checks: a concrete non-str VALUE in [Map str str] is a
+# compile error (pair index 1).
+proc main {} {
+  def s [[Map str str] "x" "ex" "y" 42]
+  print $s
+}
+main
