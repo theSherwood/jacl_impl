@@ -1,0 +1,11 @@
+# expect-error: cannot store unboxed i64 in dyn arr
+# No-autobox rule: dyn slots hold tagged values; a wide scalar (i64/u64/f64)
+# has no tagged form, so storing one in a dyn collection requires an explicit
+# [box ...] — the compiler refuses to coerce silently.
+proc main {} {
+  def i64 m 1000000
+  def i64 big [* $m 5000]
+  def a [arr]
+  [arr-push $a $big]
+}
+main

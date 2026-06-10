@@ -5164,6 +5164,48 @@ static bool compiler__reject_bare_typed(Compiler* c, AstNode* node,
   return false;
 }
 
+/* Strict no-autobox rule at dyn STORAGE sinks: dyn slots hold tagged
+ * values and a wide scalar (i64/u64/f64) has no tagged form — implicitly
+ * boxing it would silently coerce a statically-typed value to dyn,
+ * erasing the intent the annotation declared. The user must either use a
+ * typed collection or write [box ...] explicitly (the box IS the dyn
+ * form of a wide scalar). State-dependent like ensure_boxed: reads
+ * c->last_expr_type, the representation actually on the stack. Declared
+ * typed slots (e.g. [[Arr i64]] stores, [Map i64 str] keys) are NOT dyn
+ * sinks — their internal box/byte-pack bridging preserves the static
+ * type and stays. */
+static bool compiler__reject_wide_dyn(Compiler* c, uint32_t line,
+                                      uint32_t col, const char* context) {
+  if (is_unboxed_type(c->last_expr_type)) {
+    char err_msg[160];
+    snprintf(err_msg, sizeof(err_msg),
+             "cannot store unboxed %s in %s; use a typed collection or "
+             "[box ...] to box it explicitly",
+             type_name(c->last_expr_type), context);
+    compiler__error(c, line, col, err_msg);
+    return true;
+  }
+  return false;
+}
+
+/* Key argument flowing into a PLAIN-rep map op. A receiver stamped with a
+ * DECLARED wide-numeric key type ([Map i64 str] — plain rep because the
+ * value is a ref kind) boxes the key as the map's internal rep bridging:
+ * the static key type is preserved by the stamp, so this is not a dyn
+ * coercion. An undeclared (dyn-key) receiver is a dyn sink — wide keys
+ * are rejected per the no-autobox rule. */
+static bool compiler__plain_map_key_sink(Compiler* c, AstNode* recv,
+                                         uint32_t line, uint32_t col) {
+  uint32_t kidx = recv->inferred_key_struct_idx;
+  if ((JaclType)recv->inferred_type == TYPE_MAP &&
+      kidx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(kidx) &&
+      is_unboxed_type(JACL_TYPE_IDX_TO_SCALAR(kidx))) {
+    compiler__ensure_boxed(c, line);
+    return false;
+  }
+  return compiler__reject_wide_dyn(c, line, col, "dyn-keyed map");
+}
+
 /* --- Internal: Map dynamic opcode to typed opcode for a given type --- */
 
 uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
@@ -6558,7 +6600,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < argc; i++) {
           compiler__compile_node(c, args[i]);
           if (compiler__reject_bare_typed(c, args[i], line, col, "dyn arr")) return;
-          compiler__ensure_boxed(c, line);
+          if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
           if (et == TYPE_STR) {
             JaclType arg_t = (JaclType)args[i]->inferred_type;
             if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
@@ -6719,6 +6761,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         for (uint32_t i = 0; i < argc; i++) {
           compiler__compile_node(c, args[i]);
+          if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
           if (elem_t == TYPE_STR) {
             JaclType arg_t = (JaclType)args[i]->inferred_type;
             if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
@@ -6854,7 +6897,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         bool is_key = (i % 2 == 0);
         compiler__compile_node(c, args[i]);
         if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
-        compiler__ensure_boxed(c, line);
+        if (is_key && key_num && is_unboxed_type(_k3_key_t)) {
+          /* Declared wide-numeric key ([Map i64 str]): boxing is the plain
+           * rep's internal bridging — the stamp keeps the static key type. */
+          compiler__ensure_boxed(c, line);
+        } else if (compiler__reject_wide_dyn(c, line, col, "dyn map")) {
+          return;
+        }
         JaclType arg_t = (JaclType)args[i]->inferred_type;
         bool ok = true;
         if (is_key) {
@@ -6964,6 +7013,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       AstNode* k_node = args[i * 2];
       bool k_ok;
       if (key_type_idx == 0xFFFF) {
+        /* dyn-key slot: a dyn sink — wide keys are rejected, not boxed. */
+        if (compiler__reject_wide_dyn(c, line, col, "dyn-keyed map")) return;
         k_ok = true;  /* explicit dyn keys: any tagged value */
       } else if (key_is_scalar) {
         JaclType kt = (JaclType)k_node->inferred_type;
@@ -7026,6 +7077,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         } else {
           compiler__compile_node(c, args[i]);
           if (compiler__reject_bare_typed(c, args[i], line, col, "dyn vec")) return;
+          if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
           fixed_args++;
         }
       }
@@ -11991,6 +12043,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (compiler__reject_bare_typed(c, args[i], line, col, "dyn vec")) return;
+      if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -12052,7 +12105,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (compiler__reject_bare_typed(c, args[i], line, col, "dyn arr")) return;
-      compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
+      if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
     }
     compiler__emit_byte(c, OP_ARR, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -12136,7 +12189,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
-    compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
+    if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
     compiler__emit_byte(c, OP_ARR_PUSH, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -12170,7 +12223,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
-    compiler__ensure_boxed(c, line);  /* dyn slots are tagged — box wide */
+    if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
     compiler__emit_byte(c, OP_ARR_SET, line);
     c->last_expr_type = TYPE_ARR;
     return;
@@ -12551,6 +12604,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn vec")) return;
+    if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -12578,6 +12632,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn vec")) return;
+    if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_SET, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -12642,6 +12697,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
+      if (compiler__reject_wide_dyn(c, line, col, "dyn map")) return;
     }
     compiler__emit_byte(c, OP_MAP, line);
     compiler__emit_byte(c, (uint8_t)(argc / 2), line);
@@ -12666,6 +12722,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       } else {
         compiler__compile_node(c, args[1]);
+        /* dyn-key slot: dyn sink — wide keys rejected per no-autobox. */
+        if (compiler__reject_wide_dyn(c, line, col, "dyn-keyed map")) return;
       }
       compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
@@ -12679,9 +12737,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    /* Plain-rep maps key on tagged values: box a wide key so the lookup tag
-     * matches the (boxed) ctor-stored key (stamped [Map i64 str] keys). */
-    compiler__ensure_boxed(c, line);
+    if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
     compiler__emit_byte(c, OP_MAP_GET, line);
     c->last_expr_type = TYPE_DYN;
     if ((JaclType)args[0]->inferred_type == TYPE_MAP &&
@@ -12708,6 +12764,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       } else {
         compiler__compile_node(c, args[1]);
+        /* dyn-key slot: dyn sink — wide keys rejected per no-autobox. */
+        if (compiler__reject_wide_dyn(c, line, col, "dyn-keyed map")) return;
       }
       compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -12715,7 +12773,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
+    if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
     compiler__emit_byte(c, OP_MAP_HAS, line);
     c->last_expr_type = TYPE_BOOL;
     return;
@@ -12755,6 +12813,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       } else {
         compiler__compile_node(c, args[1]);
+        /* dyn-key slot: dyn sink — wide keys rejected per no-autobox. */
+        if (compiler__reject_wide_dyn(c, line, col, "dyn-keyed map")) return;
       }
       if (!compiler__compile_typed_elem_arg(c, args[2], elem_type_idx)) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
@@ -12767,10 +12827,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
+    if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn map")) return;
-    compiler__ensure_boxed(c, line);  /* tagged value */
+    if (compiler__reject_wide_dyn(c, line, col, "dyn map")) return;
     compiler__emit_byte(c, OP_MAP_SET, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -12793,6 +12853,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       } else {
         compiler__compile_node(c, args[1]);
+        /* dyn-key slot: dyn sink — wide keys rejected per no-autobox. */
+        if (compiler__reject_wide_dyn(c, line, col, "dyn-keyed map")) return;
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -12800,7 +12862,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    compiler__ensure_boxed(c, line);  /* tagged key (see map-get) */
+    if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
     compiler__emit_byte(c, OP_MAP_REMOVE, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -13096,8 +13158,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)box_arg_struct_idx, line);
       c->inline_repr = INLINE_NONE;
     } else if (compiler__expr_is_error_free(args[0])) {
+      /* [box $wide] is the EXPLICIT widening form — bridge the wide rep
+       * into the box's tagged slot (was: raw wide bits stored as the
+       * contained JaclVal, deref read back garbage). */
+      compiler__ensure_boxed(c, line);
       compiler__emit_byte(c, OP_BOX_UNCHECKED, line);
     } else {
+      compiler__ensure_boxed(c, line);
       compiler__emit_byte(c, OP_BOX, line);
     }
     c->last_expr_type = TYPE_DYN;
@@ -13115,6 +13182,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "atom: struct values cannot be stored in atoms; use [box] instead");
       return;
     }
+    compiler__ensure_boxed(c, line);  /* same explicit-widening bridge as box */
     compiler__emit_byte(c, OP_ATOM, line);
     /* atom returns an opaque atom value; element type isn't tracked. */
     c->last_expr_type = TYPE_DYN;

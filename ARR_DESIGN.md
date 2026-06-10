@@ -41,10 +41,12 @@ with the element type carried statically as TYPE_ARR + stamp (the
 annotations (the compiler def path now recognizes `[Arr …]` as a compound
 annotation — it errored "def type must be a keyword" before), def-binding
 propagation, arr-get/arr-pop narrowing, push/set expected-type + stamp
-persistence, for-binding narrowing. The plain `[arr …]` ctor and dyn
-push/set also ensure_boxed wide VALUES now (raw wide bits could land in
-tagged dyn slots before). Tests: `arr_ref_elems.jacl`,
-`arr_ref_elem_error.jacl`.
+persistence, for-binding narrowing. **No-autobox rule:** storing an
+unboxed wide scalar (i64/u64/f64) in a dyn arr (or any dyn collection
+sink) is a COMPILE ERROR — explicit `[box …]` is the only dyn form of a
+wide scalar; declared typed slots ([[Arr i64]] stores) keep their
+internal box-before-byte-pack bridging. Tests: `arr_ref_elems.jacl`,
+`arr_ref_elem_error.jacl`, `arr_wide_dyn_error.jacl`.
 
 - **Verify state:** `timeout 240 ./build.sh` → 91/91 binaries; full jacl
   suite 474/474. TSAN (`./build.sh --tsan`) race-clean in arr paths; only

@@ -250,9 +250,23 @@ pulling on them; revisit when one shows up.
   recognizes `[Arr …]` as a compound annotation at all — it errored
   "def type must be a keyword" before), def propagation, arr-get/arr-pop
   narrowing, push/set expected-type + stamp persistence, for-binding
-  narrowing. The plain `[arr …]` ctor and dyn arr-push/arr-set now
-  ensure_boxed wide values (raw wide bits could land in tagged dyn slots
-  before). Tests: `arr_ref_elems.jacl`, `arr_ref_elem_error.jacl`.
+  narrowing. Tests: `arr_ref_elems.jacl`, `arr_ref_elem_error.jacl`.
+  **No-autobox rule (2026-06-10, design decision):** dyn slots hold tagged
+  values; a wide scalar (i64/u64/f64) has no tagged form, so storing one
+  in ANY dyn collection sink (plain vec/map/arr ctors + mutators, dyn-key
+  map slots) is a COMPILE ERROR — explicit `[box …]` is the only dyn form
+  of a wide scalar (`compiler__reject_wide_dyn`). This replaced both the
+  short-lived auto-boxing AND pre-existing silent corruption (plain
+  vec-push/map ctor stored raw wide bits into tagged slots). Declared
+  typed slots ([[Arr i64]] stores, [Map i64 str] keys) keep their internal
+  box/byte-pack bridging — annotation-driven, static type preserved.
+  `[box $wide]` / `[atom $wide]` themselves now bridge correctly (they
+  stored raw wide bits before — deref read back garbage). Tests:
+  `{arr,vec,map}_wide_dyn_error.jacl`. **Open consistency question:** a
+  dyn-RETURN proc still implicitly boxes a wide tail
+  (`wide_proc_return.jacl`) while yield in an unannotated generator
+  errors — the no-autobox principle suggests the return boundary should
+  error too (annotate the return type or box).
   **Still open (vec/arr):** hard vec-push element CHECKS (currently
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)

@@ -39,12 +39,14 @@ proc main {} {
     print $s
   }
 
-  # 4. dyn arr still takes anything; wide values box into tagged slots
+  # 4. dyn slots never autobox: a wide i64 must be boxed EXPLICITLY to
+  # live in a dyn arr (an unboxed wide push is a compile error — see
+  # arr_wide_dyn_error.jacl). The box round-trips through the dyn slot.
   def i64 m 1000000
   def i64 big [* $m 5000]
   def wa [arr]
-  [arr-push $wa $big]
-  print [arr-get $wa 0]
+  [arr-push $wa [box $big]]
+  print [deref [arr-get $wa 0]]
 
   print "ok"
 }

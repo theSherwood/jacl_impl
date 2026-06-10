@@ -1,0 +1,10 @@
+# expect-error: cannot store unboxed i64 in dyn vec
+# No-autobox rule, vec flavor. Before this rule the raw wide bits were
+# silently stored into the tagged slot (read back as garbage).
+proc main {} {
+  def i64 m 1000000
+  def i64 big [* $m 5000]
+  def v [vec-push [vec] $big]
+  print $v
+}
+main
