@@ -582,6 +582,28 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
   return UINT32_MAX;
 }
 
+/* Decode an interned typed-map SHAPE (from typer__nested_elem_shape) to
+ * its PORTABLE binding encoding, honoring the map rep rule: ref-kind
+ * VALUES (str/dyn) select the PLAIN traced map rep (TYPE_MAP + stamps);
+ * value-kind values keep TYPE_TYPED_MAP. Without this, a nested
+ * [Vec [Map K str]] element would be stamped TYPE_TYPED_MAP and typed
+ * map opcodes would run against the plain rep. */
+static void typer__decode_map_shape(uint32_t iv, uint32_t ik,
+                                    JaclType* t, uint32_t* si,
+                                    uint32_t* ki) {
+  bool val_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                 (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                  JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+  if (val_ref) {
+    *t  = TYPE_MAP;
+    *si = (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR) ? iv : UINT32_MAX;
+  } else {
+    *t  = TYPE_TYPED_MAP;
+    *si = iv;
+  }
+  *ki = ik;
+}
+
 /* For a HEAD_DOT arrow `recv->lit_int_idx`, walk inside-out through
  * consecutive HEAD_DOT(_, LIT_INT) arrows to find an innermost
  * AST_VAR_REF bound to either:
@@ -1607,6 +1629,32 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     if (esh != UINT32_MAX) {
       effective = TYPE_VEC;
       struct_idx = esh;
+    }
+  }
+  /* `def row [vec-get $nested i]` where $nested's binding carries a
+   * typer-side shape: when the element is itself a depth-2+ shape
+   * ([Vec [Vec [Vec T]]] rows), it can't ride the AST stamp — re-derive
+   * it into the NEW binding so the next get/for level narrows too. */
+  if ((JaclType)value_node->inferred_type == TYPE_VEC &&
+      value_node->inferred_struct_idx == UINT32_MAX &&
+      value_node->type == AST_COMMAND &&
+      value_node->data.command.head_id == HEAD_VEC_GET &&
+      value_node->data.command.arg_count >= 1 &&
+      value_node->data.command.args[0]->type == AST_VAR_REF) {
+    AstNode* rv = value_node->data.command.args[0];
+    const TyperBinding* vb = typer__scope_resolve(tc,
+        rv->data.var_ref.name, rv->data.var_ref.length, rv->scope_mark);
+    if (vb && vb->type == TYPE_VEC && vb->struct_idx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(vb->struct_idx) &&
+        vb->struct_idx >= TYPER_MAX_STRUCTS &&
+        vb->struct_idx < tc->shape_reg.count) {
+      uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+      JaclType ek = typer__buf_elem_decode(tc, vb->struct_idx, &iv, &ik);
+      if (ek == TYPE_TYPED_VEC && !JACL_IS_SCALAR_TYPE_IDX(iv) &&
+          iv >= TYPER_MAX_STRUCTS && iv < tc->shape_reg.count) {
+        effective = TYPE_VEC;
+        struct_idx = iv;  /* typer-side inner shape — binding-only */
+      }
     }
   }
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
@@ -3105,6 +3153,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (body) {
         typer__infer_node(tc, as[0]);
         JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
+        uint32_t for_bind_key_idx = UINT32_MAX;
         JaclType coll_t = (JaclType)as[0]->inferred_type;
         if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
              coll_t == TYPE_STREAM ||
@@ -3173,7 +3222,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 bt = TYPE_TYPED_VEC; bsi = iv;
               }
             } else if (ek == TYPE_TYPED_MAP) {
-              bt = TYPE_TYPED_MAP; bsi = iv;
+              uint32_t bki;
+              typer__decode_map_shape(iv, ik, &bt, &bsi, &bki);
+              /* scope_add below has no key slot — patch it in after. */
+              for_bind_key_idx = bki;
             }
           } else if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
             /* Narrow to the element scalar — all scalars, including wide
@@ -3192,6 +3244,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
         typer__scope_push(tc);
         typer__scope_add(tc, bn, bnl, bmark, (uint8_t)bt, bsi);
+        /* Map-element bindings carry the key idx too (scope_add has no
+         * key slot — patch in place, like the def handler). */
+        if (for_bind_key_idx != UINT32_MAX && tc->binding_count > 0) {
+          tc->bindings[tc->binding_count - 1].key_struct_idx =
+              for_bind_key_idx;
+        }
         typer__infer_node(tc, body);
         typer__scope_pop(tc);
         node->inferred_type = TYPE_NIL;
@@ -3877,9 +3935,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                                 iv >= TYPER_MAX_STRUCTS &&
                                 iv < tc->shape_reg.count);
             if (inner_shape) { inner_ref = true; iv = UINT32_MAX; }
-            JaclType want = inner_ref ? TYPE_VEC
-                          : (ekind == TYPE_TYPED_MAP) ? TYPE_TYPED_MAP
-                          : TYPE_TYPED_VEC;
+            JaclType want;
+            if (inner_ref) {
+              want = TYPE_VEC;
+            } else if (ekind == TYPE_TYPED_MAP) {
+              /* Rep rule for inner maps: ref-kind VALUES → plain TYPE_MAP
+               * (compare against the decoded value stamp); value kinds →
+               * typed rep. */
+              uint32_t mki;
+              typer__decode_map_shape(iv, ik, &want, &iv, &mki);
+              (void)mki;
+            } else {
+              want = TYPE_TYPED_VEC;
+            }
             for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
               AstNode* av = node->data.command.args[ei];
               JaclType at = (JaclType)av->inferred_type;
@@ -4302,6 +4370,50 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             /* Stamped ref-element vec ([Vec str]): element narrows. */
             node->inferred_type =
                 JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+          } else if (recv_t == TYPE_VEC &&
+                     recv->inferred_struct_idx == UINT32_MAX &&
+                     recv->type == AST_VAR_REF) {
+            /* Nested-element vec binding ([Vec [Vec i64]] …): the AST
+             * stamp is suppressed by the cross-registry rule — resolve
+             * the TYPER-SIDE shape from the binding and decode to a
+             * PORTABLE result encoding, mirroring HEAD_FOR. A depth-3+
+             * inner shape stays suppressed on the AST (the def handler
+             * re-derives it into the new binding). */
+            const TyperBinding* vb = typer__scope_resolve(tc,
+                recv->data.var_ref.name, recv->data.var_ref.length,
+                recv->scope_mark);
+            if (vb && vb->type == TYPE_VEC && vb->struct_idx != UINT32_MAX &&
+                !JACL_IS_SCALAR_TYPE_IDX(vb->struct_idx) &&
+                vb->struct_idx >= TYPER_MAX_STRUCTS &&
+                vb->struct_idx < tc->shape_reg.count) {
+              uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+              JaclType ek = typer__buf_elem_decode(tc, vb->struct_idx,
+                                                   &iv, &ik);
+              if (ek == TYPE_TYPED_VEC) {
+                bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                                 (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                                  JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+                bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                                   iv >= TYPER_MAX_STRUCTS &&
+                                   iv < tc->shape_reg.count;
+                if (inner_ref) {
+                  node->inferred_type = TYPE_VEC;
+                  if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
+                    node->inferred_struct_idx = iv;
+                } else if (inner_shape) {
+                  node->inferred_type = TYPE_VEC;  /* stamp stays suppressed */
+                } else {
+                  node->inferred_type = TYPE_TYPED_VEC;
+                  node->inferred_struct_idx = iv;
+                }
+              } else if (ek == TYPE_TYPED_MAP) {
+                JaclType mt; uint32_t msi, mki;
+                typer__decode_map_shape(iv, ik, &mt, &msi, &mki);
+                node->inferred_type = mt;
+                node->inferred_struct_idx = msi;
+                node->inferred_key_struct_idx = mki;
+              }
+            }
           }
           return;
         /* arr ops mirror vec: get narrows to the element type for a typed

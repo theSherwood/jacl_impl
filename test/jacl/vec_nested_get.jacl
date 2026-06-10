@@ -1,0 +1,42 @@
+# expect: 3
+# expect: 2
+# expect: v
+# expect: v
+# expect: 7
+# expect: ok
+# vec-get narrowing through nested (shape-carried) bindings. The binding for
+# a [Vec [Vec T]] / [Vec [Map K V]] carries a TYPER-SIDE shape idx; vec-get
+# on it decodes the element to a PORTABLE encoding (mirroring HEAD_FOR), so
+# chained gets and downstream ops narrow. Inner maps honor the rep rule:
+# ref-kind VALUES ([Map str str]) decode to the PLAIN map rep. Depth-3 rows
+# re-derive the inner shape into the new binding at the def site.
+proc main {} {
+  # depth-2: row narrows to [Vec i64]; element get narrows to i64
+  def vv [[Vec [Vec i64]] [[Vec i64] 1 2] [[Vec i64] 3 4]]
+  def row [vec-get $vv 1]
+  [assert-type [vec-get $row 0] i64]
+  print [vec-get $row 0]
+
+  # chained get: outer result is stamped portably, inner get narrows
+  [assert-type [vec-get [vec-get $vv 0] 1] i64]
+  print [vec-get [vec-get $vv 0] 1]
+
+  # inner map with ref values: rows are PLAIN-rep maps, values narrow
+  def vm [[Vec [Map str str]] [[Map str str] "k" "v"]]
+  def m0 [vec-get $vm 0]
+  [assert-type [map-get $m0 "k"] str]
+  print [map-get $m0 "k"]
+  for $vm m {
+    print [map-get $m "k"]
+  }
+
+  # depth-3: def-site re-derivation carries the inner shape forward
+  def v3 [[Vec [Vec [Vec i64]]] [[Vec [Vec i64]] [[Vec i64] 7]]]
+  def plane [vec-get $v3 0]
+  def row3 [vec-get $plane 0]
+  [assert-type [vec-get $row3 0] i64]
+  print [vec-get $row3 0]
+
+  print "ok"
+}
+[main]
