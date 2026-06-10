@@ -4637,6 +4637,44 @@ static uint32_t compiler__call_closure_return_shape(Compiler* c, AstNode* node) 
   return UINT32_MAX;
 }
 
+/* Phase B3d: decode a TYPE_SHAPE_PROC to a flat signature (param types + count
+ * + return type). Returns false on a non-proc shape idx. */
+static bool compiler__decode_proc_shape(Compiler* c, uint32_t shape_idx,
+                                        JaclType* out_ptypes, uint8_t* out_pcount,
+                                        JaclType* out_rtype) {
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg || shape_idx >= reg->count ||
+      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return false;
+  TypeShape* s = &reg->shapes[shape_idx];
+  uint16_t pc = s->u.proc.param_count;
+  if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
+  *out_pcount = (uint8_t)pc;
+  for (uint16_t k = 0; k < pc; k++) {
+    uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
+    out_ptypes[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
+                      ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
+  }
+  uint32_t rid = s->u.proc.return_idx;
+  *out_rtype = COMPILER_IS_SCALAR_TYPE_IDX(rid)
+                 ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
+  return true;
+}
+
+/* Phase B3d: invariant conformance — does a Local's typed-closure signature
+ * (param_types/known_arity/return_type) match a declared (ptypes,pcount,rtype)?
+ * A Local with NULL param_types and known_arity 0 conforms to the nilary case;
+ * a non-closure local (known_arity < 0) never conforms. */
+static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
+                                             uint8_t pcount, JaclType rtype) {
+  if (L->known_arity != (int16_t)pcount) return false;
+  if (L->return_type != rtype) return false;
+  for (uint8_t k = 0; k < pcount; k++) {
+    JaclType lt = L->param_types ? L->param_types[k] : TYPE_DYN;
+    if (lt != ptypes[k]) return false;
+  }
+  return true;
+}
+
 /* Phase B3a: decode a TYPE_SHAPE_PROC into the annot_proc monomorphization
  * context + activate it, so compiling an inline proc-literal ARG to a closure
  * param monomorphizes it to the param's declared signature (reuses the same
@@ -9991,6 +10029,30 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (!proc_mono && rhs_type == TYPE_CLOSURE)
       rhs_closure_shape = compiler__call_closure_return_shape(c, args[value_arg_idx]);
 
+    /* B3d: `def [Proc [i64] i64] f $g` — a NAMED typed-closure RHS under a
+     * [Proc …] annotation. Conformance-check g's signature against the declared
+     * one, then stamp f from the annotation (its value $g already compiled to
+     * the closure on the stack). */
+    bool proc_named = false;
+    if (proc_binding && !proc_mono &&
+        args[value_arg_idx]->type == AST_VAR_REF) {
+      AstNode* gv = args[value_arg_idx];
+      JaclVal gn = compiler__name_val(c->heap, c->intern_table,
+          gv->data.var_ref.name, gv->data.var_ref.length);
+      int gslot = compiler__resolve_local(c, gn);
+      if (gslot != -1 && c->locals[gslot].known_arity >= 0 &&
+          compiler__local_closure_conforms(&c->locals[gslot],
+              c->annot_proc_param_types, c->annot_proc_param_count,
+              c->annot_proc_return_type)) {
+        proc_named = true;
+      } else {
+        compiler__error(c, line, col,
+            "right-hand side does not conform to the declared [Proc …] "
+            "closure type");
+        return;
+      }
+    }
+
     /* US-007: activate inline for function calls returning struct types.
      * If the RHS isn't already inline (struct constructor or inline get) but
      * returns a struct type with a known struct index, post-activate inline
@@ -10133,7 +10195,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         { TypeInfo ti = { effective_type, rhs_struct_idx,
                           args[value_arg_idx]->inferred_key_struct_idx };
           TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
-        if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
+        if (proc_mono || proc_named) compiler__stamp_closure_local(c);  /* Phase B */
         if (rhs_closure_shape != UINT32_MAX)
           compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
         if (sm_inline_struct) {
@@ -10179,7 +10241,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
-      if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
+      if (proc_mono || proc_named) compiler__stamp_closure_local(c);  /* Phase B */
         if (rhs_closure_shape != UINT32_MAX)
           compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
       /* Decomposed nested-buf chain: if the RHS is an intermediate
@@ -10307,7 +10369,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               TYPEINFO_SAVE(root->global_arities[i], ti); }
             /* Phase B: stamp the typed-closure signature so a global
              * closure binding's call sites use the typed convention. */
-            if (proc_mono) {
+            if (proc_mono || proc_named) {
               GlobalArity* ga = &root->global_arities[i];
               ga->known_arity = (int16_t)c->annot_proc_param_count;
               ga->return_type = c->annot_proc_return_type;
@@ -16719,10 +16781,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__activate_annot_proc_from_shape(c, call_param_struct_idxs[i]);
           compiler__compile_node(c, a);    /* HEAD_PROC consumes + checks */
           c->annot_proc_active = false;
+        } else if (a->type == AST_VAR_REF) {
+          /* Phase B3d: a NAMED typed-closure value — conformance-check its
+           * signature against the param's [Proc …], then pass the value. */
+          JaclVal gn = compiler__name_val(c->heap, c->intern_table,
+              a->data.var_ref.name, a->data.var_ref.length);
+          int gslot = compiler__resolve_local(c, gn);
+          JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
+          bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
+                    compiler__decode_proc_shape(c, call_param_struct_idxs[i],
+                                                pts, &pcnt, &prt) &&
+                    compiler__local_closure_conforms(&c->locals[gslot],
+                                                     pts, pcnt, prt);
+          if (!ok) {
+            compiler__error(c, line, col,
+                "argument is not a closure conforming to the [Proc …] "
+                "param's signature");
+            return;
+          }
+          compiler__compile_node(c, a);    /* pushes the closure value */
         } else {
           compiler__error(c, line, col,
-              "a [Proc …] closure param needs an inline closure literal "
-              "argument — passing a named/bound closure is Phase B3d");
+              "a [Proc …] closure param needs an inline closure literal or a "
+              "named typed-closure argument");
           return;
         }
         total_arg_slots += 1;

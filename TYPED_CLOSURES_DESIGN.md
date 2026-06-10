@@ -1,9 +1,34 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. B3a (closure params) +
-B3b (closures-returning-closures) LANDED (2026-06-10) via a registry
-`TYPE_SHAPE_PROC`. Next: B3c (`[Arr/Vec [Proc …]]`), B3d (named-closure
-VALUES — conformance + the closure-value-read rep).**
+Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. B3a (closure params),
+B3b (closures-returning-closures), B3d (named-closure VALUES) LANDED
+(2026-06-10) via a registry `TYPE_SHAPE_PROC`. Next: B3c (`[Arr/Vec [Proc …]]`
+— collections of closures).**
+
+**Phase B3d — named closures as values as landed (2026-06-10):**
+- **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.
+  The compiler closure-arg path resolves g's local, conformance-checks its
+  signature against the param's shape (`compiler__decode_proc_shape` +
+  `compiler__local_closure_conforms`, invariant: arity + param types + return),
+  and pushes the closure value. The typer already typed a `[Proc …]` binding as
+  `TYPE_CLOSURE`, so it accepts the arg leniently; the compiler enforces.
+- **`def [Proc [i64] i64] f $g`** — a named typed-closure RHS under a `[Proc …]`
+  annotation. A `proc_named` path conformance-checks g vs the declared signature
+  and stamps f from the annotation (so `[f …]` is typed and f composes:
+  `def h $g` then `[h …]`). The typer records f's declared signature for any
+  RHS (inline literal OR named) when the binding is `TYPE_CLOSURE`.
+- **Design choice:** conformance resolves the named binding DIRECTLY at each
+  sink (compares flat signatures) rather than changing the closure binding's
+  value-read rep — lower-risk, no VM/struct change. Tests:
+  `typed_closure_named.jacl` (pass to HOF, wide-i64 unboxed, bind-and-compose) +
+  `typed_closure_param_named_arg_error` (now a conformance-mismatch error).
+  Suite 597/597, 91/91 binaries.
+
+**B3d scope / debt:** a closure value that is an EXPRESSION (not a var-ref or
+inline literal) passed to a closure param — e.g. `[apply [pick-fn] 5]` — isn't
+handled (the value would need to carry its shape on the AST node, the
+closure-value-read rep deferred here); named closures resolve their signature
+only via locals (global typed-closure bindings as values are a follow-up).
 
 **Phase B3b — closures-returning-closures as landed (2026-06-10):**
 - **`[Proc …]` RETURN type** (`typer__resolve_return_type` + the compiler

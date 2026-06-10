@@ -1927,9 +1927,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   /* Phase B: stash the typed-closure signature on the binding so a call
    * `[f args]` narrows to the declared return + checks args (via the
    * bound_proxy at the call dispatch). */
-  if (declared_proc && effective == TYPE_CLOSURE && tc->binding_count > 0 &&
-      value_node->type == AST_COMMAND &&
-      value_node->data.command.head_id == HEAD_PROC) {
+  /* Record f's declared signature for an inline-literal RHS (B1/B2) OR a named
+   * typed-closure RHS (`def [Proc …] f $g`, B3d — conformance enforced by the
+   * compiler). Either way f's signature is the declared annotation. */
+  if (declared_proc && effective == TYPE_CLOSURE && tc->binding_count > 0) {
     TyperBinding* b = &tc->bindings[tc->binding_count - 1];
     b->is_typed_closure = true;
     b->proc_param_count = declared_proc_pcount;
