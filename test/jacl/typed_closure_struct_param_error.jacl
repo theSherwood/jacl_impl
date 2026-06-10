@@ -1,0 +1,10 @@
+# expect-error: not yet supported
+# Struct (and compound) param/return types inside [Proc …] are Phase B3 — the
+# typed-closure-value rep for non-scalar element types isn't wired yet. Reject
+# clearly rather than silently binding a rep-mismatched closure.
+struct Pt { i32 x  i32 y }
+proc main {} {
+  def [Proc [Pt] i64] f [proc {p} {7}]
+  print [f [Pt 1 2]]
+}
+main

@@ -47,6 +47,15 @@ typedef struct {
   uint32_t    buf_len;          /* TYPE_BUF N; 0 otherwise. See BUFFER_DESIGN.md */
   uint32_t    buf_inner_len;    /* TYPE_BUF M for nested [Buf N [Buf M T]]; 0 for scalar/struct element. M4.2 */
   uint32_t    scope_depth;      /* depth at which this binding was pushed */
+  /* Typed-closure signature (TYPE_CLOSURE bound via a [Proc [P…] R]
+   * annotation; TYPED_CLOSURES_DESIGN.md Phase B). is_typed_closure gates a
+   * proxy at the call site so `[f args]` narrows to the declared return and
+   * checks arg types — mirroring a named proc's TyperProc. */
+  bool        is_typed_closure;
+  uint8_t     proc_param_count;
+  uint8_t     proc_param_types[TYPER_MAX_PROC_PARAMS];
+  uint8_t     proc_return_type;
+  uint32_t    proc_return_struct_idx;
 } TyperBinding;
 
 typedef struct {
@@ -219,6 +228,7 @@ static void typer__scope_add(TyperCtx* tc, const char* name, uint32_t name_len,
   b->buf_len        = 0;
   b->buf_inner_len  = 0;
   b->scope_depth    = tc->scope_depth;
+  b->is_typed_closure = false;
 }
 
 static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
@@ -399,6 +409,94 @@ static bool typer__stream_type(TyperCtx* tc, AstNode* node,
   }
   /* Unknown element — still recognize as Stream; element idx stays
    * sentinel so downstream consumers treat it as [Stream dyn]. */
+  return true;
+}
+
+/* Resolve one type-name node inside a [Proc …] signature to a portable
+ * encoding. Scalar keywords (incl. `dyn`) are supported; struct names and
+ * compound types ([Vec T], nested [Proc …], …) are Phase B3 — recognized as
+ * a closure type but reported unsupported so the caller can error rather than
+ * silently bind a rep-mismatched closure. Returns the JaclType; *out_idx is a
+ * scalar sentinel (JACL_SCALAR_TYPE_IDX) and *out_supported reflects support. */
+static JaclType typer__proc_sig_elem(TyperCtx* tc, AstNode* n,
+                                     uint32_t* out_idx, bool* out_supported) {
+  (void)tc;
+  *out_idx = UINT32_MAX;
+  *out_supported = false;
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* compound → B3 */
+  const char* nm = n->data.lit_string.value;
+  uint32_t    nl = n->data.lit_string.length;
+  if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
+    *out_supported = true;
+    return TYPE_DYN;  /* dyn is an ordinary type (TYPED_CLOSURES_DESIGN §2.5) */
+  }
+  if (is_type_keyword(nm, nl)) {
+    JaclType t = type_from_keyword(nm, nl);
+    *out_idx = JACL_SCALAR_TYPE_IDX(t);
+    *out_supported = true;
+    return t;
+  }
+  return TYPE_DYN;  /* struct name → B3 */
+}
+
+/* Recognize a [Proc [P…] R] type-annotation expression (TYPED_CLOSURES_DESIGN
+ * §3). Layout: head "Proc"; args[0] is the bracketed PARAM LIST (an
+ * AST_COMMAND — `[]`, `[i64]`, `[i64 i64]`); optional args[1] is the RETURN
+ * type (bare keyword), defaulting to nil. Returns true iff the node is a
+ * [Proc …] shape (so the caller binds a TYPE_CLOSURE). Fills the param/return
+ * signature; *out_supported is false when any param/return is a struct or
+ * compound type (Phase B3) so the caller can emit a "not yet supported" error
+ * instead of silently degrading. Param names are not permitted — the list is
+ * a list of TYPES (positional calls), enforced by requiring lit-string types. */
+static bool typer__proc_type(TyperCtx* tc, AstNode* node,
+                             uint8_t* out_param_count,
+                             JaclType* out_param_types,
+                             uint32_t* out_param_struct_idxs,
+                             JaclType* out_return_type,
+                             uint32_t* out_return_struct_idx,
+                             bool* out_supported) {
+  *out_param_count = 0;
+  *out_return_type = TYPE_DYN;  /* no declared return ⇒ dyn (see compiler mirror) */
+  *out_return_struct_idx = UINT32_MAX;
+  *out_supported = true;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 4 ||
+      memcmp(h->data.lit_string.value, "Proc", 4) != 0) return false;
+  uint32_t ac = node->data.command.arg_count;
+  if (ac != 1 && ac != 2) { *out_supported = false; return true; } /* malformed */
+  AstNode* plist = node->data.command.args[0];
+  if (!plist || plist->type != AST_COMMAND) { *out_supported = false; return true; }
+  /* Collect param type nodes: [head] + args, skipping the empty-`[]` head. */
+  AstNode* phead = plist->data.command.head;
+  bool empty_head = (phead && phead->type == AST_LIT_STRING &&
+                     phead->data.lit_string.length == 0);
+  uint8_t pc = 0;
+  if (phead && !empty_head) {
+    if (pc >= TYPER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
+    bool sup; uint32_t idx;
+    out_param_types[pc] = typer__proc_sig_elem(tc, phead, &idx, &sup);
+    out_param_struct_idxs[pc] = idx;
+    if (!sup) *out_supported = false;
+    pc++;
+  }
+  for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
+    if (pc >= TYPER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
+    bool sup; uint32_t idx;
+    out_param_types[pc] = typer__proc_sig_elem(tc, plist->data.command.args[i],
+                                               &idx, &sup);
+    out_param_struct_idxs[pc] = idx;
+    if (!sup) *out_supported = false;
+    pc++;
+  }
+  *out_param_count = pc;
+  if (ac == 2) {
+    bool sup; uint32_t idx;
+    *out_return_type = typer__proc_sig_elem(tc, node->data.command.args[1],
+                                            &idx, &sup);
+    *out_return_struct_idx = idx;
+    if (!sup) *out_supported = false;
+  }
   return true;
 }
 
@@ -1126,6 +1224,13 @@ static bool typer__node_as_type_keyword(AstNode* node, JaclType* out_type) {
  * Adds the binding to the current scope and recurses into EXPR with
  * declared_type pushed as expected_type. Returns true if handled.
  * Does not handle destructuring forms — those default to TYPE_DYN. */
+/* Forward decl: defined below; needed by the Phase B typed-closure
+ * monomorphization walk in handle_def_or_mut. */
+static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
+                                    AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
+                                    JaclType (*types_out)[TYPER_MAX_PROC_PARAMS],
+                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]);
+
 static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
@@ -1137,6 +1242,14 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t declared_struct_idx        = UINT32_MAX;
   uint32_t declared_buf_len           = 0;
   uint32_t declared_buf_typed_elem_idx = UINT32_MAX;
+
+  /* Typed-closure signature from a [Proc [P…] R] annotation (Phase B). */
+  bool     declared_proc          = false;
+  uint8_t  declared_proc_pcount    = 0;
+  JaclType declared_proc_ptypes[TYPER_MAX_PROC_PARAMS];
+  uint32_t declared_proc_pidxs[TYPER_MAX_PROC_PARAMS];
+  JaclType declared_proc_rtype     = TYPE_NIL;
+  uint32_t declared_proc_ridx      = UINT32_MAX;
 
   /* No-value buf form: `def [Buf N T] NAME` — argc==2 with args[0] a
    * Buf type annotation and args[1] the bare name. Zero-init is
@@ -1202,7 +1315,20 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       uint32_t buf_typed_elem_idx_3 = UINT32_MAX;
       uint32_t box_sidx;
       uint32_t arr_elem_idx;
-      if (typer__future_type(tc, args[0], &fut_sidx)) {
+      bool proc_supported = true;
+      if (typer__proc_type(tc, args[0], &declared_proc_pcount,
+                           declared_proc_ptypes, declared_proc_pidxs,
+                           &declared_proc_rtype, &declared_proc_ridx,
+                           &proc_supported)) {
+        if (!proc_supported) {
+          typer__error(tc, args[0]->start.line, args[0]->start.column,
+                       "typed-closure [Proc …] struct/compound param or return "
+                       "types are not yet supported (Phase B3) — use scalar "
+                       "types or `dyn`");
+        }
+        declared_type = TYPE_CLOSURE;
+        declared_proc = true;
+      } else if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
       } else if (typer__ptr_type(tc, args[0], &ptr_sidx)) {
@@ -1502,6 +1628,50 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
 
+  /* Phase B: monomorphize an inline proc-literal RHS against the declared
+   * [Proc [P…] R] param types. The value walk above typed the body with its
+   * OWN (untyped → dyn) params; re-type it ONCE more with the declared param
+   * types bound, so body nodes carry typed stamps consistent with the
+   * compiler's monomorphization. This is the LAST walk, so its stamps win.
+   * Strict (unlike HOF inference's rollback): an explicit annotation pins the
+   * types — a body that doesn't type under them is a real error. */
+  if (declared_proc && value_node->type == AST_COMMAND &&
+      value_node->data.command.head_id == HEAD_PROC) {
+    uint32_t pac = value_node->data.command.arg_count;
+    AstNode* params = (pac == 3 || pac == 4) ? value_node->data.command.args[1] : NULL;
+    AstNode* body   = (pac == 4) ? value_node->data.command.args[3]
+                    : (pac == 3) ? value_node->data.command.args[2] : NULL;
+    if (params && body && body->type == AST_BLOCK && body->data.block.count > 0) {
+      AstNode* pn[TYPER_MAX_PROC_PARAMS];
+      JaclType pt[TYPER_MAX_PROC_PARAMS];
+      uint32_t ps[TYPER_MAX_PROC_PARAMS];
+      uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
+      typer__scope_push(tc);
+      for (uint32_t i = 0; i < pcount; i++) {
+        uint8_t  bt = (uint8_t)pt[i];
+        uint32_t bs = ps[i];
+        if (pt[i] == TYPE_DYN && i < declared_proc_pcount) {
+          bt = (uint8_t)declared_proc_ptypes[i];
+          bs = (declared_proc_ptypes[i] == TYPE_STRUCT) ? declared_proc_pidxs[i]
+                                                        : UINT32_MAX;
+        }
+        typer__scope_add(tc, pn[i]->data.lit_string.value,
+                         pn[i]->data.lit_string.length,
+                         pn[i]->scope_mark, bt, bs);
+      }
+      /* Push the declared return as expected_type on the TAIL so a bare
+       * literal (`{99}` in `[Proc [] i64]`) narrows — mirrors handle_proc. */
+      uint32_t bcount = body->data.block.count;
+      for (uint32_t i = 0; i + 1 < bcount; i++)
+        typer__infer_node(tc, body->data.block.commands[i]);
+      JaclType saved_bet = tc->expected_type;
+      if (declared_proc_rtype != TYPE_DYN) tc->expected_type = declared_proc_rtype;
+      typer__infer_node(tc, body->data.block.commands[bcount - 1]);
+      tc->expected_type = saved_bet;
+      typer__scope_pop(tc);
+    }
+  }
+
   /* Type-check declared vs. actual. Mirrors compiler.c:6714-6726 (def)
    * and 5983-5995 (mut), but uses the shared formatters consistently.
    * Skipped for DYN declarations (decision 2 — DYN binding is itself
@@ -1746,6 +1916,21 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   /* scope_add doesn't take key_struct_idx as a param; patch in place. */
   if (key_struct_idx != UINT32_MAX && tc->binding_count > 0) {
     tc->bindings[tc->binding_count - 1].key_struct_idx = key_struct_idx;
+  }
+  /* Phase B: stash the typed-closure signature on the binding so a call
+   * `[f args]` narrows to the declared return + checks args (via the
+   * bound_proxy at the call dispatch). */
+  if (declared_proc && effective == TYPE_CLOSURE && tc->binding_count > 0 &&
+      value_node->type == AST_COMMAND &&
+      value_node->data.command.head_id == HEAD_PROC) {
+    TyperBinding* b = &tc->bindings[tc->binding_count - 1];
+    b->is_typed_closure = true;
+    b->proc_param_count = declared_proc_pcount;
+    for (uint32_t i = 0; i < declared_proc_pcount &&
+                         i < TYPER_MAX_PROC_PARAMS; i++)
+      b->proc_param_types[i] = (uint8_t)declared_proc_ptypes[i];
+    b->proc_return_type = (uint8_t)declared_proc_rtype;
+    b->proc_return_struct_idx = declared_proc_ridx;
   }
   /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md.
    * Picks the declared length when annotated; otherwise the length
@@ -3445,6 +3630,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   if (head && head->type == AST_LIT_STRING) {
     proc = typer__find_proc(tc,
         head->data.lit_string.value, head->data.lit_string.length);
+    if (!proc) {
+      /* Phase B: a typed-closure binding (`def [Proc …] f …`) called by name
+       * narrows to its declared signature via a proxy, exactly like a named
+       * proc. A plain (untyped) closure binding has is_typed_closure=false and
+       * falls through to the dyn path (status quo). */
+      const TyperBinding* cb = typer__scope_resolve(tc,
+          head->data.lit_string.value, head->data.lit_string.length,
+          head->scope_mark);
+      if (cb && cb->is_typed_closure) {
+        bound_proxy.name              = cb->name;
+        bound_proxy.name_len          = cb->name_len;
+        bound_proxy.return_type       = cb->proc_return_type;
+        bound_proxy.return_struct_idx = cb->proc_return_struct_idx;
+        bound_proxy.param_count       = cb->proc_param_count;
+        for (uint32_t i = 0; i < cb->proc_param_count &&
+                             i < TYPER_MAX_PROC_PARAMS; i++) {
+          bound_proxy.param_types[i]       = cb->proc_param_types[i];
+          bound_proxy.param_struct_idxs[i] = UINT32_MAX;
+        }
+        proc = &bound_proxy;
+      }
+    }
     if (!proc) {
       for (uint32_t i = 0; i < tc->struct_count; i++) {
         if (tc->structs[i].name_len == head->data.lit_string.length &&

@@ -1,0 +1,9 @@
+# expect-error: declares
+# Conformance (TYPED_CLOSURES_DESIGN.md §2.2/2.3): an explicitly-typed literal
+# param must match the declared [Proc …] type — never silently re-typed. The
+# literal declares f64 but the type declares i64.
+proc main {} {
+  def [Proc [i64] i64] f [proc {f64 x} {* $x 2.0}]
+  print [f 3]
+}
+main

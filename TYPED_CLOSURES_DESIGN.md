@@ -1,10 +1,61 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A COMPLETE (2026-06-10). Next: Phase B (`[Proc …]`
-types, §3).** Resolved the lambda-boundary technical
+Status: **Phase A COMPLETE (2026-06-10). Phase B B1+B2 LANDED (2026-06-10):
+`[Proc [P…] R]` type syntax + typed closure VALUES bound at a `def` site +
+typed (unboxed) calling convention. Next: Phase B3 (higher-order — closure
+params, closures-returning-closures, `[Arr [Proc …]]`, named-closure
+conformance).** Resolved the lambda-boundary technical
 debt in `STREAM_TYPING_DEBT.md` (items 1, 3, 4, and 5-by-deletion); pairs with
 typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
 (`c338b99`, `aa81bef`), which is already a partial monomorphization.
+
+**Phase B — B1+B2 as landed (2026-06-10):**
+- **`[Proc [P…] R]` syntax (§3) at the `def`/`mut` annotation site.** Parses as
+  an ordinary `[...]` command (no parser change); resolved by `typer__proc_type`
+  / `compiler__proc_annotation` (mirroring `typer__future_type`). Param list is
+  the bracketed first arg (`[]`, `[i64]`, `[i64 i64]`); return is the optional
+  second arg. Scalar param/return types **and `dyn`** are supported; struct &
+  compound (`[Vec T]`, nested `[Proc …]`) param/return types are a **clear
+  compile error** (Phase B3) — never a silent rep-mismatched bind.
+- **Typed closure VALUE rep is the ordinary `JaclClosure`; NO VM change.**
+  `OP_CALL` already uses a caller-prepares-rep convention (args left in native
+  rep, callee reads by its param types; wide returns flow back unboxed for a
+  regular call). So a "typed closure value call" is a **typer + compiler
+  threading job** that reuses the existing local-typed-call path
+  (`compiler.c:16189`, `call_param_types = c->locals[slot].param_types`).
+- **Monomorphization of an inline literal RHS.** `def [Proc [i64] i64] f
+  [proc {x} {…}]`: the def handler stashes the resolved signature in
+  `c->annot_proc_*` just around compiling the literal; `HEAD_PROC` adopts the
+  param types for untyped params and the return type when undeclared
+  (generalizes `hof_param_enc`/`hof_mapper_ret_enc` from HOF context to an
+  explicit annotation), so the body compiles with typed params + typed return
+  (no box). The binding's `Local`/`GlobalArity` records the signature
+  (`compiler__stamp_closure_local`) → call sites use the typed unboxed
+  convention. The typer mirrors this: a strict tail-typed monomorphization walk
+  in `handle_def_or_mut`, the signature stored on `TyperBinding`
+  (`is_typed_closure`), and a `bound_proxy` at the call dispatch so `[f args]`
+  narrows to the declared return + checks args (like a named proc).
+- **Conformance (§2.2/2.3, invariant):** the literal's **arity** must equal the
+  declared one, and an **explicitly-typed literal param** must match the
+  declared type (untyped params infer) — both are compile errors. Proven unboxed
+  by wide i64 results past INT32_MAX flowing into strict-`i64` consumers
+  (`test/jacl/typed_closure_binding.jacl`); error tests
+  `typed_closure_{arity,param_type,struct_param}_error.jacl`. Suite 584/584.
+
+**Deliberate B1+B2 scope / debt (→ B3):**
+- **Named/bound-closure RHS** (`def [Proc …] f $g`) is **not** yet a typed bind
+  — a plain closure var reads as `dyn`, so this is a safe "cannot assign dyn to
+  closure binding" error today (no corruption). B3 adds conformance-checking of
+  a concrete-signature closure value.
+- **`[Proc …]` in param / return / array-element positions**, higher-order
+  procs (case 5.3), closures-returning-closures (case 5.1) — all B3. The
+  encoding currently lives ON the binding (`TyperBinding` / `Local` /
+  `GlobalArity`), NOT as a registry `TYPE_SHAPE_PROC` — that shape is only
+  needed when a proc type is referenced by a single idx *inside another type*,
+  which is exactly what B3 needs; add it then.
+- **No-return form `[Proc [P]]` defaults to `dyn`**, not nil (the strict
+  "defaults nil" of §3 needs a nil-return rep that discards the body tail).
+- **Struct/compound param & return types** — B3 (currently a clear error).
 
 **Landed so far (Phase A):**
 1. **Parser** — inline anonymous `proc` literals now parse inside `[...]`

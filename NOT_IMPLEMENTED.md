@@ -8,9 +8,14 @@ If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
 > **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
-> block). **Typed-closures Phase A is COMPLETE** (2026-06-10) — the open
-> next step is **Phase B** (`[Proc ...]` types, `TYPED_CLOSURES_DESIGN.md`
-> §3). Alternative next slices, all indexed below: typed spread (§4.1b),
+> block). **Typed-closures Phase A + Phase B (B1+B2) are COMPLETE**
+> (2026-06-10) — `[Proc [P…] R]` type syntax + typed closure VALUES bound at
+> a `def` site (inline-literal monomorphization, typed unboxed call,
+> invariant arity/param conformance). The open next step is **Phase B3**
+> (`[Proc …]` in param/return/array positions, higher-order procs,
+> closures-returning-closures, named-closure conformance — needs a registry
+> `TYPE_SHAPE_PROC`), `TYPED_CLOSURES_DESIGN.md` Phase B status block.
+> Alternative next slices, all indexed below: typed spread (§4.1b),
 > map iteration / `for` over maps (§4), the punted dyn-return no-autobox
 > consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
 > across suspensions (§8d/§8e).
@@ -181,7 +186,13 @@ pulling on them; revisit when one shows up.
 - **Closure literal call signatures.** Anonymous closures get
   `TYPE_CLOSURE` but the typer doesn't carry their param/return
   signature, so calls to a captured anon closure stay `dyn`. +150–300
-  in the typer.
+  in the typer. **PARTIALLY ADDRESSED (Phase B B1+B2, 2026-06-10):** an
+  inline literal bound under a `[Proc [P…] R]` annotation
+  (`def [Proc [i64] i64] f [proc {x} {…}]`) now carries a concrete
+  signature (on `TyperBinding`/`Local`/`GlobalArity`) and is called through
+  the typed unboxed convention. Still `dyn`: a closure with NO `[Proc …]`
+  annotation, a closure passed as a typed param, or a closure returned from
+  a proc (Phase B3 — `TYPED_CLOSURES_DESIGN.md`).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level

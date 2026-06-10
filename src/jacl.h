@@ -1577,6 +1577,14 @@ struct Compiler {
   uint32_t         hof_mapper_ret_enc; /* see compiler.c for documentation */
   uint32_t         gen_stream_elem_idx; /* see compiler.c for documentation */
   uint32_t         hof_param_enc;       /* see compiler.c for documentation */
+  /* Phase B typed-closure monomorphization context — see compiler.c. Must
+   * stay byte-for-byte in sync with the compiler.c definition (struct_sizes). */
+  bool             annot_proc_active;
+  uint8_t          annot_proc_param_count;
+  JaclType         annot_proc_param_types[COMPILER_MAX_PROC_PARAMS];
+  uint32_t         annot_proc_param_struct_idxs[COMPILER_MAX_PROC_PARAMS];
+  JaclType         annot_proc_return_type;
+  uint32_t         annot_proc_return_struct_idx;
   ModuleCache*     module_cache;
   Module*          current_module;
   ImportStack*     import_stack;

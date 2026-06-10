@@ -8,10 +8,20 @@
 > stamps), the no-autobox rule, suspending for-loop bodies, and the SM
 > wide-rep boundary fixes. See the git log around `64e8d6c` and
 > `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B**
->    (`[Proc …]` types: typed closure VALUES, typed named callbacks,
->    higher-order typed procs — §3 of that doc). Phase A status block at
->    the top records what shipped.
+>
+> **Phase B B1+B2 is COMPLETE** (2026-06-10): `[Proc [P…] R]` type syntax
+> at the `def` site + typed closure VALUES (inline-literal binding,
+> monomorphized, typed unboxed call) + invariant arity/param conformance.
+> No VM change (OP_CALL already caller-prepares-rep). **The active next
+> step is Phase B3** (higher-order: closure params, closures-returning-
+> closures, `[Arr [Proc …]]`, named-closure conformance — needs a registry
+> `TYPE_SHAPE_PROC` so a proc type can be referenced by idx inside another
+> type). See the `TYPED_CLOSURES_DESIGN.md` Phase B status block for exactly
+> what landed and the scoped debt.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3**
+>    (`[Proc …]` in param/return/array positions, higher-order typed procs
+>    — §3/§5 of that doc). The Phase B status block records what B1+B2
+>    shipped and the deferred items.
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).

@@ -3231,6 +3231,20 @@ struct Compiler {
    * slots, param_total_slots/has_inline_params set by the existing typed-
    * param machinery). UINT32_MAX = none. Consumed once read. */
   uint32_t         hof_param_enc;
+  /* Annotation-driven typed-closure monomorphization (TYPED_CLOSURES_DESIGN.md
+   * Phase B): `def [Proc [P…] R] f <inline-proc-literal>` resolves the declared
+   * signature into these fields just around compiling the literal value;
+   * HEAD_PROC adopts the param types for the literal's untyped params and the
+   * return type when undeclared, so the body compiles with typed params +
+   * typed return (no boxing — generalizes hof_param_enc/hof_mapper_ret_enc to
+   * an explicit annotation). annot_proc_active=false = inactive; consumed
+   * (reset) once HEAD_PROC reads it. */
+  bool             annot_proc_active;
+  uint8_t          annot_proc_param_count;
+  JaclType         annot_proc_param_types[COMPILER_MAX_PROC_PARAMS];
+  uint32_t         annot_proc_param_struct_idxs[COMPILER_MAX_PROC_PARAMS];
+  JaclType         annot_proc_return_type;
+  uint32_t         annot_proc_return_struct_idx;
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
@@ -3332,6 +3346,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->hof_mapper_ret_enc = UINT32_MAX;
   c->gen_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
   c->hof_param_enc   = UINT32_MAX;
+  c->annot_proc_active = false;
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -4414,6 +4429,99 @@ bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
 bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
   JaclType dummy;
   return compiler__resolve_type(c, word, len, &dummy);
+}
+
+/* Resolve one type-name node inside a [Proc …] signature (TYPED_CLOSURES_DESIGN
+ * Phase B). Scalar keywords + `dyn` supported; struct/compound types are
+ * Phase B3 → *out_supported=false. Mirrors typer__proc_sig_elem. */
+static JaclType compiler__proc_sig_elem(AstNode* n, uint32_t* out_idx,
+                                        bool* out_supported) {
+  *out_idx = UINT32_MAX;
+  *out_supported = false;
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* compound → B3 */
+  const char* nm = n->data.lit_string.value;
+  uint32_t    nl = n->data.lit_string.length;
+  if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
+    *out_supported = true;
+    return TYPE_DYN;
+  }
+  if (is_type_keyword(nm, nl)) {
+    *out_supported = true;
+    return type_from_keyword(nm, nl);
+  }
+  return TYPE_DYN;  /* struct name → B3 */
+}
+
+/* Recognize a [Proc [P…] R] annotation and fill c->annot_proc_* with the
+ * resolved signature (does NOT set annot_proc_active — the caller controls
+ * when the monomorphization context is live). Returns true iff `node` is a
+ * [Proc …] shape; *out_supported is false if any param/return is a struct or
+ * compound type (Phase B3). Mirrors typer__proc_type. */
+static bool compiler__proc_annotation(Compiler* c, AstNode* node,
+                                      bool* out_supported) {
+  c->annot_proc_param_count = 0;
+  /* No declared return ⇒ dyn (behaves like an unannotated closure). The strict
+   * "return defaults to nil" of TYPED_CLOSURES_DESIGN §3 is deferred — it needs
+   * a nil-return rep that discards the body tail. */
+  c->annot_proc_return_type = TYPE_DYN;
+  c->annot_proc_return_struct_idx = UINT32_MAX;
+  *out_supported = true;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 4 ||
+      memcmp(h->data.lit_string.value, "Proc", 4) != 0) return false;
+  uint32_t ac = node->data.command.arg_count;
+  if (ac != 1 && ac != 2) { *out_supported = false; return true; }
+  AstNode* plist = node->data.command.args[0];
+  if (!plist || plist->type != AST_COMMAND) { *out_supported = false; return true; }
+  AstNode* phead = plist->data.command.head;
+  bool empty_head = (phead && phead->type == AST_LIT_STRING &&
+                     phead->data.lit_string.length == 0);
+  uint8_t pc = 0;
+  bool sup; uint32_t idx;
+  if (phead && !empty_head) {
+    if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
+    c->annot_proc_param_types[pc] = compiler__proc_sig_elem(phead, &idx, &sup);
+    c->annot_proc_param_struct_idxs[pc] = idx;
+    if (!sup) *out_supported = false;
+    pc++;
+  }
+  for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
+    if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
+    c->annot_proc_param_types[pc] =
+        compiler__proc_sig_elem(plist->data.command.args[i], &idx, &sup);
+    c->annot_proc_param_struct_idxs[pc] = idx;
+    if (!sup) *out_supported = false;
+    pc++;
+  }
+  c->annot_proc_param_count = pc;
+  if (ac == 2) {
+    c->annot_proc_return_type =
+        compiler__proc_sig_elem(node->data.command.args[1], &idx, &sup);
+    c->annot_proc_return_struct_idx = idx;
+    if (!sup) *out_supported = false;
+  }
+  return true;
+}
+
+/* Phase B: stamp the most-recently-added Local (a typed-closure binding) with
+ * the resolved [Proc …] signature held in c->annot_proc_*, so call sites pick
+ * up the typed (unboxed) calling convention via call_param_types/return_type
+ * (compiler.c:16189). */
+static void compiler__stamp_closure_local(Compiler* c) {
+  Local* L = &c->locals[c->local_count - 1];
+  L->known_arity = (int16_t)c->annot_proc_param_count;
+  L->return_type = c->annot_proc_return_type;
+  L->return_struct_idx = c->annot_proc_return_struct_idx;
+  if (c->annot_proc_param_count > 0) {
+    JaclType* pts = (JaclType*)arena_alloc(c->arena,
+        sizeof(JaclType) * c->annot_proc_param_count);
+    for (uint8_t i = 0; i < c->annot_proc_param_count; i++)
+      pts[i] = c->annot_proc_param_types[i];
+    L->param_types = pts;
+  } else {
+    L->param_types = NULL;
+  }
 }
 
 /* --- Internal: Upvalue resolution --- */
@@ -9558,6 +9666,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     bool type_explicit = false;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
+    /* Phase B: set when the annotation is [Proc [P…] R]; gates the
+     * typed-closure monomorphization context + binding-signature record. The
+     * resolved signature lives in c->annot_proc_* (filled below). */
+    bool proc_binding = false;
 
     if (argc == 3) {
       /* Typed def: [def TYPE name value] */
@@ -9576,12 +9688,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           const char* hn = tn->data.command.head->data.lit_string.value;
           uint32_t    hl = tn->data.command.head->data.lit_string.length;
           bool is_ptr_type = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
+          bool is_proc_type = (hl == 4 && memcmp(hn, "Proc", 4) == 0);
           bool is_compound_type =
               (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                            memcmp(hn, "Map", 3) == 0 ||
                            memcmp(hn, "Arr", 3) == 0 ||
                            memcmp(hn, "Box", 3) == 0)) ||
-              is_ptr_type ||
+              is_ptr_type || is_proc_type ||
               (hl == 6 && (memcmp(hn, "Future", 6) == 0 ||
                            memcmp(hn, "Stream", 6) == 0));
           if (is_compound_type) {
@@ -9596,6 +9709,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             } else {
               declared_type = TYPE_DYN;
               type_explicit = false;
+            }
+            if (is_proc_type) {
+              /* Resolve the [Proc [P…] R] signature into c->annot_proc_*; the
+               * compile of the inline literal value (below) reads it to
+               * monomorphize, and the binding records it for typed calls. */
+              bool proc_ann_supported = true;
+              compiler__proc_annotation(c, tn, &proc_ann_supported);
+              if (!proc_ann_supported) {
+                compiler__error(c, line, col,
+                    "typed-closure [Proc …] struct/compound param or return "
+                    "types are not yet supported (Phase B3) — use scalar "
+                    "types or `dyn`");
+                return;
+              }
+              proc_binding = true;
             }
             name_arg_idx   = 1;
             value_arg_idx  = 2;
@@ -9685,8 +9813,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
+    /* Phase B: monomorphize an inline proc-literal RHS against the declared
+     * [Proc …] signature. Activate the context only for an inline proc literal
+     * (HEAD_PROC); a non-literal RHS (e.g. a named-closure var-ref) is left for
+     * B3 conformance-checking and the context stays inactive. */
+    bool proc_mono = proc_binding &&
+                     args[value_arg_idx]->type == AST_COMMAND &&
+                     args[value_arg_idx]->data.command.head_id == HEAD_PROC;
+    if (proc_mono) c->annot_proc_active = true;
     /* Compile the value expression with type context */
     compiler__compile_node(c, args[value_arg_idx]);
+    c->annot_proc_active = false;  /* defensive: HEAD_PROC consumes it, but a
+                                    * non-literal RHS would leave it set */
     JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
     uint32_t rhs_struct_idx = args[value_arg_idx]->inferred_struct_idx;
 
@@ -9832,6 +9970,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         { TypeInfo ti = { effective_type, rhs_struct_idx,
                           args[value_arg_idx]->inferred_key_struct_idx };
           TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+        if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
         if (sm_inline_struct) {
           uint32_t base_local_idx = c->local_count - 1;
           c->locals[base_local_idx].width = (uint16_t)sm_struct_width;
@@ -9875,6 +10014,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+      if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
       /* Decomposed nested-buf chain: if the RHS is an intermediate
        * arrow on a nested buf (e.g. `let p = $cube->1`), the AST node's
        * inferred_struct_idx is UINT32_MAX by design (cross-registry
@@ -9998,6 +10138,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (root->global_arities[i].name == name_val) {
             { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
               TYPEINFO_SAVE(root->global_arities[i], ti); }
+            /* Phase B: stamp the typed-closure signature so a global
+             * closure binding's call sites use the typed convention. */
+            if (proc_mono) {
+              GlobalArity* ga = &root->global_arities[i];
+              ga->known_arity = (int16_t)c->annot_proc_param_count;
+              ga->return_type = c->annot_proc_return_type;
+              ga->return_struct_idx = c->annot_proc_return_struct_idx;
+              for (uint8_t k = 0; k < c->annot_proc_param_count &&
+                                  k < COMPILER_MAX_PROC_PARAMS; k++)
+                ga->param_types[k] = c->annot_proc_param_types[k];
+            }
             break;
           }
         }
@@ -10240,6 +10391,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
     c->hof_mapper_ret_enc = UINT32_MAX;
+
+    /* Phase B: a [Proc [P…] R]-annotated inline literal adopts the declared
+     * RETURN type when it has no return of its own — so emit_return leaves a
+     * wide tail unboxed (the typed call site reads it raw; no box→unbox). The
+     * param adoption + active-marker consume happen at the param parse below. */
+    if (proc_return_type == TYPE_DYN && c->annot_proc_active) {
+      proc_return_type = c->annot_proc_return_type;
+      proc_return_struct_idx = c->annot_proc_return_struct_idx;
+    }
 
     if (args[name_arg_idx]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "proc name must be a string");
@@ -10646,6 +10806,47 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       param_struct_idxs[0] = c->hof_param_enc;
     }
     c->hof_param_enc = UINT32_MAX;
+
+    /* Phase B: a [Proc [P…] R]-annotated inline literal adopts the declared
+     * PARAM types for its untyped params, so the body compiles against the
+     * concrete types (no box-for-call). Then consume the active marker so a
+     * nested proc in the body isn't affected (mirrors hof_param_enc above). */
+    if (c->annot_proc_active) {
+      /* Conformance: the literal's arity must match the declared [Proc …]
+       * (TYPED_CLOSURES_DESIGN §2.3, invariant). */
+      if (param_count != c->annot_proc_param_count) {
+        char err_msg[160];
+        snprintf(err_msg, sizeof(err_msg),
+                 "typed-closure literal has %d parameter(s) but its [Proc …] "
+                 "type declares %d", (int)param_count,
+                 (int)c->annot_proc_param_count);
+        compiler__error(c, line, col, err_msg);
+        c->annot_proc_active = false;
+        return;
+      }
+      for (uint8_t i = 0; i < param_count && i < c->annot_proc_param_count; i++) {
+        if (param_types_arr[i] == TYPE_DYN &&
+            c->annot_proc_param_types[i] != TYPE_DYN) {
+          /* Untyped literal param infers the declared type (§2.2). */
+          param_types_arr[i] = c->annot_proc_param_types[i];
+          /* struct param idxs are Phase B3; scalars carry UINT32_MAX. */
+          param_struct_idxs[i] = c->annot_proc_param_struct_idxs[i];
+        } else if (param_types_arr[i] != TYPE_DYN &&
+                   param_types_arr[i] != c->annot_proc_param_types[i]) {
+          /* An explicitly-typed literal param must match the declared type —
+           * invariant conformance, never silently re-typed (§2.2/2.3). */
+          char err_msg[160];
+          snprintf(err_msg, sizeof(err_msg),
+                   "typed-closure literal param %d is %s but its [Proc …] type "
+                   "declares %s", (int)i, type_name(param_types_arr[i]),
+                   type_name(c->annot_proc_param_types[i]));
+          compiler__error(c, line, col, err_msg);
+          c->annot_proc_active = false;
+          return;
+        }
+      }
+      c->annot_proc_active = false;
+    }
 
     uint8_t min_args = is_variadic ? (uint8_t)(param_count - 1) : param_count;
 
