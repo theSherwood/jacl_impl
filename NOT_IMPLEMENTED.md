@@ -190,12 +190,23 @@ pulling on them; revisit when one shows up.
   compile-time element checks), def-binding stamp propagation, for-binding
   narrowing over stamped vecs, `collect [Stream str]` stamped `[Vec str]`
   (runtime rep unchanged — lines tests untouched). Tests:
-  `vec_ref_elems.jacl`, `vec_ref_elem_error.jacl`. **Still open:** nested
-  compound element types (`[Vec [Vec T]]`, `[Vec [Map K V]]` — needs
-  type-expression parsing into the shape registry + narrowing on get),
-  explicit `def [Vec str] v` annotations, vec-push/vec-set element checks on
-  stamped vecs, the same generalization for [Map K V] keys/values
-  ([Map str V]!), and [Arr T]. Same erasure/widening semantics should apply.
+  `vec_ref_elems.jacl`, `vec_ref_elem_error.jacl`. **Nested compound
+  element types LANDED (same day):** `[Vec [Vec T]]` / `[Vec [Map K V]]`
+  constructors (plain OP_VEC; element checks via portable stamps), def
+  bindings carry the TYPER-SIDE element shape idx (interned via
+  `typer__nested_elem_shape`; per the cross-registry rule shape idxs live in
+  bindings only — AST stamps stay UINT32_MAX and `typer__infer_var_ref`
+  suppresses them), and HEAD_FOR narrowing resolves the shape from the
+  binding (var-ref receiver) or re-derives from the ctor head (literal
+  receiver), decoding to PORTABLE inner encodings — so nested for-loops
+  narrow all the way down ([Vec [Vec i64]] → row is [Vec i64] → x is i64;
+  inner ref-kinds like [Vec [Vec str]] bind rows as plain-rep'd [Vec str]).
+  Test: `vec_nested_elems.jacl`. **Still open:** explicit `def [Vec str] v`
+  annotations, vec-push/vec-set element checks on stamped vecs, vec-get
+  narrowing on stamped/nested vecs, deeper nesting in the element TYPE
+  EXPRESSION itself ([Vec [Vec [Vec T]]] — the inner-inner is a shape, not a
+  keyword; typer__nested_elem_shape currently resolves one level), the same
+  generalization for [Map K V] keys/values ([Map str V]!), and [Arr T].
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

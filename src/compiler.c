@@ -6597,6 +6597,42 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   AstNode* _coll_elem = NULL;
   AstNode* _coll_key_elem = NULL;
   int _coll_kind = compiler__typed_collection_expr(head, &_coll_elem, &_coll_key_elem);
+  /* Nested compound element ctor: [[Vec [Vec T]] …] / [[Vec [Map …]] …].
+   * The element is a collection — a tagged heap value — so this is a
+   * REF-element vec: plain traced vec rep (OP_VEC); element typing is
+   * static and enforced by the typer's nested-element checks. Recognized
+   * here because compiler__typed_collection_expr requires a LIT_STRING
+   * element and returns kind 0 for compound elements. */
+  if (_coll_kind == 0 && head->type == AST_COMMAND &&
+      head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0 &&
+      head->data.command.arg_count == 1 &&
+      head->data.command.args[0]->type == AST_COMMAND) {
+    AstNode* _ne = head->data.command.args[0];
+    AstNode* _nh = _ne->data.command.head;
+    bool _ne_ok = _nh && _nh->type == AST_LIT_STRING &&
+                  _nh->data.lit_string.length == 3 &&
+                  (memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 ||
+                   memcmp(_nh->data.lit_string.value, "Map", 3) == 0) &&
+                  _ne->data.command.arg_count >= 1 &&
+                  _ne->data.command.arg_count <= 2;
+    for (uint32_t _ni = 0; _ne_ok && _ni < _ne->data.command.arg_count; _ni++)
+      if (_ne->data.command.args[_ni]->type != AST_LIT_STRING) _ne_ok = false;
+    if (_ne_ok) {
+      if (argc > 255) {
+        compiler__error(c, line, col,
+            "[Vec ...] too many initial elements (max 255)");
+        return;
+      }
+      for (uint32_t i = 0; i < argc; i++) compiler__compile_node(c, args[i]);
+      compiler__emit_byte(c, OP_VEC, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      c->last_expr_type = TYPE_VEC;
+      return;
+    }
+  }
   if (_coll_kind == 1) {
     const char* type_name_str = _coll_elem->data.lit_string.value;
     uint32_t type_name_len = _coll_elem->data.lit_string.length;

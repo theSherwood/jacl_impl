@@ -1,0 +1,39 @@
+# expect: 1
+# expect: 2
+# expect: 100
+# expect: hi
+# expect: ok
+# Nested compound element types: [Vec [Vec i64]] etc. The element is a
+# collection — a tagged heap value — so the outer vec is a REF-element vec
+# (plain traced rep). The element type is static: each side derives its own
+# shape (typer bindings carry typer shape idxs; AST stamps stay portable per
+# the cross-registry rule), and for-loops narrow the binding to the inner
+# collection type, so nested iteration narrows all the way down.
+proc main {} {
+  # vec of typed vecs — direct ctor receiver
+  for [[Vec [Vec i64]] [[Vec i64] 1] [[Vec i64] 2]] inner {
+    for $inner n {
+      assert-type $n i64
+      print $n                       # 1 2
+    }
+  }
+
+  # via a def binding: narrowing flows from the binding's typer-side shape
+  def m [[Vec [Vec i64]] [[Vec i64] 10 20] [[Vec i64] 30 40]]
+  mut i64 s 0
+  for $m row {
+    for $row x { set s [+ $s $x] }
+  }
+  print $s                           # 10+20+30+40 = 100
+
+  # vec of ref-element vecs ([Vec str] inner): inner is plain-rep'd
+  def sv [[Vec [Vec str]] [[Vec str] "hi"]]
+  for $sv row2 {
+    for $row2 w {
+      assert-type $w str
+      print $w                       # hi
+    }
+  }
+  print "ok"
+}
+main
