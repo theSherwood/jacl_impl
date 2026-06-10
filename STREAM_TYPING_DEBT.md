@@ -80,22 +80,21 @@ the items below are the localized compromises.
 
 ## 4. Restore-pass only partially removed
 
-- **Where:** `typer__proc_result_enc` in `src/typer.c` — `body_wide` gates the
-  restore-pass drop to i64/u64/f64 element types only.
-- **Why:** the wide-body codegen is correct only when the value arrives wide
-  (i64/u64/f64). For i32/struct/str-element mappers the restore-to-`it:dyn`
-  double-walk is kept, so those mapper bodies are typed `it:dyn` (lose the
-  element type in codegen).
-- **Impact:** the "kill the double-walk wart" goal is partial; i32-element (and
-  struct/str) transform mapper bodies still run dyn. Also two cheap missed
-  opportunities: (a) an i32-element body could safely drop the restore (tagged
-  i32 body reads a tagged i32 value fine — no garbage), tightening it; (b) the
-  double-walk's nested-pipeline cost remains for the non-wide cases.
-- **Remediation (cheap part):** allow `body_wide` (or a sibling flag) to also
-  drop the restore for i32/u32/f32/bool element types where the body rep
-  already matches the tagged value. **Remediation (full):** typed closures
-  remove the restore-pass entirely.
-- **Effort:** small for the i32 tightening; large for full removal.
+- **Status:** ✅ **resolved** (2026-06-10, with the rest of TYPED_CLOSURES
+  Phase A). The keep gate in `typer__proc_result_enc` is now
+  `keep_typed = body_bound && !probe_errored` — EVERY bindable element type
+  (wide i64/u64/f64, struct, and tagged-fit i32/u32/f32/bool/str) keeps its
+  element-typed body, because in each case the rep the runtime delivers
+  matches what the typed body reads (wide via the producer flip, struct via
+  the multi-slot channel + by-value params, tagged-fit trivially). The
+  restore pass survives ONLY as the rollback for a failed probe (mixed-type
+  bodies degrade to the lenient dyn path). The double-walk is also truly
+  gone: the generic arg pre-walk and the for-callback pre-infer now SKIP an
+  inline HOF callback over a typed stream (the skip condition mirrors the
+  HOF handler's exactly), so the callback body is typed exactly once — and
+  body-internal static typing works (`assert-type $x i32` inside a mapper
+  used to be a sticky compile error from the unbound pre-walk). Test:
+  `stream_mono_tagged_fit.jacl`.
 
 ## 5. Comparison/arith promotion asymmetry
 

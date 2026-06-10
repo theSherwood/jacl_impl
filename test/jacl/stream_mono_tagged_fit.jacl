@@ -1,0 +1,49 @@
+# expect: 11
+# expect: 5
+# expect: 3.5
+# expect: ok
+# Tagged-fit monomorphization (STREAM_TYPING_DEBT item 4, final piece): an
+# inline HOF callback over a stream of a TAGGED-FIT element (i32/u32/f32/
+# bool/str) now keeps its element-typed body — the rep is tagged on both
+# sides, so the bytecode is unchanged, but body-internal static typing works
+# (assert-type on the param was a compile error before: the body used to be
+# re-typed with the param as dyn) and the callback body is typed exactly once
+# (the restore-pass survives only as the mixed-type rollback).
+proc gi {} [Stream i32] {
+  yield 10
+}
+proc gs {} [Stream str] {
+  yield "hello"
+}
+proc gf {} [Stream f32] {
+  yield 1.5
+}
+proc main {} {
+  # i32: in-body assert-type + arithmetic; output narrows to i32
+  for [transform [gi] [proc {x} {
+    assert-type $x i32
+    + $x 1
+  }]] y {
+    assert-type $y i32
+    print $y                       # 11
+  }
+
+  # str: in-body assert-type + a string op; output narrows to i32 (length)
+  for [transform [gs] [proc {s} {
+    assert-type $s str
+    length $s
+  }]] n {
+    assert-type $n i32
+    print $n                       # 5
+  }
+
+  # f32: typed body arithmetic over the tagged f32 element
+  for [transform [gf] [proc {f} {
+    assert-type $f f32
+    + $f 2.0
+  }]] g {
+    print $g                       # 3.5
+  }
+  print "ok"
+}
+main

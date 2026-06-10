@@ -45,18 +45,18 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
    wide with no box. Named/dyn callbacks keep the tagged pull. Tests:
    `stream_each_typed.jacl`, `stream_each_named_cb.jacl`.
 
-**Still open in Phase A — restore-pass removal for non-wide elements (debt 4),
-tiered by rep (2026-06-10):**
-- **i32/u32/f32/bool — do next, typer-only.** These are tagged-fit scalars
-  (`is_unboxed_type` is i64/u64/f64 only), so the rep the VM hands the body
-  already equals what a typed-body read expects — no VM/operand change, just
-  generalize the `keep_wide` gate in `typer__proc_result_enc` to keep the
-  typed body. Win: typed-op codegen instead of dyn dispatch. Verify typed-i32
-  overflow semantics match the dyn path before trusting it.
-- **str — only if a typed-str fast path exists.** `TYPE_STR` is a real
-  distinct static type, but its runtime rep is identical to a boxed string
-  (tagged heap pointer), so dropping the restore is rep-safe yet buys nothing
-  unless string ops have typed codegen. Check first; skip if cosmetic.
+**Restore-pass removal — DONE for all element types (debt 4 resolved,
+2026-06-10):**
+- **i32/u32/f32/bool/str (tagged-fit)** — the keep gate generalized to
+  `keep_typed = body_bound && !probe_errored`; tagged on both sides, so the
+  bytecode is unchanged (no typed-i32 opcodes exist — verified), but
+  body-internal static typing now works and the double-walk is gone. The
+  generic arg pre-walk + for-callback pre-infer SKIP inline HOF callbacks
+  over typed streams, so the body is typed exactly ONCE (the original
+  "Startup" goal); the restore pass survives only as the mixed-type
+  rollback. `assert-type $x i32` inside a mapper body works (used to be a
+  sticky compile error from the unbound pre-walk). Test:
+  `stream_mono_tagged_fit.jacl` (i32/str/f32).
 - **struct — DONE for inputs (2026-06-10): channel + for-loop + HOF
   monomorphization.** The channel: `OP_YIELD_SM_WIDE` parks the struct's raw
   value bytes in `vm->yield_wide` (no GC tracing — user structs are pure
@@ -82,11 +82,12 @@ tiered by rep (2026-06-10):**
   generator-body struct bugs found en route are FIXED — see
   `NOT_IMPLEMENTED.md` §4.1b/§4.1c.
 
-The unifying gate for all tiers: drop the restore-pass exactly when *the rep
-the VM hands the body equals the rep a typed-body read expects*. Wide scalars
-needed the producer-wide flip to make that true; tagged-fit scalars already
-satisfy it; str satisfies it trivially; struct does not yet have a defined
-element rep at the pull boundary at all.
+The unifying gate, now satisfied for every element type: drop the
+restore-pass exactly when *the rep the VM hands the body equals the rep a
+typed-body read expects*. Wide scalars needed the producer-wide flip; struct
+needed the multi-slot channel + by-value param convention; tagged-fit
+scalars and str satisfied it trivially. All landed — the restore pass exists
+only as the failed-probe rollback.
 
 **Known limitation (pre-existing):** `set` of a captured mutable upvalue inside
 a HOF callback (e.g. `for $s [\ set acc [+ $acc $it]]`) type-errors — the

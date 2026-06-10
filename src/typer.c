@@ -2484,8 +2484,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    * untyped (dyn — the lambda case) and an arg type was supplied; otherwise
    * keep its declared type. Type the body; the tail's type is the result. */
   typer__scope_push(tc);
-  bool body_wide = false;  /* a param was bound to the flip-enabled wide type */
-  bool body_struct = false; /* a param was bound to a struct element type */
+  bool body_bound = false; /* a param was bound to a call-site arg type */
   for (uint32_t i = 0; i < pcount; i++) {
     uint8_t  bt = (uint8_t)pt[i];
     uint32_t bs = ps[i];
@@ -2493,11 +2492,11 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       if (JACL_IS_SCALAR_TYPE_IDX(arg_encs[i])) {
         bt = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(arg_encs[i]);
         bs = UINT32_MAX;
-        if (bt == TYPE_I64 || bt == TYPE_U64 || bt == TYPE_F64) body_wide = true;
+        if (bt != TYPE_DYN) body_bound = true; /* dyn element: no binding */
       } else {
         bt = (uint8_t)TYPE_STRUCT;
         bs = arg_encs[i];
-        body_struct = true;
+        body_bound = true;
       }
     }
     typer__scope_add(tc, pn[i]->data.lit_string.value,
@@ -2517,17 +2516,21 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
     if (saved_first_empty) tc->result->first_error[0] = '\0';
   }
 
-  /* Keep the element-typed body only when a param was bound to a rep the
-   * runtime will actually deliver AND the probe typed cleanly:
-   *  - wide scalar (i64/u64/f64): the producer-wide flip makes the source
-   *    yield wide and the HOF push it straight into this wide-compiled body.
+  /* Keep the element-typed body whenever a param was bound to a call-site
+   * type AND the probe typed cleanly. The rep the runtime delivers matches
+   * what the typed body expects for EVERY bindable element type:
+   *  - wide scalar (i64/u64/f64): the producer-wide flip yields wide and
+   *    the HOF pushes it straight into the wide-compiled body.
    *  - struct: the multi-slot channel + by-value struct param convention
    *    deliver the element as N inline slots (struct HOF monomorphization).
-   * Otherwise restore the body to its declared (dyn) param types: for
-   * tagged-fit elements (i32/str) the pipeline still hands a tagged value
-   * (a wide-typed body over a tagged param produces garbage — verified);
-   * for a failed probe we degrade to the lenient dyn path. */
-  bool keep_typed = (body_wide || body_struct) && !probe_errored;
+   *  - tagged-fit scalars (i32/u32/f32/bool/str): tagged on both sides —
+   *    a typed body read of a non-unboxed type IS a tagged read, so the
+   *    bytecode is unchanged; keeping the typed body fixes body-internal
+   *    static typing (assert-type, propagation) and kills the double-walk
+   *    (STREAM_TYPING_DEBT item 4, final piece).
+   * The restore pass below survives ONLY as the rollback for a failed
+   * probe (mixed-type bodies degrade to the lenient dyn path). */
+  bool keep_typed = body_bound && !probe_errored;
   if (!keep_typed) {
     typer__scope_push(tc);
     for (uint32_t i = 0; i < pcount; i++)
@@ -2874,15 +2877,26 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (ac == 2 && (as[1]->type == AST_COMMAND ||
                       as[1]->type == AST_VAR_REF)) {
         typer__infer_node(tc, as[0]);
-        typer__infer_node(tc, as[1]);
+        /* Type-once: an inline callback over a typed stream is typed ONLY
+         * via proc_result_enc below (param bound to the element type) —
+         * a generic walk first would type the body with the param unbound
+         * and record spurious sticky errors. Mirrors the transform/filter
+         * pre-walk skip. */
+        bool cb_inline_typed_stream =
+            (as[1]->type == AST_COMMAND &&
+             as[1]->data.command.head_id == HEAD_PROC &&
+             (JaclType)as[0]->inferred_type == TYPE_STREAM &&
+             as[0]->inferred_struct_idx != UINT32_MAX);
+        if (!cb_inline_typed_stream) typer__infer_node(tc, as[1]);
         if (as[1]->type == AST_COMMAND) {
           uint32_t cb_enc = UINT32_MAX;
-          if ((JaclType)as[0]->inferred_type == TYPE_STREAM &&
-              as[0]->inferred_struct_idx != UINT32_MAX) {
+          if (cb_inline_typed_stream) {
             uint32_t arg_enc = as[0]->inferred_struct_idx;
-            bool cb_wide = false;
-            (void)typer__proc_result_enc(tc, as[1], &arg_enc, 1, &cb_wide);
-            if (cb_wide) cb_enc = arg_enc;
+            bool cb_typed = false;
+            (void)typer__proc_result_enc(tc, as[1], &arg_enc, 1, &cb_typed);
+            if (cb_typed) cb_enc = arg_enc;
+            /* The skipped pre-walk would have stamped this (handle_proc). */
+            as[1]->inferred_type = TYPE_CLOSURE;
           }
           as[1]->inferred_struct_idx = cb_enc;
         }
@@ -3110,6 +3124,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
 
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
     AstNode* arg = node->data.command.args[i];
+    /* Type-once for monomorphized HOF callbacks: an inline proc passed to
+     * transform/filter over a typed stream is typed by the HOF case below
+     * (typer__proc_result_enc, with its param bound to the element type).
+     * Skip it here — this generic walk would type the body with the param
+     * UNBOUND (dyn), recording spurious sticky errors (e.g. an in-body
+     * assert-type) and paying an extra body walk. The skip condition
+     * mirrors the HOF case's exactly (args[0] is typed before i==1, so its
+     * stream/elem verdict is available). */
+    if (i == 1 && node->data.command.arg_count == 2 &&
+        (mutator_hid == HEAD_TRANSFORM || mutator_hid == HEAD_FILTER) &&
+        (JaclType)node->data.command.args[0]->inferred_type == TYPE_STREAM &&
+        node->data.command.args[0]->inferred_struct_idx != UINT32_MAX &&
+        arg->type == AST_COMMAND &&
+        arg->data.command.head_id == HEAD_PROC) {
+      continue;
+    }
     JaclType saved_et = tc->expected_type;
     if (proc && i < proc->param_count) {
       tc->expected_type = (JaclType)proc->param_types[i];
@@ -3838,15 +3868,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->data.command.arg_count == 2 &&
                 recv->inferred_struct_idx != UINT32_MAX) {
               uint32_t arg_enc = recv->inferred_struct_idx;
-              bool pred_wide = false;
+              bool pred_typed = false;
               (void)typer__proc_result_enc(
-                  tc, node->data.command.args[1], &arg_enc, 1, &pred_wide);
-              /* Stamp the predicate proc node so the compiler bakes the wide
-               * param rep onto OP_FILTER iff the body was actually typed wide
-               * (a clean wide probe). On fallback/non-proc it stays dyn → the
-               * pull boxes the element for the call. */
+                  tc, node->data.command.args[1], &arg_enc, 1, &pred_typed);
+              /* Stamp the predicate proc node so the compiler bakes the
+               * param rep onto OP_FILTER iff the body was actually typed
+               * against the element (a clean probe). On fallback/non-proc it
+               * stays dyn → the pull boxes a wide element for the call.
+               * An inline proc skipped the generic pre-walk (type-once), so
+               * also give it the TYPE_CLOSURE stamp handle_proc would have. */
               node->data.command.args[1]->inferred_struct_idx =
-                  pred_wide ? arg_enc : UINT32_MAX;
+                  pred_typed ? arg_enc : UINT32_MAX;
+              if (node->data.command.args[1]->type == AST_COMMAND &&
+                  node->data.command.args[1]->data.command.head_id == HEAD_PROC)
+                node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
             }
           }
           return;
@@ -3874,9 +3909,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               /* Stamp the mapper node with the element enc iff its body was
                * monomorphized (typed against the element). The compiler
                * requires this for struct-element streams: only a
-               * monomorphized inline mapper can take the N-slot element. */
+               * monomorphized inline mapper can take the N-slot element.
+               * An inline proc skipped the generic pre-walk (type-once), so
+               * also give it the TYPE_CLOSURE stamp handle_proc would have. */
               node->data.command.args[1]->inferred_struct_idx =
                   mapper_typed ? arg_enc : UINT32_MAX;
+              if (node->data.command.args[1]->type == AST_COMMAND &&
+                  node->data.command.args[1]->data.command.head_id == HEAD_PROC)
+                node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
             }
           }
           return;
