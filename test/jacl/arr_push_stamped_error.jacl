@@ -1,0 +1,7 @@
+# expect-error: arr-push: element type i32 does not match the declared str element
+# Hard element check on a stamped ref-element arr ([Arr str]).
+proc main {} {
+  def a [[Arr str] "a"]
+  [arr-push $a 42]
+}
+main

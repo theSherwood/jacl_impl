@@ -5206,6 +5206,34 @@ static bool compiler__plain_map_key_sink(Compiler* c, AstNode* recv,
   return compiler__reject_wide_dyn(c, line, col, "dyn-keyed map");
 }
 
+/* Hard element/key-type check against a STAMPED plain-rep receiver
+ * ([Vec str] / [Arr str] / [Map i64 str] key / [Map K str] value).
+ * The stamp is a scalar sentinel; a concrete non-matching arg is a
+ * compile error. dyn flow-in stays permitted — the plain rep is tagged,
+ * so dyn values are rep-safe and runtime-checked downstream. Returns
+ * true if an error was reported. */
+static bool compiler__check_stamped_elem(Compiler* c, AstNode* recv,
+                                         JaclType plain_t, bool key_slot,
+                                         AstNode* val_node, const char* op,
+                                         const char* slot,
+                                         uint32_t line, uint32_t col) {
+  if ((JaclType)recv->inferred_type != plain_t) return false;
+  uint32_t stamp_idx = key_slot ? recv->inferred_key_struct_idx
+                                : recv->inferred_struct_idx;
+  if (stamp_idx == UINT32_MAX || !JACL_IS_SCALAR_TYPE_IDX(stamp_idx))
+    return false;
+  JaclType want = COMPILER_TYPE_IDX_TO_SCALAR(stamp_idx);
+  if (want == TYPE_DYN) return false;
+  JaclType got = (JaclType)val_node->inferred_type;
+  if (got == want || got == TYPE_DYN) return false;
+  char err[160];
+  snprintf(err, sizeof(err),
+           "%s: %s type %s does not match the declared %s %s",
+           op, slot, type_name(got), type_name(want), slot);
+  compiler__error(c, line, col, err);
+  return true;
+}
+
 /* --- Internal: Map dynamic opcode to typed opcode for a given type --- */
 
 uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
@@ -12190,6 +12218,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_ARR, false,
+                                     args[1], "arr-push", "element",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_ARR_PUSH, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -12224,6 +12255,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn arr")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_ARR, false,
+                                     args[2], "arr-set", "element",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_ARR_SET, line);
     c->last_expr_type = TYPE_ARR;
     return;
@@ -12605,6 +12639,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn vec")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_VEC, false,
+                                     args[1], "vec-push", "element",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -12633,6 +12670,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn vec")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn vec")) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_VEC, false,
+                                     args[2], "vec-set", "element",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_VEC_SET, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -12738,6 +12778,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_MAP, true,
+                                     args[1], "map-get", "key",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_MAP_GET, line);
     c->last_expr_type = TYPE_DYN;
     if ((JaclType)args[0]->inferred_type == TYPE_MAP &&
@@ -12774,6 +12817,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_MAP, true,
+                                     args[1], "map-has", "key",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_MAP_HAS, line);
     c->last_expr_type = TYPE_BOOL;
     return;
@@ -12828,9 +12874,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_MAP, true,
+                                     args[1], "map-set", "key",
+                                     line, col)) return;
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_typed(c, args[2], line, col, "dyn map")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn map")) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_MAP, false,
+                                     args[2], "map-set", "value",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_MAP_SET, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -12863,6 +12915,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     if (compiler__plain_map_key_sink(c, args[0], line, col)) return;
+    if (compiler__check_stamped_elem(c, args[0], TYPE_MAP, true,
+                                     args[1], "map-remove", "key",
+                                     line, col)) return;
     compiler__emit_byte(c, OP_MAP_REMOVE, line);
     c->last_expr_type = TYPE_MAP;
     return;

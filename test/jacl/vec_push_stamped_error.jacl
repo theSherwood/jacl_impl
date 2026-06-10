@@ -1,0 +1,9 @@
+# expect-error: vec-push: element type i32 does not match the declared str element
+# Hard element check on a stamped ref-element vec: pushing a concrete
+# non-str value into a [Vec str] is a compile error (dyn flow-in stays ok).
+proc main {} {
+  def sv [[Vec str] "a"]
+  def sv2 [vec-push $sv 42]
+  print $sv2
+}
+main
