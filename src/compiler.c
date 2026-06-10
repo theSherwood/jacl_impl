@@ -6767,6 +6767,72 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
   }
+  /* Nested compound VALUE map ctor: [[Map K [Vec T]] k v …]. The value is
+   * a collection (tagged heap value — a REF kind) → PLAIN traced map rep
+   * (OP_MAP); key/value typing is static, enforced by the typer's
+   * nested-value checks. Key must be a type keyword (numeric/str/dyn);
+   * wide keys follow the plain-map key rules. */
+  if (_coll_kind == 0 && head->type == AST_COMMAND &&
+      head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Map", 3) == 0 &&
+      head->data.command.arg_count == 2 &&
+      head->data.command.args[0]->type == AST_LIT_STRING &&
+      head->data.command.args[1]->type == AST_COMMAND) {
+    AstNode* _mv = head->data.command.args[1];
+    AstNode* _mh = _mv->data.command.head;
+    bool _mv_ok = _mh && _mh->type == AST_LIT_STRING &&
+                  _mh->data.lit_string.length == 3 &&
+                  ((memcmp(_mh->data.lit_string.value, "Vec", 3) == 0 &&
+                    _mv->data.command.arg_count == 1) ||
+                   (memcmp(_mh->data.lit_string.value, "Map", 3) == 0 &&
+                    _mv->data.command.arg_count == 2));
+    for (uint32_t _mi = 0; _mv_ok && _mi < _mv->data.command.arg_count; _mi++) {
+      AstNode* _ma = _mv->data.command.args[_mi];
+      if (_ma->type != AST_LIT_STRING && _ma->type != AST_COMMAND)
+        _mv_ok = false;
+    }
+    /* Key: type keyword only (struct keys with ref values stay an error,
+     * same rule as the kind-3 plain-rep route). */
+    const char* _mk = head->data.command.args[0]->data.lit_string.value;
+    uint32_t    _mkl = head->data.command.args[0]->data.lit_string.length;
+    if (_mv_ok && !is_type_keyword(_mk, _mkl)) {
+      compiler__error(c, line, col,
+          "[Map K V]: a compound (nested-collection) value type uses the "
+          "plain map rep; keys must be a numeric scalar, str, or dyn");
+      return;
+    }
+    if (_mv_ok) {
+      JaclType _mkt = type_from_keyword(_mk, _mkl);
+      if (argc % 2 != 0) {
+        compiler__error(c, line, col, "[Map K V ...] requires an even number of arguments (key-value pairs)");
+        return;
+      }
+      if (argc / 2 > 255) {
+        compiler__error(c, line, col, "[Map K V ...] too many initial pairs (max 255)");
+        return;
+      }
+      for (uint32_t i = 0; i < argc; i++) {
+        bool is_key = (i % 2 == 0);
+        compiler__compile_node(c, args[i]);
+        if (is_key) {
+          if (compiler__is_typed_collection_scalar(_mkt) &&
+              is_unboxed_type(_mkt)) {
+            compiler__ensure_boxed(c, line);  /* declared wide key */
+          } else if (compiler__reject_wide_dyn(c, line, col, "dyn map")) {
+            return;
+          }
+        }
+        /* Values: the typer's nested-value checks own typing; bare typed
+         * collections are the DECLARED value here, so no reject. */
+      }
+      compiler__emit_byte(c, OP_MAP, line);
+      compiler__emit_byte(c, (uint8_t)(argc / 2), line);
+      c->last_expr_type = TYPE_MAP;
+      return;
+    }
+  }
   if (_coll_kind == 1) {
     const char* type_name_str = _coll_elem->data.lit_string.value;
     uint32_t type_name_len = _coll_elem->data.lit_string.length;

@@ -1,0 +1,38 @@
+# expect: 2
+# expect: 20
+# expect: ab
+# expect: x
+# expect: 5
+# expect: ok
+# Nested compound VALUE map types ([Map str [Vec i64]]): the value is a
+# collection (ref kind) -> plain map rep; the key stamps as usual and the
+# value SHAPE is carried typer-side in the binding, so map-get narrows the
+# value and chained gets narrow all the way down.
+proc main {} {
+  # [Map str [Vec i64]]: get -> [Vec i64]; element get -> i64
+  def m [[Map str [Vec i64]] "a" [[Vec i64] 10 20] "b" [[Vec i64] 30]]
+  def row [map-get $m "a"]
+  print [vec-len $row]
+  [assert-type [vec-get $row 1] i64]
+  print [vec-get $row 1]
+
+  # ref-kind inner: [Map str [Vec str]] values are plain-rep'd [Vec str]
+  def sm [[Map str [Vec str]] "k" [[Vec str] "ab"]]
+  def srow [map-get $sm "k"]
+  [assert-type [vec-get $srow 0] str]
+  print [vec-get $srow 0]
+
+  # inner map value: [Map str [Map str str]] -> plain inner map, str values
+  def mm [[Map str [Map str str]] "o" [[Map str str] "i" "x"]]
+  def inner [map-get $mm "o"]
+  [assert-type [map-get $inner "i"] str]
+  print [map-get $inner "i"]
+
+  # numeric keys with compound values ([Map i64 [Vec i64]])
+  def nm [[Map i64 [Vec i64]] 1 [[Vec i64] 5]]
+  def nrow [map-get $nm 1]
+  print [vec-get $nrow 0]
+
+  print "ok"
+}
+[main]

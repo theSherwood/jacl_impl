@@ -262,11 +262,29 @@ pulling on them; revisit when one shows up.
   box/byte-pack bridging — annotation-driven, static type preserved.
   `[box $wide]` / `[atom $wide]` themselves now bridge correctly (they
   stored raw wide bits before — deref read back garbage). Tests:
-  `{arr,vec,map}_wide_dyn_error.jacl`. **Open consistency question:** a
-  dyn-RETURN proc still implicitly boxes a wide tail
-  (`wide_proc_return.jacl`) while yield in an unannotated generator
-  errors — the no-autobox principle suggests the return boundary should
-  error too (annotate the return type or box).
+  `{arr,vec,map}_wide_dyn_error.jacl`. **Open consistency question
+  (punted 2026-06-10, user call):** a dyn-RETURN proc still implicitly
+  boxes a wide tail (`wide_proc_return.jacl`) while yield in an
+  unannotated generator errors — the no-autobox principle suggests the
+  return boundary (and dyn proc args) should error too.
+  **Collection-typing tail CLOSED (2026-06-10):** hard element/key checks
+  on stamped plain-rep mutators (`compiler__check_stamped_elem`; tests
+  `{vec,arr}_push_stamped_error`, `map_set_stamped_error`); proc-param
+  collection annotations — ref kinds → plain-rep param types with body
+  narrowing, numeric scalars → typed rep via sentinel, `[Arr T]` params
+  recognized at all reps (test `coll_ref_params.jacl`); vec-get narrowing
+  through nested shape-carried bindings incl. depth-3 def re-derivation
+  (test `vec_nested_get.jacl`; also fixed: inner maps with ref VALUES
+  were decoded TYPE_TYPED_MAP at the nested ctor check / HEAD_FOR —
+  plain-rep elements would have run typed-map opcodes; new
+  `typer__decode_map_shape` applies the rep rule at every decode site);
+  nested compound map VALUES (`[Map str [Vec i64]]` ctor both layers,
+  key stamps + binding-carried value shape, map-get portable decode,
+  test `map_nested_vals.jacl`). **Remaining (this area):** for-loop
+  iteration over maps doesn't exist at all (runtime "expected vector,
+  got map") — narrowing over stamped maps is blocked on that feature;
+  proc RETURN-type collection annotations (typer__resolve_return_type
+  ref kinds); cross-module element-type alignment (existing carve-out).
   **Still open (vec/arr):** hard vec-push element CHECKS (currently
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)
