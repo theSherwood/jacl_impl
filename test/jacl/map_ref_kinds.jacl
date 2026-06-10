@@ -46,11 +46,11 @@ proc main {} {
   def d [[Map dyn dyn] "k" 1]
   print [map-get $d "k"]
 
-  # 5. [Map str] (kind 2: dyn keys, str values) -> plain rep
-  def v [[Map str] 7 "seven"]
+  # 5. [Map dyn str] (dyn keys, str values) -> plain rep
+  def v [[Map dyn str] 7 "seven"]
   print [map-get $v 7]
 
-  # 6. explicit dyn keys with a value-type value ([Map dyn i64]) == [Map i64]
+  # 6. explicit dyn keys with a value-type value -> typed rep, dyn keys
   def t [[Map dyn i64] "q" 9]
   print [map-get $t "q"]
 

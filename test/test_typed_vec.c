@@ -508,13 +508,13 @@ static int test_typed_vec_box_roundtrip(void) {
 
 static int test_typed_vec_box_wrong_type(void) {
   PrintCapture cap;
-  /* box? [Map Point] should return false for a boxed typed vec */
+  /* box? [Map dyn Point] should return false for a boxed typed vec */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
     "  def points [[Vec Point] [Point x 1 y 2]]\n"
     "  def boxed [box $points]\n"
-    "  if [box? [Map Point] $boxed] {\n"
+    "  if [box? [Map dyn Point] $boxed] {\n"
     "    [print yes]\n"
     "  } { [print no] }\n"
     "}\n"

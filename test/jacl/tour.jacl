@@ -245,13 +245,13 @@ proc main {} {
   assert [== $cfg->port 42]
 
   # ----- typed collections -----
-  # `[Vec T]` / `[Map V]` parameterize element / value type. The typed
+  # `[Vec T]` / `[Map K V]` parameterize element / key / value types. The typed
   # binding requires the typed constructor (`[[Vec i32] ...]`), and the
   # compiler checks element types at push/set sites. Untyped `[vec ...]`
   # / `[map ...]` still work for dyn-everything use.
   def [Vec i32] typed-nums [[Vec i32] 10 20 30]
   assert [== [vec-get $typed-nums 1] 20]
-  def [Map Pt] coords [[Map Pt] origin [Pt x 0 y 0] right [Pt x 1 y 0]]
+  def [Map dyn Pt] coords [[Map dyn Pt] origin [Pt x 0 y 0] right [Pt x 1 y 0]]
   assert [== [map-get $coords right]->x 1]
 
   # ----- mutable state -----

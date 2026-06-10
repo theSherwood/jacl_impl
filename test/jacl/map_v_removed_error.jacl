@@ -1,0 +1,8 @@
+# expect-error: [Map V] was removed
+# The one-arg [Map V] form was removed: maps are always [Map K V], `map` is
+# shorthand for [Map dyn dyn], dyn keys are spelled [Map dyn V].
+proc main {} {
+  def m [[Map i64] "a" 1]
+  print $m
+}
+main

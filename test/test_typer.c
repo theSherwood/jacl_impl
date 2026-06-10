@@ -426,7 +426,7 @@ static void test_map_get_scalar_narrows(void) {
   current_test = "map_get_scalar_narrows";
   arena_t a = {0};
   ParseResult r = run_typer(
-      "def [Map i32] m [[Map i32] \"a\" 1 \"b\" 2]\n"
+      "def [Map dyn i32] m [[Map dyn i32] \"a\" 1 \"b\" 2]\n"
       "def v [map-get $m \"a\"]", &a);
   AstNode* mg = find_cmd(r.nodes[1], "map-get");
   ASSERT_NOT_NULL(mg);
@@ -599,7 +599,7 @@ static void test_future_t_annotation(void) {
    * (literal narrowed by expected_type push), binding is TYPE_FUTURE
    * with i64 element idx, await unwraps to i64. Typer-only test —
    * the compiler doesn't yet accept [Future T] as a def annotation
-   * (same gap exists for [Vec T] / [Map T] in def position). */
+   * (same gap exists for [Vec T] / [Map K V] in def position). */
   ParseResult r = run_typer(
       "def [Future i64] f [spawn { 42 }]\n"
       "def x [await $f]", &a);

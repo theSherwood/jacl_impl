@@ -214,15 +214,25 @@ pulling on them; revisit when one shows up.
   KEYS are first-class on the TYPED map rep — keys are one tagged GC-traced
   slot, so the lift was static-only (`[Map str i64]`, key checks, map-keys →
   plain `[Vec str]` both reps — VM OP_TYPED_MAP_KEYS routes str-sentinel
-  keys to the traced vec). Ref-kind VALUES (`[Map K str]` / `[Map K dyn]` /
-  `[Map str]`) select the PLAIN traced map rep with key/value stamps
+  keys to the traced vec). Ref-kind VALUES (`[Map K str]` / `[Map K dyn]`)
+  select the PLAIN traced map rep with key/value stamps
   (TYPE_MAP + inferred_key_struct_idx/inferred_struct_idx — the [Vec str]
   erasure scheme): ctor checks both reps, def propagation + `def [Map K
   str]` annotations, map-get value narrowing, set/remove stamp persistence,
-  keys/vals `[Vec str]` stamps, key/value expected-type narrowing. Numeric
-  plain-rep keys box consistently (i64 literal keys at ctor and lookup
-  sites); en route two latent runtime bugs were fixed: OP_TYPED_MAP_EQ
-  scalar-sentinel OOB (segfault on `== [Map i64] ...`, prior commit) and
+  keys/vals `[Vec str]` stamps, key/value expected-type narrowing. **The
+  one-arg `[Map V]` form was REMOVED (same day, design decision):** maps
+  are always `[Map K V]`, `map` is shorthand for `[Map dyn dyn]`, and dyn
+  keys are spelled `[Map dyn V]`. Every resolution surface (ctor, def
+  annotation, params, return types, buf elements, nested element shapes)
+  rejects or no longer recognizes the one-arg form; ctor/def/params/return
+  emit a targeted "[Map V] was removed" migration diagnostic (test:
+  `map_v_removed_error.jacl`, `test_typed_map_v_form_removed`). Internally
+  the dyn-key machinery (key idx UINT32_MAX / VM 0xFFFF) is unchanged —
+  `[Map dyn V]` normalizes the `dyn` keyword to it at every resolver.
+  Numeric plain-rep keys box consistently (i64 literal keys at ctor and
+  lookup sites); en route two latent runtime bugs were fixed:
+  OP_TYPED_MAP_EQ scalar-sentinel OOB (segfault on `== [Map dyn i64] ...`,
+  prior commit) and
   jacl_val_hash/jacl_val_eq comparing boxed wide scalars (i64/u64/f64) by
   POINTER — they now hash/compare by value, making boxed wide ints work as
   dyn-map keys everywhere. Tests: `map_ref_kinds.jacl`,

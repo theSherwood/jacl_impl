@@ -9,7 +9,7 @@ static int test_typed_map_construct_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "[print [map-len [[Map Point]]]]",
+    "[print [map-len [[Map dyn Point]]]]",
     &cap, "0\n"));
   TEST_PASS();
 }
@@ -18,7 +18,7 @@ static int test_typed_map_construct_elements(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "[print [map-len [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]]]",
+    "[print [map-len [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]]]",
     &cap, "2\n"));
   TEST_PASS();
 }
@@ -30,7 +30,7 @@ static int test_typed_map_get(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
     "  def p [map-get $m \"a\"]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -46,7 +46,7 @@ static int test_typed_map_get(void) {
 static int test_typed_map_get_missing(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "[print [map-get $m \"zzz\"]]",
     "key not found"));
   TEST_PASS();
@@ -58,7 +58,7 @@ static int test_typed_map_get_inline_local(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
     "  def p [map-get $m \"a\"]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -77,7 +77,7 @@ static int test_typed_map_get_inline_wide(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc test {} {\n"
-    "  def m [[Map Rect] \"r\" [Rect x 1 y 2 w 3 h 4]]\n"
+    "  def m [[Map dyn Rect] \"r\" [Rect x 1 y 2 w 3 h 4]]\n"
     "  def r [map-get $m \"r\"]\n"
     "  [print $r->x]\n"
     "  [print $r->h]\n"
@@ -93,7 +93,7 @@ static int test_typed_map_has(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"x\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"x\" [Point x 1 y 2]]\n"
     "[print [map-has $m \"x\"]]\n"
     "[print [map-has $m \"y\"]]",
     &cap, "true\nfalse\n"));
@@ -107,7 +107,7 @@ static int test_typed_map_set(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "  def m2 [map-set $m \"b\" [Point x 3 y 4]]\n"
     "  [print [map-len $m2]]\n"
     "  def p [map-get $m2 \"b\"]\n"
@@ -126,7 +126,7 @@ static int test_typed_map_set_overwrite(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "  def m2 [map-set $m \"a\" [Point x 99 y 88]]\n"
     "  [print [map-len $m2]]\n"
     "  def p [map-get $m2 \"a\"]\n"
@@ -144,7 +144,7 @@ static int test_typed_map_remove(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
     "def m2 [map-remove $m \"a\"]\n"
     "[print [map-len $m2]]\n"
     "[print [map-has $m2 \"a\"]]\n"
@@ -161,9 +161,9 @@ static int test_typed_map_len(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "[print [map-len [[Map Point]]]]\n"
-    "[print [map-len [[Map Point] \"a\" [Point x 1 y 2]]]]\n"
-    "[print [map-len [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4] \"c\" [Point x 5 y 6]]]]",
+    "[print [map-len [[Map dyn Point]]]]\n"
+    "[print [map-len [[Map dyn Point] \"a\" [Point x 1 y 2]]]]\n"
+    "[print [map-len [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4] \"c\" [Point x 5 y 6]]]]",
     &cap, "0\n1\n3\n"));
   TEST_PASS();
 }
@@ -175,7 +175,7 @@ static int test_typed_map_keys(void) {
   /* keys returns a dyn vec — test length */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"x\" [Point x 1 y 2] \"y\" [Point x 3 y 4]]\n"
+    "def m [[Map dyn Point] \"x\" [Point x 1 y 2] \"y\" [Point x 3 y 4]]\n"
     "[print [vec-len [map-keys $m]]]",
     &cap, "2\n"));
   TEST_PASS();
@@ -189,7 +189,7 @@ static int test_typed_map_vals(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 10 y 20]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 10 y 20]]\n"
     "  def vals [map-vals $m]\n"
     "  [print [vec-len $vals]]\n"
     "  def p [vec-get $vals 0]\n"
@@ -208,7 +208,7 @@ static int test_typed_map_wide_struct(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc main {} {\n"
-    "  def m [[Map Rect] \"a\" [Rect x 10 y 20 w 100 h 200] \"b\" [Rect x 30 y 40 w 300 h 400]]\n"
+    "  def m [[Map dyn Rect] \"a\" [Rect x 10 y 20 w 100 h 200] \"b\" [Rect x 30 y 40 w 300 h 400]]\n"
     "  [print [map-len $m]]\n"
     "  def r [map-get $m \"a\"]\n"
     "  [print $r->x]\n"
@@ -228,7 +228,7 @@ static int test_typed_map_persistence(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Map Point] \"k\" [Point x 1 y 2]]\n"
+    "def a [[Map dyn Point] \"k\" [Point x 1 y 2]]\n"
     "def b [map-set $a \"k2\" [Point x 3 y 4]]\n"
     "# a should still have length 1\n"
     "[print [map-len $a]]\n"
@@ -244,7 +244,7 @@ static int test_typed_map_integer_keys(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  def m [[Map Point] 42 [Point x 1 y 2] 99 [Point x 3 y 4]]\n"
+    "  def m [[Map dyn Point] 42 [Point x 1 y 2] 99 [Point x 3 y 4]]\n"
     "  def p [map-get $m 42]\n"
     "  [print $p->x]\n"
     "  [print $p->y]\n"
@@ -264,7 +264,7 @@ static int test_typed_map_gc_safety(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  mut m [[Map Point]]\n"
+    "  mut m [[Map dyn Point]]\n"
     "  set m [map-set $m \"a\" [Point x 1 y 2]]\n"
     "  set m [map-set $m \"b\" [Point x 3 y 4]]\n"
     "  set m [map-set $m \"c\" [Point x 5 y 6]]\n"
@@ -288,7 +288,7 @@ static int test_typed_map_closure_capture(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc make-lookup {} {\n"
-    "  def m [[Map Point] \"origin\" [Point x 0 y 0]]\n"
+    "  def m [[Map dyn Point] \"origin\" [Point x 0 y 0]]\n"
     "  proc count {} { [map-len $m] }\n"
     "  $count\n"
     "}\n"
@@ -305,7 +305,7 @@ static int test_typed_map_print(void) {
   /* Single entry — deterministic iteration order */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "[print $m]",
     &cap, "{\"a\": [Point x 1 y 2]}\n"));
   TEST_PASS();
@@ -315,7 +315,7 @@ static int test_typed_map_print_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "[print [[Map Point]]]",
+    "[print [[Map dyn Point]]]",
     &cap, "{}\n"));
   TEST_PASS();
 }
@@ -326,8 +326,8 @@ static int test_typed_map_eq_same(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Map Point] \"k\" [Point x 1 y 2]]\n"
-    "def b [[Map Point] \"k\" [Point x 1 y 2]]\n"
+    "def a [[Map dyn Point] \"k\" [Point x 1 y 2]]\n"
+    "def b [[Map dyn Point] \"k\" [Point x 1 y 2]]\n"
     "[print [== $a $b]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -337,8 +337,8 @@ static int test_typed_map_eq_different_value(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Map Point] \"k\" [Point x 1 y 2]]\n"
-    "def b [[Map Point] \"k\" [Point x 3 y 4]]\n"
+    "def a [[Map dyn Point] \"k\" [Point x 1 y 2]]\n"
+    "def b [[Map dyn Point] \"k\" [Point x 3 y 4]]\n"
     "[print [== $a $b]]",
     &cap, "false\n"));
   TEST_PASS();
@@ -348,8 +348,8 @@ static int test_typed_map_eq_different_key(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Map Point] \"x\" [Point x 1 y 2]]\n"
-    "def b [[Map Point] \"y\" [Point x 1 y 2]]\n"
+    "def a [[Map dyn Point] \"x\" [Point x 1 y 2]]\n"
+    "def b [[Map dyn Point] \"y\" [Point x 1 y 2]]\n"
     "[print [== $a $b]]",
     &cap, "false\n"));
   TEST_PASS();
@@ -359,8 +359,8 @@ static int test_typed_map_eq_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Map Point]]\n"
-    "def b [[Map Point]]\n"
+    "def a [[Map dyn Point]]\n"
+    "def b [[Map dyn Point]]\n"
     "[print [== $a $b]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -371,7 +371,7 @@ static int test_typed_map_eq_empty(void) {
 static int test_typed_map_reject_in_dyn_vec(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "[vec $m]",
     "cannot store bare"));
   TEST_PASS();
@@ -381,7 +381,7 @@ static int test_typed_map_reject_dyn_proc_param(void) {
   ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
     "proc show-len {m} { [print [map-len $m]] }\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "[show-len $m]",
     "cannot pass bare"));
   TEST_PASS();
@@ -393,8 +393,8 @@ static int test_typed_map_proc_param(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "proc get-len {[Map Point] m} { [map-len $m] }\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
+    "proc get-len {[Map dyn Point] m} { [map-len $m] }\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
     "[print [get-len $m]]",
     &cap, "2\n"));
   TEST_PASS();
@@ -404,11 +404,11 @@ static int test_typed_map_proc_param_get(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "proc lookup-x {[Map Point] m} {\n"
+    "proc lookup-x {[Map dyn Point] m} {\n"
     "  def p [map-get $m \"a\"]\n"
     "  $p->x\n"
     "}\n"
-    "def m [[Map Point] \"a\" [Point x 42 y 99]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 42 y 99]]\n"
     "[print [lookup-x $m]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -422,9 +422,9 @@ static int test_typed_map_box_roundtrip(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
     "  def boxed [box $m]\n"
-    "  if [box? [Map Point] $boxed] {\n"
+    "  if [box? [Map dyn Point] $boxed] {\n"
     "    def m2 [unbox $boxed]\n"
     "    [print [map-len $m2]]\n"
     "    def p [map-get $m2 \"a\"]\n"
@@ -443,7 +443,7 @@ static int test_typed_map_box_wrong_type(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "  def boxed [box $m]\n"
     "  if [box? [Vec Point] $boxed] {\n"
     "    [print yes]\n"
@@ -459,7 +459,7 @@ static int test_typed_map_box_in_dyn_vec(void) {
   /* boxed typed map CAN be stored in a dyn vec */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "def v [vec [box $m]]\n"
     "[print [vec-len $v]]",
     &cap, "1\n"));
@@ -474,7 +474,7 @@ static int test_typed_map_each_hof(void) {
   /* Sum values to avoid order-dependence */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 10 y 20] \"b\" [Point x 30 y 40]]\n"
     "mut total 0\n"
     "proc accum {k Point v} { set total [+ $total $v->x] }\n"
     "[for $m $accum]\n"
@@ -487,7 +487,7 @@ static int test_typed_map_each_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point]]\n"
+    "def m [[Map dyn Point]]\n"
     "proc noop {k Point v} { }\n"
     "[for $m $noop]\n"
     "[print done]",
@@ -503,7 +503,7 @@ static int test_typed_map_transform(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc getx {k Point v} { $v->x }\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 3 y 4]]\n"
     "def xs [transform $m $getx]\n"
     "[print [vec-len $xs]]",
     &cap, "2\n"));
@@ -518,7 +518,7 @@ static int test_typed_map_filter(void) {
     "struct Point {i32 x, i32 y}\n"
     "proc isbig {k Point v} { [> $v->x 10] }\n"
     "proc main {} {\n"
-    "  def m [[Map Point] \"a\" [Point x 1 y 2] \"b\" [Point x 30 y 40] \"c\" [Point x 5 y 6]]\n"
+    "  def m [[Map dyn Point] \"a\" [Point x 1 y 2] \"b\" [Point x 30 y 40] \"c\" [Point x 5 y 6]]\n"
     "  def big [filter $m $isbig]\n"
     "  [print [map-len $big]]\n"
     "  def p [map-get $big \"b\"]\n"
@@ -534,7 +534,7 @@ static int test_typed_map_filter_none(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc ishuge {k Point v} { [> $v->x 99] }\n"
-    "def m [[Map Point] \"a\" [Point x 1 y 2]]\n"
+    "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "def result [filter $m $ishuge]\n"
     "[print [map-len $result]]",
     &cap, "0\n"));
@@ -851,7 +851,7 @@ static int test_skey_wide_key(void) {
 static int test_typed_map_scalar_value_construct(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "def m [[Map i64] \"a\" 10 \"b\" 20]\n"
+    "def m [[Map dyn i64] \"a\" 10 \"b\" 20]\n"
     "print [to-string [map-len $m]]",
     &cap, "2\n"));
   TEST_PASS();
@@ -861,7 +861,7 @@ static int test_typed_map_scalar_value_get(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "proc t {} {\n"
-    "  def m [[Map i64] \"a\" 10 \"b\" 20]\n"
+    "  def m [[Map dyn i64] \"a\" 10 \"b\" 20]\n"
     "  print [to-string [map-get $m \"b\"]]\n"
     "}\n"
     "[t]",
@@ -885,7 +885,7 @@ static int test_typed_map_scalar_value_set(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "proc t {} {\n"
-    "  def m [[Map i64] \"a\" 1]\n"
+    "  def m [[Map dyn i64] \"a\" 1]\n"
     "  def m2 [map-set $m \"b\" 99]\n"
     "  print [to-string [map-get $m2 \"b\"]]\n"
     "}\n"
@@ -897,7 +897,7 @@ static int test_typed_map_scalar_value_set(void) {
 static int test_typed_map_scalar_value_has(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "def m [[Map i64] \"a\" 1]\n"
+    "def m [[Map dyn i64] \"a\" 1]\n"
     "print [to-string [map-has $m \"a\"]]\n"
     "print [to-string [map-has $m \"z\"]]",
     &cap, "true\nfalse\n"));
@@ -907,7 +907,7 @@ static int test_typed_map_scalar_value_has(void) {
 static int test_typed_map_scalar_value_print(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "def m [[Map i64] \"x\" 10]\n"
+    "def m [[Map dyn i64] \"x\" 10]\n"
     "print $m",
     &cap, "{\"x\": 10}\n"));
   TEST_PASS();
@@ -915,24 +915,37 @@ static int test_typed_map_scalar_value_print(void) {
 
 static int test_typed_map_scalar_value_type_error(void) {
   ASSERT(run_err(
-    "def m [[Map i64] \"a\" \"oops\"]\n",
-    "is not a i64 value (got str)"));
+    "def m [[Map dyn i64] \"a\" \"oops\"]\n",
+    "value 0 is not a i64"));
   TEST_PASS();
 }
 
-static int test_typed_map_scalar_unsupported_str(void) {
-  /* Ref-kind value types ([Map str] / [Map dyn]) are legal since the
+static int test_typed_map_ref_value_str(void) {
+  /* Ref-kind value types ([Map dyn str] / [Map dyn dyn]) are legal since the
    * [Map K V] ref-kind generalization: they use the PLAIN traced map rep
    * with the value type carried statically. Construction + get work; a
    * concrete non-str value is a compile-time element error. */
   PrintCapture cap;
   ASSERT(run_ok(
-    "def m [[Map str] \"a\" \"hi\"]\n"
+    "def m [[Map dyn str] \"a\" \"hi\"]\n"
     "print [map-get $m \"a\"]",
     &cap, "hi\n"));
   ASSERT(run_err(
-    "def m [[Map str] \"a\" 42]\n",
+    "def m [[Map dyn str] \"a\" 42]\n",
     "value 0 is not a str"));
+  TEST_PASS();
+}
+
+static int test_typed_map_v_form_removed(void) {
+  /* The one-arg [Map V] form was removed: maps are always [Map K V],
+   * `map` is shorthand for [Map dyn dyn]. Both the ctor and the def
+   * annotation emit the migration diagnostic. */
+  ASSERT(run_err(
+    "def m [[Map i64] \"a\" 1]\n",
+    "[Map V] was removed"));
+  ASSERT(run_err(
+    "def [Map i64] m [map]\n",
+    "[Map V] was removed"));
   TEST_PASS();
 }
 
@@ -1013,7 +1026,8 @@ int main(void) {
   RUN(test_typed_map_scalar_value_has);
   RUN(test_typed_map_scalar_value_print);
   RUN(test_typed_map_scalar_value_type_error);
-  RUN(test_typed_map_scalar_unsupported_str);
+  RUN(test_typed_map_ref_value_str);
+  RUN(test_typed_map_v_form_removed);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

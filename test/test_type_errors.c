@@ -195,10 +195,10 @@ static void run_all(void) {
     .expect_substrings = { "Vec", "i32", "element", "str" },
   });
 
-  /* [Map T] constructor with wrong scalar value type. */
+  /* [Map K V] constructor with wrong scalar value type. */
   RUN("typed_map_ctor_scalar_value_mismatch", {
-    .source = "def m [[Map i64] \"k\" 1 \"k2\" \"oops\"]",
-    .expect_substrings = { "Map", "i64", "value", "str" },
+    .source = "def m [[Map dyn i64] \"k\" 1 \"k2\" \"oops\"]",
+    .expect_substrings = { "Map", "i64", "value 1 is not a i64" },
   });
 
   /* [Map K V] constructor with wrong key type. */

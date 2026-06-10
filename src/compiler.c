@@ -108,19 +108,39 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
   if (memcmp(th->data.lit_string.value, "Vec", 3) == 0) kind = 1;
   else if (memcmp(th->data.lit_string.value, "Map", 3) == 0) kind = 2;
   if (kind == 0) return 0;
-  /* [Map K V] — struct keys (2 args) */
-  if (kind == 2 && cmd->data.command.arg_count == 2 &&
-      cmd->data.command.args[0]->type == AST_LIT_STRING &&
-      cmd->data.command.args[1]->type == AST_LIT_STRING) {
-    if (out_key_elem) *out_key_elem = cmd->data.command.args[0];
-    if (out_elem) *out_elem = cmd->data.command.args[1];
-    return 3;
+  /* [Map K V] — always two type args. The one-arg [Map V] form was
+   * REMOVED (2026-06-10): dyn keys are spelled [Map dyn V] and `map`
+   * is shorthand for [Map dyn dyn]. Kind 2 is never returned; the ctor
+   * path detects the legacy form for a targeted migration error. */
+  if (kind == 2) {
+    if (cmd->data.command.arg_count == 2 &&
+        cmd->data.command.args[0]->type == AST_LIT_STRING &&
+        cmd->data.command.args[1]->type == AST_LIT_STRING) {
+      if (out_key_elem) *out_key_elem = cmd->data.command.args[0];
+      if (out_elem) *out_elem = cmd->data.command.args[1];
+      return 3;
+    }
+    return 0;
   }
   if (cmd->data.command.arg_count != 1 ||
       cmd->data.command.args[0]->type != AST_LIT_STRING) return 0;
   if (out_elem) *out_elem = cmd->data.command.args[0];
   return kind;
 }
+
+/* Mirror of typer__map_v_form: the removed one-arg [Map V] form, kept
+ * recognizable only to emit the migration diagnostic. */
+static bool compiler__map_v_form(AstNode* cmd) {
+  if (!cmd || cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
+  AstNode* th = cmd->data.command.head;
+  return th->type == AST_LIT_STRING && th->data.lit_string.length == 3 &&
+         memcmp(th->data.lit_string.value, "Map", 3) == 0 &&
+         cmd->data.command.arg_count == 1;
+}
+
+#define COMPILER_MAP_V_REMOVED_MSG \
+  "[Map V] was removed: maps are always [Map K V] — use [Map dyn V] " \
+  "for dyn keys (`map` is shorthand for [Map dyn dyn])"
 
 /* Recognize an [Arr T] type-annotation / constructor head. Returns true and
  * sets *out_elem to the element type-name node. Single type-name argument,
@@ -6597,6 +6617,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   AstNode* _coll_elem = NULL;
   AstNode* _coll_key_elem = NULL;
   int _coll_kind = compiler__typed_collection_expr(head, &_coll_elem, &_coll_key_elem);
+  /* Removed one-arg [Map V] ctor head — targeted migration error. */
+  if (_coll_kind == 0 && compiler__map_v_form(head)) {
+    compiler__error(c, line, col, COMPILER_MAP_V_REMOVED_MSG);
+    return;
+  }
   /* Nested compound element ctor: [[Vec [Vec T]] …] / [[Vec [Map …]] …].
    * The element is a collection — a tagged heap value — so this is a
    * REF-element vec: plain traced vec rep (OP_VEC); element typing is
@@ -6612,12 +6637,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       head->data.command.args[0]->type == AST_COMMAND) {
     AstNode* _ne = head->data.command.args[0];
     AstNode* _nh = _ne->data.command.head;
+    /* Inner [Vec T] takes 1 arg; inner [Map K V] takes exactly 2 (the
+     * one-arg [Map V] form was removed). */
     bool _ne_ok = _nh && _nh->type == AST_LIT_STRING &&
                   _nh->data.lit_string.length == 3 &&
-                  (memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 ||
-                   memcmp(_nh->data.lit_string.value, "Map", 3) == 0) &&
-                  _ne->data.command.arg_count >= 1 &&
-                  _ne->data.command.arg_count <= 2;
+                  ((memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 &&
+                    _ne->data.command.arg_count == 1) ||
+                   (memcmp(_nh->data.lit_string.value, "Map", 3) == 0 &&
+                    _ne->data.command.arg_count == 2));
     for (uint32_t _ni = 0; _ne_ok && _ni < _ne->data.command.arg_count; _ni++) {
       AstNode* _na = _ne->data.command.args[_ni];
       /* Inner args may be type keywords/struct names (LIT_STRING) or
@@ -6742,128 +6769,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)type_idx, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
     c->last_expr_type = TYPE_TYPED_VEC;
-    return;
-  }
-
-  /* --- Typed map constructor: [[Map Type] key1 val1 key2 val2 ...] --- */
-  if (_coll_kind == 2) {
-    const char* type_name_str = _coll_elem->data.lit_string.value;
-    uint32_t type_name_len = _coll_elem->data.lit_string.length;
-
-    /* Scalar value type: [Map i64], [Map f64] etc. — dyn keys, scalar values. */
-    if (is_type_keyword(type_name_str, type_name_len)) {
-      JaclType val_t = type_from_keyword(type_name_str, type_name_len);
-      /* Ref-kind value type: [Map str] / [Map dyn] — dyn keys, ref values.
-       * Tagged heap values have no raw-bytes rep win, so these use the PLAIN
-       * traced map rep; the value type is static only (typer stamp + element
-       * checks here). [Map dyn] compiles to exactly a plain map literal. */
-      if (val_t == TYPE_DYN || val_t == TYPE_STR) {
-        if (argc % 2 != 0) {
-          compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
-          return;
-        }
-        if (argc / 2 > 255) {
-          compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
-          return;
-        }
-        for (uint32_t i = 0; i < argc; i++) {
-          compiler__compile_node(c, args[i]);
-          if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
-          compiler__ensure_boxed(c, line);
-          if (val_t == TYPE_STR && (i % 2 == 1)) {
-            JaclType arg_t = (JaclType)args[i]->inferred_type;
-            if (arg_t != TYPE_STR && arg_t != TYPE_DYN) {
-              char err[160];
-              jacl_format_typed_map_value(err, sizeof(err),
-                  type_name_str, type_name_len, i / 2, true, arg_t);
-              compiler__error(c, line, col, err);
-              return;
-            }
-          }
-        }
-        compiler__emit_byte(c, OP_MAP, line);
-        compiler__emit_byte(c, (uint8_t)(argc / 2), line);
-        c->last_expr_type = TYPE_MAP;
-        return;
-      }
-      if (!compiler__is_typed_collection_scalar(val_t)) {
-        char err[160];
-        snprintf(err, sizeof(err),
-                 "[Map %.*s]: only value-type scalars supported "
-                 "(i32, i64, u32, u64, f32, f64)",
-                 (int)type_name_len, type_name_str);
-        compiler__error(c, line, col, err);
-        return;
-      }
-      if (argc % 2 != 0) {
-        compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
-        return;
-      }
-      uint32_t pair_count = argc / 2;
-      if (pair_count > 255) {
-        compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
-        return;
-      }
-      uint32_t val_type_idx = COMPILER_SCALAR_TYPE_IDX(val_t);
-      for (uint32_t i = 0; i < pair_count; i++) {
-        compiler__compile_node(c, args[i * 2]);     /* key: any dyn type */
-        compiler__compile_node(c, args[i * 2 + 1]); /* value: must match scalar */
-        JaclType v_t = (JaclType)args[i * 2 + 1]->inferred_type;
-        if (v_t != val_t) {
-          char err[160];
-          jacl_format_typed_map_value(err, sizeof(err),
-              type_name_str, type_name_len, i, true, v_t);
-          compiler__error(c, line, col, err);
-          return;
-        }
-      }
-      compiler__emit_byte(c, OP_TYPED_MAP, line);
-      compiler__emit_u16(c, (uint16_t)val_type_idx, line);
-      compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* dyn keys */
-      compiler__emit_byte(c, (uint8_t)pair_count, line);
-      c->last_expr_type = TYPE_TYPED_MAP;
-      return;
-    }
-
-    StructTypeRegistry* reg = compiler__get_struct_registry(c);
-    uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
-    if (type_idx == UINT32_MAX) {
-      char err[128];
-      snprintf(err, sizeof(err), "[Map %.*s]: unknown struct type '%.*s'",
-               (int)type_name_len, type_name_str,
-               (int)type_name_len, type_name_str);
-      compiler__error(c, line, col, err);
-      return;
-    }
-    if (argc % 2 != 0) {
-      compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
-      return;
-    }
-    uint32_t pair_count = argc / 2;
-    if (pair_count > 255) {
-      compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
-      return;
-    }
-    /* Compile alternating key/value pairs. Keys are dyn, values must match struct type. */
-    for (uint32_t i = 0; i < pair_count; i++) {
-      compiler__compile_node(c, args[i * 2]);       /* key: any dyn type */
-      compiler__compile_node(c, args[i * 2 + 1]);   /* value: must be matching struct */
-      AstNode* val = args[i * 2 + 1];
-      if ((JaclType)val->inferred_type != TYPE_STRUCT ||
-          val->inferred_struct_idx != type_idx) {
-        char err[128];
-        jacl_format_typed_map_value(err, sizeof(err),
-            type_name_str, type_name_len, i, false, TYPE_DYN);
-        compiler__error(c, line, col, err);
-        return;
-      }
-      /* OP_TYPED_MAP consumes inline struct values directly via vm__pop_struct. */
-    }
-    compiler__emit_byte(c, OP_TYPED_MAP, line);
-    compiler__emit_u16(c, (uint16_t)type_idx, line);
-    compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* key_type_idx: dyn keys */
-    compiler__emit_byte(c, (uint8_t)pair_count, line);
-    c->last_expr_type = TYPE_TYPED_MAP;
     return;
   }
 
@@ -10248,11 +10153,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           uint32_t key_idx = UINT32_MAX;
           if (ct_kind == 3) {
-            key_idx = struct_registry__find(compiler__get_struct_registry(c),
-                ct_key_elem->data.lit_string.value, ct_key_elem->data.lit_string.length);
-            if (key_idx == UINT32_MAX) {
-              compiler__error(c, line, col, "unknown key type in typed map parameter");
-              return;
+            const char* knm = ct_key_elem->data.lit_string.value;
+            uint32_t    knl = ct_key_elem->data.lit_string.length;
+            if (is_type_keyword(knm, knl)) {
+              /* dyn keys ([Map dyn V]) keep the UINT32_MAX convention;
+               * scalar keys (str / numeric) use the scalar sentinel. */
+              JaclType kkw = type_from_keyword(knm, knl);
+              key_idx = (kkw == TYPE_DYN) ? UINT32_MAX
+                        : COMPILER_SCALAR_TYPE_IDX(kkw);
+            } else {
+              key_idx = struct_registry__find(compiler__get_struct_registry(c),
+                                              knm, knl);
+              if (key_idx == UINT32_MAX) {
+                compiler__error(c, line, col, "unknown key type in typed map parameter");
+                return;
+              }
             }
           }
           fi++;

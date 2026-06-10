@@ -571,10 +571,14 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
   }
   if (hl == 3 && memcmp(hn, "Vec", 3) == 0 && ac == 1)
     return type_shape_intern_typed_vec(&tc->shape_reg, inner[0]);
-  if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 1)
-    return type_shape_intern_typed_map(&tc->shape_reg, UINT32_MAX, inner[0]);
-  if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 2)
-    return type_shape_intern_typed_map(&tc->shape_reg, inner[0], inner[1]);
+  /* One-arg [Map V] removed — dyn keys are spelled [Map dyn V]. A dyn
+   * key keyword normalizes to the UINT32_MAX dyn-key convention (the
+   * VM's 0xFFFF) rather than the scalar-dyn sentinel. */
+  if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 2) {
+    uint32_t kidx = (inner[0] == JACL_SCALAR_TYPE_IDX(TYPE_DYN))
+                    ? UINT32_MAX : inner[0];
+    return type_shape_intern_typed_map(&tc->shape_reg, kidx, inner[1]);
+  }
   return UINT32_MAX;
 }
 
@@ -942,30 +946,25 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
              t_arg->data.command.head->type == AST_LIT_STRING &&
              t_arg->data.command.head->data.lit_string.length == 3 &&
              memcmp(t_arg->data.command.head->data.lit_string.value, "Map", 3) == 0 &&
-             (t_arg->data.command.arg_count == 1 ||
-              t_arg->data.command.arg_count == 2) &&
+             t_arg->data.command.arg_count == 2 &&
              t_arg->data.command.args[0]->type == AST_LIT_STRING &&
-             (t_arg->data.command.arg_count == 1 ||
-              t_arg->data.command.args[1]->type == AST_LIT_STRING)) {
-    /* Typed-map element type: [Buf N [Map V]] / [Buf N [Map K V]]
-     * (Phase 3). Each slot is a tagged JaclVal pointing to a typed-map
-     * value. K + V both ride on one shape registry entry; binding
-     * stores the entry's idx, freeing aux fields permanently for any
-     * future nesting depth. */
-    AstNode* k_node = NULL;
-    AstNode* v_node = NULL;
-    if (t_arg->data.command.arg_count == 1) {
-      v_node = t_arg->data.command.args[0];
-    } else {
-      k_node = t_arg->data.command.args[0];
-      v_node = t_arg->data.command.args[1];
-    }
+             t_arg->data.command.args[1]->type == AST_LIT_STRING) {
+    /* Typed-map element type: [Buf N [Map K V]] (Phase 3; the one-arg
+     * [Map V] form was removed — dyn keys are spelled [Map dyn V]).
+     * Each slot is a tagged JaclVal pointing to a typed-map value.
+     * K + V both ride on one shape registry entry; binding stores the
+     * entry's idx, freeing aux fields permanently for any future
+     * nesting depth. */
+    AstNode* k_node = t_arg->data.command.args[0];
+    AstNode* v_node = t_arg->data.command.args[1];
     uint32_t key_idx = UINT32_MAX;
     if (k_node) {
       const char* nm = k_node->data.lit_string.value;
       uint32_t    nl = k_node->data.lit_string.length;
       if (is_type_keyword(nm, nl)) {
-        key_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+        JaclType kkw = type_from_keyword(nm, nl);
+        /* dyn keys normalize to the UINT32_MAX convention (VM 0xFFFF). */
+        key_idx = (kkw == TYPE_DYN) ? UINT32_MAX : JACL_SCALAR_TYPE_IDX(kkw);
       } else {
         for (uint32_t si = 0; si < tc->struct_count; si++) {
           if (tc->structs[si].name_len == nl &&
@@ -1041,10 +1040,15 @@ static bool typer__buf_type(TyperCtx* tc, AstNode* node,
                               &inner_len_discard, NULL);
 }
 
-/* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
- * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
- * keys), 0 if not a typed-collection expression. Mirrors
- * compiler__typed_collection_expr in compiler.c. */
+/* Recognize [Vec T] / [Map K V] type expressions. Returns 1 for
+ * [Vec T], 3 for [Map K V], 0 if not a typed-collection expression.
+ * Mirrors compiler__typed_collection_expr in compiler.c.
+ *
+ * The one-arg [Map V] form was REMOVED (2026-06-10): maps always take a
+ * key and a value type, `map` is shorthand for [Map dyn dyn], and dyn
+ * keys are spelled [Map dyn V]. Kind 2 is never returned anymore; the
+ * surfaces that resolve type expressions call typer__map_v_form to emit
+ * a targeted migration diagnostic. */
 static int typer__typed_collection_kind(AstNode* node) {
   if (!node || node->type != AST_COMMAND || !node->data.command.head) return 0;
   AstNode* h = node->data.command.head;
@@ -1054,14 +1058,32 @@ static int typer__typed_collection_kind(AstNode* node) {
   else if (memcmp(h->data.lit_string.value, "Map", 3) == 0) kind = 2;
   if (kind == 0) return 0;
   uint32_t ac = node->data.command.arg_count;
-  if (kind == 2 && ac == 2 &&
-      node->data.command.args[0]->type == AST_LIT_STRING &&
-      node->data.command.args[1]->type == AST_LIT_STRING) {
-    return 3;
+  if (kind == 2) {
+    if (ac == 2 &&
+        node->data.command.args[0]->type == AST_LIT_STRING &&
+        node->data.command.args[1]->type == AST_LIT_STRING) {
+      return 3;
+    }
+    return 0;  /* one-arg [Map V] removed — see typer__map_v_form */
   }
   if (ac != 1 || node->data.command.args[0]->type != AST_LIT_STRING) return 0;
   return kind;
 }
+
+/* Detect the removed one-arg [Map V] form so resolution surfaces (ctor,
+ * def annotation, params, return types) can emit the migration error
+ * instead of a generic unknown-type diagnostic. */
+static bool typer__map_v_form(AstNode* node) {
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  return h->type == AST_LIT_STRING && h->data.lit_string.length == 3 &&
+         memcmp(h->data.lit_string.value, "Map", 3) == 0 &&
+         node->data.command.arg_count == 1;
+}
+
+#define TYPER_MAP_V_REMOVED_MSG \
+  "[Map V] was removed: maps are always [Map K V] — use [Map dyn V] " \
+  "for dyn keys (`map` is shorthand for [Map dyn dyn])"
 
 /* Try to extract a JaclType keyword from a string literal node.
  * Returns true and writes *out_type if the node is a known type keyword. */
@@ -1187,6 +1209,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         declared_buf_typed_elem_idx = buf_typed_elem_idx_3;
         (void)buf_inner_len_3;
       } else {
+        if (typer__map_v_form(args[0])) {
+          typer__error(tc, args[0]->start.line, args[0]->start.column,
+                       TYPER_MAP_V_REMOVED_MSG);
+          return false;
+        }
         int tcoll = typer__typed_collection_kind(args[0]);
         /* Ref-element / nested-element [Vec T] annotations resolve to
          * TYPE_VEC (+ stamp / typer-side shape idx in the binding). */
@@ -1219,13 +1246,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
             vec_ref_ann = true;
           }
         }
-        /* Ref-kind VALUE [Map ...] annotations (def [Map str] m /
-         * def [Map K str] m / def [Map str dyn] m): plain-map rep —
-         * resolve to TYPE_MAP; stamps inherit from the RHS ctor via the
-         * TYPE_MAP def arm (declared value stamp wins below). */
-        if (!vec_ref_ann && (tcoll == 2 || tcoll == 3)) {
-          AstNode* vn = (tcoll == 3) ? args[0]->data.command.args[1]
-                                     : args[0]->data.command.args[0];
+        /* Ref-kind VALUE [Map K V] annotations (def [Map K str] m /
+         * def [Map str dyn] m): plain-map rep — resolve to TYPE_MAP;
+         * stamps inherit from the RHS ctor via the TYPE_MAP def arm
+         * (declared value stamp wins below). */
+        if (!vec_ref_ann && tcoll == 3) {
+          AstNode* vn = args[0]->data.command.args[1];
           if (vn && vn->type == AST_LIT_STRING &&
               is_type_keyword(vn->data.lit_string.value,
                               vn->data.lit_string.length)) {
@@ -1844,6 +1870,10 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
         count++;
         continue;
       }
+      if (typer__map_v_form(elem)) {
+        typer__error(tc, elem->start.line, elem->start.column,
+                     TYPER_MAP_V_REMOVED_MSG);
+      }
       int tcoll = typer__typed_collection_kind(elem);
       JaclType t = TYPE_DYN;
       uint32_t elem_sidx = UINT32_MAX;
@@ -2007,6 +2037,11 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
         *out_struct_idx = esh;
         return;
       }
+    }
+    if (typer__map_v_form(tn)) {
+      typer__error(tc, tn->start.line, tn->start.column,
+                   TYPER_MAP_V_REMOVED_MSG);
+      return;
     }
     if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
       *out_type = (tcoll == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
@@ -3731,6 +3766,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
      * vec-get/map-get can narrow the result type. Scalar element types
      * (i32/i64/etc.) use the shared JACL_SCALAR_TYPE_IDX sentinel
      * encoding so the compiler can read the same idx. */
+    if (typer__map_v_form(head)) {
+      typer__error(tc, node->start.line, node->start.column,
+                   TYPER_MAP_V_REMOVED_MSG);
+      node->inferred_type = TYPE_MAP;
+      return;
+    }
     int tc_kind = typer__typed_collection_kind(head);
     /* [[Arr T] ...] constructor: element semantics are identical to vec
      * (single element type, one element per arg), so reuse the kind==1
@@ -3835,15 +3876,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
         }
       }
-      /* Ref-kind VALUE [Map ...] forms ([Map str], [Map K str], [Map K dyn]):
+      /* Ref-kind VALUE [Map K V] forms ([Map K str] / [Map K dyn]):
        * plain traced map rep; the key/value types live statically as
        * TYPE_MAP + stamps (value on inferred_struct_idx, key on
        * inferred_key_struct_idx) — the [Vec str] scheme. [Map dyn dyn] IS
        * the plain map (no stamps). Mirrors the compiler's plain-rep route. */
-      if (tc_kind == 2 || tc_kind == 3) {
-        AstNode* vn = (tc_kind == 3) ? head->data.command.args[1]
-                                     : head->data.command.args[0];
-        AstNode* kn = (tc_kind == 3) ? head->data.command.args[0] : NULL;
+      if (tc_kind == 3) {
+        AstNode* vn = head->data.command.args[1];
+        AstNode* kn = head->data.command.args[0];
         if (vn && vn->type == AST_LIT_STRING &&
             is_type_keyword(vn->data.lit_string.value,
                             vn->data.lit_string.length)) {
@@ -3875,16 +3915,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               }
               if (!ok) {
                 char err[224];
-                if (tc_kind == 3) {
-                  jacl_format_typed_map_kv(err, sizeof(err),
-                      kn->data.lit_string.value, kn->data.lit_string.length,
-                      vn->data.lit_string.value, vn->data.lit_string.length,
-                      ei / 2, !is_key);
-                } else {
-                  jacl_format_typed_map_value(err, sizeof(err),
-                      vn->data.lit_string.value, vn->data.lit_string.length,
-                      ei / 2, true, at);
-                }
+                jacl_format_typed_map_kv(err, sizeof(err),
+                    kn->data.lit_string.value, kn->data.lit_string.length,
+                    vn->data.lit_string.value, vn->data.lit_string.length,
+                    ei / 2, !is_key);
                 typer__error(tc, node->data.command.args[ei]->start.line,
                              node->data.command.args[ei]->start.column, err);
                 break;
