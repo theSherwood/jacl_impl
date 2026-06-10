@@ -36,9 +36,23 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
    permissive predicates (e.g. `[\ == 0 [% $it 2]]`) keep working. Tests:
    `stream_filter_typed.jacl`, `stream_filter_named_pred.jacl`.
 
-**Still open in Phase A:** `each` monomorphization, and full restore-pass
-removal (debt 4) for non-wide element bodies (i32/struct/str); the wide path
-already drops it.
+4. **`each` callback input monomorphization** — `each` is the HOF callback form
+   of `for` (`for $stream [\ body]` → `OP_EACH`, return discarded). Same pattern
+   as filter: the typer (`HEAD_FOR` callback branch) types the inline callback
+   body wide and stamps it; `OP_EACH` carries the same param-rep operand; the VM
+   pulls **wide** (`vm__pull_stream_one`) instead of the tagged-normalizing
+   `vm__pull_stream_dyn` when the callback was monomorphized, passing the element
+   wide with no box. Named/dyn callbacks keep the tagged pull. Tests:
+   `stream_each_typed.jacl`, `stream_each_named_cb.jacl`.
+
+**Still open in Phase A:** full restore-pass removal (debt 4) for non-wide
+element bodies (i32/struct/str); the wide path already drops it.
+
+**Known limitation (pre-existing):** `set` of a captured mutable upvalue inside
+a HOF callback (e.g. `for $s [\ set acc [+ $acc $it]]`) type-errors — the
+callback body doesn't resolve the mutable upvalue's declared type for the `set`
+target (upvalue *reads* do resolve; see case 5). Independent of this work; the
+callback bodies were typed `it:dyn` before too.
 
 ---
 

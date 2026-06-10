@@ -5774,6 +5774,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       CASE(OP_EACH): {
+        /* Operand: rep the callback param expects (wide scalar enc → pass the
+         * element wide with no box; 0xFF00 dyn → tagged). Read unconditionally
+         * so ip advances; used only in the lazy stream branch. See
+         * TYPED_CLOSURES_DESIGN.md Phase A. */
+        uint16_t each_cb_elem = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         JaclVal error_val = JACL_NIL;  /* US-005: track error from stream */
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
@@ -5913,15 +5918,26 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           JaclStream* stream = jacl_as_stream(coll_val);
 
-          /* Use unified pull helper for all stream kinds */
+          /* Pull tagged by default (the callback param is dyn). When the typer
+           * monomorphized the inline callback to read the element wide
+           * (each_cb_elem is a wide scalar enc, TYPED_CLOSURES_DESIGN.md
+           * Phase A), pull the raw wide element instead and pass it without a
+           * box — the callback body reads it wide. */
+          bool each_wide = vm__elem_idx_is_wide(each_cb_elem);
           while (stream->state != STREAM_EXHAUSTED) {
             JaclVal elem;
-            StreamPullResult pr = vm__pull_stream_dyn(vm, coll_val, &elem);
+            StreamPullResult pr = each_wide
+                ? vm__pull_stream_one(vm, coll_val, &elem)
+                : vm__pull_stream_dyn(vm, coll_val, &elem);
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) break;
 
-            /* US-005: If stream yields error value, stop iteration and propagate */
-            if (jacl_is_error(elem)) {
+            /* US-005: If stream yields error value, stop iteration and
+             * propagate. Only meaningful for the tagged pull — a wide-element
+             * stream carries raw i64/u64/f64, never a heap error value, and
+             * raw bits must not be misread as an error tag (cf. transform/
+             * filter, which never error-check wide elements). */
+            if (!each_wide && jacl_is_error(elem)) {
               error_val = elem;
               break;
             }

@@ -2860,7 +2860,31 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_type = TYPE_NIL;
         return;
       }
-      /* else: callback/each or malformed — fall through to generic. */
+      /* Callback/each form: [for $coll [\ body]] / [for $coll $cb]. Type the
+       * collection and the callback; for an inline lambda over a typed wide
+       * stream, monomorphize the callback body (type its param wide) and stamp
+       * it so the compiler bakes the wide param rep onto OP_EACH (the pull then
+       * hands the element over wide, no box). Mirrors HEAD_FILTER. A var-ref
+       * callback or a fallback (mixed-type) body stays dyn → boxed. */
+      if (ac == 2 && (as[1]->type == AST_COMMAND ||
+                      as[1]->type == AST_VAR_REF)) {
+        typer__infer_node(tc, as[0]);
+        typer__infer_node(tc, as[1]);
+        if (as[1]->type == AST_COMMAND) {
+          uint32_t cb_enc = UINT32_MAX;
+          if ((JaclType)as[0]->inferred_type == TYPE_STREAM &&
+              as[0]->inferred_struct_idx != UINT32_MAX) {
+            uint32_t arg_enc = as[0]->inferred_struct_idx;
+            bool cb_wide = false;
+            (void)typer__proc_result_enc(tc, as[1], &arg_enc, 1, &cb_wide);
+            if (cb_wide) cb_enc = arg_enc;
+          }
+          as[1]->inferred_struct_idx = cb_enc;
+        }
+        node->inferred_type = TYPE_NIL;
+        return;
+      }
+      /* else: malformed — fall through to generic. */
     }
   }
 
