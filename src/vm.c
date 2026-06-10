@@ -1813,6 +1813,19 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             return STREAM_PULL_ERROR;
         }
 
+        /* Struct-returning mapper (multi-slot HOF OUTPUT channel): the
+         * stream's elem_idx is the result struct idx; the call left the
+         * result as N inline bitmap-marked slots (or a heap ptr —
+         * vm__pop_struct handles both). Copy the value bytes into the
+         * caller's buffer; downstream consumers ride the same struct
+         * channel as generator yields. */
+        if (vm__elem_idx_is_struct(stream->elem_idx)) {
+            vm__pop_struct(vm, (uint16_t)stream->elem_idx, out_value);
+            vm->ip    = save_ip;
+            vm->chunk = save_chunk;
+            return STREAM_PULL_VALUE;
+        }
+
         JaclVal transformed;
         r = vm__pop(vm, &transformed);
         if (r != VM_OK) return STREAM_PULL_ERROR;

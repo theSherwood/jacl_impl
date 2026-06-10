@@ -1,0 +1,49 @@
+# expect: 1
+# expect: 3
+# expect: 11
+# expect: 13
+# expect: 1
+# expect: 2
+# expect: 6
+# expect: 2
+# expect: 4
+# expect: ok
+# Struct-RETURNING transform mappers (the multi-slot HOF OUTPUT channel).
+# The mapper compiles with a TYPE_STRUCT return (N inline slots via
+# OP_RETURN_WIDE); the transform pull pops the multi-slot result and the
+# stream's elem_idx becomes the struct idx, so downstream consumers
+# (for-loop, chained HOFs, typed collect) ride the existing struct channel.
+struct Pt { i32 x, i32 y }
+struct W { i64 v }
+proc pts {} [Stream Pt] {
+  yield [Pt x 1 y 2]
+  yield [Pt x 3 y 4]
+}
+proc main {} {
+  # struct -> struct: identity mapper
+  for [transform [pts] [proc {p} { $p }]] q { print $q->x }
+
+  # struct -> struct: field-modifying mapper (fresh ctor in the tail)
+  for [transform [pts] [proc {p} { [Pt x [+ $p->x 10] y $p->y] }]] q {
+    print $q->x
+  }
+
+  # scalar -> struct: wide i64 range elements into a struct field
+  for [transform [range 1 3] [proc {i} { [W v $i] }]] w {
+    print $w->v
+  }
+
+  # chained: transform (struct out) -> filter (struct in) -> for
+  def doubled [transform [pts] [proc {p} { [Pt x [* $p->x 2] y 0] }]]
+  for [filter $doubled [proc {p} { > $p->x 3 }]] q {
+    print $q->x
+  }
+
+  # typed collect of a transformed struct stream -> [Vec Pt]
+  def v [collect [transform [pts] [proc {p} { $p }]]]
+  print [vec-len $v]
+  def p1 [vec-get $v 1]
+  print $p1->y
+  print "ok"
+}
+[main]

@@ -5448,13 +5448,22 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
       compiler__error(c, line, col, hof_err);
       return;
     }
-    if (opcode == OP_TRANSFORM && out_elem_enc != UINT32_MAX &&
-        !COMPILER_IS_SCALAR_TYPE_IDX(out_elem_enc)) {
-      compiler__error(c, line, col,
-          "transform mapper returning a struct is not yet supported");
-      return;
-    }
     c->hof_param_enc = col_struct_idx;
+  }
+  /* Struct-RETURNING transform mapper (multi-slot HOF OUTPUT channel):
+   * a struct out_elem_enc only arises from an inline mapper whose body
+   * monomorphized cleanly (typer__proc_result_enc returns UINT32_MAX for
+   * var-ref closures and failed probes). Stash the enc so HEAD_PROC
+   * compiles the mapper with a TYPE_STRUCT return — emit_return ships
+   * the tail as N inline slots (or expands a heap tail) and the
+   * transform pull pops the multi-slot result via vm__pop_struct. The
+   * stream's elem_idx becomes the struct idx, so downstream consumers
+   * (for-loop, chained HOFs, typed collect) ride the existing struct
+   * channel. Works for both struct and scalar INPUT elements. */
+  if (opcode == OP_TRANSFORM && col_type == TYPE_STREAM &&
+      out_elem_enc != UINT32_MAX &&
+      !COMPILER_IS_SCALAR_TYPE_IDX(out_elem_enc)) {
+    c->hof_mapper_ret_enc = out_elem_enc;
   }
   /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): when this is a
    * `transform` over a typed *stream* whose mapper return type infers to a
@@ -10100,9 +10109,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * affect any sibling proc. The body-tail/return mismatch check below stays
      * the guard that the inferred return actually equals the body's tail. */
     if (proc_return_type == TYPE_DYN &&
-        c->hof_mapper_ret_enc != UINT32_MAX &&
-        COMPILER_IS_SCALAR_TYPE_IDX(c->hof_mapper_ret_enc)) {
-      proc_return_type = COMPILER_TYPE_IDX_TO_SCALAR(c->hof_mapper_ret_enc);
+        c->hof_mapper_ret_enc != UINT32_MAX) {
+      if (COMPILER_IS_SCALAR_TYPE_IDX(c->hof_mapper_ret_enc)) {
+        proc_return_type = COMPILER_TYPE_IDX_TO_SCALAR(c->hof_mapper_ret_enc);
+      } else {
+        /* Struct-returning mapper (multi-slot HOF output channel): a
+         * STRUCT return makes emit_return ship the tail as N inline
+         * slots / expand a heap tail (OP_RETURN_WIDE); the transform
+         * pull pops the multi-slot result via vm__pop_struct. */
+        proc_return_type = TYPE_STRUCT;
+        proc_return_struct_idx = c->hof_mapper_ret_enc;
+      }
     }
     c->hof_mapper_ret_enc = UINT32_MAX;
 

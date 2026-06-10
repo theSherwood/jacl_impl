@@ -362,10 +362,20 @@ pulling on them; revisit when one shows up.
      struct yield into an unannotated generator (typer + compiler errors).
      Typed `collect` → `[Vec T]` LANDED (same day; debt 2 — wide elements
      stored flat, struct streams collect to [Vec Struct]; str stays plain
-     vec since typed-vec storage is GC-opaque). Still open: SM-body
-     for-loop bindings, struct-returning mappers, typed spread. Tests: `stream_struct_for.jacl`,
+     vec since typed-vec storage is GC-opaque). **Struct-RETURNING
+     transform mappers LANDED (2026-06-10, multi-slot HOF OUTPUT
+     channel):** the mapper compiles with a TYPE_STRUCT return via
+     `c->hof_mapper_ret_enc` (HEAD_PROC adoption), the transform pull pops
+     the N-slot result via vm__pop_struct, and the stream's elem_idx
+     becomes the struct idx — downstream for/chained-HOF/typed-collect
+     ride the existing struct channel; works for struct AND scalar inputs.
+     Also fixed en route: def-bound typed streams kept NO element stamp
+     (no TYPE_STREAM def-propagation arm) — `def s [transform …]` then
+     `for [filter $s …]` hit the dyn-consumer runtime guard. Test:
+     `stream_struct_ret.jacl`. Still open: SM-body
+     for-loop bindings, typed spread. Tests: `stream_struct_for.jacl`,
      `stream_struct_hof.jacl` (each/transform/filter/chained, 3-slot
-     elements), `stream_struct_hof_{named,ret}_error`,
+     elements), `stream_struct_hof_named_error`,
      `stream_struct_{collect,yield_dyn}_error`.
   1c. **✅ FIXED (2026-06-10) — SM-generator rep-mismatch bug family.** All
      were one flaw in different clothes: SM compile paths for liveness-culled

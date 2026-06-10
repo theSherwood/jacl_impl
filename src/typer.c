@@ -1618,6 +1618,16 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       struct_idx = vsh;  /* typer-side shape — binding-only */
     }
   }
+  /* Typed stream ([Stream T] / derived transform/filter/take streams):
+   * propagate the element stamp into the binding so a def-bound stream
+   * keeps narrowing at downstream consumers (for-loops, chained HOFs,
+   * collect). Struct elements especially NEED this — an unstamped
+   * struct-element stream compiles the dyn consumer path and trips the
+   * runtime "requires a typed consumer" guard. */
+  if (effective == TYPE_STREAM &&
+      value_node->inferred_struct_idx != UINT32_MAX) {
+    struct_idx = value_node->inferred_struct_idx;
+  }
   /* Ref-element [Arr T] ([Arr str]): dyn-arr rep with a static element
    * stamp — propagate into the binding (mirrors the [Vec str] arm). */
   if (effective == TYPE_DYN &&

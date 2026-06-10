@@ -75,10 +75,23 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
   a rep-agnostic passthrough. Named/dyn callbacks over struct streams are a
   compile error (+ `has_inline_params` runtime defense for dyn flow) — no
   legal boxed path exists. Tests: `stream_struct_hof.jacl` (each/transform/
-  filter/chained, incl. a 3-slot element), `stream_struct_hof_named_error`,
-  `stream_struct_hof_ret_error`. **Still open:** struct-RETURNING transform
-  mappers (multi-slot HOF *output* channel — compile error for now) and
-  SM-body struct for-bindings. Typed `collect` → `[Vec T]` LANDED (debt 2;
+  filter/chained, incl. a 3-slot element), `stream_struct_hof_named_error`.
+  **Struct-RETURNING transform mappers LANDED (2026-06-10, multi-slot HOF
+  OUTPUT channel):** a struct `out_elem_enc` (only producible by a cleanly
+  monomorphized inline mapper — `typer__proc_result_enc` returns UINT32_MAX
+  otherwise) rides `c->hof_mapper_ret_enc` into HEAD_PROC, which compiles
+  the mapper with a TYPE_STRUCT return (`emit_return` ships N inline slots /
+  expands a heap tail via OP_RETURN_WIDE); the transform pull pops the
+  multi-slot result via `vm__pop_struct` into the caller's buffer, and the
+  stream's elem_idx becomes the struct idx, so downstream consumers
+  (for-loop, chained HOFs, typed collect) ride the existing struct channel.
+  Works for struct AND scalar input elements ([range …] → struct stream).
+  En route: def-bound typed streams now keep their element stamp (the def
+  handler had no TYPE_STREAM propagation arm, so `def s [transform …]` +
+  `for [filter $s …]` compiled the dyn consumer path and tripped the
+  runtime guard). Test: `stream_struct_ret.jacl` (identity, field-modifying,
+  and scalar→struct mappers; chained filter; typed collect).
+  **Still open:** SM-body struct for-bindings. Typed `collect` → `[Vec T]` LANDED (debt 2;
   struct streams collect to [Vec Struct], wide stored flat, str stays plain
   — typed-vec storage is GC-opaque). The §4.1c
   generator-body struct bugs found en route are FIXED — see
