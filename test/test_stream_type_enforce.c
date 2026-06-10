@@ -262,7 +262,9 @@ static int test_yield_literal_narrows_into_stream_i64(void) {
     "print [collect [gen]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "[vec 42]\n");
+  /* Typed collect: [Stream i64] collects into a [Vec i64] (typed-vec print
+   * format), not a plain vec. */
+  ASSERT_STR_EQ(cap.buf, "[42]\n");
   ASSERT(check_no_leaks());
   TEST_PASS();
 }

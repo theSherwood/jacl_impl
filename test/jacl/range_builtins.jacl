@@ -4,13 +4,14 @@
 # expect: ok
 
 proc check {} {
-  assert [== [collect [range 1 5]] [vec 1 2 3 4]]
-  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]
-  assert [== [collect [range 0 0]] [vec]]
-  assert [== [collect [range-inclusive 5 5]] [vec 5]]
+  assert [== [collect [range 1 5]] [[Vec i64] 1 2 3 4]]
+  assert [== [collect [range-inclusive 1 5]] [[Vec i64] 1 2 3 4 5]]
+  assert [== [vec-len [collect [range 0 0]]] 0]
+  assert [== [collect [range-inclusive 5 5]] [[Vec i64] 5]]
 
   # Composes with transform / filter like the infix form did.
-  assert [== [collect [transform [range 0 3] [\ * $it 10]]] [vec 0 10 20]]
+  # (typed collect: results are [Vec i64], compared against typed-vec literals)
+  assert [== [collect [transform [range 0 3] [\ * $it 10]]] [[Vec i64] 0 10 20]]
 
   # Element type stamps i64 so the for binding narrows — accumulate in i64.
   mut i64 sum 0

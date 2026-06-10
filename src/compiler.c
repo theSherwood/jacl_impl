@@ -7406,6 +7406,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__compile_node(c, args[0]);
       compiler__emit_byte(c, unary_emit[ui].op, line);
       if (unary_emit[ui].set_type) c->last_expr_type = unary_emit[ui].result;
+      /* Typed collect: the typer stamped [Vec T] for a typed-stream
+       * receiver (the VM keys the same decision off the runtime elem_idx);
+       * keep the compiler's expression type in agreement so downstream
+       * compile-time dispatch (typed-vec eq/get/HOFs) sees a typed vec. */
+      if (hid == HEAD_COLLECT &&
+          (JaclType)node->inferred_type == TYPE_TYPED_VEC)
+        c->last_expr_type = TYPE_TYPED_VEC;
       return;
     }
   }

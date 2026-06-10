@@ -202,10 +202,13 @@ proc main {} {
 
   # ----- streams -----
   # Lazy sequences from generators (`yield`), ranges, or `lines`.
-  # `collect` materializes; `filter`/`transform` work on either.
-  assert [== [collect [range-inclusive 1 5]] [vec 1 2 3 4 5]]
-  assert [== [collect [transform [range-inclusive 1 5] [\ * $it 2]]] [vec 2 4 6 8 10]]
-  assert [== [collect [transform [filter [range-inclusive 1 6] [\ == 0 [% $it 2]]] [\ * $it $it]]] [vec 4 16 36]]
+  # `collect` materializes; `filter`/`transform` work on either. Collecting
+  # a TYPED stream produces a typed vec — [Vec i64] here (typed collect) —
+  # so the comparisons use typed-vec literals. Dyn streams (like the
+  # unannotated `count-up` below) still collect to a plain vec.
+  assert [== [collect [range-inclusive 1 5]] [[Vec i64] 1 2 3 4 5]]
+  assert [== [collect [transform [range-inclusive 1 5] [\ * $it 2]]] [[Vec i64] 2 4 6 8 10]]
+  assert [== [collect [transform [filter [range-inclusive 1 6] [\ == 0 [% $it 2]]] [\ * $it $it]]] [[Vec i64] 4 16 36]]
 
   # ----- generators -----
   # `count-up` (defined above) is a generator: each call returns a

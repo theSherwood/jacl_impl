@@ -1,13 +1,14 @@
-# expect: [vec 3 10]
-# expect: [vec 5]
-# expect: [vec 15 25]
-# expect: [vec 20]
+# expect: [3, 10]
+# expect: [5]
+# expect: [15, 25]
+# expect: [20]
 # expect: 13
-# expect: [vec 10]
+# expect: [10]
 # expect: ok
 # f64 / u64 producer-wide streams. Exercises the wide mapper body (transform
 # arithmetic), the dyn-context predicate (filter comparison, handled by runtime
 # mixed-numeric promotion), u64, a for-loop wide bind, and a chained pipeline.
+# Typed collect: results are [Vec f64]/[Vec u64] (flat wide storage; new print format).
 # yield-time literal narrowing makes the stream elements genuinely f64/u64.
 proc fs {} [Stream f64] {
   yield 1.5

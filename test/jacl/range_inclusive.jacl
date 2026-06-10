@@ -1,3 +1,3 @@
-# expect: [vec 1 2 3 4 5]
-# Test: inclusive range collected to vector
+# expect: [1, 2, 3, 4, 5]
+# Test: inclusive range collected to a TYPED vec ([Vec i64] — typed collect)
 print [collect [range-inclusive 1 5]]

@@ -77,8 +77,10 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
   legal boxed path exists. Tests: `stream_struct_hof.jacl` (each/transform/
   filter/chained, incl. a 3-slot element), `stream_struct_hof_named_error`,
   `stream_struct_hof_ret_error`. **Still open:** struct-RETURNING transform
-  mappers (multi-slot HOF *output* channel — compile error for now), typed
-  `collect` → `[Vec T]` (debt 2), SM-body struct for-bindings. The §4.1c
+  mappers (multi-slot HOF *output* channel — compile error for now) and
+  SM-body struct for-bindings. Typed `collect` → `[Vec T]` LANDED (debt 2;
+  struct streams collect to [Vec Struct], wide stored flat, str stays plain
+  — typed-vec storage is GC-opaque). The §4.1c
   generator-body struct bugs found en route are FIXED — see
   `NOT_IMPLEMENTED.md` §4.1b/§4.1c.
 

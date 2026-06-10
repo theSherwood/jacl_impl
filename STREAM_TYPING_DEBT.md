@@ -38,18 +38,25 @@ the items below are the localized compromises.
 
 ## 2. `i32-for-small` box-back conflates i64/i32
 
-- **Where:** `vm__stream_to_tagged` in `src/vm.c` (the `TYPE_I64`/`TYPE_U64`
-  arms emit `jacl_i32` for values that fit i32).
-- **Why (forced, behavior-preserving):** keeps `collect [range 1 5] ==
-  [vec 1 2 3 4]` working (the literals are i32). Without it, collected i64
-  elements would be i64 and the equality (and other tests) would fail.
-- **Impact:** the tagged rep of a wide-stream element is i32 when small, i64
-  when large — not a clean single type. Conflates i64 and i32 at the boundary.
-- **Remediation:** decide the intended semantics of `collect [Stream i64]` — if
-  it should produce a typed `[Vec i64]` (see the open "typed collect → [Vec T]"
-  work in `NOT_IMPLEMENTED.md §4`), the box-back goes away (elements stored
-  wide in a typed vec). Couples with that feature.
-- **Effort:** medium; do it with typed-collect.
+- **Status:** ✅ **resolved for collect** (2026-06-10, typed collect).
+  `collect` over a typed stream now produces a **typed vec `[Vec T]`** —
+  wide elements (i64/u64/f64) are stored as raw flat bits straight from the
+  wide pull (no box-back at all), struct elements as flat inline bytes,
+  tagged-fit scalars as their tagged values. The decision is keyed off the
+  stream's runtime `elem_idx` (dyn-flow and typed-flow agree); the typer
+  stamps the static `[Vec T]` so `==` against typed-vec literals compiles
+  (OP_TYPED_VEC_EQ gained a scalar-element arm — it previously assumed
+  struct elements and crashed on a scalar sentinel). **Scope notes:**
+  (a) `str`-element streams (`lines`) still collect to a PLAIN vec — typed-
+  vec storage is GC-opaque raw bytes, so heap pointers must stay in a traced
+  vec (same rule as the `[Vec T]` constructor, which rejects `[Vec str]`).
+  (b) `vm__stream_to_tagged`'s i32-for-small arm still exists for the
+  remaining dyn-normalizing consumers (spread / each-dyn / userland
+  stream_next); retire it if/when those go typed. This was a BREAKING
+  semantic change (user-approved): `== [collect …] [vec …]` is now a compile
+  error → migrate to `[[Vec i64] …]` literals; print format is `[1, 2, 3]`.
+  Tests migrated: range_builtins/exclusive/inclusive, tour, wide_f64_u64,
+  struct_hof; new positive `stream_struct_collect.jacl`.
 
 ## 3. Per-element box/unbox round-trips at HOF boundaries
 

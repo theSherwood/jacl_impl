@@ -4050,6 +4050,30 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_I64);
       } else if (hid == HEAD_LINES) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+      } else if (hid == HEAD_COLLECT && node->data.command.arg_count == 1) {
+        /* Typed collect (STREAM_TYPING_DEBT item 2): collecting a TYPED
+         * stream materializes a typed vec [Vec T] — wide elements stored
+         * flat (no i32-for-small box-back), struct elements stored as
+         * inline bytes. Dyn streams (and vec identity) keep TYPE_VEC.
+         * The VM keys the same decision off the stream's runtime elem_idx,
+         * so dyn-flow and typed-flow agree. */
+        AstNode* recv = node->data.command.args[0];
+        if ((JaclType)recv->inferred_type == TYPE_STREAM &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t ce = recv->inferred_struct_idx;
+          /* Value-type elements only — same rule as the [Vec T] constructor:
+           * typed-vec storage is GC-OPAQUE raw bytes, so str (a heap
+           * pointer) must stay in a plain (traced) vec. dyn streams keep
+           * the plain vec too. */
+          bool ce_ok = !JACL_IS_SCALAR_TYPE_IDX(ce) /* struct */ ||
+                       (JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_DYN &&
+                        JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_STR);
+          if (ce_ok) {
+            node->inferred_type = TYPE_TYPED_VEC;
+            node->inferred_struct_idx = ce;
+            node->inferred_key_struct_idx = UINT32_MAX;
+          }
+        }
       }
     } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
       /* [box $val]: runtime returns a box wrapping the value. The

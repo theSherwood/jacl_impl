@@ -990,6 +990,13 @@ void vm__fmt_typed_scalar(VMFormatBuf* buf, const JaclVal* ptr, JaclType t) {
     case TYPE_I64: n = snprintf(tmp, sizeof(tmp), "%" PRId64, (int64_t)*ptr); break;
     case TYPE_U64: n = snprintf(tmp, sizeof(tmp), "%" PRIu64, (uint64_t)*ptr); break;
     case TYPE_F64: { double d; memcpy(&d, ptr, 8); n = snprintf(tmp, sizeof(tmp), "%g", d); break; }
+    case TYPE_STR:
+    case TYPE_BOOL:
+      /* Tagged-stored elements ([Vec str]/[Vec bool] slots hold the tagged
+       * JaclVal): format like any tagged value. Reachable since typed
+       * collect ([Vec str] from `lines`). */
+      vm__fmt_value(buf, *ptr);
+      return;
     default: n = snprintf(tmp, sizeof(tmp), "?"); break;
   }
   if (n > 0) vm__fmt_append(buf, tmp, (uint32_t)n);
@@ -10458,13 +10465,48 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           DISPATCH();
         }
 
-        /* Struct elements are inline value bytes — collecting into a plain
-         * vec would need the forbidden auto-box; typed collect → [Vec T] is
-         * the planned path (§4.1b / STREAM_TYPING_DEBT item 2). */
-        if (vm__elem_idx_is_struct(stream->elem_idx)) {
-          vm__set_error(vm, "struct-element streams require a typed consumer "
-                            "(for-loop); collect is not yet supported");
-          return VM_RUNTIME_ERROR;
+        /* Typed collect (STREAM_TYPING_DEBT item 2): a TYPED stream
+         * materializes into a typed vec [Vec T]. Wide scalar elements
+         * (i64/u64/f64) arrive raw from the pull and are stored raw — the
+         * i32-for-small box-back is gone. Struct elements arrive as N
+         * inline slots and store flat. Tagged-fit scalars (i32/str/bool/
+         * f32) store their tagged JaclVal. Keyed off the runtime elem_idx,
+         * so dyn-flow and typed-flow agree; the typer stamps the matching
+         * static [Vec T] on typed receivers. Routes generators and derived
+         * streams uniformly through vm__pull_stream_one. */
+        {
+          uint32_t ce = stream->elem_idx;
+          bool ce_struct = vm__elem_idx_is_struct(ce);
+          /* Value-type scalars only (mirrors the [Vec T] constructor rule):
+           * typed-vec storage is GC-opaque, so str (a heap pointer) must
+           * stay in a plain traced vec. */
+          bool ce_typed_scalar = JACL_IS_SCALAR_TYPE_IDX(ce) &&
+                                 JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_DYN &&
+                                 JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_STR;
+          if (ce_struct || ce_typed_scalar) {
+            bool ce_raw = ce_struct || vm__elem_idx_is_wide(ce);
+            uint32_t stride = ce_struct
+                ? vm__struct_width(vm->struct_registry->defs[ce]) : 1;
+            gc__current_heap = &vm->heap;
+            jacl_typed_vec_root* tvec = jacl_typed_vec_empty_strided(stride);
+            JaclVal terr = JACL_NIL;
+            while (stream->state != STREAM_EXHAUSTED) {
+              JaclVal buf[VM_MAX_STRUCT_SLOTS];
+              StreamPullResult pr = vm__pull_stream_one(vm, coll_val, buf);
+              if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+              if (pr == STREAM_PULL_EXHAUSTED) break;
+              /* US-005: a tagged element may be a yielded error value; raw
+               * (wide/struct) bits must never be inspected as a tag. */
+              if (!ce_raw && jacl_is_error(buf[0])) { terr = buf[0]; break; }
+              gc__current_heap = &vm->heap;
+              tvec = jacl_typed_vec_push_back_wide(tvec, buf);
+            }
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, jacl_is_error(terr)
+                                  ? terr : jacl_typed_vector_ptr(tvec));
+            if (result != VM_OK) return result;
+            DISPATCH();
+          }
         }
 
         /* Derived streams (filter, etc.) use the unified pull helper */
@@ -13800,7 +13842,6 @@ interpret_done:
           DISPATCH();
         }
 
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t count = jacl_typed_vec_count(a);
         if (count != jacl_typed_vec_count(b)) {
           result = vm__push(vm, JACL_FALSE);
@@ -13809,12 +13850,32 @@ interpret_done:
         }
 
         bool equal = true;
-        for (uint32_t i = 0; i < count; i++) {
-          const JaclVal* pa = jacl_typed_vec_get_ptr(a, i);
-          const JaclVal* pb = jacl_typed_vec_get_ptr(b, i);
-          if (memcmp(pa, pb, sdef->total_size) != 0) {
-            equal = false;
-            break;
+        if (type_idx >= 0xFF00) {
+          /* Scalar elements (reachable since typed collect): wide scalars
+           * (i64/u64/f64) hold raw bits — compare bytes; tagged-stored
+           * scalars (i32/str/bool/...) compare as values (strings need
+           * deep equality, not pointer identity). */
+          JaclType eq_et = (JaclType)(type_idx - 0xFF00);
+          bool eq_raw = (eq_et == TYPE_I64 || eq_et == TYPE_U64 ||
+                         eq_et == TYPE_F64);
+          for (uint32_t i = 0; i < count; i++) {
+            const JaclVal* pa = jacl_typed_vec_get_ptr(a, i);
+            const JaclVal* pb = jacl_typed_vec_get_ptr(b, i);
+            if (eq_raw ? (memcmp(pa, pb, sizeof(JaclVal)) != 0)
+                       : !vm__deep_eq(*pa, *pb)) {
+              equal = false;
+              break;
+            }
+          }
+        } else {
+          StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+          for (uint32_t i = 0; i < count; i++) {
+            const JaclVal* pa = jacl_typed_vec_get_ptr(a, i);
+            const JaclVal* pb = jacl_typed_vec_get_ptr(b, i);
+            if (memcmp(pa, pb, sdef->total_size) != 0) {
+              equal = false;
+              break;
+            }
           }
         }
         result = vm__push(vm, jacl_bool(equal));

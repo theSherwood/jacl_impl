@@ -247,8 +247,10 @@ pulling on them; revisit when one shows up.
      mappers (multi-slot HOF *output* channel not yet wired), struct-element
      for-loops inside suspending procs (needs WIDE state-field wiring),
      struct yield into an unannotated generator (typer + compiler errors).
-     Still open: typed `collect` → `[Vec T]` (debt 2), SM-body for-loop
-     bindings, struct-returning mappers. Tests: `stream_struct_for.jacl`,
+     Typed `collect` → `[Vec T]` LANDED (same day; debt 2 — wide elements
+     stored flat, struct streams collect to [Vec Struct]; str stays plain
+     vec since typed-vec storage is GC-opaque). Still open: SM-body
+     for-loop bindings, struct-returning mappers, typed spread. Tests: `stream_struct_for.jacl`,
      `stream_struct_hof.jacl` (each/transform/filter/chained, 3-slot
      elements), `stream_struct_hof_{named,ret}_error`,
      `stream_struct_{collect,yield_dyn}_error`.
