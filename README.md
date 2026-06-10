@@ -1,60 +1,265 @@
 # jacl
 
-Just A Command Lisp. A fusion of a command language and a lisp. Love child of Tcl and Clojure. Gradually typed. Supports inline operators. Easily embeddable in C with top-tier FFI. Supports multithreaded runtime using NxM work stealing. Garbage collection. Be as safe or as unsafe as you like and the language will support you.
+Just A Command Lisp. A fusion of a command language and a lisp — the
+love child of Tcl and Clojure. Gradually typed, with inline operators,
+unboxed typed values, an NxM work-stealing runtime, a non-moving
+tracing GC, and top-tier C FFI for embedding. Be as safe or as unsafe
+as you like; the language supports both.
 
-## Goals/Features
+## Goals
 
-- Safety by default
-  - Absolute freedom to be unsafe if you like
-    - Poke at memory addresses directly
-- Great comptime/macros (lisp under the hood)
-- Great shell language (command syntax)
-  - Pragma to fall back to binaries on the path if a command is not defined
-  - Aliases? (maybe some kind of macro)
-- Top-tier FFI
-  - Use it as an embedded command language in other applications
-- Effortless, safe multithreading/concurrency
-- Gradual yet strict typing
-  - Type system strict enough that you can have unboxed structs yet gradual enough to support dynamic immutable value semantics
-  - Some type inference
-- Sandbox untrusted code without performance compromises
-  - Use restricted environments (includes restricting/replacing builtins) for untrusted code
+- **Safety by default**, with absolute freedom to be unsafe (poke at
+  raw memory addresses via `[Ptr T]` / `[Buf N T]` when you want to).
+- **Great shell language** — bare-command syntax, pipelines.
+- **Great comptime/macros** — a lisp under the hood; AST macros,
+  hygienic, with quasiquoting.
+- **Top-tier FFI** — usable as an embedded command language in C apps.
+- **Effortless, safe concurrency** — direct-style `spawn`/`await`/
+  `parallel`/`race`, no async coloring at call sites.
+- **Gradual yet strict typing** — dynamic by default; opt into static
+  types for unboxed structs/scalars with no boxing or dyn dispatch.
+- **Sandbox untrusted code** — restricted preludes via `[interpret]`,
+  no performance compromise for trusted code.
+
+## Status
+
+The core language is implemented and exercised by a large test corpus
+(74 C test modules plus 496 `*.jacl` programs under `test/jacl/`). All
+17 milestones in `DESIGN.md` are marked complete — value
+representation, lexer/parser, bytecode compiler + VM, procs and control
+flow, strings, persistent collections, error handling, mutable state,
+the static type system, the tracing GC, the NxM concurrency runtime,
+modules, macros, the three-mode syntax, and the FFI/embedding API.
+
+The GC and concurrency paths were hardened by a multi-session audit
+campaign (see `DESIGN.md` "M12/M13 hardening note", `AUDIT.md`, and
+`AUDIT_HISTORY.md`).
+
+**Not yet implemented** (tracked in `NOT_IMPLEMENTED.md`): `match`/case,
+callable values (`[$map key]`), `$env` / `with-env`, aliases, globbing,
+regular-expression literals (the NFA engine exists in `lib/regex` but
+isn't wired in), and the bignum numeric tower (`lib/bignum` exists,
+not yet dispatched). The infix `()` mode was removed — use `[]`.
+
+The single best up-to-date picture of working syntax is
+`test/jacl/tour.jacl`: the harness runs it, so it cannot drift from the
+implementation. `SYNTAX.md` is the full reference. The examples below
+are drawn from that tour.
+
+## A taste
+
+```
+proc fib {i64 n} i64 {
+  if [< $n 2] { $n } { + [fib [- $n 1]] [fib [- $n 2]] }
+}
+
+proc main {} {
+  def nums [vec 1 2 3 4 5]
+  def doubled [collect [transform $nums [\ * $it 2]]]
+  print "doubled: $doubled"          # doubled: [vec 2 4 6 8 10]
+  print "fib 10 = $[fib 10]"         # fib 10 = 55
+}
+main
+```
 
 ## Syntax
 
-Comments
+**Comments.** `#` to end of line; `##` is a doc comment.
 
 ```
-# This is a comment
+# a comment
+## a doc comment (extractable by tooling)
 ```
 
-Assignments
+**Bindings.** `def` is immutable, `mut` is a mutable cell, `set`
+reassigns. The `=` / `:` / `::` operators are command-mode sugar for
+the same three. Read a variable with `$name`.
 
 ```
-foo = 3   # immutable definition
-bar : 4   # mutable definition
-bar :: 5  # mutable reassignment
-
-i64 baz = 13          # statically typed
-i64 werf : $baz + 3   # use $var to read var
+def imm 7            # immutable
+also = 11            # `=` is def sugar
+mut counter 0        # mutable cell
+set counter 2        # reassign
+reassignable : 0     # `:` is mut sugar
+reassignable :: 5    # `::` is set sugar
 ```
 
-Commands
+**Typed bindings.** Type before name. Typed locals stay unboxed and
+arithmetic narrows accordingly — no boxing, no dyn dispatch.
 
 ```
-proc add [x y] {
-  x + y
+def i64 x 10
+def i64 y 20
+def i64 sum [+ $x $y]
+def i64 wide [to i64 $small]   # explicit conversion via [to TYPE val]
+```
+
+**Two parsing modes.** `[]` is juxtaposition (head + args — a value
+computation). `{}` is command mode (bare commands / pipelines, and also
+the form for param lists, struct fields, and destructuring patterns).
+Bare words are strings.
+
+```
+def total [+ 1 [* 2 [+ 1 3]]]   # nested value computation → 9
+```
+
+**String interpolation.** `$var` and `$[...]` (juxtaposition) nest
+inside `"..."`. Triple-quoted strings strip leading indentation.
+
+```
+def msg "name=$who age=$yrs sum=$[+ 2 3]"
+```
+
+**Procs.** Params and body are both `{}` blocks; types go before names.
+The return type sits after the params block. Untyped params are `dyn`.
+
+```
+proc add {a, b} { + $a $b }                 # untyped
+proc typed-add {i64 a, i64 b} i64 { + $a $b }
+proc sum-all {..nums} {                      # variadic: collects trailing args
+  mut total 0
+  for $nums n { set total [+ $total $n] }
+  $total
 }
-
-ten = add 3 7
+sum-all ..$xs                                # `..$vec` splats at a call site
 ```
 
-Subcommands
+**Lambdas.** `[\ body]` is a one-arg proc with `$it` as the parameter.
 
 ```
-prn "three: " [add 1 2] " five: " [add 2 3]
-# or
-prn "three: $[add 1 2] five: $[add 2 3]"
+def square [\ * $it $it]
+collect [transform [vec 1 2 3] [\ * $it 2]]   # → [vec 2 4 6]
+```
+
+**Control flow.** `if` is an expression. `while [cond] {body}`. `for`
+comes in implicit-`$it`, explicit-binding (`for COLL NAME {...}`), and
+C-style (`for {init; cond; step} {...}`) forms, over vectors, arrays,
+ranges, and streams.
+
+```
+if [> $n 0] { "positive" } elif [== $n 0] { "zero" } else { "negative" }
+
+for [vec 1 2 3] { print $it }
+for [range 0 3] n { ... }
+for {mut i 1; <= $i 4; incr i} { ... }
+```
+
+**Collections.** `[vec ...]` (persistent RRB vector, immutable) and
+`[map ...]` (persistent HAMT) are dyn by default; `[[Vec T]]` /
+`[[Map K V]]` are typed and check element types at push/set. `[arr ...]`
+(`[Arr T]`) is a mutable, segment-array-backed *reference* array.
+
+```
+def m [map a 1 b 2]
+map-get $m a                       # → 1
+def [Vec i32] ns [[Vec i32] 10 20 30]
+def nums [arr 1 2 3]               # mutable; arr-push / arr-set / arr-get / arr-pop
+```
+
+**Structs.** Defined at module level, type before name; constructed
+`[Name field val ...]`; fields read with `->` and mutated with the
+3-arg `. obj field val` form (field must be `mut`). Structs are flat,
+header-less, C-ABI-laid-out value types and may carry any numeric type.
+
+```
+struct Pt {i32 x, i32 y}
+def p [Pt x 3 y 4]
+print $p->x                        # → 3
+```
+
+**Destructuring.** Positional `[]` for vectors, named `{}` for
+structs/maps, `_` wildcard, `..rest` for the remainder.
+
+```
+def [a b c] [vec 1 2 3]
+def {x, y} $pt
+def [head ..tail] [vec first second third]
+```
+
+**Streams and generators.** Any proc containing `yield` is a generator;
+each call returns a fresh lazy stream that suspends at each yield.
+`range` / `range-inclusive` / `lines` are stream sources; `transform` /
+`filter` / `take` are lazy; `collect` materializes (a typed stream
+collects to a typed vec).
+
+```
+proc count-up {start, stop} {
+  mut i $start
+  while [<= $i $stop] { yield $i; set i [+ $i 1] }
+}
+collect [take [count-up 1 100] 3]   # → [vec 1 2 3]
+```
+
+**Pipes.** `|` is a command-mode operator that threads the result into
+the next stage's first argument.
+
+```
+range-inclusive 1 10 \
+  | filter [\ == 0 [% $it 2]] \
+  | transform [\ * $it $it] \
+  | collect \
+  | print
+```
+
+**Mutable state.** `box` is a thread-local cell; `atom` is a
+CAS-shared cell. `reset` stores, `swap` applies a fn, `deref` reads.
+`watch` registers a keyed listener firing on each commit with
+`(old, new)`.
+
+```
+def cell [box 0]
+reset $cell 1
+swap $cell [\ + $it 5]             # deref → 6
+watch $counter "log" [\ ...]       # atom listener
+```
+
+**Errors as values.** `error` produces an error *value* that propagates
+through pipes; catch it with `try {body} name {handler}`. `assert`,
+by contrast, halts the VM.
+
+```
+try { error bad } e { concat "caught: " [error-val $e] }   # → "caught: bad"
+error? [error boom]                                        # → true
+```
+
+**Dynamic context (`$ctx`).** Fields declared with `ctx` at module
+level are visible everywhere. `with-ctx {field val} {body}` overrides
+for the dynamic extent of the body and restores on exit (including on
+error).
+
+```
+ctx mut i32 verbosity = 0
+with-ctx {verbosity 3} { ... }     # $ctx->verbosity is 3 inside, 0 after
+```
+
+**Macros.** `defmacro` registers a compile-time rewrite; `syntax-quote`
+templates AST and `~name` splices a captured arg.
+
+```
+defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }
+```
+
+**Concurrency.** `spawn {block}` returns a future; `await` blocks until
+it resolves. `parallel { } { } ...` runs blocks concurrently and
+returns results in argument order; `race` returns the first to
+complete. Procs that internally suspend (`await`, `sleep`) are
+suspending too — but the CPS state-machine transform makes that
+invisible at the call site (direct style, no async coloring).
+
+```
+def fut [spawn { + 20 22 }]
+await $fut                         # → 42
+parallel { 10 } { 20 } { 30 }      # → [vec 10 20 30]
+```
+
+**Sandboxing.** `[interpret SRC]` runs SRC in a child VM with the
+default prelude; `[interpret PRELUDE SRC]` restricts to the entries in
+PRELUDE (an empty map yields a no-I/O sandbox). Blocked primitives
+surface as error values rather than aborting.
+
+```
+interpret "[+ 1 [* 2 3]]"          # → 7
+interpret [map] "[+ 10 20]"        # → 30 (restricted prelude)
 ```
 
 ## Build & Test
@@ -62,43 +267,41 @@ prn "three: $[add 1 2] five: $[add 2 3]"
 Three pre-merge baselines:
 
 ```
-./build.sh                  # full normal-mode test sweep (90/0 today)
-./build.sh --tsan           # ThreadSanitizer sweep (86/2 baseline; the
-                            #   two failures are documented known-and-safe)
+./build.sh                  # full normal-mode test sweep
+./build.sh --tsan           # ThreadSanitizer sweep (two known-and-safe
+                            #   failures: TSAN blindness on barrier/fence/
+                            #   epoch-mediated synchronization, not missed
+                            #   barriers — see DESIGN.md)
 ./build.sh --wasm           # builds via Emscripten and runs the WASM
                             #   suite (test/test_wasm.mjs, including
                             #   tour.jacl end-to-end). Skips with a clear
                             #   notice when emcc or node isn't on PATH.
 ```
 
-Filter to one test:
+Each run prints `=== Results: N passed, M failed ===`. Filter to one
+test:
 
 ```
 ./build.sh --test=<name>          # one test, normal mode
 ./build.sh --tsan --test=<name>   # one test, TSAN
+./build.sh --release              # -O2 build in .build-release/ (for benchmarks)
 ```
 
 Run a single `.jacl` source through the harness:
 
 ```
 .build/jacl_harness test/jacl/<name>.jacl
-```
-
-Or compile and run a single module's test by hand:
-
-```
-gcc -Wall -Wextra -std=c99 -g <module>/test_<name>.c && ./a.out
+.build/jacl_harness test/jacl/tour.jacl     # the syntax tour
 ```
 
 The dispatch loop in `src/vm.c` is direct-threaded (computed-goto) on
-GCC/Clang non-WASM targets and falls back to a switch on Emscripten
-and other compilers. See `AUDIT.md` for the per-baseline rationale and
-`AUDIT_HISTORY.md` for the audit campaign and §13 implementation
-notes.
+GCC/Clang non-WASM targets and falls back to a switch on Emscripten and
+other compilers. See `AUDIT.md` for the per-baseline rationale and
+`AUDIT_HISTORY.md` for the audit campaign.
 
 ## Playground
 
-A browser playground for JACL lives in `demo/` — CodeMirror 6 editor
+A browser playground for JACL lives in `demo/` — a CodeMirror 6 editor
 with a position-aware JACL syntax mode, optional vim keybindings, a
 draggable panel divider, and the WASM build of the VM. To run it
 locally:
@@ -114,3 +317,14 @@ python3 -m http.server 8080  # or any static server
 The bundle (`demo/dist/playground.js`, ~425 KB minified) is committed
 so the playground works from a clone without a Node toolchain;
 `build_demo.sh` only re-bundles when you edit `demo/src/`.
+
+## Where to read more
+
+- `DESIGN.md` — core decisions, milestone roadmap, project layout
+- `SYNTAX.md` — full syntax reference + per-feature status
+- `TYPE_SYSTEM.md` — gradual typing architecture
+- `STRUCT_DESIGN.md` — flat, header-less struct value types
+- `GENERATOR_STATE_MACHINE.md` — the CPS/SM transform for suspension
+- `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
+- `NOT_IMPLEMENTED.md` — index of planned / deferred / open items
+- `test/jacl/tour.jacl` — the canonical, harness-verified syntax tour
