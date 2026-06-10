@@ -1,0 +1,46 @@
+# expect: 10
+# expect: 6
+# expect: 12
+# expect: ok
+# 1) §8e fix: a closure capturing a WIDE-TYPED SM state field (def i64 after
+#    an await) reads it correctly — the capture copies the TAGGED boxed value
+#    and the body read unboxes via the typer's binding type (it used to
+#    consume the box as raw wide bits → garbage/nil).
+# 2) §8d residue fix: a for-loop body that suspends ONLY via a CALL to a
+#    suspending proc takes the SM for-loop lowering (the suspension map is
+#    now threaded into the locals walk).
+# 3) Both combined: the loop binding (an SM state field) captured by a spawn
+#    body inside a suspending for-loop.
+proc t {} {
+  def [Future i64] f0 [spawn { 5 }]
+  def i64 x [await $f0]
+  def [Future i64] f [spawn { [* $x 2] }]
+  [await $f]
+}
+proc pause-and {i64 v} i64 {
+  def [Future i64] f [spawn { $v }]
+  [await $f]
+}
+proc agg {} {
+  mut i64 acc 0
+  for [range 1 4] i {
+    set acc [+ $acc [pause-and $i]]
+  }
+  $acc
+}
+proc cap-loop {} {
+  mut i64 acc 0
+  for [range 1 4] i {
+    def [Future i64] f [spawn { [* $i 2] }]
+    def i64 r [await $f]
+    set acc [+ $acc $r]
+  }
+  $acc
+}
+proc main {} {
+  print [t]
+  print [agg]
+  print [cap-loop]
+  print "ok"
+}
+[main]

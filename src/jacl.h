@@ -2429,7 +2429,7 @@ extern void sm__collect_destructure_vec_names (AstNode *dv, StateLayout *layout,
 extern void sm__collect_destructure_named_names (AstNode *dn, StateLayout *layout, bool is_mutable);
 extern void sm__collect_command_destructure_names (AstNode *pat, StateLayout *layout, bool is_mutable);
 extern void sm__collect_block_destructure_names (AstNode *blk, StateLayout *layout, bool is_mutable);
-extern void sm__walk_locals (AstNode *node, StateLayout *layout, StructTypeRegistry *reg);
+extern void sm__walk_locals (AstNode *node, StateLayout *layout, SuspensionMap *susp_map, StructTypeRegistry *reg);
 extern void sm__liveness_mark_write (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
 extern void sm__liveness_mark_read (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
 extern JaclVal sm__lit_string_name (AstNode *node);

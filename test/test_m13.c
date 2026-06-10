@@ -3546,14 +3546,24 @@ static int test_spawn_calls_susp_proc(void) {
     TEST_PASS();
 }
 
-/* Test: callback validation still rejects suspending callbacks via map */
+/* Test: a for-loop body suspending via a CALL to a suspending proc now
+   compiles through the SM for-loop lowering (the suspension map is
+   threaded into the locals walk — §8d residue). The HOF CALLBACK form
+   still rejects suspending callbacks. */
 static int test_susp_callback_reject_via_map(void) {
-    /* A block containing a call to a suspending proc should be
-       detected by ast__contains_suspension with map */
-    ASSERT(test__compile_has_error(
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+    VMResult r = jacl_run(
         "proc sfn {} { await [spawn { 42 }] }\n"
-        "[for [vec 1 2] { sfn }]",
-        "cannot suspend inside non-suspending callback"));
+        "[for [vec 1 2] { print [sfn] }]", &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n42\n");
+    vm_destroy(&vm);
+    arena_destroy(&arena);
     TEST_PASS();
 }
 

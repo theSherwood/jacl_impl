@@ -11341,7 +11341,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (sub == VM_OK && vm->stack_top > 0) {
             call_result = vm->stack[--vm->stack_top];
           } else if (sub != VM_OK) {
-            vm__set_error(vm, "call_suspend: inner call failed");
+            /* Keep the inner error message — overwriting it hid the real
+             * failure behind a generic wrapper. */
+            if (!vm->error_message || vm->error_message[0] == '\0')
+              vm__set_error(vm, "call_suspend: inner call failed");
             return VM_RUNTIME_ERROR;
           }
 

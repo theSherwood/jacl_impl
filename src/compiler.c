@@ -1854,6 +1854,8 @@ void sm__add_state_field(StateLayout* layout, JaclVal name,
 }
 
 bool sm__loop_body_suspends(AstNode* body);  /* defined below */
+bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
+                              ThreadHeap* heap, JaclInternTable* intern_table);
 
 /* Synthetic state-field name for a SUSPENDING for-loop's hidden
  * iteration state ('c' = collection, 'i' = index, 'l' = length). Keyed
@@ -2021,6 +2023,7 @@ void sm__collect_block_destructure_names(AstNode* blk,
 typedef struct {
   StateLayout*        layout;
   StructTypeRegistry* reg;
+  SuspensionMap*      susp_map;  /* for the suspending-for-body gate */
 } WalkLocalsCtx;
 
 static void sm__walk_locals__visit(AstNode* node, void* vctx) {
@@ -2049,6 +2052,34 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
             sm__collect_command_destructure_names(args[0], layout, is_mut);
           } else if (argc == 2 && args[0]->type == AST_BLOCK) {
             sm__collect_block_destructure_names(args[0], layout, is_mut);
+          } else if (argc == 3 && args[0]->type == AST_COMMAND &&
+                     args[0]->data.command.head &&
+                     args[0]->data.command.head->type == AST_LIT_STRING &&
+                     args[1]->type == AST_LIT_STRING) {
+            /* Compound-type annotated def: [def [Future T] name value],
+             * [Vec T]/[Map K V]/[Arr T]/[Box T]/[Stream T] — the binding
+             * is one TAGGED slot; register it so it survives suspension.
+             * It was silently left as a stack local: dead after any
+             * suspension (a def [Future i64] f before an await read back
+             * garbage). [Buf N T] (multi-slot stack alloc) and [Ptr T]
+             * (wide u64 rep) keep their pre-existing local treatment. */
+            const char* cth = args[0]->data.command.head->data.lit_string.value;
+            uint32_t    ctl = args[0]->data.command.head->data.lit_string.length;
+            bool ct_tagged =
+                (ctl == 3 && (memcmp(cth, "Vec", 3) == 0 ||
+                              memcmp(cth, "Map", 3) == 0 ||
+                              memcmp(cth, "Arr", 3) == 0 ||
+                              memcmp(cth, "Box", 3) == 0)) ||
+                (ctl == 6 && (memcmp(cth, "Future", 6) == 0 ||
+                              memcmp(cth, "Stream", 6) == 0));
+            if (ct_tagged) {
+              sm__add_state_field(layout,
+                  compiler__name_val(layout->heap, layout->intern_table,
+                                     args[1]->data.lit_string.value,
+                                     args[1]->data.lit_string.length),
+                  is_mut, false, 1, 0,
+                  node->start.line, node->start.column);
+            }
           } else if (argc >= 2 && args[0]->type == AST_LIT_STRING) {
             /* Simple: [def name value] or typed: [def type name value] */
             uint32_t name_idx = 0;
@@ -2170,7 +2201,8 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
            * collections. The compile path minted the same names. */
           if (argc >= 2 && args[argc - 1]->type == AST_BLOCK &&
               !(args[0]->type == AST_BLOCK) &&
-              sm__loop_body_suspends(args[argc - 1])) {
+              ast__contains_suspension(args[argc - 1], ctx->susp_map,
+                                       layout->heap, layout->intern_table)) {
             uint32_t fl = node->start.line, fc = node->start.column;
             sm__add_state_field(layout,
                 sm__for_hidden_name(layout->heap, layout->intern_table,
@@ -2237,9 +2269,9 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
   ast__walk_children(node, sm__walk_locals__visit, ctx);
 }
 
-void sm__walk_locals(AstNode* node, StateLayout* layout,
+void sm__walk_locals(AstNode* node, StateLayout* layout, SuspensionMap* susp_map,
                             StructTypeRegistry* reg) {
-  WalkLocalsCtx ctx = { layout, reg };
+  WalkLocalsCtx ctx = { layout, reg, susp_map };
   sm__walk_locals__visit(node, &ctx);
 }
 
@@ -2786,10 +2818,10 @@ SuspensionAnalysis compiler__analyze_suspensions(Compiler* c,
     if (body->type == AST_BLOCK) {
       for (uint32_t i = 0; i < body->data.block.count; i++) {
         sm__walk_locals(body->data.block.commands[i], &analysis.state_layout,
-                        struct_reg);
+                        map, struct_reg);
       }
     } else {
-      sm__walk_locals(body, &analysis.state_layout, struct_reg);
+      sm__walk_locals(body, &analysis.state_layout, map, struct_reg);
     }
   }
 
@@ -4337,8 +4369,12 @@ static void compiler__emit_return(Compiler* c, uint32_t line) {
   /* Box an unboxed wide tail value (i64/u64/f64) when the proc's declared
    * return type is dyn — the caller reads the result as a tagged JaclVal, so
    * raw wide bits would round-trip as nil. Declared-wide-return procs box at
-   * the call site instead, so those are left wide here. */
-  if (c->return_type == TYPE_DYN && is_unboxed_type(c->last_expr_type)) {
+   * the call site instead, so those are left wide here — EXCEPT in SM procs:
+   * an SM proc always completes through a future (a traced JaclVal slot), so
+   * a wide tail must box regardless of the declared return type; the typed
+   * call site unboxes after its await (annotation-driven bridging). */
+  if ((c->return_type == TYPE_DYN || c->sm_analysis) &&
+      is_unboxed_type(c->last_expr_type)) {
     compiler__emit_byte(c, OP_TO_DYN, line);
     compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
   }
@@ -5065,6 +5101,10 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     /* Non-suspending body: compile as block expression */
     body_compiler.in_concurrent_body = true;
     compiler__compile_block_expr(&body_compiler, body_block);
+    /* Concurrent-body result crosses a dyn boundary (the future's value):
+     * box a wide tail — raw wide bits would decode as a garbage tagged
+     * value downstream (same rule as emit_return for dyn-return procs). */
+    compiler__ensure_boxed(&body_compiler, line);
     compiler__emit_byte(&body_compiler, OP_RETURN, line);
   }
 
@@ -11377,11 +11417,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * used to register the synthetic fields). Bodies that suspend only
      * via a CALL to a suspending proc aren't seen by that predicate and
      * keep the error below. */
-    bool for_body_suspends = c->sm_analysis &&
-                             sm__loop_body_suspends(body_block);
-    if (!for_body_suspends &&
+    bool for_body_susp_any =
         ast__contains_suspension(body_block, c->suspension_map,
-                                  c->heap, c->intern_table)) {
+                                  c->heap, c->intern_table);
+    bool for_body_suspends = c->sm_analysis && for_body_susp_any;
+    if (for_body_susp_any && !c->sm_analysis) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
       return;
@@ -11546,12 +11586,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       }
 
-      /* Body (suspensions compile through the normal SM machinery) */
+      /* Body (suspensions compile through the normal SM machinery).
+       * Inner per-iteration scope: culled (non-state) locals declared in
+       * the body are popped at iteration end so the operand stack doesn't
+       * grow and local slots stay stable across iterations. */
+      compiler__begin_scope(c);
       uint32_t sm_body_count = body_block->data.block.count;
       for (uint32_t i = 0; i < sm_body_count; i++) {
         compiler__compile_node(c, body_block->data.block.commands[i]);
         compiler__emit_check_error(c, line);
       }
+      compiler__end_scope(c, line);
 
       /* Continue target */
       for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
@@ -14791,6 +14836,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Non-suspending spawn body: compile as block expression */
       body_compiler.in_concurrent_body = true;
       compiler__compile_block_expr(&body_compiler, body_block);
+      /* The spawn result becomes the future's value — a dyn boundary:
+       * box a wide tail (same rule as emit_return for dyn-return procs;
+       * an unboxed wide tail resolved the future with raw bits that
+       * decoded as nil/garbage). */
+      compiler__ensure_boxed(&body_compiler, line);
       compiler__emit_byte(&body_compiler, OP_RETURN, line);
     }
 
@@ -16224,6 +16274,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__compile_node(c, args[i]);
       JaclType arg_type = (JaclType)args[i]->inferred_type;
 
+      /* Suspending call: args land in the callee SM's GC-traced state
+       * fields (OP_CALL_SUSPEND copies them in), so a WIDE arg must be
+       * boxed — raw wide bits in a traced field are both a GC hazard and
+       * unreadable (the param read unboxes via the declared type, same
+       * convention as every SM field). Regular typed calls keep wide
+       * args raw on the operand stack. */
+      if (use_call_suspend) compiler__ensure_boxed(c, line);
+
       /* Phase 5a: struct args passed inline (multi-slot) instead of as heap copies.
        * If the arg is already inline (from constructor or typed-get), nothing to do.
        * If it's a heap struct (from OP_STRUCT_MATERIALIZE or function return),
@@ -16321,6 +16379,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_restore_operand_stack(c, suspend_spill_depth, line);
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
+      /* Typed WIDE return (i64/u64/f64) from a suspending proc: the value
+       * rode the future channel TAGGED (futures hold traced JaclVals; the
+       * SM tail boxes — annotation-driven bridging, not autobox). Unbox
+       * here so the caller's typed-call contract (wide raw) holds —
+       * mirrors state-field/global reads. Without this, [+ $acc [f ...]]
+       * consumed the tagged box as raw wide bits. */
+      if (call_return_type == TYPE_I64 || call_return_type == TYPE_U64 ||
+          call_return_type == TYPE_F64) {
+        uint8_t to_op = (call_return_type == TYPE_I64) ? OP_TO_I64
+                      : (call_return_type == TYPE_U64) ? OP_TO_U64
+                                                       : OP_TO_F64;
+        compiler__emit_byte(c, to_op, line);
+        compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+      }
     } else {
       /* Regular call — Phase 5a: use total_arg_slots for slot-based arg count */
       compiler__emit_byte(c, OP_CALL, line);
@@ -16761,6 +16833,25 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);
+            /* SM state-field captures store the value TAGGED (wide
+             * scalars are boxed in GC-traced state fields, and the
+             * capture copies the tagged value — upvalue.type is DYN).
+             * When the typer knows the binding is wide, unbox here,
+             * mirroring the cell/global/state-field read paths. Without
+             * this, a typed body read ([* $x 2] where x is a captured
+             * `def i64`) consumed the tagged box as raw wide bits.
+             * Upvalues captured from typed wide LOCALS carry the wide
+             * compile-side type and skip this. */
+            JaclType uv_nt = (JaclType)node->inferred_type;
+            if (c->upvalues[upvalue_idx].type == TYPE_DYN &&
+                is_unboxed_type(uv_nt)) {
+              uint8_t to_op = (uv_nt == TYPE_I64) ? OP_TO_I64
+                            : (uv_nt == TYPE_U64) ? OP_TO_U64 : OP_TO_F64;
+              compiler__emit_byte(c, to_op, line);
+              compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+              c->last_expr_type = uv_nt;
+              break;
+            }
           }
           c->last_expr_type = c->upvalues[upvalue_idx].type;
         } else {

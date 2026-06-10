@@ -532,27 +532,49 @@ backward OP_LOOP re-reads state fields — stack locals die at every
 suspension, so none are used). Streams pull via OP_STREAM_NEXT(_INLINE);
 vec/arr/typed collections index via state-field __idx/__len. Struct
 elements ride the WIDE field channel; break/continue work, incl. across
-suspensions. Test: `sm_for_suspend.jacl`. **Residue (still erroring):**
-bodies that suspend ONLY via a call to a suspending proc (the
-`sm__loop_body_suspends` predicate scans the AST without the suspension
-map, so the locals walk can't see them — needs the map threaded into
-the walk); the C-style `for {init; cond; step}` form; the HOF callback
-form (`for $coll $cb` — callbacks still can't suspend by design).
+suspensions. Test: `sm_for_suspend.jacl`. **Residue lifted (2026-06-10):**
+bodies that suspend only via a CALL to a suspending proc now take the SM
+lowering too — the suspension map is threaded into `sm__walk_locals`,
+so the walk and the compile gate agree. Still out: the C-style
+`for {init; cond; step}` form; the HOF callback form (`for $coll $cb` —
+callbacks can't suspend by design).
 
 ---
 
-## 8e. Nested closures cannot capture SM state fields (pre-existing)
+## 8e. SM wide-rep boundary bugs — FIXED (2026-06-10)
 
-A closure body (`spawn { … }`, inline procs) that references a binding
-living in an SM state field reads NIL silently (or errors
-"call_suspend: inner call failed" for wide-typed reads): `def x [await
-$f]` then `[spawn { $x }]` captures nothing — the capture machinery
-resolves locals and upvalues, not state fields. Surfaced 2026-06-10
-while testing suspending for-bodies (the loop binding is a state field,
-so `[spawn { $i }]` inside the loop hits the same hole). Mutable (`mut`)
-state DOES work — cells are captured by pointer. Fix sketch: at capture
-time, materialize immutable state-field reads into a local before the
-closure, or teach upvalue resolution to snapshot state fields.
+The "closures can't capture SM state fields" report decomposed into a
+family of wide-rep boundary bugs, all fixed in one pass (the capture
+machinery itself — `is_local=2`, copy-at-creation — was already
+correct):
+
+- **Captured wide-typed state fields** (`def i64 x [await $f]` →
+  `[spawn { $x }]`): the field stores the value TAGGED, but the closure
+  body's typed read consumed the box as raw wide bits. Upvalue reads now
+  unbox when the upvalue is dyn-stored and the binding is statically
+  wide (mirrors cell/global/state-field reads).
+- **Spawn/parallel body wide TAILS**: `[spawn { [* $x 2] }]` with a wide
+  tail resolved the future with raw bits (no boundary boxing — futures
+  hold traced JaclVals). Both body compiles now box wide tails.
+- **Compound-annotated defs invisible to the SM walk**: `def [Future
+  i64] f …` (and [Vec T]/[Map K V]/[Arr T]/[Box T]/[Stream T]) was never
+  registered as a state field — the binding stayed a stack LOCAL, dead
+  after any suspension and stale across loop iterations. Registered now
+  (1 tagged slot). [Buf N T] / [Ptr T] keep their pre-existing local
+  treatment (multi-slot stack alloc / wide rep — separate work).
+- **Wide ARGS to suspending calls**: `[f $wideI64]` landed raw wide bits
+  in the callee SM's GC-traced param fields (trace hazard + unreadable).
+  Suspending-call args now box; param reads already unboxed.
+- **Wide RETURNS from suspending procs**: a declared-i64-return SM proc
+  completes through a future (tagged channel); explicit returns now box
+  regardless of declared type, and the typed call site unboxes after its
+  await.
+- The SM for-loop got the per-iteration inner body scope it was missing
+  (culled locals no longer accumulate stack slots across iterations),
+  and `call_suspend` no longer overwrites the inner error message.
+
+Tests: `sm_capture_and_calls.jacl`; the m13 suspending-callback test
+flipped to assert the now-working call-suspending for body.
 
 ---
 
