@@ -7,10 +7,11 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-> **Active work-in-progress:** see `HANDOFF.md` (2026-06-09) for the
-> scalar-narrowing / typed-stream effort — what landed, the open
-> `transform` lambda-inference design decision, and the remaining
-> typed-stream work. Resume there.
+> **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
+> block) for the lambda-typing / typed-stream effort — what landed (lambda
+> inference + i64/u64/f64 producer-wide flip + contextual literals), the open
+> compromises (`STREAM_TYPING_DEBT.md`), and the next-step design
+> (`TYPED_CLOSURES_DESIGN.md`). Resume there.
 
 Last refreshed: 2026-06-08 (§1b added — the shell / external-command
 API redesign in `SHELL_API_DESIGN.md` is now indexed here as a
@@ -219,8 +220,9 @@ pulling on them; revisit when one shows up.
      `transform` lambda-return inference is a one-off special case the user
      has flagged for a rethink. **The active design decision + the remaining
      typed-stream work (typed `collect`, consumer-untyped errors,
-     struct-element streams, producer-wide rep) live in `HANDOFF.md` §1–§2 —
-     start there.**
+     struct-element streams) live in `LAMBDA_TYPING_PLAN.md` + the next-step
+     design `TYPED_CLOSURES_DESIGN.md` — start there. (Producer-wide rep for
+     i64/u64/f64 has since landed.)**
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

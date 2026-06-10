@@ -11,11 +11,9 @@
 > 4. **`STREAM_TYPING_ISSUES.md`** — retrospective / pitfalls (read before
 >    debugging: stale-binary discipline, etc.).
 >
-> The auto-loaded memory `project_typed_streams_handoff` mirrors this. The old
-> `HANDOFF.md §1` is superseded by this set.
+> The auto-loaded memory `project_typed_streams_handoff` mirrors this.
 
-Last updated: 2026-06-10. Supersedes HANDOFF.md §1 (the `transform`
-lambda-return probe).
+Last updated: 2026-06-10.
 
 ## The problem
 
@@ -78,7 +76,7 @@ they don't escape the box-vs-monomorphize runtime choice anyway); annotations
   the call site with the param typed, **drop the restore pass**, insert one
   unbox at the param prologue, memoize the node result. Removes the wart with
   the producer still tagged.
-- **Phase 3 (#4)** — Producer-wide rep flip (HANDOFF §2 option A): producers
+- **Phase 3 (#4)** — Producer-wide rep flip: producers
   emit wide, all `vm__pull_stream_one` consumers updated, GC skips wide
   `cached_value`. Drops the Phase 2 unbox. Static rep, runtime rep, and value
   flow all agree. Shared with the rest of the remaining typed-stream work.
@@ -160,7 +158,7 @@ Strategy = normalization wrapper to minimize wide-aware consumers:
 
 Validate: full 480 suite, all-or-nothing. No green intermediate exists (the
 for-loop unbox is keyed on shared static type), so build once at the end and
-debug from there. grep -E "error:" the FULL build log (HANDOFF §5).
+debug from there. grep -E "error:" the FULL build log (see STREAM_TYPING_ISSUES.md).
 
 Risks to watch: u64/f64 wide variants (range is i64-only, but generators can
 yield u64/f64 — handle all three in the generator-pull unbox); the OP_TRANSFORM
@@ -250,5 +248,5 @@ has one call site, so its single typed compilation is free and optimal.
 ```
 timeout 240 ./build.sh            # 91/91 binaries; jacl suite 480/480
 .build/jacl_harness               # full suite
-grep -E "error:" the full build log — never tail/head it (HANDOFF §5)
+grep -E "error:" the full build log — never tail/head it (STREAM_TYPING_ISSUES.md)
 ```

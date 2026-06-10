@@ -57,7 +57,7 @@ the next person doesn't relearn it. Commits referenced: `120fc1f` (layering),
 
 ## B. Process pitfalls (where time was lost)
 
-1. **Stale-binary confusion — the biggest time sink (HANDOFF §5).** Incremental
+1. **Stale-binary confusion — the biggest time sink.** Incremental
    `./build.sh` (without `rm -rf .build`) repeatedly produced inconsistent test
    results: a clean-committed f64 filter gave `[vec 5]` but a stale build of the
    same state showed empty, leading to a wrong "this is pre-existing" then "this
@@ -106,7 +106,7 @@ the next person doesn't relearn it. Commits referenced: `120fc1f` (layering),
    parsing — int literals are stored i32 in the AST. Can't easily write a large
    i64 literal directly.
 5. **Commit messages: use `git commit -F <file>`, never `-m "...backticks..."`**
-   — backticks trigger shell command substitution (HANDOFF §5).
+   — backticks trigger shell command substitution.
 
 ---
 
