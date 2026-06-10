@@ -1592,6 +1592,7 @@ struct Compiler {
   uint32_t         annot_proc_param_struct_idxs[COMPILER_MAX_PROC_PARAMS];
   JaclType         annot_proc_return_type;
   uint32_t         annot_proc_return_struct_idx;
+  uint32_t         pending_return_proc_shape; /* B3b — see compiler.c */
   ModuleCache*     module_cache;
   Module*          current_module;
   ImportStack*     import_stack;

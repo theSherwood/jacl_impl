@@ -9,19 +9,19 @@
 > wide-rep boundary fixes. See the git log around `64e8d6c` and
 > `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
 >
-> **Phase B B1+B2 + B3a are COMPLETE** (2026-06-10): `[Proc [P…] R]` type
-> syntax + typed closure VALUES at a `def` site (B1+B2) AND closure PARAMS —
-> user-defined higher-order procs `proc apply {[Proc [i64] i64] f i64 x}` (B3a,
-> via a registry `TYPE_SHAPE_PROC`). Inline-literal closure args are
-> monomorphized (typer + compiler) and called unboxed; invariant conformance.
-> No VM change (OP_CALL already caller-prepares-rep). **The active next step is
-> B3b** (closures-returning-closures, case 5.1), then B3c (`[Arr/Vec [Proc …]]`)
-> and B3d (named-closure VALUES — conformance + the closure-value-read rep; a
+> **Phase B B1+B2 + B3a + B3b are COMPLETE** (2026-06-10): `[Proc [P…] R]` type
+> syntax + typed closure VALUES at a `def` site (B1+B2), closure PARAMS /
+> user-defined HOFs `proc apply {[Proc [i64] i64] f i64 x}` (B3a), AND
+> closures-returning-closures `proc make-adder {i64 n} [Proc [i64] i64] {…}`
+> (B3b) — all via a registry `TYPE_SHAPE_PROC`. Inline closure literals (as args
+> and as return tails) are monomorphized (typer + compiler) and called unboxed;
+> the returned/passed closure's signature propagates to bindings; invariant
+> conformance. No VM change. **The active next step is B3c** (`[Arr/Vec [Proc …]]`)
+> then B3d (named-closure VALUES — conformance + the closure-value-read rep; a
 > named-closure arg is a clear error today). See the `TYPED_CLOSURES_DESIGN.md`
-> Phase B3a status block for exactly what landed and the scoped debt.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3b–d**
->    (closures-returning-closures, `[Proc …]` array elements, named-closure
->    values — §5 of that doc). The Phase B status blocks record what shipped.
+> Phase B3a/B3b status blocks for what landed and the scoped debt.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3c–d**
+>    (`[Proc …]` array/vec elements, named-closure values — §5 of that doc).
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).

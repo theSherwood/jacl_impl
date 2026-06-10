@@ -8,14 +8,14 @@ If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
 > **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
-> block). **Typed-closures Phase A + Phase B (B1+B2) + B3a are COMPLETE**
+> block). **Typed-closures Phase A + Phase B (B1+B2) + B3a + B3b are COMPLETE**
 > (2026-06-10) — `[Proc [P…] R]` type syntax + typed closure VALUES at a `def`
-> site (B1+B2) AND closure PARAMS / user-defined higher-order procs (B3a, via a
-> registry `TYPE_SHAPE_PROC`): inline-literal args monomorphized + typed unboxed
-> call + invariant conformance. The open next step is **Phase B3b** (closures-
-> returning-closures), then B3c (`[Arr/Vec [Proc …]]`) and B3d (named-closure
-> VALUES — conformance + closure-value-read rep), `TYPED_CLOSURES_DESIGN.md`
-> Phase B3a status block.
+> site (B1+B2), closure PARAMS / user HOFs (B3a), AND closures-returning-closures
+> (B3b) — all via a registry `TYPE_SHAPE_PROC`. Inline closure literals (args +
+> return tails) monomorphized, called unboxed, signature propagated to bindings,
+> invariant conformance. The open next step is **Phase B3c** (`[Arr/Vec [Proc …]]`)
+> then B3d (named-closure VALUES — conformance + closure-value-read rep),
+> `TYPED_CLOSURES_DESIGN.md` Phase B3a/B3b status blocks.
 > Alternative next slices, all indexed below: typed spread (§4.1b),
 > map iteration / `for` over maps (§4), the punted dyn-return no-autobox
 > consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
@@ -194,9 +194,12 @@ pulling on them; revisit when one shows up.
   the typed unboxed convention. **Closure PARAMS too (B3a, 2026-06-10):** a
   `[Proc …]` proc param interns a registry `TYPE_SHAPE_PROC`; an inline
   closure-literal arg is monomorphized to the param's signature and the body
-  call `[f …]` is typed-unboxed — user-defined HOFs work. Still `dyn` /
-  unsupported: a closure with NO `[Proc …]` annotation, a NAMED closure passed
-  as a typed arg (B3d error today), and a closure returned from a proc (B3b —
+  call `[f …]` is typed-unboxed — user-defined HOFs work. **Closures-RETURNING-
+  closures too (B3b, 2026-06-10):** a `[Proc …]` return type monomorphizes the
+  body-tail closure literal and the returned signature propagates to bindings
+  (`def add5 [make-adder 5]` → `[add5 3]` typed). Still `dyn` / unsupported: a
+  closure with NO `[Proc …]` annotation, a NAMED closure passed as a typed arg
+  (B3d error today), and `[Proc …]` array/vec elements (B3c —
   `TYPED_CLOSURES_DESIGN.md`).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.

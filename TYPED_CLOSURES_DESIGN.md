@@ -1,11 +1,36 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. Phase B3a LANDED
-(2026-06-10): closure PARAMS — user-defined higher-order procs
-(`proc apply {[Proc [i64] i64] f  i64 x} { [f $x] }`) via a registry
-`TYPE_SHAPE_PROC`. Next: B3b (closures-returning-closures), B3c
-(`[Arr/Vec [Proc …]]`), B3d (named-closure VALUES — conformance + the
-closure-value-read rep).**
+Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. B3a (closure params) +
+B3b (closures-returning-closures) LANDED (2026-06-10) via a registry
+`TYPE_SHAPE_PROC`. Next: B3c (`[Arr/Vec [Proc …]]`), B3d (named-closure
+VALUES — conformance + the closure-value-read rep).**
+
+**Phase B3b — closures-returning-closures as landed (2026-06-10):**
+- **`[Proc …]` RETURN type** (`typer__resolve_return_type` + the compiler
+  proc-return resolution) → `TYPE_CLOSURE` + interned shape on
+  `TyperProc`/`GlobalArity.return_struct_idx`.
+- **Return monomorphization** of the body-tail closure literal against the
+  declared return signature, on both sides. Compiler: a new
+  `pending_return_proc_shape` field is live ONLY in tail position
+  (`compile_block_expr` clears it around non-tail statements, keeps it for the
+  tail and propagates into nested tail blocks — `if`/`match` returning a
+  closure), so the tail literal activates `annot_proc` from the shape; mis-firing
+  on an intermediate closure-valued block-expr is avoided. Typer: `handle_proc`
+  monomorphizes the tail literal (captures resolve from the enclosing scope).
+- **Call-result propagation**: `def f [make-adder 5]` stamps f's binding with the
+  returned closure's signature so `[f …]` is a typed call. The compiler
+  re-derives the COMPILER-side shape from the callee's `GlobalArity.return_struct_idx`
+  (`compiler__call_closure_return_shape`) — NOT the typer's stamp on the call node
+  (cross-registry rule); the typer stamps from its own call-node shape. Works for
+  `def`-bound and directly-called (`[[make-adder 5] 3]`) returned closures, with
+  captured upvalues. Tests: `typed_closure_returning.jacl` (capture, wide-i64
+  unboxed via a strict consumer, str) + `_return_{arity,struct}_error`. Suite
+  593/593, 91/91 binaries.
+
+**B3b scope / debt → B3c–d:** call-result propagation resolves the return shape
+only via `GlobalArity` (global closure-returning procs); struct/compound
+`[Proc …]` return types still error (need nested-shape encoding); a non-literal
+tail (returning a closure param/value verbatim) isn't conformance-checked.
 
 **Phase B3a — closure params as landed (2026-06-10):**
 - **`TYPE_SHAPE_PROC` registry encoding** (shapes.c + jacl.h mirror): a proc

@@ -1,0 +1,37 @@
+# expect: 8
+# expect: 13
+# expect: 108
+# expect: 6000000005
+# expect: 6000000006
+# expect: hi!!!
+# Closures-returning-closures (TYPED_CLOSURES_DESIGN.md Phase B3b, case 5.1).
+# A proc with a [Proc …] return type monomorphizes its body-tail closure literal
+# to the declared signature; the returned closure captures upvalues and is
+# called through the typed (unboxed) convention. The call's result type
+# propagates onto a `def` binding so a later call narrows too.
+proc make-adder {i64 n} [Proc [i64] i64] { proc {x} {+ $x $n} }
+proc make-scaler {i64 n} [Proc [i64] i64] { proc {x} {+ [* $x 1000000000] $n} }
+proc suffixer {str suf} [Proc [str] str] { proc {s} {concat $s $suf} }
+
+proc main {} {
+  # Direct call of the returned closure.
+  print [[make-adder 5] 3]            # 8
+
+  # Distinct captures via separate bindings.
+  def add10 [make-adder 10]
+  def add100 [make-adder 100]
+  print [add10 3]                     # 13
+  print [add100 8]                    # 108
+
+  # Wide i64 through the returned closure, consumed in a strict i64 context —
+  # only type-checks (and stays unboxed) because [f 6] narrows to i64.
+  def f [make-scaler 5]
+  print [f 6]                         # 6_000_000_005
+  def i64 y [f 6]
+  print [+ $y 1]                      # 6_000_000_006
+
+  # str-returning closure.
+  def bang [suffixer "!!!"]
+  print [bang "hi"]                   # hi!!!
+}
+main

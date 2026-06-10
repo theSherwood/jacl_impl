@@ -3221,6 +3221,11 @@ struct Compiler {
                                        (declared types live on AstNode) */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
+  /* Phase B3b: TYPE_SHAPE_PROC idx of a closure-returning proc's declared
+   * return, live ONLY while compiling a block's TAIL (return position) so the
+   * tail proc-literal is monomorphized to it; UINT32_MAX otherwise. Cleared by
+   * compile_block_expr around non-tail statements to avoid mis-firing. */
+  uint32_t         pending_return_proc_shape;
   /* Scopes the typed-closure-return optimization (TYPED_CLOSURES_DESIGN.md
    * Phase A) to inline transform mappers. Set to a wide scalar type-idx enc
    * (i64/u64/f64) by compiler__compile_hof_builtin just around compiling an
@@ -3359,6 +3364,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->gen_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
   c->hof_param_enc   = UINT32_MAX;
   c->annot_proc_active = false;
+  c->pending_return_proc_shape = UINT32_MAX;
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -4611,6 +4617,26 @@ static void compiler__stamp_closure_param_local(Compiler* bc, Compiler* c,
   }
 }
 
+/* Phase B3b: if `node` is a call to a named proc (local binding or global)
+ * whose declared return is a [Proc …], return that return's TYPE_SHAPE_PROC idx
+ * (compiler registry); else UINT32_MAX. Lets `def f [make-adder 5]` stamp f's
+ * binding with the returned closure's signature so `[f …]` is a typed call. */
+static uint32_t compiler__call_closure_return_shape(Compiler* c, AstNode* node) {
+  if (!node || node->type != AST_COMMAND) return UINT32_MAX;
+  AstNode* h = node->data.command.head;
+  if (!h || h->type != AST_LIT_STRING) return UINT32_MAX;
+  JaclVal nv = compiler__name_val(c->heap, c->intern_table,
+      h->data.lit_string.value, h->data.lit_string.length);
+  int slot = compiler__resolve_local(c, nv);
+  if (slot != -1) {
+    return c->locals[slot].return_type == TYPE_CLOSURE
+             ? c->locals[slot].return_struct_idx : UINT32_MAX;
+  }
+  GlobalArity* ga = compiler__find_global(c, nv);
+  if (ga && ga->return_type == TYPE_CLOSURE) return ga->return_struct_idx;
+  return UINT32_MAX;
+}
+
 /* Phase B3a: decode a TYPE_SHAPE_PROC into the annot_proc monomorphization
  * context + activate it, so compiling an inline proc-literal ARG to a closure
  * param monomorphizes it to the param's declared signature (reuses the same
@@ -5379,14 +5405,30 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
     return;
   }
 
+  /* B3b: the return-tail proc-shape is live only in tail position. Clear it
+   * around non-tail statements so an intermediate closure-valued block-expr
+   * isn't mis-monomorphized; keep it for the tail (and let it propagate into a
+   * nested tail block — if/match returning a closure). */
+  uint32_t saved_ret_shape = c->pending_return_proc_shape;
   for (uint32_t i = 0; i < count - 1; i++) {
+    c->pending_return_proc_shape = UINT32_MAX;
     compiler__compile_node(c, block_node->data.block.commands[i]);
     compiler__emit_check_error(c, line);
   }
-  /* For the last statement, apply return type context if declared */
-  if (c->return_type != TYPE_DYN) {
+  c->pending_return_proc_shape = saved_ret_shape;
+  /* For the last statement: if this proc returns a [Proc …] and the tail is an
+   * inline proc literal, monomorphize it to the declared return signature. */
+  AstNode* last_stmt = block_node->data.block.commands[count - 1];
+  if (saved_ret_shape != UINT32_MAX && last_stmt->type == AST_COMMAND &&
+      last_stmt->data.command.head_id == HEAD_PROC) {
+    compiler__activate_annot_proc_from_shape(c, saved_ret_shape);
+    c->pending_return_proc_shape = UINT32_MAX; /* consumed */
+    compiler__compile_node(c, last_stmt);
+    c->annot_proc_active = false;
+  } else {
+    compiler__compile_node(c, last_stmt);
   }
-  compiler__compile_node(c, block_node->data.block.commands[count - 1]);
+  c->pending_return_proc_shape = UINT32_MAX;
 
   /* Clean up locals while preserving the result on the stack top */
   uint32_t pop_count = c->local_count - scope_start_locals;
@@ -9941,6 +9983,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
     uint32_t rhs_struct_idx = args[value_arg_idx]->inferred_struct_idx;
 
+    /* B3b: `def f [make-adder 5]` — if the RHS is a call returning a [Proc …],
+     * stamp f's binding with the returned closure's signature (compiler-side
+     * shape from the callee's GlobalArity, NOT the typer stamp on the call node
+     * — cross-registry rule) so `[f …]` is a typed call. */
+    uint32_t rhs_closure_shape = UINT32_MAX;
+    if (!proc_mono && rhs_type == TYPE_CLOSURE)
+      rhs_closure_shape = compiler__call_closure_return_shape(c, args[value_arg_idx]);
+
     /* US-007: activate inline for function calls returning struct types.
      * If the RHS isn't already inline (struct constructor or inline get) but
      * returns a struct type with a known struct index, post-activate inline
@@ -10084,6 +10134,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                           args[value_arg_idx]->inferred_key_struct_idx };
           TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
         if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
+        if (rhs_closure_shape != UINT32_MAX)
+          compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
         if (sm_inline_struct) {
           uint32_t base_local_idx = c->local_count - 1;
           c->locals[base_local_idx].width = (uint16_t)sm_struct_width;
@@ -10128,6 +10180,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       if (proc_mono) compiler__stamp_closure_local(c);  /* Phase B */
+        if (rhs_closure_shape != UINT32_MAX)
+          compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
       /* Decomposed nested-buf chain: if the RHS is an intermediate
        * arrow on a nested buf (e.g. `let p = $cube->1`), the AST node's
        * inferred_struct_idx is UINT32_MAX by design (cross-registry
@@ -10432,7 +10486,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         uint32_t    hl = tn->data.command.head->data.lit_string.length;
         bool is_ptr = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
         bool is_stream = (hl == 6 && memcmp(hn, "Stream", 6) == 0);
-        bool is_compound =
+        /* Phase B3b: [Proc [P…] R] return type → TYPE_CLOSURE + interned shape
+         * so a closure-returning proc's binding/call narrows. */
+        if (hl == 4 && memcmp(hn, "Proc", 4) == 0) {
+          bool sup = true;
+          uint32_t pshape = compiler__intern_proc_shape(c, tn, &sup);
+          if (!sup || pshape == UINT32_MAX) {
+            compiler__error(c, line, col,
+                "typed-closure [Proc …] struct/compound return types are not "
+                "yet supported (Phase B3b) — use scalar types or `dyn`");
+            return;
+          }
+          proc_return_type = TYPE_CLOSURE;
+          proc_return_struct_idx = pshape;
+          resolved = true;
+        }
+        bool is_compound = !resolved &&
             (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                          memcmp(hn, "Map", 3) == 0)) ||
             is_ptr ||
@@ -11105,6 +11174,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
     body_compiler.return_struct_idx = proc_return_struct_idx;
+    /* B3b: a [Proc …]-returning proc monomorphizes its body-tail proc literal
+     * to the declared return signature (compile_block_expr applies it only in
+     * tail position). */
+    body_compiler.pending_return_proc_shape =
+        (proc_return_type == TYPE_CLOSURE) ? proc_return_struct_idx : UINT32_MAX;
     body_compiler.gen_stream_elem_idx = proc_stream_elem_idx;
     body_compiler.suspension_map = c->suspension_map;
     body_compiler.current_scope_mark = c->current_scope_mark;

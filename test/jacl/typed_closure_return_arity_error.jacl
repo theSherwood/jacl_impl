@@ -1,0 +1,7 @@
+# expect-error: parameter
+# Conformance: a closure-returning proc's body-tail literal must match the
+# declared [Proc …] return arity (TYPED_CLOSURES_DESIGN.md §2.3). Here the
+# return declares one param but the tail literal has two.
+proc bad {i64 n} [Proc [i64] i64] { proc {x y} {+ $x $y} }
+proc main {} { print [[bad 1] 2] }
+main

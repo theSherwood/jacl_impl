@@ -1233,6 +1233,10 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                     AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
                                     JaclType (*types_out)[TYPER_MAX_PROC_PARAMS],
                                     uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]);
+/* Forward decl: B3b call-return closure-binding stamp uses it before its def. */
+static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
+                                     uint8_t* out_pcount, uint8_t* out_ptypes,
+                                     uint8_t* out_rtype);
 
 static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
@@ -1935,6 +1939,24 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     b->proc_return_type = (uint8_t)declared_proc_rtype;
     b->proc_return_struct_idx = declared_proc_ridx;
   }
+  /* B3b: `def f [make-adder 5]` — the RHS is a call returning a [Proc …]
+   * (typer stamped the call node TYPE_CLOSURE + return shape). Stamp f as a
+   * typed closure from that signature so `[f …]` narrows to the declared
+   * return (via the bound_proxy). */
+  if (!declared_proc && (JaclType)value_node->inferred_type == TYPE_CLOSURE &&
+      value_node->inferred_struct_idx != UINT32_MAX && tc->binding_count > 0) {
+    uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+    if (typer__decode_proc_shape(tc, value_node->inferred_struct_idx,
+                                 &pc2, pts2, &rt2)) {
+      TyperBinding* b = &tc->bindings[tc->binding_count - 1];
+      b->is_typed_closure = true;
+      b->proc_param_count = pc2;
+      for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
+        b->proc_param_types[k] = pts2[k];
+      b->proc_return_type = rt2;
+      b->proc_return_struct_idx = UINT32_MAX;
+    }
+  }
   /* Same patch-in-place for buf_len. See BUFFER_DESIGN.md.
    * Picks the declared length when annotated; otherwise the length
    * inferred from a typed-RHS constructor. inner_len M (for the
@@ -2403,6 +2425,19 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
   }
   if (tn->type == AST_COMMAND) {
     uint32_t sidx;
+    /* Phase B3b: [Proc [P…] R] return type → TYPE_CLOSURE + interned shape so
+     * a closure-returning proc's binding/call narrows. */
+    if (tn->data.command.head && tn->data.command.head->type == AST_LIT_STRING &&
+        tn->data.command.head->data.lit_string.length == 4 &&
+        memcmp(tn->data.command.head->data.lit_string.value, "Proc", 4) == 0) {
+      bool sup = true;
+      uint32_t pshape = typer__intern_proc_shape(tc, tn, &sup);
+      if (sup && pshape != UINT32_MAX) {
+        *out_type = TYPE_CLOSURE;
+        *out_struct_idx = pshape;
+      }
+      return;
+    }
     if (typer__ptr_type(tc, tn, &sidx)) {
       *out_type = TYPE_PTR;
       *out_struct_idx = sidx;
@@ -2602,7 +2637,23 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
     }
     JaclType saved_et = tc->expected_type;
     if (return_type != TYPE_DYN) tc->expected_type = return_type;
-    typer__infer_node(tc, body->data.block.commands[body_count - 1]);
+    AstNode* tail_stmt = body->data.block.commands[body_count - 1];
+    /* Phase B3b: a [Proc …]-returning proc whose body tail is an inline proc
+     * literal monomorphizes that literal against the declared return signature
+     * (so the returned closure's body types with the declared params — captures
+     * resolve from the enclosing scope). */
+    bool tail_mono = false;
+    if (return_type == TYPE_CLOSURE && return_struct_idx != UINT32_MAX &&
+        tail_stmt->type == AST_COMMAND &&
+        tail_stmt->data.command.head_id == HEAD_PROC) {
+      uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+      if (typer__decode_proc_shape(tc, return_struct_idx, &pc2, pts2, &rt2)) {
+        typer__monomorphize_proc_literal(tc, tail_stmt, pts2, pc2, rt2);
+        tail_stmt->inferred_struct_idx = return_struct_idx;
+        tail_mono = true;
+      }
+    }
+    if (!tail_mono) typer__infer_node(tc, tail_stmt);
     tc->expected_type = saved_et;
     if (!body->data.block.trailing_semi) {
       AstNode* last = body->data.block.commands[body_count - 1];
