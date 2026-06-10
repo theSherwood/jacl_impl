@@ -1853,6 +1853,22 @@ void sm__add_state_field(StateLayout* layout, JaclVal name,
   layout->field_count++;
 }
 
+bool sm__loop_body_suspends(AstNode* body);  /* defined below */
+
+/* Synthetic state-field name for a SUSPENDING for-loop's hidden
+ * iteration state ('c' = collection, 'i' = index, 'l' = length). Keyed
+ * by the for node's source position so nested/sequential loops get
+ * distinct fields, and so the locals walk, the liveness walk, and the
+ * compile path all mint the same name deterministically. */
+static JaclVal sm__for_hidden_name(ThreadHeap* heap,
+                                   JaclInternTable* intern_table,
+                                   char tag, uint32_t line, uint32_t col) {
+  char buf[40];
+  int n = snprintf(buf, sizeof(buf), "__f%c_%u_%u", tag,
+                   (unsigned)line, (unsigned)col);
+  return compiler__name_val(heap, intern_table, buf, (uint32_t)n);
+}
+
 /* Look up a variable name in the StateLayout.
    Returns the field index (0..field_count-1) or -1 if not found. */
 const StateField* sm__get_field(const StateLayout* layout, JaclVal name) {
@@ -2146,6 +2162,30 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
             sm__add_state_field(layout, jacl_inline_string("it", 2),  /* "it" is always <= 7 */
                                 false, false, fb_width, fb_sidx,
                                 node->start.line, node->start.column);
+          }
+          /* SUSPENDING loop body: the loop's hidden iteration state must
+           * survive yields (stack locals die at every suspension —
+           * local_count resets to 2), so register synthetic state fields:
+           * the collection always; index + length for indexed (non-stream)
+           * collections. The compile path minted the same names. */
+          if (argc >= 2 && args[argc - 1]->type == AST_BLOCK &&
+              !(args[0]->type == AST_BLOCK) &&
+              sm__loop_body_suspends(args[argc - 1])) {
+            uint32_t fl = node->start.line, fc = node->start.column;
+            sm__add_state_field(layout,
+                sm__for_hidden_name(layout->heap, layout->intern_table,
+                                    'c', fl, fc),
+                false, false, 1, 0, fl, fc);
+            if ((JaclType)args[0]->inferred_type != TYPE_STREAM) {
+              sm__add_state_field(layout,
+                  sm__for_hidden_name(layout->heap, layout->intern_table,
+                                      'i', fl, fc),
+                  false, false, 1, 0, fl, fc);
+              sm__add_state_field(layout,
+                  sm__for_hidden_name(layout->heap, layout->intern_table,
+                                      'l', fl, fc),
+                  false, false, 1, 0, fl, fc);
+            }
           }
           /* Recurse into all sub-expressions */
           for (uint32_t i = 0; i < argc; i++) {
@@ -2507,6 +2547,24 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
                        !(args[0]->type == AST_BLOCK)) {
               sm__liveness_mark_write(liveness, layout,
                   jacl_inline_string("it", 2), *segment);
+            }
+
+            /* Suspending loop: the synthetic iteration-state fields are
+             * written at loop entry and read on every iteration AFTER the
+             * body's suspensions — mark the writes here so the
+             * touched-field extension below stretches them across the
+             * loop (unmarked fields would be culled). */
+            if (loop_suspends && !(args[0]->type == AST_BLOCK)) {
+              uint32_t fl = node->start.line, fc = node->start.column;
+              sm__liveness_mark_write(liveness, layout,
+                  sm__for_hidden_name(layout->heap, layout->intern_table,
+                                      'c', fl, fc), *segment);
+              sm__liveness_mark_write(liveness, layout,
+                  sm__for_hidden_name(layout->heap, layout->intern_table,
+                                      'i', fl, fc), *segment);
+              sm__liveness_mark_write(liveness, layout,
+                  sm__for_hidden_name(layout->heap, layout->intern_table,
+                                      'l', fl, fc), *segment);
             }
 
             /* Walk body */
@@ -11308,8 +11366,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Check for suspension in block body (inlined for still can't suspend) */
-    if (ast__contains_suspension(body_block, c->suspension_map,
+    /* Suspending loop body (yield/await/sleep directly in the body): the
+     * loop compiles in SM style — ALL iteration state (collection, index,
+     * length, binding) lives in synthetic SM state fields, because stack
+     * locals die at every suspension (local_count resets to 2 after a
+     * yield). The body's suspensions then compile through the normal SM
+     * machinery: the entry dispatch jumps straight to the resume label
+     * inside the loop, and the backward OP_LOOP re-reads state fields.
+     * Gated on sm__loop_body_suspends (the same predicate the locals walk
+     * used to register the synthetic fields). Bodies that suspend only
+     * via a CALL to a suspending proc aren't seen by that predicate and
+     * keep the error below. */
+    bool for_body_suspends = c->sm_analysis &&
+                             sm__loop_body_suspends(body_block);
+    if (!for_body_suspends &&
+        ast__contains_suspension(body_block, c->suspension_map,
                                   c->heap, c->intern_table)) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
@@ -11319,6 +11390,213 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Check loop depth */
     if (c->loop_depth >= COMPILER_LOOP_DEPTH_MAX) {
       compiler__error(c, line, col, "too many nested loops");
+      return;
+    }
+
+    if (for_body_suspends) {
+      StateLayout* sm_lay = &c->sm_analysis->state_layout;
+      JaclVal n_col = sm__for_hidden_name(c->heap, c->intern_table,
+                                          'c', line, col);
+      int f_col = sm__find_field(sm_lay, n_col);
+      JaclVal sm_bind_val = compiler__name_val(c->heap, c->intern_table,
+                                               bind_name, bind_name_len);
+      const StateField* f_bind_sf = sm__get_field(sm_lay, sm_bind_val);
+      if (f_col < 0 || !f_bind_sf) {
+        compiler__error(c, line, col,
+            "internal error: suspending for-loop state fields missing");
+        return;
+      }
+      int f_bind = (int)f_bind_sf->field_index;
+
+      /* Element typing from the collection's typer stamp — mirrors the
+       * non-SM branches. */
+      JaclType sm_col_t = (JaclType)args[0]->inferred_type;
+      uint32_t sm_elem_enc = args[0]->inferred_struct_idx;
+      bool sm_is_stream = (sm_col_t == TYPE_STREAM);
+      bool sm_typed_get = (sm_col_t == TYPE_TYPED_VEC);
+      bool sm_is_arr    = (sm_col_t == TYPE_ARR || sm_col_t == TYPE_TYPED_ARR);
+      bool sm_typed     = (sm_col_t == TYPE_TYPED_VEC ||
+                           sm_col_t == TYPE_TYPED_ARR || sm_is_stream);
+      bool sm_elem_struct = sm_typed && sm_elem_enc != UINT32_MAX &&
+                            !COMPILER_IS_SCALAR_TYPE_IDX(sm_elem_enc);
+      uint32_t sm_elem_width = 1;
+      if (sm_elem_struct) {
+        StructTypeRegistry* smreg = compiler__get_struct_registry(c);
+        sm_elem_width = struct__slot_width(smreg, sm_elem_enc);
+      }
+      JaclType sm_scalar_t = TYPE_DYN;
+      if (sm_typed && !sm_is_stream && sm_elem_enc != UINT32_MAX &&
+          COMPILER_IS_SCALAR_TYPE_IDX(sm_elem_enc))
+        sm_scalar_t = COMPILER_TYPE_IDX_TO_SCALAR(sm_elem_enc);
+      bool sm_elem_wide = (sm_scalar_t == TYPE_I64 ||
+                           sm_scalar_t == TYPE_U64 ||
+                           sm_scalar_t == TYPE_F64);
+
+      int f_idx = -1, f_len = -1;
+      if (!sm_is_stream) {
+        f_idx = sm__find_field(sm_lay,
+            sm__for_hidden_name(c->heap, c->intern_table, 'i', line, col));
+        f_len = sm__find_field(sm_lay,
+            sm__for_hidden_name(c->heap, c->intern_table, 'l', line, col));
+        if (f_idx < 0 || f_len < 0) {
+          compiler__error(c, line, col,
+              "internal error: suspending for-loop state fields missing");
+          return;
+        }
+      }
+
+      /* Collection → state field */
+      compiler__compile_node(c, args[0]);
+      compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+      compiler__emit_byte(c, (uint8_t)f_col, line);
+
+      if (!sm_is_stream) {
+        /* __len = len(col); __idx = 0 — both in state fields */
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_col, line);
+        compiler__emit_byte(c, sm_typed_get ? OP_TYPED_VEC_LEN
+                              : sm_is_arr  ? OP_ARR_LEN : OP_VEC_LEN, line);
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_len, line);
+        compiler__emit_constant(c, jacl_i32(0), line);
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_idx, line);
+      }
+
+      /* Loop context: NO hidden stack locals — break/continue cleanup is
+       * state-field-free, and the counts survive suspension resets. */
+      LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+      lctx->break_patch_count = 0;
+      lctx->continue_patch_count = 0;
+      lctx->local_count_at_loop = c->local_count;
+      lctx->body_local_count = c->local_count;
+      lctx->is_for_loop = true;
+
+      uint32_t loop_start = c->chunk->code_count;
+      lctx->loop_start = loop_start;
+
+      uint32_t exit_jump = 0;
+      uint32_t error_exit_jump = 0;
+      bool has_error_exit = false;
+      if (sm_is_stream) {
+        /* Pull; check exhaustion; bind. */
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_col, line);
+        if (sm_elem_struct) {
+          compiler__emit_byte(c, OP_STREAM_NEXT_INLINE, line);
+          compiler__emit_u16(c, (uint16_t)sm_elem_enc, line);
+        } else {
+          compiler__emit_byte(c, OP_STREAM_NEXT, line);
+        }
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_col, line);
+        compiler__emit_byte(c, OP_IS_STREAM_EXHAUSTED, line);
+        uint32_t not_done_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+        compiler__emit_byte(c, OP_POP, line);  /* nil from STREAM_NEXT */
+        exit_jump = compiler__emit_jump(c, OP_JUMP, line);
+        compiler__patch_jump(c, not_done_jump);
+        if (!sm_elem_struct) {
+          error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
+          has_error_exit = true;
+        }
+        if (sm_elem_struct) {
+          compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+          compiler__emit_byte(c, (uint8_t)f_bind, line);
+          compiler__emit_byte(c, (uint8_t)sm_elem_width, line);
+        } else {
+          /* OP_STREAM_NEXT normalizes to tagged — store as-is; var-ref
+           * reads unbox wide scalars via node->inferred_type. */
+          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)f_bind, line);
+        }
+      } else {
+        /* __idx < __len */
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_idx, line);
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_len, line);
+        compiler__emit_byte(c, OP_LT, line);
+        exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+        /* elem = col[idx] */
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_col, line);
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_idx, line);
+        if (sm_typed_get) {
+          compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+          compiler__emit_u16(c, (uint16_t)sm_elem_enc, line);
+        } else if (sm_is_arr) {
+          compiler__emit_byte(c, OP_ARR_GET, line);
+        } else {
+          compiler__emit_byte(c, OP_VEC_GET, line);
+        }
+        if (sm_elem_struct) {
+          compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+          compiler__emit_byte(c, (uint8_t)f_bind, line);
+          compiler__emit_byte(c, (uint8_t)sm_elem_width, line);
+        } else {
+          /* Wide scalars come back raw (typed-vec get / arr get) — box
+           * before the GC-traced 1-slot field; var-ref reads unbox. */
+          if (sm_elem_wide) {
+            compiler__emit_byte(c, OP_TO_DYN, line);
+            compiler__emit_byte(c, (uint8_t)sm_scalar_t, line);
+          }
+          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)f_bind, line);
+        }
+      }
+
+      /* Body (suspensions compile through the normal SM machinery) */
+      uint32_t sm_body_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < sm_body_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* Continue target */
+      for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+        compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+      if (!sm_is_stream) {
+        /* __idx = __idx + 1 */
+        compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_idx, line);
+        compiler__emit_constant(c, jacl_i32(1), line);
+        compiler__emit_byte(c, OP_ADD, line);
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)f_idx, line);
+      }
+
+      /* Loop back */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t sm_back = c->chunk->code_count - loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((sm_back >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(sm_back & 0xFF), line);
+
+      /* Normal exit */
+      compiler__patch_jump(c, exit_jump);
+      compiler__emit_byte(c, OP_NIL, line);
+      uint32_t skip_landing = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* Error exit (stream pull yielded an error value — already on stack;
+       * no hidden locals to close). */
+      uint32_t error_done_jump = 0;
+      if (has_error_exit) {
+        compiler__patch_jump(c, error_exit_jump);
+        error_done_jump = compiler__emit_jump(c, OP_JUMP, line);
+      }
+
+      /* Break landing zone (break value on stack via OP_CLOSE_LOOP) */
+      for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+        compiler__patch_jump(c, lctx->break_patches[i]);
+      }
+
+      /* Convergence */
+      compiler__patch_jump(c, skip_landing);
+      if (has_error_exit) compiler__patch_jump(c, error_done_jump);
+
+      c->loop_depth--;
+      c->last_expr_type = TYPE_NIL;
       return;
     }
 

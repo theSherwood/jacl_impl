@@ -519,19 +519,40 @@ values across phase-distinct SM lifetimes long enough to matter.
 
 ---
 
-## 8d. For-loop bodies cannot suspend
+## 8d. For-loop bodies CAN now suspend (lifted 2026-06-10) — residue
 
-`for $coll x { yield … }` / `{ await … }` is a compile error ("cannot
-suspend inside non-suspending callback") for EVERY collection kind and
-element type — the for-loop is always compiled as an inlined
-non-suspending loop, and the SM lowering has no for-loop segment
-numbering (the `sm__loop_body_suspends` liveness handling exists only
-to keep state fields alive across a loop that contains suspensions in
-OTHER positions). Generators iterate with `while` + manual index/pull
-instead. Lifting this means lowering suspending for-loops through the
-SM segment machinery (resume-point inside the loop, iteration state —
-__col/__idx/__len — in state fields). Surfaced 2026-06-10 while wiring
-SM-body struct for-bindings; not previously indexed.
+`for $coll x { yield … / await … }` works: when the body directly
+contains a suspension (`sm__loop_body_suspends`), the loop compiles in
+SM style — ALL iteration state (collection / index / length / binding)
+lives in synthetic SM state fields (`__f{c,i,l}_<line>_<col>`, minted
+identically by the locals walk, the liveness walk, and the compile
+path), and the body's suspensions ride the normal resume-dispatch
+machinery (the entry dispatch jumps straight into the loop; the
+backward OP_LOOP re-reads state fields — stack locals die at every
+suspension, so none are used). Streams pull via OP_STREAM_NEXT(_INLINE);
+vec/arr/typed collections index via state-field __idx/__len. Struct
+elements ride the WIDE field channel; break/continue work, incl. across
+suspensions. Test: `sm_for_suspend.jacl`. **Residue (still erroring):**
+bodies that suspend ONLY via a call to a suspending proc (the
+`sm__loop_body_suspends` predicate scans the AST without the suspension
+map, so the locals walk can't see them — needs the map threaded into
+the walk); the C-style `for {init; cond; step}` form; the HOF callback
+form (`for $coll $cb` — callbacks still can't suspend by design).
+
+---
+
+## 8e. Nested closures cannot capture SM state fields (pre-existing)
+
+A closure body (`spawn { … }`, inline procs) that references a binding
+living in an SM state field reads NIL silently (or errors
+"call_suspend: inner call failed" for wide-typed reads): `def x [await
+$f]` then `[spawn { $x }]` captures nothing — the capture machinery
+resolves locals and upvalues, not state fields. Surfaced 2026-06-10
+while testing suspending for-bodies (the loop binding is a state field,
+so `[spawn { $i }]` inside the loop hits the same hole). Mutable (`mut`)
+state DOES work — cells are captured by pointer. Fix sketch: at capture
+time, materialize immutable state-field reads into a local before the
+closure, or teach upvalue resolution to snapshot state fields.
 
 ---
 
