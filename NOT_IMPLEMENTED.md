@@ -243,21 +243,29 @@ pulling on them; revisit when one shows up.
      handoff to monomorphized callbacks), typed `collect` → `[Vec T]` (debt
      2), SM-body for-loop bindings. Tests: `stream_struct_for.jacl` (incl. a
      3-slot element), `stream_struct_{collect,transform,yield_dyn}_error`.
-  1c. **PRE-EXISTING generator-body struct bugs (found while landing 1b,
-     both verified on the commit BEFORE the channel work — eba0b0c+3):**
-     (a) **Struct construction with COMPUTED wide (i64/u64/f64) fields inside
-     a generator body mis-packs tagged values** — `print [V3 x [* $b 3] …]`
-     inside a `[Stream i64]` generator prints `x 3026702434620567600`
-     (tagged bits byte-packed as raw i64), while the same constructor in a
-     plain proc or an await-SM proc is correct. Likely cause: generator-body
-     var-ref reads of boxed state fields don't unbox (typer stamp missing in
-     generator bodies?) → dyn arithmetic → tagged result → `OP_STRUCT_NEW_
-     INLINE` byte-packs it verbatim. (b) **`def v [V3 …]` of an inline
-     struct local inside an SM generator segfaults** (no streams involved).
-     Both need a fix in the SM-generator compile path, not the stream
-     channel. Related cheap follow-up that does NOT wait for any of this:
-     dropping the typer restore-pass for tagged-fit scalars (i32/u32/f32/
-     bool) per `STREAM_TYPING_DEBT.md` item 4a.
+  1c. **✅ FIXED (2026-06-10) — SM-generator rep-mismatch bug family.** All
+     were one flaw in different clothes: SM compile paths for liveness-culled
+     locals ignored the value's representation, while typed consumers
+     (typed arithmetic, struct byte-pack, field access) trusted the static
+     type. Fixes, all in compiler.c: (a) the def-SM fall-through now gives
+     culled locals the same typed treatment as non-SM locals — wide scalars
+     stay RAW in a typed local (no ensure_boxed), inline structs get
+     width/is_inline/padding + `OP_STRUCT_STORE_INLINE` for heap RHS (was:
+     everything boxed into ONE untyped dyn slot → tagged bytes byte-packed
+     into struct fields; N-slot struct misregistered → slot misread as heap
+     pointer → segfault); (b) the mut-SM fall-through now saves TypeInfo
+     like the non-SM mut path (cell reads unbox wide via the static type);
+     (c) the SM state layout now infers a struct field's width from the
+     TYPER STAMP on the RHS (covers `def v [proc-call]` — annotation and
+     constructor-head inference both missed it, so raw `OP_RETURN_WIDE`
+     bytes landed in a 1-slot GC-traced field); (d) the WIDE state-field
+     store expands an INLINE_NONE (heap) RHS via `OP_STRUCT_EXPAND`,
+     mirroring emit_return. Regression tests: `sm_gen_struct_local`,
+     `sm_gen_wide_ctor_fields`, `sm_gen_struct_from_call`, `sm_gen_mut_wide`,
+     `stream_struct_wide_fields` (3-slot stream element with computed wide
+     fields, end-to-end). Related cheap follow-up: dropping the typer
+     restore-pass for tagged-fit scalars (i32/u32/f32/bool) per
+     `STREAM_TYPING_DEBT.md` item 4a.
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

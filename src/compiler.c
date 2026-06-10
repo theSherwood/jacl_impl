@@ -2049,6 +2049,26 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
                 field_struct_idx = sidx;
               }
             }
+            /* Third source: the typer's stamp on the RHS. Covers a struct
+               arriving from a PROC CALL (`def v [mk 7]` where mk returns
+               Pt) — neither an annotation nor a constructor head, so the
+               two checks above miss it and the field was sized at 1 tagged
+               slot while the call returns raw inline struct bytes
+               (OP_RETURN_WIDE) — the bytes landed in a GC-traced slot and
+               read back as a non-struct (NOT_IMPLEMENTED.md §4.1c). Typer
+               and compiler registries agree on user-struct indices by the
+               slot-reservation scheme (STRUCT_DESIGN.md "Registry"). */
+            if (field_struct_idx == 0 && reg && value_idx < argc &&
+                args[value_idx]->inferred_type == TYPE_STRUCT &&
+                args[value_idx]->inferred_struct_idx != UINT32_MAX &&
+                !JACL_IS_SCALAR_TYPE_IDX(args[value_idx]->inferred_struct_idx) &&
+                args[value_idx]->inferred_struct_idx < reg->count) {
+              uint32_t sidx = args[value_idx]->inferred_struct_idx;
+              if (struct_def_is_user(reg->defs[sidx], reg)) {
+                field_width = (uint16_t)struct__slot_width(reg, sidx);
+                field_struct_idx = sidx;
+              }
+            }
             if (args[name_idx]->type == AST_LIT_STRING) {
               sm__add_state_field(layout,
                   compiler__name_val(layout->heap, layout->intern_table,
@@ -7748,7 +7768,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* mut returns nil */
         compiler__emit_byte(c, OP_NIL, line);
       } else {
-        /* Name not in state layout — shouldn't happen, fall through to cell */
+        /* Name not in state layout (liveness culled it — same-segment mut).
+           Fall through to a cell local, mirroring the non-SM mut path
+           INCLUDING the TypeInfo save: the cell stores tagged, and the
+           cell-read path unboxes a wide scalar based on the local's static
+           type — without the TypeInfo the read stayed tagged while typed
+           consumers (typed arithmetic, struct field byte-pack) expected
+           the wide rep (NOT_IMPLEMENTED.md §4.1c). */
         if (is_unboxed_type(effective_type)) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)effective_type, line);
@@ -7761,6 +7787,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->current_scope_mark = prev_mark;
         }
         c->locals[c->local_count - 1].is_mutable = true;
+        { TypeInfo ti = { effective_type, rhs_struct_idx,
+                          args[value_arg_idx]->inferred_key_struct_idx };
+          TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
         compiler__emit_byte(c, OP_NIL, line);
       }
     } else if (c->scope_depth > 0) {
@@ -9317,7 +9346,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       const StateField* sf = sm__get_field(&c->sm_analysis->state_layout, name_val);
       if (sf) {
         if (sf->struct_type_idx != 0) {
-          /* Struct state field: write N inline slots. */
+          /* Struct state field: write N inline slots. A heap-struct RHS
+             (INLINE_NONE — e.g. a boxed deref) is expanded to inline slots
+             first, mirroring compiler__emit_return. */
+          if (c->inline_repr == INLINE_NONE) {
+            compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
+            compiler__emit_u16(c, (uint16_t)sf->struct_type_idx, line);
+          }
           compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
           compiler__emit_byte(c, (uint8_t)sf->field_index, line);
           compiler__emit_byte(c, (uint8_t)sf->width, line);
@@ -9329,16 +9364,55 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* def returns nil */
         compiler__emit_byte(c, OP_NIL, line);
       } else {
-        /* Name not in state layout (e.g. liveness pass culled it because
-           the binding doesn't cross a suspension). Fall through to a
-           regular stack local. Box typed scalars first since the local
-           slot defaults to dyn. */
-        compiler__ensure_boxed(c, line);
+        /* Name not in state layout (the liveness pass culled it because the
+           binding doesn't cross a suspension). It lives as a regular stack
+           local WITHIN one segment, so it gets the same typed treatment as
+           a non-SM local — the old behavior (always ensure_boxed into an
+           untyped dyn slot) mismatched the rep downstream consumers expect
+           from the typer's stamp: a wide i64 read back TAGGED fed dyn
+           arithmetic whose tagged result was byte-packed verbatim into
+           struct fields (NOT_IMPLEMENTED.md §4.1c-a), and an inline struct
+           was registered as ONE dyn slot, so reads popped a single unmarked
+           slot and misread it as a heap pointer — segfault (§4.1c-b). */
+        bool sm_inline_struct = false;
+        uint32_t sm_struct_width = 1;
+        if (effective_type == TYPE_STRUCT && rhs_struct_idx != UINT32_MAX) {
+          StructTypeRegistry* sreg = compiler__get_struct_registry(c);
+          if (sreg && rhs_struct_idx < sreg->count &&
+              struct_def_is_user(sreg->defs[rhs_struct_idx], sreg)) {
+            sm_inline_struct = true;
+            sm_struct_width = struct__slot_width(sreg, rhs_struct_idx);
+          }
+        }
+        if (!sm_inline_struct && !is_unboxed_type(effective_type)) {
+          /* dyn/tagged values keep the boxed-dyn-slot behavior. */
+          compiler__ensure_boxed(c, line);
+        }
         {
           uint32_t prev_mark = c->current_scope_mark;
           c->current_scope_mark = bind_scope_mark;
           compiler__add_local(c, name_val, line, col);
           c->current_scope_mark = prev_mark;
+        }
+        c->locals[c->local_count - 1].known_arity = rhs_arity;
+        { TypeInfo ti = { effective_type, rhs_struct_idx,
+                          args[value_arg_idx]->inferred_key_struct_idx };
+          TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+        if (sm_inline_struct) {
+          uint32_t base_local_idx = c->local_count - 1;
+          c->locals[base_local_idx].width = (uint16_t)sm_struct_width;
+          c->locals[base_local_idx].is_inline = true;
+          for (uint32_t w = 1; w < sm_struct_width; w++) {
+            compiler__add_local(c, jacl_inline_string("", 0), line, col);
+            c->locals[c->local_count - 1].depth = c->scope_depth;
+          }
+          /* RHS produced a heap struct (proc-call return): de-materialize
+             into the inline slots, mirroring the non-SM path. */
+          if (c->inline_repr == INLINE_NONE) {
+            compiler__emit_byte(c, OP_STRUCT_STORE_INLINE, line);
+            compiler__emit_byte(c, (uint8_t)base_local_idx, line);
+            compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
+          }
         }
         compiler__emit_byte(c, OP_NIL, line);
       }

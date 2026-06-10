@@ -9,11 +9,9 @@
 # shape as the arr/vec struct loops. Previously `yield [Pt ...]` silently
 # delivered nil.
 #
-# C5 (5 x i32 = 20 bytes = 3 slots) exercises a genuinely multi-slot element.
-# NOTE: wide (i64/u64/f64) COMPUTED constructor fields inside generator bodies
-# hit a PRE-EXISTING mis-packing bug (tagged values byte-packed — see
-# NOT_IMPLEMENTED.md §4.1c, verified on the commit before this channel
-# landed), so this test uses i32 fields for the multi-slot case.
+# C5 (5 x i32 = 20 bytes = 3 slots) exercises a genuinely multi-slot element
+# with i32 fields; stream_struct_wide_fields.jacl covers computed wide
+# (i64) fields (the §4.1c mis-packing bug, fixed 2026-06-10).
 struct Point { i32 x, i32 y }
 struct C5 { i32 a, i32 b, i32 c, i32 d, i32 e }
 proc pts {} [Stream Point] {

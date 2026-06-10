@@ -1,0 +1,20 @@
+# expect: 3000000000
+# expect: 3000000001
+# expect: 3000000002
+# Multi-slot stream channel + §4.1c-a: a 3-slot [Stream V3] element with
+# computed i64 fields past INT32_MAX, read back field-by-field through the
+# for-loop. Exercises both the channel (OP_YIELD_SM_WIDE ->
+# OP_STREAM_NEXT_INLINE) and raw wide field packing in the generator.
+struct V3 { i64 x, i64 y, i64 z }
+proc vecs {} [Stream V3] {
+  def i64 b 1000000000
+  yield [V3 x [* $b 3] y [+ [* $b 3] 1] z [+ [* $b 3] 2]]
+}
+proc main {} {
+  for [vecs] v {
+    print $v->x
+    print $v->y
+    print $v->z
+  }
+}
+main
