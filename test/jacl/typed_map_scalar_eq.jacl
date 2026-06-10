@@ -1,0 +1,20 @@
+# expect: true
+# expect: false
+# expect: true
+# expect: false
+# Regression: == on typed maps with SCALAR value/key sentinels used to index
+# the struct registry with the 0xFF00+ sentinel (OOB read -> segfault).
+# Scalar map values are 1 tagged slot; compare via deep-eq.
+proc main {} {
+  def a [[Map i64] "x" 1 "y" 2]
+  def b [[Map i64] "x" 1 "y" 2]
+  print [== $a $b]
+  def c [[Map i64] "x" 1 "y" 3]
+  print [== $a $c]
+  def d [[Map i64 i64] 1 10]
+  def e [[Map i64 i64] 1 10]
+  print [== $d $e]
+  def f [[Map i64 i64] 2 10]
+  print [== $d $f]
+}
+[main]

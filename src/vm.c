@@ -13901,7 +13901,13 @@ interpret_done:
           DISPATCH();
         }
 
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        /* Scalar sentinels (>= 0xFF00) must NOT index the struct registry.
+         * Scalar map values are stored as 1 tagged slot (vm__pop_typed_elem)
+         * — compare via deep-eq, which also covers heap-boxed wide ints.
+         * Scalar keys are likewise 1 tagged slot. */
+        bool val_is_scalar = (type_idx >= 0xFF00);
+        StructTypeDef* sdef = val_is_scalar ? NULL
+                              : vm->struct_registry->defs[type_idx];
         if (jacl_typed_map_count(a) != jacl_typed_map_count(b)) {
           result = vm__push(vm, JACL_FALSE);
           if (result != VM_OK) return result;
@@ -13909,7 +13915,7 @@ interpret_done:
         }
 
         uint32_t key_stride = 1;
-        if (key_type_idx != 0xFFFF) {
+        if (key_type_idx != 0xFFFF && key_type_idx < 0xFF00) {
           StructTypeDef* kdef = vm->struct_registry->defs[key_type_idx];
           key_stride = vm__struct_width(kdef);
         }
@@ -13931,7 +13937,10 @@ interpret_done:
           if (!b_leaf) { equal = false; break; }
           const JaclVal* va = jacl_typed_map_value_ptr_from_leaf(ir.item);
           const JaclVal* vb = jacl_typed_map_value_ptr_from_leaf(b_leaf);
-          if (memcmp(va, vb, sdef->total_size) != 0) {
+          bool v_eq = val_is_scalar
+                        ? vm__deep_eq(*va, *vb)
+                        : (memcmp(va, vb, sdef->total_size) == 0);
+          if (!v_eq) {
             equal = false;
             break;
           }
