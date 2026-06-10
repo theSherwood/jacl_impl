@@ -1,6 +1,7 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A in progress.** Resolves the lambda-boundary technical
+Status: **Phase A COMPLETE (2026-06-10). Next: Phase B (`[Proc …]`
+types, §3).** Resolved the lambda-boundary technical
 debt in `STREAM_TYPING_DEBT.md` (items 1, 3, 4, and 5-by-deletion); pairs with
 typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
 (`c338b99`, `aa81bef`), which is already a partial monomorphization.

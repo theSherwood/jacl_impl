@@ -1,19 +1,34 @@
 # Plan — clean lambda result-type inference
 
 > ## START HERE — reading order for this thread
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step** (typed/
->    monomorphized closures; **Phase A** is the self-contained starting work).
->    Pick this up to implement.
-> 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — what shipped & the current state
->    (lambda inference + i64/u64/f64 producer-wide flip + contextual literals,
->    all DONE).
-> 3. **`STREAM_TYPING_DEBT.md`** — the 5 compromises the design above resolves.
+> **Phase A is COMPLETE** (2026-06-10): inline-callback monomorphization
+> for every element type (wide scalars, tagged-fit, str, STRUCT — input
+> AND output channels), typed collect, restore-pass deletion, plus the
+> collection-type unification (vec/map/arr ≡ [.. dyn]; ref-kind erasure
+> stamps), the no-autobox rule, suspending for-loop bodies, and the SM
+> wide-rep boundary fixes. See the git log around `64e8d6c` and
+> `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B**
+>    (`[Proc …]` types: typed closure VALUES, typed named callbacks,
+>    higher-order typed procs — §3 of that doc). Phase A status block at
+>    the top records what shipped.
+> 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
+>    inference design + i64/u64/f64 producer-wide flip + contextual
+>    literals (all DONE).
+> 3. **`STREAM_TYPING_DEBT.md`** — the 5 compromises (all resolved by
+>    Phase A except where noted in the doc).
 > 4. **`STREAM_TYPING_ISSUES.md`** — retrospective / pitfalls (read before
 >    debugging: stale-binary discipline, etc.).
 >
+> Other open threads to pick instead of Phase B, all indexed in
+> `NOT_IMPLEMENTED.md`: typed spread (§4.1b); map iteration (`for` over
+> maps doesn't exist — §4); the punted dyn-return no-autobox consistency
+> call (§4, after the no-autobox paragraph); C-style for suspension +
+> [Buf]/[Ptr] defs across suspensions (§8d/§8e residue).
+>
 > The auto-loaded memory `project_typed_streams_handoff` mirrors this.
 
-Last updated: 2026-06-10.
+Last updated: 2026-06-10 (end of session; Phase A closed).
 
 ## The problem
 

@@ -8,12 +8,28 @@ If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
 > **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
-> block) for the lambda-typing / typed-stream effort — what landed (lambda
-> inference + i64/u64/f64 producer-wide flip + contextual literals), the open
-> compromises (`STREAM_TYPING_DEBT.md`), and the next-step design
-> (`TYPED_CLOSURES_DESIGN.md`). Resume there.
+> block). **Typed-closures Phase A is COMPLETE** (2026-06-10) — the open
+> next step is **Phase B** (`[Proc ...]` types, `TYPED_CLOSURES_DESIGN.md`
+> §3). Alternative next slices, all indexed below: typed spread (§4.1b),
+> map iteration / `for` over maps (§4), the punted dyn-return no-autobox
+> consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
+> across suspensions (§8d/§8e).
 
-Last refreshed: 2026-06-08 (§1b added — the shell / external-command
+Last refreshed: 2026-06-10 (big session — summary, newest first; each
+item's full record lives in §4/§8: typed-closures Phase A closed with
+struct-returning transform mappers — multi-slot HOF output, `9251467`;
+SM wide-rep boundary family fixed — state-field captures,
+spawn/parallel wide tails, compound-annotated defs in SM, wide
+args/returns across suspending calls, `64e8d6c`; suspending for-loop
+BODIES landed incl. the call-only residue (`9f4d5c9`, §8d) and SM-body
+struct for-bindings (`00632f9`); collection-type unification finished —
+vec/map/arr ≡ [.. dyn], ref-kind erasure stamps, [Map V] removed
+(BREAKING, `2fe6788`), no-autobox rule at dyn sinks (BREAKING,
+`4fdfc8f`), hard stamped checks, param annotations, nested
+shape-carried narrowing, nested compound map values; pre-existing
+segfault/corruption fixes: OP_TYPED_MAP_EQ scalar sentinels, boxed-wide
+hash/eq identity, [box $wide]/[atom $wide], wide values into plain
+vec/map slots). 2026-06-08 (§1b added — the shell / external-command
 API redesign in `SHELL_API_DESIGN.md` is now indexed here as a
 planned-but-unimplemented target; current behavior is still the
 tempfile-based `OP_EXEC` path). 2026-06-02 (§12 `()` infix mode removed — parser's
