@@ -547,6 +547,15 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
   uint32_t inner[2] = { UINT32_MAX, UINT32_MAX };
   for (uint32_t i = 0; i < ac && i < 2; i++) {
     AstNode* a = en->data.command.args[i];
+    if (a && a->type == AST_COMMAND) {
+      /* Depth-2+ element type expression ([Vec [Vec [Vec T]]] …): recurse —
+       * the inner shape idx becomes this level's element encoding. Shape
+       * idxs nest fine inside the typer's own registry (they only ever live
+       * in typer bindings / typer-local decode). */
+      inner[i] = typer__nested_elem_shape(tc, a);
+      if (inner[i] == UINT32_MAX) return UINT32_MAX;
+      continue;
+    }
     if (!a || a->type != AST_LIT_STRING) return UINT32_MAX;
     const char* nm = a->data.lit_string.value;
     uint32_t    nl = a->data.lit_string.length;
@@ -1179,9 +1188,43 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         (void)buf_inner_len_3;
       } else {
         int tcoll = typer__typed_collection_kind(args[0]);
-        if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
-        else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
-        else return false;
+        /* Ref-element / nested-element [Vec T] annotations resolve to
+         * TYPE_VEC (+ stamp / typer-side shape idx in the binding). */
+        bool vec_ref_ann = false;
+        if (tcoll == 1 &&
+            args[0]->data.command.args[0]->type == AST_LIT_STRING &&
+            is_type_keyword(args[0]->data.command.args[0]->data.lit_string.value,
+                            args[0]->data.command.args[0]->data.lit_string.length)) {
+          JaclType aet = type_from_keyword(
+              args[0]->data.command.args[0]->data.lit_string.value,
+              args[0]->data.command.args[0]->data.lit_string.length);
+          if (aet == TYPE_STR || aet == TYPE_DYN) {
+            declared_type = TYPE_VEC;
+            declared_struct_idx = (aet == TYPE_STR)
+                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+            vec_ref_ann = true;
+          }
+        } else if (tcoll == 0 && args[0]->data.command.head &&
+                   args[0]->data.command.head->type == AST_LIT_STRING &&
+                   args[0]->data.command.head->data.lit_string.length == 3 &&
+                   memcmp(args[0]->data.command.head->data.lit_string.value,
+                          "Vec", 3) == 0 &&
+                   args[0]->data.command.arg_count == 1 &&
+                   args[0]->data.command.args[0]->type == AST_COMMAND) {
+          uint32_t esh =
+              typer__nested_elem_shape(tc, args[0]->data.command.args[0]);
+          if (esh != UINT32_MAX) {
+            declared_type = TYPE_VEC;
+            declared_struct_idx = esh;
+            vec_ref_ann = true;
+          }
+        }
+        if (!vec_ref_ann) {
+          if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
+          else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
+          else return false;
+        }
+        if (!vec_ref_ann) {
         /* Element struct_idx for [Vec T] / [Map V] / [Map K V] declared types. */
         AstNode* type_arg = (tcoll == 3)
             ? args[0]->data.command.args[1]
@@ -1200,6 +1243,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
               }
             }
           }
+        }
         }
       }
     }
@@ -1896,6 +1940,37 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       return;
     }
     int tcoll = typer__typed_collection_kind(tn);
+    /* Ref-element / nested-element [Vec T] annotations (vec is [Vec dyn]):
+     * [Vec str] / [Vec dyn] -> TYPE_VEC (+ str stamp); a compound element
+     * ([Vec [Vec T]]) -> TYPE_VEC + TYPER-SIDE shape idx (binding-only;
+     * never reaches AST stamps). typed_collection_kind returns 0 for
+     * compound elements, so check the head directly for that case. */
+    if (tcoll == 1 && tn->data.command.args[0]->type == AST_LIT_STRING &&
+        is_type_keyword(tn->data.command.args[0]->data.lit_string.value,
+                        tn->data.command.args[0]->data.lit_string.length)) {
+      JaclType ann_et = type_from_keyword(
+          tn->data.command.args[0]->data.lit_string.value,
+          tn->data.command.args[0]->data.lit_string.length);
+      if (ann_et == TYPE_STR || ann_et == TYPE_DYN) {
+        *out_type = TYPE_VEC;
+        *out_struct_idx = (ann_et == TYPE_STR)
+            ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+        return;
+      }
+    }
+    if (tcoll == 0 && tn->data.command.head &&
+        tn->data.command.head->type == AST_LIT_STRING &&
+        tn->data.command.head->data.lit_string.length == 3 &&
+        memcmp(tn->data.command.head->data.lit_string.value, "Vec", 3) == 0 &&
+        tn->data.command.arg_count == 1 &&
+        tn->data.command.args[0]->type == AST_COMMAND) {
+      uint32_t esh = typer__nested_elem_shape(tc, tn->data.command.args[0]);
+      if (esh != UINT32_MAX) {
+        *out_type = TYPE_VEC;
+        *out_struct_idx = esh;
+        return;
+      }
+    }
     if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
       *out_type = (tcoll == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
       AstNode* type_arg = (tcoll == 3)
@@ -2967,10 +3042,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                                 JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+              bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                                 iv >= TYPER_MAX_STRUCTS &&
+                                 iv < tc->shape_reg.count;
               if (inner_ref) {
                 bt = TYPE_VEC;
                 bsi = (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
                           ? iv : UINT32_MAX;
+              } else if (inner_shape) {
+                /* Element is itself a nested-element vec: bind as a
+                 * ref-element TYPE_VEC carrying the inner shape idx — the
+                 * next loop level resolves it from this binding (the
+                 * recursion point for depth-N narrowing). */
+                bt = TYPE_VEC; bsi = iv;
               } else {
                 bt = TYPE_TYPED_VEC; bsi = iv;
               }
@@ -3327,6 +3411,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        *   map-set  i=1 → key, i=2 → val
        *   map-remove/get/has i=1 → key
        */
+      if (recv_t == TYPE_VEC && e_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(e_idx) &&
+          (mutator_hid == HEAD_VEC_PUSH ||
+           (mutator_hid == HEAD_VEC_SET && i == 2))) {
+        /* Stamped ref-element vec ([Vec str]): pushed/assigned values take
+         * the element type as expected_type (literals narrow; mismatched
+         * concrete values surface through the generic checks). */
+        target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      }
       if (recv_t == TYPE_TYPED_VEC) {
         if (mutator_hid == HEAD_VEC_PUSH ||
             (mutator_hid == HEAD_VEC_SET && i == 2)) {
@@ -3645,6 +3738,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                               JACL_IS_SCALAR_TYPE_IDX(iv) &&
                               (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                                JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN));
+            /* A nested element whose OWN element is a shape ([Vec [Vec T]]
+             * elements of a depth-3 ctor) is itself plain-rep'd, and its AST
+             * stamp is suppressed — expect TYPE_VEC with no idx compare. */
+            bool inner_shape = (ekind == TYPE_TYPED_VEC &&
+                                !JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                                iv >= TYPER_MAX_STRUCTS &&
+                                iv < tc->shape_reg.count);
+            if (inner_shape) { inner_ref = true; iv = UINT32_MAX; }
             JaclType want = inner_ref ? TYPE_VEC
                           : (ekind == TYPE_TYPED_MAP) ? TYPE_TYPED_MAP
                           : TYPE_TYPED_VEC;
@@ -3952,6 +4053,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               node->inferred_type = TYPE_STRUCT;
               node->inferred_struct_idx = eidx;
             }
+          } else if (recv_t == TYPE_VEC &&
+                     recv->inferred_struct_idx != UINT32_MAX &&
+                     JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+            /* Stamped ref-element vec ([Vec str]): element narrows. */
+            node->inferred_type =
+                JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
           }
           return;
         /* arr ops mirror vec: get narrows to the element type for a typed

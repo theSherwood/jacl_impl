@@ -201,12 +201,21 @@ pulling on them; revisit when one shows up.
   receiver), decoding to PORTABLE inner encodings — so nested for-loops
   narrow all the way down ([Vec [Vec i64]] → row is [Vec i64] → x is i64;
   inner ref-kinds like [Vec [Vec str]] bind rows as plain-rep'd [Vec str]).
-  Test: `vec_nested_elems.jacl`. **Still open:** explicit `def [Vec str] v`
-  annotations, vec-push/vec-set element checks on stamped vecs, vec-get
-  narrowing on stamped/nested vecs, deeper nesting in the element TYPE
-  EXPRESSION itself ([Vec [Vec [Vec T]]] — the inner-inner is a shape, not a
-  keyword; typer__nested_elem_shape currently resolves one level), the same
-  generalization for [Map K V] keys/values ([Map str V]!), and [Arr T].
+  Test: `vec_nested_elems.jacl`. **Tail landed (same day):**
+  depth-N element type expressions (typer__nested_elem_shape recurses;
+  shape idxs nest inside the typer's registry and HEAD_FOR's decode binds an
+  inner-shape element as a ref-element TYPE_VEC carrying the inner shape —
+  the recursion point for depth-N narrowing), explicit `def [Vec str/dyn/
+  [Vec T]] v` annotations (both typer annotation resolvers patched — the
+  def-handler site at ~typer.c:1190 AND typer__resolve_return_type),
+  vec-get narrowing on stamped vecs, vec-push/vec-set element expected-type
+  on stamped vecs. Test: `vec_ref_tail.jacl`. **Still open:** the same
+  generalization for [Map K V] keys/values ([Map str V] — string keys! the
+  typed-map HAMT already traces 1-slot keys, so the erasure model applies
+  directly), [Arr T] (arr ≡ [Arr dyn] mirror), hard vec-push element
+  CHECKS (currently expected-type narrowing only), proc-param [Vec str]
+  annotations, and vec-get narrowing through nested (shape-carried)
+  bindings.
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

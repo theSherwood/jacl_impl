@@ -6618,8 +6618,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                    memcmp(_nh->data.lit_string.value, "Map", 3) == 0) &&
                   _ne->data.command.arg_count >= 1 &&
                   _ne->data.command.arg_count <= 2;
-    for (uint32_t _ni = 0; _ne_ok && _ni < _ne->data.command.arg_count; _ni++)
-      if (_ne->data.command.args[_ni]->type != AST_LIT_STRING) _ne_ok = false;
+    for (uint32_t _ni = 0; _ne_ok && _ni < _ne->data.command.arg_count; _ni++) {
+      AstNode* _na = _ne->data.command.args[_ni];
+      /* Inner args may be type keywords/struct names (LIT_STRING) or
+       * nested compound type expressions (depth-2+, AST_COMMAND) — the
+       * typer validates; the compiler only recognizes the shape. */
+      if (_na->type != AST_LIT_STRING && _na->type != AST_COMMAND)
+        _ne_ok = false;
+    }
     if (_ne_ok) {
       if (argc > 255) {
         compiler__error(c, line, col,
