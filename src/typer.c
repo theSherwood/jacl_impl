@@ -2485,6 +2485,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    * keep its declared type. Type the body; the tail's type is the result. */
   typer__scope_push(tc);
   bool body_wide = false;  /* a param was bound to the flip-enabled wide type */
+  bool body_struct = false; /* a param was bound to a struct element type */
   for (uint32_t i = 0; i < pcount; i++) {
     uint8_t  bt = (uint8_t)pt[i];
     uint32_t bs = ps[i];
@@ -2496,6 +2497,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       } else {
         bt = (uint8_t)TYPE_STRUCT;
         bs = arg_encs[i];
+        body_struct = true;
       }
     }
     typer__scope_add(tc, pn[i]->data.lit_string.value,
@@ -2515,16 +2517,18 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
     if (saved_first_empty) tc->result->first_error[0] = '\0';
   }
 
-  /* Keep the wide-typed body only when a param was bound to the flip-enabled
-   * wide type AND the probe typed cleanly: then the producer-wide flip makes
-   * the source yield wide and the HOF push it straight into this wide-compiled
-   * body — static and runtime rep agree. Otherwise restore the body to its
-   * declared (dyn) param types: for non-wide elements (i32/struct/str) the
-   * pipeline still hands a tagged value (a wide-typed body over a tagged param
-   * produces garbage — verified); for a failed probe we degrade to the lenient
-   * dyn path. */
-  bool keep_wide = body_wide && !probe_errored;
-  if (!keep_wide) {
+  /* Keep the element-typed body only when a param was bound to a rep the
+   * runtime will actually deliver AND the probe typed cleanly:
+   *  - wide scalar (i64/u64/f64): the producer-wide flip makes the source
+   *    yield wide and the HOF push it straight into this wide-compiled body.
+   *  - struct: the multi-slot channel + by-value struct param convention
+   *    deliver the element as N inline slots (struct HOF monomorphization).
+   * Otherwise restore the body to its declared (dyn) param types: for
+   * tagged-fit elements (i32/str) the pipeline still hands a tagged value
+   * (a wide-typed body over a tagged param produces garbage — verified);
+   * for a failed probe we degrade to the lenient dyn path. */
+  bool keep_typed = (body_wide || body_struct) && !probe_errored;
+  if (!keep_typed) {
     typer__scope_push(tc);
     for (uint32_t i = 0; i < pcount; i++)
       typer__scope_add(tc, pn[i]->data.lit_string.value,
@@ -2536,7 +2540,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   }
 
   if (probe_errored) return UINT32_MAX;  /* dyn output; not monomorphized */
-  if (out_param_wide) *out_param_wide = keep_wide;
+  if (out_param_wide) *out_param_wide = keep_typed;
 
   if (rt == TYPE_STRUCT && rsidx != UINT32_MAX) return rsidx;
   if (rt != TYPE_DYN && rt != TYPE_NIL) return JACL_SCALAR_TYPE_IDX(rt);
@@ -3864,8 +3868,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->data.command.arg_count == 2 &&
                 recv->inferred_struct_idx != UINT32_MAX) {
               uint32_t arg_enc = recv->inferred_struct_idx;
+              bool mapper_typed = false;
               node->inferred_struct_idx = typer__proc_result_enc(
-                  tc, node->data.command.args[1], &arg_enc, 1, NULL);
+                  tc, node->data.command.args[1], &arg_enc, 1, &mapper_typed);
+              /* Stamp the mapper node with the element enc iff its body was
+               * monomorphized (typed against the element). The compiler
+               * requires this for struct-element streams: only a
+               * monomorphized inline mapper can take the N-slot element. */
+              node->data.command.args[1]->inferred_struct_idx =
+                  mapper_typed ? arg_enc : UINT32_MAX;
             }
           }
           return;

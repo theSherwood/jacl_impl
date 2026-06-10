@@ -1638,9 +1638,26 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         JaclVal predicate_val = stream->args[1];
         JaclClosure* predicate = jacl_as_closure(predicate_val);
 
+        /* Struct-element streams: the element is N inline value-byte slots.
+         * It is pushed to the predicate's by-value struct param (struct HOF
+         * monomorphization; compile guard + has_inline_params defense) and,
+         * if kept, copied through to the caller's buffer. */
+        bool flt_struct = vm__elem_idx_is_struct(stream->elem_idx);
+        uint32_t flt_width = 1;
+        if (flt_struct) {
+            if (!predicate->has_inline_params) {
+                vm__set_error(vm, "filter over a struct-element stream "
+                                  "requires an inline callback typed against "
+                                  "the element");
+                return STREAM_PULL_ERROR;
+            }
+            flt_width = vm__struct_width(
+                vm->struct_registry->defs[stream->elem_idx]);
+        }
+
         for (;;) {
-            JaclVal elem;
-            StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+            JaclVal elem_buf[VM_MAX_STRUCT_SLOTS];
+            StreamPullResult pr = vm__pull_stream_one(vm, source, elem_buf);
             if (pr == STREAM_PULL_EXHAUSTED) {
                 stream->state = STREAM_EXHAUSTED;
                 *out_value = JACL_NIL;
@@ -1653,17 +1670,30 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
              * predicate, pred_elem_idx == dyn). When the inline predicate was
              * monomorphized to read the element wide (pred_elem_idx wide,
              * TYPED_CLOSURES_DESIGN.md Phase A) the element is passed wide with
-             * no box. The element yielded downstream (*out_value) stays wide. */
+             * no box. The element yielded downstream (*out_value) stays in the
+             * source rep. */
             VMResult r;
             r = vm__push(vm, predicate_val);
             if (r != VM_OK) return STREAM_PULL_ERROR;
-            JaclVal elem_for_pred = elem;
-            if (vm__elem_idx_is_wide(stream->elem_idx) &&
-                !vm__elem_idx_is_wide(stream->pred_elem_idx))
-                elem_for_pred = vm__stream_to_tagged(vm, elem,
-                                  JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
-            r = vm__push(vm, elem_for_pred);
-            if (r != VM_OK) return STREAM_PULL_ERROR;
+            if (flt_struct) {
+                if (vm->stack_top + flt_width > VM_STACK_MAX) {
+                    vm__set_operand_overflow(vm, "filter struct elem");
+                    return STREAM_PULL_ERROR;
+                }
+                memcpy(&vm->stack[vm->stack_top], elem_buf,
+                       flt_width * sizeof(JaclVal));
+                for (uint32_t si = 0; si < flt_width; si++)
+                    BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+                vm->stack_top += flt_width;
+            } else {
+                JaclVal elem_for_pred = elem_buf[0];
+                if (vm__elem_idx_is_wide(stream->elem_idx) &&
+                    !vm__elem_idx_is_wide(stream->pred_elem_idx))
+                    elem_for_pred = vm__stream_to_tagged(vm, elem_buf[0],
+                                      JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
+                r = vm__push(vm, elem_for_pred);
+                if (r != VM_OK) return STREAM_PULL_ERROR;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
                 vm__set_frame_overflow(vm);
@@ -1673,7 +1703,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = predicate;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 1;
+            cf->stack_base = vm->stack_top - predicate->param_total_slots;
             cf->chunk      = &predicate->chunk;
 
             uint8_t* save_ip = vm->ip;
@@ -1695,7 +1725,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             vm->chunk = save_chunk;
 
             if (!vm__is_falsy(pred_result)) {
-                *out_value = elem;
+                memcpy(out_value, elem_buf, flt_width * sizeof(JaclVal));
                 return STREAM_PULL_VALUE;
             }
             /* predicate falsy — try next element */
@@ -1708,8 +1738,10 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         JaclVal fn_val = stream->args[1];
         JaclClosure* fn = jacl_as_closure(fn_val);
 
-        JaclVal elem;
-        StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+        /* Buffer-sized pull: a struct-element SOURCE delivers N inline
+         * slots (multi-slot channel); scalar sources write buf[0]. */
+        JaclVal elem_buf[VM_MAX_STRUCT_SLOTS];
+        StreamPullResult pr = vm__pull_stream_one(vm, source, elem_buf);
         if (pr == STREAM_PULL_EXHAUSTED) {
             stream->state = STREAM_EXHAUSTED;
             *out_value = JACL_NIL;
@@ -1717,12 +1749,40 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         }
         if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
 
-        /* Call transform closure with elem */
+        /* Call transform closure with elem. Struct elements are passed as N
+         * bitmap-marked inline slots to the mapper's by-value struct param
+         * (struct HOF monomorphization — the compiler guarantees only a
+         * monomorphized inline mapper reaches a struct source; the
+         * has_inline_params check is the dyn-flow defense). Mirrors the
+         * eager OP_TYPED_TRANSFORM call loop. */
+        uint32_t src_eidx = jacl_is_stream(source)
+                            ? jacl_as_stream(source)->elem_idx : 0xFF00u;
+        bool src_struct = vm__elem_idx_is_struct(src_eidx);
         VMResult r;
         r = vm__push(vm, fn_val);
         if (r != VM_OK) return STREAM_PULL_ERROR;
-        r = vm__push(vm, elem);
-        if (r != VM_OK) return STREAM_PULL_ERROR;
+        if (src_struct) {
+            if (!fn->has_inline_params) {
+                vm__set_error(vm, "transform over a struct-element stream "
+                                  "requires an inline callback typed against "
+                                  "the element");
+                return STREAM_PULL_ERROR;
+            }
+            StructTypeDef* esdef = vm->struct_registry->defs[src_eidx];
+            uint32_t ewidth = vm__struct_width(esdef);
+            if (vm->stack_top + ewidth > VM_STACK_MAX) {
+                vm__set_operand_overflow(vm, "transform struct elem");
+                return STREAM_PULL_ERROR;
+            }
+            memcpy(&vm->stack[vm->stack_top], elem_buf,
+                   ewidth * sizeof(JaclVal));
+            for (uint32_t si = 0; si < ewidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+            vm->stack_top += ewidth;
+        } else {
+            r = vm__push(vm, elem_buf[0]);
+            if (r != VM_OK) return STREAM_PULL_ERROR;
+        }
 
         if (vm->frame_count >= VM_FRAMES_MAX) {
             vm__set_frame_overflow(vm);
@@ -1732,7 +1792,7 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         CallFrame* cf = &vm->frames[vm->frame_count++];
         cf->closure    = fn;
         cf->return_ip  = vm->ip;
-        cf->stack_base = vm->stack_top - 1;
+        cf->stack_base = vm->stack_top - fn->param_total_slots;
         cf->chunk      = &fn->chunk;
 
         uint8_t* save_ip = vm->ip;
@@ -1825,8 +1885,9 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         }
 
         JaclVal source = stream->args[0];
-        JaclVal elem;
-        StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+        /* Pull straight into the caller's buffer — rep-agnostic passthrough
+         * (a struct-element source writes N slots; scalars write one). */
+        StreamPullResult pr = vm__pull_stream_one(vm, source, out_value);
         if (pr == STREAM_PULL_EXHAUSTED) {
             stream->state = STREAM_EXHAUSTED;
             *out_value = JACL_NIL;
@@ -1835,7 +1896,6 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
 
         stream->args[1] = jacl_i32(remaining - 1);
-        *out_value = elem;
         return STREAM_PULL_VALUE;
     }
 
@@ -5960,29 +6020,55 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
            * Phase A), pull the raw wide element instead and pass it without a
            * box — the callback body reads it wide. */
           bool each_wide = vm__elem_idx_is_wide(each_cb_elem);
+          /* Struct-element streams: pull raw N-slot elements and push them
+           * to the callback's by-value struct param (struct HOF
+           * monomorphization; compile guard + has_inline_params defense). */
+          bool each_struct = vm__elem_idx_is_struct(stream->elem_idx);
+          uint32_t each_width = 1;
+          if (each_struct) {
+            if (!closure->has_inline_params) {
+              vm__set_error(vm, "each over a struct-element stream requires "
+                                "an inline callback typed against the element");
+              return VM_RUNTIME_ERROR;
+            }
+            each_width = vm__struct_width(
+                vm->struct_registry->defs[stream->elem_idx]);
+          }
           while (stream->state != STREAM_EXHAUSTED) {
-            JaclVal elem;
-            StreamPullResult pr = each_wide
-                ? vm__pull_stream_one(vm, coll_val, &elem)
-                : vm__pull_stream_dyn(vm, coll_val, &elem);
+            JaclVal elem_buf[VM_MAX_STRUCT_SLOTS];
+            StreamPullResult pr = (each_wide || each_struct)
+                ? vm__pull_stream_one(vm, coll_val, elem_buf)
+                : vm__pull_stream_dyn(vm, coll_val, elem_buf);
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) break;
 
             /* US-005: If stream yields error value, stop iteration and
-             * propagate. Only meaningful for the tagged pull — a wide-element
-             * stream carries raw i64/u64/f64, never a heap error value, and
-             * raw bits must not be misread as an error tag (cf. transform/
-             * filter, which never error-check wide elements). */
-            if (!each_wide && jacl_is_error(elem)) {
-              error_val = elem;
+             * propagate. Only meaningful for the tagged pull — wide/struct
+             * elements carry raw bits, never a heap error value, and raw
+             * bits must not be misread as an error tag (cf. transform/
+             * filter, which never error-check raw elements). */
+            if (!each_wide && !each_struct && jacl_is_error(elem_buf[0])) {
+              error_val = elem_buf[0];
               break;
             }
 
             /* Call callback with elem */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
-            result = vm__push(vm, elem);
-            if (result != VM_OK) return result;
+            if (each_struct) {
+              if (vm->stack_top + each_width > VM_STACK_MAX) {
+                vm__set_operand_overflow(vm, "each struct elem");
+                return VM_RUNTIME_ERROR;
+              }
+              memcpy(&vm->stack[vm->stack_top], elem_buf,
+                     each_width * sizeof(JaclVal));
+              for (uint32_t si = 0; si < each_width; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += each_width;
+            } else {
+              result = vm__push(vm, elem_buf[0]);
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_frame_overflow(vm);
@@ -5992,7 +6078,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 1;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* cb_ip = vm->ip;
@@ -6203,14 +6289,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
-          /* Struct elements: the transform pull pushes single-slot elements
-           * to the mapper; multi-slot HOF composition is not yet wired
-           * (§4.1b). */
-          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
-            vm__set_error(vm, "transform over struct-element streams is not "
-                              "yet supported (use a for-loop)");
-            return VM_RUNTIME_ERROR;
-          }
           JaclVal transform_stream_val = jacl_stream(&vm->heap);
           JaclStream* ts = jacl_as_stream(transform_stream_val);
           ts->kind      = STREAM_KIND_TRANSFORM;
@@ -6392,13 +6470,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__set_error(vm,
               "filter on stream requires a proc with 1 parameter, got %d",
               (int)closure->param_count);
-            return VM_RUNTIME_ERROR;
-          }
-          /* Struct elements: the filter pull reads single-slot elements;
-           * multi-slot HOF composition is not yet wired (§4.1b). */
-          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
-            vm__set_error(vm, "filter over struct-element streams is not yet "
-                              "supported (use a for-loop)");
             return VM_RUNTIME_ERROR;
           }
           JaclVal filter_stream_val = jacl_stream(&vm->heap);
@@ -10600,12 +10671,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         if (jacl_is_stream(coll_val)) {
-          /* Struct elements: take's pull is single-slot passthrough (§4.1b). */
-          if (vm__elem_idx_is_struct(jacl_as_stream(coll_val)->elem_idx)) {
-            vm__set_error(vm, "take over struct-element streams is not yet "
-                              "supported (use a for-loop)");
-            return VM_RUNTIME_ERROR;
-          }
           JaclVal take_stream_val = jacl_stream(&vm->heap);
           JaclStream* ts = jacl_as_stream(take_stream_val);
           ts->kind      = STREAM_KIND_TAKE;

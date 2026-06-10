@@ -223,8 +223,8 @@ pulling on them; revisit when one shows up.
      struct-element streams) live in `LAMBDA_TYPING_PLAN.md` + the next-step
      design `TYPED_CLOSURES_DESIGN.md` — start there. (Producer-wide rep for
      i64/u64/f64 has since landed.)**
-  1b. **Struct-element streams — multi-slot channel LANDED (for-loop path,
-     2026-06-10); HOF composition + typed collect still open.** What shipped:
+  1b. **Struct-element streams — channel + for-loop + HOF monomorphization
+     LANDED (2026-06-10); typed collect still open.** What shipped:
      `OP_YIELD_SM_WIDE` (yield pops the struct — inline N slots or heap ptr,
      via `vm__pop_struct` — into `vm->yield_wide`, raw value bytes, never
      GC-traced), the generator pull copies it to the consumer's buffer, and
@@ -232,17 +232,26 @@ pulling on them; revisit when one shows up.
      local (`OP_INLINE_TO_LOCAL`, same shape as the arr/vec struct loops);
      typer narrows stream struct bindings (the old "streams stay dyn" carve-
      out is gone). Box-at-yield was rejected (would violate STRUCT_DESIGN's
-     no-auto-box rule); `yield_value` stays nil for struct yields. **Guarded
-     (error instead of the old silent nil):** collect/spread/userland
-     `stream_next`/each-callback (runtime guards in `vm__pull_stream_dyn` +
-     the inline SM loops), transform/filter/take/each over struct streams
-     (compile error in `compiler__compile_hof_builtin` + runtime guards at
-     stream construction), struct-element for-loops inside suspending procs
-     (needs WIDE state-field wiring), struct yield into an unannotated
-     generator (typer + compiler errors). Still open: HOF pulls (multi-slot
-     handoff to monomorphized callbacks), typed `collect` → `[Vec T]` (debt
-     2), SM-body for-loop bindings. Tests: `stream_struct_for.jacl` (incl. a
-     3-slot element), `stream_struct_{collect,transform,yield_dyn}_error`.
+     no-auto-box rule); `yield_value` stays nil for struct yields. **HOF
+     monomorphization (same day):** inline transform/filter/each callbacks
+     over struct streams compile with a by-value struct param (typer
+     `keep_typed` + compiler `hof_param_enc` adoption → the existing
+     `param_total_slots` machinery); the lazy pulls push N bitmap-marked
+     inline slots with `stack_base = stack_top - param_total_slots`,
+     mirroring the eager OP_TYPED_TRANSFORM loop; `take` is a rep-agnostic
+     passthrough. **Guarded (error instead of the old silent nil):**
+     collect/spread/userland `stream_next` (runtime guards in
+     `vm__pull_stream_dyn` + the inline SM loops), NAMED/dyn HOF callbacks
+     over struct streams (compile error + `has_inline_params` runtime
+     defense — no legal boxed path exists), struct-RETURNING transform
+     mappers (multi-slot HOF *output* channel not yet wired), struct-element
+     for-loops inside suspending procs (needs WIDE state-field wiring),
+     struct yield into an unannotated generator (typer + compiler errors).
+     Still open: typed `collect` → `[Vec T]` (debt 2), SM-body for-loop
+     bindings, struct-returning mappers. Tests: `stream_struct_for.jacl`,
+     `stream_struct_hof.jacl` (each/transform/filter/chained, 3-slot
+     elements), `stream_struct_hof_{named,ret}_error`,
+     `stream_struct_{collect,yield_dyn}_error`.
   1c. **✅ FIXED (2026-06-10) — SM-generator rep-mismatch bug family.** All
      were one flaw in different clothes: SM compile paths for liveness-culled
      locals ignored the value's representation, while typed consumers

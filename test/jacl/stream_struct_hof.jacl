@@ -1,0 +1,42 @@
+# expect: 1
+# expect: 3
+# expect: [vec 10 30]
+# expect: 3
+# expect: 60
+# expect: 4
+# expect: ok
+# Struct HOF monomorphization (TYPED_CLOSURES_DESIGN.md Phase A): inline
+# transform/filter/each callbacks over a [Stream <Struct>] receive the element
+# as N inline slots through the by-value struct param convention
+# (param_total_slots), with the body compiled against the struct type — field
+# access works directly on $it.
+struct Point { i32 x, i32 y }
+struct C5 { i32 a, i32 b, i32 c, i32 d, i32 e }
+proc pts {} [Stream Point] {
+  yield [Point x 1 y 2]
+  yield [Point x 3 y 4]
+}
+proc cs {} [Stream C5] {
+  yield [C5 a 10 b 20 c 30 d 40 e 50]
+}
+proc main {} {
+  # each (for-callback form): field access on the struct param
+  for [pts] [\ print $it->x]                        # 1 3
+
+  # transform: struct -> i32 (mapper monomorphized, scalar output stream)
+  print [collect [transform [pts] [\ * $it->x 10]]] # [vec 10 30]
+
+  # filter: predicate on a struct field; element passes through; the
+  # downstream for-loop binds the struct
+  mut i32 fx 0
+  for [filter [pts] [\ > $it->x 1]] p { set fx [+ $fx $p->x] }
+  print $fx                                         # 3
+
+  # multi-slot element (C5 = 3 slots) through transform: sum of three fields
+  for [transform [cs] [\ + [+ $it->a $it->b] $it->c]] s { print $s }  # 60
+
+  # chained: filter -> transform over struct elements
+  for [transform [filter [pts] [\ > $it->y 2]] [\ + $it->x 1]] q { print $q }  # 4
+  print "ok"
+}
+main

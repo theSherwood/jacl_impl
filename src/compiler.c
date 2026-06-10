@@ -3093,6 +3093,14 @@ struct Compiler {
    * struct-element yield through OP_YIELD_SM_WIDE (multi-slot channel,
    * NOT_IMPLEMENTED.md §4.1b). */
   uint32_t         gen_stream_elem_idx;
+  /* Struct HOF monomorphization (TYPED_CLOSURES_DESIGN.md Phase A): the
+   * struct registry idx of a stream's element, set by
+   * compiler__compile_hof_builtin around compiling an inline callback over a
+   * struct-element stream. HEAD_PROC adopts it as the callback's single
+   * untyped param's TYPE — turning it into a by-value struct param (N inline
+   * slots, param_total_slots/has_inline_params set by the existing typed-
+   * param machinery). UINT32_MAX = none. Consumed once read. */
+  uint32_t         hof_param_enc;
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
@@ -3193,6 +3201,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->return_struct_idx = UINT32_MAX;
   c->hof_mapper_ret_enc = UINT32_MAX;
   c->gen_stream_elem_idx = COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
+  c->hof_param_enc   = UINT32_MAX;
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -5323,18 +5332,39 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   JaclType col_type = (JaclType)args[0]->inferred_type;
   uint32_t col_struct_idx = args[0]->inferred_struct_idx;
   uint32_t col_key_struct_idx = args[0]->inferred_key_struct_idx;
-  /* Struct-element STREAMS: the HOF pulls are single-slot; multi-slot
-   * composition is not yet wired (NOT_IMPLEMENTED.md §4.1b). The runtime
-   * guards at stream construction catch the dyn-flow case; this catches the
-   * statically-typed case with a compile error. */
-  if (col_type == TYPE_STREAM && col_struct_idx != UINT32_MAX &&
-      !COMPILER_IS_SCALAR_TYPE_IDX(col_struct_idx)) {
-    char hof_err[128];
-    snprintf(hof_err, sizeof(hof_err),
-             "%s over struct-element streams is not yet supported "
-             "(use a for-loop)", name);
-    compiler__error(c, line, col, hof_err);
-    return;
+  /* Struct-element STREAMS (struct HOF monomorphization, §4.1b): the element
+   * is N inline value-byte slots, so the callback MUST be an inline proc
+   * whose body monomorphized cleanly against the element type (the typer
+   * stamped args[1]->inferred_struct_idx with the element enc) — a named/dyn
+   * callback has no legal way to receive the element (no auto-box). The
+   * callback is then compiled with a by-value struct param via
+   * c->hof_param_enc (adopted in HEAD_PROC). Struct-RETURNING transform
+   * mappers stay unsupported (the transform output channel is single-slot
+   * for non-struct elems; multi-slot HOF OUTPUT is a follow-up). */
+  bool hof_struct_elem = (col_type == TYPE_STREAM &&
+                          col_struct_idx != UINT32_MAX &&
+                          !COMPILER_IS_SCALAR_TYPE_IDX(col_struct_idx));
+  if (hof_struct_elem) {
+    bool inline_cb = (args[1]->type == AST_COMMAND &&
+                      args[1]->data.command.head_id == HEAD_PROC);
+    bool monomorphized = inline_cb &&
+                         args[1]->inferred_struct_idx == col_struct_idx;
+    if (!monomorphized) {
+      char hof_err[160];
+      snprintf(hof_err, sizeof(hof_err),
+               "%s over a struct-element stream requires an inline callback "
+               "([\\ ...] or [proc {x} ...]) typed against the element",
+               name);
+      compiler__error(c, line, col, hof_err);
+      return;
+    }
+    if (opcode == OP_TRANSFORM && out_elem_enc != UINT32_MAX &&
+        !COMPILER_IS_SCALAR_TYPE_IDX(out_elem_enc)) {
+      compiler__error(c, line, col,
+          "transform mapper returning a struct is not yet supported");
+      return;
+    }
+    c->hof_param_enc = col_struct_idx;
   }
   /* Typed-closure return (TYPED_CLOSURES_DESIGN.md Phase A): when this is a
    * `transform` over a typed *stream* whose mapper return type infers to a
@@ -5358,6 +5388,7 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     c->in_non_suspending_callback = saved;
   }
   c->hof_mapper_ret_enc = UINT32_MAX; /* consumed; never leak to later compiles */
+  c->hof_param_enc      = UINT32_MAX; /* ditto */
   /* Typed collection dispatch: emit typed HOF opcode with type_idx */
   if ((col_type == TYPE_TYPED_VEC || col_type == TYPE_TYPED_MAP) &&
       (opcode == OP_EACH || opcode == OP_TRANSFORM || opcode == OP_FILTER)) {
@@ -10149,6 +10180,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         param_count++;
       }
     }
+
+    /* Struct HOF monomorphization (§4.1b): an inline HOF callback over a
+     * struct-element stream adopts the element's struct type for its single
+     * untyped param — it becomes an ordinary by-value struct param (N inline
+     * slots; param_total_slots / has_inline_params / padding locals all
+     * follow from the existing typed-param machinery below). The typer
+     * already typed the body against this binding (proc_result_enc stamp,
+     * checked by compile_hof_builtin before setting hof_param_enc). Consume
+     * the marker so it can't affect nested procs. */
+    if (c->hof_param_enc != UINT32_MAX && param_count == 1 &&
+        param_types_arr[0] == TYPE_DYN) {
+      param_types_arr[0] = TYPE_STRUCT;
+      param_struct_idxs[0] = c->hof_param_enc;
+    }
+    c->hof_param_enc = UINT32_MAX;
 
     uint8_t min_args = is_variadic ? (uint8_t)(param_count - 1) : param_count;
 

@@ -57,21 +57,29 @@ tiered by rep (2026-06-10):**
   distinct static type, but its runtime rep is identical to a boxed string
   (tagged heap pointer), so dropping the restore is rep-safe yet buys nothing
   unless string ops have typed codegen. Check first; skip if cosmetic.
-- **struct — multi-slot channel LANDED for the for-loop path (2026-06-10);
-  HOF monomorphization still open.** The channel: `OP_YIELD_SM_WIDE` parks
-  the struct's raw value bytes in `vm->yield_wide` (no GC tracing — user
-  structs are pure value bytes; box-at-yield rejected per STRUCT_DESIGN);
-  the generator pull copies to the caller's buffer; the for-loop pulls via
-  `OP_STREAM_NEXT_INLINE` and binds an N-slot inline local. Every consumer
-  that can't take inline bytes errors instead of silently losing data
-  (compile guards in `compiler__compile_hof_builtin`, runtime guards in
-  `vm__pull_stream_dyn` / the inline SM loops / HOF stream construction).
-  Remaining for struct HOF monomorphization: the transform/filter/each pulls
-  must hand N slots to a callback compiled with a by-value struct param —
-  the same mechanism as the scalar flip, now unblocked. Also still open:
-  typed `collect` → `[Vec T]` (debt 2), SM-body struct for-bindings, and two
-  PRE-EXISTING generator-body struct bugs found en route (computed-wide-field
-  constructor mis-packing; `def` inline-struct-local segfault) — see
+- **struct — DONE for inputs (2026-06-10): channel + for-loop + HOF
+  monomorphization.** The channel: `OP_YIELD_SM_WIDE` parks the struct's raw
+  value bytes in `vm->yield_wide` (no GC tracing — user structs are pure
+  value bytes; box-at-yield rejected per STRUCT_DESIGN); the generator pull
+  copies to the caller's buffer; the for-loop pulls via
+  `OP_STREAM_NEXT_INLINE` and binds an N-slot inline local. **Struct HOF
+  monomorphization:** an inline transform/filter/each callback over a
+  `[Stream <Struct>]` is compiled with a **by-value struct param** — the
+  typer keeps the struct-typed body (`keep_typed` gate in
+  `typer__proc_result_enc`) and stamps the callback node; the compiler
+  adopts the element type for the untyped param via `c->hof_param_enc`
+  (HEAD_PROC), and the existing typed-param machinery (`param_total_slots`,
+  `has_inline_params`, padding locals) does the rest; the lazy pulls push N
+  bitmap-marked inline slots and set `stack_base = stack_top -
+  param_total_slots`, mirroring the eager OP_TYPED_TRANSFORM loop. `take` is
+  a rep-agnostic passthrough. Named/dyn callbacks over struct streams are a
+  compile error (+ `has_inline_params` runtime defense for dyn flow) — no
+  legal boxed path exists. Tests: `stream_struct_hof.jacl` (each/transform/
+  filter/chained, incl. a 3-slot element), `stream_struct_hof_named_error`,
+  `stream_struct_hof_ret_error`. **Still open:** struct-RETURNING transform
+  mappers (multi-slot HOF *output* channel — compile error for now), typed
+  `collect` → `[Vec T]` (debt 2), SM-body struct for-bindings. The §4.1c
+  generator-body struct bugs found en route are FIXED — see
   `NOT_IMPLEMENTED.md` §4.1b/§4.1c.
 
 The unifying gate for all tiers: drop the restore-pass exactly when *the rep

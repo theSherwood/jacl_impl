@@ -1,0 +1,12 @@
+# expect-error: requires an inline callback
+# A NAMED callback can't take a struct-element stream's N-slot element (no
+# auto-box); only monomorphized inline callbacks are allowed.
+struct Pt { i32 x, i32 y }
+proc pts {} [Stream Pt] {
+  yield [Pt x 1 y 2]
+}
+proc main {} {
+  def f [proc {p} { 1 }]
+  for [transform [pts] $f] q { print $q }
+}
+main

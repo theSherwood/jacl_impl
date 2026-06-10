@@ -1,0 +1,10 @@
+# expect-error: returning a struct is not yet supported
+# Struct-RETURNING transform mappers need the multi-slot HOF output channel.
+struct Pt { i32 x, i32 y }
+proc pts {} [Stream Pt] {
+  yield [Pt x 1 y 2]
+}
+proc main {} {
+  for [transform [pts] [proc {p} { $p }]] q { print $q->x }
+}
+main
