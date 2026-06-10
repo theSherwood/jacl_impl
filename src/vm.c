@@ -1633,14 +1633,18 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
             }
             if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
 
-            /* Call predicate closure with elem. The predicate's param is dyn,
-             * so box a wide element back to tagged for the call; the element
-             * yielded downstream (*out_value below) stays in wide rep. */
+            /* Call predicate closure with elem. A wide element is boxed back to
+             * tagged ONLY when the predicate's param wants tagged (a named/dyn
+             * predicate, pred_elem_idx == dyn). When the inline predicate was
+             * monomorphized to read the element wide (pred_elem_idx wide,
+             * TYPED_CLOSURES_DESIGN.md Phase A) the element is passed wide with
+             * no box. The element yielded downstream (*out_value) stays wide. */
             VMResult r;
             r = vm__push(vm, predicate_val);
             if (r != VM_OK) return STREAM_PULL_ERROR;
             JaclVal elem_for_pred = elem;
-            if (vm__elem_idx_is_wide(stream->elem_idx))
+            if (vm__elem_idx_is_wide(stream->elem_idx) &&
+                !vm__elem_idx_is_wide(stream->pred_elem_idx))
                 elem_for_pred = vm__stream_to_tagged(vm, elem,
                                   JACL_TYPE_IDX_TO_SCALAR(stream->elem_idx));
             r = vm__push(vm, elem_for_pred);
@@ -6167,6 +6171,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       CASE(OP_FILTER): {
+        /* Operand: rep the predicate param expects (wide scalar enc → pass the
+         * element wide with no box; 0xFF00 dyn → box a wide element for the
+         * call). Read unconditionally so ip advances; used only in the lazy
+         * stream branch. See TYPED_CLOSURES_DESIGN.md Phase A. */
+        uint16_t filter_pred_elem = vm__read_u16(vm);
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
@@ -6335,6 +6344,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
            * producer-wide rep flows through (B). */
           if (jacl_is_stream(coll_val))
             fs->elem_idx = jacl_as_stream(coll_val)->elem_idx;
+          /* Predicate param rep (Phase A): wide enc → the inline predicate
+           * reads the element wide, so the pull skips the box-for-call. */
+          fs->pred_elem_idx = filter_pred_elem;
           result = vm__push(vm, filter_stream_val);
           if (result != VM_OK) return result;
 

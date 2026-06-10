@@ -1255,6 +1255,7 @@ typedef struct {
     JaclVal   args[STREAM_MAX_ARGS];
     uint8_t   arg_count;
     uint32_t  elem_idx;      /* element type encoding; see jacl.h JaclStream */
+    uint32_t  pred_elem_idx; /* FILTER predicate param rep; see jacl.h JaclStream */
 } JaclStream;
 
 JaclStream *jacl_as_stream(JaclVal v) {
@@ -1274,6 +1275,7 @@ JaclVal jacl_stream(ThreadHeap *heap) {
      * this early in the unity build, so use the literal. Overridden at
      * typed-stream creation sites (generator/range/lines). */
     s->elem_idx      = 0xFF00u;  /* untyped [Stream dyn] until set */
+    s->pred_elem_idx = 0xFF00u;  /* FILTER: predicate wants tagged until set wide */
     return jacl_stream_ptr(s);
 }
 

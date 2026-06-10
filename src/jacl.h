@@ -342,6 +342,13 @@ typedef struct {
      * typed-yield value rep, GC tracing of cached_value, and consumer
      * narrowing. (Definition mirrored in gc.c — keep in sync.) */
     uint32_t  elem_idx;
+    /* FILTER streams only: the rep the predicate's param expects. A wide
+     * scalar enc (i64/u64/f64) means the inline predicate was monomorphized to
+     * read the element wide, so the filter pull passes the element wide with no
+     * box-for-call (TYPED_CLOSURES_DESIGN.md Phase A). 0xFF00 (dyn) = the
+     * predicate wants a tagged value, so a wide element is boxed for the call
+     * (named/dyn predicates, and all non-stream filters). */
+    uint32_t  pred_elem_idx;
 } JaclStream;
 
 typedef struct {

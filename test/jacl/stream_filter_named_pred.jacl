@@ -1,0 +1,13 @@
+# expect: 12
+# A NAMED (var-ref) predicate over a wide i64 stream is not monomorphized
+# (only inline procs are), so it keeps its dyn param and the filter pull must
+# box the wide element back to tagged for the call. Regression guard for the
+# predicate-param-rep signal: filter must distinguish inline-typed-wide
+# predicates from named/dyn ones (TYPED_CLOSURES_DESIGN.md Phase A).
+proc main {} {
+  def gt2 [proc {x} { > $x 2 }]
+  mut i64 s 0
+  for [filter [range 1 6] $gt2] z { set s [+ $s $z] }   # 3 + 4 + 5 = 12
+  print $s
+}
+main

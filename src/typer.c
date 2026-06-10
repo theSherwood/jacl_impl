@@ -2434,7 +2434,7 @@ static const TyperImportProc* typer__find_bound_export(TyperCtx* tc,
  * form. */
 static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                                        const uint32_t* arg_encs,
-                                       uint32_t argc) {
+                                       uint32_t argc, bool* out_param_wide) {
   /* Infer the result-type encoding of applying an inline proc to arguments
    * of known type at a call site. `proc` is a proc command (head HEAD_PROC;
    * layout [name params (rettype)? body]); `arg_encs[i]` is the type encoding
@@ -2442,16 +2442,17 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    * registry idx / UINT32_MAX = dyn). Binds the proc's OWN params to those
    * arg types and returns the body tail's type encoding (UINT32_MAX = dyn).
    *
+   * `out_param_wide` (nullable): set true iff a param was bound to a wide
+   * scalar (i64/u64/f64) AND the body typed cleanly with that binding — i.e.
+   * the body was monomorphized and reads the param wide. Callers use this to
+   * decide whether the runtime can hand the value over wide (no box). false
+   * when the body fell back to dyn (see rollback below) or no param is wide.
+   *
    * General, not lambda-specific: it reads real param names via
    * typer__parse_params, so a hand-written inline `proc {^x} { … }` gets the
    * same inference as a `[\ … ]` lambda. The `\` prelude macro stays pure
-   * sugar — the typer has no knowledge of its expansion (no hardcoded `it`).
-   *
-   * INTERIM (Phase 1, see LAMBDA_TYPING_PLAN.md): after reading the result it
-   * re-types the body with params at their DECLARED types, because the
-   * runtime closure param is boxed dyn and codegen reads these annotations.
-   * Phase 2 (typed closures) drives body compilation from the call site and
-   * removes this second pass. */
+   * sugar — the typer has no knowledge of its expansion (no hardcoded `it`). */
+  if (out_param_wide) *out_param_wide = false;
   if (!proc || proc->type != AST_COMMAND) return UINT32_MAX;
   if (proc->data.command.head_id != HEAD_PROC) return UINT32_MAX;
   uint32_t ac = proc->data.command.arg_count;
@@ -2466,6 +2467,18 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
   uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
+
+  /* Snapshot error state so a failed wide probe can be rolled back. Binding a
+   * param wide can surface a strict-numeric error the dyn body never hits
+   * (e.g. `== i32-literal i64-expr` — the typer rejects mixed unboxed
+   * comparison, but the runtime is permissive). In that case we do NOT commit
+   * the wide typing: roll the errors back and fall to a dyn body (the value is
+   * boxed at the boundary), preserving the lenient runtime semantics. Only a
+   * clean wide probe is monomorphized. */
+  bool have_result = (tc->result != NULL);
+  uint32_t saved_errc = have_result ? tc->result->error_count : 0;
+  bool saved_first_empty = have_result ? (tc->result->first_error[0] == '\0')
+                                       : true;
 
   /* Probe: bind each param to the call-site arg type when the param is
    * untyped (dyn — the lambda case) and an arg type was supplied; otherwise
@@ -2496,14 +2509,22 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   uint32_t rsidx = tail->inferred_struct_idx;
   typer__scope_pop(tc);
 
-  /* Drop the restore pass ONLY when a param was bound to the flip-enabled wide
-   * type (i64): then the producer-wide flip (task B) makes the source yield
-   * wide and transform push it straight into this wide-compiled body — static
-   * and runtime rep agree. For every other param type (i32/struct/str, and the
-   * not-yet-flipped u64/f64) restore the body to it:dyn, because the pipeline
-   * still hands the mapper a tagged value (a wide-typed body over a tagged
-   * param produces garbage — verified). Mirror of vm__elem_idx_is_wide. */
-  if (!body_wide) {
+  bool probe_errored = have_result && tc->result->error_count > saved_errc;
+  if (probe_errored) {
+    tc->result->error_count = saved_errc;
+    if (saved_first_empty) tc->result->first_error[0] = '\0';
+  }
+
+  /* Keep the wide-typed body only when a param was bound to the flip-enabled
+   * wide type AND the probe typed cleanly: then the producer-wide flip makes
+   * the source yield wide and the HOF push it straight into this wide-compiled
+   * body — static and runtime rep agree. Otherwise restore the body to its
+   * declared (dyn) param types: for non-wide elements (i32/struct/str) the
+   * pipeline still hands a tagged value (a wide-typed body over a tagged param
+   * produces garbage — verified); for a failed probe we degrade to the lenient
+   * dyn path. */
+  bool keep_wide = body_wide && !probe_errored;
+  if (!keep_wide) {
     typer__scope_push(tc);
     for (uint32_t i = 0; i < pcount; i++)
       typer__scope_add(tc, pn[i]->data.lit_string.value,
@@ -2513,6 +2534,9 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
       typer__infer_node(tc, body->data.block.commands[i]);
     typer__scope_pop(tc);
   }
+
+  if (probe_errored) return UINT32_MAX;  /* dyn output; not monomorphized */
+  if (out_param_wide) *out_param_wide = keep_wide;
 
   if (rt == TYPE_STRUCT && rsidx != UINT32_MAX) return rsidx;
   if (rt != TYPE_DYN && rt != TYPE_NIL) return JACL_SCALAR_TYPE_IDX(rt);
@@ -3774,6 +3798,27 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = recv_t;
             node->inferred_struct_idx = recv->inferred_struct_idx;
             node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
+            /* Typed-closure predicate (TYPED_CLOSURES_DESIGN.md Phase A): over a
+             * typed stream, type the predicate body with its param bound to the
+             * source element type (the truthiness return is discarded, so we
+             * ignore the result enc — we just want the body typed). For a wide
+             * element this leaves the body compiled to read the param wide, so
+             * the filter pull can skip the box-for-call. Only inline procs are
+             * affected; typer__proc_result_enc no-ops on a var-ref predicate. */
+            if (recv_t == TYPE_STREAM &&
+                node->data.command.arg_count == 2 &&
+                recv->inferred_struct_idx != UINT32_MAX) {
+              uint32_t arg_enc = recv->inferred_struct_idx;
+              bool pred_wide = false;
+              (void)typer__proc_result_enc(
+                  tc, node->data.command.args[1], &arg_enc, 1, &pred_wide);
+              /* Stamp the predicate proc node so the compiler bakes the wide
+               * param rep onto OP_FILTER iff the body was actually typed wide
+               * (a clean wide probe). On fallback/non-proc it stays dyn → the
+               * pull boxes the element for the call. */
+              node->data.command.args[1]->inferred_struct_idx =
+                  pred_wide ? arg_enc : UINT32_MAX;
+            }
           }
           return;
         case HEAD_TRANSFORM:
@@ -3795,7 +3840,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 recv->inferred_struct_idx != UINT32_MAX) {
               uint32_t arg_enc = recv->inferred_struct_idx;
               node->inferred_struct_idx = typer__proc_result_enc(
-                  tc, node->data.command.args[1], &arg_enc, 1);
+                  tc, node->data.command.args[1], &arg_enc, 1, NULL);
             }
           }
           return;

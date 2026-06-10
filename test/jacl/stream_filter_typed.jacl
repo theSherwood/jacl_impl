@@ -1,0 +1,24 @@
+# expect: 5000000000
+# expect: 6
+# expect: ok
+# Filter predicate monomorphization (TYPED_CLOSURES_DESIGN.md Phase A).
+proc main {} {
+  # Wide i64 filter: the inline predicate is typed to read its param wide, so
+  # the pull passes the element wide with no box-for-call. Values exceed
+  # INT32_MAX, so a regression to the old box-back tag-confusion would corrupt
+  # the kept set instead of matching.
+  mut i64 s 0
+  for [filter [transform [range 1 4] [\ * $it 1000000000]] [\ > $it 1500000000]] x {
+    set s [+ $s $x]                # keeps 2e9 + 3e9 = 5_000_000_000
+  }
+  print $s
+
+  # Mixed-numeric predicate (`== i32-literal <i64-expr>`): the typer can't type
+  # it wide (strict mixed-unboxed comparison), so it falls back to the dyn
+  # boxed predicate path — must still work via the lenient runtime.
+  mut i64 e 0
+  for [filter [range 1 5] [\ == 0 [% $it 2]]] y { set e [+ $e $y] }   # 2 + 4 = 6
+  print $e
+  print "ok"
+}
+main

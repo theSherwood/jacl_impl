@@ -5347,6 +5347,27 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     uint16_t enc = (out_elem_enc == UINT32_MAX) ? 0xFF00u
                                                 : (uint16_t)out_elem_enc;
     compiler__emit_u16(c, enc, line);
+  } else if (opcode == OP_FILTER) {
+    /* Typed-closure predicate (TYPED_CLOSURES_DESIGN.md Phase A): bake the rep
+     * the predicate param expects. For an inline predicate over a typed stream
+     * with a wide (i64/u64/f64) element, the typer typed its body to read the
+     * element wide (HEAD_FILTER), so the filter pull can pass the element wide
+     * with no box-for-call. Otherwise 0xFF00 (dyn) → the pull boxes a wide
+     * element for a tagged-wanting (named/dyn) predicate. Only inline procs
+     * reach a wide source element with a typed body; var-ref predicates and
+     * the vec/map paths stay tagged. */
+    uint16_t pred_enc = 0xFF00u;
+    /* The typer stamped args[1]->inferred_struct_idx with the wide element enc
+     * iff it monomorphized the predicate body wide (clean wide probe); else
+     * UINT32_MAX. Trust that verdict so the baked rep matches how the body was
+     * actually typed (a fallback-to-dyn predicate must stay boxed). */
+    uint32_t pred_idx = args[1]->inferred_struct_idx;
+    if (col_type == TYPE_STREAM && COMPILER_IS_SCALAR_TYPE_IDX(pred_idx)) {
+      JaclType et = COMPILER_TYPE_IDX_TO_SCALAR(pred_idx);
+      if (et == TYPE_I64 || et == TYPE_U64 || et == TYPE_F64)
+        pred_enc = (uint16_t)pred_idx;
+    }
+    compiler__emit_u16(c, pred_enc, line);
   }
   /* Preserve collection type: stream→stream, vec→vec */
   c->last_expr_type = col_type;

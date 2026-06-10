@@ -23,9 +23,22 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
    past INT32_MAX), plus the existing `stream_transform_typed` /
    `stream_wide_f64_u64` stay green. Suite 484/484, 91/91 binaries.
 
-**Still open in Phase A:** `filter`/`each` monomorphization (filter keeps
-**truthiness** semantics — §5 decided), and full restore-pass removal (debt 4)
-for non-wide element bodies (i32/struct/str); the wide path already drops it.
+3. **Filter predicate input monomorphization** — an inline `filter` predicate
+   over a wide stream is typed to read its param wide (typer `HEAD_FILTER` runs
+   `typer__proc_result_enc` for the body-typing side effect), and `OP_FILTER`
+   carries a `pred_elem_idx` operand → `JaclStream.pred_elem_idx` so the pull
+   passes the element **wide with no box-for-call** (kills **debt item 3, filter
+   half**). Named/dyn predicates (and the vec/map paths) keep the box. Filter
+   keeps **truthiness** (§5). Crucially, `typer__proc_result_enc` now
+   **trial-types with rollback**: if binding the param wide surfaces a
+   strict-numeric error the dyn body wouldn't (e.g. `== i32-literal i64-expr`),
+   it rolls the error back and falls to the dyn boxed path — so existing
+   permissive predicates (e.g. `[\ == 0 [% $it 2]]`) keep working. Tests:
+   `stream_filter_typed.jacl`, `stream_filter_named_pred.jacl`.
+
+**Still open in Phase A:** `each` monomorphization, and full restore-pass
+removal (debt 4) for non-wide element bodies (i32/struct/str); the wide path
+already drops it.
 
 ---
 
