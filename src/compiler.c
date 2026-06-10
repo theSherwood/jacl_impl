@@ -2110,6 +2110,26 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
 
         /* for — creates loop bindings */
         if (hid == HEAD_FOR) {
+          /* Struct-element collection (stream / typed vec / typed arr):
+           * the binding is N raw value-byte slots — register a WIDE state
+           * field (width + struct idx) so the loop stores it via
+           * OP_SET_STATE_FIELD_WIDE and the GC skips the raw slots
+           * (field_inline_bitmap). Mirrors the def-RHS width inference
+           * above; typer/compiler registries agree on user-struct idxs. */
+          uint16_t fb_width = 1;
+          uint32_t fb_sidx  = 0;
+          if (reg && argc >= 2) {
+            JaclType fb_ct = (JaclType)args[0]->inferred_type;
+            uint32_t fb_ce = args[0]->inferred_struct_idx;
+            if ((fb_ct == TYPE_STREAM || fb_ct == TYPE_TYPED_VEC ||
+                 fb_ct == TYPE_TYPED_ARR) &&
+                fb_ce != UINT32_MAX && !JACL_IS_SCALAR_TYPE_IDX(fb_ce) &&
+                fb_ce < reg->count &&
+                struct_def_is_user(reg->defs[fb_ce], reg)) {
+              fb_width = (uint16_t)struct__slot_width(reg, fb_ce);
+              fb_sidx  = fb_ce;
+            }
+          }
           /* C-style for: [for {init; cond; step} { body }] — init handled by recursion */
           if (argc == 3 && args[1]->type == AST_LIT_STRING &&
               args[2]->type == AST_BLOCK) {
@@ -2118,13 +2138,13 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
                 compiler__name_val(layout->heap, layout->intern_table,
                                    args[1]->data.lit_string.value,
                                    args[1]->data.lit_string.length),
-                false, false, 1, 0,
+                false, false, fb_width, fb_sidx,
                 node->start.line, node->start.column);
           } else if (argc == 2 && args[1]->type == AST_BLOCK &&
                      !(args[0]->type == AST_BLOCK)) {
             /* [for coll { body }] — implicit "it" */
             sm__add_state_field(layout, jacl_inline_string("it", 2),  /* "it" is always <= 7 */
-                                false, false, 1, 0,
+                                false, false, fb_width, fb_sidx,
                                 node->start.line, node->start.column);
           }
           /* Recurse into all sub-expressions */
@@ -11358,16 +11378,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bool strm_narrow_local = strm_scalar && strm_scalar_t != TYPE_DYN &&
                                sm_bind_field < 0;
 
-      /* Struct-element bindings live in N inline stack slots; an SM state
-       * field is a single GC-traced slot, so suspending bodies are not yet
-       * supported (the struct would need WIDE state-field wiring). */
-      if (strm_struct && sm_bind_field >= 0) {
-        compiler__error(c, line, col,
-            "for over a struct-element stream inside a suspending proc is "
-            "not yet supported");
-        return;
-      }
-
       /* Element placeholder → local $it/name (starts as nil) */
       compiler__emit_byte(c, OP_NIL, line);
       JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
@@ -11375,7 +11385,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
       if (strm_narrow_local) {
         c->locals[c->local_count - 1].type = strm_scalar_t;
-      } else if (strm_struct) {
+      } else if (strm_struct && sm_bind_field < 0) {
         /* Mirror the typed-vec struct binding: inline local of N slots. */
         c->locals[c->local_count - 1].type = TYPE_STRUCT;
         c->locals[c->local_count - 1].struct_type_idx = strm_elem_enc;
@@ -11387,6 +11397,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->locals[c->local_count - 1].depth = c->scope_depth;
         }
       }
+      /* Struct binding in an SM state field: the walk registered it as a
+       * WIDE field (width + struct idx), the pull's N inline slots store
+       * via OP_SET_STATE_FIELD_WIDE below, var-ref reads push them back
+       * via OP_GET_STATE_FIELD_WIDE, and the GC skips the raw slots
+       * (field_inline_bitmap). The 1-slot nil local above stays as a
+       * placeholder, same as non-struct SM bindings. */
 
       /* Push loop context. local_count_at_loop is the count BEFORE
        * any iter-state locals (used by break to clean all of them).
@@ -11446,7 +11462,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * scalars and dyn elements store as-is. Struct elements: N inline
        * slots are on TOS — OP_INLINE_TO_LOCAL pops them into the binding's
        * slot range and marks the bitmap. */
-      if (strm_struct) {
+      if (strm_struct && sm_bind_field >= 0) {
+        /* Struct binding in SM state: pop the pull's N inline slots into
+         * the WIDE state field (raw value bytes; GC skips them). */
+        compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+        compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
+        compiler__emit_byte(c, (uint8_t)strm_struct_width, line);
+      } else if (strm_struct) {
         compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
         compiler__emit_byte(c, elem_slot, line);
         compiler__emit_u16(c, (uint16_t)strm_elem_enc, line);
@@ -11588,11 +11610,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclVal arr_bind_val = compiler__name_val(c->heap, c->intern_table,
                                                 bind_name, bind_name_len);
       compiler__add_local(c, arr_bind_val, line, col);
+      uint32_t arr_elem_width = 1;
       if (arr_struct_elem) {
+        StructTypeRegistry* areg = compiler__get_struct_registry(c);
+        arr_elem_width = struct__slot_width(areg, arr_elem_enc);
+      }
+      if (arr_struct_elem && arr_sm_field < 0) {
         c->locals[c->local_count - 1].type = TYPE_STRUCT;
         c->locals[c->local_count - 1].struct_type_idx = arr_elem_enc;
-        StructTypeRegistry* areg = compiler__get_struct_registry(c);
-        uint32_t arr_elem_width = struct__slot_width(areg, arr_elem_enc);
         c->locals[c->local_count - 1].width = (uint16_t)arr_elem_width;
         c->locals[c->local_count - 1].is_inline = true;
         for (uint32_t w = 1; w < arr_elem_width; w++) {
@@ -11632,9 +11657,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, arr_idx_slot, line);
       compiler__emit_byte(c, OP_ARR_GET, line);
-      if (arr_struct_elem) {
-        /* Inline-width binding (state-field-wide not wired; falls back to the
-         * local slot, mirroring the typed-vec branch). */
+      if (arr_struct_elem && arr_sm_field >= 0) {
+        /* SM: pop the element's N inline slots into the WIDE state field
+         * (the walk registered the binding with width + struct idx; reads
+         * come back via OP_GET_STATE_FIELD_WIDE; GC skips the raw slots). */
+        compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+        compiler__emit_byte(c, (uint8_t)arr_sm_field, line);
+        compiler__emit_byte(c, (uint8_t)arr_elem_width, line);
+      } else if (arr_struct_elem) {
         compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
         compiler__emit_byte(c, arr_elem_slot, line);
         compiler__emit_u16(c, (uint16_t)arr_elem_enc, line);
@@ -11745,15 +11775,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_NIL, line);
     JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
+    uint32_t vec_elem_width = 1;
     if (vec_struct_elem) {
+      StructTypeRegistry* vreg = compiler__get_struct_registry(c);
+      vec_elem_width = struct__slot_width(vreg, elem_struct_idx);
+    }
+    if (vec_struct_elem && vec_sm_field < 0) {
       c->locals[c->local_count - 1].type = TYPE_STRUCT;
       c->locals[c->local_count - 1].struct_type_idx = elem_struct_idx;
       /* Mark as inline and add padding locals for width > 1 */
-      StructTypeRegistry* reg = compiler__get_struct_registry(c);
-      uint32_t elem_width = struct__slot_width(reg, elem_struct_idx);
-      c->locals[c->local_count - 1].width = (uint16_t)elem_width;
+      c->locals[c->local_count - 1].width = (uint16_t)vec_elem_width;
       c->locals[c->local_count - 1].is_inline = true;
-      for (uint32_t w = 1; w < elem_width; w++) {
+      for (uint32_t w = 1; w < vec_elem_width; w++) {
         compiler__emit_byte(c, OP_NIL, line);
         compiler__add_local(c, jacl_inline_string("", 0), line, col);
         c->locals[c->local_count - 1].depth = c->scope_depth;
@@ -11803,14 +11836,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (vec_struct_elem) {
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
-      /* Typed-vec binding into a state field would need OP_SET_STATE_
-       * FIELD_WIDE; that path is not yet wired here. Fall back to the
-       * local-slot path — for-loops over [Vec Struct] inside SM procs
-       * are still subject to the same state-vs-local mismatch this
-       * branch handles for scalar elements. Tracked as a follow-up. */
-      compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
-      compiler__emit_byte(c, elem_slot, line);
-      compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+      if (sm_bind_field >= 0) {
+        /* SM: pop the element's N inline slots into the WIDE state field
+         * (walk registered width + struct idx; reads via
+         * OP_GET_STATE_FIELD_WIDE; GC skips the raw slots). */
+        compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+        compiler__emit_byte(c, (uint8_t)sm_bind_field, line);
+        compiler__emit_byte(c, (uint8_t)vec_elem_width, line);
+      } else {
+        compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
+        compiler__emit_byte(c, elem_slot, line);
+        compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+      }
     } else if (is_typed_vec_loop) {
       /* Scalar typed-vec ([Vec i32]/[Vec i64]…): OP_TYPED_VEC_GET_INLINE's
        * scalar path (type_idx >= 0xFF00) pushes a single slot — tagged for

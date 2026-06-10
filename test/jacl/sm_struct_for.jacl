@@ -1,0 +1,68 @@
+# expect: 24
+# expect: 103
+# expect: 1011
+# expect: 60
+# expect: ok
+# Struct-element for-loops inside SUSPENDING procs. An await anywhere makes
+# the SM liveness pass keep every local in SM state (it bails on await/
+# parallel/race), so the loop binding lives in a WIDE state field: the walk
+# registers width + struct idx, the pull stores N raw slots via
+# OP_SET_STATE_FIELD_WIDE, var-refs read via OP_GET_STATE_FIELD_WIDE, and
+# the GC skips the raw slots (field_inline_bitmap). Covers all three
+# collection kinds (stream / [Vec Pt] / [Arr Pt]) and a 3-slot element.
+struct Pt { i32 x, i32 y }
+struct Big { i32 a, i32 b, i32 c, i32 d, i32 e }
+proc pts {} [Stream Pt] {
+  yield [Pt x 1 y 2]
+  yield [Pt x 3 y 4]
+}
+proc bigs {} [Stream Big] {
+  yield [Big a 10 b 0 c 0 d 0 e 20]
+  yield [Big a 30 b 0 c 0 d 0 e 0]
+}
+proc s-sum {} {
+  def [Future i32] f [spawn { 10 }]
+  def i32 w [await $f]
+  mut i32 acc 0
+  for [pts] p {
+    set acc [+ $acc [+ $p->x $w]]
+  }
+  $acc
+}
+proc v-sum {} {
+  def [Future i32] f [spawn { 100 }]
+  def i32 w [await $f]
+  def vs [[Vec Pt] [Pt x 1 y 0] [Pt x 2 y 0]]
+  mut i32 acc 0
+  for $vs p {
+    set acc [+ $acc $p->x]
+  }
+  [+ $acc $w]
+}
+proc a-sum {} {
+  def [Future i32] f [spawn { 1000 }]
+  def i32 w [await $f]
+  def as [[Arr Pt] [Pt x 5 y 0] [Pt x 6 y 0]]
+  mut i32 acc 0
+  for $as p {
+    set acc [+ $acc $p->x]
+  }
+  [+ $acc $w]
+}
+proc big-sum {} {
+  def [Future i32] f [spawn { 0 }]
+  def i32 w [await $f]
+  mut i32 acc 0
+  for [bigs] b {
+    set acc [+ $acc [+ $b->a [+ $b->e $w]]]
+  }
+  $acc
+}
+proc main {} {
+  print [s-sum]
+  print [v-sum]
+  print [a-sum]
+  print [big-sum]
+  print "ok"
+}
+[main]

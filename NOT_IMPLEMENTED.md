@@ -357,9 +357,7 @@ pulling on them; revisit when one shows up.
      `vm__pull_stream_dyn` + the inline SM loops), NAMED/dyn HOF callbacks
      over struct streams (compile error + `has_inline_params` runtime
      defense — no legal boxed path exists), struct-RETURNING transform
-     mappers (multi-slot HOF *output* channel not yet wired), struct-element
-     for-loops inside suspending procs (needs WIDE state-field wiring),
-     struct yield into an unannotated generator (typer + compiler errors).
+     mappers (multi-slot HOF *output* channel not yet wired), struct yield into an unannotated generator (typer + compiler errors).
      Typed `collect` → `[Vec T]` LANDED (same day; debt 2 — wide elements
      stored flat, struct streams collect to [Vec Struct]; str stays plain
      vec since typed-vec storage is GC-opaque). **Struct-RETURNING
@@ -372,11 +370,23 @@ pulling on them; revisit when one shows up.
      Also fixed en route: def-bound typed streams kept NO element stamp
      (no TYPE_STREAM def-propagation arm) — `def s [transform …]` then
      `for [filter $s …]` hit the dyn-consumer runtime guard. Test:
-     `stream_struct_ret.jacl`. Still open: SM-body
-     for-loop bindings, typed spread. Tests: `stream_struct_for.jacl`,
+     `stream_struct_ret.jacl`. **SM-body struct for-bindings LANDED
+     (2026-06-10):** in a suspending proc (await/parallel/race make the
+     liveness pass keep every local in SM state) a struct-element
+     for-loop binding now lives in a WIDE state field — sm__walk_locals
+     registers width + struct idx from the collection stamp, the pull
+     stores N raw slots via OP_SET_STATE_FIELD_WIDE (which now also
+     clears the vacated stack inline bits — latent stale-bitmap hazard),
+     var-refs read via OP_GET_STATE_FIELD_WIDE, GC skips the slots. All
+     three collection kinds (stream / [Vec T] / [Arr T]); the vec/arr
+     struct loops previously MISBEHAVED silently in SM procs (stores hit
+     the inline local, reads hit the 1-slot state field → nil). Test:
+     `sm_struct_for.jacl`. Still open: typed spread; for-loop BODIES
+     that suspend (see §8d — a separate, broader limitation). Tests: `stream_struct_for.jacl`,
      `stream_struct_hof.jacl` (each/transform/filter/chained, 3-slot
      elements), `stream_struct_hof_named_error`,
      `stream_struct_{collect,yield_dyn}_error`.
+  1d. **For-loop bodies cannot suspend at all (§8d).** Indexed below.
   1c. **✅ FIXED (2026-06-10) — SM-generator rep-mismatch bug family.** All
      were one flaw in different clothes: SM compile paths for liveness-culled
      locals ignored the value's representation, while typed consumers
@@ -506,6 +516,22 @@ linear one and emits per-yield-point clears in the same lowering,
 killing both restrictions at once. Estimated +300-600 LOC. Not
 measured as a bottleneck; no workload today retains large heap
 values across phase-distinct SM lifetimes long enough to matter.
+
+---
+
+## 8d. For-loop bodies cannot suspend
+
+`for $coll x { yield … }` / `{ await … }` is a compile error ("cannot
+suspend inside non-suspending callback") for EVERY collection kind and
+element type — the for-loop is always compiled as an inlined
+non-suspending loop, and the SM lowering has no for-loop segment
+numbering (the `sm__loop_body_suspends` liveness handling exists only
+to keep state fields alive across a loop that contains suspensions in
+OTHER positions). Generators iterate with `while` + manual index/pull
+instead. Lifting this means lowering suspending for-loops through the
+SM segment machinery (resume-point inside the loop, iteration state —
+__col/__idx/__len — in state fields). Surfaced 2026-06-10 while wiring
+SM-body struct for-bindings; not previously indexed.
 
 ---
 

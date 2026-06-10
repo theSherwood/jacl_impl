@@ -10925,9 +10925,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JACL_ASSERT_TAG(state_val, jacl_is_state_machine);
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
-        /* Copy from stack (bottom of the N-slot range first) */
+        /* Copy from stack (bottom of the N-slot range first), clearing the
+         * stack's inline bits as we vacate the slots — vm__push doesn't
+         * touch the bitmap, so a stale bit would make a later tagged value
+         * at the same depth read as raw inline bytes. */
         for (uint8_t i = 0; i < width; i++) {
           sm->fields[base_idx + i] = vm->stack[vm->stack_top - width + i];
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + i);
         }
         /* US-014: mark SM field slots as raw struct bytes */
         for (uint8_t i = 0; i < width; i++) {

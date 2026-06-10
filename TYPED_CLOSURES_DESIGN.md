@@ -91,7 +91,14 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
   `for [filter $s …]` compiled the dyn consumer path and tripped the
   runtime guard). Test: `stream_struct_ret.jacl` (identity, field-modifying,
   and scalar→struct mappers; chained filter; typed collect).
-  **Still open:** SM-body struct for-bindings. Typed `collect` → `[Vec T]` LANDED (debt 2;
+  **SM-body struct for-bindings LANDED (2026-06-10):** the loop binding
+  rides a WIDE SM state field (walk registers width + struct idx from the
+  collection stamp; OP_SET/GET_STATE_FIELD_WIDE; GC skips raw slots) for
+  stream / [Vec T] / [Arr T] loops in suspending procs — the vec/arr
+  struct loops previously misbehaved silently there (local-vs-state
+  mismatch). Note for-loop BODIES still can't suspend at all
+  (NOT_IMPLEMENTED.md §8d). Test: `sm_struct_for.jacl`.
+  Typed `collect` → `[Vec T]` LANDED (debt 2;
   struct streams collect to [Vec Struct], wide stored flat, str stays plain
   — typed-vec storage is GC-opaque). The §4.1c
   generator-body struct bugs found en route are FIXED — see
