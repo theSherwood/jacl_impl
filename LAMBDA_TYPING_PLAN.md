@@ -2,6 +2,7 @@
 
 > Issues/pitfalls retrospective: **`STREAM_TYPING_ISSUES.md`**.
 > Open compromises / debt to address: **`STREAM_TYPING_DEBT.md`**.
+> Next-step design (typed/monomorphized closures): **`TYPED_CLOSURES_DESIGN.md`**.
 
 
 Last updated: 2026-06-09. Supersedes HANDOFF.md §1 (the `transform`

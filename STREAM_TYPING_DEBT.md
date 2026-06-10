@@ -7,6 +7,8 @@ Each item: where, why it exists (forced vs pragmatic), impact, remediation,
 rough effort. Nothing here is a correctness bug — the suite is 482/482 and TSAN
 is clean; these are cleanliness/consistency compromises.
 
+> **Design for the unifying fix (items 1, 3, 4, 5-by-deletion): `TYPED_CLOSURES_DESIGN.md`.**
+
 ## Root cause (most items collapse into this)
 
 **Lambdas have `dyn` params/returns at runtime — JACL has no generics.** So every
