@@ -223,6 +223,28 @@ pulling on them; revisit when one shows up.
      struct-element streams) live in `LAMBDA_TYPING_PLAN.md` + the next-step
      design `TYPED_CLOSURES_DESIGN.md` — start there. (Producer-wide rep for
      i64/u64/f64 has since landed.)**
+  1b. **Struct-element streams — broken at the yield/pull layer; typed-closure
+     monomorphization for struct (and the §4-debt restore-pass drop) deferred
+     behind it.** Verified empirically 2026-06-10: `yield [Pt …]` inside a
+     `proc pts {} [Stream Pt]` generator delivers **nil** to the consumer —
+     the generator's `yield_value` is a single `JaclVal` slot and a multi-slot
+     inline struct doesn't survive it (silent data loss, not an error). So
+     `[Stream <Struct>]` is unusable today regardless of typing. Fixing it
+     needs a producer-contract decision first: most likely "struct stream
+     elements are heap-allocated tagged pointers" (box at the yield site,
+     matching the one-slot `vm__pull_stream_one` contract). Only after that
+     contract lands does struct callback monomorphization make sense — and it
+     is a *different* optimization than the scalar wide flip: scalars convert
+     via free 1-slot↔1-slot bit reinterpretation (`vm__stream_to_wide/tagged`),
+     while struct rep conversion is expand (copy) one way and **allocation**
+     the other, so pushing structs through the scalar pattern would add a
+     per-element alloc at HOF boundaries. The typed-body win for structs is
+     typed pointer-offset field access on the boxed element, no boundary
+     conversion. Owning doc: `TYPED_CLOSURES_DESIGN.md` ("Still open in
+     Phase A"). Related cheap follow-up that does NOT wait for this:
+     dropping the typer restore-pass for tagged-fit scalars (i32/u32/f32/bool
+     — rep already agrees; typed-op codegen win) per `STREAM_TYPING_DEBT.md`
+     item 4a.
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

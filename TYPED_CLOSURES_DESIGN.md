@@ -45,8 +45,34 @@ typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
    wide with no box. Named/dyn callbacks keep the tagged pull. Tests:
    `stream_each_typed.jacl`, `stream_each_named_cb.jacl`.
 
-**Still open in Phase A:** full restore-pass removal (debt 4) for non-wide
-element bodies (i32/struct/str); the wide path already drops it.
+**Still open in Phase A — restore-pass removal for non-wide elements (debt 4),
+tiered by rep (2026-06-10):**
+- **i32/u32/f32/bool — do next, typer-only.** These are tagged-fit scalars
+  (`is_unboxed_type` is i64/u64/f64 only), so the rep the VM hands the body
+  already equals what a typed-body read expects — no VM/operand change, just
+  generalize the `keep_wide` gate in `typer__proc_result_enc` to keep the
+  typed body. Win: typed-op codegen instead of dyn dispatch. Verify typed-i32
+  overflow semantics match the dyn path before trusting it.
+- **str — only if a typed-str fast path exists.** `TYPE_STR` is a real
+  distinct static type, but its runtime rep is identical to a boxed string
+  (tagged heap pointer), so dropping the restore is rep-safe yet buys nothing
+  unless string ops have typed codegen. Check first; skip if cosmetic.
+- **struct — DEFERRED behind the struct-stream producer contract.**
+  `[Stream <Struct>]` is broken below this layer: `yield` of an inline struct
+  delivers **nil** (single-slot `yield_value` can't carry multi-slot inline
+  bytes — verified 2026-06-10). The scalar widen/narrow helpers don't extend:
+  they're free 1-slot bit reinterpretations, while struct rep conversion is
+  expand (copy) one way and **allocation** the other — pushing structs through
+  the same pattern would add a per-element alloc at HOF boundaries. Decide the
+  producer contract first (likely: box at yield → tagged pointer elements),
+  then the struct monomorphization win is typed pointer-offset field access.
+  Indexed in `NOT_IMPLEMENTED.md` §4.1b.
+
+The unifying gate for all tiers: drop the restore-pass exactly when *the rep
+the VM hands the body equals the rep a typed-body read expects*. Wide scalars
+needed the producer-wide flip to make that true; tagged-fit scalars already
+satisfy it; str satisfies it trivially; struct does not yet have a defined
+element rep at the pull boundary at all.
 
 **Known limitation (pre-existing):** `set` of a captured mutable upvalue inside
 a HOF callback (e.g. `for $s [\ set acc [+ $acc $it]]`) type-errors — the
