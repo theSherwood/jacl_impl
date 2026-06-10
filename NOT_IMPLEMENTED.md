@@ -229,22 +229,26 @@ pulling on them; revisit when one shows up.
      `proc pts {} [Stream Pt]` generator delivers **nil** to the consumer —
      the generator's `yield_value` is a single `JaclVal` slot and a multi-slot
      inline struct doesn't survive it (silent data loss, not an error). So
-     `[Stream <Struct>]` is unusable today regardless of typing. Fixing it
-     needs a producer-contract decision first: most likely "struct stream
-     elements are heap-allocated tagged pointers" (box at the yield site,
-     matching the one-slot `vm__pull_stream_one` contract). Only after that
-     contract lands does struct callback monomorphization make sense — and it
-     is a *different* optimization than the scalar wide flip: scalars convert
-     via free 1-slot↔1-slot bit reinterpretation (`vm__stream_to_wide/tagged`),
-     while struct rep conversion is expand (copy) one way and **allocation**
-     the other, so pushing structs through the scalar pattern would add a
-     per-element alloc at HOF boundaries. The typed-body win for structs is
-     typed pointer-offset field access on the boxed element, no boundary
-     conversion. Owning doc: `TYPED_CLOSURES_DESIGN.md` ("Still open in
-     Phase A"). Related cheap follow-up that does NOT wait for this:
-     dropping the typer restore-pass for tagged-fit scalars (i32/u32/f32/bool
-     — rep already agrees; typed-op codegen win) per `STREAM_TYPING_DEBT.md`
-     item 4a.
+     `[Stream <Struct>]` is unusable today regardless of typing. **Direction
+     (settled 2026-06-10): make the stream channel multi-slot for struct
+     elements**, NOT box-at-yield — auto-boxing would reintroduce exactly what
+     `STRUCT_DESIGN.md` eliminates ("auto-heap-allocation when a struct value
+     crosses a typed boundary") and violate "structs cannot live in a dyn
+     slot." The width-aware machinery already exists on the compiled-code side
+     (by-value N-slot params, `OP_RETURN_WIDE`, SM `OP_GET/SET_STATE_FIELD_WIDE`
+     + `field_inline_bitmap`, typed-vec flat storage, and user structs are pure
+     value bytes — no GC interior tracing); what is single-slot is the runtime
+     stream *channel*: `vm->yield_value`, `JaclStream.cached_value`, the
+     `vm__pull_stream_one(&elem)` out-param, and the operand handoff in the
+     ~16 HOF pull sites. Those need width plumbing, the GC must skip a
+     raw-bytes cache when `elem_idx` is a struct idx (gc.c mirror sync), and
+     it force-couples two open items — typed `collect` → `[Vec T]` (debt 2)
+     and consumer-untyped → compile error — because inline value bytes have
+     nowhere legal to go in a dyn terminal. Owning doc:
+     `TYPED_CLOSURES_DESIGN.md` ("Still open in Phase A"). Related cheap
+     follow-up that does NOT wait for this: dropping the typer restore-pass
+     for tagged-fit scalars (i32/u32/f32/bool — rep already agrees; typed-op
+     codegen win) per `STREAM_TYPING_DEBT.md` item 4a.
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

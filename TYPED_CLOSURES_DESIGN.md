@@ -57,16 +57,23 @@ tiered by rep (2026-06-10):**
   distinct static type, but its runtime rep is identical to a boxed string
   (tagged heap pointer), so dropping the restore is rep-safe yet buys nothing
   unless string ops have typed codegen. Check first; skip if cosmetic.
-- **struct — DEFERRED behind the struct-stream producer contract.**
+- **struct — DEFERRED behind the multi-slot stream channel.**
   `[Stream <Struct>]` is broken below this layer: `yield` of an inline struct
   delivers **nil** (single-slot `yield_value` can't carry multi-slot inline
-  bytes — verified 2026-06-10). The scalar widen/narrow helpers don't extend:
-  they're free 1-slot bit reinterpretations, while struct rep conversion is
-  expand (copy) one way and **allocation** the other — pushing structs through
-  the same pattern would add a per-element alloc at HOF boundaries. Decide the
-  producer contract first (likely: box at yield → tagged pointer elements),
-  then the struct monomorphization win is typed pointer-offset field access.
-  Indexed in `NOT_IMPLEMENTED.md` §4.1b.
+  bytes — verified 2026-06-10). **Direction settled: widen the stream channel
+  to N slots for struct elements; box-at-yield is REJECTED** — auto-boxing per
+  element would reintroduce what `STRUCT_DESIGN.md` explicitly eliminates
+  (auto-heap-allocation at typed boundaries / structs in dyn slots). The
+  width-aware storage and calling conventions already exist (by-value N-slot
+  params, `OP_RETURN_WIDE`, SM wide state fields, typed-vec flat storage;
+  user structs are pure value bytes so no GC interior tracing) — the gap is
+  purely the runtime channel: `yield_value`, `cached_value`, the
+  `vm__pull_stream_one` out-param, and the ~16 pull-site handoffs, plus a GC
+  skip for raw-bytes caches and the forced coupling to typed `collect` (debt
+  2) and consumer-untyped → type error. Once the channel is wide, struct
+  callback monomorphization falls out of the SAME mechanism as the scalar
+  flip (params bound to the element type, body compiled against inline
+  slots). Indexed in `NOT_IMPLEMENTED.md` §4.1b.
 
 The unifying gate for all tiers: drop the restore-pass exactly when *the rep
 the VM hands the body equals the rep a typed-body read expects*. Wide scalars
