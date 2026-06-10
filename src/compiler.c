@@ -4675,6 +4675,43 @@ static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
   return true;
 }
 
+/* fwd */
+static void compiler__activate_annot_proc_from_shape(Compiler* c, uint32_t shape_idx);
+
+/* Phase B3c/B3d: compile a closure-typed argument/element against an expected
+ * [Proc …] shape — monomorphize an inline literal, conformance-check a named
+ * closure (invariant), error otherwise. Pushes exactly one closure value.
+ * Returns false (after emitting a diagnostic) on a non-conforming value. */
+static bool compiler__compile_closure_to_shape(Compiler* c, AstNode* a,
+                                               uint32_t shape, uint32_t line,
+                                               uint32_t col) {
+  if (a->type == AST_COMMAND && a->data.command.head_id == HEAD_PROC) {
+    compiler__activate_annot_proc_from_shape(c, shape);
+    compiler__compile_node(c, a);    /* HEAD_PROC consumes + arity/param checks */
+    c->annot_proc_active = false;
+    return true;
+  }
+  if (a->type == AST_VAR_REF) {
+    JaclVal gn = compiler__name_val(c->heap, c->intern_table,
+        a->data.var_ref.name, a->data.var_ref.length);
+    int gslot = compiler__resolve_local(c, gn);
+    JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
+    bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
+              compiler__decode_proc_shape(c, shape, pts, &pcnt, &prt) &&
+              compiler__local_closure_conforms(&c->locals[gslot], pts, pcnt, prt);
+    if (!ok) {
+      compiler__error(c, line, col,
+          "value is not a closure conforming to the [Proc …] type");
+      return false;
+    }
+    compiler__compile_node(c, a);    /* pushes the closure value */
+    return true;
+  }
+  compiler__error(c, line, col,
+      "expected an inline closure literal or a named typed-closure value");
+  return false;
+}
+
 /* Phase B3a: decode a TYPE_SHAPE_PROC into the annot_proc monomorphization
  * context + activate it, so compiling an inline proc-literal ARG to a closure
  * param monomorphizes it to the param's declared signature (reuses the same
@@ -7168,13 +7205,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     AstNode* _nh = _ne->data.command.head;
     /* Inner [Vec T] takes 1 arg; inner [Map K V] takes exactly 2 (the
      * one-arg [Map V] form was removed). */
-    bool _ne_ok = _nh && _nh->type == AST_LIT_STRING &&
-                  _nh->data.lit_string.length == 3 &&
-                  ((memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 &&
-                    _ne->data.command.arg_count == 1) ||
-                   (memcmp(_nh->data.lit_string.value, "Map", 3) == 0 &&
-                    _ne->data.command.arg_count == 2));
-    for (uint32_t _ni = 0; _ne_ok && _ni < _ne->data.command.arg_count; _ni++) {
+    bool _ne_is_proc = _nh && _nh->type == AST_LIT_STRING &&
+                       _nh->data.lit_string.length == 4 &&
+                       memcmp(_nh->data.lit_string.value, "Proc", 4) == 0 &&
+                       (_ne->data.command.arg_count == 1 ||
+                        _ne->data.command.arg_count == 2);
+    bool _ne_ok = _ne_is_proc ||
+                  (_nh && _nh->type == AST_LIT_STRING &&
+                   _nh->data.lit_string.length == 3 &&
+                   ((memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 &&
+                     _ne->data.command.arg_count == 1) ||
+                    (memcmp(_nh->data.lit_string.value, "Map", 3) == 0 &&
+                     _ne->data.command.arg_count == 2)));
+    for (uint32_t _ni = 0; _ne_ok && !_ne_is_proc &&
+                           _ni < _ne->data.command.arg_count; _ni++) {
       AstNode* _na = _ne->data.command.args[_ni];
       /* Inner args may be type keywords/struct names (LIT_STRING) or
        * nested compound type expressions (depth-2+, AST_COMMAND) — the
@@ -7188,7 +7232,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             "[Vec ...] too many initial elements (max 255)");
         return;
       }
-      for (uint32_t i = 0; i < argc; i++) compiler__compile_node(c, args[i]);
+      /* B3c: [Vec [Proc …]] — each element is a closure; monomorphize an
+       * inline literal / conformance-check a named closure against the element
+       * signature. Other nested elements ([Vec [Vec T]] …) compile as-is. */
+      uint32_t _pshape = UINT32_MAX;
+      if (_ne_is_proc) {
+        bool _sup = true;
+        _pshape = compiler__intern_proc_shape(c, _ne, &_sup);
+        if (!_sup || _pshape == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Vec [Proc …]]: struct/compound param or return types are not "
+              "yet supported (Phase B3) — use scalar types or `dyn`");
+          return;
+        }
+      }
+      for (uint32_t i = 0; i < argc; i++) {
+        if (_ne_is_proc) {
+          if (!compiler__compile_closure_to_shape(c, args[i], _pshape, line, col))
+            return;
+        } else {
+          compiler__compile_node(c, args[i]);
+        }
+      }
       compiler__emit_byte(c, OP_VEC, line);
       compiler__emit_byte(c, (uint8_t)argc, line);
       c->last_expr_type = TYPE_VEC;
@@ -9863,6 +9928,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * typed-closure monomorphization context + binding-signature record. The
      * resolved signature lives in c->annot_proc_* (filled below). */
     bool proc_binding = false;
+    /* B3c: TYPE_SHAPE_PROC idx for a [Vec/Arr [Proc …]] element type, re-derived
+     * here (compiler-side, cross-registry rule) and stamped on the binding's
+     * Local so a for-loop over it can narrow the element to a typed closure. */
+    uint32_t coll_proc_elem_shape = UINT32_MAX;
 
     if (argc == 3) {
       /* Typed def: [def TYPE name value] */
@@ -9917,6 +9986,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                 return;
               }
               proc_binding = true;
+            }
+            /* B3c: [Vec [Proc …]] / [Arr [Proc …]] — intern the element proc
+             * shape so the binding's Local carries it for for-loop narrowing. */
+            if ((hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
+                             memcmp(hn, "Arr", 3) == 0)) &&
+                tn->data.command.arg_count == 1 &&
+                tn->data.command.args[0]->type == AST_COMMAND &&
+                tn->data.command.args[0]->data.command.head &&
+                tn->data.command.args[0]->data.command.head->type ==
+                    AST_LIT_STRING &&
+                tn->data.command.args[0]->data.command.head
+                    ->data.lit_string.length == 4 &&
+                memcmp(tn->data.command.args[0]->data.command.head
+                           ->data.lit_string.value, "Proc", 4) == 0) {
+              bool sup = true;
+              coll_proc_elem_shape =
+                  compiler__intern_proc_shape(c, tn->data.command.args[0], &sup);
+              if (!sup) coll_proc_elem_shape = UINT32_MAX;
             }
             name_arg_idx   = 1;
             value_arg_idx  = 2;
@@ -10127,6 +10214,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     } else {
       effective_type = TYPE_DYN;
     }
+    /* B3c: a [Vec/Arr [Proc …]] binding keeps its TYPE_VEC/TYPE_ARR type (plain-
+     * rep ref vecs fall to dyn above) so the for-loop can read the element proc
+     * shape off the Local's struct_type_idx (stamped below). */
+    if (coll_proc_elem_shape != UINT32_MAX &&
+        (rhs_type == TYPE_VEC || rhs_type == TYPE_ARR)) {
+      effective_type = rhs_type;
+    }
 
     int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
@@ -10198,6 +10292,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (proc_mono || proc_named) compiler__stamp_closure_local(c);  /* Phase B */
         if (rhs_closure_shape != UINT32_MAX)
           compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
+        if (coll_proc_elem_shape != UINT32_MAX &&
+            (effective_type == TYPE_VEC || effective_type == TYPE_ARR))
+          c->locals[c->local_count - 1].struct_type_idx = coll_proc_elem_shape; /* B3c */
         if (sm_inline_struct) {
           uint32_t base_local_idx = c->local_count - 1;
           c->locals[base_local_idx].width = (uint16_t)sm_struct_width;
@@ -10244,6 +10341,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (proc_mono || proc_named) compiler__stamp_closure_local(c);  /* Phase B */
         if (rhs_closure_shape != UINT32_MAX)
           compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape); /* B3b */
+        if (coll_proc_elem_shape != UINT32_MAX &&
+            (effective_type == TYPE_VEC || effective_type == TYPE_ARR))
+          c->locals[c->local_count - 1].struct_type_idx = coll_proc_elem_shape; /* B3c */
       /* Decomposed nested-buf chain: if the RHS is an intermediate
        * arrow on a nested buf (e.g. `let p = $cube->1`), the AST node's
        * inferred_struct_idx is UINT32_MAX by design (cross-registry
@@ -12596,6 +12696,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_NIL, line);
     JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
+    /* B3c: [Vec [Proc …]] element — if the receiver binding carries a proc-shape
+     * element, stamp the loop var as a typed closure so `[f …]` in the body is a
+     * typed call. (Resolve the receiver's ORIGINAL local, not the __col copy.) */
+    if (col_type == TYPE_VEC && args[0]->type == AST_VAR_REF) {
+      JaclVal _rn = compiler__name_val(c->heap, c->intern_table,
+          args[0]->data.var_ref.name, args[0]->data.var_ref.length);
+      int _rs = compiler__resolve_local(c, _rn);
+      StructTypeRegistry* _reg = compiler__get_struct_registry(c);
+      if (_rs != -1 && _reg) {
+        uint32_t _si = c->locals[_rs].struct_type_idx;
+        if (_si < _reg->count && _reg->shapes[_si].kind == TYPE_SHAPE_PROC)
+          compiler__stamp_closure_param_local(c, c, c->local_count - 1, _si);
+      }
+    }
     uint32_t vec_elem_width = 1;
     if (vec_struct_elem) {
       StructTypeRegistry* vreg = compiler__get_struct_registry(c);

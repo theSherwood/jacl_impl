@@ -9,16 +9,17 @@
 > wide-rep boundary fixes. See the git log around `64e8d6c` and
 > `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
 >
-> **Phase B B1+B2 + B3a + B3b + B3d are COMPLETE** (2026-06-10): `[Proc [P…] R]`
-> type syntax + typed closure VALUES at a `def` site (B1+B2), closure PARAMS /
-> user HOFs (B3a), closures-returning-closures (B3b), AND named closures as
-> VALUES — `[apply $g 5]` / `def [Proc…] f $g` with invariant conformance (B3d)
-> — all via a registry `TYPE_SHAPE_PROC`. No VM change. **The only remaining
-> Phase B slice is B3c** (`[Arr/Vec [Proc …]]` — collections of closures, the
-> nested-shape-in-element-position mechanism, like `[Vec [Vec T]]`). See the
-> `TYPED_CLOSURES_DESIGN.md` Phase B3a/B3b/B3d status blocks.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the **active next step is Phase B3c**
->    (`[Proc …]` array/vec elements — §5 of that doc).
+> **Phase B is COMPLETE for `[Vec …]`** (2026-06-10): `[Proc [P…] R]` type
+> syntax + typed closure VALUES (B1+B2), closure PARAMS / user HOFs (B3a),
+> closures-returning-closures (B3b), named closures as VALUES with conformance
+> (B3d), AND collections of closures `[Vec [Proc …]]` (B3c-vec) — all via a
+> registry `TYPE_SHAPE_PROC`, no VM change. **The only remaining follow-up is
+> `[Arr [Proc …]]`** (mutable-array variant — same mechanism, needs its own
+> constructor + for-loop branch wired; the ctor errors today) and vec-get
+> narrowing on a `[Vec [Proc …]]`. See the `TYPED_CLOSURES_DESIGN.md` Phase B3*
+> status blocks.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is essentially
+>    complete; remaining: `[Arr [Proc …]]` + vec-get narrowing (B3c debt).
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).

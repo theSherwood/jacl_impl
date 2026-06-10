@@ -1,9 +1,40 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase A COMPLETE. Phase B B1+B2 LANDED. B3a (closure params),
-B3b (closures-returning-closures), B3d (named-closure VALUES) LANDED
-(2026-06-10) via a registry `TYPE_SHAPE_PROC`. Next: B3c (`[Arr/Vec [Proc …]]`
-— collections of closures).**
+Status: **Phase B COMPLETE for `[Vec …]` (2026-06-10): B1+B2 (typed closure
+VALUES), B3a (closure params), B3b (closures-returning-closures), B3d
+(named-closure values), and B3c-vec (`[Vec [Proc …]]` — collections of
+closures), all via a registry `TYPE_SHAPE_PROC`, no VM change. The one
+remaining follow-up is `[Arr [Proc …]]` (the mutable-array variant — same
+mechanism, needs its own constructor + for-loop branch wired).**
+
+**Phase B3c — `[Vec [Proc …]]` (collections of closures) as landed (2026-06-10):**
+Closures are ref-kind (tagged heap pointers) → a `[Vec [Proc …]]` is the PLAIN
+traced vec rep with the element signature carried statically (TYPE_VEC + an
+element `TYPE_SHAPE_PROC` idx), exactly like `[Vec str]`/`[Vec [Vec i64]]`.
+- **Element type:** `typer__nested_elem_shape` gained a `[Proc …]` arm (interns
+  the shape; handled up front since the param list is an AST_COMMAND the generic
+  inner loop would misparse).
+- **Constructor** (`[[Vec [Proc …]] e0 e1]`): typer + compiler nested-vec ctor
+  recognize a `[Proc …]` element; each element is compiled via a shared helper
+  `compiler__compile_closure_to_shape` (monomorphize an inline literal /
+  conformance-check a named closure / error) — the same invariant as args.
+- **Binding shape (cross-registry):** the def handler re-derives the element
+  proc shape COMPILER-side (`coll_proc_elem_shape`) and stamps it on the Local's
+  `struct_type_idx`; a `[Vec/Arr [Proc …]]` binding keeps its `TYPE_VEC` type
+  (plain-rep ref vecs otherwise fall to dyn) so the for-loop can read it.
+- **for-loop narrowing:** the typer decodes the element proc shape onto the loop
+  binding (is_typed_closure); the compiler resolves the receiver's ORIGINAL
+  Local, reads its proc-shape `struct_type_idx`, and stamps the loop var via
+  `compiler__stamp_closure_param_local` — so `[f …]` on an element is a typed
+  unboxed call. Tests: `typed_closure_vec.jacl` (literal + named elements,
+  wide-i64 unboxed), `typed_closure_vec_error` (element conformance). Suite
+  599/599, 91/91.
+
+**B3c scope / debt:** `[Arr [Proc …]]` (mutable) — the def-annotation shape is
+already interned, but the arr CONSTRUCTOR and arr for-loop branch aren't wired
+(today the ctor errors). vec-get on a `[Vec [Proc …]]` (`[vec-get $fns 0]`)
+doesn't narrow to a typed closure yet (for-loop does). Both are mechanical
+follow-ups mirroring the vec/scalar paths.
 
 **Phase B3d — named closures as values as landed (2026-06-10):**
 - **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.

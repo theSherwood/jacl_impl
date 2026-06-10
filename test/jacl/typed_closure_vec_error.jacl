@@ -1,0 +1,10 @@
+# expect-error: conforming
+# A [Vec [Proc …]] element must conform to the declared element signature
+# (invariant). Here a named [Proc [f64] f64] closure is placed in a
+# [Vec [Proc [i64] i64]] — a compile error.
+proc main {} {
+  def [Proc [f64] f64] g [proc {n} {* $n 2.0}]
+  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] $g]
+  for $fns f { print [f 1] }
+}
+main

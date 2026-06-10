@@ -638,12 +638,23 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
  * recognizable nested collection. Cross-registry rule: the returned idx
  * lives only in typer bindings / typer-local decisions, NEVER on AST
  * stamps (docs/TYPE_REGISTRY_REFACTOR.md). */
+static uint32_t typer__intern_proc_shape(TyperCtx* tc, AstNode* node,
+                                         bool* out_supported); /* fwd (B3c) */
+
 static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
   if (!en || en->type != AST_COMMAND || !en->data.command.head ||
       en->data.command.head->type != AST_LIT_STRING) return UINT32_MAX;
   const char* hn = en->data.command.head->data.lit_string.value;
   uint32_t    hl = en->data.command.head->data.lit_string.length;
   uint32_t    ac = en->data.command.arg_count;
+  /* B3c: a [Proc [P…] R] element type interns a TYPE_SHAPE_PROC. Handled up
+   * front because the param list `[P…]` is an AST_COMMAND that the generic
+   * inner-arg loop below would misparse as a nested collection. */
+  if (hl == 4 && memcmp(hn, "Proc", 4) == 0) {
+    bool sup = true;
+    uint32_t ps = typer__intern_proc_shape(tc, en, &sup);
+    return (sup && ps != UINT32_MAX) ? ps : UINT32_MAX;
+  }
   /* Inner type-name → portable encoding (scalar sentinel / struct idx). */
   uint32_t inner[2] = { UINT32_MAX, UINT32_MAX };
   for (uint32_t i = 0; i < ac && i < 2; i++) {
@@ -3621,6 +3632,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               typer__decode_map_shape(iv, ik, &bt, &bsi, &bki);
               /* scope_add below has no key slot — patch it in after. */
               for_bind_key_idx = bki;
+            } else if (ek == TYPE_CLOSURE) {
+              /* B3c: [Vec [Proc …]] element — bind the loop var as a typed
+               * closure carrying the element signature (stamped after
+               * scope_add) so `[f …]` in the body is a typed call. */
+              bt = TYPE_CLOSURE; bsi = eidx;
             }
           } else if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
             /* Narrow to the element scalar — all scalars, including wide
@@ -3644,6 +3660,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         if (for_bind_key_idx != UINT32_MAX && tc->binding_count > 0) {
           tc->bindings[tc->binding_count - 1].key_struct_idx =
               for_bind_key_idx;
+        }
+        /* B3c: a closure-element loop binding decodes its proc shape onto the
+         * binding so a body call `[f …]` narrows (via the bound_proxy). */
+        if (bt == TYPE_CLOSURE && bsi != UINT32_MAX && tc->binding_count > 0) {
+          uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+          if (typer__decode_proc_shape(tc, bsi, &pc2, pts2, &rt2)) {
+            TyperBinding* b = &tc->bindings[tc->binding_count - 1];
+            b->is_typed_closure = true;
+            b->proc_param_count = pc2;
+            for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
+              b->proc_param_types[k] = pts2[k];
+            b->proc_return_type = rt2;
+            b->proc_return_struct_idx = UINT32_MAX;
+          }
         }
         typer__infer_node(tc, body);
         typer__scope_pop(tc);
@@ -4480,6 +4510,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               uint32_t mki;
               typer__decode_map_shape(iv, ik, &want, &iv, &mki);
               (void)mki;
+            } else if (ekind == TYPE_CLOSURE) {
+              /* B3c: [Vec [Proc …]] — closure element (ref-kind, plain rep).
+               * An inline closure-literal element is monomorphized to the
+               * element signature here (mirrors the def/arg/return walk); a
+               * named closure stays TYPE_CLOSURE (compiler enforces conformance).
+               * No idx compare — proc shapes are typer-side only. */
+              want = TYPE_CLOSURE;
+              inner_ref = true;  /* suppress the idx compare below */
+              uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+              bool dec = typer__decode_proc_shape(tc, esh, &pc2, pts2, &rt2);
+              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+                AstNode* av = node->data.command.args[ei];
+                if (dec && av->type == AST_COMMAND &&
+                    av->data.command.head_id == HEAD_PROC)
+                  typer__monomorphize_proc_literal(tc, av, pts2, pc2, rt2);
+              }
             } else {
               want = TYPE_TYPED_VEC;
             }
