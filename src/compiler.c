@@ -4803,6 +4803,37 @@ static bool compiler__global_closure_conforms(GlobalArity* ga,
                                           pcount, rtype);
 }
 
+/* Conformance-check the typer's portable proc-shape STAMP (set on a var-ref to
+ * a global proc) against a declared [Proc …] signature given as flat arrays.
+ * Fallback for a FORWARD reference: a global proc used as a value before its
+ * textual definition has no compiled GlobalArity yet, but the typer's
+ * whole-program pre-pass already stamped its real signature portably onto the
+ * var-ref. (Only reachable for an actual proc — the typer narrows `$name` to a
+ * closure solely for registered procs, so mutable/immutable global BINDINGS and
+ * undefined names never get a stamp and error at the typer instead.) */
+static bool compiler__stamp_closure_conforms(Compiler* c, uint32_t stamp_shape,
+                                            const JaclType* ptypes,
+                                            const uint32_t* pstruct_idxs,
+                                            uint8_t pcount, JaclType rtype,
+                                            uint32_t rstruct_idx) {
+  if (stamp_shape == UINT32_MAX) return false;
+  JaclType apts[COMPILER_MAX_PROC_PARAMS]; uint8_t apcnt; JaclType art;
+  uint32_t apsi[COMPILER_MAX_PROC_PARAMS]; uint32_t arsi;
+  if (!compiler__decode_proc_shape_ex(c, stamp_shape, apts, &apcnt, &art,
+                                      apsi, &arsi))
+    return false;
+  if (apcnt != pcount || art != rtype) return false;
+  if (art == TYPE_STRUCT && arsi != rstruct_idx) return false;
+  for (uint8_t k = 0; k < pcount; k++) {
+    if (apts[k] != ptypes[k]) return false;
+    if (apts[k] == TYPE_STRUCT) {
+      uint32_t d = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
+      if (apsi[k] != d) return false;
+    }
+  }
+  return true;
+}
+
 /* fwd */
 static void compiler__activate_annot_proc_from_shape(Compiler* c, uint32_t shape_idx);
 
@@ -4832,7 +4863,9 @@ static bool compiler__compile_closure_to_shape(Compiler* c, AstNode* a,
       ok = compiler__local_closure_conforms(&c->locals[gslot], pts, psi, pcnt, prt);
     else if (shape_ok && gslot == -1)  /* bare global proc ref as a value */
       ok = compiler__global_closure_conforms(compiler__find_global(c, gn),
-                                             pts, psi, pcnt, prt);
+                                             pts, psi, pcnt, prt) ||
+           compiler__stamp_closure_conforms(c, a->inferred_proc_shape_idx,
+                                            pts, psi, pcnt, prt, rsi);
     if (!ok) {
       compiler__error(c, line, col,
           "value is not a closure conforming to the [Proc …] type");
@@ -10348,11 +10381,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* A bare GLOBAL proc reference (`$dbl`) used as a closure value. Its
          * signature lives in the global registry; conformance-check it against
          * the declared [Proc …]. The value already compiled to OP_GET_GLOBAL,
-         * which yields the closure at runtime. (A forward reference — proc not
-         * compiled yet — has no signature here and is rejected.) */
+         * which yields the closure at runtime. A FORWARD reference (proc not
+         * compiled yet) falls back to the typer's portable shape stamp. */
         conforms = compiler__global_closure_conforms(compiler__find_global(c, gn),
             c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
-            c->annot_proc_param_count, c->annot_proc_return_type);
+            c->annot_proc_param_count, c->annot_proc_return_type) ||
+          compiler__stamp_closure_conforms(c, gv->inferred_proc_shape_idx,
+            c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
+            c->annot_proc_param_count, c->annot_proc_return_type,
+            c->annot_proc_return_struct_idx);
       }
       if (conforms) {
         proc_named = true;
@@ -17276,7 +17313,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                                                   pts, psi, pcnt, prt);
           else if (shape_ok && gslot == -1)
             ok = compiler__global_closure_conforms(compiler__find_global(c, gn),
-                                                   pts, psi, pcnt, prt);
+                                                   pts, psi, pcnt, prt) ||
+                 compiler__stamp_closure_conforms(c, a->inferred_proc_shape_idx,
+                                                  pts, psi, pcnt, prt, rsi);
           if (!ok) {
             compiler__error(c, line, col,
                 "argument is not a closure conforming to the [Proc …] "

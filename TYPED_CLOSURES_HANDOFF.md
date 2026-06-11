@@ -110,15 +110,30 @@ arg, `[Vec/Arr [Proc …]]` element) gained a global-registry branch
 `GlobalArity`). The var-ref compiles to OP_GET_GLOBAL, which already yields the
 closure at runtime. Test: `typed_closure_global_proc.jacl`.
 
-**Deliberately NOT supported — forward references as values.** A proc used as a
-value *before* its textual definition errors at the sink: the compiler registers
-a proc's signature when it *compiles* that proc, so the use site has nothing to
-conform against. (Forward *calls* still work via runtime dispatch — that's
-pre-existing.) This was a deliberate scoping decision, not an oversight: we did
-not want to quietly extend forward-reference semantics. Define procs before
-using them as values. Revisiting would mean a compiler proc-signature pre-pass
-(broader change) or a typer-stamp conformance fallback (the typer already stamps
-the var-ref's portable shape) — both were prototyped and backed out.
+**Forward references as values — supported (stamp fallback).** A proc used as a
+value *before* its textual definition (`[apply $later 10]` with `later` defined
+below) also conforms. The compiler builds a proc's `GlobalArity` only while
+compiling its body, so a forward use site has no compiled signature — but the
+typer's whole-program pre-pass already stamped the var-ref with the proc's
+portable shape, so the conformance sinks fall back to that stamp
+(`compiler__stamp_closure_conforms`). This keeps forward *values* consistent
+with forward *calls* (which already worked) and makes higher-order mutual
+recursion expressible (procs handed to each other as `$values`, not just called
+by name).
+
+The fallback is gated structurally so it can ONLY rescue an immutable proc: the
+typer narrows `$name` to a closure (and stamps it) *solely* for registered
+procs. A forward reference to a `mut`/`def` global BINDING, or to an undefined
+name, never gets a stamp — it stays `dyn` and errors at the typer
+(`expected closure, got dyn`), well upstream of the compiler fallback. A forward
+ref to a proc with a non-conforming signature is still rejected (the stamp
+carries the proc's real signature). Negative regression tests:
+`typed_closure_global_proc_fwd_mut_err.jacl`,
+`typed_closure_global_proc_fwd_undef_err.jacl`,
+`typed_closure_global_proc_wrong_sig_err.jacl`. Caveat: a proc with an *inferred*
+return type or a *generator* isn't known until its body compiles, so it can't be
+forward-used as a typed value — but it couldn't conform to a `[Proc …]` sink
+anyway.
 
 ## Next slice (recommended): vec-get / untyped-binding closure narrowing
 

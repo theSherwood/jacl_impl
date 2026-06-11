@@ -59,14 +59,20 @@ ret>`). Verified-remaining gaps:
    `[Vec [Proc …]]` elements all work, and wrong-signature procs are rejected.
    The compiler conformance sinks gained `compiler__global_closure_conforms` (a
    transient-`Local` view over the proc's `GlobalArity`). Test:
-   `typed_closure_global_proc.jacl`. **Not supported (deliberate):** a forward
-   reference used as a value — the compiler has no signature for a proc it
-   hasn't compiled yet, so define before use. (Procs with a non-portable
-   compound param/return also stay dyn-valued.) **Still open (same class):** a
-   closure value flowing through an UNTYPED binding (`def f $dbl` / `def f
-   [proc …]`) or a get (`def g [vec-get …]`) collapses to `dyn` when later
-   passed to a `[Proc …]` param — the untyped-def effective-type logic doesn't
-   inherit the closure shape.
+   `typed_closure_global_proc.jacl`. **Forward refs supported:** a proc used as a
+   value before its textual definition conforms via the typer's portable shape
+   stamp (`compiler__stamp_closure_conforms`) — the compiler has no compiled
+   signature yet, but the typer's pre-pass stamped one. This makes higher-order
+   mutual recursion expressible. The fallback is gated to immutable procs only:
+   the typer stamps `$name` solely for registered procs, so a forward ref to a
+   `mut`/`def` binding or an undefined name stays `dyn` and is a hard compile
+   error (`typed_closure_global_proc_fwd_{mut,undef}_err.jacl`); a wrong-signature
+   proc is still rejected (`…_wrong_sig_err.jacl`). (Procs with a non-portable
+   compound param/return, an inferred return, or a generator stay dyn-valued.)
+   **Still open (same class):** a closure value flowing through an UNTYPED
+   binding (`def f $dbl` / `def f [proc …]`) or a get (`def g [vec-get …]`)
+   collapses to `dyn` when later passed to a `[Proc …]` param — the untyped-def
+   effective-type logic doesn't inherit the closure shape.
 3. **Non-literal closure-returning tail** — a proc returning a closure *param or
    value verbatim* (not an inline literal) isn't conformance-checked against its
    declared `[Proc …]` return.

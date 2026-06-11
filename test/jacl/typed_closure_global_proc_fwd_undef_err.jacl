@@ -1,0 +1,6 @@
+# expect-error: expected closure, got dyn
+# A FORWARD reference to an UNDEFINED name as a closure value is a hard compile
+# error (the name is neither a proc nor a binding, so it stays `dyn`).
+proc run {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc main {} { print [run $nope 5] }
+main

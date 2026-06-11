@@ -2,13 +2,18 @@
 # expect: 14
 # expect: 6
 # expect: 8
+# expect: 30
 # Global procs as first-class closure values. A top-level proc referenced by
 # name (`$dbl`) is a closure value carrying the proc's signature, so it can be
 # assigned to a [Proc …] binding, passed directly to a [Proc …] param, and
 # stored as a typed-collection element — the typer narrows the `$name` ref
-# instead of leaving it dyn. (A FORWARD reference — using a proc as a value
-# before its textual definition — is not supported: the proc's signature isn't
-# compiled yet at the use site, so it's a conformance error. Define before use.)
+# instead of leaving it dyn. A FORWARD reference (using a proc as a value before
+# its textual definition, e.g. `$later` below) also works: the typer's
+# whole-program pre-pass already knows every proc's signature, and the compiler
+# conforms the use site against the typer's portable shape stamp. This makes
+# higher-order mutual recursion expressible. (Only registered procs narrow this
+# way; a forward ref to a mutable/immutable BINDING or an undefined name stays a
+# hard compile error — see typed_closure_global_proc_fwd_*_err.jacl.)
 struct Point {i32 x, i32 y}
 proc dbl   {i32 x} i32   { [* $x 2] }
 proc shift {Point p} Point { [Point x [+ $p->x 1] y $p->y] }
@@ -29,5 +34,11 @@ proc main {} {
   # Store named procs in a [Vec [Proc …]] and call an element.
   def [Vec [Proc [i32] i32]] fns [[Vec [Proc [i32] i32]] $dbl]
   print [[vec-get $fns 0] 4]                             # 8
+
+  # FORWARD reference: `later` is a proc defined AFTER main, used here as a
+  # value. The conformance falls back to the typer's portable shape stamp.
+  print [apply $later 10]                                # 30
 }
+# Defined after `main` — a forward reference when used as `$later` above.
+proc later {i32 x} i32 { [* $x 3] }
 main

@@ -1,0 +1,8 @@
+# expect-error: is not a closure conforming to the [Proc …]
+# A FORWARD reference to a proc whose signature does NOT conform is rejected: the
+# typer's portable stamp carries the proc's real signature, so the conformance
+# fallback still catches the mismatch (here i32->i32 vs the f32->f32 param).
+proc run {[Proc [f32] f32] f, f32 n} f32 { [f $n] }
+proc main {} { print [run $dbl 5.0] }
+proc dbl {i32 x} i32 { [* $x 2] }
+main
