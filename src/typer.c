@@ -4482,6 +4482,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         break;
       }
     }
+  } else if (head_is_closure_call) {
+    /* Step 2b: a DIRECT call of a closure-valued command head — the result is
+     * the closure's return type (mirrors the named-proc `if (proc)` arm).
+     * Without this the call types dyn and a proc returning it fails its return
+     * check. */
+    node->inferred_type = (JaclType)head_clos_rt;
   } else if (head && head->type == AST_COMMAND) {
     /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
      * Mirrors compiler__compile_command's typed-vec/typed-map branch.

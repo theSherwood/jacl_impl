@@ -19762,14 +19762,23 @@ bool compiler__compile_module(const char* canonical_path,
       &mc, parse.nodes, parse.count, canonical_path,
       imports, COMPILER_GLOBAL_ARITIES_MAX);
 
+  /* Step 2a: snapshot the shared registry's struct count (after dependency
+   * modules registered theirs in the import collection above), pre-register
+   * THIS module's structs before the typer, then bound the typer's seeding to
+   * the snapshot so tc.structs[] is unchanged. Enables proc-shape stamping in
+   * module compiles too. Mirrors compiler_compile. */
+  uint32_t seed_struct_count = mc.struct_registry ? mc.struct_registry->count : 0;
+  if (parse.error_count == 0) {
+    compiler__prepass_register_structs(&mc, parse.nodes, parse.count);
+  }
+
   /* Phase 3 typer pass: walk the module AST so dual-track invariants
    * hold during compile, and so consumer sites that read from
    * inferred_type don't fall back unnecessarily. */
   {
     TyperResult tr;
     typer_infer(parse.nodes, parse.count, &tr, imports, import_count,
-                mc.struct_registry,
-                mc.struct_registry ? mc.struct_registry->count : 0);
+                mc.struct_registry, seed_struct_count);
     if (tr.error_count > 0) {
       compiler__error(&mc, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -19934,13 +19943,21 @@ ProgramResult jacl_compile_program(const char* root_path,
       &c, parse.nodes, parse.count, canonical,
       imports, COMPILER_GLOBAL_ARITIES_MAX);
 
+  /* Step 2a: snapshot the struct count (after dependency modules registered
+   * theirs during import collection), pre-register the root program's structs
+   * before the typer, then bound the typer's seeding to the snapshot. Mirrors
+   * compiler_compile / compiler__compile_module. */
+  uint32_t seed_struct_count = c.struct_registry ? c.struct_registry->count : 0;
+  if (parse.error_count == 0) {
+    compiler__prepass_register_structs(&c, parse.nodes, parse.count);
+  }
+
   /* Phase 3 typer pass for module programs (mirrors compiler_compile and
    * compiler__compile_module). */
   {
     TyperResult tr;
     typer_infer(parse.nodes, parse.count, &tr, imports, import_count,
-                c.struct_registry,
-                c.struct_registry ? c.struct_registry->count : 0);
+                c.struct_registry, seed_struct_count);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);

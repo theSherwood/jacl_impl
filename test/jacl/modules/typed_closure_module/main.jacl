@@ -1,0 +1,13 @@
+# expect: 5
+# expect: 42
+# expect: 6000000000
+use "./helper.jacl" {hval}
+struct MPoint {i32 y}
+proc main {} {
+  def mp [MPoint y 5]
+  print $mp->y
+  print [hval]
+  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] [proc {x} {* $x 1000000000}]]
+  print [[vec-get $fns 0] 6]
+}
+main

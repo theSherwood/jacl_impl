@@ -167,12 +167,16 @@ Revised step-2 decomposition:
   AST-registered by `typer__register_structs`. Codegen `AST_DEFSTRUCT` skips
   re-registration when the root's `structs_preregistered` flag is set (the
   pre-pass owns registration + duplicate detection); falls back to registering
-  otherwise. **Scope:** applied to `compiler_compile` (single-file + interpret)
-  only; the module paths (`compiler__compile_module`, `jacl_compile_program`)
-  and the `syntax.c` typer calls pass the full count + leave the flag false →
-  behavior-identical, no pre-pass. Extending the pre-pass to modules is a 2b
-  prerequisite follow-up. Landed in two commits: a pure extraction of the
-  registration body into `compiler__register_struct_def`, then the reorder.
+  otherwise. **Scope:** initially `compiler_compile` (single-file + interpret)
+  only; **now also the module paths** (`compiler__compile_module`,
+  `jacl_compile_program`) — each snapshots the struct count after dependency
+  modules registered theirs (during import collection), pre-registers its own
+  structs, and bounds the typer's seeding to the snapshot, so closure
+  proc-shape stamping is collision-safe in module compiles too. Only the
+  `syntax.c` typer calls remain pass-the-full-count + no pre-pass (the prelude/
+  macro-body paths; one passes a NULL registry, so no stamping there anyway).
+  Landed in two commits: a pure extraction of the registration body into
+  `compiler__register_struct_def`, then the reorder (and a module extension).
   Suite 91/0; TSAN 89/2 (known-safe). NB: the `Compiler` struct is mirrored in
   `jacl.h` — the new `structs_preregistered` field had to be added there too
   (the `struct_sizes` test catches the sizeof drift).
