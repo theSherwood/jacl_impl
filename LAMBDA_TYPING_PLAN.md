@@ -9,17 +9,17 @@
 > wide-rep boundary fixes. See the git log around `64e8d6c` and
 > `NOT_IMPLEMENTED.md` §4/§8d/§8e for exactly what landed.
 >
-> **Phase B is COMPLETE for `[Vec …]`** (2026-06-10): `[Proc [P…] R]` type
-> syntax + typed closure VALUES (B1+B2), closure PARAMS / user HOFs (B3a),
+> **Phase B is COMPLETE** (2026-06-11): `[Proc [P…] R]` type syntax + typed
+> closure VALUES (B1+B2), closure PARAMS / user HOFs (B3a),
 > closures-returning-closures (B3b), named closures as VALUES with conformance
-> (B3d), AND collections of closures `[Vec [Proc …]]` (B3c-vec) — all via a
-> registry `TYPE_SHAPE_PROC`, no VM change. **The only remaining follow-up is
-> `[Arr [Proc …]]`** (mutable-array variant — same mechanism, needs its own
-> constructor + for-loop branch wired; the ctor errors today) and vec-get
-> narrowing on a `[Vec [Proc …]]`. See the `TYPED_CLOSURES_DESIGN.md` Phase B3*
-> status blocks.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is essentially
->    complete; remaining: `[Arr [Proc …]]` + vec-get narrowing (B3c debt).
+> (B3d), AND collections of closures in BOTH `[Vec [Proc …]]` (B3c-vec) and
+> `[Arr [Proc …]]` (B3c-arr) — all via a registry `TYPE_SHAPE_PROC`, no VM
+> change. **Remaining follow-ups** (mechanical, shared by vec and arr):
+> vec-get/arr-get element narrowing, and monomorphizing a closure literal pushed
+> via vec-push/arr-push (the push path skips the element conformance walk). See
+> the `TYPED_CLOSURES_DESIGN.md` Phase B3* status blocks.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is complete;
+>    remaining: vec-get/arr-get narrowing + push-of-closure monomorphization.
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).

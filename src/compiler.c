@@ -7260,6 +7260,70 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
   }
+  /* Nested compound element arr ctor: [[Arr [Proc …]] e0 e1 …] (and the
+   * [Arr [Vec T]] / [Arr [Map …]] variants). Mirrors the vec branch above —
+   * the element is a tagged heap value (collection / closure) so this is a
+   * REF-element arr: plain traced arr rep (OP_ARR). [Arr [Proc …]] elements
+   * are monomorphized (inline literal) / conformance-checked (named) against
+   * the element signature, exactly like the vec path. */
+  if (_coll_kind == 0 && head->type == AST_COMMAND &&
+      head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Arr", 3) == 0 &&
+      head->data.command.arg_count == 1 &&
+      head->data.command.args[0]->type == AST_COMMAND) {
+    AstNode* _ne = head->data.command.args[0];
+    AstNode* _nh = _ne->data.command.head;
+    bool _ne_is_proc = _nh && _nh->type == AST_LIT_STRING &&
+                       _nh->data.lit_string.length == 4 &&
+                       memcmp(_nh->data.lit_string.value, "Proc", 4) == 0 &&
+                       (_ne->data.command.arg_count == 1 ||
+                        _ne->data.command.arg_count == 2);
+    bool _ne_ok = _ne_is_proc ||
+                  (_nh && _nh->type == AST_LIT_STRING &&
+                   _nh->data.lit_string.length == 3 &&
+                   ((memcmp(_nh->data.lit_string.value, "Vec", 3) == 0 &&
+                     _ne->data.command.arg_count == 1) ||
+                    (memcmp(_nh->data.lit_string.value, "Map", 3) == 0 &&
+                     _ne->data.command.arg_count == 2)));
+    for (uint32_t _ni = 0; _ne_ok && !_ne_is_proc &&
+                           _ni < _ne->data.command.arg_count; _ni++) {
+      AstNode* _na = _ne->data.command.args[_ni];
+      if (_na->type != AST_LIT_STRING && _na->type != AST_COMMAND)
+        _ne_ok = false;
+    }
+    if (_ne_ok) {
+      if (argc > 255) {
+        compiler__error(c, line, col,
+            "[Arr ...] too many initial elements (max 255)");
+        return;
+      }
+      uint32_t _pshape = UINT32_MAX;
+      if (_ne_is_proc) {
+        bool _sup = true;
+        _pshape = compiler__intern_proc_shape(c, _ne, &_sup);
+        if (!_sup || _pshape == UINT32_MAX) {
+          compiler__error(c, line, col,
+              "[Arr [Proc …]]: struct/compound param or return types are not "
+              "yet supported (Phase B3) — use scalar types or `dyn`");
+          return;
+        }
+      }
+      for (uint32_t i = 0; i < argc; i++) {
+        if (_ne_is_proc) {
+          if (!compiler__compile_closure_to_shape(c, args[i], _pshape, line, col))
+            return;
+        } else {
+          compiler__compile_node(c, args[i]);
+        }
+      }
+      compiler__emit_byte(c, OP_ARR, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      c->last_expr_type = TYPE_ARR;
+      return;
+    }
+  }
   /* Nested compound VALUE map ctor: [[Map K [Vec T]] k v …]. The value is
    * a collection (tagged heap value — a REF kind) → PLAIN traced map rep
    * (OP_MAP); key/value typing is static, enforced by the typer's
@@ -12531,6 +12595,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclVal arr_bind_val = compiler__name_val(c->heap, c->intern_table,
                                                 bind_name, bind_name_len);
       compiler__add_local(c, arr_bind_val, line, col);
+      /* B3c: [Arr [Proc …]] element — if the receiver binding carries a
+       * proc-shape element, stamp the loop var as a typed closure so `[f …]`
+       * in the body is a typed call. Mirrors the vec branch. (Resolve the
+       * receiver's ORIGINAL local, not the __col copy.) */
+      if (col_type == TYPE_ARR && args[0]->type == AST_VAR_REF) {
+        JaclVal _rn = compiler__name_val(c->heap, c->intern_table,
+            args[0]->data.var_ref.name, args[0]->data.var_ref.length);
+        int _rs = compiler__resolve_local(c, _rn);
+        StructTypeRegistry* _reg = compiler__get_struct_registry(c);
+        if (_rs != -1 && _reg) {
+          uint32_t _si = c->locals[_rs].struct_type_idx;
+          if (_si < _reg->count && _reg->shapes[_si].kind == TYPE_SHAPE_PROC)
+            compiler__stamp_closure_param_local(c, c, c->local_count - 1, _si);
+        }
+      }
       uint32_t arr_elem_width = 1;
       if (arr_struct_elem) {
         StructTypeRegistry* areg = compiler__get_struct_registry(c);

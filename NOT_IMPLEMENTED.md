@@ -8,14 +8,14 @@ If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
 > **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
-> block). **Typed-closures Phase B is COMPLETE for `[Vec …]`** (2026-06-10) —
+> block). **Typed-closures Phase B is COMPLETE** (2026-06-11) —
 > `[Proc [P…] R]` type syntax + typed closure VALUES (B1+B2), closure PARAMS /
 > user HOFs (B3a), closures-returning-closures (B3b), named closures as VALUES
-> with conformance (B3d), AND collections of closures `[Vec [Proc …]]` (B3c-vec)
-> — all via a registry `TYPE_SHAPE_PROC`, no VM change. The only remaining
-> follow-up is `[Arr [Proc …]]` (mutable variant; ctor + for-loop branch not yet
-> wired — errors today) and vec-get narrowing on a `[Vec [Proc …]]`.
-> See `TYPED_CLOSURES_DESIGN.md` Phase B3* status blocks.
+> with conformance (B3d), AND collections of closures in BOTH `[Vec [Proc …]]`
+> (B3c-vec) and `[Arr [Proc …]]` (B3c-arr) — all via a registry
+> `TYPE_SHAPE_PROC`, no VM change. Remaining follow-ups (shared vec+arr):
+> vec-get/arr-get element narrowing, and monomorphizing a closure literal pushed
+> via vec-push/arr-push. See `TYPED_CLOSURES_DESIGN.md` Phase B3* status blocks.
 > Alternative next slices, all indexed below: typed spread (§4.1b),
 > map iteration / `for` over maps (§4), the punted dyn-return no-autobox
 > consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
@@ -200,13 +200,14 @@ pulling on them; revisit when one shows up.
   (`def add5 [make-adder 5]` → `[add5 3]` typed). **Named closures as VALUES too
   (B3d, 2026-06-10):** `[apply $g 5]` and `def [Proc…] f $g` conformance-check a
   named typed-closure's signature (resolved from its local) and pass/bind it.
-  **Collections of closures too (B3c-vec, 2026-06-10):** `[Vec [Proc …]]`
-  constructs (literal elements monomorphized, named elements conformance-checked)
-  and a for-loop narrows the element to a typed closure (typed unboxed call).
-  Still `dyn` / unsupported: a closure with NO `[Proc …]` annotation, a closure
-  VALUE that's an expression (not a var-ref/literal) at a closure sink,
-  `[Arr [Proc …]]` (ctor + for-loop not wired), and vec-get narrowing on a
-  `[Vec [Proc …]]` (`TYPED_CLOSURES_DESIGN.md` B3c debt).
+  **Collections of closures too (B3c-vec + B3c-arr, 2026-06-11):** both
+  `[Vec [Proc …]]` and `[Arr [Proc …]]` construct (literal elements
+  monomorphized, named elements conformance-checked) and a for-loop narrows the
+  element to a typed closure (typed unboxed call). Still `dyn` / unsupported: a
+  closure with NO `[Proc …]` annotation, a closure VALUE that's an expression
+  (not a var-ref/literal) at a closure sink, vec-get/arr-get element narrowing,
+  and a closure literal pushed via vec-push/arr-push (not monomorphized to the
+  element signature) — `TYPED_CLOSURES_DESIGN.md` B3c debt.
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level

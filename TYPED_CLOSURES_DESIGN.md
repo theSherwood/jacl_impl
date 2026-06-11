@@ -1,11 +1,39 @@
 # Design — typed / monomorphized closures
 
-Status: **Phase B COMPLETE for `[Vec …]` (2026-06-10): B1+B2 (typed closure
-VALUES), B3a (closure params), B3b (closures-returning-closures), B3d
-(named-closure values), and B3c-vec (`[Vec [Proc …]]` — collections of
-closures), all via a registry `TYPE_SHAPE_PROC`, no VM change. The one
-remaining follow-up is `[Arr [Proc …]]` (the mutable-array variant — same
-mechanism, needs its own constructor + for-loop branch wired).**
+Status: **Phase B COMPLETE (2026-06-11): B1+B2 (typed closure VALUES), B3a
+(closure params), B3b (closures-returning-closures), B3d (named-closure
+values), B3c-vec (`[Vec [Proc …]]`) AND B3c-arr (`[Arr [Proc …]]`) — collections
+of closures in both the persistent vec and the mutable arr, all via a registry
+`TYPE_SHAPE_PROC`, no VM change.** Remaining follow-ups (mechanical, shared by
+vec and arr): vec-get/arr-get element narrowing, and monomorphizing a closure
+literal pushed via vec-push/arr-push (the push path doesn't yet run the element
+conformance walk — a closure literal pushed to a `[Vec/Arr [Proc …]]` reads its
+param as nil; the for-loop and constructor paths are fully wired).
+
+**Phase B3c — `[Arr [Proc …]]` (mutable collections of closures) as landed
+(2026-06-11):** the mutable-array twin of B3c-vec. Closures are ref-kind so an
+`[Arr [Proc …]]` is the PLAIN traced arr rep (OP_ARR) with the element signature
+carried statically, exactly like `[Arr str]`. The wiring mirrors the vec path at
+every site — they were deliberately kept structurally identical:
+- **Declared annotation** (`def [Arr [Proc …]] …`): the def handler's
+  nested-compound annotation arm now accepts an `Arr` head (was Vec-only), so it
+  resolves `declared_type = TYPE_ARR` + the typer-side element shape instead of
+  bailing at the `else return false` (the bug found during this slice — without
+  it the def fell to the generic typer and the binding mistyped as a vec).
+- **Constructor** (`[[Arr [Proc …]] e0 e1]`): `typer__arr_type` /
+  `compiler__arr_type_expr` reject a command element, so both the typer ctor
+  recognition (`is_arr_ctor` now flips on an `[Arr [cmd]]` head) and a new
+  compiler arr nested-compound branch (mirrors the vec one, emits OP_ARR)
+  recognize it; each element is monomorphized / conformance-checked via the same
+  `compiler__compile_closure_to_shape` helper.
+- **Binding shape:** the def handler re-derives the element proc shape and keeps
+  the binding `TYPE_ARR` (the existing `coll_proc_elem_shape` compiler arm and
+  the local stamps already handled both VEC and ARR).
+- **for-loop narrowing:** the typer for-loop fallback + the compiler for-loop
+  closure-narrowing block now fire for `TYPE_ARR` too, stamping the loop var as a
+  typed closure. Tests: `typed_closure_arr.jacl` (literal + named elements,
+  wide-i64 unboxed — verbatim twin of `typed_closure_vec.jacl`),
+  `typed_closure_arr_error` (element conformance). Suite 537/537, 91/91 binaries.
 
 **Phase B3c — `[Vec [Proc …]]` (collections of closures) as landed (2026-06-10):**
 Closures are ref-kind (tagged heap pointers) → a `[Vec [Proc …]]` is the PLAIN
@@ -30,11 +58,12 @@ element `TYPE_SHAPE_PROC` idx), exactly like `[Vec str]`/`[Vec [Vec i64]]`.
   wide-i64 unboxed), `typed_closure_vec_error` (element conformance). Suite
   599/599, 91/91.
 
-**B3c scope / debt:** `[Arr [Proc …]]` (mutable) — the def-annotation shape is
-already interned, but the arr CONSTRUCTOR and arr for-loop branch aren't wired
-(today the ctor errors). vec-get on a `[Vec [Proc …]]` (`[vec-get $fns 0]`)
-doesn't narrow to a typed closure yet (for-loop does). Both are mechanical
-follow-ups mirroring the vec/scalar paths.
+**B3c scope / debt:** `[Arr [Proc …]]` (mutable) is now wired (B3c-arr, above).
+Remaining: vec-get/arr-get on a `[Vec/Arr [Proc …]]` (`[vec-get $fns 0]`) doesn't
+narrow to a typed closure yet (the for-loop does); and a closure literal pushed
+via vec-push/arr-push isn't monomorphized to the element signature (its param
+reads nil) — both are shared vec+arr follow-ups mirroring the existing
+ctor/for-loop paths.
 
 **Phase B3d — named closures as values as landed (2026-06-10):**
 - **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.

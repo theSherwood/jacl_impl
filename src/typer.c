@@ -1411,14 +1411,23 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         } else if (tcoll == 0 && args[0]->data.command.head &&
                    args[0]->data.command.head->type == AST_LIT_STRING &&
                    args[0]->data.command.head->data.lit_string.length == 3 &&
-                   memcmp(args[0]->data.command.head->data.lit_string.value,
-                          "Vec", 3) == 0 &&
+                   (memcmp(args[0]->data.command.head->data.lit_string.value,
+                          "Vec", 3) == 0 ||
+                    memcmp(args[0]->data.command.head->data.lit_string.value,
+                          "Arr", 3) == 0) &&
                    args[0]->data.command.arg_count == 1 &&
                    args[0]->data.command.args[0]->type == AST_COMMAND) {
+          /* Nested-element [Vec [Proc …]] / [Arr [Proc …]] declared type:
+           * plain-rep ref collection carrying the typer-side element shape on
+           * the binding (the AST stamp stays suppressed; cross-registry rule).
+           * vec_ref_ann reuses the skip-typed-resolution gate. */
+          bool _arr_ann =
+              memcmp(args[0]->data.command.head->data.lit_string.value,
+                     "Arr", 3) == 0;
           uint32_t esh =
               typer__nested_elem_shape(tc, args[0]->data.command.args[0]);
           if (esh != UINT32_MAX) {
-            declared_type = TYPE_VEC;
+            declared_type = _arr_ann ? TYPE_ARR : TYPE_VEC;
             declared_struct_idx = esh;
             vec_ref_ann = true;
           }
@@ -1829,11 +1838,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     else if (value_node->inferred_struct_idx != UINT32_MAX)
       struct_idx = value_node->inferred_struct_idx;
   }
-  /* Nested compound element ([Vec [Vec i64]] …): the AST stamp is
-   * UINT32_MAX by the cross-registry rule, so re-derive the TYPER-SIDE
-   * element shape from the ctor head's type expression and carry it in the
-   * BINDING (typer bindings may hold typer shape idxs; AST may not). */
-  if ((JaclType)value_node->inferred_type == TYPE_VEC &&
+  /* Nested compound element ([Vec [Vec i64]], [Vec/Arr [Proc …]] …): the AST
+   * stamp is UINT32_MAX by the cross-registry rule, so re-derive the
+   * TYPER-SIDE element shape from the ctor head's type expression and carry it
+   * in the BINDING (typer bindings may hold typer shape idxs; AST may not). */
+  if (((JaclType)value_node->inferred_type == TYPE_VEC ||
+       (JaclType)value_node->inferred_type == TYPE_ARR) &&
       value_node->inferred_struct_idx == UINT32_MAX &&
       value_node->type == AST_COMMAND &&
       value_node->data.command.head &&
@@ -1843,15 +1853,17 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
           AST_LIT_STRING &&
       value_node->data.command.head->data.command.head
           ->data.lit_string.length == 3 &&
-      memcmp(value_node->data.command.head->data.command.head
-                 ->data.lit_string.value, "Vec", 3) == 0 &&
+      (memcmp(value_node->data.command.head->data.command.head
+                 ->data.lit_string.value, "Vec", 3) == 0 ||
+       memcmp(value_node->data.command.head->data.command.head
+                 ->data.lit_string.value, "Arr", 3) == 0) &&
       value_node->data.command.head->data.command.arg_count == 1 &&
       value_node->data.command.head->data.command.args[0]->type ==
           AST_COMMAND) {
     uint32_t esh = typer__nested_elem_shape(
         tc, value_node->data.command.head->data.command.args[0]);
     if (esh != UINT32_MAX) {
-      effective = TYPE_VEC;
+      effective = (JaclType)value_node->inferred_type;
       struct_idx = esh;
     }
   }
@@ -3574,12 +3586,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
            * suppressed by the cross-registry rule, so resolve the TYPER-SIDE
            * shape idx directly — from the binding for a var-ref receiver, or
            * re-derived from the ctor head for a literal receiver. */
-          if (coll_t == TYPE_VEC && eidx == UINT32_MAX) {
+          if ((coll_t == TYPE_VEC || coll_t == TYPE_ARR) &&
+              eidx == UINT32_MAX) {
             if (as[0]->type == AST_VAR_REF) {
               const TyperBinding* vb = typer__scope_resolve(tc,
                   as[0]->data.var_ref.name, as[0]->data.var_ref.length,
                   as[0]->scope_mark);
-              if (vb && vb->type == TYPE_VEC) eidx = vb->struct_idx;
+              if (vb && (vb->type == TYPE_VEC || vb->type == TYPE_ARR))
+                eidx = vb->struct_idx;
             } else if (as[0]->type == AST_COMMAND &&
                        as[0]->data.command.head &&
                        as[0]->data.command.head->type == AST_COMMAND &&
@@ -3588,8 +3602,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                            AST_LIT_STRING &&
                        as[0]->data.command.head->data.command.head
                            ->data.lit_string.length == 3 &&
-                       memcmp(as[0]->data.command.head->data.command.head
-                                  ->data.lit_string.value, "Vec", 3) == 0 &&
+                       (memcmp(as[0]->data.command.head->data.command.head
+                                  ->data.lit_string.value, "Vec", 3) == 0 ||
+                        memcmp(as[0]->data.command.head->data.command.head
+                                  ->data.lit_string.value, "Arr", 3) == 0) &&
                        as[0]->data.command.head->data.command.arg_count == 1 &&
                        as[0]->data.command.head->data.command.args[0]->type ==
                            AST_COMMAND) {
@@ -4451,18 +4467,24 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     uint32_t arr_ctor_ei;
     bool is_arr_ctor = (tc_kind == 0) && typer__arr_type(tc, head, &arr_ctor_ei);
     if (is_arr_ctor) tc_kind = 1;
-    /* Nested compound element ctor ([[Vec [Vec i64]] ...]):
-     * typer__typed_collection_kind requires a LIT_STRING element and
-     * returns 0 — recognize the compound-element form directly so the
-     * ref-element branch below handles it. */
+    /* Nested compound element ctor ([[Vec [Vec i64]] ...], [[Arr [Proc …]] …]):
+     * typer__typed_collection_kind / typer__arr_type require a LIT_STRING
+     * element and return 0/false — recognize the compound-element form
+     * directly so the ref-element branch below handles it. An Arr compound
+     * element also flips is_arr_ctor so the branch stamps TYPE_ARR. */
     if (tc_kind == 0 && !is_arr_ctor && head->data.command.head &&
         head->data.command.head->type == AST_LIT_STRING &&
         head->data.command.head->data.lit_string.length == 3 &&
-        memcmp(head->data.command.head->data.lit_string.value, "Vec", 3)
-            == 0 &&
+        (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3)
+            == 0 ||
+         memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
+            == 0) &&
         head->data.command.arg_count == 1 &&
         head->data.command.args[0]->type == AST_COMMAND) {
       tc_kind = 1;
+      if (memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
+              == 0)
+        is_arr_ctor = true;
     }
     if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
       /* Ref-element [Vec T] (T = str or dyn): `vec` is shorthand for
@@ -4472,17 +4494,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * stamp, exactly the scheme typed streams use. [Vec dyn] IS the
        * plain vec (no stamp). Through a dyn slot the element type widens
        * to dyn — same as scalars. */
-      if (tc_kind == 1 && !is_arr_ctor) {
+      if (tc_kind == 1) {
         AstNode* en = head->data.command.args[0];
-        /* Nested compound element ([Vec [Vec i64]], [Vec [Map K V]]):
-         * also a REF element (collections are tagged heap values) → plain
-         * traced vec rep. The element shape is interned TYPER-SIDE for
+        /* Nested compound element ([Vec [Vec i64]], [Vec [Map K V]],
+         * [Vec [Proc …]] — and the [Arr …] variants): also a REF element
+         * (collections / closures are tagged heap values) → plain traced
+         * vec/arr rep. The element shape is interned TYPER-SIDE for
          * binding-level narrowing (def re-derives it; see the def handler);
          * the AST stamp stays UINT32_MAX per the cross-registry rule. */
         if (en && en->type == AST_COMMAND) {
           uint32_t esh = typer__nested_elem_shape(tc, en);
           if (esh != UINT32_MAX) {
-            node->inferred_type = TYPE_VEC;
+            node->inferred_type = is_arr_ctor ? TYPE_ARR : TYPE_VEC;
             node->inferred_struct_idx = UINT32_MAX;
             uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
             JaclType ekind = typer__buf_elem_decode(tc, esh, &iv, &ik);
@@ -4511,7 +4534,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               typer__decode_map_shape(iv, ik, &want, &iv, &mki);
               (void)mki;
             } else if (ekind == TYPE_CLOSURE) {
-              /* B3c: [Vec [Proc …]] — closure element (ref-kind, plain rep).
+              /* B3c: [Vec/Arr [Proc …]] — closure element (ref-kind, plain rep).
                * An inline closure-literal element is monomorphized to the
                * element signature here (mirrors the def/arg/return walk); a
                * named closure stays TYPE_CLOSURE (compiler enforces conformance).
@@ -4540,15 +4563,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               if (!ok) {
                 char err[192];
                 snprintf(err, sizeof(err),
-                         "type error: [Vec ...] element %u does not match "
-                         "the declared nested element type", ei);
+                         "type error: %s element %u does not match "
+                         "the declared nested element type",
+                         is_arr_ctor ? "[Arr ...]" : "[Vec ...]", ei);
                 typer__error(tc, node->start.line, node->start.column, err);
               }
             }
             return;
           }
         }
-        if (en && en->type == AST_LIT_STRING &&
+        if (!is_arr_ctor && en && en->type == AST_LIT_STRING &&
             is_type_keyword(en->data.lit_string.value,
                             en->data.lit_string.length)) {
           JaclType ref_et = type_from_keyword(en->data.lit_string.value,
