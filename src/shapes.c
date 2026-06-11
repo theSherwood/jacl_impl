@@ -139,6 +139,13 @@ static StructTypeDef* struct_registry__alloc_def(StructTypeRegistry* reg,
   return (StructTypeDef*)arena_alloc(reg->arena, sz);
 }
 
+/* INVARIANT (pointer stability): this reallocs reg->defs / reg->shapes (and the
+ * intern fns separately realloc proc_param_pool), so any `StructTypeDef*` /
+ * `TypeShape*` / proc_param_pool pointer is INVALIDATED across an intern. Entry
+ * INDICES are stable; raw pointers are not. Callers must re-fetch by index
+ * after any intern, never cache a pointer across one. All current call sites
+ * honor this (read-only decode/format paths, plus intern fns that grow-then-
+ * index). See docs/TYPER_SHAPE_UNIFICATION_AUDIT.md (pointer-stability audit). */
 static bool struct_registry__grow(StructTypeRegistry* reg) {
   if (reg->count < reg->capacity) return true;
   uint32_t new_cap = reg->capacity * 2;

@@ -132,17 +132,46 @@ registry.
 
 ### Open decisions (resolve before step 2)
 
-- **Dead-shape accumulation**: typer-only shapes (interned to check a type that
-  compiles away) would survive to runtime, and accumulate across `jacl_eval`s in
-  the persistent registry. Decide: lazy interning (intern only when stamping/
-  emitting), a post-codegen prune, or accept the bounded waste.
-- **Growth stability**: the typer would now grow the surviving registry. Confirm
-  growth is append-only / index-stable and that no consumer holds a raw
-  `TypeShape*` across a grow (realloc move).
+- **Dead-shape accumulation** (DECIDED: **lazy interning**): typer-only shapes
+  (interned to check a type that compiles away) would otherwise survive to
+  runtime and accumulate across `jacl_eval`s in the persistent registry. Step 2
+  will intern a shape only when it's about to be stamped on an AST node /
+  emitted, not merely to type-check.
+- **Growth stability** (✅ RESOLVED — pointer-stability audit, below).
 - **`interpret` isolation** (verified safe): `source_to_closure_in_place` calls
   `compiler_compile(..., seed_registry=NULL, …)` → a fresh registry, so a
   runtime typer pass never grows the live VM's GC-scanned registry. No new
   typer-vs-GC race.
+
+### Pointer-stability audit (✅ resolved)
+
+`struct_registry__grow` reallocs `reg->defs` / `reg->shapes`; the intern fns
+separately realloc `proc_param_pool`. So the rule is: **entry indices are
+stable across an intern; raw `TypeShape*` / `StructTypeDef*` / pool pointers are
+not.** Audited both passes for any pointer held across an intern (= grow):
+
+- **shapes.c intern fns** — all **grow-then-index**: `struct_registry__grow`
+  (and the pool realloc) run first, then `reg->shapes[idx]` / `reg->proc_param_pool[off+k]`
+  are written by index. Dedup scans are index-based. Safe.
+- **typer.c holds** — all safe:
+  - `:616` (`buf_elem_decode`), `:2214` (`decode_proc_shape`), `:5938`
+    (nested-buf format) — read-only decode/format, no intern in the live range.
+  - `:2792` (ctx-field seed) and `:6352` (struct seed loop) — setup phase: read
+    the seed registry, write the fixed `tc.structs[]`; no intern in scope
+    (`tc.shape_reg` isn't even initialized until after the seed loop).
+  - `proc_param_pool` is always read as `reg->proc_param_pool[off+k]` (re-based
+    each access), never a cached base pointer across an intern.
+- **compiler.c holds** — the decode/format paths (`:259/:314/:657/:696/:4599/
+  :4674/:4750`) are read-only with no intern in range; these are pre-existing
+  and unchanged by unification (the compiler grows its registry during its own
+  pass, after the typer pass has finished).
+
+No interleaving across passes: `typer_infer` runs to completion before codegen,
+per file/module/eval, so the typer never grows the registry while the compiler
+holds a pointer into it. Invariant documented at `struct_registry__grow`
+(`src/shapes.c`). Conclusion: growing the shared registry from the typer in
+step 2 is pointer-safe, given lazy interning keeps to the same grow-then-index
+discipline.
 
 ### Test strategy
 
