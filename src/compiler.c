@@ -4621,8 +4621,34 @@ static void compiler__stamp_closure_param_local(Compiler* bc, Compiler* c,
  * whose declared return is a [Proc …], return that return's TYPE_SHAPE_PROC idx
  * (compiler registry); else UINT32_MAX. Lets `def f [make-adder 5]` stamp f's
  * binding with the returned closure's signature so `[f …]` is a typed call. */
+/* B3c follow-up: resolve the element [Proc …] shape carried by a
+ * `[Vec/Arr [Proc …]]` receiver's local (its struct_type_idx, stamped by the
+ * def handler), or UINT32_MAX if the receiver isn't a proc-collection var-ref.
+ * Read-only — does not emit code. */
+static uint32_t compiler__coll_receiver_proc_shape(Compiler* c, AstNode* recv) {
+  if (!recv || recv->type != AST_VAR_REF) return UINT32_MAX;
+  JaclVal rn = compiler__name_val(c->heap, c->intern_table,
+      recv->data.var_ref.name, recv->data.var_ref.length);
+  int rs = compiler__resolve_local(c, rn);
+  if (rs == -1) return UINT32_MAX;
+  uint32_t si = c->locals[rs].struct_type_idx;
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (reg && si < reg->count && reg->shapes[si].kind == TYPE_SHAPE_PROC)
+    return si;
+  return UINT32_MAX;
+}
+
 static uint32_t compiler__call_closure_return_shape(Compiler* c, AstNode* node) {
   if (!node || node->type != AST_COMMAND) return UINT32_MAX;
+  /* B3c follow-up: `def g [vec-get/arr-get $fns 0]` — narrow g to the
+   * collection's element [Proc …] shape so `[g …]` is a typed call. */
+  if ((node->data.command.head_id == HEAD_VEC_GET ||
+       node->data.command.head_id == HEAD_ARR_GET) &&
+      node->data.command.arg_count >= 1) {
+    uint32_t esh =
+        compiler__coll_receiver_proc_shape(c, node->data.command.args[0]);
+    if (esh != UINT32_MAX) return esh;
+  }
   AstNode* h = node->data.command.head;
   if (!h || h->type != AST_LIT_STRING) return UINT32_MAX;
   JaclVal nv = compiler__name_val(c->heap, c->intern_table,
@@ -13379,6 +13405,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_I32;
       return;
     }
+    /* B3c follow-up: pushing onto an `[Arr [Proc …]]` — monomorphize an inline
+     * closure literal / conformance-check a named closure against the element
+     * signature (mirrors vec-push and the constructor path). */
+    {
+      uint32_t esh = compiler__coll_receiver_proc_shape(c, args[0]);
+      if (esh != UINT32_MAX) {
+        if (!compiler__compile_closure_to_shape(c, args[1], esh, line, col))
+          return;
+        compiler__emit_byte(c, OP_ARR_PUSH, line);
+        c->last_expr_type = TYPE_I32;
+        return;
+      }
+    }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn arr")) return;
     if (compiler__reject_wide_dyn(c, line, col, "dyn arr")) return;
@@ -13799,6 +13838,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
       return;
+    }
+    /* B3c follow-up: pushing onto a `[Vec [Proc …]]` (plain ref-rep vec whose
+     * element signature rides the receiver local) — monomorphize an inline
+     * closure literal / conformance-check a named closure against the element
+     * signature, mirroring the constructor path. */
+    {
+      uint32_t esh = compiler__coll_receiver_proc_shape(c, args[0]);
+      if (esh != UINT32_MAX) {
+        if (!compiler__compile_closure_to_shape(c, args[1], esh, line, col))
+          return;
+        compiler__emit_byte(c, OP_VEC_PUSH, line);
+        c->last_expr_type = TYPE_VEC;
+        return;
+      }
     }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_typed(c, args[1], line, col, "dyn vec")) return;

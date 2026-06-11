@@ -1838,6 +1838,14 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     else if (value_node->inferred_struct_idx != UINT32_MAX)
       struct_idx = value_node->inferred_struct_idx;
   }
+  /* B3c follow-up: an annotated [Vec [Proc …]]/[Vec str] binding whose RHS is
+   * NOT a constructor (e.g. `def [Vec [Proc …]] more [vec-push …]`) still gets
+   * its declared element shape from the annotation — the ctor re-derivation
+   * below only covers literal-ctor RHSs. Without this the result binding keeps
+   * no element shape and a later vec-get/for-loop can't narrow. */
+  if (effective == TYPE_VEC && declared_struct_idx != UINT32_MAX) {
+    struct_idx = declared_struct_idx;
+  }
   /* Nested compound element ([Vec [Vec i64]], [Vec/Arr [Proc …]] …): the AST
    * stamp is UINT32_MAX by the cross-registry rule, so re-derive the
    * TYPER-SIDE element shape from the ctor head's type expression and carry it
@@ -4130,6 +4138,33 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         continue;
       }
     }
+    /* B3c follow-up: an inline closure literal pushed to a [Vec/Arr [Proc …]]
+     * is monomorphized against the element signature (mirrors the ctor walk),
+     * so its body types with the declared param/return instead of staying dyn.
+     * The element proc shape rides the receiver BINDING (AST stamp suppressed
+     * by the cross-registry rule), so resolve it from the var-ref. */
+    if (i == 1 &&
+        (mutator_hid == HEAD_VEC_PUSH || mutator_hid == HEAD_ARR_PUSH) &&
+        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+      AstNode* recv = node->data.command.args[0];
+      if (recv->type == AST_VAR_REF) {
+        const TyperBinding* pb = typer__scope_resolve(tc,
+            recv->data.var_ref.name, recv->data.var_ref.length,
+            recv->scope_mark);
+        if (pb && (pb->type == TYPE_VEC || pb->type == TYPE_ARR) &&
+            pb->struct_idx != UINT32_MAX &&
+            !JACL_IS_SCALAR_TYPE_IDX(pb->struct_idx) &&
+            pb->struct_idx >= TYPER_MAX_STRUCTS &&
+            pb->struct_idx < tc->shape_reg.count) {
+          uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+          if (typer__decode_proc_shape(tc, pb->struct_idx, &pc2, pts2, &rt2)) {
+            typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
+            tc->expected_type = saved_et;
+            continue;
+          }
+        }
+      }
+    }
     typer__infer_node(tc, arg);
     tc->expected_type = saved_et;
   }
@@ -5017,6 +5052,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 node->inferred_type = mt;
                 node->inferred_struct_idx = msi;
                 node->inferred_key_struct_idx = mki;
+              } else if (ek == TYPE_CLOSURE) {
+                /* B3c follow-up: [Vec [Proc …]] element — vec-get narrows to a
+                 * typed closure carrying the element signature (typer-side
+                 * shape), so a `def g [vec-get $fns 0]` binding stamps as a
+                 * typed closure and `[g …]` is a typed call. Mirrors HEAD_FOR. */
+                node->inferred_type = TYPE_CLOSURE;
+                node->inferred_struct_idx = vb->struct_idx;
               }
             }
           }
@@ -5046,6 +5088,26 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             /* Stamped ref-element arr ([Arr str]): element narrows. */
             node->inferred_type =
                 JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+          } else if (recv_t == TYPE_ARR &&
+                     recv->inferred_struct_idx == UINT32_MAX &&
+                     recv->type == AST_VAR_REF) {
+            /* B3c follow-up: [Arr [Proc …]] element — the proc-shape elem rides
+             * the BINDING (AST stamp suppressed by the cross-registry rule), so
+             * resolve it and narrow arr-get/arr-pop to a typed closure. Mirrors
+             * the vec-get arm and HEAD_FOR. */
+            const TyperBinding* ab = typer__scope_resolve(tc,
+                recv->data.var_ref.name, recv->data.var_ref.length,
+                recv->scope_mark);
+            if (ab && ab->type == TYPE_ARR && ab->struct_idx != UINT32_MAX &&
+                !JACL_IS_SCALAR_TYPE_IDX(ab->struct_idx) &&
+                ab->struct_idx >= TYPER_MAX_STRUCTS &&
+                ab->struct_idx < tc->shape_reg.count) {
+              uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+              if (typer__decode_proc_shape(tc, ab->struct_idx, &pc2, pts2, &rt2)) {
+                node->inferred_type = TYPE_CLOSURE;
+                node->inferred_struct_idx = ab->struct_idx;
+              }
+            }
           }
           return;
         case HEAD_ARR_SET:
@@ -6119,11 +6181,13 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
     node->inferred_struct_idx = b->struct_idx;
     node->inferred_key_struct_idx = b->key_struct_idx;
     node->inferred_buf_len = b->buf_len;
-    /* Cross-registry rule: a TYPE_VEC binding may carry a TYPER-SIDE shape
-     * idx for a nested element ([Vec [Vec i64]]). Shape idxs must never
-     * reach AST stamps (the compiler's registry numbers differ) — suppress;
-     * narrowing sites (HEAD_FOR) resolve the binding directly. */
-    if ((b->type == TYPE_VEC || b->type == TYPE_MAP) &&
+    /* Cross-registry rule: a TYPE_VEC/TYPE_ARR/TYPE_MAP binding may carry a
+     * TYPER-SIDE shape idx for a nested element ([Vec [Vec i64]],
+     * [Arr [Proc …]]). Shape idxs must never reach AST stamps (the compiler's
+     * registry numbers differ) — suppress; narrowing sites (HEAD_FOR,
+     * vec-get/arr-get) resolve the binding directly. Scalar-sentinel stamps
+     * ([Arr str]) are NOT shape idxs and stay. */
+    if ((b->type == TYPE_VEC || b->type == TYPE_ARR || b->type == TYPE_MAP) &&
         b->struct_idx != UINT32_MAX &&
         !JACL_IS_SCALAR_TYPE_IDX(b->struct_idx) &&
         b->struct_idx >= TYPER_MAX_STRUCTS)

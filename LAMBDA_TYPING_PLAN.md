@@ -14,12 +14,14 @@
 > closures-returning-closures (B3b), named closures as VALUES with conformance
 > (B3d), AND collections of closures in BOTH `[Vec [Proc …]]` (B3c-vec) and
 > `[Arr [Proc …]]` (B3c-arr) — all via a registry `TYPE_SHAPE_PROC`, no VM
-> change. **Remaining follow-ups** (mechanical, shared by vec and arr):
-> vec-get/arr-get element narrowing, and monomorphizing a closure literal pushed
-> via vec-push/arr-push (the push path skips the element conformance walk). See
-> the `TYPED_CLOSURES_DESIGN.md` Phase B3* status blocks.
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is complete;
->    remaining: vec-get/arr-get narrowing + push-of-closure monomorphization.
+> change. The **B3c follow-ups are also COMPLETE** (2026-06-11):
+> vec-get/arr-get element narrowing and push-of-closure monomorphization (both
+> via a shared receiver-shape helper; included a cross-registry `TYPE_ARR`
+> var-ref suppression fix + annotated non-ctor result-binding elem-shape
+> stamping). See the `TYPED_CLOSURES_DESIGN.md` Phase B3c follow-ups block.
+> The typed-closure arc is now fully closed; pick a new thread (below).
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is complete,
+>    including the B3c get/push follow-ups (2026-06-11).
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).

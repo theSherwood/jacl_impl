@@ -4,11 +4,40 @@ Status: **Phase B COMPLETE (2026-06-11): B1+B2 (typed closure VALUES), B3a
 (closure params), B3b (closures-returning-closures), B3d (named-closure
 values), B3c-vec (`[Vec [Proc …]]`) AND B3c-arr (`[Arr [Proc …]]`) — collections
 of closures in both the persistent vec and the mutable arr, all via a registry
-`TYPE_SHAPE_PROC`, no VM change.** Remaining follow-ups (mechanical, shared by
-vec and arr): vec-get/arr-get element narrowing, and monomorphizing a closure
-literal pushed via vec-push/arr-push (the push path doesn't yet run the element
-conformance walk — a closure literal pushed to a `[Vec/Arr [Proc …]]` reads its
-param as nil; the for-loop and constructor paths are fully wired).
+`TYPE_SHAPE_PROC`, no VM change.** The B3c follow-ups (vec-get/arr-get element
+narrowing + push-of-closure monomorphization) are **also landed (2026-06-11)** —
+see the B3c follow-ups block below.
+
+**Phase B3c follow-ups — vec-get/arr-get narrowing + push monomorphization
+(2026-06-11):**
+- **vec-get/arr-get narrowing:** `[vec-get/arr-get $fns i]` on a `[Vec/Arr
+  [Proc …]]` now narrows the result to a typed closure, so `def g [vec-get
+  $fns 0]` stamps a typed-closure binding and `[g …]` is a typed (unboxed) call.
+  Typer: a `TYPE_CLOSURE` arm on the var-ref-binding decode in HEAD_VEC_GET /
+  HEAD_ARR_GET (the arr case gained the var-ref re-resolution block the vec case
+  already had), typing the node `TYPE_CLOSURE` + the typer-side proc shape — the
+  existing B3b def branch then stamps the binding. Compiler:
+  `compiler__call_closure_return_shape` recognizes a vec-get/arr-get head and
+  returns the receiver local's element proc shape (new shared helper
+  `compiler__coll_receiver_proc_shape`), so the def handler's B3b stamp fires.
+- **push monomorphization:** a closure literal pushed via vec-push/arr-push onto
+  a `[Vec/Arr [Proc …]]` is now monomorphized to the element signature (was read
+  as nil). Compiler: both push builtins compile the element via
+  `compiler__compile_closure_to_shape` when the receiver carries a proc-elem
+  shape (mirrors the ctor). Typer: an inline closure-literal push arg is
+  monomorphized via `typer__monomorphize_proc_literal` (mirrors the B3a arg
+  walk). Push receiver must be a var-ref — a nested push
+  (`[vec-push [vec-push …] …]`) doesn't monomorphize the outer element (the
+  outer receiver is a command, not a var-ref); use intermediate bindings.
+- **Cross-registry fix:** `typer__infer_var_ref` suppressed the typer-side shape
+  idx on the AST stamp only for `TYPE_VEC`/`TYPE_MAP` — `TYPE_ARR` was missing,
+  so an `[Arr [Proc …]]` var-ref leaked the shape idx and arr-get never narrowed
+  (wide-i64 returns came back nil). Added `TYPE_ARR` to the suppression.
+- **Annotated non-ctor result binding:** `def [Vec [Proc …]] more [vec-push …]`
+  now stamps `more`'s element shape from the DECLARED annotation (a new
+  `effective == TYPE_VEC` arm), not only from a literal-ctor RHS, so the result
+  vec narrows on read-back. Tests: `typed_closure_vec_getpush.jacl`,
+  `typed_closure_arr_getpush.jacl` (both wide-i64 unboxed). Suite 91/91 binaries.
 
 **Phase B3c — `[Arr [Proc …]]` (mutable collections of closures) as landed
 (2026-06-11):** the mutable-array twin of B3c-vec. Closures are ref-kind so an
@@ -58,12 +87,13 @@ element `TYPE_SHAPE_PROC` idx), exactly like `[Vec str]`/`[Vec [Vec i64]]`.
   wide-i64 unboxed), `typed_closure_vec_error` (element conformance). Suite
   599/599, 91/91.
 
-**B3c scope / debt:** `[Arr [Proc …]]` (mutable) is now wired (B3c-arr, above).
-Remaining: vec-get/arr-get on a `[Vec/Arr [Proc …]]` (`[vec-get $fns 0]`) doesn't
-narrow to a typed closure yet (the for-loop does); and a closure literal pushed
-via vec-push/arr-push isn't monomorphized to the element signature (its param
-reads nil) — both are shared vec+arr follow-ups mirroring the existing
-ctor/for-loop paths.
+**B3c scope / debt:** `[Arr [Proc …]]` (mutable) is wired (B3c-arr, above), and
+the vec-get/arr-get narrowing + push-of-closure monomorphization follow-ups are
+landed (see the B3c follow-ups block near the top). Remaining edges: a nested
+push (`[vec-push [vec-push …] …]`) only monomorphizes the inner element (the
+outer receiver is a command, not a var-ref); and a closure-collection element
+read as an EXPRESSION (not a var-ref/def binding) — e.g. a direct call of a
+nested vec-get — isn't covered.
 
 **Phase B3d — named closures as values as landed (2026-06-10):**
 - **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.
