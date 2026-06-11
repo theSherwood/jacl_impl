@@ -1,0 +1,30 @@
+# expect: 10
+# expect: 14
+# expect: 8
+# A closure value with a statically-KNOWN signature, bound via an UNTYPED `def`,
+# now keeps its signature instead of collapsing to `dyn` — so the binding is
+# *passable* to a [Proc …] sink, not just callable. This mirrors how an untyped
+# `def` of a struct ctor (`def p [Point …]`) or a typed collection already
+# inherits the concrete type; the closure case was the missing one. The rule:
+# a proc/closure's type comes from its annotations (or a propagated annotation,
+# e.g. a [Vec [Proc …]] element type) — no known signature → dyn.
+proc dbl   {i32 x} i32 { [* $x 2] }
+proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc make  {i32 by} [Proc [i32] i32] { proc {i32 x} i32 { [* $x $by] } }
+
+proc main {} {
+  # Named global proc bound untyped, then passed.
+  def f $dbl
+  print [apply $f 5]                                     # 10
+
+  # Call result (a [Proc …]-returning proc) bound untyped, then passed.
+  def g [make 2]
+  print [apply $g 7]                                     # 14
+
+  # Propagated signature: element of a [Vec [Proc …]] via vec-get, bound
+  # untyped, then passed.
+  def [Vec [Proc [i32] i32]] fns [[Vec [Proc [i32] i32]] $dbl]
+  def h [vec-get $fns 0]
+  print [apply $h 4]                                     # 8
+}
+main

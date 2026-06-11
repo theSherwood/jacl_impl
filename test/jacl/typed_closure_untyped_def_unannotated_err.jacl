@@ -1,0 +1,11 @@
+# expect-error: expected closure, got dyn
+# An UNANNOTATED inline literal (`[proc {x} {…}]`) bound via an untyped `def`
+# has no statically-known signature, so it stays `dyn` — passing it to a typed
+# [Proc …] sink is a hard error. (Only a KNOWN signature is inherited; this is
+# the boundary of the untyped-def closure-narrowing rule.)
+proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc main {} {
+  def f [proc {x} { [* $x 2] }]
+  print [apply $f 5]
+}
+main

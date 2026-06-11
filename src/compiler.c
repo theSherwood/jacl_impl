@@ -10358,8 +10358,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * shape from the callee's GlobalArity, NOT the typer stamp on the call node
      * — cross-registry rule) so `[f …]` is a typed call. */
     uint32_t rhs_closure_shape = UINT32_MAX;
-    if (!proc_mono && rhs_type == TYPE_CLOSURE)
+    if (!proc_mono && rhs_type == TYPE_CLOSURE) {
       rhs_closure_shape = compiler__call_closure_return_shape(c, args[value_arg_idx]);
+      /* Untyped binding of a NAMED closure value (`def f $dbl` — a var-ref to a
+       * global proc / local typed closure): the call-result helper bails on a
+       * non-command RHS, so take the typer's portable proc-shape stamp off the
+       * var-ref (validated against the shared registry). This records f's
+       * signature on the local so `$f` is *passable* to a [Proc …] sink, not
+       * just callable. */
+      if (rhs_closure_shape == UINT32_MAX &&
+          args[value_arg_idx]->type == AST_VAR_REF) {
+        uint32_t s = args[value_arg_idx]->inferred_proc_shape_idx;
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (s != UINT32_MAX && reg && s < reg->count &&
+            reg->shapes[s].kind == TYPE_SHAPE_PROC)
+          rhs_closure_shape = s;
+      }
+    }
 
     /* B3d: `def [Proc [i64] i64] f $g` — a NAMED typed-closure RHS under a
      * [Proc …] annotation. Conformance-check g's signature against the declared
@@ -10472,6 +10487,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                rhs_type == TYPE_PTR || rhs_type == TYPE_BOX ||
                rhs_type == TYPE_FUTURE) {
       effective_type = rhs_type;
+    } else if (rhs_type == TYPE_CLOSURE && rhs_closure_shape != UINT32_MAX) {
+      /* Untyped binding of a known-signature closure (`def f $dbl`): keep the
+       * binding TYPE_CLOSURE (mirrors typer.c handle_def_or_mut) so it stays
+       * passable to a [Proc …] sink. Its signature is stamped on the local
+       * below from rhs_closure_shape. */
+      effective_type = TYPE_CLOSURE;
     } else {
       effective_type = TYPE_DYN;
     }

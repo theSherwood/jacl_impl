@@ -1804,6 +1804,17 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         rhs_t == TYPE_BUF || rhs_t == TYPE_PTR ||
         rhs_t == TYPE_ARR || rhs_t == TYPE_TYPED_ARR) {
       effective = rhs_t;
+    } else if (rhs_t == TYPE_CLOSURE &&
+               value_node->inferred_struct_idx != UINT32_MAX) {
+      /* A closure value with a statically-KNOWN signature — a named proc
+       * (`$dbl`), a typed inline literal, or a call/get returning a [Proc …]
+       * (incl. a propagated `[Vec [Proc …]]` element type) — is inherited as
+       * TYPE_CLOSURE so the binding stays *passable* to a [Proc …] sink, not
+       * just callable. An unannotated literal (`[proc {x} {…}]`, shape idx
+       * unset) has no known signature and stays dyn. This mirrors how structs
+       * and typed collections inherit their concrete type; the closure case
+       * was the missing one. */
+      effective = TYPE_CLOSURE;
     } else {
       effective = TYPE_DYN;
     }
