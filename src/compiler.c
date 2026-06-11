@@ -8756,6 +8756,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
     uint32_t rhs_struct_idx = args[value_arg_idx]->inferred_struct_idx;
 
+    /* Untyped `mut` of a known-signature closure value (`mut f $dbl`, a call/get
+     * result, or an annotated inline literal): same rule as `def` — inherit the
+     * signature so the binding is passable to a [Proc …] sink, not just callable.
+     * A fully-unannotated literal carries no shape and stays dyn (the bridge for
+     * untyped proc bindings). */
+    uint32_t rhs_closure_shape = UINT32_MAX;
+    if (rhs_type == TYPE_CLOSURE) {
+      rhs_closure_shape = compiler__call_closure_return_shape(c, args[value_arg_idx]);
+      if (rhs_closure_shape == UINT32_MAX &&
+          args[value_arg_idx]->type == AST_VAR_REF) {
+        uint32_t s = args[value_arg_idx]->inferred_proc_shape_idx;
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (s != UINT32_MAX && reg && s < reg->count &&
+            reg->shapes[s].kind == TYPE_SHAPE_PROC)
+          rhs_closure_shape = s;
+      }
+    }
+
     /* Type check for typed mut */
     if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
       char err_msg[128];
@@ -8789,6 +8807,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
                rhs_type == TYPE_STREAM || is_typed_collection(rhs_type)) {
       effective_type = rhs_type;
+    } else if (rhs_type == TYPE_CLOSURE && rhs_closure_shape != UINT32_MAX) {
+      effective_type = TYPE_CLOSURE;
     } else {
       effective_type = TYPE_DYN;
     }
@@ -8834,6 +8854,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         { TypeInfo ti = { effective_type, rhs_struct_idx,
                           args[value_arg_idx]->inferred_key_struct_idx };
           TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+        if (rhs_closure_shape != UINT32_MAX) {
+          c->locals[c->local_count - 1].known_arity =
+              compiler__node_known_arity(c, args[value_arg_idx]);
+          compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape);
+        }
         compiler__emit_byte(c, OP_NIL, line);
       }
     } else if (c->scope_depth > 0) {
@@ -8855,6 +8880,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].is_mutable = true;
       { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+      if (rhs_closure_shape != UINT32_MAX) {
+        c->locals[c->local_count - 1].known_arity =
+            compiler__node_known_arity(c, args[value_arg_idx]);
+        compiler__stamp_closure_param_local(c, c, c->local_count - 1, rhs_closure_shape);
+      }
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {

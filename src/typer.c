@@ -2265,6 +2265,33 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
       jacl_format_assign_mismatch(err, sizeof(err),
           target_type, rhs_t, tname, tlen);
       typer__error(tc, target->start.line, target->start.column, err);
+    } else if (target_type == TYPE_CLOSURE && rhs_t == TYPE_CLOSURE) {
+      /* Reassigning a TYPED-closure binding (`mut f $dbl; set f $g`): the new
+       * closure must conform to the binding's signature (arity + exact
+       * param/return types), mirroring arg-passing conformance — otherwise the
+       * typed calling convention would call the wrong shape. Lenient when either
+       * side lacks a known shape (a bare-dyn closure binding, or an inline
+       * literal RHS that monomorphizes to the binding's type). */
+      const TyperBinding* tb = typer__scope_resolve(tc, tname, tlen,
+                                                    target->scope_mark);
+      uint8_t vpc = 0, vrt = (uint8_t)TYPE_DYN, vpts[TYPER_MAX_PROC_PARAMS];
+      if (tb && tb->is_typed_closure &&
+          value->inferred_struct_idx != UINT32_MAX &&
+          typer__decode_proc_shape(tc, value->inferred_struct_idx,
+                                   &vpc, vpts, &vrt)) {
+        bool ok = (vpc == tb->proc_param_count) &&
+                  ((uint8_t)vrt == (uint8_t)tb->proc_return_type);
+        for (uint8_t k = 0; ok && k < vpc && k < TYPER_MAX_PROC_PARAMS; k++)
+          if (vpts[k] != (uint8_t)tb->proc_param_types[k]) ok = false;
+        if (!ok) {
+          char err[192];
+          snprintf(err, sizeof(err),
+              "type error: cannot assign a closure of a different signature to "
+              "'%.*s' — reassignment must conform to the binding's [Proc …] type",
+              (int)tlen, tname);
+          typer__error(tc, target->start.line, target->start.column, err);
+        }
+      }
     }
   }
 
