@@ -173,6 +173,12 @@ typedef struct {
    * bounded to typer_infer; freed at the end. See
    * docs/TYPE_REGISTRY_REFACTOR.md. */
   StructTypeRegistry shape_reg;
+  /* step 2b: the SHARED struct registry (== the compiler's, survives to runtime).
+   * Used to intern proc shapes lazily at stamp points so the compiler can read a
+   * closure's signature from inferred_proc_shape_idx instead of re-deriving it.
+   * NULL when no seed registry was provided. Distinct from shape_reg (the typer's
+   * transient registry for its own type-checking). */
+  StructTypeRegistry* shared_reg;
 } TyperCtx;
 
 /* Record a type error. Stores location + message of the first error;
@@ -6390,6 +6396,7 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
    * >= JACL_SCALAR_VEC_BASE = 0xFF00). NULL arena because no
    * StructTypeDef allocations happen on the typer side. Freed below. */
   struct_registry__init_at_offset(&tc.shape_reg, TYPER_MAX_STRUCTS);
+  tc.shared_reg = seed_registry;  /* step 2b: lazy proc-shape stamping target */
 
   /* Pre-pass: register top-level struct definitions, the synthetic
    * ctx struct, and proc signatures so constructor calls and proc

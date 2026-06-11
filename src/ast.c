@@ -476,6 +476,11 @@ struct AstNode {
   uint32_t    inferred_key_struct_idx; /* key struct idx for TYPE_TYPED_MAP, UINT32_MAX otherwise */
   uint32_t    inferred_buf_len; /* N for TYPE_BUF; 0 otherwise. See BUFFER_DESIGN.md */
   uint32_t    inferred_buf_inner_len; /* M for TYPE_BUF nested [Buf N [Buf M T]]; 0 otherwise. M4.2 */
+  uint32_t    inferred_proc_shape_idx; /* step 2b: a SHARED-registry TYPE_SHAPE_PROC
+                                        * idx (== compiler-registry idx) stamped by
+                                        * the typer for the compiler to read directly
+                                        * instead of re-deriving a closure's signature;
+                                        * UINT32_MAX otherwise. Keep in sync with jacl.h. */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
@@ -536,6 +541,7 @@ AstNode* ast_alloc(arena_t* arena) {
   AstNode* node = (AstNode*)arena_alloc(arena, sizeof(AstNode));
   node->inferred_struct_idx = UINT32_MAX;
   node->inferred_key_struct_idx = UINT32_MAX;
+  node->inferred_proc_shape_idx = UINT32_MAX;  /* step 2b */
   return node;
 }
 

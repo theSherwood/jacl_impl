@@ -699,6 +699,10 @@ struct AstNode {
   uint32_t    inferred_key_struct_idx; /* key struct idx for TYPE_TYPED_MAP, UINT32_MAX otherwise */
   uint32_t    inferred_buf_len; /* N for TYPE_BUF; 0 otherwise. See BUFFER_DESIGN.md */
   uint32_t    inferred_buf_inner_len; /* M for TYPE_BUF nested form [Buf N [Buf M T]]; 0 otherwise (scalar/struct element). See BUFFER_DESIGN.md M4.2 */
+  uint32_t    inferred_proc_shape_idx; /* step 2b: SHARED-registry TYPE_SHAPE_PROC idx
+                                        * for the compiler to read a closure signature
+                                        * directly; UINT32_MAX otherwise. Keep in sync
+                                        * with struct AstNode in src/ast.c. */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
