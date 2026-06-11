@@ -1,10 +1,13 @@
-# expect-error: not yet supported
-# Struct RETURN types inside [Proc …] are not yet supported (the struct-param
-# slice landed; struct returns are a follow-up). A [Proc [i32] Struct]
-# annotation is a clear error, not a silent mis-encoding.
+# expect-error: does not match the struct type declared
+# Struct RETURN types inside [Proc …] are supported (the struct-return slice),
+# but a closure literal whose declared struct return differs from its [Proc …]
+# type is a conformance error — never silently re-typed. A different struct's
+# width differs, so the inline-materialized call result would otherwise be
+# type-confused (the "compare idxs, not just kinds" invariant).
 struct Point {i32 x, i32 y}
+struct Other {i32 a}
 proc main {} {
-  def [Proc [i32] Point] g [proc {i32 a} Point { [Point x $a y 0] }]
+  def [Proc [i32] Point] g [proc {i32 a} Other { [Other a $a] }]
   print 1
 }
 main

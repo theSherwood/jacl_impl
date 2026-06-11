@@ -4535,8 +4535,6 @@ static bool compiler__proc_annotation(Compiler* c, AstNode* node,
         compiler__proc_sig_elem(c, node->data.command.args[1], &idx, &sup);
     c->annot_proc_return_struct_idx = idx;
     if (!sup) *out_supported = false;
-    /* struct RETURN in [Proc …] is a later slice — reject for now. */
-    if (c->annot_proc_return_type == TYPE_STRUCT) *out_supported = false;
   }
   return true;
 }
@@ -10934,6 +10932,31 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (proc_return_type == TYPE_DYN && c->annot_proc_active) {
       proc_return_type = c->annot_proc_return_type;
       proc_return_struct_idx = c->annot_proc_return_struct_idx;
+    } else if (c->annot_proc_active &&
+               c->annot_proc_return_type != TYPE_DYN) {
+      /* The literal declares its OWN return type — it must conform to the
+       * [Proc …] declared return. A mismatch is never silently re-typed
+       * (invariant conformance, §2.2/2.3); for a struct return especially, a
+       * different struct's differing width would type-confuse the inline-
+       * materialized call result (the "compare idxs, not just kinds"
+       * invariant). */
+      if (proc_return_type != c->annot_proc_return_type) {
+        char err_msg[160];
+        snprintf(err_msg, sizeof(err_msg),
+                 "typed-closure literal returns %s but its [Proc …] type "
+                 "declares %s", type_name(proc_return_type),
+                 type_name(c->annot_proc_return_type));
+        compiler__error(c, line, col, err_msg);
+        c->annot_proc_active = false;
+        return;
+      } else if (proc_return_type == TYPE_STRUCT &&
+                 proc_return_struct_idx != c->annot_proc_return_struct_idx) {
+        compiler__error(c, line, col,
+            "typed-closure literal struct return does not match the struct "
+            "type declared by its [Proc …] type");
+        c->annot_proc_active = false;
+        return;
+      }
     }
 
     if (args[name_arg_idx]->type != AST_LIT_STRING) {

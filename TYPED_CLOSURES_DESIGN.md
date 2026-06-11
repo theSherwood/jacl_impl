@@ -17,14 +17,18 @@ expression args, nested push), across single-file + interpret + module compiles,
 plus runtime proc-signature introspection (`print` shows `<proc name(types) ->
 ret>`). Verified-remaining gaps:
 
-1. **Struct types inside `[Proc …]`** — struct PARAMS are now supported (the
-   struct-param slice): `[Proc [Point] i32]` works — a closure with a struct
-   param is passed inline + monomorphized (inline literal) / conformance-checked
-   (named, by struct idx). Tests: `typed_closure_struct_param.jacl` (+ `_error`
-   for a wrong-struct mismatch). **Still remaining:**
-   - **Struct RETURNS** (`[Proc [i32] Point]`): a clear error for now
-     (`typed_closure_struct_return_error.jacl`) — the return slice threads the
-     struct return idx so a closure call result types `TYPE_STRUCT` + idx.
+1. **Struct types inside `[Proc …]`** — struct PARAMS *and* RETURNS are now
+   supported (the struct-param + struct-return slices): `[Proc [Point] i32]` and
+   `[Proc [i32] Point]` both work — a closure with a struct param/return is
+   passed/returned inline + monomorphized (inline literal) / conformance-checked
+   (named, by struct idx). A struct-returning closure call materializes the
+   struct inline at the call site (`[g 3]->x`); a proc returning the call result
+   narrows to `TYPE_STRUCT`; the literal's declared return (or omitted, adopting
+   the annotation's) is conformance-checked against the `[Proc …]` return by
+   struct idx (a mismatched struct is a clean error, def-site *and* call-site
+   arg). Tests: `typed_closure_struct_param.jacl`,
+   `typed_closure_struct_return.jacl` (+ each `_error` for a wrong-struct
+   mismatch). **Still remaining:**
    - **Dyn-inferred struct param** (`[proc {q} …]` where the annotation says
      `Point`): narrows compiler-side but not typer-side (the typer's
      monomorphize doesn't inject the annotation's struct idx onto a dyn literal
@@ -33,8 +37,14 @@ ret>`). Verified-remaining gaps:
      shape's param struct idxs.
    - **Nested compound** inside `[Proc …]` (`[Proc [[Vec i64]] …]`, nested
      `[Proc …]`): registry-bound idxs aren't portable — stays unsupported.
-   - Direct-call / expression-arg of a struct-param closure still relies on
-     re-derivation (`typer__portable_proc_shape` declines non-scalar shapes).
+   - **Direct-call of a bare inline struct-param/return literal**
+     (`[[proc {Point q} i32 {…}] $p]`, `[[proc {i32 a} Point {…}] 3]->x`):
+     `typer__portable_proc_shape` declines non-scalar shapes, so the 2b stamp
+     doesn't fire and the direct-call path can't surface the struct idx — a
+     clean error (same gap for params and returns; named bindings / proc-param
+     pass-through work). Closing it means allowing struct idxs through
+     `typer__portable_proc_shape` *and* teaching the direct-call compiler path
+     (compiler.c ~17092) to `_ex`-decode the struct return idx.
 2. **A global proc / closure used as a first-class value** — `$procname` (a
    reference to a global proc) and a global `[Proc …]` binding type as `dyn`, so
    `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the

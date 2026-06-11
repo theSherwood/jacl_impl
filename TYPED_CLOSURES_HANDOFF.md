@@ -21,9 +21,25 @@ the known-safe `chase_lev_stress` / `jacl_harness` race-detector reports),
 The typed-closure arc is functionally complete: closure values, params, returns
 (of closures), collections (`[Vec/Arr [Proc …]]`), closure-valued *expression*
 results (direct calls, expression args, nested push), runtime proc-signature
-introspection (`print` shows `<proc name(types) -> ret>`), and — newest —
-**struct PARAMS inside `[Proc …]`** (`[Proc [Point] i32]`). All green across
-single-file + interpret + module compiles.
+introspection (`print` shows `<proc name(types) -> ret>`), **struct PARAMS inside
+`[Proc …]`** (`[Proc [Point] i32]`), and — newest — **struct RETURNS inside
+`[Proc …]`** (`[Proc [i32] Point]`). All green across single-file + interpret +
+module compiles.
+
+### Struct RETURNS slice (just landed)
+
+`[Proc [i32] Point]` works: a struct-returning closure call materializes the
+struct inline at the call site (`[g 3]->x`, `def Point p [g 3]`), a proc whose
+body returns the call result narrows to `TYPE_STRUCT` (`proc apply {[Proc [i32]
+Point] f, i32 n} Point { [f $n] }`), and the literal's return — declared
+(`{i32 a} Point`) or omitted (adopts the annotation's) — is **conformance-checked
+by struct idx** against the `[Proc …]` return. A mismatched struct is a clean
+error at BOTH the def-site and the call-site arg (not silently re-typed: a
+different struct's width would type-confuse the inline-materialized result — the
+"compare idxs, not just kinds" invariant). The conformance check lives in the
+proc-compilation path at `compiler.c` ~10932 (right where a dyn-return literal
+adopts the annotation's return). Tests: `typed_closure_struct_return.jacl` +
+`typed_closure_struct_return_error.jacl` (mismatched-struct error).
 
 Encoding contract (key mental model): a `TYPE_SHAPE_PROC` shape's param/return
 idx (in `proc_param_pool` / `return_idx`) is a **portable** encoding — a scalar
@@ -32,46 +48,46 @@ struct (struct idxs are 1:1-aligned across the typer/compiler registries).
 Nested compound (vec/map/nested-proc) idxs are registry-bound → NOT portable →
 stay unsupported.
 
-## Next slice (recommended): struct RETURNS in `[Proc …]`
+## Next slice (recommended): direct-call of a struct-param/return inline literal
 
-`[Proc [i32] Point]` — a closure returning a struct. **Most of the pipeline
-already handles it** (the struct-param slice plumbed both params and returns
-through encode/decode/stamp; only the parser was gated to params). Concretely:
-- `intern_proc_shape` (typer + compiler) already encodes a struct **return** idx.
-- the `*_ex` decoders already surface the return struct idx (`out_rstruct_idx`).
-- `compiler__stamp_closure_param_local` / `compiler__stamp_closure_local` already
-  set `Local.return_struct_idx` from the shape.
-- the typed-call return path **already** materializes a struct return inline —
-  `compiler.c` ~17386: `if (call_return_type == TYPE_STRUCT && call_return_struct_idx != UINT32_MAX)`
-  sets `INLINE_STACK` + `last_expr_type = TYPE_STRUCT`. A closure call whose
-  `Local.return_type == TYPE_STRUCT` flows through this unchanged.
+After the struct-param + struct-return slices, the ONE remaining struct gap is
+symmetric across both: a **direct-call of a bare inline literal** with a struct
+param or return doesn't ride the typed path.
+- `[[proc {Point q} i32 { $q->x }] $p]` → "cannot pass struct value to dyn
+  parameter".
+- `[[proc {i32 a} Point { … }] 3]->x` → "field access requires struct or map".
 
-What's actually left:
-1. **Remove the two rejections** (grep `struct RETURN in [Proc …] is a later
-   slice`): `typer__proc_type` (`src/typer.c`) and `compiler__proc_annotation`
-   (`src/compiler.c`). That alone accepts the annotation and (via the above)
-   should make `def [Proc [i32] Point] g …; [g 3]` return an inline Point.
-2. **Typer call-result typing:** make a closure call whose binding returns a
-   struct type the call node `TYPE_STRUCT` + the return struct idx (so
-   `[[g 3] ->x]` / a proc returning `[g 3]` type-checks). Look at where the
-   TyperBinding's `proc_return_type` / `proc_return_struct_idx` drives the
-   body-call narrowing (the bound_proxy path — grep `proc_return_struct_idx` /
-   `bound_proxy` in `src/typer.c`). Scalar returns already narrow; extend to
-   `TYPE_STRUCT` (set `node->inferred_struct_idx`).
-3. **`typer__portable_proc_shape`** (`src/typer.c`) currently declines a
-   non-scalar param/return (returns UINT32_MAX), so the 2b stamp doesn't fire for
-   struct-param/return closures (they fall back to re-derivation — works, but no
-   stamp). Optional: allow struct idxs through (they're portable — a struct idx
-   is `< tc->struct_count`; decline only nested-shape idxs) so direct-call /
-   expression-arg of a struct-param/return closure also rides the fast path.
-4. **Tests:** add a positive `typed_closure_struct_return.jacl` (`[Proc [i32]
-   Point]`, call + field access) and flip `typed_closure_struct_return_error.jacl`
-   from expect-error to the working case (or repurpose it for a non-struct
-   mismatch). Mirror the struct-param tests.
+Both are clean errors (no miscompile); named bindings and proc-param
+pass-through work. The cause is `typer__portable_proc_shape` (`src/typer.c`
+~2283): it declines any non-scalar param/return idx (`return UINT32_MAX`), so
+the 2b portable proc-shape stamp never lands on the direct-call head node, and
+the compiler's direct-call path (`compiler.c` ~17092) has nothing to decode.
 
-Risk: low-ish — the inline-struct-return machinery is reused. Watch the typer
-call-result struct typing (item 2) and a struct return through a *closure*
-(B3b closures-returning-closures interaction).
+What's left:
+1. **`typer__portable_proc_shape`:** allow **struct** idxs through (they're
+   portable — a struct idx is `< tc->struct_count`; keep declining nested-shape
+   idxs). `type_shape_intern_proc` already stores them raw. For a struct
+   *return*, also set the call node's `inferred_struct_idx` so `[…]->field`
+   resolves on the result.
+2. **Compiler direct-call path** (`compiler.c` ~17092, the `head->type ==
+   AST_COMMAND && head->inferred_proc_shape_idx != UINT32_MAX` branch): it
+   currently uses `compiler__decode_proc_shape` (scalars only). Switch to
+   `compiler__decode_proc_shape_ex` and set `call_param_struct_idxs` +
+   `call_return_struct_idx` so a struct param passes inline and a struct return
+   materializes inline (the ~17386 `call_return_type == TYPE_STRUCT` block fires
+   unchanged).
+3. **Tests:** extend `typed_closure_struct_param.jacl` /
+   `typed_closure_struct_return.jacl` with the direct-call forms (currently
+   noted as the documented gap in each file's header comment).
+
+Risk: medium — touches the shared portable-stamp path used by ALL closure
+expressions (collections, expression args). Guard struct idxs precisely
+(decline nested-shape idxs) and re-run the full `typed_closure_*` family +
+`closure_collection_*` to confirm no scalar-path regression. This also enables a
+struct-param/return closure read out of a `[Vec [Proc …]]` and called directly.
+
+(Alternatively, the lowest-effort next slice is the **dyn-inferred struct
+param** typer fix below — smaller blast radius, no shared-path risk.)
 
 ## Smaller remaining items (lower value)
 

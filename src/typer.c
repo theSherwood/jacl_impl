@@ -508,8 +508,6 @@ static bool typer__proc_type(TyperCtx* tc, AstNode* node,
                                             &idx, &sup);
     *out_return_struct_idx = idx;
     if (!sup) *out_supported = false;
-    /* struct RETURN in [Proc …] is a later slice — reject for now. */
-    if (*out_return_type == TYPE_STRUCT) *out_supported = false;
   }
   return true;
 }
