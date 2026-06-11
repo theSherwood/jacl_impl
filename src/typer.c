@@ -1275,6 +1275,30 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
 static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
                                      uint8_t* out_pcount, uint8_t* out_ptypes,
                                      uint8_t* out_rtype);
+/* Forward decls: a standalone proc-literal RHS bound UNTYPED (`def f [proc
+ * {i32 x} i32 {…}]`) interns its (possibly partial, dyn-slotted) signature so
+ * the binding inherits it. Defined below. */
+static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit);
+static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx);
+/* True iff a proc literal carries ≥1 type annotation (a typed param or a
+ * declared return) — the threshold for inheriting a signature on an untyped
+ * binding; a fully-unannotated literal stays dyn (the bridge for untyped proc
+ * bindings). */
+static bool typer__proc_literal_has_annotation(TyperCtx* tc, AstNode* lit) {
+  if (!lit || lit->type != AST_COMMAND ||
+      lit->data.command.head_id != HEAD_PROC) return false;
+  uint32_t ac = lit->data.command.arg_count;
+  if (ac == 4) return true;  /* explicit return type present */
+  AstNode* params = (ac == 3) ? lit->data.command.args[1] : NULL;
+  if (!params) return false;
+  AstNode* pn[TYPER_MAX_PROC_PARAMS];
+  JaclType pt[TYPER_MAX_PROC_PARAMS];
+  uint32_t ps[TYPER_MAX_PROC_PARAMS];
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  for (uint32_t k = 0; k < pc && k < TYPER_MAX_PROC_PARAMS; k++)
+    if (pt[k] != TYPE_DYN) return true;  /* a typed param */
+  return false;
+}
 
 static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
@@ -1701,6 +1725,24 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   tc->expected_type   = declared_type;
   if (!def_proc_mono) typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
+
+  /* Untyped binding of a standalone proc-literal RHS (`def f [proc {i32 x} i32
+   * {…}]`): the value walk types it TYPE_CLOSURE but doesn't intern a shape.
+   * If the literal carries ≥1 annotation, intern its (possibly partial,
+   * dyn-slotted) signature and stamp it so the binding inherits it below — a
+   * fully-unannotated literal carries none and stays dyn. (A TYPED binding goes
+   * through def_proc_mono above and already pins the declared signature.) */
+  if (declared_type == TYPE_DYN && value_node &&
+      value_node->type == AST_COMMAND &&
+      value_node->data.command.head_id == HEAD_PROC &&
+      value_node->inferred_struct_idx == UINT32_MAX &&
+      typer__proc_literal_has_annotation(tc, value_node)) {
+    uint32_t lsh = typer__intern_proc_literal_shape(tc, value_node);
+    if (lsh != UINT32_MAX) {
+      value_node->inferred_struct_idx = lsh;
+      value_node->inferred_proc_shape_idx = typer__portable_proc_shape(tc, lsh);
+    }
+  }
 
   /* Phase B: monomorphize an inline proc-literal RHS against the declared
    * [Proc [P…] R] param types. The value walk above typed the body with its
