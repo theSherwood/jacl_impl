@@ -22,11 +22,26 @@ The typed-closure arc is functionally complete: closure values, params, returns
 (of closures), collections (`[Vec/Arr [Proc …]]`), closure-valued *expression*
 results (direct calls, expression args, nested push), runtime proc-signature
 introspection (`print` shows `<proc name(types) -> ret>`), **struct PARAMS inside
-`[Proc …]`** (`[Proc [Point] i32]`), and — newest — **struct RETURNS inside
-`[Proc …]`** (`[Proc [i32] Point]`). All green across single-file + interpret +
-module compiles.
+`[Proc …]`** (`[Proc [Point] i32]`), **struct RETURNS inside `[Proc …]`**
+(`[Proc [i32] Point]`), and — newest — **dyn-inferred struct params** (an
+untyped `{q}` literal param adopts the annotation's `Point`). All green across
+single-file + interpret + module compiles.
 
-### Struct RETURNS slice (just landed)
+### Dyn-inferred struct param slice (just landed)
+
+`def [Proc [Point] i32] g [proc {q} i32 { $q->x }]` — a closure literal can leave
+a param untyped and the typer infers its struct type from the `[Proc …]`
+annotation (`q : Point`), so `$q->field` resolves without restating the type.
+Works on the def-binding and inline closure-arg forms.
+`typer__monomorphize_proc_literal` gained a `pstruct_idxs` arg (its 4 call sites
+`_ex`-decode the shape), and `typer__handle_def_or_mut` does the monomorphizing
+walk INSTEAD of the generic walk for a `[Proc …]` proc-literal RHS (the generic
+walk used to raise a premature "body returns dyn"). Test:
+`typed_closure_struct_param_dyn.jacl`. One sub-item remains (a `[Vec [Proc …]]`
+element literal that both omits its struct param type and declares a return —
+see the smaller-items list).
+
+### Struct RETURNS slice (prior)
 
 `[Proc [i32] Point]` works: a struct-returning closure call materializes the
 struct inline at the call site (`[g 3]->x`, `def Point p [g 3]`), a proc whose
@@ -86,21 +101,26 @@ expressions (collections, expression args). Guard struct idxs precisely
 `closure_collection_*` to confirm no scalar-path regression. This also enables a
 struct-param/return closure read out of a `[Vec [Proc …]]` and called directly.
 
-(Alternatively, the lowest-effort next slice is the **dyn-inferred struct
-param** typer fix below — smaller blast radius, no shared-path risk.)
+(A lowest-effort alternative is the leftover **dyn-inferred struct param**
+sub-item — the `[Vec [Proc …]]` element-literal case in the collection-ctor walk
+— described in the smaller-items list below.)
 
 ## Smaller remaining items (lower value)
 
 - **Dyn-inferred struct param** — `def [Proc [Point] i32] h [proc {q} i32 { $q->x }]`
-  (literal param `q` is dyn, annotation says Point). The **compiler** infers it
-  (`src/compiler.c`, the param-vs-annotation loop ~11401 sets `param_struct_idxs`
-  from `annot_proc_param_struct_idxs`), but the **typer** doesn't:
-  `typer__monomorphize_proc_literal` (`src/typer.c`) binds an overridden dyn
-  param with `struct_idx = UINT32_MAX`, so `$q->x` types dyn → "body returns dyn"
-  error. Fix: thread the shape's param struct idxs into
-  `typer__monomorphize_proc_literal` (use `typer__decode_proc_shape_ex` at its 3
-  call sites) and use them when overriding a dyn param. Currently a clean error
-  (declare the struct type on the literal).
+  (literal param `q` is dyn, annotation says Point). **DONE** (this slice): the
+  typer now infers `q : Point` on both the def-binding and inline-arg forms.
+  `typer__monomorphize_proc_literal` gained a `pstruct_idxs` arg and threads the
+  shape's param struct idxs onto an overridden dyn param; its 4 call sites decode
+  via `typer__decode_proc_shape_ex`. The def-site (`typer__handle_def_or_mut`)
+  now runs the monomorphizing walk INSTEAD of the generic walk for a `[Proc …]`
+  proc-literal RHS (the generic walk raised a premature "body returns dyn" before
+  `q` was bound to the struct). Test: `typed_closure_struct_param_dyn.jacl`.
+  **One sub-item remains:** a `[Vec [Proc …]]` element literal that BOTH omits
+  its struct param type AND declares a return still errors — the collection-ctor
+  handler walks the element generically before its monomorphize loop (same
+  premature-walk shape as the old def path, in `typer__infer_command_inner`'s
+  typed-vec ctor branch ~4734). Declare the struct param on such an element.
 - **Global proc / closure as a first-class value** — `$procname` and a global
   `[Proc …]` binding type as `dyn`, so `def [Proc …] g $dbl` errors ("cannot
   assign dyn to closure binding"). The runtime value IS a closure (`print $add`
@@ -144,6 +164,6 @@ param** typer fix below — smaller blast radius, no shared-path risk.)
   the proc-compilation param-vs-annotation loop (~11401) and the typed-call site
   (~16951 / ~17062, struct-return materialization ~17386).
 - `Local.param_struct_idxs` (src/compiler.c + src/jacl.h mirror).
-- Tests: `test/jacl/typed_closure_struct_param{,_error}.jacl`,
-  `typed_closure_struct_return_error.jacl`, and the broader
+- Tests: `test/jacl/typed_closure_struct_param{,_dyn,_error}.jacl`,
+  `typed_closure_struct_return{,_error}.jacl`, and the broader
   `typed_closure_*.jacl` family.

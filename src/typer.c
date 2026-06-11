@@ -1677,9 +1677,29 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
    * binding — bindings come into scope only after their definition).
    * Push declared_type as expected_type so int/float literals can be
    * narrowed (mirrors compiler.c:6127-6129 / 6939-6941). */
+  /* For an inline proc-literal RHS under a [Proc …] annotation we do the
+   * declared-signature monomorphization walk (below) INSTEAD of the generic
+   * walk: the generic walk types the body with the literal's own (untyped →
+   * dyn) params and would raise a premature "body returns dyn" when an untyped
+   * literal param needs the annotation's struct type (`{q}` under
+   * [Proc [Point] …], whose `$q->x` is dyn until the param is bound to Point).
+   * The re-walk binds the declared param types (incl. a struct idx). Only skip
+   * the generic walk when that re-walk will actually run (a non-empty block
+   * body); otherwise fall back so empty/odd literals keep their usual checks. */
+  bool def_proc_mono = false;
+  if (declared_proc && value_node->type == AST_COMMAND &&
+      value_node->data.command.head_id == HEAD_PROC) {
+    uint32_t pac0 = value_node->data.command.arg_count;
+    AstNode* body0 = (pac0 == 4) ? value_node->data.command.args[3]
+                   : (pac0 == 3) ? value_node->data.command.args[2] : NULL;
+    AstNode* params0 = (pac0 == 3 || pac0 == 4)
+                         ? value_node->data.command.args[1] : NULL;
+    def_proc_mono = params0 && body0 && body0->type == AST_BLOCK &&
+                    body0->data.block.count > 0;
+  }
   JaclType saved_et   = tc->expected_type;
   tc->expected_type   = declared_type;
-  typer__infer_node(tc, value_node);
+  if (!def_proc_mono) typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
 
   /* Phase B: monomorphize an inline proc-literal RHS against the declared
@@ -1723,6 +1743,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       typer__infer_node(tc, body->data.block.commands[bcount - 1]);
       tc->expected_type = saved_bet;
       typer__scope_pop(tc);
+      /* This was the only walk (the generic walk was skipped) — stamp the
+       * literal as a closure value so the def-vs-actual check below sees it. */
+      if (def_proc_mono) value_node->inferred_type = TYPE_CLOSURE;
     }
   }
 
@@ -2307,6 +2330,7 @@ static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx) {
  * monomorphization walk in handle_def_or_mut. */
 static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
                                              const uint8_t* ptypes,
+                                             const uint32_t* pstruct_idxs,
                                              uint8_t pcount, uint8_t rtype) {
   if (!literal || literal->type != AST_COMMAND ||
       literal->data.command.head_id != HEAD_PROC) return;
@@ -2323,12 +2347,15 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pc; i++) {
     uint8_t bt = (uint8_t)pt[i];
-    if (pt[i] == TYPE_DYN && i < pcount) bt = ptypes[i];
-    /* struct-in-[Proc …]: carry the literal's own struct idx for a struct param
-     * so `$p->field` resolves in the body. (A dyn literal param overridden to a
-     * struct by the declared shape would need the shape's idx — declare the
-     * struct type on the literal for now.) */
-    uint32_t psi = (bt == (uint8_t)TYPE_STRUCT) ? ps[i] : UINT32_MAX;
+    /* An explicitly-typed struct literal param keeps its own idx; a struct
+     * param is the literal's own by default. */
+    uint32_t psi = (pt[i] == (JaclType)TYPE_STRUCT) ? ps[i] : UINT32_MAX;
+    if (pt[i] == TYPE_DYN && i < pcount) {
+      bt = ptypes[i];
+      /* struct-in-[Proc …]: an untyped literal param ({q}) adopts the declared
+       * shape's struct idx, so `$q->field` resolves in the body. */
+      if (bt == (uint8_t)TYPE_STRUCT && pstruct_idxs) psi = pstruct_idxs[i];
+    }
     typer__scope_add(tc, pn[i]->data.lit_string.value,
                      pn[i]->data.lit_string.length, pn[i]->scope_mark,
                      bt, psi);
@@ -2769,8 +2796,10 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
         tail_stmt->type == AST_COMMAND &&
         tail_stmt->data.command.head_id == HEAD_PROC) {
       uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-      if (typer__decode_proc_shape(tc, return_struct_idx, &pc2, pts2, &rt2)) {
-        typer__monomorphize_proc_literal(tc, tail_stmt, pts2, pc2, rt2);
+      uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+      if (typer__decode_proc_shape_ex(tc, return_struct_idx, &pc2, pts2, &rt2,
+                                      psi2, &rsi2)) {
+        typer__monomorphize_proc_literal(tc, tail_stmt, pts2, psi2, pc2, rt2);
         tail_stmt->inferred_struct_idx = return_struct_idx;
         tail_mono = true;
       }
@@ -4255,9 +4284,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         proc->param_struct_idxs[i] != UINT32_MAX &&
         arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
       uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-      if (typer__decode_proc_shape(tc, proc->param_struct_idxs[i],
-                                   &pc2, pts2, &rt2)) {
-        typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
+      uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+      if (typer__decode_proc_shape_ex(tc, proc->param_struct_idxs[i],
+                                      &pc2, pts2, &rt2, psi2, &rsi2)) {
+        typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
         tc->expected_type = saved_et;
         continue;
       }
@@ -4274,8 +4304,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           typer__coll_receiver_proc_shape(tc, node->data.command.args[0]);
       if (esh != UINT32_MAX) {
         uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-        if (typer__decode_proc_shape(tc, esh, &pc2, pts2, &rt2)) {
-          typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
+        uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+        if (typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2, psi2, &rsi2)) {
+          typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
           tc->expected_type = saved_et;
           continue;
         }
@@ -4703,12 +4734,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               want = TYPE_CLOSURE;
               inner_ref = true;  /* suppress the idx compare below */
               uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-              bool dec = typer__decode_proc_shape(tc, esh, &pc2, pts2, &rt2);
+              uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+              bool dec = typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2,
+                                                     psi2, &rsi2);
               for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
                 AstNode* av = node->data.command.args[ei];
                 if (dec && av->type == AST_COMMAND &&
                     av->data.command.head_id == HEAD_PROC)
-                  typer__monomorphize_proc_literal(tc, av, pts2, pc2, rt2);
+                  typer__monomorphize_proc_literal(tc, av, pts2, psi2, pc2, rt2);
               }
             } else {
               want = TYPE_TYPED_VEC;
