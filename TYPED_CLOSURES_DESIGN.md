@@ -89,11 +89,16 @@ element `TYPE_SHAPE_PROC` idx), exactly like `[Vec str]`/`[Vec [Vec i64]]`.
 
 **B3c scope / debt:** `[Arr [Proc …]]` (mutable) is wired (B3c-arr, above), and
 the vec-get/arr-get narrowing + push-of-closure monomorphization follow-ups are
-landed (see the B3c follow-ups block near the top). Remaining edges: a nested
-push (`[vec-push [vec-push …] …]`) only monomorphizes the inner element (the
-outer receiver is a command, not a var-ref); and a closure-collection element
-read as an EXPRESSION (not a var-ref/def binding) — e.g. a direct call of a
-nested vec-get — isn't covered.
+landed (see the B3c follow-ups block near the top). A closure-collection element
+read as an EXPRESSION and called directly — `[[vec-get $fns i] x]` /
+`[[arr-get …] x]` — is now also covered, via the step-2b portable proc-shape
+stamp (`inferred_proc_shape_idx`): the typer stamps the get result and the
+compiler drives the typed call from it, with no binding to re-derive from. Test:
+`typed_closure_direct_get.jacl`. Remaining edge: a nested push
+(`[vec-push [vec-push …] …]`) only monomorphizes the inner element (the outer
+receiver is a command, not a var-ref) — that one needs the collection's element
+shape on the expression result, a different stamp than the closure-signature
+stamp.
 
 **Phase B3d — named closures as values as landed (2026-06-10):**
 - **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.

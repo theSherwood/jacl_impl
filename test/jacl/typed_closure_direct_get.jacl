@@ -1,0 +1,21 @@
+# expect: 6000000000
+# expect: 7
+# expect: 84
+# expect: 11
+# Step 2b: a closure-collection element read as an EXPRESSION and called
+# directly — `[[vec-get $fns i] x]` / `[[arr-get $fns i] x]` — with no
+# intermediate binding to re-derive from. The typer stamps the get result's
+# portable proc-shape idx (inferred_proc_shape_idx) and the compiler reads it to
+# drive the typed (unboxed) calling convention. Wide-i64 results prove the call
+# is unboxed (previously these read nil). This was the "element read as an
+# expression isn't covered" debt in TYPED_CLOSURES_DESIGN.md.
+proc main {} {
+  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] [proc {x} {* $x 1000000000}] [proc {x} {+ $x 1}]]
+  print [[vec-get $fns 0] 6]                 # 6000000000 (unboxed wide return)
+  print [[vec-get $fns 1] 6]                 # 7
+
+  def [Arr [Proc [i64] i64]] afns [[Arr [Proc [i64] i64]] [proc {x} {* $x 2}] [proc {x} {+ $x 1}]]
+  print [[arr-get $afns 0] 42]               # 84
+  print [[arr-get $afns 1] 10]               # 11
+}
+main

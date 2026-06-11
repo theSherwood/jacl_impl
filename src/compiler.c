@@ -16780,6 +16780,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     int16_t call_param_count = -1;
     const char* callee_name_str = NULL;
     uint32_t callee_name_len = 0;
+    /* Step 2b: decoded signature backing call_param_types for a DIRECT call of a
+     * closure-valued command head (no binding to point at). Lives for the arg
+     * loop below. */
+    JaclType head_proc_pts[COMPILER_MAX_PROC_PARAMS];
 
     /* Pre-resolve the callee name from the AST so we can detect a known
        suspending-proc call *before* compiling the head/args. If it is one,
@@ -16957,6 +16961,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               call_param_count = ga->known_arity;
             }
           }
+        }
+      } else if (head->type == AST_COMMAND &&
+                 head->inferred_proc_shape_idx != UINT32_MAX) {
+        /* Step 2b: a DIRECT call of a closure-valued expression — e.g.
+         * `[[vec-get $fns 0] 5]`. There's no binding to re-derive from, but the
+         * typer stamped the head's portable proc-shape idx; decode it to drive
+         * the typed (unboxed) calling convention. This is the new capability the
+         * stamp unlocks (a closure-collection element read as an expression). */
+        uint8_t hpc; JaclType hrt;
+        if (compiler__decode_proc_shape(c, head->inferred_proc_shape_idx,
+                                        head_proc_pts, &hpc, &hrt)) {
+          if ((int16_t)argc != (int16_t)hpc) {
+            char err_msg[96];
+            snprintf(err_msg, sizeof(err_msg),
+                     "closure expects %d arguments but got %d",
+                     (int)hpc, (int)argc);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          call_param_types  = head_proc_pts;
+          call_param_count  = (int16_t)hpc;
+          call_return_type  = hrt;
         }
       }
       compiler__compile_node(c, head);

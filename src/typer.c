@@ -4045,6 +4045,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   HeadId mutator_hid = (head && head->type == AST_LIT_STRING)
                        ? (HeadId)node->data.command.head_id : HEAD_NONE;
 
+  /* Step 2b: a DIRECT call of a closure-valued command head — e.g.
+   * `[[vec-get $fns 0] 6]`. Decode the head closure's signature (typed
+   * TYPE_CLOSURE with a typer-side proc shape) so each arg narrows to its param
+   * type (int/float literals promote), mirroring the named-proc path. */
+  uint8_t head_clos_pc = 0, head_clos_rt = 0;
+  uint8_t head_clos_pts[TYPER_MAX_PROC_PARAMS];
+  bool head_is_closure_call =
+      head && head->type == AST_COMMAND &&
+      (JaclType)head->inferred_type == TYPE_CLOSURE &&
+      head->inferred_struct_idx != UINT32_MAX &&
+      typer__decode_proc_shape(tc, head->inferred_struct_idx,
+                               &head_clos_pc, head_clos_pts, &head_clos_rt);
+
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
     AstNode* arg = node->data.command.args[i];
     /* Type-once for monomorphized HOF callbacks: an inline proc passed to
@@ -4066,6 +4079,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     JaclType saved_et = tc->expected_type;
     if (proc && i < proc->param_count) {
       tc->expected_type = (JaclType)proc->param_types[i];
+    } else if (head_is_closure_call && i < head_clos_pc) {
+      tc->expected_type = (JaclType)head_clos_pts[i];  /* step 2b */
     } else if (sdef) {
       /* Named struct constructor: args are field/value pairs. The
        * value position is at odd `i`; the preceding even-position arg
@@ -5101,6 +5116,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                  * typed closure and `[g …]` is a typed call. Mirrors HEAD_FOR. */
                 node->inferred_type = TYPE_CLOSURE;
                 node->inferred_struct_idx = vb->struct_idx;
+                /* Step 2b: portable stamp so the compiler can type a DIRECT call
+                 * of the get result — `[[vec-get $fns 0] 5]` — where there's no
+                 * binding to re-derive from. */
+                node->inferred_proc_shape_idx =
+                    typer__portable_proc_shape(tc, vb->struct_idx);
               }
             }
           }
@@ -5146,6 +5166,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               if (typer__decode_proc_shape(tc, ab->struct_idx, &pc2, pts2, &rt2)) {
                 node->inferred_type = TYPE_CLOSURE;
                 node->inferred_struct_idx = ab->struct_idx;
+                /* Step 2b: portable stamp for a DIRECT call of the get result. */
+                node->inferred_proc_shape_idx =
+                    typer__portable_proc_shape(tc, ab->struct_idx);
               }
             }
           }
