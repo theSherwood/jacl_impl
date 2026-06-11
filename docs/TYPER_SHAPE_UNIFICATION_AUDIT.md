@@ -1,0 +1,145 @@
+# Typer/Compiler Shape-Registry Unification — Audit Touch-List
+
+Prerequisite audit for collapsing the typer's private shape registry
+(`TyperCtx.shape_reg`) into the shared registry the compiler already builds
+and ships to runtime (`vm->struct_registry`). This is the "Phase 6" the
+`TYPE_REGISTRY_REFACTOR.md` work stopped short of: unify the registry
+*instance* across passes, not just the encoding within a pass.
+
+Goal of the audit: enumerate every site that discriminates a type index by
+**range** (the `TYPER_MAX_STRUCTS` / shape-band boundary) rather than by the
+per-entry **`kind`** tag, since a single unified numbering can't preserve the
+typer's offset-based bands.
+
+## Headline finding
+
+**The entire migration surface is `src/typer.c`.** The compiler, VM, and GC
+already discriminate by kind/presence/sentinel and contain **zero** range-based
+struct-vs-shape tests:
+
+| File | `TYPER_MAX_STRUCTS` refs | How it discriminates a type idx |
+|---|---|---|
+| `src/typer.c` | 32 | **range-based** (`>= TYPER_MAX_STRUCTS && < shape_reg.count`) |
+| `src/compiler.c` | 0 | `JACL_IS_SCALAR_TYPE_IDX` + `defs[idx]` presence + `shapes[idx].kind` |
+| `src/vm.c` | 0 | same (kind/sentinel) |
+| `src/gc_collect.c` | 0 | `defs[idx]` presence + `JACL_IS_SCALAR_TYPE_IDX` + heap `elem_idx` |
+
+So compiler/VM/GC need **no discrimination changes** under a unified registry —
+they already tolerate any numbering. The risky reinterpretation surface
+(the "silently read a typed-vec as a struct" hazard) is contained to `typer.c`.
+
+## The idx-space bands
+
+- `[0, 256)` = `TYPER_MAX_STRUCTS` — struct-table indices (slot 0 = dyn, slot 1
+  = ctx, user structs from 2). Already seeded 1:1 from the compiler's registry,
+  already portable, already ride AST stamps.
+- `[256, 0xFF00)` — parametric shapes (proc, typed-vec, typed-map, buf, ptr,
+  future, box). **Typer-side only**, via `struct_registry__init_at_offset(&tc.shape_reg, 256)`.
+  This band is the duplication.
+- `[0xFF00, 0x10000)` — scalar sentinels (`JACL_SCALAR_TYPE_IDX`). A fixed
+  portable encoding, **not** registry-numbering-dependent. Safe; stays as-is.
+
+Only the `[0,256)` vs `[256,…)` boundary is at issue. Scalar-sentinel checks
+(`JACL_IS_SCALAR_TYPE_IDX`) are orthogonal and need no change anywhere.
+
+## ROOT — the mechanism to remove
+
+| Site | What it is |
+|---|---|
+| `typer.c:175` | `StructTypeRegistry shape_reg;` — the private second instance |
+| `typer.c:6395` | `struct_registry__init_at_offset(&tc.shape_reg, TYPER_MAX_STRUCTS)` — the offset trick |
+| `typer.c:129` | `TyperStruct structs[TYPER_MAX_STRUCTS];` — the typer's own struct table (candidate to drop in favor of reading the shared registry) |
+
+Removing these is the change; everything below is the fallout.
+
+## Category A — range discrimination → convert to kind-based
+
+Each tests `idx >= TYPER_MAX_STRUCTS && idx < tc->shape_reg.count` (sometimes
+`< TYPER_MAX_STRUCTS` for the struct side) to mean "this is a parametric shape."
+Under unification these become a kind query — ideally one helper
+`typer__is_shape_idx(reg, idx)` (true iff `idx < reg->count && defs[idx]==NULL`,
+i.e. a shape slot) routed through the existing decode.
+
+| Site | Context |
+|---|---|
+| `typer.c:599` | `typer__buf_elem_decode` — **the central decode**; range gate before it reads `shapes[idx].kind`. Migrating this one + routing callers through it collapses most of the rest. |
+| `typer.c:803`, `:813` | nested-buf chain walk (`typer__nested_buf_chain_result`) |
+| `typer.c:1893`, `:1898` | def-handler `def row [vec-get $nested i]` nested-vec re-derivation |
+| `typer.c:3626`, `:3639` | `HEAD_FOR` loop-binding element decode |
+| `typer.c:4157` | `vec-push`/`arr-push` closure-literal monomorphization (B3c follow-up) |
+| `typer.c:4453`, `:4558` | `[[Vec/Arr […]] …]` constructor element decode |
+| `typer.c:5027`, `:5037` | `HEAD_VEC_GET` element narrowing |
+| `typer.c:5103` | `HEAD_ARR_GET` element narrowing (B3c follow-up) |
+| `typer.c:5205`, `:5215` | `HEAD_MAP_GET` element narrowing |
+| `typer.c:5687` | buf-chain shape walk |
+| `typer.c:5944` | closure/return-shape decode (B3b call-result propagation) |
+
+Note: many of these sites *also* call `typer__buf_elem_decode` right after the
+range gate. If the decode becomes the single kind-based chokepoint and callers
+drop their inline `>= TYPER_MAX_STRUCTS` pre-guards, the diff shrinks
+substantially.
+
+## Category C — the high-value deletion
+
+| Site | Context |
+|---|---|
+| `typer.c:6193` | `typer__infer_var_ref` — suppresses the shape idx on the AST stamp (the cross-registry rule). Under unification, **delete the suppression**: portable indices mean the stamp is valid for the compiler to read directly. This is the change that retires the "re-walk from the binding" tax. |
+
+Deleting this also makes obsolete the compiler-side re-derivation helpers that
+exist only because the stamp was suppressed (e.g. `compiler__coll_receiver_proc_shape`,
+the nested-buf chain re-walk) — those become follow-up cleanups once stamps are
+trusted.
+
+## Category B — struct-table capacity / seeding (not discrimination)
+
+These concern the fixed-size `tc.structs[256]` array, a separate axis. If the
+typer drops its own struct table and reads structs from the shared registry,
+they disappear; otherwise they change form.
+
+| Site | Context |
+|---|---|
+| `typer.c:2844`, `:2915` | struct-registration capacity guards (`struct_count >= TYPER_MAX_STRUCTS`) |
+| `typer.c:6362`, `:6364`, `:6367`, `:6411` | `typer_infer` seeding loop bounds |
+
+## Doc/comment-only
+
+`typer.c:583`, `:585`, `:1056`, `:6389`, `:6392`; `shapes.c:188`, `:189` —
+describe the offset trick / band layout; update once the bands collapse.
+
+## Recommended migration shape
+
+1. Land a kind-based `typer__is_shape_idx` + route Category A through
+   `typer__buf_elem_decode`; keep the offset trick in place (still green).
+2. Repoint `tc.shape_reg` interning to the shared registry; flip ownership so
+   the registry lives on the compile context (created before `typer_infer`,
+   surviving to runtime). Dedup in every `type_shape_intern_*` (verified) means
+   the compiler's existing intern calls converge on the typer's entries — no
+   duplicate entries, minimal compiler change.
+3. Delete the Category C suppression; let the compiler read AST stamps.
+4. Remove the now-dead re-derivation helpers as cleanup.
+
+Do this **proc-shapes first** in isolation — smallest kind, motivates the work,
+and unlocks runtime proc-signature introspection (a `proc_shape_idx` on the
+closure value) as a bonus, since the proc shape then lives in the surviving
+registry.
+
+### Open decisions (resolve before step 2)
+
+- **Dead-shape accumulation**: typer-only shapes (interned to check a type that
+  compiles away) would survive to runtime, and accumulate across `jacl_eval`s in
+  the persistent registry. Decide: lazy interning (intern only when stamping/
+  emitting), a post-codegen prune, or accept the bounded waste.
+- **Growth stability**: the typer would now grow the surviving registry. Confirm
+  growth is append-only / index-stable and that no consumer holds a raw
+  `TypeShape*` across a grow (realloc move).
+- **`interpret` isolation** (verified safe): `source_to_closure_in_place` calls
+  `compiler_compile(..., seed_registry=NULL, …)` → a fresh registry, so a
+  runtime typer pass never grows the live VM's GC-scanned registry. No new
+  typer-vs-GC race.
+
+### Test strategy
+
+Behavior-preserving: gate each step on full-suite-green plus a bytecode diff
+(same source → identical chunk) to catch silent reinterpretation the suite
+might miss. The 91-binary suite + the typed-closure / nested-buf fixtures are
+the safety net.
