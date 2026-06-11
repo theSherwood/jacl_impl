@@ -4312,6 +4312,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
     }
+    /* An inline closure literal ELEMENT of a typed [[Vec/Arr [Proc …]] …]
+     * constructor: skip the generic walk — the ctor branch below monomorphizes
+     * it to the element signature (binding an untyped `{q}` param to the
+     * declared struct). The generic walk would type the body with the literal's
+     * own (dyn) params and raise a premature "body returns dyn" when the literal
+     * declares a return but a param needs the annotation's struct type. */
+    if (head && head->type == AST_COMMAND && head->data.command.head &&
+        head->data.command.head->type == AST_LIT_STRING &&
+        head->data.command.head->data.lit_string.length == 3 &&
+        (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0 ||
+         memcmp(head->data.command.head->data.lit_string.value, "Arr", 3) == 0) &&
+        head->data.command.arg_count == 1 &&
+        head->data.command.args[0]->type == AST_COMMAND &&
+        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+      uint32_t esh = typer__nested_elem_shape(tc, head->data.command.args[0]);
+      uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+      if (esh != UINT32_MAX &&
+          typer__buf_elem_decode(tc, esh, &iv, &ik) == TYPE_CLOSURE) {
+        tc->expected_type = saved_et;
+        continue;  /* ctor branch monomorphizes this element */
+      }
+    }
     typer__infer_node(tc, arg);
     tc->expected_type = saved_et;
   }

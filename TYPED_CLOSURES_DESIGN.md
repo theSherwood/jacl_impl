@@ -32,14 +32,12 @@ ret>`). Verified-remaining gaps:
    - **Dyn-inferred struct param** (`[proc {q} …]` where the annotation says
      `Point`): now narrows on BOTH sides — `typer__monomorphize_proc_literal`
      threads the shape's param struct idxs onto an overridden dyn literal param,
-     and the def-site does the monomorphizing walk INSTEAD of a generic walk (the
-     generic walk used to raise a premature "body returns dyn" before the param
-     was bound to the struct). Test: `typed_closure_struct_param_dyn.jacl`
-     (def-binding + inline-arg forms). **Sub-item still open:** a
-     `[Vec [Proc …]]` element literal that BOTH omits its struct param type AND
-     declares a return still errors in the collection-ctor walk (the element is
-     walked generically before the ctor's monomorphize loop) — declare the
-     struct param on such an element for now.
+     the def-site does the monomorphizing walk INSTEAD of a generic walk, and the
+     typed vec/arr-ctor arg-walk SKIPS the generic walk for a closure-literal
+     element (the ctor branch monomorphizes it). All three used to raise a
+     premature "body returns dyn" before the param was bound to the struct. Test:
+     `typed_closure_struct_param_dyn.jacl` (def-binding + inline-arg +
+     `[Vec [Proc …]]` element forms).
    - **Nested compound** inside `[Proc …]` (`[Proc [[Vec i64]] …]`, nested
      `[Proc …]`): registry-bound idxs aren't portable — stays unsupported.
    - **Direct-call of a bare inline struct-param/return literal**

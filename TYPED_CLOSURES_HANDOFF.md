@@ -32,14 +32,21 @@ single-file + interpret + module compiles.
 `def [Proc [Point] i32] g [proc {q} i32 { $q->x }]` — a closure literal can leave
 a param untyped and the typer infers its struct type from the `[Proc …]`
 annotation (`q : Point`), so `$q->field` resolves without restating the type.
-Works on the def-binding and inline closure-arg forms.
+Works on the def-binding form, the inline closure-arg form, AND a
+`[Vec/Arr [Proc …]]` element literal.
 `typer__monomorphize_proc_literal` gained a `pstruct_idxs` arg (its 4 call sites
-`_ex`-decode the shape), and `typer__handle_def_or_mut` does the monomorphizing
-walk INSTEAD of the generic walk for a `[Proc …]` proc-literal RHS (the generic
-walk used to raise a premature "body returns dyn"). Test:
-`typed_closure_struct_param_dyn.jacl`. One sub-item remains (a `[Vec [Proc …]]`
-element literal that both omits its struct param type and declares a return —
-see the smaller-items list).
+`_ex`-decode the shape), `typer__handle_def_or_mut` does the monomorphizing walk
+INSTEAD of the generic walk for a `[Proc …]` proc-literal RHS, and the typed
+vec/arr-ctor arg-walk now SKIPS the generic walk for a closure-literal element
+(the ctor branch monomorphizes it) — all three used to raise a premature "body
+returns dyn" before the param was bound to the struct. Test:
+`typed_closure_struct_param_dyn.jacl`.
+
+(Unrelated pre-existing gap surfaced while testing: a `[vec-get …]` result bound
+to a `def` and then passed to a `[Proc …]` closure PARAM types `dyn` — true for
+scalar element vecs too. Binding + a *direct* call on the element works; passing
+the bound value to a closure param is the gap. This is the same class as the
+"vec-get result narrowing" debt, not specific to struct params.)
 
 ### Struct RETURNS slice (prior)
 
@@ -101,26 +108,28 @@ expressions (collections, expression args). Guard struct idxs precisely
 `closure_collection_*` to confirm no scalar-path regression. This also enables a
 struct-param/return closure read out of a `[Vec [Proc …]]` and called directly.
 
-(A lowest-effort alternative is the leftover **dyn-inferred struct param**
-sub-item — the `[Vec [Proc …]]` element-literal case in the collection-ctor walk
-— described in the smaller-items list below.)
+(Lower-effort alternatives: the **global proc / closure as a first-class value**
+narrowing, or the **vec-get-result-to-closure-param** narrowing gap noted in the
+dyn-struct-param slice above — both in the smaller-items list below.)
 
 ## Smaller remaining items (lower value)
 
 - **Dyn-inferred struct param** — `def [Proc [Point] i32] h [proc {q} i32 { $q->x }]`
-  (literal param `q` is dyn, annotation says Point). **DONE** (this slice): the
-  typer now infers `q : Point` on both the def-binding and inline-arg forms.
+  (literal param `q` is dyn, annotation says Point). **DONE**: the typer infers
+  `q : Point` on the def-binding form, the inline closure-arg form, AND a
+  `[Vec/Arr [Proc …]]` element literal.
   `typer__monomorphize_proc_literal` gained a `pstruct_idxs` arg and threads the
   shape's param struct idxs onto an overridden dyn param; its 4 call sites decode
   via `typer__decode_proc_shape_ex`. The def-site (`typer__handle_def_or_mut`)
-  now runs the monomorphizing walk INSTEAD of the generic walk for a `[Proc …]`
-  proc-literal RHS (the generic walk raised a premature "body returns dyn" before
-  `q` was bound to the struct). Test: `typed_closure_struct_param_dyn.jacl`.
-  **One sub-item remains:** a `[Vec [Proc …]]` element literal that BOTH omits
-  its struct param type AND declares a return still errors — the collection-ctor
-  handler walks the element generically before its monomorphize loop (same
-  premature-walk shape as the old def path, in `typer__infer_command_inner`'s
-  typed-vec ctor branch ~4734). Declare the struct param on such an element.
+  and the typed vec/arr-ctor arg-walk (`typer__infer_command_inner`) both run the
+  monomorphizing walk INSTEAD of (resp. skip) the generic walk for a `[Proc …]`
+  proc-literal (the generic walk raised a premature "body returns dyn" before `q`
+  was bound to the struct). Test: `typed_closure_struct_param_dyn.jacl`.
+- **vec-get result → closure param narrowing** (pre-existing, scalar too) — a
+  `[vec-get $fns 0]` element of a `[Vec [Proc …]]`, bound via `def g …` and then
+  passed to a `[Proc …]` closure PARAM, types `dyn` ("expected closure, got
+  dyn"). A *direct* call on the bound element works (the element narrows for a
+  call but not as a passed value). Same class as the global-ref narrowing gap.
 - **Global proc / closure as a first-class value** — `$procname` and a global
   `[Proc …]` binding type as `dyn`, so `def [Proc …] g $dbl` errors ("cannot
   assign dyn to closure binding"). The runtime value IS a closure (`print $add`

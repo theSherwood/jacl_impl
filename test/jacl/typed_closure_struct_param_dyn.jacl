@@ -1,14 +1,15 @@
 # expect: 7
 # expect: 9
+# expect: 12
 # Dyn-inferred struct param in [Proc …] (remaining item). A closure literal that
 # leaves a param UNTYPED (`{q}`) adopts the struct type the [Proc …] annotation
 # declares for it (`[Proc [Point] i32]` ⇒ q : Point), so `$q->field` resolves in
 # the body — no need to restate the struct type on the literal. Covered for the
 # def-binding form (the previously-failing case: the def-site walk used to type
-# the body with q dyn and raise a premature "body returns dyn") and the inline
-# closure-arg form. (A [Vec [Proc …]] element literal that BOTH omits its struct
-# param type AND declares a return still errors in the ctor walk — a smaller
-# remaining sub-item; declare the struct param there for now.)
+# the body with q dyn and raise a premature "body returns dyn"), the inline
+# closure-arg form, and a [Vec [Proc …]] element literal (the ctor walk skips the
+# generic element walk so the element is monomorphized to the declared signature
+# — including a struct param idx).
 struct Point {i32 x, i32 y}
 proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
 
@@ -19,5 +20,12 @@ proc main {} {
 
   # inline closure-arg form: same inference at the call site.
   print [apply [proc {q} i32 { [+ $q->x $q->y] }] [Point x 4 y 5]]   # 9
+
+  # [Vec [Proc …]] element: the element literal's untyped q infers Point. Bind
+  # the element and call it directly (passing a vec-get result straight to a
+  # closure PARAM is a separate, pre-existing narrowing gap — scalar too).
+  def [Vec [Proc [Point] i32]] fns [[Vec [Proc [Point] i32]] [proc {q} i32 { [+ $q->x $q->y] }]]
+  def h [vec-get $fns 0]
+  print [h [Point x 8 y 4]]                           # 12
 }
 main
