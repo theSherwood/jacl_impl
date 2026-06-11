@@ -1,0 +1,33 @@
+# expect: 10
+# expect: 14
+# expect: 6
+# expect: 8
+# Global procs as first-class closure values. A top-level proc referenced by
+# name (`$dbl`) is a closure value carrying the proc's signature, so it can be
+# assigned to a [Proc …] binding, passed directly to a [Proc …] param, and
+# stored as a typed-collection element — the typer narrows the `$name` ref
+# instead of leaving it dyn. (A FORWARD reference — using a proc as a value
+# before its textual definition — is not supported: the proc's signature isn't
+# compiled yet at the use site, so it's a conformance error. Define before use.)
+struct Point {i32 x, i32 y}
+proc dbl   {i32 x} i32   { [* $x 2] }
+proc shift {Point p} Point { [Point x [+ $p->x 1] y $p->y] }
+proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc applyp {[Proc [Point] Point] f, Point p} Point { [f $p] }
+
+proc main {} {
+  # Pass a named proc directly to a [Proc …] param.
+  print [apply $dbl 5]                                   # 10
+
+  # Assign a named proc to a typed [Proc …] binding, then use it.
+  def [Proc [i32] i32] g $dbl
+  print [apply $g 7]                                     # 14
+
+  # Struct-signature proc passed by name (field access on the struct return).
+  print [applyp $shift [Point x 5 y 9]]->x               # 6
+
+  # Store named procs in a [Vec [Proc …]] and call an element.
+  def [Vec [Proc [i32] i32]] fns [[Vec [Proc [i32] i32]] $dbl]
+  print [[vec-get $fns 0] 4]                             # 8
+}
+main

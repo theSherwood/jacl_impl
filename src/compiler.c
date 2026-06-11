@@ -4785,6 +4785,24 @@ static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
   return true;
 }
 
+/* Conformance-check a GLOBAL proc (referenced as a first-class closure value,
+ * `$dbl`) against a declared [Proc …] signature. Its signature lives in the
+ * global registry; reuse compiler__local_closure_conforms via a transient Local
+ * view (only the four fields that check reads are set). */
+static bool compiler__global_closure_conforms(GlobalArity* ga,
+                                             const JaclType* ptypes,
+                                             const uint32_t* pstruct_idxs,
+                                             uint8_t pcount, JaclType rtype) {
+  if (!ga || ga->known_arity < 0) return false;
+  Local tmp;
+  tmp.known_arity       = ga->known_arity;
+  tmp.return_type       = ga->return_type;
+  tmp.param_types       = ga->param_types;
+  tmp.param_struct_idxs = ga->param_struct_idxs;
+  return compiler__local_closure_conforms(&tmp, ptypes, pstruct_idxs,
+                                          pcount, rtype);
+}
+
 /* fwd */
 static void compiler__activate_annot_proc_from_shape(Compiler* c, uint32_t shape_idx);
 
@@ -4807,9 +4825,14 @@ static bool compiler__compile_closure_to_shape(Compiler* c, AstNode* a,
     int gslot = compiler__resolve_local(c, gn);
     JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
     uint32_t psi[COMPILER_MAX_PROC_PARAMS]; uint32_t rsi;
-    bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
-              compiler__decode_proc_shape_ex(c, shape, pts, &pcnt, &prt, psi, &rsi) &&
-              compiler__local_closure_conforms(&c->locals[gslot], pts, psi, pcnt, prt);
+    bool shape_ok = compiler__decode_proc_shape_ex(c, shape, pts, &pcnt, &prt,
+                                                   psi, &rsi);
+    bool ok = false;
+    if (shape_ok && gslot != -1 && c->locals[gslot].known_arity >= 0)
+      ok = compiler__local_closure_conforms(&c->locals[gslot], pts, psi, pcnt, prt);
+    else if (shape_ok && gslot == -1)  /* bare global proc ref as a value */
+      ok = compiler__global_closure_conforms(compiler__find_global(c, gn),
+                                             pts, psi, pcnt, prt);
     if (!ok) {
       compiler__error(c, line, col,
           "value is not a closure conforming to the [Proc …] type");
@@ -10316,10 +10339,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclVal gn = compiler__name_val(c->heap, c->intern_table,
           gv->data.var_ref.name, gv->data.var_ref.length);
       int gslot = compiler__resolve_local(c, gn);
-      if (gslot != -1 && c->locals[gslot].known_arity >= 0 &&
-          compiler__local_closure_conforms(&c->locals[gslot],
-              c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
-              c->annot_proc_param_count, c->annot_proc_return_type)) {
+      bool conforms = false;
+      if (gslot != -1 && c->locals[gslot].known_arity >= 0) {
+        conforms = compiler__local_closure_conforms(&c->locals[gslot],
+            c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
+            c->annot_proc_param_count, c->annot_proc_return_type);
+      } else if (gslot == -1) {
+        /* A bare GLOBAL proc reference (`$dbl`) used as a closure value. Its
+         * signature lives in the global registry; conformance-check it against
+         * the declared [Proc …]. The value already compiled to OP_GET_GLOBAL,
+         * which yields the closure at runtime. (A forward reference — proc not
+         * compiled yet — has no signature here and is rejected.) */
+        conforms = compiler__global_closure_conforms(compiler__find_global(c, gn),
+            c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
+            c->annot_proc_param_count, c->annot_proc_return_type);
+      }
+      if (conforms) {
         proc_named = true;
       } else {
         compiler__error(c, line, col,
@@ -17225,17 +17260,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->annot_proc_active = false;
         } else if (a->type == AST_VAR_REF) {
           /* Phase B3d: a NAMED typed-closure value — conformance-check its
-           * signature against the param's [Proc …], then pass the value. */
+           * signature against the param's [Proc …], then pass the value. The
+           * name is either a local typed-closure binding or a bare GLOBAL proc
+           * reference (`$dbl`), whose signature lives in the global registry. */
           JaclVal gn = compiler__name_val(c->heap, c->intern_table,
               a->data.var_ref.name, a->data.var_ref.length);
           int gslot = compiler__resolve_local(c, gn);
           JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
           uint32_t psi[COMPILER_MAX_PROC_PARAMS]; uint32_t rsi;
-          bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
-                    compiler__decode_proc_shape_ex(c, call_param_struct_idxs[i],
-                                                pts, &pcnt, &prt, psi, &rsi) &&
-                    compiler__local_closure_conforms(&c->locals[gslot],
-                                                     pts, psi, pcnt, prt);
+          bool shape_ok = compiler__decode_proc_shape_ex(c,
+              call_param_struct_idxs[i], pts, &pcnt, &prt, psi, &rsi);
+          bool ok = false;
+          if (shape_ok && gslot != -1 && c->locals[gslot].known_arity >= 0)
+            ok = compiler__local_closure_conforms(&c->locals[gslot],
+                                                  pts, psi, pcnt, prt);
+          else if (shape_ok && gslot == -1)
+            ok = compiler__global_closure_conforms(compiler__find_global(c, gn),
+                                                   pts, psi, pcnt, prt);
           if (!ok) {
             compiler__error(c, line, col,
                 "argument is not a closure conforming to the [Proc …] "

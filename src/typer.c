@@ -3312,6 +3312,34 @@ static const TyperProc* typer__find_proc(TyperCtx* tc,
   return NULL;
 }
 
+/* Intern a registered global proc's signature as a portable TYPE_SHAPE_PROC in
+ * the typer's shape registry, so a `$procname` value reference can narrow to a
+ * typed closure. Returns UINT32_MAX if any param/return is a non-portable
+ * compound type (collection / closure param / ptr / etc.) — such a proc stays
+ * dyn-valued (conservative, same as before). */
+static uint32_t typer__intern_global_proc_shape(TyperCtx* tc,
+                                                const TyperProc* p) {
+  uint8_t pc = p->param_count;
+  if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
+  uint32_t pool[TYPER_MAX_PROC_PARAMS];
+  for (uint8_t k = 0; k < pc; k++) {
+    JaclType t = (JaclType)p->param_types[k];
+    if (t == TYPE_STRUCT && p->param_struct_idxs[k] != UINT32_MAX)
+      pool[k] = p->param_struct_idxs[k];
+    else if (typer__proc_shape_portable_scalar(t))
+      pool[k] = JACL_SCALAR_TYPE_IDX(t);
+    else return UINT32_MAX;  /* compound param — not portable */
+  }
+  JaclType rt = (JaclType)p->return_type;
+  uint32_t ret_enc;
+  if (rt == TYPE_STRUCT && p->return_struct_idx != UINT32_MAX)
+    ret_enc = p->return_struct_idx;
+  else if (typer__proc_shape_portable_scalar(rt))
+    ret_enc = JACL_SCALAR_TYPE_IDX(rt);
+  else return UINT32_MAX;  /* compound return — not portable */
+  return type_shape_intern_proc(&tc->shape_reg, pool, pc, ret_enc);
+}
+
 /* Look up an imported export reached through a module binding
  * (`use "lib" m` → `[$m->fn args]` or `$m->field`). Returns NULL
  * if no entry matches both the binding name and the field name.
@@ -6449,7 +6477,24 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
         typer__is_shape_idx(tc, b->struct_idx))
       node->inferred_struct_idx = UINT32_MAX;
   } else {
-    node->inferred_type = TYPE_DYN;
+    /* No binding shadows the name — a bare reference to a global proc
+     * (`$dbl`) is a first-class closure value carrying the proc's signature.
+     * Narrow it (instead of falling back to dyn) so it conforms to a
+     * [Proc …] binding / param sink. The typer-side shape idx drives closure
+     * conformance; the portable stamp lets the compiler conformance-check the
+     * value at a [Proc …] sink (the var-ref compiles to OP_GET_GLOBAL, which
+     * already yields the closure at runtime). Procs with a non-portable
+     * (compound) param/return stay dyn-valued — conservative. */
+    const TyperProc* p = typer__find_proc(tc, node->data.var_ref.name,
+                                          node->data.var_ref.length);
+    uint32_t sh;
+    if (p && (sh = typer__intern_global_proc_shape(tc, p)) != UINT32_MAX) {
+      node->inferred_type = TYPE_CLOSURE;
+      node->inferred_struct_idx = sh;
+      node->inferred_proc_shape_idx = typer__portable_proc_shape(tc, sh);
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
   }
 }
 

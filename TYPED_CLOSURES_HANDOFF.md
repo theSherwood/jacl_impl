@@ -24,11 +24,13 @@ results (direct calls, expression args, nested push), runtime proc-signature
 introspection (`print` shows `<proc name(types) -> ret>`), **struct PARAMS inside
 `[Proc …]`** (`[Proc [Point] i32]`), **struct RETURNS inside `[Proc …]`**
 (`[Proc [i32] Point]`), **dyn-inferred struct params** (an untyped `{q}` literal
-param adopts the annotation's `Point`), and — newest — **direct-calls of bare
-inline struct-param/return literals** (`[[proc {Point q} i32 …] $p]`,
-`[[proc {i32 a} Point …] 3]->x`). All green across single-file + interpret +
-module compiles. With the direct-call slice in, the struct-in-`[Proc …]` story
-has no remaining gaps.
+param adopts the annotation's `Point`), **direct-calls of bare inline
+struct-param/return literals** (`[[proc {Point q} i32 …] $p]`,
+`[[proc {i32 a} Point …] 3]->x`), and — newest — **global procs as first-class
+values** (`$dbl` narrows to a typed closure: `def [Proc …] g $dbl`,
+`[apply $dbl 5]`). All green across single-file + interpret + module compiles.
+The struct-in-`[Proc …]` story has no remaining gaps; the open items are
+closure-VALUE narrowing through untyped bindings / gets (see Next slice).
 
 ### Direct-call of struct-param/return literal slice (just landed)
 
@@ -93,30 +95,45 @@ struct (struct idxs are 1:1-aligned across the typer/compiler registries).
 Nested compound (vec/map/nested-proc) idxs are registry-bound → NOT portable →
 stay unsupported.
 
-## Next slice (recommended): global proc / closure as a first-class value
+### Global proc as a first-class value slice (just landed)
 
-The struct-in-`[Proc …]` story is now complete (params, returns, dyn-inferred
-params, direct-calls — all in). The remaining items are narrowing gaps where the
-runtime value IS a closure but the typer reads `dyn`. The highest-value one:
+A top-level proc referenced by name (`$dbl`) now narrows to a typed closure
+VALUE carrying the proc's signature, so it works at every typed `[Proc …]` sink:
+`def [Proc [i32] i32] g $dbl`, `[apply $dbl 5]` (direct arg), struct-signature
+procs, and `[[Vec [Proc …]] $dbl]` collection elements. Wrong-signature procs
+are rejected. `typer__infer_var_ref` looks up an unshadowed name in the proc
+registry and narrows it (`TYPE_CLOSURE` + a portable proc-shape idx via the new
+`typer__intern_global_proc_shape`; procs with a non-portable compound
+param/return stay dyn-valued). The compiler conformance sinks (def-RHS, closure
+arg, `[Vec/Arr [Proc …]]` element) gained a global-registry branch
+(`compiler__global_closure_conforms`, a transient-`Local` view over the
+`GlobalArity`). The var-ref compiles to OP_GET_GLOBAL, which already yields the
+closure at runtime. Test: `typed_closure_global_proc.jacl`.
 
-A **global proc name** (`$dbl`) or a **global `[Proc …]` binding** types `dyn`,
-so `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the
-value can't be passed to a closure param. Local typed-closure bindings, inline
-literals, and closure-valued expressions all narrow; only the *global-name-as-
-value* read stays dyn. The runtime value is a real closure (`print $add` shows
-its signature). Fix: where the typer resolves a global var-ref / global proc
-ref, narrow a global proc (or a global `[Proc …]` binding) to `TYPE_CLOSURE` +
-its proc-shape idx, so the def/assign and the closure-param sink accept it. Watch
-the cross-registry rule (global proc shapes must intern portably for any AST
-stamp the compiler reads).
+**Deliberately NOT supported — forward references as values.** A proc used as a
+value *before* its textual definition errors at the sink: the compiler registers
+a proc's signature when it *compiles* that proc, so the use site has nothing to
+conform against. (Forward *calls* still work via runtime dispatch — that's
+pre-existing.) This was a deliberate scoping decision, not an oversight: we did
+not want to quietly extend forward-reference semantics. Define procs before
+using them as values. Revisiting would mean a compiler proc-signature pre-pass
+(broader change) or a typer-stamp conformance fallback (the typer already stamps
+the var-ref's portable shape) — both were prototyped and backed out.
 
-A related, lower-value gap (same class): the **vec-get-result-to-closure-param**
-narrowing — a `[vec-get $fns 0]` bound via `def g …` then passed to a `[Proc …]`
-param types `dyn` (scalar element vecs too). A direct call on the bound element
-works; passing the bound value to a param doesn't.
+## Next slice (recommended): vec-get / untyped-binding closure narrowing
 
-Risk: medium — touches global-ref typing, used everywhere. Re-run the full
-`typed_closure_*` family.
+The remaining narrowing gaps are the same class — a closure VALUE that the typer
+leaves `dyn` when it flows through an untyped binding or a get:
+- `def f $dbl` / `def f [proc …]` (UNTYPED binding) then `[apply $f …]` → `f`
+  types `dyn` ("expected closure, got dyn"). The untyped-def effective-type
+  logic collapses `TYPE_CLOSURE` to `dyn`; inheriting the closure type (shape and
+  all) would let an untyped binding of a closure value stay callable/passable.
+- `[vec-get $fns 0]` bound via `def g …` then passed to a `[Proc …]` param types
+  `dyn` (scalar element vecs too). A *direct* call on the bound element works;
+  passing the bound value to a param doesn't.
+
+Both are about propagating a closure value's shape through an untyped binding.
+Risk: medium — touches the untyped-def effective-type inheritance, used widely.
 
 ## Smaller remaining items (lower value)
 

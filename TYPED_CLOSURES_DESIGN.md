@@ -52,14 +52,21 @@ ret>`). Verified-remaining gaps:
      `typed_closure_struct_return.jacl`.
    - **Nested compound** inside `[Proc …]` (`[Proc [[Vec i64]] …]`, nested
      `[Proc …]`): registry-bound idxs aren't portable — stays unsupported.
-2. **A global proc / closure used as a first-class value** — `$procname` (a
-   reference to a global proc) and a global `[Proc …]` binding type as `dyn`, so
-   `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the
-   value can't be passed to a closure param. Local typed-closure bindings,
-   inline literals, and closure-valued expressions all work; only the
-   *global-name-as-value* read stays dyn. (The runtime value IS a closure —
-   `print $add` shows its signature — it's the typer that doesn't narrow a
-   global ref.)
+2. **A global proc used as a first-class value** — DONE: `$procname` now narrows
+   to a typed closure value (`typer__infer_var_ref` looks it up in the proc
+   registry; `typer__intern_global_proc_shape` interns its portable shape), so
+   `def [Proc …] g $dbl`, `[apply $dbl 5]`, struct-signature procs, and
+   `[Vec [Proc …]]` elements all work, and wrong-signature procs are rejected.
+   The compiler conformance sinks gained `compiler__global_closure_conforms` (a
+   transient-`Local` view over the proc's `GlobalArity`). Test:
+   `typed_closure_global_proc.jacl`. **Not supported (deliberate):** a forward
+   reference used as a value — the compiler has no signature for a proc it
+   hasn't compiled yet, so define before use. (Procs with a non-portable
+   compound param/return also stay dyn-valued.) **Still open (same class):** a
+   closure value flowing through an UNTYPED binding (`def f $dbl` / `def f
+   [proc …]`) or a get (`def g [vec-get …]`) collapses to `dyn` when later
+   passed to a `[Proc …]` param — the untyped-def effective-type logic doesn't
+   inherit the closure shape.
 3. **Non-literal closure-returning tail** — a proc returning a closure *param or
    value verbatim* (not an inline literal) isn't conformance-checked against its
    declared `[Proc …]` return.
