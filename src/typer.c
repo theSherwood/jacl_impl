@@ -426,10 +426,9 @@ static bool typer__stream_type(TyperCtx* tc, AstNode* node,
  * scalar sentinel (JACL_SCALAR_TYPE_IDX) and *out_supported reflects support. */
 static JaclType typer__proc_sig_elem(TyperCtx* tc, AstNode* n,
                                      uint32_t* out_idx, bool* out_supported) {
-  (void)tc;
   *out_idx = UINT32_MAX;
   *out_supported = false;
-  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* compound → B3 */
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* nested compound → B3 */
   const char* nm = n->data.lit_string.value;
   uint32_t    nl = n->data.lit_string.length;
   if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
@@ -442,7 +441,14 @@ static JaclType typer__proc_sig_elem(TyperCtx* tc, AstNode* n,
     *out_supported = true;
     return t;
   }
-  return TYPE_DYN;  /* struct name → B3 */
+  /* Struct name → TYPE_STRUCT + portable struct idx (B3 struct-in-[Proc …]). */
+  const TyperStruct* sd = typer__find_struct(tc, nm, nl);
+  if (sd) {
+    *out_idx = (uint32_t)(sd - tc->structs);
+    *out_supported = true;
+    return TYPE_STRUCT;
+  }
+  return TYPE_DYN;  /* unknown name */
 }
 
 /* Recognize a [Proc [P…] R] type-annotation expression (TYPED_CLOSURES_DESIGN
@@ -502,6 +508,8 @@ static bool typer__proc_type(TyperCtx* tc, AstNode* node,
                                             &idx, &sup);
     *out_return_struct_idx = idx;
     if (!sup) *out_supported = false;
+    /* struct RETURN in [Proc …] is a later slice — reject for now. */
+    if (*out_return_type == TYPE_STRUCT) *out_supported = false;
   }
   return true;
 }
@@ -2204,16 +2212,23 @@ static uint32_t typer__intern_proc_shape(TyperCtx* tc, AstNode* node,
     return UINT32_MAX;
   if (!*out_supported) return UINT32_MAX;
   uint32_t pool[TYPER_MAX_PROC_PARAMS];
-  for (uint8_t k = 0; k < pcount; k++) pool[k] = JACL_SCALAR_TYPE_IDX(pts[k]);
-  return type_shape_intern_proc(&tc->shape_reg, pool, pcount,
-                                JACL_SCALAR_TYPE_IDX(rt));
+  /* Portable encoding: scalar sentinel for a scalar, struct idx for a struct
+   * (proc_sig_elem returns either in pidxs[]); dyn falls back to its sentinel. */
+  for (uint8_t k = 0; k < pcount; k++)
+    pool[k] = (pidxs[k] != UINT32_MAX) ? pidxs[k] : JACL_SCALAR_TYPE_IDX(pts[k]);
+  uint32_t ret_enc = (ridx != UINT32_MAX) ? ridx : JACL_SCALAR_TYPE_IDX(rt);
+  return type_shape_intern_proc(&tc->shape_reg, pool, pcount, ret_enc);
 }
 
-/* Phase B3a: decode a TYPE_SHAPE_PROC shape idx into a flat signature for
- * stamping a TyperBinding (so a body call `[f …]` narrows via the proxy). */
-static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
-                                     uint8_t* out_pcount, uint8_t* out_ptypes,
-                                     uint8_t* out_rtype) {
+/* Phase B3a / B3 struct-in-[Proc …]: decode a TYPE_SHAPE_PROC shape idx into a
+ * flat signature. out_pstruct_idxs / out_rstruct_idx (NULL ok) receive the
+ * struct idx for a TYPE_STRUCT param/return, UINT32_MAX otherwise. A non-scalar,
+ * non-struct idx (nested compound) decodes to TYPE_DYN. */
+static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
+                                        uint8_t* out_pcount, uint8_t* out_ptypes,
+                                        uint8_t* out_rtype,
+                                        uint32_t* out_pstruct_idxs,
+                                        uint32_t* out_rstruct_idx) {
   StructTypeRegistry* reg = &tc->shape_reg;
   if (shape_idx >= reg->count || reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC)
     return false;
@@ -2223,13 +2238,37 @@ static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
   *out_pcount = (uint8_t)pc;
   for (uint16_t k = 0; k < pc; k++) {
     uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
-    out_ptypes[k] = JACL_IS_SCALAR_TYPE_IDX(pidx)
-                      ? (uint8_t)JACL_TYPE_IDX_TO_SCALAR(pidx) : (uint8_t)TYPE_DYN;
+    uint32_t psi = UINT32_MAX;
+    if (JACL_IS_SCALAR_TYPE_IDX(pidx)) {
+      out_ptypes[k] = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(pidx);
+    } else if (pidx < tc->struct_count) {
+      out_ptypes[k] = (uint8_t)TYPE_STRUCT; psi = pidx;
+    } else {
+      out_ptypes[k] = (uint8_t)TYPE_DYN;  /* nested compound — unsupported */
+    }
+    if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
   uint32_t rid = s->u.proc.return_idx;
-  *out_rtype = JACL_IS_SCALAR_TYPE_IDX(rid)
-                 ? (uint8_t)JACL_TYPE_IDX_TO_SCALAR(rid) : (uint8_t)TYPE_DYN;
+  uint32_t rsi = UINT32_MAX;
+  if (JACL_IS_SCALAR_TYPE_IDX(rid)) {
+    *out_rtype = (uint8_t)JACL_TYPE_IDX_TO_SCALAR(rid);
+  } else if (rid < tc->struct_count) {
+    *out_rtype = (uint8_t)TYPE_STRUCT; rsi = rid;
+  } else {
+    *out_rtype = (uint8_t)TYPE_DYN;
+  }
+  if (out_rstruct_idx) *out_rstruct_idx = rsi;
   return true;
+}
+
+/* Type-only decode (the common case): mirrors *_ex but drops the struct idxs.
+ * The 9 narrowing/stamp sites use this — they're lenient on the exact struct
+ * (TYPE_STRUCT suffices); the compiler enforces struct-idx conformance. */
+static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
+                                     uint8_t* out_pcount, uint8_t* out_ptypes,
+                                     uint8_t* out_rtype) {
+  return typer__decode_proc_shape_ex(tc, shape_idx, out_pcount, out_ptypes,
+                                     out_rtype, NULL, NULL);
 }
 
 /* Step 2b: translate a TYPER-side proc-shape idx (in tc->shape_reg) into a
@@ -2287,9 +2326,14 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
   for (uint32_t i = 0; i < pc; i++) {
     uint8_t bt = (uint8_t)pt[i];
     if (pt[i] == TYPE_DYN && i < pcount) bt = ptypes[i];
+    /* struct-in-[Proc …]: carry the literal's own struct idx for a struct param
+     * so `$p->field` resolves in the body. (A dyn literal param overridden to a
+     * struct by the declared shape would need the shape's idx — declare the
+     * struct type on the literal for now.) */
+    uint32_t psi = (bt == (uint8_t)TYPE_STRUCT) ? ps[i] : UINT32_MAX;
     typer__scope_add(tc, pn[i]->data.lit_string.value,
                      pn[i]->data.lit_string.length, pn[i]->scope_mark,
-                     bt, UINT32_MAX);
+                     bt, psi);
   }
   uint32_t bc = body->data.block.count;
   for (uint32_t i = 0; i + 1 < bc; i++)

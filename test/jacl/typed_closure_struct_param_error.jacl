@@ -1,10 +1,12 @@
-# expect-error: not yet supported
-# Struct (and compound) param/return types inside [Proc …] are Phase B3 — the
-# typed-closure-value rep for non-scalar element types isn't wired yet. Reject
-# clearly rather than silently binding a rep-mismatched closure.
-struct Pt { i32 x  i32 y }
+# expect-error: does not match the struct type declared
+# Struct-param conformance: a closure literal whose struct param is a DIFFERENT
+# struct than the [Proc [Struct] …] type declares is a clear error (their widths
+# /layouts differ — the inline call would be type-confused). Was previously a
+# blanket "not yet supported"; struct params now work, but must match.
+struct Point {i32 x, i32 y}
+struct Line {i32 a, i32 b}
+proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
 proc main {} {
-  def [Proc [Pt] i64] f [proc {p} {7}]
-  print [f [Pt 1 2]]
+  print [apply [proc {Line q} i32 { $q->a }] [Point x 1 y 2]]
 }
 main

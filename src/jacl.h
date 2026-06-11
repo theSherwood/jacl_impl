@@ -1404,6 +1404,7 @@ typedef struct {
   JaclType  return_type;
   uint32_t  return_struct_idx;
   JaclType* param_types;
+  uint32_t* param_struct_idxs; /* keep in sync with struct Local in src/compiler.c */
   uint32_t  scope_mark;
   uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;        /* true if struct is stored inline on stack (raw bytes, not heap pointer) */

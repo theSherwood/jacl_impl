@@ -1152,6 +1152,9 @@ typedef struct {
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
+  uint32_t* param_struct_idxs; /* per-param struct idx for TYPE_STRUCT params
+                                * (NULL when no struct params); arena-allocated.
+                                * B3 struct-in-[Proc …]. */
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
   uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
   bool      is_inline;    /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
@@ -3689,6 +3692,7 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->type        = TYPE_DYN;
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
+  local->param_struct_idxs = NULL;
   local->scope_mark  = c->current_scope_mark;
   local->width       = 1;
   local->is_inline   = false;
@@ -4457,11 +4461,11 @@ bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
 /* Resolve one type-name node inside a [Proc …] signature (TYPED_CLOSURES_DESIGN
  * Phase B). Scalar keywords + `dyn` supported; struct/compound types are
  * Phase B3 → *out_supported=false. Mirrors typer__proc_sig_elem. */
-static JaclType compiler__proc_sig_elem(AstNode* n, uint32_t* out_idx,
-                                        bool* out_supported) {
+static JaclType compiler__proc_sig_elem(Compiler* c, AstNode* n,
+                                        uint32_t* out_idx, bool* out_supported) {
   *out_idx = UINT32_MAX;
   *out_supported = false;
-  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* compound → B3 */
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* nested compound → B3 */
   const char* nm = n->data.lit_string.value;
   uint32_t    nl = n->data.lit_string.length;
   if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
@@ -4470,9 +4474,17 @@ static JaclType compiler__proc_sig_elem(AstNode* n, uint32_t* out_idx,
   }
   if (is_type_keyword(nm, nl)) {
     *out_supported = true;
-    return type_from_keyword(nm, nl);
+    return type_from_keyword(nm, nl);  /* scalar: out_idx stays UINT32_MAX */
   }
-  return TYPE_DYN;  /* struct name → B3 */
+  /* Struct name → TYPE_STRUCT + portable struct idx (B3 struct-in-[Proc …]). */
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  uint32_t sidx = reg ? struct_registry__find(reg, nm, nl) : UINT32_MAX;
+  if (sidx != UINT32_MAX && sidx < reg->count && reg->defs[sidx]) {
+    *out_idx = sidx;
+    *out_supported = true;
+    return TYPE_STRUCT;
+  }
+  return TYPE_DYN;  /* unknown name */
 }
 
 /* Recognize a [Proc [P…] R] annotation and fill c->annot_proc_* with the
@@ -4504,7 +4516,7 @@ static bool compiler__proc_annotation(Compiler* c, AstNode* node,
   bool sup; uint32_t idx;
   if (phead && !empty_head) {
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
-    c->annot_proc_param_types[pc] = compiler__proc_sig_elem(phead, &idx, &sup);
+    c->annot_proc_param_types[pc] = compiler__proc_sig_elem(c, phead, &idx, &sup);
     c->annot_proc_param_struct_idxs[pc] = idx;
     if (!sup) *out_supported = false;
     pc++;
@@ -4512,7 +4524,7 @@ static bool compiler__proc_annotation(Compiler* c, AstNode* node,
   for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return true; }
     c->annot_proc_param_types[pc] =
-        compiler__proc_sig_elem(plist->data.command.args[i], &idx, &sup);
+        compiler__proc_sig_elem(c, plist->data.command.args[i], &idx, &sup);
     c->annot_proc_param_struct_idxs[pc] = idx;
     if (!sup) *out_supported = false;
     pc++;
@@ -4520,9 +4532,11 @@ static bool compiler__proc_annotation(Compiler* c, AstNode* node,
   c->annot_proc_param_count = pc;
   if (ac == 2) {
     c->annot_proc_return_type =
-        compiler__proc_sig_elem(node->data.command.args[1], &idx, &sup);
+        compiler__proc_sig_elem(c, node->data.command.args[1], &idx, &sup);
     c->annot_proc_return_struct_idx = idx;
     if (!sup) *out_supported = false;
+    /* struct RETURN in [Proc …] is a later slice — reject for now. */
+    if (c->annot_proc_return_type == TYPE_STRUCT) *out_supported = false;
   }
   return true;
 }
@@ -4539,11 +4553,19 @@ static void compiler__stamp_closure_local(Compiler* c) {
   if (c->annot_proc_param_count > 0) {
     JaclType* pts = (JaclType*)arena_alloc(c->arena,
         sizeof(JaclType) * c->annot_proc_param_count);
-    for (uint8_t i = 0; i < c->annot_proc_param_count; i++)
+    uint32_t* ps = (uint32_t*)arena_alloc(c->arena,
+        sizeof(uint32_t) * c->annot_proc_param_count);
+    bool any_struct = false;
+    for (uint8_t i = 0; i < c->annot_proc_param_count; i++) {
       pts[i] = c->annot_proc_param_types[i];
+      ps[i]  = c->annot_proc_param_struct_idxs[i];
+      if (pts[i] == TYPE_STRUCT && ps[i] != UINT32_MAX) any_struct = true;
+    }
     L->param_types = pts;
+    L->param_struct_idxs = any_struct ? ps : NULL;  /* struct-in-[Proc …] */
   } else {
     L->param_types = NULL;
+    L->param_struct_idxs = NULL;
   }
 }
 
@@ -4566,29 +4588,39 @@ static uint32_t compiler__intern_proc_shape(Compiler* c, AstNode* node,
   AstNode* phead = plist->data.command.head;
   bool empty_head = (phead && phead->type == AST_LIT_STRING &&
                      phead->data.lit_string.length == 0);
-  bool sup; uint32_t dummy;
+  bool sup; uint32_t sidx;
   if (phead && !empty_head) {
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
-    JaclType t = compiler__proc_sig_elem(phead, &dummy, &sup);
+    JaclType t = compiler__proc_sig_elem(c, phead, &sidx, &sup);
     if (!sup) *out_supported = false;
-    pidx[pc++] = JACL_SCALAR_TYPE_IDX(t);
+    pidx[pc++] = (t == TYPE_STRUCT && sidx != UINT32_MAX)
+                   ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
-    JaclType t = compiler__proc_sig_elem(plist->data.command.args[i], &dummy, &sup);
+    JaclType t = compiler__proc_sig_elem(c, plist->data.command.args[i], &sidx, &sup);
     if (!sup) *out_supported = false;
-    pidx[pc++] = JACL_SCALAR_TYPE_IDX(t);
+    pidx[pc++] = (t == TYPE_STRUCT && sidx != UINT32_MAX)
+                   ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   uint32_t rid = JACL_SCALAR_TYPE_IDX(TYPE_DYN);
   if (ac == 2) {
-    JaclType t = compiler__proc_sig_elem(node->data.command.args[1], &dummy, &sup);
+    JaclType t = compiler__proc_sig_elem(c, node->data.command.args[1], &sidx, &sup);
     if (!sup) *out_supported = false;
-    rid = JACL_SCALAR_TYPE_IDX(t);
+    rid = (t == TYPE_STRUCT && sidx != UINT32_MAX)
+            ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   if (!*out_supported) return UINT32_MAX;
   StructTypeRegistry* reg = compiler__get_struct_registry(c);
   return type_shape_intern_proc(reg, pidx, pc, rid);
 }
+
+/* fwd: struct-aware proc-shape decode (defined below). */
+static bool compiler__decode_proc_shape_ex(Compiler* c, uint32_t shape_idx,
+                                           JaclType* out_ptypes, uint8_t* out_pcount,
+                                           JaclType* out_rtype,
+                                           uint32_t* out_pstruct_idxs,
+                                           uint32_t* out_rstruct_idx);
 
 /* Phase B3: decode a TYPE_SHAPE_PROC into a Local's closure signature so a
  * body call `[f args]` uses the typed (unboxed) convention. Param/return idxs
@@ -4597,27 +4629,28 @@ static uint32_t compiler__intern_proc_shape(Compiler* c, AstNode* node,
 static void compiler__stamp_closure_param_local(Compiler* bc, Compiler* c,
                                                 uint32_t local_idx,
                                                 uint32_t shape_idx) {
-  StructTypeRegistry* reg = compiler__get_struct_registry(c);
-  if (!reg || shape_idx >= reg->count ||
-      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return;
-  TypeShape* s = &reg->shapes[shape_idx];
-  uint16_t pc = s->u.proc.param_count;
+  JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pc; JaclType rt;
+  uint32_t psi[COMPILER_MAX_PROC_PARAMS]; uint32_t rsi;
+  if (!compiler__decode_proc_shape_ex(c, shape_idx, pts, &pc, &rt, psi, &rsi))
+    return;
   Local* L = &bc->locals[local_idx];
   L->known_arity = (int16_t)pc;
-  uint32_t rid = s->u.proc.return_idx;
-  L->return_type = COMPILER_IS_SCALAR_TYPE_IDX(rid)
-                     ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
-  L->return_struct_idx = UINT32_MAX;
+  L->return_type = rt;
+  L->return_struct_idx = rsi;  /* struct-in-[Proc …]: a struct return idx */
   if (pc > 0) {
-    JaclType* pts = (JaclType*)arena_alloc(c->arena, sizeof(JaclType) * pc);
-    for (uint16_t k = 0; k < pc; k++) {
-      uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
-      pts[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
-                 ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
+    JaclType* pt_arr = (JaclType*)arena_alloc(c->arena, sizeof(JaclType) * pc);
+    uint32_t* ps_arr = (uint32_t*)arena_alloc(c->arena, sizeof(uint32_t) * pc);
+    bool any_struct = false;
+    for (uint8_t k = 0; k < pc; k++) {
+      pt_arr[k] = pts[k];
+      ps_arr[k] = psi[k];
+      if (psi[k] != UINT32_MAX) any_struct = true;
     }
-    L->param_types = pts;
+    L->param_types = pt_arr;
+    L->param_struct_idxs = any_struct ? ps_arr : NULL;
   } else {
     L->param_types = NULL;
+    L->param_struct_idxs = NULL;
   }
 }
 
@@ -4685,11 +4718,15 @@ static uint32_t compiler__call_closure_return_shape(Compiler* c, AstNode* node) 
   return UINT32_MAX;
 }
 
-/* Phase B3d: decode a TYPE_SHAPE_PROC to a flat signature (param types + count
- * + return type). Returns false on a non-proc shape idx. */
-static bool compiler__decode_proc_shape(Compiler* c, uint32_t shape_idx,
-                                        JaclType* out_ptypes, uint8_t* out_pcount,
-                                        JaclType* out_rtype) {
+/* Phase B3d / B3 struct-in-[Proc …]: decode a TYPE_SHAPE_PROC to a flat
+ * signature. out_pstruct_idxs / out_rstruct_idx (NULL ok) receive the struct
+ * idx for a TYPE_STRUCT param/return, UINT32_MAX otherwise. Returns false on a
+ * non-proc shape idx. */
+static bool compiler__decode_proc_shape_ex(Compiler* c, uint32_t shape_idx,
+                                           JaclType* out_ptypes, uint8_t* out_pcount,
+                                           JaclType* out_rtype,
+                                           uint32_t* out_pstruct_idxs,
+                                           uint32_t* out_rstruct_idx) {
   StructTypeRegistry* reg = compiler__get_struct_registry(c);
   if (!reg || shape_idx >= reg->count ||
       reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return false;
@@ -4699,26 +4736,53 @@ static bool compiler__decode_proc_shape(Compiler* c, uint32_t shape_idx,
   *out_pcount = (uint8_t)pc;
   for (uint16_t k = 0; k < pc; k++) {
     uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
-    out_ptypes[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
-                      ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
+    uint32_t psi = UINT32_MAX;
+    if (COMPILER_IS_SCALAR_TYPE_IDX(pidx)) {
+      out_ptypes[k] = COMPILER_TYPE_IDX_TO_SCALAR(pidx);
+    } else if (pidx < reg->count && reg->defs[pidx]) {
+      out_ptypes[k] = TYPE_STRUCT; psi = pidx;
+    } else {
+      out_ptypes[k] = TYPE_DYN;  /* nested compound — unsupported */
+    }
+    if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
   uint32_t rid = s->u.proc.return_idx;
-  *out_rtype = COMPILER_IS_SCALAR_TYPE_IDX(rid)
-                 ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
+  uint32_t rsi = UINT32_MAX;
+  if (COMPILER_IS_SCALAR_TYPE_IDX(rid)) {
+    *out_rtype = COMPILER_TYPE_IDX_TO_SCALAR(rid);
+  } else if (rid < reg->count && reg->defs[rid]) {
+    *out_rtype = TYPE_STRUCT; rsi = rid;
+  } else {
+    *out_rtype = TYPE_DYN;
+  }
+  if (out_rstruct_idx) *out_rstruct_idx = rsi;
   return true;
 }
 
-/* Phase B3d: invariant conformance — does a Local's typed-closure signature
- * (param_types/known_arity/return_type) match a declared (ptypes,pcount,rtype)?
- * A Local with NULL param_types and known_arity 0 conforms to the nilary case;
- * a non-closure local (known_arity < 0) never conforms. */
+static bool compiler__decode_proc_shape(Compiler* c, uint32_t shape_idx,
+                                        JaclType* out_ptypes, uint8_t* out_pcount,
+                                        JaclType* out_rtype) {
+  return compiler__decode_proc_shape_ex(c, shape_idx, out_ptypes, out_pcount,
+                                        out_rtype, NULL, NULL);
+}
+
+/* Phase B3d / B3 struct-in-[Proc …]: invariant conformance — does a Local's
+ * typed-closure signature match a declared (ptypes, pstruct_idxs, pcount,
+ * rtype)? Struct params must match by struct idx (widths must agree for the
+ * inline call). pstruct_idxs (NULL ok) is the declared per-param struct idx. */
 static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
+                                             const uint32_t* pstruct_idxs,
                                              uint8_t pcount, JaclType rtype) {
   if (L->known_arity != (int16_t)pcount) return false;
   if (L->return_type != rtype) return false;
   for (uint8_t k = 0; k < pcount; k++) {
     JaclType lt = L->param_types ? L->param_types[k] : TYPE_DYN;
     if (lt != ptypes[k]) return false;
+    if (lt == TYPE_STRUCT) {
+      uint32_t lsi = L->param_struct_idxs ? L->param_struct_idxs[k] : UINT32_MAX;
+      uint32_t dsi = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
+      if (lsi != dsi) return false;
+    }
   }
   return true;
 }
@@ -4744,9 +4808,10 @@ static bool compiler__compile_closure_to_shape(Compiler* c, AstNode* a,
         a->data.var_ref.name, a->data.var_ref.length);
     int gslot = compiler__resolve_local(c, gn);
     JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
+    uint32_t psi[COMPILER_MAX_PROC_PARAMS]; uint32_t rsi;
     bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
-              compiler__decode_proc_shape(c, shape, pts, &pcnt, &prt) &&
-              compiler__local_closure_conforms(&c->locals[gslot], pts, pcnt, prt);
+              compiler__decode_proc_shape_ex(c, shape, pts, &pcnt, &prt, psi, &rsi) &&
+              compiler__local_closure_conforms(&c->locals[gslot], pts, psi, pcnt, prt);
     if (!ok) {
       compiler__error(c, line, col,
           "value is not a closure conforming to the [Proc …] type");
@@ -4775,14 +4840,28 @@ static void compiler__activate_annot_proc_from_shape(Compiler* c,
   c->annot_proc_param_count = (uint8_t)pc;
   for (uint16_t k = 0; k < pc; k++) {
     uint32_t pidx = reg->proc_param_pool[s->u.proc.params_off + k];
-    c->annot_proc_param_types[k] = COMPILER_IS_SCALAR_TYPE_IDX(pidx)
-                                     ? COMPILER_TYPE_IDX_TO_SCALAR(pidx) : TYPE_DYN;
-    c->annot_proc_param_struct_idxs[k] = UINT32_MAX; /* scalars (B3a) */
+    if (COMPILER_IS_SCALAR_TYPE_IDX(pidx)) {
+      c->annot_proc_param_types[k] = COMPILER_TYPE_IDX_TO_SCALAR(pidx);
+      c->annot_proc_param_struct_idxs[k] = UINT32_MAX;
+    } else if (pidx < reg->count && reg->defs[pidx]) {  /* struct-in-[Proc …] */
+      c->annot_proc_param_types[k] = TYPE_STRUCT;
+      c->annot_proc_param_struct_idxs[k] = pidx;
+    } else {
+      c->annot_proc_param_types[k] = TYPE_DYN;
+      c->annot_proc_param_struct_idxs[k] = UINT32_MAX;
+    }
   }
   uint32_t rid = s->u.proc.return_idx;
-  c->annot_proc_return_type = COMPILER_IS_SCALAR_TYPE_IDX(rid)
-                                ? COMPILER_TYPE_IDX_TO_SCALAR(rid) : TYPE_DYN;
-  c->annot_proc_return_struct_idx = UINT32_MAX;
+  if (COMPILER_IS_SCALAR_TYPE_IDX(rid)) {
+    c->annot_proc_return_type = COMPILER_TYPE_IDX_TO_SCALAR(rid);
+    c->annot_proc_return_struct_idx = UINT32_MAX;
+  } else if (rid < reg->count && reg->defs[rid]) {
+    c->annot_proc_return_type = TYPE_STRUCT;
+    c->annot_proc_return_struct_idx = rid;
+  } else {
+    c->annot_proc_return_type = TYPE_DYN;
+    c->annot_proc_return_struct_idx = UINT32_MAX;
+  }
   c->annot_proc_active = true;
 }
 
@@ -10241,8 +10320,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       int gslot = compiler__resolve_local(c, gn);
       if (gslot != -1 && c->locals[gslot].known_arity >= 0 &&
           compiler__local_closure_conforms(&c->locals[gslot],
-              c->annot_proc_param_types, c->annot_proc_param_count,
-              c->annot_proc_return_type)) {
+              c->annot_proc_param_types, c->annot_proc_param_struct_idxs,
+              c->annot_proc_param_count, c->annot_proc_return_type)) {
         proc_named = true;
       } else {
         compiler__error(c, line, col,
@@ -11336,6 +11415,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                    "declares %s", (int)i, type_name(param_types_arr[i]),
                    type_name(c->annot_proc_param_types[i]));
           compiler__error(c, line, col, err_msg);
+          c->annot_proc_active = false;
+          return;
+        } else if (param_types_arr[i] == TYPE_STRUCT &&
+                   param_struct_idxs[i] != c->annot_proc_param_struct_idxs[i]) {
+          /* struct-in-[Proc …]: same kind (struct) but a DIFFERENT struct —
+           * widths/layouts differ, so the inline call would be type-confused. */
+          compiler__error(c, line, col,
+              "typed-closure literal struct param does not match the struct "
+              "type declared by its [Proc …] type");
           c->annot_proc_active = false;
           return;
         }
@@ -16877,6 +16965,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (local_slot != -1) {
           head_arity = c->locals[local_slot].known_arity;
           call_param_types = c->locals[local_slot].param_types;
+          call_param_struct_idxs = c->locals[local_slot].param_struct_idxs;
           call_return_type = c->locals[local_slot].return_type;
           call_return_struct_idx = c->locals[local_slot].return_struct_idx;
           call_param_count = head_arity;
@@ -16987,6 +17076,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           int slot = compiler__resolve_local(c, vname);
           if (slot != -1) {
             call_param_types = c->locals[slot].param_types;
+            call_param_struct_idxs = c->locals[slot].param_struct_idxs;
             call_return_type = c->locals[slot].return_type;
             call_return_struct_idx = c->locals[slot].return_struct_idx;
             call_param_count = c->locals[slot].known_arity;
@@ -17113,11 +17203,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               a->data.var_ref.name, a->data.var_ref.length);
           int gslot = compiler__resolve_local(c, gn);
           JaclType pts[COMPILER_MAX_PROC_PARAMS]; uint8_t pcnt; JaclType prt;
+          uint32_t psi[COMPILER_MAX_PROC_PARAMS]; uint32_t rsi;
           bool ok = gslot != -1 && c->locals[gslot].known_arity >= 0 &&
-                    compiler__decode_proc_shape(c, call_param_struct_idxs[i],
-                                                pts, &pcnt, &prt) &&
+                    compiler__decode_proc_shape_ex(c, call_param_struct_idxs[i],
+                                                pts, &pcnt, &prt, psi, &rsi) &&
                     compiler__local_closure_conforms(&c->locals[gslot],
-                                                     pts, pcnt, prt);
+                                                     pts, psi, pcnt, prt);
           if (!ok) {
             compiler__error(c, line, col,
                 "argument is not a closure conforming to the [Proc …] "

@@ -1,0 +1,22 @@
+# expect: 7
+# expect: 5
+# Struct types as [Proc …] PARAMS (remaining item #1, struct-param slice). A
+# closure taking a struct param can be passed to a [Proc [Struct] …] param and
+# called with a struct argument (passed inline). Covers an inline-literal arg
+# (monomorphized + field access) and a named typed-closure binding
+# (conformance-checked). The literal must DECLARE the struct param type
+# (`{Point q}`); a dyn param inferred from the annotation narrows compiler-side
+# but not typer-side yet, and nested compound types inside [Proc …] remain
+# unsupported.
+struct Point {i32 x, i32 y}
+proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
+
+proc main {} {
+  # Inline closure literal with a typed struct param + field access.
+  print [apply [proc {Point q} i32 { $q->x }] [Point x 7 y 2]]      # 7
+
+  # A named [Proc [Point] i32] binding, conformance-checked at the sink.
+  def [Proc [Point] i32] g [proc {Point q} i32 { $q->y }]
+  print [apply $g [Point x 10 y 5]]                                 # 5
+}
+main

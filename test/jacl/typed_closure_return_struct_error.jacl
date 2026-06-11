@@ -1,7 +1,0 @@
-# expect-error: not yet supported
-# Struct/compound param or return types inside a [Proc …] return annotation are
-# Phase B3b+ — rejected clearly rather than silently mis-encoded.
-struct Pt { i32 x  i32 y }
-proc mk {} [Proc [Pt] i64] { proc {p} {7} }
-proc main {} { print 1 }
-main

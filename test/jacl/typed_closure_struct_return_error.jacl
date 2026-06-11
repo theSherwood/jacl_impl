@@ -1,0 +1,10 @@
+# expect-error: not yet supported
+# Struct RETURN types inside [Proc …] are not yet supported (the struct-param
+# slice landed; struct returns are a follow-up). A [Proc [i32] Struct]
+# annotation is a clear error, not a silent mis-encoding.
+struct Point {i32 x, i32 y}
+proc main {} {
+  def [Proc [i32] Point] g [proc {i32 a} Point { [Point x $a y 0] }]
+  print 1
+}
+main

@@ -17,13 +17,24 @@ expression args, nested push), across single-file + interpret + module compiles,
 plus runtime proc-signature introspection (`print` shows `<proc name(types) ->
 ret>`). Verified-remaining gaps:
 
-1. **Struct/compound types inside `[Proc …]`** — `[Proc [Point] i32]` /
-   `[Proc [i32] Point]` parse, but the call result types `dyn` (proc-shape
-   param/return idxs encode only scalars; `typer__portable_proc_shape` declines
-   non-scalar shapes). **The single biggest remaining item** — it blocks
-   higher-order procs over user data types. Struct idxs are already portable, so
-   the registry side is close; the typer's call-result narrowing +
-   monomorphization need to thread struct param/return idxs through.
+1. **Struct types inside `[Proc …]`** — struct PARAMS are now supported (the
+   struct-param slice): `[Proc [Point] i32]` works — a closure with a struct
+   param is passed inline + monomorphized (inline literal) / conformance-checked
+   (named, by struct idx). Tests: `typed_closure_struct_param.jacl` (+ `_error`
+   for a wrong-struct mismatch). **Still remaining:**
+   - **Struct RETURNS** (`[Proc [i32] Point]`): a clear error for now
+     (`typed_closure_struct_return_error.jacl`) — the return slice threads the
+     struct return idx so a closure call result types `TYPE_STRUCT` + idx.
+   - **Dyn-inferred struct param** (`[proc {q} …]` where the annotation says
+     `Point`): narrows compiler-side but not typer-side (the typer's
+     monomorphize doesn't inject the annotation's struct idx onto a dyn literal
+     param) — a clean "body returns dyn" error; declare the struct type on the
+     literal. The typer's `typer__monomorphize_proc_literal` would need the
+     shape's param struct idxs.
+   - **Nested compound** inside `[Proc …]` (`[Proc [[Vec i64]] …]`, nested
+     `[Proc …]`): registry-bound idxs aren't portable — stays unsupported.
+   - Direct-call / expression-arg of a struct-param closure still relies on
+     re-derivation (`typer__portable_proc_shape` declines non-scalar shapes).
 2. **A global proc / closure used as a first-class value** — `$procname` (a
    reference to a global proc) and a global `[Proc …]` binding type as `dyn`, so
    `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the
