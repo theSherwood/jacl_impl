@@ -3268,6 +3268,9 @@ struct Compiler {
   const char*      module_prefix;   /* "basename::" for namespace-prefixed globals */
   uint32_t         module_prefix_len;
   StructTypeRegistry* struct_registry; /* shared struct type registry (root compiler owns) */
+  bool structs_preregistered; /* step 2a: top-level structs registered by a
+                               * pre-pass before the typer; codegen AST_DEFSTRUCT
+                               * then skips re-registration. Root compiler only. */
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
   bool                 has_yield;      /* true if current proc body contains yield */
@@ -3371,6 +3374,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_prefix     = NULL;
   c->module_prefix_len = 0;
   c->struct_registry   = NULL;
+  c->structs_preregistered = false;
   c->loop_depth        = 0;
   c->has_yield         = false;
   c->sm_suspension_idx = 0;
@@ -17733,6 +17737,23 @@ static bool compiler__register_struct_def(Compiler* c, AstNode* node) {
   return true;
 }
 
+/* Step 2a: register every top-level `struct` definition into the (shared)
+ * struct registry BEFORE the typer runs, so struct indices are fixed before any
+ * shape interning (unblocking the typer/compiler registry unification — see
+ * docs/TYPER_SHAPE_UNIFICATION_AUDIT.md). Owns duplicate detection (via
+ * compiler__register_struct_def, which errors on a duplicate name). Sets the
+ * root's structs_preregistered flag so the codegen AST_DEFSTRUCT case skips
+ * re-registration. Nested defstructs aren't in the top-level `nodes` array;
+ * the codegen scope-depth check still rejects them. */
+static void compiler__prepass_register_structs(Compiler* c, AstNode** nodes,
+                                               uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    if (nodes[i] && nodes[i]->type == AST_DEFSTRUCT)
+      compiler__register_struct_def(c, nodes[i]);
+  }
+  c->structs_preregistered = true;
+}
+
 /* --- Internal: Compile a single AST node --- */
 
 void compiler__compile_node(Compiler* c, AstNode* node) {
@@ -18316,9 +18337,20 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
                         "defstruct must appear at top level");
         break;
       }
-      /* Registration extracted to compiler__register_struct_def (step 2a). */
-      if (compiler__register_struct_def(c, node))
-        compiler__emit_byte(c, OP_NIL, line);  /* declaration produces nil */
+      /* Step 2a: a struct pre-pass (compiler__prepass_register_structs) normally
+         registers all top-level structs before the typer, owning duplicate
+         detection. When it ran (root flag set), skip re-registration here.
+         Otherwise (paths without the pre-pass, e.g. module compiles) register
+         now, exactly as before. Either way a declaration produces nil. */
+      {
+        Compiler* sroot = c;
+        while (sroot->enclosing) sroot = sroot->enclosing;
+        if (sroot->structs_preregistered) {
+          compiler__emit_byte(c, OP_NIL, line);
+        } else if (compiler__register_struct_def(c, node)) {
+          compiler__emit_byte(c, OP_NIL, line);
+        }
+      }
       break;
     }
 
@@ -19041,6 +19073,11 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       c.struct_registry = reg;
     }
   }
+  /* Step 2a: snapshot the struct count BEFORE this compile registers its own
+   * structs (via the pre-pass below). The typer seeds only these pre-existing
+   * (prior-eval) structs; the current program's structs are added from the AST
+   * by typer__register_structs, so tc.structs[] stays identical. */
+  uint32_t seed_struct_count = c.struct_registry ? c.struct_registry->count : 0;
 
   /* Allocate ctx field list and pre-populate built-in pwd field */
   {
@@ -19108,12 +19145,21 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
    * Typer-detected errors are captured in tr and threaded back through
    * compiler__error so compilation fails the same way it would if the
    * compiler itself had detected the mismatch. */
+  /* Step 2a: register top-level structs into the shared registry BEFORE the
+   * typer, so struct indices are fixed before any shape interning. Owns
+   * duplicate detection; sets c.structs_preregistered so codegen skips
+   * re-registering. */
+  if (parse.error_count == 0 && result.error_count == 0) {
+    compiler__prepass_register_structs(&c, parse.nodes, parse.count);
+  }
+
   TyperResult tr;
   if (parse.error_count == 0) {
     /* compiler_compile is the single-file entry; no module cache here.
      * AST_USE nodes will error out during codegen ("use declaration
      * requires module context"), which is the existing behavior. */
-    typer_infer(parse.nodes, parse.count, &tr, NULL, 0, c.struct_registry);
+    typer_infer(parse.nodes, parse.count, &tr, NULL, 0, c.struct_registry,
+                seed_struct_count);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -19654,7 +19700,9 @@ bool compiler__compile_module(const char* canonical_path,
    * inferred_type don't fall back unnecessarily. */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr, imports, import_count, mc.struct_registry);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count,
+                mc.struct_registry,
+                mc.struct_registry ? mc.struct_registry->count : 0);
     if (tr.error_count > 0) {
       compiler__error(&mc, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -19823,7 +19871,9 @@ ProgramResult jacl_compile_program(const char* root_path,
    * compiler__compile_module). */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr, imports, import_count, c.struct_registry);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count,
+                c.struct_registry,
+                c.struct_registry ? c.struct_registry->count : 0);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);

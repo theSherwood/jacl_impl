@@ -157,12 +157,25 @@ must happen before `typer_infer`.** Two further wrinkles:
 
 Revised step-2 decomposition:
 
-- **2a.** Hoist struct registration into a pre-pass before `typer_infer`
-  (idx + names + field types into `c.struct_registry`; codegen `AST_DEFSTRUCT`
-  becomes find-or-fill-layout, idempotent). Behavior-preserving; gate on
-  full-suite-green + bytecode diff. **This is the real next step — riskier than
-  the audit first implied (touches a core compile phase: forward refs, inline
-  structs, the typer's own struct-registration path).**
+- **2a.** ✅ **DONE (2026-06-11).** Struct registration hoisted to a pre-pass
+  (`compiler__prepass_register_structs`) before `typer_infer` in
+  `compiler_compile`: the full `compiler__register_struct_def` (incl. layout)
+  runs in the pre-pass, so all struct idxs are fixed before the typer. The
+  typer gained a `seed_struct_count` param bounding its seeding loop to the
+  pre-existing (prior-eval) structs (snapshot taken before the pre-pass), so
+  `tc.structs[]` is byte-identical — the current program's structs are still
+  AST-registered by `typer__register_structs`. Codegen `AST_DEFSTRUCT` skips
+  re-registration when the root's `structs_preregistered` flag is set (the
+  pre-pass owns registration + duplicate detection); falls back to registering
+  otherwise. **Scope:** applied to `compiler_compile` (single-file + interpret)
+  only; the module paths (`compiler__compile_module`, `jacl_compile_program`)
+  and the `syntax.c` typer calls pass the full count + leave the flag false →
+  behavior-identical, no pre-pass. Extending the pre-pass to modules is a 2b
+  prerequisite follow-up. Landed in two commits: a pure extraction of the
+  registration body into `compiler__register_struct_def`, then the reorder.
+  Suite 91/0; TSAN 89/2 (known-safe). NB: the `Compiler` struct is mirrored in
+  `jacl.h` — the new `structs_preregistered` field had to be added there too
+  (the `struct_sizes` test catches the sizeof drift).
 - **2b.** Repoint typer shape interning to the shared registry (lazy), drop the
   offset trick / `tc.shape_reg`.
 - **2c.** Un-suppress AST shape stamps (Category C); compiler reads them.

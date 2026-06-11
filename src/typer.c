@@ -6315,7 +6315,7 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
 
 void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
                  TyperImportProc* imports, uint32_t import_count,
-                 StructTypeRegistry* seed_registry) {
+                 StructTypeRegistry* seed_registry, uint32_t seed_struct_count) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
@@ -6348,7 +6348,15 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
    * indices are preserved 1:1 with the compiler's registry so
    * struct_idx values stamped on AST nodes agree across passes. */
   if (seed_registry) {
-    for (uint32_t i = 2; i < seed_registry->count && i < TYPER_MAX_STRUCTS; i++) {
+    /* Seed only the structs that existed BEFORE this compile registered its own
+     * (seed_struct_count = a snapshot of the registry's struct count taken
+     * before any struct pre-pass / codegen registration). The current program's
+     * structs are appended below by typer__register_structs from the AST, so
+     * bounding here keeps tc.structs[] identical whether or not a pre-pass has
+     * already added them to the shared registry. Step 2a. */
+    uint32_t seed_lim = seed_struct_count < seed_registry->count
+                          ? seed_struct_count : seed_registry->count;
+    for (uint32_t i = 2; i < seed_lim && i < TYPER_MAX_STRUCTS; i++) {
       StructTypeDef* sd = seed_registry->defs[i];
       while (tc.struct_count < i && tc.struct_count < TYPER_MAX_STRUCTS) {
         memset(&tc.structs[tc.struct_count++], 0, sizeof(tc.structs[0]));

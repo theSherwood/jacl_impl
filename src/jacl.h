@@ -1599,6 +1599,8 @@ struct Compiler {
   const char*      module_prefix;
   uint32_t         module_prefix_len;
   StructTypeRegistry* struct_registry;
+  /* Keep in sync with struct Compiler in src/compiler.c (step 2a). */
+  bool structs_preregistered;
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;
   bool                 has_yield;
@@ -2370,7 +2372,8 @@ typedef struct TyperImportProc TyperImportProc;
 extern void typer_infer (AstNode **nodes, uint32_t count,
                          TyperResult *result_or_null,
                          TyperImportProc *imports, uint32_t import_count,
-                         StructTypeRegistry *seed_registry);
+                         StructTypeRegistry *seed_registry,
+                         uint32_t seed_struct_count);
 
 /* --- type_error.c — shared formatters used by both compiler and typer.
  * Each writes to a caller buffer in snprintf style; the reporting
