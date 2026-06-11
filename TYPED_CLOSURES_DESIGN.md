@@ -75,10 +75,21 @@ ret>`). Verified-remaining gaps:
    and a generator can't present a portable scalar signature to the pre-pass —
    `proc g {} i32 { yield 1 }` is rejected at its own definition — so the stamp
    can never conform-but-mismatch a runtime generator value. No unsoundness.)
-   **Still open (same class):** a closure value flowing through an UNTYPED
-   binding (`def f $dbl` / `def f [proc …]`) or a get (`def g [vec-get …]`)
-   collapses to `dyn` when later passed to a `[Proc …]` param — the untyped-def
-   effective-type logic doesn't inherit the closure shape.
+   **Untyped binding / get narrowing — DONE.** A closure value with a
+   statically-known signature, bound via an untyped `def` *or* `mut` — a named
+   proc (`$dbl`), a call/get result (`[make 2]`, `[vec-get $fns 0]`), or an
+   annotated inline literal — now inherits the signature instead of collapsing
+   to `dyn`, so the binding is passable to a `[Proc …]` sink, not just callable.
+   Per-slot rule: a partly-typed literal (`[proc {i32 x, y} i32 {…}]`) keeps a
+   static `[Proc [i32 dyn] i32]` (unannotated slots are `dyn`); a FULLY-
+   unannotated literal (`[proc {x} {…}]`) carries no annotation and stays `dyn`
+   (the bridge that keeps untyped proc bindings). `mut` additionally enforces
+   signature conformance on REASSIGNMENT (`set f $g`): a wrong-signature closure
+   is rejected, a conforming one (or a monomorphizing inline literal) is allowed.
+   Tests: `typed_closure_untyped_def.jacl`, `typed_closure_mut.jacl`
+   (+ `_unannotated_err`, `_mut_reassign_err`). The rule: a proc/closure's type
+   comes from its annotations (per-slot) or a propagated annotation; no known
+   signature → `dyn` — applied uniformly to `def` and `mut`.
 3. **Non-literal closure-returning tail** — a proc returning a closure *param or
    value verbatim* (not an inline literal) isn't conformance-checked against its
    declared `[Proc …]` return.
