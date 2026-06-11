@@ -120,10 +120,14 @@ stamp.
   Suite 597/597, 91/91 binaries.
 
 **B3d scope / debt:** a closure value that is an EXPRESSION (not a var-ref or
-inline literal) passed to a closure param — e.g. `[apply [pick-fn] 5]` — isn't
-handled (the value would need to carry its shape on the AST node, the
-closure-value-read rep deferred here); named closures resolve their signature
-only via locals (global typed-closure bindings as values are a follow-up).
+inline literal) passed to a closure param — e.g. `[apply [pick-fn] 5]` — is now
+handled (step 2b, slice 3): the typer stamps the expression's portable
+proc-shape idx (`inferred_proc_shape_idx`) and the compiler conformance-checks
+it at the closure-param sink, then pushes the value. A non-conforming signature
+is a clear error. Tests: `typed_closure_expr_arg.jacl` (+ direct call of the
+expr) / `typed_closure_expr_arg_error.jacl`. Remaining: named closures still
+resolve their signature only via locals (global typed-closure bindings as values
+are a follow-up).
 
 **Phase B3b — closures-returning-closures as landed (2026-06-10):**
 - **`[Proc …]` RETURN type** (`typer__resolve_return_type` + the compiler

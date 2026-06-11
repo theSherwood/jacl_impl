@@ -1,0 +1,19 @@
+# expect: 6000000000
+# expect: 6000000000
+# expect: 9
+# Step 2b (slice 3): a closure-valued EXPRESSION — the result of a call, not a
+# var-ref or inline literal — passed to a [Proc …] closure param, and called
+# directly. `[pick-fn]` returns a closure; the typer stamps its portable
+# proc-shape idx (inferred_proc_shape_idx), so the compiler can conformance-check
+# it at the closure-param sink and drive a typed (unboxed) call — previously a
+# clear error (the B3d "expression closure value" debt). Wide-i64 proves unboxed.
+proc pick-fn {} [Proc [i64] i64] { proc {x} {* $x 1000000000} }
+proc add3   {} [Proc [i64] i64] { proc {x} {+ $x 3} }
+proc apply {[Proc [i64] i64] f, i64 n} i64 { [f $n] }
+
+proc main {} {
+  print [apply [pick-fn] 6]            # 6000000000 — expr arg to a closure param
+  print [[pick-fn] 6]                  # 6000000000 — direct call of the expr
+  print [apply [add3] 6]               # 9
+}
+main

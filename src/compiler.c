@@ -17086,6 +17086,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             return;
           }
           compiler__compile_node(c, a);    /* pushes the closure value */
+        } else if (a->inferred_proc_shape_idx != UINT32_MAX) {
+          /* Step 2b (slice 3): a closure-valued EXPRESSION arg — e.g.
+           * `[apply [pick-fn] 5]`, where [pick-fn] is a call returning a
+           * closure. No binding to inspect, but the typer stamped its portable
+           * proc-shape idx; conformance-check it against the param's [Proc …]
+           * signature, then push the value. (Previously a clear error — the
+           * B3d "expression closure value" debt.) */
+          JaclType pts[COMPILER_MAX_PROC_PARAMS], apts[COMPILER_MAX_PROC_PARAMS];
+          uint8_t pcnt, apcnt; JaclType prt, art;
+          bool ok = compiler__decode_proc_shape(c, call_param_struct_idxs[i],
+                                                pts, &pcnt, &prt) &&
+                    compiler__decode_proc_shape(c, a->inferred_proc_shape_idx,
+                                                apts, &apcnt, &art) &&
+                    pcnt == apcnt && prt == art;
+          for (uint8_t k = 0; ok && k < pcnt; k++)
+            if (pts[k] != apts[k]) ok = false;
+          if (!ok) {
+            compiler__error(c, line, col,
+                "argument is not a closure conforming to the [Proc …] "
+                "param's signature");
+            return;
+          }
+          compiler__compile_node(c, a);    /* pushes the closure value */
         } else {
           compiler__error(c, line, col,
               "a [Proc …] closure param needs an inline closure literal or a "
