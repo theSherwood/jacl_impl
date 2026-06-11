@@ -185,6 +185,32 @@ Revised step-2 decomposition:
 shared by all kinds. The instance flip is a multi-step sub-project, not a single
 repoint.
 
+### Cleanup audit after 2b slices 1–3 (2026-06-11)
+
+What landed: the portable proc-shape stamp (`inferred_proc_shape_idx`) now feeds
+the def-binding (slice 1), direct-call-of-expression (slice 2), and
+closure-expression-arg (slice 3) sites. Question: can any re-derivation helper be
+retired (the 2d goal)?
+
+**Finding: nothing is safely removable yet — the stamp is purely additive.**
+- `compiler__coll_receiver_proc_shape` is still used by both push paths
+  (vec-push / arr-push monomorphization), independent of the get-narrowing
+  fast-path.
+- The get/local/global fallback branches in
+  `compiler__call_closure_return_shape` are NOT dead: they cover (a) local
+  closure-returning calls whose result the typer doesn't stamp (the 4288 stamp
+  fires only when `typer__find_proc` resolves the callee), and (b) **any typer
+  path where `tc->shared_reg` is NULL** — `syntax.c:1240` (prelude pre-pass)
+  passes a NULL seed registry, so `typer__portable_proc_shape` can't stamp
+  there; the fallback re-derivation is the only path.
+
+So 2d (deleting re-derivation) is gated on completing the plumbing everywhere —
+every typer path needs a surviving shared registry, and all shape kinds (not
+just proc) need stamping. The 2b slices delivered the *capability* wins
+(expression results carry proc shapes; the motivating B3c/B3d debts are closed);
+the *code-removal* win is a larger, later effort whose marginal value is low now
+that the motivating problems are solved.
+
 ### Open decisions (resolve before step 2)
 
 - **Dead-shape accumulation** (DECIDED: **lazy interning**): typer-only shapes
