@@ -587,6 +587,22 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
  * Writes V and K's encodings via the out params for typed-collection
  * shapes (out_inner_value_idx, out_inner_key_idx). For struct/scalar
  * elements they're left UINT32_MAX. */
+
+/* Is `idx` a parametric SHAPE entry (typed-vec/map/buf/ptr/future/box/arr/
+ * proc) in the typer's shape registry — as opposed to a struct idx, a scalar
+ * sentinel, or UINT32_MAX? KIND-based, not range-based: it asks the registry
+ * entry's kind rather than testing the [TYPER_MAX_STRUCTS, count) band. In
+ * today's offset layout the reserved [0, TYPER_MAX_STRUCTS) prefix is
+ * calloc'd to TYPE_SHAPE_NONE and shapes live at >= TYPER_MAX_STRUCTS, so this
+ * is exactly equivalent to the old range test; once struct and shape entries
+ * share one registry it stays correct because it reads the kind tag. All
+ * parametric kinds are >= TYPE_SHAPE_TYPED_VEC (NONE/STRUCT/CTX sort below).
+ * See docs/TYPER_SHAPE_UNIFICATION_AUDIT.md. */
+static bool typer__is_shape_idx(const TyperCtx* tc, uint32_t idx) {
+  return idx < tc->shape_reg.count &&
+         tc->shape_reg.shapes[idx].kind >= TYPE_SHAPE_TYPED_VEC;
+}
+
 static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
                                         uint32_t* out_inner_value_idx,
                                         uint32_t* out_inner_key_idx) {
@@ -596,7 +612,7 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
   if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
     return JACL_TYPE_IDX_TO_SCALAR(encoded);
   }
-  if (encoded >= TYPER_MAX_STRUCTS && encoded < tc->shape_reg.count) {
+  if (typer__is_shape_idx(tc, encoded)) {
     TypeShape* shape = &tc->shape_reg.shapes[encoded];
     switch (shape->kind) {
       case TYPE_SHAPE_TYPED_VEC:
@@ -800,8 +816,7 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
     /* TYPE_PTR binding with a buf-shape pointee: the pointer addresses
      * the start of the shape entry's [Buf N T] region. Dim 0 = shape
      * length; shape after 1 arrow = shape.elem_idx. */
-    if (b->struct_idx < TYPER_MAX_STRUCTS ||
-        b->struct_idx >= tc->shape_reg.count ||
+    if (!typer__is_shape_idx(tc, b->struct_idx) ||
         tc->shape_reg.shapes[b->struct_idx].kind != TYPE_SHAPE_BUF) {
       return false;
     }
@@ -810,7 +825,7 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
     return false;
   }
   uint32_t cur_enc = shape_after[1];
-  while (cur_enc >= TYPER_MAX_STRUCTS && cur_enc < tc->shape_reg.count &&
+  while (typer__is_shape_idx(tc, cur_enc) &&
          tc->shape_reg.shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
     if (num_dims >= 15) return false;
     cur_enc = tc->shape_reg.shapes[cur_enc].u.buf.elem_idx;
@@ -1888,14 +1903,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     AstNode* rv = value_node->data.command.args[0];
     const TyperBinding* vb = typer__scope_resolve(tc,
         rv->data.var_ref.name, rv->data.var_ref.length, rv->scope_mark);
-    if (vb && vb->type == TYPE_VEC && vb->struct_idx != UINT32_MAX &&
-        !JACL_IS_SCALAR_TYPE_IDX(vb->struct_idx) &&
-        vb->struct_idx >= TYPER_MAX_STRUCTS &&
-        vb->struct_idx < tc->shape_reg.count) {
+    if (vb && vb->type == TYPE_VEC &&
+        typer__is_shape_idx(tc, vb->struct_idx)) {
       uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
       JaclType ek = typer__buf_elem_decode(tc, vb->struct_idx, &iv, &ik);
-      if (ek == TYPE_TYPED_VEC && !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-          iv >= TYPER_MAX_STRUCTS && iv < tc->shape_reg.count) {
+      if (ek == TYPE_TYPED_VEC && typer__is_shape_idx(tc, iv)) {
         effective = TYPE_VEC;
         struct_idx = iv;  /* typer-side inner shape — binding-only */
       }
@@ -3623,8 +3635,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
           if (eidx == UINT32_MAX) {
             /* untyped element — binding stays dyn */
-          } else if (eidx >= TYPER_MAX_STRUCTS &&
-                     eidx < tc->shape_reg.count) {
+          } else if (typer__is_shape_idx(tc, eidx)) {
             /* Typer-side shape: decode to PORTABLE inner encodings for the
              * loop binding (scalar sentinel / aligned struct idx). Inner
              * ref-kinds ([Vec str]/[Vec dyn] elements) are plain-rep'd. */
@@ -3635,9 +3646,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                                 JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-              bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                 iv >= TYPER_MAX_STRUCTS &&
-                                 iv < tc->shape_reg.count;
+              bool inner_shape = typer__is_shape_idx(tc, iv);
               if (inner_ref) {
                 bt = TYPE_VEC;
                 bsi = (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
@@ -4152,10 +4161,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             recv->data.var_ref.name, recv->data.var_ref.length,
             recv->scope_mark);
         if (pb && (pb->type == TYPE_VEC || pb->type == TYPE_ARR) &&
-            pb->struct_idx != UINT32_MAX &&
-            !JACL_IS_SCALAR_TYPE_IDX(pb->struct_idx) &&
-            pb->struct_idx >= TYPER_MAX_STRUCTS &&
-            pb->struct_idx < tc->shape_reg.count) {
+            typer__is_shape_idx(tc, pb->struct_idx)) {
           uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
           if (typer__decode_proc_shape(tc, pb->struct_idx, &pc2, pts2, &rt2)) {
             typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
@@ -4449,9 +4455,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                            (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                             JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-          bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                             iv >= TYPER_MAX_STRUCTS &&
-                             iv < tc->shape_reg.count;
+          bool inner_shape = typer__is_shape_idx(tc, iv);
           if (inner_ref) {
             want = TYPE_VEC;
             if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR) want_idx = iv;
@@ -4554,9 +4558,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
              * elements of a depth-3 ctor) is itself plain-rep'd, and its AST
              * stamp is suppressed — expect TYPE_VEC with no idx compare. */
             bool inner_shape = (ekind == TYPE_TYPED_VEC &&
-                                !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                iv >= TYPER_MAX_STRUCTS &&
-                                iv < tc->shape_reg.count);
+                                typer__is_shape_idx(tc, iv));
             if (inner_shape) { inner_ref = true; iv = UINT32_MAX; }
             JaclType want;
             if (inner_ref) {
@@ -5022,10 +5024,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             const TyperBinding* vb = typer__scope_resolve(tc,
                 recv->data.var_ref.name, recv->data.var_ref.length,
                 recv->scope_mark);
-            if (vb && vb->type == TYPE_VEC && vb->struct_idx != UINT32_MAX &&
-                !JACL_IS_SCALAR_TYPE_IDX(vb->struct_idx) &&
-                vb->struct_idx >= TYPER_MAX_STRUCTS &&
-                vb->struct_idx < tc->shape_reg.count) {
+            if (vb && vb->type == TYPE_VEC &&
+                typer__is_shape_idx(tc, vb->struct_idx)) {
               uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
               JaclType ek = typer__buf_elem_decode(tc, vb->struct_idx,
                                                    &iv, &ik);
@@ -5033,9 +5033,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                  (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                                   JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-                bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                   iv >= TYPER_MAX_STRUCTS &&
-                                   iv < tc->shape_reg.count;
+                bool inner_shape = typer__is_shape_idx(tc, iv);
                 if (inner_ref) {
                   node->inferred_type = TYPE_VEC;
                   if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
@@ -5098,10 +5096,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             const TyperBinding* ab = typer__scope_resolve(tc,
                 recv->data.var_ref.name, recv->data.var_ref.length,
                 recv->scope_mark);
-            if (ab && ab->type == TYPE_ARR && ab->struct_idx != UINT32_MAX &&
-                !JACL_IS_SCALAR_TYPE_IDX(ab->struct_idx) &&
-                ab->struct_idx >= TYPER_MAX_STRUCTS &&
-                ab->struct_idx < tc->shape_reg.count) {
+            if (ab && ab->type == TYPE_ARR &&
+                typer__is_shape_idx(tc, ab->struct_idx)) {
               uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
               if (typer__decode_proc_shape(tc, ab->struct_idx, &pc2, pts2, &rt2)) {
                 node->inferred_type = TYPE_CLOSURE;
@@ -5200,10 +5196,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             const TyperBinding* mb = typer__scope_resolve(tc,
                 recv->data.var_ref.name, recv->data.var_ref.length,
                 recv->scope_mark);
-            if (mb && mb->type == TYPE_MAP && mb->struct_idx != UINT32_MAX &&
-                !JACL_IS_SCALAR_TYPE_IDX(mb->struct_idx) &&
-                mb->struct_idx >= TYPER_MAX_STRUCTS &&
-                mb->struct_idx < tc->shape_reg.count) {
+            if (mb && mb->type == TYPE_MAP &&
+                typer__is_shape_idx(tc, mb->struct_idx)) {
               uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
               JaclType ek = typer__buf_elem_decode(tc, mb->struct_idx,
                                                    &iv, &ik);
@@ -5211,9 +5205,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                  (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
                                   JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-                bool inner_shape = !JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                   iv >= TYPER_MAX_STRUCTS &&
-                                   iv < tc->shape_reg.count;
+                bool inner_shape = typer__is_shape_idx(tc, iv);
                 if (inner_ref) {
                   node->inferred_type = TYPE_VEC;
                   if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
@@ -5684,7 +5676,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           uint32_t pointee = b->struct_idx;
           if (b->type == TYPE_BUF) {
             uint32_t walk = pointee;
-            while (walk >= TYPER_MAX_STRUCTS && walk < tc->shape_reg.count &&
+            while (typer__is_shape_idx(tc, walk) &&
                    tc->shape_reg.shapes[walk].kind == TYPE_SHAPE_BUF) {
               walk = tc->shape_reg.shapes[walk].u.buf.elem_idx;
             }
@@ -5941,8 +5933,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
              * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
              * and T from the shape. */
-            if (b->struct_idx >= TYPER_MAX_STRUCTS &&
-                b->struct_idx < tc->shape_reg.count &&
+            if (typer__is_shape_idx(tc, b->struct_idx) &&
                 tc->shape_reg.shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
               TypeShape* inner = &tc->shape_reg.shapes[b->struct_idx];
               uint32_t inner_M = inner->u.buf.len;
@@ -6188,9 +6179,7 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
      * vec-get/arr-get) resolve the binding directly. Scalar-sentinel stamps
      * ([Arr str]) are NOT shape idxs and stay. */
     if ((b->type == TYPE_VEC || b->type == TYPE_ARR || b->type == TYPE_MAP) &&
-        b->struct_idx != UINT32_MAX &&
-        !JACL_IS_SCALAR_TYPE_IDX(b->struct_idx) &&
-        b->struct_idx >= TYPER_MAX_STRUCTS)
+        typer__is_shape_idx(tc, b->struct_idx))
       node->inferred_struct_idx = UINT32_MAX;
   } else {
     node->inferred_type = TYPE_DYN;

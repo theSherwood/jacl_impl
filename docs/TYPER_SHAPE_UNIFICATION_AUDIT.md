@@ -108,8 +108,15 @@ describe the offset trick / band layout; update once the bands collapse.
 
 ## Recommended migration shape
 
-1. Land a kind-based `typer__is_shape_idx` + route Category A through
-   `typer__buf_elem_decode`; keep the offset trick in place (still green).
+1. **✅ DONE.** Kind-based `typer__is_shape_idx(tc, idx)` landed
+   (`idx < shape_reg.count && shapes[idx].kind >= TYPE_SHAPE_TYPED_VEC`), and
+   every Category A discrimination site + `typer__buf_elem_decode`'s gate now
+   route through it. Provably equivalent to the old range test in today's
+   offset layout (`!scalar(iv) && iv>=256 && iv<count` ≡ `iv<count &&
+   kind>=TYPED_VEC`, since the reserved prefix is `TYPE_SHAPE_NONE` and shapes
+   live at >= 256), and correct under a unified layout because it reads the
+   kind tag. The offset trick (`init_at_offset`, the `structs[256]` table,
+   Category B capacity bounds) is untouched. Suite 91/0; TSAN 89/2 (known-safe).
 2. Repoint `tc.shape_reg` interning to the shared registry; flip ownership so
    the registry lives on the compile context (created before `typer_infer`,
    surviving to runtime). Dedup in every `type_shape_intern_*` (verified) means
