@@ -1979,6 +1979,10 @@ struct JaclVM_s {
      NOTE: keep in sync with struct JaclVM_s in src/embed.c. */
   JaclCtxPool     ctx_pool;
   uint8_t         ctx_initialized;
+  /* Persistent GlobalArity table — accumulates typed proc signatures
+     declared across all jacl_eval calls. Grown lazily by
+     compiler_compile. Keep in sync with src/embed.c. */
+  GlobalArityTable persistent_arities;
   JaclTrampoline* trampoline_list;
 };
 
