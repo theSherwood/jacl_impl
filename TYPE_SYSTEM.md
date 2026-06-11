@@ -53,6 +53,41 @@ The same encoding serves `TYPE_TYPED_VEC`, `TYPE_TYPED_MAP`,
 `TYPE_TYPED_MAP` additionally uses `inferred_key_struct_idx` for the
 key-side type.
 
+## Proc / closure types (`[Proc [P…] R]`)
+
+A closure is `TYPE_CLOSURE`; its **signature** (param types + return
+type) is interned in the shape registry as a `TYPE_SHAPE_PROC` entry,
+and the entry's index rides on `inferred_struct_idx` just like a
+struct idx (the slot space is shared — proc-shape idxs and struct
+idxs are distinguished by the registry entry's kind, not the value
+range). Param/return slots that are scalars use the
+`JACL_SCALAR_TYPE_IDX` encoding above; struct params/returns use the
+real struct idx. This is what makes `[Proc [Point] i32]` /
+`[Proc [i32] Point]` work — struct idxs are portable 1:1 across the
+typer and compiler registries. **Nested compounds** inside `[Proc …]`
+(`[Proc [[Vec i64]] …]`, nested `[Proc …]`) are deliberately
+unsupported: those element idxs are registry-bound and not portable.
+
+Because the typer and compiler keep *separate* shape registries, a
+proc shape that must survive the typer→AST→compiler handoff is also
+interned **portably** and stamped on the AST node as
+`inferred_proc_shape_idx` (a parallel field to `inferred_struct_idx`,
+used only for proc shapes). The compiler decodes that portable stamp
+rather than trusting a typer-side registry index. See
+`docs/TYPER_SHAPE_UNIFICATION_AUDIT.md` for the full shape-registry
+story.
+
+Closures are first-class values: a `[Proc …]`-annotated binding,
+param, return, or collection element carries a concrete signature and
+is called through the typed unboxed convention; conformance is exact
+structural match (invariant). A bare **global proc name** (`$dbl`)
+narrows to a typed closure value via its registered signature, and a
+**forward reference** (proc used as a value before its textual
+definition) conforms via the portable stamp from the typer's
+whole-program pre-pass — which is why higher-order mutual recursion is
+expressible. The authoritative status and the few remaining gaps live
+in `TYPED_CLOSURES_DESIGN.md` §"Remaining work".
+
 ## Struct registry slot reservations
 
 Both passes share the same slot layout so an `inferred_struct_idx`
@@ -100,6 +135,8 @@ flag, ctx as the lone HeapRecord) see `STRUCT_DESIGN.md`.
 | Compiler's import collector | `compiler.c:compiler__collect_typer_imports` |
 | ctx struct slot reservation | `compiler.c:struct_registry__init`, `typer.c:typer_infer` |
 | Shared scalar-elem encoding | `ast.c` (the `JACL_SCALAR_*` macros, after `JaclType` enum) |
+| Proc-shape interning (typer / portable stamp) | `typer.c:typer__intern_global_proc_shape / __portable_proc_shape`; `compiler.c:compiler__decode_proc_shape_ex` |
+| Closure conformance (global / forward-ref) | `compiler.c:compiler__global_closure_conforms / __stamp_closure_conforms` |
 | Compiler's runtime-state tracker | `compiler.c:compiler__ensure_boxed` (only reader of `c->last_expr_type`) |
 | Shared error formatters | `src/type_error.c` (`jacl_format_*`) |
 
@@ -261,8 +298,12 @@ Buf-related compile-time errors are formatted via the
 ## Deferred items
 
 See **`NOT_IMPLEMENTED.md` §4** for the canonical list of typer-side
-deferred work (closure literal signatures, imported struct
-field-typing, `swap` struct-element narrowing, match arm-walk).
+deferred work (imported struct field-typing, `swap` struct-element
+narrowing, match arm-walk). **Closure literal signatures are no longer
+deferred** — the typed-closures arc (incl. `[Proc …]` syntax, closure
+values/params/returns, global procs as values, and forward refs) is
+functionally complete; see `TYPED_CLOSURES_DESIGN.md` §"Remaining work"
+for the few residual gaps and the `[Proc …]` section above.
 
 ## Test coverage
 

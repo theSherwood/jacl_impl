@@ -1,9 +1,10 @@
 # Typed Closures — Handoff (fresh-session pickup)
 
-Last updated: 2026-06-11. Branch: `main` (push directly here). Build/verify:
-`./build.sh` (expect **91/0**), `./build.sh --tsan` (expect **89/2** — the 2 are
-the known-safe `chase_lev_stress` / `jacl_harness` race-detector reports),
-`--wasm` skipped if no `emcc`.
+Last updated: 2026-06-11. Branch: `claude/zen-pasteur-6yqc13` (the active feature
+branch — push there; the closure arc through forward-ref-as-value lives here).
+Build/verify: `./build.sh` (expect **91/0**), `./build.sh --tsan` (expect
+**89/2** — the 2 are the known-safe `chase_lev_stress` / `jacl_harness`
+race-detector reports), `--wasm` skipped if no `emcc`.
 
 ## START HERE — reading order
 

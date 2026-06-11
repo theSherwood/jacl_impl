@@ -14,14 +14,23 @@
 > closures-returning-closures (B3b), named closures as VALUES with conformance
 > (B3d), AND collections of closures in BOTH `[Vec [Proc …]]` (B3c-vec) and
 > `[Arr [Proc …]]` (B3c-arr) — all via a registry `TYPE_SHAPE_PROC`, no VM
-> change. The **B3c follow-ups are also COMPLETE** (2026-06-11):
-> vec-get/arr-get element narrowing and push-of-closure monomorphization (both
-> via a shared receiver-shape helper; included a cross-registry `TYPE_ARR`
-> var-ref suppression fix + annotated non-ctor result-binding elem-shape
-> stamping). See the `TYPED_CLOSURES_DESIGN.md` Phase B3c follow-ups block.
-> The typed-closure arc is now fully closed; pick a new thread (below).
-> 1. **`TYPED_CLOSURES_DESIGN.md`** — the typed-closure arc is complete,
->    including the B3c get/push follow-ups (2026-06-11).
+> change. The **B3c follow-ups are also COMPLETE**: vec-get/arr-get element
+> narrowing and push-of-closure monomorphization.
+>
+> **Beyond B (landed AFTER the B3c block — do not stop reading at "arc closed"):**
+> struct PARAMS *and* RETURNS inside `[Proc …]` (`[Proc [Point] i32]`,
+> `[Proc [i32] Point]`), dyn-inferred struct params, direct-calls of bare inline
+> struct-param/return literals, **global procs as first-class values** (`$dbl`
+> narrows to a typed closure), and **forward references as values** (a proc used
+> before its textual definition conforms via the typer's portable shape stamp —
+> enabling higher-order mutual recursion; gated to immutable procs, no
+> unsoundness). **`TYPED_CLOSURES_DESIGN.md` §"Remaining work (authoritative)" is
+> the single source of truth for current status — trust it over this header.**
+> Genuinely-open closure items there: closure value through an UNTYPED binding /
+> get collapses to `dyn`; non-literal closure-returning tail not
+> conformance-checked; nested compounds in `[Proc …]` unsupported by design.
+> 1. **`TYPED_CLOSURES_DESIGN.md`** — authoritative current status (the closure
+>    arc through forward-ref-as-value, 2026-06-11).
 > 2. **This file** (`LAMBDA_TYPING_PLAN.md`) — background: the lambda
 >    inference design + i64/u64/f64 producer-wide flip + contextual
 >    literals (all DONE).
@@ -38,7 +47,10 @@
 >
 > The auto-loaded memory `project_typed_streams_handoff` mirrors this.
 
-Last updated: 2026-06-10 (end of session; Phase A closed).
+Last updated: 2026-06-11 (closure arc extended through global-proc values +
+forward-ref-as-value; see `TYPED_CLOSURES_DESIGN.md` for authoritative status).
+The body below (Phase A/B stream-rep work) is historical background and remains
+accurate for that thread; the START HERE block above is the current index.
 
 ## The problem
 
