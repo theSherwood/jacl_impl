@@ -46,6 +46,49 @@ param/return/collection positions (B3a/b/c); closure params on *local* proc
 bindings; closure-returning calls / direct calls / expression args / nested push
 (2b). Trust this section over the older blocks.
 
+## Struct types in `[Proc …]` (remaining item #1) — implementation plan
+
+Goal: support **struct** param/return types in a `[Proc …]` annotation —
+`[Proc [Point] i32]`, `[Proc [i32] Point]` — so higher-order procs work over
+user data types. Scope: STRUCT idxs only (they are portable, 1:1-aligned across
+the typer/compiler registries). Nested compound types inside `[Proc …]`
+(`[Proc [[Vec i64]] …]`, nested `[Proc …]`) stay unsupported — those idxs are
+registry-bound and not portable; a clear error remains.
+
+Why it's tractable: the hard part — passing/returning a struct *inline*
+(multi-slot) — already exists for named procs and is reused by the typed-call
+arg loop. The work is plumbing the struct idx through the proc-shape pipeline.
+
+Why it's all-or-nothing: accepting a struct in the annotation parser WITHOUT
+the full plumbing yields a closure that compiles but mis-calls (struct passed as
+dyn). So the parser flip is the LAST step; everything before is dormant
+(behavior-preserving) until then.
+
+Encoding contract: a proc shape's param/return idx (in `proc_param_pool` /
+`return_idx`) is a portable encoding — `JACL_SCALAR_TYPE_IDX(t)` for a scalar,
+or a struct idx for a struct. Decode mirrors `buf_elem_decode`: scalar sentinel
+→ scalar; struct idx → `TYPE_STRUCT` + idx; else dyn/unsupported.
+
+Steps (each of 1–2 builds green; 3 flips it on with tests):
+1. **Dormant plumbing.** Add `TyperBinding.proc_param_struct_idxs[]`. Teach
+   `typer__intern_proc_shape` / `compiler__proc_annotation` to encode a struct
+   param/return as its struct idx (not a scalar sentinel). Teach
+   `typer__decode_proc_shape` / `compiler__decode_proc_shape` to return
+   `TYPE_STRUCT` for a struct idx (keep their type-only signatures; the ~3 sites
+   that also need the idx read raw param idxs via a small struct-aware
+   accessor). `compiler__activate_annot_proc_from_shape` and
+   `compiler__stamp_closure_param_local` populate struct idxs (not UINT32_MAX).
+   Conformance (`compiler__local_closure_conforms`) compares struct idxs. All
+   dormant: the parser still rejects structs, so no struct idxs flow yet.
+2. **Returns.** Thread the struct return idx so a closure call's result types
+   `TYPE_STRUCT` + idx (so `[[g 3] ->x]` works).
+3. **Flip + tests.** `typer__proc_sig_elem` (and the compiler mirror) accept a
+   struct name → `TYPE_STRUCT` + struct idx, `supported = true`; the def-handler
+   stops erroring. Tests: `[Proc [Point] i32]` param (struct passed inline,
+   monomorphized + conformance) and `[Proc [i32] Point]` return; a non-struct
+   mismatch stays a clear error. Revert to today's clean error if any step
+   can't be made green.
+
 **Phase B3c follow-ups — vec-get/arr-get narrowing + push monomorphization
 (2026-06-11):**
 - **vec-get/arr-get narrowing:** `[vec-get/arr-get $fns i]` on a `[Vec/Arr
