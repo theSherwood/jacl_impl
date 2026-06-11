@@ -121,14 +121,56 @@ describe the offset trick / band layout; update once the bands collapse.
    the registry lives on the compile context (created before `typer_infer`,
    surviving to runtime). Dedup in every `type_shape_intern_*` (verified) means
    the compiler's existing intern calls converge on the typer's entries — no
-   duplicate entries, minimal compiler change.
+   duplicate entries, minimal compiler change. **See the blocker below — this
+   step is NOT a clean repoint; it requires moving struct registration first.**
 3. Delete the Category C suppression; let the compiler read AST stamps.
 4. Remove the now-dead re-derivation helpers as cleanup.
 
-Do this **proc-shapes first** in isolation — smallest kind, motivates the work,
-and unlocks runtime proc-signature introspection (a `proc_shape_idx` on the
-closure value) as a bonus, since the proc shape then lives in the surviving
-registry.
+### Step 2 blocker — struct-registration ordering (discovered 2026-06-11)
+
+`compiler_compile` calls `typer_infer` (line ~19105) **before** the compiler
+registers the current program's structs into `c.struct_registry` — that happens
+during codegen, in the `AST_DEFSTRUCT` handler (~17994). So at typer time the
+shared registry holds only *seeded* (prior-eval) structs. Today, struct-index
+alignment between the two passes is achieved by **independent registration in
+the same source order** (typer fills `tc.structs[]`, compiler fills
+`c.struct_registry`, both from `AST_DEFSTRUCT` order starting at idx 2) — **not**
+by sharing.
+
+Consequence: the typer cannot simply intern shapes into the shared registry,
+because current-program struct idxs aren't assigned there yet. A typer-interned
+shape would take an idx that the compiler later wants for a struct → idx-space
+collision, breaking the alignment everything depends on.
+
+So step 2 has a prerequisite: **struct registration (with the idx assignment)
+must happen before `typer_infer`.** Two further wrinkles:
+
+- **Layout vs. type info.** Struct *layout* (byte offsets, sizes, inline
+  nesting via `compiler__register_inline_struct`) is computed in codegen. The
+  typer only needs names + field types + idxs, not offsets. So either the
+  layout computation moves before the typer, or registration is two-phase:
+  reserve the idx + names/field-types pre-typer, fill layout in codegen.
+- **Dual representation.** The typer caches structs as `TyperStruct` (uint8
+  field types, no offsets); the registry uses `StructTypeDef` (full layout).
+  Unifying the struct table means reconciling these or keeping `tc.structs[]`
+  as a typed-from-the-registry cache.
+
+Revised step-2 decomposition:
+
+- **2a.** Hoist struct registration into a pre-pass before `typer_infer`
+  (idx + names + field types into `c.struct_registry`; codegen `AST_DEFSTRUCT`
+  becomes find-or-fill-layout, idempotent). Behavior-preserving; gate on
+  full-suite-green + bytecode diff. **This is the real next step — riskier than
+  the audit first implied (touches a core compile phase: forward refs, inline
+  structs, the typer's own struct-registration path).**
+- **2b.** Repoint typer shape interning to the shared registry (lazy), drop the
+  offset trick / `tc.shape_reg`.
+- **2c.** Un-suppress AST shape stamps (Category C); compiler reads them.
+- **2d.** Delete the dead re-derivation helpers.
+
+"Proc-shapes first" still applies to 2b–2d, but 2a is unavoidable groundwork
+shared by all kinds. The instance flip is a multi-step sub-project, not a single
+repoint.
 
 ### Open decisions (resolve before step 2)
 
