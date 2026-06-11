@@ -1002,6 +1002,39 @@ void vm__fmt_typed_scalar(VMFormatBuf* buf, const JaclVal* ptr, JaclType t) {
   if (n > 0) vm__fmt_append(buf, tmp, (uint32_t)n);
 }
 
+/* Introspection: append a portable type-idx (scalar sentinel / struct idx) as a
+ * readable type name. */
+static void vm__fmt_type_idx(VMFormatBuf* buf, uint32_t idx) {
+  StructTypeRegistry* reg = buf->registry;
+  if (JACL_IS_SCALAR_TYPE_IDX(idx)) {
+    const char* tn = type_name(JACL_TYPE_IDX_TO_SCALAR(idx));
+    vm__fmt_append(buf, tn, (uint32_t)strlen(tn));
+  } else if (reg && idx < reg->count && reg->defs[idx]) {
+    StructTypeDef* sd = reg->defs[idx];
+    vm__fmt_append(buf, sd->name, sd->name_len);
+  } else {
+    vm__fmt_append(buf, "dyn", 3);
+  }
+}
+
+/* Introspection: append `(t1, t2) -> ret` for a closure's proc signature, or
+ * nothing (returns false) if shape_idx isn't a valid TYPE_SHAPE_PROC. */
+static bool vm__fmt_proc_sig(VMFormatBuf* buf, uint32_t shape_idx) {
+  StructTypeRegistry* reg = buf->registry;
+  if (!reg || shape_idx >= reg->count ||
+      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return false;
+  TypeShape* s = &reg->shapes[shape_idx];
+  uint16_t pc = s->u.proc.param_count;
+  vm__fmt_append(buf, "(", 1);
+  for (uint16_t k = 0; k < pc; k++) {
+    if (k) vm__fmt_append(buf, ", ", 2);
+    vm__fmt_type_idx(buf, reg->proc_param_pool[s->u.proc.params_off + k]);
+  }
+  vm__fmt_append(buf, ") -> ", 5);
+  vm__fmt_type_idx(buf, s->u.proc.return_idx);
+  return true;
+}
+
 void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   char tmp[64];
   int n;
@@ -1120,12 +1153,17 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     vm__fmt_append(buf, tmp, (uint32_t)n);
   } else if (jacl_is_closure(val)) {
     JaclClosure* cl = jacl_as_closure(val);
-    if (cl->name) {
-      n = snprintf(tmp, sizeof(tmp), "<proc %s>", cl->name);
+    /* Introspection: `<proc name(types) -> ret>` when a typed signature is
+     * known, else the plain `<proc name>` / `<closure>`. */
+    vm__fmt_append(buf, "<", 1);
+    if (cl->name && cl->name[0]) {
+      n = snprintf(tmp, sizeof(tmp), "proc %s", cl->name);
       vm__fmt_append(buf, tmp, (uint32_t)n);
     } else {
-      vm__fmt_append(buf, "<closure>", 9);
+      vm__fmt_append(buf, "closure", 7);
     }
+    vm__fmt_proc_sig(buf, cl->proc_shape_idx);
+    vm__fmt_append(buf, ">", 1);
   } else if (jacl_is_cell(val)) {
     /* Cells are transparent — print the contained value directly */
     JaclMutableRef* ref = jacl_as_cell(val);
@@ -3321,7 +3359,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           DISPATCH();
-        } else if (jacl_is_vector(val) || jacl_is_arr(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_arr(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val) || jacl_is_closure(val)) {
+          /* Closures route through vm__fmt_value too, which shows the proc
+           * signature (`<proc name(types) -> ret>`) when one is known. */
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
@@ -4438,6 +4478,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->is_generator  = template->is_generator;
         cl->is_sm_compiled = template->is_sm_compiled;
         cl->gen_elem_idx  = template->gen_elem_idx;  /* strict-stream elem type */
+        cl->proc_shape_idx = template->proc_shape_idx; /* introspection signature */
         cl->sm_field_count = template->sm_field_count;
         /* US-014: initialize upvalue inline bitmap */
         memset(cl->upvalue_inline_bitmap, 0, sizeof(cl->upvalue_inline_bitmap));

@@ -1109,6 +1109,10 @@ typedef struct {
    * type at runtime. JACL_SCALAR_TYPE_IDX(TYPE_DYN) for [Stream dyn] /
    * non-generators. */
   uint32_t      gen_elem_idx;
+  /* TYPE_SHAPE_PROC idx (runtime struct_registry) for the proc's signature,
+   * used for introspection when printing a closure; UINT32_MAX if the proc has
+   * no typed signature. Keep in sync with struct JaclClosure in src/bytecode.c. */
+  uint32_t      proc_shape_idx;
 } JaclClosure;
 
 /* ========================================================================

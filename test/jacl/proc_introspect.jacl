@@ -1,0 +1,25 @@
+# expect: <proc add(i64, i64) -> i64>
+# expect: <proc greet(str) -> str>
+# expect: <proc shift(Point) -> i32>
+# expect: <proc untyped>
+# expect: <closure(i64) -> i64>
+# Runtime proc-signature introspection: a typed proc's signature is interned as
+# a TYPE_SHAPE_PROC at compile time and carried on the closure (proc_shape_idx),
+# so printing it shows `<proc name(types) -> ret>` — struct params by name.
+# Untyped procs print plainly (`<proc name>`); anonymous closures use `closure`.
+# Enabled by the typer/compiler shape-registry work (proc shapes survive to
+# runtime in the shared registry).
+struct Point {i32 x, i32 y}
+proc add {i64 a, i64 b} i64 { + $a $b }
+proc greet {str name} str { concat "hi " $name }
+proc shift {Point p} i32 { $p->x }
+proc untyped {a, b} { + $a $b }
+proc main {} {
+  print $add
+  print $greet
+  print $shift
+  print $untyped
+  def f [proc {i64 x} i64 { * $x 2 }]
+  print $f
+}
+main

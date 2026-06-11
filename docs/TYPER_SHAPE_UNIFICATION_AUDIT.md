@@ -215,6 +215,29 @@ just proc) need stamping. The 2b slices delivered the *capability* wins
 the *code-removal* win is a larger, later effort whose marginal value is low now
 that the motivating problems are solved.
 
+### Tail closeout (2026-06-11)
+
+Investigated whether the remaining tail (full `tc.shape_reg` retirement; the
+`syntax.c` paths) is worth doing. **Conclusion: no — the arc is complete.**
+- Probed non-closure expression results that would have the "lacks its shape"
+  problem if it were general: nested-vec get-of-get (`[vec-get [vec-get $n 0] 1]`)
+  and vec-get on a call result (`[vec-get [make-vec] 1]`) — **both already
+  narrow correctly** via existing re-derivation. The problem was closure-
+  specific (proc shapes are registry-bound; scalar collection elements ride the
+  AST stamp natively as portable sentinels). So the instance flip adds **no new
+  capability**.
+- The `syntax.c` paths (prelude pre-pass / macro bodies) have **no failing
+  case** — those contexts don't use typed-closure expressions.
+
+**Introspection delivered instead** (the one high-value item the arc enabled):
+a typed proc's signature is interned as a `TYPE_SHAPE_PROC` at compile time and
+carried on the closure (`JaclClosure.proc_shape_idx`, copied at `OP_CLOSURE`),
+so printing a closure shows `<proc name(types) -> ret>` (struct params by name),
+`<proc name>` for untyped, `<closure(…)>` for anonymous. This uses the unified
+registry directly — proc shapes survive to runtime in `vm->struct_registry`.
+Closures also now route through `vm__fmt_value` in `OP_PRINT` (they previously
+printed `<unknown>` at top level). Test: `proc_introspect.jacl`.
+
 ### Open decisions (resolve before step 2)
 
 - **Dead-shape accumulation** (DECIDED: **lazy interning**): typer-only shapes

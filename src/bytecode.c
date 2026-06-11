@@ -495,6 +495,9 @@ typedef struct {
   uint8_t       sm_field_count; /* state machine field count for SM-compiled closures */
   uint8_t       upvalue_inline_bitmap[32]; /* US-014: marks which upvalue slots hold raw struct bytes */
   uint32_t      gen_elem_idx;  /* generator [Stream T] element type encoding; see jacl.h */
+  uint32_t      proc_shape_idx; /* TYPE_SHAPE_PROC idx (runtime registry) for the
+                                 * proc's signature, for introspection (print);
+                                 * UINT32_MAX if untyped. Keep in sync with jacl.h. */
 } JaclClosure;
 
 JaclVal jacl_closure(JaclClosure* cl) {

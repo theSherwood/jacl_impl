@@ -11637,6 +11637,37 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                              ? proc_stream_elem_idx
                              : COMPILER_SCALAR_TYPE_IDX(TYPE_DYN);
 
+    /* Introspection: intern the proc's signature as a TYPE_SHAPE_PROC so a
+     * printed closure shows `<proc name(types) -> ret>`. Only for procs with a
+     * typed param or return (untyped stay UINT32_MAX → plain `<proc name>`).
+     * Param/return idxs are portable registry encodings (scalar sentinel /
+     * struct idx); dedup bounds the count by distinct signatures. */
+    closure->proc_shape_idx = UINT32_MAX;
+    {
+      uint16_t sig_pc = user_param_count <= COMPILER_MAX_PROC_PARAMS
+                          ? (uint16_t)user_param_count
+                          : COMPILER_MAX_PROC_PARAMS;
+      bool any_typed = (proc_return_type != TYPE_DYN);
+      uint32_t sig_idxs[COMPILER_MAX_PROC_PARAMS];
+      for (uint16_t pi = 0; pi < sig_pc; pi++) {
+        if (param_types_arr[pi] != TYPE_DYN) any_typed = true;
+        sig_idxs[pi] = (param_types_arr[pi] == TYPE_STRUCT &&
+                        param_struct_idxs[pi] != UINT32_MAX)
+                         ? param_struct_idxs[pi]
+                         : COMPILER_SCALAR_TYPE_IDX(param_types_arr[pi]);
+      }
+      if (any_typed) {
+        uint32_t ret_idx = (proc_return_type == TYPE_STRUCT &&
+                            proc_return_struct_idx != UINT32_MAX)
+                             ? proc_return_struct_idx
+                             : COMPILER_SCALAR_TYPE_IDX(proc_return_type);
+        StructTypeRegistry* sreg = compiler__get_struct_registry(c);
+        if (sreg)
+          closure->proc_shape_idx =
+              type_shape_intern_proc(sreg, sig_idxs, sig_pc, ret_idx);
+      }
+    }
+
     /* US-008: compute upvalue_total_slots (sum of all upvalue widths) */
     {
       uint16_t total = 0;
