@@ -23,11 +23,34 @@ The typed-closure arc is functionally complete: closure values, params, returns
 results (direct calls, expression args, nested push), runtime proc-signature
 introspection (`print` shows `<proc name(types) -> ret>`), **struct PARAMS inside
 `[Proc …]`** (`[Proc [Point] i32]`), **struct RETURNS inside `[Proc …]`**
-(`[Proc [i32] Point]`), and — newest — **dyn-inferred struct params** (an
-untyped `{q}` literal param adopts the annotation's `Point`). All green across
-single-file + interpret + module compiles.
+(`[Proc [i32] Point]`), **dyn-inferred struct params** (an untyped `{q}` literal
+param adopts the annotation's `Point`), and — newest — **direct-calls of bare
+inline struct-param/return literals** (`[[proc {Point q} i32 …] $p]`,
+`[[proc {i32 a} Point …] 3]->x`). All green across single-file + interpret +
+module compiles. With the direct-call slice in, the struct-in-`[Proc …]` story
+has no remaining gaps.
 
-### Dyn-inferred struct param slice (just landed)
+### Direct-call of struct-param/return literal slice (just landed)
+
+`[[proc {Point q} i32 { $q->x }] $p]` and `[[proc {i32 a} Point …] 3]->x` now
+ride the typed (inline) convention — the struct param passes inline and the
+struct return materializes inline. `handle_proc` doesn't intern a shape for a
+proc literal, so the typer now (in `typer__infer_command_inner`, at the head
+inference) interns a DIRECT-call proc-literal head's signature
+(`typer__intern_proc_literal_shape`) and stamps it: the typer-side idx on
+`head->inferred_struct_idx` (drives `head_is_closure_call` → arg narrowing +
+result typing; a struct return sets the call node's `inferred_struct_idx` so
+`[…]->field` resolves) and the portable idx on `head->inferred_proc_shape_idx`
+(the compiler's direct-call path `_ex`-decodes it for the struct param/return
+idxs). `typer__portable_proc_shape` now allows struct idxs through (declines only
+nested-compound shape idxs, `≥ struct_count`). The compiler direct-call branch
+(`compiler.c` ~17117) switched from `compiler__decode_proc_shape` to `_ex` and
+sets `call_param_struct_idxs` + `call_return_struct_idx`. This also enables a
+struct-param/return closure read out of a `[Vec [Proc …]]` and called directly
+(`[[vec-get $fns 0] $p]`). Tests: the direct-call cases added to
+`typed_closure_struct_param.jacl` / `typed_closure_struct_return.jacl`.
+
+### Dyn-inferred struct param slice (prior)
 
 `def [Proc [Point] i32] g [proc {q} i32 { $q->x }]` — a closure literal can leave
 a param untyped and the typer infers its struct type from the `[Proc …]`
@@ -70,47 +93,30 @@ struct (struct idxs are 1:1-aligned across the typer/compiler registries).
 Nested compound (vec/map/nested-proc) idxs are registry-bound → NOT portable →
 stay unsupported.
 
-## Next slice (recommended): direct-call of a struct-param/return inline literal
+## Next slice (recommended): global proc / closure as a first-class value
 
-After the struct-param + struct-return slices, the ONE remaining struct gap is
-symmetric across both: a **direct-call of a bare inline literal** with a struct
-param or return doesn't ride the typed path.
-- `[[proc {Point q} i32 { $q->x }] $p]` → "cannot pass struct value to dyn
-  parameter".
-- `[[proc {i32 a} Point { … }] 3]->x` → "field access requires struct or map".
+The struct-in-`[Proc …]` story is now complete (params, returns, dyn-inferred
+params, direct-calls — all in). The remaining items are narrowing gaps where the
+runtime value IS a closure but the typer reads `dyn`. The highest-value one:
 
-Both are clean errors (no miscompile); named bindings and proc-param
-pass-through work. The cause is `typer__portable_proc_shape` (`src/typer.c`
-~2283): it declines any non-scalar param/return idx (`return UINT32_MAX`), so
-the 2b portable proc-shape stamp never lands on the direct-call head node, and
-the compiler's direct-call path (`compiler.c` ~17092) has nothing to decode.
+A **global proc name** (`$dbl`) or a **global `[Proc …]` binding** types `dyn`,
+so `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the
+value can't be passed to a closure param. Local typed-closure bindings, inline
+literals, and closure-valued expressions all narrow; only the *global-name-as-
+value* read stays dyn. The runtime value is a real closure (`print $add` shows
+its signature). Fix: where the typer resolves a global var-ref / global proc
+ref, narrow a global proc (or a global `[Proc …]` binding) to `TYPE_CLOSURE` +
+its proc-shape idx, so the def/assign and the closure-param sink accept it. Watch
+the cross-registry rule (global proc shapes must intern portably for any AST
+stamp the compiler reads).
 
-What's left:
-1. **`typer__portable_proc_shape`:** allow **struct** idxs through (they're
-   portable — a struct idx is `< tc->struct_count`; keep declining nested-shape
-   idxs). `type_shape_intern_proc` already stores them raw. For a struct
-   *return*, also set the call node's `inferred_struct_idx` so `[…]->field`
-   resolves on the result.
-2. **Compiler direct-call path** (`compiler.c` ~17092, the `head->type ==
-   AST_COMMAND && head->inferred_proc_shape_idx != UINT32_MAX` branch): it
-   currently uses `compiler__decode_proc_shape` (scalars only). Switch to
-   `compiler__decode_proc_shape_ex` and set `call_param_struct_idxs` +
-   `call_return_struct_idx` so a struct param passes inline and a struct return
-   materializes inline (the ~17386 `call_return_type == TYPE_STRUCT` block fires
-   unchanged).
-3. **Tests:** extend `typed_closure_struct_param.jacl` /
-   `typed_closure_struct_return.jacl` with the direct-call forms (currently
-   noted as the documented gap in each file's header comment).
+A related, lower-value gap (same class): the **vec-get-result-to-closure-param**
+narrowing — a `[vec-get $fns 0]` bound via `def g …` then passed to a `[Proc …]`
+param types `dyn` (scalar element vecs too). A direct call on the bound element
+works; passing the bound value to a param doesn't.
 
-Risk: medium — touches the shared portable-stamp path used by ALL closure
-expressions (collections, expression args). Guard struct idxs precisely
-(decline nested-shape idxs) and re-run the full `typed_closure_*` family +
-`closure_collection_*` to confirm no scalar-path regression. This also enables a
-struct-param/return closure read out of a `[Vec [Proc …]]` and called directly.
-
-(Lower-effort alternatives: the **global proc / closure as a first-class value**
-narrowing, or the **vec-get-result-to-closure-param** narrowing gap noted in the
-dyn-struct-param slice above — both in the smaller-items list below.)
+Risk: medium — touches global-ref typing, used everywhere. Re-run the full
+`typed_closure_*` family.
 
 ## Smaller remaining items (lower value)
 

@@ -1,13 +1,16 @@
 # expect: 7
 # expect: 5
+# expect: 9
 # Struct types as [Proc …] PARAMS (remaining item #1, struct-param slice). A
 # closure taking a struct param can be passed to a [Proc [Struct] …] param and
 # called with a struct argument (passed inline). Covers an inline-literal arg
-# (monomorphized + field access) and a named typed-closure binding
-# (conformance-checked). A dyn param inferred from the annotation (`{q}`) now
-# narrows on BOTH sides — see typed_closure_struct_param_dyn.jacl; this test
-# pins the explicitly-DECLARED struct param form (`{Point q}`). Nested compound
-# types inside [Proc …] remain unsupported.
+# (monomorphized + field access), a named typed-closure binding
+# (conformance-checked), and a DIRECT call of a bare inline struct-param literal
+# (the struct rides the typed convention via the head proc-shape stamp). A dyn
+# param inferred from the annotation (`{q}`) now narrows on BOTH sides — see
+# typed_closure_struct_param_dyn.jacl; this test pins the explicitly-DECLARED
+# struct param form (`{Point q}`). Nested compound types inside [Proc …] remain
+# unsupported.
 struct Point {i32 x, i32 y}
 proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
 
@@ -18,5 +21,8 @@ proc main {} {
   # A named [Proc [Point] i32] binding, conformance-checked at the sink.
   def [Proc [Point] i32] g [proc {Point q} i32 { $q->y }]
   print [apply $g [Point x 10 y 5]]                                 # 5
+
+  # Direct call of a bare inline struct-param literal (no binding/sink).
+  print [[proc {Point q} i32 { $q->x }] [Point x 9 y 0]]            # 9
 }
 main

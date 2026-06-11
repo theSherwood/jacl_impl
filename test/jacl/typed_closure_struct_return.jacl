@@ -2,15 +2,16 @@
 # expect: 5
 # expect: 8
 # expect: 3
+# expect: 4
 # Struct types as [Proc …] RETURNS (remaining item, struct-return slice). A
 # closure declared to return a struct ([Proc [i32] Point]) materializes the
 # struct inline at the call site; field access on the call result, an
 # intermediate `def Point` binding, and passing the closure to a [Proc …] param
 # whose body returns the call result (return narrowing) all type-check. The
 # literal may declare its return (`{i32 a} Point`) or omit it and adopt the
-# annotation's. Nested compound types inside [Proc …] remain unsupported, and a
-# direct-call of a bare inline literal returning a struct is still a clear error
-# (mirrors the struct-param slice's direct-call gap).
+# annotation's. A DIRECT call of a bare inline struct-returning literal also
+# materializes the struct inline (`[[proc …] 4]->x`, via the head proc-shape
+# stamp). Nested compound types inside [Proc …] remain unsupported.
 struct Point {i32 x, i32 y}
 
 # A proc whose body returns the result of a struct-returning closure call —
@@ -32,5 +33,8 @@ proc main {} {
   # A literal that OMITS its return type adopts the annotation's struct return.
   def [Proc [i32] Point] h [proc {i32 a} { [Point x $a y 0] }]
   print [h 3]->x                                      # 3
+
+  # Direct call of a bare inline struct-returning literal + field access.
+  print [[proc {i32 a} Point { [Point x $a y 0] }] 4]->x   # 4
 }
 main

@@ -16934,6 +16934,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * closure-valued command head (no binding to point at). Lives for the arg
      * loop below. */
     JaclType head_proc_pts[COMPILER_MAX_PROC_PARAMS];
+    uint32_t head_proc_psi[COMPILER_MAX_PROC_PARAMS];
 
     /* Pre-resolve the callee name from the AST so we can detect a known
        suspending-proc call *before* compiling the head/args. If it is one,
@@ -17121,9 +17122,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          * typer stamped the head's portable proc-shape idx; decode it to drive
          * the typed (unboxed) calling convention. This is the new capability the
          * stamp unlocks (a closure-collection element read as an expression). */
-        uint8_t hpc; JaclType hrt;
-        if (compiler__decode_proc_shape(c, head->inferred_proc_shape_idx,
-                                        head_proc_pts, &hpc, &hrt)) {
+        uint8_t hpc; JaclType hrt; uint32_t hrsi;
+        if (compiler__decode_proc_shape_ex(c, head->inferred_proc_shape_idx,
+                                           head_proc_pts, &hpc, &hrt,
+                                           head_proc_psi, &hrsi)) {
           if ((int16_t)argc != (int16_t)hpc) {
             char err_msg[96];
             snprintf(err_msg, sizeof(err_msg),
@@ -17132,9 +17134,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__error(c, line, col, err_msg);
             return;
           }
-          call_param_types  = head_proc_pts;
-          call_param_count  = (int16_t)hpc;
-          call_return_type  = hrt;
+          call_param_types       = head_proc_pts;
+          call_param_struct_idxs = head_proc_psi;  /* struct params pass inline */
+          call_param_count       = (int16_t)hpc;
+          call_return_type       = hrt;
+          call_return_struct_idx = hrsi;            /* struct return materializes */
         }
       }
       compiler__compile_node(c, head);

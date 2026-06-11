@@ -28,7 +28,8 @@ ret>`). Verified-remaining gaps:
    struct idx (a mismatched struct is a clean error, def-site *and* call-site
    arg). Tests: `typed_closure_struct_param.jacl`,
    `typed_closure_struct_return.jacl` (+ each `_error` for a wrong-struct
-   mismatch). **Still remaining:**
+   mismatch). The struct-in-`[Proc …]` capabilities below are all in; the only
+   remaining limit is nested compounds (unsupported by design):
    - **Dyn-inferred struct param** (`[proc {q} …]` where the annotation says
      `Point`): now narrows on BOTH sides — `typer__monomorphize_proc_literal`
      threads the shape's param struct idxs onto an overridden dyn literal param,
@@ -38,16 +39,19 @@ ret>`). Verified-remaining gaps:
      premature "body returns dyn" before the param was bound to the struct. Test:
      `typed_closure_struct_param_dyn.jacl` (def-binding + inline-arg +
      `[Vec [Proc …]]` element forms).
+   - **Direct-call of a bare inline struct-param/return literal**
+     (`[[proc {Point q} i32 {…}] $p]`, `[[proc {i32 a} Point {…}] 3]->x`): now
+     rides the typed (inline) convention. The typer interns a DIRECT-call
+     proc-literal head's signature (`typer__intern_proc_literal_shape`) and
+     stamps it (typer-side idx → `head_is_closure_call` arg narrowing + struct
+     result typing; portable idx → the compiler's direct-call path
+     `_ex`-decodes the param/return struct idxs). `typer__portable_proc_shape`
+     now passes struct idxs through (declines only nested-compound shape idxs).
+     Also enables a struct closure read out of a `[Vec [Proc …]]` and called
+     directly. Tests in `typed_closure_struct_param.jacl` /
+     `typed_closure_struct_return.jacl`.
    - **Nested compound** inside `[Proc …]` (`[Proc [[Vec i64]] …]`, nested
      `[Proc …]`): registry-bound idxs aren't portable — stays unsupported.
-   - **Direct-call of a bare inline struct-param/return literal**
-     (`[[proc {Point q} i32 {…}] $p]`, `[[proc {i32 a} Point {…}] 3]->x`):
-     `typer__portable_proc_shape` declines non-scalar shapes, so the 2b stamp
-     doesn't fire and the direct-call path can't surface the struct idx — a
-     clean error (same gap for params and returns; named bindings / proc-param
-     pass-through work). Closing it means allowing struct idxs through
-     `typer__portable_proc_shape` *and* teaching the direct-call compiler path
-     (compiler.c ~17092) to `_ex`-decode the struct return idx.
 2. **A global proc / closure used as a first-class value** — `$procname` (a
    reference to a global proc) and a global `[Proc …]` binding type as `dyn`, so
    `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the

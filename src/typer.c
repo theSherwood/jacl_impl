@@ -2314,11 +2314,16 @@ static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx) {
   uint32_t params[TYPER_MAX_PROC_PARAMS];
   for (uint16_t k = 0; k < pc; k++) {
     uint32_t pidx = tc->shape_reg.proc_param_pool[s->u.proc.params_off + k];
-    if (!JACL_IS_SCALAR_TYPE_IDX(pidx)) return UINT32_MAX; /* non-scalar param: B3 follow-up */
+    /* Portable: a scalar sentinel or a struct idx (struct idxs are 1:1-aligned
+     * across the typer/compiler registries). A nested-compound idx (a shape-
+     * registry idx, ≥ struct_count) is registry-bound → decline. */
+    if (!JACL_IS_SCALAR_TYPE_IDX(pidx) && pidx >= tc->struct_count)
+      return UINT32_MAX;
     params[k] = pidx;
   }
   uint32_t rid = s->u.proc.return_idx;
-  if (rid != UINT32_MAX && !JACL_IS_SCALAR_TYPE_IDX(rid)) return UINT32_MAX;
+  if (rid != UINT32_MAX && !JACL_IS_SCALAR_TYPE_IDX(rid) && rid >= tc->struct_count)
+    return UINT32_MAX;
   return type_shape_intern_proc(tc->shared_reg, params, pc, rid);
 }
 
@@ -2667,6 +2672,59 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       return;
     }
   }
+}
+
+/* A param/return type that the portable proc-shape encoding can carry as a
+ * scalar sentinel: any self-describing scalar (ints, floats, bool, str, char,
+ * dyn, nil). Compound/ref types (collections, closures, ptr/box/future/stream/
+ * buf) need an idx the sentinel can't hold; structs ride a separate (struct-
+ * idx) path. */
+static bool typer__proc_shape_portable_scalar(JaclType t) {
+  switch (t) {
+    case TYPE_STRUCT:
+    case TYPE_VEC: case TYPE_TYPED_VEC:
+    case TYPE_MAP: case TYPE_TYPED_MAP:
+    case TYPE_ARR: case TYPE_TYPED_ARR:
+    case TYPE_CLOSURE: case TYPE_PTR: case TYPE_BOX:
+    case TYPE_FUTURE: case TYPE_STREAM: case TYPE_BUF:
+      return false;
+    default:
+      return true;
+  }
+}
+
+/* Intern a proc LITERAL's signature (`[proc {T name…} RetType {body}]`) as a
+ * TYPE_SHAPE_PROC in the typer's shape registry; returns the idx, or UINT32_MAX
+ * if any param/return is a non-scalar, non-struct compound (not portable). Used
+ * to stamp a DIRECT-call proc-literal head (`[[proc {Point q} i32 …] $p]`) so a
+ * struct param/return rides the typed (inline) calling convention. */
+static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit) {
+  if (!lit || lit->type != AST_COMMAND ||
+      lit->data.command.head_id != HEAD_PROC)
+    return UINT32_MAX;
+  uint32_t ac = lit->data.command.arg_count;
+  AstNode* params = (ac == 3 || ac == 4) ? lit->data.command.args[1] : NULL;
+  if (!params) return UINT32_MAX;
+  AstNode* pn[TYPER_MAX_PROC_PARAMS];
+  JaclType pt[TYPER_MAX_PROC_PARAMS];
+  uint32_t ps[TYPER_MAX_PROC_PARAMS];
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
+  uint32_t pool[TYPER_MAX_PROC_PARAMS];
+  for (uint32_t k = 0; k < pc; k++) {
+    if (pt[k] == TYPE_STRUCT && ps[k] != UINT32_MAX) pool[k] = ps[k];
+    else if (typer__proc_shape_portable_scalar(pt[k]))
+      pool[k] = JACL_SCALAR_TYPE_IDX(pt[k]);
+    else return UINT32_MAX;  /* compound param — not portable */
+  }
+  JaclType rt = TYPE_DYN; uint32_t rsi = UINT32_MAX;
+  if (ac == 4) typer__resolve_return_type(tc, lit->data.command.args[2], &rt, &rsi);
+  uint32_t ret_enc;
+  if (rt == TYPE_STRUCT && rsi != UINT32_MAX) ret_enc = rsi;
+  else if (typer__proc_shape_portable_scalar(rt))
+    ret_enc = JACL_SCALAR_TYPE_IDX(rt);
+  else return UINT32_MAX;  /* compound return — not portable */
+  return type_shape_intern_proc(&tc->shape_reg, pool, (uint8_t)pc, ret_enc);
 }
 
 /* Register a proc signature (used both by the top-level pre-pass and
@@ -4142,14 +4200,34 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
    * `[[vec-get $fns 0] 6]`. Decode the head closure's signature (typed
    * TYPE_CLOSURE with a typer-side proc shape) so each arg narrows to its param
    * type (int/float literals promote), mirroring the named-proc path. */
+  /* DIRECT call of an inline proc-literal head (`[[proc {Point q} i32 …] $p]`,
+   * `[[proc {i32 a} Point …] 3]->x`): handle_proc typed the head TYPE_CLOSURE
+   * but didn't intern its shape, so it misses the typed-call path. Intern the
+   * literal's signature and stamp it on the head — the typer-side idx drives
+   * head_is_closure_call (arg narrowing + result typing) and the portable idx
+   * lets the compiler pass/return a struct inline. Scalar-only literals already
+   * work via the boxed convention; the stamp is what makes a struct work. */
+  if (head && head->type == AST_COMMAND &&
+      head->data.command.head_id == HEAD_PROC &&
+      (JaclType)head->inferred_type == TYPE_CLOSURE &&
+      head->inferred_struct_idx == UINT32_MAX) {
+    uint32_t lsh = typer__intern_proc_literal_shape(tc, head);
+    if (lsh != UINT32_MAX) {
+      head->inferred_struct_idx = lsh;
+      head->inferred_proc_shape_idx = typer__portable_proc_shape(tc, lsh);
+    }
+  }
+
   uint8_t head_clos_pc = 0, head_clos_rt = 0;
   uint8_t head_clos_pts[TYPER_MAX_PROC_PARAMS];
+  uint32_t head_clos_psi[TYPER_MAX_PROC_PARAMS], head_clos_rsi = UINT32_MAX;
   bool head_is_closure_call =
       head && head->type == AST_COMMAND &&
       (JaclType)head->inferred_type == TYPE_CLOSURE &&
       head->inferred_struct_idx != UINT32_MAX &&
-      typer__decode_proc_shape(tc, head->inferred_struct_idx,
-                               &head_clos_pc, head_clos_pts, &head_clos_rt);
+      typer__decode_proc_shape_ex(tc, head->inferred_struct_idx,
+                                  &head_clos_pc, head_clos_pts, &head_clos_rt,
+                                  head_clos_psi, &head_clos_rsi);
 
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
     AstNode* arg = node->data.command.args[i];
@@ -4581,8 +4659,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     /* Step 2b: a DIRECT call of a closure-valued command head — the result is
      * the closure's return type (mirrors the named-proc `if (proc)` arm).
      * Without this the call types dyn and a proc returning it fails its return
-     * check. */
+     * check. A struct return also carries its idx so `[…]->field` resolves. */
     node->inferred_type = (JaclType)head_clos_rt;
+    if ((JaclType)head_clos_rt == TYPE_STRUCT)
+      node->inferred_struct_idx = head_clos_rsi;
   } else if (head && head->type == AST_COMMAND) {
     /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
      * Mirrors compiler__compile_command's typed-vec/typed-map branch.
