@@ -68,7 +68,11 @@ ret>`). Verified-remaining gaps:
    `mut`/`def` binding or an undefined name stays `dyn` and is a hard compile
    error (`typed_closure_global_proc_fwd_{mut,undef}_err.jacl`); a wrong-signature
    proc is still rejected (`…_wrong_sig_err.jacl`). (Procs with a non-portable
-   compound param/return, an inferred return, or a generator stay dyn-valued.)
+   compound param/return, an inferred return, or a generator stay dyn-valued —
+   SYMMETRICALLY, in either definition order, so no forward-specific sharp edge;
+   and a generator can't present a portable scalar signature to the pre-pass —
+   `proc g {} i32 { yield 1 }` is rejected at its own definition — so the stamp
+   can never conform-but-mismatch a runtime generator value. No unsoundness.)
    **Still open (same class):** a closure value flowing through an UNTYPED
    binding (`def f $dbl` / `def f [proc …]`) or a get (`def g [vec-get …]`)
    collapses to `dyn` when later passed to a `[Proc …]` param — the untyped-def

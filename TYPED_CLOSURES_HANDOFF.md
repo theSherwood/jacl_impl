@@ -130,10 +130,17 @@ ref to a proc with a non-conforming signature is still rejected (the stamp
 carries the proc's real signature). Negative regression tests:
 `typed_closure_global_proc_fwd_mut_err.jacl`,
 `typed_closure_global_proc_fwd_undef_err.jacl`,
-`typed_closure_global_proc_wrong_sig_err.jacl`. Caveat: a proc with an *inferred*
-return type or a *generator* isn't known until its body compiles, so it can't be
-forward-used as a typed value — but it couldn't conform to a `[Proc …]` sink
-anyway.
+`typed_closure_global_proc_wrong_sig_err.jacl`. Caveat (NOT a sharp edge): a
+proc with an *inferred* return type or a *generator* (`[Stream …]` or an
+inferred yielding body) doesn't narrow to a precise closure value — but this is
+SYMMETRIC, not forward-specific: it fails to conform as a typed value whether the
+proc is defined before OR after the use site (verified both orders), with the
+same clean compile-time error. It's a facet of the pre-existing "inferred/dyn
+return doesn't produce a precise proc-shape" gap, so the forward-ref support adds
+no new asymmetry. Crucially there is no unsoundness: a generator cannot present a
+portable scalar signature to the pre-pass (`proc g {} i32 { yield 1 }` is
+rejected at its own definition — `body returns nil`), so the stamp can never
+conform to a sink while the runtime value is secretly a generator.
 
 ## Next slice (recommended): vec-get / untyped-binding closure narrowing
 
