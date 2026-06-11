@@ -2232,6 +2232,36 @@ static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
   return true;
 }
 
+/* Step 2b: translate a TYPER-side proc-shape idx (in tc->shape_reg) into a
+ * portable SHARED-registry idx (== the compiler's registry, post-2a), so the
+ * compiler can read a closure's signature from an AST stamp instead of
+ * re-deriving it. Decodes the signature and re-interns it into tc->shared_reg;
+ * dedup means this lands on the same idx the compiler's own intern produces.
+ * Lazy (called only at stamp points). Declines (UINT32_MAX) when there's no
+ * shared registry, the idx isn't a proc shape, or any param/return idx is not a
+ * scalar sentinel — i.e. struct/compound/nested-proc signatures, which are a
+ * B3 follow-up and fall back to the existing re-derivation. Pointer-safe: reads
+ * tc->shape_reg, copies the param idxs to a local, then grows the (different)
+ * shared registry. */
+static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx) {
+  if (!tc->shared_reg) return UINT32_MAX;
+  if (typer_idx >= tc->shape_reg.count ||
+      tc->shape_reg.shapes[typer_idx].kind != TYPE_SHAPE_PROC)
+    return UINT32_MAX;
+  TypeShape* s = &tc->shape_reg.shapes[typer_idx];
+  uint16_t pc = s->u.proc.param_count;
+  if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
+  uint32_t params[TYPER_MAX_PROC_PARAMS];
+  for (uint16_t k = 0; k < pc; k++) {
+    uint32_t pidx = tc->shape_reg.proc_param_pool[s->u.proc.params_off + k];
+    if (!JACL_IS_SCALAR_TYPE_IDX(pidx)) return UINT32_MAX; /* non-scalar param: B3 follow-up */
+    params[k] = pidx;
+  }
+  uint32_t rid = s->u.proc.return_idx;
+  if (rid != UINT32_MAX && !JACL_IS_SCALAR_TYPE_IDX(rid)) return UINT32_MAX;
+  return type_shape_intern_proc(tc->shared_reg, params, pc, rid);
+}
+
 /* Phase B3a: monomorphize an inline proc literal against a declared param-type
  * list (a closure ARG to a [Proc …] closure param). Types the body ONCE with
  * untyped params bound to the declared types and the declared return pushed on
@@ -4287,6 +4317,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   if (proc) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
+    /* Step 2b (proc-first): a call returning a closure with a known signature
+     * gets a portable proc-shape stamp so the compiler reads it directly from
+     * the AST instead of re-deriving via GlobalArity. Lazy intern at the stamp;
+     * dedup makes this the same idx the compiler would produce. */
+    if ((JaclType)proc->return_type == TYPE_CLOSURE &&
+        proc->return_struct_idx != UINT32_MAX)
+      node->inferred_proc_shape_idx =
+          typer__portable_proc_shape(tc, proc->return_struct_idx);
     /* Check positional arg types against declared param types. Mirrors
      * the compiler's typed-call check (compiler.c:10359-10378). Both
      * concrete-mismatch and dyn-into-typed (decision 2: no implicit

@@ -4644,6 +4644,16 @@ static uint32_t compiler__coll_receiver_proc_shape(Compiler* c, AstNode* recv) {
 
 static uint32_t compiler__call_closure_return_shape(Compiler* c, AstNode* node) {
   if (!node || node->type != AST_COMMAND) return UINT32_MAX;
+  /* Step 2b (proc-first): prefer the typer's portable proc-shape stamp — a
+   * shared-registry idx (== this registry, post-2a) — instead of re-deriving.
+   * Validated against the registry; falls through to re-derivation if absent or
+   * inconsistent. (Dedup makes this the same idx re-derivation would produce.) */
+  if (node->inferred_proc_shape_idx != UINT32_MAX) {
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    if (reg && node->inferred_proc_shape_idx < reg->count &&
+        reg->shapes[node->inferred_proc_shape_idx].kind == TYPE_SHAPE_PROC)
+      return node->inferred_proc_shape_idx;
+  }
   /* B3c follow-up: `def g [vec-get/arr-get $fns 0]` — narrow g to the
    * collection's element [Proc …] shape so `[g …]` is a typed call. */
   if ((node->data.command.head_id == HEAD_VEC_GET ||
