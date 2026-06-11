@@ -17416,6 +17416,323 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
     }
 }
 
+/* Register a top-level `struct` definition into the (root) struct registry:
+ * resolve field types, compute C-ABI layout + the GC ref-map, and register the
+ * constructor's global arity. Reports errors via compiler__error and returns
+ * false (the caller then skips the OP_NIL it would emit on success). Extracted
+ * verbatim from the AST_DEFSTRUCT codegen handler — no behavior change.
+ * (Step 2a of the typer/compiler shape-registry unification.) */
+static bool compiler__register_struct_def(Compiler* c, AstNode* node) {
+  uint32_t line = node->start.line;
+  const char* struct_name     = node->data.defstruct.name;
+  uint32_t    struct_name_len = node->data.defstruct.name_len;
+  uint32_t    field_count     = node->data.defstruct.field_count;
+
+      /* Get or create struct registry on the root compiler */
+      Compiler* root = c;
+      while (root->enclosing) root = root->enclosing;
+      if (!root->struct_registry) {
+        root->struct_registry = (StructTypeRegistry*)arena_alloc(
+            root->arena, sizeof(StructTypeRegistry));
+        struct_registry__init(root->struct_registry, root->arena);
+      }
+      StructTypeRegistry* reg = root->struct_registry;
+
+      /* Error on duplicate struct name */
+      if (struct_registry__find(reg, struct_name, struct_name_len) != UINT32_MAX) {
+        char err[128];
+        snprintf(err, sizeof(err), "duplicate struct definition '%.*s'",
+                 (int)struct_name_len, struct_name);
+        compiler__error(c, line, node->start.column, err);
+        return false;
+      }
+
+      /* Ensure capacity for the new type */
+      if (!struct_registry__grow(reg)) {
+        compiler__error(c, line, node->start.column,
+                        "struct registry allocation failure");
+        return false;
+      }
+
+      /* Reserve slot first so inline struct registration doesn't overwrite it.
+         We'll assign the actual StructTypeDef* after parsing fields. */
+      uint32_t this_idx = reg->count;
+      reg->count++;
+      reg->defs[this_idx] = NULL; /* placeholder */
+
+      /* Parse fields into temporary stack array (FAM requires knowing count upfront) */
+      StructTypeField tmp_fields[256];
+      uint32_t offset = 0;
+      uint32_t max_align = 1;
+      bool has_error = false;
+
+      for (uint32_t fi = 0; fi < field_count; fi++) {
+        const char* fname     = node->data.defstruct.field_names[fi];
+        uint32_t    fname_len = node->data.defstruct.field_name_lens[fi];
+        const char* ftype_str = node->data.defstruct.field_types[fi];
+        uint32_t    ftype_len = node->data.defstruct.field_type_lens[fi];
+
+        /* Check for duplicate field names */
+        for (uint32_t j = 0; j < fi; j++) {
+          if (tmp_fields[j].name_len == fname_len &&
+              memcmp(tmp_fields[j].name, fname, fname_len) == 0) {
+            char err[128];
+            snprintf(err, sizeof(err), "duplicate field name '%.*s' in struct '%.*s'",
+                     (int)fname_len, fname, (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+        }
+        if (has_error) break;
+
+        /* Resolve field type */
+        JaclType ftype = TYPE_DYN;
+        uint32_t f_struct_idx = 0;
+        uint32_t f_buf_len    = 0;
+
+        if (is_type_keyword(ftype_str, ftype_len)) {
+          ftype = type_from_keyword(ftype_str, ftype_len);
+        } else if (ftype_len > 4 && memcmp(ftype_str, "Buf{", 4) == 0 &&
+                   ftype_str[ftype_len - 1] == '}') {
+          /* Buf field: canonical form "Buf{N,T}". See BUFFER_DESIGN.md M4.3. */
+          const char* p = ftype_str + 4;
+          const char* end = ftype_str + ftype_len - 1;
+          /* Parse N */
+          uint32_t n = 0;
+          while (p < end && *p >= '0' && *p <= '9') {
+            n = n * 10 + (uint32_t)(*p - '0');
+            p++;
+          }
+          if (p >= end || *p != ',' || n == 0) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                "field '%.*s': malformed Buf type '%.*s'",
+                (int)fname_len, fname, (int)ftype_len, ftype_str);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          p++; /* skip ',' */
+          uint32_t tlen = (uint32_t)(end - p);
+          JaclType elem_t = TYPE_DYN;
+          uint32_t elem_sidx_local = UINT32_MAX;
+          if (is_type_keyword(p, tlen)) {
+            elem_t = type_from_keyword(p, tlen);
+            /* Ref-elem types (dyn/str/vec/map/closure/stream) are now
+             * allowed: the struct's slot_ref_bitmap (computed below)
+             * marks JaclVal-sized slots inside the field as GC-traced,
+             * and the marker descends into them via the HeapRecord
+             * walker. See BUFFER_DESIGN.md Tier 1 + Path 2 design. */
+            elem_sidx_local = JACL_SCALAR_TYPE_IDX(elem_t);
+          } else {
+            uint32_t sidx = struct_registry__find(reg, p, tlen);
+            if (sidx == UINT32_MAX) {
+              char err[160];
+              snprintf(err, sizeof(err),
+                  "field '%.*s': unknown buf element type '%.*s'",
+                  (int)fname_len, fname, (int)tlen, p);
+              compiler__error(c, line, node->start.column, err);
+              has_error = true;
+              break;
+            }
+            elem_t = TYPE_STRUCT;
+            elem_sidx_local = sidx;
+          }
+          ftype = TYPE_BUF;
+          f_struct_idx = elem_sidx_local;
+          f_buf_len = n;
+        } else if (ftype_len > 7 && memcmp(ftype_str, "struct{", 7) == 0) {
+          /* Inline anonymous struct type */
+          uint32_t idx = compiler__register_inline_struct(reg, ftype_str, ftype_len);
+          if (idx == UINT32_MAX) {
+            char err[128];
+            snprintf(err, sizeof(err),
+                     "invalid inline struct type for field '%.*s' in struct '%.*s'",
+                     (int)fname_len, fname,
+                     (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          ftype = TYPE_STRUCT;
+          f_struct_idx = idx;
+        } else {
+          /* Check if it's a named struct type */
+          uint32_t idx = struct_registry__find(reg, ftype_str, ftype_len);
+          if (idx == UINT32_MAX) {
+            char err[128];
+            snprintf(err, sizeof(err),
+                     "undefined type '%.*s' for field '%.*s' in struct '%.*s'",
+                     (int)ftype_len, ftype_str,
+                     (int)fname_len, fname,
+                     (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          ftype = TYPE_STRUCT;
+          f_struct_idx = idx;
+        }
+
+        /* Reject reference field types — structs hold value-type bytes only.
+         * TYPE_BUF is also a value type (inline N*sizeof(T) bytes) so it
+         * is allowed in struct fields. Use [box $val] to reference data. */
+        if (ftype != TYPE_BUF && !is_struct_value_type(ftype)) {
+          char err[192];
+          snprintf(err, sizeof(err),
+                   "struct field '%.*s' has reference type '%s' — "
+                   "struct fields must be value types (primitives or nested structs); "
+                   "use [box $val] to hold a reference",
+                   (int)fname_len, fname, type_name(ftype));
+          compiler__error(c, line, node->start.column, err);
+          has_error = true;
+          break;
+        }
+
+        /* Compute C-ABI layout. For TYPE_BUF fields, fsize is
+         * N * sizeof(element); falign is the element's alignment. */
+        uint32_t fsize, falign;
+        if (ftype == TYPE_BUF) {
+          /* f_struct_idx holds the element encoding (scalar sentinel or
+           * struct idx). Size/align come from the recursive descriptor so
+           * the math matches the layout used everywhere else. */
+          uint32_t elem_sz    = (uint32_t)compiler__encoding_byte_size(reg, f_struct_idx);
+          uint32_t elem_align = compiler__encoding_align(reg, f_struct_idx);
+          fsize  = f_buf_len * elem_sz;
+          falign = elem_align;
+        } else {
+          fsize  = struct__type_size(ftype, reg, f_struct_idx);
+          falign = struct__type_align(ftype, reg, f_struct_idx);
+        }
+        offset = struct__align_up(offset, falign);
+
+        tmp_fields[fi].name           = fname;
+        tmp_fields[fi].name_len       = fname_len;
+        tmp_fields[fi].type           = ftype;
+        tmp_fields[fi].struct_type_idx = f_struct_idx;
+        tmp_fields[fi].offset         = offset;
+        tmp_fields[fi].size           = fsize;
+        tmp_fields[fi].is_mutable     = node->data.defstruct.field_mutable[fi] != 0;
+        tmp_fields[fi].default_val    = JACL_NIL;
+        tmp_fields[fi].buf_len        = f_buf_len;
+
+        offset += fsize;
+        if (falign > max_align) max_align = falign;
+      }
+
+      if (has_error) {
+        reg->count = this_idx; /* rollback slot reservation */
+        return false;
+      }
+
+      /* Allocate StructTypeDef with exact field count in the registry arena */
+      StructTypeDef* sdef = struct_registry__alloc_def(reg, field_count);
+      if (!sdef) {
+        reg->count = this_idx;
+        compiler__error(c, line, node->start.column,
+                        "struct registry allocation failure");
+        return false;
+      }
+      /* Copy struct + field names into the registry arena. Token text
+         points into the source buffer, which the embedding caller may
+         free after jacl_eval returns -- but the persistent struct
+         registry survives across evals, so storing the raw token
+         pointer leaves struct_registry__find scanning freed memory on
+         the next compile. */
+      {
+        char* nc = (char*)arena_alloc(reg->arena, struct_name_len + 1);
+        memcpy(nc, struct_name, struct_name_len);
+        nc[struct_name_len] = '\0';
+        sdef->name = nc;
+      }
+      sdef->name_len = struct_name_len;
+      if (struct_name_len <= 128) {
+        sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
+      } else {
+        sdef->name_val = JACL_NIL;
+      }
+      sdef->field_count = field_count;
+      sdef->total_size  = struct__align_up(offset, max_align);
+      sdef->alignment   = max_align;
+      memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
+      for (uint32_t fi = 0; fi < field_count; fi++) {
+        char* fc = (char*)arena_alloc(reg->arena, sdef->fields[fi].name_len + 1);
+        memcpy(fc, sdef->fields[fi].name, sdef->fields[fi].name_len);
+        fc[sdef->fields[fi].name_len] = '\0';
+        sdef->fields[fi].name = fc;
+      }
+
+      /* Assign to reserved slot */
+      reg->defs[this_idx] = sdef;
+      reg->shapes[this_idx].kind = TYPE_SHAPE_STRUCT;
+      reg->shapes[this_idx].u.struct_def = sdef;
+
+      /* Compute slot_ref_bitmap via the recursive layout descriptor
+       * (RECURSIVE_LAYOUT_REFACTOR.md, Step 2). Marking GC-traced JaclVal
+       * slots compositionally -- a buf tiles its element map, a struct unions
+       * its fields' maps -- means ref-elem bufs reached through a nested
+       * struct field are now marked too. The previous hand loop walked only
+       * the struct's own TYPE_BUF fields and silently skipped sub-struct
+       * fields, so an Inner-with-ref-buf embedded in Outer left Outer's slots
+       * unmarked and invisible to the GC. Runs after registration so the
+       * recursion can reach this struct's own (now memcpy'd) fields via the
+       * registry. */
+      memset(sdef->slot_ref_bitmap, 0, sizeof(sdef->slot_ref_bitmap));
+      compiler__encoding_ref_map(reg, this_idx, 0, sdef->slot_ref_bitmap, 256);
+      /* Cache overflow guard: the GC mark path reads the 256-slot cache
+       * (vm__mark_struct_inline_slots) and would silently miss ref slots
+       * past 255. Reject struct definitions that would land any ref in
+       * that range, so the cache is always sufficient. The buf size cap is
+       * 65535 bytes (~8191 JaclVal slots), so 1 KiB is enough scratch. */
+      {
+        uint8_t overflow_bitmap[1024];
+        memset(overflow_bitmap, 0, sizeof(overflow_bitmap));
+        compiler__encoding_ref_map(reg, this_idx, 0, overflow_bitmap,
+                                   (uint32_t)sizeof(overflow_bitmap) * 8u);
+        uint32_t overflow_slot = UINT32_MAX;
+        for (uint32_t b = sizeof(sdef->slot_ref_bitmap);
+             b < sizeof(overflow_bitmap); b++) {
+          if (overflow_bitmap[b] != 0) {
+            for (uint32_t bit = 0; bit < 8; bit++) {
+              if (overflow_bitmap[b] & (uint8_t)(1u << bit)) {
+                overflow_slot = b * 8u + bit; break;
+              }
+            }
+            break;
+          }
+        }
+        if (overflow_slot != UINT32_MAX) {
+          char err[256];
+          snprintf(err, sizeof(err),
+              "struct '%.*s': reference-typed slot %u exceeds the 256-slot "
+              "GC ref-map cache (slot index counts 8-byte JaclVal positions); "
+              "split large [Buf N <ref>] fields or use [Vec T] for collections "
+              "larger than 256 reference elements",
+              (int)struct_name_len, struct_name, (unsigned)overflow_slot);
+          compiler__error(c, line, node->start.column, err);
+          reg->defs[this_idx]   = NULL;
+          reg->shapes[this_idx].kind          = TYPE_SHAPE_NONE;
+          reg->shapes[this_idx].u.struct_def  = NULL;
+          return false;
+        }
+      }
+
+      /* Register struct name as a global with arity = field_count (constructor)
+         and type = TYPE_STRUCT */
+      if (struct_name_len <= 128) {
+        JaclVal name_val = sdef->name_val;
+        compiler__set_global_arity(root, name_val, (int16_t)field_count);
+        GlobalArity* ga = compiler__find_global(root, name_val);
+        if (ga) {
+          ga->type = TYPE_STRUCT;
+          ga->return_type = TYPE_STRUCT;
+        }
+      }
+
+  return true;
+}
+
 /* --- Internal: Compile a single AST node --- */
 
 void compiler__compile_node(Compiler* c, AstNode* node) {
@@ -17992,10 +18309,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_DEFSTRUCT: {
-      const char* struct_name     = node->data.defstruct.name;
-      uint32_t    struct_name_len = node->data.defstruct.name_len;
-      uint32_t    field_count     = node->data.defstruct.field_count;
-
       /* Must be at top level (scope_depth == 0) — parser already rejects
          defstruct inside blocks, but double-check */
       if (c->scope_depth > 0) {
@@ -18003,311 +18316,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
                         "defstruct must appear at top level");
         break;
       }
-
-      /* Get or create struct registry on the root compiler */
-      Compiler* root = c;
-      while (root->enclosing) root = root->enclosing;
-      if (!root->struct_registry) {
-        root->struct_registry = (StructTypeRegistry*)arena_alloc(
-            root->arena, sizeof(StructTypeRegistry));
-        struct_registry__init(root->struct_registry, root->arena);
-      }
-      StructTypeRegistry* reg = root->struct_registry;
-
-      /* Error on duplicate struct name */
-      if (struct_registry__find(reg, struct_name, struct_name_len) != UINT32_MAX) {
-        char err[128];
-        snprintf(err, sizeof(err), "duplicate struct definition '%.*s'",
-                 (int)struct_name_len, struct_name);
-        compiler__error(c, line, node->start.column, err);
-        break;
-      }
-
-      /* Ensure capacity for the new type */
-      if (!struct_registry__grow(reg)) {
-        compiler__error(c, line, node->start.column,
-                        "struct registry allocation failure");
-        break;
-      }
-
-      /* Reserve slot first so inline struct registration doesn't overwrite it.
-         We'll assign the actual StructTypeDef* after parsing fields. */
-      uint32_t this_idx = reg->count;
-      reg->count++;
-      reg->defs[this_idx] = NULL; /* placeholder */
-
-      /* Parse fields into temporary stack array (FAM requires knowing count upfront) */
-      StructTypeField tmp_fields[256];
-      uint32_t offset = 0;
-      uint32_t max_align = 1;
-      bool has_error = false;
-
-      for (uint32_t fi = 0; fi < field_count; fi++) {
-        const char* fname     = node->data.defstruct.field_names[fi];
-        uint32_t    fname_len = node->data.defstruct.field_name_lens[fi];
-        const char* ftype_str = node->data.defstruct.field_types[fi];
-        uint32_t    ftype_len = node->data.defstruct.field_type_lens[fi];
-
-        /* Check for duplicate field names */
-        for (uint32_t j = 0; j < fi; j++) {
-          if (tmp_fields[j].name_len == fname_len &&
-              memcmp(tmp_fields[j].name, fname, fname_len) == 0) {
-            char err[128];
-            snprintf(err, sizeof(err), "duplicate field name '%.*s' in struct '%.*s'",
-                     (int)fname_len, fname, (int)struct_name_len, struct_name);
-            compiler__error(c, line, node->start.column, err);
-            has_error = true;
-            break;
-          }
-        }
-        if (has_error) break;
-
-        /* Resolve field type */
-        JaclType ftype = TYPE_DYN;
-        uint32_t f_struct_idx = 0;
-        uint32_t f_buf_len    = 0;
-
-        if (is_type_keyword(ftype_str, ftype_len)) {
-          ftype = type_from_keyword(ftype_str, ftype_len);
-        } else if (ftype_len > 4 && memcmp(ftype_str, "Buf{", 4) == 0 &&
-                   ftype_str[ftype_len - 1] == '}') {
-          /* Buf field: canonical form "Buf{N,T}". See BUFFER_DESIGN.md M4.3. */
-          const char* p = ftype_str + 4;
-          const char* end = ftype_str + ftype_len - 1;
-          /* Parse N */
-          uint32_t n = 0;
-          while (p < end && *p >= '0' && *p <= '9') {
-            n = n * 10 + (uint32_t)(*p - '0');
-            p++;
-          }
-          if (p >= end || *p != ',' || n == 0) {
-            char err[160];
-            snprintf(err, sizeof(err),
-                "field '%.*s': malformed Buf type '%.*s'",
-                (int)fname_len, fname, (int)ftype_len, ftype_str);
-            compiler__error(c, line, node->start.column, err);
-            has_error = true;
-            break;
-          }
-          p++; /* skip ',' */
-          uint32_t tlen = (uint32_t)(end - p);
-          JaclType elem_t = TYPE_DYN;
-          uint32_t elem_sidx_local = UINT32_MAX;
-          if (is_type_keyword(p, tlen)) {
-            elem_t = type_from_keyword(p, tlen);
-            /* Ref-elem types (dyn/str/vec/map/closure/stream) are now
-             * allowed: the struct's slot_ref_bitmap (computed below)
-             * marks JaclVal-sized slots inside the field as GC-traced,
-             * and the marker descends into them via the HeapRecord
-             * walker. See BUFFER_DESIGN.md Tier 1 + Path 2 design. */
-            elem_sidx_local = JACL_SCALAR_TYPE_IDX(elem_t);
-          } else {
-            uint32_t sidx = struct_registry__find(reg, p, tlen);
-            if (sidx == UINT32_MAX) {
-              char err[160];
-              snprintf(err, sizeof(err),
-                  "field '%.*s': unknown buf element type '%.*s'",
-                  (int)fname_len, fname, (int)tlen, p);
-              compiler__error(c, line, node->start.column, err);
-              has_error = true;
-              break;
-            }
-            elem_t = TYPE_STRUCT;
-            elem_sidx_local = sidx;
-          }
-          ftype = TYPE_BUF;
-          f_struct_idx = elem_sidx_local;
-          f_buf_len = n;
-        } else if (ftype_len > 7 && memcmp(ftype_str, "struct{", 7) == 0) {
-          /* Inline anonymous struct type */
-          uint32_t idx = compiler__register_inline_struct(reg, ftype_str, ftype_len);
-          if (idx == UINT32_MAX) {
-            char err[128];
-            snprintf(err, sizeof(err),
-                     "invalid inline struct type for field '%.*s' in struct '%.*s'",
-                     (int)fname_len, fname,
-                     (int)struct_name_len, struct_name);
-            compiler__error(c, line, node->start.column, err);
-            has_error = true;
-            break;
-          }
-          ftype = TYPE_STRUCT;
-          f_struct_idx = idx;
-        } else {
-          /* Check if it's a named struct type */
-          uint32_t idx = struct_registry__find(reg, ftype_str, ftype_len);
-          if (idx == UINT32_MAX) {
-            char err[128];
-            snprintf(err, sizeof(err),
-                     "undefined type '%.*s' for field '%.*s' in struct '%.*s'",
-                     (int)ftype_len, ftype_str,
-                     (int)fname_len, fname,
-                     (int)struct_name_len, struct_name);
-            compiler__error(c, line, node->start.column, err);
-            has_error = true;
-            break;
-          }
-          ftype = TYPE_STRUCT;
-          f_struct_idx = idx;
-        }
-
-        /* Reject reference field types — structs hold value-type bytes only.
-         * TYPE_BUF is also a value type (inline N*sizeof(T) bytes) so it
-         * is allowed in struct fields. Use [box $val] to reference data. */
-        if (ftype != TYPE_BUF && !is_struct_value_type(ftype)) {
-          char err[192];
-          snprintf(err, sizeof(err),
-                   "struct field '%.*s' has reference type '%s' — "
-                   "struct fields must be value types (primitives or nested structs); "
-                   "use [box $val] to hold a reference",
-                   (int)fname_len, fname, type_name(ftype));
-          compiler__error(c, line, node->start.column, err);
-          has_error = true;
-          break;
-        }
-
-        /* Compute C-ABI layout. For TYPE_BUF fields, fsize is
-         * N * sizeof(element); falign is the element's alignment. */
-        uint32_t fsize, falign;
-        if (ftype == TYPE_BUF) {
-          /* f_struct_idx holds the element encoding (scalar sentinel or
-           * struct idx). Size/align come from the recursive descriptor so
-           * the math matches the layout used everywhere else. */
-          uint32_t elem_sz    = (uint32_t)compiler__encoding_byte_size(reg, f_struct_idx);
-          uint32_t elem_align = compiler__encoding_align(reg, f_struct_idx);
-          fsize  = f_buf_len * elem_sz;
-          falign = elem_align;
-        } else {
-          fsize  = struct__type_size(ftype, reg, f_struct_idx);
-          falign = struct__type_align(ftype, reg, f_struct_idx);
-        }
-        offset = struct__align_up(offset, falign);
-
-        tmp_fields[fi].name           = fname;
-        tmp_fields[fi].name_len       = fname_len;
-        tmp_fields[fi].type           = ftype;
-        tmp_fields[fi].struct_type_idx = f_struct_idx;
-        tmp_fields[fi].offset         = offset;
-        tmp_fields[fi].size           = fsize;
-        tmp_fields[fi].is_mutable     = node->data.defstruct.field_mutable[fi] != 0;
-        tmp_fields[fi].default_val    = JACL_NIL;
-        tmp_fields[fi].buf_len        = f_buf_len;
-
-        offset += fsize;
-        if (falign > max_align) max_align = falign;
-      }
-
-      if (has_error) {
-        reg->count = this_idx; /* rollback slot reservation */
-        break;
-      }
-
-      /* Allocate StructTypeDef with exact field count in the registry arena */
-      StructTypeDef* sdef = struct_registry__alloc_def(reg, field_count);
-      if (!sdef) {
-        reg->count = this_idx;
-        compiler__error(c, line, node->start.column,
-                        "struct registry allocation failure");
-        break;
-      }
-      /* Copy struct + field names into the registry arena. Token text
-         points into the source buffer, which the embedding caller may
-         free after jacl_eval returns -- but the persistent struct
-         registry survives across evals, so storing the raw token
-         pointer leaves struct_registry__find scanning freed memory on
-         the next compile. */
-      {
-        char* nc = (char*)arena_alloc(reg->arena, struct_name_len + 1);
-        memcpy(nc, struct_name, struct_name_len);
-        nc[struct_name_len] = '\0';
-        sdef->name = nc;
-      }
-      sdef->name_len = struct_name_len;
-      if (struct_name_len <= 128) {
-        sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
-      } else {
-        sdef->name_val = JACL_NIL;
-      }
-      sdef->field_count = field_count;
-      sdef->total_size  = struct__align_up(offset, max_align);
-      sdef->alignment   = max_align;
-      memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
-      for (uint32_t fi = 0; fi < field_count; fi++) {
-        char* fc = (char*)arena_alloc(reg->arena, sdef->fields[fi].name_len + 1);
-        memcpy(fc, sdef->fields[fi].name, sdef->fields[fi].name_len);
-        fc[sdef->fields[fi].name_len] = '\0';
-        sdef->fields[fi].name = fc;
-      }
-
-      /* Assign to reserved slot */
-      reg->defs[this_idx] = sdef;
-      reg->shapes[this_idx].kind = TYPE_SHAPE_STRUCT;
-      reg->shapes[this_idx].u.struct_def = sdef;
-
-      /* Compute slot_ref_bitmap via the recursive layout descriptor
-       * (RECURSIVE_LAYOUT_REFACTOR.md, Step 2). Marking GC-traced JaclVal
-       * slots compositionally -- a buf tiles its element map, a struct unions
-       * its fields' maps -- means ref-elem bufs reached through a nested
-       * struct field are now marked too. The previous hand loop walked only
-       * the struct's own TYPE_BUF fields and silently skipped sub-struct
-       * fields, so an Inner-with-ref-buf embedded in Outer left Outer's slots
-       * unmarked and invisible to the GC. Runs after registration so the
-       * recursion can reach this struct's own (now memcpy'd) fields via the
-       * registry. */
-      memset(sdef->slot_ref_bitmap, 0, sizeof(sdef->slot_ref_bitmap));
-      compiler__encoding_ref_map(reg, this_idx, 0, sdef->slot_ref_bitmap, 256);
-      /* Cache overflow guard: the GC mark path reads the 256-slot cache
-       * (vm__mark_struct_inline_slots) and would silently miss ref slots
-       * past 255. Reject struct definitions that would land any ref in
-       * that range, so the cache is always sufficient. The buf size cap is
-       * 65535 bytes (~8191 JaclVal slots), so 1 KiB is enough scratch. */
-      {
-        uint8_t overflow_bitmap[1024];
-        memset(overflow_bitmap, 0, sizeof(overflow_bitmap));
-        compiler__encoding_ref_map(reg, this_idx, 0, overflow_bitmap,
-                                   (uint32_t)sizeof(overflow_bitmap) * 8u);
-        uint32_t overflow_slot = UINT32_MAX;
-        for (uint32_t b = sizeof(sdef->slot_ref_bitmap);
-             b < sizeof(overflow_bitmap); b++) {
-          if (overflow_bitmap[b] != 0) {
-            for (uint32_t bit = 0; bit < 8; bit++) {
-              if (overflow_bitmap[b] & (uint8_t)(1u << bit)) {
-                overflow_slot = b * 8u + bit; break;
-              }
-            }
-            break;
-          }
-        }
-        if (overflow_slot != UINT32_MAX) {
-          char err[256];
-          snprintf(err, sizeof(err),
-              "struct '%.*s': reference-typed slot %u exceeds the 256-slot "
-              "GC ref-map cache (slot index counts 8-byte JaclVal positions); "
-              "split large [Buf N <ref>] fields or use [Vec T] for collections "
-              "larger than 256 reference elements",
-              (int)struct_name_len, struct_name, (unsigned)overflow_slot);
-          compiler__error(c, line, node->start.column, err);
-          reg->defs[this_idx]   = NULL;
-          reg->shapes[this_idx].kind          = TYPE_SHAPE_NONE;
-          reg->shapes[this_idx].u.struct_def  = NULL;
-          break;
-        }
-      }
-
-      /* Register struct name as a global with arity = field_count (constructor)
-         and type = TYPE_STRUCT */
-      if (struct_name_len <= 128) {
-        JaclVal name_val = sdef->name_val;
-        compiler__set_global_arity(root, name_val, (int16_t)field_count);
-        GlobalArity* ga = compiler__find_global(root, name_val);
-        if (ga) {
-          ga->type = TYPE_STRUCT;
-          ga->return_type = TYPE_STRUCT;
-        }
-      }
-
-      /* defstruct is a declaration, produces nil */
-      compiler__emit_byte(c, OP_NIL, line);
+      /* Registration extracted to compiler__register_struct_def (step 2a). */
+      if (compiler__register_struct_def(c, node))
+        compiler__emit_byte(c, OP_NIL, line);  /* declaration produces nil */
       break;
     }
 
