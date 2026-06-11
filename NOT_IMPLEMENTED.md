@@ -7,9 +7,8 @@ to the doc that owns the long version.
 If you find yourself adding a new "TODO"-class item, add it here *and*
 in the owning doc. Keep entries tight: one paragraph max.
 
-> **Active work-in-progress:** see `LAMBDA_TYPING_PLAN.md` (its "START HERE"
-> block) and — authoritative for current status —
-> `TYPED_CLOSURES_DESIGN.md` §"Remaining work". **The typed-closures arc is
+> **Active work-in-progress:** see `TYPED_CLOSURES_DESIGN.md` §"Remaining work"
+> — authoritative for current status. **The typed-closures arc is
 > functionally complete (2026-06-11):** `[Proc [P…] R]` syntax, closure
 > VALUES/PARAMS/RETURNS, user HOFs, closures-returning-closures, named closures
 > as values with conformance, collections (`[Vec/Arr [Proc …]]`), closure-valued
@@ -387,9 +386,8 @@ pulling on them; revisit when one shows up.
      `transform` lambda-return inference is a one-off special case the user
      has flagged for a rethink. **The active design decision + the remaining
      typed-stream work (typed `collect`, consumer-untyped errors,
-     struct-element streams) live in `LAMBDA_TYPING_PLAN.md` + the next-step
-     design `TYPED_CLOSURES_DESIGN.md` — start there. (Producer-wide rep for
-     i64/u64/f64 has since landed.)**
+     struct-element streams) lives in `TYPED_CLOSURES_DESIGN.md` — start there.
+     (Producer-wide rep for i64/u64/f64 has since landed.)**
   1b. **Struct-element streams — channel + for-loop + HOF monomorphization
      LANDED (2026-06-10); typed collect still open.** What shipped:
      `OP_YIELD_SM_WIDE` (yield pops the struct — inline N slots or heap ptr,
@@ -462,8 +460,7 @@ pulling on them; revisit when one shows up.
      `sm_gen_wide_ctor_fields`, `sm_gen_struct_from_call`, `sm_gen_mut_wide`,
      `stream_struct_wide_fields` (3-slot stream element with computed wide
      fields, end-to-end). Related cheap follow-up: dropping the typer
-     restore-pass for tagged-fit scalars (i32/u32/f32/bool) per
-     `STREAM_TYPING_DEBT.md` item 4a.
+     restore-pass for tagged-fit scalars (i32/u32/f32/bool).
   2. **Yield-site inference.** Today an unannotated generator stays
      `[Stream dyn]`; the typer doesn't walk yield expressions to
      unify their types. Annotation is the only narrowing path. Adding

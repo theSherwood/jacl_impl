@@ -318,8 +318,8 @@ tail (returning a closure param/value verbatim) isn't conformance-checked.
 - Closure params only resolve their shape via `GlobalArity` (global procs); a
   closure param on a *local* proc binding has no shape at the call site yet.
 - Struct/compound param/return inside `[Proc …]` still B3b (clear error). Resolved the lambda-boundary technical
-debt in `STREAM_TYPING_DEBT.md` (items 1, 3, 4, and 5-by-deletion); pairs with
-typed `collect` (item 2). Builds directly on the existing i64 wide-mapper path
+debt (the typed-body/double-walk removal and the box/unbox round-trip); pairs
+with typed `collect`. Builds directly on the existing i64 wide-mapper path
 (`c338b99`, `aa81bef`), which is already a partial monomorphization.
 
 **Phase B — B1+B2 as landed (2026-06-10):**

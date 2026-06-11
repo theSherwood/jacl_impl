@@ -3469,8 +3469,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    *  - tagged-fit scalars (i32/u32/f32/bool/str): tagged on both sides —
    *    a typed body read of a non-unboxed type IS a tagged read, so the
    *    bytecode is unchanged; keeping the typed body fixes body-internal
-   *    static typing (assert-type, propagation) and kills the double-walk
-   *    (STREAM_TYPING_DEBT item 4, final piece).
+   *    static typing (assert-type, propagation) and kills the double-walk.
    * The restore pass below survives ONLY as the rollback for a failed
    * probe (mixed-type bodies degrade to the lenient dyn path). */
   bool keep_typed = body_bound && !probe_errored;
@@ -5741,7 +5740,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       } else if (hid == HEAD_LINES) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
       } else if (hid == HEAD_COLLECT && node->data.command.arg_count == 1) {
-        /* Typed collect (STREAM_TYPING_DEBT item 2): collecting a TYPED
+        /* Typed collect: collecting a TYPED
          * stream materializes a typed vec [Vec T] — wide elements stored
          * flat (no i32-for-small box-back), struct elements stored as
          * inline bytes. Dyn streams (and vec identity) keep TYPE_VEC.

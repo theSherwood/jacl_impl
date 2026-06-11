@@ -6106,8 +6106,8 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
    * `transform` over a typed *stream* whose mapper return type infers to a
    * wide scalar (i64/u64/f64), tell the inline mapper proc to compile with a
    * TYPED return. Then emit_return won't box the wide tail and the transform
-   * stream-pull won't unbox it — the box/unbox round-trip (STREAM_TYPING_DEBT
-   * item 3) disappears. The condition matches exactly when the transform
+   * stream-pull won't unbox it — the box/unbox round-trip disappears. The
+   * condition matches exactly when the transform
    * stream's elem_idx is wide (out_elem_enc == the OP_TRANSFORM operand), so
    * the vm-side unbox removal stays sound. Only inline procs reach a wide
    * out_elem_enc (typer__proc_result_enc returns dyn for var-ref closures). */

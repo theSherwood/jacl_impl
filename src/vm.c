@@ -1566,8 +1566,7 @@ static inline bool vm__elem_idx_is_wide(uint32_t elem_idx) {
     /* i64/u64/f64 all flow wide. The earlier f64/u64 blocker (a tagged element
      * comparing against a differently-tagged literal in a dyn-context predicate)
      * is handled by runtime mixed-numeric promotion in the ordering opcodes
-     * (vm__numeric_order) plus yield-time literal narrowing — see
-     * LAMBDA_TYPING_PLAN.md. */
+     * (vm__numeric_order) plus yield-time literal narrowing. */
     return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
@@ -10519,7 +10518,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           DISPATCH();
         }
 
-        /* Typed collect (STREAM_TYPING_DEBT item 2): a TYPED stream
+        /* Typed collect: a TYPED stream
          * materializes into a typed vec [Vec T]. Wide scalar elements
          * (i64/u64/f64) arrive raw from the pull and are stored raw — the
          * i32-for-small box-back is gone. Struct elements arrive as N
