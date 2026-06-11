@@ -8,6 +8,44 @@ of closures in both the persistent vec and the mutable arr, all via a registry
 narrowing + push-of-closure monomorphization) are **also landed (2026-06-11)** —
 see the B3c follow-ups block below.
 
+## Remaining work (authoritative, as of 2026-06-11)
+
+The arc (B1–B3d + the B3c follow-ups + the 2b portable-stamp slices) is
+functionally complete: closure values, params, returns, collections, and
+closure-valued *expression* results (direct calls of get/call results,
+expression args, nested push), across single-file + interpret + module compiles,
+plus runtime proc-signature introspection (`print` shows `<proc name(types) ->
+ret>`). Verified-remaining gaps:
+
+1. **Struct/compound types inside `[Proc …]`** — `[Proc [Point] i32]` /
+   `[Proc [i32] Point]` parse, but the call result types `dyn` (proc-shape
+   param/return idxs encode only scalars; `typer__portable_proc_shape` declines
+   non-scalar shapes). **The single biggest remaining item** — it blocks
+   higher-order procs over user data types. Struct idxs are already portable, so
+   the registry side is close; the typer's call-result narrowing +
+   monomorphization need to thread struct param/return idxs through.
+2. **A global proc / closure used as a first-class value** — `$procname` (a
+   reference to a global proc) and a global `[Proc …]` binding type as `dyn`, so
+   `def [Proc …] g $dbl` errors ("cannot assign dyn to closure binding") and the
+   value can't be passed to a closure param. Local typed-closure bindings,
+   inline literals, and closure-valued expressions all work; only the
+   *global-name-as-value* read stays dyn. (The runtime value IS a closure —
+   `print $add` shows its signature — it's the typer that doesn't narrow a
+   global ref.)
+3. **Non-literal closure-returning tail** — a proc returning a closure *param or
+   value verbatim* (not an inline literal) isn't conformance-checked against its
+   declared `[Proc …]` return.
+
+Non-bug nuance: the no-return form `[Proc [P]]` yields `dyn` (discarded at the
+tail), not nil.
+
+**The per-phase "scope / debt" notes below are partly STALE** — written as
+forward references that later phases resolved. Already done despite those notes:
+named/bound-closure RHS & ARG for *local* bindings (B3d); `[Proc …]` in
+param/return/collection positions (B3a/b/c); closure params on *local* proc
+bindings; closure-returning calls / direct calls / expression args / nested push
+(2b). Trust this section over the older blocks.
+
 **Phase B3c follow-ups — vec-get/arr-get narrowing + push monomorphization
 (2026-06-11):**
 - **vec-get/arr-get narrowing:** `[vec-get/arr-get $fns i]` on a `[Vec/Arr
