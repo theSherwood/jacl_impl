@@ -94,11 +94,13 @@ read as an EXPRESSION and called directly — `[[vec-get $fns i] x]` /
 `[[arr-get …] x]` — is now also covered, via the step-2b portable proc-shape
 stamp (`inferred_proc_shape_idx`): the typer stamps the get result and the
 compiler drives the typed call from it, with no binding to re-derive from. Test:
-`typed_closure_direct_get.jacl`. Remaining edge: a nested push
-(`[vec-push [vec-push …] …]`) only monomorphizes the inner element (the outer
-receiver is a command, not a var-ref) — that one needs the collection's element
-shape on the expression result, a different stamp than the closure-signature
-stamp.
+`typed_closure_direct_get.jacl`. The nested-push edge
+(`[vec-push [vec-push …] …]`, where the outer receiver is a command) is also
+closed: both passes' receiver→element-shape resolvers
+(`{typer,compiler}__coll_receiver_proc_shape`) now recurse through
+vec-push/arr-push receivers (a push preserves its receiver's element type), so
+every pushed closure literal — including the outermost — monomorphizes. Test:
+`typed_closure_nested_push.jacl` (triple-nested).
 
 **Phase B3d — named closures as values as landed (2026-06-10):**
 - **`[apply $g 5]`** — a NAMED typed-closure value passed to a `[Proc …]` param.

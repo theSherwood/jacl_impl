@@ -3340,6 +3340,28 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
 
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node);
 
+/* B3c follow-up: resolve the typer-side element proc-shape idx of a
+ * `[Vec/Arr [Proc …]]` receiver expression — a var-ref binding, or a
+ * vec-push/arr-push expression (which preserves its receiver's element type;
+ * recurse). UINT32_MAX otherwise. Mirrors compiler__coll_receiver_proc_shape so
+ * a closure literal pushed onto a NESTED push monomorphizes on both sides. */
+static uint32_t typer__coll_receiver_proc_shape(TyperCtx* tc, AstNode* recv) {
+  if (!recv) return UINT32_MAX;
+  if (recv->type == AST_COMMAND &&
+      (recv->data.command.head_id == HEAD_VEC_PUSH ||
+       recv->data.command.head_id == HEAD_ARR_PUSH) &&
+      recv->data.command.arg_count >= 1)
+    return typer__coll_receiver_proc_shape(tc, recv->data.command.args[0]);
+  if (recv->type == AST_VAR_REF) {
+    const TyperBinding* pb = typer__scope_resolve(tc,
+        recv->data.var_ref.name, recv->data.var_ref.length, recv->scope_mark);
+    if (pb && (pb->type == TYPE_VEC || pb->type == TYPE_ARR) &&
+        typer__is_shape_idx(tc, pb->struct_idx))
+      return pb->struct_idx;
+  }
+  return UINT32_MAX;
+}
+
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   /* Reset expected_type at command boundaries so sub-expressions don't
    * inherit parent context. Individual handlers (typed def/mut, set,
@@ -4206,19 +4228,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     if (i == 1 &&
         (mutator_hid == HEAD_VEC_PUSH || mutator_hid == HEAD_ARR_PUSH) &&
         arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
-      AstNode* recv = node->data.command.args[0];
-      if (recv->type == AST_VAR_REF) {
-        const TyperBinding* pb = typer__scope_resolve(tc,
-            recv->data.var_ref.name, recv->data.var_ref.length,
-            recv->scope_mark);
-        if (pb && (pb->type == TYPE_VEC || pb->type == TYPE_ARR) &&
-            typer__is_shape_idx(tc, pb->struct_idx)) {
-          uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-          if (typer__decode_proc_shape(tc, pb->struct_idx, &pc2, pts2, &rt2)) {
-            typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
-            tc->expected_type = saved_et;
-            continue;
-          }
+      uint32_t esh =
+          typer__coll_receiver_proc_shape(tc, node->data.command.args[0]);
+      if (esh != UINT32_MAX) {
+        uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+        if (typer__decode_proc_shape(tc, esh, &pc2, pts2, &rt2)) {
+          typer__monomorphize_proc_literal(tc, arg, pts2, pc2, rt2);
+          tc->expected_type = saved_et;
+          continue;
         }
       }
     }

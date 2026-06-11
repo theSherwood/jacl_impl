@@ -4628,8 +4628,16 @@ static void compiler__stamp_closure_param_local(Compiler* bc, Compiler* c,
 /* B3c follow-up: resolve the element [Proc …] shape carried by a
  * `[Vec/Arr [Proc …]]` receiver's local (its struct_type_idx, stamped by the
  * def handler), or UINT32_MAX if the receiver isn't a proc-collection var-ref.
- * Read-only — does not emit code. */
+ * Read-only — does not emit code. A vec-push/arr-push expression preserves its
+ * receiver's element type, so recurse through it — this monomorphizes a closure
+ * literal pushed onto a NESTED push (`[vec-push [vec-push $fns A] B]`), whose
+ * receiver is a command, not a var-ref. */
 static uint32_t compiler__coll_receiver_proc_shape(Compiler* c, AstNode* recv) {
+  if (recv && recv->type == AST_COMMAND &&
+      (recv->data.command.head_id == HEAD_VEC_PUSH ||
+       recv->data.command.head_id == HEAD_ARR_PUSH) &&
+      recv->data.command.arg_count >= 1)
+    return compiler__coll_receiver_proc_shape(c, recv->data.command.args[0]);
   if (!recv || recv->type != AST_VAR_REF) return UINT32_MAX;
   JaclVal rn = compiler__name_val(c->heap, c->intern_table,
       recv->data.var_ref.name, recv->data.var_ref.length);

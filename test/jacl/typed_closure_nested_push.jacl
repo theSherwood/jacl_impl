@@ -1,0 +1,17 @@
+# expect: 6000000000
+# expect: 9
+# expect: 14
+# B3c follow-up (closes the nested-push edge): in `[vec-push [vec-push … ] B]`
+# the outer push's receiver is a COMMAND, not a var-ref, so the element [Proc …]
+# shape couldn't be resolved and B's closure literal wasn't monomorphized (its
+# param read nil). Both passes now recurse through vec-push/arr-push receivers
+# (a push preserves its receiver's element type) so every pushed literal —
+# including the outermost — monomorphizes. Triple-nested proves the recursion.
+proc main {} {
+  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] [proc {x} {* $x 2}]]
+  def [Vec [Proc [i64] i64]] more [vec-push [vec-push [vec-push $fns [proc {x} {* $x 1000000000}]] [proc {x} {+ $x 3}]] [proc {x} {+ $x 8}]]
+  print [[vec-get $more 1] 6]   # 6000000000 — inner-most pushed (wide, unboxed)
+  print [[vec-get $more 2] 6]   # 9          — middle pushed
+  print [[vec-get $more 3] 6]   # 14         — outer-most pushed (was nil)
+}
+main
