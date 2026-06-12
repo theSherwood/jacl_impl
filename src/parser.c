@@ -2482,6 +2482,23 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
   parser__arr_init(&args, p->arena);
 
   while (!parser__is_operand_end(p)) {
+    /* Spread argument: ..expr (e.g. [+ ..$nums], [!ls ..$args]). Command mode
+     * must recognize this the way the old prefix parser did, otherwise `..`
+     * and the expr split into two bogus args. */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      Token* dotdot = parser__advance(p); /* consume '..' */
+      AstNode* inner = parser__parse_expr(p);
+      if (inner == NULL) {
+        return parser__error(p, "expected expression after '..' in spread", dotdot);
+      }
+      AstNode* spread = ast_alloc(p->arena);
+      spread->type  = AST_SPREAD;
+      spread->start = parser__token_start(dotdot);
+      spread->end   = inner->end;
+      spread->data.spread.expr = inner;
+      parser__arr_push(&args, spread);
+      continue;
+    }
     AstNode* arg = parser__parse_expr(p);
     if (arg == NULL) break;
     parser__arr_push(&args, arg);
