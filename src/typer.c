@@ -563,7 +563,7 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
     if (typer__buf_type_full(tc, arg, &inner_sidx, &inner_len,
                              &inner_inner_len, NULL) &&
         inner_len > 0 && inner_sidx != UINT32_MAX) {
-      uint32_t shape_idx = type_shape_intern_buf(&tc->shape_reg,
+      uint32_t shape_idx = type_shape_intern_buf(tc->shared_reg,
                                                   inner_len, inner_sidx);
       if (shape_idx != UINT32_MAX) {
         *out_struct_idx = shape_idx;
@@ -611,8 +611,8 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
  * parametric kinds are >= TYPE_SHAPE_TYPED_VEC (NONE/STRUCT/CTX sort below).
  * See docs/TYPER_SHAPE_UNIFICATION_AUDIT.md. */
 static bool typer__is_shape_idx(const TyperCtx* tc, uint32_t idx) {
-  return idx < tc->shape_reg.count &&
-         tc->shape_reg.shapes[idx].kind >= TYPE_SHAPE_TYPED_VEC;
+  return idx < tc->shared_reg->count &&
+         tc->shared_reg->shapes[idx].kind >= TYPE_SHAPE_TYPED_VEC;
 }
 
 static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
@@ -625,7 +625,7 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
     return JACL_TYPE_IDX_TO_SCALAR(encoded);
   }
   if (typer__is_shape_idx(tc, encoded)) {
-    TypeShape* shape = &tc->shape_reg.shapes[encoded];
+    TypeShape* shape = &tc->shared_reg->shapes[encoded];
     switch (shape->kind) {
       case TYPE_SHAPE_TYPED_VEC:
         if (out_inner_value_idx) *out_inner_value_idx = shape->u.tvec.elem_idx;
@@ -710,14 +710,14 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
     }
   }
   if (hl == 3 && memcmp(hn, "Vec", 3) == 0 && ac == 1)
-    return type_shape_intern_typed_vec(&tc->shape_reg, inner[0]);
+    return type_shape_intern_typed_vec(tc->shared_reg, inner[0]);
   /* One-arg [Map V] removed — dyn keys are spelled [Map dyn V]. A dyn
    * key keyword normalizes to the UINT32_MAX dyn-key convention (the
    * VM's 0xFFFF) rather than the scalar-dyn sentinel. */
   if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 2) {
     uint32_t kidx = (inner[0] == JACL_SCALAR_TYPE_IDX(TYPE_DYN))
                     ? UINT32_MAX : inner[0];
-    return type_shape_intern_typed_map(&tc->shape_reg, kidx, inner[1]);
+    return type_shape_intern_typed_map(tc->shared_reg, kidx, inner[1]);
   }
   return UINT32_MAX;
 }
@@ -829,18 +829,18 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
      * the start of the shape entry's [Buf N T] region. Dim 0 = shape
      * length; shape after 1 arrow = shape.elem_idx. */
     if (!typer__is_shape_idx(tc, b->struct_idx) ||
-        tc->shape_reg.shapes[b->struct_idx].kind != TYPE_SHAPE_BUF) {
+        tc->shared_reg->shapes[b->struct_idx].kind != TYPE_SHAPE_BUF) {
       return false;
     }
-    shape_after[1] = tc->shape_reg.shapes[b->struct_idx].u.buf.elem_idx;
+    shape_after[1] = tc->shared_reg->shapes[b->struct_idx].u.buf.elem_idx;
   } else {
     return false;
   }
   uint32_t cur_enc = shape_after[1];
   while (typer__is_shape_idx(tc, cur_enc) &&
-         tc->shape_reg.shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
+         tc->shared_reg->shapes[cur_enc].kind == TYPE_SHAPE_BUF) {
     if (num_dims >= 15) return false;
-    cur_enc = tc->shape_reg.shapes[cur_enc].u.buf.elem_idx;
+    cur_enc = tc->shared_reg->shapes[cur_enc].u.buf.elem_idx;
     num_dims++;
     shape_after[num_dims] = cur_enc;
   }
@@ -1062,7 +1062,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
                              &inner_inner_M, NULL) &&
         inner_M > 0 && inner_elem_sidx != UINT32_MAX) {
       uint32_t inner_shape_idx =
-          type_shape_intern_buf(&tc->shape_reg, inner_M, inner_elem_sidx);
+          type_shape_intern_buf(tc->shared_reg, inner_M, inner_elem_sidx);
       if (inner_shape_idx != UINT32_MAX) {
         *out_struct_idx = inner_shape_idx;
       }
@@ -1098,7 +1098,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
       }
     }
     if (inner_idx != UINT32_MAX) {
-      uint32_t shape_idx = type_shape_intern_typed_vec(&tc->shape_reg, inner_idx);
+      uint32_t shape_idx = type_shape_intern_typed_vec(tc->shared_reg, inner_idx);
       if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
       if (out_typed_elem_idx) *out_typed_elem_idx = inner_idx; /* legacy mirror */
     }
@@ -1154,7 +1154,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
         if (value_idx == UINT32_MAX) return true; /* bad_elem */
       }
     }
-    uint32_t shape_idx = type_shape_intern_typed_map(&tc->shape_reg,
+    uint32_t shape_idx = type_shape_intern_typed_map(tc->shared_reg,
                                                      key_idx, value_idx);
     if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
   } else if (t_arg->type == AST_COMMAND) {
@@ -1165,7 +1165,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
      * to T. */
     uint32_t pointee_idx = UINT32_MAX;
     if (typer__ptr_type(tc, t_arg, &pointee_idx)) {
-      uint32_t shape_idx = type_shape_intern_ptr(&tc->shape_reg, pointee_idx);
+      uint32_t shape_idx = type_shape_intern_ptr(tc->shared_reg, pointee_idx);
       if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
     } else {
       /* Future element [Buf N [Future T]] (Phase 5 compose case).
@@ -1173,7 +1173,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
        * is carried by the shape entry. */
       uint32_t fut_idx = UINT32_MAX;
       if (typer__future_type(tc, t_arg, &fut_idx)) {
-        uint32_t shape_idx = type_shape_intern_future(&tc->shape_reg, fut_idx);
+        uint32_t shape_idx = type_shape_intern_future(tc->shared_reg, fut_idx);
         if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
       } else {
         /* Box element [Buf N [Box T]] (Phase 5 compose case). Tagged
@@ -1181,7 +1181,7 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
          * T rides on the shape entry. */
         uint32_t box_idx = UINT32_MAX;
         if (typer__box_type(tc, t_arg, &box_idx)) {
-          uint32_t shape_idx = type_shape_intern_box(&tc->shape_reg, box_idx);
+          uint32_t shape_idx = type_shape_intern_box(tc->shared_reg, box_idx);
           if (shape_idx != UINT32_MAX) *out_struct_idx = shape_idx;
         }
       }
@@ -2328,7 +2328,7 @@ static uint32_t typer__intern_proc_shape(TyperCtx* tc, AstNode* node,
   for (uint8_t k = 0; k < pcount; k++)
     pool[k] = (pidxs[k] != UINT32_MAX) ? pidxs[k] : JACL_SCALAR_TYPE_IDX(pts[k]);
   uint32_t ret_enc = (ridx != UINT32_MAX) ? ridx : JACL_SCALAR_TYPE_IDX(rt);
-  return type_shape_intern_proc(&tc->shape_reg, pool, pcount, ret_enc);
+  return type_shape_intern_proc(tc->shared_reg, pool, pcount, ret_enc);
 }
 
 /* Phase B3a / B3 struct-in-[Proc …]: decode a TYPE_SHAPE_PROC shape idx into a
@@ -2340,7 +2340,7 @@ static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
                                         uint8_t* out_rtype,
                                         uint32_t* out_pstruct_idxs,
                                         uint32_t* out_rstruct_idx) {
-  StructTypeRegistry* reg = &tc->shape_reg;
+  StructTypeRegistry* reg = tc->shared_reg;
   if (shape_idx >= reg->count || reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC)
     return false;
   TypeShape* s = &reg->shapes[shape_idx];
@@ -2395,15 +2395,15 @@ static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
  * shared registry. */
 static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx) {
   if (!tc->shared_reg) return UINT32_MAX;
-  if (typer_idx >= tc->shape_reg.count ||
-      tc->shape_reg.shapes[typer_idx].kind != TYPE_SHAPE_PROC)
+  if (typer_idx >= tc->shared_reg->count ||
+      tc->shared_reg->shapes[typer_idx].kind != TYPE_SHAPE_PROC)
     return UINT32_MAX;
-  TypeShape* s = &tc->shape_reg.shapes[typer_idx];
+  TypeShape* s = &tc->shared_reg->shapes[typer_idx];
   uint16_t pc = s->u.proc.param_count;
   if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
   uint32_t params[TYPER_MAX_PROC_PARAMS];
   for (uint16_t k = 0; k < pc; k++) {
-    uint32_t pidx = tc->shape_reg.proc_param_pool[s->u.proc.params_off + k];
+    uint32_t pidx = tc->shared_reg->proc_param_pool[s->u.proc.params_off + k];
     /* Portable: a scalar sentinel or a struct idx (struct idxs are 1:1-aligned
      * across the typer/compiler registries). A nested-compound idx (a shape-
      * registry idx, ≥ struct_count) is registry-bound → decline. */
@@ -2814,7 +2814,7 @@ static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit) {
   else if (typer__proc_shape_portable_scalar(rt))
     ret_enc = JACL_SCALAR_TYPE_IDX(rt);
   else return UINT32_MAX;  /* compound return — not portable */
-  return type_shape_intern_proc(&tc->shape_reg, pool, (uint8_t)pc, ret_enc);
+  return type_shape_intern_proc(tc->shared_reg, pool, (uint8_t)pc, ret_enc);
 }
 
 /* Register a proc signature (used both by the top-level pre-pass and
@@ -3465,7 +3465,7 @@ static uint32_t typer__intern_global_proc_shape(TyperCtx* tc,
   else if (typer__proc_shape_portable_scalar(rt))
     ret_enc = JACL_SCALAR_TYPE_IDX(rt);
   else return UINT32_MAX;  /* compound return — not portable */
-  return type_shape_intern_proc(&tc->shape_reg, pool, pc, ret_enc);
+  return type_shape_intern_proc(tc->shared_reg, pool, pc, ret_enc);
 }
 
 /* Look up an imported export reached through a module binding
@@ -6099,8 +6099,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           if (b->type == TYPE_BUF) {
             uint32_t walk = pointee;
             while (typer__is_shape_idx(tc, walk) &&
-                   tc->shape_reg.shapes[walk].kind == TYPE_SHAPE_BUF) {
-              walk = tc->shape_reg.shapes[walk].u.buf.elem_idx;
+                   tc->shared_reg->shapes[walk].kind == TYPE_SHAPE_BUF) {
+              walk = tc->shared_reg->shapes[walk].u.buf.elem_idx;
             }
             pointee = walk;
           }
@@ -6356,8 +6356,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
              * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
              * and T from the shape. */
             if (typer__is_shape_idx(tc, b->struct_idx) &&
-                tc->shape_reg.shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
-              TypeShape* inner = &tc->shape_reg.shapes[b->struct_idx];
+                tc->shared_reg->shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
+              TypeShape* inner = &tc->shared_reg->shapes[b->struct_idx];
               uint32_t inner_M = inner->u.buf.len;
               uint32_t inner_t_enc = inner->u.buf.elem_idx;
               if (JACL_IS_SCALAR_TYPE_IDX(inner_t_enc)) {
@@ -6829,7 +6829,15 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
    * >= JACL_SCALAR_VEC_BASE = 0xFF00). NULL arena because no
    * StructTypeDef allocations happen on the typer side. Freed below. */
   struct_registry__init_at_offset(&tc.shape_reg, TYPER_MAX_STRUCTS);
-  tc.shared_reg = seed_registry;  /* step 2b: lazy proc-shape stamping target */
+  /* Step 2b (registry unification): the typer interns/decodes ALL shapes in the
+   * shared compile-context registry — the same instance the compiler builds and
+   * ships to runtime — so shape idxs are portable across passes (no offset-256
+   * private band, no re-intern bridge). The embedded tc.shape_reg is only a
+   * fallback for paths with no shared registry (the syntax.c prelude/macro
+   * pre-passes, which don't use typed-closure/compound shapes). Struct
+   * registration already runs before the typer (step 2a), so shapes appended
+   * here never collide with this program's struct idxs. */
+  tc.shared_reg = seed_registry ? seed_registry : &tc.shape_reg;
 
   /* Pre-pass: register top-level struct definitions, the synthetic
    * ctx struct, and proc signatures so constructor calls and proc
