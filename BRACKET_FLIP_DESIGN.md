@@ -151,11 +151,24 @@ Done (branch `claude/flip-bracket-mode`):
 - `jacl_harness` — 4: `tour`, `typed_closure_binding` (compound `[Proc …]`, Phase
   B3), + 2.
 
-Pending:
+**Structural cleanup (in progress):**
+- DONE: `compile_block_expr` and `typer__infer_block` now delegate to the single
+  `compile_seq` / always-scope sequence implementation; the value-position
+  scope-hacks are removed (value brackets lower to commands and no longer reach
+  the block path). Neutral (jacl_harness 4, all groups green).
+- **Retire `AST_BLOCK` (next, mechanical):** make proc/if/while/else/macro bodies
+  parse to an always-`[do …]` command (a `parse_body_seq` = `parse_block` +
+  unconditional `make_do`, no single-statement collapse — collapse is value-only).
+  Then change the 11 `compile_block_expr` callers → `compile_node` and the
+  `infer_block` caller → `infer_node`; `compile_node`/`infer_node` route `[do …]`
+  to `compile_seq`/the HEAD_DO infer, which is equivalent (incl. tail
+  `[Proc …]` monomorphization — a single-statement `[do [proc …]]` still
+  monomorphizes the tail). Finally delete the dead `AST_BLOCK` compile/infer
+  cases and the now-dead `as_type_command` peels.
+
+Pending (other):
 - 2 multi-line `.jacl` statement brackets; `destructure_spread_all` `{..}`.
 - Compound `[Proc ...]` param/return inference (`typed_closure_binding`).
 - Surgical `[def]`/keyword-head wrap.
 - Unit-test rewrites (parser/compiler/syntax) for the new AST.
-- Bodies → `do` and retire `AST_BLOCK`; delete dead peels / collapse remnants /
-  `compile_block_expr` scope-hack.
 - `{}` → `[]` for struct fields, `use`, and named/spread destructure.
