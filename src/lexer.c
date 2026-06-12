@@ -941,19 +941,19 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
         lexer__arr_push(arr, tok);
         return;
       }
-      /* Nested ] — emit RBRACKET */
+      /* Nested ] — emit RBRACE (command-mode block close) */
       {
         uint32_t s  = lex->pos;
         uint32_t sl = lex->line;
         uint32_t sc = lex->col;
         lexer__advance(lex);
-        Token tok = lexer__make_token(lex, TOKEN_RBRACKET, s, sl, sc);
+        Token tok = lexer__make_token(lex, TOKEN_RBRACE, s, sl, sc);
         lexer__arr_push(arr, tok);
       }
       continue;
     }
 
-    /* Opening bracket */
+    /* Opening bracket — command-mode block open */
     if (c == '[') {
       depth++;
       {
@@ -961,7 +961,7 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
         uint32_t sl = lex->line;
         uint32_t sc = lex->col;
         lexer__advance(lex);
-        Token tok = lexer__make_token(lex, TOKEN_LBRACKET, s, sl, sc);
+        Token tok = lexer__make_token(lex, TOKEN_LBRACE, s, sl, sc);
         lexer__arr_push(arr, tok);
       }
       continue;
@@ -1182,8 +1182,8 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
       lexer__advance(lex);
       TokenType type;
       switch (c) {
-        case '[': type = TOKEN_LBRACKET; break;
-        case ']': type = TOKEN_RBRACKET; break;
+        case '[': type = TOKEN_LBRACE;   break;
+        case ']': type = TOKEN_RBRACE;   break;
         case '{': type = TOKEN_LBRACE;   break;
         default:  type = TOKEN_RBRACE;   break;
       }
