@@ -3851,6 +3851,23 @@ static uint32_t typer__receiver_coll_shape(TyperCtx* tc, AstNode* recv) {
   return UINT32_MAX;
 }
 
+/* Decode a portable type idx (a scalar sentinel, or a struct registry idx) to a
+ * for-loop binding's (type, struct_idx). Used for a map key/value binding in
+ * `for $map [k] v`. A scalar sentinel narrows to its scalar; a struct idx →
+ * TYPE_STRUCT; UINT32_MAX (dyn key/value) and nested-shape values stay dyn (the
+ * latter is a v1 carve-out — a nested-compound map value binding isn't narrowed
+ * in the loop yet). */
+static void typer__idx_to_for_binding(TyperCtx* tc, uint32_t idx,
+                                      JaclType* bt, uint32_t* bsi) {
+  *bt = TYPE_DYN; *bsi = UINT32_MAX;
+  if (idx == UINT32_MAX) return;
+  if (JACL_IS_SCALAR_TYPE_IDX(idx)) {
+    *bt = JACL_TYPE_IDX_TO_SCALAR(idx);
+  } else if (!typer__is_shape_idx(tc, idx) && idx < tc->struct_count) {
+    *bt = TYPE_STRUCT; *bsi = idx;
+  }
+}
+
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   /* Reset expected_type at command boundaries so sub-expressions don't
    * inherit parent context. Individual handlers (typed def/mut, set,
@@ -4114,7 +4131,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       return;
     } else if (hid == HEAD_FOR &&
                (node->data.command.arg_count == 2 ||
-                node->data.command.arg_count == 3)) {
+                node->data.command.arg_count == 3 ||
+                node->data.command.arg_count == 4)) {
       /* for [coll] { body }  /  for [coll] name { body } — narrow the loop
        * binding to the collection's element type so typed body operations
        * (typed arithmetic, assigning to a typed local, assert-type) see the
@@ -4125,7 +4143,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * malformed shape fall through to the generic walker. */
       AstNode** as = node->data.command.args;
       uint32_t  ac = node->data.command.arg_count;
+      /* `bn` is the VALUE binding (the LAST name); `en` (NULL = none) is the
+       * ENUMERATOR binding (the optional FIRST name — the index for vec/arr, the
+       * key for maps). See SYNTAX.md §"`for` — unified iteration". */
       const char* bn = "it"; uint32_t bnl = 2;
+      const char* en = NULL; uint32_t enl = 0; uint32_t emark = 0;
       AstNode* body = NULL; uint32_t bmark = 0;
       if (ac == 2 && as[1]->type == AST_BLOCK) {
         body = as[1]; bmark = as[1]->scope_mark;
@@ -4134,6 +4156,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         bn = as[1]->data.lit_string.value;
         bnl = as[1]->data.lit_string.length;
         body = as[2]; bmark = as[1]->scope_mark;
+      } else if (ac == 4 && as[1]->type == AST_LIT_STRING &&
+                 as[2]->type == AST_LIT_STRING && as[3]->type == AST_BLOCK) {
+        en = as[1]->data.lit_string.value;
+        enl = as[1]->data.lit_string.length; emark = as[1]->scope_mark;
+        bn = as[2]->data.lit_string.value;
+        bnl = as[2]->data.lit_string.length; bmark = as[2]->scope_mark;
+        body = as[3];
       }
       if (body) {
         typer__infer_node(tc, as[0]);
@@ -4230,7 +4259,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             bt = TYPE_STRUCT; bsi = eidx;
           }
         }
+        /* The ENUMERATOR (first name of the two-name form) defaults to the i32
+         * index for sequences. For a MAP the VALUE binding is V and the
+         * enumerator is the KEY K — narrow both from the map's value/key idxs.
+         * (Single-name over a map binds the value; see SYNTAX.md.) */
+        JaclType et = TYPE_I32; uint32_t esi = UINT32_MAX;
+        if (coll_t == TYPE_MAP || coll_t == TYPE_TYPED_MAP) {
+          typer__idx_to_for_binding(tc, as[0]->inferred_struct_idx, &bt, &bsi);
+          typer__idx_to_for_binding(tc, as[0]->inferred_key_struct_idx, &et, &esi);
+        }
         typer__scope_push(tc);
+        /* Two-name form: add the enumerator binding first (index/key). */
+        if (en) typer__scope_add(tc, en, enl, emark, (uint8_t)et, esi);
         typer__scope_add(tc, bn, bnl, bmark, (uint8_t)bt, bsi);
         /* Map-element bindings carry the key idx too (scope_add has no
          * key slot — patch in place, like the def handler). */

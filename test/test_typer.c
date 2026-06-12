@@ -1078,6 +1078,55 @@ static void test_buf_def_annotation(void) {
 
 /* --- Driver ------------------------------------------------------- */
 
+/* --- `for` over maps + the enumerator (two-name) form -------------- */
+
+static void test_for_map_key_value(void) {
+  current_test = "for_map_key_value";
+  arena_t a = {0};
+  /* `for $map k v` over [Map str i64]: enumerator k narrows to the KEY (str),
+   * value v to the VALUE (i64). */
+  ParseResult r = run_typer(
+    "def [Map str i64] m [[Map str i64] \"a\" 1]\n"
+    "for $m k v { print $k; print $v }", &a);
+  AstNode* vk = find_var_ref(r.nodes[1], "k");
+  AstNode* vv = find_var_ref(r.nodes[1], "v");
+  ASSERT_NOT_NULL(vk);
+  ASSERT_NOT_NULL(vv);
+  ASSERT_TYPE(vk, TYPE_STR);
+  ASSERT_TYPE(vv, TYPE_I64);
+  arena_destroy(&a);
+}
+
+static void test_for_map_value_single(void) {
+  current_test = "for_map_value_single";
+  arena_t a = {0};
+  /* A SINGLE name over a map binds the VALUE (not the key). */
+  ParseResult r = run_typer(
+    "def [Map str i64] m [[Map str i64] \"a\" 1]\n"
+    "for $m v { print $v }", &a);
+  AstNode* vv = find_var_ref(r.nodes[1], "v");
+  ASSERT_NOT_NULL(vv);
+  ASSERT_TYPE(vv, TYPE_I64);
+  arena_destroy(&a);
+}
+
+static void test_for_vec_enumerate(void) {
+  current_test = "for_vec_enumerate";
+  arena_t a = {0};
+  /* `for $vec i x` over [Vec i64]: enumerator i is the i32 index, x the
+   * i64 element. */
+  ParseResult r = run_typer(
+    "def [Vec i64] xs [[Vec i64] 1 2 3]\n"
+    "for $xs i x { print $i; print $x }", &a);
+  AstNode* vi = find_var_ref(r.nodes[1], "i");
+  AstNode* vx = find_var_ref(r.nodes[1], "x");
+  ASSERT_NOT_NULL(vi);
+  ASSERT_NOT_NULL(vx);
+  ASSERT_TYPE(vi, TYPE_I32);
+  ASSERT_TYPE(vx, TYPE_I64);
+  arena_destroy(&a);
+}
+
 int main(void) {
   printf("=== test_typer ===\n");
 
@@ -1147,6 +1196,10 @@ int main(void) {
   test_nested_proc_call_narrows();
 
   test_buf_def_annotation();
+
+  test_for_map_key_value();
+  test_for_map_value_single();
+  test_for_vec_enumerate();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {
