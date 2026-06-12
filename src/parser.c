@@ -1673,6 +1673,21 @@ AstNode* parser__parse_extern_form(Parser* p, AstNode* extern_head) {
  * Produces the same AST_COMMAND shape the compiler expects.
  * ------------------------------------------------------------------------- */
 
+/* From a position at a block opener, return the index just past the matching
+ * closer (handling nested [] and {}). Returns the EOF index if unbalanced. */
+static uint32_t parser__after_balanced(Parser* p, uint32_t pos) {
+  int depth = 0;
+  uint32_t i = pos;
+  for (; p->tokens[i].type != TOKEN_EOF; i++) {
+    TokenType t = p->tokens[i].type;
+    if (t == TOKEN_LBRACKET || t == TOKEN_LBRACE) depth++;
+    else if (t == TOKEN_RBRACKET || t == TOKEN_RBRACE) {
+      if (--depth == 0) return i + 1;
+    }
+  }
+  return i; /* EOF index */
+}
+
 AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   SourcePos start = proc_head->start;
   NodeArray args;
@@ -1713,19 +1728,28 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   if (params->type == AST_ERROR) return params;
   parser__arr_push(&args, params);
 
-  /* 3) Optional return type, before the body block. Detected by
-        whatever follows the params block: another '{' → body
-        (no return type); anything else → return type, then body. */
-  if (!parser__is_block_open(parser__peek(p)->type)) {
+  /* 3) Optional return type, before the body block. Since `[]` is now a
+        block delimiter too, a bracket group could be the return type OR the
+        body — disambiguate by lookahead:
+          - a WORD/STRUCT after params is a scalar return type (body follows);
+          - a `[…]` group is the return type only if ANOTHER block follows it
+            (the body); otherwise it IS the body;
+          - a `{…}` brace group is always the body (never a return type). */
+  TokenType after_params = parser__peek(p)->type;
+  bool has_ret_type = false;
+  if (after_params == TOKEN_WORD || after_params == TOKEN_STRUCT) {
+    has_ret_type = true;
+  } else if (after_params == TOKEN_LBRACKET) {
+    uint32_t after = parser__after_balanced(p, p->pos);
+    if (parser__is_block_open(p->tokens[after].type)) has_ret_type = true;
+  }
+  if (has_ret_type) {
     AstNode* ret_type;
-    if (parser__peek(p)->type == TOKEN_LBRACKET) {
-      ret_type = parser__parse_expr(p);
-    } else if (parser__peek(p)->type == TOKEN_WORD ||
-               parser__peek(p)->type == TOKEN_STRUCT) {
+    if (parser__peek(p)->type == TOKEN_WORD ||
+        parser__peek(p)->type == TOKEN_STRUCT) {
       ret_type = parser__parse_atom(p);
     } else {
-      return parser__error(p,
-          "expected return type or '{' for proc body", parser__peek(p));
+      ret_type = parser__parse_expr(p); /* bracketed compound return type */
     }
     if (ret_type == NULL || ret_type->type == AST_ERROR) {
       return parser__error(p, "expected return type after proc params",
