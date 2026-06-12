@@ -9,4 +9,4 @@ lb = proc {old, new} { print "b:$old->$new" }
 watch $counter "a" $la
 watch $counter "b" $lb
 reset $counter 1
-swap $counter [\ + $it 1]
+swap $counter [\ $+ $it 1]

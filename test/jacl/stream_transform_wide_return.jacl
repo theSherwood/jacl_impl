@@ -9,9 +9,9 @@
 proc main {} {
   mut i64 s 0
   # range 1 4 -> 1,2,3 ; *1000000000 -> 1e9, 2e9, 3e9 (two exceed INT32_MAX).
-  for [transform [range 1 4] [\ * $it 1000000000]] x { set s [+ $s $x] }
+  for [transform [range 1 4] [\ $* $it 1000000000]] x { set s [+ $s $x] }
   print $s                                  # 6_000_000_000
-  for [transform [range 1 4] [\ * $it 1000000000]] y { assert-type $y i64 }
+  for [transform [range 1 4] [\ $* $it 1000000000]] y { assert-type $y i64 }
   print "ok"
 }
 main

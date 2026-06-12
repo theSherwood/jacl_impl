@@ -8,7 +8,7 @@ def a [atom 0]
 outer_fn = proc {old, new} {
   print "outer: $old -> $new"
   if [== $new 1] {
-    swap $a [\ + $it 1]
+    swap $a [\ $+ $it 1]
   }
 }
 inner_fn = proc {old, new} {

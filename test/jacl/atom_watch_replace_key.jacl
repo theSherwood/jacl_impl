@@ -8,4 +8,4 @@ loggerB = proc {old, new} { print "B: $old -> $new" }
 watch $counter "k" $loggerA
 reset $counter 1
 watch $counter "k" $loggerB
-swap $counter [\ + $it 1]
+swap $counter [\ $+ $it 1]

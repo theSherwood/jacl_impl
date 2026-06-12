@@ -8,7 +8,7 @@ proc main {} {
   # INT32_MAX, so a regression to the old box-back tag-confusion would corrupt
   # the kept set instead of matching.
   mut i64 s 0
-  for [filter [transform [range 1 4] [\ * $it 1000000000]] [\ > $it 1500000000]] x {
+  for [filter [transform [range 1 4] [\ $* $it 1000000000]] [\ $> $it 1500000000]] x {
     set s [+ $s $x]                # keeps 2e9 + 3e9 = 5_000_000_000
   }
   print $s
@@ -17,7 +17,7 @@ proc main {} {
   # it wide (strict mixed-unboxed comparison), so it falls back to the dyn
   # boxed predicate path — must still work via the lenient runtime.
   mut i64 e 0
-  for [filter [range 1 5] [\ == 0 [% $it 2]]] y { set e [+ $e $y] }   # 2 + 4 = 6
+  for [filter [range 1 5] [\ $== 0 [% $it 2]]] y { set e [+ $e $y] }   # 2 + 4 = 6
   print $e
   print "ok"
 }

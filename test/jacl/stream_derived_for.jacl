@@ -13,9 +13,9 @@ proc main {} {
 
   # filter [stream] pred -> same element type
   mut i64 f 0
-  for [filter [range 1 6] [\ > $it 2]] z { set f [+ $f $z] }  # 3 + 4 + 5 = 12
+  for [filter [range 1 6] [\ $> $it 2]] z { set f [+ $f $z] }  # 3 + 4 + 5 = 12
   print $f
-  for [filter [range 1 6] [\ > $it 2]] w { assert-type $w i64 }
+  for [filter [range 1 6] [\ $> $it 2]] w { assert-type $w i64 }
   print "ok"
 }
 main

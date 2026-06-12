@@ -13,7 +13,7 @@ proc main {} {
 
   # The `\` sugar form — must produce the identical result.
   mut i64 b 0
-  for [transform [range 1 4] [\ * $it 10]] q { set b [+ $b $q] }
+  for [transform [range 1 4] [\ $* $it 10]] q { set b [+ $b $q] }
   print $b
 
   # Inline proc return type is inferred just like the lambda: i64 here.

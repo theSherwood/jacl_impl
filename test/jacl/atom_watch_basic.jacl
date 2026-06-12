@@ -6,4 +6,4 @@ def counter [atom 0]
 logger = proc {old, new} { print "changed: $old -> $new" }
 watch $counter "log" $logger
 reset $counter 1
-swap $counter [\ + $it 4]
+swap $counter [\ $+ $it 4]

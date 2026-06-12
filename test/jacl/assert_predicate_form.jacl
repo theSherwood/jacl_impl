@@ -16,11 +16,11 @@ proc check {} {
   assert [not [== 1 2]]
 
   # Predicate form (new): operator in head position via [].
-  [assert == 7 7]
-  [assert < 1 2]
-  [assert <= 2 2]
-  [assert > 5 2]
-  [assert >= 5 5]
+  [assert $== 7 7]
+  [assert $< 1 2]
+  [assert $<= 2 2]
+  [assert $> 5 2]
+  [assert $>= 5 5]
 
   # User-defined predicate works the same way.
   [assert is-positive? 5]

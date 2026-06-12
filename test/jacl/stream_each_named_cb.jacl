@@ -7,6 +7,6 @@
 # signal (TYPED_CLOSURES_DESIGN.md Phase A).
 proc main {} {
   def show [proc {x} { print $x }]
-  for [transform [range 1 4] [\ * $it 1000000000]] $show   # 1e9, 2e9, 3e9
+  for [transform [range 1 4] [\ $* $it 1000000000]] $show   # 1e9, 2e9, 3e9
 }
 main

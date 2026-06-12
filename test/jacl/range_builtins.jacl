@@ -11,7 +11,7 @@ proc check {} {
 
   # Composes with transform / filter like the infix form did.
   # (typed collect: results are [Vec i64], compared against typed-vec literals)
-  assert [== [collect [transform [range 0 3] [\ * $it 10]]] [[Vec i64] 0 10 20]]
+  assert [== [collect [transform [range 0 3] [\ $* $it 10]]] [[Vec i64] 0 10 20]]
 
   # Element type stamps i64 so the for binding narrows — accumulate in i64.
   mut i64 sum 0

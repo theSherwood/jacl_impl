@@ -156,9 +156,9 @@ proc main {} {
 
   # ----- lambdas -----
   # `[\ body ]` is shorthand for a one-arg proc with `$it` as the param.
-  def square [\ * $it $it]
+  def square [\ $* $it $it]
   assert [== [square 10] 100]
-  assert [== [collect [transform [vec 1 2 3] [\ * $it 2]]] [vec 2 4 6]]
+  assert [== [collect [transform [vec 1 2 3] [\ $* $it 2]]] [vec 2 4 6]]
 
   # ----- if / while -----
   # `if` is an expression. `while [cond] {body}`.
@@ -207,8 +207,8 @@ proc main {} {
   # so the comparisons use typed-vec literals. Dyn streams (like the
   # unannotated `count-up` below) still collect to a plain vec.
   assert [== [collect [range-inclusive 1 5]] [[Vec i64] 1 2 3 4 5]]
-  assert [== [collect [transform [range-inclusive 1 5] [\ * $it 2]]] [[Vec i64] 2 4 6 8 10]]
-  assert [== [collect [transform [filter [range-inclusive 1 6] [\ == 0 [% $it 2]]] [\ * $it $it]]] [[Vec i64] 4 16 36]]
+  assert [== [collect [transform [range-inclusive 1 5] [\ $* $it 2]]] [[Vec i64] 2 4 6 8 10]]
+  assert [== [collect [transform [filter [range-inclusive 1 6] [\ $== 0 [% $it 2]]] [\ $* $it $it]]] [[Vec i64] 4 16 36]]
 
   # ----- generators -----
   # `count-up` (defined above) is a generator: each call returns a
@@ -261,7 +261,7 @@ proc main {} {
   assert [== [deref $cell] 0]
   reset $cell 1
   assert [== [deref $cell] 1]
-  swap $cell [\ + $it 5]
+  swap $cell [\ $+ $it 5]
   assert [== [deref $cell] 6]
 
   # ----- atom watchers -----
@@ -273,7 +273,7 @@ proc main {} {
   watch $counter tap $tap
   reset $counter 7
   assert [== [deref $witness] 7]
-  swap $counter [\ + $it 5]
+  swap $counter [\ $+ $it 5]
   assert [== [deref $witness] 12]
 
   # ----- errors -----

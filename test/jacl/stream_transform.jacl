@@ -5,4 +5,4 @@ proc gen {} {
   yield 2
   yield 3
 }
-print [collect [transform [gen] [\ * $it 2]]]
+print [collect [transform [gen] [\ $* $it 2]]]
