@@ -12965,6 +12965,166 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    /* ====== Dyn-collection inlined for loop (runtime tag dispatch) ======
+       A statically-dyn `$coll` could be a map or a sequence at runtime. Check
+       with OP_IS_MAP: if a (plain) map, replace __col with its values vec and
+       stash its keys (two-name); then iterate __col as a dyn vec. The enumerator
+       is the key (map) or the i32 index (vec/non-map), chosen per iteration by
+       the same runtime flag. All bindings are dyn (untyped collection). */
+    if (col_type == TYPE_DYN) {
+      /* __ismap = is-map(__col) */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_IS_MAP, line);
+      compiler__add_local(c, jacl_inline_string("__ismap", 7), line, col);
+      uint8_t dismap_slot = (uint8_t)(c->local_count - 1);
+
+      /* __keys placeholder (two-name) */
+      uint8_t dkeys_slot = 0;
+      if (enum_name) {
+        compiler__emit_byte(c, OP_NIL, line);
+        compiler__add_local(c, jacl_inline_string("__keys", 6), line, col);
+        dkeys_slot = (uint8_t)(c->local_count - 1);
+      }
+
+      /* if __ismap: __keys = map-keys(__col) [two-name]; __col = map-vals(__col) */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, dismap_slot, line);
+      uint32_t dnorm_skip = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+      if (enum_name) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, col_slot, line);
+        compiler__emit_byte(c, OP_MAP_KEYS, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, dkeys_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_MAP_VALS, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+      compiler__patch_jump(c, dnorm_skip);
+
+      /* __len = vec-len(__col) */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_VEC_LEN, line);
+      compiler__add_local(c, jacl_inline_string("__len", 5), line, col);
+      uint8_t dlen_slot = (uint8_t)(c->local_count - 1);
+
+      /* __idx = 0 */
+      compiler__emit_constant(c, jacl_i32(0), line);
+      compiler__add_local(c, jacl_inline_string("__idx", 5), line, col);
+      uint8_t didx_slot = (uint8_t)(c->local_count - 1);
+
+      /* value binding (dyn) */
+      compiler__emit_byte(c, OP_NIL, line);
+      compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                          bind_name, bind_name_len), line, col);
+      uint8_t dval_slot = (uint8_t)(c->local_count - 1);
+
+      /* enumerator binding (dyn — holds a tagged i32 index or a dyn key) */
+      uint8_t denum_slot = 0;
+      if (enum_name) {
+        compiler__emit_byte(c, OP_NIL, line);
+        compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                            enum_name, enum_name_len), line, col);
+        denum_slot = (uint8_t)(c->local_count - 1);
+      }
+
+      LoopContext* dlctx = &c->loop_stack[c->loop_depth++];
+      dlctx->break_patch_count = 0;
+      dlctx->continue_patch_count = 0;
+      dlctx->local_count_at_loop = saved_local_count;
+      dlctx->body_local_count = c->local_count;
+      dlctx->is_for_loop = true;
+
+      uint32_t dloop_start = c->chunk->code_count;
+      dlctx->loop_start = dloop_start;
+
+      /* __idx < __len */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, didx_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, dlen_slot, line);
+      compiler__emit_byte(c, OP_LT, line);
+      uint32_t dexit = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* value = __col[idx] */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, didx_slot, line);
+      compiler__emit_byte(c, OP_VEC_GET, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, dval_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* enumerator (two-name): if __ismap -> keys[idx] else -> idx */
+      if (enum_name) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, dismap_slot, line);
+        uint32_t use_idx = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+        /* map: enum = keys[idx] */
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, dkeys_slot, line);
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, didx_slot, line);
+        compiler__emit_byte(c, OP_VEC_GET, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, denum_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+        uint32_t enum_done = compiler__emit_jump(c, OP_JUMP, line);
+        /* vec: enum = idx */
+        compiler__patch_jump(c, use_idx);
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, didx_slot, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, denum_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+        compiler__patch_jump(c, enum_done);
+      }
+
+      /* body */
+      uint32_t dbody_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < dbody_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* continue target */
+      for (uint32_t i = 0; i < dlctx->continue_patch_count; i++)
+        compiler__patch_jump(c, dlctx->continue_patches[i]);
+
+      /* __idx++ */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, didx_slot, line);
+      compiler__emit_constant(c, jacl_i32(1), line);
+      compiler__emit_byte(c, OP_ADD, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, didx_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* loop back */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t dback = c->chunk->code_count - dloop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((dback >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(dback & 0xFF), line);
+
+      /* exit / break landing */
+      compiler__patch_jump(c, dexit);
+      compiler__end_scope(c, line);
+      compiler__emit_byte(c, OP_NIL, line);
+      uint32_t dskip_break = compiler__emit_jump(c, OP_JUMP, line);
+      for (uint32_t i = 0; i < dlctx->break_patch_count; i++)
+        compiler__patch_jump(c, dlctx->break_patches[i]);
+      compiler__patch_jump(c, dskip_break);
+      c->loop_depth--;
+      return;
+    }
+
     if (col_type == TYPE_STREAM) {
       /* ====== Stream-specific inlined for loop ======
          Hidden locals: __col (stream), elem

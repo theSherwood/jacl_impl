@@ -361,9 +361,12 @@ typedef enum {
   OP_YIELD_SM_WIDE,         /* u16 type_idx; pop struct (inline N slots or heap
                                ptr, via vm__pop_struct) into vm->yield_wide,
                                set yield_value=nil, return VM_YIELD */
-  OP_STREAM_NEXT_INLINE     /* u16 type_idx; pop stream, pull one struct elem:
+  OP_STREAM_NEXT_INLINE,    /* u16 type_idx; pop stream, pull one struct elem:
                                value → push N inline slots (bitmap-marked);
                                exhausted → push nil (1 slot) */
+  OP_IS_MAP                 /* pop value, push true if it is a (plain) map, else
+                               false. Drives the for-loop's runtime dyn-
+                               collection dispatch (dyn map vs dyn vec). */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -765,6 +768,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_DEREF_INLINE:      return "OP_DEREF_INLINE";
     case OP_YIELD_SM_WIDE:     return "OP_YIELD_SM_WIDE";
     case OP_STREAM_NEXT_INLINE: return "OP_STREAM_NEXT_INLINE";
+    case OP_IS_MAP:             return "OP_IS_MAP";
   }
   return "OP_UNKNOWN";
 }

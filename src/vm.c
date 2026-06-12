@@ -2807,6 +2807,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_TYPED_ARR] = &&L_OP_TYPED_ARR,
     [OP_TYPED_ARR_PUSH] = &&L_OP_TYPED_ARR_PUSH,
     [OP_TYPED_ARR_SET] = &&L_OP_TYPED_ARR_SET,
+    [OP_IS_MAP] = &&L_OP_IS_MAP,
     [OP_MAP] = &&L_OP_MAP,
     [OP_MAP_GET] = &&L_OP_MAP_GET,
     [OP_MAP_HAS] = &&L_OP_MAP_HAS,
@@ -10676,6 +10677,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           exhausted = (s->state == STREAM_EXHAUSTED);
         }
         result = vm__push(vm, exhausted ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        DISPATCH();
+      }
+
+      CASE(OP_IS_MAP): {
+        /* Pop a value; push true if it's a (plain) map. The for-loop's runtime
+         * dyn-collection dispatch branches on this to iterate a dyn map vs a dyn
+         * vec. Typed maps go through the static for-loop branch, so only the
+         * plain rep is relevant here. */
+        JaclVal mv;
+        result = vm__pop(vm, &mv);
+        if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_is_map(mv) ? JACL_TRUE : JACL_FALSE);
         if (result != VM_OK) return result;
         DISPATCH();
       }

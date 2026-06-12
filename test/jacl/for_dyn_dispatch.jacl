@@ -1,0 +1,31 @@
+# expect: 7
+# expect: 7
+# expect: 60
+# expect: 3
+# Runtime dyn-collection dispatch: a statically-dyn $coll is iterated as a map
+# or a sequence based on its runtime tag. The enumerator (first name) is the
+# KEY for a map, the i32 INDEX for a vec — decided per iteration at runtime.
+proc main {} {
+  # bare dyn map (TYPE_DYN binding) — single name binds the value
+  def m [map a 3 b 4]
+  mut s1 0
+  for $m v { set s1 [+ $s1 $v] }
+  print $s1                          # 3+4 = 7
+
+  # dyn map, two-name — k=key, v=value
+  mut s2 0
+  for $m k v { set s2 [+ $s2 $v] }
+  print $s2                          # 7
+
+  # dyn vec, single name — value (unchanged behavior, now via dyn dispatch)
+  def xs [vec 10 20 30]
+  mut s3 0
+  for $xs v { set s3 [+ $s3 $v] }
+  print $s3                          # 60
+
+  # dyn vec, two-name — i is the index, v the value
+  mut s4 0
+  for $xs i v { set s4 [+ $s4 $i] }
+  print $s4                          # 0+1+2 = 3
+}
+main

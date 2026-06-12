@@ -365,26 +365,29 @@ pulling on them; revisit when one shows up.
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)
   bindings.
-- **`for` over maps + the enumerator form — DESIGN SETTLED 2026-06, IN
-  PROGRESS.** One binding rule across all collections: the LAST name is the
-  value/element; an optional FIRST name is the *enumerator* — the `i32` index for
-  vec/arr, the key `K` for maps. So `for $vec v` / `for $vec i v` is `enumerate`,
-  `for $map v` / `for $map k v` is `values` / `items`. A single name over a map
-  binds the VALUE (not the key — opposite of Python; deliberate, follows the
-  rule). Order is hash/HAMT (unspecified), matching `map-keys`/`map-vals`. Full
-  surface spec: `SYNTAX.md` §"`for` — unified iteration". **Implementation plan
-  (no new VM opcodes):** lower a map for-loop by materializing `map-vals` (single
-  name) or `map-keys`+`map-vals` (two names) from the map evaluated ONCE into a
-  temp, then iterate the resulting vec(s) on the existing typed-vec for-loop path
-  — so SM/suspension + element narrowing come for free; `keys[i]`↔`vals[i]`
-  correspond by HAMT traversal determinism. The vec/arr two-name form just
-  exposes the loop's existing `__idx` counter under the user's name (`i32`).
-  Phasing: (a) parser + typer for the two-name form and map dispatch; (b) map
-  iteration (single + two-name); (c) vec/arr two-name (index exposure). **Open /
-  deferred:** stream enumerate (`for $stream n v` — the stream path carries no
-  index today; a counter is the natural add); a lazy HAMT-iterator lowering
-  (avoids the two materialized vecs, but drags the depth-8 iterator struct into
-  SM state — only if a workload needs it).
+- **`for` over maps + the enumerator form — LANDED 2026-06 (phases a+b+dyn;
+  phase c pending).** One binding rule across all collections: the LAST name is
+  the value/element; an optional FIRST name is the *enumerator* — the `i32` index
+  for vec/arr, the key `K` for maps. So `for $vec v` / `for $vec i v` is
+  `enumerate`, `for $map v` / `for $map k v` is `values` / `items`. A single name
+  over a map binds the VALUE (not the key — opposite of Python; deliberate,
+  follows the rule). Order is hash/HAMT (unspecified), matching
+  `map-keys`/`map-vals`. Full surface spec: `SYNTAX.md` §"`for` — unified
+  iteration". **What landed:** (a) parser/typer two-name form + map narrowing;
+  (b) compiler map iteration for STATICALLY-typed maps (TYPE_MAP/TYPE_TYPED_MAP)
+  — materialize `map-vals` (single) / `map-keys`+`map-vals` (two names) from the
+  map at __col, iterate the resulting vec(s) on the vec-loop scaffolding,
+  `keys[i]`↔`vals[i]` by HAMT determinism; **runtime DYN dispatch** — a
+  statically-dyn `$coll` is checked with `OP_IS_MAP` and iterated as a dyn map
+  (replace __col with map-vals, stash map-keys) or a dyn vec, the enumerator
+  resolved per-iteration (key vs i32 index). Tests: `for_map`, `for_map_continue`,
+  `for_map_struct_err`, `for_dyn_dispatch`. **Open / deferred:** (c) the
+  STATICALLY-typed vec/arr two-name form (`for [Vec i64] i v` — expose the loop's
+  `__idx` under the enumerator name; dyn vecs already work via the dyn dispatch);
+  struct keys/values in a map for-loop (inline-slot binding — clean error today);
+  suspending map-loop bodies + the enumerator form in a suspending body (SM
+  lowering — clean error today); stream enumerate (`for $stream n v`); a lazy
+  HAMT-iterator lowering (avoids the two materialized vecs).
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,
