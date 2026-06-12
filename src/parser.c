@@ -75,6 +75,11 @@ typedef struct {
   arena_t* arena;
   uint32_t error_count;
   uint32_t syntax_quote_depth;  /* nesting depth for syntax-quote */
+  int      in_value_bracket;    /* parsing the head of a value-position `[…]`:
+                                 * a zero-arg callable head (var/bracket) is
+                                 * applied (`[$f]` calls, `[[Vec T]]` constructs).
+                                 * Read-and-cleared at operand entry so it does
+                                 * not leak into args/nested bodies. */
 } Parser;
 
 void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
@@ -84,6 +89,7 @@ void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
   p->arena       = arena;
   p->error_count = 0;
   p->syntax_quote_depth = 0;
+  p->in_value_bracket = 0;
 }
 
 Token* parser__peek(Parser* p) {
@@ -643,8 +649,14 @@ AstNode* parser__parse_expr(Parser* p) {
   switch (tok->type) {
     case TOKEN_LBRACKET: {
       /* `[…]` in value position lowers to a command (application) or `[do …]`
-       * (sequence); empty `[]` -> nil. See parser__block_to_value. */
-      result = parser__block_to_value(p, parser__parse_block(p));
+       * (sequence); empty `[]` -> nil. See parser__block_to_value. The
+       * value-bracket flag makes a zero-arg callable head apply (`[$f]` calls,
+       * `[[Vec T]]` constructs); parse_cmd_operand reads+clears it. */
+      int saved_vb = p->in_value_bracket;
+      p->in_value_bracket = 1;
+      AstNode* blk = parser__parse_block(p);
+      p->in_value_bracket = saved_vb;
+      result = parser__block_to_value(p, blk);
       break;
     }
 
@@ -2358,6 +2370,11 @@ AstNode* parser__parse_destructure_named_pattern(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 AstNode* parser__parse_cmd_operand(Parser* p) {
+  /* Are we the head of a value-position `[…]`? Read-and-clear so the flag
+   * applies to this operand's head only — not its args or any nested body. */
+  int value_head = p->in_value_bracket;
+  p->in_value_bracket = 0;
+
   /* ctx inside a block/proc — reject (must be at module top level) */
   Token* peek = parser__peek(p);
   if (peek->type == TOKEN_CTX) {
@@ -2559,8 +2576,15 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
 
   /* Single expression with no trailing args */
   if (args.count == 0) {
-    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]'). */
-    if (head_token_type == TOKEN_WORD) {
+    /* A bare word always wraps as a zero-arg command call (`[foo]`, statement
+     * `foo`). A var or bracketed head applies only as the head of a
+     * *value-position* `[…]`: `[$f]` calls the closure, `[[Vec T]]` constructs
+     * an empty `Vec T`. At statement/body position a bare `$x` or `[…]` is a
+     * value, not a call (BRACKET_FLIP_DESIGN.md decision 5). A literal always
+     * returns its value. */
+    if (head_token_type == TOKEN_WORD ||
+        (value_head && (head_token_type == TOKEN_VAR ||
+                        head_token_type == TOKEN_LBRACKET))) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
       node->start = head->start;
