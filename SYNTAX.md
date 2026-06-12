@@ -506,8 +506,9 @@ Compiler distinguishes forms by argument shape:
 - First arg is a value, next two are bare words, next is `{}` block → enumerator + value
 - First arg is a value, next is a proc/variable → HOF callback
 
-Works on streams, vectors, arrays, and maps. (Stream enumerate — `for $stream n v`
-— is a planned follow-up; see `NOT_IMPLEMENTED.md`.) `filter` and `transform`
+Works on streams, vectors, arrays, and maps. The enumerator over a stream
+(`for $stream n v`) is a **0-based counter** (the pull carries no index).
+`filter` and `transform`
 remain separate — they produce new collections, not side effects.
 
 `while` stays as a separate construct: `while $cond { body }`.

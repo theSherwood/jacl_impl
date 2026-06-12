@@ -1,3 +1,0 @@
-# expect-error: not yet supported over a stream
-proc main {} { for [range 0 3] i v { print $i } }
-main

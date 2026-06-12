@@ -383,13 +383,14 @@ pulling on them; revisit when one shows up.
   resolved per-iteration (key vs i32 index); (c) STATICALLY-typed vec/arr
   two-name form — the enumerator binds the loop's `__idx` under the user's name
   as `i32` (a separate per-iteration copy, so body writes don't perturb the
-  counter). Tests: `for_map`, `for_map_continue`, `for_map_struct_err`,
-  `for_dyn_dispatch`, `for_enumerate`, `for_stream_enum_err`. **Open / deferred
-  (clean errors today):** struct keys/values in a map for-loop (inline-slot
-  binding); suspending map-loop bodies + the enumerator form in a suspending body
-  (SM lowering); stream enumerate (`for $stream n v` — the pull carries no index;
-  a counter is the natural add); a lazy HAMT-iterator lowering (avoids the two
-  materialized vecs).
+  counter); STREAM enumerate — `for $stream n v` binds `n` to a 0-based `i32`
+  counter maintained at the loop tail (the pull carries no index), incremented
+  after the continue target so `continue` advances it. Tests: `for_map`,
+  `for_map_continue`, `for_map_struct_err`, `for_dyn_dispatch`, `for_enumerate`,
+  `for_stream_enum`. **Open / deferred (clean errors today):** struct keys/values
+  in a map for-loop (inline-slot binding); suspending map-loop bodies + the
+  enumerator form in a suspending body (SM lowering); a lazy HAMT-iterator
+  lowering (avoids the two materialized vecs).
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

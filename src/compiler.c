@@ -13126,16 +13126,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     if (col_type == TYPE_STREAM) {
-      /* Stream enumerate (`for $stream n v`) is a planned follow-up — the
-       * stream pull carries no index; a counter is the natural add. */
-      if (enum_name) {
-        compiler__error(c, line, col,
-            "the two-name enumerator form is not yet supported over a stream "
-            "(use a single binding, or enumerate after `collect`)");
-        return;
-      }
       /* ====== Stream-specific inlined for loop ======
-         Hidden locals: __col (stream), elem
+         Hidden locals: __col (stream), elem[, __scnt, enum]
          Loop: STREAM_NEXT → check exhausted → bind → body → LOOP */
 
       /* Strict-stream narrowing (for-loop consumer, incremental cut). The
@@ -13203,6 +13195,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * via OP_GET_STATE_FIELD_WIDE, and the GC skips the raw slots
        * (field_inline_bitmap). The 1-slot nil local above stays as a
        * placeholder, same as non-struct SM bindings. */
+
+      /* Two-name enumerate: a hidden 0-based i32 counter (__scnt) and the
+       * enumerator local (a per-iteration copy of it, so body writes don't
+       * perturb the count). The stream pull carries no index, so the counter is
+       * maintained here and incremented at the loop tail. */
+      int strm_scnt_slot = -1, strm_enum_slot = -1;
+      if (enum_name) {
+        compiler__emit_constant(c, jacl_i32(0), line);
+        compiler__add_local(c, jacl_inline_string("__scnt", 6), line, col);
+        c->locals[c->local_count - 1].type = TYPE_I32;
+        strm_scnt_slot = (int)(c->local_count - 1);
+        compiler__emit_constant(c, jacl_i32(0), line);
+        compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                            enum_name, enum_name_len), line, col);
+        c->locals[c->local_count - 1].type = TYPE_I32;
+        strm_enum_slot = (int)(c->local_count - 1);
+      }
 
       /* Push loop context. local_count_at_loop is the count BEFORE
        * any iter-state locals (used by break to clean all of them).
@@ -13291,6 +13300,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_POP, line);
       }
 
+      /* Two-name: enumerator = current count. */
+      if (strm_enum_slot >= 0) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)strm_scnt_slot, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)strm_enum_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
+
       /* Compile body statements inline */
       uint32_t body_count = body_block->data.block.count;
       for (uint32_t i = 0; i < body_count; i++) {
@@ -13301,6 +13319,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* --- Continue target --- */
       for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
         compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+
+      /* Two-name: increment the counter (after the continue target, so
+       * `continue` still advances it). */
+      if (strm_scnt_slot >= 0) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)strm_scnt_slot, line);
+        compiler__emit_constant(c, jacl_i32(1), line);
+        compiler__emit_byte(c, OP_ADD, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)strm_scnt_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
       }
 
       /* Loop back to start */
@@ -13326,9 +13356,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t error_done_jump = 0;
       if (!strm_struct) {
         compiler__patch_jump(c, error_exit_jump);
-        /* Pop hidden locals under top, preserving error value */
+        /* Pop hidden iter-state locals under top, preserving the error value.
+         * Computed (not hardcoded 2) so it covers the enumerate counter/enum
+         * locals and a struct element's inline-slot width. */
         compiler__emit_byte(c, OP_CLOSE_LOOP, line);
-        compiler__emit_byte(c, 2, line);  /* __col and elem */
+        compiler__emit_byte(c,
+            (uint8_t)(lctx->body_local_count - lctx->local_count_at_loop), line);
         /* Jump to convergence (error value remains on stack) */
         error_done_jump = compiler__emit_jump(c, OP_JUMP, line);
       }
