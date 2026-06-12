@@ -102,6 +102,11 @@ int parser__at_end(Parser* p) {
   return p->tokens[p->pos].type == TOKEN_EOF;
 }
 
+/* A block/body/params opener — either delimiter during the `[]` flip. */
+int parser__is_block_open(TokenType t) {
+  return t == TOKEN_LBRACE || t == TOKEN_LBRACKET;
+}
+
 SourcePos parser__token_start(Token* tok) {
   SourcePos pos;
   pos.line   = tok->line;
@@ -376,7 +381,7 @@ AstNode* parser__parse_command(Parser* p) {
    * a definition and belongs at statement level. `\` desugars to exactly this
    * shape, so allowing it here makes `\` demonstrably pure sugar (TYPED_CLOSURES_DESIGN.md). */
   if (head_token_type == TOKEN_PROC) {
-    if (parser__peek(p)->type != TOKEN_LBRACE) {
+    if (!parser__is_block_open(parser__peek(p)->type)) {
       AstNode* err = parser__error(p,
           "inline proc must be anonymous: [proc {params} {body}]", open);
       parser__sync_bracket(p);
@@ -919,7 +924,7 @@ const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
   /* Consume TOKEN_WORD("struct") */
   parser__advance(p);
   /* Consume TOKEN_LBRACE */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     parser__error(p, "expected '{' after 'struct' in inline type", parser__peek(p));
     return NULL;
   }
@@ -1360,7 +1365,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   uint32_t macro_name_len = name_tok->length;
 
   /* Expect parameter list in braces {param1, param2, ...} */
-  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_LBRACE) {
+  if (parser__at_end(p) || !parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for macro parameters", parser__peek(p));
   }
   Token* open_params = parser__advance(p); /* consume '{' */
@@ -1449,7 +1454,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   }
 
   /* Expect body block { ... } */
-  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_LBRACE) {
+  if (parser__at_end(p) || !parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for macro body", parser__peek(p));
   }
   AstNode* body = parser__parse_block(p);
@@ -1490,26 +1495,33 @@ AstNode* parser__parse_defmacro(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 AstNode* parser__parse_proc_params(Parser* p) {
-  Token* open = parser__advance(p); /* consume '{' */
+  /* Auto-detect delimiter: params are `{…}` (pre-flip) or `[…]` (post-flip). */
+  Token* open = parser__peek(p);
+  TokenType close_type = (open->type == TOKEN_LBRACKET)
+                         ? TOKEN_RBRACKET : TOKEN_RBRACE;
+  const char* close_msg = (close_type == TOKEN_RBRACKET)
+                          ? "expected ']' to close proc parameters"
+                          : "expected '}' to close proc parameters";
+  parser__advance(p); /* consume open delimiter */
   SourcePos start = parser__token_start(open);
 
   NodeArray elems;
   parser__arr_init(&elems, p->arena);
 
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+  while (!parser__at_end(p) && parser__peek(p)->type != close_type) {
     /* Skip commas and newlines between parameters */
     while (parser__peek(p)->type == TOKEN_COMMA ||
            parser__peek(p)->type == TOKEN_NEWLINE ||
            parser__peek(p)->type == TOKEN_SEMICOLON) {
       parser__advance(p);
     }
-    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+    if (parser__at_end(p) || parser__peek(p)->type == close_type) break;
 
-    /* Collect all words within one parameter slot (up to comma/brace).
+    /* Collect all words within one parameter slot (up to comma/close).
        Each slot is "name", "type name", "& name", or "[Vec Type] name". */
     while (!parser__at_end(p) &&
            parser__peek(p)->type != TOKEN_COMMA &&
-           parser__peek(p)->type != TOKEN_RBRACE &&
+           parser__peek(p)->type != close_type &&
            parser__peek(p)->type != TOKEN_NEWLINE) {
       AstNode* elem;
       if (parser__peek(p)->type == TOKEN_LBRACKET) {
@@ -1525,11 +1537,11 @@ AstNode* parser__parse_proc_params(Parser* p) {
     }
   }
 
-  /* Expect closing brace */
-  if (parser__peek(p)->type != TOKEN_RBRACE) {
-    return parser__error(p, "expected '}' to close proc parameters", open);
+  /* Expect closing delimiter */
+  if (parser__peek(p)->type != close_type) {
+    return parser__error(p, close_msg, open);
   }
-  Token* close = parser__advance(p); /* consume '}' */
+  Token* close = parser__advance(p); /* consume close delimiter */
 
   /* Build AST_COMMAND (same shape as [elem0 elem1 ...]) */
   AstNode* node = ast_alloc(p->arena);
@@ -1601,7 +1613,7 @@ AstNode* parser__parse_extern_form(Parser* p, AstNode* extern_head) {
   parser__arr_push(&args, name);
 
   /* 2) {params} */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for extern parameters", parser__peek(p));
   }
   AstNode* params = parser__parse_proc_params(p);
@@ -1682,7 +1694,7 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   }
 
   /* 2) {params} */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for proc parameters", parser__peek(p));
   }
   AstNode* params = parser__parse_proc_params(p);
@@ -1692,7 +1704,7 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   /* 3) Optional return type, before the body block. Detected by
         whatever follows the params block: another '{' → body
         (no return type); anything else → return type, then body. */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     AstNode* ret_type;
     if (parser__peek(p)->type == TOKEN_LBRACKET) {
       ret_type = parser__parse_expr(p);
@@ -1711,7 +1723,7 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   }
 
   /* 4) {body} */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for proc body", parser__peek(p));
   }
   AstNode* body = parser__parse_block(p);
@@ -1753,7 +1765,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   if (cond->type == AST_ERROR) return cond;
 
   /* Expect { then_body } */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' after if condition", parser__peek(p));
   }
   AstNode* then_block = parser__parse_block(p);
@@ -1815,7 +1827,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     }
 
     /* Expect { else_body } */
-    if (parser__peek(p)->type != TOKEN_LBRACE) {
+    if (!parser__is_block_open(parser__peek(p)->type)) {
       return parser__error(p, "expected '{' after 'else'", parser__peek(p));
     }
     AstNode* else_block = parser__parse_block(p);
@@ -1895,7 +1907,7 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
   if (cond->type == AST_ERROR) return cond;
 
   /* Expect { body } */
-  if (parser__peek(p)->type != TOKEN_LBRACE) {
+  if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' after while condition", parser__peek(p));
   }
   AstNode* body = parser__parse_block(p);
@@ -2098,7 +2110,7 @@ AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 int parser__lookahead_is_named_destructure_binding(Parser* p) {
-  if (parser__peek(p)->type != TOKEN_LBRACE) return 0;
+  if (!parser__is_block_open(parser__peek(p)->type)) return 0;
   uint32_t saved = p->pos;
   int depth = 0;
   int result = 0;
