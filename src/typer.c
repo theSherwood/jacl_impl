@@ -6848,11 +6848,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
 }
 
 static void typer__infer_block(TyperCtx* tc, AstNode* node) {
-  /* [] flip: a single-command bracket is a value expression, not a scope —
-   * its bindings must escape (e.g. `[def x 1]`, `[def [a b c] …]`), matching
-   * the old prefix-mode command. Only multi-statement blocks open a scope. */
-  bool new_scope = node->data.block.count != 1 || node->data.block.trailing_semi;
-  if (new_scope) typer__scope_push(tc);
+  /* A block (a proc/if/while body) always opens a scope — same as the `[do …]`
+   * form. (The single-command no-scope special case existed only for
+   * value-position brackets, which now lower to commands and never reach
+   * here.) */
+  typer__scope_push(tc);
   for (uint32_t i = 0; i < node->data.block.count; i++) {
     typer__infer_node(tc, node->data.block.commands[i]);
   }
@@ -6863,7 +6863,7 @@ static void typer__infer_block(TyperCtx* tc, AstNode* node) {
   } else {
     node->inferred_type = TYPE_NIL;
   }
-  if (new_scope) typer__scope_pop(tc);
+  typer__scope_pop(tc);
 }
 
 static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
