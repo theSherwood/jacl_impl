@@ -5769,19 +5769,10 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
 void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   uint32_t line  = block_node->start.line;
   uint32_t count = block_node->data.block.count;
-  uint32_t scope_start_locals = c->local_count;
 
-  bool trailing_semi = block_node->data.block.trailing_semi;
-
-  /* [] flip: a single-command bracket is a value expression, not a scope —
-   * its bindings escape into the enclosing scope (e.g. `[def x 1]`,
-   * `[def [a b c] …]`), matching the old prefix-mode command. Multi-statement
-   * blocks (and trailing-semi side-effect blocks) still open a real scope. */
-  bool new_scope = count != 1 || trailing_semi;
-  if (new_scope) compiler__begin_scope(c);
-
-  if (count == 0 || trailing_semi) {
-    /* All commands run for side effects; block evaluates to nil */
+  if (count > 0 && block_node->data.block.trailing_semi) {
+    /* Trailing `;`: run every command for side effects, yield nil. */
+    compiler__begin_scope(c);
     for (uint32_t i = 0; i < count; i++) {
       compiler__compile_node(c, block_node->data.block.commands[i]);
       compiler__emit_check_error(c, line);
@@ -5791,48 +5782,12 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
     return;
   }
 
-  /* B3b: the return-tail proc-shape is live only in tail position. Clear it
-   * around non-tail statements so an intermediate closure-valued block-expr
-   * isn't mis-monomorphized; keep it for the tail (and let it propagate into a
-   * nested tail block — if/match returning a closure). */
-  uint32_t saved_ret_shape = c->pending_return_proc_shape;
-  for (uint32_t i = 0; i < count - 1; i++) {
-    c->pending_return_proc_shape = UINT32_MAX;
-    compiler__compile_node(c, block_node->data.block.commands[i]);
-    compiler__emit_check_error(c, line);
-  }
-  c->pending_return_proc_shape = saved_ret_shape;
-  /* For the last statement: if this proc returns a [Proc …] and the tail is an
-   * inline proc literal, monomorphize it to the declared return signature. */
-  AstNode* last_stmt = block_node->data.block.commands[count - 1];
-  if (saved_ret_shape != UINT32_MAX && last_stmt->type == AST_COMMAND &&
-      last_stmt->data.command.head_id == HEAD_PROC) {
-    compiler__activate_annot_proc_from_shape(c, saved_ret_shape);
-    c->pending_return_proc_shape = UINT32_MAX; /* consumed */
-    compiler__compile_node(c, last_stmt);
-    c->annot_proc_active = false;
-  } else {
-    compiler__compile_node(c, last_stmt);
-  }
-  c->pending_return_proc_shape = UINT32_MAX;
-
-  /* Clean up locals while preserving the result on the stack top. For a
-   * single-command (no-scope) block, leave the locals in place so bindings
-   * escape into the enclosing scope. */
-  uint32_t pop_count = new_scope ? (c->local_count - scope_start_locals) : 0;
-  if (new_scope) {
-    c->scope_depth--;
-    c->local_count = scope_start_locals;
-  }
-
-  if (pop_count > 0) {
-    /* Result is on top, locals are below it. Save result into the first
-       local's slot, then POP_N removes the rest plus the old top copy. */
-    compiler__emit_byte(c, OP_SET_LOCAL, line);
-    compiler__emit_byte(c, (uint8_t)scope_start_locals, line);
-    compiler__emit_byte(c, OP_POP_N, line);
-    compiler__emit_byte(c, (uint8_t)pop_count, line);
-  }
+  /* Normal sequence (value = last; empty -> nil). Shared with the `[do …]`
+   * form via compile_seq — the single scope/sequence/tail-monomorphization
+   * implementation. (The old single-command no-scope special case lived here
+   * only for value-position brackets, which now lower to commands and never
+   * reach this path; bodies always open a scope.) */
+  compiler__compile_seq(c, block_node->data.block.commands, count, line);
 }
 
 /* --- Internal: Compile a `[do s0 s1 …]` sequence form ---
