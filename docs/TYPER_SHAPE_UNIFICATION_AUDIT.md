@@ -197,6 +197,22 @@ Revised step-2 decomposition:
 - **2d.** Delete the dead re-derivation helpers. **NOT DONE** (gated on 2c +
   every typer path having a shared registry).
 
+**Empirical confirmation that 2c and 2d must land together (2026-06-12).**
+Tried the *gated* 2c in isolation — keep suppressing only when
+`tc->shared_reg == &tc->shape_reg` (the non-portable embedded fallback), let the
+portable shared-registry stamp through otherwise. Build stayed clean but **10
+jacl tests failed** (`map_nested_vals`, `vec_nested_get`,
+`typed_closure_{arr_getpush,direct_get,mut,nested_push,struct_param_dyn,untyped_def,vec_getpush}`,
+`typed_closure_module`), all with `assert-type failed: expected <elem>, got dyn`.
+Cause: the compiler's nested-collection narrowing sites still RE-DERIVE from the
+binding and branch on `inferred_struct_idx == UINT32_MAX` to detect the nested
+case; making the stamp present flips those branches and the element collapses to
+`dyn`. So 2c cannot ship without simultaneously converting every such compiler
+reader to consume the stamp (the 2d helper-removal). This is the "wide blast
+radius" — a coordinated typer+compiler change across ~10 narrowing sites for
+**zero** user-facing or soundness benefit (the closure arc + nested narrowing are
+already functionally complete). Reverted; left deferred as lowest priority.
+
 "Proc-shapes first" still applies to 2c–2d, but 2a/2b are the groundwork shared
 by all kinds. The instance flip is a multi-step sub-project, not a single
 repoint.

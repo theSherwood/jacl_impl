@@ -14,9 +14,15 @@ implementation plan and per-phase blocks have been trimmed (git history).
 
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
-> `[Proc …]` work end-to-end (item 4). The open items, in rough priority:
-> 1. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
->    (low value, entangled with the `syntax.c` NULL-registry paths).
+> `[Proc …]` work end-to-end (item 4). **The typed-closure arc is now CLOSED** —
+> the only remaining handoff item is the non-closure registry tidy-up:
+> 1. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`.
+>    INVESTIGATED 2026-06-12 and DEFERRED: the gated un-suppress (2c) alone breaks
+>    10 jacl nested-narrowing tests because the compiler's re-derivation sites
+>    branch on `inferred_struct_idx == UINT32_MAX`; 2c and 2d must land together
+>    (a coordinated typer+compiler change across ~10 sites) for zero user-facing
+>    or soundness benefit. Not a closure feature; lowest priority. See the audit
+>    doc's "Empirical confirmation" note for the exact failing set.
 > **DONE 2026-06-12 — Non-literal closure-returning tail, compound conformance**
 > (was item 1 / item 3 "re-check"): the verbatim-return conformance
 > (`typer__proc_shapes_conform`) only compared a STRUCT param's idx, so a
