@@ -948,6 +948,38 @@ static int test_dollar_bang(void) {
   TEST_PASS();
 }
 
+static int test_dollar_operator_value(void) {
+  setup();
+  /* $+ → WORD("+") + EOF = 2 (operator escaped from infix folding) */
+  LexResult r = lexer_lex("$+", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "+"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_operator_value_multichar(void) {
+  setup();
+  /* $== → WORD("=="), $!= → WORD("!="), $<= → WORD("<=") */
+  LexResult r = lexer_lex("$== $!= $<=", &test_arena);
+  /* WORD WORD WORD EOF = 4 */
+  ASSERT_U32_EQ(r.count, 4);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "=="));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "!="));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "<="));
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_var_terminates_at_delimiter(void) {
   setup();
   LexResult r = lexer_lex("$foo[bar]", &test_arena);
@@ -2902,6 +2934,8 @@ int main(void) {
     {"dollar_at_eof",             test_dollar_at_eof},
     {"dollar_digit",              test_dollar_digit},
     {"dollar_bang",               test_dollar_bang},
+    {"dollar_operator_value",     test_dollar_operator_value},
+    {"dollar_operator_value_multichar", test_dollar_operator_value_multichar},
     {"var_at_delimiter",          test_var_terminates_at_delimiter},
     {"var_in_expression",         test_var_in_expression},
     {"var_underscore_start",      test_var_underscore_start},

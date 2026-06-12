@@ -291,6 +291,23 @@ int lexer__is_operator_char(char c) {
          c == '^' || c == '|' || c == '~';
 }
 
+/* Whitelist of operators that may be referenced as a value via `$op`
+ * (e.g. $+, $==, $&&). Binding/structural glyphs (=, :, ::, !, ., ?, ->,
+ * &, |, @, ^, ~, \) are deliberately excluded so forms like `$!` keep their
+ * prior meaning ('$' error + '!' bang). */
+int lexer__is_operator_value(const char* s, uint32_t n) {
+  if (n == 1) {
+    char c = s[0];
+    return c=='+'||c=='-'||c=='*'||c=='/'||c=='%'||c=='<'||c=='>';
+  }
+  if (n == 2) {
+    return (s[0]=='='&&s[1]=='=')||(s[0]=='!'&&s[1]=='=')||
+           (s[0]=='<'&&s[1]=='=')||(s[0]=='>'&&s[1]=='=')||
+           (s[0]=='&'&&s[1]=='&')||(s[0]=='|'&&s[1]=='|');
+  }
+  return 0;
+}
+
 /* Forward declaration: lexer__lex_number is defined further down but
  * called from the negative-literal helper below. Required for the strict
  * `-Werror=implicit-function-declaration` flag the wasm build uses. */
@@ -1740,6 +1757,29 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         tok.payload.text = lex.source + start + 1; /* skip '$' */
         lexer__arr_push(&arr, tok);
         continue;
+      }
+
+      /* $operator → operator as a bare-word value (e.g. $+, $==, $&&).
+       * Emits a TOKEN_WORD carrying the operator text (no '$'), so the
+       * parser treats it as an ordinary atom rather than an infix operator.
+       * In head position it dispatches to the operator's opcode exactly like
+       * a bare operator; in argument position it is the operator symbol as a
+       * value. This is the escape that lets operators survive command-mode
+       * infix folding (e.g. lambda bodies: [\ $+ $it 1]). Only whitelisted
+       * operators qualify; anything else falls through to the '$' error so
+       * forms like `$!` keep their prior meaning. */
+      if (lexer__is_operator_char(next)) {
+        uint32_t op_start = lex.pos; /* first operator char, past '$' */
+        uint32_t k = 0;
+        while (lexer__is_operator_char(lex.source[op_start + k])) k++;
+        if (lexer__is_operator_value(lex.source + op_start, k)) {
+          for (uint32_t i = 0; i < k; i++) lexer__advance(&lex);
+          Token tok = lexer__make_token(&lex, TOKEN_WORD, op_start, sline, scol);
+          tok.payload.text = lex.source + op_start;
+          lexer__arr_push(&arr, tok);
+          continue;
+        }
+        /* not a recognized operator value — fall through to '$' error */
       }
 
       /* $ followed by invalid char or EOF → ERROR */
