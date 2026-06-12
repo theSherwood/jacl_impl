@@ -20,10 +20,12 @@ in the owning doc. Keep entries tight: one paragraph max.
 > in `[Proc …]` work end-to-end incl. invariant param conformance (2026-06-12:
 > the compiler unified its per-param conformance encoding on the FULL compound
 > shape idx — closes the `[Map K V]` KEY soundness edge and a latent
-> def-binding-vs-arg encoding mismatch).** Genuinely-open closure items (DESIGN
-> §"Remaining work"): compound RETURNS beyond `[Vec T]` (`[Map K V]`/`[Arr T]`,
-> blocked on the broader proc return-type collection gap); unification cleanup
-> 2c/2d (low value). Alternative next slices, all indexed below: typed spread (§4.1b),
+> def-binding-vs-arg encoding mismatch).** **The typed-closure arc + the
+> shape-registry unification (2a–2d) are now fully CLOSED** (2026-06-12): compound
+> RETURNS (`[Map K V]`/`[Arr T]`, plain + closure-param + def-binding), verbatim-
+> return compound conformance, and the 2c/2d nested-collection narrowing cleanup
+> (consumers consolidated onto one helper; portable stamp un-suppressed) all
+> landed. Alternative next slices, all indexed below: typed spread (§4.1b),
 > map iteration / `for` over maps (§4), the punted dyn-return no-autobox
 > consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
 > across suspensions (§8d/§8e).
@@ -226,7 +228,8 @@ pulling on them; revisit when one shows up.
   (key carried for maps), on the same footing as the `[Vec T]` return. Still
   `dyn` / unsupported (now a SHORT list — see `TYPED_CLOSURES_DESIGN.md`
   §"Remaining work" for the authoritative version): a closure with NO `[Proc …]`
-  annotation; unification cleanup 2c/2d (internal tidiness, low value).
+  annotation. (The 2c/2d nested-collection narrowing cleanup landed 2026-06-12 —
+  consumers consolidated onto one helper; portable stamp un-suppressed.)
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level

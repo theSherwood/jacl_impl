@@ -14,15 +14,19 @@ implementation plan and per-phase blocks have been trimmed (git history).
 
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
-> `[Proc …]` work end-to-end (item 4). **The typed-closure arc is now CLOSED** —
-> the only remaining handoff item is the non-closure registry tidy-up:
-> 1. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`.
->    INVESTIGATED 2026-06-12 and DEFERRED: the gated un-suppress (2c) alone breaks
->    10 jacl nested-narrowing tests because the compiler's re-derivation sites
->    branch on `inferred_struct_idx == UINT32_MAX`; 2c and 2d must land together
->    (a coordinated typer+compiler change across ~10 sites) for zero user-facing
->    or soundness benefit. Not a closure feature; lowest priority. See the audit
->    doc's "Empirical confirmation" note for the exact failing set.
+> `[Proc …]` work end-to-end (item 4). **The typed-closure arc is CLOSED, and the
+> registry tidy-up (2c/2d) is done too — no open items remain here.**
+> **DONE 2026-06-12 — Unification cleanup 2c/2d** (`docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`):
+> consolidated the four nested-collection narrowing consumers (vec-get/arr-get/
+> map-get/for) onto one helper `typer__receiver_coll_shape` (the scattered
+> "re-resolve the binding" convention now lives in one place), then un-suppressed
+> the portable nested-shape AST stamp — gated to the non-portable `syntax.c`
+> prelude embedded registry, which carries no nested-collection types anyway. The
+> earlier blanket un-suppress broke 10 tests; routing consumers through the
+> stamp-first helper first removed that fragility, so it lands clean. Remaining
+> re-derivation (ctor-head shape computation for literal receivers; the compiler's
+> Local-based element-shape recovery) is load-bearing, not dead. Build 91/0,
+> suite 580/580.
 > **DONE 2026-06-12 — Non-literal closure-returning tail, compound conformance**
 > (was item 1 / item 3 "re-check"): the verbatim-return conformance
 > (`typer__proc_shapes_conform`) only compared a STRUCT param's idx, so a
