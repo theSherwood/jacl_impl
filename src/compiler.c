@@ -12484,9 +12484,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Determine binding name and body block */
+    /* Determine binding name(s) and body block. `bind_name` is the VALUE
+     * binding (the LAST name); `enum_name` (NULL = none) is the ENUMERATOR
+     * binding (the optional FIRST name — index for vec/arr, key for maps).
+     * See SYNTAX.md §"`for` — unified iteration". */
     const char* bind_name = "it";
     uint32_t bind_name_len = 2;
+    const char* enum_name = NULL;
+    uint32_t enum_name_len = 0;
     AstNode* body_block = NULL;
 
     if (argc == 2 && args[1]->type == AST_BLOCK) {
@@ -12494,18 +12499,30 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       body_block = args[1];
     } else if (argc == 3 && args[1]->type == AST_LIT_STRING &&
                args[2]->type == AST_BLOCK) {
-      /* [for $collection name { body }] — explicit binding */
+      /* [for $collection name { body }] — explicit binding (value) */
       bind_name = args[1]->data.lit_string.value;
       bind_name_len = args[1]->data.lit_string.length;
       body_block = args[2];
+    } else if (argc == 4 && args[1]->type == AST_LIT_STRING &&
+               args[2]->type == AST_LIT_STRING && args[3]->type == AST_BLOCK) {
+      /* [for $collection enum value { body }] — enumerator + value */
+      enum_name = args[1]->data.lit_string.value;
+      enum_name_len = args[1]->data.lit_string.length;
+      bind_name = args[2]->data.lit_string.value;
+      bind_name_len = args[2]->data.lit_string.length;
+      body_block = args[3];
     } else if (argc == 2 && args[1]->type == AST_COMMAND) {
       /* [for $collection [\ body]] — lambda callback via OP_EACH */
       compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, UINT32_MAX, line, col);
       return;
     } else {
       compiler__error(c, line, col,
-          "for requires: $collection { body }, $collection name { body }, "
-          "or $collection $callback");
+          "for requires: $collection { body }, $collection [enum] value "
+          "{ body }, or $collection $callback");
+      return;
+    }
+    if (enum_name && enum_name_len > 128) {
+      compiler__error(c, line, col, "for binding name exceeds 128-byte limit");
       return;
     }
 
@@ -12542,6 +12559,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     if (for_body_suspends) {
+      /* v1: a suspending loop body over a map, or the two-name enumerator form,
+       * isn't lowered through the SM machinery yet (the materialized keys/vals
+       * vecs + a second binding would need their own state fields). Defer. */
+      JaclType susp_ct = (JaclType)args[0]->inferred_type;
+      if (enum_name || susp_ct == TYPE_MAP || susp_ct == TYPE_TYPED_MAP) {
+        compiler__error(c, line, col,
+            "for-over-map and the enumerator (two-name) form are not yet "
+            "supported in a suspending loop body");
+        return;
+      }
       StateLayout* sm_lay = &c->sm_analysis->state_layout;
       JaclVal n_col = sm__for_hidden_name(c->heap, c->intern_table,
                                           'c', line, col);
@@ -12763,6 +12790,180 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
 
     uint8_t col_slot = (uint8_t)(saved_local_count);
+
+    /* ====== Map-based inlined for loop (for-over-maps) ======
+       Lower to: materialize map-vals (single name) / map-keys + map-vals (two
+       names) from the map at __col, then iterate the resulting vec(s) by index —
+       no new VM opcodes; the same index/len/vec-get scaffolding as the vec loop.
+       keys[i] <-> vals[i] correspond by HAMT traversal determinism. v1 supports
+       scalar + str/dyn keys/values; struct keys/values (inline-slot binding) and
+       suspending bodies are follow-ups. */
+    if (col_type == TYPE_MAP || col_type == TYPE_TYPED_MAP) {
+      bool typed_map = (col_type == TYPE_TYPED_MAP);
+      uint32_t val_enc = args[0]->inferred_struct_idx;       /* V */
+      uint32_t key_enc = args[0]->inferred_key_struct_idx;   /* K (enumerator) */
+      StructTypeRegistry* mreg = compiler__get_struct_registry(c);
+      bool val_struct = !COMPILER_IS_SCALAR_TYPE_IDX(val_enc) &&
+                        val_enc != UINT32_MAX && mreg && val_enc < mreg->count &&
+                        mreg->defs[val_enc];
+      bool key_struct = !COMPILER_IS_SCALAR_TYPE_IDX(key_enc) &&
+                        key_enc != UINT32_MAX && mreg && key_enc < mreg->count &&
+                        mreg->defs[key_enc];
+      if (val_struct || (enum_name && key_struct)) {
+        compiler__error(c, line, col,
+            "for-over-map with a struct key/value is not yet supported "
+            "(use map-keys/map-vals, or scalar/str element types)");
+        return;
+      }
+
+      /* Materialize keys (two-name) then vals from the map at __col. The typed
+       * ops route str/dyn keys to a plain vec (mirrors map-keys). */
+      uint8_t keys_slot = 0; bool keys_typed_vec = false;
+      if (enum_name) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, col_slot, line);
+        if (typed_map) {
+          compiler__emit_byte(c, OP_TYPED_MAP_KEYS, line);
+          compiler__emit_u16(c, (uint16_t)key_enc, line);
+          keys_typed_vec = COMPILER_IS_SCALAR_TYPE_IDX(key_enc) &&
+                           key_enc != JACL_SCALAR_TYPE_IDX(TYPE_STR);
+        } else {
+          compiler__emit_byte(c, OP_MAP_KEYS, line);
+        }
+        compiler__add_local(c, jacl_inline_string("__keys", 6), line, col);
+        keys_slot = (uint8_t)(c->local_count - 1);
+      }
+
+      bool vals_typed_vec = typed_map;
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      if (typed_map) {
+        compiler__emit_byte(c, OP_TYPED_MAP_VALS, line);
+        compiler__emit_u16(c, (uint16_t)val_enc, line);
+      } else {
+        compiler__emit_byte(c, OP_MAP_VALS, line);
+      }
+      compiler__add_local(c, jacl_inline_string("__vals", 6), line, col);
+      uint8_t vals_slot = (uint8_t)(c->local_count - 1);
+
+      /* __len = len(vals) */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, vals_slot, line);
+      compiler__emit_byte(c, vals_typed_vec ? OP_TYPED_VEC_LEN : OP_VEC_LEN, line);
+      compiler__add_local(c, jacl_inline_string("__len", 5), line, col);
+      uint8_t mlen_slot = (uint8_t)(c->local_count - 1);
+
+      /* __idx = 0 */
+      compiler__emit_constant(c, jacl_i32(0), line);
+      compiler__add_local(c, jacl_inline_string("__idx", 5), line, col);
+      uint8_t midx_slot = (uint8_t)(c->local_count - 1);
+
+      /* value binding (nil placeholder) + narrowed local type */
+      compiler__emit_byte(c, OP_NIL, line);
+      compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                          bind_name, bind_name_len), line, col);
+      uint8_t mval_slot = (uint8_t)(c->local_count - 1);
+      if (COMPILER_IS_SCALAR_TYPE_IDX(val_enc))
+        c->locals[mval_slot].type = COMPILER_TYPE_IDX_TO_SCALAR(val_enc);
+
+      /* enumerator (key) binding (two-name) */
+      uint8_t mkey_slot = 0;
+      if (enum_name) {
+        compiler__emit_byte(c, OP_NIL, line);
+        compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                            enum_name, enum_name_len), line, col);
+        mkey_slot = (uint8_t)(c->local_count - 1);
+        if (COMPILER_IS_SCALAR_TYPE_IDX(key_enc))
+          c->locals[mkey_slot].type = COMPILER_TYPE_IDX_TO_SCALAR(key_enc);
+      }
+
+      LoopContext* mlctx = &c->loop_stack[c->loop_depth++];
+      mlctx->break_patch_count = 0;
+      mlctx->continue_patch_count = 0;
+      mlctx->local_count_at_loop = saved_local_count;
+      mlctx->body_local_count = c->local_count;
+      mlctx->is_for_loop = true;
+
+      uint32_t mloop_start = c->chunk->code_count;
+      mlctx->loop_start = mloop_start;
+
+      /* __idx < __len */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, midx_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, mlen_slot, line);
+      compiler__emit_byte(c, OP_LT, line);
+      uint32_t mexit = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* value = vals[idx] */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, vals_slot, line);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, midx_slot, line);
+      if (vals_typed_vec) {
+        compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)val_enc, line);
+      } else {
+        compiler__emit_byte(c, OP_VEC_GET, line);
+      }
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, mval_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* key = keys[idx] (two-name) */
+      if (enum_name) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, keys_slot, line);
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, midx_slot, line);
+        if (keys_typed_vec) {
+          compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+          compiler__emit_u16(c, (uint16_t)key_enc, line);
+        } else {
+          compiler__emit_byte(c, OP_VEC_GET, line);
+        }
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, mkey_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
+
+      /* body */
+      uint32_t mbody_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < mbody_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* continue target */
+      for (uint32_t i = 0; i < mlctx->continue_patch_count; i++)
+        compiler__patch_jump(c, mlctx->continue_patches[i]);
+
+      /* __idx++ */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, midx_slot, line);
+      compiler__emit_constant(c, jacl_i32(1), line);
+      compiler__emit_byte(c, OP_ADD, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, midx_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* loop back */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t mback = c->chunk->code_count - mloop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((mback >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(mback & 0xFF), line);
+
+      /* exit / break landing */
+      compiler__patch_jump(c, mexit);
+      compiler__end_scope(c, line);
+      compiler__emit_byte(c, OP_NIL, line);
+      uint32_t mskip_break = compiler__emit_jump(c, OP_JUMP, line);
+      for (uint32_t i = 0; i < mlctx->break_patch_count; i++)
+        compiler__patch_jump(c, mlctx->break_patches[i]);
+      compiler__patch_jump(c, mskip_break);
+      c->loop_depth--;
+      return;
+    }
 
     if (col_type == TYPE_STREAM) {
       /* ====== Stream-specific inlined for loop ======

@@ -1,0 +1,8 @@
+# expect-error: struct key/value is not yet supported
+# v1 carve-out: a struct-valued map can't be for-iterated yet (use map-vals).
+struct Pt {i32 x, i32 y}
+proc main {} {
+  def [Map str Pt] m [[Map str Pt] "a" [Pt x 1 y 2]]
+  for $m v { print $v->x }
+}
+main
