@@ -16,11 +16,14 @@ in the owning doc. Keep entries tight: one paragraph max.
 > returns in `[Proc …]`**, dyn-inferred struct params, direct-calls of inline
 > struct literals, **global procs as first-class values**, and **forward
 > references as values** (higher-order mutual recursion) — all via a registry
-> `TYPE_SHAPE_PROC` + portable proc-shape stamp, no VM change. Genuinely-open
-> closure items (DESIGN §"Remaining work"): closure value through an UNTYPED
-> binding / get collapses to `dyn`; non-literal closure-returning tail not
-> conformance-checked; nested compounds in `[Proc …]` unsupported by design.
-> Alternative next slices, all indexed below: typed spread (§4.1b),
+> `TYPE_SHAPE_PROC` + portable proc-shape stamp, no VM change. **Compound types
+> in `[Proc …]` work end-to-end incl. invariant param conformance (2026-06-12:
+> the compiler unified its per-param conformance encoding on the FULL compound
+> shape idx — closes the `[Map K V]` KEY soundness edge and a latent
+> def-binding-vs-arg encoding mismatch).** Genuinely-open closure items (DESIGN
+> §"Remaining work"): compound RETURNS beyond `[Vec T]` (`[Map K V]`/`[Arr T]`,
+> blocked on the broader proc return-type collection gap); unification cleanup
+> 2c/2d (low value). Alternative next slices, all indexed below: typed spread (§4.1b),
 > map iteration / `for` over maps (§4), the punted dyn-return no-autobox
 > consistency call (§4), C-style-for suspension and [Buf]/[Ptr] defs
 > across suspensions (§8d/§8e).
@@ -212,13 +215,17 @@ pulling on them; revisit when one shows up.
   **Beyond B (2026-06-11):** struct params/returns in `[Proc …]`, dyn-inferred
   struct params, direct-calls of inline struct literals, **global procs as
   first-class values** (`$dbl` narrows), and **forward-ref-as-value** (proc used
-  before its definition; higher-order mutual recursion). Still `dyn` /
-  unsupported (now a SHORT list — see `TYPED_CLOSURES_DESIGN.md` §"Remaining
-  work" for the authoritative version): a closure with NO `[Proc …]` annotation;
-  a closure value flowing through an UNTYPED binding (`def f $dbl`) or get
-  (`def g [vec-get …]`) collapses to `dyn` at a later sink; a non-literal
-  closure-returning tail isn't conformance-checked; nested compounds inside
-  `[Proc …]` (`[Proc [[Vec i64]] …]`) unsupported by design (non-portable idxs).
+  before its definition; higher-order mutual recursion). **Compound types inside
+  `[Proc …]` work** — `[Vec/Arr/Map …]` and nested `[Proc …]` params with
+  invariant conformance (the registry-unification foundation made the shape idxs
+  portable), and as of 2026-06-12 the compiler carries the FULL compound shape
+  idx as its per-param conformance encoding, so a map's KEY is conformance-checked
+  (`[Map str i64]` ≠ `[Map i64 i64]`) and `def [Proc [[Vec/Map …]] …] f $proc`
+  binds correctly. Still `dyn` / unsupported (now a SHORT list — see
+  `TYPED_CLOSURES_DESIGN.md` §"Remaining work" for the authoritative version): a
+  closure with NO `[Proc …]` annotation; compound RETURNS beyond `[Vec T]`
+  (`[Map K V]`/`[Arr T]`, blocked on the broader proc return-type collection
+  gap — see below).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level
@@ -336,8 +343,12 @@ pulling on them; revisit when one shows up.
   test `map_nested_vals.jacl`). **Remaining (this area):** for-loop
   iteration over maps doesn't exist at all (runtime "expected vector,
   got map") — narrowing over stamped maps is blocked on that feature;
-  proc RETURN-type collection annotations (typer__resolve_return_type
-  ref kinds); cross-module element-type alignment (existing carve-out).
+  proc RETURN-type collection annotations — `typer__resolve_return_type`
+  resolves `[Vec T]` but NOT `[Arr T]` (returns stay `dyn`; the compiler's
+  4-arg proc-form also doesn't recognize an `[Arr …]` return head), and it
+  DROPS a `[Map K V]` return's KEY (no key output channel), so even a plain
+  `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its result (runtime
+  key-not-found); cross-module element-type alignment (existing carve-out).
   **Still open (vec/arr):** hard vec-push element CHECKS (currently
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)

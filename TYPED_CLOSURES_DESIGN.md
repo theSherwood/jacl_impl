@@ -15,13 +15,28 @@ implementation plan and per-phase blocks have been trimmed (git history).
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
 > `[Proc …]` mostly work (item 4). The open items, in rough priority:
-> 1. **Map KEY conformance** (item 4) — compiler-side mirror of the param
->    representation; a narrow soundness edge, bounded but touches several call
->    sites (`compiler__decode_proc_shape_ex` + the conformance fns).
-> 2. **Compound RETURNS beyond `[Vec T]`** (`[Map K V]`/`[Arr T]`) — item 4.
-> 3. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
-> 4. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
+> 1. **Compound RETURNS beyond `[Vec T]`** (`[Map K V]`/`[Arr T]`) — item 4.
+>    NOTE this is the broader "proc RETURN-type collection annotations" gap:
+>    `typer__resolve_return_type` doesn't resolve `[Arr T]` returns at all and
+>    DROPS a `[Map K V]` return's KEY (no key output channel), so even a plain
+>    `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its result. Fixing
+>    closure-return narrowing for maps/arrs rides on closing that first.
+> 2. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
+> 3. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
 >    (low value, entangled with the `syntax.c` NULL-registry paths).
+> **DONE 2026-06-12 — Map KEY conformance + the compiler-side representation
+> migration for PARAMS** (was items 1 + "compiler-side representation
+> migration"): the compiler now carries the FULL compound shape idx as the
+> per-param conformance encoding on BOTH sides — `compiler__decode_proc_shape_ex`
+> emits `pidx` (not the element idx) for a declared `[Proc …]` compound param, and
+> the stored signature side (`GlobalArity`/`Local`, via the new
+> `compiler__param_conf_idx` re-intern from a param's value+key) matches it. This
+> closed the map-key soundness edge (`[Map str i64]` no longer conforms to a
+> `[Map i64 i64]` sink) AND fixed a latent inconsistency bug where the
+> def-binding path (`def [Proc [[Vec/Map …]] …] f $proc`) used a different
+> encoding than the arg-passing path and wrongly REJECTED a valid bind. Tests:
+> `typed_closure_compound_def`, `typed_closure_compound_map_key_err`,
+> `typed_closure_compound_map_key_def_err`.
 > Full per-item detail (what works, what's open, file/function pointers) is
 > below in items 1–4.
 
@@ -141,19 +156,34 @@ ret>`). Verified-remaining gaps:
    `[Vec i64]`, `[Proc [str] str]` ≠ `[Proc [i64] i64]`, map VALUE `[Map i64 i32]`
    ≠ `[Map i64 i64]`), on both the `GlobalArity` and forward-ref stamp paths.
 
+   **Map KEY conformance — DONE (2026-06-12), via the compiler-side
+   representation migration for PARAMS.** The compiler used to compare the
+   per-param VALUE/element idx (`inner`), losing a map's key — so `[Map str i64]`
+   leniently conformed to a `[Map i64 i64]` sink (a runtime hash-miss). It also
+   carried TWO encodings: the `annot`/`proc_sig_elem` path stored the FULL
+   compound shape idx while `decode`/`GlobalArity` stored the element idx, so the
+   def-binding path and the arg-passing path disagreed and the def path wrongly
+   REJECTED a valid `def [Proc [[Vec/Map …]] …] f $proc`. Both are now fixed by
+   carrying the FULL compound shape idx as the per-param conformance encoding
+   everywhere: `compiler__decode_proc_shape_ex` emits `pidx` for a compound param,
+   and the stored side re-interns it from a param's (type, value, key) via
+   `compiler__param_conf_idx` (the proc-compile path keeps its element/key idxs
+   for body narrowing — those are untouched). The shared registry dedups, so the
+   existing invariant `lsi != dsi` compare now captures key+value+element with no
+   change to the conformance fns. `call_param_struct_idxs` is consumed only for
+   `TYPE_CLOSURE` params, so widening the compound encoding is inert at call
+   sites. Tests: `typed_closure_compound_def` (positive vec/map/arr bind),
+   `typed_closure_compound_map_key_err` (arg path), `…_map_key_def_err` (def
+   path).
+
    **Still open:**
-   - **Map KEY conformance** — the compiler conformance compares the per-param
-     value idx, not the map's key, so `[Map i32 i64]` leniently conforms to a
-     `[Map i64 i64]` param (a narrow soundness edge; VALUE is checked). The
-     compiler mirror of the migration closes it: a per-param key (or full
-     shape-idx) on `GlobalArity`/`Local` threaded through
-     `compiler__decode_proc_shape_ex` and the conformance functions
-     (`local`/`global`/`stamp`). Bounded but touches many call sites.
    - **Compound RETURNS beyond `[Vec T]`** — `[Map K V]`/`[Arr T]` returns
-     (call-result narrowing) on the same footing as the vec return.
-   - **The compiler-side representation migration** — mirror
-     `TyperProc.param_shape_idxs` on `GlobalArity`/`Local` and drive conformance
-     off it uniformly (subsumes map-key conformance above).
+     (call-result narrowing) on the same footing as the vec return. Rides on the
+     broader return-type gap: `typer__resolve_return_type` doesn't resolve
+     `[Arr T]` returns and drops a `[Map K V]` return's KEY (no key out channel),
+     so even a plain `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its
+     result. Add an arr arm + a key output (mirroring the param-side
+     `typer__nested_elem_shape`) and thread the key onto the call-result binding.
    - **Unification cleanup tail (2c/2d)** — un-suppress AST stamps + retire
      re-derivation helpers. Entangled: the `syntax.c` prelude paths pass a NULL
      registry (shapes land in the embedded fallback, not portable), so a blanket

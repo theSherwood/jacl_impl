@@ -4618,14 +4618,16 @@ static void compiler__stamp_closure_local(Compiler* c) {
         sizeof(JaclType) * c->annot_proc_param_count);
     uint32_t* ps = (uint32_t*)arena_alloc(c->arena,
         sizeof(uint32_t) * c->annot_proc_param_count);
-    bool any_struct = false;
+    bool any_idx = false;
     for (uint8_t i = 0; i < c->annot_proc_param_count; i++) {
       pts[i] = c->annot_proc_param_types[i];
-      ps[i]  = c->annot_proc_param_struct_idxs[i];
-      if (pts[i] == TYPE_STRUCT && ps[i] != UINT32_MAX) any_struct = true;
+      ps[i]  = c->annot_proc_param_struct_idxs[i];  /* full compound shape idx */
+      if (ps[i] != UINT32_MAX) any_idx = true;
     }
     L->param_types = pts;
-    L->param_struct_idxs = any_struct ? ps : NULL;  /* struct-in-[Proc …] */
+    /* Keep the per-param idxs for ANY param that carries one (struct, typed
+     * collection, nested [Proc …]) so conformance can compare full shapes. */
+    L->param_struct_idxs = any_idx ? ps : NULL;
   } else {
     L->param_types = NULL;
     L->param_struct_idxs = NULL;
@@ -4802,14 +4804,17 @@ static bool compiler__decode_proc_shape_ex(Compiler* c, uint32_t shape_idx,
     } else if (pidx < reg->count && reg->defs[pidx]) {
       out_ptypes[k] = TYPE_STRUCT; psi = pidx;
     } else {
-      /* Nested compound ([Vec T], [Map K V], nested [Proc …]) — decode to its
-       * compound type. Carry the same idx a proc's GlobalArity stores for such a
-       * param (so conformance compares like-for-like): the ELEMENT idx for a
-       * typed-vec/arr/map, the nested proc-shape idx for a [Proc …]. */
-      uint32_t inner = UINT32_MAX;
-      JaclType ct = compiler__buf_elem_decode(reg, pidx, &inner);
+      /* Nested compound ([Vec T], [Map K V], [Arr T], nested [Proc …]) — decode
+       * to its compound type but carry the FULL compound shape idx (`pidx`, not
+       * the element idx). The shared registry dedups structurally-equal shapes,
+       * so this gives invariant conformance that captures EVERYTHING a compound
+       * type encodes — a map's KEY as well as its value ([Map i32 i64] ≠
+       * [Map i64 i64]), a vec/arr's element, a nested proc's full signature. The
+       * stored-signature side (GlobalArity/Local) carries the same full-shape idx
+       * (compiler__param_conf_idx), so the two compare like-for-like. */
+      JaclType ct = compiler__buf_elem_decode(reg, pidx, NULL);
       out_ptypes[k] = ct;
-      psi = (ct == TYPE_CLOSURE) ? pidx : inner;
+      psi = pidx;
     }
     if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
@@ -4831,6 +4836,30 @@ static bool compiler__decode_proc_shape(Compiler* c, uint32_t shape_idx,
                                         JaclType* out_rtype) {
   return compiler__decode_proc_shape_ex(c, shape_idx, out_ptypes, out_pcount,
                                         out_rtype, NULL, NULL);
+}
+
+/* The conformance encoding for a stored proc-param signature (GlobalArity /
+ * Local): the FULL compound shape idx for a value-kind typed collection, so a
+ * stored signature compares like-for-like against the declared one that
+ * compiler__decode_proc_shape_ex now emits (full shape idx). The proc-compile
+ * path tracks a param's element/value idx (`vidx`) and a map's key (`kidx`)
+ * separately (those drive body narrowing); this re-interns the compound shape
+ * from them. Structs / nested [Proc …] already store a registry idx that IS the
+ * full shape (returned as-is); scalars carry UINT32_MAX. */
+static uint32_t compiler__param_conf_idx(Compiler* c, JaclType t,
+                                         uint32_t vidx, uint32_t kidx) {
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg) return vidx;
+  switch (t) {
+    case TYPE_TYPED_VEC:
+      return (vidx != UINT32_MAX) ? type_shape_intern_typed_vec(reg, vidx) : vidx;
+    case TYPE_TYPED_ARR:
+      return (vidx != UINT32_MAX) ? type_shape_intern_typed_arr(reg, vidx) : vidx;
+    case TYPE_TYPED_MAP:
+      return type_shape_intern_typed_map(reg, kidx, vidx);
+    default:
+      return vidx;  /* struct idx / closure shape idx / scalar sentinel */
+  }
 }
 
 /* Phase B3d / B3 struct-in-[Proc …]: invariant conformance — does a Local's
@@ -12021,6 +12050,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       memcpy(stored_param_types, param_types_arr, sizeof(JaclType) * param_count);
     }
 
+    /* Per-param conformance idxs (full compound shape idx for typed
+     * collections) — the encoding compiler__decode_proc_shape_ex emits for a
+     * declared [Proc …] param, so this proc-as-value conforms like-for-like
+     * when passed/bound to a [Proc …] sink. Carried on both the local binding
+     * and the GlobalArity below. */
+    uint32_t* stored_param_conf_idxs = NULL;
+    if (param_count > 0) {
+      bool any_conf = false;
+      stored_param_conf_idxs = (uint32_t*)arena_alloc(c->arena,
+                                  sizeof(uint32_t) * param_count);
+      for (uint8_t i = 0; i < param_count; i++) {
+        stored_param_conf_idxs[i] = compiler__param_conf_idx(c, param_types_arr[i],
+                                        param_struct_idxs[i], param_key_struct_idxs[i]);
+        if (stored_param_conf_idxs[i] != UINT32_MAX) any_conf = true;
+      }
+      if (!any_conf) stored_param_conf_idxs = NULL;
+    }
+
     /* Look up suspension status from analysis map */
     JaclVal name_val = compiler__name_val(c->heap, c->intern_table, proc_name, proc_name_len);
     bool proc_suspends = false;
@@ -12056,6 +12103,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->locals[c->local_count - 1].return_type = proc_return_type;
         c->locals[c->local_count - 1].return_struct_idx = proc_return_struct_idx;
         c->locals[c->local_count - 1].param_types = stored_param_types;
+        c->locals[c->local_count - 1].param_struct_idxs = stored_param_conf_idxs;
         c->locals[c->local_count - 1].suspends    = proc_suspends;
         c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
         compiler__emit_byte(c, OP_NIL, line);
@@ -12067,6 +12115,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].return_type = proc_return_type;
       c->locals[c->local_count - 1].return_struct_idx = proc_return_struct_idx;
       c->locals[c->local_count - 1].param_types = stored_param_types;
+      c->locals[c->local_count - 1].param_struct_idxs = stored_param_conf_idxs;
       c->locals[c->local_count - 1].suspends    = proc_suspends;
       c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
       /* proc returns the closure value (enables make-adder pattern) */
@@ -12090,8 +12139,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           for (uint8_t i = 0; i < user_param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
             ga->param_types[i] = param_types_arr[i];
             /* B3a: carry struct/shape idx so call sites can recover a closure
-             * param's [Proc …] signature (and struct params' idx). */
-            ga->param_struct_idxs[i] = param_struct_idxs[i];
+             * param's [Proc …] signature (and struct params' idx). Typed
+             * collections store the FULL compound shape idx (key+value+element)
+             * so this proc conforms invariantly when passed to a [Proc …] sink. */
+            ga->param_struct_idxs[i] = compiler__param_conf_idx(c,
+                param_types_arr[i], param_struct_idxs[i], param_key_struct_idxs[i]);
           }
         }
       }

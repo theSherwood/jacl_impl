@@ -1,0 +1,13 @@
+# expect-error: conform
+# Map KEY conformance is enforced: a [Map str i64]-param proc does NOT conform to
+# a [Proc [[Map i64 i64]] i64] sink — the keys differ (str vs i64). Previously the
+# compiler compared only the map's VALUE idx, so the key mismatch leaked through
+# and surfaced as a runtime "key not found". (Value conformance: see
+# typed_closure_compound_map_val_err.jacl.)
+proc usesmap {[Map str i64] m} i64 { [map-get $m "a"] }
+proc hof {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
+proc main {} {
+  def [Map i64 i64] m [[Map i64 i64] 1 1]
+  print [hof $usesmap $m]
+}
+main

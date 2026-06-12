@@ -1,6 +1,7 @@
 # expect-error: not a closure conforming to the [Proc …]
 # Map VALUE conformance is enforced: [Map i64 i32] does not conform to a
-# [Map i64 i64] param. (Map KEY conformance is a follow-up — see DESIGN item 4.)
+# [Map i64 i64] param. (Map KEY conformance is now enforced too — see
+# typed_closure_compound_map_key_err.jacl.)
 proc getvi32 {[Map i64 i32] m} i64 { 0 }
 proc hof {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
 proc main {} {
