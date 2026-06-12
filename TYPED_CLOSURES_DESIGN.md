@@ -114,22 +114,33 @@ ret>`). Verified-remaining gaps:
    - **`[Arr T]` PARAMS** — `typed_closure_compound_arr`.
    - **Nested `[Proc …]` PARAMS** — `[Proc [[Proc [i64] i64]] i64]`, with
      invariant inner-signature conformance — `typed_closure_nested_proc_param`.
+   - **`[Map K V]` PARAMS** — a value-kind typed-map param works end to end:
+     `[Proc [[Map i64 i64]] i64]`. The typer half of the **representation
+     migration** landed: `TyperProc.param_shape_idxs[]` carries the full encoded
+     idx per param (computed in `parse_params` via `nested_elem_shape`, capturing
+     a map's key+value), and `intern_global_proc_shape` uses it. This also fixed
+     a pre-existing bug — a value-kind typed-map proc param lost its KEY, so a
+     body `[map-get $m 1]` typed the key literal as i32 and hash-missed at
+     runtime; `handle_proc` now patches the binding's key from the shape.
+     `typed_closure_compound_map`.
 
    Element / inner-signature conformance is enforced throughout (`[Vec i32]` ≠
-   `[Vec i64]`, `[Proc [str] str]` ≠ `[Proc [i64] i64]`), on both the
-   `GlobalArity` and forward-ref stamp paths.
+   `[Vec i64]`, `[Proc [str] str]` ≠ `[Proc [i64] i64]`, map VALUE `[Map i64 i32]`
+   ≠ `[Map i64 i64]`), on both the `GlobalArity` and forward-ref stamp paths.
 
    **Still open:**
-   - **`[Map K V]` params** — the proc registry's *single* per-param idx slot
-     can't hold a map's key *and* value (parse_params doesn't capture the key for
-     a map param). Needs the "single encoded shape-idx per param" representation
-     migration (below); edge-case value as a HOF param, so deferred.
-   - **The representation migration itself** — store one encoded idx per proc
-     param (scalar sentinel / struct idx / shape idx) uniformly, decoding it at
-     the body binding, instead of the current decoded `(type, element-or-value
-     idx, separate key)` slots. This is the clean end state that subsumes maps;
-     it touches `parse_params`, the closure-param body binding, `GlobalArity`,
-     and the compiler mirror.
+   - **Map KEY conformance** — the compiler conformance compares the per-param
+     value idx, not the map's key, so `[Map i32 i64]` leniently conforms to a
+     `[Map i64 i64]` param (a narrow soundness edge; VALUE is checked). The
+     compiler mirror of the migration closes it: a per-param key (or full
+     shape-idx) on `GlobalArity`/`Local` threaded through
+     `compiler__decode_proc_shape_ex` and the conformance functions
+     (`local`/`global`/`stamp`). Bounded but touches many call sites.
+   - **Compound RETURNS beyond `[Vec T]`** — `[Map K V]`/`[Arr T]` returns
+     (call-result narrowing) on the same footing as the vec return.
+   - **The compiler-side representation migration** — mirror
+     `TyperProc.param_shape_idxs` on `GlobalArity`/`Local` and drive conformance
+     off it uniformly (subsumes map-key conformance above).
    - **Unification cleanup tail (2c/2d)** — un-suppress AST stamps + retire
      re-derivation helpers. Entangled: the `syntax.c` prelude paths pass a NULL
      registry (shapes land in the embedded fallback, not portable), so a blanket
