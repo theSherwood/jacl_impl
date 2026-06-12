@@ -4,6 +4,35 @@ Tracks the migration that makes `[]` the single command/expression delimiter
 (was the prefix-expression delimiter; `{}` was command mode). This is the
 authoritative spec for what `[]` means in every position.
 
+## Handoff (start here)
+
+- **Branch:** `claude/flip-bracket-mode` (off `main`, which has Stage A/B). Pushed
+  and in sync with `origin`. The core flip is **done and working**; what remains
+  is cleanup/migration (see "Migration status").
+- **Build / verify:** `./build.sh` runs the whole suite; `./build.sh --test=NAME`
+  runs one group (e.g. `--test=jacl_harness`, `--test=typed_vec`); `--lib` builds
+  just the library. **Current baseline: full suite 85 passed / 6 failed groups;
+  jacl_harness 4 failing scenarios.** Start by reproducing this.
+- **Key code entry points:**
+  - Value `[…]` lowering: `parser__block_to_value` + `parser__make_do` (src/parser.c).
+  - Value-position application/call wrap: the `in_value_bracket` flag (Parser
+    struct, src/parser.c) — set in `parse_expr`'s `TOKEN_LBRACKET` case, read-and-
+    cleared at the top of `parser__parse_cmd_operand`, used in its zero-arg branch.
+  - `[do …]`: `HEAD_DO` head-id (src/ast.c), `compiler__compile_seq` + the
+    `HEAD_DO` dispatch in `compiler__compile_command`, and the `HEAD_DO` case in
+    `typer__infer_command_inner`.
+  - Sequence/scope: `compiler__compile_block_expr` and `typer__infer_block` both
+    delegate to `compile_seq` / always-scope.
+  - Dead transitional code to delete in the retire: `compiler__as_type_command` /
+    `typer__as_type_command` peels (no-ops now); destructure still on `AST_BLOCK`
+    at `compiler.c:2006/2084/2213`.
+- **Migration helpers:** corpus debrace + `$op` operator escaping were applied via
+  one-off python scripts (see commits `e6fad6a`, `6dcd0a0`, the C-lambda commits);
+  reuse the same shape for remaining migrations.
+- **Note:** a few early commits (`a96e1e6`, `ec2cd44`, …) predate the git
+  committer-email being set to `noreply@anthropic.com`, so GitHub shows them
+  "Unverified". Cosmetic; rebase-reset-author if you want them clean.
+
 ## Core model
 
 - **A line that does not start with `[` is a command application** (Tcl-style):
