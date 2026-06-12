@@ -601,11 +601,23 @@ AstNode* parser__parse_expr(Parser* p) {
   AstNode* result = NULL;
 
   switch (tok->type) {
-    case TOKEN_LBRACKET:
-      /* `[…]` is now a command-mode block (the prefix-expression mode was
-       * retired). parse_block auto-detects the `]` delimiter. */
-      result = parser__parse_block(p);
+    case TOKEN_LBRACKET: {
+      /* `[…]` is now parsed in command mode (the prefix-expression mode was
+       * retired); parse_block auto-detects the `]` delimiter. In *value*
+       * position a single-command bracket collapses back to the bare command
+       * (the prefix-mode AST shape) so type forms `[Vec T]`, destructuring
+       * `[a b c]`, and bindings `[def x 1]` keep their non-block semantics —
+       * no extra scope, recognizable by the type/destructure machinery.
+       * Multi-statement brackets stay a block. */
+      AstNode* blk = parser__parse_block(p);
+      if (blk && blk->type == AST_BLOCK && blk->data.block.count == 1 &&
+          !blk->data.block.trailing_semi) {
+        result = blk->data.block.commands[0];
+      } else {
+        result = blk;
+      }
       break;
+    }
 
     case TOKEN_LPAREN: {
       /* §12: `()` infix mode was removed. Consume the `(` so the error
@@ -2477,8 +2489,11 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
 
   /* Single expression with no trailing args */
   if (args.count == 0) {
-    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]') */
-    if (head_token_type == TOKEN_WORD) {
+    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]').
+     * A bracketed head with no args is a zero-element constructor call —
+     * `[[Vec T]]` (empty typed vec) — so wrap it the same way prefix mode
+     * did; returning the inner `[Vec T]` bare would lose the constructor. */
+    if (head_token_type == TOKEN_WORD || head_token_type == TOKEN_LBRACKET) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
       node->start = head->start;

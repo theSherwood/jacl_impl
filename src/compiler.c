@@ -94,6 +94,16 @@ static bool compiler__is_typed_collection_scalar(JaclType t) {
 
 /* (compiler__compile_typed_elem_arg defined after the Compiler struct.) */
 
+/* A `[Vec T]`-style type form parses as an AST_COMMAND in the old prefix
+   mode and as a singleton AST_BLOCK under the `[]` command-mode flip. Unwrap
+   a one-command block so the type recognizers below see the inner command
+   either way. */
+static AstNode* compiler__as_type_command(AstNode* n) {
+  if (n && n->type == AST_BLOCK && n->data.block.count == 1)
+    return n->data.block.commands[0];
+  return n;
+}
+
 /* Check if an AST_COMMAND node is a typed collection expression.
    Returns 1 for [Vec Type], 2 for [Map Type] (dyn keys),
    3 for [Map KeyType ValueType] (struct keys), 0 if not a match.
@@ -101,6 +111,7 @@ static bool compiler__is_typed_collection_scalar(JaclType t) {
    *out_key_elem is set to the key type name node (kind==3 only). */
 static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
                                            AstNode** out_key_elem) {
+  cmd = compiler__as_type_command(cmd);
   if (cmd->type != AST_COMMAND || !cmd->data.command.head) return 0;
   AstNode* th = cmd->data.command.head;
   if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3) return 0;
@@ -131,6 +142,7 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
 /* Mirror of typer__map_v_form: the removed one-arg [Map V] form, kept
  * recognizable only to emit the migration diagnostic. */
 static bool compiler__map_v_form(AstNode* cmd) {
+  cmd = compiler__as_type_command(cmd);
   if (!cmd || cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
   AstNode* th = cmd->data.command.head;
   return th->type == AST_LIT_STRING && th->data.lit_string.length == 3 &&
@@ -146,6 +158,7 @@ static bool compiler__map_v_form(AstNode* cmd) {
  * sets *out_elem to the element type-name node. Single type-name argument,
  * like [Box T]. See ARR_DESIGN.md. */
 static bool compiler__arr_type_expr(AstNode* cmd, AstNode** out_elem) {
+  cmd = compiler__as_type_command(cmd);
   if (!cmd || cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
   AstNode* th = cmd->data.command.head;
   if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3 ||
