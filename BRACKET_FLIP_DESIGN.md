@@ -128,17 +128,21 @@ Done (branch `claude/flip-bracket-mode`):
   so the strict-application wrap has no lone-bracket *statements* to
   double-apply.
 
+- **Strict-application wrap DONE** (`in_value_bracket` flag, read-and-cleared at
+  operand entry): value-position `[...]` applies a zero-arg callable head —
+  `[$f]` calls, `[[Vec T]]` constructs an empty `Vec T` (no collapse), `[foo]`
+  calls; bare `$x`/`[…]` at statement/body position stay values; literal → value.
+  **jacl_harness 20 → 4** (≈2 real: `tour`, `typed_closure_binding`);
+  `typed_vec`/`typed_map` now pass (empty `[[Vec T]]`); no regressions, no
+  segfaults.
+
 Pending:
-- **Parser (strict-application wrap):** value-position `[...]` applies its head
-  (zero-arg wrap for callable heads: word/var/bracket; literal → value;
-  `;`/`,`/nl → `[do]`; empty → nil). The wrap must be **value-position only**
-  (see decision 5) — thread a value-vs-statement flag into the operand parser.
-  This makes `[$f]` call and `[[Vec T]]` construct without collapsing, while a
-  bare `$x` statement stays a value.
-- **Remaining debrace:** 2 multi-line `.jacl` statement brackets; the
-  C-embedded jacl strings in `test/*.c` (those groups already fail / need
-  rewrite for the flip).
-- Then: `[[Vec T]]` empty-constructor support; compound `[Proc ...]` param/return
-  inference; bodies → `do` and retire `AST_BLOCK`; delete dead peels /
-  collapse remnants / `compile_block_expr` scope-hack.
+- **C-embedded jacl migration:** the jacl strings in `test/*.c` still use
+  pre-flip syntax (e.g. `[\ > $it 3]` bare operators) — debrace + `$op` + `{}`→`[]`
+  there too. (Failing C-groups: yield, stream_*, lines, integration, plus the
+  unit groups parser/typer/compiler/syntax that assert the old AST.)
+- 2 multi-line `.jacl` statement brackets.
+- Compound `[Proc ...]` param/return inference (`typed_closure_binding`, Phase B3).
+- Bodies → `do` and retire `AST_BLOCK`; delete dead peels / collapse remnants /
+  `compile_block_expr` scope-hack.
 - `{}` → `[]` for struct fields and `use`.
