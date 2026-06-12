@@ -6784,14 +6784,20 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
     node->inferred_struct_idx = b->struct_idx;
     node->inferred_key_struct_idx = b->key_struct_idx;
     node->inferred_buf_len = b->buf_len;
-    /* Cross-registry rule: a TYPE_VEC/TYPE_ARR/TYPE_MAP binding may carry a
-     * TYPER-SIDE shape idx for a nested element ([Vec [Vec i64]],
-     * [Arr [Proc …]]). Shape idxs must never reach AST stamps (the compiler's
-     * registry numbers differ) — suppress; narrowing sites (HEAD_FOR,
-     * vec-get/arr-get) resolve the binding directly. Scalar-sentinel stamps
-     * ([Arr str]) are NOT shape idxs and stay. */
+    /* Unification 2c: a TYPE_VEC/TYPE_ARR/TYPE_MAP binding may carry a shape idx
+     * for a nested element ([Vec [Vec i64]], [Arr [Proc …]]). Since 2b the typer
+     * interns into the SHARED registry, so that idx is PORTABLE and now reaches
+     * the AST stamp directly — narrowing sites read it via
+     * typer__receiver_coll_shape (no more re-resolving the binding for the common
+     * case). The lone exception is a NON-portable registry: the `syntax.c`
+     * prelude/macro typer pass runs with the embedded `tc.shape_reg` fallback
+     * (offset-banded idxs the compiler can't read), so a shape idx is suppressed
+     * there. The prelude uses no nested-collection types today, so this guards a
+     * future regression rather than a live path. Scalar-sentinel stamps
+     * ([Arr str]) are NOT shape idxs and stay regardless. */
     if ((b->type == TYPE_VEC || b->type == TYPE_ARR || b->type == TYPE_MAP) &&
-        typer__is_shape_idx(tc, b->struct_idx))
+        typer__is_shape_idx(tc, b->struct_idx) &&
+        tc->shared_reg == &tc->shape_reg)
       node->inferred_struct_idx = UINT32_MAX;
   } else {
     /* No binding shadows the name — a bare reference to a global proc

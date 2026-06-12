@@ -190,12 +190,31 @@ Revised step-2 decomposition:
   giving those paths a shared registry). Shape idxs are now portable across
   passes by construction; this is what enabled compound types in `[Proc …]`
   (`TYPED_CLOSURES_DESIGN.md` item 4). Build 91/0, --tsan 89/2.
-- **2c.** Un-suppress AST shape stamps (Category C — `typer__infer_var_ref:6193`);
-  compiler reads them. **NOT DONE.** Must be gated: the NULL-registry prelude
-  paths still need suppression (their shapes live in the non-portable embedded
-  fallback), so a blanket un-suppress misfires there. Low user-facing value.
-- **2d.** Delete the dead re-derivation helpers. **NOT DONE** (gated on 2c +
-  every typer path having a shared registry).
+- **2c.** Un-suppress AST shape stamps (Category C — `typer__infer_var_ref`).
+  ✅ **DONE (2026-06-12).** Two steps: (1) the four nested-collection narrowing
+  consumers (vec-get / arr-get / map-get / for) were consolidated onto one helper
+  `typer__receiver_coll_shape(recv)` — reads the stamp first, falls back to the
+  binding for a var-ref — so the scattered "re-resolve the binding" convention
+  now lives in ONE place (behavior-preserving; suite 580/580). (2) The
+  suppression was then GATED to the non-portable registry only
+  (`tc->shared_reg == &tc->shape_reg`, i.e. the `syntax.c` prelude/macro pass's
+  embedded `tc.shape_reg` fallback). The prelude uses no nested-collection types,
+  so in practice the stamp is now always portable and reaches the AST; the gate
+  guards a future prelude regression rather than a live path. With the consumers
+  reading through the helper (stamp-first), the un-suppress passed 580/580 — the
+  earlier blanket attempt failed 10 because the consumers branched on
+  `== UINT32_MAX`; the helper removed that fragility.
+- **2d.** Delete the dead re-derivation helpers. ✅ **EFFECTIVELY DONE** via the
+  2c consolidation: the per-site inline `scope_resolve` re-resolutions are gone
+  (folded into the helper). The re-derivation that REMAINS is load-bearing, not
+  dead: (a) the helper's binding fallback (the gated/expression path), (b) the
+  def-handler + HEAD_FOR ctor-head shape computation for a *literal* receiver
+  (`def n [[Vec [Vec i64]] …]` — no binding to read; ctors still stamp
+  UINT32_MAX), and (c) the compiler's `compiler__coll_receiver_proc_shape`, which
+  recovers a `[Vec/Arr [Proc …]]` element shape from the compiler's OWN Local
+  (a parallel, independent mechanism, not a suppression workaround) to
+  monomorphize a pushed closure. Converting (c) to read the typer stamp is a
+  separate lateral change with its own risk and no behavioral payoff — left as-is.
 
 **Empirical confirmation that 2c and 2d must land together (2026-06-12).**
 Tried the *gated* 2c in isolation — keep suppressing only when
