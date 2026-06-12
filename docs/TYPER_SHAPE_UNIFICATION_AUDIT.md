@@ -180,13 +180,25 @@ Revised step-2 decomposition:
   Suite 91/0; TSAN 89/2 (known-safe). NB: the `Compiler` struct is mirrored in
   `jacl.h` — the new `structs_preregistered` field had to be added there too
   (the `struct_sizes` test catches the sizeof drift).
-- **2b.** Repoint typer shape interning to the shared registry (lazy), drop the
-  offset trick / `tc.shape_reg`.
-- **2c.** Un-suppress AST shape stamps (Category C); compiler reads them.
-- **2d.** Delete the dead re-derivation helpers.
+- **2b.** ✅ **DONE (2026-06-12, commit `b61342a`).** The typer now interns AND
+  decodes all shapes in the shared registry (`tc.shared_reg`): every
+  `type_shape_intern_*(&tc.shape_reg, …)` and `tc.shape_reg` read was repointed
+  to `tc->shared_reg`, `typer__is_shape_idx` reads it, and
+  `typer__portable_proc_shape` collapsed to identity. The embedded `tc.shape_reg`
+  remains ONLY as a fallback for the `syntax.c` prelude/macro paths (which pass a
+  NULL seed registry) — so the offset trick isn't fully dropped (gated on 2c/2d /
+  giving those paths a shared registry). Shape idxs are now portable across
+  passes by construction; this is what enabled compound types in `[Proc …]`
+  (`TYPED_CLOSURES_DESIGN.md` item 4). Build 91/0, --tsan 89/2.
+- **2c.** Un-suppress AST shape stamps (Category C — `typer__infer_var_ref:6193`);
+  compiler reads them. **NOT DONE.** Must be gated: the NULL-registry prelude
+  paths still need suppression (their shapes live in the non-portable embedded
+  fallback), so a blanket un-suppress misfires there. Low user-facing value.
+- **2d.** Delete the dead re-derivation helpers. **NOT DONE** (gated on 2c +
+  every typer path having a shared registry).
 
-"Proc-shapes first" still applies to 2b–2d, but 2a is unavoidable groundwork
-shared by all kinds. The instance flip is a multi-step sub-project, not a single
+"Proc-shapes first" still applies to 2c–2d, but 2a/2b are the groundwork shared
+by all kinds. The instance flip is a multi-step sub-project, not a single
 repoint.
 
 ### Cleanup audit after 2b slices 1–3 (2026-06-11)

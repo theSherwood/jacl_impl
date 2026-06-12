@@ -10,7 +10,20 @@ no VM change. See **"Remaining work"** below for the few open items; **§2/§3**
 are the settled core rules and type syntax (the enduring spec). The historical
 implementation plan and per-phase blocks have been trimmed (git history).
 
-## Remaining work (authoritative, as of 2026-06-11)
+## Remaining work (authoritative, as of 2026-06-12)
+
+> **NEXT SESSION — start here.** This section is the live handoff. The
+> typed-closure arc + the registry unification (2b) are done; compound types in
+> `[Proc …]` mostly work (item 4). The open items, in rough priority:
+> 1. **Map KEY conformance** (item 4) — compiler-side mirror of the param
+>    representation; a narrow soundness edge, bounded but touches several call
+>    sites (`compiler__decode_proc_shape_ex` + the conformance fns).
+> 2. **Compound RETURNS beyond `[Vec T]`** (`[Map K V]`/`[Arr T]`) — item 4.
+> 3. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
+> 4. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
+>    (low value, entangled with the `syntax.c` NULL-registry paths).
+> Full per-item detail (what works, what's open, file/function pointers) is
+> below in items 1–4.
 
 The arc (B1–B3d + the B3c follow-ups + the 2b portable-stamp slices) is
 functionally complete: closure values, params, returns, collections, and
