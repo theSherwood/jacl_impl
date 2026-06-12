@@ -19,24 +19,24 @@ struct Bag { i32 size, [Buf 4 dyn] items }
 
 proc scalar_field {} {
   def h [ElfHeader ver 1]
-  [buf-set $h->magic 0 0x7f]
-  [buf-set $h->magic 1 0x45]
+  buf-set $h->magic 0 0x7f
+  buf-set $h->magic 1 0x45
   print [buf-get $h->magic 0]
   print [buf-get $h->magic 1]
   print [buf-len $h->magic]
   # Unchecked variant -- no bounds check at runtime.
-  [buf-unchecked-set $h->magic 3 0xfe]
+  buf-unchecked-set $h->magic 3 0xfe
   print [buf-unchecked-get $h->magic 3]
 }
-[scalar_field]
+scalar_field
 
 proc ref_field {} {
   def b [Bag size 0]
-  [buf-set $b->items 0 "hello"]
-  [buf-set $b->items 1 42]
+  buf-set $b->items 0 "hello"
+  buf-set $b->items 1 42
   print [buf-get $b->items 0]
   print [buf-get $b->items 1]
   print [buf-len $b->items]
   print "ok"
 }
-[ref_field]
+ref_field

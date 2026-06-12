@@ -13,19 +13,19 @@ proc main {} {
   def m [[Map str [Vec i64]] "a" [[Vec i64] 10 20] "b" [[Vec i64] 30]]
   def row [map-get $m "a"]
   print [vec-len $row]
-  [assert-type [vec-get $row 1] i64]
+  assert-type [vec-get $row 1] i64
   print [vec-get $row 1]
 
   # ref-kind inner: [Map str [Vec str]] values are plain-rep'd [Vec str]
   def sm [[Map str [Vec str]] "k" [[Vec str] "ab"]]
   def srow [map-get $sm "k"]
-  [assert-type [vec-get $srow 0] str]
+  assert-type [vec-get $srow 0] str
   print [vec-get $srow 0]
 
   # inner map value: [Map str [Map str str]] -> plain inner map, str values
   def mm [[Map str [Map str str]] "o" [[Map str str] "i" "x"]]
   def inner [map-get $mm "o"]
-  [assert-type [map-get $inner "i"] str]
+  assert-type [map-get $inner "i"] str
   print [map-get $inner "i"]
 
   # numeric keys with compound values ([Map i64 [Vec i64]])
@@ -35,4 +35,4 @@ proc main {} {
 
   print "ok"
 }
-[main]
+main

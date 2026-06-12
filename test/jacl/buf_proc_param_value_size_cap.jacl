@@ -9,6 +9,6 @@ proc too_big {[Buf 256 i32] xs} {
 
 proc main {} {
   def [Buf 256 i32] big
-  [too_big $big]
+  too_big $big
 }
-[main]
+main

@@ -8,13 +8,13 @@
 # via buf-get, and the small-int widen-to-i32 on load.
 def [Buf 4 u8] b
 print [buf-get $b 0]
-[buf-set $b 0 127]
+buf-set $b 0 127
 print [buf-get $b 0]
-[buf-set $b 2 255]
+buf-set $b 2 255
 print [buf-get $b 2]
 
 def [Buf 16 i32] words
-[buf-set $words 5 5]
+buf-set $words 5 5
 print [buf-get $words 5]
-[buf-set $words 15 42]
+buf-set $words 15 42
 print [buf-get $words 15]

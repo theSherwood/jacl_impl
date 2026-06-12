@@ -3,4 +3,4 @@
 proc t-par {x} {
   set x 42
 }
-[t-par 10]
+t-par 10

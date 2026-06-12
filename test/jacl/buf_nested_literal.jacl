@@ -22,7 +22,7 @@ proc full {} {
   print $m->1->2
   print $m->2->3
 }
-[full]
+full
 
 # Partial fill at both levels -- LHS annotation is also inferred from
 # the RHS constructor (M5b LHS inference combined with M4.2 nesting).
@@ -36,7 +36,7 @@ proc partial {} {
   print $m->2->0
   print [buf-len $m]
 }
-[partial]
+partial
 
 # Element-overflow check fires at compile time for nested too (M5
 # overflow check + M4.2 nesting).
@@ -44,4 +44,4 @@ proc good {} {
   def [Buf 2 [Buf 2 u8]] bytes [[Buf 2 [Buf 2 u8]] [[Buf 2 u8] 0x0f 0x10]]
   print $bytes->0->1
 }
-[good]
+good

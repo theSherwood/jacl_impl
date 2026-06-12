@@ -8,7 +8,7 @@ proc sum {Point, p} {
 }
 
 proc mk {i32 a, i32 b} Point {
-  [Point x $a y $b]
+  Point x $a y $b
 }
 
 proc main {} {

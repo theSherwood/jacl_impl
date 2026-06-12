@@ -21,17 +21,17 @@ proc bump {[Buf 4 u8] b} {
   # Mutating the local-copy doesn't escape: the caller's bytes are
   # untouched. Returns the modified byte so we can observe the local
   # update succeeded.
-  [buf-set $b 0 99]
+  buf-set $b 0 99
   return [buf-get $b 0]
 }
 
 proc main {} {
   def [Buf 4 u8] magic [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
-  [inspect $magic]
+  inspect $magic
   # Pass by-value: caller's $magic byte 0 stays 0x7f even after bump
   # writes 99 into its local copy. bump returns 99 from its own copy;
   # the caller's buf is unchanged.
   print [bump $magic]
   print [buf-get $magic 0]
 }
-[main]
+main

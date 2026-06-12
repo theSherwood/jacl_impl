@@ -2,4 +2,4 @@
 # call through variable alias with wrong arity produces compile error
 proc add3 {a, b, c} { + [+ $a $b] $c }
 def f $add3
-[$f 1]
+$f 1

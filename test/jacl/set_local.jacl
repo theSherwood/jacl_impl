@@ -9,4 +9,4 @@ proc t-set {} {
   set y [+ $y 5]
   print [+ $y 0]
 }
-[t-set]
+t-set

@@ -4,4 +4,4 @@ proc t-imm {} {
   def x 10
   set x 42
 }
-[t-imm]
+t-imm

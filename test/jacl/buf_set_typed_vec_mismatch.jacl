@@ -6,6 +6,6 @@
 proc main {} {
   def [Buf 3 [Vec i64]] xs
   def bad_v [[Vec str] "a" "b"]
-  [buf-set $xs 0 $bad_v]
+  buf-set $xs 0 $bad_v
 }
 main

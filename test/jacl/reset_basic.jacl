@@ -3,10 +3,10 @@
 # expect: 5
 # reset stores a new value and returns it
 def b [box 0]
-[print [reset $b 99]]
+print [reset $b 99]
 # deref confirms the update
-[print [deref $b]]
+print [deref $b]
 # reset works on atoms too
 def a [atom 10]
-[reset $a 5]
-[print [deref $a]]
+reset $a 5
+print [deref $a]

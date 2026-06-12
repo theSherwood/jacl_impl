@@ -22,7 +22,7 @@ proc main {} {
   print $h->magic->0
   print $h->magic->1
 }
-[main]
+main
 
 # Deeply nested: $o->inner->data->0 chains three arrows.
 struct Inner { [Buf 2 u8] data }
@@ -34,7 +34,7 @@ proc nested {} {
   print $o->inner->data->1
   print $o->tag
 }
-[nested]
+nested
 
 # [addr] on a chained arrow leaf: must recover the un-widened pointee
 # type. `[addr $h->magic->1]` is [Ptr u8] (not [Ptr i32] from the
@@ -45,4 +45,4 @@ proc addr_chain {} {
   def [Ptr u8] p [addr $h->magic->1]
   print [ptr-deref $p]
 }
-[addr_chain]
+addr_chain

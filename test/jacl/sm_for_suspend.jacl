@@ -77,4 +77,4 @@ proc main {} {
   for [dgen] x { print $x }
   print "ok"
 }
-[main]
+main

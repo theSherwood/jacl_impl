@@ -5,4 +5,4 @@ proc foo {} {
   print "never"
   42
 }
-[print [error-val [foo]]]
+print [error-val [foo]]

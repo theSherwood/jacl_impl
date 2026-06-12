@@ -4,10 +4,10 @@
 # swap applies closure to current value, stores result, returns result
 def b [box 0]
 proc inc {x} { + $x 1 }
-[print [swap $b $inc]]
+print [swap $b $inc]
 # deref confirms the update
-[print [deref $b]]
+print [deref $b]
 # swap works on atoms
 def a [atom 10]
-[swap $a $inc]
-[print [deref $a]]
+swap $a $inc
+print [deref $a]

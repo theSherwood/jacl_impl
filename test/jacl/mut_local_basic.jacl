@@ -7,4 +7,4 @@ proc t-mut {} {
   mut y 0
   print [+ $y 0]
 }
-[t-mut]
+t-mut

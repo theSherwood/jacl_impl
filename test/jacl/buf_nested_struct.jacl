@@ -42,4 +42,4 @@ proc main {} {
   print $grid->0->1->x
   print $grid->0->1->y
 }
-[main]
+main

@@ -28,7 +28,7 @@ proc sum {} {
   def [Buf 3 i32] xs [[Buf 3 i32] 6 7 8]
   print [t_sumi $xs 3]
 }
-[sum]
+sum
 
 proc fill {} {
   # Callee writes through the decayed pointer; caller observes the
@@ -40,7 +40,7 @@ proc fill {} {
   print [buf-get $scratch 2]
   print [buf-get $scratch 3]
 }
-[fill]
+fill
 
 proc xor {} {
   # Two buf args decay independently; both pointer values reach C
@@ -53,4 +53,4 @@ proc xor {} {
   print [buf-get $dst 2]
   print [buf-get $dst 3]
 }
-[xor]
+xor

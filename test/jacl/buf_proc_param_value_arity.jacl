@@ -19,6 +19,6 @@ proc main {} {
   # OP_INLINE_COPY_LOCAL copies width=1 slot (4 bytes rounded up to 8);
   # callee expects param_total_slots=2 (16 bytes). Runtime arity check
   # catches the mismatch.
-  [takes_16 $small]
+  takes_16 $small
 }
-[main]
+main

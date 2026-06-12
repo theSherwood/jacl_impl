@@ -5,6 +5,6 @@ proc test {} {
   proc inner {} {
     print $p->x
   }
-  [inner]
+  inner
 }
-[test]
+test

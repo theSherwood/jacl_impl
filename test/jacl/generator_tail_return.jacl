@@ -4,6 +4,6 @@
 # check.)
 proc gen {} {
   yield 1
-  [return]
+  return
 }
 print [collect [gen]]

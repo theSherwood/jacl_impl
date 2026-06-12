@@ -5,4 +5,4 @@ proc foo {} {
   print "done"
   99
 }
-[print [foo]]
+print [foo]

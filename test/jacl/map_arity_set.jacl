@@ -1,2 +1,2 @@
 # expect-error: builtin 'map-set' expects 3 arguments but got 2
-[map-set [map] "a"]
+map-set [map] "a"

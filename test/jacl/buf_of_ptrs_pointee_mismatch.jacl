@@ -6,6 +6,6 @@ proc main {} {
   def [Ptr i64] wrong [addr $words->0]
 
   def [Buf 2 [Ptr u8]] ptrs
-  [buf-set $ptrs 0 $wrong]
+  buf-set $ptrs 0 $wrong
 }
 main

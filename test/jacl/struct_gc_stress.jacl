@@ -23,5 +23,5 @@ proc loop {i, n} {
   } else { 0 }
 }
 
-[loop 0 50]
+loop 0 50
 print "done"

@@ -3,11 +3,11 @@
 # expect: false
 # expect: true
 # box? on a box returns true
-[print [box? [box 42]]]
+print [box? [box 42]]
 # box? on a non-box returns false
-[print [box? 42]]
+print [box? 42]
 # box? on an atom returns false
-[print [box? [atom 0]]]
+print [box? [atom 0]]
 # box creates a box containing the value
 def b [box 42]
-[print [box? $b]]
+print [box? $b]

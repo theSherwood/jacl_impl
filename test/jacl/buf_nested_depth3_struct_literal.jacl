@@ -28,4 +28,4 @@ proc main {} {
   print $sparse->1->1->1->x
   print $sparse->0->0->1->y
 }
-[main]
+main

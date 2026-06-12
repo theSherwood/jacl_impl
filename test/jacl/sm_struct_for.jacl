@@ -65,4 +65,4 @@ proc main {} {
   print [big-sum]
   print "ok"
 }
-[main]
+main

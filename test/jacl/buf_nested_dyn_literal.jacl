@@ -16,4 +16,4 @@ proc main {} {
   print $grid->1->0
   print $grid->1->1
 }
-[main]
+main

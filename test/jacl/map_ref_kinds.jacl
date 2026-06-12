@@ -31,7 +31,7 @@ proc main {} {
 
   # 2. ref values -> plain rep: [Map str str]; map-get narrows to str
   def s [[Map str str] "x" "ex" "y" "why"]
-  [assert-type [map-get $s "x"] str]
+  assert-type [map-get $s "x"] str
   print [map-get $s "x"]
   def s2 [map-set $s "z" "zed"]
   print [map-get $s2 "z"]
@@ -39,7 +39,7 @@ proc main {} {
 
   # 3. numeric keys + ref values ([Map i64 str]) -> plain rep
   def n [[Map i64 str] 1 "one" 2 "two"]
-  [assert-type [map-get $n 1] str]
+  assert-type [map-get $n 1] str
   print [map-get $n 1]
 
   # 4. [Map dyn dyn] is the plain map
@@ -61,17 +61,17 @@ proc main {} {
   # 8. map-keys of a str-keyed TYPED map -> plain [Vec str]; for narrows
   def km [[Map str i64] "hello" 5]
   for [map-keys $km] k {
-    [assert-type $k str]
+    assert-type $k str
     print [length $k]
   }
 
   # 9. map-vals of [Map K str] (plain rep) -> [Vec str]; for narrows
   def vm [[Map i64 str] 1 "abc"]
   for [map-vals $vm] vv {
-    [assert-type $vv str]
+    assert-type $vv str
     print [length $vv]
   }
 
   print "ok"
 }
-[main]
+main

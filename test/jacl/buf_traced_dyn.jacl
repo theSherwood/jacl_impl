@@ -10,9 +10,9 @@
 # types, and buf-len.
 def [Buf 4 dyn] xs
 print [buf-get $xs 0]
-[buf-set $xs 0 "hello"]
+buf-set $xs 0 "hello"
 print [buf-get $xs 0]
-[buf-set $xs 1 42]
+buf-set $xs 1 42
 print [buf-get $xs 1]
 print [buf-len $xs]
 print [buf-get $xs 3]

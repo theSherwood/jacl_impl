@@ -9,7 +9,7 @@ proc check {} {
   assert [not [!= "x" "x"]]
 
   # Composable in predicate form via the assert macro.
-  [assert $!= 1 2]
+  assert $!= 1 2
 
   "ok"
 }

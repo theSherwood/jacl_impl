@@ -20,16 +20,16 @@ proc main {} {
 
   # Compose: [Buf N [Box T]] via the Phase 5 TYPE_SHAPE_BOX kind.
   def [Buf 4 [Box i32]] xs
-  [buf-set $xs 0 [box 7]]
-  [buf-set $xs 1 [box 8]]
+  buf-set $xs 0 [box 7]
+  buf-set $xs 1 [box 8]
   print [deref [buf-get $xs 0]]
   print [deref [buf-get $xs 1]]
 
   # Churn the heap so the buf slots are the only roots holding the
   # boxes alive; verify they survive a GC cycle.
   mut i 0
-  [buf-set $xs 2 [box 11]]
-  [buf-set $xs 3 [box 13]]
+  buf-set $xs 2 [box 11]
+  buf-set $xs 3 [box 13]
   while [< $i 100] {
     def junk [vec $i $i $i]
     set i [+ $i 1]
@@ -37,4 +37,4 @@ proc main {} {
   print [deref [buf-get $xs 2]]
   print [deref [buf-get $xs 3]]
 }
-[main]
+main

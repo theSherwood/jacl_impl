@@ -17,4 +17,4 @@ proc main {} {
   def f [[Map i64 i64] 2 10]
   print [== $d $f]
 }
-[main]
+main

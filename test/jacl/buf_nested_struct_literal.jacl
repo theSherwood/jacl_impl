@@ -32,4 +32,4 @@ proc main {} {
   print $partial->1->1->x
   print $partial->0->1->y
 }
-[main]
+main

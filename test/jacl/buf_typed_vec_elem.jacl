@@ -9,9 +9,9 @@
 # T at compile time.
 def [Buf 3 [Vec i64]] xs
 def v1 [[Vec i64] 10 20 30]
-[buf-set $xs 0 $v1]
+buf-set $xs 0 $v1
 def v2 [[Vec i64] 100 200]
-[buf-set $xs 1 $v2]
+buf-set $xs 1 $v2
 
 def got [buf-get $xs 0]
 print [vec-get $got 1]

@@ -9,12 +9,12 @@
 # still reachable through the buf slots (i.e. the marker scanned them
 # as roots and the slot tagged values weren't mistaken for raw bytes).
 def [Buf 4 dyn] xs
-[buf-set $xs 0 "hello"]
-[buf-set $xs 1 "world"]
+buf-set $xs 0 "hello"
+buf-set $xs 1 "world"
 def v [vec 1 2 3]
-[buf-set $xs 2 $v]
+buf-set $xs 2 $v
 def m [map "k" 7]
-[buf-set $xs 3 $m]
+buf-set $xs 3 $m
 
 # Churn: allocate a pile of throw-away vecs nobody else references,
 # encouraging a young-gen sweep while $xs is the sole root.

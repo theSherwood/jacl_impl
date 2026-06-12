@@ -46,4 +46,4 @@ proc main {} {
   print $p1->y
   print "ok"
 }
-[main]
+main

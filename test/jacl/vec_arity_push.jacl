@@ -1,2 +1,2 @@
 # expect-error: builtin 'vec-push' expects 2 arguments but got 1
-[vec-push [vec]]
+vec-push [vec]

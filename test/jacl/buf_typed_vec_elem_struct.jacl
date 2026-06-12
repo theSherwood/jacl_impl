@@ -9,7 +9,7 @@ struct Point { i32 x, i32 y }
 proc main {} {
   def [Buf 2 [Vec Point]] grid
   def row0 [[Vec Point] [Point x 7 y 11] [Point x 22 y 33]]
-  [buf-set $grid 0 $row0]
+  buf-set $grid 0 $row0
 
   def fetched [buf-get $grid 0]
   def p0 [vec-get $fetched 0]

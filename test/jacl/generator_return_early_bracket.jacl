@@ -3,7 +3,7 @@
 proc gen {} {
   yield 1
   yield 2
-  [return]
+  return
   yield 3
 }
 print [collect [gen]]

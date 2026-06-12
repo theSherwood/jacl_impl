@@ -20,4 +20,4 @@ proc main {} {
   print $back->items->0
   print $back->items->1
 }
-[main]
+main

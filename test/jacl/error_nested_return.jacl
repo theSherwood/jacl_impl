@@ -8,4 +8,4 @@ proc outer {} {
   print "never"
   99
 }
-[print [error? [outer]]]
+print [error? [outer]]

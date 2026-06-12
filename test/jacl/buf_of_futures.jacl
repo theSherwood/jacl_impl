@@ -8,8 +8,8 @@ proc main {} {
   def [Buf 2 [Future i32]] futs
   def [Future i32] f0 [spawn { 7 }]
   def [Future i32] f1 [spawn { 11 }]
-  [buf-set $futs 0 $f0]
-  [buf-set $futs 1 $f1]
+  buf-set $futs 0 $f0
+  buf-set $futs 1 $f1
 
   # buf-get narrows to [Future i32]; await yields i32.
   def [Future i32] g0 [buf-get $futs 0]

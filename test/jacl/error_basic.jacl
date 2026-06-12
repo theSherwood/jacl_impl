@@ -1,4 +1,4 @@
 # expect-error: cannot call
 # calling a non-callable value (integer)
 def x 42
-[x 1]
+x 1

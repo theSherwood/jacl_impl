@@ -6,6 +6,6 @@ proc main {} {
   def i64 m 1000000
   def i64 big [* $m 5000]
   def a [arr]
-  [arr-push $a $big]
+  arr-push $a $big
 }
 main

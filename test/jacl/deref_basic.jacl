@@ -2,8 +2,8 @@
 # expect: hello
 # expect: 0
 # deref reads the value inside a box
-[print [deref [box 42]]]
+print [deref [box 42]]
 # deref reads the value inside a box containing a string
-[print [deref [box "hello"]]]
+print [deref [box "hello"]]
 # deref reads the value inside an atom
-[print [deref [atom 0]]]
+print [deref [atom 0]]

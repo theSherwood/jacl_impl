@@ -1,2 +1,2 @@
 # expect-error: builtin 'try' expects 3 arguments but got 1
-[try { 42 }]
+try { 42 }

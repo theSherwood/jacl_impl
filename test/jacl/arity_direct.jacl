@@ -1,4 +1,4 @@
 # expect-error: proc 'add3' expects 3 arguments but got 2
 # direct call with too few args produces compile error
 proc add3 {a, b, c} { + [+ $a $b] $c }
-[add3 1 2]
+add3 1 2

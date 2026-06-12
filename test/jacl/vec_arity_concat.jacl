@@ -1,2 +1,2 @@
 # expect-error: builtin 'vec-concat' expects 2 arguments but got 1
-[vec-concat [vec]]
+vec-concat [vec]

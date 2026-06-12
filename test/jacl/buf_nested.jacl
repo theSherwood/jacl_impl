@@ -37,4 +37,4 @@ proc main {} {
   print $matrix->1->1
   print $matrix->2->1
 }
-[main]
+main

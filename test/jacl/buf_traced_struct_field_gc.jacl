@@ -41,4 +41,4 @@ proc main {} {
   print [map-get $got_m "k"]
   print $i
 }
-[main]
+main

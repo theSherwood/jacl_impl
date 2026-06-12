@@ -15,11 +15,11 @@ proc t {} {
   def [Future i64] f0 [spawn { 5 }]
   def i64 x [await $f0]
   def [Future i64] f [spawn { [* $x 2] }]
-  [await $f]
+  await $f
 }
 proc pause-and {i64 v} i64 {
   def [Future i64] f [spawn { $v }]
-  [await $f]
+  await $f
 }
 proc agg {} {
   mut i64 acc 0
@@ -43,4 +43,4 @@ proc main {} {
   print [cap-loop]
   print "ok"
 }
-[main]
+main

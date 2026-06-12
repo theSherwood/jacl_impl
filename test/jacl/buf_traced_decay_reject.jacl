@@ -7,4 +7,4 @@ proc takes_ptr {[Ptr dyn] data i32 len} {
   return [+ $len 0]
 }
 def [Buf 4 dyn] xs
-[takes_ptr $xs 4]
+takes_ptr $xs 4

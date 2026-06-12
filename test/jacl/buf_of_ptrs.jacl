@@ -10,8 +10,8 @@ proc main {} {
   def [Ptr u8] p1 [addr $elf->1]
 
   def [Buf 2 [Ptr u8]] ptrs
-  [buf-set $ptrs 0 $p0]
-  [buf-set $ptrs 1 $p1]
+  buf-set $ptrs 0 $p0
+  buf-set $ptrs 1 $p1
 
   # Retrieve via buf-get; result narrows to [Ptr u8] so ptr-deref works.
   def [Ptr u8] g0 [buf-get $ptrs 0]

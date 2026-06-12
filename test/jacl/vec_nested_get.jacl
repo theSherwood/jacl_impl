@@ -14,17 +14,17 @@ proc main {} {
   # depth-2: row narrows to [Vec i64]; element get narrows to i64
   def vv [[Vec [Vec i64]] [[Vec i64] 1 2] [[Vec i64] 3 4]]
   def row [vec-get $vv 1]
-  [assert-type [vec-get $row 0] i64]
+  assert-type [vec-get $row 0] i64
   print [vec-get $row 0]
 
   # chained get: outer result is stamped portably, inner get narrows
-  [assert-type [vec-get [vec-get $vv 0] 1] i64]
+  assert-type [vec-get [vec-get $vv 0] 1] i64
   print [vec-get [vec-get $vv 0] 1]
 
   # inner map with ref values: rows are PLAIN-rep maps, values narrow
   def vm [[Vec [Map str str]] [[Map str str] "k" "v"]]
   def m0 [vec-get $vm 0]
-  [assert-type [map-get $m0 "k"] str]
+  assert-type [map-get $m0 "k"] str
   print [map-get $m0 "k"]
   for $vm m {
     print [map-get $m "k"]
@@ -34,9 +34,9 @@ proc main {} {
   def v3 [[Vec [Vec [Vec i64]]] [[Vec [Vec i64]] [[Vec i64] 7]]]
   def plane [vec-get $v3 0]
   def row3 [vec-get $plane 0]
-  [assert-type [vec-get $row3 0] i64]
+  assert-type [vec-get $row3 0] i64
   print [vec-get $row3 0]
 
   print "ok"
 }
-[main]
+main

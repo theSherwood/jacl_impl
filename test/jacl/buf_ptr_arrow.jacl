@@ -12,6 +12,6 @@ def [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]
 def [Ptr i32] p [addr $b->0]
 print $p->0
 print $p->1
-[set_index $b 1 9999]
+set_index $b 1 9999
 print [buf-get $b 1]
 print [ptr-deref [addr $p->1]]

@@ -3,4 +3,4 @@
 proc foo {} {
   error "final"
 }
-[print [error? [foo]]]
+print [error? [foo]]

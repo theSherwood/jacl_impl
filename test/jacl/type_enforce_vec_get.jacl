@@ -1,3 +1,3 @@
 # expect-error: vec-get requires a vector; got stream (use collect to materialize)
 # compile-time error: stream passed to vec-get
-[vec-get [lines "a\nb"] 0]
+vec-get [lines "a\nb"] 0

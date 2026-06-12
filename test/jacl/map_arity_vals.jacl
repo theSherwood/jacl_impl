@@ -1,2 +1,2 @@
 # expect-error: builtin 'map-vals' expects 1 argument but got 2
-[map-vals [map] "extra"]
+map-vals [map] "extra"

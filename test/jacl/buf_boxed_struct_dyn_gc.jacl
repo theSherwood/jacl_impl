@@ -42,4 +42,4 @@ proc main {} {
   print [vec-get $back->items->3 0]
   print $i
 }
-[main]
+main

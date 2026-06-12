@@ -21,4 +21,4 @@ proc main {} {
   print $b->items->1
   print "ok"
 }
-[main]
+main

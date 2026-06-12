@@ -1,2 +1,2 @@
 # expect-error: builtin 'map-keys' expects 1 argument but got 2
-[map-keys [map] "extra"]
+map-keys [map] "extra"

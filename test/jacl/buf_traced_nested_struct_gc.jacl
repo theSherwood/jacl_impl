@@ -40,4 +40,4 @@ proc main {} {
   print [vec-get $d 0]
   print $i
 }
-[main]
+main
