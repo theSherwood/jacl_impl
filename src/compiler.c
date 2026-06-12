@@ -4458,14 +4458,74 @@ bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
   return compiler__resolve_type(c, word, len, &dummy);
 }
 
+static uint32_t compiler__intern_proc_shape(Compiler* c, AstNode* node,
+                                            bool* out_supported); /* fwd */
+
+/* Resolve a COMPOUND type node ([Vec T], [Map K V], nested [Proc …], with
+ * arbitrary nesting) to an interned shape idx in the shared registry. Mirrors
+ * typer__nested_elem_shape — and since both passes intern into the same
+ * registry (unification 2b), the idxs dedup and align across passes.
+ * UINT32_MAX if the node isn't a recognizable compound. */
+static uint32_t compiler__nested_elem_shape(Compiler* c, AstNode* en) {
+  if (!en || en->type != AST_COMMAND || !en->data.command.head ||
+      en->data.command.head->type != AST_LIT_STRING) return UINT32_MAX;
+  const char* hn = en->data.command.head->data.lit_string.value;
+  uint32_t    hl = en->data.command.head->data.lit_string.length;
+  uint32_t    ac = en->data.command.arg_count;
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg) return UINT32_MAX;
+  if (hl == 4 && memcmp(hn, "Proc", 4) == 0) {     /* nested [Proc …] */
+    bool sup = true;
+    uint32_t ps = compiler__intern_proc_shape(c, en, &sup);
+    return (sup && ps != UINT32_MAX) ? ps : UINT32_MAX;
+  }
+  uint32_t inner[2] = { UINT32_MAX, UINT32_MAX };
+  for (uint32_t i = 0; i < ac && i < 2; i++) {
+    AstNode* a = en->data.command.args[i];
+    if (a && a->type == AST_COMMAND) {            /* depth-2+: recurse */
+      inner[i] = compiler__nested_elem_shape(c, a);
+      if (inner[i] == UINT32_MAX) return UINT32_MAX;
+      continue;
+    }
+    if (!a || a->type != AST_LIT_STRING) return UINT32_MAX;
+    const char* nm = a->data.lit_string.value;
+    uint32_t    nl = a->data.lit_string.length;
+    if (is_type_keyword(nm, nl)) {
+      inner[i] = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    } else {
+      uint32_t si = struct_registry__find(reg, nm, nl);
+      if (si == UINT32_MAX || si >= reg->count || !reg->defs[si]) return UINT32_MAX;
+      inner[i] = si;
+    }
+  }
+  if (hl == 3 && memcmp(hn, "Vec", 3) == 0 && ac == 1)
+    return type_shape_intern_typed_vec(reg, inner[0]);
+  if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 2) {
+    uint32_t kidx = (inner[0] == JACL_SCALAR_TYPE_IDX(TYPE_DYN)) ? UINT32_MAX : inner[0];
+    return type_shape_intern_typed_map(reg, kidx, inner[1]);
+  }
+  return UINT32_MAX;
+}
+
 /* Resolve one type-name node inside a [Proc …] signature (TYPED_CLOSURES_DESIGN
- * Phase B). Scalar keywords + `dyn` supported; struct/compound types are
- * Phase B3 → *out_supported=false. Mirrors typer__proc_sig_elem. */
+ * Phase B). Scalar keywords + `dyn` + struct names + COMPOUND types ([Vec T],
+ * [Map K V], nested [Proc …] — portable since unification 2b). Mirrors
+ * typer__proc_sig_elem. */
 static JaclType compiler__proc_sig_elem(Compiler* c, AstNode* n,
                                         uint32_t* out_idx, bool* out_supported) {
   *out_idx = UINT32_MAX;
   *out_supported = false;
-  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* nested compound → B3 */
+  if (n && n->type == AST_COMMAND) {
+    uint32_t sh = compiler__nested_elem_shape(c, n);
+    if (sh != UINT32_MAX) {
+      *out_idx = sh;
+      *out_supported = true;
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      return compiler__buf_elem_decode(reg, sh, NULL);
+    }
+    return TYPE_DYN;  /* malformed compound — unsupported */
+  }
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;
   const char* nm = n->data.lit_string.value;
   uint32_t    nl = n->data.lit_string.length;
   if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
@@ -4591,22 +4651,19 @@ static uint32_t compiler__intern_proc_shape(Compiler* c, AstNode* node,
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
     JaclType t = compiler__proc_sig_elem(c, phead, &sidx, &sup);
     if (!sup) *out_supported = false;
-    pidx[pc++] = (t == TYPE_STRUCT && sidx != UINT32_MAX)
-                   ? sidx : JACL_SCALAR_TYPE_IDX(t);
+    pidx[pc++] = (sidx != UINT32_MAX) ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   for (uint32_t i = 0; i < plist->data.command.arg_count; i++) {
     if (pc >= COMPILER_MAX_PROC_PARAMS) { *out_supported = false; return UINT32_MAX; }
     JaclType t = compiler__proc_sig_elem(c, plist->data.command.args[i], &sidx, &sup);
     if (!sup) *out_supported = false;
-    pidx[pc++] = (t == TYPE_STRUCT && sidx != UINT32_MAX)
-                   ? sidx : JACL_SCALAR_TYPE_IDX(t);
+    pidx[pc++] = (sidx != UINT32_MAX) ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   uint32_t rid = JACL_SCALAR_TYPE_IDX(TYPE_DYN);
   if (ac == 2) {
     JaclType t = compiler__proc_sig_elem(c, node->data.command.args[1], &sidx, &sup);
     if (!sup) *out_supported = false;
-    rid = (t == TYPE_STRUCT && sidx != UINT32_MAX)
-            ? sidx : JACL_SCALAR_TYPE_IDX(t);
+    rid = (sidx != UINT32_MAX) ? sidx : JACL_SCALAR_TYPE_IDX(t);
   }
   if (!*out_supported) return UINT32_MAX;
   StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -4740,7 +4797,14 @@ static bool compiler__decode_proc_shape_ex(Compiler* c, uint32_t shape_idx,
     } else if (pidx < reg->count && reg->defs[pidx]) {
       out_ptypes[k] = TYPE_STRUCT; psi = pidx;
     } else {
-      out_ptypes[k] = TYPE_DYN;  /* nested compound — unsupported */
+      /* Nested compound ([Vec T], [Map K V], nested [Proc …]) — decode to its
+       * compound type. Carry the same idx a proc's GlobalArity stores for such a
+       * param (so conformance compares like-for-like): the ELEMENT idx for a
+       * typed-vec/arr/map, the nested proc-shape idx for a [Proc …]. */
+      uint32_t inner = UINT32_MAX;
+      JaclType ct = compiler__buf_elem_decode(reg, pidx, &inner);
+      out_ptypes[k] = ct;
+      psi = (ct == TYPE_CLOSURE) ? pidx : inner;
     }
     if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
@@ -4751,7 +4815,7 @@ static bool compiler__decode_proc_shape_ex(Compiler* c, uint32_t shape_idx,
   } else if (rid < reg->count && reg->defs[rid]) {
     *out_rtype = TYPE_STRUCT; rsi = rid;
   } else {
-    *out_rtype = TYPE_DYN;
+    *out_rtype = compiler__buf_elem_decode(reg, rid, NULL); rsi = rid;
   }
   if (out_rstruct_idx) *out_rstruct_idx = rsi;
   return true;
@@ -4776,7 +4840,11 @@ static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
   for (uint8_t k = 0; k < pcount; k++) {
     JaclType lt = L->param_types ? L->param_types[k] : TYPE_DYN;
     if (lt != ptypes[k]) return false;
-    if (lt == TYPE_STRUCT) {
+    /* Struct params match by struct idx; typed-collection params match by their
+     * element idx (so [Vec i32] does NOT conform to a [Vec i64] param). Both are
+     * carried in the per-param idx slot. */
+    if (lt == TYPE_STRUCT || lt == TYPE_TYPED_VEC || lt == TYPE_TYPED_ARR ||
+        lt == TYPE_TYPED_MAP) {
       uint32_t lsi = L->param_struct_idxs ? L->param_struct_idxs[k] : UINT32_MAX;
       uint32_t dsi = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
       if (lsi != dsi) return false;
@@ -4823,10 +4891,14 @@ static bool compiler__stamp_closure_conforms(Compiler* c, uint32_t stamp_shape,
                                       apsi, &arsi))
     return false;
   if (apcnt != pcount || art != rtype) return false;
-  if (art == TYPE_STRUCT && arsi != rstruct_idx) return false;
+  if ((art == TYPE_STRUCT || art == TYPE_TYPED_VEC || art == TYPE_TYPED_ARR ||
+       art == TYPE_TYPED_MAP) && arsi != rstruct_idx) return false;
   for (uint8_t k = 0; k < pcount; k++) {
     if (apts[k] != ptypes[k]) return false;
-    if (apts[k] == TYPE_STRUCT) {
+    /* Struct + typed-collection params match by their per-param idx (struct idx
+     * / element idx), so [Vec i32] does not conform to a [Vec i64] param. */
+    if (apts[k] == TYPE_STRUCT || apts[k] == TYPE_TYPED_VEC ||
+        apts[k] == TYPE_TYPED_ARR || apts[k] == TYPE_TYPED_MAP) {
       uint32_t d = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
       if (apsi[k] != d) return false;
     }

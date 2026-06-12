@@ -1,0 +1,21 @@
+# expect: 6
+# expect: 7
+# A COMPOUND type — [Vec T] (incl. [Vec Struct]) — as a param inside a [Proc …]
+# now works: the registry unification (2b) made nested compound shape idxs
+# portable across the typer/compiler passes, so a higher-order proc can take a
+# closure whose param is a typed collection, pass a conforming proc, and call it.
+# Element conformance is enforced (see typed_closure_compound_param_err).
+struct Point {i32 x, i32 y}
+proc sumv  {[Vec i64] v} i64 { [+ [+ [vec-get $v 0] [vec-get $v 1]] [vec-get $v 2]] }
+proc firstx {[Vec Point] v} i32 { [vec-get $v 0]->x }
+proc hofv  {[Proc [[Vec i64]] i64] f, [Vec i64] v} i64 { [f $v] }
+proc hofp  {[Proc [[Vec Point]] i32] f, [Vec Point] v} i32 { [f $v] }
+
+proc main {} {
+  # [Vec i64] param: pass a conforming proc, call it through the closure.
+  print [hofv $sumv [[Vec i64] 1 2 3]]                   # 6
+
+  # [Vec Struct] param: nested struct element flows through the closure call.
+  print [hofp $firstx [[Vec Point] [Point x 7 y 9]]]     # 7
+}
+main
