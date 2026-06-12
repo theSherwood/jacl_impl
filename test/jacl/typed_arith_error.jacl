@@ -1,4 +1,4 @@
 # expect-error: type error: cannot add i64 and f64
 def i64 a 10
 def f64 b 20.0
-[+ $a $b]
++ $a $b

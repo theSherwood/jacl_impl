@@ -27,7 +27,7 @@ proc walk {[Arr str] a} {
 }
 proc total {[Vec i64] v} {
   assert-type [vec-get $v 0] i64
-  [+ [vec-get $v 0] [vec-get $v 1]]
+  + [vec-get $v 0] [vec-get $v 1]
 }
 proc main {} {
   lens [[Vec str] "ab" "xyz"]

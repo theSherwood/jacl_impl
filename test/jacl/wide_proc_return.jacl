@@ -8,13 +8,13 @@
 # the SM (suspending) tail, and an explicit `return`.
 proc ret_def {} {
   def i64 x 5
-  [+ $x 3]                  # 8 (non-SM dyn-return tail)
+  + $x 3                  # 8 (non-SM dyn-return tail)
 }
 proc ret_sm {} {
   def fut [spawn { 0 }]
   def i64 x 100
   await $fut
-  [+ $x 1]                  # 101 (SM dyn-return tail)
+  + $x 1                  # 101 (SM dyn-return tail)
 }
 proc ret_explicit {} {
   def i64 x 200

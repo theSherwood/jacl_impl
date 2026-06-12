@@ -37,7 +37,7 @@ proc v-sum {} {
   for $vs p {
     set acc [+ $acc $p->x]
   }
-  [+ $acc $w]
+  + $acc $w
 }
 proc a-sum {} {
   def [Future i32] f [spawn { 1000 }]
@@ -47,7 +47,7 @@ proc a-sum {} {
   for $as p {
     set acc [+ $acc $p->x]
   }
-  [+ $acc $w]
+  + $acc $w
 }
 proc big-sum {} {
   def [Future i32] f [spawn { 0 }]
