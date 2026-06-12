@@ -345,8 +345,9 @@ pulling on them; revisit when one shows up.
   nested compound map VALUES (`[Map str [Vec i64]]` ctor both layers,
   key stamps + binding-carried value shape, map-get portable decode,
   test `map_nested_vals.jacl`). **Remaining (this area):** for-loop
-  iteration over maps doesn't exist at all (runtime "expected vector,
-  got map") — narrowing over stamped maps is blocked on that feature;
+  iteration over maps — DESIGN SETTLED, IN PROGRESS (2026-06; see the §"for over
+  maps" entry below and `SYNTAX.md` §"`for` — unified iteration"); narrowing over
+  stamped maps rides it;
   proc RETURN-type collection annotations LANDED for `[Arr T]` and `[Map K V]`
   (2026-06-12): `typer__resolve_return_type` now resolves `[Arr T]` returns
   (value + ref kind; the compiler's 4-arg proc-form recognizes the `[Arr …]`
@@ -364,6 +365,26 @@ pulling on them; revisit when one shows up.
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)
   bindings.
+- **`for` over maps + the enumerator form — DESIGN SETTLED 2026-06, IN
+  PROGRESS.** One binding rule across all collections: the LAST name is the
+  value/element; an optional FIRST name is the *enumerator* — the `i32` index for
+  vec/arr, the key `K` for maps. So `for $vec v` / `for $vec i v` is `enumerate`,
+  `for $map v` / `for $map k v` is `values` / `items`. A single name over a map
+  binds the VALUE (not the key — opposite of Python; deliberate, follows the
+  rule). Order is hash/HAMT (unspecified), matching `map-keys`/`map-vals`. Full
+  surface spec: `SYNTAX.md` §"`for` — unified iteration". **Implementation plan
+  (no new VM opcodes):** lower a map for-loop by materializing `map-vals` (single
+  name) or `map-keys`+`map-vals` (two names) from the map evaluated ONCE into a
+  temp, then iterate the resulting vec(s) on the existing typed-vec for-loop path
+  — so SM/suspension + element narrowing come for free; `keys[i]`↔`vals[i]`
+  correspond by HAMT traversal determinism. The vec/arr two-name form just
+  exposes the loop's existing `__idx` counter under the user's name (`i32`).
+  Phasing: (a) parser + typer for the two-name form and map dispatch; (b) map
+  iteration (single + two-name); (c) vec/arr two-name (index exposure). **Open /
+  deferred:** stream enumerate (`for $stream n v` — the stream path carries no
+  index today; a counter is the natural add); a lazy HAMT-iterator lowering
+  (avoids the two materialized vecs, but drags the depth-8 iterator struct into
+  SM state — only if a workload needs it).
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

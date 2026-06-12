@@ -465,9 +465,36 @@ for $items { log $it }
 # Collection + explicit binding — collection first, name second
 for $items item { log $item }
 
+# Collection + ENUMERATOR + value — two names
+for $items i item { log "$i: $item" }     # vec/arr: i is the i32 index
+for $scores name pts { log "$name = $pts" }  # map: name is the key
+
 # Collection + callback (HOF form)
 for $items $callback
 ```
+
+**The binding rule (one rule for every collection):** the **last** name is
+always the value/element; an optional **first** name is the *enumerator* — the
+thing that locates the element. For sequences (vec / arr) the enumerator is the
+`i32` index; for maps it is the key (typed `K`). So `for $vec v` / `for $vec i v`
+is `enumerate`, and `for $map v` / `for $map k v` is `values` / `items`. A single
+name always binds the value.
+
+**Maps iterate too** (added 2026-06; previously vec/arr/stream only):
+
+```
+def m [map a 1 b 2]
+for $m v { print $v }            # values: 1, 2
+for $m k v { print "$k=$v" }     # entries: a=1, b=2
+```
+
+- **Order is unspecified** — maps are hash-ordered (HAMT), not insertion-ordered.
+  `for` matches `map-keys` / `map-vals` enumeration order. Don't rely on it.
+- **A single name over a map binds the VALUE, not the key** — the opposite of
+  Python's `for x in dict`. This follows the "last name = value" rule; reach for
+  the key with the two-name `for $m k v` form (or `map-keys`).
+- Typed maps narrow: over `[Map str i64]`, `for $m k v` types `k` as `str`,
+  `v` as `i64`.
 
 The explicit form is **collection-first** so that pipe threading works naturally: `$items | for item { … }` threads the piped value as the first arg, which is the collection slot. A name-first form would put the threaded value in the name slot and break the pipe idiom — a real ergonomic loss in a shell/glue language.
 
@@ -475,10 +502,13 @@ Compiler distinguishes forms by argument shape:
 
 - First arg is `{}` block → C-style loop
 - First arg is a value, next is `{}` block → implicit binding (`$it`)
-- First arg is a value, next is bare word, next is `{}` block → explicit binding
+- First arg is a value, next is bare word, next is `{}` block → explicit binding (value)
+- First arg is a value, next two are bare words, next is `{}` block → enumerator + value
 - First arg is a value, next is a proc/variable → HOF callback
 
-Works on both streams and vectors. `filter` and `transform` remain separate — they produce new collections, not side effects.
+Works on streams, vectors, arrays, and maps. (Stream enumerate — `for $stream n v`
+— is a planned follow-up; see `NOT_IMPLEMENTED.md`.) `filter` and `transform`
+remain separate — they produce new collections, not side effects.
 
 `while` stays as a separate construct: `while $cond { body }`.
 
