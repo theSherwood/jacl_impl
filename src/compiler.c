@@ -5728,7 +5728,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   } else {
     /* Non-suspending body: compile as block expression */
     body_compiler.in_concurrent_body = true;
-    compiler__compile_block_expr(&body_compiler, body_block);
+    compiler__compile_node(&body_compiler, body_block);
     /* Concurrent-body result crosses a dyn boundary (the future's value):
      * box a wide tail — raw wide bits would decode as a garbage tagged
      * value downstream (same rule as emit_return for dyn-return procs). */
@@ -12097,7 +12097,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     } else {
       /* Normal non-suspending proc */
-      compiler__compile_block_expr(&body_compiler, args[body_arg_idx]);
+      compiler__compile_node(&body_compiler, args[body_arg_idx]);
 
       /* Return type checking: body's last expression type must match declared.
        * Read from the AST. For an `AST_RETURN`-tail body, take the return
@@ -12414,7 +12414,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t then_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
     /* Compile then-body as expression (narrowing is active) */
-    compiler__compile_block_expr(c, args[1]);
+    compiler__compile_node(c, args[1]);
 
     /* Save then-branch type for unification. */
     JaclType then_type = (JaclType)args[1]->inferred_type;
@@ -12434,7 +12434,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType else_type;
     if (argc == 3) {
       /* Compile else-body as expression */
-      compiler__compile_block_expr(c, args[2]);
+      compiler__compile_node(c, args[2]);
       else_type = (JaclType)args[2]->inferred_type;
     } else {
       /* No else: push nil */
@@ -14152,7 +14152,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->in_try_body = true;
 
     /* Compile try body as block expression */
-    compiler__compile_block_expr(c, args[0]);
+    compiler__compile_node(c, args[0]);
 
     /* Restore in_try_body (patches still need to be applied) */
     c->in_try_body = saved_in_try;
@@ -14184,7 +14184,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__add_local(c, bind_name, line, col);
 
     /* Compile handler block expression */
-    compiler__compile_block_expr(c, args[2]);
+    compiler__compile_node(c, args[2]);
 
     /* Clean up handler scope (pop binding while keeping result) */
     uint32_t handler_pop = c->local_count - handler_scope_start;
@@ -14292,7 +14292,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile body block as expression (result stays on stack).
        OP_CTX_FORK/RESTORE use a VM-internal save stack — no value stack
        involvement for the saved ctx, so body_result is naturally on top. */
-    compiler__compile_block_expr(c, args[1]);
+    compiler__compile_node(c, args[1]);
 
     /* Restore original ctx from VM save stack, free forked ctx to pool */
     compiler__emit_byte(c, OP_CTX_RESTORE, line);
@@ -16622,7 +16622,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     } else {
       /* Non-suspending spawn body: compile as block expression */
       body_compiler.in_concurrent_body = true;
-      compiler__compile_block_expr(&body_compiler, body_block);
+      compiler__compile_node(&body_compiler, body_block);
       /* The spawn result becomes the future's value — a dyn boundary:
        * box a wide tail (same rule as emit_return for dyn-return procs;
        * an unboxed wide tail resolved the future with raw bits that
@@ -19549,7 +19549,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               body_compiler.locals[body_compiler.local_count - 1].is_param = true;
             }
 
-            compiler__compile_block_expr(&body_compiler,
+            compiler__compile_node(&body_compiler,
                                           node->data.defmacro.body);
             compiler__emit_byte(&body_compiler, OP_RETURN, line);
 
@@ -19625,7 +19625,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
 
         /* Compile body block */
-        compiler__compile_block_expr(&body_compiler, node->data.defmacro.body);
+        compiler__compile_node(&body_compiler, node->data.defmacro.body);
         compiler__emit_byte(&body_compiler, OP_RETURN, line);
 
         /* Propagate errors */
