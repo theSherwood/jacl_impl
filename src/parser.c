@@ -2489,11 +2489,8 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
 
   /* Single expression with no trailing args */
   if (args.count == 0) {
-    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]').
-     * A bracketed head with no args is a zero-element constructor call —
-     * `[[Vec T]]` (empty typed vec) — so wrap it the same way prefix mode
-     * did; returning the inner `[Vec T]` bare would lose the constructor. */
-    if (head_token_type == TOKEN_WORD || head_token_type == TOKEN_LBRACKET) {
+    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]'). */
+    if (head_token_type == TOKEN_WORD) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
       node->start = head->start;
