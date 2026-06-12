@@ -2006,7 +2006,7 @@ static int test_builtin_lambda_macro(void) {
     ctx->vm.print_ctx = &cap;
 
     /* [\ + $it 10] should expand to [proc "" (it) { [+ $it 10] }] via macro */
-    const char *src = "[print [[\\  + $it 10] 32]]";
+    const char *src = "[print [[\\  $+ $it 10] 32]]";
 
     JaclError err;
     jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
