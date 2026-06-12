@@ -596,24 +596,55 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
  *   otherwise       → NULL
  * ------------------------------------------------------------------------- */
 
+/* Synthesize a `[do …]` sequence command from statements (head_id HEAD_DO).
+ * An empty do (count 0) is the canonical nil value under the []-flip. */
+static AstNode* parser__make_do(Parser* p, AstNode** stmts, uint32_t count,
+                                SourcePos start, SourcePos end) {
+  AstNode* head = ast_alloc(p->arena);
+  head->type  = AST_LIT_STRING;
+  head->start = start;
+  head->end   = end;
+  head->data.lit_string.value  = "do";
+  head->data.lit_string.length = 2;
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = start;
+  node->end   = end;
+  node->data.command.head      = head;
+  node->data.command.head_id   = HEAD_DO;
+  node->data.command.args      = stmts;
+  node->data.command.arg_count = count;
+  return node;
+}
+
+/* Lower a parsed statement-sequence (AST_BLOCK) to its value form:
+ *   0 statements        -> nil  (empty `[do]`)
+ *   1 statement, no `;`  -> the bare command (an application)
+ *   otherwise            -> `[do s0 s1 …]` (+ trailing nil for a trailing `;`)
+ * The []-flip lowering: value-position brackets are commands, never blocks,
+ * so the type/constructor machinery sees AST_COMMAND directly — no peels. */
+static AstNode* parser__block_to_value(Parser* p, AstNode* blk) {
+  if (!blk || blk->type != AST_BLOCK) return blk; /* error passthrough */
+  uint32_t n     = blk->data.block.count;
+  bool     tsemi = blk->data.block.trailing_semi;
+  if (n == 0) return parser__make_do(p, NULL, 0, blk->start, blk->end);
+  if (n == 1 && !tsemi) return blk->data.block.commands[0];
+  uint32_t total = n + (tsemi ? 1u : 0u);
+  AstNode** args = (AstNode**)arena_alloc(p->arena, sizeof(AstNode*) * total);
+  for (uint32_t i = 0; i < n; i++) args[i] = blk->data.block.commands[i];
+  if (tsemi) args[n] = parser__make_do(p, NULL, 0, blk->end, blk->end);
+  return parser__make_do(p, args, total, blk->start, blk->end);
+}
+
 AstNode* parser__parse_expr(Parser* p) {
   Token* tok = parser__peek(p);
   AstNode* result = NULL;
 
   switch (tok->type) {
     case TOKEN_LBRACKET: {
-      /* `[…]` is now parsed in command mode (the prefix-expression mode was
-       * retired); parse_block auto-detects the `]` delimiter. In *value*
-       * position a single-command bracket collapses back to the bare command
-       * (the prefix-mode AST shape) so type forms `[Vec T]`, destructuring
-       * `[a b c]`, and bindings `[def x 1]` keep their non-block semantics —
-       * no extra scope, recognizable by the type/destructure machinery.
-       * Multi-statement brackets stay a block. */
-      /* `[…]` parses in command mode. A value-position bracket stays a block;
-       * type/constructor recognizers peel a singleton block one level via
-       * compiler__as_type_command / typer__as_type_command where needed (this
-       * keeps `[X]` and `[[X]]` distinct, unlike the old value collapse). */
-      result = parser__parse_block(p);
+      /* `[…]` in value position lowers to a command (application) or `[do …]`
+       * (sequence); empty `[]` -> nil. See parser__block_to_value. */
+      result = parser__block_to_value(p, parser__parse_block(p));
       break;
     }
 
