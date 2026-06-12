@@ -185,24 +185,35 @@ Done (branch `claude/flip-bracket-mode`):
   `compile_seq` / always-scope sequence implementation; the value-position
   scope-hacks are removed (value brackets lower to commands and no longer reach
   the block path). Neutral (jacl_harness 4, all groups green).
-- **Retire `AST_BLOCK` (next, mechanical):** make proc/if/while/else/macro bodies
-  parse to an always-`[do …]` command (a `parse_body_seq` = `parse_block` +
-  unconditional `make_do`, no single-statement collapse — collapse is value-only).
-  Then change the 11 `compile_block_expr` callers → `compile_node` and the
-  `infer_block` caller → `infer_node`; `compile_node`/`infer_node` route `[do …]`
-  to `compile_seq`/the HEAD_DO infer, which is equivalent (incl. tail
-  `[Proc …]` monomorphization — a single-statement `[do [proc …]]` still
-  monomorphizes the tail). Finally delete the dead `AST_BLOCK` compile/infer
-  cases and the now-dead `as_type_command` peels.
-  - **Entanglement:** `AST_BLOCK` is *also* the representation for destructure
-    patterns (`{a,b,c}`/`[a,b,c]` -> `AST_BLOCK`; `compiler.c:2006/2084/2213`),
-    so full retirement must convert bodies AND the destructure-pattern shape
-    in the same pass — not body-only. (The sequence/scope unification, done,
-    is the safe prerequisite.)
+- **Retire `AST_BLOCK` — LARGER than first estimated (revised after attempt):**
+  - DONE (step A, neutral, committed): the 10 explicit `compile_block_expr` body
+    call sites now call `compile_node` (the `AST_BLOCK` dispatch at
+    `compiler.c:~19147` still routes there, so it's a no-op until bodies change).
+    The typer already infers bodies via `infer_node` → the `AST_BLOCK` case, so it
+    needs no caller change.
+  - **NOT mechanical:** converting proc/if/while/else bodies to `[do …]` commands
+    (tried: `parse_body_seq` + 5 callers) **broke 376 scenarios.** Cause: there
+    are **~53 `type == AST_BLOCK` guard checks** across compiler (34) + typer (19)
+    that gate body handling (e.g. `compiler.c:1487/1491`) — a `[do]` command isn't
+    `AST_BLOCK`, so every guard rejects it. Full conversion must update all of
+    those (or make them accept `HEAD_DO`), not just the 11 callers. Reverted to
+    green for now.
+  - **Entanglement:** `AST_BLOCK` is *also* the destructure-pattern representation
+    (`{a,b,c}`/`[a,b,c]`; `compiler.c:2006/2084/2213`), so deleting the node means
+    converting bodies AND destructure together. This is a multi-step focused pass,
+    not a single slice. (Sequence/scope unification + step A are the safe prereqs.)
 
-Pending (other):
-- 2 multi-line `.jacl` statement brackets; `destructure_spread_all` `{..}`.
-- Compound `[Proc ...]` param/return inference (`typed_closure_binding`).
-- Surgical `[def]`/keyword-head wrap.
-- Unit-test rewrites (parser/compiler/syntax) for the new AST.
+Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
+- **`destructure_spread_all`** — NOT just a `{..}`→`[..]` rename: spread-all
+  destructure is *functionally broken* under the flip — `{..}`/`[..]` don't bind
+  the struct fields ("undefined variable"), and `[x, ..]` errors "elements must be
+  names". Entangled with destructure-pattern recognition (the dedicated
+  `parse_destructure_named_pattern` and the `AST_BLOCK` destructure path).
+- **`tour.jacl`** — behavioral: an `[assert $== $hit 5]` fails (a value is computed
+  wrong somewhere in the tour); needs debugging, not a syntax fix.
+- **`typed_closure_binding`** — compound `[Proc …]` param/return inference (Phase
+  B3 "not yet supported"); deep type-system.
+- Surgical `[def]`/keyword-head wrap (wrapping all keywords regressed 6 scenarios).
+- Unit-test rewrites (parser/compiler/syntax) for the new AST — substantial.
+- 2 multi-line `.jacl` statement brackets (tiny).
 - `{}` → `[]` for struct fields, `use`, and named/spread destructure.
