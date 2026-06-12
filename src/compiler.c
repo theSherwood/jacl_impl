@@ -6575,6 +6575,76 @@ void compiler__compile_destructure_vec(
 }
 
 /* -------------------------------------------------------------------------
+ * Read a single-command block as a positional juxtaposition pattern.
+ *
+ * Post-flip, `[a b c]` and `[head ..rest]` parse as a command-mode block
+ * holding one command (head + name args, optional trailing `..rest` spread).
+ * This recognizes that shape and fills the positional name arrays so the
+ * block path can dispatch to compile_destructure_vec for a vector RHS — the
+ * same result the AST_COMMAND prefix path produces today. Returns 1 on a
+ * recognized juxtaposition pattern, 0 otherwise (caller falls back to named).
+ * ------------------------------------------------------------------------- */
+static int compiler__block_as_positional_pattern(
+    AstNode* blk,
+    const char** d_names, uint32_t* d_name_lens, uint32_t* d_count_out,
+    const char** rest_name_out, uint32_t* rest_name_len_out)
+{
+  if (blk->data.block.count != 1) return 0;
+  AstNode* pat = blk->data.block.commands[0];
+  if (pat->type != AST_COMMAND) return 0;
+  AstNode* head = pat->data.command.head;
+  /* Head must be a plain name (not "..", which is the comma-form rest). */
+  if (head->type != AST_LIT_STRING) return 0;
+  if (head->data.lit_string.length == 2 &&
+      head->data.lit_string.value[0] == '.' &&
+      head->data.lit_string.value[1] == '.') return 0;
+  /* Only treat as juxtaposition when there is more than just the head, so a
+   * bare single name stays on the (type-driven) comma path. */
+  if (pat->data.command.arg_count == 0) return 0;
+
+  uint32_t d_count = 0;
+  const char* rest_name = NULL;
+  uint32_t rest_name_len = 0;
+  int rest_seen = 0;
+
+  d_names[d_count] = head->data.lit_string.value;
+  d_name_lens[d_count] = head->data.lit_string.length;
+  d_count++;
+
+  for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
+    AstNode* elem = pat->data.command.args[i];
+    if (elem->type == AST_SPREAD) {
+      if (rest_seen) return 0; /* duplicate rest — reject, let named report */
+      AstNode* inner = elem->data.spread.expr;
+      if (!inner || inner->type != AST_LIT_STRING) return 0;
+      rest_name = inner->data.lit_string.value;
+      rest_name_len = inner->data.lit_string.length;
+      rest_seen = 1;
+    } else if (elem->type == AST_LIT_STRING) {
+      /* A bare ".." here means the rest was written as juxtaposition
+       * (`{h ..t}`), which command-mode parses as separate `..` and `t`
+       * tokens rather than a spread. Bail so the caller can report/redirect
+       * to the comma form `{h, ..t}` instead of mis-binding it positionally. */
+      if (elem->data.lit_string.length == 2 &&
+          elem->data.lit_string.value[0] == '.' &&
+          elem->data.lit_string.value[1] == '.') return 0;
+      if (rest_seen) return 0; /* name after rest — not a clean positional */
+      if (d_count >= 255) return 0;
+      d_names[d_count] = elem->data.lit_string.value;
+      d_name_lens[d_count] = elem->data.lit_string.length;
+      d_count++;
+    } else {
+      return 0;
+    }
+  }
+
+  *d_count_out = d_count;
+  *rest_name_out = rest_name;
+  *rest_name_len_out = rest_name_len;
+  return 1;
+}
+
+/* -------------------------------------------------------------------------
  * Compile named struct/map destructuring: def {x, y} $expr or mut {x, y} $expr
  *
  * For known struct types: emits OP_HEAP_RECORD_GET per field (compile-time resolved).
@@ -8725,6 +8795,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
       }
+      /* Juxtaposition positional ({a b c} / {head ..rest}) over a vector RHS:
+       * a single multi-token command destructures by index. Tried first so it
+       * takes precedence over the typed-field reading of `{x y}`. */
+      {
+        JaclType jrhs = (JaclType)args[1]->inferred_type;
+        if (jrhs == TYPE_VEC || jrhs == TYPE_ARR || jrhs == TYPE_TYPED_VEC) {
+          const char* jn[256]; uint32_t jl[256]; uint32_t jc = 0;
+          const char* jr = NULL; uint32_t jrl = 0;
+          if (compiler__block_as_positional_pattern(blk, jn, jl, &jc, &jr, &jrl)) {
+            compiler__compile_destructure_vec(c, jn, jl, NULL, NULL, jc, jr, jrl,
+                                              args[1], true, line, col);
+            return;
+          }
+        }
+      }
       const char* d_names_arr[256];
       uint32_t d_name_lens_arr[256];
       const char* d_types_arr[256];
@@ -10238,6 +10323,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (blk_count == 0 || blk_count > 255) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
+      }
+      /* Juxtaposition positional ({a b c} / {head ..rest}) over a vector RHS:
+       * a single multi-token command destructures by index. Tried first so it
+       * takes precedence over the typed-field reading of `{x y}`. */
+      {
+        JaclType jrhs = (JaclType)args[1]->inferred_type;
+        if (jrhs == TYPE_VEC || jrhs == TYPE_ARR || jrhs == TYPE_TYPED_VEC) {
+          const char* jn[256]; uint32_t jl[256]; uint32_t jc = 0;
+          const char* jr = NULL; uint32_t jrl = 0;
+          if (compiler__block_as_positional_pattern(blk, jn, jl, &jc, &jr, &jrl)) {
+            compiler__compile_destructure_vec(c, jn, jl, NULL, NULL, jc, jr, jrl,
+                                              args[1], false, line, col);
+            return;
+          }
+        }
       }
       const char* d_names_arr[256];
       uint32_t d_name_lens_arr[256];
