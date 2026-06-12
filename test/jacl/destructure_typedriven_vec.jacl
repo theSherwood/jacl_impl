@@ -1,0 +1,13 @@
+# expect: 10
+# expect: 20
+# expect: 30
+# expect: 3
+# type-driven destructuring: a comma pattern over a vector RHS
+# destructures positionally (by index), not by field name.
+def {a, b, c} [vec 10 20 30]
+print $a
+print $b
+print $c
+# rest pattern works positionally on a vector too (h=1, t=[2 3 4])
+def {h, ..t} [vec 1 2 3 4]
+print [vec-len $t]

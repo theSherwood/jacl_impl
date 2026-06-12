@@ -8791,6 +8791,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       }
       if (valid) {
+        /* Type-driven dispatch: when the RHS is statically a vector/array,
+         * a brace/comma pattern destructures positionally (by index); for
+         * structs/maps (and dyn) it destructures by field name. Typed entries
+         * and spread-all are named-only constructs. */
+        JaclType rhs_t = (JaclType)args[1]->inferred_type;
+        if (!has_types && !spread_all_flag &&
+            (rhs_t == TYPE_VEC || rhs_t == TYPE_ARR || rhs_t == TYPE_TYPED_VEC)) {
+          compiler__compile_destructure_vec(
+              c, d_names_arr, d_name_lens_arr, NULL, NULL,
+              d_count, rest_nm, rest_nm_len, args[1], true, line, col);
+          return;
+        }
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr,
             has_types ? d_types_arr : NULL,
@@ -10293,6 +10305,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       }
       if (valid) {
+        /* Type-driven dispatch: vector/array RHS → positional (by index);
+         * struct/map (and dyn) → by field name. Typed entries and spread-all
+         * are named-only constructs. */
+        JaclType rhs_t = (JaclType)args[1]->inferred_type;
+        if (!has_types && !spread_all_flag &&
+            (rhs_t == TYPE_VEC || rhs_t == TYPE_ARR || rhs_t == TYPE_TYPED_VEC)) {
+          compiler__compile_destructure_vec(
+              c, d_names_arr, d_name_lens_arr, NULL, NULL,
+              d_count, rest_nm, rest_nm_len, args[1], false, line, col);
+          return;
+        }
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr,
             has_types ? d_types_arr : NULL,
