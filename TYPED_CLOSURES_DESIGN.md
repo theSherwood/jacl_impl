@@ -90,9 +90,23 @@ ret>`). Verified-remaining gaps:
    (+ `_unannotated_err`, `_mut_reassign_err`). The rule: a proc/closure's type
    comes from its annotations (per-slot) or a propagated annotation; no known
    signature → `dyn` — applied uniformly to `def` and `mut`.
-3. **Non-literal closure-returning tail** — a proc returning a closure *param or
-   value verbatim* (not an inline literal) isn't conformance-checked against its
-   declared `[Proc …]` return.
+3. **Non-literal closure-returning tail — DONE.** A proc declaring a `[Proc …]`
+   return that returns a closure VALUE verbatim — a param (`$f`), a named proc
+   (`$dbl`), or a closure binding (`$g`) — is now conformance-checked against the
+   declared return signature (`typer__proc_shapes_conform`: arity + per-slot
+   param/return type & struct-idx). Previously only `TYPE_CLOSURE == TYPE_CLOSURE`
+   was checked, so a wrong-signature verbatim return was silently accepted (a
+   latent unsoundness). An inline-literal tail is monomorphized to the declared
+   shape (so it conforms); lenient when the tail has no known shape. An inherited
+   untyped closure binding now also carries its proc-shape idx so a `$g` read
+   keeps the signature for this check. Tests:
+   `typed_closure_return_verbatim.jacl` (+ `_err`).
+
+The remaining item is by design only:
+4. **Nested compounds inside `[Proc …]`** (`[Proc [[Vec i64]] …]`, nested
+   `[Proc …]`) — unsupported; the element idxs are registry-bound, not portable.
+   (Its current diagnostic — a downstream "body returns dyn" — could be made a
+   direct "nested compound not supported" error, a small follow-up.)
 
 Non-bug nuance: the no-return form `[Proc [P]]` yields `dyn` (discarded at the
 tail), not nil.
