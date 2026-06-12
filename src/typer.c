@@ -2980,17 +2980,24 @@ static bool typer__proc_shapes_conform(TyperCtx* tc, uint32_t a_idx,
                                        uint32_t b_idx) {
   if (a_idx == UINT32_MAX || b_idx == UINT32_MAX) return false;
   if (a_idx == b_idx) return true;  /* interned dedup: same idx ⇒ same shape */
-  uint8_t apc, art, bpc, brt;
-  uint8_t apts[TYPER_MAX_PROC_PARAMS], bpts[TYPER_MAX_PROC_PARAMS];
-  uint32_t apsi[TYPER_MAX_PROC_PARAMS], arsi;
-  uint32_t bpsi[TYPER_MAX_PROC_PARAMS], brsi;
-  if (!typer__decode_proc_shape_ex(tc, a_idx, &apc, apts, &art, apsi, &arsi) ||
-      !typer__decode_proc_shape_ex(tc, b_idx, &bpc, bpts, &brt, bpsi, &brsi))
-    return false;
-  if (apc != bpc || art != brt || arsi != brsi) return false;
-  for (uint8_t k = 0; k < apc && k < TYPER_MAX_PROC_PARAMS; k++) {
-    if (apts[k] != bpts[k]) return false;
-    if (apts[k] == (uint8_t)TYPE_STRUCT && apsi[k] != bpsi[k]) return false;
+  /* Different idxs ⇒ structurally different: the shared registry dedups every
+   * shape (including nested compounds), so each param-pool entry and the return
+   * idx is a canonical portable idx. Compare them directly — exact invariant
+   * conformance that captures EVERYTHING a slot encodes: a vec/arr element, a
+   * map's key AND value, a nested [Proc …] signature, a struct idx. (The old
+   * decode-based check compared only a STRUCT param's idx, so a [Vec i32] vs
+   * [Vec i64] / [Map i32 V] vs [Map i64 V] / nested-proc param mismatch leaked
+   * through and a wrong-signature verbatim return was silently accepted.) */
+  StructTypeRegistry* reg = tc->shared_reg;
+  if (!reg || a_idx >= reg->count || b_idx >= reg->count) return false;
+  const TypeShape* a = &reg->shapes[a_idx];
+  const TypeShape* b = &reg->shapes[b_idx];
+  if (a->kind != TYPE_SHAPE_PROC || b->kind != TYPE_SHAPE_PROC) return false;
+  if (a->u.proc.param_count != b->u.proc.param_count) return false;
+  if (a->u.proc.return_idx != b->u.proc.return_idx) return false;
+  for (uint16_t k = 0; k < a->u.proc.param_count; k++) {
+    if (reg->proc_param_pool[a->u.proc.params_off + k] !=
+        reg->proc_param_pool[b->u.proc.params_off + k]) return false;
   }
   return true;
 }

@@ -226,8 +226,7 @@ pulling on them; revisit when one shows up.
   (key carried for maps), on the same footing as the `[Vec T]` return. Still
   `dyn` / unsupported (now a SHORT list — see `TYPED_CLOSURES_DESIGN.md`
   §"Remaining work" for the authoritative version): a closure with NO `[Proc …]`
-  annotation; a non-literal closure-returning tail (re-check); unification
-  cleanup 2c/2d (low value).
+  annotation; unification cleanup 2c/2d (internal tidiness, low value).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level

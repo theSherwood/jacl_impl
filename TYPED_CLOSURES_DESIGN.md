@@ -15,9 +15,18 @@ implementation plan and per-phase blocks have been trimmed (git history).
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
 > `[Proc …]` work end-to-end (item 4). The open items, in rough priority:
-> 1. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
-> 2. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
+> 1. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
 >    (low value, entangled with the `syntax.c` NULL-registry paths).
+> **DONE 2026-06-12 — Non-literal closure-returning tail, compound conformance**
+> (was item 1 / item 3 "re-check"): the verbatim-return conformance
+> (`typer__proc_shapes_conform`) only compared a STRUCT param's idx, so a
+> compound-param mismatch in the returned closure's signature leaked through
+> (`[Vec i32]` vs `[Vec i64]`, `[Map i32 V]` vs `[Map i64 V]`, a nested `[Proc …]`
+> mismatch — all silently accepted). Rewritten to compare the shapes' portable
+> param-pool entries + return idx directly (the shared registry dedups every
+> nested shape, so this is exact invariant conformance covering vec/arr element,
+> map key+value, and nested-proc signatures). Tests:
+> `typed_closure_return_verbatim_compound` (+ `_compound_err`).
 > **DONE 2026-06-12 — Def-binding a compound-RETURNING closure** (was item 1):
 > `def [Proc [..] [Vec/Map/Arr ..]] f $proc` then `[vec-get [f …] 0]` /
 > `[map-get [f …] k]` no longer segfaults. Root cause: the typer's def-binding
@@ -144,7 +153,13 @@ ret>`). Verified-remaining gaps:
    shape (so it conforms); lenient when the tail has no known shape. An inherited
    untyped closure binding now also carries its proc-shape idx so a `$g` read
    keeps the signature for this check. Tests:
-   `typed_closure_return_verbatim.jacl` (+ `_err`).
+   `typed_closure_return_verbatim.jacl` (+ `_err`). **Compound-param conformance
+   in the verbatim return (2026-06-12):** `typer__proc_shapes_conform` now
+   compares the shapes' portable param-pool entries + return idx directly
+   (registry dedup makes this exact invariant conformance), so a vec/arr-element,
+   map-key/value, or nested-`[Proc …]` mismatch in the returned closure's
+   signature is rejected — previously only a struct param's idx was checked.
+   Tests: `typed_closure_return_verbatim_compound` (+ `_compound_err`).
 
 4. **Nested compounds inside `[Proc …]`** — was "by design unsupported" because
    nested-compound shape idxs weren't portable across the typer/compiler
