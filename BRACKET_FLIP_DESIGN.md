@@ -165,6 +165,11 @@ Done (branch `claude/flip-bracket-mode`):
   `[Proc …]` monomorphization — a single-statement `[do [proc …]]` still
   monomorphizes the tail). Finally delete the dead `AST_BLOCK` compile/infer
   cases and the now-dead `as_type_command` peels.
+  - **Entanglement:** `AST_BLOCK` is *also* the representation for destructure
+    patterns (`{a,b,c}`/`[a,b,c]` -> `AST_BLOCK`; `compiler.c:2006/2084/2213`),
+    so full retirement must convert bodies AND the destructure-pattern shape
+    in the same pass — not body-only. (The sequence/scope unification, done,
+    is the safe prerequisite.)
 
 Pending (other):
 - 2 multi-line `.jacl` statement brackets; `destructure_spread_all` `{..}`.
