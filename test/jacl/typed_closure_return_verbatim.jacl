@@ -1,0 +1,31 @@
+# expect: 10
+# expect: 6
+# expect: 21
+# expect: 10
+# A proc declaring a [Proc …] return type may return a closure VALUE verbatim —
+# a param, a named proc, or a closure binding — and the returned closure is now
+# conformance-checked against the declared return signature (see the _err
+# companion for the mismatch case). An inline-literal tail is monomorphized to
+# the declared shape (the pre-existing path) and also conforms.
+struct Point {i32 x, i32 y}
+proc dbl    {i32 x} i32 { [* $x 2] }
+proc getx   {Point p} i32 { $p->x }
+proc apply  {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc applyp {[Proc [Point] i32] f, Point p} i32 { [f $p] }
+
+# Return a closure PARAM verbatim (declared return conforms).
+proc pick  {[Proc [i32] i32] f} [Proc [i32] i32] { $f }
+# Return a NAMED proc verbatim.
+proc getf  {} [Proc [i32] i32] { $dbl }
+# Return a struct-signature closure param verbatim.
+proc pickp {[Proc [Point] i32] f} [Proc [Point] i32] { $f }
+# Return an inline literal (monomorphized to the declared shape).
+proc mk    {} [Proc [i32] i32] { proc {i32 x} i32 { [* $x 3] } }
+
+proc main {} {
+  print [apply [pick $dbl] 5]                        # 10
+  print [applyp [pickp $getx] [Point x 6 y 9]]       # 6
+  print [apply [mk] 7]                               # 21
+  print [apply [getf] 5]                             # 10
+}
+main

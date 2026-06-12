@@ -2046,6 +2046,16 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     }
   }
 
+  /* Closure binding inherited from an untyped RHS: carry the proc-shape idx so a
+   * var-ref read (`$g`) keeps the signature — needed for the typer-side return
+   * and reassignment conformance checks (passing to a sink already works via the
+   * compiler local). Mirrors how a typed closure PARAM carries its shape. */
+  if (effective == TYPE_CLOSURE && declared_type == TYPE_DYN &&
+      struct_idx == UINT32_MAX &&
+      value_node->inferred_struct_idx != UINT32_MAX) {
+    struct_idx = value_node->inferred_struct_idx;
+  }
+
   typer__scope_add(tc, name_node->data.lit_string.value,
                    name_node->data.lit_string.length,
                    name_node->scope_mark,
@@ -2843,9 +2853,29 @@ static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
 /* Proc definition introduces a new isolated scope for params + body.
  * Adds typed params (parsed via typer__parse_params) into scope so
  * var-refs inside the body resolve correctly. Also registers the proc
- * in the global registry so subsequent calls in the same compilation
- * unit can resolve its signature (handles nested-proc case where the
- * top-level pre-pass missed it). */
+/* True iff two TYPE_SHAPE_PROC shapes are structurally identical — same arity,
+ * each param type + struct-idx, return type + struct-idx (invariant conformance
+ * for closure-value sinks). Returns false (not comparable) if either idx is
+ * UINT32_MAX or doesn't decode; the caller treats that as lenient/skip. */
+static bool typer__proc_shapes_conform(TyperCtx* tc, uint32_t a_idx,
+                                       uint32_t b_idx) {
+  if (a_idx == UINT32_MAX || b_idx == UINT32_MAX) return false;
+  if (a_idx == b_idx) return true;  /* interned dedup: same idx ⇒ same shape */
+  uint8_t apc, art, bpc, brt;
+  uint8_t apts[TYPER_MAX_PROC_PARAMS], bpts[TYPER_MAX_PROC_PARAMS];
+  uint32_t apsi[TYPER_MAX_PROC_PARAMS], arsi;
+  uint32_t bpsi[TYPER_MAX_PROC_PARAMS], brsi;
+  if (!typer__decode_proc_shape_ex(tc, a_idx, &apc, apts, &art, apsi, &arsi) ||
+      !typer__decode_proc_shape_ex(tc, b_idx, &bpc, bpts, &brt, bpsi, &brsi))
+    return false;
+  if (apc != bpc || art != brt || arsi != brsi) return false;
+  for (uint8_t k = 0; k < apc && k < TYPER_MAX_PROC_PARAMS; k++) {
+    if (apts[k] != bpts[k]) return false;
+    if (apts[k] == (uint8_t)TYPE_STRUCT && apsi[k] != bpsi[k]) return false;
+  }
+  return true;
+}
+
 static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
@@ -2992,6 +3022,24 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
           name_node->data.lit_string.value,
           name_node->data.lit_string.length,
           return_type, body_t);
+      typer__error(tc, name_node->start.line, name_node->start.column, err);
+    } else if (return_type == TYPE_CLOSURE && body_t == TYPE_CLOSURE &&
+               return_struct_idx != UINT32_MAX && tail_value &&
+               tail_value->inferred_struct_idx != UINT32_MAX &&
+               !typer__proc_shapes_conform(tc, return_struct_idx,
+                                           tail_value->inferred_struct_idx)) {
+      /* A [Proc …]-returning proc whose tail returns a closure VALUE verbatim
+       * (a param `$f`, a named proc `$dbl`, or a closure binding `$g`) must have
+       * that closure conform to the declared return signature. An inline-literal
+       * tail is already monomorphized to the declared shape above (so its idx
+       * matches); only a non-literal verbatim closure reaches here. Lenient when
+       * the tail has no known shape (a bare-dyn closure). */
+      char err[208];
+      snprintf(err, sizeof(err),
+          "type error: proc %.*s declared a [Proc …] return type, but the tail "
+          "returns a closure of a different signature",
+          (int)name_node->data.lit_string.length,
+          name_node->data.lit_string.value);
       typer__error(tc, name_node->start.line, name_node->start.column, err);
     }
   }
