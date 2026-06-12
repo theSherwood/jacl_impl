@@ -597,7 +597,9 @@ AstNode* parser__parse_expr(Parser* p) {
 
   switch (tok->type) {
     case TOKEN_LBRACKET:
-      result = parser__parse_command(p);
+      /* `[…]` is now a command-mode block (the prefix-expression mode was
+       * retired). parse_block auto-detects the `]` delimiter. */
+      result = parser__parse_block(p);
       break;
 
     case TOKEN_LPAREN: {
@@ -2542,14 +2544,24 @@ AstNode* parser__parse_cmd_expr(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 AstNode* parser__parse_block(Parser* p) {
-  Token* open = parser__advance(p); /* consume '{' */
+  /* Auto-detect the delimiter from the open token: `{`…`}` or `[`…`]`.
+   * This lets every block-consuming caller (proc bodies, if/while/for
+   * branches, value expressions) accept either delimiter, which is how the
+   * `[]` command-mode flip works — `[` routes here from parse_expr. */
+  Token* open = parser__peek(p);
+  TokenType close_type = (open->type == TOKEN_LBRACKET)
+                         ? TOKEN_RBRACKET : TOKEN_RBRACE;
+  const char* close_msg = (close_type == TOKEN_RBRACKET)
+                          ? "expected ']' to close block"
+                          : "expected '}' to close block";
+  parser__advance(p); /* consume open delimiter */
   SourcePos block_start = parser__token_start(open);
 
   NodeArray commands;
   parser__arr_init(&commands, p->arena);
 
   bool trailing_semi = false;
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+  while (!parser__at_end(p) && parser__peek(p)->type != close_type) {
     /* Skip newlines, semicolons, commas, and pragmas between commands */
     bool saw_semi = false;
     while (parser__peek(p)->type == TOKEN_NEWLINE ||
@@ -2560,7 +2572,7 @@ AstNode* parser__parse_block(Parser* p) {
         saw_semi = true;
       parser__advance(p);
     }
-    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) {
+    if (parser__at_end(p) || parser__peek(p)->type == close_type) {
       trailing_semi = saw_semi;
       break;
     }
@@ -2574,13 +2586,13 @@ AstNode* parser__parse_block(Parser* p) {
     }
   }
 
-  /* Expect closing brace */
-  if (parser__peek(p)->type != TOKEN_RBRACE) {
-    AstNode* err = parser__error(p, "expected '}' to close block", open);
+  /* Expect closing delimiter */
+  if (parser__peek(p)->type != close_type) {
+    AstNode* err = parser__error(p, close_msg, open);
     err->end = parser__token_end(parser__peek(p));
     return err;
   }
-  Token* close = parser__advance(p); /* consume '}' */
+  Token* close = parser__advance(p); /* consume close delimiter */
 
   /* Build AST_BLOCK node */
   AstNode* node = ast_alloc(p->arena);
