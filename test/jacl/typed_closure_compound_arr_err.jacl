@@ -1,0 +1,8 @@
+# expect-error: not a closure conforming to the [Proc …]
+proc suma32 {[Arr i32] a} i64 { 0 }
+proc hof {[Proc [[Arr i64]] i64] f, [Arr i64] a} i64 { [f $a] }
+proc main {} {
+  def [Arr i64] a [[Arr i64] 3 4]
+  print [hof $suma32 $a]
+}
+main

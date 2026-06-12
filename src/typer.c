@@ -650,6 +650,9 @@ static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
       case TYPE_SHAPE_TYPED_VEC:
         if (out_inner_value_idx) *out_inner_value_idx = shape->u.tvec.elem_idx;
         return TYPE_TYPED_VEC;
+      case TYPE_SHAPE_TYPED_ARR:
+        if (out_inner_value_idx) *out_inner_value_idx = shape->u.tarr.elem_idx;
+        return TYPE_TYPED_ARR;
       case TYPE_SHAPE_TYPED_MAP:
         if (out_inner_value_idx) *out_inner_value_idx = shape->u.tmap.value_idx;
         if (out_inner_key_idx)   *out_inner_key_idx   = shape->u.tmap.key_idx;
@@ -731,6 +734,8 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
   }
   if (hl == 3 && memcmp(hn, "Vec", 3) == 0 && ac == 1)
     return type_shape_intern_typed_vec(tc->shared_reg, inner[0]);
+  if (hl == 3 && memcmp(hn, "Arr", 3) == 0 && ac == 1)
+    return type_shape_intern_typed_arr(tc->shared_reg, inner[0]);
   /* One-arg [Map V] removed — dyn keys are spelled [Map dyn V]. A dyn
    * key keyword normalizes to the UINT32_MAX dyn-key convention (the
    * VM's 0xFFFF) rather than the scalar-dyn sentinel. */
@@ -3469,6 +3474,8 @@ static uint32_t typer__encode_proc_slot(TyperCtx* tc, JaclType t, uint32_t idx) 
   if (t == TYPE_STRUCT)    return (idx != UINT32_MAX) ? idx : UINT32_MAX;
   if (t == TYPE_TYPED_VEC && idx != UINT32_MAX)
     return type_shape_intern_typed_vec(tc->shared_reg, idx);
+  if (t == TYPE_TYPED_ARR && idx != UINT32_MAX)
+    return type_shape_intern_typed_arr(tc->shared_reg, idx);
   if (t == TYPE_CLOSURE)   return (idx != UINT32_MAX) ? idx : UINT32_MAX;
   if (typer__proc_shape_portable_scalar(t)) return JACL_SCALAR_TYPE_IDX(t);
   return UINT32_MAX;

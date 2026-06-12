@@ -261,6 +261,9 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
     case TYPE_SHAPE_TYPED_VEC:
       if (out_inner_idx) *out_inner_idx = shape->u.tvec.elem_idx;
       return TYPE_TYPED_VEC;
+    case TYPE_SHAPE_TYPED_ARR:
+      if (out_inner_idx) *out_inner_idx = shape->u.tarr.elem_idx;
+      return TYPE_TYPED_ARR;
     case TYPE_SHAPE_TYPED_MAP:
       /* V via out_inner_idx; K is reachable via shape->u.tmap.key_idx
        * for callers that need it. */
@@ -4500,6 +4503,8 @@ static uint32_t compiler__nested_elem_shape(Compiler* c, AstNode* en) {
   }
   if (hl == 3 && memcmp(hn, "Vec", 3) == 0 && ac == 1)
     return type_shape_intern_typed_vec(reg, inner[0]);
+  if (hl == 3 && memcmp(hn, "Arr", 3) == 0 && ac == 1)
+    return type_shape_intern_typed_arr(reg, inner[0]);
   if (hl == 3 && memcmp(hn, "Map", 3) == 0 && ac == 2) {
     uint32_t kidx = (inner[0] == JACL_SCALAR_TYPE_IDX(TYPE_DYN)) ? UINT32_MAX : inner[0];
     return type_shape_intern_typed_map(reg, kidx, inner[1]);
