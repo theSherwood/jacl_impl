@@ -1,0 +1,124 @@
+# Bracket Flip — `[]` Command-Mode Migration
+
+Tracks the migration that makes `[]` the single command/expression delimiter
+(was the prefix-expression delimiter; `{}` was command mode). This is the
+authoritative spec for what `[]` means in every position.
+
+## Core model
+
+- **A line that does not start with `[` is a command application** (Tcl-style):
+  `print 7` = apply `print` to `(7)`. The first element is the head.
+- **`[...]` in value position is an application that yields a value**:
+  `[+ 1 2]` = apply `+` to `(1,2)` = `3`. The first element is the head, the
+  rest are arguments.
+- **There is no separate `AST_BLOCK` node.** A sequence is the `do` form,
+  `[do s0 s1 ...]` — an ordinary command. (See "The `do` form".)
+- **`[]` is fundamentally a list; its interpretation is decided by position**
+  (value / type / binding / body), exactly like `()` in Lisp. We are *not*
+  pure-Lisp, though: separators carry meaning and binding positions parse
+  their own item lists (see "Separators").
+
+## Separators inside `[]`
+
+| Separator | Meaning |
+|---|---|
+| space | arguments of an application — `[f a b]` = apply `f` to `(a,b)` |
+| comma `,` | item separator. In **binding** position → list items (params, fields, destructure names). In **value** position → statement separator (→ `do`). |
+| `;` / newline | statement separator (→ `do`) |
+
+So `[i64 x, f64 y]` (binding) is a list of two items, each a space-group
+(`i64 x`); `[a; b]` (value) is `[do a b]`.
+
+## `[]` by position
+
+### 1. Value / expression — `[]` is an **application**
+
+| Use | Example | Sep | Result |
+|---|---|---|---|
+| Call | `[f a b]`, `[+ 1 2]`, `[$f x]` | space | apply `f` to args |
+| Zero-arg call | `[f]`, `[$f]` | — | apply to `()` → call (words **and vars**) |
+| Literal | `[5]`, `["s"]` | — | the value (literals are **not** called) |
+| Sequence | `[a; b]`, multi-line | `;`/nl | `[do a b]` |
+| Empty | `[]` | — | nil (an empty `[do]`) |
+| Populated constructor | `[[Vec T] e0 e1]` | space | construct `Vec T` with elements |
+| Empty constructor | `[[Vec T]]` | — | apply the type to `()` → **empty** `Vec T` |
+
+### 2. Type — `[]` is a **type**
+
+| Use | Example |
+|---|---|
+| Compound | `[Vec T]`, `[Map K V]`, `[Arr T]`, `[Box T]`, `[Ptr T]`, `[Future T]`, `[Stream T]` |
+| Sized buffer | `[Buf N T]` |
+| Proc type | `[Proc [i64, f64] R]` — outer space, **comma** in the param-type list |
+
+### 3. Binding / structural — `[]` is a **comma-list of items** (not an application)
+
+Each parsed by a dedicated, position-aware parser; the `do` lowering does
+**not** apply here.
+
+| Use | Example |
+|---|---|
+| Param list | `[x, y]`, `[i64 x, f64 y]` |
+| Positional destructure | `[a, b, c]`, `[h, ..t]` |
+| Named (struct) destructure | `[x, y]` |
+| Struct fields | `struct P [i32 x, i32 y]` |
+| `use` imports | `use [a, b]` |
+
+### 4. Body / block — `[]` is a **sequence** (lowers to `do`)
+
+`proc f [x] [body]`, `if c [body]`, `while c [body]`, `else [body]`,
+`for $coll x [body]`.
+
+## Key decisions
+
+1. **`[Vec T]` ≠ `[[Vec T]]`.** `[Vec T]` is a *parameterized type* and is only
+   valid in type position — **there is no bare-type-as-value**. `[[Vec T]]` is a
+   *form with `[Vec T]` as the head*, i.e. it constructs an **empty** `[Vec T]`.
+   `[[Vec T] e0 e1]` constructs a populated one. None of these collapse: the
+   outer bracket is a real application of the type.
+2. **Comma is position-dependent:** statement separator (→ `do`) in value
+   position; item separator in binding position.
+3. **Named vs positional destructure** share the spelling `[a, b, c]` and are
+   disambiguated by the **RHS type** (vec → positional, struct → named), which
+   the typer already infers.
+4. **`{}` → `[]` everywhere**, including the last holdouts: struct fields
+   (`struct P [i32 x, i32 y]`) and `use` imports (`use [a, b]`).
+5. **`[$f]` calls** the closure in `$f`; the *value* of a var is the bare `$f`.
+   Migration: any `[$x]` that meant "the value of x" becomes `$x`.
+6. **`[5]` / `["s"]`** (a bare literal head) returns the value — literals are not
+   called.
+7. **`[]`** is nil (an empty `[do]`).
+8. **`match`** is out of scope (not supported yet).
+
+## The `do` form
+
+`[do s0 s1 ...]` is the single sequence/scope primitive (replaces `AST_BLOCK`):
+opens a scope, runs each statement, value = the last element. An empty `[do]`
+is nil. A **trailing separator** materializes a trailing `nil` element, so
+"value = last element" needs no `trailing_semi` flag:
+`[a b; c d;]` → `[do [a b] [c d] nil]` → nil. `do` is user-callable.
+
+`HeadId` is `HEAD_DO`; compiled by `compiler__compile_seq`, typed by the
+`HEAD_DO` case in `typer__infer_command_inner`.
+
+## Migration status
+
+Done (branch `claude/flip-bracket-mode`):
+- Stage A/B operator-as-value, type-driven & juxtaposition positional (on `main`).
+- `[do]` form added (additive).
+- Value-position `[...]` lowers to bare-command / `[do ...]` / nil.
+  Type-confusion segfaults (`def [Vec T]`, `def [Map K V]`,
+  `typed_closure_compound_map`) resolved at the source.
+
+Pending (one coordinated parser + corpus change):
+- **Parser:** value `[...]` builds the application directly (head = first
+  element, args = rest; zero-arg wrap for callable heads word/var/bracket;
+  literal → value; `;`/`,`/nl → `[do]`; empty → nil). Statement parser routes a
+  leading-`[` line through `parse_expr` (one application) and a leading-word
+  line as a bare command — eliminating the statement/value double-apply.
+- **Corpus:** debrace ~189 `[word ...]` statement lines → `word ...`; rewrite
+  the few `[$x]` value-groupings → `$x`. Lands together with the parser change.
+- Then: `[[Vec T]]` empty-constructor support; compound `[Proc ...]` param/return
+  inference; bodies → `do` and retire `AST_BLOCK`; delete dead peels /
+  collapse remnants / `compile_block_expr` scope-hack.
+- `{}` → `[]` for struct fields and `use`.
