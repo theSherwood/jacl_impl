@@ -85,6 +85,18 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
    (`struct P [i32 x, i32 y]`) and `use` imports (`use [a, b]`).
 5. **`[$f]` calls** the closure in `$f`; the *value* of a var is the bare `$f`.
    Migration: any `[$x]` that meant "the value of x" becomes `$x`.
+   - **A bare `$x` statement is a *value*** (substitution), not a call — *for
+     now*. NOTE: this may change; a stricter "every statement line is a command
+     application" reading would make a bare `$x` line a call. Revisit before
+     finalizing.
+   - **Implementation consequence:** the zero-arg "apply a callable head"
+     wrap (so `[$f]` calls, `[[Vec T]]` constructs) must fire **only inside a
+     value-position bracket**, *not* when parsing a statement/body. A leading
+     word at statement position is still a command (`foo` → call `foo`); a
+     leading `$var` or `[...]` at statement position is a value. So the parse
+     needs a value-position vs statement-position distinction (e.g. a flag
+     threaded into the operand parser), since `[$x]` as an *argument* is a call
+     but `[$x]` as a *body* (its single statement `$x`) is the value of x.
 6. **`[5]` / `["s"]`** (a bare literal head) returns the value — literals are not
    called.
 7. **`[]`** is nil (an empty `[do]`).
@@ -110,14 +122,22 @@ Done (branch `claude/flip-bracket-mode`):
   Type-confusion segfaults (`def [Vec T]`, `def [Map K V]`,
   `typed_closure_compound_map`) resolved at the source.
 
-Pending (one coordinated parser + corpus change):
-- **Parser:** value `[...]` builds the application directly (head = first
-  element, args = rest; zero-arg wrap for callable heads word/var/bracket;
-  literal → value; `;`/`,`/nl → `[do]`; empty → nil). Statement parser routes a
-  leading-`[` line through `parse_expr` (one application) and a leading-word
-  line as a bare command — eliminating the statement/value double-apply.
-- **Corpus:** debrace ~189 `[word ...]` statement lines → `word ...`; rewrite
-  the few `[$x]` value-groupings → `$x`. Lands together with the parser change.
+- Corpus **debraced**: ~197 single-line command statements (word/var/operator
+  headed) → bare `cmd ...` across the `.jacl` files. Behavior-preserving
+  against the current parser (jacl_harness stays 20); pre-positions the corpus
+  so the strict-application wrap has no lone-bracket *statements* to
+  double-apply.
+
+Pending:
+- **Parser (strict-application wrap):** value-position `[...]` applies its head
+  (zero-arg wrap for callable heads: word/var/bracket; literal → value;
+  `;`/`,`/nl → `[do]`; empty → nil). The wrap must be **value-position only**
+  (see decision 5) — thread a value-vs-statement flag into the operand parser.
+  This makes `[$f]` call and `[[Vec T]]` construct without collapsing, while a
+  bare `$x` statement stays a value.
+- **Remaining debrace:** 2 multi-line `.jacl` statement brackets; the
+  C-embedded jacl strings in `test/*.c` (those groups already fail / need
+  rewrite for the flip).
 - Then: `[[Vec T]]` empty-constructor support; compound `[Proc ...]` param/return
   inference; bodies → `do` and retire `AST_BLOCK`; delete dead peels /
   collapse remnants / `compile_block_expr` scope-hack.
