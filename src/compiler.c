@@ -4282,16 +4282,19 @@ static bool compiler__emit_buf_init_walk(
     Compiler* c, StructTypeRegistry* reg, AstNode* ctor,
     uint32_t elem_enc, uint32_t n, uint32_t byte_base,
     uint8_t base_slot, uint32_t depth, BufInitPos* pos, uint16_t line) {
+  /* [] flip: each nested `[[Buf M T] …]` init arg and its `[Buf M T]` head are
+   * singleton blocks — peel both to their inner commands. */
+  ctor = compiler__as_type_command(ctor);
   if (!ctor || ctor->type != AST_COMMAND ||
       !ctor->data.command.head ||
-      ctor->data.command.head->type != AST_COMMAND) {
+      compiler__as_type_command(ctor->data.command.head)->type != AST_COMMAND) {
     compiler__error(c, ctor ? ctor->start.line : line,
                     ctor ? ctor->start.column : 0,
                     "nested buf literal init: expected [[Buf N ...] ...] "
                     "constructor");
     return false;
   }
-  AstNode* ctor_head = ctor->data.command.head;
+  AstNode* ctor_head = compiler__as_type_command(ctor->data.command.head);
   AstNode* head_name = ctor_head->data.command.head;
   if (!head_name || head_name->type != AST_LIT_STRING ||
       head_name->data.lit_string.length != 3 ||
@@ -7431,7 +7434,10 @@ static bool compiler__emit_zero_struct(Compiler* c, uint32_t struct_idx,
 /* --- Internal: Compile a command invocation --- */
 
 void compiler__compile_command(Compiler* c, AstNode* node) {
-  AstNode* head = node->data.command.head;
+  /* [] flip: a bracket-headed constructor `[[Vec T] …]` / `[[Buf N T] …]` has
+   * a singleton-block head — peel it so the typed-collection / buf constructor
+   * codegen (which requires an AST_COMMAND head) fires. No-op for string heads. */
+  AstNode* head = compiler__as_type_command(node->data.command.head);
   HeadId   hid  = (HeadId)node->data.command.head_id;
   uint32_t argc = node->data.command.arg_count;
   AstNode** args = node->data.command.args;
@@ -9411,6 +9417,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* def builtin — supports [def name value] and [def TYPE name value]
      and [def [a b c] value] for vector destructuring */
   if (hid == HEAD_DEF) {
+    /* [] flip: a type/name/pattern slot ([Vec T], [Buf N T], …) parses as a
+     * singleton block — peel args[0]/args[1] so the recognition branches below
+     * see the inner command. compiler__as_type_command is a no-op for
+     * non-singleton-block nodes, so bare names and multi-statement values are
+     * untouched (the value slot args[2] is deliberately left alone). */
+    AstNode* def_peeled[3];
+    if (argc >= 1 && argc <= 3) {
+      for (uint32_t i = 0; i < argc; i++)
+        def_peeled[i] = (i < 2) ? compiler__as_type_command(args[i]) : args[i];
+      args = def_peeled;
+    }
     /* --- Destructuring: [def [a b c] value] or [def DESTRUCTURE_VEC value] --- */
     if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
       compiler__compile_destructure_vec(
@@ -9465,7 +9482,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         args[0]->data.command.arg_count == 2) {
       AstNode* tn   = args[0];
       AstNode* nlen = tn->data.command.args[0];
-      AstNode* telt = tn->data.command.args[1];
+      /* [] flip: a compound element type ([Buf M T], …) is a singleton block. */
+      AstNode* telt = compiler__as_type_command(tn->data.command.args[1]);
       if (nlen->type != AST_LIT_INT || nlen->data.lit_int.value <= 0) {
         compiler__error(c, line, col,
                         "[Buf N T] length must be a positive integer literal");
@@ -9502,7 +9520,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          * as a chain in HEAD_DOT that emits
          * OP_BUF_GET_STRUCT_LOCAL with flat index i*M+j (M4.2.2). */
         AstNode* inner_mlen = telt->data.command.args[0];
-        AstNode* inner_telt = telt->data.command.args[1];
+        AstNode* inner_telt = compiler__as_type_command(telt->data.command.args[1]);
         if (inner_mlen->type != AST_LIT_INT || inner_mlen->data.lit_int.value <= 0) {
           compiler__error(c, line, col,
                           "[Buf N [Buf M T]] inner length must be a positive integer literal");
@@ -9933,25 +9951,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t init_count = 0;
       AstNode** init_vals = NULL;
       if (argc == 3) {
-        AstNode* rhs = args[2];
-        bool rhs_ok = rhs->type == AST_COMMAND &&
-                      rhs->data.command.head &&
-                      rhs->data.command.head->type == AST_COMMAND &&
-                      rhs->data.command.head->data.command.head &&
-                      rhs->data.command.head->data.command.head->type == AST_LIT_STRING &&
-                      rhs->data.command.head->data.command.head->data.lit_string.length == 3 &&
-                      memcmp(rhs->data.command.head->data.command.head->data.lit_string.value,
+        /* [] flip: the RHS `[[Buf N T] v0 …]` and its inner `[Buf N T]` head
+         * parse as singleton blocks — peel both to their inner commands. */
+        AstNode* rhs = compiler__as_type_command(args[2]);
+        AstNode* rhs_tn = (rhs->type == AST_COMMAND && rhs->data.command.head)
+                          ? compiler__as_type_command(rhs->data.command.head)
+                          : NULL;
+        bool rhs_ok = rhs->type == AST_COMMAND && rhs_tn &&
+                      rhs_tn->type == AST_COMMAND &&
+                      rhs_tn->data.command.head &&
+                      rhs_tn->data.command.head->type == AST_LIT_STRING &&
+                      rhs_tn->data.command.head->data.lit_string.length == 3 &&
+                      memcmp(rhs_tn->data.command.head->data.lit_string.value,
                              "Buf", 3) == 0 &&
-                      rhs->data.command.head->data.command.arg_count == 2;
+                      rhs_tn->data.command.arg_count == 2;
         if (!rhs_ok) {
           compiler__error(c, line, col,
               "def [Buf N T]: RHS must be omitted (zero-init) or "
               "[[Buf N T] v0 v1 ...] literal");
           return;
         }
-        AstNode* rhs_tn   = rhs->data.command.head;
         AstNode* rhs_nlen = rhs_tn->data.command.args[0];
-        AstNode* rhs_telt = rhs_tn->data.command.args[1];
+        AstNode* rhs_telt = compiler__as_type_command(rhs_tn->data.command.args[1]);
         if (rhs_nlen->type != AST_LIT_INT ||
             (uint32_t)rhs_nlen->data.lit_int.value != n) {
           compiler__error(c, line, col,
@@ -9974,7 +9995,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             return;
           }
           AstNode* rhs_inner_mlen = rhs_telt->data.command.args[0];
-          AstNode* rhs_inner_telt = rhs_telt->data.command.args[1];
+          AstNode* rhs_inner_telt = compiler__as_type_command(rhs_telt->data.command.args[1]);
           if (rhs_inner_mlen->type != AST_LIT_INT ||
               (uint32_t)rhs_inner_mlen->data.lit_int.value != inner_buf_len) {
             compiler__error(c, line, col,
@@ -10454,8 +10475,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t coll_proc_elem_shape = UINT32_MAX;
 
     if (argc == 3) {
-      /* Typed def: [def TYPE name value] */
-      if (args[0]->type == AST_COMMAND) {
+      /* Typed def: [def TYPE name value]. The type slot `[Vec T]` parses as a
+       * singleton block under the [] flip — peel it to the inner command. */
+      AstNode* type_slot = compiler__as_type_command(args[0]);
+      if (type_slot->type == AST_COMMAND) {
         /* Compound type annotation: [Vec T], [Map T], [Map K V], [Future T].
          * The typer is the source of truth for these — it narrows
          * the binding's static type from inferred_type and tracks
@@ -10464,7 +10487,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          * effective type (e.g., TYPE_FUTURE from spawn, TYPE_TYPED_VEC
          * from a typed-vec ctor). Recognized so the user can document
          * the intent in source even though codegen doesn't change. */
-        AstNode* tn = args[0];
+        AstNode* tn = type_slot;
         if (tn->data.command.head &&
             tn->data.command.head->type == AST_LIT_STRING) {
           const char* hn = tn->data.command.head->data.lit_string.value;

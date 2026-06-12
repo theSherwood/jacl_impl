@@ -609,13 +609,11 @@ AstNode* parser__parse_expr(Parser* p) {
        * `[a b c]`, and bindings `[def x 1]` keep their non-block semantics —
        * no extra scope, recognizable by the type/destructure machinery.
        * Multi-statement brackets stay a block. */
-      AstNode* blk = parser__parse_block(p);
-      if (blk && blk->type == AST_BLOCK && blk->data.block.count == 1 &&
-          !blk->data.block.trailing_semi) {
-        result = blk->data.block.commands[0];
-      } else {
-        result = blk;
-      }
+      /* `[…]` parses in command mode. A value-position bracket stays a block;
+       * type/constructor recognizers peel a singleton block one level via
+       * compiler__as_type_command / typer__as_type_command where needed (this
+       * keeps `[X]` and `[[X]]` distinct, unlike the old value collapse). */
+      result = parser__parse_block(p);
       break;
     }
 

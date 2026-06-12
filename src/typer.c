@@ -288,6 +288,15 @@ static bool typer__is_typed_collection_scalar(JaclType t) {
          t == TYPE_F32 || t == TYPE_F64;
 }
 
+/* Mirror of compiler__as_type_command: a `[Vec T]`-style type form parses as a
+ * singleton AST_BLOCK under the [] flip; peel it to the inner command so the
+ * type recognizers below see an AST_COMMAND either way. */
+static AstNode* typer__as_type_command(AstNode* n) {
+  if (n && n->type == AST_BLOCK && n->data.block.count == 1)
+    return n->data.block.commands[0];
+  return n;
+}
+
 /* Recognize [Future T] type-annotation expressions. Returns true and
  * writes *out_struct_idx with the element type encoding (scalar
  * sentinel for type keywords, real struct idx for struct names) when
@@ -299,7 +308,9 @@ static bool typer__is_typed_collection_scalar(JaclType t) {
 static bool typer__future_type(TyperCtx* tc, AstNode* node,
                                uint32_t* out_struct_idx) {
   *out_struct_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 6 ||
       memcmp(h->data.lit_string.value, "Future", 6) != 0) return false;
@@ -333,7 +344,9 @@ static bool typer__future_type(TyperCtx* tc, AstNode* node,
 static bool typer__box_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_struct_idx) {
   *out_struct_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
       memcmp(h->data.lit_string.value, "Box", 3) != 0) return false;
@@ -365,7 +378,9 @@ static bool typer__box_type(TyperCtx* tc, AstNode* node,
 static bool typer__arr_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_elem_idx) {
   *out_elem_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
       memcmp(h->data.lit_string.value, "Arr", 3) != 0) return false;
@@ -399,7 +414,9 @@ static bool typer__arr_type(TyperCtx* tc, AstNode* node,
 static bool typer__stream_type(TyperCtx* tc, AstNode* node,
                                uint32_t* out_struct_idx) {
   *out_struct_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 6 ||
       memcmp(h->data.lit_string.value, "Stream", 6) != 0) return false;
@@ -503,7 +520,9 @@ static bool typer__proc_type(TyperCtx* tc, AstNode* node,
   *out_return_type = TYPE_DYN;  /* no declared return ⇒ dyn (see compiler mirror) */
   *out_return_struct_idx = UINT32_MAX;
   *out_supported = true;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 4 ||
       memcmp(h->data.lit_string.value, "Proc", 4) != 0) return false;
@@ -559,7 +578,9 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
 static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
                             uint32_t* out_struct_idx) {
   *out_struct_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
       memcmp(h->data.lit_string.value, "Ptr", 3) != 0) return false;
@@ -1052,13 +1073,18 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
   *out_len = 0;
   *out_inner_len = 0;
   if (out_typed_elem_idx) *out_typed_elem_idx = UINT32_MAX;
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
       memcmp(h->data.lit_string.value, "Buf", 3) != 0) return false;
   if (node->data.command.arg_count != 2) return true; /* shape error; caller reports */
   AstNode* n_arg = node->data.command.args[0];
-  AstNode* t_arg = node->data.command.args[1];
+  /* [] flip: a compound element type ([Buf M T], [Vec T], …) parses as a
+   * singleton block — peel it so the element-type branches below recognize it
+   * (no-op for scalar/struct name lit strings). */
+  AstNode* t_arg = typer__as_type_command(node->data.command.args[1]);
   if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0) {
     *out_len = (uint32_t)n_arg->data.lit_int.value;
   }
@@ -1248,7 +1274,9 @@ static bool typer__buf_type(TyperCtx* tc, AstNode* node,
  * surfaces that resolve type expressions call typer__map_v_form to emit
  * a targeted migration diagnostic. */
 static int typer__typed_collection_kind(AstNode* node) {
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return 0;
+  if (!node) return 0;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return 0;
   AstNode* h = node->data.command.head;
   if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3) return 0;
   int kind = 0;
@@ -1272,7 +1300,9 @@ static int typer__typed_collection_kind(AstNode* node) {
  * def annotation, params, return types) can emit the migration error
  * instead of a generic unknown-type diagnostic. */
 static bool typer__map_v_form(AstNode* node) {
-  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  if (!node) return false;
+  node = typer__as_type_command(node);
+  if (node->type != AST_COMMAND || !node->data.command.head) return false;
   AstNode* h = node->data.command.head;
   return h->type == AST_LIT_STRING && h->data.lit_string.length == 3 &&
          memcmp(h->data.lit_string.value, "Map", 3) == 0 &&
@@ -3881,7 +3911,10 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
 }
 
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
-  AstNode* head = node->data.command.head;
+  /* [] flip: a bracket-headed constructor `[[Vec T] …]` / `[[Buf N T] …]` has
+   * a singleton-block head — peel it so the type-constructor recognizers below
+   * (which require an AST_COMMAND head) fire. No-op for ordinary string heads. */
+  AstNode* head = typer__as_type_command(node->data.command.head);
 
   /* Recognize a few common command shapes. Compiler.c rewrites `::` →
    * set during its compile walk (compiler.c:5556); the typer runs
