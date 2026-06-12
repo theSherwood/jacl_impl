@@ -365,8 +365,8 @@ pulling on them; revisit when one shows up.
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)
   bindings.
-- **`for` over maps + the enumerator form — LANDED 2026-06 (phases a+b+dyn;
-  phase c pending).** One binding rule across all collections: the LAST name is
+- **`for` over maps + the enumerator form — LANDED 2026-06 (phases a+b+c+dyn).**
+  One binding rule across all collections: the LAST name is
   the value/element; an optional FIRST name is the *enumerator* — the `i32` index
   for vec/arr, the key `K` for maps. So `for $vec v` / `for $vec i v` is
   `enumerate`, `for $map v` / `for $map k v` is `values` / `items`. A single name
@@ -380,14 +380,16 @@ pulling on them; revisit when one shows up.
   `keys[i]`↔`vals[i]` by HAMT determinism; **runtime DYN dispatch** — a
   statically-dyn `$coll` is checked with `OP_IS_MAP` and iterated as a dyn map
   (replace __col with map-vals, stash map-keys) or a dyn vec, the enumerator
-  resolved per-iteration (key vs i32 index). Tests: `for_map`, `for_map_continue`,
-  `for_map_struct_err`, `for_dyn_dispatch`. **Open / deferred:** (c) the
-  STATICALLY-typed vec/arr two-name form (`for [Vec i64] i v` — expose the loop's
-  `__idx` under the enumerator name; dyn vecs already work via the dyn dispatch);
-  struct keys/values in a map for-loop (inline-slot binding — clean error today);
-  suspending map-loop bodies + the enumerator form in a suspending body (SM
-  lowering — clean error today); stream enumerate (`for $stream n v`); a lazy
-  HAMT-iterator lowering (avoids the two materialized vecs).
+  resolved per-iteration (key vs i32 index); (c) STATICALLY-typed vec/arr
+  two-name form — the enumerator binds the loop's `__idx` under the user's name
+  as `i32` (a separate per-iteration copy, so body writes don't perturb the
+  counter). Tests: `for_map`, `for_map_continue`, `for_map_struct_err`,
+  `for_dyn_dispatch`, `for_enumerate`, `for_stream_enum_err`. **Open / deferred
+  (clean errors today):** struct keys/values in a map for-loop (inline-slot
+  binding); suspending map-loop bodies + the enumerator form in a suspending body
+  (SM lowering); stream enumerate (`for $stream n v` — the pull carries no index;
+  a counter is the natural add); a lazy HAMT-iterator lowering (avoids the two
+  materialized vecs).
 - **Parameterized stream element type — for-loop narrowing & yield
   inference (Phase 2).** Annotation-driven typing landed 2026-05-19
   (`compiler__stream_type_expr`, `typer__stream_type`,

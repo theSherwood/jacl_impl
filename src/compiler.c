@@ -13126,6 +13126,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     if (col_type == TYPE_STREAM) {
+      /* Stream enumerate (`for $stream n v`) is a planned follow-up — the
+       * stream pull carries no index; a counter is the natural add. */
+      if (enum_name) {
+        compiler__error(c, line, col,
+            "the two-name enumerator form is not yet supported over a stream "
+            "(use a single binding, or enumerate after `collect`)");
+        return;
+      }
       /* ====== Stream-specific inlined for loop ======
          Hidden locals: __col (stream), elem
          Loop: STREAM_NEXT → check exhausted → bind → body → LOOP */
@@ -13436,6 +13444,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->locals[c->local_count - 1].type = arr_scalar_t;
       }
 
+      /* Two-name enumerator: bind the FIRST name to the i32 index (a separate
+       * local copied from __idx each iteration). */
+      int arr_enum_slot = -1;
+      if (enum_name) {
+        compiler__emit_constant(c, jacl_i32(0), line);
+        compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                            enum_name, enum_name_len), line, col);
+        c->locals[c->local_count - 1].type = TYPE_I32;
+        arr_enum_slot = (int)(c->local_count - 1);
+      }
+
       uint8_t arr_len_slot  = (uint8_t)(saved_local_count + 1);
       uint8_t arr_idx_slot  = (uint8_t)(saved_local_count + 2);
       uint8_t arr_elem_slot = (uint8_t)(saved_local_count + 3);
@@ -13492,6 +13511,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          * everything else. No boxing. */
         compiler__emit_byte(c, OP_SET_LOCAL, line);
         compiler__emit_byte(c, arr_elem_slot, line);
+        compiler__emit_byte(c, OP_POP, line);
+      }
+
+      /* Two-name: enumerator = current index. */
+      if (arr_enum_slot >= 0) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, arr_idx_slot, line);
+        compiler__emit_byte(c, OP_SET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)arr_enum_slot, line);
         compiler__emit_byte(c, OP_POP, line);
       }
 
@@ -13616,6 +13644,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].type = vec_scalar_t;
     }
 
+    /* Two-name enumerator: bind the FIRST name to the i32 index. A separate
+     * local copied from __idx each iteration (body writes to it don't perturb
+     * the loop counter). Added after the element local(s) so the existing
+     * elem_slot offsets are unchanged. */
+    int vec_enum_slot = -1;
+    if (enum_name) {
+      compiler__emit_constant(c, jacl_i32(0), line);
+      compiler__add_local(c, compiler__name_val(c->heap, c->intern_table,
+                          enum_name, enum_name_len), line, col);
+      c->locals[c->local_count - 1].type = TYPE_I32;
+      vec_enum_slot = (int)(c->local_count - 1);
+    }
+
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
     uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
     uint8_t elem_slot = (uint8_t)(saved_local_count + 3);
@@ -13699,6 +13740,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, elem_slot, line);
         compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
       }
+    }
+
+    /* Two-name: enumerator = current index. */
+    if (vec_enum_slot >= 0) {
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, idx_slot, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)vec_enum_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
     }
 
     /* Compile body statements inline */
