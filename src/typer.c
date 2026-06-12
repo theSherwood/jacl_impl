@@ -424,11 +424,31 @@ static bool typer__stream_type(TyperCtx* tc, AstNode* node,
  * a closure type but reported unsupported so the caller can error rather than
  * silently bind a rep-mismatched closure. Returns the JaclType; *out_idx is a
  * scalar sentinel (JACL_SCALAR_TYPE_IDX) and *out_supported reflects support. */
+/* fwd: a compound [Proc …] slot ([Vec T], [Map K V], nested [Proc …]) interns
+ * its shape (defined below); the decode maps a shape kind back to a JaclType. */
+static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en);
+static JaclType typer__buf_elem_decode(TyperCtx* tc, uint32_t encoded,
+                                       uint32_t* out_inner_value_idx,
+                                       uint32_t* out_inner_key_idx);
+
 static JaclType typer__proc_sig_elem(TyperCtx* tc, AstNode* n,
                                      uint32_t* out_idx, bool* out_supported) {
   *out_idx = UINT32_MAX;
   *out_supported = false;
-  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;  /* nested compound → B3 */
+  if (n && n->type == AST_COMMAND) {
+    /* A COMPOUND slot ([Vec T], [Map K V], nested [Proc …], …). Now that the
+     * typer interns into the shared registry (unification 2b), the nested shape
+     * idx is portable across passes, so a compound param/return is supported —
+     * intern it and carry the shape idx. UINT32_MAX ⇒ malformed → unsupported. */
+    uint32_t sh = typer__nested_elem_shape(tc, n);
+    if (sh != UINT32_MAX) {
+      *out_idx = sh;
+      *out_supported = true;
+      return typer__buf_elem_decode(tc, sh, NULL, NULL);
+    }
+    return TYPE_DYN;  /* malformed compound — unsupported */
+  }
+  if (!n || n->type != AST_LIT_STRING) return TYPE_DYN;
   const char* nm = n->data.lit_string.value;
   uint32_t    nl = n->data.lit_string.length;
   if (nl == 3 && memcmp(nm, "dyn", 3) == 0) {
@@ -2355,7 +2375,12 @@ static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
     } else if (pidx < tc->struct_count) {
       out_ptypes[k] = (uint8_t)TYPE_STRUCT; psi = pidx;
     } else {
-      out_ptypes[k] = (uint8_t)TYPE_DYN;  /* nested compound — unsupported */
+      /* Nested compound ([Vec T], [Map K V], nested [Proc …]): decode to its
+       * compound type and carry the SHAPE idx in the struct-idx slot (callers
+       * interpret it as a shape idx when the type is compound). Portable since
+       * unification 2b. */
+      out_ptypes[k] = (uint8_t)typer__buf_elem_decode(tc, pidx, NULL, NULL);
+      psi = pidx;
     }
     if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
@@ -2366,7 +2391,8 @@ static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
   } else if (rid < tc->struct_count) {
     *out_rtype = (uint8_t)TYPE_STRUCT; rsi = rid;
   } else {
-    *out_rtype = (uint8_t)TYPE_DYN;
+    *out_rtype = (uint8_t)typer__buf_elem_decode(tc, rid, NULL, NULL);
+    rsi = rid;
   }
   if (out_rstruct_idx) *out_rstruct_idx = rsi;
   return true;
@@ -2382,39 +2408,17 @@ static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
                                      out_rtype, NULL, NULL);
 }
 
-/* Step 2b: translate a TYPER-side proc-shape idx (in tc->shape_reg) into a
- * portable SHARED-registry idx (== the compiler's registry, post-2a), so the
- * compiler can read a closure's signature from an AST stamp instead of
- * re-deriving it. Decodes the signature and re-interns it into tc->shared_reg;
- * dedup means this lands on the same idx the compiler's own intern produces.
- * Lazy (called only at stamp points). Declines (UINT32_MAX) when there's no
- * shared registry, the idx isn't a proc shape, or any param/return idx is not a
- * scalar sentinel — i.e. struct/compound/nested-proc signatures, which are a
- * B3 follow-up and fall back to the existing re-derivation. Pointer-safe: reads
- * tc->shape_reg, copies the param idxs to a local, then grows the (different)
- * shared registry. */
+/* Validate that a proc-shape idx is a live proc shape in the shared registry and
+ * return it. Since unification 2b the typer interns directly into the shared
+ * registry, so a typer proc-shape idx IS already a portable shared-registry idx
+ * — this is the identity, kept as a named guard at stamp sites. (All slot kinds,
+ * including nested compounds, are portable now; the old scalar/struct-only
+ * decline is gone.) */
 static uint32_t typer__portable_proc_shape(TyperCtx* tc, uint32_t typer_idx) {
-  if (!tc->shared_reg) return UINT32_MAX;
-  if (typer_idx >= tc->shared_reg->count ||
+  if (!tc->shared_reg || typer_idx >= tc->shared_reg->count ||
       tc->shared_reg->shapes[typer_idx].kind != TYPE_SHAPE_PROC)
     return UINT32_MAX;
-  TypeShape* s = &tc->shared_reg->shapes[typer_idx];
-  uint16_t pc = s->u.proc.param_count;
-  if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
-  uint32_t params[TYPER_MAX_PROC_PARAMS];
-  for (uint16_t k = 0; k < pc; k++) {
-    uint32_t pidx = tc->shared_reg->proc_param_pool[s->u.proc.params_off + k];
-    /* Portable: a scalar sentinel or a struct idx (struct idxs are 1:1-aligned
-     * across the typer/compiler registries). A nested-compound idx (a shape-
-     * registry idx, ≥ struct_count) is registry-bound → decline. */
-    if (!JACL_IS_SCALAR_TYPE_IDX(pidx) && pidx >= tc->struct_count)
-      return UINT32_MAX;
-    params[k] = pidx;
-  }
-  uint32_t rid = s->u.proc.return_idx;
-  if (rid != UINT32_MAX && !JACL_IS_SCALAR_TYPE_IDX(rid) && rid >= tc->struct_count)
-    return UINT32_MAX;
-  return type_shape_intern_proc(tc->shared_reg, params, pc, rid);
+  return typer_idx;
 }
 
 /* Phase B3a: monomorphize an inline proc literal against a declared param-type
@@ -3445,26 +3449,34 @@ static const TyperProc* typer__find_proc(TyperCtx* tc,
  * typed closure. Returns UINT32_MAX if any param/return is a non-portable
  * compound type (collection / closure param / ptr / etc.) — such a proc stays
  * dyn-valued (conservative, same as before). */
+/* Encode one proc param/return slot (as the proc registry stores it: a JaclType
+ * + an element/struct/shape idx) into a portable proc-pool idx. Scalars →
+ * sentinel; structs → struct idx; a [Vec T] (value-kind) reconstructs its
+ * typed-vec shape from the element idx; a nested [Proc …] is already a shape
+ * idx. Other compounds (maps, ref-kind vecs, arrs) aren't reconstructable from
+ * the registry's single-idx slot → UINT32_MAX (decline). Portable since 2b. */
+static uint32_t typer__encode_proc_slot(TyperCtx* tc, JaclType t, uint32_t idx) {
+  if (t == TYPE_STRUCT)    return (idx != UINT32_MAX) ? idx : UINT32_MAX;
+  if (t == TYPE_TYPED_VEC && idx != UINT32_MAX)
+    return type_shape_intern_typed_vec(tc->shared_reg, idx);
+  if (t == TYPE_CLOSURE)   return (idx != UINT32_MAX) ? idx : UINT32_MAX;
+  if (typer__proc_shape_portable_scalar(t)) return JACL_SCALAR_TYPE_IDX(t);
+  return UINT32_MAX;
+}
+
 static uint32_t typer__intern_global_proc_shape(TyperCtx* tc,
                                                 const TyperProc* p) {
   uint8_t pc = p->param_count;
   if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
   uint32_t pool[TYPER_MAX_PROC_PARAMS];
   for (uint8_t k = 0; k < pc; k++) {
-    JaclType t = (JaclType)p->param_types[k];
-    if (t == TYPE_STRUCT && p->param_struct_idxs[k] != UINT32_MAX)
-      pool[k] = p->param_struct_idxs[k];
-    else if (typer__proc_shape_portable_scalar(t))
-      pool[k] = JACL_SCALAR_TYPE_IDX(t);
-    else return UINT32_MAX;  /* compound param — not portable */
+    pool[k] = typer__encode_proc_slot(tc, (JaclType)p->param_types[k],
+                                      p->param_struct_idxs[k]);
+    if (pool[k] == UINT32_MAX) return UINT32_MAX;  /* unsupported compound slot */
   }
-  JaclType rt = (JaclType)p->return_type;
-  uint32_t ret_enc;
-  if (rt == TYPE_STRUCT && p->return_struct_idx != UINT32_MAX)
-    ret_enc = p->return_struct_idx;
-  else if (typer__proc_shape_portable_scalar(rt))
-    ret_enc = JACL_SCALAR_TYPE_IDX(rt);
-  else return UINT32_MAX;  /* compound return — not portable */
+  uint32_t ret_enc = typer__encode_proc_slot(tc, (JaclType)p->return_type,
+                                             p->return_struct_idx);
+  if (ret_enc == UINT32_MAX) return UINT32_MAX;
   return type_shape_intern_proc(tc->shared_reg, pool, pc, ret_enc);
 }
 
