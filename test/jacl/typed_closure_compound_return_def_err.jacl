@@ -1,0 +1,6 @@
+# expect-error: conform
+# Conformance is enforced on the def-binding path too: a [Vec i32]-returning proc
+# does not conform to a [Proc [i64] [Vec i64]] binding.
+proc mki32 {i64 n} [Vec i32] { [[Vec i32] 1 1] }
+proc main {} { def [Proc [i64] [Vec i64]] f $mki32; print 0 }
+main

@@ -226,8 +226,8 @@ pulling on them; revisit when one shows up.
   (key carried for maps), on the same footing as the `[Vec T]` return. Still
   `dyn` / unsupported (now a SHORT list — see `TYPED_CLOSURES_DESIGN.md`
   §"Remaining work" for the authoritative version): a closure with NO `[Proc …]`
-  annotation; def-BINDING a compound-returning closure (`def [Proc [..] [Vec/Map
-  ..]] f $proc` — pre-existing compiler-side segfault, see below).
+  annotation; a non-literal closure-returning tail (re-check); unification
+  cleanup 2c/2d (low value).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level
@@ -352,11 +352,12 @@ pulling on them; revisit when one shows up.
   `TyperProc.return_key_struct_idx`), so a plain `proc f {} [Map i64 i64] {…}`
   types `map-get` on its result and a `[Proc [..] [Arr/Map …]]` PARAM narrows
   the closure call result fully (tests `proc_return_collection`,
-  `typed_closure_compound_return_{arr,map}`). STILL OPEN: def-BINDING a
-  compound-returning closure (`def [Proc [..] [Vec/Map ..]] f $proc`) — a
-  pre-existing compiler-side segfault (the binding carries the return's full
-  shape idx where the call-result narrowing expects an element idx);
-  cross-module element-type alignment (existing carve-out).
+  `typed_closure_compound_return_{arr,map}`). Def-BINDING a compound-returning
+  closure (`def [Proc [..] [Vec/Map ..]] f $proc`) works too (2026-06-12 — was a
+  segfault; the def-binding path decodes the return shape to the element/value
+  idx + map key, matching the param convention; test
+  `typed_closure_compound_return_def`). STILL OPEN: cross-module element-type
+  alignment (existing carve-out).
   **Still open (vec/arr):** hard vec-push element CHECKS (currently
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)

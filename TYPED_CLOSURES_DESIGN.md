@@ -14,19 +14,20 @@ implementation plan and per-phase blocks have been trimmed (git history).
 
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
-> `[Proc …]` mostly work (item 4). The open items, in rough priority:
-> 1. **Def-binding a compound-RETURNING closure** — `def [Proc [..] [Vec/Map/Arr
->    ..]] f $proc` then `[vec-get [f …] 0]` / `[map-get [f …] k]`. PRE-EXISTING
->    compiler-side gap (segfaults today): the closure-binding path stores the
->    return's FULL compound shape idx in `proc_return_struct_idx` where the
->    compiler's call-result narrowing expects the element/value idx, so a vec/arr
->    element decode runs on a bogus idx. The closure-PARAM form (the common HOF)
->    works; only the def-BINDING form is open. Needs the compiler's closure-
->    binding return representation aligned with the param path (decode to
->    element/value + a map key channel on the Local).
-> 2. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
-> 3. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
+> `[Proc …]` work end-to-end (item 4). The open items, in rough priority:
+> 1. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
+> 2. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
 >    (low value, entangled with the `syntax.c` NULL-registry paths).
+> **DONE 2026-06-12 — Def-binding a compound-RETURNING closure** (was item 1):
+> `def [Proc [..] [Vec/Map/Arr ..]] f $proc` then `[vec-get [f …] 0]` /
+> `[map-get [f …] k]` no longer segfaults. Root cause: the typer's def-binding
+> path stored the return's FULL compound shape idx in `proc_return_struct_idx`,
+> which propagated through the bound_proxy onto the `[f …]` call stamp — and
+> vec-get/map-get read that receiver stamp as the ELEMENT idx, so the typed-get
+> opcode ran on a bogus idx. Fix (typer-only): the def path now decodes the
+> compound return's shape idx to the element/value idx (+ a map's KEY) via
+> `typer__buf_elem_decode`, matching the closure-PARAM convention. Conformance
+> stays enforced. Tests: `typed_closure_compound_return_def` (+ `_def_err`).
 > **DONE 2026-06-12 — Compound RETURNS beyond `[Vec T]` (`[Map K V]` + `[Arr
 > T]`), param/HOF + plain forms** (was item 1 above): the broader "proc
 > RETURN-type collection annotations" gap is closed for the common paths.
@@ -198,10 +199,10 @@ ret>`). Verified-remaining gaps:
    call-result stamp + `bound_proxy` carry `return_key_struct_idx`, and
    `intern_global_proc_shape` encodes a typed-map return so a map-returning proc
    narrows to a closure value. Conformance is invariant (element/key/value).
-   **Still open here:** def-BINDING a compound-returning closure (`def [Proc [..]
-   [Vec/Map ..]] f $proc`) — a pre-existing compiler-side segfault (the binding
-   carries the return's full shape idx where the compiler expects an element
-   idx); see the NEXT-SESSION item 1.
+   Def-BINDING a compound-returning closure (`def [Proc [..] [Vec/Map ..]] f
+   $proc`) works too (2026-06-12 — was a segfault; the def-binding path decodes
+   the return shape to the element/value idx + map key, matching the param
+   convention). Tests: `typed_closure_compound_return_def` (+ `_def_err`).
 
    **Still open:**
    - **Unification cleanup tail (2c/2d)** — un-suppress AST stamps + retire

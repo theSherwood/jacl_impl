@@ -2117,15 +2117,23 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
                          i < TYPER_MAX_PROC_PARAMS; i++)
       b->proc_param_types[i] = (uint8_t)declared_proc_ptypes[i];
     b->proc_return_type = (uint8_t)declared_proc_rtype;
-    /* NOTE: declared_proc_ridx is the FULL compound shape idx for a typed
-     * collection return (proc_sig_elem), NOT the element/value idx the closure-
-     * PARAM path stores. Def-binding a compound-RETURNING closure
-     * (`def [Proc [..] [Vec/Map ..]] f $proc`) is a pre-existing gap that
-     * segfaults in the compiler's closure-binding return narrowing; the typer
-     * representation here can't fix that alone, so it's left as-is. The common
-     * HOF form — a [Proc [..] [Vec/Map/Arr ..]] PARAM — works (see the param
-     * binding path above). */
-    b->proc_return_struct_idx = declared_proc_ridx;
+    /* proc_sig_elem hands back the FULL compound shape idx for a typed-collection
+     * return; decode it to the element/value idx (+ a map's KEY) so the binding
+     * matches the closure-PARAM convention — a body call result `[vec-get [f …]
+     * 0]` / `[map-get [f …] k]` reads the receiver's typer stamp, which must be
+     * the element idx, not the shape idx (a shape idx there segfaults the
+     * typed-get opcode). Struct / scalar returns carry their idx directly. */
+    if ((declared_proc_rtype == TYPE_TYPED_VEC ||
+         declared_proc_rtype == TYPE_TYPED_ARR ||
+         declared_proc_rtype == TYPE_TYPED_MAP) &&
+        declared_proc_ridx != UINT32_MAX) {
+      uint32_t rval = UINT32_MAX, rkey = UINT32_MAX;
+      typer__buf_elem_decode(tc, declared_proc_ridx, &rval, &rkey);
+      b->proc_return_struct_idx = rval;
+      b->proc_return_key_struct_idx = rkey;
+    } else {
+      b->proc_return_struct_idx = declared_proc_ridx;
+    }
   }
   /* B3b: `def f [make-adder 5]` — the RHS is a call returning a [Proc …]
    * (typer stamped the call node TYPE_CLOSURE + return shape). Stamp f as a
