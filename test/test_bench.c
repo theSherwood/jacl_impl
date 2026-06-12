@@ -41,8 +41,8 @@ static const char *SRC_BASELINE =
 
 /* 2. Lambda shorthand: exercises the built-in \ macro */
 static const char *SRC_LAMBDA =
-    "def f [\\ + $it 10]\n"
-    "def g [\\ * $it $it]\n"
+    "def f [\\ $+ $it 10]\n"
+    "def g [\\ $* $it $it]\n"
     "[g [f 5]]\n";
 
 /* 3. User defmacro: define and use a simple unless macro */
@@ -55,11 +55,11 @@ static const char *SRC_USER_MACRO =
 
 /* 4. Macro-heavy: many lambda invocations */
 static const char *SRC_MACRO_HEAVY =
-    "def a [\\ + $it 1]\n"
-    "def b [\\ + $it 2]\n"
-    "def c [\\ + $it 3]\n"
-    "def d [\\ * $it 2]\n"
-    "def e [\\ - $it 1]\n"
+    "def a [\\ $+ $it 1]\n"
+    "def b [\\ $+ $it 2]\n"
+    "def c [\\ $+ $it 3]\n"
+    "def d [\\ $* $it 2]\n"
+    "def e [\\ $- $it 1]\n"
     "[e [d [c [b [a 0]]]]]\n";
 
 /* 5. Hand-written procs equivalent to MACRO_HEAVY (no macro expansion) */

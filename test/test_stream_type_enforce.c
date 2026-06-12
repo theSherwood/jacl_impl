@@ -204,7 +204,7 @@ static int test_spread_stream_derived(void) {
     "  [yield 2]\n"
     "  [yield 3]\n"
     "}\n"
-    "s = [filter [gen] [\\ > $it 1]]\n"
+    "s = [filter [gen] [\\ $> $it 1]]\n"
     "[print [+ ..$s]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

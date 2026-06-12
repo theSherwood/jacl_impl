@@ -99,7 +99,7 @@ static int test_lines_collect(void) {
 static int test_lines_filter(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[print [collect [filter [lines \"aa\\nbb\\ncc\\ndd\"] [\\ > $it \"bb\"]]]]\n",
+    "[print [collect [filter [lines \"aa\\nbb\\ncc\\ndd\"] [\\ $> $it \"bb\"]]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec \"cc\" \"dd\"]\n");

@@ -997,7 +997,7 @@ static int test_sm_filter_collect(void) {
     "  [yield 4]\n"
     "  [yield 5]\n"
     "}\n"
-    "def v [collect [filter [gen] [\\ > $it 3]]]\n"
+    "def v [collect [filter [gen] [\\ $> $it 3]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -1015,7 +1015,7 @@ static int test_sm_transform_collect(void) {
     "  [yield 2]\n"
     "  [yield 3]\n"
     "}\n"
-    "def v [collect [transform [gen] [\\ * $it 10]]]\n"
+    "def v [collect [transform [gen] [\\ $* $it 10]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -1055,7 +1055,7 @@ static int test_sm_chained_pipeline(void) {
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "[gen 10] | filter [\\ > $it 4] | transform [\\ * $it 2] | collect | print\n",
+    "[gen 10] | filter [\\ $> $it 4] | transform [\\ $* $it 2] | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   /* values 5,6,7,8,9 → doubled: 10,12,14,16,18 */
@@ -1075,7 +1075,7 @@ static int test_sm_filter_while_gen(void) {
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "[print [collect [filter [counter 8] [\\ == [% $it 2] 0]]]]\n",
+    "[print [collect [filter [counter 8] [\\ $== [% $it 2] 0]]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   /* evens from 0..7: 0, 2, 4, 6 */
@@ -1097,7 +1097,7 @@ static int test_sm_filter_take(void) {
     "  [yield 6]\n"
     "  [yield 7]\n"
     "}\n"
-    "[gen] | filter [\\ > $it 3] | take 2 | collect | print\n",
+    "[gen] | filter [\\ $> $it 3] | take 2 | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 4 5]\n");
@@ -1114,7 +1114,7 @@ static int test_sm_collect_transform(void) {
     "  [yield 10]\n"
     "  [yield 15]\n"
     "}\n"
-    "[print [collect [transform [gen] [\\ + $it 1]]]]\n",
+    "[print [collect [transform [gen] [\\ $+ $it 1]]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 6 11 16]\n");
@@ -1908,7 +1908,7 @@ static int test_sm_mixed_pipeline(void) {
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "[gen] | filter [\\ > $it 11] | take 2 | collect | print\n",
+    "[gen] | filter [\\ $> $it 11] | take 2 | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   /* Yields: 10,11,12,13,14 → filter >11: 12,13 → take 2: 12,13 */

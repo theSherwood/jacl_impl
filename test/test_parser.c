@@ -1671,7 +1671,7 @@ static int test_roundtrip_lambda(void) {
   setup();
   /* Lambda desugars to proc — roundtrip on desugared form */
   ASSERT(roundtrip_ok("for [vec 1 2 3] [\\ print $it]"));
-  ASSERT(roundtrip_ok("[\\ + $it 1]"));
+  ASSERT(roundtrip_ok("[\\ $+ $it 1]"));
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1737,7 +1737,7 @@ static int test_nesting_block_with_bracket(void) {
 static int test_nesting_pipe_with_lambda(void) {
   /* Pipe + lambda: data | map [\ + $it 1] */
   setup();
-  ParseResult r = parse("data | map [\\ + $it 1]");
+  ParseResult r = parse("data | map [\\ $+ $it 1]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   /* Pipe kept as [| [data] [map [\...]]] — compiler desugars */
@@ -2996,9 +2996,9 @@ static int test_pipe_literal_in_brackets(void) {
 /* ---- US-011: Lambda shorthand (\\) ---- */
 
 static int test_lambda_basic(void) {
-  /* [\\ + $it 2] → [\ + $it 2] (macro handles desugaring now) */
+  /* [\\ $+ $it 2] → [\ + $it 2] (macro handles desugaring now) */
   setup();
-  AstNode* n = parse_expr("[\\ + $it 2]");
+  AstNode* n = parse_expr("[\\ $+ $it 2]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
   /* head = "\\" */
@@ -3054,9 +3054,9 @@ static int test_lambda_single_arg(void) {
 }
 
 static int test_lambda_nested_bracket(void) {
-  /* [\\ + $it [len $v]] — nested [] inside lambda (now regular command) */
+  /* [\\ $+ $it [len $v]] — nested [] inside lambda (now regular command) */
   setup();
-  AstNode* n = parse_expr("[\\ + $it [len $v]]");
+  AstNode* n = parse_expr("[\\ $+ $it [len $v]]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
   ASSERT(n->data.command.head->data.lit_string.value[0] == '\\');
@@ -3072,12 +3072,12 @@ static int test_lambda_nested_bracket(void) {
 }
 
 static int test_lambda_in_pipe(void) {
-  /* Lambda used in pipe: vec 1 2 3 | filter [\\ > $it 2] */
+  /* Lambda used in pipe: vec 1 2 3 | filter [\\ $> $it 2] */
   setup();
-  ParseResult r = parse("vec 1 2 3 | filter [\\ > $it 2]");
+  ParseResult r = parse("vec 1 2 3 | filter [\\ $> $it 2]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
-  /* pipe kept as [| [vec 1 2 3] [filter [\\ > $it 2]]] */
+  /* pipe kept as [| [vec 1 2 3] [filter [\\ $> $it 2]]] */
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);

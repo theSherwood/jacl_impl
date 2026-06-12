@@ -41,7 +41,7 @@ static int test_transform_stream_lazy(void) {
     "  [yield 2]\n"
     "  [yield 3]\n"
     "}\n"
-    "def s [transform [gen] [\\ * $it 10]]\n"
+    "def s [transform [gen] [\\ $* $it 10]]\n"
     "print \"<stream>\"\n"
     "def v [collect $s]\n"
     "[print $v]\n",
@@ -61,7 +61,7 @@ static int test_transform_collect(void) {
     "  [yield 10]\n"
     "  [yield 15]\n"
     "}\n"
-    "def v [collect [transform [gen] [\\ + $it 1]]]\n"
+    "def v [collect [transform [gen] [\\ $+ $it 1]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -81,7 +81,7 @@ static int test_transform_chained_pipeline(void) {
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [transform [filter [gen] [\\ > $it 5]] [\\ * $it 2]]]\n"
+    "def v [collect [transform [filter [gen] [\\ $> $it 5]] [\\ $* $it 2]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -94,7 +94,7 @@ static int test_transform_chained_pipeline(void) {
 static int test_transform_vector_unchanged(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "def v [transform [vec 1 2 3] [\\ * $it 3]]\n"
+    "def v [transform [vec 1 2 3] [\\ $* $it 3]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -112,7 +112,7 @@ static int test_transform_pipe(void) {
     "  [yield 2]\n"
     "  [yield 3]\n"
     "}\n"
-    "[gen] | transform [\\ + $it 100] | collect | print\n",
+    "[gen] | transform [\\ $+ $it 100] | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 101 102 103]\n");
@@ -129,7 +129,7 @@ static int test_transform_for_each(void) {
     "  [yield 20]\n"
     "  [yield 30]\n"
     "}\n"
-    "def s [transform [gen] [\\ + $it 5]]\n"
+    "def s [transform [gen] [\\ $+ $it 5]]\n"
     "for $s { print $it }\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -149,7 +149,7 @@ static int test_transform_empty_stream(void) {
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [transform [gen] [\\ * $it 2]]]\n"
+    "def v [collect [transform [gen] [\\ $* $it 2]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -169,7 +169,7 @@ static int test_transform_then_filter(void) {
     "  [yield 4]\n"
     "  [yield 5]\n"
     "}\n"
-    "def v [collect [filter [transform [gen] [\\ * $it 10]] [\\ > $it 25]]]\n"
+    "def v [collect [filter [transform [gen] [\\ $* $it 10]] [\\ $> $it 25]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -189,7 +189,7 @@ static int test_transform_loop_generator(void) {
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [transform [gen 5] [\\ * $it $it]]]\n"
+    "def v [collect [transform [gen 5] [\\ $* $it $it]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

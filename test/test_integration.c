@@ -2026,7 +2026,7 @@ static int test_builtin_lambda_macro(void) {
     ctx->vm.print_ctx = &cap;
 
     const char *src2 =
-        "def f [\\ * $it $it]\n"
+        "def f [\\ $* $it $it]\n"
         "[print [f 7]]";
 
     JaclError err2;
@@ -2242,7 +2242,7 @@ static int test_ctx_run_with_macros_restores_heap(void) {
     ctx->vm.print_ctx = &cap;
 
     const char *src =
-        "def f [\\ + $it 10]\n"
+        "def f [\\ $+ $it 10]\n"
         "[print [f 5]]";
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
@@ -2275,7 +2275,7 @@ static int test_ctx_sequential_runs(void) {
     ASSERT(gc__current_heap == original_heap);
 
     /* Run 2: with lambda macro */
-    VMResult r2 = jacl_run("def f [\\ * $it 3]\n[f 7]", &vm, &arena);
+    VMResult r2 = jacl_run("def f [\\ $* $it 3]\n[f 7]", &vm, &arena);
     ASSERT(r2 == VM_OK);
     ASSERT(jacl_as_i32(vm.stack[0]) == 21);
     ASSERT(gc__current_heap == original_heap);

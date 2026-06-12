@@ -102,7 +102,7 @@ static int test_count_filtered_stream(void) {
     "  [yield 4]\n"
     "  [yield 5]\n"
     "}\n"
-    "[print [count [filter [gen] [\\ > $it 3]]]]\n",
+    "[print [count [filter [gen] [\\ $> $it 3]]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "2\n");
@@ -288,7 +288,7 @@ static int test_pipe_filter_take(void) {
     "  [yield 6]\n"
     "  [yield 7]\n"
     "}\n"
-    "[gen] | filter [\\ > $it 3] | take 2 | collect | print\n",
+    "[gen] | filter [\\ $> $it 3] | take 2 | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 4 5]\n");
@@ -323,7 +323,7 @@ static int test_first_on_filtered(void) {
     "  [yield 3]\n"
     "  [yield 4]\n"
     "}\n"
-    "[print [first [filter [gen] [\\ > $it 2]]]]\n",
+    "[print [first [filter [gen] [\\ $> $it 2]]]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");

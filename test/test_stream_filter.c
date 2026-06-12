@@ -43,7 +43,7 @@ static int test_filter_stream_lazy(void) {
     "  yield 4\n"
     "  yield 5\n"
     "}\n"
-    "def s [filter [gen] [\\ > $it 3]]\n"
+    "def s [filter [gen] [\\ $> $it 3]]\n"
     "print \"<stream>\"\n"
     "def v [collect $s]\n"
     "[print $v]\n",
@@ -65,7 +65,7 @@ static int test_filter_collect(void) {
     "  yield 30\n"
     "  yield 40\n"
     "}\n"
-    "def v [collect [filter [gen] [\\ > $it 15]]]\n"
+    "def v [collect [filter [gen] [\\ $> $it 15]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -85,8 +85,8 @@ static int test_filter_chained(void) {
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def s1 [filter [gen] [\\ > $it 3]]\n"
-    "def s2 [filter $s1 [\\ < $it 8]]\n"
+    "def s1 [filter [gen] [\\ $> $it 3]]\n"
+    "def s2 [filter $s1 [\\ $< $it 8]]\n"
     "def v [collect $s2]\n"
     "[print $v]\n",
     &cap);
@@ -100,7 +100,7 @@ static int test_filter_chained(void) {
 static int test_filter_vector_unchanged(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "def v [filter [vec 1 2 3 4 5] [\\ > $it 2]]\n"
+    "def v [filter [vec 1 2 3 4 5] [\\ $> $it 2]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -118,7 +118,7 @@ static int test_filter_no_matches(void) {
     "  yield 2\n"
     "  yield 3\n"
     "}\n"
-    "def v [collect [filter [gen] [\\ > $it 100]]]\n"
+    "def v [collect [filter [gen] [\\ $> $it 100]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -137,7 +137,7 @@ static int test_filter_pipe(void) {
     "  yield 15\n"
     "  yield 20\n"
     "}\n"
-    "[gen] | filter [\\ > $it 7] | collect | print\n",
+    "[gen] | filter [\\ $> $it 7] | collect | print\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "[vec 10 15 20]\n");
@@ -155,7 +155,7 @@ static int test_filter_for_each(void) {
     "  yield 3\n"
     "  yield 4\n"
     "}\n"
-    "for [filter [gen] [\\ > $it 2]] [\\ print $it]\n",
+    "for [filter [gen] [\\ $> $it 2]] [\\ print $it]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n4\n");
@@ -172,7 +172,7 @@ static int test_filter_for_inline(void) {
     "  yield 20\n"
     "  yield 30\n"
     "}\n"
-    "for [filter [gen] [\\ > $it 10]] {\n"
+    "for [filter [gen] [\\ $> $it 10]] {\n"
     "  print $it\n"
     "}\n",
     &cap);
@@ -214,7 +214,7 @@ static int test_filter_empty_stream(void) {
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "def v [collect [filter [gen] [\\ > $it 0]]]\n"
+    "def v [collect [filter [gen] [\\ $> $it 0]]]\n"
     "[print $v]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

@@ -9614,7 +9614,7 @@ static int test_pipe_in_proc_body(void) {
 
 /* --- US-011: Lambda shorthand (\) --- */
 
-/* Basic lambda: [\\ + $it 2] called via for */
+/* Basic lambda: [\\ $+ $it 2] called via for */
 static int test_lambda_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -9733,7 +9733,7 @@ static int test_lambda_as_value(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "proc apply {f, x} { $f $x }\n"
-      "apply [\\ + $it 5] 10 | print",
+      "apply [\\ $+ $it 5] 10 | print",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "15\n");
