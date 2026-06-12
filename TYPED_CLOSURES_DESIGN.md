@@ -102,11 +102,22 @@ ret>`). Verified-remaining gaps:
    keeps the signature for this check. Tests:
    `typed_closure_return_verbatim.jacl` (+ `_err`).
 
-The remaining item is by design only:
-4. **Nested compounds inside `[Proc …]`** (`[Proc [[Vec i64]] …]`, nested
-   `[Proc …]`) — unsupported; the element idxs are registry-bound, not portable.
-   (Its current diagnostic — a downstream "body returns dyn" — could be made a
-   direct "nested compound not supported" error, a small follow-up.)
+4. **Nested compounds inside `[Proc …]`** — was "by design unsupported" because
+   nested-compound shape idxs weren't portable across the typer/compiler
+   registries. The **registry unification** (docs/TYPER_SHAPE_UNIFICATION_AUDIT.md
+   step 2b) removed that blocker — the typer now interns/decodes all shapes in
+   the shared registry. On that foundation, **typed-vec PARAMS now work end to
+   end**: `[Proc [[Vec i64]] i64]` / `[Proc [[Vec Point]] i32]` — a higher-order
+   proc takes a closure with a typed-collection param, conforms a passed proc,
+   and calls it, with element conformance enforced (`[Vec i32]` ≠ `[Vec i64]`).
+   Tests: `typed_closure_compound_param.jacl` (+ `_err`). **Still open (each a
+   further increment on the same foundation):** compound RETURNS (call-result
+   narrowing — `[Proc [i64] [Vec i64]]` still types the call `dyn`); nested
+   `[Proc …]` PARAMS (conformance not yet aligned); `[Map K V]` / `[Arr T]`
+   params (the proc registry's single-idx param slot is lossy for maps/arrs — a
+   representation rework). And the unification's own cleanup tail (2c/2d:
+   un-suppress AST stamps + retire re-derivation helpers) remains, entangled with
+   giving the `syntax.c` prelude paths a shared registry.
 
 Non-bug nuance: the no-return form `[Proc [P]]` yields `dyn` (discarded at the
 tail), not nil.
