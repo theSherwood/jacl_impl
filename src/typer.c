@@ -3827,6 +3827,30 @@ static uint32_t typer__coll_receiver_proc_shape(TyperCtx* tc, AstNode* recv) {
   return UINT32_MAX;
 }
 
+/* Unification 2c/2d (step 1 — consolidation): the portable element/value SHAPE
+ * idx of a collection RECEIVER, for narrowing a get/for on it. Reads the AST
+ * stamp when it already carries a nested shape; for a var-ref whose nested-
+ * element stamp is suppressed (the cross-registry rule), falls back to the
+ * binding's shape. UINT32_MAX when the receiver carries no nested shape (scalar/
+ * ref-kind elements are handled by their own branches). This puts the var-ref
+ * re-resolution that every nested-collection narrowing site used to hand-roll in
+ * ONE place — so the convention can't be forgotten at a new site, and the
+ * eventual un-suppress (2c) is a single change here (the stamp read already
+ * comes first). */
+static uint32_t typer__receiver_coll_shape(TyperCtx* tc, AstNode* recv) {
+  if (!recv) return UINT32_MAX;
+  if (recv->inferred_struct_idx != UINT32_MAX &&
+      typer__is_shape_idx(tc, recv->inferred_struct_idx))
+    return recv->inferred_struct_idx;
+  if (recv->type == AST_VAR_REF) {
+    const TyperBinding* b = typer__scope_resolve(tc,
+        recv->data.var_ref.name, recv->data.var_ref.length, recv->scope_mark);
+    if (b && typer__is_shape_idx(tc, b->struct_idx))
+      return b->struct_idx;
+  }
+  return UINT32_MAX;
+}
+
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   /* Reset expected_type at command boundaries so sub-expressions don't
    * inherit parent context. Individual handlers (typed def/mut, set,
@@ -4131,13 +4155,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
            * re-derived from the ctor head for a literal receiver. */
           if ((coll_t == TYPE_VEC || coll_t == TYPE_ARR) &&
               eidx == UINT32_MAX) {
-            if (as[0]->type == AST_VAR_REF) {
-              const TyperBinding* vb = typer__scope_resolve(tc,
-                  as[0]->data.var_ref.name, as[0]->data.var_ref.length,
-                  as[0]->scope_mark);
-              if (vb && (vb->type == TYPE_VEC || vb->type == TYPE_ARR))
-                eidx = vb->struct_idx;
-            } else if (as[0]->type == AST_COMMAND &&
+            /* var-ref receiver → the consolidated helper (binding shape today,
+             * the stamp once 2c un-suppresses). */
+            eidx = typer__receiver_coll_shape(tc, as[0]);
+            if (eidx == UINT32_MAX && as[0]->type == AST_COMMAND &&
                        as[0]->data.command.head &&
                        as[0]->data.command.head->type == AST_COMMAND &&
                        as[0]->data.command.head->data.command.head &&
@@ -5611,23 +5632,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             /* Stamped ref-element vec ([Vec str]): element narrows. */
             node->inferred_type =
                 JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
-          } else if (recv_t == TYPE_VEC &&
-                     recv->inferred_struct_idx == UINT32_MAX &&
-                     recv->type == AST_VAR_REF) {
-            /* Nested-element vec binding ([Vec [Vec i64]] …): the AST
-             * stamp is suppressed by the cross-registry rule — resolve
-             * the TYPER-SIDE shape from the binding and decode to a
-             * PORTABLE result encoding, mirroring HEAD_FOR. A depth-3+
+          } else if (recv_t == TYPE_VEC) {
+            /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
+             * suppressed by the cross-registry rule, so the element SHAPE comes
+             * from the receiver via the consolidated helper (binding for a
+             * var-ref today; the stamp directly once 2c un-suppresses). Decode
+             * it to a PORTABLE result encoding, mirroring HEAD_FOR. A depth-3+
              * inner shape stays suppressed on the AST (the def handler
              * re-derives it into the new binding). */
-            const TyperBinding* vb = typer__scope_resolve(tc,
-                recv->data.var_ref.name, recv->data.var_ref.length,
-                recv->scope_mark);
-            if (vb && vb->type == TYPE_VEC &&
-                typer__is_shape_idx(tc, vb->struct_idx)) {
+            uint32_t vsh = typer__receiver_coll_shape(tc, recv);
+            if (vsh != UINT32_MAX) {
               uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-              JaclType ek = typer__buf_elem_decode(tc, vb->struct_idx,
-                                                   &iv, &ik);
+              JaclType ek = typer__buf_elem_decode(tc, vsh, &iv, &ik);
               if (ek == TYPE_TYPED_VEC) {
                 bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                  (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
@@ -5655,12 +5671,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                  * shape), so a `def g [vec-get $fns 0]` binding stamps as a
                  * typed closure and `[g …]` is a typed call. Mirrors HEAD_FOR. */
                 node->inferred_type = TYPE_CLOSURE;
-                node->inferred_struct_idx = vb->struct_idx;
+                node->inferred_struct_idx = vsh;
                 /* Step 2b: portable stamp so the compiler can type a DIRECT call
                  * of the get result — `[[vec-get $fns 0] 5]` — where there's no
                  * binding to re-derive from. */
                 node->inferred_proc_shape_idx =
-                    typer__portable_proc_shape(tc, vb->struct_idx);
+                    typer__portable_proc_shape(tc, vsh);
               }
             }
           }
@@ -5690,25 +5706,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             /* Stamped ref-element arr ([Arr str]): element narrows. */
             node->inferred_type =
                 JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
-          } else if (recv_t == TYPE_ARR &&
-                     recv->inferred_struct_idx == UINT32_MAX &&
-                     recv->type == AST_VAR_REF) {
+          } else if (recv_t == TYPE_ARR) {
             /* B3c follow-up: [Arr [Proc …]] element — the proc-shape elem rides
-             * the BINDING (AST stamp suppressed by the cross-registry rule), so
-             * resolve it and narrow arr-get/arr-pop to a typed closure. Mirrors
-             * the vec-get arm and HEAD_FOR. */
-            const TyperBinding* ab = typer__scope_resolve(tc,
-                recv->data.var_ref.name, recv->data.var_ref.length,
-                recv->scope_mark);
-            if (ab && ab->type == TYPE_ARR &&
-                typer__is_shape_idx(tc, ab->struct_idx)) {
+             * the receiver (AST stamp suppressed by the cross-registry rule), so
+             * recover it via the consolidated helper and narrow arr-get/arr-pop
+             * to a typed closure. Mirrors the vec-get arm and HEAD_FOR. */
+            uint32_t ash = typer__receiver_coll_shape(tc, recv);
+            if (ash != UINT32_MAX) {
               uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-              if (typer__decode_proc_shape(tc, ab->struct_idx, &pc2, pts2, &rt2)) {
+              if (typer__decode_proc_shape(tc, ash, &pc2, pts2, &rt2)) {
                 node->inferred_type = TYPE_CLOSURE;
-                node->inferred_struct_idx = ab->struct_idx;
+                node->inferred_struct_idx = ash;
                 /* Step 2b: portable stamp for a DIRECT call of the get result. */
                 node->inferred_proc_shape_idx =
-                    typer__portable_proc_shape(tc, ab->struct_idx);
+                    typer__portable_proc_shape(tc, ash);
               }
             }
           }
@@ -5793,21 +5804,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                          JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
             /* Stamped ref-value map ([Map K str]): the value narrows. */
             node->inferred_type = TYPE_STR;
-          } else if (recv_t == TYPE_MAP &&
-                     recv->inferred_struct_idx == UINT32_MAX &&
-                     recv->type == AST_VAR_REF) {
-            /* Nested compound VALUE map binding ([Map str [Vec i64]]):
-             * resolve the typer-side value shape from the binding and
-             * decode to a PORTABLE result encoding (mirrors vec-get on
-             * shape-carried vec bindings). */
-            const TyperBinding* mb = typer__scope_resolve(tc,
-                recv->data.var_ref.name, recv->data.var_ref.length,
-                recv->scope_mark);
-            if (mb && mb->type == TYPE_MAP &&
-                typer__is_shape_idx(tc, mb->struct_idx)) {
+          } else if (recv_t == TYPE_MAP) {
+            /* Nested compound VALUE map ([Map str [Vec i64]]): recover the
+             * typer-side value shape from the receiver via the consolidated
+             * helper and decode to a PORTABLE result encoding (mirrors vec-get
+             * on shape-carried vec bindings). */
+            uint32_t msh = typer__receiver_coll_shape(tc, recv);
+            if (msh != UINT32_MAX) {
               uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-              JaclType ek = typer__buf_elem_decode(tc, mb->struct_idx,
-                                                   &iv, &ik);
+              JaclType ek = typer__buf_elem_decode(tc, msh, &iv, &ik);
               if (ek == TYPE_TYPED_VEC) {
                 bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
                                  (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
