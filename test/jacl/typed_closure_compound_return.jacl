@@ -1,0 +1,15 @@
+# expect: 5
+# expect: 2
+# A COMPOUND return type — [Vec T] — inside a [Proc …] now narrows the closure
+# call result fully: `[f 5]` on a [Proc [i64] [Vec i64]] param types as
+# [Vec i64], so vec-get/vec-len on it work (the element idx is preserved through
+# the closure-param binding). Element conformance is enforced (a [Vec i32]-
+# returning proc does NOT conform — see _err).
+proc mkv {i64 n} [Vec i64] { [[Vec i64] $n $n] }
+proc getfst {[Proc [i64] [Vec i64]] f} i64 { [vec-get [f 5] 0] }
+proc getlen {[Proc [i64] [Vec i64]] f} i32 { [vec-len [f 5]] }
+proc main {} {
+  print [getfst $mkv]                                   # 5
+  print [getlen $mkv]                                   # 2
+}
+main

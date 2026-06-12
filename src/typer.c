@@ -2376,11 +2376,14 @@ static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
       out_ptypes[k] = (uint8_t)TYPE_STRUCT; psi = pidx;
     } else {
       /* Nested compound ([Vec T], [Map K V], nested [Proc …]): decode to its
-       * compound type and carry the SHAPE idx in the struct-idx slot (callers
-       * interpret it as a shape idx when the type is compound). Portable since
-       * unification 2b. */
-      out_ptypes[k] = (uint8_t)typer__buf_elem_decode(tc, pidx, NULL, NULL);
-      psi = pidx;
+       * compound type and carry the idx a proc's registry slot stores for it —
+       * the ELEMENT idx for a typed-vec/arr/map, the nested proc-shape idx for a
+       * [Proc …] — so conformance and call-result narrowing match the direct
+       * proc convention. Portable since unification 2b. */
+      uint32_t inner = UINT32_MAX;
+      JaclType ct = typer__buf_elem_decode(tc, pidx, &inner, NULL);
+      out_ptypes[k] = (uint8_t)ct;
+      psi = (ct == TYPE_CLOSURE) ? pidx : inner;
     }
     if (out_pstruct_idxs) out_pstruct_idxs[k] = psi;
   }
@@ -2391,8 +2394,10 @@ static bool typer__decode_proc_shape_ex(TyperCtx* tc, uint32_t shape_idx,
   } else if (rid < tc->struct_count) {
     *out_rtype = (uint8_t)TYPE_STRUCT; rsi = rid;
   } else {
-    *out_rtype = (uint8_t)typer__buf_elem_decode(tc, rid, NULL, NULL);
-    rsi = rid;
+    uint32_t rinner = UINT32_MAX;
+    JaclType crt = typer__buf_elem_decode(tc, rid, &rinner, NULL);
+    *out_rtype = (uint8_t)crt;
+    rsi = (crt == TYPE_CLOSURE) ? rid : rinner;
   }
   if (out_rstruct_idx) *out_rstruct_idx = rsi;
   return true;
@@ -2928,13 +2933,18 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
     if (pt[i] == TYPE_CLOSURE && ps[i] != UINT32_MAX && tc->binding_count > 0) {
       TyperBinding* b = &tc->bindings[tc->binding_count - 1];
       uint8_t pc2, rt2; uint8_t ptypes2[TYPER_MAX_PROC_PARAMS];
-      if (typer__decode_proc_shape(tc, ps[i], &pc2, ptypes2, &rt2)) {
+      uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2 = UINT32_MAX;
+      if (typer__decode_proc_shape_ex(tc, ps[i], &pc2, ptypes2, &rt2,
+                                      psi2, &rsi2)) {
         b->is_typed_closure = true;
         b->proc_param_count = pc2;
         for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
           b->proc_param_types[k] = ptypes2[k];
         b->proc_return_type = rt2;
-        b->proc_return_struct_idx = UINT32_MAX;
+        /* Preserve the return's idx (struct idx, or element idx for a compound
+         * return) so a body call `[f …]` narrows the result fully — e.g.
+         * `[vec-get [f 5] 0]` on a [Proc [i64] [Vec i64]] param. */
+        b->proc_return_struct_idx = rsi2;
       }
     }
   }
