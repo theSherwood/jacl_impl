@@ -71,6 +71,12 @@ typedef struct {
    * [Buf N T] → [Ptr T] decay matches the param's declared pointee
    * exactly. See BUFFER_DESIGN.md M3. */
   uint32_t    param_struct_idxs[TYPER_MAX_PROC_PARAMS];
+  /* Full ENCODED idx per param (scalar sentinel / struct idx / shape idx for a
+   * compound — [Vec T], [Map K V], [Arr T], nested [Proc …]). Unlike
+   * param_struct_idxs (the element/value idx), this carries a map's key AND
+   * value (via the interned shape), so a proc value with a compound param can be
+   * narrowed/conformed uniformly. UINT32_MAX if not computed. */
+  uint32_t    param_shape_idxs[TYPER_MAX_PROC_PARAMS];
 } TyperProc;
 
 typedef struct {
@@ -1295,7 +1301,8 @@ static bool typer__node_as_type_keyword(AstNode* node, JaclType* out_type) {
 static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                     AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
                                     JaclType (*types_out)[TYPER_MAX_PROC_PARAMS],
-                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]);
+                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS],
+                                    uint32_t (*shape_idxs_out)[TYPER_MAX_PROC_PARAMS]);
 /* Forward decl: B3b call-return closure-binding stamp uses it before its def. */
 static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
                                      uint8_t* out_pcount, uint8_t* out_ptypes,
@@ -1319,7 +1326,7 @@ static bool typer__proc_literal_has_annotation(TyperCtx* tc, AstNode* lit) {
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
-  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps, NULL);
   for (uint32_t k = 0; k < pc && k < TYPER_MAX_PROC_PARAMS; k++)
     if (pt[k] != TYPE_DYN) return true;  /* a typed param */
   return false;
@@ -1786,7 +1793,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       AstNode* pn[TYPER_MAX_PROC_PARAMS];
       JaclType pt[TYPER_MAX_PROC_PARAMS];
       uint32_t ps[TYPER_MAX_PROC_PARAMS];
-      uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
+      uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps, NULL);
       typer__scope_push(tc);
       for (uint32_t i = 0; i < pcount; i++) {
         uint8_t  bt = (uint8_t)pt[i];
@@ -2452,7 +2459,7 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
-  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps, NULL);
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pc; i++) {
     uint8_t bt = (uint8_t)pt[i];
@@ -2488,7 +2495,8 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
 static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                     AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
                                     JaclType (*types_out)[TYPER_MAX_PROC_PARAMS],
-                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]) {
+                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS],
+                                    uint32_t (*shape_idxs_out)[TYPER_MAX_PROC_PARAMS]) {
   uint32_t count = 0;
   if (!params || params->type != AST_COMMAND) return 0;
   /* Build flat element list: head + args. Head may be a LIT_STRING
@@ -2516,6 +2524,8 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
        * else falls back to dyn. Element/pointee struct_idx is
        * propagated so vec-get/map-get/auto-deref on the param can
        * narrow the result. */
+      AstNode* ctype_node = elem;  /* the [Vec T]/[Map K V]/… node (elem is
+                                    * reassigned to the name below) */
       uint32_t ptr_sidx;
       if (typer__ptr_type(tc, elem, &ptr_sidx)) {
         fi++;
@@ -2525,6 +2535,7 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
         (*name_nodes_out)[count]   = nameelem;
         (*types_out)[count]        = TYPE_PTR;
         (*struct_idxs_out)[count]  = ptr_sidx;
+        if (shape_idxs_out) (*shape_idxs_out)[count] = ptr_sidx;
         count++;
         continue;
       }
@@ -2547,6 +2558,9 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                       ? TYPE_CLOSURE : TYPE_DYN;
         (*struct_idxs_out)[count] = (sup && shape_idx != UINT32_MAX)
                                       ? shape_idx : UINT32_MAX;
+        if (shape_idxs_out)
+          (*shape_idxs_out)[count] = (sup && shape_idx != UINT32_MAX)
+                                       ? shape_idx : UINT32_MAX;
         count++;
         continue;
       }
@@ -2603,6 +2617,13 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
       (*name_nodes_out)[count]   = elem;
       (*types_out)[count]        = t;
       (*struct_idxs_out)[count]  = elem_sidx;
+      if (shape_idxs_out) {
+        /* Full encoded shape idx for the compound param: intern its shape
+         * (captures a map's key AND value). Falls back to the element idx if
+         * the shape isn't internable (ref-kind erasure / malformed). */
+        uint32_t sh = typer__nested_elem_shape(tc, ctype_node);
+        (*shape_idxs_out)[count] = (sh != UINT32_MAX) ? sh : elem_sidx;
+      }
       count++;
       continue;
     }
@@ -2617,6 +2638,7 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
       (*name_nodes_out)[count]   = next;
       (*types_out)[count]        = t;
       (*struct_idxs_out)[count]  = UINT32_MAX;
+      if (shape_idxs_out) (*shape_idxs_out)[count] = JACL_SCALAR_TYPE_IDX(t);
       count++;
     } else if (elem->data.lit_string.length == 3 &&
                memcmp(elem->data.lit_string.value, "...", 3) == 0) {
@@ -2641,11 +2663,14 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
         (*name_nodes_out)[count]   = next;
         (*types_out)[count]        = TYPE_STRUCT;
         (*struct_idxs_out)[count]  = found_idx;
+        if (shape_idxs_out) (*shape_idxs_out)[count] = found_idx;
         count++;
       } else {
         (*name_nodes_out)[count]   = elem;
         (*types_out)[count]        = TYPE_DYN;
         (*struct_idxs_out)[count]  = UINT32_MAX;
+        if (shape_idxs_out)
+          (*shape_idxs_out)[count] = JACL_SCALAR_TYPE_IDX(TYPE_DYN);
         count++;
       }
     }
@@ -2812,7 +2837,7 @@ static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit) {
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
-  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps);
+  uint32_t pc = typer__parse_params(tc, params, &pn, &pt, &ps, NULL);
   if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
   uint32_t pool[TYPER_MAX_PROC_PARAMS];
   for (uint32_t k = 0; k < pc; k++) {
@@ -2849,11 +2874,13 @@ static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
       break;
     }
   }
+  bool is_new = false;
   if (!p) {
     if (tc->proc_count >= TYPER_MAX_PROCS) return;
     p = &tc->procs[tc->proc_count++];
     p->name     = name_node->data.lit_string.value;
     p->name_len = name_node->data.lit_string.length;
+    is_new = true;
   }
   p->return_type = (uint8_t)return_type;
   p->return_struct_idx = return_struct_idx;
@@ -2861,6 +2888,13 @@ static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
   p->param_count = (uint8_t)pcount;
   for (uint32_t i = 0; i < pcount; i++) {
     p->param_types[i] = (uint8_t)(*pt)[i];
+    /* This lazy path doesn't carry struct/shape idxs; init them on a NEW entry
+     * so intern_global_proc_shape falls back cleanly. Don't clobber an existing
+     * entry (the pre-pass filled its full param_struct_idxs/param_shape_idxs). */
+    if (is_new) {
+      p->param_struct_idxs[i] = UINT32_MAX;
+      p->param_shape_idxs[i]  = UINT32_MAX;
+    }
   }
 }
 
@@ -2913,7 +2947,8 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
-  uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
+  uint32_t pshape[TYPER_MAX_PROC_PARAMS];
+  uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps, &pshape);
 
   /* Generator detection: yielding body without declared return type
    * → returns TYPE_STREAM. Mirrors the pre-pass detection in
@@ -2932,6 +2967,18 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
     typer__scope_add(tc, pn[i]->data.lit_string.value,
                      pn[i]->data.lit_string.length,
                      pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
+    /* A typed-map param ([Map K V]) carries its KEY only in the interned shape
+     * (parse_params' single struct_idx slot holds the value). Decode the key
+     * from the param's shape idx and patch the binding so a body `[map-get $m
+     * k]` types the key literal `k` with the map's actual key type (else it
+     * defaults to i32 and a value-kind i64 key hash-misses at runtime). */
+    if (pt[i] == TYPE_TYPED_MAP && pshape[i] != UINT32_MAX &&
+        tc->binding_count > 0) {
+      uint32_t vkey = UINT32_MAX;
+      typer__buf_elem_decode(tc, pshape[i], NULL, &vkey);
+      if (vkey != UINT32_MAX)
+        tc->bindings[tc->binding_count - 1].key_struct_idx = vkey;
+    }
     /* Phase B3a: a [Proc …] closure param carries a shape idx — decode it onto
      * the binding so a body call `[f …]` narrows to the declared return (via
      * the typed-closure bound_proxy at the call dispatch). */
@@ -3423,12 +3470,14 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     AstNode* pn[TYPER_MAX_PROC_PARAMS];
     JaclType pt[TYPER_MAX_PROC_PARAMS];
     uint32_t ps[TYPER_MAX_PROC_PARAMS];
-    uint32_t pcount = typer__parse_params(tc, args[params_idx], &pn, &pt, &ps);
+    uint32_t pshape[TYPER_MAX_PROC_PARAMS];
+    uint32_t pcount = typer__parse_params(tc, args[params_idx], &pn, &pt, &ps, &pshape);
     if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
     p->param_count = (uint8_t)pcount;
     for (uint32_t i = 0; i < pcount; i++) {
       p->param_types[i] = (uint8_t)pt[i];
       p->param_struct_idxs[i] = ps[i];
+      p->param_shape_idxs[i] = pshape[i];
     }
 
     /* Nested procs: recurse into the proc body so inner `proc`
@@ -3487,8 +3536,13 @@ static uint32_t typer__intern_global_proc_shape(TyperCtx* tc,
   if (pc > TYPER_MAX_PROC_PARAMS) return UINT32_MAX;
   uint32_t pool[TYPER_MAX_PROC_PARAMS];
   for (uint8_t k = 0; k < pc; k++) {
-    pool[k] = typer__encode_proc_slot(tc, (JaclType)p->param_types[k],
-                                      p->param_struct_idxs[k]);
+    /* Prefer the precomputed full shape idx (carries a map's key+value); fall
+     * back to reconstructing from (type, element idx) for any param the parse
+     * didn't stamp. */
+    pool[k] = (p->param_shape_idxs[k] != UINT32_MAX)
+                ? p->param_shape_idxs[k]
+                : typer__encode_proc_slot(tc, (JaclType)p->param_types[k],
+                                          p->param_struct_idxs[k]);
     if (pool[k] == UINT32_MAX) return UINT32_MAX;  /* unsupported compound slot */
   }
   uint32_t ret_enc = typer__encode_proc_slot(tc, (JaclType)p->return_type,
@@ -3566,7 +3620,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
-  uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
+  uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps, NULL);
 
   /* Snapshot error state so a failed wide probe can be rolled back. Binding a
    * param wide can surface a strict-numeric error the dyn body never hits

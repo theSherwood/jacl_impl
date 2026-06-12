@@ -1,0 +1,10 @@
+# expect-error: not a closure conforming to the [Proc …]
+# Map VALUE conformance is enforced: [Map i64 i32] does not conform to a
+# [Map i64 i64] param. (Map KEY conformance is a follow-up — see DESIGN item 4.)
+proc getvi32 {[Map i64 i32] m} i64 { 0 }
+proc hof {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
+proc main {} {
+  def [Map i64 i64] m [[Map i64 i64] 1 9]
+  print [hof $getvi32 $m]
+}
+main

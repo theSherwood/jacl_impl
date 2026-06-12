@@ -1,0 +1,15 @@
+# expect: 9
+# expect: 9
+# A [Map K V] param inside a [Proc …] now works: a proc with a value-kind typed-
+# map param narrows to a closure value and is called through the HOF. This also
+# required carrying the map's KEY on the proc-param binding (parse_params' single
+# struct-idx slot only held the value) — which additionally fixed map-get on a
+# value-kind map param in the body (the key literal now types correctly).
+proc getm {[Map i64 i64] m} i64 { [map-get $m 1] }
+proc hof  {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
+proc main {} {
+  def [Map i64 i64] m [[Map i64 i64] 1 9]
+  print [getm $m]                 # 9 (direct — map-param key body fix)
+  print [hof $getm $m]            # 9 (through the HOF)
+}
+main
