@@ -5771,9 +5771,14 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   uint32_t count = block_node->data.block.count;
   uint32_t scope_start_locals = c->local_count;
 
-  compiler__begin_scope(c);
-
   bool trailing_semi = block_node->data.block.trailing_semi;
+
+  /* [] flip: a single-command bracket is a value expression, not a scope —
+   * its bindings escape into the enclosing scope (e.g. `[def x 1]`,
+   * `[def [a b c] …]`), matching the old prefix-mode command. Multi-statement
+   * blocks (and trailing-semi side-effect blocks) still open a real scope. */
+  bool new_scope = count != 1 || trailing_semi;
+  if (new_scope) compiler__begin_scope(c);
 
   if (count == 0 || trailing_semi) {
     /* All commands run for side effects; block evaluates to nil */
@@ -5811,10 +5816,14 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   }
   c->pending_return_proc_shape = UINT32_MAX;
 
-  /* Clean up locals while preserving the result on the stack top */
-  uint32_t pop_count = c->local_count - scope_start_locals;
-  c->scope_depth--;
-  c->local_count = scope_start_locals;
+  /* Clean up locals while preserving the result on the stack top. For a
+   * single-command (no-scope) block, leave the locals in place so bindings
+   * escape into the enclosing scope. */
+  uint32_t pop_count = new_scope ? (c->local_count - scope_start_locals) : 0;
+  if (new_scope) {
+    c->scope_depth--;
+    c->local_count = scope_start_locals;
+  }
 
   if (pop_count > 0) {
     /* Result is on top, locals are below it. Save result into the first
