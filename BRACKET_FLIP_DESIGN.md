@@ -136,13 +136,26 @@ Done (branch `claude/flip-bracket-mode`):
   `typed_vec`/`typed_map` now pass (empty `[[Vec T]]`); no regressions, no
   segfaults.
 
+- **C-embedded operator-lambda migration DONE**: `[\ > $it 3]` → `[\ $> $it 3]`
+  in `test/*.c` (whitespace-flexible). Greened stream_filter, stream_transform,
+  yield, lines, stream_seq_ops, stream_type_enforce. typer now passes too.
+
+**Full suite: 85 passed / 6 failed groups** (was 65 passing). Remaining failing:
+- `parser`, `compiler`, `syntax` — unit tests that assert the *old* prefix AST;
+  need rewriting for the flip (substantial, separate).
+- `integration` — one edge: `[def]` (a keyword zero-arg head) returns the bare
+  word `"def"` instead of a command (no arity error). Keyword heads don't wrap;
+  wrapping all keywords regressed 6 other scenarios (assert/neq/timeout), so a
+  surgical fix is deferred.
+- `destructure_spread_all` — uses old `{..}` spread-all named destructure.
+- `jacl_harness` — 4: `tour`, `typed_closure_binding` (compound `[Proc …]`, Phase
+  B3), + 2.
+
 Pending:
-- **C-embedded jacl migration:** the jacl strings in `test/*.c` still use
-  pre-flip syntax (e.g. `[\ > $it 3]` bare operators) — debrace + `$op` + `{}`→`[]`
-  there too. (Failing C-groups: yield, stream_*, lines, integration, plus the
-  unit groups parser/typer/compiler/syntax that assert the old AST.)
-- 2 multi-line `.jacl` statement brackets.
-- Compound `[Proc ...]` param/return inference (`typed_closure_binding`, Phase B3).
+- 2 multi-line `.jacl` statement brackets; `destructure_spread_all` `{..}`.
+- Compound `[Proc ...]` param/return inference (`typed_closure_binding`).
+- Surgical `[def]`/keyword-head wrap.
+- Unit-test rewrites (parser/compiler/syntax) for the new AST.
 - Bodies → `do` and retire `AST_BLOCK`; delete dead peels / collapse remnants /
   `compile_block_expr` scope-hack.
-- `{}` → `[]` for struct fields and `use`.
+- `{}` → `[]` for struct fields, `use`, and named/spread destructure.
