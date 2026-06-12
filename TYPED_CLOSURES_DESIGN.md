@@ -106,18 +106,37 @@ ret>`). Verified-remaining gaps:
    nested-compound shape idxs weren't portable across the typer/compiler
    registries. The **registry unification** (docs/TYPER_SHAPE_UNIFICATION_AUDIT.md
    step 2b) removed that blocker — the typer now interns/decodes all shapes in
-   the shared registry. On that foundation, **typed-vec PARAMS now work end to
-   end**: `[Proc [[Vec i64]] i64]` / `[Proc [[Vec Point]] i32]` — a higher-order
-   proc takes a closure with a typed-collection param, conforms a passed proc,
-   and calls it, with element conformance enforced (`[Vec i32]` ≠ `[Vec i64]`).
-   Tests: `typed_closure_compound_param.jacl` (+ `_err`). **Still open (each a
-   further increment on the same foundation):** compound RETURNS (call-result
-   narrowing — `[Proc [i64] [Vec i64]]` still types the call `dyn`); nested
-   `[Proc …]` PARAMS (conformance not yet aligned); `[Map K V]` / `[Arr T]`
-   params (the proc registry's single-idx param slot is lossy for maps/arrs — a
-   representation rework). And the unification's own cleanup tail (2c/2d:
-   un-suppress AST stamps + retire re-derivation helpers) remains, entangled with
-   giving the `syntax.c` prelude paths a shared registry.
+   the shared registry. On that foundation, **most compound forms now work end to
+   end, with invariant conformance:**
+   - **`[Vec T]` PARAMS** (incl. `[Vec Struct]`) — `typed_closure_compound_param`.
+   - **`[Vec T]` RETURNS** — `[f 5]` on `[Proc [i64] [Vec i64]]` narrows to
+     `[Vec i64]` (element idx preserved) — `typed_closure_compound_return`.
+   - **`[Arr T]` PARAMS** — `typed_closure_compound_arr`.
+   - **Nested `[Proc …]` PARAMS** — `[Proc [[Proc [i64] i64]] i64]`, with
+     invariant inner-signature conformance — `typed_closure_nested_proc_param`.
+
+   Element / inner-signature conformance is enforced throughout (`[Vec i32]` ≠
+   `[Vec i64]`, `[Proc [str] str]` ≠ `[Proc [i64] i64]`), on both the
+   `GlobalArity` and forward-ref stamp paths.
+
+   **Still open:**
+   - **`[Map K V]` params** — the proc registry's *single* per-param idx slot
+     can't hold a map's key *and* value (parse_params doesn't capture the key for
+     a map param). Needs the "single encoded shape-idx per param" representation
+     migration (below); edge-case value as a HOF param, so deferred.
+   - **The representation migration itself** — store one encoded idx per proc
+     param (scalar sentinel / struct idx / shape idx) uniformly, decoding it at
+     the body binding, instead of the current decoded `(type, element-or-value
+     idx, separate key)` slots. This is the clean end state that subsumes maps;
+     it touches `parse_params`, the closure-param body binding, `GlobalArity`,
+     and the compiler mirror.
+   - **Unification cleanup tail (2c/2d)** — un-suppress AST stamps + retire
+     re-derivation helpers. Entangled: the `syntax.c` prelude paths pass a NULL
+     registry (shapes land in the embedded fallback, not portable), so a blanket
+     un-suppress would misfire there; full 2c/2d needs those paths on a shared
+     registry first. Low user-facing value (internal tidiness, wide blast
+     radius), so lowest priority — the unification is *functionally* complete
+     without it.
 
 Non-bug nuance: the no-return form `[Proc [P]]` yields `dyn` (discarded at the
 tail), not nil.
