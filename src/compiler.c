@@ -11086,7 +11086,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         bool is_compound = !resolved &&
             (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
-                         memcmp(hn, "Map", 3) == 0)) ||
+                         memcmp(hn, "Map", 3) == 0 ||
+                         memcmp(hn, "Arr", 3) == 0)) ||
             is_ptr ||
             is_stream ||
             (hl == 6 && memcmp(hn, "Future", 6) == 0);

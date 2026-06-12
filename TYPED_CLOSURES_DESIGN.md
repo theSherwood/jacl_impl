@@ -15,15 +15,30 @@ implementation plan and per-phase blocks have been trimmed (git history).
 > **NEXT SESSION — start here.** This section is the live handoff. The
 > typed-closure arc + the registry unification (2b) are done; compound types in
 > `[Proc …]` mostly work (item 4). The open items, in rough priority:
-> 1. **Compound RETURNS beyond `[Vec T]`** (`[Map K V]`/`[Arr T]`) — item 4.
->    NOTE this is the broader "proc RETURN-type collection annotations" gap:
->    `typer__resolve_return_type` doesn't resolve `[Arr T]` returns at all and
->    DROPS a `[Map K V]` return's KEY (no key output channel), so even a plain
->    `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its result. Fixing
->    closure-return narrowing for maps/arrs rides on closing that first.
+> 1. **Def-binding a compound-RETURNING closure** — `def [Proc [..] [Vec/Map/Arr
+>    ..]] f $proc` then `[vec-get [f …] 0]` / `[map-get [f …] k]`. PRE-EXISTING
+>    compiler-side gap (segfaults today): the closure-binding path stores the
+>    return's FULL compound shape idx in `proc_return_struct_idx` where the
+>    compiler's call-result narrowing expects the element/value idx, so a vec/arr
+>    element decode runs on a bogus idx. The closure-PARAM form (the common HOF)
+>    works; only the def-BINDING form is open. Needs the compiler's closure-
+>    binding return representation aligned with the param path (decode to
+>    element/value + a map key channel on the Local).
 > 2. **Non-literal closure-returning tail** — item 3 (mostly done; re-check).
 > 3. **Unification cleanup 2c/2d** — `docs/TYPER_SHAPE_UNIFICATION_AUDIT.md`
 >    (low value, entangled with the `syntax.c` NULL-registry paths).
+> **DONE 2026-06-12 — Compound RETURNS beyond `[Vec T]` (`[Map K V]` + `[Arr
+> T]`), param/HOF + plain forms** (was item 1 above): the broader "proc
+> RETURN-type collection annotations" gap is closed for the common paths.
+> `typer__resolve_return_type` now resolves `[Arr T]` returns (value + ref kind)
+> and threads a `[Map K V]` return's KEY (new out-channel + `TyperProc
+> .return_key_struct_idx`), so a plain `proc f {} [Map i64 i64] {…}` types
+> `map-get` on its result, and a `[Proc [..] [Arr T]]` / `[Proc [..] [Map K V]]`
+> PARAM narrows the closure call result fully (key carried onto the
+> typed-closure binding + bound_proxy; `intern_global_proc_shape` encodes a
+> typed-map return so the proc value narrows). Element/key/value conformance
+> enforced. Tests: `proc_return_collection`, `typed_closure_compound_return_arr`,
+> `typed_closure_compound_return_map` (+ `_arr_err`, `_map_key_err`).
 > **DONE 2026-06-12 — Map KEY conformance + the compiler-side representation
 > migration for PARAMS** (was items 1 + "compiler-side representation
 > migration"): the compiler now carries the FULL compound shape idx as the
@@ -176,14 +191,19 @@ ret>`). Verified-remaining gaps:
    `typed_closure_compound_map_key_err` (arg path), `…_map_key_def_err` (def
    path).
 
+   **Compound RETURNS beyond `[Vec T]` — DONE (2026-06-12) for plain + closure-
+   PARAM forms.** `[Arr T]` and `[Map K V]` returns now narrow the call result
+   on the same footing as the vec return: `typer__resolve_return_type` grew an
+   `[Arr T]` arm and a KEY out-channel for maps, `TyperProc`/`TyperBinding`/the
+   call-result stamp + `bound_proxy` carry `return_key_struct_idx`, and
+   `intern_global_proc_shape` encodes a typed-map return so a map-returning proc
+   narrows to a closure value. Conformance is invariant (element/key/value).
+   **Still open here:** def-BINDING a compound-returning closure (`def [Proc [..]
+   [Vec/Map ..]] f $proc`) — a pre-existing compiler-side segfault (the binding
+   carries the return's full shape idx where the compiler expects an element
+   idx); see the NEXT-SESSION item 1.
+
    **Still open:**
-   - **Compound RETURNS beyond `[Vec T]`** — `[Map K V]`/`[Arr T]` returns
-     (call-result narrowing) on the same footing as the vec return. Rides on the
-     broader return-type gap: `typer__resolve_return_type` doesn't resolve
-     `[Arr T]` returns and drops a `[Map K V]` return's KEY (no key out channel),
-     so even a plain `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its
-     result. Add an arr arm + a key output (mirroring the param-side
-     `typer__nested_elem_shape`) and thread the key onto the call-result binding.
    - **Unification cleanup tail (2c/2d)** — un-suppress AST stamps + retire
      re-derivation helpers. Entangled: the `syntax.c` prelude paths pass a NULL
      registry (shapes land in the embedded fallback, not portable), so a blanket

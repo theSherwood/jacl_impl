@@ -1,0 +1,9 @@
+# expect: 7
+# A COMPOUND [Map K V] return inside a [Proc …] narrows the closure call result
+# AND carries the KEY: `[map-get [f 7] 7]` on a [Proc [i64] [Map i64 i64]] param
+# types the key literal as i64 (not i32) so the lookup hits. Key + value
+# conformance enforced (see _err).
+proc mkm {i64 n} [Map i64 i64] { [[Map i64 i64] $n $n] }
+proc getit {[Proc [i64] [Map i64 i64]] f} i64 { [map-get [f 7] 7] }
+proc main {} { print [getit $mkm] }
+main

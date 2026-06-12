@@ -1,0 +1,7 @@
+# expect-error: conform
+# Element conformance for an [Arr T] return: an [Arr i32]-returning proc does not
+# conform to a [Proc [i64] [Arr i64]] param.
+proc mki32 {i64 n} [Arr i32] { [[Arr i32] 1 1] }
+proc getfst {[Proc [i64] [Arr i64]] f} i64 { [arr-get [f 3] 0] }
+proc main {} { print [getfst $mki32] }
+main

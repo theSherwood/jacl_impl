@@ -221,11 +221,13 @@ pulling on them; revisit when one shows up.
   portable), and as of 2026-06-12 the compiler carries the FULL compound shape
   idx as its per-param conformance encoding, so a map's KEY is conformance-checked
   (`[Map str i64]` ≠ `[Map i64 i64]`) and `def [Proc [[Vec/Map …]] …] f $proc`
-  binds correctly. Still `dyn` / unsupported (now a SHORT list — see
-  `TYPED_CLOSURES_DESIGN.md` §"Remaining work" for the authoritative version): a
-  closure with NO `[Proc …]` annotation; compound RETURNS beyond `[Vec T]`
-  (`[Map K V]`/`[Arr T]`, blocked on the broader proc return-type collection
-  gap — see below).
+  binds correctly. **Compound RETURNS now narrow too (2026-06-12):** `[Proc [..]
+  [Arr T]]` and `[Proc [..] [Map K V]]` PARAMS narrow the closure call result
+  (key carried for maps), on the same footing as the `[Vec T]` return. Still
+  `dyn` / unsupported (now a SHORT list — see `TYPED_CLOSURES_DESIGN.md`
+  §"Remaining work" for the authoritative version): a closure with NO `[Proc …]`
+  annotation; def-BINDING a compound-returning closure (`def [Proc [..] [Vec/Map
+  ..]] f $proc` — pre-existing compiler-side segfault, see below).
 - **Imported struct exports field-typing.** Imported struct types go
   through the CapitalCase placeholder pre-pass with empty fields.
   Field access on imported structs stays `dyn` at the typer level
@@ -343,12 +345,18 @@ pulling on them; revisit when one shows up.
   test `map_nested_vals.jacl`). **Remaining (this area):** for-loop
   iteration over maps doesn't exist at all (runtime "expected vector,
   got map") — narrowing over stamped maps is blocked on that feature;
-  proc RETURN-type collection annotations — `typer__resolve_return_type`
-  resolves `[Vec T]` but NOT `[Arr T]` (returns stay `dyn`; the compiler's
-  4-arg proc-form also doesn't recognize an `[Arr …]` return head), and it
-  DROPS a `[Map K V]` return's KEY (no key output channel), so even a plain
-  `proc f {} [Map i64 i64] {…}` mis-types `map-get` on its result (runtime
-  key-not-found); cross-module element-type alignment (existing carve-out).
+  proc RETURN-type collection annotations LANDED for `[Arr T]` and `[Map K V]`
+  (2026-06-12): `typer__resolve_return_type` now resolves `[Arr T]` returns
+  (value + ref kind; the compiler's 4-arg proc-form recognizes the `[Arr …]`
+  head) and threads a `[Map K V]` return's KEY (new out-channel +
+  `TyperProc.return_key_struct_idx`), so a plain `proc f {} [Map i64 i64] {…}`
+  types `map-get` on its result and a `[Proc [..] [Arr/Map …]]` PARAM narrows
+  the closure call result fully (tests `proc_return_collection`,
+  `typed_closure_compound_return_{arr,map}`). STILL OPEN: def-BINDING a
+  compound-returning closure (`def [Proc [..] [Vec/Map ..]] f $proc`) — a
+  pre-existing compiler-side segfault (the binding carries the return's full
+  shape idx where the call-result narrowing expects an element idx);
+  cross-module element-type alignment (existing carve-out).
   **Still open (vec/arr):** hard vec-push element CHECKS (currently
   expected-type narrowing only), proc-param [Vec str]/[Arr str]
   annotations, and vec-get narrowing through nested (shape-carried)

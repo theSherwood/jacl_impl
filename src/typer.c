@@ -56,6 +56,7 @@ typedef struct {
   uint8_t     proc_param_types[TYPER_MAX_PROC_PARAMS];
   uint8_t     proc_return_type;
   uint32_t    proc_return_struct_idx;
+  uint32_t    proc_return_key_struct_idx; /* [Map K V] return: KEY idx (else dyn) */
 } TyperBinding;
 
 typedef struct {
@@ -63,6 +64,10 @@ typedef struct {
   uint32_t    name_len;
   uint8_t     return_type;          /* JaclType */
   uint32_t    return_struct_idx;    /* UINT32_MAX if not struct */
+  /* For a [Map K V] return, the KEY idx (the value/element idx rides
+   * return_struct_idx); UINT32_MAX (dyn key) otherwise. Lets a call result
+   * `[f …]` narrow to a fully-typed map so map-get on it types the key. */
+  uint32_t    return_key_struct_idx;
   uint8_t     param_count;
   uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
   /* For TYPE_PTR / TYPE_STRUCT params, the pointee/struct idx
@@ -241,6 +246,7 @@ static void typer__scope_add(TyperCtx* tc, const char* name, uint32_t name_len,
   b->buf_inner_len  = 0;
   b->scope_depth    = tc->scope_depth;
   b->is_typed_closure = false;
+  b->proc_return_key_struct_idx = UINT32_MAX;
 }
 
 static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
@@ -2111,6 +2117,14 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
                          i < TYPER_MAX_PROC_PARAMS; i++)
       b->proc_param_types[i] = (uint8_t)declared_proc_ptypes[i];
     b->proc_return_type = (uint8_t)declared_proc_rtype;
+    /* NOTE: declared_proc_ridx is the FULL compound shape idx for a typed
+     * collection return (proc_sig_elem), NOT the element/value idx the closure-
+     * PARAM path stores. Def-binding a compound-RETURNING closure
+     * (`def [Proc [..] [Vec/Map ..]] f $proc`) is a pre-existing gap that
+     * segfaults in the compiler's closure-binding return narrowing; the typer
+     * representation here can't fix that alone, so it's left as-is. The common
+     * HOF form — a [Proc [..] [Vec/Map/Arr ..]] PARAM — works (see the param
+     * binding path above). */
     b->proc_return_struct_idx = declared_proc_ridx;
   }
   /* B3b: `def f [make-adder 5]` — the RHS is a call returning a [Proc …]
@@ -2425,6 +2439,19 @@ static bool typer__decode_proc_shape(TyperCtx* tc, uint32_t shape_idx,
                                      out_rtype, NULL, NULL);
 }
 
+/* The KEY idx of a proc shape's [Map K V] return (UINT32_MAX if the return isn't
+ * a typed map, or has a dyn key). decode_proc_shape_ex hands back only the
+ * return VALUE/element idx, so a typed-closure binding poking the return map's
+ * key (to type a body call result's map-get) gets it through here. */
+static uint32_t typer__proc_shape_return_key(TyperCtx* tc, uint32_t shape_idx) {
+  StructTypeRegistry* reg = tc->shared_reg;
+  if (!reg || shape_idx >= reg->count ||
+      reg->shapes[shape_idx].kind != TYPE_SHAPE_PROC) return UINT32_MAX;
+  uint32_t rkey = UINT32_MAX;
+  typer__buf_elem_decode(tc, reg->shapes[shape_idx].u.proc.return_idx, NULL, &rkey);
+  return rkey;
+}
+
 /* Validate that a proc-shape idx is a live proc shape in the shared registry and
  * return it. Since unification 2b the typer interns directly into the shared
  * registry, so a typer proc-shape idx IS already a portable shared-registry idx
@@ -2678,16 +2705,37 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
   return count;
 }
 
-/* Resolve a proc/extern return-type AST node to (type, struct_idx).
+/* Resolve a single type-name node (a scalar keyword like i64 or a struct name)
+ * to its portable idx: a scalar sentinel for keywords, the struct registry idx
+ * for a known struct, UINT32_MAX otherwise. Used for a typed collection's
+ * element/key/value type in return-type resolution. */
+static uint32_t typer__resolve_typename_idx(TyperCtx* tc, AstNode* type_arg) {
+  if (!type_arg || type_arg->type != AST_LIT_STRING) return UINT32_MAX;
+  const char* nm = type_arg->data.lit_string.value;
+  uint32_t    nl = type_arg->data.lit_string.length;
+  if (is_type_keyword(nm, nl))
+    return JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0)
+      return si;
+  }
+  return UINT32_MAX;
+}
+
+/* Resolve a proc/extern return-type AST node to (type, struct_idx, key_idx).
  * Handles all annotation shapes: type keyword (i32, str, ...),
  * struct name (Point), and compound forms ([Ptr T], [Future T],
- * [Vec T], [Map K V]). Falls back to (TYPE_DYN, UINT32_MAX) on
- * unrecognized shapes — the caller can leave the proc untyped. */
+ * [Vec T], [Arr T], [Map K V] — the last writes key_idx). Falls back to
+ * (TYPE_DYN, UINT32_MAX) on unrecognized shapes — the caller can leave the proc
+ * untyped. out_key_idx may be NULL. */
 static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
                                        JaclType* out_type,
-                                       uint32_t* out_struct_idx) {
+                                       uint32_t* out_struct_idx,
+                                       uint32_t* out_key_idx) {
   *out_type = TYPE_DYN;
   *out_struct_idx = UINT32_MAX;
+  if (out_key_idx) *out_key_idx = UINT32_MAX;
   if (!tn) return;
   if (tn->type == AST_LIT_STRING) {
     const char* nm = tn->data.lit_string.value;
@@ -2741,6 +2789,26 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       *out_struct_idx = sidx;
       return;
     }
+    /* [Arr T] return — typed_collection_kind only knows Vec/Map, so handle Arr
+     * here, mirroring the param side: a value-kind element → TYPE_TYPED_ARR + its
+     * idx; a ref-kind element (str/dyn) → the plain TYPE_ARR rep (+ str stamp). */
+    {
+      uint32_t arr_elem_idx;
+      if (typer__arr_type(tc, tn, &arr_elem_idx)) {
+        bool ref_kind = JACL_IS_SCALAR_TYPE_IDX(arr_elem_idx) &&
+                        (JACL_TYPE_IDX_TO_SCALAR(arr_elem_idx) == TYPE_STR ||
+                         JACL_TYPE_IDX_TO_SCALAR(arr_elem_idx) == TYPE_DYN);
+        if (ref_kind) {
+          *out_type = TYPE_ARR;
+          *out_struct_idx = (JACL_TYPE_IDX_TO_SCALAR(arr_elem_idx) == TYPE_STR)
+                              ? arr_elem_idx : UINT32_MAX;
+        } else {
+          *out_type = TYPE_TYPED_ARR;
+          *out_struct_idx = arr_elem_idx;
+        }
+        return;
+      }
+    }
     int tcoll = typer__typed_collection_kind(tn);
     /* Ref-element / nested-element [Vec T] annotations (vec is [Vec dyn]):
      * [Vec str] / [Vec dyn] -> TYPE_VEC (+ str stamp); a compound element
@@ -2783,20 +2851,13 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       AstNode* type_arg = (tcoll == 3)
           ? tn->data.command.args[1]
           : tn->data.command.args[0];
-      if (type_arg && type_arg->type == AST_LIT_STRING) {
-        const char* nm = type_arg->data.lit_string.value;
-        uint32_t    nl = type_arg->data.lit_string.length;
-        if (is_type_keyword(nm, nl)) {
-          *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
-        } else {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == nl &&
-                memcmp(tc->structs[si].name, nm, nl) == 0) {
-              *out_struct_idx = si;
-              break;
-            }
-          }
-        }
+      *out_struct_idx = typer__resolve_typename_idx(tc, type_arg);
+      /* [Map K V] return — also resolve the KEY so a call result narrows to a
+       * fully-typed map (without it, map-get on the result mis-types the key). A
+       * dyn key keyword normalizes to the UINT32_MAX dyn-key convention. */
+      if (tcoll == 3 && out_key_idx) {
+        uint32_t kidx = typer__resolve_typename_idx(tc, tn->data.command.args[0]);
+        *out_key_idx = (kidx == JACL_SCALAR_TYPE_IDX(TYPE_DYN)) ? UINT32_MAX : kidx;
       }
       return;
     }
@@ -2847,7 +2908,7 @@ static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit) {
     else return UINT32_MAX;  /* compound param — not portable */
   }
   JaclType rt = TYPE_DYN; uint32_t rsi = UINT32_MAX;
-  if (ac == 4) typer__resolve_return_type(tc, lit->data.command.args[2], &rt, &rsi);
+  if (ac == 4) typer__resolve_return_type(tc, lit->data.command.args[2], &rt, &rsi, NULL);
   uint32_t ret_enc;
   if (rt == TYPE_STRUCT && rsi != UINT32_MAX) ret_enc = rsi;
   else if (typer__proc_shape_portable_scalar(rt))
@@ -2862,6 +2923,7 @@ static uint32_t typer__intern_proc_literal_shape(TyperCtx* tc, AstNode* lit) {
 static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
                                   JaclType return_type,
                                   uint32_t return_struct_idx,
+                                  uint32_t return_key_struct_idx,
                                   AstNode* (*pn)[TYPER_MAX_PROC_PARAMS],
                                   JaclType (*pt)[TYPER_MAX_PROC_PARAMS],
                                   uint32_t pcount) {
@@ -2884,6 +2946,7 @@ static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
   }
   p->return_type = (uint8_t)return_type;
   p->return_struct_idx = return_struct_idx;
+  p->return_key_struct_idx = return_key_struct_idx;
   if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
   p->param_count = (uint8_t)pcount;
   for (uint32_t i = 0; i < pcount; i++) {
@@ -2930,9 +2993,11 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   uint32_t  name_idx, params_idx, body_idx;
   JaclType  return_type = TYPE_DYN;
   uint32_t  return_struct_idx = UINT32_MAX;
+  uint32_t  return_key_struct_idx = UINT32_MAX;
   /* New layout: [name params (ret_type)? body]. */
   if (argc == 4) {
-    typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+    typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx,
+                               &return_key_struct_idx);
     name_idx = 0; params_idx = 1; body_idx = 3;
   } else if (argc == 3) {
     name_idx = 0; params_idx = 1; body_idx = 2;
@@ -2960,7 +3025,8 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
 
   /* Register (idempotent) so nested procs are visible to subsequent
    * calls in the same scope. */
-  typer__register_proc(tc, name_node, return_type, return_struct_idx, &pn, &pt, pcount);
+  typer__register_proc(tc, name_node, return_type, return_struct_idx,
+                       return_key_struct_idx, &pn, &pt, pcount);
 
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pcount; i++) {
@@ -2995,8 +3061,10 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
         b->proc_return_type = rt2;
         /* Preserve the return's idx (struct idx, or element idx for a compound
          * return) so a body call `[f …]` narrows the result fully — e.g.
-         * `[vec-get [f 5] 0]` on a [Proc [i64] [Vec i64]] param. */
+         * `[vec-get [f 5] 0]` on a [Proc [i64] [Vec i64]] param. For a [Map K V]
+         * return also carry the KEY so `[map-get [f 5] k]` types k. */
         b->proc_return_struct_idx = rsi2;
+        b->proc_return_key_struct_idx = typer__proc_shape_return_key(tc, ps[i]);
       }
     }
   }
@@ -3429,19 +3497,22 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     uint32_t  name_idx, params_idx;
     JaclType  return_type = TYPE_DYN;
     uint32_t  return_struct_idx = UINT32_MAX;
+    uint32_t  return_key_struct_idx = UINT32_MAX;
     /* Layout (June 2026 redesign §4):
      *   proc   name params (TYPE)? body     (argc==3 or 4; TYPE at [2])
      *   extern name params (TYPE)?          (argc==2 or 3; TYPE at [2]) */
     if (is_extern) {
       if (argc == 3) {
-        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx,
+                                   &return_key_struct_idx);
         name_idx = 0; params_idx = 1;
       } else if (argc == 2) {
         name_idx = 0; params_idx = 1;
       } else continue;
     } else {
       if (argc == 4) {
-        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx);
+        typer__resolve_return_type(tc, args[2], &return_type, &return_struct_idx,
+                                   &return_key_struct_idx);
         name_idx = 0; params_idx = 1;
       } else if (argc == 3) {
         name_idx = 0; params_idx = 1;
@@ -3466,6 +3537,7 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     }
     p->return_type = (uint8_t)return_type;
     p->return_struct_idx = return_struct_idx;
+    p->return_key_struct_idx = return_key_struct_idx;
 
     AstNode* pn[TYPER_MAX_PROC_PARAMS];
     JaclType pt[TYPER_MAX_PROC_PARAMS];
@@ -3545,8 +3617,19 @@ static uint32_t typer__intern_global_proc_shape(TyperCtx* tc,
                                           p->param_struct_idxs[k]);
     if (pool[k] == UINT32_MAX) return UINT32_MAX;  /* unsupported compound slot */
   }
-  uint32_t ret_enc = typer__encode_proc_slot(tc, (JaclType)p->return_type,
-                                             p->return_struct_idx);
+  /* A typed-map return needs both key and value to rebuild its shape (the
+   * single-idx encode_proc_slot can't), so intern it here from the proc's
+   * return_key_struct_idx + return_struct_idx (value). */
+  uint32_t ret_enc;
+  if ((JaclType)p->return_type == TYPE_TYPED_MAP &&
+      p->return_struct_idx != UINT32_MAX) {
+    ret_enc = type_shape_intern_typed_map(tc->shared_reg,
+                                          p->return_key_struct_idx,
+                                          p->return_struct_idx);
+  } else {
+    ret_enc = typer__encode_proc_slot(tc, (JaclType)p->return_type,
+                                      p->return_struct_idx);
+  }
   if (ret_enc == UINT32_MAX) return UINT32_MAX;
   return type_shape_intern_proc(tc->shared_reg, pool, pc, ret_enc);
 }
@@ -4305,6 +4388,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         bound_proxy.name_len          = cb->name_len;
         bound_proxy.return_type       = cb->proc_return_type;
         bound_proxy.return_struct_idx = cb->proc_return_struct_idx;
+        bound_proxy.return_key_struct_idx = cb->proc_return_key_struct_idx;
         bound_proxy.param_count       = cb->proc_param_count;
         for (uint32_t i = 0; i < cb->proc_param_count &&
                              i < TYPER_MAX_PROC_PARAMS; i++) {
@@ -4760,6 +4844,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   if (proc) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
+    /* [Map K V] return: carry the KEY so a binding `def [Map K V] m [f …]` and
+     * map-get on the call result type the key (not just the value). */
+    node->inferred_key_struct_idx = proc->return_key_struct_idx;
     /* Step 2b (proc-first): a call returning a closure with a known signature
      * gets a portable proc-shape stamp so the compiler reads it directly from
      * the AST instead of re-deriving via GlobalArity. Lazy intern at the stamp;
