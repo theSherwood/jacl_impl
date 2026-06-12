@@ -47,6 +47,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - `SYNTAX.md` — full syntax reference + per-feature implementation status + syntax-level open questions
 - `TYPE_SYSTEM.md` — type-system architecture, decisions, deferred items
 - `STRUCT_DESIGN.md` — struct value-type architecture (no header, C-ABI layout)
+- `ITERATION_DESIGN.md` — `for` over every collection: the unified binding rule, lowering strategy, and the principles that generalize
 - `GENERATOR_STATE_MACHINE.md` — generator SM transform
 - `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
 - `SYNCHRONIZATION.md` — per-field shared-state synchronization reference

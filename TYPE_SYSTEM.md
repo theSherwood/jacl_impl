@@ -301,9 +301,9 @@ See **`NOT_IMPLEMENTED.md` §4** for the canonical list of typer-side
 deferred work (imported struct field-typing, `swap` struct-element
 narrowing, match arm-walk). **Closure literal signatures are no longer
 deferred** — the typed-closures arc (incl. `[Proc …]` syntax, closure
-values/params/returns, global procs as values, and forward refs) is
-functionally complete; see `TYPED_CLOSURES_DESIGN.md` §"Remaining work"
-for the few residual gaps and the `[Proc …]` section above.
+values/params/returns, compound params & returns, global procs as values,
+and forward refs) is **complete**; see `TYPED_CLOSURES_DESIGN.md`
+(§"Status" for capabilities, §2/§3 for the settled spec).
 
 ## Test coverage
 

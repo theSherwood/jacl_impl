@@ -99,3 +99,21 @@
 - Tests should make use of the memory tracking helpers in `test/test_helpers.h`.
   - This means that implementations either need to use the Allocator from `platform/platform.h` or they need to use macro-based polymorphism to allow the allocator to be set statically.
 - Use helpers from `platform/platform.h` where appropriate.
+
+### Dual-definition drift (gotchas)
+
+Some definitions are **duplicated across files and can silently drift** — the
+unity build (`src/jacl.c` `#include`s the `.c` files) means only one copy is
+canonical per build:
+
+- **`OpCode` enum.** Canonical copy is in `src/bytecode.c` (the VM dispatch
+  table and the compiler's `OP_*` emits resolve against it via the unity build).
+  `src/jacl.h` has a **second, drifted** `OpCode` enum that is *not* what the VM
+  uses — adding an opcode there alone fails to link. **Add a new opcode to
+  `src/bytecode.c`** (the enum + the `opcode_name` switch); the VM handler goes
+  in `src/vm.c` (`CASE(OP_X)` label + the `dispatch_table[OP_X]` designated
+  initializer — add at the enum's end so existing values don't renumber).
+- **`Compiler` / `Runtime` / `WorkerThread` structs** are mirrored in `jacl.h`
+  vs `compiler.c`/`runtime.c`. Offsets are offset-checked via
+  `src/struct_drift_fields.h` (the `struct_sizes` test fails on drift); a new
+  field must be added to *both* copies.

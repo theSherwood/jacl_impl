@@ -1,5 +1,15 @@
 # Typer/Compiler Shape-Registry Unification — Audit Touch-List
 
+> **STATUS: COMPLETE (2026-06-12).** Steps 2a–2d all landed — the typer interns
+> and decodes shapes in the shared registry, portable idxs reach AST stamps
+> (the cross-registry suppression is gone except the gated, never-exercised
+> prelude fallback), and the scattered re-resolution is consolidated into one
+> helper. This document is kept as a **historical record** of the migration
+> (what drifted, why, and the consolidate-then-flip approach that made the wide-
+> blast-radius un-suppress land safely). The durable takeaway: **dedup all type
+> shapes into one shared registry and cross-pass conformance/identity reduces to
+> idx equality** (see `TYPED_CLOSURES_DESIGN.md` §"Status").
+
 Prerequisite audit for collapsing the typer's private shape registry
 (`TyperCtx.shape_reg`) into the shared registry the compiler already builds
 and ships to runtime (`vm->struct_registry`). This is the "Phase 6" the
