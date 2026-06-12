@@ -1429,8 +1429,8 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       lexer__advance(&lex);
       TokenType type;
       switch (c) {
-        case '[': type = TOKEN_LBRACKET;  break;
-        case ']': type = TOKEN_RBRACKET;  break;
+        case '[': type = TOKEN_LBRACE;  break;
+        case ']': type = TOKEN_RBRACE;  break;
         case '{': type = TOKEN_LBRACE;    break;
         case '}': type = TOKEN_RBRACE;    break;
         case '(': type = TOKEN_LPAREN;    break;
