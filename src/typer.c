@@ -3944,6 +3944,21 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * recognized. Pin closure for shapes handle_proc bailed on. */
       node->inferred_type = TYPE_CLOSURE;
       return;
+    } else if (hid == HEAD_DO) {
+      /* [do s0 s1 …] — sequence/scope form (mirror of typer__infer_block). */
+      typer__scope_push(tc);
+      uint32_t dc = node->data.command.arg_count;
+      for (uint32_t i = 0; i < dc; i++)
+        typer__infer_node(tc, node->data.command.args[i]);
+      if (dc > 0) {
+        AstNode* last = node->data.command.args[dc - 1];
+        node->inferred_type       = last->inferred_type;
+        node->inferred_struct_idx = last->inferred_struct_idx;
+      } else {
+        node->inferred_type = TYPE_NIL;
+      }
+      typer__scope_pop(tc);
+      return;
     } else if (hid == HEAD_IF &&
                (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
       /* if [cond] {then} {else?} — detect [box? Type $var] for flow

@@ -74,6 +74,7 @@ typedef enum {
   HEAD_IF, HEAD_WHILE, HEAD_FOR,
   HEAD_BREAK, HEAD_CONTINUE, HEAD_RETURN,
   HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
+  HEAD_DO,  /* [do s0 s1 …] — sequence form: scope + run each, value = last */
 
   /* Concurrency / suspension */
   HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE, HEAD_SLEEP,
@@ -168,6 +169,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (s[0] == '?' && s[1] == '.') return HEAD_QDOT;
       if (s[0] == 'i' && s[1] == 'f') return HEAD_IF;
       if (s[0] == 't' && s[1] == 'o') return HEAD_TO;
+      if (s[0] == 'd' && s[1] == 'o') return HEAD_DO;
       return HEAD_NONE;
     case 3:
       if (memcmp(s, "def", 3) == 0) return HEAD_DEF;

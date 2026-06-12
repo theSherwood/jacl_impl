@@ -5835,6 +5835,56 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   }
 }
 
+/* --- Internal: Compile a `[do s0 s1 …]` sequence form ---
+ * Opens a scope, runs each statement, leaves the last statement's value on
+ * the stack (an empty `[do]` yields nil). This is the command-form twin of
+ * compile_block_expr; under the []-flip it replaces AST_BLOCK as the single
+ * sequence/scope primitive. A trailing separator parses to a trailing `nil`
+ * element, so "value = last element" needs no trailing-semi flag. */
+void compiler__compile_seq(Compiler* c, AstNode** stmts, uint32_t count,
+                           uint32_t line) {
+  uint32_t scope_start_locals = c->local_count;
+  compiler__begin_scope(c);
+
+  if (count == 0) {
+    compiler__end_scope(c, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* Clear the tail return-proc-shape around non-tail statements (mirrors
+   * compile_block_expr) so only the tail monomorphizes a closure literal. */
+  uint32_t saved_ret_shape = c->pending_return_proc_shape;
+  for (uint32_t i = 0; i + 1 < count; i++) {
+    c->pending_return_proc_shape = UINT32_MAX;
+    compiler__compile_node(c, stmts[i]);
+    compiler__emit_check_error(c, line);
+  }
+  c->pending_return_proc_shape = saved_ret_shape;
+  AstNode* last_stmt = stmts[count - 1];
+  if (saved_ret_shape != UINT32_MAX && last_stmt->type == AST_COMMAND &&
+      last_stmt->data.command.head_id == HEAD_PROC) {
+    compiler__activate_annot_proc_from_shape(c, saved_ret_shape);
+    c->pending_return_proc_shape = UINT32_MAX;
+    compiler__compile_node(c, last_stmt);
+    c->annot_proc_active = false;
+  } else {
+    compiler__compile_node(c, last_stmt);
+  }
+  c->pending_return_proc_shape = UINT32_MAX;
+
+  /* Clean up locals while preserving the result on the stack top. */
+  uint32_t pop_count = c->local_count - scope_start_locals;
+  c->scope_depth--;
+  c->local_count = scope_start_locals;
+  if (pop_count > 0) {
+    compiler__emit_byte(c, OP_SET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)scope_start_locals, line);
+    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, (uint8_t)pop_count, line);
+  }
+}
+
 /* --- Internal: Command head matching --- */
 
 int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
@@ -12318,6 +12368,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
     c->last_expr_type = TYPE_CLOSURE;
+    return;
+  }
+
+  /* [do s0 s1 …] — sequence/scope form (replaces AST_BLOCK as a value). */
+  if (hid == HEAD_DO) {
+    compiler__compile_seq(c, args, argc, line);
     return;
   }
 
