@@ -4840,11 +4840,13 @@ static bool compiler__local_closure_conforms(Local* L, const JaclType* ptypes,
   for (uint8_t k = 0; k < pcount; k++) {
     JaclType lt = L->param_types ? L->param_types[k] : TYPE_DYN;
     if (lt != ptypes[k]) return false;
-    /* Struct params match by struct idx; typed-collection params match by their
-     * element idx (so [Vec i32] does NOT conform to a [Vec i64] param). Both are
-     * carried in the per-param idx slot. */
+    /* Invariant per-param idx match: struct params by struct idx, typed
+     * collections by element idx ([Vec i32] ≠ [Vec i64]), and a nested [Proc …]
+     * param by its proc-shape idx ([Proc [str] str] ≠ [Proc [i64] i64]). All are
+     * carried in the per-param idx slot (deduped in the shared registry, so
+     * structurally-equal signatures share an idx). */
     if (lt == TYPE_STRUCT || lt == TYPE_TYPED_VEC || lt == TYPE_TYPED_ARR ||
-        lt == TYPE_TYPED_MAP) {
+        lt == TYPE_TYPED_MAP || lt == TYPE_CLOSURE) {
       uint32_t lsi = L->param_struct_idxs ? L->param_struct_idxs[k] : UINT32_MAX;
       uint32_t dsi = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
       if (lsi != dsi) return false;
@@ -4895,10 +4897,11 @@ static bool compiler__stamp_closure_conforms(Compiler* c, uint32_t stamp_shape,
        art == TYPE_TYPED_MAP) && arsi != rstruct_idx) return false;
   for (uint8_t k = 0; k < pcount; k++) {
     if (apts[k] != ptypes[k]) return false;
-    /* Struct + typed-collection params match by their per-param idx (struct idx
-     * / element idx), so [Vec i32] does not conform to a [Vec i64] param. */
+    /* Struct + typed-collection + nested-[Proc …] params match by their
+     * per-param idx (struct idx / element idx / proc-shape idx). */
     if (apts[k] == TYPE_STRUCT || apts[k] == TYPE_TYPED_VEC ||
-        apts[k] == TYPE_TYPED_ARR || apts[k] == TYPE_TYPED_MAP) {
+        apts[k] == TYPE_TYPED_ARR || apts[k] == TYPE_TYPED_MAP ||
+        apts[k] == TYPE_CLOSURE) {
       uint32_t d = pstruct_idxs ? pstruct_idxs[k] : UINT32_MAX;
       if (apsi[k] != d) return false;
     }

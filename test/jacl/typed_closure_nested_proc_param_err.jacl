@@ -1,0 +1,7 @@
+# expect-error: not a closure conforming to the [Proc …]
+# Invariant inner-signature conformance: a proc whose param is [Proc [str] str]
+# does NOT conform to a param expecting a proc whose param is [Proc [i64] i64].
+proc applys {[Proc [str] str] f} i64 { 0 }
+proc hof {[Proc [[Proc [i64] i64]] i64] g} i64 { 0 }
+proc main {} { print [hof $applys] }
+main

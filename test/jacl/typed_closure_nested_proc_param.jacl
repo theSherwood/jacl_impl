@@ -1,0 +1,10 @@
+# expect: 6
+# A nested [Proc …] param — a higher-order proc taking a proc that itself takes
+# a proc — now works (portable since unification 2b). Inner-signature conformance
+# is invariant: a proc taking [Proc [str] str] does NOT conform to a param
+# expecting a proc that takes [Proc [i64] i64] (see _err).
+proc dbl    {i64 x} i64 { [* $x 2] }
+proc apply3 {[Proc [i64] i64] f} i64 { [f 3] }
+proc hof    {[Proc [[Proc [i64] i64]] i64] g} i64 { [g $dbl] }
+proc main {} { print [hof $apply3] }                    # apply3(dbl) = dbl(3) = 6
+main
