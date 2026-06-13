@@ -5639,7 +5639,7 @@ void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
  */
 void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
                                              uint32_t line, uint32_t col) {
-  if (body_block->type != AST_BLOCK) {
+  if (!ast__is_seq(body_block)) {
     compiler__error(c, line, col, "parallel body must be a block");
     return;
   }
@@ -11373,7 +11373,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "proc params must be a bracketed list");
       return;
     }
-    if (args[body_arg_idx]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[body_arg_idx])) {
       compiler__error(c, line, col, "proc body must be a block");
       return;
     }
@@ -12338,11 +12338,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "if", "2 or 3 arguments", argc);
       return;
     }
-    if (args[1]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[1])) {
       compiler__error(c, line, col, "if then-branch must be a block");
       return;
     }
-    if (argc == 3 && args[2]->type != AST_BLOCK) {
+    if (argc == 3 && !ast__is_seq(args[2])) {
       compiler__error(c, line, col, "if else-branch must be a block");
       return;
     }
@@ -12466,7 +12466,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "while", "2 arguments", argc);
       return;
     }
-    if (args[1]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[1])) {
       compiler__error(c, line, col, "while body must be a block");
       return;
     }
@@ -14125,7 +14125,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "try", "3 arguments", argc);
       return;
     }
-    if (args[0]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[0])) {
       compiler__error(c, line, col, "try body must be a block");
       return;
     }
@@ -14133,7 +14133,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "try binding must be a name");
       return;
     }
-    if (args[2]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[2])) {
       compiler__error(c, line, col, "try handler must be a block");
       return;
     }
@@ -14208,11 +14208,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "with-ctx", "2 arguments", argc);
       return;
     }
-    if (args[0]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[0])) {
       compiler__error(c, line, col, "with-ctx overrides must be a block");
       return;
     }
-    if (args[1]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[1])) {
       compiler__error(c, line, col, "with-ctx body must be a block");
       return;
     }
@@ -16535,7 +16535,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "spawn", "1 argument", argc);
       return;
     }
-    if (args[0]->type != AST_BLOCK) {
+    if (!ast__is_seq(args[0])) {
       compiler__error(c, line, col, "spawn body must be a block");
       return;
     }

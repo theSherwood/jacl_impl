@@ -2519,7 +2519,7 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
   AstNode* params = (ac == 3 || ac == 4) ? literal->data.command.args[1] : NULL;
   AstNode* body   = (ac == 4) ? literal->data.command.args[3]
                   : (ac == 3) ? literal->data.command.args[2] : NULL;
-  if (!params || !body || body->type != AST_BLOCK ||
+  if (!params || !body || !ast__is_seq(body) ||
       body->data.block.count == 0) return;
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
@@ -3052,7 +3052,7 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode* params    = args[params_idx];
   AstNode* body      = args[body_idx];
   if (name_node->type != AST_LIT_STRING) return false;
-  if (body->type != AST_BLOCK) return false;
+  if (!ast__is_seq(body)) return false;
 
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
@@ -3741,7 +3741,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   if (ac != 3 && ac != 4) return UINT32_MAX;
   AstNode* params = proc->data.command.args[1];
   AstNode* body   = proc->data.command.args[ac == 4 ? 3 : 2];
-  if (!body || body->type != AST_BLOCK) return UINT32_MAX;
+  if (!body || !ast__is_seq(body)) return UINT32_MAX;
   uint32_t bc = body->data.block.count;
   if (bc == 0) return UINT32_MAX;
 
@@ -6248,7 +6248,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       bool      all_same     = true;
       for (uint32_t i = 0; i < n; i++) {
         AstNode* body = as[i];
-        if (body->type != AST_BLOCK) { all_same = false; break; }
+        if (!ast__is_seq(body)) { all_same = false; break; }
         JaclType bt = (JaclType)body->inferred_type;
         if (bt == TYPE_DYN) { all_same = false; break; }
         if (i == 0) {
