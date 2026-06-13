@@ -2,8 +2,9 @@
 # expect: 7
 # `timeout` macro: body completes well within the deadline, so its
 # value wins the race against the sleeping branch.
-proc main {} {
+proc main [] [
+  # macro body arg stays braces (BRACKET_FLIP_DESIGN.md Key decision 0)
   def r [timeout 1.0 { + 3 4 }]
   print $r
-}
+]
 main

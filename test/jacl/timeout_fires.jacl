@@ -2,12 +2,13 @@
 # expect: true
 # `timeout` fires: body sleeps longer than the deadline, so the
 # sleeping branch errors first and the result is an error value.
-proc slow {} {
+proc slow [] [
   sleep 1.0
   "done"
-}
-proc main {} {
+]
+proc main [] [
+  # macro body arg stays braces (BRACKET_FLIP_DESIGN.md Key decision 0)
   def r [timeout 0.02 { slow }]
   print [error? $r]
-}
+]
 main
