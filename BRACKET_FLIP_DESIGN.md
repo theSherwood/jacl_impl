@@ -276,9 +276,20 @@ Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
   B3 "not yet supported"); deep type-system.
 - DONE: surgical `[def]`/keyword-head wrap (value-bracket keyword heads only).
 - DONE: unit-test rewrites (parser/compiler/syntax) for the new AST.
-- `{}` → `[]` for struct fields, `use`, and named/spread destructure (token-
-  level parsers; the `{` spelling still works everywhere else via `[do]`
-  lowering).
+- DONE: **every position now accepts `[]`** — `{}` is a fully redundant
+  spelling:
+  - Body-position `[…]` for the generic-command heads (`parser__head_body_arg`
+    in parse_cmd_operand): `for $coll [body]`, C-style `for [i = 0; …] [body]`,
+    `try [body] e [handler]`, `spawn [body]`, `parallel`/`race` (all args),
+    `with-ctx [overrides] [body]`. Parsed via parse_body_seq (always-do, no
+    collapse); a `[\ …]` lambda arg stays a value so for's HOF callback form
+    is unchanged.
+  - `struct Name [i32 x, i32 y]` and `use "path" [a, b]` (delimiter
+    auto-detect, like proc params).
+  - Covered by `test/jacl/bracket_bodies.jacl` + `modules/use_bracket`.
+  Remaining for ACTUAL `{}` removal: scripted corpus debrace (~396 .jacl files
+  + embedded C sources), SYNTAX.md/AGENTS.md/playground-highlighter updates,
+  then drop `{}` from the value/body grammar (and step 6 rides along).
 - Step 6 (delete `AST_BLOCK`) is now unblocked: no test file asserts the node
   type anymore except via the accessors; remaining references are the parser
   internals, dispatch cases, syntax converters, and 2 synthetic fake_blocks
