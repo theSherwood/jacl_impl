@@ -1399,15 +1399,14 @@ static int test_staged_sq_nested(void) {
     ASSERT(err.kind == JACL_ERROR_NONE);
     ASSERT(jacl_is_syntax(result));
 
-    /* The outer syntax-quote wraps a block containing an inner syntax-quote.
-     * The result should be a block (or the inner expression) containing
-     * a SYNTAX_SYNTAX_QUOTE node. */
+    /* The outer syntax-quote wraps a sequence containing an inner
+     * syntax-quote. Under the []-flip, the `{ … }` template parses as a
+     * `[do …]` command, so the result is a SYNTAX_COMMAND (head "do") whose
+     * single arg is the SYNTAX_SYNTAX_QUOTE node. */
     JaclSyntax *syn = jacl_as_syntax(result);
-    /* The block { ... } compiles as a SYNTAX_BLOCK */
-    ASSERT(syn->kind == SYNTAX_BLOCK);
+    ASSERT(syn->kind == SYNTAX_COMMAND);
 
-    /* The single command inside is the nested syntax-quote */
-    JaclVal cmds = syn->data.block.commands;
+    JaclVal cmds = syn->data.command.args;
     uint32_t cnt = jacl_vec_count((jacl_vec_root*)jacl_as_ptr(cmds));
     ASSERT(cnt == 1);
 

@@ -2615,9 +2615,21 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
      * an empty `Vec T`. At statement/body position a bare `$x` or `[…]` is a
      * value, not a call (BRACKET_FLIP_DESIGN.md decision 5). A literal always
      * returns its value. */
+    /* Keyword head of a value bracket — `[def]`, `[mut]`, … — wraps so the
+     * builtin's compile handler reports the arity error instead of yielding
+     * the bare word. Statement-position lone keywords are untouched, and
+     * string literals (`["if"]`) stay values. */
+    bool keyword_head =
+        head_token_type == TOKEN_DEF   || head_token_type == TOKEN_MUT ||
+        head_token_type == TOKEN_SET   || head_token_type == TOKEN_IF  ||
+        head_token_type == TOKEN_WHILE || head_token_type == TOKEN_FOR ||
+        head_token_type == TOKEN_TRY   || head_token_type == TOKEN_MATCH ||
+        head_token_type == TOKEN_PROC  || head_token_type == TOKEN_STRUCT ||
+        head_token_type == TOKEN_DEFMACRO || head_token_type == TOKEN_EXTERN;
     if (head_token_type == TOKEN_WORD ||
         (value_head && (head_token_type == TOKEN_VAR ||
-                        head_token_type == TOKEN_LBRACKET))) {
+                        head_token_type == TOKEN_LBRACKET ||
+                        keyword_head))) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
       node->start = head->start;
