@@ -1,5 +1,10 @@
 # JACL Design Critique
 
+> Historical note (2026-06): written before the bracket flip. The
+> "three-mode delimiter system" discussed below has since collapsed to a
+> single `[]` delimiter (`()` infix was already cut; `{}` is being retired).
+> See `BRACKET_FLIP_DESIGN.md`. The argument is preserved as written.
+
 A critical, high-level read of JACL as a language and as a program, after
 a pass through `DESIGN.md`, `SYNTAX.md`, `TYPE_SYSTEM.md`, `STRUCT_DESIGN.md`,
 `AUDIT.md`, `GENERATOR_STATE_MACHINE.md`, `prelude.jacl`, sample fixtures

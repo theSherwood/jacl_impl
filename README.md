@@ -94,10 +94,13 @@ def i64 sum [+ $x $y]
 def i64 wide [to i64 $small]   # explicit conversion via [to TYPE val]
 ```
 
-**Two parsing modes.** `[]` is juxtaposition (head + args — a value
-computation). `{}` is command mode (bare commands / pipelines, and also
-the form for param lists, struct fields, and destructuring patterns).
-Bare words are strings.
+**One delimiter, position decides.** `[]` is the single command/expression
+delimiter: a value computation (head + args, `[+ 1 2]`), a statement
+sequence (`[a; b]` → `[do …]`), a type, a binding list (param lists, struct
+fields, destructuring), or a body. A line not starting with `[` is a command
+application (`print $x`). Bare words are strings. (`{}` still parses as a
+legacy alias for the sequence/list forms, lowering to the same AST — see
+`BRACKET_FLIP_DESIGN.md` — but is being retired.)
 
 ```
 def total [+ 1 [* 2 [+ 1 3]]]   # nested value computation → 9

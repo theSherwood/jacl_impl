@@ -1,13 +1,42 @@
 # JACL Syntax Reference
 
-JACL syntax is built around a two-mode delimiter system. This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
+This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
 
-**Why two modes:** the two surviving delimiters split along a real semantic axis — expression vs. command/pipeline — rather than offering multiple flavors of the same operation. An earlier `()` infix mode was cut for being a redundant third flavor of operations already covered by `[]` and `{}`; remaining cleanup is tracked in `NOT_IMPLEMENTED.md` §12.
+> **Bracket flip in effect.** `[]` is now the single command/expression
+> delimiter (was: `[]` prefix-expression + `{}` command mode). `{}` still
+> parses as a legacy alias — it lowers to the same `[do …]` AST — but is
+> being retired. `BRACKET_FLIP_DESIGN.md` is the authoritative spec for what
+> `[]` means in every position. Some examples below still show `{}`; read
+> them as equivalent to `[]`. The migration is tracked there, including the
+> open call-vs-block question (Key decision 0) that gates full `{}` removal.
 
-## Two parsing modes (delimiter-determined)
+## The model: `[]` everywhere, position decides meaning
 
-- `[]` — **Prefix expression mode**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]`, value-producing expressions, and nesting `[foo [bar 3] 2]`. Pure value computation.
-- `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). Symbolic connectors live here: `|` pipes between commands, with `&&`/`||` and redirections in the same family. Used for code blocks, param lists, struct field declarations, and shell-pipeline composition (same construct, differentiated by context).
+`[]` is fundamentally a list; its interpretation is decided by position, like
+`()` in Lisp (but separators carry meaning — see below).
+
+- **Statement / value — application.** A line that does not start with `[` is
+  a command application (Tcl-style): `print 7` applies `print` to `(7)`. A
+  `[…]` in value position is the same: `[+ 1 2]` = `3`. First element is the
+  head, the rest are args. `[f]`/`[$f]` call zero-arg; a literal `[5]` is just
+  the value.
+- **Sequence — `[do …]`.** Statements separated by `;`/newline form a `do`
+  sequence: `[a; b]` = `[do a b]`. `[]` is nil (an empty `[do]`). This is the
+  single scope/sequence primitive (there is no separate block node).
+- **Type.** `[Vec T]`, `[Map K V]`, `[Proc [i64, f64] R]`.
+- **Binding / structural** — a comma-list of items, each position-parsed:
+  param lists `[i64 x, f64 y]`, destructure `[a, b, ..t]`, struct fields
+  `struct P [i32 x, i32 y]`, `use [a, b]`.
+- **Body / block** — a sequence: `proc f [x] [body]`, `if c [body]`,
+  `while c [body]`, `for $coll x [body]`.
+
+**Separators inside `[]`:** space = arguments of an application; comma `,` =
+item separator in binding position / statement separator in value position;
+`;` / newline = statement separator (→ `do`).
+
+An earlier `()` infix mode was cut as a redundant third flavor of operations
+already covered by `[]`; remaining cleanup is tracked in `NOT_IMPLEMENTED.md`
+§12.
 
 ## Key principle: print/parse symmetry
 
@@ -24,14 +53,16 @@ This principle constrains constructor design: every collection / record type has
 
 ## Key syntax decisions
 
-- `proc foo {x, y} {+ $x $y}` — braces for both params and body
-- `proc add {i32 x, i32 y} i32 {+ $x $y}` — typed return goes after params (optional bare type token between the params block and the body block)
-- `struct Point {i32 x, i32 y}` — `defstruct` shortened to `struct`
+(Post-flip spelling shown; the `{}` equivalents still parse.)
+
+- `proc foo [x, y] [+ $x $y]` — brackets for both params and body
+- `proc add [i32 x, i32 y] i32 [+ $x $y]` — typed return goes after params (optional bare type token between the params list and the body)
+- `struct Point [i32 x, i32 y]` — `defstruct` shortened to `struct`
 - `[Point x 30 y 15]` — struct constructor mirrors `[map …]`, named-only, no positional form
-- Type-before-name in params and fields: `{i64 a, i64 b}`, `struct Pt {i32 x, i32 y}`
+- Type-before-name in params and fields: `[i64 a, i64 b]`, `struct Pt [i32 x, i32 y]`
 - `:type` prefix in struct fields replaced with type-before-name
-- Zero-arg procs: `proc greet {} {print "hello"}`
-- Block bodies use bare command syntax: `{* $n 2}` not `{[* $n 2]}`
+- Zero-arg procs: `proc greet [] [print "hello"]`
+- A body is a sequence: a single-statement body still scopes (`[* $n 2]`), and a multi-statement body is `[do …]`
 
 ## String interpolation
 

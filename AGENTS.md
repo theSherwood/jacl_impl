@@ -14,13 +14,27 @@
 
 ## When writing JACL source
 
-- Inside `{}` command-mode blocks (proc bodies, for/while/if bodies,
-  top-level), write bare commands: `yield 10`, not `[yield 10]`;
-  `print $x`, not `[print $x]`. `{}` is command mode — items separated
-  by `;` / `,` / newline are each parsed as a head + args command.
-- Use `[...]` only when nesting one command as a value inside another
-  expression: `print [collect [gen]]` — `collect` is an arg to `print`,
-  so it needs `[]`; `gen` is an arg to `collect`, same.
+- **The bracket flip is in effect** (`BRACKET_FLIP_DESIGN.md` is the
+  authoritative spec). `[]` is now the single command/expression
+  delimiter; `{}` is a legacy alias that still parses (it lowers to the
+  same `[do …]` AST) but is on the way out. **Prefer `[]` everywhere** in
+  new sources.
+- A line/statement that does NOT start with `[` is a command application
+  (Tcl-style): `print $x`, `yield 10` — the first word is the head, the
+  rest are args. Don't bracket a bare statement: write `print $x`, not
+  `[print $x]`.
+- Wrap a command in `[...]` when its VALUE is used as an argument to
+  another command: `print [collect [gen]]` — `collect` is an arg to
+  `print`, so it needs `[]`; `gen` is an arg to `collect`, same.
+- Bodies and binding lists take `[...]`: `proc f [x] [body]`,
+  `if c [body]`, `while c [body]`, `for $coll x [body]`,
+  `struct P [i32 x, i32 y]`, `use "p" [a, b]`.
+- **Known limitation (`BRACKET_FLIP_DESIGN.md` Key decision 0):** a
+  single-statement `[…]` arg to a NON-special head collapses to a call,
+  so macro body args and `timeout`'s body arg still need `{…}` (e.g.
+  `unless [c] { set hit 5 }`, `timeout 0.02 { slow }`). Inline struct
+  types (`struct{x:i32}`) and `#{ … }` pragma bodies are brace-only by
+  grammar. These are the only places `{}` is still required.
 - This applies to test sources (`.c` strings, `test/jacl/*.jacl`) and
   any sample code in docs.
 - For a single-file survey of working JACL syntax, see
