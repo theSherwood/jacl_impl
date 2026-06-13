@@ -831,9 +831,10 @@ static int test_from_ast_block(void) {
     JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
     ASSERT(jacl_is_syntax(syn));
     JaclSyntax *s = jacl_as_syntax(syn);
-    ASSERT_INT_EQ(s->kind, SYNTAX_BLOCK);
+    /* []-flip: a { … } statement parses as a [do …] command. */
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
 
-    jacl_vec_root *cmds = (jacl_vec_root *)jacl_as_ptr(s->data.block.commands);
+    jacl_vec_root *cmds = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
     ASSERT_U32_EQ(jacl_vec_count(cmds), 2);
 
     /* Each command should be a SYNTAX_COMMAND */
@@ -1040,9 +1041,9 @@ static int test_from_ast_nested_command(void) {
     JaclSyntax *cond = jacl_as_syntax(jacl_vec_get(args, 0).value);
     ASSERT_INT_EQ(cond->kind, SYNTAX_COMMAND);
 
-    /* args[1] should be a block */
+    /* args[1] should be a sequence ([do …] command under the []-flip) */
     JaclSyntax *body = jacl_as_syntax(jacl_vec_get(args, 1).value);
-    ASSERT_INT_EQ(body->kind, SYNTAX_BLOCK);
+    ASSERT_INT_EQ(body->kind, SYNTAX_COMMAND);
 
     intern_table_destroy(&intern);
     vm_destroy(&vm);
@@ -1473,7 +1474,7 @@ static int test_parse_defmacro_basic(void) {
     ASSERT(memcmp(node->data.defmacro.param_names[1], "body", 4) == 0);
     ASSERT_U32_EQ(node->data.defmacro.param_name_lens[1], 4);
     ASSERT(node->data.defmacro.body != NULL);
-    ASSERT_INT_EQ(node->data.defmacro.body->type, AST_BLOCK);
+    ASSERT(ast__is_seq(node->data.defmacro.body));
     arena_destroy(&arena);
     TEST_PASS();
 }
@@ -1489,7 +1490,7 @@ static int test_parse_defmacro_zero_params(void) {
     ASSERT(memcmp(node->data.defmacro.name, "now", 3) == 0);
     ASSERT_U32_EQ(node->data.defmacro.param_count, 0);
     ASSERT(node->data.defmacro.body != NULL);
-    ASSERT_INT_EQ(node->data.defmacro.body->type, AST_BLOCK);
+    ASSERT(ast__is_seq(node->data.defmacro.body));
     arena_destroy(&arena);
     TEST_PASS();
 }
@@ -1609,8 +1610,8 @@ static int test_parse_quote_block(void) {
     AstNode *node = pr.nodes[0];
     ASSERT_INT_EQ(node->type, AST_QUOTE);
     ASSERT(node->data.quote.child != NULL);
-    ASSERT_INT_EQ(node->data.quote.child->type, AST_BLOCK);
-    ASSERT_U32_EQ(node->data.quote.child->data.block.count, 2);
+    ASSERT(ast__is_seq(node->data.quote.child));
+    ASSERT_U32_EQ(ast__seq_count(node->data.quote.child), 2);
     arena_destroy(&arena);
     TEST_PASS();
 }
@@ -2159,10 +2160,10 @@ static int test_expand_unless(void) {
     ASSERT(eq_cmd->data.command.head->type == AST_LIT_STRING);
     ASSERT(memcmp(eq_cmd->data.command.head->data.lit_string.value, "eq", 2) == 0);
     ASSERT(eq_cmd->data.command.arg_count == 2);
-    /* Second arg: { print ok } — should be a block */
+    /* Second arg: { print ok } — should be a sequence ([do …]) */
     AstNode* body = expanded->data.command.args[1];
     ASSERT(body != NULL);
-    ASSERT(body->type == AST_BLOCK);
+    ASSERT(ast__is_seq(body));
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -2304,7 +2305,7 @@ static int test_expand_use_before_defmacro(void) {
     ASSERT(not_cmd->data.command.head->type == AST_LIT_STRING);
     ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "~", 1) == 0);
     AstNode* body = first->data.command.args[1];
-    ASSERT(body->type == AST_BLOCK);
+    ASSERT(ast__is_seq(body));
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -2382,9 +2383,9 @@ static int test_expand_inside_block(void) {
     /* The block body should contain expanded [+ 3 3] */
     AstNode* block = if_cmd->data.command.args[1];
     ASSERT(block != NULL);
-    ASSERT(block->type == AST_BLOCK);
-    ASSERT(block->data.block.count == 1);
-    AstNode* plus_cmd = block->data.block.commands[0];
+    ASSERT(ast__is_seq(block));
+    ASSERT(ast__seq_count(block) == 1);
+    AstNode* plus_cmd = ast__seq_stmt(block, 0);
     ASSERT(plus_cmd != NULL);
     ASSERT(plus_cmd->type == AST_COMMAND);
     ASSERT(memcmp(plus_cmd->data.command.head->data.lit_string.value, "+", 1) == 0);
@@ -2852,9 +2853,10 @@ static int test_us010_unquote_splicing_in_block(void) {
     ASSERT(jacl_is_syntax(result));
 
     JaclSyntax* blk = jacl_as_syntax(result);
-    ASSERT_INT_EQ(blk->kind, SYNTAX_BLOCK);
+    /* []-flip: the { ~@stmts } template is a [do …] command. */
+    ASSERT_INT_EQ(blk->kind, SYNTAX_COMMAND);
 
-    jacl_vec_root* cmds = (jacl_vec_root*)jacl_as_ptr(blk->data.block.commands);
+    jacl_vec_root* cmds = (jacl_vec_root*)jacl_as_ptr(blk->data.command.args);
     ASSERT_U32_EQ(jacl_vec_count(cmds), 2);
     JaclSyntax* b0 = jacl_as_syntax(jacl_vec_get(cmds, 0).value);
     ASSERT_INT_EQ(b0->kind, SYNTAX_COMMAND);

@@ -11832,15 +11832,27 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
         case 4: {  /* syntax-commands */
-          if (syn->kind != SYNTAX_BLOCK) {
-            vm__set_error(vm,
-              "type error in 'syntax-commands': expected block syntax, got '%s'",
-              syntax_kind_name(syn->kind));
-            return VM_RUNTIME_ERROR;
+          /* A sequence is a SYNTAX_BLOCK (legacy) or, under the []-flip, a
+           * [do …] SYNTAX_COMMAND — its args are the statements. */
+          if (syn->kind == SYNTAX_BLOCK) {
+            result = vm__push(vm, syn->data.block.commands);
+            if (result != VM_OK) return result;
+            break;
           }
-          result = vm__push(vm, syn->data.block.commands);
-          if (result != VM_OK) return result;
-          break;
+          if (syn->kind == SYNTAX_COMMAND && jacl_is_syntax(syn->data.command.head)) {
+            JaclSyntax *h = jacl_as_syntax(syn->data.command.head);
+            if (h->kind == SYNTAX_LIT_STRING &&
+                jacl_string_eq(h->data.lit_string.value,
+                               jacl_inline_string("do", 2))) {
+              result = vm__push(vm, syn->data.command.args);
+              if (result != VM_OK) return result;
+              break;
+            }
+          }
+          vm__set_error(vm,
+            "type error in 'syntax-commands': expected block syntax, got '%s'",
+            syntax_kind_name(syn->kind));
+          return VM_RUNTIME_ERROR;
         }
         case 5: {  /* syntax-pos — map {line, col} */
           jacl_map_node *m = NULL;

@@ -1864,11 +1864,21 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   }
   if (cond->type == AST_ERROR) return cond;
 
-  /* Expect { then_body } */
-  if (!parser__is_block_open(parser__peek(p)->type)) {
-    return parser__error(p, "expected '{' after if condition", parser__peek(p));
+  /* Expect { then_body } — or, inside a syntax-quote template, a `~x`
+   * unquote as the whole branch (`[if ~cond ~then …]`; the spliced branch
+   * arrives as a [do …] sequence at expansion). */
+  AstNode* then_block;
+  if (p->syntax_quote_depth == 1 && parser__peek(p)->type == TOKEN_NOT) {
+    then_block = parser__parse_expr(p);
+    if (!then_block) {
+      return parser__error(p, "expected then branch", parser__peek(p));
+    }
+  } else {
+    if (!parser__is_block_open(parser__peek(p)->type)) {
+      return parser__error(p, "expected '{' after if condition", parser__peek(p));
+    }
+    then_block = parser__parse_body_seq(p);
   }
-  AstNode* then_block = parser__parse_body_seq(p);
   if (then_block->type == AST_ERROR) return then_block;
 
   /* Skip newlines to check for elif/else. Track whether we crossed one (the
