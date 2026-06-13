@@ -4,8 +4,8 @@
 # operand-stack spill on SM suspension. Without the spill, the first
 # vec-get's i32 result is wiped when the second parallel suspends, and the
 # outer + sees the raw vec value on the stack instead of a number.
-proc main {} {
-  def x [+ [vec-get [parallel { sleep 0.02; 100 } { sleep 0.02; 99 }] 0] [vec-get [parallel { sleep 0.02; 200 } { sleep 0.02; 99 }] 0]]
+proc main [] [
+  def x [+ [vec-get [parallel [ sleep 0.02; 100 ] [ sleep 0.02; 99 ]] 0] [vec-get [parallel [ sleep 0.02; 200 ] [ sleep 0.02; 99 ]] 0]]
   print $x
-}
+]
 main

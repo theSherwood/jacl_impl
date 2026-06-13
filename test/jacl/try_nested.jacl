@@ -1,10 +1,10 @@
 # expect: inner caught
-[print [try {
-  try {
+[print [try [
+  try [
     error "inner"
-  } e1 {
+  ] e1 [
     concat [error-val $e1] " caught"
-  }
-} e2 {
+  ]
+] e2 [
   concat "outer: " [error-val $e2]
-}]]
+]]]

@@ -12,9 +12,9 @@
 # concurrent mark sees the published references. See BUFFER_DESIGN.md
 # Tier 1 (ref-elem bufs as struct fields).
 
-struct Bag { i32 size, [Buf 4 dyn] items }
+struct Bag [ i32 size, [Buf 4 dyn] items ]
 
-proc main {} {
+proc main [] [
   def b [Bag size 0]
   set $b->items->0 "hello"
   set $b->items->1 "world"
@@ -27,11 +27,11 @@ proc main {} {
   # cycle while the only roots for these values are the buf slots
   # embedded in $b.
   mut i 0
-  while [< $i 100] {
+  while [< $i 100] [
     def junk_v [vec $i $i $i]
     def junk_m [map "x" $i]
     set i [+ $i 1]
-  }
+  ]
 
   print $b->items->0
   print $b->items->1
@@ -40,5 +40,5 @@ proc main {} {
   def got_m $b->items->3
   print [map-get $got_m "k"]
   print $i
-}
+]
 main

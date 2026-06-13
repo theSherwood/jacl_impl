@@ -3,17 +3,17 @@
 # expect: 70
 # Multiple pre-await variables captured by different parallel/spawn body closures
 # in the same continuation — verifies all upvalue indices resolve correctly
-proc main {} {
+proc main [] [
   def x 10
   def y 20
   def z 30
-  def f [spawn { 40 }]
+  def f [spawn [ 40 ]]
   def w [await $f]
   # w=40, x=10, y=20, z=30 all available as upvalues in continuation
   # Each parallel body captures a different subset of pre-await variables
-  def r [parallel { + $x $y } { + $y $z } { + $z $w }]
+  def r [parallel [ + $x $y ] [ + $y $z ] [ + $z $w ]]
   print [vec-get $r 0]
   print [vec-get $r 1]
   print [vec-get $r 2]
-}
+]
 main

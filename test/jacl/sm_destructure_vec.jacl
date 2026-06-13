@@ -6,16 +6,16 @@
 # expect: 60
 # expect: 6
 
-proc from-parallel {} {
-  def [a b c] [parallel { 10 } { 20 } { 30 }]
+proc from-parallel [] [
+  def [a b c] [parallel [ 10 ] [ 20 ] [ 30 ]]
   + $a [+ $b $c]
-}
+]
 
-proc from-vec {} {
-  def fut [spawn { 0 }]
+proc from-vec [] [
+  def fut [spawn [ 0 ]]
   def [a b c] [vec 1 2 3]
   + $a [+ $b [+ $c [await $fut]]]
-}
+]
 
 print [from-parallel]
 print [from-vec]

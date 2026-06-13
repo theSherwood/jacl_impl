@@ -2,13 +2,13 @@
 # expect: true
 # expect: task failure
 # spawn a task that calls [error "msg"], await it, verify error? is true and error-val returns the message
-proc fail {} {
+proc fail [] [
   error "task failure"
-}
-proc main {} {
-  def f [spawn { fail }]
+]
+proc main [] [
+  def f [spawn [ fail ]]
   def result [await $f]
   print [error? $result]
   print [error-val $result]
-}
+]
 main

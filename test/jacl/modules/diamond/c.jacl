@@ -1,2 +1,2 @@
-use "./d.jacl" {base}
-proc cfn {x} { base [* $x 10] }
+use "./d.jacl" [base]
+proc cfn [x] [ base [* $x 10] ]

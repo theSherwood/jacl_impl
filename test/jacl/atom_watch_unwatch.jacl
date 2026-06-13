@@ -4,7 +4,7 @@
 # reset/swap. Subsequent prints confirm only the first two transitions
 # produce output.
 def counter [atom 0]
-logger = proc {old, new} { print "$old -> $new" }
+logger = proc [old, new] [ print "$old -> $new" ]
 watch $counter "k" $logger
 reset $counter 1
 swap $counter [\ $+ $it 1]

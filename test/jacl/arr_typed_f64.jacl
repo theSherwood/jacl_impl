@@ -9,7 +9,7 @@
 # branches and stored 0. Fixed by boxing wide scalar elements before the
 # byte-packed store (compiler__ensure_boxed). Also exercises Phase 1 narrowing:
 # arr-get/arr-pop on [Arr f64] now infer f64 (wide), not dyn.
-proc main {} {
+proc main [] [
   def c [[Arr f64] 2.5 3.5]
   print $c                     # [arr 2.5 3.5]  (construct stores real bits)
 
@@ -26,5 +26,5 @@ proc main {} {
   assert-type [arr-get $c 0] f64
   assert-type [arr-pop $c] f64
   print "ok"
-}
+]
 main

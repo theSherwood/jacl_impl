@@ -2,11 +2,11 @@
 # expect: 20
 # expect: 30
 # for loop over a stream
-proc gen {} {
+proc gen [] [
   yield 10
   yield 20
   yield 30
-}
-for [gen] {
+]
+for [gen] [
   print $it
-}
+]

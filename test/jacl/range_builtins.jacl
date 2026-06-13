@@ -3,7 +3,7 @@
 #
 # expect: ok
 
-proc check {} {
+proc check [] [
   assert [== [collect [range 1 5]] [[Vec i64] 1 2 3 4]]
   assert [== [collect [range-inclusive 1 5]] [[Vec i64] 1 2 3 4 5]]
   assert [== [vec-len [collect [range 0 0]]] 0]
@@ -15,10 +15,10 @@ proc check {} {
 
   # Element type stamps i64 so the for binding narrows — accumulate in i64.
   mut i64 sum 0
-  for [range-inclusive 1 4] n { set sum [+ $sum $n] }
+  for [range-inclusive 1 4] n [ set sum [+ $sum $n] ]
   assert [== $sum 10]
 
   "ok"
-}
+]
 
 print [check]

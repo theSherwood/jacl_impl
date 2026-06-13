@@ -6,15 +6,15 @@
 # annotation, narrows its call result fully — vec-get/arr-get/map-get on `[f …]`
 # read the receiver's typer stamp, which is now the element/value idx (+ a map's
 # key), not the raw shape idx. Mirrors the closure-PARAM convention.
-proc mkv {i64 n} [Vec i64] { [[Vec i64] $n $n] }
-proc mka {i64 n} [Arr i64] { [[Arr i64] $n $n] }
-proc mkm {i64 n} [Map i64 i64] { [[Map i64 i64] $n $n] }
-proc main {} {
+proc mkv [i64 n] [Vec i64] [ [[Vec i64] $n $n] ]
+proc mka [i64 n] [Arr i64] [ [[Arr i64] $n $n] ]
+proc mkm [i64 n] [Map i64 i64] [ [[Map i64 i64] $n $n] ]
+proc main [] [
   def [Proc [i64] [Vec i64]] fv $mkv
   def [Proc [i64] [Arr i64]] fa $mka
   def [Proc [i64] [Map i64 i64]] fm $mkm
   print [vec-get [fv 9] 0]         # 9
   print [arr-len [fa 1]]           # 2
   print [map-get [fm 7] 7]         # 7 (key typed i64)
-}
+]
 main

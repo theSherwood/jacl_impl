@@ -6,24 +6,24 @@
 # Winner result = 100 per race, 8 races = 800. GC triggered by
 # heavy allocation across race branches.
 
-proc trash {i, n} {
-  if [< $i $n] {
+proc trash [i, n] [
+  if [< $i $n] [
     def v [vec 1 2 3 4 5 6 7 8 9 10 11 12 13]
     def w [vec-push [vec-push $v 14] 15]
     trash [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc work {n} {
+proc work [n] [
   trash 0 $n
   100
-}
+]
 
-proc r5 {} {
-  race { work 5 } { work 10 } { work 20 } { work 30 } { work 40 }
-}
+proc r5 [] [
+  race [ work 5 ] [ work 10 ] [ work 20 ] [ work 30 ] [ work 40 ]
+]
 
-proc main {} {
+proc main [] [
   def r0 [r5]
   def r1 [r5]
   def r2 [r5]
@@ -33,5 +33,5 @@ proc main {} {
   def r6 [r5]
   def r7 [r5]
   print [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5v] [+ $r6 $r7]]]
-}
+]
 main

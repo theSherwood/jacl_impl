@@ -19,7 +19,7 @@
 # (str/dyn) select the PLAIN traced map rep with the key/value types carried
 # statically as stamps (the [Vec str] erasure scheme). [Map dyn dyn] IS the
 # plain map.
-proc main {} {
+proc main [] [
   # 1. str keys on the typed rep: [Map str i64]
   def m [[Map str i64] "a" 1 "b" 2]
   print [map-get $m "a"]
@@ -60,18 +60,18 @@ proc main {} {
 
   # 8. map-keys of a str-keyed TYPED map -> plain [Vec str]; for narrows
   def km [[Map str i64] "hello" 5]
-  for [map-keys $km] k {
+  for [map-keys $km] k [
     assert-type $k str
     print [length $k]
-  }
+  ]
 
   # 9. map-vals of [Map K str] (plain rep) -> [Vec str]; for narrows
   def vm [[Map i64 str] 1 "abc"]
-  for [map-vals $vm] vv {
+  for [map-vals $vm] vv [
     assert-type $vv str
     print [length $vv]
-  }
+  ]
 
   print "ok"
-}
+]
 main

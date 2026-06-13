@@ -14,7 +14,7 @@
 ## this tour is wrapped in `main`.
 ##
 
-struct Pt {i32 x, i32 y}
+struct Pt [i32 x, i32 y]
 
 # `ctx <type> <name> = <value>` declares a field of `$ctx`, the dynamic
 # context object visible everywhere. Plain `ctx` is immutable; `ctx mut`
@@ -24,58 +24,58 @@ ctx mut i32 verbosity = 0
 # `defmacro` registers a compile-time rewrite. `syntax-quote [...]` is
 # a templating form for AST literals; `~name` splices a captured arg's
 # AST in. The macro fires at compile time and never appears at runtime.
-defmacro unless {cond body} {
-  syntax-quote [if ~cond {} ~body]
-}
+defmacro unless [cond body] [
+  syntax-quote [if ~cond [] ~body]
+]
 
 # A generator: any proc that contains `yield` is one. Each call returns
 # a fresh lazy stream; the compiler lowers the body to a state machine
 # that suspends/resumes across yield sites.
-proc count-up {start, stop} {
+proc count-up [start, stop] [
   mut i $start
-  while [<= $i $stop] {
+  while [<= $i $stop] [
     yield $i
     set i [+ $i 1]
-  }
-}
+  ]
+]
 
-proc add {a, b} { + $a $b }
-proc greet {name} { concat "hi " $name }
-proc zero-arg {} { + 10 20 }
+proc add [a, b] [ + $a $b ]
+proc greet [name] [ concat "hi " $name ]
+proc zero-arg [] [ + 10 20 ]
 
 # Typed proc: `proc <name> {<param-type> <param>, ...} <ret> {body}`.
 # Return type comes after the params block, before the body. Param
 # and return types are checked at call sites and arithmetic narrows
 # accordingly (no boxing, no dyn dispatch). Untyped params default
 # to `dyn`.
-proc typed-add {i64 a, i64 b} i64 { + $a $b }
-proc shout {str s} str { concat $s "!" }
+proc typed-add [i64 a, i64 b] i64 [ + $a $b ]
+proc shout [str s] str [ concat $s "!" ]
 
 # Variadic: `..rest` in params collects trailing args into a vector.
-proc sum-all {..nums} {
+proc sum-all [..nums] [
   mut total 0
-  for $nums n { set total [+ $total $n] }
+  for $nums n [ set total [+ $total $n] ]
   $total
-}
+]
 
 # A suspending proc: contains `sleep` (unconditional suspension).
 # Callers don't see any async machinery — they just call it like a
 # normal function and get a value back. This is the direct-style
 # payoff of CPS. (`spawn`/`await` is shown explicitly further below.)
-proc double-async {n} {
+proc double-async [n] [
   sleep 0.001
   * $n 2
-}
+]
 
 # Suspending procs compose. Two suspending calls can appear inline as
 # args to the same outer call — the SM compiler spills the enclosing
 # operand stack across each suspension so siblings don't trample each
 # other's results.
-proc sum-async {a, b} {
+proc sum-async [a, b] [
   + [double-async $a] [double-async $b]
-}
+]
 
-proc main {} {
+proc main [] [
   # ----- values -----
   # Numbers, strings, booleans, vectors.
   assert [== 42 42]
@@ -99,7 +99,7 @@ proc main {} {
   # to i32, so typed accumulation type-checks.
   def scores [[Arr i32] 1 2 3 4]
   mut i32 total 0
-  for $scores s { set total [+ $total $s] }
+  for $scores s [ set total [+ $total $s] ]
   assert [== $total 10]
 
   # ----- bindings -----
@@ -162,13 +162,13 @@ proc main {} {
 
   # ----- if / while -----
   # `if` is an expression. `while [cond] {body}`.
-  assert [== [if [> 5 0] { "positive" } { "non-positive" }] "positive"]
+  assert [== [if [> 5 0] [ "positive" ] [ "non-positive" ]] "positive"]
   mut sum 0
   mut i 1
-  while [<= $i 10] {
+  while [<= $i 10] [
     set sum [+ $sum $i]
     set i [+ $i 1]
-  }
+  ]
   assert [== $sum 55]
 
   # ----- for -----
@@ -185,10 +185,10 @@ proc main {} {
   # keep collection-first so `$xs | for n { body }` reads as
   # `[for $xs n { body }]` and Just Works.
   mut seen 0
-  for [vec 1 2 3] { set seen [+ $seen $it] }
+  for [vec 1 2 3] [ set seen [+ $seen $it] ]
   assert [== $seen 6]
   mut i64 range-sum 0              # range yields i64; binding narrows, so accumulate in i64
-  for [range 0 3] n { set range-sum [+ $range-sum $n] }
+  for [range 0 3] n [ set range-sum [+ $range-sum $n] ]
   assert [== $range-sum 3]
 
   # C-style `for {init; cond; step} { body }` — Tcl-shaped, falls out
@@ -197,7 +197,7 @@ proc main {} {
   # counted loops where you want a single mutable index visible in
   # both the condition and the body.
   mut product 1
-  for {mut i 1; <= $i 4; incr i} { set product [* $product $i] }
+  for [mut i 1; <= $i 4; incr i] [ set product [* $product $i] ]
   assert [== $product 24]
 
   # ----- streams -----
@@ -223,7 +223,7 @@ proc main {} {
   def [a b c] [vec 1 2 3]
   assert [&& [== $a 1] [&& [== $b 2] [== $c 3]]]
   def p [Pt x 10 y 20]
-  def {x, y} $p
+  def [x, y] $p
   assert [&& [== $x 10] [== $y 20]]
   def [head ..tail] [vec first second third]
   assert [== $head first]
@@ -269,7 +269,7 @@ proc main {} {
   # with (old, new) in the writing thread.
   def witness [box 0]
   def counter [atom 0]
-  tap = proc {old, new} { reset $witness $new }
+  tap = proc [old, new] [ reset $witness $new ]
   watch $counter tap $tap
   reset $counter 7
   assert [== [deref $witness] 7]
@@ -280,7 +280,7 @@ proc main {} {
   # `try {body} name {handler}`. Errors are values; pipes short-circuit.
   # `assert` halts the VM, but `error` produces an error VALUE that
   # propagates through pipes and can be caught.
-  assert [== [try { error bad } e { concat "caught: " [error-val $e] }] "caught: bad"]
+  assert [== [try [ error bad ] e [ concat "caught: " [error-val $e] ]] "caught: bad"]
   assert [error? [error boom]]
 
   # ----- $ctx (dynamic context) -----
@@ -289,19 +289,21 @@ proc main {} {
   # { body }` overrides for the dynamic extent of body; prior values
   # restore on exit, including via error.
   assert [== $ctx->verbosity 0]
-  with-ctx {verbosity 3} {
+  with-ctx [verbosity 3] [
     assert [== $ctx->verbosity 3]
-  }
+  ]
   assert [== $ctx->verbosity 0]
-  try {
-    with-ctx {verbosity 99} { error escape }
-  } _ {}
+  try [
+    with-ctx [verbosity 99] [ error escape ]
+  ] _ []
   assert [== $ctx->verbosity 0]
 
   # ----- macros -----
   # `defmacro` (see top of file) rewrites at compile time. `unless` is
   # implemented as a one-line macro; the expansion `[if cond {} body]`
   # is what actually runs.
+  # NOTE: macro body args stay braces — a single-statement [..] arg to a
+  # macro head collapses to a call (BRACKET_FLIP_DESIGN.md, Key decision 0).
   mut hit 0
   unless [== 1 2] { set hit 5 }
   assert [== $hit 5]
@@ -319,7 +321,7 @@ proc main {} {
   # Blocked primitives surface as error values rather than aborting.
   def safe [map-remove [interpret-prelude] "spawn"]
   assert [error? [interpret $safe "[spawn { 99 }]"]]
-}
+]
 
 main
 
@@ -334,7 +336,7 @@ main
 # ----- spawn / await -----
 # `spawn { block }` returns a future. `await` blocks until it resolves.
 # Spawned tasks run on the NxM worker pool and snapshot `$ctx`.
-def fut [spawn { + 20 22 }]
+def fut [spawn [ + 20 22 ]]
 assert [== [await $fut] 42]
 
 # ----- direct-style: calling suspending procs -----
@@ -352,15 +354,15 @@ assert [== [sum-async 10 16] 52]
 # ----- parallel -----
 # `parallel { } { } ...` runs all blocks concurrently and returns a
 # vector of results in argument order, regardless of finish order.
-assert [== [parallel { 10 } { 20 } { 30 }] [vec 10 20 30]]
+assert [== [parallel [ 10 ] [ 20 ] [ 30 ]] [vec 10 20 30]]
 
 # ----- race -----
 # `race { } { } ...` returns the first to complete. Bodies should be
 # deterministic for testability — both branches return the same value.
-assert [== [race { 7 } { 7 }] 7]
+assert [== [race [ 7 ] [ 7 ]] 7]
 
 # ----- error in parallel -----
 # `parallel` runs every branch to completion; the result vector may
 # contain errors. Caller decides how to handle.
-def results [parallel { + 1 1 } { error boom }]
+def results [parallel [ + 1 1 ] [ error boom ]]
 assert [error? [vec-get $results 1]]

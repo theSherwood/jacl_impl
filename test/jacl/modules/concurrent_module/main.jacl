@@ -1,5 +1,5 @@
 # expect: 10
 # mode: concurrent
-use "./compute.jacl" {double}
-def f [spawn { double 5 }]
+use "./compute.jacl" [double]
+def f [spawn [ double 5 ]]
 print [await $f]

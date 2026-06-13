@@ -1,8 +1,8 @@
 # expect-error: map-set: value type i32 does not match the declared str value
 # Hard value check on a stamped plain-rep map ([Map str str]).
-proc main {} {
+proc main [] [
   def m [[Map str str] "a" "b"]
   def m2 [map-set $m "c" 7]
   print $m2
-}
+]
 main

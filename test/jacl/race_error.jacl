@@ -2,9 +2,9 @@
 # expect: true
 # expect: boom
 # race where both bodies error, result is error regardless of winner
-proc main {} {
-  def r [race { error "boom" } { error "boom" }]
+proc main [] [
+  def r [race [ error "boom" ] [ error "boom" ]]
   print [error? $r]
   print [error-val $r]
-}
+]
 main

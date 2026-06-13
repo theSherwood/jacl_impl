@@ -5,8 +5,8 @@
 # (only inline procs are), so OP_EACH pulls tagged (boxes the wide element) for
 # the dyn-param callback. Regression guard for the each-callback param-rep
 # signal (TYPED_CLOSURES_DESIGN.md Phase A).
-proc main {} {
-  def show [proc {x} { print $x }]
+proc main [] [
+  def show [proc [x] [ print $x ]]
   for [transform [range 1 4] [\ $* $it 1000000000]] $show   # 1e9, 2e9, 3e9
-}
+]
 main

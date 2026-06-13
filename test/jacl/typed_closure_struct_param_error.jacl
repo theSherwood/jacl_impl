@@ -3,10 +3,10 @@
 # struct than the [Proc [Struct] …] type declares is a clear error (their widths
 # /layouts differ — the inline call would be type-confused). Was previously a
 # blanket "not yet supported"; struct params now work, but must match.
-struct Point {i32 x, i32 y}
-struct Line {i32 a, i32 b}
-proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
-proc main {} {
-  print [apply [proc {Line q} i32 { $q->a }] [Point x 1 y 2]]
-}
+struct Point [i32 x, i32 y]
+struct Line [i32 a, i32 b]
+proc apply [[Proc [Point] i32] f, Point p] i32 [ [f $p] ]
+proc main [] [
+  print [apply [proc [Line q] i32 [ $q->a ]] [Point x 1 y 2]]
+]
 main

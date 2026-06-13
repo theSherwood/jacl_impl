@@ -4,7 +4,7 @@
 # i64] return (the inner vec element differs). Previously the check only compared
 # a struct param's idx, so vec/arr-element, map-key, and nested-proc mismatches
 # leaked through.
-proc usev {[Vec i32] v} i64 { 0 }
-proc pick {[Proc [[Vec i32]] i64] f} [Proc [[Vec i64]] i64] { $f }
-proc main {} { print "x" }
+proc usev [[Vec i32] v] i64 [ 0 ]
+proc pick [[Proc [[Vec i32]] i64] f] [Proc [[Vec i64]] i64] [ $f ]
+proc main [] [ print "x" ]
 main

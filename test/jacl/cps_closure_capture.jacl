@@ -1,10 +1,10 @@
 # expect: 30
 # closures capturing variables across suspension points
-proc main {} {
+proc main [] [
   def x 10
-  def f [spawn { 20 }]
+  def f [spawn [ 20 ]]
   def y [await $f]
-  proc adder {} { + $x $y }
+  proc adder [] [ + $x $y ]
   print [adder]
-}
+]
 main

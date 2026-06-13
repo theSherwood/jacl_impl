@@ -1,8 +1,8 @@
 # expect-error: ?. cannot be used on struct 'Point'; use -> for struct field access
 # Test: optional chaining on a struct is a compile error
-struct Point {i32 x, i32 y}
-proc main {} {
+struct Point [i32 x, i32 y]
+proc main [] [
   def p [Point x 10 y 20]
   print [?. $p x]
-}
+]
 main

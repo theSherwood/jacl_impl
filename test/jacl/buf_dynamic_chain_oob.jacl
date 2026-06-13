@@ -4,9 +4,9 @@
 # compile time (see buf_nested_oob.jacl); this fixture covers the
 # runtime path for the dynamic case.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
   mut j 5
   print $cube->0->$j->0
-}
+]
 main

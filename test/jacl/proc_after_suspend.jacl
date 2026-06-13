@@ -1,8 +1,8 @@
 # mode: concurrent
 # expect: 42
-proc main {} {
-  proc f {} { 42 }
-  await [spawn { 0 }]
+proc main [] [
+  proc f [] [ 42 ]
+  await [spawn [ 0 ]]
   print [f]
-}
+]
 main

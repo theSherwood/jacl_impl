@@ -1,2 +1,2 @@
 print "d init"
-proc base {x} { + $x 1 }
+proc base [x] [ + $x 1 ]

@@ -3,6 +3,6 @@
 # does NOT match the declared return is rejected. Here the param is
 # [Proc [i32] i32] but the declared return is [Proc [f32] f32]. (A conforming
 # return, or an inline-literal tail that monomorphizes, is accepted.)
-proc bad {[Proc [i32] i32] f} [Proc [f32] f32] { $f }
-proc main {} { print "x" }
+proc bad [[Proc [i32] i32] f] [Proc [f32] f32] [ $f ]
+proc main [] [ print "x" ]
 main

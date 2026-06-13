@@ -3,8 +3,8 @@
 # race as a non-last operand in an enclosing expression — same operand-stack
 # spill discipline as parallel_in_expr.jacl. Both race bodies return the same
 # value so the result is deterministic without timing assumptions.
-proc main {} {
-  def x [+ [race { sleep 0.02; 100 } { sleep 0.02; 100 }] [race { sleep 0.02; 200 } { sleep 0.02; 200 }]]
+proc main [] [
+  def x [+ [race [ sleep 0.02; 100 ] [ sleep 0.02; 100 ]] [race [ sleep 0.02; 200 ] [ sleep 0.02; 200 ]]]
   print $x
-}
+]
 main

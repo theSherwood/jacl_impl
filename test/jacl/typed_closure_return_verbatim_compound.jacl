@@ -4,16 +4,16 @@
 # COMPOUND param/return ([Vec T] / [Map K V] / nested [Proc …]); the returned
 # closure is conformance-checked structurally (see _compound_err). Here the
 # verbatim returns match exactly and the closures are then applied.
-proc usev {[Vec i64] v} i64 { [vec-get $v 0] }
-proc usem {[Map i64 i64] m} i64 { [map-get $m 1] }
-proc pickv {[Proc [[Vec i64]] i64] f} [Proc [[Vec i64]] i64] { $f }
-proc pickm {[Proc [[Map i64 i64]] i64] f} [Proc [[Map i64 i64]] i64] { $f }
-proc applyv {[Proc [[Vec i64]] i64] f, [Vec i64] v} i64 { [f $v] }
-proc applym {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
-proc main {} {
+proc usev [[Vec i64] v] i64 [ [vec-get $v 0] ]
+proc usem [[Map i64 i64] m] i64 [ [map-get $m 1] ]
+proc pickv [[Proc [[Vec i64]] i64] f] [Proc [[Vec i64]] i64] [ $f ]
+proc pickm [[Proc [[Map i64 i64]] i64] f] [Proc [[Map i64 i64]] i64] [ $f ]
+proc applyv [[Proc [[Vec i64]] i64] f, [Vec i64] v] i64 [ [f $v] ]
+proc applym [[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m] i64 [ [f $m] ]
+proc main [] [
   def [Vec i64] v [[Vec i64] 9 9]
   def [Map i64 i64] m [[Map i64 i64] 1 5]
   print [applyv [pickv $usev] $v]        # 9
   print [applym [pickm $usem] $m]        # 5
-}
+]
 main

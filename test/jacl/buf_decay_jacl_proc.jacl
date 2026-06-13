@@ -3,13 +3,13 @@
 # JACL proc taking a [Ptr T] receives the buf by pointer (same C-style
 # decay as extern calls). The proc reads through the pointer; address
 # identity is preserved across the call boundary.
-proc read_first {[Ptr i32] p} i32 {
+proc read_first [[Ptr i32] p] i32 [
   ptr-deref $p
-}
+]
 
-proc read_second {[Ptr i32] p} i32 {
+proc read_second [[Ptr i32] p] i32 [
   ptr-deref [ptr-offset $p 1]
-}
+]
 
 def [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]
 print [read_first $b]

@@ -2,8 +2,8 @@
 # Missing file: read-file returns an error value rather than a runtime trap.
 # This lets users handle the failure with [error?] or pipe through [catch].
 def r [read-file "/tmp/jacl_io_definitely_does_not_exist_47291.txt"]
-if [error? $r] {
+if [error? $r] [
   print "error"
-} else {
+] else [
   print "got: $r"
-}
+]

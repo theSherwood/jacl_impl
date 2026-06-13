@@ -2,12 +2,12 @@
 # read-file on an empty file returns an empty string, not an error.
 write-file "" "/tmp/jacl_io_empty_47291.txt"
 def s [read-file "/tmp/jacl_io_empty_47291.txt"]
-if [error? $s] {
+if [error? $s] [
   print "got error"
-} else {
-  if [== $s ""] {
+] else [
+  if [== $s ""] [
     print "empty"
-  } else {
+  ] else [
     print "got: $s"
-  }
-}
+  ]
+]

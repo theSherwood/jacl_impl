@@ -1,8 +1,8 @@
 # expect: ok
 # sleep 0 should evaluate to nil immediately (or near-immediately) and
 # continue execution. Acts as a yield point in concurrent contexts.
-proc main {} {
+proc main [] [
   sleep 0
   print "ok"
-}
+]
 main

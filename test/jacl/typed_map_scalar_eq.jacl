@@ -5,7 +5,7 @@
 # Regression: == on typed maps with SCALAR value/key sentinels used to index
 # the struct registry with the 0xFF00+ sentinel (OOB read -> segfault).
 # Scalar map values are 1 tagged slot; compare via deep-eq.
-proc main {} {
+proc main [] [
   def a [[Map dyn i64] "x" 1 "y" 2]
   def b [[Map dyn i64] "x" 1 "y" 2]
   print [== $a $b]
@@ -16,5 +16,5 @@ proc main {} {
   print [== $d $e]
   def f [[Map i64 i64] 2 10]
   print [== $d $f]
-}
+]
 main

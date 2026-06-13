@@ -1,4 +1,4 @@
 # expect: nil
 # for on empty vector calls proc zero times, returns nil
-proc cb {x} { print $x }
+proc cb [x] [ print $x ]
 print [for [vec] $cb]

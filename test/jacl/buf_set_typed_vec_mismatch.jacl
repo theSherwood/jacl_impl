@@ -3,9 +3,9 @@
 # landed, [Vec str] uses the PLAIN vec rep (str is a tagged heap value — no
 # strided rep exists for it), so the mismatch reports vec-vs-typed-vec.
 # Either way the wrong-repped value is rejected before storage.
-proc main {} {
+proc main [] [
   def [Buf 3 [Vec i64]] xs
   def bad_v [[Vec str] "a" "b"]
   buf-set $xs 0 $bad_v
-}
+]
 main

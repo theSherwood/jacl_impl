@@ -1,7 +1,7 @@
 # expect-error: is not a str value
 # [[Arr str] ...] element checks: a concrete non-str element is a compile error.
-proc main {} {
+proc main [] [
   def sa [[Arr str] "a" 42]
   print $sa
-}
+]
 main

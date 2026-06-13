@@ -2,7 +2,7 @@
 # Element-type conformance is enforced for a compound [Proc …] param: a
 # [Vec i32] closure does NOT conform to a [Proc [[Vec i64]] i64] param (the
 # element widths differ — silently accepting it would be unsound at the call).
-proc sum32 {[Vec i32] v} i64 { 0 }
-proc hof {[Proc [[Vec i64]] i64] f, [Vec i64] v} i64 { [f $v] }
-proc main {} { print [hof $sum32 [[Vec i64] 1 2 3]] }
+proc sum32 [[Vec i32] v] i64 [ 0 ]
+proc hof [[Proc [[Vec i64]] i64] f, [Vec i64] v] i64 [ [f $v] ]
+proc main [] [ print [hof $sum32 [[Vec i64] 1 2 3]] ]
 main

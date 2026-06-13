@@ -3,15 +3,15 @@
 # expect:   at outer (line 10)
 # expect:   at <main> (line 13)
 # Test: stack-trace from nested calls shows full call chain
-proc inner {} {
+proc inner [] [
   error "deep"
-}
-proc outer {} {
+]
+proc outer [] [
   inner
-}
-try {
+]
+try [
   outer
-} e {
+] e [
   print "caught"
   print [stack-trace]
-}
+]

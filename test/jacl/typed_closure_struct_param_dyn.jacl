@@ -10,22 +10,22 @@
 # closure-arg form, and a [Vec [Proc …]] element literal (the ctor walk skips the
 # generic element walk so the element is monomorphized to the declared signature
 # — including a struct param idx).
-struct Point {i32 x, i32 y}
-proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
+struct Point [i32 x, i32 y]
+proc apply [[Proc [Point] i32] f, Point p] i32 [ [f $p] ]
 
-proc main {} {
+proc main [] [
   # def-binding form: q is inferred Point from the annotation.
-  def [Proc [Point] i32] g [proc {q} i32 { $q->x }]
+  def [Proc [Point] i32] g [proc [q] i32 [ $q->x ]]
   print [apply $g [Point x 7 y 2]]                    # 7
 
   # inline closure-arg form: same inference at the call site.
-  print [apply [proc {q} i32 { [+ $q->x $q->y] }] [Point x 4 y 5]]   # 9
+  print [apply [proc [q] i32 [ [+ $q->x $q->y] ]] [Point x 4 y 5]]   # 9
 
   # [Vec [Proc …]] element: the element literal's untyped q infers Point. Bind
   # the element and call it directly (passing a vec-get result straight to a
   # closure PARAM is a separate, pre-existing narrowing gap — scalar too).
-  def [Vec [Proc [Point] i32]] fns [[Vec [Proc [Point] i32]] [proc {q} i32 { [+ $q->x $q->y] }]]
+  def [Vec [Proc [Point] i32]] fns [[Vec [Proc [Point] i32]] [proc [q] i32 [ [+ $q->x $q->y] ]]]
   def h [vec-get $fns 0]
   print [h [Point x 8 y 4]]                           # 12
-}
+]
 main

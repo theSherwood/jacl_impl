@@ -1,6 +1,6 @@
 # expect-error: assert-type: unknown type 'nope'
-proc main {} {
+proc main [] [
   def x 1
   assert-type $x nope
-}
+]
 main

@@ -1,9 +1,9 @@
 # expect: [vec 1 2]
 # A binding form (def / mut / =) in tail position is nil-producing
 # and is whitelisted.
-proc gen {} {
+proc gen [] [
   yield 1
   yield 2
   def unused 99
-}
+]
 print [collect [gen]]

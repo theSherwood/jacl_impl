@@ -5,13 +5,13 @@
 # Named closures as VALUES (TYPED_CLOSURES_DESIGN.md Phase B3d). A [Proc …]
 # binding can be passed to a closure param and bound to another [Proc …] binding
 # — conformance-checked (invariant), called through the typed unboxed convention.
-proc apply {[Proc [i64] i64] f  i64 x} i64 { [f $x] }
+proc apply [[Proc [i64] i64] f  i64 x] i64 [ [f $x] ]
 
-proc main {} {
-  def [Proc [i64] i64] g [proc {n} {* $n 2}]
+proc main [] [
+  def [Proc [i64] i64] g [proc [n] [* $n 2]]
   print [apply $g 5]                      # 10 — named closure passed to a HOF
 
-  def [Proc [i64] i64] big [proc {n} {* $n 1000000000}]
+  def [Proc [i64] i64] big [proc [n] [* $n 1000000000]]
   print [apply $big 6]                    # 6_000_000_000 — wide, unboxed
 
   # Bind a named closure to another [Proc …] binding, then use it.
@@ -21,5 +21,5 @@ proc main {} {
   # The composed binding is still a proper typed closure (strict-i64 consumer).
   def i64 y [apply $big 6]
   print [+ $y 1]                          # 6_000_000_001
-}
+]
 main

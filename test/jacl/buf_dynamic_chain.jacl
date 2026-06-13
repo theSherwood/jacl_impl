@@ -11,7 +11,7 @@
 # trailing literals fold into the leaf load/store's u16 offset.
 # See docs/TYPE_REGISTRY_REFACTOR.md.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
 
   # All-dynamic chain on a TYPE_BUF base.
@@ -32,5 +32,5 @@ proc main {} {
   def [Buf 3 [Buf 4 i32]] matrix
   set $matrix->$i->$j 13
   print $matrix->1->2
-}
+]
 main

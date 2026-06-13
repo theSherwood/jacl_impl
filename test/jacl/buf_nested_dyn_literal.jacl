@@ -9,11 +9,11 @@
 # emits OP_BUF_STORE_OFF — the ref-leaf code path stores a tagged
 # JaclVal with a GC write barrier.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 2 dyn]] grid [[Buf 2 [Buf 2 dyn]] [[Buf 2 dyn] "hello" "world"] [[Buf 2 dyn] 42 nil]]
   print $grid->0->0
   print $grid->0->1
   print $grid->1->0
   print $grid->1->1
-}
+]
 main

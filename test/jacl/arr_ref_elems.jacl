@@ -15,7 +15,7 @@
 # the element type lives statically as TYPE_ARR + stamp: constructor element
 # checks, arr-get/arr-pop narrowing, push/set expected-type, for-binding
 # narrowing. Value-type elements ([Arr i64], [Arr Pt]) keep the flat rep.
-proc main {} {
+proc main [] [
   # 1. [Arr str]: ctor + get narrowing + push/pop/set/len
   def sa [[Arr str] "x" "y"]
   assert-type [arr-get $sa 0] str
@@ -34,10 +34,10 @@ proc main {} {
 
   # 3. def propagation + annotation: binding keeps the stamp; for narrows
   def [Arr str] aa [[Arr str] "a" "b"]
-  for $aa s {
+  for $aa s [
     assert-type $s str
     print $s
-  }
+  ]
 
   # 4. dyn slots never autobox: a wide i64 must be boxed EXPLICITLY to
   # live in a dyn arr (an unboxed wide push is a compile error — see
@@ -49,5 +49,5 @@ proc main {} {
   print [deref [arr-get $wa 0]]
 
   print "ok"
-}
+]
 main

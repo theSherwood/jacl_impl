@@ -13,9 +13,9 @@
 # the vecs only via the boxed struct's bytes. Without the fix the
 # tracer ignores those bytes and the vecs get collected.
 
-struct Bag { [Buf 4 dyn] items }
+struct Bag [ [Buf 4 dyn] items ]
 
-proc main {} {
+proc main [] [
   def b [Bag ]
   set $b->items->0 [vec 30 0 0]
   set $b->items->1 [vec 31 0 0]
@@ -30,10 +30,10 @@ proc main {} {
   set $b->items->3 nil
 
   mut i 0
-  while [< $i 500] {
+  while [< $i 500] [
     def junk [vec $i $i $i $i $i $i]
     set i [+ $i 1]
-  }
+  ]
 
   def back [deref $boxed]
   print [vec-get $back->items->0 0]
@@ -41,5 +41,5 @@ proc main {} {
   print [vec-get $back->items->2 0]
   print [vec-get $back->items->3 0]
   print $i
-}
+]
 main

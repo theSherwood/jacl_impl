@@ -8,8 +8,8 @@
 # vec-push is monomorphized to the element signature (its param is unboxed, not
 # read as nil); the annotated result vec narrows on read-back. Wide-i64 elements
 # prove the element calls are unboxed.
-proc main {} {
-  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] [proc {x} {* $x 2}] [proc {x} {+ $x 1}]]
+proc main [] [
+  def [Vec [Proc [i64] i64]] fns [[Vec [Proc [i64] i64]] [proc [x] [* $x 2]] [proc [x] [+ $x 1]]]
 
   # vec-get narrowing: bind an element, then a typed call on it.
   def g [vec-get $fns 0]
@@ -20,10 +20,10 @@ proc main {} {
   # vec-push monomorphization: push a wide-i64 closure literal (proves unboxed),
   # then read it — and an original element — back out of the annotated result
   # vec and call them typed.
-  def [Vec [Proc [i64] i64]] more [vec-push $fns [proc {x} {* $x 1000000000}]]
+  def [Vec [Proc [i64] i64]] more [vec-push $fns [proc [x] [* $x 1000000000]]]
   def w [vec-get $more 2]
   print [w 6]                               # 6000000000
   def v [vec-get $more 0]
   print [v 6]                               # 12
-}
+]
 main

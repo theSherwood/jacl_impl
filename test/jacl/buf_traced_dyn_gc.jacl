@@ -19,11 +19,11 @@ buf-set $xs 3 $m
 # Churn: allocate a pile of throw-away vecs nobody else references,
 # encouraging a young-gen sweep while $xs is the sole root.
 mut i 0
-while [< $i 100] {
+while [< $i 100] [
   def junk_v [vec $i $i $i]
   def junk_m [map "x" $i]
   set i [+ $i 1]
-}
+]
 
 print [buf-get $xs 0]
 print [buf-get $xs 1]

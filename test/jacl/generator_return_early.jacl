@@ -1,10 +1,10 @@
 # expect: [vec 1 2]
 # bare `return` (no value) inside a generator is allowed — it just
 # exhausts the stream early.
-proc gen {} {
+proc gen [] [
   yield 1
   yield 2
   return
   yield 3
-}
+]
 print [collect [gen]]

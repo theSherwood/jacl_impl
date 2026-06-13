@@ -18,19 +18,19 @@
 # as inline strings without the intern table. See BUFFER_DESIGN.md
 # Tier 2 (test-harness native-fn registration).
 
-extern t_sumi {[Ptr i32] buf i32 len} i32
-extern t_fill {[Ptr u8] buf i32 len i32 byte} i32
-extern t_xor {[Ptr u8] dst [Ptr u8] src i32 len} i32
+extern t_sumi [[Ptr i32] buf i32 len] i32
+extern t_fill [[Ptr u8] buf i32 len i32 byte] i32
+extern t_xor [[Ptr u8] dst [Ptr u8] src i32 len] i32
 
-proc sum {} {
+proc sum [] [
   # Callee reads back the i32 elements the caller stored. Decayed
   # pointer is the actual byte address of the caller's frame slot.
   def [Buf 3 i32] xs [[Buf 3 i32] 6 7 8]
   print [t_sumi $xs 3]
-}
+]
 sum
 
-proc fill {} {
+proc fill [] [
   # Callee writes through the decayed pointer; caller observes the
   # mutation by reading the buf back through buf-get.
   def [Buf 4 u8] scratch
@@ -39,10 +39,10 @@ proc fill {} {
   print [buf-get $scratch 1]
   print [buf-get $scratch 2]
   print [buf-get $scratch 3]
-}
+]
 fill
 
-proc xor {} {
+proc xor [] [
   # Two buf args decay independently; both pointer values reach C
   # alongside one another. dst gets dst ^ src in-place.
   def [Buf 4 u8] dst [[Buf 4 u8] 0xaa 0xaa 0xaa 0xaa]
@@ -52,5 +52,5 @@ proc xor {} {
   print [buf-get $dst 1]
   print [buf-get $dst 2]
   print [buf-get $dst 3]
-}
+]
 xor

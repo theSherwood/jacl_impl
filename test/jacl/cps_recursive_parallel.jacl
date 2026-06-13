@@ -2,18 +2,18 @@
 # mode: concurrent
 # Recursive proc with parallel in body — exercises 3 levels of recursion.
 # Tests CPS transform for recursive procs with suspending parallel operations.
-proc sum {n} {
-  if [== $n 0] {
+proc sum [n] [
+  if [== $n 0] [
     0
-  } else {
-    def r [parallel { + $n 0 } { sum [- $n 1] }]
+  ] else [
+    def r [parallel [ + $n 0 ] [ sum [- $n 1] ]]
     def cur [vec-get $r 0]
     def rest [vec-get $r 1]
     + $cur $rest
-  }
-}
-proc main {} {
+  ]
+]
+proc main [] [
   def r [sum 3]
   print $r
-}
+]
 main

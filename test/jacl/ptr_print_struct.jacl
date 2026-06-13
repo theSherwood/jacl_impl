@@ -1,5 +1,5 @@
 # expect: Ptr<Point>(0x10)
-struct Point {i32 x i32 y}
+struct Point [i32 x i32 y]
 def u64 addr 16
 def [Ptr Point] p [ptr-cast [Ptr Point] $addr]
 print $p

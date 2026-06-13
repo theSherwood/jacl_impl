@@ -4,10 +4,10 @@
 # type is a conformance error — never silently re-typed. A different struct's
 # width differs, so the inline-materialized call result would otherwise be
 # type-confused (the "compare idxs, not just kinds" invariant).
-struct Point {i32 x, i32 y}
-struct Other {i32 a}
-proc main {} {
-  def [Proc [i32] Point] g [proc {i32 a} Other { [Other a $a] }]
+struct Point [i32 x, i32 y]
+struct Other [i32 a]
+proc main [] [
+  def [Proc [i32] Point] g [proc [i32 a] Other [ [Other a $a] ]]
   print 1
-}
+]
 main

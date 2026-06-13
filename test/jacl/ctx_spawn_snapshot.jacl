@@ -1,8 +1,8 @@
 # expect: 42
 # Test: spawned task reads ctx field set before spawn — sees snapshot value
 ctx mut i32 level = 42
-proc main {} {
-  def f [spawn { $ctx->level }]
+proc main [] [
+  def f [spawn [ $ctx->level ]]
   print [await $f]
-}
+]
 main

@@ -1463,7 +1463,9 @@ AstNode* parser__parse_defmacro(Parser* p) {
   if (parser__at_end(p) || !parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for macro parameters", parser__peek(p));
   }
-  Token* open_params = parser__advance(p); /* consume '{' */
+  Token* open_params = parser__advance(p); /* consume open delimiter */
+  TokenType params_close = (open_params->type == TOKEN_LBRACKET)
+                           ? TOKEN_RBRACKET : TOKEN_RBRACE;
 
   #define DEFMACRO_MAX_PARAMS 32
   const char* tmp_names[DEFMACRO_MAX_PARAMS];
@@ -1471,7 +1473,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   uint32_t param_count = 0;
   bool is_variadic = false;
 
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+  while (!parser__at_end(p) && parser__peek(p)->type != params_close) {
     /* Skip commas and newlines between params */
     while (!parser__at_end(p) &&
            (parser__peek(p)->type == TOKEN_COMMA ||
@@ -1479,7 +1481,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
             parser__peek(p)->type == TOKEN_SEMICOLON)) {
       parser__advance(p);
     }
-    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+    if (parser__at_end(p) || parser__peek(p)->type == params_close) break;
 
     /* Check for rest marker '..' */
     if (parser__peek(p)->type == TOKEN_DOTDOT) {
@@ -1507,7 +1509,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
               parser__peek(p)->type == TOKEN_SEMICOLON)) {
         parser__advance(p);
       }
-      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+      if (parser__at_end(p) || parser__peek(p)->type != params_close) {
         return parser__error(p, "rest parameter must be last in defmacro", kw_tok);
       }
       break;
@@ -1538,7 +1540,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   }
 
   /* Expect closing brace for params */
-  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+  if (parser__at_end(p) || parser__peek(p)->type != params_close) {
     return parser__error(p, "expected '}' to close macro parameters", open_params);
   }
   parser__advance(p); /* consume '}' */
@@ -1785,8 +1787,10 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
        proc {params} type {body}              — anonymous, typed
      p->pos points to the first token after 'proc'. */
 
-  /* 1) Name (or synthesized empty for anonymous). */
-  if (p->tokens[p->pos].type == TOKEN_LBRACE) {
+  /* 1) Name (or synthesized empty for anonymous — params open with `{` or,
+        post-flip, `[`). */
+  if (p->tokens[p->pos].type == TOKEN_LBRACE ||
+      p->tokens[p->pos].type == TOKEN_LBRACKET) {
     AstNode* name = ast_alloc(p->arena);
     name->type = AST_LIT_STRING;
     name->start = proc_head->start;
@@ -1914,6 +1918,10 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     TokenType after = parser__peek(p)->type;
     bool else_form = after == TOKEN_ELIF || after == TOKEN_ELSE ||
                      after == TOKEN_LBRACE ||
+                     /* `[…]` as trailing else only on the SAME line — a
+                        bracket statement on the next line is a separate
+                        statement, not an else branch. */
+                     (!crossed_nl && after == TOKEN_LBRACKET) ||
                      (!crossed_nl && p->syntax_quote_depth == 1 &&
                       after == TOKEN_NOT);
     if (!else_form) p->pos = pos_before_nl_skip;
@@ -1989,6 +1997,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     return node;
 
   } else if (parser__peek(p)->type == TOKEN_LBRACE ||
+             (!crossed_nl && parser__peek(p)->type == TOKEN_LBRACKET) ||
              (!crossed_nl && p->syntax_quote_depth == 1 &&
               parser__peek(p)->type == TOKEN_NOT)) {
     /* Trailing block without 'else' keyword — treat as else branch
@@ -1997,7 +2006,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
        else branch (`[if ~cond {…} ~body]` — the spliced body arrives as a
        [do …] sequence at expansion). Same-line only, so an unrelated `~stmt`
        on the next template line isn't swallowed. */
-    AstNode* else_block = (parser__peek(p)->type == TOKEN_LBRACE)
+    AstNode* else_block = parser__is_block_open(parser__peek(p)->type)
                             ? parser__parse_body_seq(p)
                             : parser__parse_expr(p);
     if (!else_block) {

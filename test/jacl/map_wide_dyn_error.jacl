@@ -2,10 +2,10 @@
 # No-autobox rule, map flavor: wide values into a plain map are rejected.
 # (Declared wide keys — [Map i64 str] — still work: boxing there is the
 # plain rep's internal bridging, the stamp keeps the static key type.)
-proc main {} {
+proc main [] [
   def i64 m 1000000
   def i64 big [* $m 5000]
   def mp [map "k" $big]
   print $mp
-}
+]
 main

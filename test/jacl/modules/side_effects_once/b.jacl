@@ -1,2 +1,2 @@
-use "./shared.jacl" {val}
-proc bfn {x} { + $x $val }
+use "./shared.jacl" [val]
+proc bfn [x] [ + $x $val ]

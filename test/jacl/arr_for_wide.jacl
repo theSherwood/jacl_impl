@@ -9,25 +9,25 @@
 # store it in a typed local, SM loops store it boxed in a state field and
 # unbox on read. Regression for the original segfault (raw wide bits in a
 # GC-traced state field).
-proc sum-arr {} {
-  def fut [spawn { 0 }]          # makes this an SM proc
+proc sum-arr [] [
+  def fut [spawn [ 0 ]]          # makes this an SM proc
   def a [[Arr i64] 10 20 30]
   mut i64 total 0
-  for $a n { set total [+ $total $n] }   # wide binding in a state field
+  for $a n [ set total [+ $total $n] ]   # wide binding in a state field
   await $fut
   $total
-}
-proc main {} {
+]
+proc main [] [
   def a [[Arr i64] 100 200 300]
-  for $a x { print $x }          # 100 200 300 (narrowed wide, correct values)
+  for $a x [ print $x ]          # 100 200 300 (narrowed wide, correct values)
 
   mut i64 total 0
-  for $a y { set total [+ $total $y] }   # typed i64 accumulation (non-SM)
+  for $a y [ set total [+ $total $y] ]   # typed i64 accumulation (non-SM)
   print $total                   # 600
 
-  for $a z { assert-type $z i64 }        # binding statically narrows to i64
+  for $a z [ assert-type $z i64 ]        # binding statically narrows to i64
 
   print [sum-arr]                # 60 (wide for-binding across a suspension)
   print "ok"
-}
+]
 main

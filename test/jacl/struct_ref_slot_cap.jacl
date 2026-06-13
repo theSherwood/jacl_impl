@@ -5,4 +5,4 @@
 # at index 256+ would be silently misclassified as raw bytes and the GC would
 # leak references at those positions. See RECURSIVE_LAYOUT_REFACTOR.md
 # "256-slot cap asymmetry" follow-up.
-struct Big { [Buf 257 dyn] items }
+struct Big [ [Buf 257 dyn] items ]

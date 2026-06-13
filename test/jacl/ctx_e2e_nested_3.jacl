@@ -7,11 +7,11 @@
 ctx mut i32 level = 1
 
 print $ctx->level
-with-ctx {level 2} {
+with-ctx [level 2] [
   print $ctx->level
-  with-ctx {level 3} {
+  with-ctx [level 3] [
     print $ctx->level
-  }
+  ]
   print $ctx->level
-}
+]
 print $ctx->level

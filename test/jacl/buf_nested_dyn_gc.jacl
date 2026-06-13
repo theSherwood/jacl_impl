@@ -12,7 +12,7 @@
 # multiple GC cycles; if any slot were misclassified as raw the vecs
 # would be collected and the final reads would crash.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 2 dyn]] grid [[Buf 2 [Buf 2 dyn]] [[Buf 2 dyn] nil nil] [[Buf 2 dyn] nil nil]]
   set $grid->0->0 [vec 30 0 0]
   set $grid->0->1 [vec 31 0 0]
@@ -20,10 +20,10 @@ proc main {} {
   set $grid->1->1 [vec 33 0 0]
 
   mut i 0
-  while [< $i 500] {
+  while [< $i 500] [
     def junk [vec $i $i $i $i $i $i]
     set i [+ $i 1]
-  }
+  ]
 
   def a $grid->0->0
   def b $grid->0->1
@@ -34,5 +34,5 @@ proc main {} {
   print [vec-get $c 0]
   print [vec-get $d 0]
   print $i
-}
+]
 main

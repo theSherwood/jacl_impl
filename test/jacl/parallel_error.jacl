@@ -2,9 +2,9 @@
 # expect: true
 # expect: fail
 # one parallel body errors, result is error (first-error-wins)
-proc main {} {
-  def r [parallel { 42 } { error "fail" }]
+proc main [] [
+  def r [parallel [ 42 ] [ error "fail" ]]
   print [error? $r]
   print [error-val $r]
-}
+]
 main

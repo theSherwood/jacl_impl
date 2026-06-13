@@ -11,7 +11,7 @@
 # the leaf), no decomposition into per-arrow steps.
 # See docs/TYPE_REGISTRY_REFACTOR.md.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
   print [buf-len $cube]
 
@@ -33,5 +33,5 @@ proc main {} {
 
   # Untouched slot still 0.
   print $cube->0->0->1
-}
+]
 main

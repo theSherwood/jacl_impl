@@ -1,9 +1,9 @@
 # expect: 2
 # continue inside a for-over-map skips to the next entry.
-proc main {} {
+proc main [] [
   def [Map i64 i64] m [[Map i64 i64] 1 1 2 2 3 3]
   mut i64 odd 0
-  for $m k v { if [== [% $v 2] 0] { continue }; set odd [+ $odd 1] }
+  for $m k v [ if [== [% $v 2] 0] [ continue ]; set odd [+ $odd 1] ]
   print $odd                 # values 1,2,3 → two odd (1,3)
-}
+]
 main

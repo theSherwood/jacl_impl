@@ -12,16 +12,16 @@
 # annotation's. A DIRECT call of a bare inline struct-returning literal also
 # materializes the struct inline (`[[proc …] 4]->x`, via the head proc-shape
 # stamp). Nested compound types inside [Proc …] remain unsupported.
-struct Point {i32 x, i32 y}
+struct Point [i32 x, i32 y]
 
 # A proc whose body returns the result of a struct-returning closure call —
 # exercises typer return narrowing (the call node types as Point).
-proc apply {[Proc [i32] Point] f, i32 n} Point { [f $n] }
+proc apply [[Proc [i32] Point] f, i32 n] Point [ [f $n] ]
 
-proc main {} {
+proc main [] [
   # Named [Proc [i32] Point] binding; field access on the inline-materialized
   # call result.
-  def [Proc [i32] Point] g [proc {i32 a} Point { [Point x $a y 5] }]
+  def [Proc [i32] Point] g [proc [i32 a] Point [ [Point x $a y 5] ]]
   print [g 7]->x                                      # 7
   print [g 1]->y                                      # 5
 
@@ -31,10 +31,10 @@ proc main {} {
   print $p->x                                         # 8
 
   # A literal that OMITS its return type adopts the annotation's struct return.
-  def [Proc [i32] Point] h [proc {i32 a} { [Point x $a y 0] }]
+  def [Proc [i32] Point] h [proc [i32 a] [ [Point x $a y 0] ]]
   print [h 3]->x                                      # 3
 
   # Direct call of a bare inline struct-returning literal + field access.
-  print [[proc {i32 a} Point { [Point x $a y 0] }] 4]->x   # 4
-}
+  print [[proc [i32 a] Point [ [Point x $a y 0] ]] 4]->x   # 4
+]
 main

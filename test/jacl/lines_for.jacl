@@ -1,6 +1,6 @@
 # expect: hello
 # expect: world
 # iterate lines with for
-for [lines "hello\nworld"] {
+for [lines "hello\nworld"] [
   print $it
-}
+]

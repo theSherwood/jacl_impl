@@ -1,7 +1,7 @@
 # expect: 10
 # expect: 20
 # Test: chained access on struct-typed ctx field works
-struct Point {i32 x, i32 y}
+struct Point [i32 x, i32 y]
 ctx Point origin = [Point x 10 y 20]
 print $ctx->origin->x
 print $ctx->origin->y

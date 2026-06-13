@@ -11,18 +11,18 @@
 # typed_closure_struct_param_dyn.jacl; this test pins the explicitly-DECLARED
 # struct param form (`{Point q}`). Nested compound types inside [Proc …] remain
 # unsupported.
-struct Point {i32 x, i32 y}
-proc apply {[Proc [Point] i32] f, Point p} i32 { [f $p] }
+struct Point [i32 x, i32 y]
+proc apply [[Proc [Point] i32] f, Point p] i32 [ [f $p] ]
 
-proc main {} {
+proc main [] [
   # Inline closure literal with a typed struct param + field access.
-  print [apply [proc {Point q} i32 { $q->x }] [Point x 7 y 2]]      # 7
+  print [apply [proc [Point q] i32 [ $q->x ]] [Point x 7 y 2]]      # 7
 
   # A named [Proc [Point] i32] binding, conformance-checked at the sink.
-  def [Proc [Point] i32] g [proc {Point q} i32 { $q->y }]
+  def [Proc [Point] i32] g [proc [Point q] i32 [ $q->y ]]
   print [apply $g [Point x 10 y 5]]                                 # 5
 
   # Direct call of a bare inline struct-param literal (no binding/sink).
-  print [[proc {Point q} i32 { $q->x }] [Point x 9 y 0]]            # 9
-}
+  print [[proc [Point q] i32 [ $q->x ]] [Point x 9 y 0]]            # 9
+]
 main

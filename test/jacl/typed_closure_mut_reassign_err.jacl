@@ -4,12 +4,12 @@
 # is rejected. This is the consequence of the binding being typed — the same
 # strictness as `mut i32 x; set x "hi"`. (A non-closure value is caught by the
 # existing "cannot assign … to closure binding" check.)
-proc dbl {i32 x} i32 { [* $x 2] }
-proc s2s {str x} str { $x }
-proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
-proc main {} {
+proc dbl [i32 x] i32 [ [* $x 2] ]
+proc s2s [str x] str [ $x ]
+proc apply [[Proc [i32] i32] f, i32 n] i32 [ [f $n] ]
+proc main [] [
   mut f $dbl
   set f $s2s
   print [apply $f 20]
-}
+]
 main

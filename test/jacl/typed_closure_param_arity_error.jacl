@@ -1,8 +1,8 @@
 # expect-error: parameter
 # Conformance: an inline closure arg's arity must match the param's [Proc …]
 # type — caught at compile time (TYPED_CLOSURES_DESIGN.md §2.3).
-proc apply {[Proc [i64] i64] f  i64 x} i64 { [f $x] }
-proc main {} {
-  print [apply [proc {a b} {+ $a $b}] 5]
-}
+proc apply [[Proc [i64] i64] f  i64 x] i64 [ [f $x] ]
+proc main [] [
+  print [apply [proc [a b] [+ $a $b]] 5]
+]
 main

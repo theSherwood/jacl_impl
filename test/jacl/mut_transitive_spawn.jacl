@@ -2,12 +2,12 @@
 # mode: concurrent
 # Nested closure with box used in spawn — correct result (US-003)
 # proc f captures mut x, spawn body calls $f — transitive capture pinned
-proc main {} {
+proc main [] [
   mut x 42
-  proc f {} {
+  proc f [] [
     + $x 0
-  }
-  def r [await [spawn { [$f] }]]
+  ]
+  def r [await [spawn [ [$f] ]]]
   print $r
-}
+]
 main

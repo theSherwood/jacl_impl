@@ -4,20 +4,20 @@
 # Each task allocates vectors (garbage after use) and returns its index.
 # Final sum = 1+2+...+100 = 5050.
 
-proc trash {i, n} {
-  if [< $i $n] {
+proc trash [i, n] [
+  if [< $i $n] [
     def v [vec 1 2 3 4 5 6 7 8 9 10]
     def w [vec-push [vec-push [vec-push $v 11] 12] 13]
     trash [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc work {id} {
+proc work [id] [
   trash 0 30
   + $id 0
-}
+]
 
-proc s10 {base} {
+proc s10 [base] [
   def a0 [+ $base 1]
   def a1 [+ $base 2]
   def a2 [+ $base 3]
@@ -28,16 +28,16 @@ proc s10 {base} {
   def a7 [+ $base 8]
   def a8 [+ $base 9]
   def a9 [+ $base 10]
-  def f0 [spawn { work $a0 }]
-  def f1 [spawn { work $a1 }]
-  def f2 [spawn { work $a2 }]
-  def f3 [spawn { work $a3 }]
-  def f4 [spawn { work $a4 }]
-  def f5 [spawn { work $a5 }]
-  def f6 [spawn { work $a6 }]
-  def f7 [spawn { work $a7 }]
-  def f8 [spawn { work $a8 }]
-  def f9 [spawn { work $a9 }]
+  def f0 [spawn [ work $a0 ]]
+  def f1 [spawn [ work $a1 ]]
+  def f2 [spawn [ work $a2 ]]
+  def f3 [spawn [ work $a3 ]]
+  def f4 [spawn [ work $a4 ]]
+  def f5 [spawn [ work $a5 ]]
+  def f6 [spawn [ work $a6 ]]
+  def f7 [spawn [ work $a7 ]]
+  def f8 [spawn [ work $a8 ]]
+  def f9 [spawn [ work $a9 ]]
   def r0 [await $f0]
   def r1 [await $f1]
   def r2 [await $f2]
@@ -49,9 +49,9 @@ proc s10 {base} {
   def r8 [await $f8]
   def r9 [await $f9]
   + [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5] [+ $r6 $r7]]] [+ $r8 $r9]
-}
+]
 
-proc main {} {
+proc main [] [
   def r0 [s10 0]
   def r1 [s10 10]
   def r2 [s10 20]
@@ -63,5 +63,5 @@ proc main {} {
   def r8 [s10 80]
   def r9 [s10 90]
   print [+ [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5] [+ $r6 $r7]]] [+ $r8 $r9]]
-}
+]
 main

@@ -1,4 +1,4 @@
 # expect-error: cannot assign str to i32
-use "./lib.jacl" {greet}
+use "./lib.jacl" [greet]
 def i32 oops [greet "world"]
 print $oops

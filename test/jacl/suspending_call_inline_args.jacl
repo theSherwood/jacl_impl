@@ -15,33 +15,33 @@
 # unconditional — spawn/await can take the inline-resolved path and
 # never actually suspend, which would silently weaken this test.
 
-proc double-async {n} {
+proc double-async [n] [
   sleep 0.001
   * $n 2
-}
+]
 
-proc add-async {n} {
+proc add-async [n] [
   sleep 0.001
   + $n 1
-}
+]
 
-proc sum-two {a, b} {
+proc sum-two [a, b] [
   + [double-async $a] [double-async $b]
-}
+]
 
-proc sum-three {a, b, c} {
+proc sum-three [a, b, c] [
   + [double-async $a] [+ [double-async $b] [double-async $c]]
-}
+]
 
-proc mixed {a, b} {
+proc mixed [a, b] [
   + [add-async $a] [double-async $b]
-}
+]
 
-proc nested {a, b} {
+proc nested [a, b] [
   * [add-async $a] [double-async $b]
-}
+]
 
-proc main {} {
+proc main [] [
   # 10*2 + 16*2 = 20 + 32 = 52
   print [sum-two 10 16]
   # 5*2 + 10*2 + 17*2 = 10 + 20 + 34 = 64
@@ -50,5 +50,5 @@ proc main {} {
   print [mixed 7 11]
   # (11+1) * (6*2) = 12 * 12 = 144
   print [nested 11 6]
-}
+]
 main

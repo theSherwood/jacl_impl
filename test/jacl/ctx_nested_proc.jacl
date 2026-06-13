@@ -1,9 +1,9 @@
 # expect: ok
 # expect: ok
 # Test: $ctx works inside a nested proc
-proc check-ctx {} {
+proc check-ctx [] [
   def c $ctx
   print "ok"
-}
+]
 print "ok"
 check-ctx

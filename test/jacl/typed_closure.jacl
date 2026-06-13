@@ -2,8 +2,8 @@
 # expect: 200
 # expect: 25
 def i64 base 100
-proc addto {i64 n} i64 { + $base $n }
+proc addto [i64 n] i64 [ + $base $n ]
 print [to-string [addto 50]]
 print [to-string [addto 100]]
-proc half {i64 n} i64 { / $n 2 }
+proc half [i64 n] i64 [ / $n 2 ]
 print [to-string [half 50]]

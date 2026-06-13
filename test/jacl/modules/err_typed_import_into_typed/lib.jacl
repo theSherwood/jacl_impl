@@ -1,1 +1,1 @@
-proc greet {str name} str { + "hi " $name }
+proc greet [str name] str [ + "hi " $name ]

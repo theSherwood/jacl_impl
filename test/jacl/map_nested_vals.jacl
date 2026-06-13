@@ -8,7 +8,7 @@
 # collection (ref kind) -> plain map rep; the key stamps as usual and the
 # value SHAPE is carried typer-side in the binding, so map-get narrows the
 # value and chained gets narrow all the way down.
-proc main {} {
+proc main [] [
   # [Map str [Vec i64]]: get -> [Vec i64]; element get -> i64
   def m [[Map str [Vec i64]] "a" [[Vec i64] 10 20] "b" [[Vec i64] 30]]
   def row [map-get $m "a"]
@@ -34,5 +34,5 @@ proc main {} {
   print [vec-get $nrow 0]
 
   print "ok"
-}
+]
 main

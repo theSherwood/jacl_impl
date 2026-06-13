@@ -5,11 +5,11 @@
 # builtin form has the field's static length and emits
 # OP_PTR_OFFSET_CHECKED.
 
-struct ElfHeader { i32 ver, [Buf 4 u8] magic }
+struct ElfHeader [ i32 ver, [Buf 4 u8] magic ]
 
-proc main {} {
+proc main [] [
   def h [ElfHeader ver 1]
   def i32 i 7
   print [buf-get $h->magic $i]
-}
+]
 main

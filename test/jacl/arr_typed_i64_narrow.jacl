@@ -7,7 +7,7 @@
 # vec-get. Proves BOTH the static narrowing (assert-type) and wide-rep
 # correctness — typed i64 arithmetic on the result yields the real value, not
 # the NaN-box tag bits the old heap-boxed path would have leaked.
-proc main {} {
+proc main [] [
   def a [[Arr i64] 100 200 300]
 
   def i64 x [arr-get $a 0]
@@ -23,5 +23,5 @@ proc main {} {
   assert-type [arr-get $a 0] i64
   assert-type [arr-pop $a] i64
   print "ok"
-}
+]
 main

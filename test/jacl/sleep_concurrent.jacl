@@ -5,15 +5,15 @@
 # A naive blocking implementation would still produce 3 — but the wall time
 # would be ~3x as long. We don't assert timing here; we only assert
 # that multiple concurrent sleeps don't deadlock or drop wakeups.
-proc nap {} {
+proc nap [] [
   sleep 0.02
   1
-}
-proc main {} {
-  def a [spawn { nap }]
-  def b [spawn { nap }]
-  def c [spawn { nap }]
+]
+proc main [] [
+  def a [spawn [ nap ]]
+  def b [spawn [ nap ]]
+  def c [spawn [ nap ]]
   def sum [+ [+ [await $a] [await $b]] [await $c]]
   print $sum
-}
+]
 main

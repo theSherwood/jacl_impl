@@ -2,7 +2,7 @@
 # expect: [Point x 99 y 20]
 # M4.1b: [addr $buf->N] returns [Ptr Struct]; field-set through
 # the pointer modifies the buf in place.
-struct Point {mut i32 x, mut i32 y}
+struct Point [mut i32 x, mut i32 y]
 
 def [Buf 4 Point] pts
 set $pts->0 [Point x 10 y 20]

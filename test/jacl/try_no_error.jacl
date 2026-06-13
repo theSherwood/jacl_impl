@@ -1,2 +1,2 @@
 # expect: 42
-print [try { 42 } e { 0 }]
+print [try [ 42 ] e [ 0 ]]

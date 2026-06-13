@@ -1,6 +1,6 @@
 # expect-error: variable 'x' already defined in this scope
 # Test: same-scope shadowing of immutable binding is a compile error
-{
+[
   def x 1
   def x 2
-}
+]

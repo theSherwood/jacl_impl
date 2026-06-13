@@ -7,7 +7,7 @@
 # the flat base, and ptr-offset walks the flat layout for 3-D access.
 # Arrow chains beyond depth-2 ($cube->i->j->k) are not wired up yet --
 # manual pointer arithmetic is the workaround.
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
   print [buf-len $cube]
   def [Ptr i32] p [addr $cube->0]
@@ -15,5 +15,5 @@ proc main {} {
   print [ptr-deref $p]
   # cube[0][1][2] = flat index 1 * 4 + 2 = 6
   print [ptr-deref [ptr-offset $p 6]]
-}
+]
 main

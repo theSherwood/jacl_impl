@@ -2,12 +2,12 @@
 # assert-type does NOT evaluate its expression at runtime. If it did,
 # the embedded `print "side-effect"` would fire and the body of
 # `compute` would run too.
-proc compute {} i32 {
+proc compute [] i32 [
   print "side-effect"
   42
-}
-proc main {} {
+]
+proc main [] [
   assert-type [compute] i32
   print "only-this"
-}
+]
 main

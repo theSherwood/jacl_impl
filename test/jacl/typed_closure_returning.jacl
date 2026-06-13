@@ -9,11 +9,11 @@
 # to the declared signature; the returned closure captures upvalues and is
 # called through the typed (unboxed) convention. The call's result type
 # propagates onto a `def` binding so a later call narrows too.
-proc make-adder {i64 n} [Proc [i64] i64] { proc {x} {+ $x $n} }
-proc make-scaler {i64 n} [Proc [i64] i64] { proc {x} {+ [* $x 1000000000] $n} }
-proc suffixer {str suf} [Proc [str] str] { proc {s} {concat $s $suf} }
+proc make-adder [i64 n] [Proc [i64] i64] [ proc [x] [+ $x $n] ]
+proc make-scaler [i64 n] [Proc [i64] i64] [ proc [x] [+ [* $x 1000000000] $n] ]
+proc suffixer [str suf] [Proc [str] str] [ proc [s] [concat $s $suf] ]
 
-proc main {} {
+proc main [] [
   # Direct call of the returned closure.
   print [[make-adder 5] 3]            # 8
 
@@ -33,5 +33,5 @@ proc main {} {
   # str-returning closure.
   def bang [suffixer "!!!"]
   print [bang "hi"]                   # hi!!!
-}
+]
 main

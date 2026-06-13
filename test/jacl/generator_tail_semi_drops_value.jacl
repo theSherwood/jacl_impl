@@ -1,10 +1,10 @@
 # expect: [vec 1 2]
 # Trailing `;` after a value-producing tail makes the drop explicit,
 # satisfying the generator tail check.
-proc helper {} { return 42 }
-proc gen {} {
+proc helper [] [ return 42 ]
+proc gen [] [
   yield 1
   yield 2
   helper;
-}
+]
 print [collect [gen]]

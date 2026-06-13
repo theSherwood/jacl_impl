@@ -1,7 +1,7 @@
 # expect: d init
 # expect: 7
 # expect: 51
-use "./b.jacl" {bfn}
-use "./c.jacl" {cfn}
+use "./b.jacl" [bfn]
+use "./c.jacl" [cfn]
 print [bfn 5]
 print [cfn 5]

@@ -4,10 +4,10 @@
 # holds a tagged JaclVal carrying a [Future T]. Storage path same as
 # M4.4 ref-elem; new piece is [Future T] recognized as an inner buf
 # element via TYPE_SHAPE_FUTURE in the registry.
-proc main {} {
+proc main [] [
   def [Buf 2 [Future i32]] futs
-  def [Future i32] f0 [spawn { 7 }]
-  def [Future i32] f1 [spawn { 11 }]
+  def [Future i32] f0 [spawn [ 7 ]]
+  def [Future i32] f1 [spawn [ 11 ]]
   buf-set $futs 0 $f0
   buf-set $futs 1 $f1
 
@@ -16,5 +16,5 @@ proc main {} {
   print [await $g0]
   def [Future i32] g1 [buf-get $futs 1]
   print [await $g1]
-}
+]
 main

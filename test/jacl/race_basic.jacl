@@ -1,8 +1,8 @@
 # mode: concurrent
 # expect: 10
 # race two bodies, both return same value for deterministic concurrent output
-proc main {} {
-  def r [race { 10 } { 10 }]
+proc main [] [
+  def r [race [ 10 ] [ 10 ]]
   print $r
-}
+]
 main

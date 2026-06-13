@@ -6,41 +6,41 @@
 # expect: 0
 # for-over-maps (phase b — statically-typed + explicit [Map dyn dyn] maps).
 # Order is hash/HAMT (unspecified), so tests use order-independent reductions.
-proc main {} {
+proc main [] [
   # single name binds the VALUE
   def [Map str i64] m [[Map str i64] "a" 1 "b" 2]
   mut i64 s1 0
-  for $m v { set s1 [+ $s1 $v] }
+  for $m v [ set s1 [+ $s1 $v] ]
   print $s1                                  # 1+2 = 3
 
   # two-name over [Map i64 i64]: enumerator k = key, v = value (both i64)
   def [Map i64 i64] n [[Map i64 i64] 10 1 20 2]
   mut i64 s2 0
-  for $n k v { set s2 [+ $s2 [+ $k $v]] }
+  for $n k v [ set s2 [+ $s2 [+ $k $v]] ]
   print $s2                                  # 10+1+20+2 = 33
 
   # two-name, value unused — count entries
   def [Map str i64] c [[Map str i64] "x" 9 "y" 8]
   mut i64 cnt 0
-  for $c k v { set cnt [+ $cnt 1] }
+  for $c k v [ set cnt [+ $cnt 1] ]
   print $cnt                                 # 2
 
   # explicit [Map dyn dyn] — value binds dyn
   def [Map dyn dyn] d [map a 3 b 4]
   mut s3 0
-  for $d v { set s3 [+ $s3 $v] }
+  for $d v [ set s3 [+ $s3 $v] ]
   print $s3                                  # 3+4 = 7
 
   # break stops the loop early
   def [Map i64 i64] b [[Map i64 i64] 1 1 2 2 3 3]
   mut i64 nb 0
-  for $b k v { set nb [+ $nb 1]; if [== $nb 2] { break } }
+  for $b k v [ set nb [+ $nb 1]; if [== $nb 2] [ break ] ]
   print $nb                                  # 2
 
   # empty map → zero iterations
   def [Map str i64] e [[Map str i64]]
   mut i64 ne 0
-  for $e v { set ne [+ $ne 1] }
+  for $e v [ set ne [+ $ne 1] ]
   print $ne                                  # 0
-}
+]
 main

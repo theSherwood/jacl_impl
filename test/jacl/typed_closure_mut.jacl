@@ -7,17 +7,17 @@
 # because the binding is typed, REASSIGNMENT must conform to it (a non-conforming
 # closure is rejected — see typed_closure_mut_reassign_err.jacl). A fully-
 # unannotated literal value keeps the binding `dyn` (freely reassignable).
-proc dbl   {i32 x} i32 { [* $x 2] }
-proc halve {i32 x} i32 { [/ $x 2] }
-proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
+proc dbl   [i32 x] i32 [ [* $x 2] ]
+proc halve [i32 x] i32 [ [/ $x 2] ]
+proc apply [[Proc [i32] i32] f, i32 n] i32 [ [f $n] ]
 
-proc main {} {
+proc main [] [
   # Named proc → typed mut binding, passable.
   mut f $dbl
   print [apply $f 5]                                     # 10
 
   # Annotated inline literal → typed mut binding.
-  mut lit [proc {i32 x} i32 { [* $x 3] }]
+  mut lit [proc [i32 x] i32 [ [* $x 3] ]]
   print [apply $lit 5]                                   # 15
 
   # Propagated element signature via vec-get.
@@ -27,7 +27,7 @@ proc main {} {
 
   # Reassign the typed mut binding to a CONFORMING closure — allowed.
   set f $halve
-  set f [proc {i32 x} i32 { [* $x 5] }]
+  set f [proc [i32 x] i32 [ [* $x 5] ]]
   print [apply $f 20]                                    # 100
-}
+]
 main

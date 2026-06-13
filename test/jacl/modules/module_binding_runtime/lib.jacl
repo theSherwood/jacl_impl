@@ -1,2 +1,2 @@
-proc greet {name} { print "Hello, " ; print $name ; print "!" }
+proc greet [name] [ print "Hello, " ; print $name ; print "!" ]
 def version 1

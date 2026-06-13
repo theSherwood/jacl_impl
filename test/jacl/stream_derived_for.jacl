@@ -4,18 +4,18 @@
 # Derived streams keep their element type, so a for-loop over them narrows.
 # filter already propagated elem_idx; take now does too (it was dropping it).
 # (transform's element type follows its lambda's return type — separate change.)
-proc main {} {
+proc main [] [
   # take [stream] N -> same element type
   mut i64 s 0
-  for [take [range 1 100] 3] x { set s [+ $s $x] }   # 1 + 2 + 3 = 6
+  for [take [range 1 100] 3] x [ set s [+ $s $x] ]   # 1 + 2 + 3 = 6
   print $s
-  for [take [range 1 100] 3] y { assert-type $y i64 }
+  for [take [range 1 100] 3] y [ assert-type $y i64 ]
 
   # filter [stream] pred -> same element type
   mut i64 f 0
-  for [filter [range 1 6] [\ $> $it 2]] z { set f [+ $f $z] }  # 3 + 4 + 5 = 12
+  for [filter [range 1 6] [\ $> $it 2]] z [ set f [+ $f $z] ]  # 3 + 4 + 5 = 12
   print $f
-  for [filter [range 1 6] [\ $> $it 2]] w { assert-type $w i64 }
+  for [filter [range 1 6] [\ $> $it 2]] w [ assert-type $w i64 ]
   print "ok"
-}
+]
 main

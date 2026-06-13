@@ -1,9 +1,9 @@
 # expect-error: conform
 # Same KEY conformance enforced on the def-binding path (`def [Proc …] f $proc`),
 # not just the HOF-arg path.
-proc usesmap {[Map str i64] m} i64 { [map-get $m "a"] }
-proc main {} {
+proc usesmap [[Map str i64] m] i64 [ [map-get $m "a"] ]
+proc main [] [
   def [Proc [[Map i64 i64]] i64] f $usesmap
   print 0
-}
+]
 main

@@ -10,17 +10,17 @@
 # signature; named typed-closure elements are conformance-checked. A for-loop
 # narrows the binding to a typed closure, so calling an element is a typed
 # (unboxed) call.
-proc main {} {
-  def [Arr [Proc [i64] i64]] fns [[Arr [Proc [i64] i64]] [proc {x} {* $x 2}] [proc {x} {+ $x 1}]]
-  for $fns f { print [f 10] }              # 20, 11
+proc main [] [
+  def [Arr [Proc [i64] i64]] fns [[Arr [Proc [i64] i64]] [proc [x] [* $x 2]] [proc [x] [+ $x 1]]]
+  for $fns f [ print [f 10] ]              # 20, 11
 
   # Wide-i64 element proves the element call is unboxed; a plain closure too.
-  def [Arr [Proc [i64] i64]] more [[Arr [Proc [i64] i64]] [proc {x} {* $x 1000000000}] [proc {x} {+ $x 3}]]
-  for $more g { print [g 6] }              # 6_000_000_000, 9
+  def [Arr [Proc [i64] i64]] more [[Arr [Proc [i64] i64]] [proc [x] [* $x 1000000000]] [proc [x] [+ $x 3]]]
+  for $more g [ print [g 6] ]              # 6_000_000_000, 9
 
   # A NAMED typed closure as an element (conformance-checked).
-  def [Proc [i64] i64] dbl [proc {n} {* $n 2}]
+  def [Proc [i64] i64] dbl [proc [n] [* $n 2]]
   def [Arr [Proc [i64] i64]] named [[Arr [Proc [i64] i64]] $dbl]
-  for $named h { print [h 10] }            # 20
-}
+  for $named h [ print [h 10] ]            # 20
+]
 main

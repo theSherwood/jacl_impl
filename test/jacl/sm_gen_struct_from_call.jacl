@@ -6,16 +6,16 @@
 # tagged slot while OP_RETURN_WIDE delivered raw inline bytes — they landed
 # in a GC-traced slot and read back as a non-struct. The layout now also
 # reads the typer's stamp on the RHS.
-struct Pt { i32 x, i32 y }
-proc mk {i32 a} Pt {
+struct Pt [ i32 x, i32 y ]
+proc mk [i32 a] Pt [
   return [Pt x $a y [+ $a 4]]
-}
-proc g {} [Stream i32] {
+]
+proc g [] [Stream i32] [
   def v [mk 7]
   yield $v->x
   yield $v->y
-}
-proc main {} {
-  for [g] n { print $n }
-}
+]
+proc main [] [
+  for [g] n [ print $n ]
+]
 main

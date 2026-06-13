@@ -10,23 +10,23 @@
 # mixed-numeric promotion), u64, a for-loop wide bind, and a chained pipeline.
 # Typed collect: results are [Vec f64]/[Vec u64] (flat wide storage; new print format).
 # yield-time literal narrowing makes the stream elements genuinely f64/u64.
-proc fs {} [Stream f64] {
+proc fs [] [Stream f64] [
   yield 1.5
   yield 5.0
-}
-proc us {} [Stream u64] {
+]
+proc us [] [Stream u64] [
   yield 10
   yield 20
-}
-proc main {} {
+]
+proc main [] [
   print [collect [transform [fs] [\ $* $it 2.0]]]      # 3.0 10.0
   print [collect [filter [fs] [\ $> $it 3.5]]]         # 5.0
   print [collect [transform [us] [\ $+ $it 5]]]        # 15 25
   print [collect [filter [us] [\ $> $it 12]]]          # 20
   mut f64 fsum 0.0
-  for [transform [fs] [\ $* $it 2.0]] g { set fsum [+ $fsum $g] }
+  for [transform [fs] [\ $* $it 2.0]] g [ set fsum [+ $fsum $g] ]
   print $fsum                                          # 3.0 + 10.0 = 13.0
   print [collect [filter [transform [fs] [\ $* $it 2.0]] [\ $> $it 5.0]]]  # 10.0
   print "ok"
-}
+]
 main

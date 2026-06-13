@@ -4,14 +4,14 @@
 # remain silent. The conservative `sm__walk_locals` walker reaches the
 # same name from multiple AST branches (here, both arms of the if write
 # to `n`) and dedup is intentional. Only differing storage shapes error.
-proc choose {} {
-  def fut [spawn { 0 }]
+proc choose [] [
+  def fut [spawn [ 0 ]]
   mut n 0
-  if [== 1 1] {
+  if [== 1 1] [
     mut n 7
-  } else {
+  ] else [
     mut n 99
-  }
+  ]
   + $n [await $fut]
-}
+]
 print [choose]

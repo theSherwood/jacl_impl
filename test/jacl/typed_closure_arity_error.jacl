@@ -3,8 +3,8 @@
 # arity must match the declared [Proc …] type. Here the type declares two
 # params but the literal has one — a compile error, not a confusing runtime
 # arity fault at the call site.
-proc main {} {
-  def [Proc [i64 i64] i64] f [proc {x} {* $x 2}]
+proc main [] [
+  def [Proc [i64 i64] i64] f [proc [x] [* $x 2]]
   print [f 3 4]
-}
+]
 main

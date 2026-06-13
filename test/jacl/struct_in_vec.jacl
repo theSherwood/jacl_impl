@@ -1,7 +1,7 @@
 # expect: [Point x 3 y 4]
 # expect: 3
 # Test boxed structs stored in vec
-struct Point {i32 x, i32 y}
+struct Point [i32 x, i32 y]
 def v [vec [box [Point x 1 y 2]] [box [Point x 3 y 4]]]
 def p [deref [vec-get $v 1]]
 print $p

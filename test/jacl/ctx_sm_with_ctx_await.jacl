@@ -2,12 +2,12 @@
 # expect: 42
 # Test: with-ctx spanning an await — override visible after resume, restored after block
 ctx mut i32 level = 42
-proc main {} {
-  with-ctx {level 99} {
-    def f [spawn { 1 }]
+proc main [] [
+  with-ctx [level 99] [
+    def f [spawn [ 1 ]]
     def r [await $f]
     print $ctx->level
-  }
+  ]
   print $ctx->level
-}
+]
 main

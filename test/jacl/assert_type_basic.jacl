@@ -4,10 +4,10 @@
 # No runtime evaluation — the expression is NOT compiled (no side
 # effects, no operand-stack cost).
 
-proc typed-add {i64 a, i64 b} i64 { + $a $b }
-proc shout {str s} str { concat $s "!" }
+proc typed-add [i64 a, i64 b] i64 [ + $a $b ]
+proc shout [str s] str [ concat $s "!" ]
 
-proc main {} {
+proc main [] [
   def i32 thirty-two 32
   def i64 sixty-four 64
   def f64 pi 3.14
@@ -23,5 +23,5 @@ proc main {} {
   assert-type [vec 1 2 3] vec
   assert-type [== 1 1] bool
   print "ok"
-}
+]
 main

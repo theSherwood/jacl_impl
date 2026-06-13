@@ -7,8 +7,8 @@
 # [Buf N [Map K V]] -- typed-map element type. The shape entry in
 # the type registry carries both K and V; the buf binding stores
 # one registry idx instead of growing aux fields per nesting depth.
-struct Point { i32 x, i32 y }
-proc main {} {
+struct Point [ i32 x, i32 y ]
+proc main [] [
   def [Buf 3 [Map i64 i64]] xs
   def m1 [[Map i64 i64] 1 100 2 200]
   buf-set $xs 0 $m1
@@ -25,5 +25,5 @@ proc main {} {
   def p [map-get $pgot 7]
   print $p->x
   print $p->y
-}
+]
 main

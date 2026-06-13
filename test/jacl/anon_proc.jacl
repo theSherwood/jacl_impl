@@ -4,23 +4,23 @@
 # expect: 25
 # expect: 120
 # anonymous proc assigned to variable
-g = proc {a, b} {+ $a $b}
+g = proc [a, b] [+ $a $b]
 print [g 3 7]
 
 # anonymous proc with single param
-h = proc {x} {- $x 3}
+h = proc [x] [- $x 3]
 print [h 10]
 
 # anonymous proc with no params
-greet = proc {} { "hello world" }
+greet = proc [] [ "hello world" ]
 print [greet]
 
 # anonymous proc as closure capturing outer variable
 def base 20
-addb = proc {n} {+ $base $n}
+addb = proc [n] [+ $base $n]
 print [addb 5]
 
 # anonymous proc used with higher-order function
-proc apply {f, x} { f $x }
-dbl = proc {n} { * $n 2 }
+proc apply [f, x] [ f $x ]
+dbl = proc [n] [ * $n 2 ]
 print [apply $dbl 60]

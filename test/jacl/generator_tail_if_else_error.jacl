@@ -1,12 +1,12 @@
 # expect-error: generator tail expression produces a value
 # Two-armed if recurses into both arms; the then-arm has a value-
 # producing tail that would be silently discarded.
-proc gen {} {
+proc gen [] [
   yield 1
-  if true {
+  if true [
     42
-  } else {
+  ] else [
     yield 2
-  }
-}
+  ]
+]
 print [collect [gen]]

@@ -5,17 +5,17 @@
 # fresh fire cycle for that nested change. The nested cycle runs
 # entirely within the outer watcher's call frame.
 def a [atom 0]
-outer_fn = proc {old, new} {
+outer_fn = proc [old, new] [
   print "outer: $old -> $new"
-  if [== $new 1] {
+  if [== $new 1] [
     swap $a [\ $+ $it 1]
-  }
-}
-inner_fn = proc {old, new} {
-  if [== $old 1] {
+  ]
+]
+inner_fn = proc [old, new] [
+  if [== $old 1] [
     print "inner: $old -> $new"
-  }
-}
+  ]
+]
 watch $a "outer" $outer_fn
 watch $a "inner" $inner_fn
 reset $a 1

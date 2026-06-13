@@ -1,2 +1,2 @@
 # expect: caught: oops
-print [try { error "oops" } e { concat "caught: " [error-val $e] }]
+print [try [ error "oops" ] e [ concat "caught: " [error-val $e] ]]

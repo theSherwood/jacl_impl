@@ -16,8 +16,8 @@
 # the Struct value at byte offset j*sizeof(Struct).
 # See BUFFER_DESIGN.md "Receiver-shape generalization" / M4.2.2.
 
-struct Point {i32 x, i32 y}
-proc main {} {
+struct Point [i32 x, i32 y]
+proc main [] [
   def [Buf 3 [Buf 4 Point]] grid
   print [buf-len $grid]
 
@@ -41,5 +41,5 @@ proc main {} {
   print $grid->0->0->y
   print $grid->0->1->x
   print $grid->0->1->y
-}
+]
 main

@@ -12,10 +12,10 @@
 # the vecs out from under us. Now the descriptor unions the sub-struct's
 # ref map at the field offset, so the stack-inline marker traces them.
 
-struct Inner { i32 n, [Buf 4 dyn] items }
-struct Outer { i32 tag, Inner bag }
+struct Inner [ i32 n, [Buf 4 dyn] items ]
+struct Outer [ i32 tag, Inner bag ]
 
-proc main {} {
+proc main [] [
   def o [Outer tag 1 bag [Inner n 2]]
   set $o->bag->items->0 [vec 30 0 0]
   set $o->bag->items->1 [vec 31 0 0]
@@ -25,10 +25,10 @@ proc main {} {
   # Heavy heap churn to force GC cycles. The junk vecs are unrooted the
   # instant the next iteration overwrites the binding.
   mut i 0
-  while [< $i 500] {
+  while [< $i 500] [
     def junk [vec $i $i $i $i $i $i]
     set i [+ $i 1]
-  }
+  ]
 
   def a $o->bag->items->0
   def b $o->bag->items->1
@@ -39,5 +39,5 @@ proc main {} {
   print [vec-get $c 0]
   print [vec-get $d 0]
   print $i
-}
+]
 main

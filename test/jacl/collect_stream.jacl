@@ -1,11 +1,11 @@
 # expect: [vec 1 2 3]
 # expect: [vec 1 2 3]
 # collect materializes stream to vector; identity on vectors
-proc gen {} {
+proc gen [] [
   yield 1
   yield 2
   yield 3
-}
+]
 print [collect [gen]]
 v = [vec 1 2 3]
 print [collect $v]

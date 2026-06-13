@@ -12,12 +12,12 @@
 # partly-typed literal still has a static signature) or a propagated annotation
 # (e.g. a [Vec [Proc …]] element type). A FULLY-unannotated literal carries no
 # annotation and stays `dyn` (see the _unannotated_err companion test).
-proc dbl    {i32 x} i32 { [* $x 2] }
-proc apply  {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
-proc apply2 {[Proc [i32 dyn] i32] f, i32 a, dyn b} i32 { [f $a $b] }
-proc make   {i32 by} [Proc [i32] i32] { proc {i32 x} i32 { [* $x $by] } }
+proc dbl    [i32 x] i32 [ [* $x 2] ]
+proc apply  [[Proc [i32] i32] f, i32 n] i32 [ [f $n] ]
+proc apply2 [[Proc [i32 dyn] i32] f, i32 a, dyn b] i32 [ [f $a $b] ]
+proc make   [i32 by] [Proc [i32] i32] [ proc [i32 x] i32 [ [* $x $by] ] ]
 
-proc main {} {
+proc main [] [
   # Named global proc bound untyped, then passed.
   def f $dbl
   print [apply $f 5]                                     # 10
@@ -33,12 +33,12 @@ proc main {} {
   print [apply $h 4]                                     # 8
 
   # Standalone fully-typed inline literal bound untyped, then passed.
-  def lit [proc {i32 x} i32 { [* $x 3] }]
+  def lit [proc [i32 x] i32 [ [* $x 3] ]]
   print [apply $lit 5]                                   # 15
 
   # Standalone PARTLY-typed literal → [Proc [i32 dyn] i32] (per-slot: the
   # unannotated param is dyn). The mixed typed/dyn calling convention works.
-  def partial [proc {i32 x, y} i32 { [+ $x [to i32 $y]] }]
+  def partial [proc [i32 x, y] i32 [ [+ $x [to i32 $y]] ]]
   print [apply2 $partial 5 6]                            # 11
-}
+]
 main

@@ -2,9 +2,9 @@
 # A NAMED typed-closure arg to a [Proc …] param is allowed (B3d) but must
 # CONFORM to the param's signature (invariant). Here g is [Proc [f64] f64] but
 # the param wants [Proc [i64] i64] — a compile error.
-proc apply {[Proc [i64] i64] f  i64 x} i64 { [f $x] }
-proc main {} {
-  def [Proc [f64] f64] g [proc {n} {* $n 2.0}]
+proc apply [[Proc [i64] i64] f  i64 x] i64 [ [f $x] ]
+proc main [] [
+  def [Proc [f64] f64] g [proc [n] [* $n 2.0]]
   print [apply $g 5]
-}
+]
 main

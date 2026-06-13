@@ -11,7 +11,7 @@
 # no strided rep win exists for tagged heap values — and the element type
 # lives statically: constructor element checks, for-binding narrowing.
 # Value-type elements ([Vec i64], [Vec Pt]) keep the strided rep as before.
-proc main {} {
+proc main [] [
   def sv [[Vec str] "a" "b"]
   print $sv                          # plain-vec rep => plain print format
   print [== $sv [vec "a" "b"]]       # same runtime type => structural eq
@@ -22,17 +22,17 @@ proc main {} {
 
   # for-binding narrows to str via the static element stamp
   mut s ""
-  for $sv c {
+  for $sv c [
     assert-type $c str
     set s [concat $s $c]
-  }
+  ]
   print $s                           # ab
 
   # collect [Stream str] (lines) is statically [Vec str] now — binding narrows
-  for [collect [lines "x\ny"]] l {
+  for [collect [lines "x\ny"]] l [
     assert-type $l str
     print $l                         # x y
-  }
+  ]
   print "ok"
-}
+]
 main

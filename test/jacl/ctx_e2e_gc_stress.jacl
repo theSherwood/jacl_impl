@@ -3,10 +3,10 @@
 ctx mut str tag = "alive"
 
 mut i 0
-while [< $i 50] {
-  with-ctx {tag "temp"} {
+while [< $i 50] [
+  with-ctx [tag "temp"] [
     def x $ctx->tag
-  }
+  ]
   set i [+ $i 1]
-}
+]
 print $ctx->tag

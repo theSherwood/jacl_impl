@@ -7,8 +7,8 @@
 # is typed to read $it wide, so the pull hands the element over wide with no
 # box-for-call, and wide arithmetic in the body works on it directly. Values
 # past INT32_MAX guard against tag confusion at the callback boundary.
-proc main {} {
+proc main [] [
   for [transform [range 1 4] [\ $* $it 1000000000]] [\ print [+ $it 1000000000]]
   print "ok"                        # prints 2e9, 3e9, 4e9
-}
+]
 main

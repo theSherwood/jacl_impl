@@ -5,22 +5,22 @@
 # for TYPED_CLOSURES_DESIGN.md Phase A). `\` is pure sugar for exactly this
 # shape, so an inline `[proc {x} {...}]` must behave identically to the `\`
 # form in every typed-HOF context.
-proc main {} {
+proc main [] [
   # Inline proc as a transform mapper over a typed i64 stream.
   mut i64 a 0
-  for [transform [range 1 4] [proc {x} { * $x 10 }]] p { set a [+ $a $p] }
+  for [transform [range 1 4] [proc [x] [ * $x 10 ]]] p [ set a [+ $a $p] ]
   print $a   # 10+20+30 = 60
 
   # The `\` sugar form — must produce the identical result.
   mut i64 b 0
-  for [transform [range 1 4] [\ $* $it 10]] q { set b [+ $b $q] }
+  for [transform [range 1 4] [\ $* $it 10]] q [ set b [+ $b $q] ]
   print $b
 
   # Inline proc return type is inferred just like the lambda: i64 here.
-  for [transform [range 1 4] [proc {x} { * $x 10 }]] r { assert-type $r i64 }
+  for [transform [range 1 4] [proc [x] [ * $x 10 ]]] r [ assert-type $r i64 ]
 
   # Type-changing inline proc: i64 -> bool.
-  for [transform [range 1 4] [proc {x} { > $x 2 }]] s { assert-type $s bool }
+  for [transform [range 1 4] [proc [x] [ > $x 2 ]]] s [ assert-type $s bool ]
   print "ok"
-}
+]
 main

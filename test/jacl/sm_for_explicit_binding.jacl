@@ -6,20 +6,20 @@
 # expect: 9
 # expect: 6
 
-proc sum-vec {} {
-  def fut [spawn { + 1 2 }]
+proc sum-vec [] [
+  def fut [spawn [ + 1 2 ]]
   mut total 0
-  for [vec 1 2 3] n { set total [+ $total $n] }
+  for [vec 1 2 3] n [ set total [+ $total $n] ]
   + $total [await $fut]
-}
+]
 
-proc count-stream {} {
-  def fut [spawn { 0 }]
+proc count-stream [] [
+  def fut [spawn [ 0 ]]
   mut i64 total 0                 # [range] yields i64; binding narrows to i64
-  for [range 1 4] n { set total [+ $total $n] }
+  for [range 1 4] n [ set total [+ $total $n] ]
   await $fut                      # await for SM ordering; result (0) unused
   $total
-}
+]
 
 print [sum-vec]
 print [count-stream]

@@ -13,19 +13,19 @@
 # after the inner vm__run, the spawn body's overflow becomes a future
 # error, and await surfaces it cleanly.  We only care that the program
 # completes without a SEGV; the await result is allowed to be an error.
-proc burn {n} {
-  if [== $n 0] { 1 } else {
+proc burn [n] [
+  if [== $n 0] [ 1 ] else [
     def g [vec 1 2 3 4 5 6 7 8 9 10]
     burn [- $n 1]
-  }
-}
-proc main {} {
+  ]
+]
+proc main [] [
   # burn 300 exceeds VM_FRAMES_MAX (256) so the spawn body overflows.
   # Test purpose: verify the awaiter sees a clean future-error rather
   # than SEGV'ing on stale frames left by the inner vm__run. Bumped
   # from 70 when VM_FRAMES_MAX was raised 64 → 256 (2026-05-16).
-  def f [spawn { burn 300 }]
+  def f [spawn [ burn 300 ]]
   def _ [await $f]
   print "ok"
-}
+]
 main

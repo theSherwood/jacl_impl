@@ -1,13 +1,13 @@
 # expect-error: generator tail expression produces a value
 # try/catch recurses into body and handler; the body's tail produces
 # a value that would be silently discarded.
-proc gen {} {
+proc gen [] [
   yield 1
-  try {
+  try [
     yield 2
     99
-  } e {
+  ] e [
     yield 3
-  }
-}
+  ]
+]
 print [collect [gen]]

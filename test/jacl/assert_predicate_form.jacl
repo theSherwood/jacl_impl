@@ -5,11 +5,11 @@
 #
 # expect: ok
 
-proc is-positive? {n} {
+proc is-positive? [n] [
   > $n 0
-}
+]
 
-proc check {} {
+proc check [] [
   # Single-arg form (today's behavior, preserved).
   assert $true
   assert [== 42 42]
@@ -26,6 +26,6 @@ proc check {} {
   assert is-positive? 5
 
   "ok"
-}
+]
 
 print [check]

@@ -1,8 +1,8 @@
 # expect-error: cannot mutate immutable field 'y' on struct 'Point'
 # Test: immutable field write produces compile error
-struct Point {mut i32 x, i32 y}
-proc main {} {
+struct Point [mut i32 x, i32 y]
+proc main [] [
   def p [Point x 10 y 20]
   . $p y 99
-}
+]
 main

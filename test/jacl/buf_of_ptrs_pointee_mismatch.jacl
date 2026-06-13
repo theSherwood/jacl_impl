@@ -1,11 +1,11 @@
 # expect-error: buf-set value is a pointer to a different type than the buf's [Ptr T]
 # [Buf N [Ptr u8]] rejects a [Ptr i64] value at compile time. Phase 5
 # compose + the M4.4-ext-follow-up buf-set value check working together.
-proc main {} {
+proc main [] [
   def [Buf 4 i64] words [[Buf 4 i64] 1 2 3 4]
   def [Ptr i64] wrong [addr $words->0]
 
   def [Buf 2 [Ptr u8]] ptrs
   buf-set $ptrs 0 $wrong
-}
+]
 main

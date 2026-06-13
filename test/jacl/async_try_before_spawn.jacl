@@ -1,10 +1,10 @@
 # expect: caught: sync-err
 # expect: 42
 # try/catch wrapping non-async code works alongside spawn/await
-proc main {} {
-  def x [try { error "sync-err" } e { concat "caught: " [error-val $e] }]
+proc main [] [
+  def x [try [ error "sync-err" ] e [ concat "caught: " [error-val $e] ]]
   print $x
-  def f [spawn { 42 }]
+  def f [spawn [ 42 ]]
   print [await $f]
-}
+]
 main

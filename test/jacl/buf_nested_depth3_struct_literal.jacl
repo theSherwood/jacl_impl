@@ -13,8 +13,8 @@
 # descriptor-driven walker (OP_BUF_STORE_OFF) which stores each struct's
 # inline bytes at its flat byte offset.
 
-struct Point {i32 x, i32 y}
-proc main {} {
+struct Point [i32 x, i32 y]
+proc main [] [
   def [Buf 2 [Buf 2 [Buf 2 Point]]] cube [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 1 y 2] [Point x 3 y 4]] [[Buf 2 Point] [Point x 5 y 6] [Point x 7 y 8]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 9 y 10] [Point x 11 y 12]] [[Buf 2 Point] [Point x 13 y 14] [Point x 15 y 16]]]]
   print $cube->0->0->0->x
   print $cube->0->0->0->y
@@ -27,5 +27,5 @@ proc main {} {
   def [Buf 2 [Buf 2 [Buf 2 Point]]] sparse [[Buf 2 [Buf 2 [Buf 2 Point]]] [[Buf 2 [Buf 2 Point]] [[Buf 2 Point] [Point x 99 y 99]]]]
   print $sparse->1->1->1->x
   print $sparse->0->0->1->y
-}
+]
 main

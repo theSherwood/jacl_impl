@@ -18,63 +18,63 @@
 # fields (stack locals die at every suspension), the binding is a state
 # field, and the body's suspensions ride the normal resume-dispatch
 # machinery (the entry dispatch jumps straight into the loop).
-struct Pt { i32 x, i32 y }
-proc nums {} [Stream i32] {
+struct Pt [ i32 x, i32 y ]
+proc nums [] [Stream i32] [
   yield 1
   yield 2
   yield 3
-}
-proc doubled {} [Stream i32] {
-  for [nums] n {
+]
+proc doubled [] [Stream i32] [
+  for [nums] n [
     yield [* $n 2]
-  }
-}
-proc tens {} [Stream i64] {
-  for [range 1 4] n {
+  ]
+]
+proc tens [] [Stream i64] [
+  for [range 1 4] n [
     yield [* $n 10]
-  }
-}
-proc vgen {} [Stream i32] {
+  ]
+]
+proc vgen [] [Stream i32] [
   def vs [[Vec i32] 5 6]
-  for $vs v {
+  for $vs v [
     yield $v
-  }
-}
-proc pts {} [Stream Pt] {
+  ]
+]
+proc pts [] [Stream Pt] [
   yield [Pt x 1 y 2]
   yield [Pt x 3 y 4]
-}
-proc xs {} [Stream i32] {
-  for [pts] p {
+]
+proc xs [] [Stream i32] [
+  for [pts] p [
     yield $p->x
-  }
-}
-proc awsum {} {
+  ]
+]
+proc awsum [] [
   mut i64 acc 0
-  for [range 1 4] i {
+  for [range 1 4] i [
     # NOTE: the spawn body must not capture $i — nested-closure capture of
     # SM state fields is a pre-existing gap (NOT_IMPLEMENTED.md §8e).
-    def [Future i64] f [spawn { 7 }]
+    def [Future i64] f [spawn [ 7 ]]
     def i64 r [await $f]
     set acc [+ $acc [* $i $r]]
-  }
+  ]
   $acc
-}
-proc dgen {} [Stream dyn] {
+]
+proc dgen [] [Stream dyn] [
   def dv [vec 100 101 102 103]
-  for $dv d {
-    if [== $d 100] { continue }
-    if [== $d 103] { break }
+  for $dv d [
+    if [== $d 100] [ continue ]
+    if [== $d 103] [ break ]
     yield $d
-  }
-}
-proc main {} {
-  for [doubled] x { print $x }
-  for [tens] x { print $x }
-  for [vgen] x { print $x }
-  for [xs] x { print $x }
+  ]
+]
+proc main [] [
+  for [doubled] x [ print $x ]
+  for [tens] x [ print $x ]
+  for [vgen] x [ print $x ]
+  for [xs] x [ print $x ]
   print [awsum]
-  for [dgen] x { print $x }
+  for [dgen] x [ print $x ]
   print "ok"
-}
+]
 main

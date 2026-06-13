@@ -1,5 +1,5 @@
-struct HPoint {i32 x}
-proc hval {} i64 {
-  def [Vec [Proc [i64] i64]] hf [[Vec [Proc [i64] i64]] [proc {x} {* $x 7}]]
+struct HPoint [i32 x]
+proc hval [] i64 [
+  def [Vec [Proc [i64] i64]] hf [[Vec [Proc [i64] i64]] [proc [x] [* $x 7]]]
   [[vec-get $hf 0] 6]
-}
+]

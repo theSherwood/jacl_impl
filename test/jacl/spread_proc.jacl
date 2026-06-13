@@ -1,5 +1,5 @@
 # expect: 60
 # spread vector into user proc
-proc add3 {a, b, c} { + [+ $a $b] $c }
+proc add3 [a, b, c] [ + [+ $a $b] $c ]
 args = [vec 10 20 30]
 print [add3 ..$args]

@@ -10,11 +10,11 @@
 # Phase B). An inline proc literal bound under a [Proc …] type is monomorphized
 # to the declared param/return types and called through the typed (unboxed)
 # convention — no boxing across the closure boundary.
-proc main {} {
+proc main [] [
   # Wide i64: the param is read wide and the i64 result (> INT32_MAX) flows
   # back unboxed. A regression to the dyn path would still print the value, so
   # the strict-i64 consumer below is the real proof.
-  def [Proc [i64] i64] f [proc {x} {* $x 1000000000}]
+  def [Proc [i64] i64] f [proc [x] [* $x 1000000000]]
   print [f 6]                       # 6_000_000_000
 
   # The call narrows to the declared i64 return — storing it in a strict i64
@@ -23,28 +23,28 @@ proc main {} {
   print [+ $y 1]                    # 6_000_000_001
 
   # Multiple params.
-  def [Proc [i64 i64] i64] add [proc {a b} {+ $a $b}]
+  def [Proc [i64 i64] i64] add [proc [a b] [+ $a $b]]
   print [add 3 4]                   # 7
 
   # f64 param + return.
-  def [Proc [f64] f64] half [proc {x} {/ $x 2.0}]
+  def [Proc [f64] f64] half [proc [x] [/ $x 2.0]]
   print [half 13.0]                 # 6.5
 
   # str param + return.
-  def [Proc [str str] str] cat [proc {a b} {concat $a $b}]
+  def [Proc [str str] str] cat [proc [a b] [concat $a $b]]
   print [cat "hi" "bye"]            # hibye
 
   # Nilary form [Proc [] R]: the bare-literal tail narrows to the return type.
-  def [Proc [] i64] g [proc {} {99}]
+  def [Proc [] i64] g [proc [] [99]]
   print [g]                         # 99
 
   # dyn is an ordinary type (§2.5): [Proc [dyn] dyn] is the status-quo closure.
-  def [Proc [dyn] dyn] id [proc {x} {$x}]
+  def [Proc [dyn] dyn] id [proc [x] [$x]]
   print [id 8]                      # 8
 
   # An explicitly-typed literal param that MATCHES the annotation is fine
   # (conformance, not re-typing).
-  def [Proc [i64] i64] dbl [proc {i64 x} {* $x 2}]
+  def [Proc [i64] i64] dbl [proc [i64 x] [* $x 2]]
   print [dbl 6]                     # 12
-}
+]
 main

@@ -5,20 +5,20 @@
 # the body, and uses its tail type as the output element type (a scoped case
 # of anonymous-closure return inference). The body's own annotations are
 # restored to it:dyn afterward so codegen is unaffected.
-proc main {} {
+proc main [] [
   # i64 source, i64-returning lambda -> [Stream i64]; for-binding narrows
   mut i64 s 0
-  for [transform [range 1 4] [\ $* $it 10]] x { set s [+ $s $x] }   # 10+20+30 = 60
+  for [transform [range 1 4] [\ $* $it 10]] x [ set s [+ $s $x] ]   # 10+20+30 = 60
   print $s
-  for [transform [range 1 4] [\ $* $it 10]] y { assert-type $y i64 }
+  for [transform [range 1 4] [\ $* $it 10]] y [ assert-type $y i64 ]
 
   # type-changing lambda: i64 -> bool
-  for [transform [range 1 4] [\ $> $it 2]] b { assert-type $b bool }
+  for [transform [range 1 4] [\ $> $it 2]] b [ assert-type $b bool ]
 
   # composed: range i64 -> (*10) i64 -> (>15) bool
-  for [transform [transform [range 1 4] [\ $* $it 10]] [\ $> $it 15]] c {
+  for [transform [transform [range 1 4] [\ $* $it 10]] [\ $> $it 15]] c [
     assert-type $c bool
-  }
+  ]
   print "ok"
-}
+]
 main

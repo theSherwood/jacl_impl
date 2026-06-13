@@ -14,13 +14,13 @@
 # higher-order mutual recursion expressible. (Only registered procs narrow this
 # way; a forward ref to a mutable/immutable BINDING or an undefined name stays a
 # hard compile error — see typed_closure_global_proc_fwd_*_err.jacl.)
-struct Point {i32 x, i32 y}
-proc dbl   {i32 x} i32   { [* $x 2] }
-proc shift {Point p} Point { [Point x [+ $p->x 1] y $p->y] }
-proc apply {[Proc [i32] i32] f, i32 n} i32 { [f $n] }
-proc applyp {[Proc [Point] Point] f, Point p} Point { [f $p] }
+struct Point [i32 x, i32 y]
+proc dbl   [i32 x] i32   [ [* $x 2] ]
+proc shift [Point p] Point [ [Point x [+ $p->x 1] y $p->y] ]
+proc apply [[Proc [i32] i32] f, i32 n] i32 [ [f $n] ]
+proc applyp [[Proc [Point] Point] f, Point p] Point [ [f $p] ]
 
-proc main {} {
+proc main [] [
   # Pass a named proc directly to a [Proc …] param.
   print [apply $dbl 5]                                   # 10
 
@@ -38,7 +38,7 @@ proc main {} {
   # FORWARD reference: `later` is a proc defined AFTER main, used here as a
   # value. The conformance falls back to the typer's portable shape stamp.
   print [apply $later 10]                                # 30
-}
+]
 # Defined after `main` — a forward reference when used as `$later` above.
-proc later {i32 x} i32 { [* $x 3] }
+proc later [i32 x] i32 [ [* $x 3] ]
 main

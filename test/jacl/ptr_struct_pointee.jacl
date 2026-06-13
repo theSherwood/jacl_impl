@@ -1,7 +1,7 @@
 # expect: 4096
 # Stage 5a: pointer with a struct pointee — round-trip the address.
 # Stage 5b will add the auto-deref for $p->x reads/writes.
-struct Point {i32 x i32 y}
+struct Point [i32 x i32 y]
 def u64 addr 4096
 def [Ptr Point] p [ptr-cast [Ptr Point] $addr]
 print [ptr-addr $p]

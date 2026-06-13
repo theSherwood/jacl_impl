@@ -2,13 +2,13 @@
 # expect: 42
 # Test: spawned task mutates ctx — parent ctx unchanged
 ctx mut i32 level = 42
-proc main {} {
-  def f [spawn {
+proc main [] [
+  def f [spawn [
     set $ctx->level 99
     $ctx->level
-  }]
+  ]]
   def child_val [await $f]
   print $child_val
   print $ctx->level
-}
+]
 main

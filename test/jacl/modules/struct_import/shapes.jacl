@@ -1,1 +1,1 @@
-struct Point {i32 x, i32 y}
+struct Point [i32 x, i32 y]

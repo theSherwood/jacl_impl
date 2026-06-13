@@ -3,15 +3,15 @@
 # Test: parallel bodies each get independent ctx copies
 # Each body mutates ctx->level but parent's ctx is unchanged
 ctx mut i32 level = 42
-proc main {} {
-  def r [parallel {
+proc main [] [
+  def r [parallel [
     set $ctx->level 10
     $ctx->level
-  } {
+  ] [
     set $ctx->level 20
     $ctx->level
-  }]
+  ]]
   print $r
   print $ctx->level
-}
+]
 main

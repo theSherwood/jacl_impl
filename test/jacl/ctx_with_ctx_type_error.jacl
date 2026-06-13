@@ -1,6 +1,6 @@
 # expect-error: type error
 # Test: type mismatch in override value rejected
 ctx mut i32 level = 42
-with-ctx {level hello} {
+with-ctx [level hello] [
   print $ctx->level
-}
+]

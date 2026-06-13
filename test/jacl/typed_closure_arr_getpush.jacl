@@ -8,8 +8,8 @@
 # literal pushed via arr-push is monomorphized to the element signature.
 # arr-push mutates in place, so the original binding keeps its element shape and
 # the appended element reads back typed. Wide-i64 elements prove unboxed calls.
-proc main {} {
-  def [Arr [Proc [i64] i64]] fns [[Arr [Proc [i64] i64]] [proc {x} {* $x 2}] [proc {x} {+ $x 1}]]
+proc main [] [
+  def [Arr [Proc [i64] i64]] fns [[Arr [Proc [i64] i64]] [proc [x] [* $x 2]] [proc [x] [+ $x 1]]]
 
   # arr-get narrowing: bind an element, then a typed call on it.
   def g [arr-get $fns 0]
@@ -19,11 +19,11 @@ proc main {} {
 
   # arr-push monomorphization: append literals in place (wide-i64 proves
   # unboxed), then read them back out and call them typed.
-  arr-push $fns [proc {x} {* $x 1000000000}]
-  arr-push $fns [proc {x} {+ $x 3}]
+  arr-push $fns [proc [x] [* $x 1000000000]]
+  arr-push $fns [proc [x] [+ $x 3]]
   def w [arr-get $fns 2]
   print [w 6]                               # 6000000000
   def p [arr-get $fns 3]
   print [p 6]                               # 9
-}
+]
 main

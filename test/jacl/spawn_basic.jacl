@@ -1,8 +1,8 @@
 # mode: concurrent
 # expect: 42
 # spawn a simple computation on a worker, await the result
-proc main {} {
-  def f [spawn { + 20 22 }]
+proc main [] [
+  def f [spawn [ + 20 22 ]]
   print [await $f]
-}
+]
 main

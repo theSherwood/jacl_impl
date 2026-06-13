@@ -1,8 +1,8 @@
 # expect-error: buf-set value type str does not match buf element type i32
 # Arrow-set form: `set $b->i value` is checked the same way as the
 # builtin [buf-set] form.
-proc main {} {
+proc main [] [
   def [Buf 4 i32] xs
   set $xs->0 "hello"
-}
+]
 main

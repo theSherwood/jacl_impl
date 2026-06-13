@@ -1,7 +1,7 @@
 # expect-error: conform
 # KEY conformance for a [Map K V] return: a [Map str i64]-returning proc does not
 # conform to a [Proc [i64] [Map i64 i64]] param (keys differ).
-proc mkbad {i64 n} [Map str i64] { [[Map str i64] "a" 1] }
-proc getit {[Proc [i64] [Map i64 i64]] f} i64 { 0 }
-proc main {} { print [getit $mkbad] }
+proc mkbad [i64 n] [Map str i64] [ [[Map str i64] "a" 1] ]
+proc getit [[Proc [i64] [Map i64 i64]] f] i64 [ 0 ]
+proc main [] [ print [getit $mkbad] ]
 main

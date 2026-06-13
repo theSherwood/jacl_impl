@@ -3,11 +3,11 @@
 # A COMPOUND [Arr T] return inside a [Proc …] narrows the closure call result:
 # `[f 3]` on a [Proc [i64] [Arr i64]] param types as [Arr i64], so arr-get/arr-len
 # on it work. Element conformance is enforced (see _err).
-proc mka {i64 n} [Arr i64] { [[Arr i64] $n $n] }
-proc getfst {[Proc [i64] [Arr i64]] f} i64 { [arr-get [f 3] 0] }
-proc getlen {[Proc [i64] [Arr i64]] f} i32 { [arr-len [f 3]] }
-proc main {} {
+proc mka [i64 n] [Arr i64] [ [[Arr i64] $n $n] ]
+proc getfst [[Proc [i64] [Arr i64]] f] i64 [ [arr-get [f 3] 0] ]
+proc getlen [[Proc [i64] [Arr i64]] f] i32 [ [arr-len [f 3]] ]
+proc main [] [
   print [getfst $mka]              # 3
   print [getlen $mka]              # 2
-}
+]
 main

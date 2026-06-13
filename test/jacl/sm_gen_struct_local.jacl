@@ -4,13 +4,13 @@
 # the N-slot struct as ONE dyn slot, so reads popped a single unmarked slot
 # and misread it as a heap pointer. Also covers §4.1c-a: the computed wide
 # field values must arrive raw, not tagged.
-struct V3 { i64 x, i64 y, i64 z }
-proc g {} [Stream i64] {
+struct V3 [ i64 x, i64 y, i64 z ]
+proc g [] [Stream i64] [
   def i64 b 1000000000
   def v [V3 x [* $b 3] y [+ [* $b 3] 1] z [+ [* $b 3] 2]]
   yield $v->x
-}
-proc main {} {
-  for [g] n { print $n }
-}
+]
+proc main [] [
+  for [g] n [ print $n ]
+]
 main

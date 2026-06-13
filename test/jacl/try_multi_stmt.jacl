@@ -1,2 +1,2 @@
 # expect: x
-print [try { error "x"; print "skip"; 1 } e { error-val $e }]
+print [try [ error "x"; print "skip"; 1 ] e [ error-val $e ]]

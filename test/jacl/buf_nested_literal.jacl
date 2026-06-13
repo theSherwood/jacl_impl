@@ -15,18 +15,18 @@
 # values. Partial fill allowed at both levels (rest stays zero).
 # See BUFFER_DESIGN.md.
 
-proc full {} {
+proc full [] [
   def [Buf 3 [Buf 4 i32]] m [[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2 3 4] [[Buf 4 i32] 5 6 7 8] [[Buf 4 i32] 9 10 11 12]]
   print $m->0->0
   print $m->0->3
   print $m->1->2
   print $m->2->3
-}
+]
 full
 
 # Partial fill at both levels -- LHS annotation is also inferred from
 # the RHS constructor (M5b LHS inference combined with M4.2 nesting).
-proc partial {} {
+proc partial [] [
   def m [[Buf 3 [Buf 4 i32]] [[Buf 4 i32] 1 2] [[Buf 4 i32] 5]]
   print $m->0->0
   print $m->0->1
@@ -35,13 +35,13 @@ proc partial {} {
   print $m->1->1
   print $m->2->0
   print [buf-len $m]
-}
+]
 partial
 
 # Element-overflow check fires at compile time for nested too (M5
 # overflow check + M4.2 nesting).
-proc good {} {
+proc good [] [
   def [Buf 2 [Buf 2 u8]] bytes [[Buf 2 [Buf 2 u8]] [[Buf 2 u8] 0x0f 0x10]]
   print $bytes->0->1
-}
+]
 good

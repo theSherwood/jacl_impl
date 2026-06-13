@@ -2,8 +2,8 @@
 # Compile-time type check on [buf-set]: assigning a str into an i32-elem
 # buf is now a typer error instead of a runtime trap. Closes the
 # soundness gap noted in BUFFER_DESIGN.md M4.4 ext follow-ups.
-proc main {} {
+proc main [] [
   def [Buf 4 i32] xs
   buf-set $xs 0 "hello"
-}
+]
 main

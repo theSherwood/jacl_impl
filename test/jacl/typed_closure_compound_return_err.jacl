@@ -1,7 +1,7 @@
 # expect-error: not a closure conforming to the [Proc …]
 # A proc returning [Vec i32] does NOT conform to a [Proc [i64] [Vec i64]] param —
 # the return element type is part of the signature.
-proc mkv32 {i64 n} [Vec i32] { [[Vec i32] 1 2] }
-proc hof {[Proc [i64] [Vec i64]] f} i64 { [vec-get [f 5] 0] }
-proc main {} { print [hof $mkv32] }
+proc mkv32 [i64 n] [Vec i32] [ [[Vec i32] 1 2] ]
+proc hof [[Proc [i64] [Vec i64]] f] i64 [ [vec-get [f 5] 0] ]
+proc main [] [ print [hof $mkv32] ]
 main

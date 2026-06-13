@@ -3,9 +3,9 @@
 # to uint32_t in the VM trap makes -1 a huge unsigned number, but the
 # `n < 0` guard fires first).
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
   mut k -1
   print $cube->0->0->$k
-}
+]
 main

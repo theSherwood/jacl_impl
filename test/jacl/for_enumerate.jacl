@@ -4,19 +4,19 @@
 # expect: 3
 # Two-name enumerate over statically-typed vec/arr: the FIRST name is the i32
 # index, the LAST the element. (Dyn vecs already enumerate via the dyn dispatch.)
-proc main {} {
+proc main [] [
   def [Vec i64] xs [[Vec i64] 10 20 30]
   mut i64 sv 0
   mut i32 si 0
-  for $xs i v { set sv [+ $sv $v]; set si [+ $si $i] }
+  for $xs i v [ set sv [+ $sv $v]; set si [+ $si $i] ]
   print $sv                              # 10+20+30 = 60
   print $si                              # 0+1+2 = 3
 
   def [Arr i64] ys [[Arr i64] 1 2 3]
   mut i64 av 0
   mut i32 ai 0
-  for $ys i v { set av [+ $av $v]; set ai [+ $ai $i] }
+  for $ys i v [ set av [+ $av $v]; set ai [+ $ai $i] ]
   print $av                              # 1+2+3 = 6
   print $ai                              # 0+1+2 = 3
-}
+]
 main

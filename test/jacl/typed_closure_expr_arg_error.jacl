@@ -2,9 +2,9 @@
 # Step 2b (slice 3): a closure-valued expression arg whose signature does NOT
 # conform to the [Proc …] param is a compile error. `pick-str` returns
 # [Proc [str] str]; `apply` expects [Proc [i64] i64].
-proc pick-str {} [Proc [str] str] { proc {s} {concat $s "!"} }
-proc apply {[Proc [i64] i64] f, i64 n} i64 { [f $n] }
-proc main {} {
+proc pick-str [] [Proc [str] str] [ proc [s] [concat $s "!"] ]
+proc apply [[Proc [i64] i64] f, i64 n] i64 [ [f $n] ]
+proc main [] [
   print [apply [pick-str] 6]
-}
+]
 main

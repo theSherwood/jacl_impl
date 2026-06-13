@@ -9,7 +9,7 @@
 # unchanged; this adds the annotation surface so explicit declarations
 # can carry the boxed element type. See BUFFER_DESIGN.md Tier 2.
 
-proc main {} {
+proc main [] [
   # Explicit annotation, scalar payload.
   def [Box i32] bi [box 42]
   print [deref $bi]
@@ -30,11 +30,11 @@ proc main {} {
   mut i 0
   buf-set $xs 2 [box 11]
   buf-set $xs 3 [box 13]
-  while [< $i 100] {
+  while [< $i 100] [
     def junk [vec $i $i $i]
     set i [+ $i 1]
-  }
+  ]
   print [deref [buf-get $xs 2]]
   print [deref [buf-get $xs 3]]
-}
+]
 main

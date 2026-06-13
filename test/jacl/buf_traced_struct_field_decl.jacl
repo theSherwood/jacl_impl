@@ -10,9 +10,9 @@
 # struct's StructTypeDef tells the inline-push helpers to leave that
 # slot GC-traceable. See BUFFER_DESIGN.md Tier 1.
 
-struct Bag { i32 size, [Buf 4 dyn] items }
+struct Bag [ i32 size, [Buf 4 dyn] items ]
 
-proc main {} {
+proc main [] [
   def b [Bag size 0]
   print $b->size
   set $b->items->0 "hello"
@@ -20,5 +20,5 @@ proc main {} {
   print $b->items->0
   print $b->items->1
   print "ok"
-}
+]
 main

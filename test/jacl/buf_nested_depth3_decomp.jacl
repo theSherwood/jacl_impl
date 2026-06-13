@@ -14,7 +14,7 @@
 # The shape is recovered by re-walking the RHS AST at def-time on both
 # sides (typer + compiler). See docs/TYPE_REGISTRY_REFACTOR.md.
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
 
   # One-step decomp: p views row 1 of cube as [Ptr [Buf 3 [Buf 4 i32]]].
@@ -37,5 +37,5 @@ proc main {} {
   print $q->3
   print $p->2->3
   print $cube->1->2->3
-}
+]
 main

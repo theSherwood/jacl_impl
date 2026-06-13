@@ -5,11 +5,11 @@
 # required carrying the map's KEY on the proc-param binding (parse_params' single
 # struct-idx slot only held the value) — which additionally fixed map-get on a
 # value-kind map param in the body (the key literal now types correctly).
-proc getm {[Map i64 i64] m} i64 { [map-get $m 1] }
-proc hof  {[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m} i64 { [f $m] }
-proc main {} {
+proc getm [[Map i64 i64] m] i64 [ [map-get $m 1] ]
+proc hof  [[Proc [[Map i64 i64]] i64] f, [Map i64 i64] m] i64 [ [f $m] ]
+proc main [] [
   def [Map i64 i64] m [[Map i64 i64] 1 9]
   print [getm $m]                 # 9 (direct — map-param key body fix)
   print [hof $getm $m]            # 9 (through the HOF)
-}
+]
 main

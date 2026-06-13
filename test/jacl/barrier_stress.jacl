@@ -6,33 +6,33 @@
 # US-007: Write barrier stress test — spawn N workers that concurrently
 # swap! atoms in a tight loop while other workers allocate heavily,
 # forcing GC. Verify all final atom values are consistent.
-proc add1 {x} { + $x 1 }
+proc add1 [x] [ + $x 1 ]
 
-proc bump {a, i, n} {
-  if [< $i $n] {
+proc bump [a, i, n] [
+  if [< $i $n] [
     swap $a $add1
     bump $a [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc trash {i, n} {
-  if [< $i $n] {
+proc trash [i, n] [
+  if [< $i $n] [
     def v [vec 1 2 3 4 5 6 7 8 9 10]
     trash [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc main {} {
+proc main [] [
   def a1 [atom 0]
   def a2 [atom 0]
   def a3 [atom 0]
   def a4 [atom 0]
-  def f1 [spawn { bump $a1 0 50 }]
-  def f2 [spawn { bump $a2 0 50 }]
-  def f3 [spawn { bump $a3 0 50 }]
-  def f4 [spawn { bump $a4 0 50 }]
-  def g1 [spawn { trash 0 50 }]
-  def g2 [spawn { trash 0 50 }]
+  def f1 [spawn [ bump $a1 0 50 ]]
+  def f2 [spawn [ bump $a2 0 50 ]]
+  def f3 [spawn [ bump $a3 0 50 ]]
+  def f4 [spawn [ bump $a4 0 50 ]]
+  def g1 [spawn [ trash 0 50 ]]
+  def g2 [spawn [ trash 0 50 ]]
   await $f1
   await $f2
   await $f3
@@ -43,5 +43,5 @@ proc main {} {
   print [deref $a2]
   print [deref $a3]
   print [deref $a4]
-}
+]
 main

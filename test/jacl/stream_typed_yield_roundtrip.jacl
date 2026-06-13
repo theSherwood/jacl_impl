@@ -3,6 +3,6 @@
 # through the for-loop. Before the wide-cell bridge fix,
 # `def i64 a 42; yield $a` left raw 64-bit bits in stream storage (no
 # JaclVal tag), which read back as nil and printed "nil" here.
-proc gen {} [Stream i64] { def i64 a 42; yield $a }
-proc main {} { for [gen] i { print $i } }
+proc gen [] [Stream i64] [ def i64 a 42; yield $a ]
+proc main [] [ for [gen] i [ print $i ] ]
 main

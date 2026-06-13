@@ -1,12 +1,12 @@
 # expect: ok
 # expect: ok
 # Test: $ctx->pwd accessible before and after await in async proc
-proc main {} {
+proc main [] [
   def pwd1 $ctx->pwd
-  def f [spawn { 42 }]
+  def f [spawn [ 42 ]]
   def r [await $f]
   def pwd2 $ctx->pwd
   print ok
   print ok
-}
+]
 main

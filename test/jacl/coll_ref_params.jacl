@@ -9,31 +9,31 @@
 # element/value type carried statically (the erasure scheme): [Vec str],
 # [Map str str], [Arr str] params narrow inside the body. Numeric typed
 # params ([Vec i64]) resolve to the typed rep via the scalar sentinel.
-proc lens {[Vec str] v} {
-  for $v s {
+proc lens [[Vec str] v] [
+  for $v s [
     assert-type $s str
     print [length $s]
-  }
-}
-proc lookup {[Map str str] m str k} {
+  ]
+]
+proc lookup [[Map str str] m str k] [
   assert-type [map-get $m $k] str
   map-get $m $k
-}
-proc walk {[Arr str] a} {
-  for $a s {
+]
+proc walk [[Arr str] a] [
+  for $a s [
     assert-type $s str
     print $s
-  }
-}
-proc total {[Vec i64] v} {
+  ]
+]
+proc total [[Vec i64] v] [
   assert-type [vec-get $v 0] i64
   + [vec-get $v 0] [vec-get $v 1]
-}
-proc main {} {
+]
+proc main [] [
   lens [[Vec str] "ab" "xyz"]
   print [lookup [[Map str str] "x" "ex"] "x"]
   walk [[Arr str] "a" "b"]
   print [total [[Vec i64] 10 50]]
   print "ok"
-}
+]
 main

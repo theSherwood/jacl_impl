@@ -1,6 +1,6 @@
 # expect-error: proc mk returns a struct but has no return type; add a return type annotation
-struct Point {i32 x, i32 y}
-proc mk {i32 a, i32 b} {
+struct Point [i32 x, i32 y]
+proc mk [i32 a, i32 b] [
   Point x $a y $b
-}
+]
 mk 1 2

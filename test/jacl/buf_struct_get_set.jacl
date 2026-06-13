@@ -4,7 +4,7 @@
 # M4.1b: $buf->N read/write for struct-element bufs. Zero-init
 # shows up as [Point x 0 y 0]. Stores via struct constructor
 # round-trip cleanly.
-struct Point {i32 x i32 y}
+struct Point [i32 x i32 y]
 
 def [Buf 4 Point] pts
 print $pts->0

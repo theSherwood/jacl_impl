@@ -1,15 +1,15 @@
 # expect-error: generator tail expression produces a value
 # Deeply nested: block inside if/else tail; the inner block's tail is
 # a literal that would be silently discarded.
-proc gen {} {
+proc gen [] [
   yield 1
-  if true {
+  if true [
     yield 2
-  } else {
-    {
+  ] else [
+    [
       yield 3
       42
-    }
-  }
-}
+    ]
+  ]
+]
 print [collect [gen]]

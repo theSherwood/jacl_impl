@@ -3,21 +3,21 @@
 # expect: 110
 # 3+ levels of nested closures across suspension points with variable capture at each level
 # Verifies bounds checks don't false-positive on valid deep upvalue chains
-proc main {} {
+proc main [] [
   def a 1
-  def f1 [spawn { 10 }]
+  def f1 [spawn [ 10 ]]
   def b [await $f1]
   # b=10, a=1 — both captured by continuation
-  def f2 [spawn { 100 }]
+  def f2 [spawn [ 100 ]]
   def c [await $f2]
   # c=100, b=10, a=1 — all captured across two suspension points
-  def f3 [spawn { 1000 }]
+  def f3 [spawn [ 1000 ]]
   def d [await $f3]
   # d=1000, c=100, b=10, a=1 — deep chain: 3 suspension points
   print [+ $a [+ $b [+ $c [+ $d 0]]]]
   # Use nested parallel bodies to create closure nesting across suspension boundary
-  def r [parallel { + $a [+ $b [+ $c 0]] } { + $b [+ $c 0] }]
+  def r [parallel [ + $a [+ $b [+ $c 0]] ] [ + $b [+ $c 0] ]]
   print [vec-get $r 0]
   print [vec-get $r 1]
-}
+]
 main

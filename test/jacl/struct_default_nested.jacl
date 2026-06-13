@@ -12,11 +12,11 @@
 # expect: 0
 # expect: 0
 
-struct Pt {i32 x, i32 y}
-struct Line {Pt start, Pt end}
-struct Body {i32 tag, Line bounds}
+struct Pt [i32 x, i32 y]
+struct Line [Pt start, Pt end]
+struct Body [i32 tag, Line bounds]
 
-proc main {} {
+proc main [] [
   # Both nested Pts default to {0, 0}.
   def ln [Line]
   print $ln->start->x
@@ -34,5 +34,5 @@ proc main {} {
   print $b->bounds->start->y
   print $b->bounds->end->x
   print $b->bounds->end->y
-}
+]
 main

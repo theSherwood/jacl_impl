@@ -3,15 +3,15 @@
 # WITHOUT TypeInfo, so reads stayed tagged while typed consumers expected
 # the wide rep (segfault in typed arithmetic once `def` locals went typed).
 # The SM mut fall-through now saves TypeInfo like the non-SM mut path.
-struct V3 { i64 x, i64 y, i64 z }
-proc g {} [Stream i64] {
+struct V3 [ i64 x, i64 y, i64 z ]
+proc g [] [Stream i64] [
   def i64 b 1000000000
   mut i64 acc 0
   set acc [+ $acc [* $b 3]]
   set acc [+ $acc [* $b 3]]
   yield $acc
-}
-proc main {} {
-  for [g] n { print $n }
-}
+]
+proc main [] [
+  for [g] n [ print $n ]
+]
 main

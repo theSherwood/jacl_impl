@@ -2,16 +2,16 @@
 # expect: 18
 # expect: 2
 # Stream enumerate: `for $stream n v` — n is a 0-based i32 counter, v the element.
-proc main {} {
+proc main [] [
   mut i32 si 0
   mut i64 sv 0
-  for [range 5 8] n v { set si [+ $si $n]; set sv [+ $sv $v] }
+  for [range 5 8] n v [ set si [+ $si $n]; set sv [+ $sv $v] ]
   print $si                  # values 5,6,7 → counter 0,1,2 → 3
   print $sv                  # 5+6+7 = 18
 
   # continue still advances the counter; break works
   mut i32 last 0
-  for [range 0 100] n v { if [== $v 3] { break }; set last $n }
+  for [range 0 100] n v [ if [== $v 3] [ break ]; set last $n ]
   print $last                # n at v=2 is 2 (counter 0,1,2 before break at v=3)
-}
+]
 main

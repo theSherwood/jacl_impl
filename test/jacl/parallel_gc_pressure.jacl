@@ -6,16 +6,16 @@
 # US-002 regression: parallel result vector must survive GC between
 # completion and join continuation execution. Heavy allocation in each
 # body creates GC pressure; concurrent mode exercises real worker threads.
-proc fib {n} {
-  if [< $n 2] { + $n 0 } else {
+proc fib [n] [
+  if [< $n 2] [ + $n 0 ] else [
     + [fib [- $n 1]] [fib [- $n 2]]
-  }
-}
-proc main {} {
-  def r [parallel { fib 12 } { fib 10 } { fib 8 } { fib 6 }]
+  ]
+]
+proc main [] [
+  def r [parallel [ fib 12 ] [ fib 10 ] [ fib 8 ] [ fib 6 ]]
   print [vec-get $r 0]
   print [vec-get $r 1]
   print [vec-get $r 2]
   print [vec-get $r 3]
-}
+]
 main

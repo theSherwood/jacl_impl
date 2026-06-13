@@ -7,10 +7,10 @@
 # carries its KEY so map-get on the result types the key correctly (previously
 # [Arr T] returns stayed dyn and [Map K V] returns dropped the key → runtime
 # key-not-found).
-proc mka {i64 n} [Arr i64] { [[Arr i64] $n $n] }
-proc mks {} [Arr str] { [[Arr str] "hi" "yo"] }
-proc mkm {i64 n} [Map i64 i64] { [[Map i64 i64] $n $n] }
-proc main {} {
+proc mka [i64 n] [Arr i64] [ [[Arr i64] $n $n] ]
+proc mks [] [Arr str] [ [[Arr str] "hi" "yo"] ]
+proc mkm [i64 n] [Map i64 i64] [ [[Map i64 i64] $n $n] ]
+proc main [] [
   def [Arr i64] a [mka 3]
   print [arr-get $a 0]              # 3
   print [arr-len $a]               # 2
@@ -18,5 +18,5 @@ proc main {} {
   print [arr-get $s 0]             # hi
   def [Map i64 i64] m [mkm 7]
   print [map-get $m 7]             # 7 (key typed i64, not i32)
-}
+]
 main

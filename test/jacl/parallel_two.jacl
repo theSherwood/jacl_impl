@@ -1,7 +1,7 @@
 # expect: [vec 10 20]
 # parallel with 2 bodies, print result vector
-proc main {} {
-  def r [parallel { 10 } { 20 }]
+proc main [] [
+  def r [parallel [ 10 ] [ 20 ]]
   print $r
-}
+]
 main

@@ -11,27 +11,27 @@
 # param re-derives the correct strides at any depth and supports
 # dynamic indices (`$p->$i->$i`). See docs/TYPE_REGISTRY_REFACTOR.md.
 
-proc set_diag {[Ptr [Buf 3 [Buf 4 i32]]] p a b c} {
+proc set_diag [[Ptr [Buf 3 [Buf 4 i32]]] p a b c] [
   set $p->0->0 $a
   set $p->1->1 $b
   set $p->2->2 $c
-}
+]
 
-proc sum_diag {[Ptr [Buf 3 [Buf 4 i32]]] p} {
+proc sum_diag [[Ptr [Buf 3 [Buf 4 i32]]] p] [
   mut total 0
   mut i 0
-  while [< $i 3] {
+  while [< $i 3] [
     set total [+ $total $p->$i->$i]
     set i [+ $i 1]
-  }
+  ]
   return $total
-}
+]
 
-proc bump {[Ptr [Buf 3 [Buf 4 i32]]] p row col v} {
+proc bump [[Ptr [Buf 3 [Buf 4 i32]]] p row col v] [
   set $p->$row->$col $v
-}
+]
 
-proc main {} {
+proc main [] [
   def [Buf 2 [Buf 3 [Buf 4 i32]]] cube
 
   def slice $cube->1
@@ -45,5 +45,5 @@ proc main {} {
   print $cube->0->0->0
   bump $cube->0 2 3 99
   print $cube->0->2->3
-}
+]
 main

@@ -4,9 +4,9 @@
 # expect: 9999
 # Ptr arrow indexing: $p->N reads, set $p->N $v writes. Address of
 # element N obtained via [addr $p->N] equals [ptr-offset $p N].
-proc set_index {[Ptr i32] p i32 idx i32 v} {
+proc set_index [[Ptr i32] p i32 idx i32 v] [
   set $p->1 $v
-}
+]
 
 def [Buf 4 i32] b [[Buf 4 i32] 1024 2048 4096 8192]
 def [Ptr i32] p [addr $b->0]

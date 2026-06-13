@@ -7,10 +7,10 @@
 # (the compiler carries the FULL compound shape idx on both sides). Previously
 # the def-binding path used a different encoding than the annotation and
 # rejected the (valid) bind.
-proc getv {[Vec i64] v} i64 { [vec-get $v 0] }
-proc getm {[Map i64 i64] m} i64 { [map-get $m 1] }
-proc geta {[Arr i64] a} i64 { [arr-get $a 0] }
-proc main {} {
+proc getv [[Vec i64] v] i64 [ [vec-get $v 0] ]
+proc getm [[Map i64 i64] m] i64 [ [map-get $m 1] ]
+proc geta [[Arr i64] a] i64 [ [arr-get $a 0] ]
+proc main [] [
   def [Vec i64] v [[Vec i64] 9 9]
   def [Map i64 i64] m [[Map i64 i64] 1 7]
   def [Arr i64] a [[Arr i64] 4 4]
@@ -20,5 +20,5 @@ proc main {} {
   print [fv $v]                # 9
   print [fm $m]                # 7
   print [fa $a]                # 4
-}
+]
 main

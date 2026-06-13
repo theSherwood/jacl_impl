@@ -4,22 +4,22 @@
 # expect: ok
 # Tail of the vec-type unification: depth-3 nested element types, explicit
 # [Vec T] annotations, and vec-get narrowing on stamped ref-element vecs.
-proc main {} {
+proc main [] [
   # depth-3: [Vec [Vec [Vec i64]]] — narrowing recurses through bindings
   def d3 [[Vec [Vec [Vec i64]]] [[Vec [Vec i64]] [[Vec i64] 4 5]]]
   mut i64 t 0
-  for $d3 plane {
-    for $plane row {
-      for $row x { set t [+ $t $x] }
-    }
-  }
+  for $d3 plane [
+    for $plane row [
+      for $row x [ set t [+ $t $x] ]
+    ]
+  ]
   print $t                              # 4 + 5 = 9
 
   # explicit annotation: def [Vec str] — binding carries the element type
   def [Vec str] names [[Vec str] "a" "b"]
-  for $names n {
+  for $names n [
     assert-type $n str
-  }
+  ]
   # vec-get narrows on the stamped vec (assert on the expression — plain
   # def doesn't propagate tagged-scalar types into bindings, by design)
   assert-type [vec-get $names 0] str
@@ -28,8 +28,8 @@ proc main {} {
   # annotation with a nested element type
   def [Vec [Vec i64]] m [[Vec [Vec i64]] [[Vec i64] 2 3]]
   mut i64 s 0
-  for $m row { for $row v { set s [+ $s $v] } }
+  for $m row [ for $row v [ set s [+ $s $v] ] ]
   print $s                              # 5
   print "ok"
-}
+]
 main

@@ -6,24 +6,24 @@
 # return type is boxed at the return boundary so the caller reads a tagged
 # value — otherwise raw wide bits round-trip as nil. Covers the plain tail,
 # the SM (suspending) tail, and an explicit `return`.
-proc ret_def {} {
+proc ret_def [] [
   def i64 x 5
   + $x 3                  # 8 (non-SM dyn-return tail)
-}
-proc ret_sm {} {
-  def fut [spawn { 0 }]
+]
+proc ret_sm [] [
+  def fut [spawn [ 0 ]]
   def i64 x 100
   await $fut
   + $x 1                  # 101 (SM dyn-return tail)
-}
-proc ret_explicit {} {
+]
+proc ret_explicit [] [
   def i64 x 200
   return $x                 # 200 (explicit return of a wide value)
-}
-proc main {} {
+]
+proc main [] [
   print [ret_def]
   print [ret_sm]
   print [ret_explicit]
   print "ok"
-}
+]
 main

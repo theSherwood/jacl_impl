@@ -6,11 +6,11 @@
 # Test: nested with-ctx (3 levels) with different overrides at each level
 ctx mut i32 depth = 1
 print $ctx->depth
-with-ctx {depth 2} {
+with-ctx [depth 2] [
   print $ctx->depth
-  with-ctx {depth 3} {
+  with-ctx [depth 3] [
     print $ctx->depth
-  }
+  ]
   print $ctx->depth
-}
+]
 print $ctx->depth

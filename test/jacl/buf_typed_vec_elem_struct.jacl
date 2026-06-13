@@ -5,8 +5,8 @@
 # structs. The struct T's registry idx is stashed on the buf local's
 # key_struct_idx; vec-get on the returned typed-vec narrows to TYPE_STRUCT
 # with the right registry idx so $point->x chains type-check.
-struct Point { i32 x, i32 y }
-proc main {} {
+struct Point [ i32 x, i32 y ]
+proc main [] [
   def [Buf 2 [Vec Point]] grid
   def row0 [[Vec Point] [Point x 7 y 11] [Point x 22 y 33]]
   buf-set $grid 0 $row0
@@ -17,5 +17,5 @@ proc main {} {
   print $p0->y
   def p1 [vec-get $fetched 1]
   print $p1->x
-}
+]
 main

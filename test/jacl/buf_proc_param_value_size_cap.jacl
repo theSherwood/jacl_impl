@@ -3,12 +3,12 @@
 # behaviour-shaping policy in BUFFER_DESIGN.md Tier 2. Anything
 # larger needs [Ptr [Buf N T]] to avoid a per-call memcpy.
 
-proc too_big {[Buf 256 i32] xs} {
+proc too_big [[Buf 256 i32] xs] [
   print [buf-len $xs]
-}
+]
 
-proc main {} {
+proc main [] [
   def [Buf 256 i32] big
   too_big $big
-}
+]
 main

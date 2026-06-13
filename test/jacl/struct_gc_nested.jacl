@@ -2,15 +2,15 @@
 # expect: 99
 # Test: nested struct survives after outer struct is no longer referenced.
 # Extract inner struct, let outer become garbage, verify inner is still valid.
-struct Point {i32 x, i32 y}
-struct Line {Point start, Point end}
+struct Point [i32 x, i32 y]
+struct Line [Point start, Point end]
 
-proc getpt {} Point {
+proc getpt [] Point [
   def ln [Line start [Point x 42 y 99] end [Point x 0 y 0]]
   $ln->start
-}
+]
 
-proc main {} {
+proc main [] [
   def pt [getpt]
   # ln is now garbage — only pt (the inner Point) is still live
   # Allocate more to trigger GC
@@ -21,5 +21,5 @@ proc main {} {
   def e [Line start $b end $c]
   print $pt->x
   print $pt->y
-}
+]
 main

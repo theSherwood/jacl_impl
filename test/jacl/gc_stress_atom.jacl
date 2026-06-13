@@ -4,35 +4,35 @@
 # times while allocating garbage to trigger GC. CAS retries on contention.
 # Final value = 50 * 10 = 500 (no lost updates).
 
-proc add1 {x} { + $x 1 }
+proc add1 [x] [ + $x 1 ]
 
-proc trash {i, n} {
-  if [< $i $n] {
+proc trash [i, n] [
+  if [< $i $n] [
     def v [vec 1 2 3 4 5 6 7 8 9 10 11 12 13]
     def w [vec-push [vec-push $v 14] 15]
     trash [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc bump {a, i, n} {
-  if [< $i $n] {
+proc bump [a, i, n] [
+  if [< $i $n] [
     swap $a $add1
     def v [vec 1 2 3 4 5 6 7 8 9 10]
     bump $a [+ $i 1] $n
-  } else { 0 }
-}
+  ] else [ 0 ]
+]
 
-proc s10 {a} {
-  def f0 [spawn { bump $a 0 10; trash 0 20 }]
-  def f1 [spawn { bump $a 0 10; trash 0 20 }]
-  def f2 [spawn { bump $a 0 10; trash 0 20 }]
-  def f3 [spawn { bump $a 0 10; trash 0 20 }]
-  def f4 [spawn { bump $a 0 10; trash 0 20 }]
-  def f5 [spawn { bump $a 0 10; trash 0 20 }]
-  def f6 [spawn { bump $a 0 10; trash 0 20 }]
-  def f7 [spawn { bump $a 0 10; trash 0 20 }]
-  def f8 [spawn { bump $a 0 10; trash 0 20 }]
-  def f9 [spawn { bump $a 0 10; trash 0 20 }]
+proc s10 [a] [
+  def f0 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f1 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f2 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f3 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f4 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f5 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f6 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f7 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f8 [spawn [ bump $a 0 10; trash 0 20 ]]
+  def f9 [spawn [ bump $a 0 10; trash 0 20 ]]
   await $f0
   await $f1
   await $f2
@@ -43,9 +43,9 @@ proc s10 {a} {
   await $f7
   await $f8
   await $f9
-}
+]
 
-proc main {} {
+proc main [] [
   def a [atom 0]
   s10 $a
   s10 $a
@@ -53,5 +53,5 @@ proc main {} {
   s10 $a
   s10 $a
   print [deref $a]
-}
+]
 main

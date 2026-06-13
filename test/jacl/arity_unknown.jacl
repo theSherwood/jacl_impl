@@ -1,8 +1,8 @@
 # expect: 15
 # call through unknown-arity variable compiles without error
-proc mkadd {x} {
-  proc inner {y} { + $x $y }
-}
+proc mkadd [x] [
+  proc inner [y] [ + $x $y ]
+]
 def f [mkadd 10]
 # f's arity is unknown at compile time (bound to a command result)
 # so the compiler does not reject this call

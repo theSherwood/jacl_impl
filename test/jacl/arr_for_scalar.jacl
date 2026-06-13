@@ -10,30 +10,30 @@
 # binding narrowing (typed accumulation + assert-type), implicit $it,
 # and break/continue. Wide scalars (i64/u64/f64) keep a dyn binding —
 # see arr_for_wide.jacl.
-proc main {} {
+proc main [] [
   # dyn arr -> dyn binding
   def d [arr 1 2 3]
-  for $d x { print $x }              # 1 2 3
+  for $d x [ print $x ]              # 1 2 3
 
   # [Arr i32] -> binding narrows to i32, enabling typed accumulation
   def s [[Arr i32] 1 2 3]
   mut i32 sum 0
-  for $s y { set sum [+ $sum $y] }
+  for $s y [ set sum [+ $sum $y] ]
   print $sum                         # 6
 
   # implicit $it + continue
   def b [[Arr i32] 10 20 30]
-  for $b {
-    if [== $it 20] { continue }
+  for $b [
+    if [== $it 20] [ continue ]
     print $it                        # 10 30
-  }
+  ]
 
   # break with value
-  def r [for $b z { if [== $z 30] { break 99 } }]
+  def r [for $b z [ if [== $z 30] [ break 99 ] ]]
   print $r                           # 99
 
   # narrowing is statically visible
-  for $s w { assert-type $w i32 }
+  for $s w [ assert-type $w i32 ]
   print "ok"
-}
+]
 main

@@ -6,12 +6,12 @@
 # M4.3c: realistic FFI use case -- a struct with a buf field for
 # magic bytes plus a separate scalar field. Matches C layout:
 # struct { uint32_t version; uint8_t magic[4]; }.
-struct ElfHeader {
+struct ElfHeader [
   i32 version,
   [Buf 4 u8] magic
-}
+]
 
-proc main {} {
+proc main [] [
   def h [ElfHeader version 1]
   def [Ptr u8] m $h->magic
   set $m->0 0x7f
@@ -23,6 +23,6 @@ proc main {} {
   print $m->2
   print $m->3
   print $h->version
-}
+]
 
 main

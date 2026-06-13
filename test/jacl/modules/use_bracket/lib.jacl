@@ -1,1 +1,1 @@
-proc triple {n} { * $n 3 }
+proc triple [n] [ * $n 3 ]

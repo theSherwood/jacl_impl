@@ -14,10 +14,10 @@
 # are the only path to skip the check for struct buf fields. See
 # BUFFER_DESIGN.md Tier 2.
 
-struct ElfHeader { i32 ver, [Buf 4 u8] magic }
-struct Bag { i32 size, [Buf 4 dyn] items }
+struct ElfHeader [ i32 ver, [Buf 4 u8] magic ]
+struct Bag [ i32 size, [Buf 4 dyn] items ]
 
-proc scalar_field {} {
+proc scalar_field [] [
   def h [ElfHeader ver 1]
   buf-set $h->magic 0 0x7f
   buf-set $h->magic 1 0x45
@@ -27,10 +27,10 @@ proc scalar_field {} {
   # Unchecked variant -- no bounds check at runtime.
   buf-unchecked-set $h->magic 3 0xfe
   print [buf-unchecked-get $h->magic 3]
-}
+]
 scalar_field
 
-proc ref_field {} {
+proc ref_field [] [
   def b [Bag size 0]
   buf-set $b->items 0 "hello"
   buf-set $b->items 1 42
@@ -38,5 +38,5 @@ proc ref_field {} {
   print [buf-get $b->items 1]
   print [buf-len $b->items]
   print "ok"
-}
+]
 ref_field

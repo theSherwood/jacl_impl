@@ -120,6 +120,13 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
    - Macros that take bodies work because args arrive as unevaluated syntax —
      but the same `[…]` arg parses differently under a macro head (whatever
      the template does with it) than under `for`.
+   - Bitten in practice by the corpus debrace: `timeout 0.02 [ slow ]` and
+     `unless $c [ set hit 5 ]` (macro heads) collapse the single-statement
+     arg to a call. NOTE there is no good explicit spelling either: a typed
+     `[do slow]` parses `slow` as an *atom arg*, not a statement (do's args
+     are only statement-parsed when produced by `;`/newline lowering) —
+     you'd need `[do [slow]]`. Those corpus call sites keep `{…}` for now
+     (tour.jacl macro section, timeout_fires/timeout_success).
    Candidate resolutions to evaluate before `{}` is dropped: (a) accept the
    per-head table as the language rule and document each builtin's body
    positions as part of its signature; (b) require explicit `[do …]` for all

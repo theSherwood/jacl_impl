@@ -1,10 +1,10 @@
 # expect: true
 # expect: oops
 # spawn a task that errors, await it, check with error? and error-val
-proc main {} {
-  def f [spawn { error "oops" }]
+proc main [] [
+  def f [spawn [ error "oops" ]]
   def result [await $f]
   print [error? $result]
   print [error-val $result]
-}
+]
 main

@@ -4,7 +4,7 @@
 # holds a tagged JaclVal carrying a [Ptr T]. Same GC + write-barrier
 # story as the M4.4 ref-elem path; new piece is the typer's recognition
 # of [Ptr T] as an inner buf-element type, interned as TYPE_SHAPE_PTR.
-proc main {} {
+proc main [] [
   def [Buf 4 u8] elf [[Buf 4 u8] 0x7f 0x45 0x4c 0x46]
   def [Ptr u8] p0 [addr $elf->0]
   def [Ptr u8] p1 [addr $elf->1]
@@ -18,5 +18,5 @@ proc main {} {
   print [ptr-deref $g0]
   def [Ptr u8] g1 [buf-get $ptrs 1]
   print [ptr-deref $g1]
-}
+]
 main
