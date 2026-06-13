@@ -1,0 +1,26 @@
+# expect: 42
+# expect: [vec 2 4]
+# expect: 1
+# expect: 2
+# expect: 7
+# expect: 8
+# expect: c-style
+# expect: c-style
+# expect: caught
+# expect: 3
+# Body-position [...] for the generic-command heads (BRACKET_FLIP_DESIGN.md):
+# spawn/parallel/race/for/try take bracket bodies like brace bodies.
+struct Point [i32 x, i32 y]
+def f [spawn [+ 20 22]]
+print [await $f]
+def r [parallel [+ 1 1] [+ 2 2]]
+print $r
+for [vec 1 2] [print $it]
+for [vec 7 8] [\ print $it]
+for [i = 0; < $i 2; i :: [+ $i 1]] [print "c-style"]
+try [error bad] e [print "caught"]
+proc main {} {
+  def p [Point x 3 y 4]
+  print $p->x
+}
+main

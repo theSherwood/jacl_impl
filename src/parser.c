@@ -921,23 +921,29 @@ AstNode* parser__parse_use(Parser* p) {
     return node;
   }
 
-  if (next_tok->type == TOKEN_LBRACE) {
-    /* Destructuring form: use "path" {name1, name2, ...} */
-    Token* brace_tok = parser__advance(p); /* consume '{' */
+  if (next_tok->type == TOKEN_LBRACE || next_tok->type == TOKEN_LBRACKET) {
+    /* Destructuring form: use "path" {name1, name2, ...} — `[…]` accepted
+     * as the post-flip spelling (auto-detect, like proc params). */
+    Token* brace_tok = parser__advance(p); /* consume open delimiter */
+    TokenType close_type = (brace_tok->type == TOKEN_LBRACKET)
+                           ? TOKEN_RBRACKET : TOKEN_RBRACE;
+    const char* close_msg = (close_type == TOKEN_RBRACKET)
+                            ? "expected ']' to close use destructuring"
+                            : "expected '}' to close use destructuring";
 
     /* Check for empty name list */
-    if (parser__peek(p)->type == TOKEN_RBRACE) {
+    if (parser__peek(p)->type == close_type) {
       Token* close = parser__advance(p);
       AstNode* err = parser__error(p, "use destructuring must not be empty", close);
       err->start = start;
       return err;
     }
 
-    /* Parse names until '}' */
+    /* Parse names until the close delimiter */
     NodeArray names;
     parser__arr_init(&names, p->arena);
 
-    while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    while (!parser__at_end(p) && parser__peek(p)->type != close_type) {
       Token* name_tok = parser__peek(p);
       if (name_tok->type != TOKEN_WORD) {
         return parser__error(p, "expected name in use destructuring", name_tok);
@@ -951,9 +957,9 @@ AstNode* parser__parse_use(Parser* p) {
       }
     }
 
-    /* Expect closing '}' */
-    if (parser__peek(p)->type != TOKEN_RBRACE) {
-      return parser__error(p, "expected '}' to close use destructuring", brace_tok);
+    /* Expect closing delimiter */
+    if (parser__peek(p)->type != close_type) {
+      return parser__error(p, close_msg, brace_tok);
     }
     Token* close = parser__advance(p);
 
@@ -1193,11 +1199,15 @@ AstNode* parser__parse_defstruct(Parser* p) {
 
   SourcePos last_end = parser__token_end(name_tok);
 
-  /* ── New syntax: struct Name {type name, type name, ...} ── */
-  if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_LBRACE) {
-    Token* open = parser__advance(p); /* consume '{' */
+  /* ── New syntax: struct Name {type name, type name, ...} — `[…]` accepted
+   * as the post-flip spelling (auto-detect, like proc params). ── */
+  if (!parser__at_end(p) && (parser__peek(p)->type == TOKEN_LBRACE ||
+                             parser__peek(p)->type == TOKEN_LBRACKET)) {
+    Token* open = parser__advance(p); /* consume open delimiter */
+    TokenType fields_close = (open->type == TOKEN_LBRACKET)
+                             ? TOKEN_RBRACKET : TOKEN_RBRACE;
 
-    while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    while (!parser__at_end(p) && parser__peek(p)->type != fields_close) {
       /* Skip commas, newlines, and pragmas between fields */
       while (!parser__at_end(p) &&
              (parser__peek(p)->type == TOKEN_COMMA ||
@@ -1206,7 +1216,7 @@ AstNode* parser__parse_defstruct(Parser* p) {
               parser__peek(p)->type == TOKEN_PRAGMA)) {
         parser__advance(p);
       }
-      if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+      if (parser__at_end(p) || parser__peek(p)->type == fields_close) break;
 
       /* Optional mut keyword before field type */
       uint8_t field_is_mutable = 0;
@@ -1274,9 +1284,12 @@ AstNode* parser__parse_defstruct(Parser* p) {
       field_count++;
     }
 
-    /* Expect closing brace */
-    if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
-      return parser__error(p, "expected '}' to close struct fields", open);
+    /* Expect closing delimiter */
+    if (parser__at_end(p) || parser__peek(p)->type != fields_close) {
+      return parser__error(p,
+          (fields_close == TOKEN_RBRACKET)
+              ? "expected ']' to close struct fields"
+              : "expected '}' to close struct fields", open);
     }
     Token* close = parser__advance(p);
     last_end = parser__token_end(close);
