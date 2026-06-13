@@ -1031,8 +1031,8 @@ static void test_nested_proc_call_narrows(void) {
       outer->data.command.arg_count >= 3) {
     AstNode* body = outer->data.command.args[2];
     ASSERT_NOT_NULL(body);
-    if (body && body->type == AST_BLOCK && body->data.block.count >= 2) {
-      AstNode* call = body->data.block.commands[1];
+    if (body && ast__is_seq(body) && ast__seq_count(body) >= 2) {
+      AstNode* call = ast__seq_stmt(body, 1);
       ASSERT_TYPE(call, TYPE_I32);
     } else {
       fprintf(stderr, "  FAIL %s: body shape unexpected\n", current_test);

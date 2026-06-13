@@ -1728,6 +1728,10 @@ static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
     case HEAD_DEFSTRUCT:
     case HEAD_DEFMACRO:
     case HEAD_EXTERN:
+    /* Sequence — [do s0 s1 …] compiles statements sequentially, popping each
+       intermediate result (compile_seq), so every statement sees depth =
+       parent, not parent + i. Bodies are [do] under the []-flip. */
+    case HEAD_DO:
     /* Control flow — cond is popped before the branch body runs; branch
        bodies see depth = parent, not parent + i. */
     case HEAD_IF:
@@ -5484,13 +5488,16 @@ int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
 static AstNode* compiler__find_disallowed_generator_tail(AstNode* node) {
   if (!node) return NULL;
 
+  /* Sequence (AST_BLOCK or [do …]): the tail is the last statement; empty or
+   * trailing-`;` sequences are nil. */
+  if (ast__is_seq(node)) {
+    uint32_t count = ast__seq_count(node);
+    if (count == 0 || ast__seq_trailing_semi(node)) return NULL;
+    return compiler__find_disallowed_generator_tail(
+        ast__seq_stmt(node, count - 1));
+  }
+
   switch (node->type) {
-    case AST_BLOCK: {
-      uint32_t count = node->data.block.count;
-      if (count == 0 || node->data.block.trailing_semi) return NULL;
-      return compiler__find_disallowed_generator_tail(
-          node->data.block.commands[count - 1]);
-    }
 
     case AST_RETURN:
     case AST_BREAK:

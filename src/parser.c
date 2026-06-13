@@ -642,6 +642,25 @@ static AstNode* parser__block_to_value(Parser* p, AstNode* blk) {
   return parser__make_do(p, args, total, blk->start, blk->end);
 }
 
+/* Parse a body block (proc/if/while/else) as a `[do …]` sequence command —
+ * like block_to_value but with NO single-statement collapse: a body is always
+ * a sequence (it scopes), even when it holds one statement. Errors pass
+ * through. Step 3 of the AST_BLOCK retirement. */
+static AstNode* parser__parse_body_seq(Parser* p) {
+  AstNode* blk = parser__parse_block(p);
+  if (!blk || blk->type != AST_BLOCK) return blk; /* error passthrough */
+  uint32_t n     = blk->data.block.count;
+  bool     tsemi = blk->data.block.trailing_semi;
+  uint32_t total = n + (tsemi ? 1u : 0u);
+  AstNode** args = NULL;
+  if (total > 0) {
+    args = (AstNode**)arena_alloc(p->arena, sizeof(AstNode*) * total);
+    for (uint32_t i = 0; i < n; i++) args[i] = blk->data.block.commands[i];
+    if (tsemi) args[n] = parser__make_do(p, NULL, 0, blk->end, blk->end);
+  }
+  return parser__make_do(p, args, total, blk->start, blk->end);
+}
+
 AstNode* parser__parse_expr(Parser* p) {
   Token* tok = parser__peek(p);
   AstNode* result = NULL;
@@ -1803,7 +1822,7 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for proc body", parser__peek(p));
   }
-  AstNode* body = parser__parse_block(p);
+  AstNode* body = parser__parse_body_seq(p);
   if (body->type == AST_ERROR) return body;
   parser__arr_push(&args, body);
 
@@ -1845,7 +1864,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' after if condition", parser__peek(p));
   }
-  AstNode* then_block = parser__parse_block(p);
+  AstNode* then_block = parser__parse_body_seq(p);
   if (then_block->type == AST_ERROR) return then_block;
 
   /* Skip newlines to check for elif/else */
@@ -1869,15 +1888,11 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     AstNode* nested_if = parser__parse_if_form(p, nested_if_head);
     if (nested_if->type == AST_ERROR) return nested_if;
 
-    /* Wrap nested if in a block for the else branch */
-    AstNode* else_block = ast_alloc(p->arena);
-    else_block->type  = AST_BLOCK;
-    else_block->start = nested_if->start;
-    else_block->end   = nested_if->end;
+    /* Wrap nested if in a [do] sequence for the else branch */
     AstNode** block_cmds = ast_alloc_array(p->arena, 1);
     block_cmds[0] = nested_if;
-    else_block->data.block.commands = block_cmds;
-    else_block->data.block.count    = 1;
+    AstNode* else_block = parser__make_do(p, block_cmds, 1,
+                                          nested_if->start, nested_if->end);
 
     /* Build 3-arg if: [if cond then_block else_block] */
     AstNode** args = ast_alloc_array(p->arena, 3);
@@ -1907,7 +1922,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     if (!parser__is_block_open(parser__peek(p)->type)) {
       return parser__error(p, "expected '{' after 'else'", parser__peek(p));
     }
-    AstNode* else_block = parser__parse_block(p);
+    AstNode* else_block = parser__parse_body_seq(p);
     if (else_block->type == AST_ERROR) return else_block;
 
     /* Build 3-arg if: [if cond then_block else_block] */
@@ -1929,7 +1944,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   } else if (parser__peek(p)->type == TOKEN_LBRACE) {
     /* Trailing block without 'else' keyword — treat as else branch
        so that `if cond {} {}` behaves the same as `[if cond {} {}]`. */
-    AstNode* else_block = parser__parse_block(p);
+    AstNode* else_block = parser__parse_body_seq(p);
     if (else_block->type == AST_ERROR) return else_block;
 
     AstNode** args = ast_alloc_array(p->arena, 3);
@@ -1987,7 +2002,7 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
   if (!parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' after while condition", parser__peek(p));
   }
-  AstNode* body = parser__parse_block(p);
+  AstNode* body = parser__parse_body_seq(p);
   if (body->type == AST_ERROR) return body;
 
   /* Build 2-arg while: [while cond body_block] */
