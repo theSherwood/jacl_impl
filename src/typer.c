@@ -1786,8 +1786,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
                    : (pac0 == 3) ? value_node->data.command.args[2] : NULL;
     AstNode* params0 = (pac0 == 3 || pac0 == 4)
                          ? value_node->data.command.args[1] : NULL;
-    def_proc_mono = params0 && body0 && body0->type == AST_BLOCK &&
-                    body0->data.block.count > 0;
+    def_proc_mono = params0 && body0 && ast__is_seq(body0) &&
+                    ast__seq_count(body0) > 0;
   }
   JaclType saved_et   = tc->expected_type;
   tc->expected_type   = declared_type;
@@ -4045,9 +4045,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       return;
     } else if (hid == HEAD_TRY &&
                node->data.command.arg_count == 3 &&
-               node->data.command.args[0]->type == AST_BLOCK &&
+               ast__is_seq(node->data.command.args[0]) &&
                node->data.command.args[1]->type == AST_LIT_STRING &&
-               node->data.command.args[2]->type == AST_BLOCK) {
+               ast__is_seq(node->data.command.args[2])) {
       /* try body err handler — result is body's tail value (no error)
        * or handler's tail value (error). Unify the two; if they agree,
        * propagate the type. The error binding (args[1]) is the local
@@ -4075,8 +4075,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       return;
     } else if (hid == HEAD_WITH_CTX &&
                node->data.command.arg_count == 2 &&
-               node->data.command.args[0]->type == AST_BLOCK &&
-               node->data.command.args[1]->type == AST_BLOCK) {
+               ast__is_seq(node->data.command.args[0]) &&
+               ast__is_seq(node->data.command.args[1])) {
       /* with-ctx overrides body — result is the body's tail value
        * (overrides block produces nil). Mirrors compiler.c:8214. */
       AstNode** as = node->data.command.args;
@@ -4197,15 +4197,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       const char* bn = "it"; uint32_t bnl = 2;
       const char* en = NULL; uint32_t enl = 0; uint32_t emark = 0;
       AstNode* body = NULL; uint32_t bmark = 0;
-      if (ac == 2 && as[1]->type == AST_BLOCK) {
+      if (ac == 2 && ast__is_seq(as[1])) {
         body = as[1]; bmark = as[1]->scope_mark;
       } else if (ac == 3 && as[1]->type == AST_LIT_STRING &&
-                 as[2]->type == AST_BLOCK) {
+                 ast__is_seq(as[2])) {
         bn = as[1]->data.lit_string.value;
         bnl = as[1]->data.lit_string.length;
         body = as[2]; bmark = as[1]->scope_mark;
       } else if (ac == 4 && as[1]->type == AST_LIT_STRING &&
-                 as[2]->type == AST_LIT_STRING && as[3]->type == AST_BLOCK) {
+                 as[2]->type == AST_LIT_STRING && ast__is_seq(as[3])) {
         en = as[1]->data.lit_string.value;
         enl = as[1]->data.lit_string.length; emark = as[1]->scope_mark;
         bn = as[2]->data.lit_string.value;
@@ -6223,7 +6223,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_type = TYPE_DYN;
       }
     } else if (hid == HEAD_SPAWN && node->data.command.arg_count == 1 &&
-               node->data.command.args[0]->type == AST_BLOCK) {
+               ast__is_seq(node->data.command.args[0])) {
       /* spawn: runtime returns a future (vm.c:4763). Element type is
        * the body's tail type when concrete, dyn otherwise. The body
        * was already typed by the args walk; its inferred_type is the

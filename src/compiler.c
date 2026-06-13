@@ -2210,7 +2210,7 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
           }
           /* C-style for: [for {init; cond; step} { body }] — init handled by recursion */
           if (argc == 3 && args[1]->type == AST_LIT_STRING &&
-              args[2]->type == AST_BLOCK) {
+              ast__is_seq(args[2])) {
             /* [for coll name { body }] */
             sm__add_state_field(layout,
                 compiler__name_val(layout->heap, layout->intern_table,
@@ -2218,8 +2218,8 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
                                    args[1]->data.lit_string.length),
                 false, false, fb_width, fb_sidx,
                 node->start.line, node->start.column);
-          } else if (argc == 2 && args[1]->type == AST_BLOCK &&
-                     !(args[0]->type == AST_BLOCK)) {
+          } else if (argc == 2 && ast__is_seq(args[1]) &&
+                     !ast__is_seq(args[0])) {
             /* [for coll { body }] — implicit "it" */
             sm__add_state_field(layout, jacl_inline_string("it", 2),  /* "it" is always <= 7 */
                                 false, false, fb_width, fb_sidx,
@@ -2230,8 +2230,8 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
            * local_count resets to 2), so register synthetic state fields:
            * the collection always; index + length for indexed (non-stream)
            * collections. The compile path minted the same names. */
-          if (argc >= 2 && args[argc - 1]->type == AST_BLOCK &&
-              !(args[0]->type == AST_BLOCK) &&
+          if (argc >= 2 && ast__is_seq(args[argc - 1]) &&
+              !ast__is_seq(args[0]) &&
               ast__contains_suspension(args[argc - 1], ctx->susp_map,
                                        layout->heap, layout->intern_table)) {
             uint32_t fl = node->start.line, fc = node->start.column;
@@ -2607,7 +2607,7 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
               sm__liveness_mark_write(liveness, layout,
                   sm__lit_string_name(layout, args[1]), *segment);
             } else if (argc == 2 && ast__is_seq(body) &&
-                       !(args[0]->type == AST_BLOCK)) {
+                       !ast__is_seq(args[0])) {
               sm__liveness_mark_write(liveness, layout,
                   jacl_inline_string("it", 2), *segment);
             }
@@ -2617,7 +2617,7 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
              * body's suspensions — mark the writes here so the
              * touched-field extension below stretches them across the
              * loop (unmarked fields would be culled). */
-            if (loop_suspends && !(args[0]->type == AST_BLOCK)) {
+            if (loop_suspends && !ast__is_seq(args[0])) {
               uint32_t fl = node->start.line, fc = node->start.column;
               sm__liveness_mark_write(liveness, layout,
                   sm__for_hidden_name(layout->heap, layout->intern_table,
@@ -12497,9 +12497,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Scope for while body: ensures locals (def) are cleaned up each iteration */
     compiler__begin_scope(c);
-    uint32_t body_count = args[1]->data.block.count;
+    uint32_t body_count = ast__seq_count(args[1]);
     for (uint32_t i = 0; i < body_count; i++) {
-      compiler__compile_node(c, args[1]->data.block.commands[i]);
+      compiler__compile_node(c, ast__seq_stmt(args[1], i));
       compiler__emit_check_error(c, line);
     }
     compiler__end_scope(c, line);
@@ -12542,19 +12542,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   */
   if (hid == HEAD_FOR) {
     /* C-style for: [for {init; cond; step} { body }] */
-    if (argc == 2 && args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK) {
+    if (argc == 2 && ast__is_seq(args[0]) && ast__is_seq(args[1])) {
       AstNode* ctrl       = args[0];
       AstNode* body_block = args[1];
 
-      if (ctrl->data.block.count != 3) {
+      if (ast__seq_count(ctrl) != 3) {
         compiler__error(c, line, col,
             "C-style for control block must have exactly 3 parts: init; cond; step");
         return;
       }
 
-      AstNode* init_node = ctrl->data.block.commands[0];
-      AstNode* cond_node = ctrl->data.block.commands[1];
-      AstNode* step_node = ctrl->data.block.commands[2];
+      AstNode* init_node = ast__seq_stmt(ctrl, 0);
+      AstNode* cond_node = ast__seq_stmt(ctrl, 1);
+      AstNode* step_node = ast__seq_stmt(ctrl, 2);
 
       if (c->loop_depth >= COMPILER_LOOP_DEPTH_MAX) {
         compiler__error(c, line, col, "too many nested loops");
@@ -12673,17 +12673,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t enum_name_len = 0;
     AstNode* body_block = NULL;
 
-    if (argc == 2 && args[1]->type == AST_BLOCK) {
+    if (argc == 2 && ast__is_seq(args[1])) {
       /* [for $collection { body }] — implicit $it */
       body_block = args[1];
     } else if (argc == 3 && args[1]->type == AST_LIT_STRING &&
-               args[2]->type == AST_BLOCK) {
+               ast__is_seq(args[2])) {
       /* [for $collection name { body }] — explicit binding (value) */
       bind_name = args[1]->data.lit_string.value;
       bind_name_len = args[1]->data.lit_string.length;
       body_block = args[2];
     } else if (argc == 4 && args[1]->type == AST_LIT_STRING &&
-               args[2]->type == AST_LIT_STRING && args[3]->type == AST_BLOCK) {
+               args[2]->type == AST_LIT_STRING && ast__is_seq(args[3])) {
       /* [for $collection enum value { body }] — enumerator + value */
       enum_name = args[1]->data.lit_string.value;
       enum_name_len = args[1]->data.lit_string.length;
@@ -14225,9 +14225,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Validate override fields at compile time */
     AstNode *overrides_block = args[0];
-    uint32_t override_count = overrides_block->data.block.count;
+    uint32_t override_count = ast__seq_count(overrides_block);
     for (uint32_t i = 0; i < override_count; i++) {
-      AstNode *override_cmd = overrides_block->data.block.commands[i];
+      AstNode *override_cmd = ast__seq_stmt(overrides_block, i);
       if (override_cmd->type != AST_COMMAND || override_cmd->data.command.arg_count != 1) {
         compiler__error(c, line, col, "with-ctx override must be: field_name value");
         return;
@@ -14252,7 +14252,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Compile field overrides: each sets a field on the new (forked) ctx */
     for (uint32_t i = 0; i < override_count; i++) {
-      AstNode *override_cmd = overrides_block->data.block.commands[i];
+      AstNode *override_cmd = ast__seq_stmt(overrides_block, i);
       AstNode *field_head = override_cmd->data.command.head;
       const char *fname = field_head->data.lit_string.value;
       uint32_t flen = field_head->data.lit_string.length;
