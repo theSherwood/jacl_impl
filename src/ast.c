@@ -555,6 +555,25 @@ static HeadId ast__compute_head_id(AstNode* head) {
                           head->data.lit_string.length);
 }
 
+/* Sequence accessors — uniform over the body representation during the
+ * AST_BLOCK -> [do] migration. A "seq" is a proc/if/while/etc. body: either a
+ * legacy AST_BLOCK or a HEAD_DO command `[do s0 s1 …]`. */
+bool ast__is_seq(AstNode* n) {
+  return n && (n->type == AST_BLOCK ||
+               (n->type == AST_COMMAND && n->data.command.head_id == HEAD_DO));
+}
+uint32_t ast__seq_count(AstNode* n) {
+  if (!n) return 0;
+  if (n->type == AST_BLOCK) return n->data.block.count;
+  if (n->type == AST_COMMAND && n->data.command.head_id == HEAD_DO)
+    return n->data.command.arg_count;
+  return 0;
+}
+AstNode* ast__seq_stmt(AstNode* n, uint32_t i) {
+  if (n->type == AST_BLOCK) return n->data.block.commands[i];
+  return n->data.command.args[i]; /* HEAD_DO */
+}
+
 AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {
   return (AstNode**)arena_alloc(arena, sizeof(AstNode*) * count);
 }

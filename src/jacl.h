@@ -2287,6 +2287,12 @@ extern LexResult lexer_lex (const char *source, arena_t *arena);
 /* --- ast.c --- */
 extern AstNode *ast_alloc (arena_t *arena);
 extern AstNode **ast_alloc_array (arena_t *arena, uint32_t count);
+/* Sequence accessors — uniform over a proc/if/while/etc. body during the
+ * AST_BLOCK -> [do] migration: a body is an AST_BLOCK (legacy) or a HEAD_DO
+ * command. Use these instead of `type == AST_BLOCK` / `data.block.*`. */
+extern bool      ast__is_seq (AstNode *n);
+extern uint32_t  ast__seq_count (AstNode *n);
+extern AstNode  *ast__seq_stmt (AstNode *n, uint32_t i);
 extern void ast__buf_init (AstStrBuf *b, arena_t *arena);
 extern void ast__buf_ensure (AstStrBuf *b, uint32_t extra);
 extern void ast__buf_char (AstStrBuf *b, char c);
