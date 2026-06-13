@@ -634,7 +634,13 @@ static AstNode* parser__block_to_value(Parser* p, AstNode* blk) {
   uint32_t n     = blk->data.block.count;
   bool     tsemi = blk->data.block.trailing_semi;
   if (n == 0) return parser__make_do(p, NULL, 0, blk->start, blk->end);
-  if (n == 1 && !tsemi) return blk->data.block.commands[0];
+  if (n == 1 && !tsemi) {
+    /* Single-statement collapse: the node spans the whole bracket. */
+    AstNode* stmt = blk->data.block.commands[0];
+    stmt->start = blk->start;
+    stmt->end   = blk->end;
+    return stmt;
+  }
   uint32_t total = n + (tsemi ? 1u : 0u);
   AstNode** args = (AstNode**)arena_alloc(p->arena, sizeof(AstNode*) * total);
   for (uint32_t i = 0; i < n; i++) args[i] = blk->data.block.commands[i];

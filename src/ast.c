@@ -754,8 +754,24 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
       break;
     }
     case AST_COMMAND: {
-      /* Detect [. $var field] → print as $var->field to avoid rejected [. ...] */
       AstNode* head = node->data.command.head;
+      /* [do s0 s1 …] sequences print in brace form `{ s0; s1 }` — the same
+       * rendering AST_BLOCK had, so bodies/sequences roundtrip through the
+       * parser (which lowers `{…}` back to [do …]). */
+      if (node->data.command.head_id == HEAD_DO) {
+        ast__buf_char(b, '{');
+        if (node->data.command.arg_count > 0) {
+          ast__buf_char(b, ' ');
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (i > 0) ast__buf_cstr(b, "; ");
+            ast__pp_node(b, node->data.command.args[i]);
+          }
+          ast__buf_char(b, ' ');
+        }
+        ast__buf_char(b, '}');
+        break;
+      }
+      /* Detect [. $var field] → print as $var->field to avoid rejected [. ...] */
       if (head->type == AST_LIT_STRING &&
           head->data.lit_string.length == 1 &&
           head->data.lit_string.value[0] == '.' &&
@@ -780,9 +796,9 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
           /* args: [0]=name(""), [1]=params, [2]=body_block */
           AstNode* body_block = node->data.command.args[2];
           ast__buf_cstr(b, "[\\ ");
-          if (body_block->type == AST_BLOCK && body_block->data.block.count == 1) {
+          if (ast__is_seq(body_block) && ast__seq_count(body_block) == 1) {
             /* Single-command body: unwrap the block and print command directly */
-            AstNode* cmd = body_block->data.block.commands[0];
+            AstNode* cmd = ast__seq_stmt(body_block, 0);
             if (cmd->type == AST_COMMAND) {
               ast__pp_node(b, cmd->data.command.head);
               for (uint32_t i = 0; i < cmd->data.command.arg_count; i++) {
@@ -826,10 +842,28 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
         break;
       }
       ast__buf_char(b, '[');
-      ast__pp_node(b, head);
+      if (head->type == AST_LIT_STRING && head->data.lit_string.length == 1 &&
+          head->data.lit_string.value[0] == '\\') {
+        /* Lambda head `\` prints bare (string-escaping would quote it and
+         * break the roundtrip). */
+        ast__buf_char(b, '\\');
+      } else {
+        ast__pp_node(b, head);
+      }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         ast__buf_char(b, ' ');
-        ast__pp_node(b, node->data.command.args[i]);
+        AstNode* arg = node->data.command.args[i];
+        /* Operator-as-value args print with the `$` escape (`$+`, `$>`) —
+         * bare operator chars would reparse as infix/binding operators. */
+        if (arg->type == AST_LIT_STRING && arg->data.lit_string.length > 0) {
+          bool all_op = true;
+          for (uint32_t k = 0; k < arg->data.lit_string.length; k++) {
+            char ch = arg->data.lit_string.value[k];
+            if (!strchr("+-*/%<>=!&|~^?", ch)) { all_op = false; break; }
+          }
+          if (all_op) ast__buf_char(b, '$');
+        }
+        ast__pp_node(b, arg);
       }
       ast__buf_char(b, ']');
       break;
