@@ -2429,6 +2429,25 @@ AstNode* parser__parse_destructure_named_pattern(Parser* p) {
  * Non-word atoms ($var, literals, [], (), {}) are returned bare.
  * ------------------------------------------------------------------------- */
 
+/* Heads whose arg at the given index is a BODY position: a `[…]` there
+ * parses as a sequence (always-do, no single-statement collapse), mirroring
+ * the `{…}` spelling, so `for $coll [print $it]` / `try [body] e [handler]`
+ * work. The named forms (proc/if/while/else/macro) handle their own bodies;
+ * this covers the generic-command heads. See BRACKET_FLIP_DESIGN.md §4. */
+static bool parser__head_body_arg(AstNode* head, uint32_t arg_idx) {
+  if (!head || head->type != AST_LIT_STRING) return false;
+  switch (ast__head_id_for(head->data.lit_string.value,
+                           head->data.lit_string.length)) {
+    case HEAD_SPAWN:    return arg_idx == 0;
+    case HEAD_PARALLEL:
+    case HEAD_RACE:     return true;          /* every arg is a body */
+    case HEAD_WITH_CTX: return arg_idx <= 1;  /* overrides + body */
+    case HEAD_TRY:      return arg_idx == 0 || arg_idx == 2; /* body, handler */
+    case HEAD_FOR:      return arg_idx >= 1;  /* coll/ctrl first, body last */
+    default:            return false;
+  }
+}
+
 AstNode* parser__parse_cmd_operand(Parser* p) {
   /* Are we the head of a value-position `[…]`? Read-and-clear so the flag
    * applies to this operand's head only — not its args or any nested body. */
@@ -2627,6 +2646,17 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
       spread->end   = inner->end;
       spread->data.spread.expr = inner;
       parser__arr_push(&args, spread);
+      continue;
+    }
+    /* Body-position `[…]`: parse as a sequence for body-taking heads. A
+     * `[\ …]` lambda stays a value (for's HOF callback form). */
+    if (parser__peek(p)->type == TOKEN_LBRACKET &&
+        p->pos + 1 < p->count &&
+        p->tokens[p->pos + 1].type != TOKEN_BACKSLASH &&
+        parser__head_body_arg(head, args.count)) {
+      AstNode* body = parser__parse_body_seq(p);
+      if (body == NULL) break;
+      parser__arr_push(&args, body);
       continue;
     }
     AstNode* arg = parser__parse_expr(p);
