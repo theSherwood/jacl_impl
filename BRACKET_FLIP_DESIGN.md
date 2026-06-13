@@ -11,8 +11,9 @@ authoritative spec for what `[]` means in every position.
   is cleanup/migration (see "Migration status").
 - **Build / verify:** `./build.sh` runs the whole suite; `./build.sh --test=NAME`
   runs one group (e.g. `--test=jacl_harness`, `--test=typed_vec`); `--lib` builds
-  just the library. **Current baseline: full suite 85 passed / 6 failed groups;
-  jacl_harness 4 failing scenarios.** Start by reproducing this.
+  just the library. **Current baseline: full suite 86 passed / 5 failed groups
+  (parser, compiler, integration, jacl_harness, syntax); jacl_harness 585/587
+  (`tour`, `typed_closure_binding`).** Start by reproducing this.
 - **Key code entry points:**
   - Value `[…]` lowering: `parser__block_to_value` + `parser__make_do` (src/parser.c).
   - Value-position application/call wrap: the `in_value_bracket` flag (Parser
@@ -169,16 +170,16 @@ Done (branch `claude/flip-bracket-mode`):
   in `test/*.c` (whitespace-flexible). Greened stream_filter, stream_transform,
   yield, lines, stream_seq_ops, stream_type_enforce. typer now passes too.
 
-**Full suite: 85 passed / 6 failed groups** (was 65 passing). Remaining failing:
+**Full suite: 86 passed / 5 failed groups** (was 65 passing). Remaining failing:
 - `parser`, `compiler`, `syntax` — unit tests that assert the *old* prefix AST;
   need rewriting for the flip (substantial, separate).
 - `integration` — one edge: `[def]` (a keyword zero-arg head) returns the bare
   word `"def"` instead of a command (no arity error). Keyword heads don't wrap;
   wrapping all keywords regressed 6 other scenarios (assert/neq/timeout), so a
   surgical fix is deferred.
-- `destructure_spread_all` — uses old `{..}` spread-all named destructure.
-- `jacl_harness` — 4: `tour`, `typed_closure_binding` (compound `[Proc …]`, Phase
-  B3), + 2.
+- `jacl_harness` — 2: `tour`, `typed_closure_binding` (compound `[Proc …]`, Phase
+  B3).
+- `destructure_spread_all` — FIXED by step 4 (seq-unified destructure path).
 
 **Structural cleanup (in progress):**
 - DONE: `compile_block_expr` and `typer__infer_block` now delegate to the single
@@ -212,46 +213,54 @@ Done (branch `claude/flip-bracket-mode`):
        (`!= AST_BLOCK → error`, 14 sites → `!ast__is_seq`) and all **body-variable
        content accesses** (`body`/`body_blk`/`body_block`/`then_block`/`else_block`
        + `args[body_idx]` detection → `is_seq`/`seq_*`).
-     - REMAINING (the hard part): the `args[N] == AST_BLOCK` guards in the
-       control-flow handlers (`for`/`try`/`with-ctx`: compiler 2213/2221/2233/12545/
-       12676/12680/12686, typer 4048/4050/4078/4079/6226). These are entangled —
-       some args are **non-body braces** (C-style for control `{init;cond;step}`,
-       `with-ctx` overrides) which are value-position `{…}` (step 4), so steps 3 &
-       4 must be coordinated here, not separated. Destructure guards (def `args[0]`:
-       2084/8824/10368, typer 1676) stay until step 5.
-  2. **Migrate the body guards to the accessors (neutral, bodies still AST_BLOCK):**
-     replace `X->type == AST_BLOCK` → `ast__is_seq(X)`, `!= AST_BLOCK` →
-     `!ast__is_seq(X)`, `X->data.block.count` → `ast__seq_count(X)`,
-     `X->data.block.commands[i]` → `ast__seq_stmt(X,i)`. **Only the BODY guards** —
-     leave destructure guards (def `args[0]` etc.) until step 5.
-     - Body guards (compiler): `1487 1491 2598 2609 2610 2620 2753 2831 2849 5642
-       11376 12109 12341 12345 12469 12545 12676 12680 12686 14128 14136 14211
-       14215 16538` (plus the typer's body guards). Destructure (leave):
-       `2084 2213 2221 2222 2233 2234 8824 10368`. Peel: `102`.
-     - Note `trailing_semi`: a `[do]` materializes a trailing `nil` element
-       instead of a flag; sites reading `block.trailing_semi` need the do
-       equivalent (last arg is nil), or rely on compile_seq's last-element rule.
-  3. **Flip bodies → `[do]`:** re-add `parse_body_seq` (= `parse_block` + always
-     `make_do`, no single-statement collapse) and point the 5 proc/if/while/else
-     parser body callers at it (1824/1866/1928/1950/2008, pre-accessor line nums).
-     Now guards accept it; verify green. Then macro body too.
-  4. **Flip value-`{…}`** (parse_expr `TOKEN_LBRACE`, ~685/703) to `block_to_value`
-     like `[…]` so non-body braces stop producing `AST_BLOCK`.
-  5. **Destructure off `AST_BLOCK`:** make `{a,b,c}`/`[a,b,c]` patterns parse to the
-     existing `AST_DESTRUCTURE_VEC`/`AST_DESTRUCTURE_NAMED` nodes (the dedicated
-     `parse_destructure_*` parsers exist but are currently unused); update the
-     destructure recognizers off the block form. This also fixes
-     `destructure_spread_all` (spread-all is currently broken).
+  2. DONE (neutral, committed): ALL remaining guards migrated to the accessors —
+     the control-flow `args[N] == AST_BLOCK` guards (`for`/`try`/`with-ctx`,
+     C-style for control reads, with-ctx override reads, while body compile)
+     in compiler + typer.
+  3. DONE (committed, green): **bodies → `[do]`**. `parser__parse_body_seq`
+     (= `parse_block` + always `make_do`, no single-statement collapse; trailing
+     separator materializes a trailing nil) feeds the proc / if-then / else /
+     trailing-else / while / **macro** body callers; the elif desugar synthesizes
+     a `[do]` wrapper. Fallout fixed in the same slice:
+     - `compiler__find_disallowed_generator_tail` needed a seq case (a `[do]`
+       body was itself reported as a bad generator tail).
+     - `sm__head_uses_operand_stack_for_args`: `HEAD_DO` belongs in the
+       special-form `false` list (statements compile at parent depth) — without
+       it, suspensions inside if/while branches got bogus operand depth and
+       cps_if_suspend asserted in vm__run.
+     - `expand__compile_staged_body` (syntax.c) called `compile_block_expr`
+       directly on the macro body → segfault on the command form; routed through
+       `compile_node`.
+  4. DONE (committed, green): **value-`{…}` → `[do …]`** (parse_expr
+     `TOKEN_LBRACE` → `parse_body_seq`; always-do, NOT `block_to_value`, to keep
+     the scoped-sequence semantics and keep for-bodies/single-statement patterns
+     as seqs). Destructure recognizers were entangled and migrated in the same
+     slice: def/mut named-destructure paths, `block_as_positional_pattern`, SM
+     locals/liveness pattern walks, typer named-destructure — all via
+     `is_seq`/`seq_*`, with `HEAD_DO` excluded from the bracket-positional
+     command form (a `[do x y]` pattern is an AST_COMMAND; seq checks must come
+     FIRST at every recognizer). **This fixed `destructure_spread_all`** (85→86
+     groups) — step 5's dedicated-node conversion is now optional cleanup, not a
+     prerequisite.
+     **The parser no longer emits AST_BLOCK at all** (every `parse_block` caller
+     wraps; only parser-internal/transient + 2 synthetic `fake_block` sites in
+     compiler_compile remain).
+  5. (now optional) **Destructure onto dedicated nodes:** `{a,b,c}`/`[a,b,c]`
+     patterns → `AST_DESTRUCTURE_VEC`/`AST_DESTRUCTURE_NAMED` (the dedicated
+     `parse_destructure_*` parsers exist, unused). Patterns currently ride the
+     `[do]` form through the seq accessors and work, including spread-all.
   6. **Delete `AST_BLOCK`:** remove the enum value, `compile_block_expr`,
-     `infer_block`, the `AST_BLOCK` dispatch/analysis cases, and the dead
-     `as_type_command` peels. The accessors' `AST_BLOCK` branch becomes dead too.
+     `infer_block`, the `AST_BLOCK` dispatch/analysis cases (compiler 1262/1293/
+     3466/18482/19164, typer 3518/6942, syntax.c 99/415/911/1072, ast.c 783/837,
+     vm.c 14551), the dead `as_type_command` peels (compiler 102, typer 295),
+     and the 2 synthetic `fake_block`s (compiler ~20414/21101 — convert to a
+     stack-built HEAD_DO command). `parse_block` internals must stop building
+     the node (return stmts+count+trailing instead). **Blocked on the unit-test
+     rewrite:** test_parser/test_compiler/test_syntax/test_head_id_stamp still
+     reference AST_BLOCK and would stop compiling — rewrite them for the new
+     AST first (they're already failing groups).
 
 Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
-- **`destructure_spread_all`** — NOT just a `{..}`→`[..]` rename: spread-all
-  destructure is *functionally broken* under the flip — `{..}`/`[..]` don't bind
-  the struct fields ("undefined variable"), and `[x, ..]` errors "elements must be
-  names". Entangled with destructure-pattern recognition (the dedicated
-  `parse_destructure_named_pattern` and the `AST_BLOCK` destructure path).
 - **`tour.jacl`** — behavioral: an `[assert $== $hit 5]` fails (a value is computed
   wrong somewhere in the tour); needs debugging, not a syntax fix.
 - **`typed_closure_binding`** — compound `[Proc …]` param/return inference (Phase
