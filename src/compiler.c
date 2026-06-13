@@ -20024,7 +20024,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_ERROR: {
-      compiler__error(c, line, node->start.column, "parse error in AST");
+      /* Surface the parser's message so callers of compiler_compile see the
+       * real cause, not a generic placeholder. */
+      compiler__error(c, line, node->start.column,
+                      node->data.error.message ? node->data.error.message
+                                               : "parse error in AST");
       break;
     }
   }

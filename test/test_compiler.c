@@ -2439,9 +2439,10 @@ static int test_while_wrong_argc_1(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
+  /* Under the []-flip the while form requires a brace body at parse time. */
   CompileResult cr = compile_source("[while $true]", &arena, &heap);
   ASSERT(cr.error_count > 0);
-  ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 1") != NULL);
+  ASSERT(strstr(cr.error_message, "expected '{' after while condition") != NULL);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -2457,9 +2458,11 @@ static int test_while_wrong_argc_3(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
+  /* Under the []-flip the trailing { 2 } is a second, unseparated statement —
+   * a parse error rather than a while arity error. */
   CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena, &heap);
   ASSERT(cr.error_count > 0);
-  ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 3") != NULL);
+  ASSERT(strstr(cr.error_message, "between statements") != NULL);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -2475,9 +2478,10 @@ static int test_while_body_not_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
+  /* Under the []-flip the while form requires a brace body at parse time. */
   CompileResult cr = compile_source("[while $true 42]", &arena, &heap);
   ASSERT(cr.error_count > 0);
-  ASSERT(strstr(cr.error_message, "while body must be a block") != NULL);
+  ASSERT(strstr(cr.error_message, "expected '{' after while condition") != NULL);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);

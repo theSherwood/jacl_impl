@@ -1871,12 +1871,23 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   AstNode* then_block = parser__parse_body_seq(p);
   if (then_block->type == AST_ERROR) return then_block;
 
-  /* Skip newlines to check for elif/else. Track whether we crossed one:
-   * the unquote-else form below is same-line only. */
+  /* Skip newlines to check for elif/else. Track whether we crossed one (the
+   * unquote-else form below is same-line only), and remember where we were:
+   * if no else-form follows, the newlines are statement separators that
+   * belong to the enclosing block — rewind so they aren't swallowed. */
   bool crossed_nl = false;
+  uint32_t pos_before_nl_skip = p->pos;
   while (parser__peek(p)->type == TOKEN_NEWLINE) {
     crossed_nl = true;
     parser__advance(p);
+  }
+  {
+    TokenType after = parser__peek(p)->type;
+    bool else_form = after == TOKEN_ELIF || after == TOKEN_ELSE ||
+                     after == TOKEN_LBRACE ||
+                     (!crossed_nl && p->syntax_quote_depth == 1 &&
+                      after == TOKEN_NOT);
+    if (!else_form) p->pos = pos_before_nl_skip;
   }
 
   if (parser__peek(p)->type == TOKEN_ELIF) {
@@ -2743,6 +2754,20 @@ AstNode* parser__parse_block(Parser* p) {
     AstNode* cmd = parser__parse_cmd_expr(p);
     if (cmd != NULL) {
       parser__arr_push(&commands, cmd);
+      /* Statements must be separated: after one, the next token has to be a
+       * separator, pragma, or the closing delimiter. Without this, leftover
+       * tokens (e.g. `[while $c {…} {…}]`, `[if $c {…} 42]`) silently start
+       * a new statement. */
+      if (cmd->type != AST_ERROR && !parser__at_end(p)) {
+        TokenType nt = parser__peek(p)->type;
+        if (nt != close_type && nt != TOKEN_NEWLINE &&
+            nt != TOKEN_SEMICOLON && nt != TOKEN_COMMA &&
+            nt != TOKEN_PRAGMA && nt != TOKEN_EOF) {
+          return parser__error(p,
+              "expected ';', ',' or newline between statements",
+              parser__peek(p));
+        }
+      }
     } else {
       /* Skip unrecognized token to avoid infinite loop */
       parser__advance(p);
