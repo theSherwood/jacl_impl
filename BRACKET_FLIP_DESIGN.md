@@ -203,6 +203,49 @@ Done (branch `claude/flip-bracket-mode`):
     converting bodies AND destructure together. This is a multi-step focused pass,
     not a single slice. (Sequence/scope unification + step A are the safe prereqs.)
 
+  **DECISION (user): delete `AST_BLOCK` — it's two-mode-split debt. Execution plan
+  (each step neutral-verifiable, commit green):**
+  1. DONE: seq accessors (ast.c, jacl.h) — `ast__is_seq`, `seq_count`, `seq_stmt`,
+     `seq_stmts` (array), `seq_trailing_semi` ([do] trailing-nil = nil). Uniform
+     over `AST_BLOCK` or a `HEAD_DO` command.
+     - DONE (neutral, committed): migrated all **body validations**
+       (`!= AST_BLOCK → error`, 14 sites → `!ast__is_seq`) and all **body-variable
+       content accesses** (`body`/`body_blk`/`body_block`/`then_block`/`else_block`
+       + `args[body_idx]` detection → `is_seq`/`seq_*`).
+     - REMAINING (the hard part): the `args[N] == AST_BLOCK` guards in the
+       control-flow handlers (`for`/`try`/`with-ctx`: compiler 2213/2221/2233/12545/
+       12676/12680/12686, typer 4048/4050/4078/4079/6226). These are entangled —
+       some args are **non-body braces** (C-style for control `{init;cond;step}`,
+       `with-ctx` overrides) which are value-position `{…}` (step 4), so steps 3 &
+       4 must be coordinated here, not separated. Destructure guards (def `args[0]`:
+       2084/8824/10368, typer 1676) stay until step 5.
+  2. **Migrate the body guards to the accessors (neutral, bodies still AST_BLOCK):**
+     replace `X->type == AST_BLOCK` → `ast__is_seq(X)`, `!= AST_BLOCK` →
+     `!ast__is_seq(X)`, `X->data.block.count` → `ast__seq_count(X)`,
+     `X->data.block.commands[i]` → `ast__seq_stmt(X,i)`. **Only the BODY guards** —
+     leave destructure guards (def `args[0]` etc.) until step 5.
+     - Body guards (compiler): `1487 1491 2598 2609 2610 2620 2753 2831 2849 5642
+       11376 12109 12341 12345 12469 12545 12676 12680 12686 14128 14136 14211
+       14215 16538` (plus the typer's body guards). Destructure (leave):
+       `2084 2213 2221 2222 2233 2234 8824 10368`. Peel: `102`.
+     - Note `trailing_semi`: a `[do]` materializes a trailing `nil` element
+       instead of a flag; sites reading `block.trailing_semi` need the do
+       equivalent (last arg is nil), or rely on compile_seq's last-element rule.
+  3. **Flip bodies → `[do]`:** re-add `parse_body_seq` (= `parse_block` + always
+     `make_do`, no single-statement collapse) and point the 5 proc/if/while/else
+     parser body callers at it (1824/1866/1928/1950/2008, pre-accessor line nums).
+     Now guards accept it; verify green. Then macro body too.
+  4. **Flip value-`{…}`** (parse_expr `TOKEN_LBRACE`, ~685/703) to `block_to_value`
+     like `[…]` so non-body braces stop producing `AST_BLOCK`.
+  5. **Destructure off `AST_BLOCK`:** make `{a,b,c}`/`[a,b,c]` patterns parse to the
+     existing `AST_DESTRUCTURE_VEC`/`AST_DESTRUCTURE_NAMED` nodes (the dedicated
+     `parse_destructure_*` parsers exist but are currently unused); update the
+     destructure recognizers off the block form. This also fixes
+     `destructure_spread_all` (spread-all is currently broken).
+  6. **Delete `AST_BLOCK`:** remove the enum value, `compile_block_expr`,
+     `infer_block`, the `AST_BLOCK` dispatch/analysis cases, and the dead
+     `as_type_command` peels. The accessors' `AST_BLOCK` branch becomes dead too.
+
 Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
 - **`destructure_spread_all`** — NOT just a `{..}`→`[..]` rename: spread-all
   destructure is *functionally broken* under the flip — `{..}`/`[..]` don't bind
