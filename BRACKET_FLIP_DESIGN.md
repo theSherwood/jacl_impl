@@ -11,10 +11,10 @@ authoritative spec for what `[]` means in every position.
   is cleanup/migration (see "Migration status").
 - **Build / verify:** `./build.sh` runs the whole suite; `./build.sh --test=NAME`
   runs one group (e.g. `--test=jacl_harness`, `--test=typed_vec`); `--lib` builds
-  just the library. **Current baseline: full suite 86 passed / 5 failed groups
-  (parser, compiler, integration, jacl_harness, syntax); jacl_harness 586/587
-  (`typed_closure_binding` only).** Start by reproducing this.
-  `--tsan`: 85/6 (same groups + `chase_lev_stress`, a known-safe tsan failure).
+  just the library. **Current baseline: full suite 90 passed / 1 failed —
+  jacl_harness 586/587, `typed_closure_binding` only (Phase B3 compound
+  `[Proc …]` inference, separate feature work).** Start by reproducing this.
+  `--tsan`: same + `chase_lev_stress` (a known-safe tsan failure).
   `--wasm`: skipped in the cloud sandbox (no emcc).
 - **Key code entry points:**
   - Value `[…]` lowering: `parser__block_to_value` + `parser__make_do` (src/parser.c).
@@ -172,15 +172,21 @@ Done (branch `claude/flip-bracket-mode`):
   in `test/*.c` (whitespace-flexible). Greened stream_filter, stream_transform,
   yield, lines, stream_seq_ops, stream_type_enforce. typer now passes too.
 
-**Full suite: 86 passed / 5 failed groups** (was 65 passing). Remaining failing:
-- `parser`, `compiler`, `syntax` — unit tests that assert the *old* prefix AST;
-  need rewriting for the flip (substantial, separate).
-- `integration` — one edge: `[def]` (a keyword zero-arg head) returns the bare
-  word `"def"` instead of a command (no arity error). Keyword heads don't wrap;
-  wrapping all keywords regressed 6 other scenarios (assert/neq/timeout), so a
-  surgical fix is deferred.
-- `jacl_harness` — 1: `typed_closure_binding` (compound `[Proc …]`, Phase B3).
+**Full suite: 90 passed / 1 failed** (was 65 passing). All previously failing
+groups are green:
+- `parser`, `compiler`, `syntax` — unit tests REWRITTEN for the flip AST (seq
+  accessors; flip-semantics expectations: `[x = 5]` binds, `[foo | bar]`
+  pipes, `[. $p x]` is the desugared arrow, `[]` is the empty `[do]`,
+  unclosed-bracket recovery swallows to EOF). The pretty-printer renders
+  `[do …]` in brace form, lambda head `\` bare, operator args `$`-escaped —
+  roundtrips hold.
+- `integration` — `[def]`-style keyword heads in value brackets now wrap to
+  zero-arg commands → real arity errors. Statement separators are enforced in
+  parse_block (leftover tokens after a statement are a parse error), and the
+  compiler surfaces parser messages from AST_ERROR nodes.
 - `destructure_spread_all` — FIXED by step 4 (seq-unified destructure path).
+- `jacl_harness` 586/587 — only `typed_closure_binding` (compound `[Proc …]`,
+  Phase B3 type-system feature, separate work).
 
 **Structural cleanup (in progress):**
 - DONE: `compile_block_expr` and `typer__infer_block` now delegate to the single
@@ -268,7 +274,12 @@ Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
   else branch.
 - **`typed_closure_binding`** — compound `[Proc …]` param/return inference (Phase
   B3 "not yet supported"); deep type-system.
-- Surgical `[def]`/keyword-head wrap (wrapping all keywords regressed 6 scenarios).
-- Unit-test rewrites (parser/compiler/syntax) for the new AST — substantial.
-- 2 multi-line `.jacl` statement brackets (tiny).
-- `{}` → `[]` for struct fields, `use`, and named/spread destructure.
+- DONE: surgical `[def]`/keyword-head wrap (value-bracket keyword heads only).
+- DONE: unit-test rewrites (parser/compiler/syntax) for the new AST.
+- `{}` → `[]` for struct fields, `use`, and named/spread destructure (token-
+  level parsers; the `{` spelling still works everywhere else via `[do]`
+  lowering).
+- Step 6 (delete `AST_BLOCK`) is now unblocked: no test file asserts the node
+  type anymore except via the accessors; remaining references are the parser
+  internals, dispatch cases, syntax converters, and 2 synthetic fake_blocks
+  (see step 6 list above).
