@@ -1825,7 +1825,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     AstNode* params = (pac == 3 || pac == 4) ? value_node->data.command.args[1] : NULL;
     AstNode* body   = (pac == 4) ? value_node->data.command.args[3]
                     : (pac == 3) ? value_node->data.command.args[2] : NULL;
-    if (params && body && body->type == AST_BLOCK && body->data.block.count > 0) {
+    if (params && body && ast__is_seq(body) && ast__seq_count(body) > 0) {
       AstNode* pn[TYPER_MAX_PROC_PARAMS];
       JaclType pt[TYPER_MAX_PROC_PARAMS];
       uint32_t ps[TYPER_MAX_PROC_PARAMS];
@@ -1845,12 +1845,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       }
       /* Push the declared return as expected_type on the TAIL so a bare
        * literal (`{99}` in `[Proc [] i64]`) narrows — mirrors handle_proc. */
-      uint32_t bcount = body->data.block.count;
+      uint32_t bcount = ast__seq_count(body);
       for (uint32_t i = 0; i + 1 < bcount; i++)
-        typer__infer_node(tc, body->data.block.commands[i]);
+        typer__infer_node(tc, ast__seq_stmt(body, i));
       JaclType saved_bet = tc->expected_type;
       if (declared_proc_rtype != TYPE_DYN) tc->expected_type = declared_proc_rtype;
-      typer__infer_node(tc, body->data.block.commands[bcount - 1]);
+      typer__infer_node(tc, ast__seq_stmt(body, bcount - 1));
       tc->expected_type = saved_bet;
       typer__scope_pop(tc);
       /* This was the only walk (the generic walk was skipped) — stamp the
@@ -2520,7 +2520,7 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
   AstNode* body   = (ac == 4) ? literal->data.command.args[3]
                   : (ac == 3) ? literal->data.command.args[2] : NULL;
   if (!params || !body || !ast__is_seq(body) ||
-      body->data.block.count == 0) return;
+      ast__seq_count(body) == 0) return;
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
@@ -2541,12 +2541,12 @@ static void typer__monomorphize_proc_literal(TyperCtx* tc, AstNode* literal,
                      pn[i]->data.lit_string.length, pn[i]->scope_mark,
                      bt, psi);
   }
-  uint32_t bc = body->data.block.count;
+  uint32_t bc = ast__seq_count(body);
   for (uint32_t i = 0; i + 1 < bc; i++)
-    typer__infer_node(tc, body->data.block.commands[i]);
+    typer__infer_node(tc, ast__seq_stmt(body, i));
   JaclType saved = tc->expected_type;
   if ((JaclType)rtype != TYPE_DYN) tc->expected_type = (JaclType)rtype;
-  typer__infer_node(tc, body->data.block.commands[bc - 1]);
+  typer__infer_node(tc, ast__seq_stmt(body, bc - 1));
   tc->expected_type = saved;
   typer__scope_pop(tc);
   literal->inferred_type = TYPE_CLOSURE;
@@ -3124,16 +3124,16 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   /* Walk body. For the last statement, push return_type as expected_type
    * so int/float literals at the tail position get narrowed (mirrors
    * compiler.c:3851-3853). */
-  uint32_t body_count = body->data.block.count;
+  uint32_t body_count = ast__seq_count(body);
   if (body_count == 0) {
     body->inferred_type = TYPE_NIL;
   } else {
     for (uint32_t i = 0; i + 1 < body_count; i++) {
-      typer__infer_node(tc, body->data.block.commands[i]);
+      typer__infer_node(tc, ast__seq_stmt(body, i));
     }
     JaclType saved_et = tc->expected_type;
     if (return_type != TYPE_DYN) tc->expected_type = return_type;
-    AstNode* tail_stmt = body->data.block.commands[body_count - 1];
+    AstNode* tail_stmt = ast__seq_stmt(body, body_count - 1);
     /* Phase B3b: a [Proc …]-returning proc whose body tail is an inline proc
      * literal monomorphizes that literal against the declared return signature
      * (so the returned closure's body types with the declared params — captures
@@ -3153,8 +3153,8 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
     }
     if (!tail_mono) typer__infer_node(tc, tail_stmt);
     tc->expected_type = saved_et;
-    if (!body->data.block.trailing_semi) {
-      AstNode* last = body->data.block.commands[body_count - 1];
+    if (!ast__seq_trailing_semi(body)) {
+      AstNode* last = ast__seq_stmt(body, body_count - 1);
       body->inferred_type = last->inferred_type;
       body->inferred_struct_idx = last->inferred_struct_idx;
     } else {
@@ -3175,9 +3175,9 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
    *    Per decision 2's commitment-site rule, an explicit
    *    `[to T $val]` cast is required at the tail. */
   if (return_type != TYPE_DYN && return_type != TYPE_STREAM &&
-      body->type == AST_BLOCK && body->data.block.count > 0 &&
-      !body->data.block.trailing_semi) {
-    AstNode* tail = body->data.block.commands[body->data.block.count - 1];
+      ast__is_seq(body) && ast__seq_count(body) > 0 &&
+      !ast__seq_trailing_semi(body)) {
+    AstNode* tail = ast__seq_stmt(body, ast__seq_count(body) - 1);
     JaclType body_t = TYPE_DYN;
     AstNode* tail_value = NULL;
     if (tail->type == AST_RETURN && tail->data.return_stmt.value) {
@@ -3605,10 +3605,10 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
      * resolves names lexically. Externs have no body, skip them. */
     if (!is_extern) {
       uint32_t body_idx = (argc == 4) ? 3 : 2;
-      if (body_idx < argc && args[body_idx]->type == AST_BLOCK) {
+      if (body_idx < argc && ast__is_seq(args[body_idx])) {
         AstNode* body = args[body_idx];
-        typer__register_procs(tc, body->data.block.commands,
-                              body->data.block.count);
+        typer__register_procs(tc, ast__seq_stmts(body),
+                              ast__seq_count(body));
       }
     }
   }
@@ -3742,7 +3742,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
   AstNode* params = proc->data.command.args[1];
   AstNode* body   = proc->data.command.args[ac == 4 ? 3 : 2];
   if (!body || !ast__is_seq(body)) return UINT32_MAX;
-  uint32_t bc = body->data.block.count;
+  uint32_t bc = ast__seq_count(body);
   if (bc == 0) return UINT32_MAX;
 
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
@@ -3786,8 +3786,8 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                      pn[i]->scope_mark, bt, bs);
   }
   for (uint32_t i = 0; i < bc; i++)
-    typer__infer_node(tc, body->data.block.commands[i]);
-  AstNode* tail = body->data.block.commands[bc - 1];
+    typer__infer_node(tc, ast__seq_stmt(body, i));
+  AstNode* tail = ast__seq_stmt(body, bc - 1);
   JaclType rt = (JaclType)tail->inferred_type;
   uint32_t rsidx = tail->inferred_struct_idx;
   typer__scope_pop(tc);
@@ -3819,7 +3819,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                        pn[i]->data.lit_string.length,
                        pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
     for (uint32_t i = 0; i < bc; i++)
-      typer__infer_node(tc, body->data.block.commands[i]);
+      typer__infer_node(tc, ast__seq_stmt(body, i));
     typer__scope_pop(tc);
   }
 

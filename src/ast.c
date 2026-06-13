@@ -573,6 +573,22 @@ AstNode* ast__seq_stmt(AstNode* n, uint32_t i) {
   if (n->type == AST_BLOCK) return n->data.block.commands[i];
   return n->data.command.args[i]; /* HEAD_DO */
 }
+AstNode** ast__seq_stmts(AstNode* n) {
+  if (n->type == AST_BLOCK) return n->data.block.commands;
+  return n->data.command.args; /* HEAD_DO */
+}
+/* Did the sequence end with a trailing separator (so it yields nil)? For a
+ * [do …] body the trailing separator is materialized as a trailing empty [do]
+ * (= nil) element. */
+bool ast__seq_trailing_semi(AstNode* n) {
+  if (n->type == AST_BLOCK) return n->data.block.trailing_semi;
+  uint32_t c = (n->type == AST_COMMAND) ? n->data.command.arg_count : 0;
+  if (c == 0) return false;
+  AstNode* last = n->data.command.args[c - 1];
+  return last && last->type == AST_COMMAND &&
+         last->data.command.head_id == HEAD_DO &&
+         last->data.command.arg_count == 0;
+}
 
 AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {
   return (AstNode**)arena_alloc(arena, sizeof(AstNode*) * count);

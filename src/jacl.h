@@ -2293,6 +2293,8 @@ extern AstNode **ast_alloc_array (arena_t *arena, uint32_t count);
 extern bool      ast__is_seq (AstNode *n);
 extern uint32_t  ast__seq_count (AstNode *n);
 extern AstNode  *ast__seq_stmt (AstNode *n, uint32_t i);
+extern AstNode **ast__seq_stmts (AstNode *n);
+extern bool      ast__seq_trailing_semi (AstNode *n);
 extern void ast__buf_init (AstStrBuf *b, arena_t *arena);
 extern void ast__buf_ensure (AstStrBuf *b, uint32_t extra);
 extern void ast__buf_char (AstStrBuf *b, char c);

@@ -1484,11 +1484,11 @@ static void analyze__collect_procs__visit(AstNode* node, void* vctx) {
           info->has_yield = false;
           info->has_indirect_call = false;
           info->callee_count = 0;
-          if (args[body_idx]->type == AST_BLOCK) {
+          if (ast__is_seq(args[body_idx])) {
             analyze__walk_body(args[body_idx], info, ctx->heap, ctx->intern_table);
           }
         }
-        if (args[body_idx]->type == AST_BLOCK) {
+        if (ast__is_seq(args[body_idx])) {
           analyze__collect_procs__visit(args[body_idx], ctx);
         }
         handled = true;
@@ -2595,7 +2595,7 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
         if (hid == HEAD_FOR) {
           if (argc >= 2) {
             AstNode* body = args[argc - 1];
-            bool loop_suspends = (body->type == AST_BLOCK) &&
+            bool loop_suspends = (ast__is_seq(body)) &&
                                  sm__loop_body_suspends(body);
             int32_t loop_start = *segment;
 
@@ -2606,7 +2606,7 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
             if (argc == 3 && args[1]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
                   sm__lit_string_name(layout, args[1]), *segment);
-            } else if (argc == 2 && body->type == AST_BLOCK &&
+            } else if (argc == 2 && ast__is_seq(body) &&
                        !(args[0]->type == AST_BLOCK)) {
               sm__liveness_mark_write(liveness, layout,
                   jacl_inline_string("it", 2), *segment);
@@ -2750,9 +2750,9 @@ void sm__optimize_state_layout(SuspensionAnalysis* analysis,
 
   /* Walk the AST body to collect read/write segment info */
   int32_t segment = 0;
-  if (body->type == AST_BLOCK) {
-    for (uint32_t i = 0; i < body->data.block.count; i++) {
-      sm__liveness_walk(body->data.block.commands[i], layout, liveness,
+  if (ast__is_seq(body)) {
+    for (uint32_t i = 0; i < ast__seq_count(body); i++) {
+      sm__liveness_walk(ast__seq_stmt(body, i), layout, liveness,
                         &segment);
     }
   } else {
@@ -2828,9 +2828,9 @@ SuspensionAnalysis compiler__analyze_suspensions(Compiler* c,
   if (!body) return analysis;
 
   /* Pass 1: find suspension points */
-  if (body->type == AST_BLOCK) {
-    for (uint32_t i = 0; i < body->data.block.count; i++) {
-      sm__walk_suspensions(body->data.block.commands[i], &analysis, map,
+  if (ast__is_seq(body)) {
+    for (uint32_t i = 0; i < ast__seq_count(body); i++) {
+      sm__walk_suspensions(ast__seq_stmt(body, i), &analysis, map,
                            heap, intern_table);
     }
   } else {
@@ -2846,9 +2846,9 @@ SuspensionAnalysis compiler__analyze_suspensions(Compiler* c,
       sm__add_state_field(&analysis.state_layout, param_names[i], false, true, 1, 0, 0, 0);
     }
     /* Then body locals — pass struct registry for width computation */
-    if (body->type == AST_BLOCK) {
-      for (uint32_t i = 0; i < body->data.block.count; i++) {
-        sm__walk_locals(body->data.block.commands[i], &analysis.state_layout,
+    if (ast__is_seq(body)) {
+      for (uint32_t i = 0; i < ast__seq_count(body); i++) {
+        sm__walk_locals(ast__seq_stmt(body, i), &analysis.state_layout,
                         map, struct_reg);
       }
     } else {
@@ -5619,8 +5619,8 @@ void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
 
 void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
                                        uint32_t line) {
-  uint32_t stmt_count = body_block->data.block.count;
-  AstNode** stmts = body_block->data.block.commands;
+  uint32_t stmt_count = ast__seq_count(body_block);
+  AstNode** stmts = ast__seq_stmts(body_block);
   compiler__compile_sm_stmts(c, stmts, stmt_count, line, false);
 }
 
@@ -5644,8 +5644,8 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     return;
   }
 
-  uint32_t stmt_count = body_block->data.block.count;
-  AstNode** stmts = body_block->data.block.commands;
+  uint32_t stmt_count = ast__seq_count(body_block);
+  AstNode** stmts = ast__seq_stmts(body_block);
 
   /* Check if the body contains suspension points */
   bool body_suspends = ast__contains_suspension(body_block, c->suspension_map,
@@ -12090,8 +12090,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                 "`yield` it, bind it, or restructure");
           }
         }
-        uint32_t stmt_count = body_block->data.block.count;
-        AstNode** body_stmts = body_block->data.block.commands;
+        uint32_t stmt_count = ast__seq_count(body_block);
+        AstNode** body_stmts = ast__seq_stmts(body_block);
         compiler__compile_sm_stmts(&body_compiler, body_stmts, stmt_count,
                                     line, !has_yield);
       }
@@ -12106,9 +12106,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       AstNode* body_blk = args[body_arg_idx];
       JaclType body_type = TYPE_DYN;
       uint32_t body_struct_idx = UINT32_MAX;
-      if (body_blk->type == AST_BLOCK && body_blk->data.block.count > 0 &&
-          !body_blk->data.block.trailing_semi) {
-        AstNode* tail = body_blk->data.block.commands[body_blk->data.block.count - 1];
+      if (ast__is_seq(body_blk) && ast__seq_count(body_blk) > 0 &&
+          !ast__seq_trailing_semi(body_blk)) {
+        AstNode* tail = ast__seq_stmt(body_blk, ast__seq_count(body_blk) - 1);
         if (tail->type == AST_RETURN && tail->data.return_stmt.value) {
           body_type = (JaclType)tail->data.return_stmt.value->inferred_type;
           body_struct_idx = tail->data.return_stmt.value->inferred_struct_idx;
@@ -12604,9 +12604,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__begin_scope(c);
 
       /* Compile body statements inline */
-      uint32_t body_count = body_block->data.block.count;
+      uint32_t body_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < body_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
 
@@ -12905,9 +12905,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * the body are popped at iteration end so the operand stack doesn't
        * grow and local slots stay stable across iterations. */
       compiler__begin_scope(c);
-      uint32_t sm_body_count = body_block->data.block.count;
+      uint32_t sm_body_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < sm_body_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
       compiler__end_scope(c, line);
@@ -13107,9 +13107,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* body */
-      uint32_t mbody_count = body_block->data.block.count;
+      uint32_t mbody_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < mbody_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
 
@@ -13267,9 +13267,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* body */
-      uint32_t dbody_count = body_block->data.block.count;
+      uint32_t dbody_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < dbody_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
 
@@ -13489,9 +13489,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* Compile body statements inline */
-      uint32_t body_count = body_block->data.block.count;
+      uint32_t body_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < body_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
 
@@ -13736,9 +13736,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* Body */
-      uint32_t body_count = body_block->data.block.count;
+      uint32_t body_count = ast__seq_count(body_block);
       for (uint32_t i = 0; i < body_count; i++) {
-        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__compile_node(c, ast__seq_stmt(body_block, i));
         compiler__emit_check_error(c, line);
       }
 
@@ -13964,9 +13964,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* Compile body statements inline */
-    uint32_t body_count = body_block->data.block.count;
+    uint32_t body_count = ast__seq_count(body_block);
     for (uint32_t i = 0; i < body_count; i++) {
-      compiler__compile_node(c, body_block->data.block.commands[i]);
+      compiler__compile_node(c, ast__seq_stmt(body_block, i));
       compiler__emit_check_error(c, line);
     }
 
@@ -16541,8 +16541,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     AstNode* body_block = args[0];
-    uint32_t stmt_count = body_block->data.block.count;
-    AstNode** stmts = body_block->data.block.commands;
+    uint32_t stmt_count = ast__seq_count(body_block);
+    AstNode** stmts = ast__seq_stmts(body_block);
 
     /* Check if the spawn body contains suspension points */
     bool spawn_suspends = ast__contains_suspension(body_block, c->suspension_map,
