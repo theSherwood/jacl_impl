@@ -1529,7 +1529,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   if (parser__at_end(p) || !parser__is_block_open(parser__peek(p)->type)) {
     return parser__error(p, "expected '{' for macro body", parser__peek(p));
   }
-  AstNode* body = parser__parse_block(p);
+  AstNode* body = parser__parse_body_seq(p);
   if (body->type == AST_ERROR) return body;
 
   /* Copy param names to arena-allocated arrays */

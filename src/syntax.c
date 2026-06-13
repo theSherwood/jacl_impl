@@ -1135,7 +1135,9 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     typer_infer(&entry->body, 1, NULL, NULL, 0, body_compiler.struct_registry,
                 body_compiler.struct_registry ? body_compiler.struct_registry->count : 0);
 
-    compiler__compile_block_expr(&body_compiler, entry->body);
+    /* compile_node dispatches the body whether it's a legacy AST_BLOCK or a
+     * [do …] command (the []-flip body form). */
+    compiler__compile_node(&body_compiler, entry->body);
     compiler__emit_byte(&body_compiler, OP_RETURN, 0);
 
     if (body_compiler.error_count > 0) {
