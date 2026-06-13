@@ -12,8 +12,10 @@ authoritative spec for what `[]` means in every position.
 - **Build / verify:** `./build.sh` runs the whole suite; `./build.sh --test=NAME`
   runs one group (e.g. `--test=jacl_harness`, `--test=typed_vec`); `--lib` builds
   just the library. **Current baseline: full suite 86 passed / 5 failed groups
-  (parser, compiler, integration, jacl_harness, syntax); jacl_harness 585/587
-  (`tour`, `typed_closure_binding`).** Start by reproducing this.
+  (parser, compiler, integration, jacl_harness, syntax); jacl_harness 586/587
+  (`typed_closure_binding` only).** Start by reproducing this.
+  `--tsan`: 85/6 (same groups + `chase_lev_stress`, a known-safe tsan failure).
+  `--wasm`: skipped in the cloud sandbox (no emcc).
 - **Key code entry points:**
   - Value `[…]` lowering: `parser__block_to_value` + `parser__make_do` (src/parser.c).
   - Value-position application/call wrap: the `in_value_bracket` flag (Parser
@@ -177,8 +179,7 @@ Done (branch `claude/flip-bracket-mode`):
   word `"def"` instead of a command (no arity error). Keyword heads don't wrap;
   wrapping all keywords regressed 6 other scenarios (assert/neq/timeout), so a
   surgical fix is deferred.
-- `jacl_harness` — 2: `tour`, `typed_closure_binding` (compound `[Proc …]`, Phase
-  B3).
+- `jacl_harness` — 1: `typed_closure_binding` (compound `[Proc …]`, Phase B3).
 - `destructure_spread_all` — FIXED by step 4 (seq-unified destructure path).
 
 **Structural cleanup (in progress):**
@@ -261,8 +262,10 @@ Done (branch `claude/flip-bracket-mode`):
      AST first (they're already failing groups).
 
 Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
-- **`tour.jacl`** — behavioral: an `[assert $== $hit 5]` fails (a value is computed
-  wrong somewhere in the tour); needs debugging, not a syntax fix.
+- **`tour.jacl`** — FIXED: `[if ~cond {…} ~body]` templates dropped `~body` out
+  of the if (parse_if_form's else-detection), so `unless` ran its body
+  unconditionally. A same-line `~x` at syntax-quote depth 1 now parses as the
+  else branch.
 - **`typed_closure_binding`** — compound `[Proc …]` param/return inference (Phase
   B3 "not yet supported"); deep type-system.
 - Surgical `[def]`/keyword-head wrap (wrapping all keywords regressed 6 scenarios).
