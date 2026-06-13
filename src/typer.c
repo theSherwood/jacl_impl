@@ -1673,8 +1673,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       node->inferred_type = TYPE_NIL;
       return true;
     }
-    if (args[0]->type == AST_BLOCK) {
-      /* `{x, y}` named destructuring (parser produces AST_BLOCK
+    if (ast__is_seq(args[0])) {
+      /* `{x, y}` named destructuring (an AST_BLOCK or its [do …] lowering,
        * with each name as a zero-arg AST_COMMAND inside).
        * Match destructured names against the source struct's field
        * types when available. */
@@ -1687,9 +1687,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
           args[1]->inferred_struct_idx < tc->struct_count) {
         src_struct = &tc->structs[args[1]->inferred_struct_idx];
       }
-      uint32_t bcount = args[0]->data.block.count;
+      uint32_t bcount = ast__seq_count(args[0]);
       for (uint32_t i = 0; i < bcount; i++) {
-        AstNode* item = args[0]->data.block.commands[i];
+        AstNode* item = ast__seq_stmt(args[0], i);
         const char* nm = NULL;
         uint32_t    nl = 0;
         JaclType    item_t = TYPE_DYN;

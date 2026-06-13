@@ -701,7 +701,11 @@ AstNode* parser__parse_expr(Parser* p) {
     }
 
     case TOKEN_LBRACE:
-      result = parser__parse_block(p);
+      /* Value-position `{…}` lowers to a `[do …]` sequence (always-do, no
+       * single-statement collapse — preserves the scoped-sequence semantics
+       * the AST_BLOCK form had). Destructure recognizers accept the [do]
+       * form via the seq accessors. Step 4 of the AST_BLOCK retirement. */
+      result = parser__parse_body_seq(p);
       break;
 
     case TOKEN_STRING_BEGIN:

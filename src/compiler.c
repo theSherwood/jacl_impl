@@ -2007,13 +2007,14 @@ void sm__collect_command_destructure_names(AstNode* pat,
   }
 }
 
-/* Collect names from a curly-brace destructure in AST_BLOCK form {a, b, c}. */
+/* Collect names from a curly-brace destructure: {a, b, c} as an AST_BLOCK or
+ * its [do a b c] lowering. */
 void sm__collect_block_destructure_names(AstNode* blk,
                                                 StateLayout* layout,
                                                 bool is_mutable) {
   uint32_t blk_line = blk->start.line, blk_col = blk->start.column;
-  for (uint32_t i = 0; i < blk->data.block.count; i++) {
-    AstNode* cmd = blk->data.block.commands[i];
+  for (uint32_t i = 0; i < ast__seq_count(blk); i++) {
+    AstNode* cmd = ast__seq_stmt(blk, i);
     if (cmd->type == AST_LIT_STRING) continue;  /* bare ".." spread-all */
     if (cmd->type != AST_COMMAND) continue;
     const char* hstr = NULL;
@@ -2083,10 +2084,12 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
             sm__collect_destructure_vec_names(args[0], layout, is_mut);
           } else if (argc >= 2 && args[0]->type == AST_DESTRUCTURE_NAMED) {
             sm__collect_destructure_named_names(args[0], layout, is_mut);
+          } else if (argc == 2 && ast__is_seq(args[0])) {
+            /* Curly/do-form named destructure — must be checked before the
+             * generic AST_COMMAND case ([do …] is a command). */
+            sm__collect_block_destructure_names(args[0], layout, is_mut);
           } else if (argc == 2 && args[0]->type == AST_COMMAND) {
             sm__collect_command_destructure_names(args[0], layout, is_mut);
-          } else if (argc == 2 && args[0]->type == AST_BLOCK) {
-            sm__collect_block_destructure_names(args[0], layout, is_mut);
           } else if (argc == 3 && args[0]->type == AST_COMMAND &&
                      args[0]->data.command.head &&
                      args[0]->data.command.head->type == AST_LIT_STRING &&
@@ -2375,6 +2378,35 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
                                              FieldLiveness* liveness,
                                              int32_t segment) {
   if (!pattern) return;
+  /* Curly destructure {a, b, c} — AST_BLOCK or its [do …] lowering. Must be
+   * intercepted before the switch: a [do] is an AST_COMMAND and would be
+   * misread as a bracket pattern. */
+  if (ast__is_seq(pattern)) {
+    for (uint32_t i = 0; i < ast__seq_count(pattern); i++) {
+      AstNode* cmd = ast__seq_stmt(pattern, i);
+      if (cmd->type == AST_LIT_STRING) continue;
+      if (cmd->type != AST_COMMAND) continue;
+      AstNode* chd = cmd->data.command.head;
+      if (chd->type != AST_LIT_STRING) continue;
+      const char* hstr = chd->data.lit_string.value;
+      uint32_t hlen = chd->data.lit_string.length;
+      if (hlen == 2 && hstr[0] == '.' && hstr[1] == '.') {
+        if (cmd->data.command.arg_count == 1 &&
+            cmd->data.command.args[0]->type == AST_LIT_STRING) {
+          sm__liveness_mark_write(liveness, layout,
+              sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
+        }
+      } else if (cmd->data.command.arg_count == 1 &&
+                 cmd->data.command.args[0]->type == AST_LIT_STRING) {
+        sm__liveness_mark_write(liveness, layout,
+            sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
+      } else if (cmd->data.command.arg_count == 0) {
+        sm__liveness_mark_write(liveness, layout,
+            compiler__name_val(layout->heap, layout->intern_table, hstr, hlen), segment);
+      }
+    }
+    return;
+  }
   switch (pattern->type) {
     case AST_LIT_STRING:
       sm__liveness_mark_write(liveness, layout,
@@ -2440,33 +2472,6 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
                    elem->data.spread.expr->type == AST_LIT_STRING) {
           sm__liveness_mark_write(liveness, layout,
               sm__lit_string_name(layout, elem->data.spread.expr), segment);
-        }
-      }
-      break;
-    }
-    case AST_BLOCK: {
-      /* Curly destructure {a, b, c} */
-      for (uint32_t i = 0; i < pattern->data.block.count; i++) {
-        AstNode* cmd = pattern->data.block.commands[i];
-        if (cmd->type == AST_LIT_STRING) continue;
-        if (cmd->type != AST_COMMAND) continue;
-        AstNode* chd = cmd->data.command.head;
-        if (chd->type != AST_LIT_STRING) continue;
-        const char* hstr = chd->data.lit_string.value;
-        uint32_t hlen = chd->data.lit_string.length;
-        if (hlen == 2 && hstr[0] == '.' && hstr[1] == '.') {
-          if (cmd->data.command.arg_count == 1 &&
-              cmd->data.command.args[0]->type == AST_LIT_STRING) {
-            sm__liveness_mark_write(liveness, layout,
-                sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
-          }
-        } else if (cmd->data.command.arg_count == 1 &&
-                   cmd->data.command.args[0]->type == AST_LIT_STRING) {
-          sm__liveness_mark_write(liveness, layout,
-              sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
-        } else if (cmd->data.command.arg_count == 0) {
-          sm__liveness_mark_write(liveness, layout,
-              compiler__name_val(layout->heap, layout->intern_table, hstr, hlen), segment);
         }
       }
       break;
@@ -6626,8 +6631,8 @@ static int compiler__block_as_positional_pattern(
     const char** d_names, uint32_t* d_name_lens, uint32_t* d_count_out,
     const char** rest_name_out, uint32_t* rest_name_len_out)
 {
-  if (blk->data.block.count != 1) return 0;
-  AstNode* pat = blk->data.block.commands[0];
+  if (ast__seq_count(blk) != 1) return 0;
+  AstNode* pat = ast__seq_stmt(blk, 0);
   if (pat->type != AST_COMMAND) return 0;
   AstNode* head = pat->data.command.head;
   /* Head must be a plain name (not "..", which is the comma-form rest). */
@@ -8709,9 +8714,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], true, line, col);
       return;
     }
-    if (argc == 2 && args[0]->type == AST_COMMAND) {
+    if (argc == 2 && args[0]->type == AST_COMMAND &&
+        args[0]->data.command.head_id != HEAD_DO) {
       /* keyword form: mut [a b c] expr — convert AST_COMMAND to name arrays
-       * Also handles rest patterns: [mut [head ..rest] expr] */
+       * Also handles rest patterns: [mut [head ..rest] expr]
+       * ([do …] patterns are the curly named-destructure form; they fall
+       * through to the seq branch below.) */
       AstNode* pat = args[0];
       uint32_t total_elems = 1 + pat->data.command.arg_count;
       if (total_elems > 255) {
@@ -8828,9 +8836,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * Also handles rest patterns: [mut {x, ..rest} value]
      * spread-all: [mut {..} value]
      * and typed fields: [mut {i32 x, i32 y} value] --- */
-    if (argc == 2 && args[0]->type == AST_BLOCK) {
+    if (argc == 2 && ast__is_seq(args[0])) {
       AstNode* blk = args[0];
-      uint32_t blk_count = blk->data.block.count;
+      uint32_t blk_count = ast__seq_count(blk);
       if (blk_count == 0 || blk_count > 255) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
@@ -8861,7 +8869,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t d_count = 0;
       int valid = 1;
       for (uint32_t i = 0; i < blk_count; i++) {
-        AstNode* cmd = blk->data.block.commands[i];
+        AstNode* cmd = ast__seq_stmt(blk, i);
         /* Handle bare ".." token (AST_LIT_STRING, not wrapped in AST_COMMAND)
            — this is how {..} parses since ".." is not a TOKEN_WORD */
         if (cmd->type == AST_LIT_STRING &&
@@ -10242,10 +10250,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    if (argc == 2 && args[0]->type == AST_COMMAND) {
+    if (argc == 2 && args[0]->type == AST_COMMAND &&
+        args[0]->data.command.head_id != HEAD_DO) {
       /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays
        * Also handles rest patterns: [def [head ..rest] expr] where ..rest
-       * is parsed as AST_SPREAD */
+       * is parsed as AST_SPREAD
+       * ([do …] patterns are the curly named-destructure form; they fall
+       * through to the seq branch below.) */
       AstNode* pat = args[0];
       uint32_t total_elems = 1 + pat->data.command.arg_count; /* head + args */
       if (total_elems > 255) {
@@ -10372,9 +10383,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * Also handles rest patterns: [def {x, ..rest} value]
      * spread-all: [def {..} value]
      * and typed fields: [def {i32 x, i32 y} value] --- */
-    if (argc == 2 && args[0]->type == AST_BLOCK) {
+    if (argc == 2 && ast__is_seq(args[0])) {
       AstNode* blk = args[0];
-      uint32_t blk_count = blk->data.block.count;
+      uint32_t blk_count = ast__seq_count(blk);
       if (blk_count == 0 || blk_count > 255) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
@@ -10405,7 +10416,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       uint32_t d_count = 0;
       int valid = 1;
       for (uint32_t i = 0; i < blk_count; i++) {
-        AstNode* cmd = blk->data.block.commands[i];
+        AstNode* cmd = ast__seq_stmt(blk, i);
         /* Handle bare ".." token (AST_LIT_STRING, not wrapped in AST_COMMAND)
            — this is how {..} parses since ".." is not a TOKEN_WORD */
         if (cmd->type == AST_LIT_STRING &&
