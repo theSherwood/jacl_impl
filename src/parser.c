@@ -1871,8 +1871,11 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   AstNode* then_block = parser__parse_body_seq(p);
   if (then_block->type == AST_ERROR) return then_block;
 
-  /* Skip newlines to check for elif/else */
+  /* Skip newlines to check for elif/else. Track whether we crossed one:
+   * the unquote-else form below is same-line only. */
+  bool crossed_nl = false;
   while (parser__peek(p)->type == TOKEN_NEWLINE) {
+    crossed_nl = true;
     parser__advance(p);
   }
 
@@ -1945,10 +1948,21 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->data.command.arg_count = 3;
     return node;
 
-  } else if (parser__peek(p)->type == TOKEN_LBRACE) {
+  } else if (parser__peek(p)->type == TOKEN_LBRACE ||
+             (!crossed_nl && p->syntax_quote_depth == 1 &&
+              parser__peek(p)->type == TOKEN_NOT)) {
     /* Trailing block without 'else' keyword — treat as else branch
-       so that `if cond {} {}` behaves the same as `[if cond {} {}]`. */
-    AstNode* else_block = parser__parse_body_seq(p);
+       so that `if cond {} {}` behaves the same as `[if cond {} {}]`.
+       Inside a syntax-quote template, a same-line `~x` unquote is also an
+       else branch (`[if ~cond {…} ~body]` — the spliced body arrives as a
+       [do …] sequence at expansion). Same-line only, so an unrelated `~stmt`
+       on the next template line isn't swallowed. */
+    AstNode* else_block = (parser__peek(p)->type == TOKEN_LBRACE)
+                            ? parser__parse_body_seq(p)
+                            : parser__parse_expr(p);
+    if (!else_block) {
+      return parser__error(p, "expected else branch", parser__peek(p));
+    }
     if (else_block->type == AST_ERROR) return else_block;
 
     AstNode** args = ast_alloc_array(p->arena, 3);
