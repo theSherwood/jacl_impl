@@ -103,6 +103,30 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
 
 ## Key decisions
 
+0. **OPEN ISSUE — call vs. block is no longer structurally distinguishable.**
+   Surfaced by the body-position work: `[…]` is *one* spelling for two
+   different things — an application (`[print $it]` = call print now) and a
+   statement sequence (`[print $it]` as a for-body = run per element). Nothing
+   in the syntax distinguishes them; **the head decides**, per argument
+   position (`parser__head_body_arg`: for/try/spawn/with-ctx/parallel/race).
+   This is Tcl-like (each command interprets its own args) but has real
+   consequences:
+   - `for $coll [\ print $it]` (HOF callback = a *value* arg) vs
+     `for $coll [print $it]` (body) is disambiguated only by peeking for the
+     `\` token inside the bracket — a special case, not a rule.
+   - User-defined procs/HOFs **cannot** take a literal block argument: a
+     `[…]` arg to a non-special head is always an application. The only
+     explicit "sequence as a value" spelling in such positions is `[do …]`.
+   - Macros that take bodies work because args arrive as unevaluated syntax —
+     but the same `[…]` arg parses differently under a macro head (whatever
+     the template does with it) than under `for`.
+   Candidate resolutions to evaluate before `{}` is dropped: (a) accept the
+   per-head table as the language rule and document each builtin's body
+   positions as part of its signature; (b) require explicit `[do …]` for all
+   block args and remove the per-head table (uniform but noisy); (c) keep a
+   dedicated block-literal spelling. Until decided, the per-head table is
+   the behavior.
+
 1. **`[Vec T]` ≠ `[[Vec T]]`.** `[Vec T]` is a *parameterized type* and is only
    valid in type position — **there is no bare-type-as-value**. `[[Vec T]]` is a
    *form with `[Vec T]` as the head*, i.e. it constructs an **empty** `[Vec T]`.
