@@ -329,14 +329,31 @@ Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
   - `struct Name [i32 x, i32 y]` and `use "path" [a, b]` (delimiter
     auto-detect, like proc params).
   - Covered by `test/jacl/bracket_bodies.jacl` + `modules/use_bracket`.
-  Remaining for ACTUAL `{}` removal: the `.jacl` corpus is DONE (debraced via
-  `tools/debrace.py`; only comments, pragma bodies, inline struct types, and
-  error-message strings still contain `{`). Left: the embedded JACL in C test
-  strings (NOT safely auto-debraceable — source braces are indistinguishable
-  from expected-output `{ body }` strings; needs per-file judgment), the
-  playground highlighter, then drop `{}` from the value/body grammar (step 6,
-  delete `AST_BLOCK`, rides along).
-- Step 6 (delete `AST_BLOCK`) is now unblocked: no test file asserts the node
-  type anymore except via the accessors; remaining references are the parser
-  internals, dispatch cases, syntax converters, and 2 synthetic fake_blocks
-  (see step 6 list above).
+  The THREE non-block `{}` uses are now retired:
+  - DONE: dead pragma syntax (`#{ … }`) removed (lexer + parser + tests).
+  - DONE: typed-map display → constructor form `[[Map K V] k v …]` (was `{…}`).
+  - DONE: inline struct type → `struct [i32 x]` (was `struct{x:i32}`); internal
+    canonical key stays `struct{name:type}`.
+
+  Remaining for ACTUAL `{}` removal — the **block/list** delimiter. The `.jacl`
+  corpus is debraced; the hard part is the C-test embedded JACL + the
+  **value-position collapse**, which makes a batch text swap unsafe:
+  - **`{X}` ≠ `[X]` in value position.** A single-statement `{X}` is `[do X]`
+    (scoped sequence); `[X]` *collapses* to the bare application `X`. So
+    `{ x = 42 }` (x scoped, not visible after) ≠ `[ x = 42 ]` (x leaks), and
+    `ast__is_seq({X})` (true) ≠ `ast__is_seq([X])` (false). A blunt
+    `{`→`[` debrace of the C tests breaks ~32 block-semantics assertions
+    across parser/compiler/syntax/integration/destructure_spread_all (scope
+    tests, seq-shape asserts, spread-all `{..}`). Each needs a per-test
+    `[do X]` conversion, not a swap. (Body-position braces ARE safe — they
+    lower to `[do]` either way; the `.jacl` corpus was mostly those.)
+  - **The pretty-printer still emits `{…}`** for `[do]` sequences
+    (`ast.c` HEAD_DO case) — must render as `[do …]` (a 4th `{}` emission
+    site, found during the debrace attempt). Affects roundtrip/pp tests.
+  - Then drop `{` `}` from the lexer/grammar (remove `TOKEN_LBRACE/RBRACE`,
+    the brace block/list parse paths; update `test_lexer.c` brace-token tests
+    + the 2 `expected '{' after while` strings) and delete `AST_BLOCK` (step 6:
+    enum, compile_block_expr, infer_block, dispatch/analysis cases, syntax
+    converters, 2 synthetic fake_blocks).
+  This is a larger, delicate pass (printer + ~32 per-test `[do]` conversions +
+  lexer/grammar + AST_BLOCK), not a mechanical debrace.
