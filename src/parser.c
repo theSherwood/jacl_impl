@@ -137,8 +137,7 @@ AstNode* parser__error(Parser* p, const char* message, Token* tok) {
  * ------------------------------------------------------------------------- */
 
 void parser__skip_newlines(Parser* p) {
-  while (parser__peek(p)->type == TOKEN_NEWLINE ||
-         parser__peek(p)->type == TOKEN_PRAGMA) {
+  while (parser__peek(p)->type == TOKEN_NEWLINE) {
     parser__advance(p);
   }
 }
@@ -1113,8 +1112,7 @@ AstNode* parser__parse_defstruct(Parser* p) {
       while (!parser__at_end(p) &&
              (parser__peek(p)->type == TOKEN_COMMA ||
               parser__peek(p)->type == TOKEN_NEWLINE ||
-              parser__peek(p)->type == TOKEN_SEMICOLON ||
-              parser__peek(p)->type == TOKEN_PRAGMA)) {
+              parser__peek(p)->type == TOKEN_SEMICOLON)) {
         parser__advance(p);
       }
       if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
@@ -2554,8 +2552,7 @@ AstNode* parser__parse_block(Parser* p) {
     bool saw_semi = false;
     while (parser__peek(p)->type == TOKEN_NEWLINE ||
            parser__peek(p)->type == TOKEN_SEMICOLON ||
-           parser__peek(p)->type == TOKEN_COMMA ||
-           parser__peek(p)->type == TOKEN_PRAGMA) {
+           parser__peek(p)->type == TOKEN_COMMA) {
       if (parser__peek(p)->type == TOKEN_SEMICOLON)
         saw_semi = true;
       parser__advance(p);
@@ -2761,8 +2758,7 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     /* Skip newlines, semicolons, commas, and pragmas between commands */
     while (parser__peek(&p)->type == TOKEN_NEWLINE ||
            parser__peek(&p)->type == TOKEN_SEMICOLON ||
-           parser__peek(&p)->type == TOKEN_COMMA ||
-           parser__peek(&p)->type == TOKEN_PRAGMA) {
+           parser__peek(&p)->type == TOKEN_COMMA) {
       parser__advance(&p);
     }
     if (parser__at_end(&p)) break;

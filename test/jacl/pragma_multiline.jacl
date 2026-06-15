@@ -1,6 +1,0 @@
-# expect: hello
-# Test: multi-line pragma is skipped
-#{ author: "test"
-   version: 2
-   tags: [a, b, c] }
-print "hello"
