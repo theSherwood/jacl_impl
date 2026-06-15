@@ -25,7 +25,7 @@ ctx mut i32 verbosity = 0
 # a templating form for AST literals; `~name` splices a captured arg's
 # AST in. The macro fires at compile time and never appears at runtime.
 defmacro unless [cond body] [
-  syntax-quote [if ~cond [] ~body]
+  syntax-quote [if ~cond [] [do ~body]]
 ]
 
 # A generator: any proc that contains `yield` is one. Each call returns
@@ -43,7 +43,7 @@ proc add [a, b] [ + $a $b ]
 proc greet [name] [ concat "hi " $name ]
 proc zero-arg [] [ + 10 20 ]
 
-# Typed proc: `proc <name> {<param-type> <param>, ...} <ret> {body}`.
+# Typed proc: `proc <name> [<param-type> <param>, ...] <ret> [body]`.
 # Return type comes after the params block, before the body. Param
 # and return types are checked at call sites and arithmetic narrows
 # accordingly (no boxing, no dyn dispatch). Untyped params default
@@ -116,9 +116,8 @@ proc main [] [
   reassignable :: 5               # `::` is `set` sugar
   assert [== $reassignable 5]
 
-  # ----- two modes -----
-  # `[]` juxtaposition: head + args (value computation).
-  # `{}` command mode: bare commands and pipelines.
+  # ----- expressions -----
+  # `[head args]` is an application; nest freely for value computation.
   assert [== [+ 1 [* 2 [+ 1 3]]] 9]
   assert [== [+ [+ 1 2] 4] 7]
   assert [== [* [+ 1 2] 2] 6]
@@ -130,7 +129,7 @@ proc main [] [
   assert [== "name=$who age=$yrs sum=$[+ 2 3]" "name=alice age=31 sum=5"]
 
   # ----- procs -----
-  # Params and body are both `{}` blocks. Type-before-name everywhere.
+  # Params and body are both `[…]`. Type-before-name everywhere.
   # Procs are defined at module level (see above).
   assert [== [add 20 30] 50]
   assert [== [greet bob] "hi bob"]
@@ -161,7 +160,7 @@ proc main [] [
   assert [== [collect [transform [vec 1 2 3] [\ $* $it 2]]] [vec 2 4 6]]
 
   # ----- if / while -----
-  # `if` is an expression. `while [cond] {body}`.
+  # `if` is an expression. `while [cond] [body]`.
   assert [== [if [> 5 0] [ "positive" ] [ "non-positive" ]] "positive"]
   mut sum 0
   mut i 1
@@ -175,15 +174,15 @@ proc main [] [
   # Three relevant forms: implicit `$it`, explicit binding, C-style.
   # Works on vectors, streams, and ranges.
   #
-  # Explicit binding is `for COLL NAME { body }` (collection first).
+  # Explicit binding is `for COLL NAME [body]` (collection first).
   # This intentionally breaks the `def name value` / `mut name value` /
   # `set name value` shape used by binding statements: a name-first
   # form (`for n $xs`) conflicts with pipe threading, which inserts
-  # the piped value as the first argument. `$xs | for n { body }` would
-  # then mean `[for $xs n { body }]` — the threaded collection landing
+  # the piped value as the first argument. `$xs | for n [body]` would
+  # then mean `[for $xs n [body]]` — the threaded collection landing
   # in the name slot — and the only fix is to forbid that idiom. We
-  # keep collection-first so `$xs | for n { body }` reads as
-  # `[for $xs n { body }]` and Just Works.
+  # keep collection-first so `$xs | for n [body]` reads as
+  # `[for $xs n [body]]` and Just Works.
   mut seen 0
   for [vec 1 2 3] [ set seen [+ $seen $it] ]
   assert [== $seen 6]
@@ -191,7 +190,7 @@ proc main [] [
   for [range 0 3] n [ set range-sum [+ $range-sum $n] ]
   assert [== $range-sum 3]
 
-  # C-style `for {init; cond; step} { body }` — Tcl-shaped, falls out
+  # C-style `for [init; cond; step] [body]` — Tcl-shaped, falls out
   # of the language for free: `for` taking a header-block plus a
   # body-block, the implementation inspects the header. Useful for
   # counted loops where you want a single mutable index visible in
@@ -218,7 +217,7 @@ proc main [] [
   assert [== [collect [take [count-up 1 100] 3]] [vec 1 2 3]]
 
   # ----- destructuring -----
-  # Positional `[]` for vectors; named `{}` for structs/maps;
+  # `[a b c]` positional (vectors); `[x, y]` named (structs/maps),
   # `_` wildcard; `..rest` for trailing remainder.
   def [a b c] [vec 1 2 3]
   assert [&& [== $a 1] [&& [== $b 2] [== $c 3]]]
@@ -230,7 +229,7 @@ proc main [] [
   assert [== $tail [vec second third]]
 
   # ----- structs -----
-  # `struct Name {type field, ...}` at module level. Constructor
+  # `struct Name [type field, ...]` at module level. Constructor
   # `[Name vals...]`. Field access via `->`.
   def pt [Pt x 3 y 4]
   assert [== $pt->x 3]
@@ -277,7 +276,7 @@ proc main [] [
   assert [== [deref $witness] 12]
 
   # ----- errors -----
-  # `try {body} name {handler}`. Errors are values; pipes short-circuit.
+  # `try [body] name [handler]`. Errors are values; pipes short-circuit.
   # `assert` halts the VM, but `error` produces an error VALUE that
   # propagates through pipes and can be caught.
   assert [== [try [ error bad ] e [ concat "caught: " [error-val $e] ]] "caught: bad"]
@@ -285,8 +284,8 @@ proc main [] [
 
   # ----- $ctx (dynamic context) -----
   # `$ctx` is the dynamic context object; fields declared with `ctx`
-  # at module level are visible everywhere. `with-ctx {field val ...}
-  # { body }` overrides for the dynamic extent of body; prior values
+  # at module level are visible everywhere. `with-ctx [field val ...]
+  # [body]` overrides for the dynamic extent of body; prior values
   # restore on exit, including via error.
   assert [== $ctx->verbosity 0]
   with-ctx [verbosity 3] [
@@ -300,14 +299,13 @@ proc main [] [
 
   # ----- macros -----
   # `defmacro` (see top of file) rewrites at compile time. `unless` is
-  # implemented as a one-line macro; the expansion `[if cond {} body]`
-  # is what actually runs.
-  # NOTE: macro body args stay braces — a single-statement [..] arg to a
-  # macro head collapses to a call (BRACKET_FLIP_DESIGN.md, Key decision 0).
+  # implemented as a one-line macro; the expansion `[if cond [] [do body]]`
+  # is what actually runs. The macro wraps its body arg in `[do …]`, so a
+  # bracket body works even when it's a single statement.
   mut hit 0
-  unless [== 1 2] { set hit 5 }
+  unless [== 1 2] [set hit 5]
   assert [== $hit 5]
-  unless [== 1 1] { set hit 99 }
+  unless [== 1 1] [set hit 99]
   assert [== $hit 5]
 
   # ----- interpret / sandbox -----
@@ -320,7 +318,7 @@ proc main [] [
   assert [== [interpret [map] "[+ 10 20]"] 30]
   # Blocked primitives surface as error values rather than aborting.
   def safe [map-remove [interpret-prelude] "spawn"]
-  assert [error? [interpret $safe "[spawn { 99 }]"]]
+  assert [error? [interpret $safe "[spawn [99]]"]]
 ]
 
 main
@@ -334,7 +332,7 @@ main
 # remaining sharp edge is name-shadowing across SM state fields.
 
 # ----- spawn / await -----
-# `spawn { block }` returns a future. `await` blocks until it resolves.
+# `spawn [block]` returns a future. `await` blocks until it resolves.
 # Spawned tasks run on the NxM worker pool and snapshot `$ctx`.
 def fut [spawn [ + 20 22 ]]
 assert [== [await $fut] 42]
@@ -352,12 +350,12 @@ assert [== [double-async 21] 42]
 assert [== [sum-async 10 16] 52]
 
 # ----- parallel -----
-# `parallel { } { } ...` runs all blocks concurrently and returns a
+# `parallel [] [] ...` runs all blocks concurrently and returns a
 # vector of results in argument order, regardless of finish order.
 assert [== [parallel [ 10 ] [ 20 ] [ 30 ]] [vec 10 20 30]]
 
 # ----- race -----
-# `race { } { } ...` returns the first to complete. Bodies should be
+# `race [] [] ...` returns the first to complete. Bodies should be
 # deterministic for testability — both branches return the same value.
 assert [== [race [ 7 ] [ 7 ]] 7]
 

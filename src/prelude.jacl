@@ -58,7 +58,7 @@ defmacro incr {x} {
 # context (the implicit one created by spawn/parallel/race/proc with
 # suspending callees).
 defmacro timeout {n body} {
-  syntax-quote [race ~body { sleep ~n; error "timeout" }]
+  syntax-quote [race [do ~body] { sleep ~n; error "timeout" }]
 }
 
 # assert — predicate check; on failure, format a source-context message

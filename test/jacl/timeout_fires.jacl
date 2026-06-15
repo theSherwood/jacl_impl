@@ -7,8 +7,7 @@ proc slow [] [
   "done"
 ]
 proc main [] [
-  # macro body arg stays braces (BRACKET_FLIP_DESIGN.md Key decision 0)
-  def r [timeout 0.02 { slow }]
+  def r [timeout 0.02 [slow]]
   print [error? $r]
 ]
 main

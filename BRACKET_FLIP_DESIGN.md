@@ -103,36 +103,37 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
 
 ## Key decisions
 
-0. **OPEN ISSUE — call vs. block is no longer structurally distinguishable.**
-   Surfaced by the body-position work: `[…]` is *one* spelling for two
-   different things — an application (`[print $it]` = call print now) and a
-   statement sequence (`[print $it]` as a for-body = run per element). Nothing
-   in the syntax distinguishes them; **the head decides**, per argument
-   position (`parser__head_body_arg`: for/try/spawn/with-ctx/parallel/race).
-   This is Tcl-like (each command interprets its own args) but has real
-   consequences:
-   - `for $coll [\ print $it]` (HOF callback = a *value* arg) vs
-     `for $coll [print $it]` (body) is disambiguated only by peeking for the
-     `\` token inside the bracket — a special case, not a rule.
-   - User-defined procs/HOFs **cannot** take a literal block argument: a
-     `[…]` arg to a non-special head is always an application. The only
-     explicit "sequence as a value" spelling in such positions is `[do …]`.
-   - Macros that take bodies work because args arrive as unevaluated syntax —
-     but the same `[…]` arg parses differently under a macro head (whatever
-     the template does with it) than under `for`.
-   - Bitten in practice by the corpus debrace: `timeout 0.02 [ slow ]` and
-     `unless $c [ set hit 5 ]` (macro heads) collapse the single-statement
-     arg to a call. NOTE there is no good explicit spelling either: a typed
-     `[do slow]` parses `slow` as an *atom arg*, not a statement (do's args
-     are only statement-parsed when produced by `;`/newline lowering) —
-     you'd need `[do [slow]]`. Those corpus call sites keep `{…}` for now
-     (tour.jacl macro section, timeout_fires/timeout_success).
-   Candidate resolutions to evaluate before `{}` is dropped: (a) accept the
-   per-head table as the language rule and document each builtin's body
-   positions as part of its signature; (b) require explicit `[do …]` for all
-   block args and remove the per-head table (uniform but noisy); (c) keep a
-   dedicated block-literal spelling. Until decided, the per-head table is
-   the behavior.
+0. **Call vs. block — DECIDED (direction set; implementation staged).**
+   `[…]` is one spelling for an application (`[print $it]` = call print) and
+   for a statement sequence (a body). Special forms already know their body
+   slots (`parser__head_body_arg`: for/try/spawn/with-ctx/parallel/race), but
+   **macros** can't be in that parser table (macros register at compile time,
+   the parser runs first), so a single-statement `[…]` arg to a macro head
+   collapses to a call before the macro sees it — which broke `timeout`/`unless`
+   under the corpus debrace.
+
+   **Resolution (agreed with user):**
+   - **Consumer-normalizes, not parser.** A body slot accepts whatever it gets
+     — a collapsed command *or* a `[do …]` — and normalizes: wrap a lone
+     command into a one-element `do`, splice an existing `do` as-is. Macros work
+     for free because they expand *into* the special forms that normalize
+     (`timeout` → `[race [do ~body] …]`; `race` gets a seq). **Validated now
+     (step #1 below):** body-taking macro templates wrap the splice in
+     `[do ~body]` — `timeout`/`unless` take bracket bodies, the brace holdouts
+     are gone. Generalizing this into a post-expansion normalization pass
+     (keyed by the head→body-index table, moved out of the parser) is the next
+     step; it also lets us delete `parser__head_body_arg` and the `[\` hack.
+   - **`$var` = closure, `[…]` = block — no lambda special-case.** Inline
+     closures (`for $coll [\ …]`) are **dropped**; their role is taken by
+     auto/explicit-binding blocks: `filter $coll [> $idx $it]` or
+     `filter $coll index item [> $index $item]`, with `filter $coll $cb` for a
+     bound closure. A block is *inlined* with the bindings in scope, which
+     subsumes (and improves on) the Phase-A monomorphization that keyed on the
+     inline literal. All iteration forms become macros over one core `for`.
+     (This is the larger follow-on slice; not yet implemented.)
+   - **`do` args stay value-position.** `[do [slow]]` is correct; `[do slow]`
+     (slow = atom) is not, and `[do this that]` has no sensible reading — so
+     `do` is not changed.
 
 1. **`[Vec T]` ≠ `[[Vec T]]`.** `[Vec T]` is a *parameterized type* and is only
    valid in type position — **there is no bare-type-as-value**. `[[Vec T]]` is a

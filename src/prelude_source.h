@@ -60,7 +60,7 @@ static const char *jacl_prelude_source =
     "# context (the implicit one created by spawn/parallel/race/proc with\n"
     "# suspending callees).\n"
     "defmacro timeout {n body} {\n"
-    "  syntax-quote [race ~body { sleep ~n; error \"timeout\" }]\n"
+    "  syntax-quote [race [do ~body] { sleep ~n; error \"timeout\" }]\n"
     "}\n"
     "\n"
     "# assert — predicate check; on failure, format a source-context message\n"
