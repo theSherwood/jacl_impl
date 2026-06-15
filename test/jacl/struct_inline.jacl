@@ -1,7 +1,7 @@
 # expect: 42
 # Test inline anonymous struct type in defstruct field
 struct Point {i32 x, i32 y}
-struct Wrapper {struct{x:i32,y:i32} pos}
+struct Wrapper {[struct [i32 x, i32 y]] pos}
 proc main {} {
   def w [Wrapper pos [Point x 42 y 10]]
   print $w->pos->x
