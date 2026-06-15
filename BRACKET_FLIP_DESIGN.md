@@ -103,34 +103,40 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
 
 ## Key decisions
 
-0. **Call vs. block — DECIDED (direction set; implementation staged).**
+0. **Call vs. block — DECIDED & DONE.**
    `[…]` is one spelling for an application (`[print $it]` = call print) and
-   for a statement sequence (a body). Special forms already know their body
-   slots (`parser__head_body_arg`: for/try/spawn/with-ctx/parallel/race), but
-   **macros** can't be in that parser table (macros register at compile time,
-   the parser runs first), so a single-statement `[…]` arg to a macro head
-   collapses to a call before the macro sees it — which broke `timeout`/`unless`
-   under the corpus debrace.
+   for a statement sequence (a body). The ambiguity only ever bites where a
+   head needs a *body*; everywhere else `[…]` is an application and that's
+   correct.
 
-   **Resolution (agreed with user):**
-   - **Consumer-normalizes, not parser.** A body slot accepts whatever it gets
-     — a collapsed command *or* a `[do …]` — and normalizes: wrap a lone
-     command into a one-element `do`, splice an existing `do` as-is. Macros work
-     for free because they expand *into* the special forms that normalize
-     (`timeout` → `[race [do ~body] …]`; `race` gets a seq). **Validated now
-     (step #1 below):** body-taking macro templates wrap the splice in
-     `[do ~body]` — `timeout`/`unless` take bracket bodies, the brace holdouts
-     are gone. Generalizing this into a post-expansion normalization pass
-     (keyed by the head→body-index table, moved out of the parser) is the next
-     step; it also lets us delete `parser__head_body_arg` and the `[\` hack.
-   - **`$var` = closure, `[…]` = block — no lambda special-case.** Inline
-     closures (`for $coll [\ …]`) are **dropped**; their role is taken by
-     auto/explicit-binding blocks: `filter $coll [> $idx $it]` or
-     `filter $coll index item [> $index $item]`, with `filter $coll $cb` for a
-     bound closure. A block is *inlined* with the bindings in scope, which
-     subsumes (and improves on) the Phase-A monomorphization that keyed on the
-     inline literal. All iteration forms become macros over one core `for`.
-     (This is the larger follow-on slice; not yet implemented.)
+   **Resolution (settled, implemented):**
+   - **Special forms self-identify their body slots.** The parser keeps a
+     small head→body-arg table (`parser__head_body_arg`: for/try/spawn/
+     with-ctx/parallel/race) that parses those slots as `[do …]` sequences.
+     This is **load-bearing, not a wart**: making bodies `[do]` nodes is what
+     lets the whole pipeline (parser → typer → compiler → SM/liveness
+     analysis) recognize a body uniformly via `ast__is_seq`. Removing it would
+     push body re-identification into ~20+ dispatch sites across three
+     codebases (including suspending-loop analysis) — a bad trade. Keep it.
+   - **Macros use the `[do ~body]` discipline.** A macro can't be in the
+     parser table (macros register at compile time, the parser runs first), so
+     a single-statement `[…]` arg to a macro head collapses to a call before
+     the macro sees it. Body-taking macro templates wrap the splice:
+     `timeout` → `[race [do ~body] …]`, `unless` → `[if ~c [] [do ~body]]`.
+     Done — `timeout`/`unless` take bracket bodies; the brace holdouts are gone.
+   - **Inline closures stay.** `transform`/`filter` (and HOFs generally) are
+     lazy stream adapters that *store a closure* and call it per `stream_next`
+     — they have to take closures, and the typed-closure monomorphization
+     (TYPED_CLOSURES_DESIGN.md, complete & sound) depends on the inline literal
+     at those sites. So `transform $s [\ * $it 2]` / `filter $s $cb` are
+     unchanged. **`for` is the one construct that must distinguish a block
+     (loop body, `for $c [print $it]`) from an inline closure (callback,
+     `for $c [\ …]` / `for $c $cb`)** — that's inherent, so the `[\` peek that
+     does the disambiguation is legitimate. The earlier idea of dropping inline
+     closures + making all iteration macros over `for` (with a unified `iter`
+     primitive) was **abandoned**: it turns lazy adapters eager / forces a
+     heavier generator representation (perf regression) and unwinds the sound
+     stream + typed-closure design for no real gain.
    - **`do` args stay value-position.** `[do [slow]]` is correct; `[do slow]`
      (slow = atom) is not, and `[do this that]` has no sensible reading — so
      `do` is not changed.
@@ -319,9 +325,13 @@ Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
   - `struct Name [i32 x, i32 y]` and `use "path" [a, b]` (delimiter
     auto-detect, like proc params).
   - Covered by `test/jacl/bracket_bodies.jacl` + `modules/use_bracket`.
-  Remaining for ACTUAL `{}` removal: scripted corpus debrace (~396 .jacl files
-  + embedded C sources), SYNTAX.md/AGENTS.md/playground-highlighter updates,
-  then drop `{}` from the value/body grammar (and step 6 rides along).
+  Remaining for ACTUAL `{}` removal: the `.jacl` corpus is DONE (debraced via
+  `tools/debrace.py`; only comments, pragma bodies, inline struct types, and
+  error-message strings still contain `{`). Left: the embedded JACL in C test
+  strings (NOT safely auto-debraceable — source braces are indistinguishable
+  from expected-output `{ body }` strings; needs per-file judgment), the
+  playground highlighter, then drop `{}` from the value/body grammar (step 6,
+  delete `AST_BLOCK`, rides along).
 - Step 6 (delete `AST_BLOCK`) is now unblocked: no test file asserts the node
   type anymore except via the accessors; remaining references are the parser
   internals, dispatch cases, syntax converters, and 2 synthetic fake_blocks
