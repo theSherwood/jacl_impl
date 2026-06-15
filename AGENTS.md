@@ -33,8 +33,8 @@
   single-statement `[…]` arg to a NON-special head collapses to a call,
   so macro body args and `timeout`'s body arg still need `{…}` (e.g.
   `unless [c] { set hit 5 }`, `timeout 0.02 { slow }`). Inline struct
-  types (`struct{x:i32}`) and `#{ … }` pragma bodies are brace-only by
-  grammar. These are the only places `{}` is still required.
+  types are written `struct [i32 x]` (bracketed, type-name order). The only
+  remaining `{}` is the legacy block/list alias, on its way out.
 - This applies to test sources (`.c` strings, `test/jacl/*.jacl`) and
   any sample code in docs.
 - For a single-file survey of working JACL syntax, see

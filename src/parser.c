@@ -1008,22 +1008,23 @@ AstNode* parser__parse_use(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
-  /* Consume TOKEN_WORD("struct") */
-  parser__advance(p);
-  /* Consume TOKEN_LBRACE */
-  if (!parser__is_block_open(parser__peek(p)->type)) {
-    parser__error(p, "expected '{' after 'struct' in inline type", parser__peek(p));
+  /* Surface form: `struct [type name, type name, …]` (bracketed, type-name
+   * order — same as a named struct's field list). The internal canonical
+   * string stays `struct{name:type,…}` (an internal type key, never re-lexed;
+   * consumed by compiler__register_inline_struct + the typer mirror). */
+  parser__advance(p); /* consume 'struct' */
+  if (parser__peek(p)->type != TOKEN_LBRACKET) {
+    parser__error(p, "expected '[' after 'struct' in inline type", parser__peek(p));
     return NULL;
   }
   parser__advance(p);
 
-  /* Build canonical string in a stack buffer */
   char buf[512];
   uint32_t pos = 0;
   memcpy(buf + pos, "struct{", 7); pos += 7;
 
   int first = 1;
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
     if (!first) {
       if (parser__peek(p)->type != TOKEN_COMMA) {
         parser__error(p, "expected ',' between inline struct fields", parser__peek(p));
@@ -1034,78 +1035,48 @@ const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
     }
     first = 0;
 
-    /* Field name: TOKEN_WORD */
+    /* Field TYPE first: a type word/keyword, or a nested `struct [...]`. */
+    Token* tname = parser__peek(p);
+    const char* type_str; uint32_t type_len;
+    if ((tname->type == TOKEN_STRUCT ||
+         (tname->type == TOKEN_WORD && tname->length == 6 &&
+          memcmp(tname->payload.text, "struct", 6) == 0)) &&
+        p->pos + 1 < p->count &&
+        p->tokens[p->pos + 1].type == TOKEN_LBRACKET) {
+      uint32_t nested_len = 0;
+      type_str = parser__parse_inline_struct_type(p, &nested_len);
+      if (!type_str) return NULL;
+      type_len = nested_len;
+    } else if (tname->type == TOKEN_WORD) {
+      parser__advance(p);
+      type_str = tname->payload.text;
+      type_len = tname->length;
+    } else {
+      parser__error(p, "expected field type in inline struct field", tname);
+      return NULL;
+    }
+
+    /* Field NAME. */
     Token* fname = parser__peek(p);
     if (fname->type != TOKEN_WORD) {
-      parser__error(p, "expected field name in inline struct", fname);
+      parser__error(p, "expected field name after type in inline struct", fname);
       return NULL;
     }
     parser__advance(p);
-    if (pos + fname->length + 1 >= sizeof(buf)) {
+
+    /* Canonical: name:type */
+    if (pos + fname->length + 1 + type_len >= sizeof(buf)) {
       parser__error(p, "inline struct type too long", fname);
       return NULL;
     }
-    memcpy(buf + pos, fname->payload.text, fname->length);
-    pos += fname->length;
-
-    /* Colon: TOKEN_COLON or TOKEN_OPERATOR starting with ':' */
-    Token* colon = parser__peek(p);
-    int is_colon = (colon->type == TOKEN_COLON) ||
-                   (colon->type == TOKEN_OPERATOR && colon->length >= 1 &&
-                    colon->payload.text[0] == ':');
-    if (!is_colon) {
-      parser__error(p, "expected ':type' in inline struct field", colon);
-      return NULL;
-    }
-    parser__advance(p);
+    memcpy(buf + pos, fname->payload.text, fname->length); pos += fname->length;
     buf[pos++] = ':';
-
-    if (colon->type == TOKEN_OPERATOR && colon->length > 1) {
-      /* :i32 etc — type is rest of operator token */
-      uint32_t tlen = colon->length - 1;
-      const char* tstr = colon->payload.text + 1;
-      if (pos + tlen >= sizeof(buf)) {
-        parser__error(p, "inline struct type too long", colon);
-        return NULL;
-      }
-      memcpy(buf + pos, tstr, tlen);
-      pos += tlen;
-    } else {
-      /* Just ':' — check for nested struct or type name */
-      Token* tname = parser__peek(p);
-      if ((tname->type == TOKEN_STRUCT ||
-           (tname->type == TOKEN_WORD && tname->length == 6 &&
-            memcmp(tname->payload.text, "struct", 6) == 0)) &&
-          p->pos + 1 < p->count &&
-          p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-        /* Recursive inline struct */
-        uint32_t nested_len = 0;
-        const char* nested = parser__parse_inline_struct_type(p, &nested_len);
-        if (!nested) return NULL;
-        if (pos + nested_len >= sizeof(buf)) {
-          parser__error(p, "inline struct type too long", tname);
-          return NULL;
-        }
-        memcpy(buf + pos, nested, nested_len);
-        pos += nested_len;
-      } else if (tname->type == TOKEN_WORD) {
-        parser__advance(p);
-        if (pos + tname->length >= sizeof(buf)) {
-          parser__error(p, "inline struct type too long", tname);
-          return NULL;
-        }
-        memcpy(buf + pos, tname->payload.text, tname->length);
-        pos += tname->length;
-      } else {
-        parser__error(p, "expected type name in inline struct field", tname);
-        return NULL;
-      }
-    }
+    memcpy(buf + pos, type_str, type_len); pos += type_len;
   }
 
-  /* Expect '}' */
-  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
-    parser__error(p, "expected '}' to close inline struct type", parser__peek(p));
+  /* Expect ']' */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACKET) {
+    parser__error(p, "expected ']' to close inline struct type", parser__peek(p));
     return NULL;
   }
   parser__advance(p);
@@ -1234,8 +1205,8 @@ AstNode* parser__parse_defstruct(Parser* p) {
         parser__advance(p);
       } else if (type_tok->type == TOKEN_STRUCT &&
                  p->pos + 1 < p->count &&
-                 p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-        /* Inline struct type: struct{...} */
+                 p->tokens[p->pos + 1].type == TOKEN_LBRACKET) {
+        /* Inline struct type: struct [type name, …] */
         uint32_t inline_len = 0;
         type_str = parser__parse_inline_struct_type(p, &inline_len);
         if (!type_str) {

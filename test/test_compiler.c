@@ -4706,7 +4706,7 @@ static int test_defstruct_ref_type_rejected(void) {
 
   /* inline anonymous struct with a ref field is rejected */
   CompileResult cr5 = compile_source(
-      "struct Outer {struct{x:i32,name:str} inner}", &arena, &heap);
+      "struct Outer {struct [i32 x, str name] inner}", &arena, &heap);
   ASSERT(cr5.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -7091,7 +7091,7 @@ static int test_inline_struct_runtime(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "struct Wrapper {struct{x:i32,y:i32} pos}\n"
+      "struct Wrapper {struct [i32 x, i32 y] pos}\n"
       "proc main {} {\n"
       "  def w [Wrapper pos [Point x 42 y 10]]\n"
       "  print $w->pos->x\n"
@@ -7115,7 +7115,7 @@ static int test_inline_struct_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct Wrapper {struct{x:i32,y:i32} pos}", &arena, &heap);
+      "struct Wrapper {struct [i32 x, i32 y] pos}", &arena, &heap);
   if (cr.error_count > 0) {
     printf("ERRORS: %u\n", cr.error_count);
   }
@@ -7139,8 +7139,8 @@ static int test_inline_struct_equivalence(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct A {struct{x:i32,y:i32} p}\n"
-      "struct B {struct{x:i32,y:i32} q}", &arena, &heap);
+      "struct A {struct [i32 x, i32 y] p}\n"
+      "struct B {struct [i32 x, i32 y] q}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Registry: anon_struct (shared), A, B = 3 struct types + ctx
      (count includes reserved slot 0, so count == 5) */
@@ -7161,7 +7161,7 @@ static int test_inline_struct_nested(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct C {struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}} d}",
+      "struct C {struct [struct [i32 x, i32 y] start, struct [i32 x, i32 y] end] d}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
