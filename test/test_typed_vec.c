@@ -642,7 +642,7 @@ static int test_typed_vec_each_lambda(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point x 1 y 2] [Point x 3 y 4] [Point x 5 y 6]]\n"
-    "[for $points [\\ print $it]]",
+    "[for $points [print $it]]",
     &cap, "[Point x 1 y 2]\n[Point x 3 y 4]\n[Point x 5 y 6]\n"));
   TEST_PASS();
 }

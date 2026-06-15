@@ -12708,14 +12708,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bind_name = args[2]->data.lit_string.value;
       bind_name_len = args[2]->data.lit_string.length;
       body_block = args[3];
-    } else if (argc == 2 && args[1]->type == AST_COMMAND) {
-      /* [for $collection [\ body]] — lambda callback via OP_EACH */
-      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, UINT32_MAX, line, col);
-      return;
     } else {
       compiler__error(c, line, col,
-          "for requires: $collection { body }, $collection [enum] value "
-          "{ body }, or $collection $callback");
+          "for requires: $collection [body], $collection [enum] value "
+          "[body], or $collection $callback");
       return;
     }
     if (enum_name && enum_name_len > 128) {

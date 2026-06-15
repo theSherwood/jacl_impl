@@ -1667,7 +1667,7 @@ static int test_roundtrip_pipe(void) {
 static int test_roundtrip_lambda(void) {
   setup();
   /* Lambda desugars to proc — roundtrip on desugared form */
-  ASSERT(roundtrip_ok("for [vec 1 2 3] [\\ print $it]"));
+  ASSERT(roundtrip_ok("for [vec 1 2 3] [print $it]"));
   ASSERT(roundtrip_ok("[\\ $+ $it 1]"));
   teardown();
   ASSERT(check_no_leaks());
@@ -3024,20 +3024,23 @@ static int test_lambda_basic(void) {
 }
 
 static int test_lambda_as_callback(void) {
-  /* for $items [\\ print $it] — lambda used as callback */
+  /* []-flip: for's bracket arg is ALWAYS a block (no `[\` peek). A `[\ …]`
+   * there is a one-element block, not a callback. The callback form is a
+   * bare `$var`. */
   setup();
-  ParseResult r = parse("for $items [\\ print $it]");
+  /* Bracket arg → block (a [do …] seq). */
+  ParseResult r = parse("for $items [print $it]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* second arg is lambda command [\ print $it] */
-  AstNode* lambda = n->data.command.args[1];
-  ASSERT(lambda->type == AST_COMMAND);
-  ASSERT(lambda->data.command.head->data.lit_string.value[0] == '\\');
-  ASSERT_U32_EQ(lambda->data.command.arg_count, 2); /* print, $it */
+  ASSERT(ast__is_seq(n->data.command.args[1]));   /* block body */
+  /* Var-ref arg → callback. */
+  ParseResult r2 = parse("for $items $cb");
+  ASSERT_U32_EQ(r2.error_count, 0);
+  ASSERT(r2.nodes[0]->data.command.args[1]->type == AST_VAR_REF);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();

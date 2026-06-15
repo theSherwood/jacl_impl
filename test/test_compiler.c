@@ -9631,7 +9631,7 @@ static int test_lambda_basic_call(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
-      "for [vec 10 20 30] [\\ print $it]",
+      "for [vec 10 20 30] [print $it]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
@@ -9657,7 +9657,7 @@ static int test_lambda_arithmetic(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
-      "for [vec 1 2 3] [\\ print [+ $it 10]]",
+      "for [vec 1 2 3] [print [+ $it 10]]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "11\n12\n13\n");
@@ -9683,7 +9683,7 @@ static int test_lambda_each_compat(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
-      "for [vec 3 5 7] [\\ print [* $it 2]]",
+      "for [vec 3 5 7] [print [* $it 2]]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "6\n10\n14\n");
@@ -9710,7 +9710,7 @@ static int test_lambda_upvalue(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "x = 100\n"
-      "for [vec 1 2 3] [\\ print [+ $it $x]]",
+      "for [vec 1 2 3] [print [+ $it $x]]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "101\n102\n103\n");
@@ -9763,7 +9763,7 @@ static int test_lambda_in_pipe(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
-      "for [vec 5 10 15] [\\ print [* $it 3]]",
+      "for [vec 5 10 15] [print [* $it 3]]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "15\n30\n45\n");

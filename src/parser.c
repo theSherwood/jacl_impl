@@ -2670,11 +2670,11 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
       parser__arr_push(&args, spread);
       continue;
     }
-    /* Body-position `[…]`: parse as a sequence for body-taking heads. A
-     * `[\ …]` lambda stays a value (for's HOF callback form). */
+    /* Body-position `[…]`: parse as a sequence for body-taking heads. Any
+     * `[…]` in a body slot is a block — including `[\ …]` (which becomes a
+     * one-element block, not a callback). The callback form is `head $var`
+     * (a var-ref), not a bracket. */
     if (parser__peek(p)->type == TOKEN_LBRACKET &&
-        p->pos + 1 < p->count &&
-        p->tokens[p->pos + 1].type != TOKEN_BACKSLASH &&
         parser__head_body_arg(head, args.count)) {
       AstNode* body = parser__parse_body_seq(p);
       if (body == NULL) break;

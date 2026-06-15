@@ -124,19 +124,23 @@ Each parsed by a dedicated, position-aware parser; the `do` lowering does
      the macro sees it. Body-taking macro templates wrap the splice:
      `timeout` → `[race [do ~body] …]`, `unless` → `[if ~c [] [do ~body]]`.
      Done — `timeout`/`unless` take bracket bodies; the brace holdouts are gone.
-   - **Inline closures stay.** `transform`/`filter` (and HOFs generally) are
-     lazy stream adapters that *store a closure* and call it per `stream_next`
-     — they have to take closures, and the typed-closure monomorphization
-     (TYPED_CLOSURES_DESIGN.md, complete & sound) depends on the inline literal
-     at those sites. So `transform $s [\ * $it 2]` / `filter $s $cb` are
-     unchanged. **`for` is the one construct that must distinguish a block
-     (loop body, `for $c [print $it]`) from an inline closure (callback,
-     `for $c [\ …]` / `for $c $cb`)** — that's inherent, so the `[\` peek that
-     does the disambiguation is legitimate. The earlier idea of dropping inline
-     closures + making all iteration macros over `for` (with a unified `iter`
-     primitive) was **abandoned**: it turns lazy adapters eager / forces a
-     heavier generator representation (perf regression) and unwinds the sound
-     stream + typed-closure design for no real gain.
+   - **Inline closures stay as HOF arguments; `[…]` in a body slot is always
+     a block.** `transform`/`filter` (and HOFs generally) are lazy stream
+     adapters that *store a closure* and call it per `stream_next` — they take
+     closures, and the typed-closure monomorphization (TYPED_CLOSURES_DESIGN.md,
+     complete & sound) depends on the inline literal at those sites. So
+     `transform $s [\ * $it 2]` / `filter $s $cb` are unchanged — there a `[\ …]`
+     is a lambda *value* in arg position, parsed normally.
+     **`for`/`while` treat any `[…]` arg as a block, full stop — there is no
+     `[\` peek.** The for callback form is a bare `$var` (`for $c $cb`); a
+     `[\ …]` in for's body slot is just a one-element block, not a callback (so
+     `for $c [\ print $it]` is dropped — write `for $c [print $it]`; the loop
+     already binds `$it`). This removes the parser special-case entirely while
+     keeping inline closures where they belong (HOF value args). The broader
+     idea of dropping inline closures everywhere + making all iteration macros
+     over `for` (with a unified `iter` primitive) was **abandoned**: it turns
+     lazy adapters eager / forces a heavier generator representation (perf
+     regression) and unwinds the sound stream + typed-closure design for no gain.
    - **`do` args stay value-position.** `[do [slow]]` is correct; `[do slow]`
      (slow = atom) is not, and `[do this that]` has no sensible reading — so
      `do` is not changed.
@@ -320,8 +324,8 @@ Pending (other) — all bigger/deeper than "clean slices" (verified this pass):
     in parse_cmd_operand): `for $coll [body]`, C-style `for [i = 0; …] [body]`,
     `try [body] e [handler]`, `spawn [body]`, `parallel`/`race` (all args),
     `with-ctx [overrides] [body]`. Parsed via parse_body_seq (always-do, no
-    collapse); a `[\ …]` lambda arg stays a value so for's HOF callback form
-    is unchanged.
+    collapse). A body-slot `[…]` is ALWAYS a block — no `[\` peek; the for
+    callback form is a bare `$var` (`for $coll $cb`).
   - `struct Name [i32 x, i32 y]` and `use "path" [a, b]` (delimiter
     auto-detect, like proc params).
   - Covered by `test/jacl/bracket_bodies.jacl` + `modules/use_bracket`.

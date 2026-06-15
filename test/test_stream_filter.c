@@ -155,7 +155,7 @@ static int test_filter_for_each(void) {
     "  yield 3\n"
     "  yield 4\n"
     "}\n"
-    "for [filter [gen] [\\ $> $it 2]] [\\ print $it]\n",
+    "for [filter [gen] [\\ $> $it 2]] [print $it]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n4\n");

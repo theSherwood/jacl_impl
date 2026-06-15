@@ -2,13 +2,13 @@
 # expect: 3000000000
 # expect: 4000000000
 # expect: ok
-# `each` monomorphization (TYPED_CLOSURES_DESIGN.md Phase A): `for $stream [\ body]`
-# is the HOF callback form (OP_EACH). Over a wide i64 stream the inline callback
-# is typed to read $it wide, so the pull hands the element over wide with no
-# box-for-call, and wide arithmetic in the body works on it directly. Values
-# past INT32_MAX guard against tag confusion at the callback boundary.
+# `for $stream [body]` — the block iterates the stream, binding $it to each
+# element. Over a wide i64 stream the binding narrows to i64, so the element is
+# handed over wide and wide arithmetic in the body works on it directly. Values
+# past INT32_MAX guard against tag confusion at the binding boundary. (The
+# transform mapper is still an inline closure — HOFs keep closures.)
 proc main [] [
-  for [transform [range 1 4] [\ $* $it 1000000000]] [\ print [+ $it 1000000000]]
+  for [transform [range 1 4] [\ $* $it 1000000000]] [print [+ $it 1000000000]]
   print "ok"                        # prints 2e9, 3e9, 4e9
 ]
 main

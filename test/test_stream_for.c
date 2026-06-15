@@ -184,7 +184,7 @@ static int test_for_stream_lambda(void) {
     "  yield 6\n"
     "  yield 7\n"
     "}\n"
-    "for [gen] [\\ print $it]\n",
+    "for [gen] [print $it]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n6\n7\n");
