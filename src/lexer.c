@@ -76,8 +76,7 @@ typedef enum {
   TOKEN_CARET_WORD,       /* ^identifier (caller-scope inside syntax-quote) */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
-  TOKEN_EOF,              /* end of input */
-  TOKEN_PRAGMA            /* #{ ... } pragma */
+  TOKEN_EOF               /* end of input */
 } TokenType;
 
 /* -------------------------------------------------------------------------
@@ -1443,52 +1442,10 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
-    /* Pragmas: #{ ... } or Comments: # to end of line */
+    /* Comments: # to end of line. (The `#{ … }` pragma form was removed — it
+     * was parsed-and-ignored dead syntax.) */
     if (c == '#') {
-      uint32_t start = lex.pos;
-      uint32_t sline = lex.line;
-      uint32_t scol  = lex.col;
       lexer__advance(&lex);
-
-      if (lexer__peek(&lex) == '{') {
-        /* Pragma: #{ ... } — scan to matching } */
-        lexer__advance(&lex); /* consume '{' */
-        StringBuf sb;
-        strbuf_init(&sb, lex.arena);
-        int depth = 1;
-        while (lexer__peek(&lex) != '\0' && depth > 0) {
-          char pc = lexer__peek(&lex);
-          if (pc == '{') depth++;
-          else if (pc == '}') { depth--; if (depth == 0) break; }
-          if (pc == '\n' || pc == '\r') {
-            lexer__advance(&lex);
-            if (pc == '\r' && lexer__peek(&lex) == '\n')
-              lexer__advance(&lex);
-            strbuf_push(&sb, '\n');
-            lex.line++;
-            lex.col = 1;
-            continue;
-          }
-          strbuf_push(&sb, pc);
-          lexer__advance(&lex);
-        }
-        if (lexer__peek(&lex) == '}') {
-          lexer__advance(&lex); /* consume closing '}' */
-        } else {
-          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-          tok.payload.error_msg = "unterminated pragma";
-          lexer__arr_push(&arr, tok);
-          error_count++;
-          continue;
-        }
-        strbuf_push(&sb, '\0');
-        Token tok = lexer__make_token(&lex, TOKEN_PRAGMA, start, sline, scol);
-        tok.payload.text = sb.data;
-        lexer__arr_push(&arr, tok);
-        continue;
-      }
-
-      /* Regular comment: skip to end of line */
       while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '\n'
              && lexer__peek(&lex) != '\r') {
         lexer__advance(&lex);

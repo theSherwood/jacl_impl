@@ -1080,7 +1080,7 @@ LOC (single-header), grand total ≈ 79k LOC.
 | Jobs (Future + OS process map) | +150 marginal over `spawn` | Mostly inside OP_EXEC / AWAIT_JOB / SIGNAL above. |
 | `spawn` / `await` / `parallel` / `race` (state machines, scheduling) | ~1,300 | vm AWAIT_SM (164) + SPAWN (94) + PARALLEL (187) + RACE (156) + RESOLVE_FUTURE (24) + CALL_SUSPEND (129) + COMPLETE_PARALLEL/RACE (~40) + gc.c future/parallel-agg/race-agg (~200) + compiler SPAWN/AWAIT/PARALLEL/RACE (~280). |
 | State machine transform (suspension analysis, liveness, body compile, dispatch table) | ~2,800 | compiler.c suspension+SM analysis+liveness+body compile (~2,500) + vm SM resume / state-field opcodes (~250) + gc.c JaclStateMachine (39). Biggest single piece of compiler complexity. Underlies both async and generators. |
-| Pragmas `#{...}` | ~30 | Lexer recognition stub. |
+| ~~Pragmas `#{...}`~~ | — | Removed (was a ~30 LOC parsed-and-ignored lexer stub). |
 
 ### 9.3 Library code carried by the runtime (single-header)
 

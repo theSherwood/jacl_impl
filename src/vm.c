@@ -13868,14 +13868,33 @@ interpret_done:
 
         VMFormatBuf fmt;
         vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
-        vm__fmt_append(&fmt, "{", 1);
+        /* Reader-symmetric form: print as the constructor `[[Map K V] k v …]`
+         * (matches how it's built; consistent with the dyn-map [map …] form). */
+        vm__fmt_append(&fmt, "[[Map ", 6);
+        if (key_is_scalar) {
+          const char* tn = type_name(key_t); uint32_t tl = 0; while (tn[tl]) tl++;
+          vm__fmt_append(&fmt, tn, tl);
+        } else if (kdef) {
+          vm__fmt_append(&fmt, kdef->name, kdef->name_len);
+        } else {
+          vm__fmt_append(&fmt, "dyn", 3);
+        }
+        vm__fmt_append(&fmt, " ", 1);
+        if (val_is_scalar) {
+          const char* tn = type_name(val_t); uint32_t tl = 0; while (tn[tl]) tl++;
+          vm__fmt_append(&fmt, tn, tl);
+        } else if (sdef) {
+          vm__fmt_append(&fmt, sdef->name, sdef->name_len);
+        } else {
+          vm__fmt_append(&fmt, "dyn", 3);
+        }
+        vm__fmt_append(&fmt, "]", 1);
         jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
         jacl_typed_map_iter_result ir;
-        uint32_t idx = 0;
         for (;;) {
           ir = jacl_typed_map_next_leaf(&it);
           if (ir.done) break;
-          if (idx > 0) vm__fmt_append(&fmt, ", ", 2);
+          vm__fmt_append(&fmt, " ", 1);
           /* Format key */
           if (kdef) {
             const JaclVal* key_ptr = ir.item->slots;
@@ -13886,7 +13905,7 @@ interpret_done:
             JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
             vm__fmt_value(&fmt, key);
           }
-          vm__fmt_append(&fmt, ": ", 2);
+          vm__fmt_append(&fmt, " ", 1);
           /* Format value */
           const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
           if (val_is_scalar) {
@@ -13894,9 +13913,8 @@ interpret_done:
           } else {
             vm__fmt_struct_data(&fmt, sdef, (const uint8_t*)val_ptr);
           }
-          idx++;
         }
-        vm__fmt_append(&fmt, "}\n", 2);
+        vm__fmt_append(&fmt, "]\n", 2);
         vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;

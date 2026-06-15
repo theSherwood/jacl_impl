@@ -307,7 +307,7 @@ static int test_typed_map_print(void) {
     "struct Point {i32 x, i32 y}\n"
     "def m [[Map dyn Point] \"a\" [Point x 1 y 2]]\n"
     "[print $m]",
-    &cap, "{\"a\": [Point x 1 y 2]}\n"));
+    &cap, "[[Map dyn Point] \"a\" [Point x 1 y 2]]\n"));
   TEST_PASS();
 }
 
@@ -316,7 +316,7 @@ static int test_typed_map_print_empty(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "[print [[Map dyn Point]]]",
-    &cap, "{}\n"));
+    &cap, "[[Map dyn Point]]\n"));
   TEST_PASS();
 }
 
@@ -730,7 +730,7 @@ static int test_skey_print(void) {
     "struct Point {i32 x, i32 y}\n"
     "def m [[Map Id Point] [Id n 42] [Point x 1 y 2]]\n"
     "[print $m]\n",
-    &cap, "{[Id n 42]: [Point x 1 y 2]}\n"));
+    &cap, "[[Map Id Point] [Id n 42] [Point x 1 y 2]]\n"));
   TEST_PASS();
 }
 
@@ -909,7 +909,7 @@ static int test_typed_map_scalar_value_print(void) {
   ASSERT(run_ok(
     "def m [[Map dyn i64] \"x\" 10]\n"
     "print $m",
-    &cap, "{\"x\": 10}\n"));
+    &cap, "[[Map dyn i64] \"x\" 10]\n"));
   TEST_PASS();
 }
 
