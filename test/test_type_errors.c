@@ -433,7 +433,7 @@ static void run_all(void) {
    * pre-rewrite and applies the field-type check. */
   RUN("ctx_set_arrow_type_mismatch", {
     .source =
-      "ctx mut i32 level = 42\n"
+      "ctx mut i32 level 42\n"
       "set $ctx->level \"hello\"",
     .expect_substrings = { "type error", "level", "i32", "str" },
   });

@@ -5,5 +5,5 @@ proc gen {} {
   yield 20
   yield 30
 }
-s = [gen]
+def s [gen]
 print [+ ..$s]

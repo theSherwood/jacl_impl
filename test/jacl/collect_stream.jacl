@@ -7,5 +7,5 @@ proc gen {} {
   yield 3
 }
 print [collect [gen]]
-v = [vec 1 2 3]
+def v [vec 1 2 3]
 print [collect $v]

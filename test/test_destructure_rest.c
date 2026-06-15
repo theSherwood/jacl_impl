@@ -97,7 +97,7 @@ static int test_vec_rest_mut(void) {
     "[mut [head ..rest] [vec 10 20 30]]\n"
     "[print $head]\n"
     "[print $rest]\n"
-    "head :: 99\n"
+    "set head 99\n"
     "[print $head]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -148,7 +148,7 @@ static int test_named_rest_struct(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y, i32 z}\n"
     "proc main {} {\n"
-    "  p = [Point x 10 y 20 z 30]\n"
+    "  def p [Point x 10 y 20 z 30]\n"
     "  [def {x, ..rest} $p]\n"
     "}\n"
     "main\n",
@@ -162,7 +162,7 @@ static int test_named_rest_struct(void) {
 static int test_named_rest_map(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "m = [map \"x\" 100 \"y\" 200 \"z\" 300]\n"
+    "def m [map \"x\" 100 \"y\" 200 \"z\" 300]\n"
     "[def {x, ..rest} $m]\n"
     "[print $x]\n"
     "[print [map-get $rest \"y\"]]\n"
@@ -178,10 +178,10 @@ static int test_named_rest_map(void) {
 static int test_named_rest_mut(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "m = [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
+    "def m [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
     "[mut {a, ..rest} $m]\n"
     "[print $a]\n"
-    "a :: 99\n"
+    "set a 99\n"
     "[print $a]\n"
     "[print [map-get $rest \"b\"]]\n",
     &cap);
@@ -195,7 +195,7 @@ static int test_named_rest_mut(void) {
 static int test_named_rest_excludes(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "m = [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
+    "def m [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
     "[def {a, b, ..rest} $m]\n"
     "[print $a]\n"
     "[print $b]\n"
@@ -227,7 +227,7 @@ static int test_vec_rest_global(void) {
 static int test_named_rest_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "m = [map \"x\" 10 \"y\" 20 \"z\" 30]\n"
+    "def m [map \"x\" 10 \"y\" 20 \"z\" 30]\n"
     "[def {x, ..rest} $m]\n"
     "[print $x]\n"
     "[print [map-get $rest \"y\"]]\n",

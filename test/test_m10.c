@@ -56,7 +56,7 @@ static int test_mut_returns_nil(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "proc t {} {\n"
-    "  r = [mut x 42]\n"
+    "  def r [mut x 42]\n"
     "  print $r\n"
     "}\n"
     "[t]",
@@ -71,7 +71,7 @@ static int test_set_local_basic(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut x 0\n"
-    "  x :: 42\n"
+    "  set x 42\n"
     "  print $x\n"
     "}\n"
     "[t]",
@@ -84,7 +84,7 @@ static int test_set_local_expr(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut y 10\n"
-    "  y :: [+ $y 5]\n"
+    "  set y [+ $y 5]\n"
     "  print $y\n"
     "}\n"
     "[t]",
@@ -97,9 +97,9 @@ static int test_set_local_multiple(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut x 0\n"
-    "  x :: 1\n"
-    "  x :: 2\n"
-    "  x :: 3\n"
+    "  set x 1\n"
+    "  set x 2\n"
+    "  set x 3\n"
     "  print $x\n"
     "}\n"
     "[t]",
@@ -112,7 +112,7 @@ static int test_set_returns_nil(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut x 0\n"
-    "  r = [set x 42]\n"
+    "  def r [set x 42]\n"
     "  print $r\n"
     "}\n"
     "[t]",
@@ -126,7 +126,7 @@ static int test_set_immutable_def_error(void) {
   ASSERT(run_err(
     "proc t {} {\n"
     "  def x 1\n"
-    "  x :: 2\n"
+    "  set x 2\n"
     "}\n",
     "cannot mutate immutable binding"));
   TEST_PASS();
@@ -135,7 +135,7 @@ static int test_set_immutable_def_error(void) {
 static int test_set_param_error(void) {
   ASSERT(run_err(
     "proc t {x} {\n"
-    "  x :: 2\n"
+    "  set x 2\n"
     "}\n",
     "cannot mutate parameter"));
   TEST_PASS();
@@ -144,7 +144,7 @@ static int test_set_param_error(void) {
 static int test_set_undeclared_error(void) {
   ASSERT(run_err(
     "proc t {} {\n"
-    "  zzz :: 1\n"
+    "  set zzz 1\n"
     "}\n",
     "undefined variable"));
   TEST_PASS();
@@ -156,8 +156,8 @@ static int test_mut_global_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut cnt 0\n"
-    "cnt :: 1\n"
-    "cnt :: [+ $cnt 1]\n"
+    "set cnt 1\n"
+    "set cnt [+ $cnt 1]\n"
     "[print $cnt]",
     &cap, "2\n"));
   TEST_PASS();
@@ -167,9 +167,9 @@ static int test_mut_global_multiple_set(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut g 0\n"
-    "g :: 10\n"
-    "g :: 20\n"
-    "g :: 30\n"
+    "set g 10\n"
+    "set g 20\n"
+    "set g 30\n"
     "[print $g]",
     &cap, "30\n"));
   TEST_PASS();
@@ -178,7 +178,7 @@ static int test_mut_global_multiple_set(void) {
 static int test_set_global_immutable_error(void) {
   ASSERT(run_err(
     "def x 1\n"
-    "x :: 2",
+    "set x 2",
     "cannot mutate immutable binding"));
   TEST_PASS();
 }
@@ -209,7 +209,7 @@ static int test_closure_bidirectional(void) {
     "proc test {} {\n"
     "  mut x 0\n"
     "  proc get {} { + $x 0 }\n"
-    "  x :: 42\n"
+    "  set x 42\n"
     "  print [get]\n"
     "}\n"
     "[test]",

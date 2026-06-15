@@ -2,7 +2,7 @@
 # expect: 42
 # Test: parallel bodies each get independent ctx copies
 # Each body mutates ctx->level but parent's ctx is unchanged
-ctx mut i32 level = 42
+ctx mut i32 level 42
 proc main {} {
   def r [parallel {
     set $ctx->level 10

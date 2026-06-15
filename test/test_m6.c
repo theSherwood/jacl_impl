@@ -76,7 +76,7 @@ static int test_var_cmd(void) {
 
   const char* program =
     "proc f {} { 42 }\n"
-    "g = $f\n"
+    "def g $f\n"
     "print [$g]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -174,7 +174,7 @@ static int test_explicit_brackets(void) {
   TEST_SETUP();
 
   const char* program =
-    "x = 42\n"
+    "def x 42\n"
     "[print [+ $x 1]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -205,8 +205,8 @@ static int test_multiline_block(void) {
 
   const char* program =
     "proc f {} {\n"
-    "  x = 10\n"
-    "  y = 20\n"
+    "  def x 10\n"
+    "  def y 20\n"
     "  + $x $y\n"
     "}\n"
     "print [f]";

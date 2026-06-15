@@ -81,7 +81,7 @@ static int run_err(const char* source, const char* err_substr) {
 static int test_def_long_name(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "my_counter = 42\n"
+    "def my_counter 42\n"
     "[print $my_counter]",
     &cap, "42\n"));
   TEST_PASS();
@@ -250,7 +250,7 @@ static int test_name_boundary_7_bytes(void) {
   PrintCapture cap;
   /* 7 bytes: should use inline string */
   ASSERT(run_ok(
-    "abcdefg = 7\n"
+    "def abcdefg 7\n"
     "[print $abcdefg]",
     &cap, "7\n"));
   TEST_PASS();
@@ -260,7 +260,7 @@ static int test_name_boundary_8_bytes(void) {
   PrintCapture cap;
   /* 8 bytes: should use interned string */
   ASSERT(run_ok(
-    "abcdefgh = 8\n"
+    "def abcdefgh 8\n"
     "[print $abcdefgh]",
     &cap, "8\n"));
   TEST_PASS();
@@ -271,7 +271,7 @@ static int test_name_exactly_128_bytes(void) {
   PrintCapture cap;
   /* 128-byte name: should be accepted */
   ASSERT(run_ok(
-    "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffgggggggghhhhhhhhiiiiiiiijjjjjjjjkkkkkkkkllllllllmmmmmmmmnnnnnnnnoooooooopppppppp = 128\n"
+    "def aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffgggggggghhhhhhhhiiiiiiiijjjjjjjjkkkkkkkkllllllllmmmmmmmmnnnnnnnnoooooooopppppppp 128\n"
     "[print $aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffgggggggghhhhhhhhiiiiiiiijjjjjjjjkkkkkkkkllllllllmmmmmmmmnnnnnnnnoooooooopppppppp]",
     &cap, "128\n"));
   TEST_PASS();

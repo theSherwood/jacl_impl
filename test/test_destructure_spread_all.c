@@ -38,7 +38,7 @@ static int test_spread_all_basic(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  p = [Point x 10 y 20]\n"
+    "  def p [Point x 10 y 20]\n"
     "  [def {..} $p]\n"
     "  [print $x]\n"
     "  [print $y]\n"
@@ -57,7 +57,7 @@ static int test_spread_all_explicit_plus(void) {
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
     "proc main {} {\n"
-    "  v = [Vec3 x 1 y 2 z 3]\n"
+    "  def v [Vec3 x 1 y 2 z 3]\n"
     "  [def {x, ..} $v]\n"
     "  [print $x]\n"
     "  [print $y]\n"
@@ -77,7 +77,7 @@ static int test_spread_all_different_struct(void) {
   VMResult r = run_capture(
     "struct Color {i32 r, i32 g, i32 b}\n"
     "proc main {} {\n"
-    "  c = [Color r 255 g 128 b 0]\n"
+    "  def c [Color r 255 g 128 b 0]\n"
     "  [def {..} $c]\n"
     "  [print $r]\n"
     "  [print $g]\n"
@@ -97,7 +97,7 @@ static int test_spread_all_no_dup(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "proc main {} {\n"
-    "  p = [Point x 10 y 20]\n"
+    "  def p [Point x 10 y 20]\n"
     "  [def {y, ..} $p]\n"
     "  [print $x]\n"
     "  [print $y]\n"
@@ -131,8 +131,8 @@ static int test_spread_all_shadow_error(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "proc test {} {\n"
-    "  x = 99\n"
-    "  p = [Point x 10 y 20]\n"
+    "  def x 99\n"
+    "  def p [Point x 10 y 20]\n"
     "  [def {..} $p]\n"
     "  [print $x]\n"
     "}\n"
@@ -148,7 +148,7 @@ static int test_spread_all_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point x 42 y 99]\n",
+    "def p [Point x 42 y 99]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -160,7 +160,7 @@ static int test_spread_all_explicit_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
-    "v = [Vec3 x 5 y 6 z 7]\n",
+    "def v [Vec3 x 5 y 6 z 7]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -191,7 +191,7 @@ static int test_spread_all_single_field(void) {
   VMResult r = run_capture(
     "struct Wrapper {i64 val}\n"
     "proc main {} {\n"
-    "  w = [Wrapper val 100]\n"
+    "  def w [Wrapper val 100]\n"
     "  [def {..} $w]\n"
     "  [print $val]\n"
     "}\n"

@@ -1,6 +1,6 @@
 # expect: alive
 # Test: GC stress — many ctx forks in a loop, strings stay alive
-ctx mut str tag = "alive"
+ctx mut str tag "alive"
 
 mut i 0
 while [< $i 50] {

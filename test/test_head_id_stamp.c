@@ -60,12 +60,12 @@ static void walk(AstNode* n) {
 
 int main(void) {
   const char* src =
-    "def x = 1\n"
+    "def x 1\n"
     "if [< $x 10] { print $x } else { print 0 }\n"
-    "def v = [vec 1 2 3]\n"
-    "def y = [+ 1 2]\n"
-    "while [== $x 1] { def z = [vec-get $v 0] }\n"
-    "proc f {a b} { def r = [+ $a $b]; return $r }\n";
+    "def v [vec 1 2 3]\n"
+    "def y [+ 1 2]\n"
+    "while [== $x 1] { def z [vec-get $v 0] }\n"
+    "proc f {a b} { def r [+ $a $b]; return $r }\n";
 
   arena_t arena = {0};
   LexResult lex = lexer_lex(src, &arena);

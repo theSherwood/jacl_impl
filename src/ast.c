@@ -61,7 +61,6 @@ typedef enum {
   /* Operators */
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
-  HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
   HEAD_DOT, HEAD_QDOT,
@@ -150,8 +149,6 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
         case '%': return HEAD_PERCENT;
         case '<': return HEAD_LT;
         case '>': return HEAD_GT;
-        case '=': return HEAD_EQUALS;
-        case ':': return HEAD_COLON;
         case '|': return HEAD_PIPE;
         case '~': return HEAD_TILDE;
         case '.': return HEAD_DOT;
@@ -162,7 +159,6 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (s[0] == '!' && s[1] == '=') return HEAD_BANG_EQ;
       if (s[0] == '<' && s[1] == '=') return HEAD_LE;
       if (s[0] == '>' && s[1] == '=') return HEAD_GE;
-      if (s[0] == ':' && s[1] == ':') return HEAD_COLON_COLON;
       if (s[0] == '|' && s[1] == '|') return HEAD_PIPE_PIPE;
       if (s[0] == '&' && s[1] == '&') return HEAD_AMP_AMP;
       if (s[0] == '?' && s[1] == '.') return HEAD_QDOT;

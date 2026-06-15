@@ -290,12 +290,10 @@ static void test_map_has_returns_bool(void) {
 }
 
 static void test_def_sugar_returns_nil(void) {
-  /* `x = 5` parses as `[= [x] 5]` (zero-arg AST_COMMAND wrapping name).
-   * The typer must unwrap that shape, just like compiler__rewrite_binding_op,
-   * so the def returns nil instead of leaking dyn. Stage 1 fix. */
+  /* `def x 5` returns nil (a binding is a statement, not a value). */
   current_test = "def_sugar_returns_nil";
   arena_t a = {0};
-  ParseResult r = run_typer("x = 5", &a);
+  ParseResult r = run_typer("def x 5", &a);
   ASSERT_TYPE(r.nodes[0], TYPE_NIL);
   arena_destroy(&a);
 }
@@ -303,7 +301,7 @@ static void test_def_sugar_returns_nil(void) {
 static void test_mut_sugar_returns_nil(void) {
   current_test = "mut_sugar_returns_nil";
   arena_t a = {0};
-  ParseResult r = run_typer("x : 5", &a);
+  ParseResult r = run_typer("mut x 5", &a);
   ASSERT_TYPE(r.nodes[0], TYPE_NIL);
   arena_destroy(&a);
 }
@@ -474,7 +472,7 @@ static void test_with_ctx_inherits_body_type(void) {
   arena_t a = {0};
   /* with-ctx overrides body — result is the body's tail type. */
   ParseResult r = run_typer(
-      "ctx mut i32 level = 0\n"
+      "ctx mut i32 level 0\n"
       "proc f {} { with-ctx { level 5 } { 42 } }", &a);
   AstNode* proc = r.nodes[1];
   AstNode* wc = find_cmd(proc, "with-ctx");

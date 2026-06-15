@@ -242,10 +242,7 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_AND:
     case TOKEN_OR:
     case TOKEN_NOT:
-    case TOKEN_TILDE_AT:
-    case TOKEN_EQUALS:
-    case TOKEN_COLON:
-    case TOKEN_DOUBLE_COLON: {
+    case TOKEN_TILDE_AT: {
       parser__advance(p);
       AstNode* node = ast_alloc(p->arena);
       node->type = AST_LIT_STRING;
@@ -473,11 +470,9 @@ AstNode* parser__parse_command(Parser* p) {
 /* -------------------------------------------------------------------------
  * Internal: Check if a token is a symbolic operator
  *
- * Uniform operator set used in both () and {} modes:
+ * Uniform operator set used in {} mode:
  *   TOKEN_OPERATOR: +, -, *, /, %, ==, !=, <, >, <=, >=
- *   TOKEN_AND: &&   TOKEN_OR: ||
- *   TOKEN_PIPE: |   TOKEN_EQUALS: =
- *   TOKEN_COLON: :  TOKEN_DOUBLE_COLON: ::
+ *   TOKEN_AND: &&   TOKEN_OR: ||   TOKEN_PIPE: |
  * ------------------------------------------------------------------------- */
 
 int parser__is_operator(Token* tok) {
@@ -485,9 +480,6 @@ int parser__is_operator(Token* tok) {
       || tok->type == TOKEN_AND
       || tok->type == TOKEN_OR
       || tok->type == TOKEN_PIPE
-      || tok->type == TOKEN_EQUALS
-      || tok->type == TOKEN_COLON
-      || tok->type == TOKEN_DOUBLE_COLON
 ;
 }
 
@@ -723,9 +715,6 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_AMP:
     case TOKEN_AND:
     case TOKEN_OR:
-    case TOKEN_EQUALS:
-    case TOKEN_COLON:
-    case TOKEN_DOUBLE_COLON:
     /* New keyword tokens */
     case TOKEN_STRUCT:
     case TOKEN_PROC:
@@ -747,6 +736,15 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_EXTERN:
       result = parser__parse_atom(p);
       break;
+
+    case TOKEN_ERROR: {
+      /* Lexer-level error token (e.g. a stray '=' / ':' / '::'). Surface the
+       * lexer's message as a parse error so it is always reported. */
+      Token* bad = parser__advance(p);
+      return parser__error(p,
+          bad->payload.error_msg ? bad->payload.error_msg : "invalid token",
+          bad);
+    }
 
     default:
       return NULL;
@@ -1244,7 +1242,7 @@ static bool parser__is_constant_expr(AstNode* node) {
 /* -------------------------------------------------------------------------
  * Internal: Parse ctx field declaration
  *
- * Syntax: ctx [mut] Type name = default_expr
+ * Syntax: ctx [mut] Type name default_expr
  * Called when the current token is TOKEN_CTX.
  * ------------------------------------------------------------------------- */
 
@@ -1277,23 +1275,22 @@ AstNode* parser__parse_ctx_decl(Parser* p) {
   const char* field_name = name_tok->payload.text;
   uint32_t field_name_len = name_tok->length;
 
-  /* Expect '=' */
-  Token* eq_tok = parser__peek(p);
-  if (eq_tok->type != TOKEN_EQUALS) {
-    return parser__error(p, "ctx field must have a default value", eq_tok);
+  /* Expect a default value via juxtaposition: ctx [mut] Type name default */
+  Token* default_tok = parser__peek(p);
+  if (parser__is_command_end(p)) {
+    return parser__error(p, "ctx field must have a default value", default_tok);
   }
-  parser__advance(p); /* consume '=' */
 
   /* Parse default expression */
   AstNode* default_expr = parser__parse_expr(p);
   if (default_expr == NULL) {
-    return parser__error(p, "expected expression after '=' in ctx declaration", eq_tok);
+    return parser__error(p, "expected default value in ctx declaration", default_tok);
   }
   if (default_expr->type == AST_ERROR) return default_expr;
 
   /* Validate: default must be a compile-time constant */
   if (!parser__is_constant_expr(default_expr)) {
-    return parser__error(p, "ctx field default must be a compile-time constant", eq_tok);
+    return parser__error(p, "ctx field default must be a compile-time constant", default_tok);
   }
 
   AstNode* node = ast_alloc(p->arena);
@@ -1329,9 +1326,6 @@ AstNode* parser__parse_defmacro(Parser* p) {
       name_tok->type != TOKEN_BANG &&
       name_tok->type != TOKEN_AMP &&
       name_tok->type != TOKEN_DOTDOT &&
-      name_tok->type != TOKEN_EQUALS &&
-      name_tok->type != TOKEN_COLON &&
-      name_tok->type != TOKEN_DOUBLE_COLON &&
       name_tok->type != TOKEN_AND &&
       name_tok->type != TOKEN_OR &&
       name_tok->type != TOKEN_NOT) {
@@ -1896,360 +1890,6 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
   node->data.command.head_id   = HEAD_WHILE;
   node->data.command.args      = args;
   node->data.command.arg_count = 2;
-  return node;
-}
-
-/* -------------------------------------------------------------------------
- * Internal: Check if current position starts a destructuring binding
- *
- * Returns true if the current TOKEN_LBRACKET is followed by a matching
- * TOKEN_RBRACKET and then TOKEN_EQUALS or TOKEN_COLON (e.g. [a b c] = expr).
- * Does NOT advance the parser position.
- * ------------------------------------------------------------------------- */
-
-int parser__lookahead_is_destructure_binding(Parser* p) {
-  if (parser__peek(p)->type != TOKEN_LBRACKET) return 0;
-  uint32_t saved = p->pos;
-  int depth = 0;
-  int result = 0;
-  while (p->pos < p->count) {
-    TokenType t = p->tokens[p->pos].type;
-    if (t == TOKEN_LBRACKET) depth++;
-    else if (t == TOKEN_RBRACKET) {
-      depth--;
-      if (depth == 0) {
-        p->pos++;
-        if (p->pos < p->count) {
-          TokenType after = p->tokens[p->pos].type;
-          result = (after == TOKEN_EQUALS || after == TOKEN_COLON);
-        }
-        break;
-      }
-    } else if (t == TOKEN_EOF) {
-      break;
-    }
-    p->pos++;
-  }
-  p->pos = saved;
-  return result;
-}
-
-/* -------------------------------------------------------------------------
- * Internal: Parse a destructuring vector pattern [a b c] or [i64 a, i64 b]
- *
- * Called when we know the current token is '[' and this is a destructuring
- * context. Supports optional type prefixes and comma separators.
- * Returns AST_DESTRUCTURE_VEC node.
- * ------------------------------------------------------------------------- */
-
-AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
-  Token* open = parser__advance(p); /* consume '[' */
-  SourcePos start = parser__token_start(open);
-
-  /* Collect binding entries */
-  uint32_t cap = 8;
-  const char** names = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
-  uint32_t* name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
-  const char** types = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
-  uint32_t* type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
-  uint32_t count = 0;
-  const char* rest_name = NULL;
-  uint32_t rest_name_len = 0;
-
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
-    /* Skip commas and newlines */
-    if (parser__peek(p)->type == TOKEN_COMMA) {
-      parser__advance(p);
-      continue;
-    }
-    if (parser__peek(p)->type == TOKEN_NEWLINE) {
-      parser__advance(p);
-      continue;
-    }
-
-    /* Check for rest pattern: ..name */
-    if (parser__peek(p)->type == TOKEN_DOTDOT) {
-      Token* dotdot = parser__advance(p); /* consume '..' */
-      if (rest_name) {
-        return parser__error(p, "duplicate rest pattern '..' in destructuring", dotdot);
-      }
-      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_WORD) {
-        return parser__error(p, "expected name after '..' in destructuring pattern", dotdot);
-      }
-      Token* rn = parser__advance(p); /* consume rest name */
-      rest_name = rn->payload.text;
-      rest_name_len = rn->length;
-      continue;
-    }
-
-    /* Error if we already have a rest and there are more positional elements */
-    if (rest_name) {
-      return parser__error(p, "rest pattern '..' must be last in destructuring", parser__peek(p));
-    }
-
-    /* Check for typed entry: type name */
-    const char* entry_type = NULL;
-    uint32_t entry_type_len = 0;
-    Token* tok = parser__peek(p);
-
-    if (tok->type == TOKEN_WORD && p->pos + 1 < p->count) {
-      Token* next = &p->tokens[p->pos + 1];
-      /* If current is a type keyword and next is also a word, treat as typed */
-      if (next->type == TOKEN_WORD &&
-          (tok->length == 3 || tok->length == 4)) {
-        /* Quick check for known type keywords */
-        int is_type = 0;
-        if (tok->length == 3) {
-          is_type = (memcmp(tok->payload.text, "i32", 3) == 0 ||
-                     memcmp(tok->payload.text, "i64", 3) == 0 ||
-                     memcmp(tok->payload.text, "u32", 3) == 0 ||
-                     memcmp(tok->payload.text, "u64", 3) == 0 ||
-                     memcmp(tok->payload.text, "f32", 3) == 0 ||
-                     memcmp(tok->payload.text, "f64", 3) == 0 ||
-                     memcmp(tok->payload.text, "str", 3) == 0 ||
-                     memcmp(tok->payload.text, "dyn", 3) == 0);
-        } else if (tok->length == 4) {
-          is_type = (memcmp(tok->payload.text, "bool", 4) == 0);
-        }
-        if (is_type) {
-          entry_type = tok->payload.text;
-          entry_type_len = tok->length;
-          parser__advance(p); /* consume type */
-          tok = parser__peek(p);
-        }
-      }
-    }
-
-    /* Expect a binding name (word) */
-    if (tok->type != TOKEN_WORD) {
-      return parser__error(p, "expected variable name in destructuring pattern", tok);
-    }
-    parser__advance(p); /* consume name */
-
-    /* Grow arrays if needed */
-    if (count >= cap) {
-      uint32_t new_cap = cap * 2;
-      const char** new_names = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
-      uint32_t* new_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
-      const char** new_types = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
-      uint32_t* new_type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
-      memcpy(new_names, names, sizeof(const char*) * count);
-      memcpy(new_name_lens, name_lens, sizeof(uint32_t) * count);
-      memcpy(new_types, types, sizeof(const char*) * count);
-      memcpy(new_type_lens, type_lens, sizeof(uint32_t) * count);
-      names = new_names;
-      name_lens = new_name_lens;
-      types = new_types;
-      type_lens = new_type_lens;
-      cap = new_cap;
-    }
-
-    names[count] = tok->payload.text;
-    name_lens[count] = tok->length;
-    types[count] = entry_type;
-    type_lens[count] = entry_type_len;
-    count++;
-  }
-
-  /* Expect closing bracket */
-  if (parser__peek(p)->type != TOKEN_RBRACKET) {
-    return parser__error(p, "expected ']' to close destructuring pattern", open);
-  }
-  Token* close = parser__advance(p);
-
-  AstNode* node = ast_alloc(p->arena);
-  node->type  = AST_DESTRUCTURE_VEC;
-  node->start = start;
-  node->end   = parser__token_end(close);
-  node->data.destructure_vec.names         = names;
-  node->data.destructure_vec.name_lens     = name_lens;
-  node->data.destructure_vec.types         = types;
-  node->data.destructure_vec.type_lens     = type_lens;
-  node->data.destructure_vec.count         = count;
-  node->data.destructure_vec.rest_name     = rest_name;
-  node->data.destructure_vec.rest_name_len = rest_name_len;
-  return node;
-}
-
-/* -------------------------------------------------------------------------
- * Internal: Check if current position starts a named destructuring binding
- *
- * Returns true if the current TOKEN_LBRACE is followed by a matching
- * TOKEN_RBRACE and then TOKEN_EQUALS or TOKEN_COLON (e.g. {x, y} = expr).
- * Does NOT advance the parser position.
- * ------------------------------------------------------------------------- */
-
-int parser__lookahead_is_named_destructure_binding(Parser* p) {
-  if (parser__peek(p)->type != TOKEN_LBRACE) return 0;
-  uint32_t saved = p->pos;
-  int depth = 0;
-  int result = 0;
-  /* We need to distinguish {x, y} = expr from a block { cmd; cmd }.
-     Named destructure patterns contain only words, commas, and optional
-     type keywords — no commands, operators, or dollar signs. */
-  int has_non_pattern = 0;
-  while (p->pos < p->count) {
-    TokenType t = p->tokens[p->pos].type;
-    if (t == TOKEN_LBRACE) depth++;
-    else if (t == TOKEN_RBRACE) {
-      depth--;
-      if (depth == 0) {
-        p->pos++;
-        if (p->pos < p->count && !has_non_pattern) {
-          TokenType after = p->tokens[p->pos].type;
-          result = (after == TOKEN_EQUALS || after == TOKEN_COLON);
-        }
-        break;
-      }
-    } else if (t == TOKEN_EOF) {
-      break;
-    } else if (depth == 1) {
-      /* Inside the top-level braces: words, commas, newlines, and dotdot are valid */
-      if (t != TOKEN_WORD && t != TOKEN_COMMA && t != TOKEN_NEWLINE &&
-          t != TOKEN_DOTDOT) {
-        has_non_pattern = 1;
-      }
-    }
-    p->pos++;
-  }
-  p->pos = saved;
-  return result;
-}
-
-/* -------------------------------------------------------------------------
- * Internal: Parse a named destructuring pattern {x, y} or {i32 x, i32 y}
- *
- * Called when we know the current token is '{' and this is a destructuring
- * context. Supports optional type prefixes and comma separators.
- * Returns AST_DESTRUCTURE_NAMED node.
- * ------------------------------------------------------------------------- */
-
-AstNode* parser__parse_destructure_named_pattern(Parser* p) {
-  Token* open = parser__advance(p); /* consume '{' */
-  SourcePos start = parser__token_start(open);
-
-  /* Collect field entries */
-  uint32_t cap = 8;
-  const char** names = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
-  uint32_t* name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
-  const char** types = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
-  uint32_t* type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
-  uint32_t count = 0;
-  const char* rest_name = NULL;
-  uint32_t rest_name_len = 0;
-  int spread_all = 0;
-
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
-    /* Skip commas and newlines */
-    if (parser__peek(p)->type == TOKEN_COMMA) {
-      parser__advance(p);
-      continue;
-    }
-    if (parser__peek(p)->type == TOKEN_NEWLINE) {
-      parser__advance(p);
-      continue;
-    }
-
-    /* Check for rest pattern: ..name, or spread-all: .. */
-    if (parser__peek(p)->type == TOKEN_DOTDOT) {
-      Token* dotdot = parser__advance(p); /* consume '..' */
-      if (rest_name || spread_all) {
-        return parser__error(p, "duplicate rest pattern '..' in destructuring", dotdot);
-      }
-      /* If next token is a word, this is a rest pattern ..name */
-      if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_WORD) {
-        Token* rn = parser__advance(p); /* consume rest name */
-        rest_name = rn->payload.text;
-        rest_name_len = rn->length;
-      } else {
-        /* Spread-all pattern {..} or {x, ..} */
-        spread_all = 1;
-      }
-      continue;
-    }
-
-    /* Check for typed entry: type name */
-    const char* entry_type = NULL;
-    uint32_t entry_type_len = 0;
-    Token* tok = parser__peek(p);
-
-    if (tok->type == TOKEN_WORD && p->pos + 1 < p->count) {
-      Token* next = &p->tokens[p->pos + 1];
-      /* If current is a type keyword and next is also a word, treat as typed */
-      if (next->type == TOKEN_WORD &&
-          (tok->length == 3 || tok->length == 4)) {
-        /* Quick check for known type keywords */
-        int is_type = 0;
-        if (tok->length == 3) {
-          is_type = (memcmp(tok->payload.text, "i32", 3) == 0 ||
-                     memcmp(tok->payload.text, "i64", 3) == 0 ||
-                     memcmp(tok->payload.text, "u32", 3) == 0 ||
-                     memcmp(tok->payload.text, "u64", 3) == 0 ||
-                     memcmp(tok->payload.text, "f32", 3) == 0 ||
-                     memcmp(tok->payload.text, "f64", 3) == 0 ||
-                     memcmp(tok->payload.text, "str", 3) == 0 ||
-                     memcmp(tok->payload.text, "dyn", 3) == 0);
-        } else if (tok->length == 4) {
-          is_type = (memcmp(tok->payload.text, "bool", 4) == 0);
-        }
-        if (is_type) {
-          entry_type = tok->payload.text;
-          entry_type_len = tok->length;
-          parser__advance(p); /* consume type */
-          tok = parser__peek(p);
-        }
-      }
-    }
-
-    /* Expect a field name (word) */
-    if (tok->type != TOKEN_WORD) {
-      return parser__error(p, "expected field name in destructuring pattern", tok);
-    }
-    parser__advance(p); /* consume name */
-
-    /* Grow arrays if needed */
-    if (count >= cap) {
-      uint32_t new_cap = cap * 2;
-      const char** new_names = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
-      uint32_t* new_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
-      const char** new_types = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
-      uint32_t* new_type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
-      memcpy(new_names, names, sizeof(const char*) * count);
-      memcpy(new_name_lens, name_lens, sizeof(uint32_t) * count);
-      memcpy(new_types, types, sizeof(const char*) * count);
-      memcpy(new_type_lens, type_lens, sizeof(uint32_t) * count);
-      names = new_names;
-      name_lens = new_name_lens;
-      types = new_types;
-      type_lens = new_type_lens;
-      cap = new_cap;
-    }
-
-    names[count] = tok->payload.text;
-    name_lens[count] = tok->length;
-    types[count] = entry_type;
-    type_lens[count] = entry_type_len;
-    count++;
-  }
-
-  /* Expect closing brace */
-  if (parser__peek(p)->type != TOKEN_RBRACE) {
-    return parser__error(p, "expected '}' to close destructuring pattern", open);
-  }
-  Token* close = parser__advance(p);
-
-  AstNode* node = ast_alloc(p->arena);
-  node->type  = AST_DESTRUCTURE_NAMED;
-  node->start = start;
-  node->end   = parser__token_end(close);
-  node->data.destructure_named.names         = names;
-  node->data.destructure_named.name_lens     = name_lens;
-  node->data.destructure_named.types         = types;
-  node->data.destructure_named.type_lens     = type_lens;
-  node->data.destructure_named.count         = count;
-  node->data.destructure_named.rest_name     = rest_name;
-  node->data.destructure_named.rest_name_len = rest_name_len;
-  node->data.destructure_named.spread_all    = spread_all;
   return node;
 }
 

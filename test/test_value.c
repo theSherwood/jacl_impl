@@ -1219,7 +1219,7 @@ static int test_predicate_matrix(void) {
       bool result = preds[pred_idx](values[val_idx]);
       bool expected = (pred_idx == val_idx);
       if (result != expected) {
-        fprintf(stderr, "FAIL: jacl_is_%s(value[%zu]=%s) = %d, expected %d\n",
+        fprintf(stderr, "def FAIL: jacl_is_%s(value[%zu]=%s) [%d, expected %d]\n",
                 names[pred_idx], val_idx, names[val_idx], result, expected);
         return 0;
       }
@@ -1264,7 +1264,7 @@ static int test_predicate_matrix_with_flags(void) {
       bool result = preds[pred_idx](flagged);
       bool expected = (pred_idx == val_idx);
       if (result != expected) {
-        fprintf(stderr, "FAIL: jacl_is_[%zu](flagged_value[%zu]) = %d, expected %d\n",
+        fprintf(stderr, "def FAIL: jacl_is_[%zu](flagged_value[%zu]) [%d, expected %d]\n",
                 pred_idx, val_idx, result, expected);
         return 0;
       }

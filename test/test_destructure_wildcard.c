@@ -36,7 +36,7 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_wildcard_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ b _] = [vec 1 2 3]\n"
+    "def [_ b _] [vec 1 2 3]\n"
     "[print $b]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -62,7 +62,7 @@ static int test_wildcard_keyword(void) {
 static int test_wildcard_multiple(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ _ c] = [vec 1 2 3]\n"
+    "def [_ _ c] [vec 1 2 3]\n"
     "[print $c]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -75,7 +75,7 @@ static int test_wildcard_multiple(void) {
 static int test_wildcard_at_end(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a _] = [vec 42 99]\n"
+    "def [a _] [vec 42 99]\n"
     "[print $a]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -88,7 +88,7 @@ static int test_wildcard_at_end(void) {
 static int test_wildcard_reference_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ b] = [vec 1 2]\n"
+    "def [_ b] [vec 1 2]\n"
     "[print $_]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
@@ -101,8 +101,8 @@ static int test_wildcard_named_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point { i32 x, i32 y }\n"
-    "p = [Point x 1 y 2]\n"
-    "{x, _} = $p\n",
+    "def p [Point x 1 y 2]\n"
+    "def {x, _} $p\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -113,9 +113,9 @@ static int test_wildcard_named_error(void) {
 static int test_wildcard_mut(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ b] : [vec 10 20]\n"
+    "mut [_ b] [vec 10 20]\n"
     "[print $b]\n"
-    "b :: 99\n"
+    "set b 99\n"
     "[print $b]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -128,7 +128,7 @@ static int test_wildcard_mut(void) {
 static int test_wildcard_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ b _] = [vec 100 200 300]\n"
+    "def [_ b _] [vec 100 200 300]\n"
     "[print $b]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -141,7 +141,7 @@ static int test_wildcard_global(void) {
 static int test_wildcard_length_mismatch(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ b _] = [vec 1 2]\n",
+    "def [_ b _] [vec 1 2]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -152,7 +152,7 @@ static int test_wildcard_length_mismatch(void) {
 static int test_wildcard_all(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[_ _] = [vec 1 2]\n"
+    "def [_ _] [vec 1 2]\n"
     "[print \"ok\"]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

@@ -122,7 +122,7 @@ static int test_variadic_splat(void) {
     "proc sum {..nums} {\n"
     "  [+ ..$nums]\n"
     "}\n"
-    "args = [vec 10 20 30]\n"
+    "def args [vec 10 20 30]\n"
     "[print [sum ..$args]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -156,7 +156,7 @@ static int test_variadic_splat_mixed(void) {
     "  [print $level]\n"
     "  [print [+ ..$msgs]]\n"
     "}\n"
-    "extras = [vec 20 30]\n"
+    "def extras [vec 20 30]\n"
     "[log \"WARN\" 10 ..$extras]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

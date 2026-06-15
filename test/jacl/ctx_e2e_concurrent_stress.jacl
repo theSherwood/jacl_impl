@@ -1,7 +1,7 @@
 # mode: concurrent
 # expect: done
 # Test: concurrent stress — multiple workers spawning tasks with ctx forks
-ctx mut i32 level = 1
+ctx mut i32 level 1
 
 proc main {} {
   def r [parallel {

@@ -37,8 +37,8 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_destructure_basic_operator(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "v = [vec 1 2 3]\n"
-    "[a b c] = $v\n"
+    "def v [vec 1 2 3]\n"
+    "def [a b c] $v\n"
     "[print $a]\n"
     "[print $b]\n"
     "[print $c]\n",
@@ -68,7 +68,7 @@ static int test_destructure_basic_keyword(void) {
 static int test_destructure_expr_rhs(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b] = [vec [+ 1 2] [* 3 4]]\n"
+    "def [a b] [vec [+ 1 2] [* 3 4]]\n"
     "[print $a]\n"
     "[print $b]\n",
     &cap);
@@ -82,9 +82,9 @@ static int test_destructure_expr_rhs(void) {
 static int test_destructure_nested_scope(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "v = [vec 1 2 3]\n"
+    "def v [vec 1 2 3]\n"
     "proc show {} {\n"
-    "  [a b c] = $v\n"
+    "  def [a b c] $v\n"
     "  [print $a]\n"
     "  [print $b]\n"
     "  [print $c]\n"
@@ -101,10 +101,10 @@ static int test_destructure_nested_scope(void) {
 static int test_destructure_mut(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b] : [vec 10 20]\n"
+    "mut [a b] [vec 10 20]\n"
     "[print $a]\n"
     "[print $b]\n"
-    "a :: 99\n"
+    "set a 99\n"
     "[print $a]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -117,7 +117,7 @@ static int test_destructure_mut(void) {
 static int test_destructure_length_mismatch(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b c] = [vec 1 2]\n",
+    "def [a b c] [vec 1 2]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -128,7 +128,7 @@ static int test_destructure_length_mismatch(void) {
 static int test_destructure_non_vector(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b] = 42\n",
+    "def [a b] 42\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -139,7 +139,7 @@ static int test_destructure_non_vector(void) {
 static int test_destructure_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b c] = [vec 100 200 300]\n"
+    "def [a b c] [vec 100 200 300]\n"
     "[print $a]\n"
     "[print $b]\n"
     "[print $c]\n",
@@ -167,7 +167,7 @@ static int test_destructure_single(void) {
 static int test_destructure_strings(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b] = [vec \"hello\" \"world\"]\n"
+    "def [a b] [vec \"hello\" \"world\"]\n"
     "[print $a]\n"
     "[print $b]\n",
     &cap);
@@ -185,7 +185,7 @@ static int test_destructure_typed(void) {
      Use untyped form here since [i32 a, i32 b] in [] mode
      is just a command, not a destructuring pattern. */
   VMResult r = run_capture(
-    "[a b] = [vec 5 6]\n"
+    "def [a b] [vec 5 6]\n"
     "[print $a]\n"
     "[print $b]\n",
     &cap);

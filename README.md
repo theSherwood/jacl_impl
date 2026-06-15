@@ -72,16 +72,13 @@ main
 ```
 
 **Bindings.** `def` is immutable, `mut` is a mutable cell, `set`
-reassigns. The `=` / `:` / `::` operators are command-mode sugar for
-the same three. Read a variable with `$name`.
+reassigns. Bindings are name-first prefix commands — there is no infix
+binding operator. Read a variable with `$name`.
 
 ```
 def imm 7            # immutable
-also = 11            # `=` is def sugar
 mut counter 0        # mutable cell
 set counter 2        # reassign
-reassignable : 0     # `:` is mut sugar
-reassignable :: 5    # `::` is set sugar
 ```
 
 **Typed bindings.** Type before name. Typed locals stay unboxed and
@@ -228,7 +225,7 @@ for the dynamic extent of the body and restores on exit (including on
 error).
 
 ```
-ctx mut i32 verbosity = 0
+ctx mut i32 verbosity 0
 with-ctx {verbosity 3} { ... }     # $ctx->verbosity is 3 inside, 0 after
 ```
 

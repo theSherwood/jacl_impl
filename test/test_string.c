@@ -541,7 +541,7 @@ static int test_compile_def_long_string_no_error(void) {
   intern_table_init(&table, &arena);
 
   CompileResult cr = compile_with_intern(
-      "greet = \"hello world\"", &arena, &table, &heap);
+      "def greet \"hello world\"", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -647,7 +647,7 @@ static int test_print_heap_string_via_variable(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "greet = \"hello world\"\n[print $greet]", &vm, &arena);
+      "def greet \"hello world\"\n[print $greet]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
@@ -1061,7 +1061,7 @@ static int test_concat_with_variable(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "s = \"hello\"\n[print [concat $s \" world\"]]", &vm, &arena);
+      "def s \"hello\"\n[print [concat $s \" world\"]]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
@@ -1830,7 +1830,7 @@ static int test_interp_variable(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "name = \"world\"\n[print \"hello $name\"]", &vm, &arena);
+      "def name \"world\"\n[print \"hello $name\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
@@ -1853,7 +1853,7 @@ static int test_interp_int_variable(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "x = 42\n[print \"x is $x\"]", &vm, &arena);
+      "def x 42\n[print \"x is $x\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "x is 42\n");
@@ -1922,7 +1922,7 @@ static int test_interp_adjacent(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "a = \"x\"\nb = \"y\"\n[print \"$a$b\"]", &vm, &arena);
+      "def a \"x\"\ndef b \"y\"\n[print \"$a$b\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "xy\n");
@@ -1945,7 +1945,7 @@ static int test_interp_mixed(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "n = 10\n[print \"n=$n, n+1=$[+ $n 1]\"]", &vm, &arena);
+      "def n 10\n[print \"n=$n, n+1=$[+ $n 1]\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "n=10, n+1=11\n");
@@ -1968,7 +1968,7 @@ static int test_interp_only_var(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "x = \"hi\"\n[print \"$x\"]", &vm, &arena);
+      "def x \"hi\"\n[print \"$x\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hi\n");
@@ -1991,7 +1991,7 @@ static int test_interp_heap_result(void) {
   vm.print_ctx = &cap;
 
   VMResult result = jacl_run(
-      "name = \"JACL\"\n[print \"hello $name world\"]", &vm, &arena);
+      "def name \"JACL\"\n[print \"hello $name world\"]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello JACL world\n");

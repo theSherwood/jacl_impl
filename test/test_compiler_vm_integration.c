@@ -38,7 +38,7 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_interpolation_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "name = \"world\"\n"
+    "def name \"world\"\n"
     "[print \"hello $name\"]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -65,7 +65,7 @@ static int test_interpolation_tier_span(void) {
   /* "number=" + "42" + " end" = "number=42 end" (13 bytes, flat tier).
      Interpolation builds via OP_TO_STRING + OP_CONCAT. */
   VMResult r = run_capture(
-    "n = 42\n"
+    "def n 42\n"
     "[print \"number=$n end\"]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -79,7 +79,7 @@ static int test_interpolation_empty(void) {
   PrintCapture cap;
   /* Test that empty string works through jacl_string_new */
   VMResult r = run_capture(
-    "s = \"\"\n"
+    "def s \"\"\n"
     "[print [length $s]]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -92,8 +92,8 @@ static int test_interpolation_empty(void) {
 static int test_to_string_via_interpolation(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "x = $true\n"
-    "y = 123\n"
+    "def x $true\n"
+    "def y 123\n"
     "[print \"$x $y\"]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -174,7 +174,7 @@ static int test_print_large_concat_string(void) {
     "proc rep {s, n} {\n"
     "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
-    "big = [rep \"abcdefghij\" 20]\n"
+    "def big [rep \"abcdefghij\" 20]\n"
     "[print [byte-length $big]]\n"
     "[print [length $big]]",
     &cap);
@@ -205,8 +205,8 @@ static int test_closure_captures_string(void) {
     "proc mk {s} {\n"
     "  proc get {} { $s }\n"
     "}\n"
-    "f1 = [mk \"hello\"]\n"
-    "f2 = [mk \"hello world\"]\n"
+    "def f1 [mk \"hello\"]\n"
+    "def f2 [mk \"hello world\"]\n"
     "[print [f1]]\n"
     "[print [f2]]",
     &cap);
@@ -223,11 +223,11 @@ static int test_closure_captures_rope(void) {
     "proc rep {s, n} {\n"
     "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
-    "big = [rep \"abcdefghij\" 20]\n"
+    "def big [rep \"abcdefghij\" 20]\n"
     "proc mkget {val} {\n"
     "  proc get {} { $val }\n"
     "}\n"
-    "g = [mkget $big]\n"
+    "def g [mkget $big]\n"
     "[print [byte-length [g]]]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -240,8 +240,8 @@ static int test_closure_captures_rope(void) {
 static int test_mixed_tiers_expression(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "s = \"hi\"\n"
-    "m = \"abcdefghijk\"\n"
+    "def s \"hi\"\n"
+    "def m \"abcdefghijk\"\n"
     "[print [concat $s \" \" $m]]\n"
     "[print [== $s \"hi\"]]\n"
     "[print [== $m \"abcdefghijk\"]]",

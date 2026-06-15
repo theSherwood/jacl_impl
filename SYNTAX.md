@@ -912,7 +912,7 @@ Modules can declare additional typed fields on `$ctx` at the top level. Only dec
 
 ```
 ctx mut Connection db-conn              # mutable, no default — runtime error if read while unset
-ctx mut i32 log-level = 0               # mutable, has default — always safe to read
+ctx mut i32 log-level 0                 # mutable, has default — always safe to read
 ctx str app-name                        # immutable, set via with-ctx only
 ```
 
@@ -1279,7 +1279,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 |---------|-------|
 | Two-mode delimiter system (`[]`, `{}`) | yes — `[]` prefix expressions + `{}` command mode. Earlier `()` infix mode removed (NOT_IMPLEMENTED.md §12). |
 | Pipe threading (`\|` first-arg in command mode) | yes |
-| Binding operators (`=`, `:`, `::`) | **(spec ahead of impl)** removed from spec; prelude macros currently still in place. |
+| Binding operators (`=`, `:`, `::`) | **removed** — `=`/`:`/`::` no longer lex; bind with the prefix commands `def`/`mut`/`set` (`def x 5`, `mut n 0`, `set n 1`). `ctx` defaults are juxtaposed: `ctx [mut] Type name default`. |
 | Arrow field access (`->`) | chained |
 | `proc` syntax (`{params} {body}`) | yes |
 | `proc` / `extern` typed-return position — after params: `proc f {…} T {…}`, `extern f {…} T` | parser produces `[name params (ret_type)? body?]`; compiler / typer / SM analysis all read the new shape. Same layout for both forms. |

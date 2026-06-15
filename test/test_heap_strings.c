@@ -1000,7 +1000,7 @@ static int test_gc_rope_strings(void) {
     "proc rep {s, n} {\n"
     "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
-    "big = [rep \"abcdefghijklmnopqrstuvwxyz\" 20]\n"
+    "def big [rep \"abcdefghijklmnopqrstuvwxyz\" 20]\n"
     "[print [byte-length $big]]",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -1016,11 +1016,11 @@ static int test_gc_rope_stress(void) {
   /* Create and discard many rope strings via repeated top-level concat
      to exercise GC sweep of rope objects */
   VMResult r = run_capture(
-    "s : \"start\"\n"
-    "i : 0\n"
+    "mut s \"start\"\n"
+    "mut i 0\n"
     "[while [< $i 30] {\n"
-    "  s :: [concat $s \"abcdefghijklmnopqrstuvwxyz\"]\n"
-    "  i :: [+ $i 1]\n"
+    "  set s [concat $s \"abcdefghijklmnopqrstuvwxyz\"]\n"
+    "  set i [+ $i 1]\n"
     "}]\n"
     "[print [byte-length $s]]",
     &cap);

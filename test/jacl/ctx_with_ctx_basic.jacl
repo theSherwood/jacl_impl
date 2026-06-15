@@ -1,7 +1,7 @@
 # expect: 99
 # expect: 42
 # Test: field override visible inside body, original restored after
-ctx mut i32 level = 42
+ctx mut i32 level 42
 with-ctx {level 99} {
   print $ctx->level
 }

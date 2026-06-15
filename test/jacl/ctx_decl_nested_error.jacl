@@ -1,5 +1,5 @@
 # expect-error: parse error: ctx declarations must be at module top level
 # Test: ctx inside a proc produces compile error
 proc foo {} {
-  ctx i32 x = 0
+  ctx i32 x 0
 }
