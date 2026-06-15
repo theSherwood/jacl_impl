@@ -50,9 +50,6 @@ typedef enum {
   TOKEN_OR,               /* || */
   TOKEN_NOT,              /* ~ */
   TOKEN_TILDE_AT,         /* ~@ */
-  TOKEN_EQUALS,           /* = (single) */
-  TOKEN_COLON,            /* : (single) */
-  TOKEN_DOUBLE_COLON,     /* :: */
   /* --- new keyword tokens --- */
   TOKEN_PROC,             /* proc */
   TOKEN_DEFMACRO,         /* defmacro */

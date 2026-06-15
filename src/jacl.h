@@ -526,9 +526,6 @@ typedef enum {
   TOKEN_OR,
   TOKEN_NOT,
   TOKEN_TILDE_AT,
-  TOKEN_EQUALS,
-  TOKEN_COLON,
-  TOKEN_DOUBLE_COLON,
   TOKEN_PROC,
   TOKEN_DEFMACRO,
   TOKEN_QUOTE,
@@ -635,7 +632,6 @@ typedef enum {
   HEAD_NONE = 0,
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
-  HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
   HEAD_DOT, HEAD_QDOT,
@@ -2327,10 +2323,6 @@ extern AstNode *parser__parse_proc_params (Parser *p);
 extern AstNode *parser__parse_proc_form (Parser *p, AstNode *proc_head);
 extern AstNode *parser__parse_if_form (Parser *p, AstNode *if_head);
 extern AstNode *parser__parse_while_form (Parser *p, AstNode *while_head);
-extern int parser__lookahead_is_destructure_binding (Parser *p);
-extern AstNode *parser__parse_destructure_vec_pattern (Parser *p);
-extern int parser__lookahead_is_named_destructure_binding (Parser *p);
-extern AstNode *parser__parse_destructure_named_pattern (Parser *p);
 extern AstNode *parser__parse_cmd_operand (Parser *p);
 extern AstNode *parser__parse_cmd_expr (Parser *p);
 extern AstNode *parser__parse_block (Parser *p);
@@ -2513,7 +2505,6 @@ extern void compiler__compile_binary (Compiler *c, AstNode **args, uint8_t op, c
 extern void compiler__compile_hof_builtin (Compiler *c, const char *name, AstNode **args, uint32_t argc, uint8_t opcode, uint32_t out_elem_enc, uint32_t line, uint32_t col);
 extern void compiler__compile_destructure_vec (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
 extern void compiler__compile_destructure_named (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, int spread_all, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
-extern void compiler__rewrite_binding_op (Compiler *c, AstNode *node, const char *target, uint32_t target_len);
 extern void compiler__compile_pipe_op (Compiler *c, AstNode *node);
 extern void compiler__compile_command (Compiler *c, AstNode *node);
 extern void compiler__compile_node (Compiler *c, AstNode *node);

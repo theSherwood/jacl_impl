@@ -190,9 +190,10 @@ Scaffolding that exists in the runtime but no compiler path emits it.
   `=`/`:`/`::` is a lexer error that points at the prefix form to use. Bind
   with the prefix commands `def`/`mut`/`set` only. `ctx` takes its default by
   juxtaposition (`ctx [mut] Type name default`, e.g. `ctx i32 x 0`) rather
-  than `=`. The lexer still defines the (now unused) `TOKEN_EQUALS`/`COLON`/
-  `DOUBLE_COLON` and the `HEAD_EQUALS`/`COLON`/`COLON_COLON` rewrite paths
-  remain as unreachable dead code (nothing can emit those tokens).
+  than `=`. The `TOKEN_EQUALS`/`COLON`/`DOUBLE_COLON` tokens, the
+  `HEAD_EQUALS`/`COLON`/`COLON_COLON` head ids and their rewrite paths
+  (`compiler__rewrite_binding_op`), and the never-called `=`-based
+  destructure-lookahead parser helpers were all deleted.
 
 ---
 

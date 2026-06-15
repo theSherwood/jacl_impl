@@ -1700,16 +1700,10 @@ static void sm__walk_suspensions__visit_child(AstNode* node, void* vctx) {
 static bool sm__head_uses_operand_stack_for_args(HeadId hid) {
   switch (hid) {
     /* Bindings & assignments — args[0] is a name pattern (used at compile
-       time, never compiled as a value). HEAD_EQUALS/HEAD_COLON/HEAD_COLON_COLON
-       are syntactic sugar that compiler__rewrite_binding_op rewrites to
-       HEAD_DEF/HEAD_MUT/HEAD_SET, but the walk runs on the original node so
-       all six must be listed here. */
+       time, never compiled as a value). */
     case HEAD_DEF:
     case HEAD_MUT:
     case HEAD_SET:
-    case HEAD_EQUALS:
-    case HEAD_COLON:
-    case HEAD_COLON_COLON:
     /* Declarations — separate scopes or compile-time-only. */
     case HEAD_PROC:
     case HEAD_DEFSTRUCT:
@@ -2057,10 +2051,9 @@ static void sm__walk_locals__visit(AstNode* node, void* vctx) {
         uint32_t argc = node->data.command.arg_count;
         AstNode** args = node->data.command.args;
 
-        /* def / mut / = / : — local bindings (= is sugar for def, : for mut) */
-        if (hid == HEAD_DEF || hid == HEAD_MUT ||
-            hid == HEAD_EQUALS || hid == HEAD_COLON) {
-          bool is_mut = (hid == HEAD_MUT || hid == HEAD_COLON);
+        /* def / mut — local bindings */
+        if (hid == HEAD_DEF || hid == HEAD_MUT) {
+          bool is_mut = (hid == HEAD_MUT);
 
           if (argc >= 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
             sm__collect_destructure_vec_names(args[0], layout, is_mut);
@@ -2512,9 +2505,8 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
           return;
         }
 
-        /* --- def / mut / = / : — mark binding names as writes --- */
-        if (hid == HEAD_DEF || hid == HEAD_MUT ||
-            hid == HEAD_EQUALS || hid == HEAD_COLON) {
+        /* --- def / mut — mark binding names as writes --- */
+        if (hid == HEAD_DEF || hid == HEAD_MUT) {
           uint32_t val_idx = (argc == 3) ? 2 : 1;
           if (val_idx < argc) {
             sm__liveness_walk__visit(args[val_idx], ctx);
@@ -2528,7 +2520,7 @@ static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
         }
 
         /* --- set: mark target as write, walk value --- */
-        if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
+        if (hid == HEAD_SET) {
           if (argc >= 2) {
             sm__liveness_walk__visit(args[1], ctx);
             if (args[0]->type == AST_LIT_STRING) {
@@ -5496,9 +5488,6 @@ static AstNode* compiler__find_disallowed_generator_tail(AstNode* node) {
         case HEAD_DEF:
         case HEAD_MUT:
         case HEAD_SET:
-        case HEAD_EQUALS:
-        case HEAD_COLON:
-        case HEAD_COLON_COLON:
         case HEAD_RETURN:
         case HEAD_BREAK:
         case HEAD_CONTINUE:
@@ -7003,81 +6992,6 @@ void compiler__compile_destructure_named(
   c->last_expr_type = TYPE_NIL;
 }
 
-/* --- Internal: Rewrite operator node [op LHS RHS] into [target ...args]
- *
- * For = → def, : → mut, :: → set:
- *   [= name val]         →  [def name val]
- *   [= [type name] val]  →  [def type name val]  (typed binding)
- *   [= pattern val]      →  [def pattern val]    (destructuring)
- *
- * For | (pipe):
- *   [| [cmd1 a] [cmd2 b]]  →  [cmd2 [cmd1 a] b]  (first-arg threading)
- *   [| [cmd1 a] val]       →  [val [cmd1 a]]      (wrap as call)
- * ----------------------------------------------------------------------- */
-
-void compiler__compile_command(Compiler* c, AstNode* node);
-
-void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
-                                          const char* target, uint32_t target_len) {
-  AstNode* lhs = node->data.command.args[0];
-  AstNode* rhs = node->data.command.args[1];
-  uint32_t line = node->start.line;
-
-  /* Build synthetic command: [target ...normalized_args] */
-  AstNode* new_head = ast_alloc(c->arena);
-  new_head->type = AST_LIT_STRING;
-  new_head->start = node->data.command.head->start;
-  new_head->end   = node->data.command.head->end;
-  new_head->data.lit_string.value  = target;
-  new_head->data.lit_string.length = target_len;
-
-  AstNode* synth = ast_alloc(c->arena);
-  synth->type  = AST_COMMAND;
-  synth->start = node->start;
-  synth->end   = node->end;
-  synth->data.command.head    = new_head;
-  synth->data.command.head_id = ast__compute_head_id(new_head);
-
-  /* Determine arg shape based on LHS type */
-  if (lhs->type == AST_COMMAND && lhs->data.command.arg_count == 1 &&
-      lhs->data.command.head->type == AST_LIT_STRING &&
-      compiler__is_type_annotation(c,
-          lhs->data.command.head->data.lit_string.value,
-          lhs->data.command.head->data.lit_string.length)) {
-    /* LHS is [type name] → typed binding: [target type name RHS] */
-    AstNode** new_args = ast_alloc_array(c->arena, 3);
-    new_args[0] = lhs->data.command.head;
-    new_args[1] = lhs->data.command.args[0];
-    new_args[2] = rhs;
-    synth->data.command.args      = new_args;
-    synth->data.command.arg_count = 3;
-  } else if (lhs->type == AST_COMMAND && lhs->data.command.arg_count > 0) {
-    /* LHS is a multi-word command like [a b c] → destructuring: [target [a b c] RHS] */
-    AstNode** new_args = ast_alloc_array(c->arena, 2);
-    new_args[0] = lhs;
-    new_args[1] = rhs;
-    synth->data.command.args      = new_args;
-    synth->data.command.arg_count = 2;
-  } else if (lhs->type == AST_COMMAND && lhs->data.command.arg_count == 0) {
-    /* LHS is a zero-arg command [name] → unwrap to [target name RHS] */
-    AstNode** new_args = ast_alloc_array(c->arena, 2);
-    new_args[0] = lhs->data.command.head;
-    new_args[1] = rhs;
-    synth->data.command.args      = new_args;
-    synth->data.command.arg_count = 2;
-  } else {
-    /* LHS is a destructuring pattern, block, or other node → [target LHS RHS] */
-    AstNode** new_args = ast_alloc_array(c->arena, 2);
-    new_args[0] = lhs;
-    new_args[1] = rhs;
-    synth->data.command.args      = new_args;
-    synth->data.command.arg_count = 2;
-  }
-
-  compiler__compile_command(c, synth);
-  (void)line;
-}
-
 /* Helper: Check if node is a shell command chain (either shell cmd or pipe of shell cmds) */
 static int compiler__is_shell_cmd_chain(AstNode* node) {
   if (node->type == AST_SHELL_CMD) return 1;
@@ -8235,36 +8149,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* --- Operator forms from uniform parsing --- */
-
-  /* = → def (immutable binding) */
-  if (hid == HEAD_EQUALS) {
-    if (argc != 2) {
-      compiler__error(c, line, col, "'=' requires exactly 2 operands");
-      return;
-    }
-    compiler__rewrite_binding_op(c, node, "def", 3);
-    return;
-  }
-
-  /* : → mut (mutable binding) */
-  if (hid == HEAD_COLON) {
-    if (argc != 2) {
-      compiler__error(c, line, col, "':' requires exactly 2 operands");
-      return;
-    }
-    compiler__rewrite_binding_op(c, node, "mut", 3);
-    return;
-  }
-
-  /* :: → set (reassignment) */
-  if (hid == HEAD_COLON_COLON) {
-    if (argc != 2) {
-      compiler__error(c, line, col, "'::' requires exactly 2 operands");
-      return;
-    }
-    compiler__rewrite_binding_op(c, node, "set", 3);
-    return;
-  }
 
   /* | → pipe threading */
   if (hid == HEAD_PIPE) {
@@ -19074,7 +18958,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
        * directly, so pinning here closes that leak. */
       switch (node->data.command.head_id) {
         case HEAD_SET:
-        case HEAD_COLON_COLON:
         case HEAD_FOR:
         case HEAD_DEF:
         case HEAD_MUT:

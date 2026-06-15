@@ -1700,10 +1700,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         args[0]->data.command.arg_count == 0 &&
         args[0]->data.command.head &&
         args[0]->data.command.head->type == AST_LIT_STRING) {
-      /* `[name] = value` — bare identifier wrapped as a zero-arg command.
-       * Mirrors compiler__rewrite_binding_op's "unwrap to [target name RHS]"
-       * branch (compiler.c:4650). Without this, `x = 5` falls through to
-       * the AST_COMMAND name branch and bails with return false. */
+      /* Binding name wrapped as a zero-arg command `[name]` — unwrap to the
+       * head so the def/mut handler can read the name directly. */
       name_node  = args[0]->data.command.head;
       value_node = args[1];
     } else if (args[0]->type == AST_COMMAND &&
@@ -3883,17 +3881,12 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   AstNode* head = node->data.command.head;
 
-  /* Recognize a few common command shapes. Compiler.c rewrites `::` →
-   * set during its compile walk (compiler.c:5556); the typer runs
-   * before that rewrite, so it must recognize the sugar form directly.
-   * (`=` → def, `:` → mut have different AST shapes — LHS is a typed
-   * sub-command — so we handle those only via the keyword forms after
-   * the compiler's rewrite. Future: handle the sugar shapes too.)
-   * Anything not handled falls through to generic call dispatch. */
+  /* Recognize a few common command shapes. Bindings are the prefix
+   * commands def/mut/set; anything not handled falls through to generic
+   * call dispatch. */
   if (head && head->type == AST_LIT_STRING) {
     HeadId hid = (HeadId)node->data.command.head_id;
-    if (hid == HEAD_DEF || hid == HEAD_MUT ||
-        hid == HEAD_EQUALS || hid == HEAD_COLON) {
+    if (hid == HEAD_DEF || hid == HEAD_MUT) {
       if (typer__handle_def_or_mut(tc, node)) return;
       /* Even if the def/mut shape didn't match a typed handler (e.g.,
        * destructure with non-LIT_STRING name), all def/mut commands
@@ -3901,7 +3894,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * with the compiler's HEAD_DEF/HEAD_MUT pin. */
       node->inferred_type = TYPE_NIL;
       return;
-    } else if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
+    } else if (hid == HEAD_SET) {
       if (typer__handle_set(tc, node)) return;
       node->inferred_type = TYPE_NIL;
       return;
