@@ -54,7 +54,7 @@ static int test_concat_var(void) {
   TEST_SETUP();
 
   const char* program =
-    "s = \"hello\"\n"
+    "def s \"hello\"\n"
     "[print [concat $s \" world\"]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -108,7 +108,7 @@ static int test_interpolation_var(void) {
   TEST_SETUP();
 
   const char* program =
-    "name = \"JACL\"\n"
+    "def name \"JACL\"\n"
     "[print \"hello $name\"]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -186,7 +186,7 @@ static int test_closure_captures_heap_string(void) {
     "    [concat $prefix $name]\n"
     "  }\n"
     "}\n"
-    "hi = [mkgreet \"hello \"]\n"
+    "def hi [mkgreet \"hello \"]\n"
     "[print [hi \"world\"]]\n"
     "[print [hi \"JACL\"]]";
   VMResult result = jacl_run(program, &vm, &arena);
@@ -228,7 +228,7 @@ static int test_interpolation_mixed(void) {
   TEST_SETUP();
 
   const char* program =
-    "x = 10\n"
+    "def x 10\n"
     "[print \"$x times 2 is $[* $x 2]\"]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -284,12 +284,12 @@ static int test_string_while_loop(void) {
   TEST_SETUP();
 
   const char* program =
-    "s = \"hello\"\n"
-    "i : 0\n"
-    "r : \"\"\n"
+    "def s \"hello\"\n"
+    "mut i 0\n"
+    "mut r \"\"\n"
     "[while [< $i [length $s]] {\n"
-    "  r :: [concat $r [index $s $i]]\n"
-    "  i :: [+ $i 1]\n"
+    "  set r [concat $r [index $s $i]]\n"
+    "  set i [+ $i 1]\n"
     "}]\n"
     "[print $r]";
   VMResult result = jacl_run(program, &vm, &arena);

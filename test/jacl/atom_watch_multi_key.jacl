@@ -4,8 +4,8 @@
 # expect: b:1->2
 # Multiple keyed watchers all fire on each commit in registration order.
 def counter [atom 0]
-la = proc {old, new} { print "a:$old->$new" }
-lb = proc {old, new} { print "b:$old->$new" }
+proc la {old, new} { print "a:$old->$new" }
+proc lb {old, new} { print "b:$old->$new" }
 watch $counter "a" $la
 watch $counter "b" $lb
 reset $counter 1

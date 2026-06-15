@@ -119,7 +119,7 @@ static int test_runtime_error_with_line(void) {
   vm_init(&vm, &arena);
 
   /* Type mismatch on line 2 */
-  VMResult result = jacl_run("x = $true\n[+ $x 1]", &vm, &arena);
+  VMResult result = jacl_run("def x $true\n[+ $x 1]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -172,16 +172,16 @@ static int test_comprehensive_program(void) {
   arena_t arena = { .allocator = tracked_allocator };
 
   const char* program =
-    "x = 10\n"
-    "y = 20\n"
-    "sum = [+ $x $y]\n"
+    "def x 10\n"
+    "def y 20\n"
+    "def sum [+ $x $y]\n"
     "[print $sum]\n"
     "[print [* $x 2]]\n"
-    "gt = [> $x 5]\n"
+    "def gt [> $x 5]\n"
     "[print $gt]\n"
     "[print [== $x 10]]\n"
     "[print [< $y 100]]\n"
-    "z = [+ [* $x $y] 5]\n"
+    "def z [+ [* $x $y] 5]\n"
     "[print $z]\n"
     "[print [- $z $sum]]";
 
@@ -242,7 +242,7 @@ static int test_semicolons_pipeline(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
-  VMResult result = jacl_run("a = 3\nb = 7\n[print [+ $a $b]]",
+  VMResult result = jacl_run("def a 3\ndef b 7\n[print [+ $a $b]]",
                              &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1359,7 +1359,7 @@ static int test_staged_sq_splice(void) {
     /* Create a vec of syntax objects and splice them into a command */
     const char *src =
         "proc make-it {items} { syntax-quote [+ ~@items] }\n"
-        "xs = [vec [make-syntax \"lit-int\" 1] [make-syntax \"lit-int\" 2] [make-syntax \"lit-int\" 3]]\n"
+        "def xs [vec [make-syntax \"lit-int\" 1] [make-syntax \"lit-int\" 2] [make-syntax \"lit-int\" 3]]\n"
         "[make-it $xs]";
     JaclError err;
     JaclVal result = staged_run(src, &err);
@@ -3140,7 +3140,7 @@ static int test_job_await_returns_result(void) {
 
     /* Run a quick command in background and await it */
     VMResult result = jacl_run(
-        "job = !echo hello &\nawait $job",
+        "def job {!echo hello &}\nawait $job",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3175,7 +3175,7 @@ static int test_job_await_captures_stdout(void) {
     vm_init(&vm, &arena);
 
     VMResult result = jacl_run(
-        "job = !echo hello &; res = {await $job}; {$res->stdout | collect}",
+        "def job {!echo hello &}; def res {await $job}; {$res->stdout | collect}",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3213,7 +3213,7 @@ static int test_job_doesnt_block(void) {
     /* Start a short command in background, immediately print, then await.
      * If jobs blocked, "immediate" would print after command finished. */
     VMResult result = jacl_run(
-        "job = !echo bg &; [print \"immediate\"]; {await $job}; [print \"done\"]",
+        "def job {!echo bg &}; [print \"immediate\"]; {await $job}; [print \"done\"]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3240,7 +3240,7 @@ static int test_signal_job_sigterm(void) {
 
     /* Start a long-running command, signal it, then await */
     VMResult result = jacl_run(
-        "job = !sleep \"10\" &; [signal $job SIGTERM]",
+        "def job {!sleep \"10\" &}; [signal $job SIGTERM]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3272,7 +3272,7 @@ static int test_signal_job_sigkill(void) {
 
     /* Start a long-running command, signal with SIGKILL */
     VMResult result = jacl_run(
-        "job = !sleep \"10\" &; [signal $job SIGKILL]",
+        "def job {!sleep \"10\" &}; [signal $job SIGKILL]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3303,7 +3303,7 @@ static int test_cancel_job(void) {
 
     /* Start a long-running command, cancel it */
     VMResult result = jacl_run(
-        "job = !sleep \"10\" &; [cancel $job]",
+        "def job {!sleep \"10\" &}; [cancel $job]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3334,7 +3334,7 @@ static int test_signal_completed_job(void) {
 
     /* Run a quick command, await it to completion, then try to signal */
     VMResult result = jacl_run(
-        "job = !echo done &; {await $job}; [signal $job SIGTERM]",
+        "def job {!echo done &}; {await $job}; [signal $job SIGTERM]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3362,7 +3362,7 @@ static int test_cancel_completed_job(void) {
 
     /* Run a quick command, await it to completion, then try to cancel */
     VMResult result = jacl_run(
-        "job = !echo done &; {await $job}; [cancel $job]",
+        "def job {!echo done &}; {await $job}; [cancel $job]",
         &vm, &arena);
 
     if (result != VM_OK) {
@@ -3396,7 +3396,7 @@ static int test_repl_fallback_echo(void) {
 
     /* Create prelude with :shell-fallback enabled and exec available */
     VMResult result = jacl_run(
-        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "def prelude [map-set [interpret-prelude] \":shell-fallback\" $true]; "
         "{[interpret $prelude \"echo hello\"] | collect | print}",
         &vm, &arena);
 
@@ -3426,7 +3426,7 @@ static int test_repl_fallback_with_args(void) {
 
     /* Use echo with multiple arguments */
     VMResult result = jacl_run(
-        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "def prelude [map-set [interpret-prelude] \":shell-fallback\" $true]; "
         "{[interpret $prelude \"echo a b c\"] | collect | print}",
         &vm, &arena);
 
@@ -3483,9 +3483,9 @@ static int test_repl_fallback_needs_exec(void) {
     /* Prelude with :shell-fallback but exec removed should produce error.
      * Must start from interpret-prelude and remove exec to have valid prelude. */
     VMResult result = jacl_run(
-        "base = [interpret-prelude]; "
-        "noexec = [map-remove $base \"exec\"]; "
-        "prelude = [map-set $noexec \":shell-fallback\" $true]; "
+        "def base [interpret-prelude]; "
+        "def noexec [map-remove $base \"exec\"]; "
+        "def prelude [map-set $noexec \":shell-fallback\" $true]; "
         "[interpret $prelude \"unknowncmd arg\"]",
         &vm, &arena);
 
@@ -3515,7 +3515,7 @@ static int test_repl_fallback_proc_precedence(void) {
 
     /* Define a proc that returns a known value - should take precedence over shell */
     VMResult result = jacl_run(
-        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "def prelude [map-set [interpret-prelude] \":shell-fallback\" $true]; "
         "[interpret $prelude \"proc ls {} { 999 }; ls\"]",
         &vm, &arena);
 
@@ -3545,7 +3545,7 @@ static int test_repl_fallback_disable(void) {
 
     /* Prelude with :shell-fallback = $false should NOT enable fallback */
     VMResult result = jacl_run(
-        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $false]; "
+        "def prelude [map-set [interpret-prelude] \":shell-fallback\" $false]; "
         "[interpret $prelude \"unknowncmd\"]",
         &vm, &arena);
 
@@ -3719,7 +3719,7 @@ static int test_arg_variable_single(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     ASSERT(ctx != NULL);
 
-    const char *src = "arg = \"hello world\"; {!echo $arg | collect}";
+    const char *src = "def arg \"hello world\"; {!echo $arg | collect}";
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
     ASSERT(err.kind == JACL_ERROR_NONE);
@@ -3741,7 +3741,7 @@ static int test_arg_splat_vector(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     ASSERT(ctx != NULL);
 
-    const char *src = "args = [vec \"a\" \"b\" \"c\"]; {!echo ..$args | collect}";
+    const char *src = "def args [vec \"a\" \"b\" \"c\"]; {!echo ..$args | collect}";
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
     ASSERT(err.kind == JACL_ERROR_NONE);
@@ -3808,7 +3808,7 @@ static int test_arg_mixed_splat(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     ASSERT(ctx != NULL);
 
-    const char *src = "middle = [vec \"b\" \"c\"]; {!echo \"a\" ..$middle \"d\" | collect}";
+    const char *src = "def middle [vec \"b\" \"c\"]; {!echo \"a\" ..$middle \"d\" | collect}";
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
     ASSERT(err.kind == JACL_ERROR_NONE);
@@ -3830,7 +3830,7 @@ static int test_arg_multiple_splats(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     ASSERT(ctx != NULL);
 
-    const char *src = "a = [vec \"1\" \"2\"]; b = [vec \"3\" \"4\"]; {!echo ..$a ..$b | collect}";
+    const char *src = "def a [vec \"1\" \"2\"]; def b [vec \"3\" \"4\"]; {!echo ..$a ..$b | collect}";
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
     ASSERT(err.kind == JACL_ERROR_NONE);

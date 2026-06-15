@@ -3,7 +3,7 @@
 # Basic watch: closure fires synchronously after each reset/swap commit,
 # receives (old, new), and runs in the thread that committed the change.
 def counter [atom 0]
-logger = proc {old, new} { print "changed: $old -> $new" }
+proc logger {old, new} { print "changed: $old -> $new" }
 watch $counter "log" $logger
 reset $counter 1
 swap $counter [\ + $it 4]

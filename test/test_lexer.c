@@ -2163,12 +2163,12 @@ static int test_token_not(void) {
 
 static int test_token_equals(void) {
   setup();
+  /* '=' is no longer a binding operator — it is an error token. */
   LexResult r = lexer_lex("=", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_EQUALS);
-  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
-  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2190,12 +2190,12 @@ static int test_token_eq_eq_stays_operator(void) {
 
 static int test_token_colon(void) {
   setup();
+  /* ':' is no longer a binding operator — it is an error token. */
   LexResult r = lexer_lex(":", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_COLON);
-  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
-  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2203,12 +2203,12 @@ static int test_token_colon(void) {
 
 static int test_token_double_colon(void) {
   setup();
+  /* '::' is no longer a binding operator — it is an error token. */
   LexResult r = lexer_lex("::", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOUBLE_COLON);
-  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
-  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2600,15 +2600,13 @@ static int test_amp_vs_and(void) {
 
 static int test_colon_vs_double_colon(void) {
   setup();
-  /* ":" and "::" produce different tokens */
+  /* ":" and "::" are both error tokens now (no binding operators) */
   LexResult r = lexer_lex(": ::", &test_arena);
-  ASSERT_U32_EQ(r.count, 3); /* COLON DOUBLE_COLON EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_COLON);
-  ASSERT_U32_EQ(r.tokens[0].length, 1);
-  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_DOUBLE_COLON);
-  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_U32_EQ(r.count, 3); /* ERROR ERROR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_ERROR);
   ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
-  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.error_count, 2);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2616,15 +2614,14 @@ static int test_colon_vs_double_colon(void) {
 
 static int test_equals_vs_eq_eq(void) {
   setup();
-  /* "=" is TOKEN_EQUALS, "==" is TOKEN_OPERATOR */
+  /* "=" is an error token; "==" is still TOKEN_OPERATOR */
   LexResult r = lexer_lex("= ==", &test_arena);
-  ASSERT_U32_EQ(r.count, 3); /* EQUALS OPERATOR EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_EQUALS);
-  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.count, 3); /* ERROR OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
   ASSERT_U32_EQ(r.tokens[1].length, 2);
   ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
-  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();

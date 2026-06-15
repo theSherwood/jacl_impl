@@ -36,7 +36,7 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_spread_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "nums = [vec 1 2 3]\n"
+    "def nums [vec 1 2 3]\n"
     "[print [+ ..$nums]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -49,7 +49,7 @@ static int test_spread_basic(void) {
 static int test_spread_mixed(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "nums = [vec 1 2 3]\n"
+    "def nums [vec 1 2 3]\n"
     "[print [+ 10 ..$nums 20]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -62,8 +62,8 @@ static int test_spread_mixed(void) {
 static int test_spread_multiple(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "a = [vec 1 2]\n"
-    "b = [vec 3 4]\n"
+    "def a [vec 1 2]\n"
+    "def b [vec 3 4]\n"
     "[print [+ ..$a ..$b]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -76,7 +76,7 @@ static int test_spread_multiple(void) {
 static int test_spread_empty(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "empty = [vec]\n"
+    "def empty [vec]\n"
     "[print [+ 10 ..$empty 20]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -89,7 +89,7 @@ static int test_spread_empty(void) {
 static int test_spread_multiply(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "nums = [vec 2 3 4]\n"
+    "def nums [vec 2 3 4]\n"
     "[print [* ..$nums]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -103,7 +103,7 @@ static int test_spread_proc(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc add3 {a, b, c} { + [+ $a $b] $c }\n"
-    "args = [vec 10 20 30]\n"
+    "def args [vec 10 20 30]\n"
     "[print [add3 ..$args]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -127,7 +127,7 @@ static int test_spread_non_vector(void) {
 static int test_spread_single(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "nums = [vec 5]\n"
+    "def nums [vec 5]\n"
     "[print [+ 10 ..$nums]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -140,7 +140,7 @@ static int test_spread_single(void) {
 static int test_spread_single_only(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "nums = [vec 42]\n"
+    "def nums [vec 42]\n"
     "[print [+ ..$nums]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -158,7 +158,7 @@ static int test_spread_proc_mixed(void) {
     "  print $b\n"
     "  print $c\n"
     "}\n"
-    "rest = [vec 2 3]\n"
+    "def rest [vec 2 3]\n"
     "[greet 1 ..$rest]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

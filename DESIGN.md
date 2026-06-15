@@ -8,7 +8,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Execution   | Bytecode VM (AST → bytecode → stack-based interpreter). Dispatch is direct-threaded (computed-goto) on GCC/Clang; switch fallback on Emscripten/WASM.                                                                                                                    |
 | Values      | 64-bit tagged values (tag byte + 56-bit payload). i32/f32 inline, pointers for heap types. Tainted/secret/error flag bits in tag.                                                                                                                                        |
-| Syntax      | Three-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields), `()` infix mode. Bare words are strings; `$var` reads a variable. Binding operators (`=`, `:`, `::`) sugar `def`/`mut`/`set`. Full reference: `SYNTAX.md`.                |
+| Syntax      | Two-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields). Bare words are strings; `$var` reads a variable. Bindings are prefix commands — `def`/`mut`/`set` (`def x 5`); there are no infix binding operators. Full reference: `SYNTAX.md`.                |
 | Concurrency | Direct-style. State-machine transform for every suspending proc — `yield`, `await`, `parallel`, `race`, and calls into suspending procs all resume through one SM dispatch table (`GENERATOR_STATE_MACHINE.md`). NxM work-stealing scheduler. Atoms for shared state, boxes for thread-local.                                                                 |
 | GC          | Epoch-based tracing, non-moving, no stop-the-world. Co-design with concurrency: `GC_CONCURRENCY_DESIGN.md`.                                                                                                                                                              |
 | Types       | Gradual typing — dynamic by default, optional static types give unboxed values. Sound at commitment sites (typed slots reject implicit dyn flow). Architecture and decisions: `TYPE_SYSTEM.md`.                                                                          |
@@ -39,7 +39,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 13  | Concurrency               | **COMPLETE** ⚠ | NxM scheduler, parallel/spawn/await, escape analysis for mutable capture pinning. Hardened by May 2026 audit campaign — see note below. |
 | 14  | Module System             | **COMPLETE** | File modules, both `use` forms, cross-module typing, sandboxed `interpret`                |
 | 15  | Macro System              | **COMPLETE** | AST macros via syntax objects, hygienic expansion, quasiquoting, `gensym`                 |
-| 16  | Phase 2 Syntax            | **COMPLETE** | Three-mode delimiters, infix in `()`, binding operators (`=`/`:`/`::`)                    |
+| 16  | Phase 2 Syntax            | **COMPLETE** | Two-mode delimiters (`[]`/`{}`); `()` infix and the `=`/`:`/`::` binding operators were removed — bind with `def`/`mut`/`set` |
 | 17  | FFI & Embedding           | **COMPLETE** | `embed.c` API, native fns, typed `extern`, `[Ptr T]` for in-process inspection            |
 
 ## Where to read more

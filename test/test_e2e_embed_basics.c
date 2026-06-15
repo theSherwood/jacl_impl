@@ -276,7 +276,7 @@ static int test_e2e_ctx_declaration(void) {
 
   /* Single-call form: decl + read + with-ctx override + restore. */
   JaclVal r = jacl_eval(vm,
-      "ctx mut i32 verbosity = 7\n"
+      "ctx mut i32 verbosity 7\n"
       "def baseline $ctx->verbosity\n"
       "def overridden [with-ctx {verbosity 99} { $ctx->verbosity }]\n"
       "def after $ctx->verbosity\n"
@@ -300,7 +300,7 @@ static int test_e2e_ctx_cross_eval(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal r1 = jacl_eval(vm, "ctx mut i32 verbosity = 7");
+  JaclVal r1 = jacl_eval(vm, "ctx mut i32 verbosity 7");
   ASSERT(!jacl_is_error(r1));
 
   JaclVal r2 = jacl_eval(vm, "$ctx->verbosity");

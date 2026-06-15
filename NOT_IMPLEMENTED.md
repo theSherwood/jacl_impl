@@ -185,18 +185,14 @@ Scaffolding that exists in the runtime but no compiler path emits it.
   implementation. See §1 above.
 - **Pragma block (`#{...}`)** — removed (was a parsed-and-ignored lexer
   stub with no consumer). `#` is a line comment only.
-
-## Planned
-
-- **Drop the binding operators (`=` / `:` / `::`)** — the `x = 3` (def),
-  `x : 3` (mut), `x :: 3` (set) infix sugar is slated for removal in favor
-  of the prefix `def`/`mut`/`set` forms only. `ctx` will take its default by
-  juxtaposition (`ctx i32 x 0`) rather than `=`. Validated on a scratch pass
-  (the `.jacl` corpus migrates cleanly; proc-valued bindings become named
-  procs); remaining work is the C-test embedded-JACL migration (~25 files),
-  removing the operators from the lexer/parser/compiler, and rewriting the
-  binding/ctx parser+typer assert tests. A coherent all-or-nothing change —
-  do it in one dedicated pass.
+- **Binding operators (`=` / `:` / `::`)** — removed. The `x = 3` (def),
+  `x : 3` (mut), `x :: 3` (set) infix sugar no longer lexes: a stray
+  `=`/`:`/`::` is a lexer error that points at the prefix form to use. Bind
+  with the prefix commands `def`/`mut`/`set` only. `ctx` takes its default by
+  juxtaposition (`ctx [mut] Type name default`, e.g. `ctx i32 x 0`) rather
+  than `=`. The lexer still defines the (now unused) `TOKEN_EQUALS`/`COLON`/
+  `DOUBLE_COLON` and the `HEAD_EQUALS`/`COLON`/`COLON_COLON` rewrite paths
+  remain as unreachable dead code (nothing can emit those tokens).
 
 ---
 

@@ -3,8 +3,8 @@
 # Re-registering under the same key replaces the previous closure.
 # The first commit fires A; the second fires B (not A).
 def counter [atom 0]
-loggerA = proc {old, new} { print "A: $old -> $new" }
-loggerB = proc {old, new} { print "B: $old -> $new" }
+proc loggerA {old, new} { print "A: $old -> $new" }
+proc loggerB {old, new} { print "B: $old -> $new" }
 watch $counter "k" $loggerA
 reset $counter 1
 watch $counter "k" $loggerB

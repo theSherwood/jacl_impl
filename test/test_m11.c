@@ -259,7 +259,7 @@ static int test_mut_i64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut i64 x 0\n"
-    "x :: 42\n"
+    "set x 42\n"
     "[print [to-string $x]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -269,7 +269,7 @@ static int test_mut_f64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut f64 x 0.0\n"
-    "x :: 3.14\n"
+    "set x 3.14\n"
     "[print [to-string $x]]",
     &cap, "3.14\n"));
   TEST_PASS();
@@ -279,7 +279,7 @@ static int test_mut_u64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut u64 x 0\n"
-    "x :: 100\n"
+    "set x 100\n"
     "[print [to-string $x]]",
     &cap, "100\n"));
   TEST_PASS();
@@ -289,7 +289,7 @@ static int test_mut_u32_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut u32 x 0\n"
-    "x :: 77\n"
+    "set x 77\n"
     "[print [to-string $x]]",
     &cap, "77\n"));
   TEST_PASS();
@@ -298,7 +298,7 @@ static int test_mut_u32_basic(void) {
 static int test_set_type_error_str_to_i64(void) {
   ASSERT(run_err(
     "mut i64 x 0\n"
-    "x :: \"hello\"",
+    "set x \"hello\"",
     "type error: cannot assign str to i64 binding"));
   TEST_PASS();
 }
@@ -307,7 +307,7 @@ static int test_set_type_error_dyn_to_i64(void) {
   ASSERT(run_err(
     "mut i64 x 0\n"
     "def y 42\n"
-    "x :: $y",
+    "set x $y",
     "type error: cannot assign dyn to i64 binding"));
   TEST_PASS();
 }
@@ -375,7 +375,7 @@ static int test_set_typed_to_typed_ok(void) {
     "proc t {} {\n"
     "  mut i64 x 0\n"
     "  def i64 y 99\n"
-    "  x :: $y\n"
+    "  set x $y\n"
     "  print [to-string $x]\n"
     "}\n"
     "[t]",
@@ -388,7 +388,7 @@ static int test_set_untyped_mut_no_checking(void) {
   /* Untyped mut should accept any value type */
   ASSERT(run_ok(
     "mut x 0\n"
-    "x :: \"hello\"\n"
+    "set x \"hello\"\n"
     "[print $x]",
     &cap, "hello\n"));
   TEST_PASS();
@@ -401,7 +401,7 @@ static int test_mut_i64_local(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut i64 n 0\n"
-    "  n :: 10\n"
+    "  set n 10\n"
     "  set n [+ $n 5]\n"
     "  print [to-string $n]\n"
     "}\n"
@@ -843,7 +843,7 @@ static int test_contextual_literal_in_set(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut i64 x 0\n"
-    "  x :: 99\n"
+    "  set x 99\n"
     "  print [to-string $x]\n"
     "}\n"
     "[t]",

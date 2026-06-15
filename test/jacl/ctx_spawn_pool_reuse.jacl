@@ -3,7 +3,7 @@
 # expect: 1
 # expect: done
 # Test: ctx freed on task completion — pool reuse across multiple spawns
-ctx mut i32 level = 1
+ctx mut i32 level 1
 proc main {} {
   def f1 [spawn { $ctx->level }]
   print [await $f1]

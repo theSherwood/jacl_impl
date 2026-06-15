@@ -78,10 +78,10 @@ static int test_count_empty_stream(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  i : 0\n"
+    "  mut i 0\n"
     "  while [< $i 0] {\n"
     "    [yield $i]\n"
-    "    i :: [+ $i 1]\n"
+    "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
     "[print [count [gen]]]\n",
@@ -242,10 +242,10 @@ static int test_first_empty_stream(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  i : 0\n"
+    "  mut i 0\n"
     "  while [< $i 0] {\n"
     "    [yield $i]\n"
-    "    i :: [+ $i 1]\n"
+    "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
     "[print [if [== [first [gen]] $nil] { \"nil\" } { \"nope\" }]]\n",

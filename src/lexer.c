@@ -1278,7 +1278,12 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
             lexer__advance(lex);
             otype = TOKEN_OPERATOR;
           } else {
-            otype = TOKEN_EQUALS;
+            Token etok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
+            etok.payload.error_msg =
+              "'=' is not a valid token; use 'def name value' to bind";
+            lexer__arr_push(arr, etok);
+            (*error_count)++;
+            continue;
           }
           break;
         case '-':
@@ -1614,18 +1619,31 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
             lexer__advance(&lex);
             otype = TOKEN_OPERATOR; /* == stays TOKEN_OPERATOR */
           } else {
-            otype = TOKEN_EQUALS;
+            /* '=' is no longer a binding operator. */
+            Token etok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+            etok.payload.error_msg =
+              "'=' is not a valid token; use 'def name value' to bind";
+            lexer__arr_push(&arr, etok);
+            error_count++;
+            continue;
           }
           break;
         case ':':
           lexer__advance(&lex);
-          if (lexer__peek(&lex) == ':') {
-            lexer__advance(&lex);
-            otype = TOKEN_DOUBLE_COLON;
-          } else {
-            otype = TOKEN_COLON;
+          {
+            /* ':' / '::' are no longer binding operators. */
+            const char* emsg =
+              "':' is not a valid token; use 'mut name value' to bind";
+            if (lexer__peek(&lex) == ':') {
+              lexer__advance(&lex);
+              emsg = "'::' is not a valid token; use 'set name value' to reassign";
+            }
+            Token etok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+            etok.payload.error_msg = emsg;
+            lexer__arr_push(&arr, etok);
+            error_count++;
+            continue;
           }
-          break;
         case '!':
           lexer__advance(&lex);
           if (lexer__peek(&lex) == '=') {

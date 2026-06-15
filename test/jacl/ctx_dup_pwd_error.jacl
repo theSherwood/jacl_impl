@@ -1,4 +1,4 @@
 # expect-error: ctx field 'pwd' already declared
 # Test: user code cannot re-declare built-in pwd field
-ctx mut str pwd = /foo
+ctx mut str pwd /foo
 print $ctx->pwd

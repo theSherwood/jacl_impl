@@ -2,9 +2,9 @@
 # expect: 10
 # expect: true
 # Test: multiple ctx fields all accessible, no conflicts
-ctx mut str name = "hello"
-ctx mut i32 count = 10
-ctx mut bool active = true
+ctx mut str name "hello"
+ctx mut i32 count 10
+ctx mut bool active true
 
 print $ctx->name
 print $ctx->count

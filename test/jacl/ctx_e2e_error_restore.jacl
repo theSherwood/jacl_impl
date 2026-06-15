@@ -1,7 +1,7 @@
 # expect: caught
 # expect: 42
 # Test: error in with-ctx body restores old ctx correctly
-ctx mut i32 level = 42
+ctx mut i32 level 42
 try {
   with-ctx {level 99} {
     error "boom"

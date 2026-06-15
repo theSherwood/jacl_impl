@@ -31,7 +31,7 @@ static int test_proc_call_pipeline(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "x = 10\n"
+    "def x 10\n"
     "proc double {n} { * $n 2 }\n"
     "[print [double $x]]";
 
@@ -117,7 +117,7 @@ static int test_closure_capture(void) {
     "proc mkadd {x} {\n"
     "  proc inner {y} { + $x $y }\n"
     "}\n"
-    "add10 = [mkadd 10]\n"
+    "def add10 [mkadd 10]\n"
     "[print [add10 5]]\n"
     "[print [add10 90]]";
 
@@ -178,8 +178,8 @@ static int test_nested_procs(void) {
     "    proc inner {c} { + [+ $a $b] $c }\n"
     "  }\n"
     "}\n"
-    "m = [outer 100]\n"
-    "i = [m 20]\n"
+    "def m [outer 100]\n"
+    "def i [m 20]\n"
     "[print [i 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -226,7 +226,7 @@ static int test_error_call_non_function(void) {
   vm_init(&vm, &arena);
 
   const char* program =
-    "x = 42\n"
+    "def x 42\n"
     "[x 1]";  /* x is i32, not callable */
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -277,11 +277,11 @@ static int test_while_iterative_sum(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "i : 1\n"
-    "sum : 0\n"
+    "mut i 1\n"
+    "mut sum 0\n"
     "[while [<= $i 10] {\n"
-    "  sum :: [+ $sum $i]\n"
-    "  i :: [+ $i 1]\n"
+    "  set sum [+ $sum $i]\n"
+    "  set i [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 

@@ -242,10 +242,7 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_AND:
     case TOKEN_OR:
     case TOKEN_NOT:
-    case TOKEN_TILDE_AT:
-    case TOKEN_EQUALS:
-    case TOKEN_COLON:
-    case TOKEN_DOUBLE_COLON: {
+    case TOKEN_TILDE_AT: {
       parser__advance(p);
       AstNode* node = ast_alloc(p->arena);
       node->type = AST_LIT_STRING;
@@ -473,11 +470,9 @@ AstNode* parser__parse_command(Parser* p) {
 /* -------------------------------------------------------------------------
  * Internal: Check if a token is a symbolic operator
  *
- * Uniform operator set used in both () and {} modes:
+ * Uniform operator set used in {} mode:
  *   TOKEN_OPERATOR: +, -, *, /, %, ==, !=, <, >, <=, >=
- *   TOKEN_AND: &&   TOKEN_OR: ||
- *   TOKEN_PIPE: |   TOKEN_EQUALS: =
- *   TOKEN_COLON: :  TOKEN_DOUBLE_COLON: ::
+ *   TOKEN_AND: &&   TOKEN_OR: ||   TOKEN_PIPE: |
  * ------------------------------------------------------------------------- */
 
 int parser__is_operator(Token* tok) {
@@ -485,9 +480,6 @@ int parser__is_operator(Token* tok) {
       || tok->type == TOKEN_AND
       || tok->type == TOKEN_OR
       || tok->type == TOKEN_PIPE
-      || tok->type == TOKEN_EQUALS
-      || tok->type == TOKEN_COLON
-      || tok->type == TOKEN_DOUBLE_COLON
 ;
 }
 
@@ -723,9 +715,6 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_AMP:
     case TOKEN_AND:
     case TOKEN_OR:
-    case TOKEN_EQUALS:
-    case TOKEN_COLON:
-    case TOKEN_DOUBLE_COLON:
     /* New keyword tokens */
     case TOKEN_STRUCT:
     case TOKEN_PROC:
@@ -747,6 +736,15 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_EXTERN:
       result = parser__parse_atom(p);
       break;
+
+    case TOKEN_ERROR: {
+      /* Lexer-level error token (e.g. a stray '=' / ':' / '::'). Surface the
+       * lexer's message as a parse error so it is always reported. */
+      Token* bad = parser__advance(p);
+      return parser__error(p,
+          bad->payload.error_msg ? bad->payload.error_msg : "invalid token",
+          bad);
+    }
 
     default:
       return NULL;
@@ -1244,7 +1242,7 @@ static bool parser__is_constant_expr(AstNode* node) {
 /* -------------------------------------------------------------------------
  * Internal: Parse ctx field declaration
  *
- * Syntax: ctx [mut] Type name = default_expr
+ * Syntax: ctx [mut] Type name default_expr
  * Called when the current token is TOKEN_CTX.
  * ------------------------------------------------------------------------- */
 
@@ -1277,23 +1275,22 @@ AstNode* parser__parse_ctx_decl(Parser* p) {
   const char* field_name = name_tok->payload.text;
   uint32_t field_name_len = name_tok->length;
 
-  /* Expect '=' */
-  Token* eq_tok = parser__peek(p);
-  if (eq_tok->type != TOKEN_EQUALS) {
-    return parser__error(p, "ctx field must have a default value", eq_tok);
+  /* Expect a default value via juxtaposition: ctx [mut] Type name default */
+  Token* default_tok = parser__peek(p);
+  if (parser__is_command_end(p)) {
+    return parser__error(p, "ctx field must have a default value", default_tok);
   }
-  parser__advance(p); /* consume '=' */
 
   /* Parse default expression */
   AstNode* default_expr = parser__parse_expr(p);
   if (default_expr == NULL) {
-    return parser__error(p, "expected expression after '=' in ctx declaration", eq_tok);
+    return parser__error(p, "expected default value in ctx declaration", default_tok);
   }
   if (default_expr->type == AST_ERROR) return default_expr;
 
   /* Validate: default must be a compile-time constant */
   if (!parser__is_constant_expr(default_expr)) {
-    return parser__error(p, "ctx field default must be a compile-time constant", eq_tok);
+    return parser__error(p, "ctx field default must be a compile-time constant", default_tok);
   }
 
   AstNode* node = ast_alloc(p->arena);
@@ -1329,9 +1326,6 @@ AstNode* parser__parse_defmacro(Parser* p) {
       name_tok->type != TOKEN_BANG &&
       name_tok->type != TOKEN_AMP &&
       name_tok->type != TOKEN_DOTDOT &&
-      name_tok->type != TOKEN_EQUALS &&
-      name_tok->type != TOKEN_COLON &&
-      name_tok->type != TOKEN_DOUBLE_COLON &&
       name_tok->type != TOKEN_AND &&
       name_tok->type != TOKEN_OR &&
       name_tok->type != TOKEN_NOT) {

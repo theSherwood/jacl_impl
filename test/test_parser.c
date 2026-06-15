@@ -1645,13 +1645,23 @@ static int test_roundtrip_complex(void) {
 
 /* ---- US-013: Comprehensive new-syntax roundtrip and nesting tests ---- */
 
+static int parse_fails(const char* input) {
+  LexResult t = lexer_lex(input, &test_arena);
+  ParseResult r = parser_parse(t, &test_arena);
+  return r.error_count > 0;
+}
+
 static int test_roundtrip_binding_ops(void) {
   setup();
-  /* Binding ops desugar to def/mut/set — roundtrip on desugared form */
-  ASSERT(roundtrip_ok("x = 5"));
-  ASSERT(roundtrip_ok("x : 0"));
-  ASSERT(roundtrip_ok("x :: 10"));
-  ASSERT(roundtrip_ok("x = [+ 1 2]"));
+  /* Binding operators were removed: bindings are name-first prefix commands. */
+  ASSERT(roundtrip_ok("def x 5"));
+  ASSERT(roundtrip_ok("mut x 0"));
+  ASSERT(roundtrip_ok("set x 10"));
+  ASSERT(roundtrip_ok("def x [+ 1 2]"));
+  /* The old infix operators no longer lex/parse. */
+  ASSERT(parse_fails("x = 5"));
+  ASSERT(parse_fails("x : 0"));
+  ASSERT(parse_fails("x :: 10"));
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2556,131 +2566,69 @@ static int test_for_inline_collection(void) {
   TEST_PASS();
 }
 
-/* ---- Syntax Redesign US-008: Binding operators (=, :, ::) ---- */
+/* ---- Binding operators (=, :, ::) were removed ---- */
 
-/* x = 5 → [= [x] 5] — left operand is zero-arg command in bare mode */
+/* x = 5 → lex/parse error: '=' is no longer a binding operator */
 static int test_binding_equals_def(void) {
   setup();
   ParseResult r = parse("x = 5");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* left: [x] (command, not lit_string — bare mode operands are commands) */
-  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.args[0]->data.command.arg_count, 0);
-  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* i64 x = 5 → [= [i64 x] 5] — left side is command [i64 x] */
+/* i64 x = 5 → parse error */
 static int test_binding_typed_equals(void) {
   setup();
   ParseResult r = parse("i64 x = 5");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* left: [i64 x] */
-  AstNode* left = n->data.command.args[0];
-  ASSERT(left->type == AST_COMMAND);
-  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "i64", 3) == 0);
-  ASSERT_U32_EQ(left->data.command.arg_count, 1);
-  ASSERT(memcmp(left->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
-  /* right: 5 */
-  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* x : 0 → [: [x] 0] — left operand is zero-arg command */
+/* x : 0 → parse error */
 static int test_binding_colon_mut(void) {
   setup();
   ParseResult r = parse("x : 0");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ":", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
-  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* i64 x : 0 → [: [i64 x] 0] — left side is command [i64 x] */
+/* i64 x : 0 → parse error */
 static int test_binding_typed_colon(void) {
   setup();
   ParseResult r = parse("i64 x : 0");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ":", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* left: [i64 x] */
-  AstNode* left = n->data.command.args[0];
-  ASSERT(left->type == AST_COMMAND);
-  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "i64", 3) == 0);
-  ASSERT_U32_EQ(left->data.command.arg_count, 1);
-  ASSERT(memcmp(left->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
-  /* right: 0 */
-  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* x :: [+ $x 1] → [:: [x] [+ $x 1]] — left is zero-arg command */
+/* x :: [+ $x 1] → parse error */
 static int test_binding_double_colon_set(void) {
   setup();
   ParseResult r = parse("x :: [+ $x 1]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "::", 2) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
-  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Binding operators inside {} block */
+/* Binding operators inside {} block → parse error */
 static int test_binding_in_block(void) {
   setup();
   ParseResult r = parse("{ x = 5; y : 0 }");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* blk = r.nodes[0];
-  ASSERT(blk->type == AST_BLOCK);
-  ASSERT_U32_EQ(blk->data.block.count, 2);
-  /* first: [= x 5] — parser keeps "=", compiler rewrites */
-  ASSERT(blk->data.block.commands[0]->type == AST_COMMAND);
-  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "=", 1) == 0);
-  /* second: [: y 0] — parser keeps ":", compiler rewrites */
-  ASSERT(blk->data.block.commands[1]->type == AST_COMMAND);
-  ASSERT(memcmp(blk->data.block.commands[1]->data.command.head->data.lit_string.value, ":", 1) == 0);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* def/mut/set command forms still work */
+/* def/mut/set command forms are the only binding syntax */
 static int test_binding_def_cmd_still_works(void) {
   setup();
   ParseResult r = parse("def x 5");
@@ -2695,36 +2643,27 @@ static int test_binding_def_cmd_still_works(void) {
   TEST_PASS();
 }
 
-/* Binding with expression value: x = [vec 1 2 3] → [= [x] [vec 1 2 3]] */
+/* Binding with expression value uses prefix form: def x [vec 1 2 3] */
 static int test_binding_expr_value(void) {
   setup();
-  ParseResult r = parse("x = [vec 1 2 3]");
+  ParseResult r = parse("def x [vec 1 2 3]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* left: [x] (command) */
-  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
   ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* [vec 1 2 3] */
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Binding operators not active inside [] */
+/* '=' is an error token even inside [] */
 static int test_binding_not_in_brackets(void) {
   setup();
   ParseResult r = parse("[x = 5]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  /* Inside [], = is just an atom — head is "x", args are "=" and 5 */
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "x", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3326,8 +3265,8 @@ static int test_shell_cmd_neq_not_shell(void) {
 
 static int test_ctx_decl_basic(void) {
   setup();
-  /* ctx i32 count = 0 */
-  ParseResult r = parse("ctx i32 count = 0");
+  /* ctx i32 count 0 */
+  ParseResult r = parse("ctx i32 count 0");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3347,8 +3286,8 @@ static int test_ctx_decl_basic(void) {
 
 static int test_ctx_decl_mutable(void) {
   setup();
-  /* ctx mut str name = "default" */
-  ParseResult r = parse("ctx mut str name = \"default\"");
+  /* ctx mut str name "default" */
+  ParseResult r = parse("ctx mut str name \"default\"");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3367,7 +3306,7 @@ static int test_ctx_decl_mutable(void) {
 
 static int test_ctx_decl_float_default(void) {
   setup();
-  ParseResult r = parse("ctx f32 score = 3.14");
+  ParseResult r = parse("ctx f32 score 3.14");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3383,7 +3322,7 @@ static int test_ctx_decl_float_default(void) {
 
 static int test_ctx_decl_bool_default(void) {
   setup();
-  ParseResult r = parse("ctx bool verbose = true");
+  ParseResult r = parse("ctx bool verbose true");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3399,7 +3338,7 @@ static int test_ctx_decl_bool_default(void) {
 
 static int test_ctx_decl_multiple(void) {
   setup();
-  ParseResult r = parse("ctx i32 x = 1\nctx mut str y = \"hi\"");
+  ParseResult r = parse("ctx i32 x 1\nctx mut str y \"hi\"");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 2);
   ASSERT(r.nodes[0]->type == AST_CTX_DECL);
@@ -3414,7 +3353,7 @@ static int test_ctx_decl_multiple(void) {
 
 static int test_ctx_decl_missing_default(void) {
   setup();
-  /* Missing = and default: should produce error */
+  /* Missing default value: should produce error */
   ParseResult r = parse("ctx i32 count");
   ASSERT(r.error_count > 0);
   teardown();
@@ -3425,7 +3364,7 @@ static int test_ctx_decl_missing_default(void) {
 static int test_ctx_decl_non_constant(void) {
   setup();
   /* Variable reference as default — not a constant */
-  ParseResult r = parse("ctx i32 count = $x");
+  ParseResult r = parse("ctx i32 count $x");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -3435,7 +3374,7 @@ static int test_ctx_decl_non_constant(void) {
 static int test_ctx_decl_nested_in_block(void) {
   setup();
   /* ctx inside a block should produce error */
-  ParseResult r = parse("proc foo {} { ctx i32 x = 0 }");
+  ParseResult r = parse("proc foo {} { ctx i32 x 0 }");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -3445,7 +3384,7 @@ static int test_ctx_decl_nested_in_block(void) {
 static int test_ctx_decl_nested_in_bare_block(void) {
   setup();
   /* ctx inside a bare block should produce error */
-  ParseResult r = parse("if true { ctx i32 x = 0 }");
+  ParseResult r = parse("if true { ctx i32 x 0 }");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -3455,7 +3394,7 @@ static int test_ctx_decl_nested_in_bare_block(void) {
 static int test_ctx_decl_struct_constructor_default(void) {
   setup();
   /* Struct constructor with literal args is a valid constant default */
-  ParseResult r = parse("ctx Point origin = [Point x 0 y 0]");
+  ParseResult r = parse("ctx Point origin [Point x 0 y 0]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];

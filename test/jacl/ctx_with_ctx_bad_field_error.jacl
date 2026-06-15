@@ -1,6 +1,6 @@
 # expect-error: no field 'missing' on ctx
 # Test: invalid field name in overrides rejected
-ctx mut i32 level = 42
+ctx mut i32 level 42
 with-ctx {missing 99} {
   print ok
 }

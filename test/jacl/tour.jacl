@@ -16,10 +16,10 @@
 
 struct Pt {i32 x, i32 y}
 
-# `ctx <type> <name> = <value>` declares a field of `$ctx`, the dynamic
+# `ctx <type> <name> <value>` declares a field of `$ctx`, the dynamic
 # context object visible everywhere. Plain `ctx` is immutable; `ctx mut`
 # allows `with-ctx` overrides. Declarations live at module level.
-ctx mut i32 verbosity = 0
+ctx mut i32 verbosity 0
 
 # `defmacro` registers a compile-time rewrite. `syntax-quote [...]` is
 # a templating form for AST literals; `~name` splices a captured arg's
@@ -103,17 +103,17 @@ proc main {} {
   assert [== $total 10]
 
   # ----- bindings -----
-  # `def` immutable, `mut` mutable, `set` reassigns. The `=`/`:`/`::`
-  # operators are command-mode sugar for these.
+  # `def` immutable, `mut` mutable, `set` reassigns. Bindings are
+  # name-first prefix commands; there is no infix binding operator.
   def imm 7
   assert [== $imm 7]
-  also = 11                       # `=` is `def` sugar
+  def also 11
   assert [== $also 11]
   mut counter 0
   set counter 2
   assert [== $counter 2]
-  reassignable : 0                # `:` is `mut` sugar
-  reassignable :: 5               # `::` is `set` sugar
+  mut reassignable 0
+  set reassignable 5
   assert [== $reassignable 5]
 
   # ----- two modes -----
@@ -269,7 +269,7 @@ proc main {} {
   # with (old, new) in the writing thread.
   def witness [box 0]
   def counter [atom 0]
-  tap = proc {old, new} { reset $witness $new }
+  proc tap {old, new} { reset $witness $new }
   watch $counter tap $tap
   reset $counter 7
   assert [== [deref $witness] 7]
