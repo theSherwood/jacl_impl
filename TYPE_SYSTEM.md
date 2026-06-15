@@ -97,7 +97,7 @@ registry:
 - Slot 0: dyn placeholder (`defs[0] = NULL`).
 - Slot 1: ctx struct (always populated; pre-reserved at registry init).
 - Slot 2+: user-declared structs in source order. Anonymous inline
-  struct types (`struct{x:i32,y:i32}`) are registered on demand by
+  struct types (`[struct [i32 x, i32 y]]`) are registered on demand by
   both passes during the defstruct walk; same source order → same
   slot indices.
 

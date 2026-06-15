@@ -15,7 +15,8 @@ Every value prints as a form the reader accepts. `[read [print v]] == v` for eve
 
 Consequences:
 
-- Maps print as `[map a 1 b 2]`.
+- Dyn maps print as `[map a 1 b 2]`; typed maps print as their constructor
+  `[[Map K V] k1 v1 k2 v2 …]`.
 - Vectors print as `[vec 1 2 3]`.
 - Errors print as `[error "msg"]`.
 - Structs print as `[Pt x 30 y 15]` — same form as the constructor (see Structs below).
@@ -647,17 +648,10 @@ def results [parallel
 ]
 ```
 
-## Pragmas
+## Pragmas — removed
 
-`#{ ... }` syntax for pragmas (avoids collision with `#!/usr/bin/env jacl` shebang):
-
-```
-#!/usr/bin/env jacl
-#{ path-fallback }
-
-# script content...
-!ls -la | lines | for line { print $line }
-```
+The `#{ ... }` pragma form was removed (it was parsed-and-ignored dead
+syntax). `#` is a line comment only.
 
 ## Scoping
 
@@ -1256,7 +1250,7 @@ stay listed as historical record.
 6. ~~**Multi-line strings**~~ — resolved: triple-quoted strings with interpolation, Kotlin-style whitespace stripping.
 7. ~~**Comments**~~ — resolved: `#` single-line, `##` doc comments, no multi-line syntax.
 8. ~~**Variadic procs**~~ — resolved: `..` in param lists, consistent with destructuring.
-9. ~~**Pragmas**~~ — resolved: `#{ ... }` syntax, avoids shebang collision.
+9. ~~**Pragmas**~~ — removed (was `#{ ... }`); parsed-and-ignored dead syntax.
 10. ~~**Ranges**~~ — resolved: `[range 1 10]` exclusive, `[range-inclusive 1 10]` inclusive, produce streams. (Originally infix `(1 ..< 10)`; revised June 2026.)
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
 12. ~~**Optional chaining**~~ — resolved (holding pattern): `[?. $val field]` prefix form. Glued-suffix mirror of `->` is the eventual target; the choice gets made during the `()` cleanup tracked in `NOT_IMPLEMENTED.md` §12.
@@ -1327,7 +1321,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Optional chaining (`?.`) | `[?. $val field]` prefix (holding pattern). The long-term target is a glued suffix `$val?.field` mirroring `->`; not pursued yet. |
 | Negative numeric literals (`-1`) | yes — lexer accepts `-1` directly (commit `c5289fd`). |
 | Module visibility (`_` prefix = private) | compiler-enforced at import |
-| Pragmas (`#{ ... }`) | yes |
+| Pragmas (`#{ ... }`) | removed |
 | Same-scope shadowing error | compile-time |
 | Shell interop (`!cmd`, `exec`) | `OP_EXEC` with FULL/STDIN/BG/PIPE flags; OS pipes, stdin/stdout |
 | Jobs (Future + OS process) | `exec` BG mode + `signal`/`cancel`; map carries `pid`. `&` sugar + cancel semantics still design-open |

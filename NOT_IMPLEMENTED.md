@@ -183,8 +183,20 @@ Scaffolding that exists in the runtime but no compiler path emits it.
 - **`match` reservations** — `TOKEN_MATCH`, `HEAD_MATCH`, special-form
   recognition at `compiler.c:2527`. Reserves the word; no
   implementation. See §1 above.
-- **Pragma block (`#{...}`)** — lexer stub recognizes it (~30 LOC).
-  No consumer.
+- **Pragma block (`#{...}`)** — removed (was a parsed-and-ignored lexer
+  stub with no consumer). `#` is a line comment only.
+
+## Planned
+
+- **Drop the binding operators (`=` / `:` / `::`)** — the `x = 3` (def),
+  `x : 3` (mut), `x :: 3` (set) infix sugar is slated for removal in favor
+  of the prefix `def`/`mut`/`set` forms only. `ctx` will take its default by
+  juxtaposition (`ctx i32 x 0`) rather than `=`. Validated on a scratch pass
+  (the `.jacl` corpus migrates cleanly; proc-valued bindings become named
+  procs); remaining work is the C-test embedded-JACL migration (~25 files),
+  removing the operators from the lexer/parser/compiler, and rewriting the
+  binding/ctx parser+typer assert tests. A coherent all-or-nothing change —
+  do it in one dedicated pass.
 
 ---
 
