@@ -194,3 +194,26 @@ this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
   **tag dispatch must switch on the i32 type index** (`jaclrt_type_index`), not
   chained `(v & TAG_MASK) == const` tests. (Candidate svm-llvm enhancement: i64
   `switch`/`br_table`.)
+
+- **P1.5 collections (vector) ✅** — `runtime/collections.c`: the real `lib/rrb_vec`
+  instantiated for `JaclVal`, with node alloc → `jacl_alloc(JOBJ_NODE)` (traced) and
+  size-tables → `JOBJ_BLOB`. A vector value is `JACL_TAG_VECTOR` over the RRB root;
+  GC reachability flows value → root → internals → leaves → elements. `test_vec.c`
+  (build/get/persistence) and `test_vec_gc.c` (a vector of heap-string elements —
+  reachable only via the vector — survives collection intact and is stable across a
+  second collect, while intermediate persistent versions + external garbage are
+  reclaimed) green on interp + JIT. (Map/HAMT is the remaining P1.5 piece.)
+
+  **Key finding — `gc.roots` vs tagged values (an svm ask).** JACL stack roots are
+  **tagged JaclVals** (`VECTOR<<56 | offset`, …) whose full word sits far above the
+  raw heap range, so `gc.roots`' range filter on the raw word **drops them** (raw
+  `JaclObj*` roots pass; tagged ones don't). Phase-1 workaround: widen the range
+  past the max heap-tagged value and mask each candidate in the collector (re-admits
+  host addresses — an ASLR smell, harmless here since we mask + range-check). **The
+  proper fix is a `gc.roots` payload-mask parameter** so tagged-pointer guests keep
+  the tight range and svm returns masked offsets — file as an svm enhancement before
+  Phase 2 / production.
+
+  Lesser findings: persistent `push` creates intermediate versions that become
+  garbage, so tests assert reachable-survival + stability, not exact reclaim counts;
+  `rrb_vec.h`'s `assert()` needs `-DNDEBUG` (added to the harness clang flags).

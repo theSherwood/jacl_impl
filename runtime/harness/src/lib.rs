@@ -26,7 +26,7 @@ fn compile_driver(driver_abs: &str) -> PathBuf {
         .file_stem().and_then(|s| s.to_str()).unwrap_or("driver");
     let bc = dir.join(format!("jaclrt_{}_{}.bc", stem, std::process::id()));
     let status = Command::new("clang")
-        .args(["-O2", "-emit-llvm", "-c", "-fno-vectorize", "-fno-slp-vectorize"])
+        .args(["-O2", "-emit-llvm", "-c", "-fno-vectorize", "-fno-slp-vectorize", "-DNDEBUG"])
         .arg("-I").arg(RUNTIME_DIR)
         .arg(driver_abs)
         .arg("-o").arg(&bc)

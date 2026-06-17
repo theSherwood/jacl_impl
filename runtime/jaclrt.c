@@ -2,3 +2,4 @@
  * Include this once at the end of a driver TU (after the driver defines `run`). */
 #include "heap_gc.c"
 #include "string.c"
+#include "collections.c"

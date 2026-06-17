@@ -156,10 +156,18 @@ long jacl_gc_collect(void) {
     o->mark = 0;
     off += o->size;
   }
-  /* 2. roots from the svm gc.roots op */
-  static long rootbuf[4096];
-  long n = __vm_gc_roots(jacl_heap_lo(), jacl_heap_hi(), rootbuf, 4096);
-  long scan = n < 4096 ? n : 4096;
+  /* 2. roots from the svm gc.roots op.
+   * Stack roots are tagged JaclVals (tag in the high byte: STRING<<56, VECTOR<<56,
+   * …), whose full word sits far above the raw heap range. svm's gc.roots
+   * range-filters on the raw word, so we widen `hi` past the max heap-tagged value
+   * (0x1A<<56) and mask each candidate below — handling both raw heap pointers and
+   * tagged values. NOTE (Phase-1 workaround): widening re-admits host addresses to
+   * the candidate set (an ASLR smell, harmless here since we mask + range-check).
+   * The clean fix is a gc.roots **payload-mask parameter** so tagged-pointer guests
+   * keep the tight range and svm returns masked offsets — filed as an svm ask. */
+  static long rootbuf[8192];
+  long n = __vm_gc_roots(jacl_heap_lo(), (long)((uint64_t)0x20 << 56), rootbuf, 8192);
+  long scan = n < 8192 ? n : 8192;
   mark_sp = 0;
   for (long i = 0; i < scan; i++) {
     mark_push_word(rootbuf[i]);

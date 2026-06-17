@@ -155,4 +155,15 @@ uint32_t jacl_str_len(JaclVal v);
 void     jacl_str_bytes(JaclVal v, char *buf, uint32_t buflen);  /* NUL-terminated copy */
 bool     jacl_str_eq(JaclVal a, JaclVal b);
 
+/* ===================================================================
+ * Collections (P1.5) — persistent vector over the GC heap. Defined in
+ * collections.c (instantiates lib/rrb_vec for JaclVal). A vector value is
+ * JACL_TAG_VECTOR over the RRB root cell; nodes are JOBJ_NODE (traced), so
+ * the GC keeps the whole structure — including heap-valued elements — alive.
+ * =================================================================== */
+JaclVal  jacl_vec_empty(void);
+JaclVal  jacl_vec_push(JaclVal vec, JaclVal elem);   /* persistent: returns a new vector */
+JaclVal  jacl_vec_get(JaclVal vec, uint32_t idx);    /* element, or JACL_NIL if out of range */
+uint32_t jacl_vec_count(JaclVal vec);
+
 #endif /* JACLRT_H */
