@@ -82,6 +82,9 @@ conservative-non-moving-GC model are all validated end-to-end on interp + JIT.
 
 ## 3. Phase 1 — runtime substrate (guest-side)
 
+> **Scoped into concrete, ordered steps in `SVM_BACKEND_PHASE1.md`** (P1.0–P1.7,
+> runtime layout, sequencing, exit criteria). Summary:
+
 - Heap allocator over the `Memory` window + Immix block/line maps.
 - Non-moving conservative mark-sweep wired to `gc.roots` + cooperative STW.
 - JaclVal value ops re-homed; string interning + RRB-vec/HAMT-map over the new
