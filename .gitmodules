@@ -1,0 +1,3 @@
+[submodule "vendor/svm"]
+	path = vendor/svm
+	url = https://github.com/theSherwood/vm

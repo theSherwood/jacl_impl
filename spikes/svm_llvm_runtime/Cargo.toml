@@ -1,0 +1,21 @@
+# Spike-1b(a): compile a REAL JACL lib/ collection (rrb_vec.h) through svm-llvm
+# (clang -O2 -emit-llvm -> svm_llvm::translate_bc_path) and run it on interp + JIT,
+# checked against native cc. Validates the "reuse existing C" thesis.
+#
+# Own cargo root; path-deps into the svm submodule. svm-llvm links libLLVM (needs
+# llvm-18-dev installed), so the first build is heavy.
+[workspace]
+
+[package]
+name = "jacl-svm-llvm-runtime-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
+svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }
+svm-text   = { path = "../../vendor/svm/crates/svm-text" }
+svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
+svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
+svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }

@@ -1,0 +1,18 @@
+# Spike-2: conservative, non-moving mark-sweep over a window heap, driven by
+# gc.roots. C runtime compiled via svm-llvm, run on interp + JIT. Own cargo root;
+# path-deps into the svm submodule (links libLLVM — needs llvm-18-dev).
+[workspace]
+
+[package]
+name = "jacl-svm-gc-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
+svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }
+svm-text   = { path = "../../vendor/svm/crates/svm-text" }
+svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
+svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
+svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
