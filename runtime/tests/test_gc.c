@@ -80,4 +80,4 @@ static long     blobval(JaclObj *o) { return *(long*)jacl_obj_payload(o); }
 static JaclObj* child_a(JaclObj *o) { return ((Node*)jacl_obj_payload(o))->a; }
 static JaclObj* child_b(JaclObj *o) { return ((Node*)jacl_obj_payload(o))->b; }
 
-#include "heap_gc.c"   /* runtime impl last, so run() is module function 0 */
+#include "jaclrt.c"   /* runtime impl last, so run() is module function 0 */

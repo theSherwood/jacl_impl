@@ -79,6 +79,37 @@ static inline int32_t jaclrt_as_i32(JaclVal v)  { return (int32_t)(uint32_t)(v &
 /* Heap payload as a window offset (for P1.2+). */
 static inline uint64_t jaclrt_payload(JaclVal v) { return v & JACL_PAYLOAD_MASK; }
 
+/* Heap pointer <-> tagged value. Heap pointers are window offsets, so they round
+ * trip through the 56-bit payload. */
+static inline void*   jaclrt_as_ptr(JaclVal v) { return (void*)(uintptr_t)(v & JACL_PAYLOAD_MASK); }
+static inline JaclVal jaclrt_from_ptr(uint64_t tag, void *p) {
+  return tag | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* ----- inline strings (<=7 bytes packed into the payload; length = first NUL) ----- */
+static inline JaclVal jaclrt_inline_string(const char *s, uint32_t len) {
+  uint64_t payload = 0;
+  for (uint32_t i = 0; i < len && i < 7; i++) {
+    if (s[i] == '\0') break;
+    payload |= ((uint64_t)(unsigned char)s[i]) << (i * 8);
+  }
+  return JACL_TAG_INLINE_STRING | payload;
+}
+static inline bool jaclrt_is_inline_string(JaclVal v) { return jaclrt_type_index(v) == 0x04; }
+static inline uint32_t jaclrt_inline_len(JaclVal v) {
+  uint64_t p = v & JACL_PAYLOAD_MASK; uint32_t n = 0;
+  for (uint32_t i = 0; i < 7; i++) { if (((p >> (i * 8)) & 0xFF) == 0) break; n++; }
+  return n;
+}
+static inline void jaclrt_inline_get(JaclVal v, char *buf, uint32_t buflen) {
+  uint64_t p = v & JACL_PAYLOAD_MASK; uint32_t i = 0;
+  for (; i < 7 && i + 1 < buflen; i++) {
+    unsigned char c = (unsigned char)((p >> (i * 8)) & 0xFF);
+    if (c == '\0') break; buf[i] = (char)c;
+  }
+  if (buflen) buf[i] = '\0';
+}
+
 /* ===================================================================
  * Heap + GC (P1.2 / P1.3) — non-inline; defined in heap_gc.c.
  * Conservative, non-moving mark-sweep over a heap region; roots via the
@@ -91,6 +122,7 @@ enum {
   JOBJ_FREE = 0,   /* a swept/free cell (skipped by tracing) */
   JOBJ_BLOB = 1,   /* opaque payload, no outgoing pointers   */
   JOBJ_NODE = 2,   /* payload may contain heap pointers (conservatively traced) */
+  JOBJ_STR  = 3,   /* heap string: { u32 len; bytes[] } — no outgoing pointers */
 };
 
 typedef struct JaclObj {
@@ -106,6 +138,21 @@ long   jacl_gc_collect(void);                             /* mark-sweep; returns
 long   jacl_live_count(void);                             /* #live (non-free) cells */
 long   jacl_heap_lo(void);                                /* window-offset bounds, for gc.roots */
 long   jacl_heap_hi(void);
+void   jacl_gc_mark(JaclVal v);                           /* mark a heap value as reachable (for runtime roots) */
 static inline void*    jacl_obj_payload(JaclObj* o) { return (void*)((uint8_t*)o + sizeof(JaclObj)); }
+
+/* Runtime-internal roots the collector must also mark (intern table, …) — JACL
+ * obligation #3. Defined in string.c (extends as more runtime state lands). */
+void   jacl_mark_runtime_roots(void);
+
+/* ===================================================================
+ * Strings (P1.4) — inline / heap / interned. Defined in string.c.
+ * =================================================================== */
+void     jacl_intern_init(void);                          /* reset the intern table */
+JaclVal  jacl_str_new(const char *s, uint32_t len);       /* inline if <=7, else a fresh heap string */
+JaclVal  jacl_str_intern(const char *s, uint32_t len);    /* canonical (pointer-equal) string */
+uint32_t jacl_str_len(JaclVal v);
+void     jacl_str_bytes(JaclVal v, char *buf, uint32_t buflen);  /* NUL-terminated copy */
+bool     jacl_str_eq(JaclVal a, JaclVal b);
 
 #endif /* JACLRT_H */

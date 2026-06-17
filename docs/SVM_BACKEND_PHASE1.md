@@ -178,3 +178,19 @@ runtime artifact builds reproducibly via `runtime/build.sh`. Then Phase 2 begins
 
 Next: P1.4 strings, P1.5 collections (wire `lib/rrb_vec` + `lib/hamt` GC hooks to
 this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
+
+- **P1.4 strings ✅** — `runtime/string.c` (+ `jaclrt.c` unity): inline (≤7B, value),
+  heap (`JOBJ_STR`), and interned strings over the GC heap. Interning introduces a
+  **runtime root set** (the intern table) the collector marks via
+  `jacl_mark_runtime_roots` / `jacl_gc_mark` (obligation #3) — strong interning, so
+  interned strings survive GC via the table (weak interning is a later refinement).
+  `test_strings.c` (inline/heap/intern/eq) and `test_strings_gc.c` (interned string
+  survives collection while n non-interned heap strings are reclaimed) green on
+  interp + JIT.
+
+  Findings: svm-llvm provides `memcpy`/`memset` but **not** `bcmp`/`memcmp`/`strcmp`
+  — hand-roll byte compares in runtime + tests. And clang merges chained i64 tag
+  compares into an **i64 `switch`** that svm-llvm can't lower (only i32) — runtime
+  **tag dispatch must switch on the i32 type index** (`jaclrt_type_index`), not
+  chained `(v & TAG_MASK) == const` tests. (Candidate svm-llvm enhancement: i64
+  `switch`/`br_table`.)

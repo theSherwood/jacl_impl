@@ -125,6 +125,12 @@ static void mark_push_word(long word) {
   if (mark_sp < MARK_STACK_CAP) mark_stack[mark_sp++] = soff;
 }
 
+/* Public: mark a heap-typed JaclVal as reachable. Used by jacl_mark_runtime_roots
+ * (intern table, etc.) — the roots gc.roots cannot see (they are not on the stack). */
+void jacl_gc_mark(JaclVal v) {
+  if (jaclrt_is_heap(v)) mark_push_word((long)(v & JACL_PAYLOAD_MASK));
+}
+
 static void mark_drain(void) {
   while (mark_sp) {
     uint32_t off = mark_stack[--mark_sp];
@@ -159,6 +165,8 @@ long jacl_gc_collect(void) {
     mark_push_word(rootbuf[i]);
     mark_push_word(rootbuf[i] & (long)JACL_PAYLOAD_MASK);  /* tolerate tagged JaclVal roots */
   }
+  /* 2b. runtime-internal roots (intern table, …) — not visible to gc.roots */
+  jacl_mark_runtime_roots();
   /* 3. trace */
   mark_drain();
   /* 4. sweep: unmarked live cells -> free list */
