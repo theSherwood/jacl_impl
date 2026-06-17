@@ -1,0 +1,16 @@
+# Spike-1 harness (JACL on SVM). Its own cargo root; path-deps into the svm
+# submodule. Proves JACL's emit → verify → static-link → run path end to end.
+[workspace]
+
+[package]
+name = "jacl-svm-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
+svm-text   = { path = "../../vendor/svm/crates/svm-text" }
+svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
+svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
+svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }

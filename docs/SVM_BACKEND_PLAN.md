@@ -41,12 +41,14 @@
 
 Do these *first*; a bad answer here changes the project's size or viability.
 
-- **Spike-1 — program IR emission (highest leverage).** Prove JACL's compiler can
-  emit SVM IR directly: a hand-built module as **text IR → assemble (`svm-text`) →
-  run through the verifier + interp**, then **static-link** (`svm_ir::link`) a
-  program module against a separately-compiled runtime module. Confirms the emit +
-  link path our codegen depends on. (Binary `svm-encode` emission is a later speed
-  swap behind the same builder.) *Sets the project shape (Design §4.4).*
+- **Spike-1 — program IR emission. ✅ DONE** (`spikes/svm_emit_link`, PASS).
+  Emitted JACL-shaped **text IR** (incl. a real SSA loop calling the runtime),
+  passed the **verifier**, **static-linked** (`svm_ir::link`) program units against
+  a separate runtime unit (cross-module call resolved by name), and ran identically
+  on **interp and JIT** (`sum_to(100)=5050`, etc.). Finding: svm is **block-local
+  SSA** — cross-block values must be threaded as block args (now a codegen
+  obligation, Design §4.4). Binary `svm-encode` emission remains a later speed swap
+  behind the same builder.
 - **Spike-1b — runtime via `svm-llvm` + the intrinsic surface.** (a) Compile a
   non-trivial slice of existing JACL runtime C (e.g. an `lib/` collection) through
   `svm-llvm` and run it. (b) Land the svm-llvm intrinsic surface for

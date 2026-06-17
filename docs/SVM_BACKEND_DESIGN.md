@@ -154,10 +154,19 @@ JACL is built from **two IR producers**, linked into one module:
   LLVM bitcode → `svm-llvm` → SVM IR** (see §4.5). Built once as a prebuilt IR
   **artifact**.
 
+**Codegen obligation — block-local SSA.** svm's IR is block-local: a block may
+reference only its own block parameters and locally-defined values, **never**
+values from a dominating block. Everything crossing a block boundary
+(loop-carried state, values live across a branch) must be threaded explicitly as a
+**block argument**. JACL's codegen must lower to this discipline. Proven against
+the real verifier/interp/JIT in `spikes/svm_emit_link` (Spike-1).
+
 **Linking:** svm has static linking (`svm_ir::link`, `DYNLINK.md`) — merge the
 runtime artifact + the program module into **one re-verified module** (function
 symbols → direct `call`, data → constant addresses, like `ld`). This is the
-blessed path for "shared runtime libraries" / GC'd-language runtimes.
+blessed path for "shared runtime libraries" / GC'd-language runtimes. Proven in
+Spike-1 (program units static-linked against a runtime unit, cross-module call
+resolved by name, runs identically on interp and JIT).
 
 **chibicc is dropped** as a dependency. Its `__vm_*` builtin table survives only as
 the *spec* (and a cross-check oracle) for the intrinsic surface `svm-llvm` must
