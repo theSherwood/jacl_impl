@@ -57,10 +57,15 @@ Do these *first*; a bad answer here changes the project's size or viability.
   (`__vm_gc_roots`→`gc.roots`, `cont.*`, atomics/futex/threads) is exercised green
   by svm-llvm's own `vm_*` tests (12/12). Confirms "port + recompile the runtime,
   don't re-author it." Needs `llvm-18-dev` in the build env.
-- **Spike-2 — GC model.** Prototype a non-moving mark-sweep over a linear-window
-  heap arena + block/line maps, using `gc.roots` for roots and the cooperative
-  STW handshake. Tiny heap, a couple of fibers. Confirms the riskiest design point
-  end-to-end (and that obligation #1 safepoints suffice).
+- **Spike-2 — GC model. ✅ DONE** (`spikes/svm_gc`, PASS). A conservative,
+  non-moving **mark-sweep** over a window heap, roots via the real `gc.roots` op,
+  compiled through svm-llvm and run on **interp + JIT**: the live stack root is
+  found via `gc.roots`, a trace-only-reachable child survives, exactly `n` garbage
+  objects are reclaimed per cycle, and swept slots are **reused** across two
+  collections (`run(200)` over 256 slots) — `run(n)=230` invariant. Findings:
+  `gc.roots` found the stack root through the call chain (no spill trick needed
+  here); svm-llvm rejects a *constant* `ptrtoint` of a global (route through a
+  `noinline` helper). The riskiest design point holds end-to-end.
 - **Spike-3 — fibers replace SM. ✅ DONE** (`spikes/svm_fiber_generator`, PASS).
   A generator runtime in C on `__vm_fiber_*` (`cont.*`) — a loop generator, a
   **deep yield** (`suspend` from a `noinline` nested call, which the SM transform
@@ -69,9 +74,11 @@ Do these *first*; a bad answer here changes the project's size or viability.
   (`run(20)=3440`). Confirms the SM transform is replaceable by fibers, with deep
   yield as a capability bonus.
 
-**Exit criteria:** all spikes green → proceed. **Status: 3 of 4 done** —
-Spike-1 ✅, Spike-1b ✅, Spike-3 ✅; **Spike-2 (GC model) remains** (the riskiest).
-Spike-2 fighting back → reassess scope (or stay on the bytecode VM).
+**Exit criteria:** all spikes green → proceed. **Status: ✅ ALL 4 DONE** —
+Spike-1, Spike-1b, Spike-2, Spike-3 all PASS. The front door (emit/verify/link),
+the reuse-existing-C thesis, the fibers-replace-SM simplification, and the
+conservative-non-moving-GC model are all validated end-to-end on interp + JIT.
+**Phase 0 clears; the rewrite proper (Phases 1–5) is unblocked.**
 
 ## 3. Phase 1 — runtime substrate (guest-side)
 
