@@ -104,19 +104,85 @@ linear-window heap.
 - Obligation: blocking host ops must use **async-form capabilities** (park the
   fiber), never block a vCPU mid-`cap.call` during STW.
 
-### 4.4 Toolchain — how JACL emits SVM IR (THE open question)
-JACL's compiler is C; SVM's IR-builder is Rust (`svm-ir`). Candidate paths
-(resolve in Plan Spike-1):
-- **(a) Emit text IR from C**, assemble via `svm-text` (if available as a
-  CLI/C-callable lib). Most portable; re-parsing cost.
-- **(b) Emit the binary encoding from C** (`svm-encode` format) directly.
-- **(c) Rewrite codegen in Rust** against `svm-ir`. Most native, biggest pivot.
-This single answer largely sets the effort (6-month vs 12-month shape).
+### 4.3.1 Generators & streams — fibers, not the SM transform
 
-### 4.5 Runtime-as-guest
-Builtins/GC/value-ops run inside the sandbox: compiled from C via **chibicc**
-(subset C — JACL's runtime C must fit) or written as IR. Likely hybrid: codegen
-emits IR for program logic; the runtime library is compiled once and linked.
+JACL's current state-machine transform exists to give generators **one heap
+allocation per stream, zero allocations per yield** (it replaced a CPS path that
+allocated closures per yield). **Fibers preserve that property** — a `yield` is a
+`suspend`/`resume` stack switch, allocation-free — *and* add deep-yield (yield
+through a helper call) for free, which the SM transform never supported. So the
+original motivation for the SM does not argue for keeping it over fibers.
+
+Decision:
+
+- **Built-in stream combinators are stackless iterator objects, not coroutines.**
+  `map`/`filter`/`take`/`enumerate`/`lines`/`collect` are small pull-based `next`
+  steppers (Rust-iterator / transducer style) — no fiber, no SM. A pipeline like
+  `!cmd | lines | filter | take 10` is a chain of `next`-stepping heap objects;
+  it's the fastest option (the `next` inlines) and pays no per-stream stack cost.
+  This is where most "stream" usage lives, so it removes most footprint pressure.
+- **User-defined `yield` generators run on fibers.** Simple, deep-yield-capable,
+  allocation-free per yield; fine for the realistic workload (a few live pipelines,
+  or one generator producing many values).
+- **Delete the general SM transform** — the most bug-prone subsystem (state-field
+  layout, wide-rep boundaries, inline-struct bitmaps, transitive coloring).
+- **Deferred optimization, not now: a *narrow* stackless-generator lowering.**
+  Only if profiling shows a real problem, add a restricted lowering for the
+  **flat** generator shape (yields at its own lexical level, no deep yield) into a
+  small heap state object; deep-yielding generators fall back to fibers. It is a
+  fraction of today's complexity *because fibers handle the general case*
+  (await/parallel/race/deep-yield), so it never deals with coloring, wide reps, or
+  the concurrency primitives. **Named triggers to revisit:** (1) many
+  simultaneously-live user generators / high stream churn where per-fiber stacks
+  dominate memory; (2) extremely hot trivial-body generator loops (two stack
+  switches per element vs. on-stack dispatch); (3) a need to **persist or migrate
+  suspended generators** (svm `durable`/`snapshot`) — a heap state object
+  serializes; a fiber stack does not.
+
+### 4.4 Toolchain — how JACL emits SVM IR
+
+JACL's compiler is C; SVM's IR-builder is Rust (`svm-ir`) — but the **text IR**
+is the decoupling interface, and SVM's own C frontend (**chibicc**) already emits
+it. Two distinct producers:
+
+- **JACL runtime library** (GC, scheduler, builtins, value ops, fiber glue):
+  written in C, compiled by **chibicc → text IR**. See §4.5 — chibicc already
+  lowers the svm ops we need as `__vm_*` builtins.
+- **JACL program codegen** (JACL source → IR): JACL's compiler emits **text IR**
+  (path (a), what chibicc itself emits) or, later, the **binary encoding**
+  (path (b)) for speed. Either is a pure serialization concern — **no C-callable
+  binding to svm's Rust is required**; the two producers' output is assembled and
+  linked into one module. (Rewriting codegen in Rust against `svm-ir`, path (c),
+  stays the fallback if the text path proves inadequate — but the chibicc
+  precedent makes that unlikely.)
+
+Spike-1 still confirms the text assembler (`svm-text`) is reachable from our
+toolchain (CLI or lib) and that JACL-program-codegen + runtime modules link.
+
+### 4.5 Runtime-as-guest — C via chibicc (already wired)
+
+Builtins/GC/value-ops run inside the sandbox as guest code, written in **C and
+compiled by chibicc**. Crucially, chibicc **already exposes the svm ops JACL needs
+as C builtins** that lower straight to IR — verified in `vendor/svm`
+(`frontend/chibicc/codegen_ir.c`):
+
+- **Fibers:** `__vm_fiber_new` / `__vm_fiber_resume` / `__vm_fiber_suspend`
+  (→ `cont.new`/`cont.resume`/`suspend`) — the generator + suspension substrate.
+- **Threads:** `__vm_thread_spawn` / `__vm_thread_join` — the M:N executor.
+- **Atomics + futex:** `__vm_atomic_*` (incl. `cas32`) and `__vm_wait32` /
+  `__vm_notify` — the lock-free scheduler + the cooperative-STW barrier.
+- **Memory:** `__vm_map` / `__vm_unmap` / `__vm_protect` / `__vm_page_size` — the
+  heap allocator's window growth.
+- **Async I/O + caps:** `__vm_io_submit_async` / `__vm_io_reap` /
+  `__vm_blocking_handle` (async-form blocking ops, JACL obligation #2) and
+  `__vm_cap*` (the host boundary).
+
+**The one gap:** there is no `__vm_gc_roots` builtin yet (the `gc.roots` *op*
+exists in the IR/interp/JIT; chibicc just doesn't surface it). Adding it follows
+the existing `gen_builtin_*` pattern and is the single concrete svm-side C-interface
+ask (see `SVM_BACKEND_PLAN.md`). With that, the GC, scheduler, and fiber-based
+generators are all writable in plain C against chibicc builtins — **no new
+Rust↔C bindings required.**
 
 ### 4.6 Forward-compat
 The `ref` `ValType` is reserved in SVM now (lowers as `i64`). If precise GC is

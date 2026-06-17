@@ -9,6 +9,16 @@
 
 - **svm side: ready.** `vendor/svm` @ `7737c9e` ships `gc.roots` + the `ref`
   `ValType`; verified (`SVM_GC_CONTRACT.md`). The GC interface JACL needs exists.
+- **C interface: mostly already there.** svm's C frontend **chibicc** already
+  lowers the ops JACL's runtime needs as `__vm_*` C builtins — fibers
+  (`__vm_fiber_new/resume/suspend`), threads (`__vm_thread_spawn/join`), atomics +
+  futex (`__vm_atomic_*`, `__vm_wait32`/`__vm_notify`), memory
+  (`__vm_map/unmap/protect/page_size`), async I/O and caps. So the GC, scheduler,
+  and fiber generators are writable in plain C, compiled by chibicc → IR, with **no
+  new Rust↔C bindings**. (See Design §4.4/§4.5.)
+- **The one concrete svm-side ask:** add a `__vm_gc_roots` chibicc builtin
+  surfacing the existing `gc.roots` IR op (follows the existing `gen_builtin_*`
+  pattern). Without it the runtime can't drive collection from C.
 - **JACL side: not started.** Frontend (lexer/parser/typer/macros) and the value
   representation are the assets we carry forward; everything below the AST is
   rewritten.
@@ -27,10 +37,16 @@
 Do these *first*; a bad answer here changes the project's size or viability.
 
 - **Spike-1 — IR emission path (highest leverage).** Can JACL's C toolchain emit
-  and assemble SVM IR? Prove: emit a hand-written `gc.roots`/arithmetic module as
-  **text IR from C → assemble (`svm-text`) → run**, or via the **binary encoding**.
-  If neither is C-reachable, decide **codegen-in-Rust** now. *This answer sets the
-  6-vs-12-month shape (Design §4.4).*
+  and assemble SVM IR? Prove: emit a hand-written arithmetic-plus-`__vm_*` module
+  as **text IR from C → assemble (`svm-text`) → run**, or via the **binary
+  encoding**. (chibicc already emits text IR, so the producer side is precedented;
+  this spike confirms the assembler is reachable from our toolchain and that a
+  JACL-codegen module links against a chibicc-compiled runtime module.) If the text
+  path proves inadequate, fall back to **codegen-in-Rust**. *Sets the 6-vs-12-month
+  shape (Design §4.4).*
+- **Spike-1b — `__vm_gc_roots` builtin.** Add the missing chibicc builtin and prove
+  a C function can call `gc.roots` and read back candidate words. Tiny; unblocks
+  Spike-2.
 - **Spike-2 — GC model.** Prototype a non-moving mark-sweep over a linear-window
   heap arena + block/line maps, using `gc.roots` for roots and the cooperative
   STW handshake. Tiny heap, a couple of fibers. Confirms the riskiest design point
@@ -48,6 +64,8 @@ reassess scope (or stay on the bytecode VM).
 - Non-moving conservative mark-sweep wired to `gc.roots` + cooperative STW.
 - JaclVal value ops re-homed; string interning + RRB-vec/HAMT-map over the new
   heap.
+- Built-in stream combinators (`map`/`filter`/`take`/`lines`/`collect`/…) as
+  **stackless iterator objects** — no fibers, no SM (Design §4.3.1).
 - Decide & stand up the **runtime-as-guest** build (chibicc-compiled C runtime lib
   vs hand-written IR), per Design §4.5.
 
@@ -61,9 +79,12 @@ reassess scope (or stay on the bytecode VM).
 
 ## 5. Phase 3 — concurrency on fibers
 
-- `yield`/`await`/`parallel`/`race` → fiber `cont.*` switches.
+- `yield`/`await`/`parallel`/`race` → fiber `cont.*` switches; user `yield`
+  generators run on fibers (Design §4.3.1). **No SM transform.**
 - Re-platform the NxM Chase-Lev scheduler onto fibers + `thread.spawn` + futex.
 - Convert blocking builtins to **async-form** capabilities (park the fiber).
+- (Deferred, only on a named trigger: a narrow stackless-generator lowering —
+  Design §4.3.1.)
 
 ## 6. Phase 4 — bring-up & parity
 
@@ -97,10 +118,13 @@ front-loaded by the spikes); Spike-1's answer can push it toward 12.
 
 ## 9. Risk register
 
-- **R-Toolchain (high):** no C-reachable IR emission → codegen-in-Rust pivot
-  (language split, bigger effort). *Mitigation: Spike-1 first.*
-- **R-Runtime-in-chibicc (med):** JACL's runtime C may exceed chibicc's subset.
-  *Mitigation: identify early; fall back to IR or trim C.*
+- **R-Toolchain (now low-med):** chibicc already emits text IR and wires the
+  `__vm_*` ops, so the producer side is precedented; residual risk is only whether
+  the `svm-text` assembler is cleanly reachable from our build. *Mitigation:
+  Spike-1.*
+- **R-Runtime-in-chibicc (med):** JACL's runtime C may exceed chibicc's subset
+  (it's a subset-C compiler). *Mitigation: identify early; trim C or drop to
+  hand-written IR for the offending pieces.*
 - **R-Perf (med):** dynamic dispatch + conservative GC may eat the JIT win.
   *Mitigation: measure after parity, not before.*
 - **R-Determinism (low/known):** conservative GC ⇒ backend-divergent occupancy
