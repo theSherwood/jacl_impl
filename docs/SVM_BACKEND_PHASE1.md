@@ -146,3 +146,35 @@ runtime/
 
 The DoD scenario passes on interp + JIT, the `runtime/tests` suite is green, and the
 runtime artifact builds reproducibly via `runtime/build.sh`. Then Phase 2 begins.
+
+## Progress
+
+- **P1.0 harness ✅** — `runtime/harness` (Rust): compiles a C driver + runtime via
+  `clang -O2 → svm-llvm`, runs `run` (func 0) on interp + JIT, asserts agreement.
+  `cargo test` is the runner. Whole-program compilation (see Sequencing).
+- **P1.1 values ✅** — `runtime/jaclrt.h`: `JaclVal` tag scheme mirroring
+  `src/jacl.h`; inline ctors/predicates/extractors; `test_values.c` green.
+- **P1.2 allocator + P1.3 GC ✅** — `runtime/heap_gc.c`: size-class free lists +
+  bump + per-granule object-start bitmap; conservative non-moving mark-sweep with
+  roots via `gc.roots`, **interior-pointer resolution**, and per-class reuse.
+  `test_gc.c` (reachable graph incl. a trace-only leaf, n varied-size garbage,
+  two cycles with reuse) green on interp + JIT.
+
+  Two findings (both expected for conservative GC, both load-bearing):
+  1. **Interior pointers are mandatory.** At `-O2` the program holds a pointer to an
+     object's *payload* (`cell + header`), not its start, so the mark phase must
+     resolve any candidate to its enclosing object (back-scan the start bitmap), not
+     require an exact start.
+  2. **The runtime must be opaque to the program optimizer.** Inlined into a
+     deterministic test, the allocator's object addresses constant-fold, so roots
+     stop being live stack values and `gc.roots` can't see them. The real backend
+     compiles the runtime separately (opaque by construction); here `jacl_alloc` is
+     `noinline` to reproduce that. **Implication for Phase 2:** keep the
+     runtime↔program boundary a real call boundary (separate artifact / no
+     cross-boundary inlining of allocation).
+
+- **Backing store:** static 16 MiB region for now; `__vm_map`-grown window pages
+  are a follow-up needing the powerbox harness (the algorithm is unchanged).
+
+Next: P1.4 strings, P1.5 collections (wire `lib/rrb_vec` + `lib/hamt` GC hooks to
+this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.

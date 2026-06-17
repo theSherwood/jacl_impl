@@ -79,4 +79,33 @@ static inline int32_t jaclrt_as_i32(JaclVal v)  { return (int32_t)(uint32_t)(v &
 /* Heap payload as a window offset (for P1.2+). */
 static inline uint64_t jaclrt_payload(JaclVal v) { return v & JACL_PAYLOAD_MASK; }
 
+/* ===================================================================
+ * Heap + GC (P1.2 / P1.3) — non-inline; defined in heap_gc.c.
+ * Conservative, non-moving mark-sweep over a heap region; roots via the
+ * svm `gc.roots` op (__vm_gc_roots). Object pointers are the cell address
+ * (header included). See heap_gc.c.
+ * =================================================================== */
+
+/* GC object types (expands as real heap types land in P1.4/P1.5). */
+enum {
+  JOBJ_FREE = 0,   /* a swept/free cell (skipped by tracing) */
+  JOBJ_BLOB = 1,   /* opaque payload, no outgoing pointers   */
+  JOBJ_NODE = 2,   /* payload may contain heap pointers (conservatively traced) */
+};
+
+typedef struct JaclObj {
+  uint32_t size;     /* total cell size in bytes (header + payload), granule-aligned */
+  uint8_t  obj_type; /* JOBJ_* */
+  uint8_t  mark;     /* GC mark bit */
+  uint16_t _rsv;
+} JaclObj;
+
+void   jacl_heap_init(void);                              /* reset the heap */
+void*  jacl_alloc(uint32_t obj_type, uint32_t payload);   /* -> object cell (header+payload), zeroed payload */
+long   jacl_gc_collect(void);                             /* mark-sweep; returns #cells reclaimed */
+long   jacl_live_count(void);                             /* #live (non-free) cells */
+long   jacl_heap_lo(void);                                /* window-offset bounds, for gc.roots */
+long   jacl_heap_hi(void);
+static inline void*    jacl_obj_payload(JaclObj* o) { return (void*)((uint8_t*)o + sizeof(JaclObj)); }
+
 #endif /* JACLRT_H */
