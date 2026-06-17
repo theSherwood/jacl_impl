@@ -49,11 +49,14 @@ Do these *first*; a bad answer here changes the project's size or viability.
   SSA** — cross-block values must be threaded as block args (now a codegen
   obligation, Design §4.4). Binary `svm-encode` emission remains a later speed swap
   behind the same builder.
-- **Spike-1b — runtime via `svm-llvm` + the intrinsic surface.** (a) Compile a
-  non-trivial slice of existing JACL runtime C (e.g. an `lib/` collection) through
-  `svm-llvm` and run it. (b) Land the svm-llvm intrinsic surface for
-  `__vm_gc_roots` + `cont.*` and prove a C runtime fn can call `gc.roots` and
-  resume a fiber. Gates Spike-2/Spike-3. *(Depends on the svm handoff ask.)*
+- **Spike-1b — runtime via `svm-llvm` + the intrinsic surface. ✅ DONE**
+  (`spikes/svm_llvm_runtime`, PASS). (a) JACL's **real `lib/rrb_vec/rrb_vec.h`**
+  (RRB persistent vector) compiled clang `-O2` → `svm-llvm` → SVM IR, verified, and
+  ran on **interp + JIT** matching native `cc` (`run(1000)=499500`, a multi-level
+  COW tree) with **zero unresolved imports**. (b) The `__vm_*` surface
+  (`__vm_gc_roots`→`gc.roots`, `cont.*`, atomics/futex/threads) is exercised green
+  by svm-llvm's own `vm_*` tests (12/12). Confirms "port + recompile the runtime,
+  don't re-author it." Needs `llvm-18-dev` in the build env.
 - **Spike-2 — GC model.** Prototype a non-moving mark-sweep over a linear-window
   heap arena + block/line maps, using `gc.roots` for roots and the cooperative
   STW handshake. Tiny heap, a couple of fibers. Confirms the riskiest design point
