@@ -9,16 +9,20 @@
 
 - **svm side: ready.** `vendor/svm` @ `7737c9e` ships `gc.roots` + the `ref`
   `ValType`; verified (`SVM_GC_CONTRACT.md`). The GC interface JACL needs exists.
-- **C interface: mostly already there.** svm's C frontend **chibicc** already
-  lowers the ops JACL's runtime needs as `__vm_*` C builtins — fibers
-  (`__vm_fiber_new/resume/suspend`), threads (`__vm_thread_spawn/join`), atomics +
-  futex (`__vm_atomic_*`, `__vm_wait32`/`__vm_notify`), memory
-  (`__vm_map/unmap/protect/page_size`), async I/O and caps. So the GC, scheduler,
-  and fiber generators are writable in plain C, compiled by chibicc → IR, with **no
-  new Rust↔C bindings**. (See Design §4.4/§4.5.)
-- **The one concrete svm-side ask:** add a `__vm_gc_roots` chibicc builtin
-  surfacing the existing `gc.roots` IR op (follows the existing `gen_builtin_*`
-  pattern). Without it the runtime can't drive collection from C.
+- **Runtime path: LLVM, not chibicc.** The runtime is C compiled via **`svm-llvm`**
+  (clang `-O2` → LLVM bitcode → SVM IR), which is production-mature (8 real libs
+  compile byte-identical to native clang, incl. clay). This lets us **reuse JACL's
+  existing runtime C** (value ops, `lib/` collections, strings, bignum, builtins)
+  instead of re-authoring it, with `-O2` optimization. Linked against
+  JACL-emitted program IR via svm static linking (`svm_ir::link`, `DYNLINK.md`).
+  (See Design §4.4/§4.5.) chibicc is dropped (spec/oracle only).
+- **The one concrete svm-side ask:** extend `svm-llvm` to lower svm's
+  concurrency/GC ops (it currently handles only ordinary C — verified zero support
+  for `cont.*`/atomics/futex/`gc.roots`). Recognize external symbols/intrinsics
+  mirroring chibicc's `__vm_*` (`__vm_fiber_*`, `__vm_atomic_*`, `__vm_wait32`/
+  `__vm_notify`, `__vm_thread_*`, **`__vm_gc_roots`**) → existing IR ops. Bounded;
+  the ops already exist in IR/interp/JIT. See the svm handoff doc
+  (`SVM_LLVM_INTRINSICS_ASK.md`).
 - **JACL side: not started.** Frontend (lexer/parser/typer/macros) and the value
   representation are the assets we carry forward; everything below the AST is
   rewritten.
@@ -36,17 +40,17 @@
 
 Do these *first*; a bad answer here changes the project's size or viability.
 
-- **Spike-1 — IR emission path (highest leverage).** Can JACL's C toolchain emit
-  and assemble SVM IR? Prove: emit a hand-written arithmetic-plus-`__vm_*` module
-  as **text IR from C → assemble (`svm-text`) → run**, or via the **binary
-  encoding**. (chibicc already emits text IR, so the producer side is precedented;
-  this spike confirms the assembler is reachable from our toolchain and that a
-  JACL-codegen module links against a chibicc-compiled runtime module.) If the text
-  path proves inadequate, fall back to **codegen-in-Rust**. *Sets the 6-vs-12-month
-  shape (Design §4.4).*
-- **Spike-1b — `__vm_gc_roots` builtin.** Add the missing chibicc builtin and prove
-  a C function can call `gc.roots` and read back candidate words. Tiny; unblocks
-  Spike-2.
+- **Spike-1 — program IR emission (highest leverage).** Prove JACL's compiler can
+  emit SVM IR directly: a hand-built module as **text IR → assemble (`svm-text`) →
+  run through the verifier + interp**, then **static-link** (`svm_ir::link`) a
+  program module against a separately-compiled runtime module. Confirms the emit +
+  link path our codegen depends on. (Binary `svm-encode` emission is a later speed
+  swap behind the same builder.) *Sets the project shape (Design §4.4).*
+- **Spike-1b — runtime via `svm-llvm` + the intrinsic surface.** (a) Compile a
+  non-trivial slice of existing JACL runtime C (e.g. an `lib/` collection) through
+  `svm-llvm` and run it. (b) Land the svm-llvm intrinsic surface for
+  `__vm_gc_roots` + `cont.*` and prove a C runtime fn can call `gc.roots` and
+  resume a fiber. Gates Spike-2/Spike-3. *(Depends on the svm handoff ask.)*
 - **Spike-2 — GC model.** Prototype a non-moving mark-sweep over a linear-window
   heap arena + block/line maps, using `gc.roots` for roots and the cooperative
   STW handshake. Tiny heap, a couple of fibers. Confirms the riskiest design point
@@ -66,8 +70,8 @@ reassess scope (or stay on the bytecode VM).
   heap.
 - Built-in stream combinators (`map`/`filter`/`take`/`lines`/`collect`/…) as
   **stackless iterator objects** — no fibers, no SM (Design §4.3.1).
-- Decide & stand up the **runtime-as-guest** build (chibicc-compiled C runtime lib
-  vs hand-written IR), per Design §4.5.
+- Stand up the **runtime build**: existing/ported runtime C → clang `-O2` →
+  `svm-llvm` → IR artifact; static-linked against program IR (Design §4.5).
 
 ## 4. Phase 2 — codegen retarget
 
@@ -107,24 +111,30 @@ reassess scope (or stay on the bytecode VM).
 | Frontend (lexer/parser/ast/typer/macros) | ~14k | **preserved** |
 | Value representation (`value.c`) | ~0.9k | preserved conceptually |
 | Codegen (`compiler.c` minus SM) | ~18k | **retargeted** to SVM IR |
-| Builtin/runtime semantics (from `vm.c`) | ~12k | **re-homed** as guest code |
+| Builtin/runtime semantics (from `vm.c`) + `lib/` collections | ~12k+ | **ported + recompiled** via `svm-llvm` (substrate swaps, not re-authored) |
 | Scheduler (`runtime.c`) | ~2.3k | **re-platformed** on fibers |
 | GC (`gc.c`/`gc_collect.c`) | ~2.8k | **rewritten** (simpler: STW non-moving) |
 | Bytecode dispatch + `bytecode.c` | — | **deleted** |
 | SM transform (~3k in `compiler.c`) | ~3k | **deleted** |
 
-Rough shape: **rewrite ~25–30k, preserve ~14k.** One-person, multi-month (≈6+,
-front-loaded by the spikes); Spike-1's answer can push it toward 12.
+Rough shape: **rewrite ~22–26k, preserve ~14k, port-recompile ~12k.** The LLVM
+path moves the bulk of the builtin/collection semantics from "re-author" to
+"port + recompile," which is the biggest single effort reduction. One-person,
+multi-month, front-loaded by the spikes.
 
 ## 9. Risk register
 
-- **R-Toolchain (now low-med):** chibicc already emits text IR and wires the
-  `__vm_*` ops, so the producer side is precedented; residual risk is only whether
-  the `svm-text` assembler is cleanly reachable from our build. *Mitigation:
-  Spike-1.*
-- **R-Runtime-in-chibicc (med):** JACL's runtime C may exceed chibicc's subset
-  (it's a subset-C compiler). *Mitigation: identify early; trim C or drop to
-  hand-written IR for the offending pieces.*
+- **R-svm-llvm-intrinsics (med, blocking):** the LLVM on-ramp doesn't yet lower
+  `cont.*`/atomics/futex/`gc.roots` — required before the runtime can do
+  concurrency or GC. *Mitigation: the svm handoff ask; Spike-1b; the work is
+  bounded and the ops already exist in IR/interp/JIT.*
+- **R-Runtime-port (med):** existing runtime C needs substrate swaps (window
+  allocator, conservative GC, fibers-for-threads) before it recompiles cleanly;
+  some C may hit svm-llvm gaps (e.g. varargs `printf`, not yet supported).
+  *Mitigation: port the substrate-touching layer first; most pure-compute C is
+  proven to compile.*
+- **R-LLVM-builddep (low):** clang/LLVM is a build-time dep for the runtime
+  artifact. *Mitigation: prebuilt/checked-in artifact; end users don't need LLVM.*
 - **R-Perf (med):** dynamic dispatch + conservative GC may eat the JIT win.
   *Mitigation: measure after parity, not before.*
 - **R-Determinism (low/known):** conservative GC ⇒ backend-divergent occupancy
@@ -134,9 +144,10 @@ front-loaded by the spikes); Spike-1's answer can push it toward 12.
 
 ## 10. Open questions
 
-1. IR emission path (Spike-1) — text vs binary vs Rust codegen.
-2. Runtime-as-guest packaging — one chibicc-compiled lib vs IR, and how it links
-   with codegen output.
+1. Program IR emission (Spike-1) — text-then-binary behind one builder; confirm
+   `svm-text` reachable and `svm_ir::link` merges program + runtime modules.
+2. Runtime packaging — granularity of the `svm-llvm` artifact(s) and the
+   symbol/ABI convention linking JACL-emitted program IR to runtime functions.
 3. Fiber stack sizing / quota policy for many lightweight JACL tasks (no auto
    stack growth; stack probes needed for large frames).
 4. How JACL's sandboxed `interpret` maps onto SVM domains/capabilities.

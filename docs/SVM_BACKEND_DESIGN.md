@@ -139,50 +139,64 @@ Decision:
   suspended generators** (svm `durable`/`snapshot`) — a heap state object
   serializes; a fiber stack does not.
 
-### 4.4 Toolchain — how JACL emits SVM IR
+### 4.4 Toolchain — two producers, one linked module
 
-JACL's compiler is C; SVM's IR-builder is Rust (`svm-ir`) — but the **text IR**
-is the decoupling interface, and SVM's own C frontend (**chibicc**) already emits
-it. Two distinct producers:
+JACL is built from **two IR producers**, linked into one module:
 
-- **JACL runtime library** (GC, scheduler, builtins, value ops, fiber glue):
-  written in C, compiled by **chibicc → text IR**. See §4.5 — chibicc already
-  lowers the svm ops we need as `__vm_*` builtins.
-- **JACL program codegen** (JACL source → IR): JACL's compiler emits **text IR**
-  (path (a), what chibicc itself emits) or, later, the **binary encoding**
-  (path (b)) for speed. Either is a pure serialization concern — **no C-callable
-  binding to svm's Rust is required**; the two producers' output is assembled and
-  linked into one module. (Rewriting codegen in Rust against `svm-ir`, path (c),
-  stays the fallback if the text path proves inadequate — but the chibicc
-  precedent makes that unlikely.)
+- **JACL program codegen** (JACL source → IR): JACL's compiler emits SVM IR
+  **directly** — its own in-memory IR-builder serialized to **text now**
+  (debuggable; runs through svm's verifier + interp + the interp↔JIT differential
+  oracle) and **binary (`svm-encode`) later** for compile speed, behind the same
+  builder. JACL programs are dynamically typed, GC-safepointed, and
+  fiber-suspending — bespoke codegen, **not** routed through any C frontend.
+- **JACL runtime library** (GC, allocator, scheduler, value ops, collections,
+  builtins, fiber glue): low-level systems C, compiled with **clang `-O2` →
+  LLVM bitcode → `svm-llvm` → SVM IR** (see §4.5). Built once as a prebuilt IR
+  **artifact**.
 
-Spike-1 still confirms the text assembler (`svm-text`) is reachable from our
-toolchain (CLI or lib) and that JACL-program-codegen + runtime modules link.
+**Linking:** svm has static linking (`svm_ir::link`, `DYNLINK.md`) — merge the
+runtime artifact + the program module into **one re-verified module** (function
+symbols → direct `call`, data → constant addresses, like `ld`). This is the
+blessed path for "shared runtime libraries" / GC'd-language runtimes.
 
-### 4.5 Runtime-as-guest — C via chibicc (already wired)
+**chibicc is dropped** as a dependency. Its `__vm_*` builtin table survives only as
+the *spec* (and a cross-check oracle) for the intrinsic surface `svm-llvm` must
+expose (§4.5).
 
-Builtins/GC/value-ops run inside the sandbox as guest code, written in **C and
-compiled by chibicc**. Crucially, chibicc **already exposes the svm ops JACL needs
-as C builtins** that lower straight to IR — verified in `vendor/svm`
-(`frontend/chibicc/codegen_ir.c`):
+### 4.5 Runtime via the LLVM on-ramp (reuse existing C)
 
-- **Fibers:** `__vm_fiber_new` / `__vm_fiber_resume` / `__vm_fiber_suspend`
-  (→ `cont.new`/`cont.resume`/`suspend`) — the generator + suspension substrate.
-- **Threads:** `__vm_thread_spawn` / `__vm_thread_join` — the M:N executor.
-- **Atomics + futex:** `__vm_atomic_*` (incl. `cas32`) and `__vm_wait32` /
-  `__vm_notify` — the lock-free scheduler + the cooperative-STW barrier.
-- **Memory:** `__vm_map` / `__vm_unmap` / `__vm_protect` / `__vm_page_size` — the
-  heap allocator's window growth.
-- **Async I/O + caps:** `__vm_io_submit_async` / `__vm_io_reap` /
-  `__vm_blocking_handle` (async-form blocking ops, JACL obligation #2) and
-  `__vm_cap*` (the host boundary).
+The runtime runs as guest code, written in **C and compiled through `svm-llvm`**
+(`crates/svm-llvm`) — svm's production LLVM-bitcode→IR translator. It is mature:
+eight real libraries (SHA-256, xxHash, tiny-regex-c, jsmn, miniz/tinfl, clay ~93k
+IR lines, …) compile **byte-identical to native clang**, including malloc/calloc/
+free, structs-by-value, function pointers, globals, float + bit intrinsics.
 
-**The one gap:** there is no `__vm_gc_roots` builtin yet (the `gc.roots` *op*
-exists in the IR/interp/JIT; chibicc just doesn't surface it). Adding it follows
-the existing `gen_builtin_*` pattern and is the single concrete svm-side C-interface
-ask (see `SVM_BACKEND_PLAN.md`). With that, the GC, scheduler, and fiber-based
-generators are all writable in plain C against chibicc builtins — **no new
-Rust↔C bindings required.**
+**Why this over chibicc / hand-built IR:**
+- **Reuse JACL's existing runtime C** — value-tag ops, the `lib/` collections
+  (RRB vec, HAMT map), string/rope handling, bignum, and much of the ~12k of
+  builtin semantics are portable C that clang→`svm-llvm` compiles. The largest
+  part of the rewrite becomes **port + recompile**, not re-author.
+- **`-O2` on the hot runtime**, then Cranelift JIT on top — two-stage optimization.
+- Production toolchain; any LLVM language (pieces could be Rust later).
+
+**Not a pure recompile — substrate swaps remain:** native `malloc`/pointers →
+JACL's window allocator over offsets (svm-llvm's malloc already grows the window;
+ptr↔int works); the epoch GC → the new conservative collector; native threads →
+svm fibers/threads. The *pure-computation* parts port nearly as-is.
+
+**The one svm-side gap (the ask):** `svm-llvm` lowers ordinary C but does **not**
+yet surface svm's concurrency/GC ops — verified: zero handling for `cont.*`,
+atomics, futex, or `gc.roots`. The runtime needs them, so the on-ramp must
+recognize a set of external symbols / intrinsics (mirroring chibicc's `__vm_*`:
+`__vm_fiber_new/resume/suspend`, `__vm_atomic_*`, `__vm_wait32`/`__vm_notify`,
+`__vm_thread_spawn/join`, **`__vm_gc_roots`**) and lower them to the existing IR
+ops. Bounded and well-precedented (svm-llvm already binds `write`/`read`/`exit` to
+named imports and synthesizes `memset`/`memcpy` helpers). The ops already exist in
+the IR/interp/JIT. See `SVM_BACKEND_PLAN.md` and the svm handoff doc.
+
+**Build dependency:** clang/LLVM is needed *at build time* to produce the runtime
+artifact (prebuilt, checked in / CI-built) — end users linking JACL programs do
+not need LLVM. A production-grade dependency, unlike chibicc.
 
 ### 4.6 Forward-compat
 The `ref` `ValType` is reserved in SVM now (lowers as `i64`). If precise GC is
