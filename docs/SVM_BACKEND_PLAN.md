@@ -61,12 +61,17 @@ Do these *first*; a bad answer here changes the project's size or viability.
   heap arena + block/line maps, using `gc.roots` for roots and the cooperative
   STW handshake. Tiny heap, a couple of fibers. Confirms the riskiest design point
   end-to-end (and that obligation #1 safepoints suffice).
-- **Spike-3 — fibers replace SM.** Port exactly one suspending primitive
-  (`yield`) onto a fiber and confirm it does what the SM transform did, simpler.
-  Validates the core simplification thesis.
+- **Spike-3 — fibers replace SM. ✅ DONE** (`spikes/svm_fiber_generator`, PASS).
+  A generator runtime in C on `__vm_fiber_*` (`cont.*`) — a loop generator, a
+  **deep yield** (`suspend` from a `noinline` nested call, which the SM transform
+  can't express), and **two interleaved live fibers** — compiled via `svm-llvm`,
+  run on **interp + JIT** matching closed forms + a native oracle
+  (`run(20)=3440`). Confirms the SM transform is replaceable by fibers, with deep
+  yield as a capability bonus.
 
-**Exit criteria:** all three green → proceed. Spike-1 or Spike-2 fighting back →
-reassess scope (or stay on the bytecode VM).
+**Exit criteria:** all spikes green → proceed. **Status: 3 of 4 done** —
+Spike-1 ✅, Spike-1b ✅, Spike-3 ✅; **Spike-2 (GC model) remains** (the riskiest).
+Spike-2 fighting back → reassess scope (or stay on the bytecode VM).
 
 ## 3. Phase 1 — runtime substrate (guest-side)
 

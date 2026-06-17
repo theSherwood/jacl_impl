@@ -1,0 +1,19 @@
+# Spike-3: fibers replace the state-machine transform. A real generator written in
+# C on svm's __vm_fiber_* (cont.*) primitives, compiled via svm-llvm, run on
+# interp + JIT. Own cargo root; path-deps into the svm submodule (links libLLVM —
+# needs llvm-18-dev).
+[workspace]
+
+[package]
+name = "jacl-svm-fiber-generator-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
+svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }
+svm-text   = { path = "../../vendor/svm/crates/svm-text" }
+svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
+svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
+svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
