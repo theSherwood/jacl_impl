@@ -1,5 +1,12 @@
 # Ask for svm: expose the concurrency/GC ops in the LLVM on-ramp
 
+> **STATUS: SATISFIED — svm `f75509a` (slices AC = P0+P1+Memory, AD = P2, AF =
+> SharedRegion).** `svm-llvm` now lowers the full `<svm.h>` `__vm_*` surface
+> (35 builtins) incl. `__vm_gc_roots` → `gc.roots`, `__vm_fiber_*` → `cont.*`,
+> atomics/futex/threads, memory, async-I/O, caps — each to its existing IR op, with
+> dedicated tests (`vm_gc_roots_smoke`, `vm_fibers_generator`, `vm_atomics_*`,
+> `vm_threads_atomic_counter`). The original request is preserved below for record.
+
 > For the svm side. Small, bounded request. Context: JACL is building its backend
 > on svm and will compile its **runtime** (allocator, GC, scheduler, value ops,
 > collections) as C → `clang -O2` → LLVM bitcode → **`svm-llvm`** → SVM IR, then

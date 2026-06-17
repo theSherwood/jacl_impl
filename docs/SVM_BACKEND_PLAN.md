@@ -16,13 +16,14 @@
   instead of re-authoring it, with `-O2` optimization. Linked against
   JACL-emitted program IR via svm static linking (`svm_ir::link`, `DYNLINK.md`).
   (See Design §4.4/§4.5.) chibicc is dropped (spec/oracle only).
-- **The one concrete svm-side ask:** extend `svm-llvm` to lower svm's
-  concurrency/GC ops (it currently handles only ordinary C — verified zero support
-  for `cont.*`/atomics/futex/`gc.roots`). Recognize external symbols/intrinsics
-  mirroring chibicc's `__vm_*` (`__vm_fiber_*`, `__vm_atomic_*`, `__vm_wait32`/
-  `__vm_notify`, `__vm_thread_*`, **`__vm_gc_roots`**) → existing IR ops. Bounded;
-  the ops already exist in IR/interp/JIT. See the svm handoff doc
-  (`SVM_LLVM_INTRINSICS_ASK.md`).
+- **The one concrete svm-side ask: SATISFIED** (svm `f75509a`, slices AC/AD/AF).
+  `svm-llvm` now lowers the full `<svm.h>` `__vm_*` surface — **35 builtins** incl.
+  `__vm_gc_roots` → `gc.roots`, the fiber ops → `cont.*`, atomics/futex/threads,
+  and the P2 memory/async-I/O/caps. Verified by inspection of the lowering bodies +
+  the dedicated tests (`vm_gc_roots_smoke`, `vm_fibers_generator`,
+  `vm_atomics_*`, `vm_threads_atomic_counter`); the `__vm_gc_roots` signature
+  matches the ask exactly. (Tests run in svm CI; not runnable in this sandbox —
+  missing LLVM-18 dev headers.) Our submodule is pinned at this version.
 - **JACL side: not started.** Frontend (lexer/parser/typer/macros) and the value
   representation are the assets we carry forward; everything below the AST is
   rewritten.
@@ -124,10 +125,9 @@ multi-month, front-loaded by the spikes.
 
 ## 9. Risk register
 
-- **R-svm-llvm-intrinsics (med, blocking):** the LLVM on-ramp doesn't yet lower
-  `cont.*`/atomics/futex/`gc.roots` — required before the runtime can do
-  concurrency or GC. *Mitigation: the svm handoff ask; Spike-1b; the work is
-  bounded and the ops already exist in IR/interp/JIT.*
+- **R-svm-llvm-intrinsics — RESOLVED** (svm `f75509a`): the on-ramp now lowers the
+  full `__vm_*` surface incl. `__vm_gc_roots`/`cont.*`/atomics/futex/threads. No
+  longer blocking.
 - **R-Runtime-port (med):** existing runtime C needs substrate swaps (window
   allocator, conservative GC, fibers-for-threads) before it recompiles cleanly;
   some C may hit svm-llvm gaps (e.g. varargs `printf`, not yet supported).

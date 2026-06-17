@@ -184,15 +184,13 @@ JACL's window allocator over offsets (svm-llvm's malloc already grows the window
 ptr↔int works); the epoch GC → the new conservative collector; native threads →
 svm fibers/threads. The *pure-computation* parts port nearly as-is.
 
-**The one svm-side gap (the ask):** `svm-llvm` lowers ordinary C but does **not**
-yet surface svm's concurrency/GC ops — verified: zero handling for `cont.*`,
-atomics, futex, or `gc.roots`. The runtime needs them, so the on-ramp must
-recognize a set of external symbols / intrinsics (mirroring chibicc's `__vm_*`:
-`__vm_fiber_new/resume/suspend`, `__vm_atomic_*`, `__vm_wait32`/`__vm_notify`,
-`__vm_thread_spawn/join`, **`__vm_gc_roots`**) and lower them to the existing IR
-ops. Bounded and well-precedented (svm-llvm already binds `write`/`read`/`exit` to
-named imports and synthesizes `memset`/`memcpy` helpers). The ops already exist in
-the IR/interp/JIT. See `SVM_BACKEND_PLAN.md` and the svm handoff doc.
+**The svm-side gap is now closed** (svm `f75509a`, slices AC/AD/AF). `svm-llvm`
+surfaces the full `<svm.h>` `__vm_*` set — 35 builtins incl. `__vm_gc_roots` →
+`gc.roots`, `__vm_fiber_*` → `cont.*`, atomics/futex/threads, and memory/async-IO/
+caps — each lowering to the existing IR op, with dedicated tests. So the runtime's
+GC, scheduler, and fiber generators are all expressible in C `#include <svm.h>` and
+compiled through the on-ramp. (Originally the on-ramp lowered only ordinary C; the
+ask in `SVM_LLVM_INTRINSICS_ASK.md` was implemented.)
 
 **Build dependency:** clang/LLVM is needed *at build time* to produce the runtime
 artifact (prebuilt, checked in / CI-built) — end users linking JACL programs do
