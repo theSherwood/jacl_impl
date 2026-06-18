@@ -31,7 +31,7 @@ typedef struct {
   IrVal   *args; int nargs;
 } Inst;
 
-typedef enum { T_NONE, T_BR, T_BRIF, T_RETURN } TermKind;
+typedef enum { T_NONE, T_BR, T_BRIF, T_RETURN, T_RETURN_CALL } TermKind;
 
 typedef struct {
   TermKind kind;
@@ -41,6 +41,7 @@ typedef struct {
   IrBlock  then_blk; IrVal *then_args; int nthen;
   IrBlock  else_blk; IrVal *else_args; int nelse;
   IrVal   *ret_vals; int nret; /* return */
+  uint32_t rc_func;            /* return_call: callee function index */
 } Term;
 
 typedef struct {
@@ -236,6 +237,14 @@ void irb_return(IrFunc *f, IrBlock b, const IrVal *vals, int nvals) {
   blk->term.kind = T_RETURN;
   blk->term.ret_vals = dup_vals(vals, nvals); blk->term.nret = nvals;
 }
+void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, int nargs) {
+  int idx = irb_func_index(f->module, callee);
+  if (idx < 0) { fprintf(stderr, "irbuilder: return_call to unknown function\n"); abort(); }
+  Block *blk = block_at(f, b);
+  blk->term.kind = T_RETURN_CALL;
+  blk->term.rc_func = (uint32_t)idx;
+  blk->term.args = dup_vals(args, nargs); blk->term.nargs = nargs;
+}
 
 /* ---- text serialization ---- */
 
@@ -363,6 +372,10 @@ static void out_term(Out *o, const Term *t) {
         out_str(o, "return ");
         for (int i = 0; i < t->nret; i++) out_fmt(o, "%sv%u", i ? ", " : "", t->ret_vals[i]);
       }
+      break;
+    case T_RETURN_CALL:
+      out_fmt(o, "return_call %u", t->rc_func);
+      out_arglist(o, t->args, t->nargs);
       break;
     case T_NONE:
     default:

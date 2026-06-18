@@ -136,9 +136,24 @@ separate-artifact path.
 - **Deferred:** `for` over collections/streams (the runtime stream-iteration protocol)
   and `break`/`continue` — next, alongside or after procs (P2.5).
 
-### P2.5 — Procs & calls
+### P2.5 — Procs & calls — **DONE**
 - JACL procs → SVM IR functions (data-SP ABI); args/returns, recursion, arity.
 - Tail calls via `return_call` where applicable.
+- **Done:** top-level `proc name {params} (rettype)? {body}` → one SVM function each,
+  `func (i64 sp, i64 a0…) -> i64`. Codegen is two-pass — all procs are registered
+  (name → func + arity) before any body is compiled, so (mutual) recursion resolves.
+  Params bind as the function's args (sp is param 0; types are skipped — every value
+  is an i64 JaclVal); calls thread `sp` unchanged (generated code holds no data-stack
+  slots). Calls (`[f a b]`) resolve by name against the proc table — even when the
+  name collides with a builtin head id (e.g. `count`) — with an arity check; `return`
+  in tail position is honored. Proc bodies are compiled in **tail position**: a tail
+  proc call becomes `return_call` (added to the IR builder), and a tail `if` returns
+  from each branch with no join — so tail recursion runs in constant stack (validated
+  with a 200k-deep loop on interp + JIT). Validated in `codegen.rs`: simple/typed/
+  zero-arg calls, proc-calls-proc, recursive factorial, explicit return, a proc with a
+  local `while` loop, arity-mismatch error, and tail recursion (small + deep).
+- **Deferred:** nested procs / first-class proc values → **closures (P2.6)**;
+  general `for` over collections; `break`/`continue`.
 
 ### P2.6 — Closures
 - Captured environment → a runtime closure object (`JACL_TAG_CLOSURE`) holding

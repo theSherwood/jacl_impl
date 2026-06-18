@@ -43,6 +43,7 @@ static const char *binary_runtime_fn(uint8_t head_id) {
  * inside a branch updates a local's SSA id in that block, so the merge block's param
  * for it naturally becomes the phi of the two edges. */
 #define IRB_MAX_FRAME 256
+#define CG_MAX_PARAMS 64
 
 typedef struct {
   const char *name;
@@ -50,6 +51,16 @@ typedef struct {
   IrVal       value;
   int         is_mut;
 } Binding;
+
+/* A top-level proc: name -> its SVM function + arity. Registered before any body is
+ * compiled, so (mutual) recursion resolves. */
+typedef struct {
+  const char *name;
+  uint32_t    len;
+  IrFunc     *func;
+  int         arity;
+  AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
+} Proc;
 
 typedef struct {
   char  *err;
@@ -62,6 +73,8 @@ typedef struct {
 
   Binding *locals; int nlocals, cap_locals; /* flat env (most-recent wins) */
   int     *marks;  int nmarks,  cap_marks;  /* scope start indices into locals */
+
+  Proc *procs; int nprocs, cap_procs;       /* top-level proc table (persists) */
 } Cx;
 
 static void cx_fail(Cx *cx, const char *msg) {
@@ -108,6 +121,62 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
     if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
   }
   cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut};
+}
+
+/* ---- top-level procs ---- */
+
+/* Mirror of src/ast.c's type_keyword_table (kept local to avoid linking a static
+ * frontend helper). Used only to skip type tokens when reading proc param names. */
+static int cg_is_type_kw(const char *s, uint32_t n) {
+  static const struct { const char *k; uint32_t n; } T[] = {
+    {"i8", 2}, {"u8", 2}, {"i16", 3}, {"u16", 3}, {"i32", 3}, {"i64", 3},
+    {"u32", 3}, {"u64", 3}, {"f32", 3}, {"f64", 3}, {"str", 3}, {"vec", 3},
+    {"map", 3}, {"dyn", 3}, {"bool", 4}, {"stream", 6}};
+  for (size_t i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+    if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return 1;
+  return 0;
+}
+
+/* Read a proc's param NAMES from its params command (args[1]). Params are flattened
+ * into the command's head + args; typed params interleave a type token before each
+ * name (`{i32 x, i32 y}` -> i32 x i32 y), untyped are bare (`{x, y}` -> x y), and a
+ * single empty-string token means zero params (`{}`). Returns the count, or -1 on
+ * error. Types are skipped (codegen treats every value as an i64 JaclVal). */
+static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint32_t *lens) {
+  if (!plist || plist->type != AST_COMMAND) { cx_fail(cx, "proc params must be a { list }"); return -1; }
+  AstNode *toks[CG_MAX_PARAMS * 2 + 2];
+  int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 0 &&
+      plist->data.command.arg_count == 0)
+    return 0; /* {} */
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+
+  int np = 0, i = 0;
+  while (i < nt) {
+    if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "proc param must be a name"); return -1; }
+    const char *s = toks[i]->data.lit_string.value;
+    uint32_t n = toks[i]->data.lit_string.length;
+    AstNode *name_tok = toks[i];
+    if (cg_is_type_kw(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      name_tok = toks[i + 1]; i += 2; /* `<type> <name>` */
+    } else {
+      i += 1;
+    }
+    if (np >= CG_MAX_PARAMS) { cx_fail(cx, "proc has too many params"); return -1; }
+    names[np] = name_tok->data.lit_string.value;
+    lens[np] = name_tok->data.lit_string.length;
+    np++;
+  }
+  return np;
+}
+
+static Proc *proc_lookup(Cx *cx, const char *name, uint32_t len) {
+  for (int i = 0; i < cx->nprocs; i++)
+    if (cx->procs[i].len == len && memcmp(cx->procs[i].name, name, len) == 0) return &cx->procs[i];
+  return NULL;
 }
 
 /* ---- frame threading helpers ---- */
@@ -375,6 +444,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       return bd->value;
     }
 
+    case AST_RETURN:
+      /* Tail-position return: evaluate to the value; the proc wraps the body value in
+       * a single `return`. Early/mid-block return (out of loops) is not yet supported. */
+      if (node->data.return_stmt.value) return compile_expr(cx, node->data.return_stmt.value);
+      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+
     case AST_BLOCK: {
       uint32_t bn = node->data.block.count;
       scope_enter(cx);
@@ -414,6 +489,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return val;
       }
 
+      if (hid == HEAD_PROC) { cx_fail(cx, "nested procs not yet supported (closures are P2.6)"); return 0; }
+
       const char *fn = binary_runtime_fn(hid);
       if (fn) {
         uint32_t argc = node->data.command.arg_count;
@@ -427,13 +504,204 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
         return acc;
       }
-      cx_fail(cx, "unsupported command head (scaffold: + - * / %, comparisons, def/mut/set, if, while)");
+
+      /* A call to a user-defined proc (matched by name — may collide with a builtin
+       * head id like `count`, which we route to the user proc). */
+      AstNode *head = node->data.command.head;
+      if (head && head->type == AST_LIT_STRING) {
+        Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
+        if (p) {
+          uint32_t argc = node->data.command.arg_count;
+          if ((int)argc != p->arity) {
+            cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
+                     head->data.lit_string.value, head->data.lit_string.length);
+            return 0;
+          }
+          IrVal args[1 + CG_MAX_PARAMS];
+          args[0] = cx->sp; /* data-SP ABI: thread sp as the leading argument */
+          for (uint32_t i = 0; i < argc; i++) {
+            args[i + 1] = compile_expr(cx, node->data.command.args[i]);
+            if (cx->failed) return 0;
+          }
+          return irb_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
+        }
+      }
+
+      cx_fail(cx, "unsupported command head (scaffold: + - * / %, comparisons, def/mut/set, if/while/for, proc calls)");
       return 0;
     }
 
     default:
       cx_fail(cx, "unsupported AST node (scaffold: literals, vars, arithmetic, bindings, if, while)");
       return 0;
+  }
+}
+
+/* ---- tail-position compilation (proc bodies) ----
+ *
+ * Compiling a proc body in tail position lets a call that produces the body's value
+ * become a `return_call` (a real tail call), and an `if` in tail position return from
+ * each branch directly (no join). Anything else falls back to "compute a value, then
+ * return it". */
+static void compile_tail(Cx *cx, AstNode *node);
+
+static void emit_return_value(Cx *cx, IrVal v) {
+  IrVal r[] = {v};
+  irb_return(cx->f, cx->cur, r, 1);
+}
+
+static void compile_if_tail(Cx *cx, AstNode **args, uint32_t argc, uint32_t start) {
+  if (start + 1 >= argc || args[start + 1]->type != AST_BLOCK) { cx_fail(cx, "if/elif needs a condition and a { then-block }"); return; }
+  if (!frame_guard(cx)) return;
+  IrVal cond = compile_expr(cx, args[start]);
+  if (cx->failed) return;
+  IrVal truth = emit_truthy(cx, cond);
+
+  int w = frame_width(cx);
+  IrBlock then_blk = new_i64_block(cx, w);
+  IrBlock else_blk = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, then_blk, frame, w, else_blk, frame, w);
+
+  enter_frame_block(cx, then_blk);
+  compile_tail(cx, args[start + 1]);
+  if (cx->failed) return;
+
+  enter_frame_block(cx, else_blk);
+  uint32_t next = start + 2;
+  if (next >= argc) {
+    emit_return_value(cx, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL));
+  } else if (kw_is(args[next], "elif", 4)) {
+    compile_if_tail(cx, args, argc, next + 1);
+  } else if (kw_is(args[next], "else", 4)) {
+    if (next + 1 >= argc || args[next + 1]->type != AST_BLOCK) { cx_fail(cx, "else needs a { block }"); return; }
+    compile_tail(cx, args[next + 1]);
+  } else if (args[next]->type == AST_BLOCK) {
+    compile_tail(cx, args[next]);
+  } else {
+    cx_fail(cx, "malformed if (expected elif/else or an else block)");
+  }
+}
+
+static void compile_tail(Cx *cx, AstNode *node) {
+  if (cx->failed) return;
+
+  if (node->type == AST_RETURN) {
+    if (node->data.return_stmt.value) compile_tail(cx, node->data.return_stmt.value);
+    else emit_return_value(cx, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL));
+    return;
+  }
+
+  if (node->type == AST_BLOCK) {
+    uint32_t bn = node->data.block.count;
+    if (bn == 0) { emit_return_value(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))); return; }
+    scope_enter(cx);
+    for (uint32_t i = 0; i + 1 < bn && !cx->failed; i++) compile_expr(cx, node->data.block.commands[i]);
+    if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
+    scope_exit(cx);
+    return;
+  }
+
+  if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    if (hid == HEAD_IF) { compile_if_tail(cx, node->data.command.args, node->data.command.arg_count, 0); return; }
+    /* A tail-position proc call becomes a real tail call. A user proc name may
+     * collide with a builtin head id (e.g. `count`), so match by the proc table, not
+     * head_id; non-procs fall through to the value+return fallback. */
+    if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING) {
+      AstNode *head = node->data.command.head;
+      Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
+      if (p) {
+        uint32_t argc = node->data.command.arg_count;
+        if ((int)argc != p->arity) {
+          cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
+                   head->data.lit_string.value, head->data.lit_string.length);
+          return;
+        }
+        IrVal args[1 + CG_MAX_PARAMS];
+        args[0] = cx->sp;
+        for (uint32_t i = 0; i < argc; i++) {
+          args[i + 1] = compile_expr(cx, node->data.command.args[i]);
+          if (cx->failed) return;
+        }
+        irb_return_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
+        return;
+      }
+    }
+  }
+
+  /* Fallback: compute the value normally and return it. */
+  IrVal v = compile_expr(cx, node);
+  if (!cx->failed) emit_return_value(cx, v);
+}
+
+static int is_proc_def(AstNode *n) {
+  return n->type == AST_COMMAND && n->data.command.head_id == HEAD_PROC;
+}
+
+/* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
+ * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
+ * resolve before any body is compiled. */
+static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count) {
+  IrType ptypes[1 + CG_MAX_PARAMS];
+  IrType r1[] = {IRB_I64};
+  for (uint32_t i = 0; i < count && !cx->failed; i++) {
+    if (!is_proc_def(nodes[i])) continue;
+    AstNode *def = nodes[i];
+    uint32_t argc = def->data.command.arg_count;
+    if (argc < 3 || def->data.command.args[0]->type != AST_LIT_STRING ||
+        def->data.command.args[argc - 1]->type != AST_BLOCK) {
+      cx_fail(cx, "malformed proc (expected `proc name {params} {body}`)"); return;
+    }
+    const char *pname = def->data.command.args[0]->data.lit_string.value;
+    uint32_t plen = def->data.command.args[0]->data.lit_string.length;
+    if (proc_lookup(cx, pname, plen)) { cx_failf(cx, "codegen: proc '%.*s' already defined", pname, plen); return; }
+
+    const char *names[CG_MAX_PARAMS]; uint32_t lens[CG_MAX_PARAMS];
+    int arity = extract_param_names(cx, def->data.command.args[1], names, lens);
+    if (arity < 0) return;
+
+    ptypes[0] = IRB_I64; /* sp */
+    for (int k = 0; k < arity; k++) ptypes[k + 1] = IRB_I64;
+    IrFunc *func = irb_func_new(m, ptypes, arity + 1, r1, 1);
+
+    if (cx->nprocs == cx->cap_procs) {
+      cx->cap_procs = cx->cap_procs ? cx->cap_procs * 2 : 8;
+      cx->procs = realloc(cx->procs, (size_t)cx->cap_procs * sizeof(Proc));
+      if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
+    }
+    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, def};
+  }
+}
+
+/* Reset the per-function lexical environment (the proc table persists). */
+static void env_reset(Cx *cx) { cx->nlocals = 0; cx->nmarks = 0; }
+
+/* Pass 2: compile each registered proc's body into its function. */
+static void compile_procs(Cx *cx) {
+  for (int i = 0; i < cx->nprocs && !cx->failed; i++) {
+    Proc *p = &cx->procs[i];
+    AstNode *def = p->def;
+    uint32_t argc = def->data.command.arg_count;
+    AstNode *body = def->data.command.args[argc - 1];
+
+    const char *names[CG_MAX_PARAMS]; uint32_t lens[CG_MAX_PARAMS];
+    int arity = extract_param_names(cx, def->data.command.args[1], names, lens);
+    if (arity < 0) return;
+
+    IrType ptypes[1 + CG_MAX_PARAMS];
+    for (int k = 0; k <= arity; k++) ptypes[k] = IRB_I64;
+    cx->f = p->func;
+    cx->cur = irb_block(p->func, ptypes, arity + 1);
+    cx->sp = 0; /* param 0 */
+    env_reset(cx);
+    scope_enter(cx);
+    for (int k = 0; k < arity; k++) env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0);
+
+    compile_tail(cx, body); /* emits the proc's return / return_call */
+    scope_exit(cx);
+    if (cx->failed) return;
   }
 }
 
@@ -444,28 +712,37 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
 
   IrModule *m = irb_module_new();
 
-  /* Entry: func (i64 sp) -> (i64). sp (v0) threads to runtime calls + child blocks. */
+  /* Entry must be program function 0 (the harness runs it). Create it first, compile
+   * its body last so it can call procs defined anywhere at top level. */
   IrType i64_1[] = {IRB_I64};
   IrType r1[] = {IRB_I64};
-  cx.f = irb_func_new(m, i64_1, 1, r1, 1);
-  cx.cur = irb_block(cx.f, i64_1, 1);
-  cx.sp = 0; /* block0's only param */
+  IrFunc *entry = irb_func_new(m, i64_1, 1, r1, 1);
+  IrBlock entry_block = irb_block(entry, i64_1, 1);
 
-  scope_enter(&cx); /* top-level lexical scope */
-  IrVal last = (count == 0) ? irb_const_i64(cx.f, cx.cur, jaclval_i32(0)) : 0;
-  for (uint32_t i = 0; i < count; i++) {
-    last = compile_expr(&cx, nodes[i]);
-    if (cx.failed) break;
+  register_procs(&cx, m, nodes, count); /* pass 1 */
+  if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
+
+  /* Entry body: the non-proc top-level forms, in order; value = last. */
+  if (!cx.failed) {
+    cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    env_reset(&cx);
+    scope_enter(&cx);
+    IrVal last = 0; int have = 0;
+    for (uint32_t i = 0; i < count; i++) {
+      if (is_proc_def(nodes[i])) continue;
+      last = compile_expr(&cx, nodes[i]);
+      have = 1;
+      if (cx.failed) break;
+    }
+    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
+    scope_exit(&cx);
+    if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
-  scope_exit(&cx);
 
   int failed = cx.failed;
-  if (!failed) {
-    IrVal ret[] = {last};
-    irb_return(cx.f, cx.cur, ret, 1); /* return in whatever block we ended up in */
-  }
   free(cx.locals);
   free(cx.marks);
+  free(cx.procs);
   if (failed) { irb_module_free(m); return NULL; }
   return m;
 }

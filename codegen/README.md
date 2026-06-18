@@ -38,7 +38,14 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     (integer ranges) desugars onto the loop machinery. Conditions reduce to an i32
     truth (`(c != false) & (c != nil)`); comparisons lower to `jacl_lt/le/gt/ge/eq/ne`.
 
-  Later slices extend the walk (procs, closures, type-driven unboxing, `for` over
+  - **P2.5 (procs & calls):** top-level `proc`s become SVM functions
+    (`func (i64 sp, i64 a0…) -> i64`); codegen is two-pass (register all procs, then
+    compile bodies) so recursion resolves. Calls resolve by name against the proc
+    table (with an arity check) and thread `sp` unchanged. Proc bodies compile in
+    *tail position*: a tail call becomes `return_call` and a tail `if` returns from
+    each branch, so tail recursion is constant-stack.
+
+  Later slices extend the walk (closures, type-driven unboxing, `for` over
   collections, break/continue) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their

@@ -53,6 +53,27 @@ static const char *source_for(const char *name) {
     return "mut acc 0\nfor i in 0..5 { set acc [+ $acc $i] }\n[+ $acc 0]";
   if (!strcmp(name, "for_with_if"))
     return "mut acc 0\n[for i in [range 0 5] { [if [> $i 2] { set acc [+ $acc $i] }] }]\n[+ $acc 0]";
+  /* P2.5 procs & calls */
+  if (!strcmp(name, "proc_add"))
+    return "proc add {x, y} {+ $x $y}\n[add 40 2]";
+  if (!strcmp(name, "proc_typed"))
+    return "proc add {i32 x, i32 y} i32 {+ $x $y}\n[add 40 2]";
+  if (!strcmp(name, "proc_zero_arg"))
+    return "proc answer {} {42}\n[answer]";
+  if (!strcmp(name, "proc_calls_proc"))
+    return "proc inc {x} {+ $x 1}\nproc dbl {x} {* $x 2}\n[dbl [inc 20]]";
+  if (!strcmp(name, "proc_recursion"))
+    return "proc fac {n} {[if [<= $n 1] { 1 } else { [* $n [fac [- $n 1]]] }]}\n[fac 5]";
+  if (!strcmp(name, "proc_return"))
+    return "proc f {n} {return [+ $n 1]}\n[f 41]";
+  if (!strcmp(name, "proc_local_loop"))
+    return "proc sumto {n} {mut acc 0\nmut i 1\n[while [<= $i $n] { set acc [+ $acc $i]\nset i [+ $i 1] }]\n[+ $acc 0]}\n[sumto 5]";
+  if (!strcmp(name, "proc_arity_err"))
+    return "proc add {x, y} {+ $x $y}\n[add 1]";
+  if (!strcmp(name, "proc_tail_rec"))
+    return "proc count {n, acc} {[if [<= $n 0] { $acc } else { [count [- $n 1] [+ $acc 1]] }]}\n[count 5 0]";
+  if (!strcmp(name, "proc_tail_deep"))
+    return "proc count {n, acc} {[if [<= $n 0] { $acc } else { [count [- $n 1] [+ $acc 1]] }]}\n[count 200000 0]";
   return NULL;
 }
 

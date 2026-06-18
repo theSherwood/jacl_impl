@@ -108,6 +108,10 @@ void irb_br_if(IrFunc *f, IrBlock b, IrVal cond,
                IrBlock else_blk, const IrVal *else_args, int nelse);
 void irb_return(IrFunc *f, IrBlock b, const IrVal *vals, int nvals);
 
+/* Tail call: `return_call callee(args)` — return the callee's result as this
+ * function's result (the two must share a result signature). Terminates the block. */
+void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, int nargs);
+
 /* ---- serialization ---- */
 
 /* Serialize the whole module to svm-text. Returns a malloc'd NUL-terminated string;

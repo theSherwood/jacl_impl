@@ -222,3 +222,58 @@ fn for_over_dotdot_range() {
 fn for_with_nested_if() {
     run_case("for_with_if", i32_val(7)); // sum i in 0..5 where i > 2: 3+4
 }
+
+// ---- P2.5 procs & calls ----
+
+#[test]
+fn proc_simple_call() {
+    run_case("proc_add", i32_val(42)); // proc add {x,y}; [add 40 2]
+}
+
+#[test]
+fn proc_typed_params_and_return() {
+    run_case("proc_typed", i32_val(42)); // proc add {i32 x, i32 y} i32
+}
+
+#[test]
+fn proc_zero_args() {
+    run_case("proc_zero_arg", i32_val(42)); // [answer]
+}
+
+#[test]
+fn proc_calls_another_proc() {
+    run_case("proc_calls_proc", i32_val(42)); // [dbl [inc 20]]
+}
+
+#[test]
+fn proc_recursive_factorial() {
+    run_case("proc_recursion", i32_val(120)); // [fac 5]
+}
+
+#[test]
+fn proc_explicit_return() {
+    run_case("proc_return", i32_val(42)); // proc f {n} {return [+ $n 1]}; [f 41]
+}
+
+#[test]
+fn proc_with_local_loop() {
+    run_case("proc_local_loop", i32_val(15)); // proc sumto {n} { while … }; [sumto 5]
+}
+
+#[test]
+fn proc_arity_mismatch_is_an_error() {
+    let err = emit_expecting_error("proc_arity_err"); // [add 1] for a 2-arg proc
+    assert!(err.contains("arity"), "unexpected error: {err}");
+}
+
+#[test]
+fn proc_tail_recursion() {
+    run_case("proc_tail_rec", i32_val(5)); // count 5 0 -> 5
+}
+
+#[test]
+fn proc_tail_recursion_is_constant_stack() {
+    // 200k tail calls: must not overflow the native stack — proves return_call is a
+    // real tail call on both backends.
+    run_case("proc_tail_deep", i32_val(200_000));
+}
