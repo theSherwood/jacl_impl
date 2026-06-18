@@ -61,17 +61,39 @@ fn i32_val(x: i32) -> i64 {
     ((0x02u64 << 56) | (x as u32 as u64)) as i64
 }
 
+/// Split the driver's output into the module text and any data relocations (emitted
+/// after a `%%RELOCS%%` sentinel as `<func> <block> <inst>` lines — SelfData relocs).
+fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
+    match raw.find("%%RELOCS%%") {
+        None => (raw, Vec::new()),
+        Some(i) => {
+            let relocs = raw[i..]
+                .lines()
+                .skip(1)
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| {
+                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
+                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
+                })
+                .collect();
+            (&raw[..i], relocs)
+        }
+    }
+}
+
 /// Compile `case` from JACL source, link it against the runtime, run on interp + JIT,
 /// and assert the returned JaclVal equals `want`.
 fn run_case(case: &str, want: i64) {
-    let program = svm_text::parse_module(&emit(case)).unwrap_or_else(|e| panic!("parse {case}: {e:?}"));
+    let raw = emit(case);
+    let (text, relocs) = split_relocs(&raw);
+    let program = svm_text::parse_module(text).unwrap_or_else(|e| panic!("parse {case}: {e:?}"));
 
     let rt = translate_runtime();
     let entry_sp = rt.entry_sp;
     let entry = rt.module.funcs.len() as u32; // the program function lands after the runtime
     let linked = link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
-        LinkUnit { module: program, ..Default::default() },
+        LinkUnit { module: program, relocations: relocs, ..Default::default() },
     ])
     .unwrap_or_else(|e| panic!("link {case}: {e:?}"));
     assert!(linked.imports.is_empty(), "{case}: unresolved imports {:?}", linked.imports);
@@ -347,6 +369,33 @@ fn dynamic_arithmetic_keeps_runtime_calls() {
     let ir = emit("bind_read");
     assert!(ir.contains("jacl_add"), "dynamic arithmetic should call jacl_add:\n{ir}");
     run_case("bind_read", i32_val(15));
+}
+
+// ---- P2.8: strings + collections ----
+
+#[test]
+fn string_literal_length() {
+    run_case("str_len", i32_val(5)); // [length "hello"]
+}
+
+#[test]
+fn string_concat_length() {
+    run_case("str_concat_len", i32_val(5)); // [length [concat "ab" "cde"]]
+}
+
+#[test]
+fn string_interpolation_length() {
+    run_case("interp_len", i32_val(5)); // [length "val=$n"] with n=7 -> "val=7"
+}
+
+#[test]
+fn vector_literal_length() {
+    run_case("vec_len", i32_val(3)); // [length [vec 1 2 3]]
+}
+
+#[test]
+fn vector_literal_length_four() {
+    run_case("vec_len4", i32_val(4)); // [length [vec 10 20 30 40]]
 }
 
 #[test]

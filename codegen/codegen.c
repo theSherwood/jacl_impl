@@ -284,6 +284,31 @@ static IrVal compile_i32(Cx *cx, AstNode *node) {
   return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
 }
 
+/* ---- strings & collections (P2.8) ---- */
+
+/* Build a heap string from a literal: its bytes go in a data segment, and
+ * jacl_str_new(ptr, len) copies them. `ptr` is a relocated data address; `len` is i32. */
+static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len) {
+  uint64_t off = irb_add_data(cx->m, s, len);
+  IrVal addr = irb_data_addr(cx->f, cx->cur, off);
+  IrVal lv = irb_const_i32(cx->f, cx->cur, (int32_t)len);
+  IrType sig[] = {IRB_I64, IRB_I64, IRB_I32};
+  IrType r1[] = {IRB_I64};
+  IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal args[] = {cx->sp, addr, lv};
+  return irb_call_import(cx->f, cx->cur, "jacl_str_new", sig, 3, r1, 1, h, args, 3);
+}
+
+/* One segment of an interpolated string: a literal → a string; an expression →
+ * jacl_to_string of its value. */
+static IrVal compile_str_segment(Cx *cx, AstNode *seg) {
+  if (seg->type == AST_LIT_STRING)
+    return compile_string_literal(cx, seg->data.lit_string.value, seg->data.lit_string.length);
+  IrVal v = compile_expr(cx, seg);
+  IrVal a[] = {cx->sp, v};
+  return emit_rt_call(cx, "jacl_to_string", a, 2);
+}
+
 /* Reduce a JaclVal condition to an i32 truth (1/0): truthy unless nil or false. */
 static IrVal emit_truthy(Cx *cx, IrVal cond) {
   IrVal cfalse = irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
@@ -732,6 +757,21 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (node->data.return_stmt.value) return compile_expr(cx, node->data.return_stmt.value);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
+    case AST_LIT_STRING:
+      return compile_string_literal(cx, node->data.lit_string.value, node->data.lit_string.length);
+
+    case AST_INTERP_STRING: {
+      uint32_t n = node->data.interp_string.count;
+      if (n == 0) return compile_string_literal(cx, "", 0);
+      IrVal acc = compile_str_segment(cx, node->data.interp_string.segments[0]);
+      for (uint32_t i = 1; i < n; i++) {
+        IrVal s = compile_str_segment(cx, node->data.interp_string.segments[i]);
+        if (cx->failed) return 0;
+        acc = emit_binop_call(cx, "jacl_str_concat", acc, s);
+      }
+      return acc;
+    }
+
     case AST_BLOCK: {
       uint32_t bn = node->data.block.count;
       scope_enter(cx);
@@ -821,6 +861,36 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
         else bd->value = val; /* uncaptured: plain SSA rebind */
         return val;
+      }
+
+      /* Vector literal `[vec e0 e1 …]` → empty + push each element. */
+      if (hid == HEAD_VEC) {
+        IrVal empty[] = {cx->sp};
+        IrVal acc = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+        for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+          IrVal e = compile_expr(cx, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, acc, e};
+          acc = emit_rt_call(cx, "jacl_vec_push", a, 3);
+        }
+        return acc;
+      }
+      /* `[length X]` → jacl_len (string / vec / map). */
+      if (hid == HEAD_LENGTH && node->data.command.arg_count == 1) {
+        IrVal v = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v};
+        return emit_rt_call(cx, "jacl_len", a, 2);
+      }
+      /* `[concat a b …]` → fold jacl_str_concat. */
+      if (hid == HEAD_CONCAT && node->data.command.arg_count >= 2) {
+        IrVal acc = compile_expr(cx, node->data.command.args[0]);
+        for (uint32_t i = 1; i < node->data.command.arg_count; i++) {
+          IrVal s = compile_expr(cx, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          acc = emit_binop_call(cx, "jacl_str_concat", acc, s);
+        }
+        return acc;
       }
 
       const char *fn = binary_runtime_fn(hid);

@@ -68,6 +68,11 @@ void      irb_module_free(IrModule *m);
  * Required for load/store to have backing storage. Without it no memory is emitted. */
 void      irb_set_memory(IrModule *m, uint8_t size_log2);
 
+/* Append a read-only data segment (e.g. a string literal's bytes) to the window and
+ * return its unit-local byte offset. After linking, the segment is relocated by the
+ * unit's data base; reference it with irb_data_addr so the address const is patched. */
+uint64_t  irb_add_data(IrModule *m, const char *bytes, uint32_t len);
+
 /* Append a function with the given signature; returns its handle. Functions are
  * created up front so direct `call`s (which reference a function index) resolve. */
 IrFunc   *irb_func_new(IrModule *m, const IrType *params, int nparams,
@@ -97,6 +102,11 @@ IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, in
 /* `ref.func` — a forgeable i32 funcref (the callee's link-relocated function index),
  * suitable as the index operand of irb_call_indirect. */
 IrVal irb_ref_func(IrFunc *f, IrBlock b, const IrFunc *callee);
+
+/* An i64 constant holding the unit-local offset `local_off` of a data segment, plus a
+ * recorded relocation so the linker patches it to the segment's final window address.
+ * Pass the result where the runtime expects a data pointer (e.g. jacl_str_new). */
+IrVal irb_data_addr(IrFunc *f, IrBlock b, uint64_t local_off);
 
 /* Width conversion (i64.extend_i32_s/u, i32.wrap_i64). */
 IrVal irb_convert(IrFunc *f, IrBlock b, IrConvOp op, IrVal a);
@@ -135,5 +145,9 @@ void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *ar
 /* Serialize the whole module to svm-text. Returns a malloc'd NUL-terminated string;
  * the caller frees it. */
 char *irb_to_text(const IrModule *m);
+
+/* Serialize the data relocations (one `<func> <block> <inst>` line each) — the linker
+ * applies these as SelfData relocs on this unit. malloc'd; "" if none; caller frees. */
+char *irb_relocs_text(const IrModule *m);
 
 #endif /* JACL_IRBUILDER_H */

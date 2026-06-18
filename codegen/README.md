@@ -59,8 +59,16 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     dynamic `jacl_*` call; `dyn` falls back to the dynamic path. Unboxing is confined
     to typed arithmetic trees — locals/frame stay all-i64 boxed JaclVals.
 
-  Later slices extend the walk (`for` over collections, break/continue, more unboxed
-  types/ops) behind the same entry point.
+  - **P2.8 (strings + vectors):** string literals build a `data` segment + a relocated
+    address const and call `jacl_str_new`; interpolation / `[concat …]` fold
+    `jacl_str_concat` (with `jacl_to_string` of expression segments). `[vec …]` →
+    `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`. The IR builder gained
+    data segments + `SelfData` relocations (`irb_add_data`/`irb_data_addr`/
+    `irb_relocs_text`); the driver emits relocs after a `%%RELOCS%%` sentinel and the
+    harness passes them to `svm_ir::link`.
+
+  Later slices extend the walk (maps + element access, structs, `for` over collections,
+  break/continue, more unboxed types/ops) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.

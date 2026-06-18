@@ -200,9 +200,23 @@ separate-artifact path.
   (pure statically-typed arithmetic). `div`/`mod` (error path), comparisons, `f64`, and
   true cross-statement unboxing (locals kept unboxed) remain dynamic/boxed for now.
 
-### P2.8 — Strings, structs, remaining value forms
+### P2.8 — Strings, structs, remaining value forms — **DONE (strings + vectors)**
 - String literals + interpolation (→ runtime concat/format), struct construction +
   field access, vector/map literals → runtime calls.
+- **Done:** **strings** — a string literal's bytes go in a `data` segment and
+  `jacl_str_new(ptr, len)` builds a heap string; interpolation concatenates each
+  segment (`jacl_to_string` of expression segments) via `jacl_str_concat`; `[concat …]`
+  folds the same. This added the **data-section + relocation** infra to the IR builder
+  (`irb_add_data`, `irb_data_addr` recording a `SelfData` reloc, `irb_relocs_text`); the
+  driver emits the relocs after a `%%RELOCS%%` sentinel and the harness feeds them to
+  `svm_ir::link` so the address const is patched to the linked data address. **Vectors**
+  — `[vec …]` lowers to `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`.
+  Validated on interp + JIT (lengths of a literal string, a concat, an interpolation,
+  and vectors).
+- **Deferred:** **structs** (no runtime support yet) and **maps + element access /
+  indexing** — `[$x k]` is overloaded (vector index / map get / closure call) and the
+  typer makes `def`-bound containers `dyn`, so it needs runtime dispatch (or richer
+  types); maps additionally need string keys (now available). Tracked for a follow-up.
 
 ### P2.9 — GC safepoints & root discipline
 - Emit the `gc_epoch` safepoint poll at loop back-edges + call sites (obligation

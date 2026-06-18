@@ -59,9 +59,14 @@ struct IrFunc {
   Block    *blocks; int nblocks, cap_blocks;
 };
 
+typedef struct { uint64_t off; char *bytes; uint32_t len; } DataSeg;
+typedef struct { uint32_t func, block, inst; } Reloc;
+
 struct IrModule {
   IrFunc **funcs; int nfuncs, cap_funcs;
   int      has_memory; uint8_t mem_log2;
+  DataSeg *data; int ndata, cap_data; uint64_t data_top;
+  Reloc   *relocs; int nrelocs, cap_relocs;
 };
 
 /* ---- small helpers ---- */
@@ -114,6 +119,40 @@ IrModule *irb_module_new(void) {
 
 void irb_set_memory(IrModule *m, uint8_t size_log2) {
   m->has_memory = 1; m->mem_log2 = size_log2;
+}
+
+uint64_t irb_add_data(IrModule *m, const char *bytes, uint32_t len) {
+  uint64_t off = (m->data_top + 7) & ~(uint64_t)7; /* 8-byte align */
+  if (m->ndata == m->cap_data) {
+    m->cap_data = m->cap_data ? m->cap_data * 2 : 8;
+    m->data = realloc(m->data, (size_t)m->cap_data * sizeof(DataSeg));
+    if (!m->data) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+  }
+  char *copy = xmalloc(len ? len : 1);
+  if (len) memcpy(copy, bytes, len);
+  m->data[m->ndata++] = (DataSeg){off, copy, len};
+  m->data_top = off + len;
+  return off;
+}
+
+/* Record a SelfData relocation on the most recently emitted instruction of `b`. */
+static void record_reloc(IrFunc *f, IrBlock b) {
+  IrModule *m = f->module;
+  if (m->nrelocs == m->cap_relocs) {
+    m->cap_relocs = m->cap_relocs ? m->cap_relocs * 2 : 8;
+    m->relocs = realloc(m->relocs, (size_t)m->cap_relocs * sizeof(Reloc));
+    if (!m->relocs) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+  }
+  Block *blk = block_at(f, b);
+  m->relocs[m->nrelocs++] = (Reloc){(uint32_t)irb_func_index(m, f), (uint32_t)b, (uint32_t)(blk->ninsts - 1)};
+}
+
+IrVal irb_data_addr(IrFunc *f, IrBlock b, uint64_t local_off) {
+  Block *blk = block_at(f, b);
+  Inst *in = push_inst(blk);
+  in->kind = K_CONST_I64; in->nresults = 1; in->c64 = (int64_t)local_off;
+  record_reloc(f, b); /* patched to dbase + local_off at link time */
+  return take_val(blk);
 }
 
 IrFunc *irb_func_new(IrModule *m, const IrType *params, int nparams,
@@ -459,13 +498,38 @@ static void out_func(Out *o, const IrFunc *f) {
   out_str(o, "}\n");
 }
 
+/* Escape data bytes for svm-text: printable ASCII verbatim (except \ and "), else \xHH. */
+static void out_data_bytes(Out *o, const char *b, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)b[i];
+    if (c == '\\') out_str(o, "\\\\");
+    else if (c == '"') out_str(o, "\\\"");
+    else if (c >= 0x20 && c <= 0x7e) { char s[2] = {(char)c, 0}; out_str(o, s); }
+    else out_fmt(o, "\\x%02x", c);
+  }
+}
+
 char *irb_to_text(const IrModule *m) {
   Out o = {0};
+  for (int i = 0; i < m->ndata; i++) {
+    out_fmt(&o, "data ro %llu \"", (unsigned long long)m->data[i].off);
+    out_data_bytes(&o, m->data[i].bytes, m->data[i].len);
+    out_str(&o, "\"\n");
+  }
+  if (m->ndata) out_str(&o, "\n");
   if (m->has_memory) out_fmt(&o, "memory %u\n\n", (unsigned)m->mem_log2);
   for (int i = 0; i < m->nfuncs; i++) {
     if (i > 0) out_str(&o, "\n");
     out_func(&o, m->funcs[i]);
   }
+  if (!o.buf) { o.buf = xmalloc(1); o.buf[0] = '\0'; }
+  return o.buf;
+}
+
+char *irb_relocs_text(const IrModule *m) {
+  Out o = {0};
+  for (int i = 0; i < m->nrelocs; i++)
+    out_fmt(&o, "%u %u %u\n", m->relocs[i].func, m->relocs[i].block, m->relocs[i].inst);
   if (!o.buf) { o.buf = xmalloc(1); o.buf[0] = '\0'; }
   return o.buf;
 }
@@ -497,6 +561,9 @@ void irb_module_free(IrModule *m) {
     free(f->results);
     free(f);
   }
+  for (int i = 0; i < m->ndata; i++) free(m->data[i].bytes);
+  free(m->data);
+  free(m->relocs);
   free(m->funcs);
   free(m);
 }

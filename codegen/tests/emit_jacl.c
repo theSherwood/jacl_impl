@@ -94,6 +94,12 @@ static const char *source_for(const char *name) {
     return "proc make {} { mut n 0\n[\\ {} { set n [+ $n 1] }] }\ndef c [make]\n[$c]\n[$c]\n[$c]";
   if (!strcmp(name, "closure_shared_mut"))
     return "mut x 10\ndef get [\\ {} { [+ $x 0] }]\ndef setx [\\ {v} { set x $v }]\n[$setx 42]\n[$get]";
+  /* P2.8 strings + collections (checked via [length …] so the result is an i32) */
+  if (!strcmp(name, "str_len"))        return "[length \"hello\"]";
+  if (!strcmp(name, "str_concat_len")) return "[length [concat \"ab\" \"cde\"]]";
+  if (!strcmp(name, "interp_len"))     return "def n 7\n[length \"val=$n\"]";
+  if (!strcmp(name, "vec_len"))        return "[length [vec 1 2 3]]";
+  if (!strcmp(name, "vec_len4"))       return "[length [vec 10 20 30 40]]";
   return NULL;
 }
 
@@ -119,6 +125,11 @@ int main(int argc, char **argv) {
   char *text = irb_to_text(m);
   fputs(text, stdout);
   free(text);
+  /* Data relocations follow the module after a sentinel (the harness splits on it and
+   * feeds them to svm_ir::link as SelfData relocs). */
+  char *relocs = irb_relocs_text(m);
+  if (relocs[0]) { fputs("%%RELOCS%%\n", stdout); fputs(relocs, stdout); }
+  free(relocs);
   irb_module_free(m);
   arena_destroy(&arena);
   return 0;
