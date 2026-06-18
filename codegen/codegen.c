@@ -48,8 +48,9 @@ static const char *binary_runtime_fn(uint8_t head_id) {
 typedef struct {
   const char *name;
   uint32_t    len;
-  IrVal       value;
+  IrVal       value;   /* SSA value, or (when is_cell) the cell pointer */
   int         is_mut;
+  int         is_cell; /* a captured `mut`: backed by a heap cell, shared on capture */
 } Binding;
 
 /* A top-level proc: name -> its SVM function + arity. Registered before any body is
@@ -69,7 +70,7 @@ typedef struct {
   IrFunc     *func;
   AstNode    *body;
   const char *pnames[CG_MAX_PARAMS]; uint32_t plens[CG_MAX_PARAMS]; int nparams;
-  const char *cnames[CG_MAX_PARAMS]; uint32_t clens[CG_MAX_PARAMS]; int ncaps;
+  const char *cnames[CG_MAX_PARAMS]; uint32_t clens[CG_MAX_PARAMS]; int ccell[CG_MAX_PARAMS]; int ncaps;
 } Pending;
 
 typedef struct {
@@ -87,6 +88,10 @@ typedef struct {
 
   Proc *procs; int nprocs, cap_procs;       /* top-level proc table (persists) */
   Pending *pending; int npending, cap_pending; /* closure bodies to compile */
+
+  /* Names captured by some closure in the function currently being compiled — a `mut`
+   * among them is boxed in a heap cell so mutations are shared with the closure. */
+  const char *capset[CG_MAX_PARAMS]; uint32_t capsetlen[CG_MAX_PARAMS]; int ncapset;
 } Cx;
 
 static void cx_fail(Cx *cx, const char *msg) {
@@ -120,7 +125,7 @@ static Binding *env_lookup(Cx *cx, const char *name, uint32_t len) {
   return NULL;
 }
 
-static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut) {
+static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
   for (int i = mark; i < cx->nlocals; i++)
     if (name_eq(&cx->locals[i], name, len) && !cx->locals[i].is_mut) {
@@ -132,7 +137,7 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
     cx->locals = realloc(cx->locals, (size_t)cx->cap_locals * sizeof(Binding));
     if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
   }
-  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut};
+  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell};
 }
 
 /* ---- top-level procs ---- */
@@ -278,7 +283,9 @@ static void collect_bound(AstNode *node, const char **ns, uint32_t *ls, int *n) 
   } else if (node->type == AST_COMMAND) {
     uint8_t hid = node->data.command.head_id;
     AstNode **args = node->data.command.args; uint32_t argc = node->data.command.arg_count;
-    if ((hid == HEAD_DEF || hid == HEAD_MUT || hid == HEAD_SET || hid == HEAD_FOR) &&
+    /* def/mut/for introduce bindings; `set` only mutates an existing one (so it does
+     * not make the name closure-local — a `set` on a captured var still captures). */
+    if ((hid == HEAD_DEF || hid == HEAD_MUT || hid == HEAD_FOR) &&
         argc >= 1 && args[0]->type == AST_LIT_STRING)
       set_add(ns, ls, n, args[0]->data.lit_string.value, args[0]->data.lit_string.length);
     for (uint32_t i = 0; i < argc; i++) collect_bound(args[i], ns, ls, n);
@@ -298,46 +305,121 @@ static void collect_caps(Cx *cx, AstNode *node, const char **bound, uint32_t *bl
   } else if (node->type == AST_BLOCK) {
     for (uint32_t i = 0; i < node->data.block.count; i++) collect_caps(cx, node->data.block.commands[i], bound, blen, nb, caps, clen, nc);
   } else if (node->type == AST_COMMAND) {
+    /* a `set NAME …` target is a reference (by name), so it captures too */
+    if (node->data.command.head_id == HEAD_SET && node->data.command.arg_count >= 1 &&
+        node->data.command.args[0]->type == AST_LIT_STRING) {
+      const char *nm = node->data.command.args[0]->data.lit_string.value;
+      uint32_t nl = node->data.command.args[0]->data.lit_string.length;
+      if (!set_has(bound, blen, nb, nm, nl) && env_lookup(cx, nm, nl)) set_add(caps, clen, nc, nm, nl);
+    }
     if (node->data.command.head) collect_caps(cx, node->data.command.head, bound, blen, nb, caps, clen, nc);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) collect_caps(cx, node->data.command.args[i], bound, blen, nb, caps, clen, nc);
   }
 }
 
-/* Extract closure param names. Lambda params arrive in a BLOCK (`[\ {x} …]`), anon
- * proc params in a command (`[proc {x} …]`); both flatten to type/name tokens. */
-static int closure_params(Cx *cx, AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
+/* Is `node` a closure literal? Lambda `[\ {params} {body}]` (params in a BLOCK) or
+ * anonymous `[proc {params} {body}]` (empty name). Fills the out-params if so. */
+static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNode **body) {
+  if (node->type != AST_COMMAND) return 0;
+  AstNode *h = node->data.command.head;
+  uint32_t argc = node->data.command.arg_count;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 && h->data.lit_string.value[0] == '\\') {
+    if (argc == 2 && node->data.command.args[0]->type == AST_BLOCK && node->data.command.args[1]->type == AST_BLOCK) {
+      *pnode = node->data.command.args[0]; *in_block = 1; *body = node->data.command.args[1]; return 1;
+    }
+    return 0;
+  }
+  if (node->data.command.head_id == HEAD_PROC && argc >= 3 &&
+      node->data.command.args[0]->type == AST_LIT_STRING && node->data.command.args[0]->data.lit_string.length == 0) {
+    *pnode = node->data.command.args[1]; *in_block = 0; *body = node->data.command.args[argc - 1]; return 1;
+  }
+  return 0;
+}
+
+/* Extract closure param names (tolerant — returns the count, 0 on malformed). Lambda
+ * params arrive in a BLOCK (`[\ {x} …]`), anon proc params in a command
+ * (`[proc {x} …]`); both flatten to type/name tokens (types skipped). */
+static int closure_param_names(AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
   AstNode *toks[CG_MAX_PARAMS * 2 + 4]; int nt = 0;
   if (in_block) {
-    if (pnode->type != AST_BLOCK) { cx_fail(cx, "closure params must be a { list }"); return -1; }
+    if (pnode->type != AST_BLOCK) return 0;
     for (uint32_t i = 0; i < pnode->data.block.count; i++) {
       AstNode *cmd = pnode->data.block.commands[i];
-      if (cmd->type != AST_COMMAND) { cx_fail(cx, "bad closure param list"); return -1; }
+      if (cmd->type != AST_COMMAND) return 0;
       if (cmd->data.command.head && nt < CG_MAX_PARAMS * 2) toks[nt++] = cmd->data.command.head;
       for (uint32_t j = 0; j < cmd->data.command.arg_count && nt < CG_MAX_PARAMS * 2; j++) toks[nt++] = cmd->data.command.args[j];
     }
   } else {
-    if (pnode->type != AST_COMMAND) { cx_fail(cx, "closure params must be a list"); return -1; }
+    if (pnode->type != AST_COMMAND) return 0;
     if (pnode->data.command.head) toks[nt++] = pnode->data.command.head;
     for (uint32_t j = 0; j < pnode->data.command.arg_count && nt < CG_MAX_PARAMS * 2; j++) toks[nt++] = pnode->data.command.args[j];
   }
   if (nt == 0) return 0;
   if (nt == 1 && toks[0]->type == AST_LIT_STRING && toks[0]->data.lit_string.length == 0) return 0;
   int np = 0, i = 0;
-  while (i < nt) {
-    if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "closure param must be a name"); return -1; }
+  while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type != AST_LIT_STRING) return np;
     const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
     AstNode *nmtok = toks[i];
     if (cg_is_type_kw(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) { nmtok = toks[i + 1]; i += 2; }
     else i += 1;
-    if (np >= CG_MAX_PARAMS) { cx_fail(cx, "closure has too many params"); return -1; }
     ns[np] = nmtok->data.lit_string.value; ls[np] = nmtok->data.lit_string.length; np++;
   }
   return np;
 }
 
+/* Syntactic free var-refs of `node` (names referenced but not in `bound`) added to a set. */
+static void add_free_varrefs(AstNode *node, const char **bound, uint32_t *blen, int nb,
+                             const char **set, uint32_t *slen, int *sn) {
+  if (node->type == AST_VAR_REF) {
+    const char *nm = node->data.var_ref.name; uint32_t nl = node->data.var_ref.length;
+    if (!set_has(bound, blen, nb, nm, nl)) set_add(set, slen, sn, nm, nl);
+  } else if (node->type == AST_RETURN) {
+    if (node->data.return_stmt.value) add_free_varrefs(node->data.return_stmt.value, bound, blen, nb, set, slen, sn);
+  } else if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) add_free_varrefs(node->data.block.commands[i], bound, blen, nb, set, slen, sn);
+  } else if (node->type == AST_COMMAND) {
+    if (node->data.command.head_id == HEAD_SET && node->data.command.arg_count >= 1 &&
+        node->data.command.args[0]->type == AST_LIT_STRING) {
+      const char *nm = node->data.command.args[0]->data.lit_string.value;
+      uint32_t nl = node->data.command.args[0]->data.lit_string.length;
+      if (!set_has(bound, blen, nb, nm, nl)) set_add(set, slen, sn, nm, nl);
+    }
+    if (node->data.command.head) add_free_varrefs(node->data.command.head, bound, blen, nb, set, slen, sn);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) add_free_varrefs(node->data.command.args[i], bound, blen, nb, set, slen, sn);
+  }
+}
+
+/* Build the "captured names" set for the function whose body region is `node`: the free
+ * variables of every closure literal directly within it (not descending into a closure,
+ * whose own captures are computed when it is compiled). A `mut` among these is boxed. */
+static void capset_scan(Cx *cx, AstNode *node) {
+  AstNode *pnode, *body; int in_block;
+  if (closure_literal(node, &pnode, &in_block, &body)) {
+    const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
+    int np = closure_param_names(pnode, in_block, pn, pl);
+    const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
+    for (int k = 0; k < np; k++) set_add(bound, blen, &nb, pn[k], pl[k]);
+    collect_bound(body, bound, blen, &nb);
+    add_free_varrefs(body, bound, blen, nb, cx->capset, cx->capsetlen, &cx->ncapset);
+    return; /* don't descend into the closure */
+  }
+  if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
+  if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
+  if (node->type == AST_COMMAND) {
+    if (node->data.command.head) capset_scan(cx, node->data.command.head);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) capset_scan(cx, node->data.command.args[i]);
+  }
+}
+
+static void capset_reset(Cx *cx) { cx->ncapset = 0; }
+static int is_captured_name(Cx *cx, const char *s, uint32_t l) {
+  return set_has(cx->capset, cx->capsetlen, cx->ncapset, s, l);
+}
+
 static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
                         const char **pn, uint32_t *pl, int np,
-                        const char **cn, uint32_t *cl, int nc) {
+                        const char **cn, uint32_t *cl, const int *cc, int nc) {
   if (cx->npending == cx->cap_pending) {
     cx->cap_pending = cx->cap_pending ? cx->cap_pending * 2 : 8;
     cx->pending = realloc(cx->pending, (size_t)cx->cap_pending * sizeof(Pending));
@@ -346,7 +428,7 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
   Pending *p = &cx->pending[cx->npending++];
   p->func = func; p->body = body; p->nparams = np; p->ncaps = nc;
   for (int i = 0; i < np; i++) { p->pnames[i] = pn[i]; p->plens[i] = pl[i]; }
-  for (int i = 0; i < nc; i++) { p->cnames[i] = cn[i]; p->clens[i] = cl[i]; }
+  for (int i = 0; i < nc; i++) { p->cnames[i] = cn[i]; p->clens[i] = cl[i]; p->ccell[i] = cc[i]; }
 }
 
 /* Compile a closure literal: build the closure object (ref.func + captured values) at
@@ -354,8 +436,7 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
  * params (a BLOCK for `\`, a command for `proc`). Returns the closure JaclVal. */
 static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body) {
   const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
-  int np = closure_params(cx, pnode, in_block, pn, pl);
-  if (np < 0) return 0;
+  int np = closure_param_names(pnode, in_block, pn, pl);
 
   const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
   for (int k = 0; k < np; k++) set_add(bound, blen, &nb, pn[k], pl[k]);
@@ -370,23 +451,24 @@ static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body
   IrType r1[] = {IRB_I64};
   IrFunc *fn = irb_func_new(cx->m, pt, 2 + np, r1, 1);
 
-  /* build the closure object at the creation site, capturing current values */
+  /* build the closure object at the creation site, capturing current values; a captured
+   * `mut` is a cell, so we capture the shared cell pointer (mutations stay visible). */
   IrVal fnref = irb_ref_func(cx->f, cx->cur, fn);
   IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
   IrVal nupv = irb_const_i64(cx->f, cx->cur, nc);
   IrVal new_args[] = {cx->sp, fnref64, nupv};
   IrVal clos = emit_rt_call(cx, "jacl_closure_new", new_args, 3);
+  int ccell[CG_CAP_MAX];
   for (int i = 0; i < nc; i++) {
     Binding *b = env_lookup(cx, cn[i], cl[i]);
     if (!b) { cx_failf(cx, "codegen: cannot capture undefined '%.*s'", cn[i], cl[i]); return 0; }
-    /* Capturing a mutable variable by value would not share later mutations; correct
-     * shared semantics needs a cell (P2.6b). Reject for now rather than be silently wrong. */
-    if (b->is_mut) { cx_failf(cx, "codegen: capturing a mutable variable '%.*s' needs cells (not yet implemented)", cn[i], cl[i]); return 0; }
+    if (b->is_mut && !b->is_cell) { cx_fail(cx, "internal: captured mutable not boxed"); return 0; }
+    ccell[i] = b->is_cell;
     IrVal idx = irb_const_i64(cx->f, cx->cur, i);
-    IrVal set_args[] = {cx->sp, clos, idx, b->value};
+    IrVal set_args[] = {cx->sp, clos, idx, b->value}; /* cell pointer or by-value */
     (void)emit_rt_call(cx, "jacl_closure_set", set_args, 4);
   }
-  pending_add(cx, fn, body, pn, pl, np, cn, cl, nc);
+  pending_add(cx, fn, body, pn, pl, np, cn, cl, ccell, nc);
   return clos;
 }
 
@@ -506,8 +588,8 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   IrVal startv = compile_expr(cx, start_node);
   IrVal endv = compile_expr(cx, end_node);
   if (cx->failed) { scope_exit(cx); return 0; }
-  env_define(cx, name, nlen, startv, /*is_mut=*/1);
-  env_define(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN, endv, /*is_mut=*/0);
+  env_define(cx, name, nlen, startv, /*is_mut=*/1, /*is_cell=*/0);
+  env_define(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN, endv, /*is_mut=*/0, /*is_cell=*/0);
   if (cx->failed) { scope_exit(cx); return 0; }
   if (!frame_guard(cx)) { scope_exit(cx); return 0; }
 
@@ -596,6 +678,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
       if (!bd) { cx_failf(cx, "codegen: undefined variable '%.*s'",
                           node->data.var_ref.name, node->data.var_ref.length); return 0; }
+      if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
       return bd->value;
     }
 
@@ -672,7 +755,15 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (!binding_name(cx, node, &name, &len)) return 0;
         IrVal val = compile_expr(cx, node->data.command.args[1]);
         if (cx->failed) return 0;
-        env_define(cx, name, len, val, hid == HEAD_MUT);
+        /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
+         * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
+        if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
+          IrVal a[] = {cx->sp, val};
+          IrVal cell = emit_rt_call(cx, "jacl_cell_new", a, 2);
+          env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
+        } else {
+          env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
+        }
         return val;
       }
       if (hid == HEAD_SET) {
@@ -683,7 +774,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         Binding *bd = env_lookup(cx, name, len);
         if (!bd) { cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0; }
         if (!bd->is_mut) { cx_failf(cx, "codegen: cannot set immutable variable '%.*s'", name, len); return 0; }
-        bd->value = val;
+        if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
+        else bd->value = val; /* uncaptured: plain SSA rebind */
         return val;
       }
 
@@ -892,8 +984,9 @@ static void compile_procs(Cx *cx) {
     cx->cur = irb_block(p->func, ptypes, arity + 1);
     cx->sp = 0; /* param 0 */
     env_reset(cx);
+    capset_reset(cx); capset_scan(cx, body); /* which muts a nested closure captures */
     scope_enter(cx);
-    for (int k = 0; k < arity; k++) env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0);
+    for (int k = 0; k < arity; k++) env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
 
     compile_tail(cx, body); /* emits the proc's return / return_call */
     scope_exit(cx);
@@ -913,13 +1006,15 @@ static void compile_pending_closures(Cx *cx) {
     cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
     cx->sp = 0; /* param 0; self is param 1 */
     env_reset(cx);
+    capset_reset(cx); capset_scan(cx, p.body); /* muts captured by this closure's own nested closures */
     scope_enter(cx);
-    for (int k = 0; k < p.nparams; k++) env_define(cx, p.pnames[k], p.plens[k], (IrVal)(2 + k), /*is_mut=*/0);
+    for (int k = 0; k < p.nparams; k++) env_define(cx, p.pnames[k], p.plens[k], (IrVal)(2 + k), /*is_mut=*/0, /*is_cell=*/0);
     for (int j = 0; j < p.ncaps; j++) {
       IrVal idx = irb_const_i64(cx->f, cx->cur, j);
       IrVal uargs[] = {cx->sp, /*self=*/1, idx};
       IrVal uv = emit_rt_call(cx, "jacl_closure_upval", uargs, 3);
-      env_define(cx, p.cnames[j], p.clens[j], uv, /*is_mut=*/0);
+      /* a captured cell stays a cell (mutable + shared); a by-value capture is immutable */
+      env_define(cx, p.cnames[j], p.clens[j], uv, /*is_mut=*/p.ccell[j], /*is_cell=*/p.ccell[j]);
     }
     compile_tail(cx, p.body);
     scope_exit(cx);
@@ -948,6 +1043,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   if (!cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
     env_reset(&cx);
+    capset_reset(&cx);
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
     IrVal last = 0; int have = 0;
     for (uint32_t i = 0; i < count; i++) {

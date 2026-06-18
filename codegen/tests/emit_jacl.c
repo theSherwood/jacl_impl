@@ -87,6 +87,13 @@ static const char *source_for(const char *name) {
     return "proc adder {n} { [\\ {x} { [+ $x $n] }] }\ndef add5 [adder 5]\n[$add5 37]";
   if (!strcmp(name, "closure_nested"))
     return "def a 1\ndef f [\\ {x} { [\\ {y} { [+ [+ $a $x] $y] }] }]\ndef g [$f 10]\n[$g 31]";
+  /* P2.6b mut-capture cells (shared mutation) */
+  if (!strcmp(name, "closure_mut_capture"))
+    return "mut c 0\ndef inc [\\ {} { set c [+ $c 1] }]\n[$inc]\n[$inc]\n[+ $c 0]";
+  if (!strcmp(name, "closure_counter_factory"))
+    return "proc make {} { mut n 0\n[\\ {} { set n [+ $n 1] }] }\ndef c [make]\n[$c]\n[$c]\n[$c]";
+  if (!strcmp(name, "closure_shared_mut"))
+    return "mut x 10\ndef get [\\ {} { [+ $x 0] }]\ndef setx [\\ {v} { set x $v }]\n[$setx 42]\n[$get]";
   return NULL;
 }
 

@@ -49,11 +49,12 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     `[proc {params} {body}]` become a runtime closure object (`ref.func` funcref +
     captured upvalues, built with the `runtime/closure.c` helpers); a call `[$f a]`
     dispatches via `call_indirect`. Free vars are found by a capture scan (transitive
-    through nested closures); closure bodies compile on a deferred worklist. Capturing
-    a `mut` is rejected pending cells (P2.6b).
+    through nested closures); closure bodies compile on a deferred worklist. A captured
+    `mut` is boxed in a heap **cell** (`jacl_cell_*`) so mutation is shared between the
+    defining scope and the closure (a per-function pre-pass decides which `mut`s to box).
 
   Later slices extend the walk (type-driven unboxing, `for` over collections,
-  break/continue, mut-capture cells) behind the same entry point.
+  break/continue) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.

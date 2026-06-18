@@ -309,3 +309,23 @@ fn closure_returned_from_proc_captures_param() {
 fn closure_nested_transitive_capture() {
     run_case("closure_nested", i32_val(42)); // (1+10)+31, inner captures a and x
 }
+
+// ---- P2.6b: captured `mut` is boxed in a shared cell ----
+
+#[test]
+fn closure_mutates_captured_variable() {
+    // inc() twice mutates the shared cell; the outer scope sees c == 2.
+    run_case("closure_mut_capture", i32_val(2));
+}
+
+#[test]
+fn closure_counter_factory_keeps_state() {
+    // each make() closure has its own cell; calling it 3× yields 3.
+    run_case("closure_counter_factory", i32_val(3));
+}
+
+#[test]
+fn closures_share_one_mutable_cell() {
+    // get and setx capture the same cell; setx 42 is visible to get.
+    run_case("closure_shared_mut", i32_val(42));
+}

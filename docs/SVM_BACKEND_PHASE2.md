@@ -155,7 +155,7 @@ separate-artifact path.
 - **Deferred:** nested procs / first-class proc values → **closures (P2.6)**;
   general `for` over collections; `break`/`continue`.
 
-### P2.6 — Closures — **DONE (immutable capture); mut-capture cells deferred (P2.6b)**
+### P2.6 — Closures — **DONE (incl. mut-capture cells, P2.6b)**
 - Captured environment → a runtime closure object (`JACL_TAG_CLOSURE`) holding
   upvalues + a funcref; call via `call_indirect`. Upvalue capture/mutation
   semantics (cells for `mut` captures). (Sequential only; generators are Phase 3.)
@@ -172,10 +172,15 @@ separate-artifact path.
   conversions. Validated on interp + JIT (basic lambda, capture, anon proc, multi-capture,
   closure-returned-from-proc, nested transitive capture), plus a hand-built closure in
   the IR-builder test.
-- **Deferred (P2.6b):** **cells for `mut` captures** — the runtime `jacl_cell_*`
-  helpers exist, but the codegen does not yet box captured mutables, so capturing a
-  `mut` is rejected with a clear error rather than snapshotting incorrectly. Also the
-  `[\ expr]` (`$it`) lambda shorthand and immediately-applied lambdas.
+- **P2.6b (mut-capture cells):** a per-function pre-pass computes which names are
+  captured by a closure; a `mut` among them is boxed in a heap **cell**
+  (`jacl_cell_new`), with reads/writes routed through `jacl_cell_get`/`jacl_cell_set`
+  and the closure capturing the shared cell pointer — so mutations are visible across
+  the defining scope and all capturing closures. (`def`/uncaptured `mut` stay plain
+  SSA.) A `set` target counts as a reference for capture analysis. Validated on interp
+  + JIT: a counter closure mutating its captured var, a counter *factory* (each call
+  gets its own cell), and two closures sharing one mutable cell.
+- **Deferred:** the `[\ expr]` (`$it`) lambda shorthand and immediately-applied lambdas.
 
 ### P2.7 — Type-driven lowering (the gradual-typing payoff)
 - Where the typer proved a static type, emit **unboxed** ops (native i32/f64
