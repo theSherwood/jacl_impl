@@ -49,7 +49,9 @@ typedef uint64_t JaclVal;
  * the runtime's streams are GC objects that hold heap references. */
 #define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15))
 
-/* Flag bits (61..63), above the 5-bit type. */
+/* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
+#define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
+#define JACL_FLAG_SECRET       ((uint64_t)1 << 62)
 #define JACL_FLAG_ERROR        ((uint64_t)1 << 61)
 
 #define JACL_NIL    ((JaclVal)JACL_TAG_NIL)
@@ -69,6 +71,8 @@ static inline bool jaclrt_is_heap(JaclVal v) {
   return (JACL_HEAP_TAG_MASK >> jaclrt_type_index(v)) & 1u;
 }
 static inline bool jaclrt_is_error(JaclVal v) { return (v & JACL_FLAG_ERROR) != 0; }
+static inline JaclVal jaclrt_set_error(JaclVal v) { return v | JACL_FLAG_ERROR; }
+static inline JaclVal jaclrt_error(void) { return JACL_NIL | JACL_FLAG_ERROR; }
 
 /* ----- constructors (inline scalars) ----- */
 static inline JaclVal jaclrt_nil(void)        { return JACL_NIL; }
@@ -161,6 +165,7 @@ uint32_t jacl_str_len(JaclVal v);
 void     jacl_str_bytes(JaclVal v, char *buf, uint32_t buflen);  /* NUL-terminated copy */
 bool     jacl_str_eq(JaclVal a, JaclVal b);
 uint32_t jacl_str_hash(JaclVal v);                        /* hash of string bytes (inline or heap) */
+JaclVal  jacl_str_concat(JaclVal a, JaclVal b);           /* a ++ b */
 
 /* ===================================================================
  * Collections (P1.5) — persistent vector over the GC heap. Defined in
@@ -200,5 +205,28 @@ JaclVal jacl_stream_filter(JaclVal src, JaclPredFn p);
 JaclVal jacl_stream_take(JaclVal src, int64_t k);
 int     jacl_stream_next(JaclVal s, JaclVal *out);    /* 1 + *out if a value; 0 if done */
 JaclVal jacl_stream_collect(JaclVal s);               /* drain into a vector */
+
+/* ===================================================================
+ * Builtins (P1.7) — the dynamic value-op layer JACL codegen calls into.
+ * Errors short-circuit (an error operand is returned as-is); type/domain
+ * errors return an error-flagged value (the NaN-like propagation model).
+ * The full opcode surface is ported incrementally (continues into Phase 2).
+ * =================================================================== */
+JaclVal jacl_add(JaclVal a, JaclVal b);
+JaclVal jacl_sub(JaclVal a, JaclVal b);
+JaclVal jacl_mul(JaclVal a, JaclVal b);
+JaclVal jacl_div(JaclVal a, JaclVal b);    /* div-by-zero -> error */
+JaclVal jacl_mod(JaclVal a, JaclVal b);    /* mod-by-zero -> error */
+JaclVal jacl_neg(JaclVal a);
+JaclVal jacl_eq(JaclVal a, JaclVal b);     /* bitwise type+payload equality -> bool */
+JaclVal jacl_ne(JaclVal a, JaclVal b);
+JaclVal jacl_lt(JaclVal a, JaclVal b);     /* ordered comparisons: i32 (else error) */
+JaclVal jacl_le(JaclVal a, JaclVal b);
+JaclVal jacl_gt(JaclVal a, JaclVal b);
+JaclVal jacl_ge(JaclVal a, JaclVal b);
+JaclVal jacl_not(JaclVal a);               /* bool negation */
+JaclVal jacl_typeof(JaclVal v);            /* -> type-name string */
+JaclVal jacl_len(JaclVal v);               /* string/vec/map length -> i32 (else error) */
+JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 #endif /* JACLRT_H */

@@ -240,3 +240,14 @@ this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
   both reachable only via the map — survives collection intact) green on interp +
   JIT. Finding: HAMT key-eq handler is `bool (*)(K,K)` — match the return type
   exactly (clang errors on `int` vs `bool` funcptr). Vector + map ⇒ P1.5 done.
+
+- **P1.7 builtins (core) ✅** — `runtime/builtins.c`: the dynamic value-op layer
+  Phase-2 codegen lowers operator/builtin calls to. Arithmetic (`add`/`sub`/`mul`/
+  `div`/`mod`/`neg`, i32), comparisons (`eq`/`ne` bitwise; `lt`/`le`/`gt`/`ge` i32),
+  `not`, `typeof` (→ type-name string), polymorphic `len` (string/vec/map), and
+  `to_string` (i32/bool/nil/string), plus `jacl_str_concat`. Error model mirrors
+  `src/value.c`: error operands short-circuit; type/domain errors (incl. div/mod by
+  zero) return an error-flagged value; tainted/secret flags propagate. `test_builtins.c`
+  (incl. error propagation through a pipeline) green on interp + JIT. A representative
+  core — the full opcode surface (f64 arithmetic, string ordering, more collection
+  ops, …) is ported incrementally as Phase-2 codegen pins the exact call surface.

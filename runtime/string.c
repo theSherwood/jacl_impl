@@ -103,6 +103,25 @@ JaclVal jacl_str_intern(const char *s, uint32_t len) {
   return jacl_str_new(s, len);                            /* table full (shouldn't happen in P1) */
 }
 
+/* a ++ b. Inline if the result is <=7 bytes, else a fresh heap string. */
+JaclVal jacl_str_concat(JaclVal a, JaclVal b) {
+  uint32_t la = jacl_str_len(a), lb = jacl_str_len(b), n = la + lb;
+  if (n <= 7) {
+    char tmp[8];
+    jacl_str_bytes(a, tmp, la + 1);
+    jacl_str_bytes(b, tmp + la, lb + 1);
+    return jaclrt_inline_string(tmp, n);
+  }
+  JaclObj *o = (JaclObj*)jacl_alloc(JOBJ_STR, (uint32_t)sizeof(JaclStr) + n + 1);
+  JaclStr *st = (JaclStr*)jacl_obj_payload(o);
+  st->len = n;
+  char *d = (char*)(st + 1);
+  jacl_str_bytes(a, d, la + 1);          /* la bytes + NUL at d[la] */
+  jacl_str_bytes(b, d + la, lb + 1);     /* lb bytes + NUL at d[n]  */
+  d[n] = '\0';
+  return jaclrt_from_ptr(JACL_TAG_STRING, o);
+}
+
 /* Hash of a string's bytes (inline or heap) — shared by interning and map keys. */
 uint32_t jacl_str_hash(JaclVal v) {
   if (jaclrt_is_inline_string(v)) {
