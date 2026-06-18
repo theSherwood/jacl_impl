@@ -68,16 +68,21 @@ separate-artifact path.
 
 ## Concrete steps
 
-### P2.1 — The JACL IR builder (C, JACL-owned)
+### P2.1 — The JACL IR builder (C, JACL-owned) — **DONE**
 - **Goal:** an in-memory SVM IR module/func/block/inst representation, mirroring
   `svm-ir`'s shape, with a **text serializer** now and a **binary (`svm-encode`)**
   serializer later behind the same API (Design §4.4).
-- **Deliverable:** `src2/` (or `codegen/`) builder: `irb_module`, `irb_func`,
-  `irb_block` (with block params), `irb_emit_*` (const, intbin, intcmp, call,
-  call.import, br, br_if, return, data-stack load/store), `irb_to_text`.
-- **Validates:** hand-built modules round-trip through the harness
-  (parse→verify→interp≡jit) — Spike-1, but via the builder.
-- **Block-local SSA** discipline baked in (thread cross-block values as block args).
+- **Deliverable:** ✅ `codegen/irbuilder.{h,c}`: `irb_module_new`, `irb_func_new`,
+  `irb_block` (typed block params), the emit set (`irb_const_i32/i64`, `irb_intbin`,
+  `irb_intcmp`, `irb_load`/`irb_store` + `irb_set_memory`, `irb_call`,
+  `irb_call_import`, `irb_br`/`irb_br_if`/`irb_return`), and `irb_to_text`.
+- **Validates:** ✅ `runtime/harness/tests/irbuilder.rs` — the builder's output for
+  arithmetic, an SSA loop with block args, a direct call, a load/store memory
+  round-trip, and a `call.import` linked against the runtime artifact all
+  parse→verify→run identically on interp + JIT (Spike-1, but via the builder).
+  Import-free output is asserted to be canonical svm-text.
+- **Block-local SSA** discipline baked in: values are numbered per block and returned
+  by each `irb_*`; cross-block values thread through branch args.
 
 ### P2.2 — Codegen scaffold: literals, arithmetic, return
 - **Goal:** `compile_program(AST) → IR module`; lower literals, operator/builtin
