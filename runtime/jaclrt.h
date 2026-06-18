@@ -229,4 +229,14 @@ JaclVal jacl_typeof(JaclVal v);            /* -> type-name string */
 JaclVal jacl_len(JaclVal v);               /* string/vec/map length -> i32 (else error) */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
+/* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are
+ * JaclVals. A closure holds [fnref, upvals…]; a cell is a shared mutable box. */
+JaclVal jacl_closure_new(JaclVal fnref, JaclVal nupvals);
+JaclVal jacl_closure_set(JaclVal c, JaclVal i, JaclVal v);
+JaclVal jacl_closure_fn(JaclVal c);
+JaclVal jacl_closure_upval(JaclVal c, JaclVal i);
+JaclVal jacl_cell_new(JaclVal v);
+JaclVal jacl_cell_get(JaclVal c);
+JaclVal jacl_cell_set(JaclVal c, JaclVal v);
+
 #endif /* JACLRT_H */

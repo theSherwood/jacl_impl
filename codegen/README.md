@@ -45,8 +45,15 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     *tail position*: a tail call becomes `return_call` and a tail `if` returns from
     each branch, so tail recursion is constant-stack.
 
-  Later slices extend the walk (closures, type-driven unboxing, `for` over
-  collections, break/continue) behind the same entry point.
+  - **P2.6 (closures):** lambda `[\ {params} {body}]` and anonymous
+    `[proc {params} {body}]` become a runtime closure object (`ref.func` funcref +
+    captured upvalues, built with the `runtime/closure.c` helpers); a call `[$f a]`
+    dispatches via `call_indirect`. Free vars are found by a capture scan (transitive
+    through nested closures); closure bodies compile on a deferred worklist. Capturing
+    a `mut` is rejected pending cells (P2.6b).
+
+  Later slices extend the walk (type-driven unboxing, `for` over collections,
+  break/continue, mut-capture cells) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.

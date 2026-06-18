@@ -5,3 +5,4 @@
 #include "collections.c"
 #include "stream.c"
 #include "builtins.c"
+#include "closure.c"

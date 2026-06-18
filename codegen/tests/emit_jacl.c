@@ -74,6 +74,19 @@ static const char *source_for(const char *name) {
     return "proc count {n, acc} {[if [<= $n 0] { $acc } else { [count [- $n 1] [+ $acc 1]] }]}\n[count 5 0]";
   if (!strcmp(name, "proc_tail_deep"))
     return "proc count {n, acc} {[if [<= $n 0] { $acc } else { [count [- $n 1] [+ $acc 1]] }]}\n[count 200000 0]";
+  /* P2.6 closures */
+  if (!strcmp(name, "closure_basic"))
+    return "def f [\\ {x} { [+ $x 1] }]\n[$f 41]";
+  if (!strcmp(name, "closure_capture"))
+    return "def y 10\ndef f [\\ {x} { [+ $x $y] }]\n[$f 32]";
+  if (!strcmp(name, "closure_anon_proc"))
+    return "def f [proc {x} { [* $x 2] }]\n[$f 21]";
+  if (!strcmp(name, "closure_multi_capture"))
+    return "def a 100\ndef b 20\ndef f [\\ {x} { [+ [+ $a $b] $x] }]\n[$f 2]";
+  if (!strcmp(name, "closure_returned_from_proc"))
+    return "proc adder {n} { [\\ {x} { [+ $x $n] }] }\ndef add5 [adder 5]\n[$add5 37]";
+  if (!strcmp(name, "closure_nested"))
+    return "def a 1\ndef f [\\ {x} { [\\ {y} { [+ [+ $a $x] $y] }] }]\ndef g [$f 10]\n[$g 31]";
   return NULL;
 }
 

@@ -277,3 +277,35 @@ fn proc_tail_recursion_is_constant_stack() {
     // real tail call on both backends.
     run_case("proc_tail_deep", i32_val(200_000));
 }
+
+// ---- P2.6 closures ----
+
+#[test]
+fn closure_basic_lambda() {
+    run_case("closure_basic", i32_val(42)); // def f [\ {x} {[+ $x 1]}]; [$f 41]
+}
+
+#[test]
+fn closure_captures_outer_binding() {
+    run_case("closure_capture", i32_val(42)); // captures y=10; [$f 32]
+}
+
+#[test]
+fn closure_anonymous_proc() {
+    run_case("closure_anon_proc", i32_val(42)); // def f [proc {x} {[* $x 2]}]; [$f 21]
+}
+
+#[test]
+fn closure_multiple_captures() {
+    run_case("closure_multi_capture", i32_val(122)); // (100+20)+2
+}
+
+#[test]
+fn closure_returned_from_proc_captures_param() {
+    run_case("closure_returned_from_proc", i32_val(42)); // adder(5) then add5(37)
+}
+
+#[test]
+fn closure_nested_transitive_capture() {
+    run_case("closure_nested", i32_val(42)); // (1+10)+31, inner captures a and x
+}

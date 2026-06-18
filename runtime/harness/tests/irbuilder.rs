@@ -134,6 +134,34 @@ fn memory_load_store_round_trip() {
 }
 
 #[test]
+fn closure_via_call_indirect() {
+    // A hand-built closure (ref.func + closure object + call_indirect), linked against
+    // the runtime: a closure over `+upval(10)` applied to 32 -> 42.
+    let program = svm_text::parse_module(&emit("closure")).expect("parse closure");
+    let rt = translate_runtime();
+    let entry_sp = rt.entry_sp;
+    let entry = rt.module.funcs.len() as u32;
+    let linked = link(&[
+        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
+        LinkUnit { module: program, ..Default::default() },
+    ])
+    .expect("link closure program");
+    assert!(linked.imports.is_empty(), "unresolved: {:?}", linked.imports);
+    svm_verify::verify_module(&linked).expect("verify linked closure");
+
+    let i32_val = |x: i32| ((0x02u64 << 56) | (x as u32 as u64)) as i64;
+    let args = [Value::I64(entry_sp as i64)];
+    let mut fuel = 100_000_000u64;
+    let interp = svm_interp::run(&linked, entry, &args, &mut fuel).expect("interp");
+    assert_eq!(match interp[0] { Value::I64(x) => x, _ => panic!() }, i32_val(42), "interp closure");
+    let jv = match svm_jit::compile_and_run(&linked, entry, &[entry_sp as i64]).expect("jit") {
+        svm_jit::JitOutcome::Returned(s) => s[0],
+        o => panic!("jit: {o:?}"),
+    };
+    assert_eq!(jv, i32_val(42), "jit closure");
+}
+
+#[test]
 fn call_import_linked_against_runtime() {
     // The builder emits a program calling jacl_add via call.import; link it against
     // the separately-translated runtime (P2.0 path) and run.

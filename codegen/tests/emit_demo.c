@@ -116,6 +116,61 @@ static IrModule *build_call_jacl_add(void) {
   return m;
 }
 
+/* A hand-built closure: build a 1-upval closure over a function that adds its upval
+ * to its arg, then call it via call_indirect — exercises ref.func, i32<->i64
+ * conversions, the runtime closure helpers, and the closure ABI (sp, self, args). */
+static IrModule *build_closure(void) {
+  IrModule *m = irb_module_new();
+  IrType i64_1[] = {IRB_I64};
+  IrType i64_2[] = {IRB_I64, IRB_I64};
+  IrType i64_3[] = {IRB_I64, IRB_I64, IRB_I64};
+  IrType i64_4[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+  IrType r[] = {IRB_I64};
+  IrFunc *entry = irb_func_new(m, i64_1, 1, r, 1);
+  IrFunc *clo = irb_func_new(m, i64_3, 3, r, 1); /* (sp, self, x) */
+
+  /* i32 JaclVal helper inline */
+  const int64_t TAG_I32 = (int64_t)((uint64_t)0x02 << 56);
+
+  /* entry: make closure {fn=clo, upval0=10}, then call it with 32 -> 42 */
+  IrBlock e0 = irb_block(entry, i64_1, 1);
+  IrVal sp = 0;
+  IrVal fnref = irb_ref_func(entry, e0, clo);
+  IrVal fnref64 = irb_convert(entry, e0, IRB_EXTEND_I32U, fnref);
+  IrVal h = irb_const_i32(entry, e0, 0);
+  IrVal nupv = irb_const_i64(entry, e0, 1);
+  IrVal cargs[] = {sp, fnref64, nupv};
+  IrVal clos = irb_call_import(entry, e0, "jacl_closure_new", i64_3, 3, r, 1, h, cargs, 3);
+  IrVal idx0 = irb_const_i64(entry, e0, 0);
+  IrVal upv0 = irb_const_i64(entry, e0, TAG_I32 | 10);
+  IrVal h2 = irb_const_i32(entry, e0, 0);
+  IrVal sargs[] = {sp, clos, idx0, upv0};
+  (void)irb_call_import(entry, e0, "jacl_closure_set", i64_4, 4, r, 1, h2, sargs, 4);
+  IrVal h3 = irb_const_i32(entry, e0, 0);
+  IrVal fargs[] = {sp, clos};
+  IrVal fn = irb_call_import(entry, e0, "jacl_closure_fn", i64_2, 2, r, 1, h3, fargs, 2);
+  IrVal fnw = irb_convert(entry, e0, IRB_WRAP_I64, fn);
+  IrVal arg = irb_const_i64(entry, e0, TAG_I32 | 32);
+  IrVal iargs[] = {sp, clos, arg};
+  IrVal res = irb_call_indirect(entry, e0, i64_3, 3, r, 1, fnw, iargs, 3);
+  IrVal eret[] = {res};
+  irb_return(entry, e0, eret, 1);
+
+  /* clo(sp, self, x): return x + upval0 */
+  IrBlock c0 = irb_block(clo, i64_3, 3);
+  IrVal csp = 0, cself = 1, cx = 2;
+  IrVal cidx0 = irb_const_i64(clo, c0, 0);
+  IrVal ch = irb_const_i32(clo, c0, 0);
+  IrVal uargs[] = {csp, cself, cidx0};
+  IrVal uv = irb_call_import(clo, c0, "jacl_closure_upval", i64_3, 3, r, 1, ch, uargs, 3);
+  IrVal ah = irb_const_i32(clo, c0, 0);
+  IrVal aargs[] = {csp, cx, uv};
+  IrVal sum = irb_call_import(clo, c0, "jacl_add", i64_3, 3, r, 1, ah, aargs, 3);
+  IrVal cret[] = {sum};
+  irb_return(clo, c0, cret, 1);
+  return m;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) { fprintf(stderr, "usage: emit_demo <module>\n"); return 2; }
   const char *name = argv[1];
@@ -125,6 +180,7 @@ int main(int argc, char **argv) {
   else if (!strcmp(name, "call_addone")) m = build_call_addone();
   else if (!strcmp(name, "mem_roundtrip")) m = build_mem_roundtrip();
   else if (!strcmp(name, "call_jacl_add")) m = build_call_jacl_add();
+  else if (!strcmp(name, "closure")) m = build_closure();
   else { fprintf(stderr, "unknown module: %s\n", name); return 2; }
 
   char *text = irb_to_text(m);

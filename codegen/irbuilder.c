@@ -9,7 +9,8 @@
 /* ---- internal representation (mirrors svm-ir's Inst / Terminator shape) ---- */
 
 typedef enum {
-  K_CONST_I32, K_CONST_I64, K_INTBIN, K_INTCMP, K_LOAD, K_STORE, K_CALL, K_CALL_IMPORT
+  K_CONST_I32, K_CONST_I64, K_INTBIN, K_INTCMP, K_LOAD, K_STORE, K_CALL, K_CALL_IMPORT,
+  K_REF_FUNC, K_CONVERT, K_CALL_INDIRECT
 } InstKind;
 
 typedef struct {
@@ -201,6 +202,34 @@ IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, in
   in->nresults = (uint8_t)(callee->nresults == 1 ? 1 : 0);
   return in->nresults ? take_val(blk) : 0;
 }
+IrVal irb_ref_func(IrFunc *f, IrBlock b, const IrFunc *callee) {
+  Block *blk = block_at(f, b);
+  int idx = irb_func_index(f->module, callee);
+  if (idx < 0) { fprintf(stderr, "irbuilder: ref.func to unknown function\n"); abort(); }
+  Inst *in = push_inst(blk);
+  in->kind = K_REF_FUNC; in->nresults = 1; in->callee = (uint32_t)idx;
+  return take_val(blk);
+}
+IrVal irb_convert(IrFunc *f, IrBlock b, IrConvOp op, IrVal a) {
+  Block *blk = block_at(f, b);
+  Inst *in = push_inst(blk);
+  in->kind = K_CONVERT; in->nresults = 1; in->op = (int)op; in->a = a;
+  return take_val(blk);
+}
+IrVal irb_call_indirect(IrFunc *f, IrBlock b,
+                        const IrType *params, int nparams,
+                        const IrType *results, int nresults,
+                        IrVal idx, const IrVal *args, int nargs) {
+  Block *blk = block_at(f, b);
+  Inst *in = push_inst(blk);
+  in->kind = K_CALL_INDIRECT;
+  in->sig_params = dup_types(params, nparams); in->sig_np = nparams;
+  in->sig_results = dup_types(results, nresults); in->sig_nr = nresults;
+  in->addr = idx; /* reuse `addr` slot for the index operand */
+  in->args = dup_vals(args, nargs); in->nargs = nargs;
+  in->nresults = (uint8_t)(nresults == 1 ? 1 : 0);
+  return in->nresults ? take_val(blk) : 0;
+}
 IrVal irb_call_import(IrFunc *f, IrBlock b, const char *name,
                       const IrType *params, int nparams,
                       const IrType *results, int nresults,
@@ -351,6 +380,20 @@ static void out_inst(Out *o, const Inst *in) {
       out_str(o, ") -> (");
       out_typelist(o, in->sig_results, in->sig_nr);
       out_fmt(o, ") v%u", in->handle);
+      out_arglist(o, in->args, in->nargs);
+      break;
+    case K_REF_FUNC:
+      out_fmt(o, "ref.func %u", in->callee); break;
+    case K_CONVERT: {
+      static const char *cn[] = {"i64.extend_i32_s", "i64.extend_i32_u", "i32.wrap_i64"};
+      out_fmt(o, "%s v%u", cn[in->op], in->a); break;
+    }
+    case K_CALL_INDIRECT:
+      out_str(o, "call_indirect (");
+      out_typelist(o, in->sig_params, in->sig_np);
+      out_str(o, ") -> (");
+      out_typelist(o, in->sig_results, in->sig_nr);
+      out_fmt(o, ") v%u", in->addr);
       out_arglist(o, in->args, in->nargs);
       break;
   }

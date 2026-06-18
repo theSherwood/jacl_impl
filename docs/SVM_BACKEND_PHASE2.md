@@ -155,10 +155,27 @@ separate-artifact path.
 - **Deferred:** nested procs / first-class proc values → **closures (P2.6)**;
   general `for` over collections; `break`/`continue`.
 
-### P2.6 — Closures
+### P2.6 — Closures — **DONE (immutable capture); mut-capture cells deferred (P2.6b)**
 - Captured environment → a runtime closure object (`JACL_TAG_CLOSURE`) holding
   upvalues + a funcref; call via `call_indirect`. Upvalue capture/mutation
   semantics (cells for `mut` captures). (Sequential only; generators are Phase 3.)
+- **Done:** lambda `[\ {params} {body}]` and anonymous `[proc {params} {body}]` lower
+  to a runtime closure object (`jacl_closure_new` + `jacl_closure_set`, in the new
+  `runtime/closure.c`) holding a **`ref.func`** funcref (link-relocated) plus the
+  captured upvalues. The closure function is `(i64 sp, i64 self, params…) -> i64` and
+  reads its captures back via `jacl_closure_upval`. A call `[$f a b]` (head is a value)
+  loads the funcref (`jacl_closure_fn`), wraps i64→i32, and dispatches with
+  `call_indirect (sp, self, args…)`. Free variables are found by a capture scan; nested
+  closures capture transitively; closures returned from procs capture the proc's params.
+  Closure bodies compile via a deferred worklist (so nested closures resolve). New IR
+  builder ops: `ref.func`, `call_indirect`, and the `i32.wrap_i64` / `i64.extend_i32_*`
+  conversions. Validated on interp + JIT (basic lambda, capture, anon proc, multi-capture,
+  closure-returned-from-proc, nested transitive capture), plus a hand-built closure in
+  the IR-builder test.
+- **Deferred (P2.6b):** **cells for `mut` captures** — the runtime `jacl_cell_*`
+  helpers exist, but the codegen does not yet box captured mutables, so capturing a
+  `mut` is rejected with a clear error rather than snapshotting incorrectly. Also the
+  `[\ expr]` (`$it`) lambda shorthand and immediately-applied lambdas.
 
 ### P2.7 — Type-driven lowering (the gradual-typing payoff)
 - Where the typer proved a static type, emit **unboxed** ops (native i32/f64

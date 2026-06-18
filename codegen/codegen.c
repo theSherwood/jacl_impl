@@ -62,11 +62,22 @@ typedef struct {
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
 } Proc;
 
+/* A closure literal whose body is compiled after its creation site (a worklist, so
+ * nested closures are handled). The closure function is `(i64 sp, i64 self, args…)`;
+ * its body reads captures back from `self`. Names point into the (arena-lived) AST. */
+typedef struct {
+  IrFunc     *func;
+  AstNode    *body;
+  const char *pnames[CG_MAX_PARAMS]; uint32_t plens[CG_MAX_PARAMS]; int nparams;
+  const char *cnames[CG_MAX_PARAMS]; uint32_t clens[CG_MAX_PARAMS]; int ncaps;
+} Pending;
+
 typedef struct {
   char  *err;
   size_t errcap;
   int    failed;
 
+  IrModule *m;  /* the module under construction (closures append functions) */
   IrFunc *f;
   IrBlock cur;  /* block currently being emitted into */
   IrVal   sp;   /* current value-id of the data-stack pointer in `cur` */
@@ -75,6 +86,7 @@ typedef struct {
   int     *marks;  int nmarks,  cap_marks;  /* scope start indices into locals */
 
   Proc *procs; int nprocs, cap_procs;       /* top-level proc table (persists) */
+  Pending *pending; int npending, cap_pending; /* closure bodies to compile */
 } Cx;
 
 static void cx_fail(Cx *cx, const char *msg) {
@@ -207,13 +219,20 @@ static void enter_frame_block(Cx *cx, IrBlock blk) {
 
 static IrVal compile_expr(Cx *cx, AstNode *node);
 
-/* Emit `fn(sp, lhs, rhs)` — a binary runtime call returning an i64 JaclVal. */
-static IrVal emit_binop_call(Cx *cx, const char *fn, IrVal lhs, IrVal rhs) {
-  IrType i64x3[] = {IRB_I64, IRB_I64, IRB_I64};
+/* Emit a `call.import` to a runtime function with all-i64 args (args[0] is sp) and a
+ * single i64 result. */
+static IrVal emit_rt_call(Cx *cx, const char *fn, const IrVal *args, int nargs) {
+  IrType sig[2 + CG_MAX_PARAMS];
+  for (int i = 0; i < nargs; i++) sig[i] = IRB_I64;
   IrType r1[] = {IRB_I64};
   IrVal handle = irb_const_i32(cx->f, cx->cur, 0);
+  return irb_call_import(cx->f, cx->cur, fn, sig, nargs, r1, 1, handle, args, nargs);
+}
+
+/* Emit `fn(sp, lhs, rhs)` — a binary runtime call returning an i64 JaclVal. */
+static IrVal emit_binop_call(Cx *cx, const char *fn, IrVal lhs, IrVal rhs) {
   IrVal args[] = {cx->sp, lhs, rhs};
-  return irb_call_import(cx->f, cx->cur, fn, i64x3, 3, r1, 1, handle, args, 3);
+  return emit_rt_call(cx, fn, args, 3);
 }
 
 /* Reduce a JaclVal condition to an i32 truth (1/0): truthy unless nil or false. */
@@ -233,6 +252,142 @@ static int frame_guard(Cx *cx) {
 static int kw_is(AstNode *n, const char *kw, uint32_t kl) {
   return n->type == AST_LIT_STRING && n->data.lit_string.length == kl &&
          memcmp(n->data.lit_string.value, kw, kl) == 0;
+}
+
+/* ---- closures ---- */
+
+#define CG_CAP_MAX CG_MAX_PARAMS
+
+static int set_has(const char **ns, const uint32_t *ls, int n, const char *s, uint32_t l) {
+  for (int i = 0; i < n; i++) if (ls[i] == l && memcmp(ns[i], s, l) == 0) return 1;
+  return 0;
+}
+static void set_add(const char **ns, uint32_t *ls, int *n, const char *s, uint32_t l) {
+  if (set_has(ns, ls, *n, s, l)) return;
+  if (*n < CG_CAP_MAX) { ns[*n] = s; ls[*n] = l; (*n)++; }
+}
+
+/* Names bound *inside* a closure body (def/mut/set targets + for loop vars), collected
+ * across the whole body, so the capture scan excludes them. Conservative w.r.t. inner
+ * shadowing (rare). */
+static void collect_bound(AstNode *node, const char **ns, uint32_t *ls, int *n) {
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) collect_bound(node->data.block.commands[i], ns, ls, n);
+  } else if (node->type == AST_RETURN) {
+    if (node->data.return_stmt.value) collect_bound(node->data.return_stmt.value, ns, ls, n);
+  } else if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    AstNode **args = node->data.command.args; uint32_t argc = node->data.command.arg_count;
+    if ((hid == HEAD_DEF || hid == HEAD_MUT || hid == HEAD_SET || hid == HEAD_FOR) &&
+        argc >= 1 && args[0]->type == AST_LIT_STRING)
+      set_add(ns, ls, n, args[0]->data.lit_string.value, args[0]->data.lit_string.length);
+    for (uint32_t i = 0; i < argc; i++) collect_bound(args[i], ns, ls, n);
+  }
+}
+
+/* Free variables: var-refs in the body not bound locally but present in the enclosing
+ * env (cx) — these become the closure's captured upvalues. Descends into nested
+ * closures so a transitively-needed outer var is captured here too. */
+static void collect_caps(Cx *cx, AstNode *node, const char **bound, uint32_t *blen, int nb,
+                         const char **caps, uint32_t *clen, int *nc) {
+  if (node->type == AST_VAR_REF) {
+    const char *nm = node->data.var_ref.name; uint32_t nl = node->data.var_ref.length;
+    if (!set_has(bound, blen, nb, nm, nl) && env_lookup(cx, nm, nl)) set_add(caps, clen, nc, nm, nl);
+  } else if (node->type == AST_RETURN) {
+    if (node->data.return_stmt.value) collect_caps(cx, node->data.return_stmt.value, bound, blen, nb, caps, clen, nc);
+  } else if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) collect_caps(cx, node->data.block.commands[i], bound, blen, nb, caps, clen, nc);
+  } else if (node->type == AST_COMMAND) {
+    if (node->data.command.head) collect_caps(cx, node->data.command.head, bound, blen, nb, caps, clen, nc);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) collect_caps(cx, node->data.command.args[i], bound, blen, nb, caps, clen, nc);
+  }
+}
+
+/* Extract closure param names. Lambda params arrive in a BLOCK (`[\ {x} …]`), anon
+ * proc params in a command (`[proc {x} …]`); both flatten to type/name tokens. */
+static int closure_params(Cx *cx, AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
+  AstNode *toks[CG_MAX_PARAMS * 2 + 4]; int nt = 0;
+  if (in_block) {
+    if (pnode->type != AST_BLOCK) { cx_fail(cx, "closure params must be a { list }"); return -1; }
+    for (uint32_t i = 0; i < pnode->data.block.count; i++) {
+      AstNode *cmd = pnode->data.block.commands[i];
+      if (cmd->type != AST_COMMAND) { cx_fail(cx, "bad closure param list"); return -1; }
+      if (cmd->data.command.head && nt < CG_MAX_PARAMS * 2) toks[nt++] = cmd->data.command.head;
+      for (uint32_t j = 0; j < cmd->data.command.arg_count && nt < CG_MAX_PARAMS * 2; j++) toks[nt++] = cmd->data.command.args[j];
+    }
+  } else {
+    if (pnode->type != AST_COMMAND) { cx_fail(cx, "closure params must be a list"); return -1; }
+    if (pnode->data.command.head) toks[nt++] = pnode->data.command.head;
+    for (uint32_t j = 0; j < pnode->data.command.arg_count && nt < CG_MAX_PARAMS * 2; j++) toks[nt++] = pnode->data.command.args[j];
+  }
+  if (nt == 0) return 0;
+  if (nt == 1 && toks[0]->type == AST_LIT_STRING && toks[0]->data.lit_string.length == 0) return 0;
+  int np = 0, i = 0;
+  while (i < nt) {
+    if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "closure param must be a name"); return -1; }
+    const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
+    AstNode *nmtok = toks[i];
+    if (cg_is_type_kw(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) { nmtok = toks[i + 1]; i += 2; }
+    else i += 1;
+    if (np >= CG_MAX_PARAMS) { cx_fail(cx, "closure has too many params"); return -1; }
+    ns[np] = nmtok->data.lit_string.value; ls[np] = nmtok->data.lit_string.length; np++;
+  }
+  return np;
+}
+
+static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
+                        const char **pn, uint32_t *pl, int np,
+                        const char **cn, uint32_t *cl, int nc) {
+  if (cx->npending == cx->cap_pending) {
+    cx->cap_pending = cx->cap_pending ? cx->cap_pending * 2 : 8;
+    cx->pending = realloc(cx->pending, (size_t)cx->cap_pending * sizeof(Pending));
+    if (!cx->pending) { fprintf(stderr, "codegen: oom\n"); abort(); }
+  }
+  Pending *p = &cx->pending[cx->npending++];
+  p->func = func; p->body = body; p->nparams = np; p->ncaps = nc;
+  for (int i = 0; i < np; i++) { p->pnames[i] = pn[i]; p->plens[i] = pl[i]; }
+  for (int i = 0; i < nc; i++) { p->cnames[i] = cn[i]; p->clens[i] = cl[i]; }
+}
+
+/* Compile a closure literal: build the closure object (ref.func + captured values) at
+ * the current site, and enqueue its body for deferred compilation. `pnode` holds the
+ * params (a BLOCK for `\`, a command for `proc`). Returns the closure JaclVal. */
+static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body) {
+  const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
+  int np = closure_params(cx, pnode, in_block, pn, pl);
+  if (np < 0) return 0;
+
+  const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
+  for (int k = 0; k < np; k++) set_add(bound, blen, &nb, pn[k], pl[k]);
+  collect_bound(body, bound, blen, &nb);
+  const char *cn[CG_CAP_MAX]; uint32_t cl[CG_CAP_MAX]; int nc = 0;
+  collect_caps(cx, body, bound, blen, nb, cn, cl, &nc);
+
+  /* closure function: (i64 sp, i64 self, params…) -> i64 */
+  IrType pt[2 + CG_MAX_PARAMS];
+  pt[0] = IRB_I64; pt[1] = IRB_I64;
+  for (int k = 0; k < np; k++) pt[2 + k] = IRB_I64;
+  IrType r1[] = {IRB_I64};
+  IrFunc *fn = irb_func_new(cx->m, pt, 2 + np, r1, 1);
+
+  /* build the closure object at the creation site, capturing current values */
+  IrVal fnref = irb_ref_func(cx->f, cx->cur, fn);
+  IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+  IrVal nupv = irb_const_i64(cx->f, cx->cur, nc);
+  IrVal new_args[] = {cx->sp, fnref64, nupv};
+  IrVal clos = emit_rt_call(cx, "jacl_closure_new", new_args, 3);
+  for (int i = 0; i < nc; i++) {
+    Binding *b = env_lookup(cx, cn[i], cl[i]);
+    if (!b) { cx_failf(cx, "codegen: cannot capture undefined '%.*s'", cn[i], cl[i]); return 0; }
+    /* Capturing a mutable variable by value would not share later mutations; correct
+     * shared semantics needs a cell (P2.6b). Reject for now rather than be silently wrong. */
+    if (b->is_mut) { cx_failf(cx, "codegen: capturing a mutable variable '%.*s' needs cells (not yet implemented)", cn[i], cl[i]); return 0; }
+    IrVal idx = irb_const_i64(cx->f, cx->cur, i);
+    IrVal set_args[] = {cx->sp, clos, idx, b->value};
+    (void)emit_rt_call(cx, "jacl_closure_set", set_args, 4);
+  }
+  pending_add(cx, fn, body, pn, pl, np, cn, cl, nc);
+  return clos;
 }
 
 /* Compile one if/elif clause whose condition is args[start] and then-block is
@@ -469,6 +624,49 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
 
+      /* Closure literals. Lambda `[\ {params} {body}]`: head is the bare word "\",
+       * params in a BLOCK. Anonymous proc `[proc {params} {body}]`: an empty name. */
+      {
+        AstNode *h = node->data.command.head;
+        uint32_t argc = node->data.command.arg_count;
+        if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 &&
+            h->data.lit_string.value[0] == '\\') {
+          if (argc != 2 || node->data.command.args[0]->type != AST_BLOCK ||
+              node->data.command.args[1]->type != AST_BLOCK) {
+            cx_fail(cx, "lambda must be [\\ {params} {body}]"); return 0;
+          }
+          return compile_closure(cx, node->data.command.args[0], /*in_block=*/1,
+                                 node->data.command.args[1]);
+        }
+        if (hid == HEAD_PROC) {
+          int anon = argc >= 3 && node->data.command.args[0]->type == AST_LIT_STRING &&
+                     node->data.command.args[0]->data.lit_string.length == 0;
+          if (!anon) { cx_fail(cx, "nested named procs not supported (use a lambda / anonymous proc)"); return 0; }
+          return compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
+                                 node->data.command.args[argc - 1]);
+        }
+      }
+
+      /* Calling a closure value: the head is an expression (e.g. `[$f x]`). */
+      if (node->data.command.head && node->data.command.head->type == AST_VAR_REF) {
+        IrVal cval = compile_expr(cx, node->data.command.head);
+        if (cx->failed) return 0;
+        uint32_t argc = node->data.command.arg_count;
+        IrVal fnargs[] = {cx->sp, cval};
+        IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
+        IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+        IrVal cargs[2 + CG_MAX_PARAMS];
+        IrType sig[2 + CG_MAX_PARAMS];
+        cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
+        for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
+          cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
+          sig[2 + i] = IRB_I64;
+          if (cx->failed) return 0;
+        }
+        IrType r1[] = {IRB_I64};
+        return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+      }
+
       if (hid == HEAD_DEF || hid == HEAD_MUT) {
         const char *name; uint32_t len;
         if (!binding_name(cx, node, &name, &len)) return 0;
@@ -488,8 +686,6 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         bd->value = val;
         return val;
       }
-
-      if (hid == HEAD_PROC) { cx_fail(cx, "nested procs not yet supported (closures are P2.6)"); return 0; }
 
       const char *fn = binary_runtime_fn(hid);
       if (fn) {
@@ -705,12 +901,38 @@ static void compile_procs(Cx *cx) {
   }
 }
 
+/* Compile the bodies of closures enqueued during compilation (a worklist — nested
+ * closures enqueue more). Each closure function is `(i64 sp, i64 self, params…)`; its
+ * params bind to its args and its captures are read back from `self`. */
+static void compile_pending_closures(Cx *cx) {
+  for (int i = 0; i < cx->npending && !cx->failed; i++) {
+    Pending p = cx->pending[i]; /* copy: the worklist may realloc as bodies enqueue */
+    IrType ptypes[2 + CG_MAX_PARAMS];
+    for (int k = 0; k < 2 + p.nparams; k++) ptypes[k] = IRB_I64;
+    cx->f = p.func;
+    cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
+    cx->sp = 0; /* param 0; self is param 1 */
+    env_reset(cx);
+    scope_enter(cx);
+    for (int k = 0; k < p.nparams; k++) env_define(cx, p.pnames[k], p.plens[k], (IrVal)(2 + k), /*is_mut=*/0);
+    for (int j = 0; j < p.ncaps; j++) {
+      IrVal idx = irb_const_i64(cx->f, cx->cur, j);
+      IrVal uargs[] = {cx->sp, /*self=*/1, idx};
+      IrVal uv = emit_rt_call(cx, "jacl_closure_upval", uargs, 3);
+      env_define(cx, p.cnames[j], p.clens[j], uv, /*is_mut=*/0);
+    }
+    compile_tail(cx, p.body);
+    scope_exit(cx);
+  }
+}
+
 IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
 
   IrModule *m = irb_module_new();
+  cx.m = m;
 
   /* Entry must be program function 0 (the harness runs it). Create it first, compile
    * its body last so it can call procs defined anywhere at top level. */
@@ -739,10 +961,13 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 
+  if (!cx.failed) compile_pending_closures(&cx); /* closure bodies (incl. nested) */
+
   int failed = cx.failed;
   free(cx.locals);
   free(cx.marks);
   free(cx.procs);
+  free(cx.pending);
   if (failed) { irb_module_free(m); return NULL; }
   return m;
 }

@@ -50,6 +50,9 @@ typedef enum {
   IRB_STORE_I32_8, IRB_STORE_I32_16, IRB_STORE_I64_8, IRB_STORE_I64_16, IRB_STORE_I64_32
 } IrStoreOp;
 
+/* Width conversions (ConvOp), in svm-ir order. */
+typedef enum { IRB_EXTEND_I32S, IRB_EXTEND_I32U, IRB_WRAP_I64 } IrConvOp;
+
 typedef struct IrModule IrModule;
 typedef struct IrFunc   IrFunc;
 
@@ -90,6 +93,21 @@ void  irb_store(IrFunc *f, IrBlock b, IrStoreOp op, IrVal addr, IrVal value,
 /* Direct call to a function in this module. Returns the result value id when the
  * callee has exactly one result, else 0 (the builder currently models 0/1 results). */
 IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, int nargs);
+
+/* `ref.func` — a forgeable i32 funcref (the callee's link-relocated function index),
+ * suitable as the index operand of irb_call_indirect. */
+IrVal irb_ref_func(IrFunc *f, IrBlock b, const IrFunc *callee);
+
+/* Width conversion (i64.extend_i32_s/u, i32.wrap_i64). */
+IrVal irb_convert(IrFunc *f, IrBlock b, IrConvOp op, IrVal a);
+
+/* Indirect call through the function table: `call_indirect (sig) v<idx> (args)`.
+ * `idx` is an i32 function index (e.g. from irb_ref_func or a closure's fnref).
+ * Single-result (i64 for the JACL closure ABI); returns its value id. */
+IrVal irb_call_indirect(IrFunc *f, IrBlock b,
+                        const IrType *params, int nparams,
+                        const IrType *results, int nresults,
+                        IrVal idx, const IrVal *args, int nargs);
 
 /* §7 named import call, name-inline form: `call.import "name" (sig) v<handle> (args)`.
  * The linker resolves `name` against the runtime artifact's exports. `handle` is an
