@@ -41,26 +41,30 @@ VM. (Full corpus parity is Phase 4.)
   on calls, so program↔runtime calls interop. All `jacl_*` runtime functions take
   i64 `JaclVal`s and return i64.
 
-## Prerequisites — the svm-side asks (P2.0)
+## Prerequisites — the svm-side asks (P2.0) — **DONE** (svm pin `a7cbcf1`)
 
-Separate-artifact linking + tagged-root GC need three svm changes (the runtime
-itself is unchanged):
+Separate-artifact linking + tagged-root GC needed three svm changes (the runtime
+itself unchanged). All three landed in svm (`docs/SVM_PHASE2_ASKS.md`) and are
+wired up + verified on the JACL side:
 
-1. **`svm-llvm` name→index export map.** `Translated` must expose each defined
-   function's symbol→index so the runtime artifact's `jacl_*` exports can be named
-   in `svm_ir::link`'s `LinkUnit.exports`. (Today `Func` carries no name.)
-2. **`svm-llvm-translate` CLI** (or thin tool): bitcode → serialized SVM IR module
-   (+ the export map), so `runtime/build.sh` produces a real linkable `.svm`
-   artifact (not just bitcode). Today translation only runs in-process in the
-   harness.
-3. **`gc.roots` payload-mask parameter** (Phase-1 P1.5 finding): so tagged JaclVal
-   roots are found without widening the range / re-admitting host addresses. Real
-   programs hold tagged values on the stack everywhere — this becomes load-bearing.
+1. **`svm-llvm` name→index export map.** ✅ `Translated.exports: Vec<(String, u32)>`
+   names each defined function so the runtime artifact's `jacl_*` exports populate
+   `svm_ir::link`'s `LinkUnit.exports`.
+2. **`svm-llvm-translate` CLI.** ✅ `runtime/build.sh` now runs `clang -emit-llvm`
+   then `svm-llvm-translate` to emit `build/jaclrt.svm` (SVM-IR module) +
+   `build/jaclrt.syms` (export sidecar) — a real linkable artifact, not just bitcode.
+3. **`gc.roots` payload-mask parameter.** ✅ `heap_gc.c` passes `JACL_PAYLOAD_MASK`
+   with the tight heap range; svm strips the tag byte and returns bare offsets, so
+   tagged JaclVal roots are found without widening (the Phase-1 widen+mask workaround
+   and its ASLR smell are gone).
 
-These are svm-submodule changes; file them as asks and bump the pin. JACL-side
-codegen (P2.1+) can start in parallel using the **whole-program harness** (program
-+ runtime in one TU, as in Phase 1) for early tests; the separate-artifact path
-lands when P2.0 does.
+**Verified:** the GC-path harness tests pass on interp + JIT with the new signature;
+`build.sh` produces the artifact (58 `jacl_*` exports); and
+`runtime/harness/tests/link_artifact.rs` proves a JACL-shaped program module links
+against the separately-translated runtime (via the export map) and calls `jacl_add`
+through `call.import`, matching on interp + JIT — the separate-artifact analogue of
+Spike-1. JACL-side codegen (P2.1+) can use either the whole-program harness or this
+separate-artifact path.
 
 ## Concrete steps
 
