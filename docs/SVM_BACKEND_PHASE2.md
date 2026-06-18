@@ -182,10 +182,23 @@ separate-artifact path.
   gets its own cell), and two closures sharing one mutable cell.
 - **Deferred:** the `[\ expr]` (`$it`) lambda shorthand and immediately-applied lambdas.
 
-### P2.7 — Type-driven lowering (the gradual-typing payoff)
+### P2.7 — Type-driven lowering (the gradual-typing payoff) — **DONE (i32 arithmetic)**
 - Where the typer proved a static type, emit **unboxed** ops (native i32/f64
   arithmetic, direct field access) instead of dynamic `jacl_*` calls; fall back to
   dynamic dispatch for `dyn`. Mirrors the old compiler's type-aware codegen.
+- **Done:** the driver now runs `typer_infer` so nodes carry `inferred_type`. When the
+  typer proved an arithmetic expression is `i32` (`+ - *`), the codegen lowers it to
+  **native `i32.add`/`sub`/`mul`** with the operands unboxed and the result boxed once
+  at the root — no `jacl_*` call, no tag-check/error path. Values still flow as boxed
+  JaclVals across locals/calls/blocks (the env/frame stay all-i64); unboxing is
+  confined to a typed arithmetic tree (literals → `i32.const`, var reads → `i32.wrap`,
+  nested typed `+ - *` stay unboxed). `dyn` operands fall back to the dynamic
+  `jacl_add`… path unchanged. Validated on interp + JIT and by IR inspection:
+  `[+ 1 [* 2 3]]` and a typed proc body emit native i32 ops with no runtime calls,
+  while an untyped `def`+arith still calls `jacl_add`.
+- **Trade / deferred:** taint/secret flag propagation is dropped on the unboxed path
+  (pure statically-typed arithmetic). `div`/`mod` (error path), comparisons, `f64`, and
+  true cross-statement unboxing (locals kept unboxed) remain dynamic/boxed for now.
 
 ### P2.8 — Strings, structs, remaining value forms
 - String literals + interpolation (→ runtime concat/format), struct construction +

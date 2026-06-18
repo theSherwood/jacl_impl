@@ -329,3 +329,31 @@ fn closures_share_one_mutable_cell() {
     // get and setx capture the same cell; setx 42 is visible to get.
     run_case("closure_shared_mut", i32_val(42));
 }
+
+// ---- P2.7: type-driven (unboxed) lowering ----
+
+#[test]
+fn typed_arithmetic_lowers_to_native_i32() {
+    // [+ 1 [* 2 3]] — the typer proves i32, so native i32 ops with no runtime calls.
+    let ir = emit("nested");
+    assert!(ir.contains("i32.mul") && ir.contains("i32.add"), "expected native i32 ops:\n{ir}");
+    assert!(!ir.contains("jacl_mul") && !ir.contains("jacl_add"), "should not call the runtime:\n{ir}");
+    run_case("nested", i32_val(7)); // and it's still correct
+}
+
+#[test]
+fn dynamic_arithmetic_keeps_runtime_calls() {
+    // def x 5; [+ $x 10] — x is dyn, so the dynamic jacl_add path is used.
+    let ir = emit("bind_read");
+    assert!(ir.contains("jacl_add"), "dynamic arithmetic should call jacl_add:\n{ir}");
+    run_case("bind_read", i32_val(15));
+}
+
+#[test]
+fn typed_proc_body_is_unboxed() {
+    // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.
+    let ir = emit("proc_typed");
+    assert!(ir.contains("i32.add"), "typed proc body should use native i32.add:\n{ir}");
+    assert!(!ir.contains("jacl_add"), "typed proc body should not call jacl_add:\n{ir}");
+    run_case("proc_typed", i32_val(42));
+}

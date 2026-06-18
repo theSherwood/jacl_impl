@@ -108,6 +108,10 @@ int main(int argc, char **argv) {
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) { fprintf(stderr, "parse errors: %u\n", parse.error_count); return 1; }
 
+  /* Type inference: annotates each node's inferred_type, which the codegen uses for
+   * type-driven (unboxed) lowering. */
+  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
+
   char err[256] = {0};
   IrModule *m = svm_codegen_program(parse.nodes, parse.count, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }

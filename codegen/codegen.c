@@ -240,6 +240,50 @@ static IrVal emit_binop_call(Cx *cx, const char *fn, IrVal lhs, IrVal rhs) {
   return emit_rt_call(cx, fn, args, 3);
 }
 
+/* ---- type-driven (unboxed) i32 arithmetic ----
+ *
+ * Where the typer proved an arithmetic expression is i32, compute it with native i32
+ * ops instead of dynamic `jacl_*` calls. Values still flow as boxed JaclVals across
+ * locals/calls/blocks; unboxing happens only *within* a typed arithmetic tree, with a
+ * single box at the root — so the env/frame stay all-i64 and no rep tracking leaks out.
+ * (Taint/secret flag propagation is dropped on the unboxed path; statically-typed pure
+ * arithmetic is the intended trade.) */
+static IrVal box_i32(Cx *cx, IrVal v) {
+  IrVal ext = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v);
+  IrVal tag = irb_const_i64(cx->f, cx->cur, (int64_t)JACL_TAG_I32_SHIFTED);
+  return irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, ext, tag);
+}
+static IrVal unbox_i32(Cx *cx, IrVal boxed) {
+  return irb_convert(cx->f, cx->cur, IRB_WRAP_I64, boxed);
+}
+
+/* True when `[op …]` can be lowered to native i32 arithmetic (typer proved i32). */
+static int i32_arith(AstNode *node) {
+  if (node->type != AST_COMMAND || node->inferred_type != TYPE_I32) return 0;
+  uint8_t hid = node->data.command.head_id;
+  return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR;
+}
+
+/* Lower `node` to a native i32 value. Typed `+ - *` stay unboxed (recursively);
+ * literals are i32 constants; anything else is computed boxed then unboxed. */
+static IrVal compile_i32(Cx *cx, AstNode *node) {
+  if (cx->failed) return 0;
+  if (node->type == AST_LIT_INT) return irb_const_i32(cx->f, cx->cur, node->data.lit_int.value);
+  if (i32_arith(node)) {
+    uint8_t hid = node->data.command.head_id;
+    IrBinOp op = hid == HEAD_PLUS ? IRB_ADD : hid == HEAD_MINUS ? IRB_SUB : IRB_MUL;
+    uint32_t argc = node->data.command.arg_count;
+    IrVal acc = compile_i32(cx, node->data.command.args[0]);
+    for (uint32_t i = 1; i < argc; i++) {
+      IrVal r = compile_i32(cx, node->data.command.args[i]);
+      if (cx->failed) return 0;
+      acc = irb_intbin(cx->f, cx->cur, IRB_I32, op, acc, r);
+    }
+    return acc;
+  }
+  return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
+}
+
 /* Reduce a JaclVal condition to an i32 truth (1/0): truthy unless nil or false. */
 static IrVal emit_truthy(Cx *cx, IrVal cond) {
   IrVal cfalse = irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
@@ -784,6 +828,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         uint32_t argc = node->data.command.arg_count;
         AstNode **args = node->data.command.args;
         if (argc < 2) { cx_fail(cx, "operator needs at least 2 arguments"); return 0; }
+        /* Type-driven: native i32 arithmetic when the typer proved i32 (boxed once). */
+        if (i32_arith(node)) return box_i32(cx, compile_i32(cx, node));
         IrVal acc = compile_expr(cx, args[0]);
         for (uint32_t i = 1; i < argc; i++) {
           IrVal rhs = compile_expr(cx, args[i]);

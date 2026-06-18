@@ -53,15 +53,21 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     `mut` is boxed in a heap **cell** (`jacl_cell_*`) so mutation is shared between the
     defining scope and the closure (a per-function pre-pass decides which `mut`s to box).
 
-  Later slices extend the walk (type-driven unboxing, `for` over collections,
-  break/continue) behind the same entry point.
+  - **P2.7 (type-driven lowering):** the driver runs the typer (`typer_infer`), and
+    where it proved an arithmetic expression is `i32` (`+ - *`) the codegen emits
+    native `i32.add`/`sub`/`mul` (operands unboxed, result boxed once) instead of a
+    dynamic `jacl_*` call; `dyn` falls back to the dynamic path. Unboxing is confined
+    to typed arithmetic trees — locals/frame stay all-i64 boxed JaclVals.
+
+  Later slices extend the walk (`for` over collections, break/continue, more unboxed
+  types/ops) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.
 
 - `tests/emit_jacl.c` — parses a JACL source snippet through the real frontend
-  (`src/jacl.c`: lexer + parser) and runs `svm_codegen_program`, printing the program
-  module's svm-text. Built with **gcc** (the frontend's toolchain).
+  (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`,
+  printing the program module's svm-text. Built with **gcc** (the frontend's toolchain).
 
 ## Testing
 
