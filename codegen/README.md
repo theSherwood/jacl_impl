@@ -67,6 +67,12 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     `irb_relocs_text`); the driver emits relocs after a `%%RELOCS%%` sentinel and the
     harness passes them to `svm_ir::link`.
 
+  - **P2.9 (GC):** the codegen entry initializes the runtime (`jacl_heap_init` /
+    `jacl_intern_init` / `jacl_map_init`) before the program runs. GC is stop-the-world,
+    conservative, non-moving — `jacl_alloc` collects on pressure, and because the
+    collector is conservative the allocation point is the safe point (no `gc_epoch`
+    polling). Live roots in codegen-shaped IR are found by `gc.roots` across a collect.
+
   Later slices extend the walk (maps + element access, structs, `for` over collections,
   break/continue, more unboxed types/ops) behind the same entry point.
 

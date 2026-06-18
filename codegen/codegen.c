@@ -240,6 +240,14 @@ static IrVal emit_binop_call(Cx *cx, const char *fn, IrVal lhs, IrVal rhs) {
   return emit_rt_call(cx, fn, args, 3);
 }
 
+/* Emit a `void`-returning runtime call `fn(sp)` (e.g. an init routine). */
+static void emit_void_call(Cx *cx, const char *fn) {
+  IrType sig[] = {IRB_I64};
+  IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal args[] = {cx->sp};
+  (void)irb_call_import(cx->f, cx->cur, fn, sig, 1, NULL, 0, h, args, 1);
+}
+
 /* ---- type-driven (unboxed) i32 arithmetic ----
  *
  * Where the typer proved an arithmetic expression is i32, compute it with native i32
@@ -1158,6 +1166,12 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   /* Entry body: the non-proc top-level forms, in order; value = last. */
   if (!cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    /* Initialize the runtime before anything allocates: reset the heap (so GC's
+     * sweep walks well-formed cells), the string intern table, and the map key
+     * handlers. Without this the program runs on an uninitialized heap. */
+    emit_void_call(&cx, "jacl_heap_init");
+    emit_void_call(&cx, "jacl_intern_init");
+    emit_void_call(&cx, "jacl_map_init");
     env_reset(&cx);
     capset_reset(&cx);
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);

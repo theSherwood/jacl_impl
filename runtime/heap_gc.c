@@ -26,7 +26,9 @@
  * host address can be folded into the heap window. */
 long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
-#define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region */
+#ifndef JACL_HEAP_BYTES
+#define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region (override for tests) */
+#endif
 #define JACL_GRANULE      16u
 #define JACL_MAX_CLASS    1024u         /* cells <= this get an exact-size free list */
 #define JACL_NCLASS       (JACL_MAX_CLASS / JACL_GRANULE)   /* 64 classes */
@@ -64,19 +66,37 @@ long jacl_heap_hi(void) { return jacl_pti(&jacl_heap_mem[JACL_HEAP_BYTES]); }
  * that are never live pointers on the stack — invisible to gc.roots. A separately
  * compiled runtime (the real backend) is opaque by construction; noinline
  * reproduces that opacity here. */
+/* Try to obtain a cell offset of `cell` bytes from the free list or the bump pointer;
+ * returns 0 (the null sentinel offset) if neither has room. */
+static uint32_t jacl_alloc_off(uint32_t cell) {
+  uint32_t cls = cell / JACL_GRANULE;
+  if (cls <= JACL_NCLASS && jacl_freelist[cls]) {
+    uint32_t off = jacl_freelist[cls];                /* reuse a swept cell of this exact size */
+    JaclObj* fo = (JaclObj*)&jacl_heap_mem[off];
+    jacl_freelist[cls] = *free_next_slot(fo);
+    return off;
+  }
+  if (jacl_bump + cell <= JACL_HEAP_BYTES) {
+    uint32_t off = jacl_bump;
+    jacl_bump += cell;
+    return off;
+  }
+  return 0;                                           /* no room */
+}
+
 __attribute__((noinline))
 void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
   uint32_t cell = round_granule((uint32_t)sizeof(JaclObj) + payload);
-  uint32_t off;
-  uint32_t cls = cell / JACL_GRANULE;
-  if (cls <= JACL_NCLASS && jacl_freelist[cls]) {
-    off = jacl_freelist[cls];                       /* reuse a swept cell of this exact size */
-    JaclObj* fo = (JaclObj*)&jacl_heap_mem[off];
-    jacl_freelist[cls] = *free_next_slot(fo);
-  } else {
-    if (jacl_bump + cell > JACL_HEAP_BYTES) return 0; /* OOM (static region; window growth is a follow-up) */
-    off = jacl_bump;
-    jacl_bump += cell;
+  uint32_t off = jacl_alloc_off(cell);
+  if (!off) {
+    /* Out of room: a stop-the-world, conservative, non-moving collection. The only
+     * fiber (Phase 2 is sequential) is at this call — a safe point — and gc.roots
+     * conservatively scans the whole control stack, so every live root (the caller's
+     * tagged JaclVals and any in-progress runtime allocations) is found without
+     * precise stack maps or a rooting protocol. Multi-fiber quiescing is Phase 3. */
+    jacl_gc_collect();
+    off = jacl_alloc_off(cell);
+    if (!off) return 0;                               /* genuine OOM after collection */
   }
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
   o->size = cell;

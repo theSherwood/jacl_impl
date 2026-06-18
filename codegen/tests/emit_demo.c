@@ -132,9 +132,11 @@ static IrModule *build_closure(void) {
   /* i32 JaclVal helper inline */
   const int64_t TAG_I32 = (int64_t)((uint64_t)0x02 << 56);
 
-  /* entry: make closure {fn=clo, upval0=10}, then call it with 32 -> 42 */
+  /* entry: init the heap, make closure {fn=clo, upval0=10}, call it with 32 -> 42 */
   IrBlock e0 = irb_block(entry, i64_1, 1);
   IrVal sp = 0;
+  IrVal ia[] = {sp};
+  (void)irb_call_import(entry, e0, "jacl_heap_init", i64_1, 1, NULL, 0, irb_const_i32(entry, e0, 0), ia, 1);
   IrVal fnref = irb_ref_func(entry, e0, clo);
   IrVal fnref64 = irb_convert(entry, e0, IRB_EXTEND_I32U, fnref);
   IrVal h = irb_const_i32(entry, e0, 0);
@@ -171,6 +173,59 @@ static IrModule *build_closure(void) {
   return m;
 }
 
+/* GC root discipline: build a live 3-element vector, make unreachable garbage in a
+ * helper (whose frame is gone on return), force a collection, and return the live
+ * vector's length. 3 iff gc.roots found `keep` across the collect (else its nodes are
+ * swept and the length is wrong). Exercises conservative roots in codegen-shaped IR. */
+static IrModule *build_gc(void) {
+  IrModule *m = irb_module_new();
+  IrType i64_1[] = {IRB_I64};
+  IrType i64_2[] = {IRB_I64, IRB_I64};
+  IrType i64_3[] = {IRB_I64, IRB_I64, IRB_I64};
+  IrType r[] = {IRB_I64};
+  const int64_t TAG_I32 = (int64_t)((uint64_t)0x02 << 56);
+  IrFunc *entry = irb_func_new(m, i64_1, 1, r, 1);
+  IrFunc *mkjunk = irb_func_new(m, i64_1, 1, r, 1); /* (sp) -> nil, leaks a dead vec */
+
+  /* mkjunk: build a small vector and return nil; it is unreachable on return, so it
+   * gives the collector real garbage to reclaim. */
+  IrBlock jb = irb_block(mkjunk, i64_1, 1);
+  IrVal je[] = {0};
+  IrVal jv = irb_call_import(mkjunk, jb, "jacl_vec_empty", i64_1, 1, r, 1, irb_const_i32(mkjunk, jb, 0), je, 1);
+  for (int k = 0; k < 3; k++) {
+    IrVal jel = irb_const_i64(mkjunk, jb, TAG_I32 | k);
+    IrVal ja[] = {0, jv, jel};
+    jv = irb_call_import(mkjunk, jb, "jacl_vec_push", i64_3, 3, r, 1, irb_const_i32(mkjunk, jb, 0), ja, 3);
+  }
+  (void)jv;
+  IrVal jnil[] = {irb_const_i64(mkjunk, jb, 0)};
+  irb_return(mkjunk, jb, jnil, 1);
+
+  /* entry: init the heap; keep = [111 222 333]; make garbage; collect; length(keep). */
+  IrBlock b = irb_block(entry, i64_1, 1);
+  IrVal sp = 0;
+  IrVal initargs[] = {sp};
+  (void)irb_call_import(entry, b, "jacl_heap_init", i64_1, 1, NULL, 0, irb_const_i32(entry, b, 0), initargs, 1);
+  IrVal ke[] = {sp};
+  IrVal keep = irb_call_import(entry, b, "jacl_vec_empty", i64_1, 1, r, 1, irb_const_i32(entry, b, 0), ke, 1);
+  for (int k = 1; k <= 3; k++) {
+    IrVal el = irb_const_i64(entry, b, TAG_I32 | (111 * k));
+    IrVal a[] = {sp, keep, el};
+    keep = irb_call_import(entry, b, "jacl_vec_push", i64_3, 3, r, 1, irb_const_i32(entry, b, 0), a, 3);
+  }
+  for (int g = 0; g < 6; g++) {
+    IrVal a[] = {sp};
+    (void)irb_call(entry, b, mkjunk, a, 1);
+  }
+  IrVal gc[] = {sp};
+  (void)irb_call_import(entry, b, "jacl_gc_collect", i64_1, 1, r, 1, irb_const_i32(entry, b, 0), gc, 1);
+  IrVal la[] = {sp, keep};
+  IrVal len = irb_call_import(entry, b, "jacl_len", i64_2, 2, r, 1, irb_const_i32(entry, b, 0), la, 2);
+  IrVal ret[] = {len};
+  irb_return(entry, b, ret, 1);
+  return m;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) { fprintf(stderr, "usage: emit_demo <module>\n"); return 2; }
   const char *name = argv[1];
@@ -181,6 +236,7 @@ int main(int argc, char **argv) {
   else if (!strcmp(name, "mem_roundtrip")) m = build_mem_roundtrip();
   else if (!strcmp(name, "call_jacl_add")) m = build_call_jacl_add();
   else if (!strcmp(name, "closure")) m = build_closure();
+  else if (!strcmp(name, "gc")) m = build_gc();
   else { fprintf(stderr, "unknown module: %s\n", name); return 2; }
 
   char *text = irb_to_text(m);

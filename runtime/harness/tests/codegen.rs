@@ -398,6 +398,7 @@ fn vector_literal_length_four() {
     run_case("vec_len4", i32_val(4)); // [length [vec 10 20 30 40]]
 }
 
+
 #[test]
 fn typed_proc_body_is_unboxed() {
     // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.

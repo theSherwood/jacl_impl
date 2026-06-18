@@ -218,10 +218,27 @@ separate-artifact path.
   typer makes `def`-bound containers `dyn`, so it needs runtime dispatch (or richer
   types); maps additionally need string keys (now available). Tracked for a follow-up.
 
-### P2.9 — GC safepoints & root discipline
-- Emit the `gc_epoch` safepoint poll at loop back-edges + call sites (obligation
-  #1), piggybacked on svm's epoch site. Ensure live tagged JaclVals are findable as
-  roots (needs P2.0 #3 / the gc.roots mask). Validate the GC under real programs.
+### P2.9 — GC: stop-the-world, conservative, non-moving — **DONE (sequential)**
+- ~~Emit the `gc_epoch` safepoint poll at loop back-edges + call sites.~~ **Superseded:**
+  the SVM backend uses a **stop-the-world, conservative, non-moving** collector — no
+  `gc_epoch` polling, no precise stack maps, no rooting protocol. Because the collector
+  is *conservative*, the **allocation point is the safe point**: `gc.roots` scans the
+  whole control stack, so every live root — the program's tagged JaclVals *and* any
+  in-progress runtime intermediates — is found automatically.
+- **Done:** `jacl_alloc` now **collects on pressure** (when the free list + bump are
+  exhausted it runs `jacl_gc_collect`, then retries; genuine OOM still returns null).
+  For sequential Phase 2 there is one fiber, so "quiesce all fibers" is trivial — the
+  collector runs synchronously at the failing allocation. The codegen entry now emits
+  `jacl_heap_init` / `jacl_intern_init` / `jacl_map_init` before the program (a
+  correctness fix — programs had been running on an uninitialized heap, which also
+  made the sweep walk malformed cells). `JACL_HEAP_BYTES` is overridable for tests.
+- **Validated:** `runtime/harness/tests/irbuilder.rs::gc_keeps_live_root_across_collect`
+  — a live vector held across a `jacl_gc_collect` (with unreachable garbage created in a
+  helper) survives on interp + JIT (its length still reads 3), proving `gc.roots` finds
+  codegen-shaped roots.
+- **Deferred:** **multi-fiber quiesce** (stop all vCPUs at a safe point before GC) →
+  **Phase 3** (concurrency). GC throughput tuning (the conservative interior-pointer
+  back-scan is costly under frequent collection) is a runtime concern, not codegen.
 
 ### P2.10 — Bring-up (sequential subset)
 - Drive a curated set of sequential `test/jacl/*.jacl` through the new codegen;

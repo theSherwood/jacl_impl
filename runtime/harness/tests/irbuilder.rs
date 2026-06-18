@@ -162,6 +162,35 @@ fn closure_via_call_indirect() {
 }
 
 #[test]
+fn gc_keeps_live_root_across_collect() {
+    // Build a live 3-element vector, leak some unreachable junk vectors (in a helper
+    // whose frame is gone on return), then jacl_gc_collect. The live root must survive
+    // — gc.roots conservatively finds it across the collect, so its nodes aren't swept
+    // and length reads 3. Validates GC root discipline for codegen-shaped IR.
+    let program = svm_text::parse_module(&emit("gc")).expect("parse gc");
+    let rt = translate_runtime();
+    let entry_sp = rt.entry_sp;
+    let entry = rt.module.funcs.len() as u32;
+    let linked = link(&[
+        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
+        LinkUnit { module: program, ..Default::default() },
+    ])
+    .expect("link gc");
+    svm_verify::verify_module(&linked).expect("verify gc");
+
+    let want = ((0x02u64 << 56) | 3) as i64; // jaclval_i32(3)
+    let args = [Value::I64(entry_sp as i64)];
+    let mut fuel = 200_000_000u64;
+    let interp = svm_interp::run(&linked, entry, &args, &mut fuel).expect("interp gc");
+    assert_eq!(match interp[0] { Value::I64(x) => x, ref o => panic!("{o:?}") }, want, "interp gc");
+    let jv = match svm_jit::compile_and_run(&linked, entry, &[entry_sp as i64]).expect("jit gc") {
+        svm_jit::JitOutcome::Returned(s) => s[0],
+        o => panic!("jit gc: {o:?}"),
+    };
+    assert_eq!(jv, want, "jit gc");
+}
+
+#[test]
 fn call_import_linked_against_runtime() {
     // The builder emits a program calling jacl_add via call.import; link it against
     // the separately-translated runtime (P2.0 path) and run.
