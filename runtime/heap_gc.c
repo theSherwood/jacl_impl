@@ -19,8 +19,12 @@
 #include <stdint.h>
 #include <string.h>
 
-/* svm op: scan the calling fiber's roots into buf, return total candidate count. */
-long __vm_gc_roots(long heap_lo, long heap_hi, void *buf, long cap);
+/* svm op: scan the calling fiber's roots into buf, return total candidate count.
+ * `mask` is AND-ed with each scanned word before the range test (and the masked
+ * value is what is returned), so a tagged JaclVal (tag in the high byte) resolves
+ * to its bare heap offset. svm constrains the mask to top-byte-strip only, so no
+ * host address can be folded into the heap window. */
+long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
 #define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region */
 #define JACL_GRANULE      16u
@@ -158,21 +162,17 @@ long jacl_gc_collect(void) {
   }
   /* 2. roots from the svm gc.roots op.
    * Stack roots are tagged JaclVals (tag in the high byte: STRING<<56, VECTOR<<56,
-   * …), whose full word sits far above the raw heap range. svm's gc.roots
-   * range-filters on the raw word, so we widen `hi` past the max heap-tagged value
-   * (0x1A<<56) and mask each candidate below — handling both raw heap pointers and
-   * tagged values. NOTE (Phase-1 workaround): widening re-admits host addresses to
-   * the candidate set (an ASLR smell, harmless here since we mask + range-check).
-   * The clean fix is a gc.roots **payload-mask parameter** so tagged-pointer guests
-   * keep the tight range and svm returns masked offsets — filed as an svm ask. */
+   * …) whose full word sits far above the heap range, plus raw heap pointers
+   * (tag byte 0) on C frames. We pass JACL_PAYLOAD_MASK so svm strips the tag byte
+   * before the range test and returns the bare offset: a tagged JaclVal masks to
+   * its heap offset (in range → kept), a raw heap pointer is unchanged (kept), and
+   * a host address never folds into the heap window (the mask only clears the top
+   * byte). The returned words are already masked + in [heap_lo, heap_hi). */
   static long rootbuf[8192];
-  long n = __vm_gc_roots(jacl_heap_lo(), (long)((uint64_t)0x20 << 56), rootbuf, 8192);
+  long n = __vm_gc_roots(jacl_heap_lo(), jacl_heap_hi(), (long)JACL_PAYLOAD_MASK, rootbuf, 8192);
   long scan = n < 8192 ? n : 8192;
   mark_sp = 0;
-  for (long i = 0; i < scan; i++) {
-    mark_push_word(rootbuf[i]);
-    mark_push_word(rootbuf[i] & (long)JACL_PAYLOAD_MASK);  /* tolerate tagged JaclVal roots */
-  }
+  for (long i = 0; i < scan; i++) mark_push_word(rootbuf[i]);
   /* 2b. runtime-internal roots (intern table, …) — not visible to gc.roots */
   jacl_mark_runtime_roots();
   /* 3. trace */
