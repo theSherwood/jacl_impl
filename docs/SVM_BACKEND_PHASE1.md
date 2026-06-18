@@ -142,10 +142,25 @@ runtime/
   → **Phase 3**.
 - Cutover / deleting the old VM → **Phase 5**.
 
-## Exit criteria
+## Exit criteria — ✅ MET (Phase 1 complete)
 
-The DoD scenario passes on interp + JIT, the `runtime/tests` suite is green, and the
-runtime artifact builds reproducibly via `runtime/build.sh`. Then Phase 2 begins.
+- The **DoD capstone** (`test_capstone.c`) — one program that allocates heap
+  objects, builds a persistent vector + map, interns strings, runs a stackless
+  stream pipeline, calls value-op builtins, and triggers a GC that keeps the whole
+  reachable graph (vector, map keys+values, interned strings) intact — passes on
+  **interp + JIT** (`run → 1234` for garbage n ∈ {0,3,50,250}).
+- The full `runtime/harness` suite is green (12 test files: values, gc, strings ×2,
+  vec ×2, map ×2, stream ×2, builtins, capstone — interp ≡ JIT).
+- The runtime LLVM-bitcode artifact builds reproducibly via `runtime/build.sh`
+  (`build/jaclrt.bc`).
+
+**Carried follow-ups (none blocking Phase 2):** the `gc.roots` payload-mask svm
+enhancement (clean tagged-root finding); `__vm_map` window growth (needs the
+powerbox harness); the standalone `svm-llvm-translate` CLI + name→index export map
+(for separate runtime-artifact linking — a Phase-2 prerequisite); `enumerate`/`lines`
+stream combinators; and the long tail of builtins (f64, string ordering, more
+collection ops) ported as Phase-2 codegen pins the call surface. **→ Phase 2
+(JACL program codegen + the JACL-owned IR builder) begins.**
 
 ## Progress
 
@@ -251,3 +266,8 @@ this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
   (incl. error propagation through a pipeline) green on interp + JIT. A representative
   core — the full opcode surface (f64 arithmetic, string ordering, more collection
   ops, …) is ported incrementally as Phase-2 codegen pins the exact call surface.
+
+- **DoD capstone + build.sh ✅** — `test_capstone.c` composes the whole substrate in
+  one program (heap+GC, vector, map, interning, stream pipeline, builtins) with the
+  live structures held across a collection; green on interp + JIT. `runtime/build.sh`
+  emits the runtime bitcode artifact (`build/jaclrt.bc`). **Phase 1 complete.**
