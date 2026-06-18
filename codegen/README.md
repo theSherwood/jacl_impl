@@ -72,9 +72,14 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     conservative, non-moving — `jacl_alloc` collects on pressure, and because the
     collector is conservative the allocation point is the safe point (no `gc_epoch`
     polling). Live roots in codegen-shaped IR are found by `gc.roots` across a collect.
+  - **P2.10 (bring-up):** combined programs across the subset are diffed against the
+    old bytecode VM (the driver's `--oldvm` mode runs `jacl_eval` in-process); the test
+    `bringup_matches_old_vm` asserts new-codegen interp == JIT == old VM. This surfaced
+    non-canonical forms the codegen accepts (`for NAME in …`, `[\ {params}{body}]`, flat
+    `elif`/`else`, vector `length`) to reconcile in Phase 4.
 
-  Later slices extend the walk (maps + element access, structs, `for` over collections,
-  break/continue, more unboxed types/ops) behind the same entry point.
+  Later slices (Phase 4) reconcile the canonical surface forms (with macro expansion),
+  add maps + element access and structs, and drive the full corpus.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.

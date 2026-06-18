@@ -100,11 +100,58 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "interp_len"))     return "def n 7\n[length \"val=$n\"]";
   if (!strcmp(name, "vec_len"))        return "[length [vec 1 2 3]]";
   if (!strcmp(name, "vec_len4"))       return "[length [vec 10 20 30 40]]";
+  /* P2.10 bring-up — combined programs across the supported subset, each returning an
+   * i32 so the result can be diffed against the old VM. */
+  if (!strcmp(name, "bring_bindings"))
+    return "def x 5\ndef y 37\n[+ $x $y]";
+  if (!strcmp(name, "bring_nested_arith"))
+    return "[+ 1 [* 2 [- 10 5]]]";
+  if (!strcmp(name, "bring_factorial"))  /* braces-only else (canonical 3-arg if) */
+    return "proc fac {n} {[if [<= $n 1] { 1 } { [* $n [fac [- $n 1]]] }]}\n[fac 6]";
+  if (!strcmp(name, "bring_while_sum"))
+    return "mut acc 0\nmut i 1\n[while [<= $i 10] { set acc [+ $acc $i]\nset i [+ $i 1] }]\n[+ $acc 0]";
+  if (!strcmp(name, "bring_if"))
+    return "def n 7\n[if [> $n 5] { 100 } { 200 }]";
+  if (!strcmp(name, "bring_closure"))    /* anonymous proc (canonical) capturing $y */
+    return "def y 10\ndef f [proc {x} { [+ $x $y] }]\n[$f 32]";
+  if (!strcmp(name, "bring_counter"))    /* anonymous proc capturing a mutable */
+    return "mut c 0\ndef inc [proc {} { set c [+ $c 1] }]\n[$inc]\n[$inc]\n[$inc]\n[+ $c 0]";
+  if (!strcmp(name, "bring_str"))
+    return "[length [concat \"foo\" \"barbaz\"]]";
+  if (!strcmp(name, "bring_hof"))
+    return "proc apply {f, x} { [$f $x] }\ndef dbl [proc {n} { [* $n 2] }]\n[apply $dbl 21]";
+  if (!strcmp(name, "bring_proc_chain"))
+    return "proc add {a, b} {+ $a $b}\nproc dbl {n} {* $n 2}\n[dbl [add 19 2]]";
+  if (!strcmp(name, "bring_recur_sum")) /* sum 1..n recursively */
+    return "proc sumto {n} {[if [<= $n 0] { 0 } { [+ $n [sumto [- $n 1]]] }]}\n[sumto 10]";
   return NULL;
 }
 
+/* Run `src` through the old bytecode VM and print its i32 result — the reference for
+ * the P2.10 diff (the driver already links the whole frontend + VM). */
+static int run_old_vm(const char *src) {
+  JaclVM *vm = jacl_vm_new();
+  JaclVal r = jacl_eval(vm, src);
+  int rc = 0;
+  /* Accept any integer width — a `dyn` result (closures, recursion, if-exprs) is often
+   * i64 in the VM. We compare the numeric value, which the codegen models in i32. */
+  if (jacl_is_i32(r))      printf("%d\n", jacl_as_i32(r));
+  else if (jacl_is_u32(r)) printf("%lld\n", (long long)(uint32_t)jacl_as_i64(r));
+  else if (jacl_is_i64(r)) printf("%lld\n", (long long)jacl_as_i64(r));
+  else if (jacl_is_u64(r)) printf("%llu\n", (unsigned long long)jacl_as_u64(r));
+  else { fprintf(stderr, "old vm result is not an integer\n"); rc = 3; }
+  jacl_vm_free(vm);
+  return rc;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 2) { fprintf(stderr, "usage: emit_jacl <case>\n"); return 2; }
+  /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
+  if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
+    const char *src = source_for(argv[2]);
+    if (!src) { fprintf(stderr, "unknown case: %s\n", argv[2]); return 2; }
+    return run_old_vm(src);
+  }
+  if (argc != 2) { fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --oldvm <case>\n"); return 2; }
   const char *src = source_for(argv[1]);
   if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
 

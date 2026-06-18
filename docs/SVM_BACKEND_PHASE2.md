@@ -240,9 +240,34 @@ separate-artifact path.
   **Phase 3** (concurrency). GC throughput tuning (the conservative interior-pointer
   back-scan is costly under frequent collection) is a runtime concern, not codegen.
 
-### P2.10 — Bring-up (sequential subset)
+### P2.10 — Bring-up (sequential subset) — **DONE**
 - Drive a curated set of sequential `test/jacl/*.jacl` through the new codegen;
   diff output vs. the old VM. (Full parity = Phase 4.)
+- **Done:** the driver gained an `--oldvm` mode that runs a program through the old
+  bytecode VM in-process (`jacl_eval`) and prints its integer result. The harness test
+  `bringup_matches_old_vm` runs 11 **combined** programs across the supported subset
+  (def/dynamic + typed arithmetic, recursion + if/else, while + mut/set, anonymous-proc
+  closures capturing immutables and mutables, higher-order procs, nested proc calls,
+  string concat+length) and asserts a **3-way agreement**: new-codegen interp ==
+  new-codegen JIT == old VM. Since the program result must be an integer to diff, value
+  forms are observed via `[length …]`.
+- **Bring-up findings (divergences the diff surfaced).** Comparing against the old VM
+  showed the codegen handles some AST shapes the *parser permits* but that are **not
+  canonical JACL** (the old VM rejects them) and need reconciling:
+  - `for NAME in COLLECTION { … }` — canonical `for` is `for $collection name { … }`
+    (collection-first, no `in`). The codegen's `for` (P2.4) handles the non-canonical
+    shape; it should move to the canonical form (and general collection iteration).
+  - `[\ {params} {body}]` — canonical `\` is the `$it` shorthand `[\ expr]`; parameterized
+    anonymous functions use `[proc {params} {body}]` (which the codegen also supports and
+    is canonical). The `\`-with-params form should be dropped/replaced.
+  - `if … elif … else …` (flat keyword form) — in canonical JACL `elif`/`else` are
+    **prelude macros** that desugar to nested 3-arg `if`; raw `if` is 2–3 args. The
+    codegen lowers the flat form directly; once macro expansion runs ahead of codegen
+    this becomes nested `if` and the special-case can go.
+  - `[length vec]` — the old VM's `length` is string-only; the SVM runtime's `jacl_len`
+    also covers vectors/maps. Vector length should use the canonical count op.
+  These are tracked for Phase 4 (full corpus parity), where macro expansion + the
+  canonical surface forms are wired in.
 
 ## Carried constraints
 
@@ -265,11 +290,15 @@ separate-artifact path.
 - Full corpus parity + perf pass → **Phase 4**.
 - Cutover / retiring the old VM → **Phase 5**.
 
-## Exit criteria
+## Exit criteria — **MET**
 
 The DoD subset compiles via the new codegen, links against the runtime artifact,
 and runs on interp + JIT matching the old VM; the codegen + IR-builder tests are
-green. Then Phase 3 (concurrency on fibers) begins.
+green. **Status:** P2.0–P2.10 complete. The combined-program bring-up
+(`bringup_matches_old_vm`) shows new-codegen interp == JIT == old VM across the
+subset; the full harness suite is green. Remaining surface-form reconciliation
+(canonical `for`/`\`, macro-expanded `elif`/`else`, vector `length`) and the rest of
+the corpus are Phase 4. Then Phase 3 (concurrency on fibers) begins.
 
 ## Note on size
 

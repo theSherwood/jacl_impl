@@ -49,6 +49,13 @@ fn emit(case: &str) -> String {
     String::from_utf8(out.stdout).expect("emit_jacl output is UTF-8")
 }
 
+/// The old bytecode VM's integer result for a case (the bring-up oracle).
+fn old_vm_result(case: &str) -> i32 {
+    let out = Command::new(driver()).arg("--oldvm").arg(case).output().expect("run --oldvm");
+    assert!(out.status.success(), "old vm {case} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or_else(|e| panic!("old vm {case} output: {e}"))
+}
+
 /// Run a case expected to fail codegen; returns the emitted error (stderr).
 fn emit_expecting_error(case: &str) -> String {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
@@ -398,6 +405,30 @@ fn vector_literal_length_four() {
     run_case("vec_len4", i32_val(4)); // [length [vec 10 20 30 40]]
 }
 
+
+// ---- P2.10: bring-up — combined programs diffed against the old bytecode VM ----
+
+#[test]
+fn bringup_matches_old_vm() {
+    // Each program uses only canonical JACL the old VM accepts and the new codegen
+    // supports; the new codegen (interp + JIT) must produce the same integer the old
+    // VM does. run_case asserts interp == jit == want, so this is a 3-way agreement.
+    for case in [
+        "bring_bindings",      // def + dynamic arithmetic
+        "bring_nested_arith",  // typed (unboxed) nested arithmetic
+        "bring_factorial",     // recursion + if/else
+        "bring_while_sum",     // while + mut + set
+        "bring_if",            // if expression
+        "bring_closure",       // anonymous proc capturing an outer binding
+        "bring_counter",       // anonymous proc capturing a mutable (cell)
+        "bring_str",           // string concat + length
+        "bring_hof",           // higher-order: proc taking a closure arg
+        "bring_proc_chain",    // nested proc calls
+        "bring_recur_sum",     // recursion + accumulation
+    ] {
+        run_case(case, i32_val(old_vm_result(case)));
+    }
+}
 
 #[test]
 fn typed_proc_body_is_unboxed() {
