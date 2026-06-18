@@ -3,3 +3,4 @@
 #include "heap_gc.c"
 #include "string.c"
 #include "collections.c"
+#include "stream.c"

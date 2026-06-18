@@ -217,3 +217,15 @@ this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
   Lesser findings: persistent `push` creates intermediate versions that become
   garbage, so tests assert reachable-survival + stability, not exact reclaim counts;
   `rrb_vec.h`'s `assert()` needs `-DNDEBUG` (added to the harness clang flags).
+
+- **P1.6 stream iterators ✅** — `runtime/stream.c`: stackless, pull-based
+  combinators — `range`/`vec` sources, `map`/`filter`/`take`, and `collect` — each a
+  heap object (`JOBJ_NODE`, `JACL_TAG_STREAM`) holding its source + state; `next`
+  pulls from the source. **No fibers, no SM** (Design §4.3.1). Transforms/predicates
+  are C function pointers (funcrefs) — stand-ins for the JACL closures that arrive
+  with Phase-2 codegen; stored in the payload as code refs (never in the heap-data
+  range, so conservative tracing skips them). `test_stream.c`
+  (range|map|filter|take|collect + vec source + empty take) and `test_stream_gc.c`
+  (a held pipeline keeps its source vector + string elements alive across a
+  collection, then collects to the right result) green on interp + JIT.
+  (`enumerate`/`lines` are the remaining combinators.)

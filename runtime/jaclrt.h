@@ -42,10 +42,12 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_F64           ((uint64_t)0x10 << JACL_TAG_SHIFT)
 #define JACL_TAG_STRUCT        ((uint64_t)0x12 << JACL_TAG_SHIFT)
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
+#define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
- * Same constant as src/jacl.h (JACL_HEAP_TAG_MASK). */
-#define JACL_HEAP_TAG_MASK     0x07D7DFE0u
+ * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21) added since
+ * the runtime's streams are GC objects that hold heap references. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15))
 
 /* Flag bits (61..63), above the 5-bit type. */
 #define JACL_FLAG_ERROR        ((uint64_t)1 << 61)
@@ -165,5 +167,23 @@ JaclVal  jacl_vec_empty(void);
 JaclVal  jacl_vec_push(JaclVal vec, JaclVal elem);   /* persistent: returns a new vector */
 JaclVal  jacl_vec_get(JaclVal vec, uint32_t idx);    /* element, or JACL_NIL if out of range */
 uint32_t jacl_vec_count(JaclVal vec);
+
+/* ===================================================================
+ * Streams (P1.6) — stackless pull-based iterators. Defined in stream.c.
+ * No fibers, no state machines: each combinator is a heap object (JOBJ_NODE,
+ * JACL_TAG_STREAM) holding its source + state; `next` pulls from the source.
+ * Transforms/predicates are C function pointers here (stand-ins for JACL
+ * closures, which arrive with Phase-2 codegen).
+ * =================================================================== */
+typedef JaclVal (*JaclMapFn)(JaclVal);   /* element -> element */
+typedef int     (*JaclPredFn)(JaclVal);  /* element -> keep? (nonzero = keep) */
+
+JaclVal jacl_stream_range(int64_t n);                 /* 0..n-1 as i32 */
+JaclVal jacl_stream_vec(JaclVal vec);                 /* a vector's elements */
+JaclVal jacl_stream_map(JaclVal src, JaclMapFn f);
+JaclVal jacl_stream_filter(JaclVal src, JaclPredFn p);
+JaclVal jacl_stream_take(JaclVal src, int64_t k);
+int     jacl_stream_next(JaclVal s, JaclVal *out);    /* 1 + *out if a value; 0 if done */
+JaclVal jacl_stream_collect(JaclVal s);               /* drain into a vector */
 
 #endif /* JACLRT_H */
