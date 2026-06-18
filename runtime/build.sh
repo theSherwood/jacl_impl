@@ -1,13 +1,30 @@
 #!/bin/sh
-# Produce the JACL runtime LLVM-bitcode artifact (the clang stage of the pipeline:
-# runtime C -> clang -O2 -emit-llvm). Translation to SVM IR (svm-llvm) + static
-# linking against a program module are exercised in-process by runtime/harness; a
-# standalone svm-llvm-translate CLI is the Phase-2 piece (tied to the name->index
-# export ask). Requires clang (LLVM 18 to match the svm submodule).
+# Produce the JACL runtime artifacts for the SVM backend:
+#
+#   1. jaclrt.bc   — the clang stage (runtime C -> clang -O2 -emit-llvm).
+#   2. jaclrt.svm  — the SVM-IR module (svm-llvm-translate of the bitcode), the
+#                    reusable, separately-compiled runtime that programs link against.
+#   3. jaclrt.syms — the export sidecar (`name idx` per line): each jacl_* function's
+#                    index in the module, so a program module resolves its
+#                    `call.import "jacl_*"` through svm_ir::link (LinkUnit.exports).
+#
+# This is the separate-artifact path (SVM_BACKEND_PHASE2.md P2.0): compile the
+# runtime once here, link many JACL-emitted program modules against it. Requires
+# clang (LLVM 18, to match the svm submodule) and libLLVM-18 dev (for svm-llvm).
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="${DIR}/build"
+SVM_LLVM="${DIR}/../vendor/svm/crates/svm-llvm"
 mkdir -p "$OUT"
+
+# 1. runtime C -> LLVM bitcode. -fno-*vectorize keeps the IR in svm-llvm's scalar
+#    subset (the backend ingests auto-vec selectively; the runtime stays scalar).
 clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
   -I "$DIR" "$DIR/jaclrt.c" -o "$OUT/jaclrt.bc"
-echo "runtime artifact: $OUT/jaclrt.bc"
+echo "runtime bitcode:  $OUT/jaclrt.bc"
+
+# 2 + 3. bitcode -> SVM-IR module + export sidecar, via the standalone CLI.
+cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin svm-llvm-translate -- \
+  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.svm" --emit-syms "$OUT/jaclrt.syms"
+echo "runtime module:   $OUT/jaclrt.svm"
+echo "runtime exports:  $OUT/jaclrt.syms"

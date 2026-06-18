@@ -21,12 +21,22 @@ use svm_jit::JitOutcome;
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 fn compile_driver(driver_abs: &str) -> PathBuf {
+    compile_driver_defs(driver_abs, &[])
+}
+
+/// Like `compile_driver`, but with extra `-D` defines (e.g. a smaller `JACL_HEAP_BYTES`
+/// so a test exercises the collect-on-pressure path without filling 16 MiB).
+fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
     let dir = std::env::temp_dir();
     let stem = std::path::Path::new(driver_abs)
         .file_stem().and_then(|s| s.to_str()).unwrap_or("driver");
-    let bc = dir.join(format!("jaclrt_{}_{}.bc", stem, std::process::id()));
-    let status = Command::new("clang")
-        .args(["-O2", "-emit-llvm", "-c", "-fno-vectorize", "-fno-slp-vectorize", "-DNDEBUG"])
+    let bc = dir.join(format!("jaclrt_{}_{}_{}.bc", stem, defines.len(), std::process::id()));
+    let mut cmd = Command::new("clang");
+    cmd.args(["-O2", "-emit-llvm", "-c", "-fno-vectorize", "-fno-slp-vectorize", "-DNDEBUG"]);
+    for d in defines {
+        cmd.arg(format!("-D{d}"));
+    }
+    let status = cmd
         .arg("-I").arg(RUNTIME_DIR)
         .arg(driver_abs)
         .arg("-o").arg(&bc)
@@ -34,6 +44,25 @@ fn compile_driver(driver_abs: &str) -> PathBuf {
         .expect("spawn clang (is clang installed?)");
     assert!(status.success(), "clang failed to compile {driver_abs}");
     bc
+}
+
+/// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
+/// own — the separately-compiled runtime artifact. The returned `exports` name each
+/// `jacl_*` function with its module index, so a program module can resolve a
+/// `call.import "jacl_*"` against it through `svm_ir::link` (the separate-artifact
+/// path: compile the runtime once, link many programs against it). This is the
+/// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
+pub fn translate_runtime() -> svm_llvm::Translated {
+    let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+}
+
+/// Translate the runtime with a custom `JACL_HEAP_BYTES` (a small heap makes the
+/// collect-on-pressure path fire after a modest number of allocations).
+pub fn translate_runtime_heap(heap_bytes: u32) -> svm_llvm::Translated {
+    let def = format!("JACL_HEAP_BYTES={heap_bytes}u");
+    let bc = compile_driver_defs(&format!("{RUNTIME_DIR}/jaclrt.c"), &[&def]);
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
 }
 
 /// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run

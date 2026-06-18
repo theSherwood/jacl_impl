@@ -19,10 +19,16 @@
 #include <stdint.h>
 #include <string.h>
 
-/* svm op: scan the calling fiber's roots into buf, return total candidate count. */
-long __vm_gc_roots(long heap_lo, long heap_hi, void *buf, long cap);
+/* svm op: scan the calling fiber's roots into buf, return total candidate count.
+ * `mask` is AND-ed with each scanned word before the range test (and the masked
+ * value is what is returned), so a tagged JaclVal (tag in the high byte) resolves
+ * to its bare heap offset. svm constrains the mask to top-byte-strip only, so no
+ * host address can be folded into the heap window. */
+long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
-#define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region */
+#ifndef JACL_HEAP_BYTES
+#define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region (override for tests) */
+#endif
 #define JACL_GRANULE      16u
 #define JACL_MAX_CLASS    1024u         /* cells <= this get an exact-size free list */
 #define JACL_NCLASS       (JACL_MAX_CLASS / JACL_GRANULE)   /* 64 classes */
@@ -60,19 +66,37 @@ long jacl_heap_hi(void) { return jacl_pti(&jacl_heap_mem[JACL_HEAP_BYTES]); }
  * that are never live pointers on the stack — invisible to gc.roots. A separately
  * compiled runtime (the real backend) is opaque by construction; noinline
  * reproduces that opacity here. */
+/* Try to obtain a cell offset of `cell` bytes from the free list or the bump pointer;
+ * returns 0 (the null sentinel offset) if neither has room. */
+static uint32_t jacl_alloc_off(uint32_t cell) {
+  uint32_t cls = cell / JACL_GRANULE;
+  if (cls <= JACL_NCLASS && jacl_freelist[cls]) {
+    uint32_t off = jacl_freelist[cls];                /* reuse a swept cell of this exact size */
+    JaclObj* fo = (JaclObj*)&jacl_heap_mem[off];
+    jacl_freelist[cls] = *free_next_slot(fo);
+    return off;
+  }
+  if (jacl_bump + cell <= JACL_HEAP_BYTES) {
+    uint32_t off = jacl_bump;
+    jacl_bump += cell;
+    return off;
+  }
+  return 0;                                           /* no room */
+}
+
 __attribute__((noinline))
 void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
   uint32_t cell = round_granule((uint32_t)sizeof(JaclObj) + payload);
-  uint32_t off;
-  uint32_t cls = cell / JACL_GRANULE;
-  if (cls <= JACL_NCLASS && jacl_freelist[cls]) {
-    off = jacl_freelist[cls];                       /* reuse a swept cell of this exact size */
-    JaclObj* fo = (JaclObj*)&jacl_heap_mem[off];
-    jacl_freelist[cls] = *free_next_slot(fo);
-  } else {
-    if (jacl_bump + cell > JACL_HEAP_BYTES) return 0; /* OOM (static region; window growth is a follow-up) */
-    off = jacl_bump;
-    jacl_bump += cell;
+  uint32_t off = jacl_alloc_off(cell);
+  if (!off) {
+    /* Out of room: a stop-the-world, conservative, non-moving collection. The only
+     * fiber (Phase 2 is sequential) is at this call — a safe point — and gc.roots
+     * conservatively scans the whole control stack, so every live root (the caller's
+     * tagged JaclVals and any in-progress runtime allocations) is found without
+     * precise stack maps or a rooting protocol. Multi-fiber quiescing is Phase 3. */
+    jacl_gc_collect();
+    off = jacl_alloc_off(cell);
+    if (!off) return 0;                               /* genuine OOM after collection */
   }
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
   o->size = cell;
@@ -158,21 +182,17 @@ long jacl_gc_collect(void) {
   }
   /* 2. roots from the svm gc.roots op.
    * Stack roots are tagged JaclVals (tag in the high byte: STRING<<56, VECTOR<<56,
-   * …), whose full word sits far above the raw heap range. svm's gc.roots
-   * range-filters on the raw word, so we widen `hi` past the max heap-tagged value
-   * (0x1A<<56) and mask each candidate below — handling both raw heap pointers and
-   * tagged values. NOTE (Phase-1 workaround): widening re-admits host addresses to
-   * the candidate set (an ASLR smell, harmless here since we mask + range-check).
-   * The clean fix is a gc.roots **payload-mask parameter** so tagged-pointer guests
-   * keep the tight range and svm returns masked offsets — filed as an svm ask. */
+   * …) whose full word sits far above the heap range, plus raw heap pointers
+   * (tag byte 0) on C frames. We pass JACL_PAYLOAD_MASK so svm strips the tag byte
+   * before the range test and returns the bare offset: a tagged JaclVal masks to
+   * its heap offset (in range → kept), a raw heap pointer is unchanged (kept), and
+   * a host address never folds into the heap window (the mask only clears the top
+   * byte). The returned words are already masked + in [heap_lo, heap_hi). */
   static long rootbuf[8192];
-  long n = __vm_gc_roots(jacl_heap_lo(), (long)((uint64_t)0x20 << 56), rootbuf, 8192);
+  long n = __vm_gc_roots(jacl_heap_lo(), jacl_heap_hi(), (long)JACL_PAYLOAD_MASK, rootbuf, 8192);
   long scan = n < 8192 ? n : 8192;
   mark_sp = 0;
-  for (long i = 0; i < scan; i++) {
-    mark_push_word(rootbuf[i]);
-    mark_push_word(rootbuf[i] & (long)JACL_PAYLOAD_MASK);  /* tolerate tagged JaclVal roots */
-  }
+  for (long i = 0; i < scan; i++) mark_push_word(rootbuf[i]);
   /* 2b. runtime-internal roots (intern table, …) — not visible to gc.roots */
   jacl_mark_runtime_roots();
   /* 3. trace */
