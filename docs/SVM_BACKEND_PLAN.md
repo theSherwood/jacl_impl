@@ -99,6 +99,10 @@ conservative-non-moving-GC model are all validated end-to-end on interp + JIT.
 
 ## 4. Phase 2 — codegen retarget
 
+> **Scoped into concrete, ordered steps in `SVM_BACKEND_PHASE2.md`** (the JACL-owned
+> IR builder, the two-producer/link model + data-SP ABI, the svm-side prerequisites,
+> P2.0–P2.10, exit criteria). Largest phase; expect sub-phasing. Summary:
+
 - Rewrite `compiler.c` emit sites: AST → SVM IR (keep the type-aware structure).
 - Insert `gc_epoch` safepoint polls at back-edges/call sites (one poll, shared
   with svm's epoch check).
