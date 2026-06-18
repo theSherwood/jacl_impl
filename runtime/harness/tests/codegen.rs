@@ -155,3 +155,70 @@ fn binding_set_immutable_is_an_error() {
     let err = emit_expecting_error("set_immut_err"); // def x 1; set x 2
     assert!(err.contains("immutable"), "unexpected error: {err}");
 }
+
+// ---- P2.4 control flow ----
+
+#[test]
+fn if_then_taken() {
+    run_case("if_true", i32_val(10)); // [if [> 5 3] { 10 } else { 20 }]
+}
+
+#[test]
+fn if_else_taken() {
+    run_case("if_false", i32_val(20)); // [if [> 1 3] { 10 } else { 20 }]
+}
+
+#[test]
+fn if_without_else_taken() {
+    run_case("if_noelse_true", i32_val(7)); // [if [> 5 3] { 7 }]
+}
+
+#[test]
+fn if_without_else_falls_to_nil() {
+    run_case("if_noelse_false", 0); // [if [> 1 3] { 7 }] => nil (JACL_NIL == 0)
+}
+
+#[test]
+fn if_branch_mutates_outer_binding() {
+    run_case("if_sets_outer", i32_val(100)); // mut x 1; [if [> 5 3] { set x 100 }]; [+ $x 0]
+}
+
+#[test]
+fn if_used_as_expression() {
+    run_case("if_expr_bind", i32_val(9)); // def x [if [> 5 3] { 9 } else { 0 }]; [+ $x 0]
+}
+
+#[test]
+fn elif_chain_middle_clause() {
+    run_case("elif_chain", i32_val(22)); // [if false { 1 } elif true { 22 } else { 33 }]
+}
+
+#[test]
+fn while_accumulating_loop() {
+    run_case("while_sum", i32_val(15)); // sum 1..=5
+}
+
+#[test]
+fn while_countdown_loop() {
+    run_case("while_countdown", i32_val(30)); // 3 iterations × 10
+}
+
+#[test]
+fn for_over_range_command() {
+    run_case("for_range_cmd", i32_val(6)); // for i in [range 1 4]: 1+2+3
+}
+
+#[test]
+fn for_over_range_sum() {
+    run_case("for_sum", i32_val(10)); // for i in [range 0 5]: 0+1+2+3+4
+}
+
+#[test]
+fn for_over_dotdot_range() {
+    run_case("for_dotdot", i32_val(10)); // for i in 0..5: 0+1+2+3+4
+}
+
+#[test]
+fn for_with_nested_if() {
+    run_case("for_with_if", i32_val(7)); // sum i in 0..5 where i > 2: 3+4
+}

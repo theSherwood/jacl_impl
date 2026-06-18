@@ -31,6 +31,28 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
   if (!strcmp(name, "set_undef_err"))return "set nope 1";
   if (!strcmp(name, "set_immut_err"))return "def x 1\nset x 2";
+  /* P2.4 control flow */
+  if (!strcmp(name, "if_true"))        return "[if [> 5 3] { 10 } else { 20 }]";
+  if (!strcmp(name, "if_false"))       return "[if [> 1 3] { 10 } else { 20 }]";
+  if (!strcmp(name, "if_noelse_true")) return "[if [> 5 3] { 7 }]";
+  if (!strcmp(name, "if_noelse_false"))return "[if [> 1 3] { 7 }]";
+  if (!strcmp(name, "if_sets_outer"))  return "mut x 1\n[if [> 5 3] { set x 100 }]\n[+ $x 0]";
+  if (!strcmp(name, "while_sum"))
+    return "mut i 1\nmut acc 0\n[while [<= $i 5] { set acc [+ $acc $i]\nset i [+ $i 1] }]\n[+ $acc 0]";
+  if (!strcmp(name, "while_countdown"))
+    return "mut n 3\nmut c 0\n[while [> $n 0] { set n [- $n 1]\nset c [+ $c 10] }]\n[+ $c 0]";
+  if (!strcmp(name, "elif_chain"))
+    return "[if [> 1 2] { 1 } elif [> 3 2] { 22 } else { 33 }]";
+  if (!strcmp(name, "if_expr_bind"))
+    return "def x [if [> 5 3] { 9 } else { 0 }]\n[+ $x 0]";
+  if (!strcmp(name, "for_sum"))
+    return "mut acc 0\n[for i in [range 0 5] { set acc [+ $acc $i] }]\n[+ $acc 0]";
+  if (!strcmp(name, "for_range_cmd"))
+    return "mut acc 0\n[for i in [range 1 4] { set acc [+ $acc $i] }]\n[+ $acc 0]";
+  if (!strcmp(name, "for_dotdot"))
+    return "mut acc 0\nfor i in 0..5 { set acc [+ $acc $i] }\n[+ $acc 0]";
+  if (!strcmp(name, "for_with_if"))
+    return "mut acc 0\n[for i in [range 0 5] { [if [> $i 2] { set acc [+ $acc $i] }] }]\n[+ $acc 0]";
   return NULL;
 }
 

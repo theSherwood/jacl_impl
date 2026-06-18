@@ -116,10 +116,25 @@ separate-artifact path.
   block args; address-taken locals → data-stack slots. Today everything lives in one
   block, so a local is just its current SSA value.
 
-### P2.4 — Control flow
+### P2.4 — Control flow — **DONE (if/elif/else, while, for-over-range)**
 - `if`/`elif`/`else`, `while`, `for` over ranges/collections → IR blocks +
   `br`/`br_if` with block args for loop-carried state. (`for` over a stream uses
   the runtime stream API.)
+- **Done:** the codegen now tracks a *current block* and threads a **frame** — the
+  data-stack pointer `sp` plus every live local — through block params on each
+  control-flow edge (block-local SSA). `if`/`elif`/`else` lower to an SSA diamond with
+  a join block carrying the frame + the if's result (so a `set` inside one branch
+  becomes the join phi; `if` is usable as an expression). `while` lowers to
+  header/body/exit with the body's back-edge re-passing the updated frame. `for NAME in
+  RANGE { body }` (integer ranges: `[range A B]` and the flat `A..B`) desugars onto the
+  same loop machinery with the induction var + end bound threaded as locals. Conditions
+  reduce to an i32 truth via `(c != false) & (c != nil)`; comparison operators
+  (`< <= > >= == !=`) lower to `jacl_lt`/`le`/`gt`/`ge`/`eq`/`ne`. Validated in
+  `codegen.rs` on interp + JIT (then/else/no-else/nil, elif chains, if-as-expression,
+  accumulating + countdown `while`, `for` sum over both range forms, and `if` nested in
+  `for`).
+- **Deferred:** `for` over collections/streams (the runtime stream-iteration protocol)
+  and `break`/`continue` — next, alongside or after procs (P2.5).
 
 ### P2.5 — Procs & calls
 - JACL procs → SVM IR functions (data-SP ABI); args/returns, recursion, arity.

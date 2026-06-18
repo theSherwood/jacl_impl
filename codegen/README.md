@@ -30,11 +30,16 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   - **P2.3 (bindings & scope):** a compile-time lexical environment (scope chain of
     name→SSA-value). `def`/`mut` bind, `set` updates the most-recent binding in place
     (errors on undefined / immutable), `$x` reads it, `{ … }` blocks open a nested
-    scope. Same-scope immutable shadowing is an error. (Single-block for now;
-    cross-block mutation/address-taken locals come with control flow in P2.4.)
+    scope. Same-scope immutable shadowing is an error.
+  - **P2.4 (control flow):** the walk tracks a *current block* and threads a frame
+    (`sp` + all live locals) through block params on every control-flow edge
+    (block-local SSA). `if`/`elif`/`else` → an SSA diamond joining on the frame + the
+    if's result; `while` → header/body/exit with a back-edge; `for NAME in RANGE`
+    (integer ranges) desugars onto the loop machinery. Conditions reduce to an i32
+    truth (`(c != false) & (c != nil)`); comparisons lower to `jacl_lt/le/gt/ge/eq/ne`.
 
-  Later slices extend the walk (control flow, procs, closures, type-driven unboxing)
-  behind the same entry point.
+  Later slices extend the walk (procs, closures, type-driven unboxing, `for` over
+  collections, break/continue) behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.
