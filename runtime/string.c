@@ -103,6 +103,16 @@ JaclVal jacl_str_intern(const char *s, uint32_t len) {
   return jacl_str_new(s, len);                            /* table full (shouldn't happen in P1) */
 }
 
+/* Hash of a string's bytes (inline or heap) — shared by interning and map keys. */
+uint32_t jacl_str_hash(JaclVal v) {
+  if (jaclrt_is_inline_string(v)) {
+    char b[8]; jaclrt_inline_get(v, b, sizeof b);
+    return str_hash(b, jaclrt_inline_len(v));
+  }
+  JaclStr *st = str_obj(v);
+  return str_hash((const char*)(st + 1), st->len);
+}
+
 /* GC: interned strings are strong roots. */
 void jacl_mark_runtime_roots(void) {
   for (uint32_t i = 0; i < INTERN_CAP; i++) {

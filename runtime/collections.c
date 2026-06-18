@@ -54,3 +54,60 @@ __attribute__((noinline)) JaclVal jacl_vec_get(JaclVal vec, uint32_t idx) {
 __attribute__((noinline)) uint32_t jacl_vec_count(JaclVal vec) {
   return jvec_count((jvec_root*)jaclrt_as_ptr(vec));
 }
+
+/* ===================================================================
+ * Persistent map (HAMT) over the GC heap — JaclVal -> JaclVal (P1.5).
+ * Nodes are JOBJ_NODE (traced: leaf slots hold key/value JaclVals, internal
+ * nodes hold child pointers — all found by the conservative payload scan).
+ * Empty map = JACL_TAG_MAP over a NULL root.
+ * =================================================================== */
+static void* jmap_gc_alloc(int obj_type, unsigned long sz) {
+  (void)obj_type;
+  return jacl_obj_payload((JaclObj*)jacl_alloc(JOBJ_NODE, (uint32_t)sz));
+}
+
+/* value-aware key hash/eq: strings by content, everything else by bits */
+static uint32_t jmap_key_hash(JaclVal k) {
+  if (jaclrt_is_string(k)) return jacl_str_hash(k);
+  uint64_t x = k;                                  /* scalar: mix the bits (splitmix64-ish) */
+  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+  return (uint32_t)x;
+}
+static bool jmap_key_eq(JaclVal a, JaclVal b) {
+  if (jaclrt_is_string(a) && jaclrt_is_string(b)) return jacl_str_eq(a, b);
+  return a == b;
+}
+
+#define HAMT_KEY_T              JaclVal
+#define HAMT_VAL_T              JaclVal
+#define HAMT_NAME               jmap
+#define HAMT_GC_ALLOC(ot,sz)    jmap_gc_alloc((ot),(sz))
+#define HAMT_GC_OBJ_INTERNAL    JOBJ_NODE
+#define HAMT_GC_OBJ_LEAF        JOBJ_NODE
+#define HAMT_GC_OBJ_COLLISION   JOBJ_NODE
+#include "../lib/hamt/hamt.h"
+
+void jacl_map_init(void) { jmap_set_key_handlers(jmap_key_hash, jmap_key_eq); }
+
+__attribute__((noinline)) JaclVal jacl_map_empty(void) {
+  return jaclrt_from_ptr(JACL_TAG_MAP, (void*)0);
+}
+__attribute__((noinline)) JaclVal jacl_map_set(JaclVal m, JaclVal key, JaclVal val) {
+  jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
+  return jaclrt_from_ptr(JACL_TAG_MAP, jmap_set(r, key, val));
+}
+__attribute__((noinline)) int jacl_map_has(JaclVal m, JaclVal key) {
+  return jmap_has((jmap_node*)jaclrt_as_ptr(m), key);
+}
+__attribute__((noinline)) JaclVal jacl_map_get(JaclVal m, JaclVal key) {
+  jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
+  if (!jmap_has(r, key)) return JACL_NIL;
+  return jmap_get(r, key);
+}
+__attribute__((noinline)) JaclVal jacl_map_remove(JaclVal m, JaclVal key) {
+  jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
+  return jaclrt_from_ptr(JACL_TAG_MAP, jmap_unset(r, key));
+}
+__attribute__((noinline)) uint32_t jacl_map_count(JaclVal m) {
+  return (uint32_t)jmap_count((jmap_node*)jaclrt_as_ptr(m));
+}

@@ -111,6 +111,10 @@ static inline void jaclrt_inline_get(JaclVal v, char *buf, uint32_t buflen) {
   }
   if (buflen) buf[i] = '\0';
 }
+static inline bool jaclrt_is_string(JaclVal v) {
+  uint32_t t = jaclrt_type_index(v);
+  return t == 0x04 || t == 0x05 || t == 0x14;   /* inline / heap / rope */
+}
 
 /* ===================================================================
  * Heap + GC (P1.2 / P1.3) — non-inline; defined in heap_gc.c.
@@ -156,6 +160,7 @@ JaclVal  jacl_str_intern(const char *s, uint32_t len);    /* canonical (pointer-
 uint32_t jacl_str_len(JaclVal v);
 void     jacl_str_bytes(JaclVal v, char *buf, uint32_t buflen);  /* NUL-terminated copy */
 bool     jacl_str_eq(JaclVal a, JaclVal b);
+uint32_t jacl_str_hash(JaclVal v);                        /* hash of string bytes (inline or heap) */
 
 /* ===================================================================
  * Collections (P1.5) — persistent vector over the GC heap. Defined in
@@ -167,6 +172,16 @@ JaclVal  jacl_vec_empty(void);
 JaclVal  jacl_vec_push(JaclVal vec, JaclVal elem);   /* persistent: returns a new vector */
 JaclVal  jacl_vec_get(JaclVal vec, uint32_t idx);    /* element, or JACL_NIL if out of range */
 uint32_t jacl_vec_count(JaclVal vec);
+
+/* persistent map (HAMT) over the GC heap; keys/values are JaclVals (value-aware
+ * hash/eq for strings + scalars). An empty map is JACL_TAG_MAP over a NULL root. */
+void     jacl_map_init(void);                        /* install key handlers (call once) */
+JaclVal  jacl_map_empty(void);
+JaclVal  jacl_map_set(JaclVal map, JaclVal key, JaclVal val);   /* persistent: returns a new map */
+JaclVal  jacl_map_get(JaclVal map, JaclVal key);     /* value, or JACL_NIL if absent */
+int      jacl_map_has(JaclVal map, JaclVal key);
+JaclVal  jacl_map_remove(JaclVal map, JaclVal key);  /* persistent */
+uint32_t jacl_map_count(JaclVal map);
 
 /* ===================================================================
  * Streams (P1.6) — stackless pull-based iterators. Defined in stream.c.

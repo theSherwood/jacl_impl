@@ -229,3 +229,14 @@ this allocator + make nodes traceable), P1.6 stream iterators, P1.7 builtins.
   (a held pipeline keeps its source vector + string elements alive across a
   collection, then collects to the right result) green on interp + JIT.
   (`enumerate`/`lines` are the remaining combinators.)
+
+- **P1.5 collections (map) ✅ — collections complete.** `runtime/collections.c`: the
+  real `lib/hamt` instantiated for `JaclVal → JaclVal`, nodes → `jacl_alloc(JOBJ_NODE)`
+  (leaf slots hold key/value JaclVals; internal nodes hold child pointers — all
+  traced conservatively). Value-aware key handlers: strings by content
+  (`jacl_str_hash`/`jacl_str_eq`), scalars by bits. Empty map = `JACL_TAG_MAP` over a
+  NULL root. `test_map.c` (i32 + string keys, get/has/persistence/overwrite/remove,
+  content-equality lookup) and `test_map_gc.c` (a map of heap key→value strings —
+  both reachable only via the map — survives collection intact) green on interp +
+  JIT. Finding: HAMT key-eq handler is `bool (*)(K,K)` — match the return type
+  exactly (clang errors on `int` vs `bool` funcptr). Vector + map ⇒ P1.5 done.
