@@ -21,15 +21,31 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   branch arguments and are received as block params. The builder numbers values per
   block and returns each new id; the caller threads cross-block values explicitly.
 
+- `codegen.h` / `codegen.c` — **P2.2: the codegen scaffold.** `svm_codegen_program`
+  walks the JACL AST (from `src/jacl.h`) and emits an SVM-IR module via the builder,
+  with a single entry `func (i64 sp) -> (i64)` returning the last top-level form's
+  JaclVal. The scaffold lowers integer literals (→ i32 JaclVal constants) and the
+  arithmetic operators `+ - * / %` (→ runtime `jacl_add`/`sub`/`mul`/`div`/`mod` via
+  `call.import`, left-folded for >2 args), threading `sp` per the §3d ABI. Later
+  slices extend the walk (bindings, control flow, procs, closures, type-driven
+  unboxing) behind the same entry point.
+
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
-  svm-text (selected by argv), the C side of the round-trip test.
+  svm-text (selected by argv), the C side of the IR-builder round-trip test.
+
+- `tests/emit_jacl.c` — parses a JACL source snippet through the real frontend
+  (`src/jacl.c`: lexer + parser) and runs `svm_codegen_program`, printing the program
+  module's svm-text. Built with **gcc** (the frontend's toolchain).
 
 ## Testing
 
 `runtime/harness/tests/irbuilder.rs` compiles the builder + demo natively, emits each
 module, then parses → verifies → runs it on interp + JIT (and checks import-free
-output is canonical svm-text). Run from `runtime/harness/`:
+output is canonical svm-text). `runtime/harness/tests/codegen.rs` does the same from
+real JACL source through `svm_codegen_program`, linking each program against the
+runtime artifact. Run from `runtime/harness/`:
 
 ```sh
 cargo test --test irbuilder
+cargo test --test codegen
 ```

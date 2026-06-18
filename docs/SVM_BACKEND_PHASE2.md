@@ -84,13 +84,21 @@ separate-artifact path.
 - **Block-local SSA** discipline baked in: values are numbered per block and returned
   by each `irb_*`; cross-block values thread through branch args.
 
-### P2.2 — Codegen scaffold: literals, arithmetic, return
+### P2.2 — Codegen scaffold: literals, arithmetic, return — **DONE**
 - **Goal:** `compile_program(AST) → IR module`; lower literals, operator/builtin
   calls (→ runtime `call.import`), and top-level result.
-- **Deliverable:** the codegen entry + dispatch skeleton; map a JACL value to an
-  i64 SSA value.
-- **Validates:** `[+ 1 2]`, nested arithmetic, `[print …]`-style → run, compare to
-  the old VM.
+- **Deliverable:** ✅ `codegen/codegen.{h,c}` — `svm_codegen_program(nodes, count)`
+  walks the JACL AST (`src/jacl.h`) into the IR builder: an entry
+  `func (i64 sp) -> (i64)` returning the last form's JaclVal. Lowers int literals
+  (→ i32 JaclVal const) and `+ - * / %` (→ `jacl_add`/`sub`/`mul`/`div`/`mod` via
+  `call.import`, left-folded for >2 args), threading `sp` (§3d ABI). JACL values are
+  modelled as i64 SSA values (tagged JaclVals).
+- **Validates:** ✅ `runtime/harness/tests/codegen.rs` parses real JACL source through
+  the frontend (`codegen/tests/emit_jacl.c`, gcc), links each program against the
+  runtime artifact, and runs on interp + JIT: `[+ 1 2]`, `[+ 1 [* 2 3]]`,
+  `[- [* 4 5] 3]`, `[+ 1 2 3 4]`, `[+ [/ 20 6] [% 20 6]]` all match expected JaclVals.
+  (`print` needs a host-I/O capability — deferred to the powerbox; full old-VM diff is
+  P2.10 bring-up.)
 
 ### P2.3 — Bindings & scope
 - `def`/`mut`/`set`, lexical scopes, block bodies. Locals as SSA values threaded
