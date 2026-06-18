@@ -36,6 +36,17 @@ fn compile_driver(driver_abs: &str) -> PathBuf {
     bc
 }
 
+/// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
+/// own — the separately-compiled runtime artifact. The returned `exports` name each
+/// `jacl_*` function with its module index, so a program module can resolve a
+/// `call.import "jacl_*"` against it through `svm_ir::link` (the separate-artifact
+/// path: compile the runtime once, link many programs against it). This is the
+/// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
+pub fn translate_runtime() -> svm_llvm::Translated {
+    let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+}
+
 /// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run
 /// `run(n)` (func 0) on interp + JIT. Asserts the two backends agree; returns the
 /// i32 result.
