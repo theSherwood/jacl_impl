@@ -80,7 +80,13 @@ the reuse-existing-C thesis, the fibers-replace-SM simplification, and the
 conservative-non-moving-GC model are all validated end-to-end on interp + JIT.
 **Phase 0 clears; the rewrite proper (Phases 1–5) is unblocked.**
 
-## 3. Phase 1 — runtime substrate (guest-side)
+## 3. Phase 1 — runtime substrate (guest-side)  ✅ COMPLETE
+
+> Implemented in `runtime/` (P1.0–P1.7), green on interp + JIT incl. the DoD
+> capstone. Full step record + findings: `SVM_BACKEND_PHASE1.md`.
+
+> **Scoped into concrete, ordered steps in `SVM_BACKEND_PHASE1.md`** (P1.0–P1.7,
+> runtime layout, sequencing, exit criteria). Summary:
 
 - Heap allocator over the `Memory` window + Immix block/line maps.
 - Non-moving conservative mark-sweep wired to `gc.roots` + cooperative STW.

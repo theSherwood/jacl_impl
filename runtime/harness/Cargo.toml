@@ -1,0 +1,19 @@
+# Phase 1 runtime test harness. Compiles a C driver (which includes the JACL
+# runtime) via svm-llvm and runs it on interp + JIT. `cargo test` here is the
+# Phase 1 test runner. Own cargo root; path-deps into the svm submodule (links
+# libLLVM — needs llvm-18-dev).
+[workspace]
+
+[package]
+name = "jacl-runtime-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
+svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }
+svm-text   = { path = "../../vendor/svm/crates/svm-text" }
+svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
+svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
+svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
