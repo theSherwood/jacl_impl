@@ -239,4 +239,9 @@ JaclVal jacl_cell_new(JaclVal v);
 JaclVal jacl_cell_get(JaclVal c);
 JaclVal jacl_cell_set(JaclVal c, JaclVal v);
 
+/* P3.1 generators on fibers (see fiber.c). fnref is a raw funcref (from ref.func). */
+JaclVal jacl_gen_new(JaclVal fnref, JaclVal arg);
+JaclVal jacl_gen_next(JaclVal gen);
+JaclVal jacl_gen_done(JaclVal gen);
+
 #endif /* JACLRT_H */

@@ -111,6 +111,10 @@ IrVal irb_data_addr(IrFunc *f, IrBlock b, uint64_t local_off);
 /* Width conversion (i64.extend_i32_s/u, i32.wrap_i64). */
 IrVal irb_convert(IrFunc *f, IrBlock b, IrConvOp op, IrVal a);
 
+/* `suspend value` — yield `value` out of the current fiber (a generator `yield`); the
+ * result is the argument the next resume passes back in. */
+IrVal irb_suspend(IrFunc *f, IrBlock b, IrVal value);
+
 /* Indirect call through the function table: `call_indirect (sig) v<idx> (args)`.
  * `idx` is an i32 function index (e.g. from irb_ref_func or a closure's fnref).
  * Single-result (i64 for the JACL closure ABI); returns its value id. */

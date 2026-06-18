@@ -10,7 +10,7 @@
 
 typedef enum {
   K_CONST_I32, K_CONST_I64, K_INTBIN, K_INTCMP, K_LOAD, K_STORE, K_CALL, K_CALL_IMPORT,
-  K_REF_FUNC, K_CONVERT, K_CALL_INDIRECT
+  K_REF_FUNC, K_CONVERT, K_CALL_INDIRECT, K_SUSPEND
 } InstKind;
 
 typedef struct {
@@ -255,6 +255,12 @@ IrVal irb_convert(IrFunc *f, IrBlock b, IrConvOp op, IrVal a) {
   in->kind = K_CONVERT; in->nresults = 1; in->op = (int)op; in->a = a;
   return take_val(blk);
 }
+IrVal irb_suspend(IrFunc *f, IrBlock b, IrVal value) {
+  Block *blk = block_at(f, b);
+  Inst *in = push_inst(blk);
+  in->kind = K_SUSPEND; in->nresults = 1; in->a = value;
+  return take_val(blk);
+}
 IrVal irb_call_indirect(IrFunc *f, IrBlock b,
                         const IrType *params, int nparams,
                         const IrType *results, int nresults,
@@ -423,6 +429,8 @@ static void out_inst(Out *o, const Inst *in) {
       break;
     case K_REF_FUNC:
       out_fmt(o, "ref.func %u", in->callee); break;
+    case K_SUSPEND:
+      out_fmt(o, "suspend v%u", in->a); break;
     case K_CONVERT: {
       static const char *cn[] = {"i64.extend_i32_s", "i64.extend_i32_u", "i32.wrap_i64"};
       out_fmt(o, "%s v%u", cn[in->op], in->a); break;

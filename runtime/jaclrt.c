@@ -6,3 +6,4 @@
 #include "stream.c"
 #include "builtins.c"
 #include "closure.c"
+#include "fiber.c"

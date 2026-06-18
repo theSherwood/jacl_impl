@@ -52,18 +52,23 @@ non-canonical shape flagged at bring-up and is reconciled here.)
 
 ## Concrete steps
 
-### P3.1 — Generators (`yield`) on fibers — **the foundation, scheduler-free**
+### P3.1 — Generators (`yield`) on fibers — **DONE (scheduler-free)**
 - A proc whose body contains `yield` is a **generator**: it lowers to an SVM function
-  `(i64 sp, i64 resume_arg) -> i64`; `yield V` → `__vm_fiber_suspend(V)`; the body's
-  end returns a **done sentinel**.
-- Creating a generator instance (`[g args]` in a generator context / a `for`) makes a
-  runtime **generator object** wrapping a fiber (`__vm_fiber_new` over a fresh stack)
-  plus the bound params; driving it (`for $g x { … }`, stream-next/collect) calls
-  `__vm_fiber_resume` until `done`.
-- Runtime: `jacl_gen_*` helpers (new/resume/done) over `__vm_fiber_*`, and the
-  generator value (`JACL_TAG_STREAM`/a generator tag). Codegen: detect generator procs,
-  lower `yield`, lower `for $coll name {body}` over a generator, lower collect.
-- **Validates:** `gen_range`-style generators + `for`-drain, matching the old VM.
+  `(i64 sp, i64 resume_arg) -> i64`; `yield V` → the `suspend` op; the body returning
+  is the `done` signal (`cont.resume`'s status), so no sentinel value is needed.
+- **Done:** runtime `runtime/fiber.c` — `jacl_gen_new(fnref, arg)` builds a generator
+  object (a fiber via `__vm_fiber_new` over a pooled data stack + the prime arg),
+  `jacl_gen_next` resumes it (priming the first resume with the param), `jacl_gen_done`
+  reports completion. IR builder gained the `suspend` op. Codegen: a generator proc is
+  detected (`contains_yield`) and given the `(sp, arg)` signature with its one declared
+  param bound to the resume arg; `yield V` → `suspend`; a generator-proc call
+  `[g a]` builds the generator (`jacl_gen_new` over `ref.func`) instead of calling it;
+  and the **canonical** `for [g a] name { body }` drives it (resume/`done` loop, binding
+  `name` to each yielded value). Validated on interp + JIT against the old VM:
+  `[for [upto 5] x …]` → 10 and a squares generator → 30.
+- **Limits (current):** a generator takes ≤1 param (the single resume arg); a generator
+  must not hold heap roots across a `yield` until multi-fiber GC quiesce (P3.6) scans
+  parked fibers' data stacks (i32 generators are safe); the data-stack pool is fixed.
 
 ### P3.2 — `spawn` / `await` + a minimal fiber scheduler
 - `spawn { block }` → schedule a task fiber, return a **future**. `await $f` parks the

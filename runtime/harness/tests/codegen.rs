@@ -430,6 +430,20 @@ fn bringup_matches_old_vm() {
     }
 }
 
+// ---- P3.1: generators (yield) on fibers ----
+
+#[test]
+fn generator_count_matches_old_vm() {
+    // proc upto {n} { … yield $i … }; [for [upto 5] x { sum }] -> 0+1+2+3+4 = 10
+    run_case("gen_count", i32_val(old_vm_result("gen_count")));
+}
+
+#[test]
+fn generator_squares_matches_old_vm() {
+    // a generator yielding i*i, driven by for-over-generator
+    run_case("gen_squares", i32_val(old_vm_result("gen_squares")));
+}
+
 #[test]
 fn typed_proc_body_is_unboxed() {
     // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.

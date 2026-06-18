@@ -124,6 +124,11 @@ static const char *source_for(const char *name) {
     return "proc add {a, b} {+ $a $b}\nproc dbl {n} {* $n 2}\n[dbl [add 19 2]]";
   if (!strcmp(name, "bring_recur_sum")) /* sum 1..n recursively */
     return "proc sumto {n} {[if [<= $n 0] { 0 } { [+ $n [sumto [- $n 1]]] }]}\n[sumto 10]";
+  /* P3.1 generators (yield) on fibers, driven by canonical for-over-generator */
+  if (!strcmp(name, "gen_count"))
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [upto 5] x { set s [+ $s $x] }]\n[+ $s 0]";
+  if (!strcmp(name, "gen_squares"))
+    return "proc sq {n} { mut i 1\n[while [<= $i $n] { yield [* $i $i]\nset i [+ $i 1] }] }\nmut s 0\n[for [sq 4] x { set s [+ $s $x] }]\n[+ $s 0]";
   return NULL;
 }
 
