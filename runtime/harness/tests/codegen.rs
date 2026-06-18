@@ -49,6 +49,13 @@ fn emit(case: &str) -> String {
     String::from_utf8(out.stdout).expect("emit_jacl output is UTF-8")
 }
 
+/// Run a case expected to fail codegen; returns the emitted error (stderr).
+fn emit_expecting_error(case: &str) -> String {
+    let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
+    assert!(!out.status.success(), "{case}: expected codegen to fail but it succeeded");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 /// JaclVal encoding of an i32 (tag 0x02 high byte), matching the runtime + codegen.
 fn i32_val(x: i32) -> i64 {
     ((0x02u64 << 56) | (x as u32 as u64)) as i64
@@ -109,4 +116,42 @@ fn arithmetic_variadic_fold() {
 #[test]
 fn arithmetic_div_and_mod() {
     run_case("div_mod", i32_val(5)); // [+ [/ 20 6] [% 20 6]] = 3 + 2
+}
+
+#[test]
+fn binding_def_and_read() {
+    run_case("bind_read", i32_val(15)); // def x 5; [+ $x 10]
+}
+
+#[test]
+fn binding_mutate_with_set() {
+    run_case("mutate", i32_val(42)); // mut c 1; set c 42; [+ $c 0]
+}
+
+#[test]
+fn binding_set_to_expression() {
+    run_case("reassign_expr", i32_val(42)); // mut c 1; set c [+ $c 41]; [+ $c 0]
+}
+
+#[test]
+fn binding_block_scope() {
+    run_case("scoped_block", i32_val(11)); // def x 1; { def y 10; [+ $x $y] }
+}
+
+#[test]
+fn binding_same_scope_shadow_is_an_error() {
+    let err = emit_expecting_error("shadow_err"); // def x 1; def x 2
+    assert!(err.contains("already defined in this scope"), "unexpected error: {err}");
+}
+
+#[test]
+fn binding_set_undefined_is_an_error() {
+    let err = emit_expecting_error("set_undef_err"); // set nope 1
+    assert!(err.contains("undefined variable"), "unexpected error: {err}");
+}
+
+#[test]
+fn binding_set_immutable_is_an_error() {
+    let err = emit_expecting_error("set_immut_err"); // def x 1; set x 2
+    assert!(err.contains("immutable"), "unexpected error: {err}");
 }

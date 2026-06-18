@@ -21,14 +21,20 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   branch arguments and are received as block params. The builder numbers values per
   block and returns each new id; the caller threads cross-block values explicitly.
 
-- `codegen.h` / `codegen.c` — **P2.2: the codegen scaffold.** `svm_codegen_program`
-  walks the JACL AST (from `src/jacl.h`) and emits an SVM-IR module via the builder,
-  with a single entry `func (i64 sp) -> (i64)` returning the last top-level form's
-  JaclVal. The scaffold lowers integer literals (→ i32 JaclVal constants) and the
-  arithmetic operators `+ - * / %` (→ runtime `jacl_add`/`sub`/`mul`/`div`/`mod` via
-  `call.import`, left-folded for >2 args), threading `sp` per the §3d ABI. Later
-  slices extend the walk (bindings, control flow, procs, closures, type-driven
-  unboxing) behind the same entry point.
+- `codegen.h` / `codegen.c` — **the codegen walk.** `svm_codegen_program` walks the
+  JACL AST (from `src/jacl.h`) and emits an SVM-IR module via the builder, with a
+  single entry `func (i64 sp) -> (i64)` returning the last top-level form's JaclVal.
+  - **P2.2 (literals + arithmetic):** integer literals (→ i32 JaclVal constants) and
+    `+ - * / %` (→ runtime `jacl_add`/`sub`/`mul`/`div`/`mod` via `call.import`,
+    left-folded for >2 args), threading `sp` per the §3d ABI.
+  - **P2.3 (bindings & scope):** a compile-time lexical environment (scope chain of
+    name→SSA-value). `def`/`mut` bind, `set` updates the most-recent binding in place
+    (errors on undefined / immutable), `$x` reads it, `{ … }` blocks open a nested
+    scope. Same-scope immutable shadowing is an error. (Single-block for now;
+    cross-block mutation/address-taken locals come with control flow in P2.4.)
+
+  Later slices extend the walk (control flow, procs, closures, type-driven unboxing)
+  behind the same entry point.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
   svm-text (selected by argv), the C side of the IR-builder round-trip test.

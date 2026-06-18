@@ -22,6 +22,15 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "submul"))   return "[- [* 4 5] 3]";
   if (!strcmp(name, "variadic")) return "[+ 1 2 3 4]";
   if (!strcmp(name, "div_mod"))  return "[+ [/ 20 6] [% 20 6]]";
+  /* P2.3 bindings & scope */
+  if (!strcmp(name, "bind_read"))    return "def x 5\n[+ $x 10]";
+  if (!strcmp(name, "mutate"))       return "mut c 1\nset c 42\n[+ $c 0]";
+  if (!strcmp(name, "reassign_expr"))return "mut c 1\nset c [+ $c 41]\n[+ $c 0]";
+  if (!strcmp(name, "scoped_block")) return "def x 1\n{ def y 10\n[+ $x $y] }";
+  /* error cases (driver exits nonzero) */
+  if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
+  if (!strcmp(name, "set_undef_err"))return "set nope 1";
+  if (!strcmp(name, "set_immut_err"))return "def x 1\nset x 2";
   return NULL;
 }
 

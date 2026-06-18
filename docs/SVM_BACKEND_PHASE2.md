@@ -100,10 +100,21 @@ separate-artifact path.
   (`print` needs a host-I/O capability — deferred to the powerbox; full old-VM diff is
   P2.10 bring-up.)
 
-### P2.3 — Bindings & scope
+### P2.3 — Bindings & scope — **DONE (sequential, single-block)**
 - `def`/`mut`/`set`, lexical scopes, block bodies. Locals as SSA values threaded
   through blocks (or data-stack slots where address-taken). Same-scope shadow
   errors preserved.
+- **Done:** `codegen.c` carries a compile-time lexical environment (a scope chain of
+  name→SSA-value bindings). `def`/`mut` introduce a binding (mut flagged mutable),
+  `set` updates the most-recent binding in place (errors on undefined / immutable),
+  `$x` var-refs read it, and `{ … }` blocks push a nested scope evaluating to their
+  last form. Same-scope immutable shadowing is rejected (matching the old compiler's
+  "already defined in this scope"). Validated in `codegen.rs`: `def`+read, `set`
+  mutation (incl. `set c [+ $c 41]`), block scope reading an outer binding, and the
+  shadow / set-undefined / set-immutable error paths.
+- **Deferred to P2.4:** mutation that must cross blocks (loop-carried `set`) needs
+  block args; address-taken locals → data-stack slots. Today everything lives in one
+  block, so a local is just its current SSA value.
 
 ### P2.4 — Control flow
 - `if`/`elif`/`else`, `while`, `for` over ranges/collections → IR blocks +
