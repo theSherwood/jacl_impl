@@ -166,6 +166,12 @@ void   jacl_gc_safepoint(void);                          /* task code: suspend i
 void   jacl_gc_worker_park_if_requested(void);           /* scheduler loop top: park the vCPU if stopping */
 long   jacl_gc_violation_count(void);                    /* STW mutual-exclusion violations (must be 0) */
 
+/* Reusable worker-pool batch scheduler (P3.4d, sched.c): run n task fibers across
+ * nworkers vCPU workers, GC-safe via the quiesce primitives above. The substrate
+ * parallel/race/await move onto. */
+typedef long (*JaclTaskFn)(long);
+void   jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers);
+
 /* Runtime-internal roots the collector must also mark (intern table, …) — JACL
  * obligation #3. Defined in string.c (extends as more runtime state lands). */
 void   jacl_mark_runtime_roots(void);

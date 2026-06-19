@@ -7,3 +7,4 @@
 #include "builtins.c"
 #include "closure.c"
 #include "fiber.c"
+#include "sched.c"

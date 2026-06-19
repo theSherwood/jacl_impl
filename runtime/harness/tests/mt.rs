@@ -9,6 +9,14 @@ fn alloc_mt() {
 }
 
 #[test]
+fn sched_batch() {
+    let r = run_test("test_sched_mt.c", 0);
+    assert_eq!(r, 888,
+        "reusable worker pool runs a task batch across vCPUs, GC-safe; results + keepers \
+         intact, no violation (diag {r})");
+}
+
+#[test]
 fn gc_sched() {
     let r = run_test("test_gc_sched.c", 0);
     assert_eq!(r, 999,
