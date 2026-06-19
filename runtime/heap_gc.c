@@ -1,15 +1,28 @@
-/* heap_gc.c — JACL runtime heap allocator + conservative non-moving GC (P1.2/P1.3).
+/* heap_gc.c — JACL runtime heap allocator + conservative non-moving GC.
  *
- * Allocator: a granule-aligned region with in-band object headers, size-class free
- * lists (perfect reuse within a class) + a bump pointer for fresh cells, and a
- * per-granule **object-start bitmap** for O(1) conservative object-start checks.
+ * Allocator (P3.4a — per-vCPU heaps): the backing region is carved into fixed-size
+ * **regions**; each worker (vCPU) owns a current region and bump-allocates within it
+ * with **no lock** (only the owner touches its bump pointer and its size-class free
+ * lists). The sole cross-worker synchronization on the allocation path is claiming a
+ * fresh region from a shared pool — one `__vm_atomic_add`, amortized once per region.
+ * The current worker is the per-vCPU TLS word (`__vm_vcpu_tls_get`, seeded by svm to
+ * a dense vCPU id), so a fiber that migrated under work-stealing allocates into the
+ * vCPU it is *currently* on. The main thread is vCPU 0, so the single-thread path is
+ * unchanged. (This replaces P1's single global bump + free lists.)
  *
  * GC: conservative, non-moving mark-sweep. Roots come from the svm `gc.roots` op
  * (__vm_gc_roots) — the words on the control stack/registers that point into the
  * heap. Heap edges are traced conservatively (each live cell's payload words are
- * scanned for candidate object-starts); precise per-type tracing is a later
- * refinement (P1.5, once object layouts are defined). Non-moving ⇒ found pointers
- * stay valid; sweep returns unmarked cells to their size-class free list.
+ * scanned for candidate object-starts). Non-moving ⇒ found pointers stay valid; the
+ * sweep returns each unmarked cell to its owning worker's size-class free list.
+ * Multi-vCPU stop-the-world quiescing is P3.4c; until then the only safe point is the
+ * single thread's allocation call, exactly as in P2.
+ *
+ * Heap iteration (live_count, mark-clear, sweep) walks the per-granule **object-start
+ * bitmap** rather than `off += size`: with per-worker regions the live cells are no
+ * longer one contiguous run (region tails and unclaimed regions are gaps), but every
+ * allocated cell still has exactly one start bit, so the bitmap is the authoritative
+ * iterator. Free cells clear their start bit, so they are skipped.
  *
  * Backing store: a large static region (no window growth yet). Swapping the chunk
  * source to __vm_map-grown window pages is a localized follow-up that needs the
@@ -26,6 +39,12 @@
  * host address can be folded into the heap window. */
 long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
+/* svm §12 atomics + §12 per-vCPU TLS register (svm-llvm lowers these). The TLS word
+ * is seeded to a dense vCPU id (root 0, children sequential) and read at the
+ * execution point, so it is the current worker's index even across fiber migration. */
+long __vm_atomic_add(void *p, long v);   /* returns the previous value */
+long __vm_vcpu_tls_get(void);
+
 #ifndef JACL_HEAP_BYTES
 #define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region (override for tests) */
 #endif
@@ -33,11 +52,30 @@ long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 #define JACL_MAX_CLASS    1024u         /* cells <= this get an exact-size free list */
 #define JACL_NCLASS       (JACL_MAX_CLASS / JACL_GRANULE)   /* 64 classes */
 
+#define JACL_REGION_BYTES (1u << 16)    /* 64 KiB per-worker allocation region */
+#define JACL_MAX_WORKERS  64            /* vCPU ids 0 .. JACL_MAX_WORKERS-1 */
+#define JACL_NREGIONS     (JACL_HEAP_BYTES / JACL_REGION_BYTES)
+#define JACL_REGION_NONE  0xFFFFFFFFu   /* "shared pool exhausted" sentinel base */
+
 static uint8_t  jacl_heap_mem[JACL_HEAP_BYTES] __attribute__((aligned(16)));
-static uint32_t jacl_bump;                       /* next fresh byte offset */
-static uint32_t jacl_freelist[JACL_NCLASS + 1];  /* head offsets per class (0 = empty/null sentinel) */
-/* object-start bitmap: 1 bit per granule */
+/* object-start bitmap: 1 bit per granule. A region spans a whole number of bitmap
+ * bytes (64 KiB / 16 / 8 = 512), so distinct workers never share a bitmap byte. */
 static uint8_t  jacl_startmap[JACL_HEAP_BYTES / JACL_GRANULE / 8];
+
+/* shared region pool: a monotonic byte cursor bumped atomically, plus the owning
+ * worker of each handed-out region (so the sweep returns a cell to its owner). */
+static long     jacl_region_bump;
+static uint8_t  jacl_region_owner[JACL_NREGIONS];
+
+/* per-worker (per-vCPU) heap: a current bump region + exact-size free lists. Only the
+ * owning worker reads/writes its own entry on the allocation fast path (lock-free);
+ * the sweep (STW, all workers quiesced) is the only other writer. */
+typedef struct {
+  uint32_t bump;                        /* next fresh byte offset in the current region */
+  uint32_t limit;                       /* end offset of the current region */
+  uint32_t freelist[JACL_NCLASS + 1];   /* per-class swept-cell stacks (0 = empty) */
+} JaclWorker;
+static JaclWorker jacl_worker[JACL_MAX_WORKERS];
 
 /* a free cell stores the next free offset in the word right after its header */
 static inline uint32_t* free_next_slot(JaclObj* o) { return (uint32_t*)((uint8_t*)o + sizeof(JaclObj)); }
@@ -49,9 +87,14 @@ static inline void startbit_clear(uint32_t off) { uint32_t g = off / JACL_GRANUL
 static inline int  startbit_test(uint32_t off)  { uint32_t g = off / JACL_GRANULE; return (jacl_startmap[g >> 3] >> (g & 7)) & 1; }
 
 void jacl_heap_init(void) {
-  jacl_bump = JACL_GRANULE;   /* leave offset 0 unused so a 0 offset reads as "null" */
-  for (uint32_t i = 0; i <= JACL_NCLASS; i++) jacl_freelist[i] = 0;
+  jacl_region_bump = 0;
+  for (int w = 0; w < JACL_MAX_WORKERS; w++) {
+    jacl_worker[w].bump = 0;
+    jacl_worker[w].limit = 0;
+    for (uint32_t i = 0; i <= JACL_NCLASS; i++) jacl_worker[w].freelist[i] = 0;
+  }
   memset(jacl_startmap, 0, sizeof(jacl_startmap));
+  memset(jacl_region_owner, 0, sizeof(jacl_region_owner));
 }
 
 /* svm-llvm rejects a *constant* ptrtoint of a global address; route the cast
@@ -60,28 +103,65 @@ __attribute__((noinline)) static long jacl_pti(void *p) { return (long)p; }
 long jacl_heap_lo(void) { return jacl_pti(&jacl_heap_mem[0]); }
 long jacl_heap_hi(void) { return jacl_pti(&jacl_heap_mem[JACL_HEAP_BYTES]); }
 
+/* Claim `bytes` (rounded up to whole regions) from the shared pool with a single
+ * atomic bump — the only cross-worker synchronization on the allocation path. Marks
+ * each claimed region as owned by `w` and returns the base offset, or
+ * JACL_REGION_NONE when the pool is exhausted. */
+static uint32_t jacl_grab_regions(int w, uint32_t bytes) {
+  uint32_t need = round_granule(bytes);
+  need = (need + (JACL_REGION_BYTES - 1)) & ~(JACL_REGION_BYTES - 1);
+  long base = __vm_atomic_add((void*)&jacl_region_bump, (long)need);
+  if (base < 0 || base + (long)need > (long)(JACL_NREGIONS * JACL_REGION_BYTES))
+    return JACL_REGION_NONE;
+  uint32_t b = (uint32_t)base;
+  for (uint32_t off = b; off < b + need; off += JACL_REGION_BYTES)
+    jacl_region_owner[off / JACL_REGION_BYTES] = (uint8_t)w;
+  return b;
+}
+
 /* noinline is load-bearing for conservative GC: if the allocator is inlined into
  * the program, the optimizer can constant-fold object addresses (a deterministic
  * bump sequence over a static heap), so "roots" become rematerialized constants
  * that are never live pointers on the stack — invisible to gc.roots. A separately
  * compiled runtime (the real backend) is opaque by construction; noinline
  * reproduces that opacity here. */
-/* Try to obtain a cell offset of `cell` bytes from the free list or the bump pointer;
- * returns 0 (the null sentinel offset) if neither has room. */
+/* Try to obtain a cell offset of `cell` bytes for the current worker — from its
+ * exact-size free list, its current region's bump, or a freshly claimed region.
+ * Returns 0 (the null sentinel offset) when the shared pool is exhausted. */
 static uint32_t jacl_alloc_off(uint32_t cell) {
+  int w = (int)__vm_vcpu_tls_get();
+  if (w < 0 || w >= JACL_MAX_WORKERS) w = 0;   /* defensive: stay on worker 0 */
+  JaclWorker* wh = &jacl_worker[w];
   uint32_t cls = cell / JACL_GRANULE;
-  if (cls <= JACL_NCLASS && jacl_freelist[cls]) {
-    uint32_t off = jacl_freelist[cls];                /* reuse a swept cell of this exact size */
+
+  /* 1. exact-size free list — reuse a swept cell (single-owner, no lock) */
+  if (cls <= JACL_NCLASS && wh->freelist[cls]) {
+    uint32_t off = wh->freelist[cls];
     JaclObj* fo = (JaclObj*)&jacl_heap_mem[off];
-    jacl_freelist[cls] = *free_next_slot(fo);
+    wh->freelist[cls] = *free_next_slot(fo);
     return off;
   }
-  if (jacl_bump + cell <= JACL_HEAP_BYTES) {
-    uint32_t off = jacl_bump;
-    jacl_bump += cell;
+  /* 2. bump within the worker's current region (lock-free fast path) */
+  if (wh->bump + cell <= wh->limit) {
+    uint32_t off = wh->bump;
+    wh->bump += cell;
     return off;
   }
-  return 0;                                           /* no room */
+  /* 3. a large cell gets its own dedicated run of regions (never a TLAB) */
+  if (cell > JACL_REGION_BYTES) {
+    uint32_t base = jacl_grab_regions(w, cell);
+    if (base == JACL_REGION_NONE) return 0;
+    /* base==0 is unreachable here: small allocations always claim region 0 first. */
+    return base;
+  }
+  /* 4. refill: claim a fresh region from the shared pool, then bump */
+  uint32_t base = jacl_grab_regions(w, JACL_REGION_BYTES);
+  if (base == JACL_REGION_NONE) return 0;
+  wh->limit = base + JACL_REGION_BYTES;
+  wh->bump  = (base == 0) ? JACL_GRANULE : base;   /* reserve offset 0 as the null sentinel */
+  uint32_t off = wh->bump;
+  wh->bump += cell;
+  return off;
 }
 
 __attribute__((noinline))
@@ -89,11 +169,10 @@ void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
   uint32_t cell = round_granule((uint32_t)sizeof(JaclObj) + payload);
   uint32_t off = jacl_alloc_off(cell);
   if (!off) {
-    /* Out of room: a stop-the-world, conservative, non-moving collection. The only
-     * fiber (Phase 2 is sequential) is at this call — a safe point — and gc.roots
-     * conservatively scans the whole control stack, so every live root (the caller's
-     * tagged JaclVals and any in-progress runtime allocations) is found without
-     * precise stack maps or a rooting protocol. Multi-fiber quiescing is Phase 3. */
+    /* Out of room: a stop-the-world, conservative, non-moving collection. The calling
+     * fiber is at this allocation — a safe point — and gc.roots conservatively scans
+     * the whole control stack, so every live root is found without precise stack maps.
+     * (Multi-vCPU quiescing of the other workers is P3.4c.) */
     jacl_gc_collect();
     off = jacl_alloc_off(cell);
     if (!off) return 0;                               /* genuine OOM after collection */
@@ -110,10 +189,18 @@ void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
 
 long jacl_live_count(void) {
   long n = 0;
-  for (uint32_t off = JACL_GRANULE; off < jacl_bump; ) {
-    JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-    if (o->obj_type != JOBJ_FREE) n++;
-    off += o->size;
+  uint32_t hi = (uint32_t)jacl_region_bump;          /* high-water of claimed regions */
+  uint32_t nbytes = (hi / JACL_GRANULE + 7) / 8;
+  for (uint32_t byte = 0; byte < nbytes; byte++) {
+    uint8_t bits = jacl_startmap[byte];
+    if (!bits) continue;
+    for (uint32_t b = 0; b < 8; b++) {
+      if (!(bits & (1u << b))) continue;
+      uint32_t off = (byte * 8 + b) * JACL_GRANULE;
+      if (off >= hi) break;
+      JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
+      if (o->obj_type != JOBJ_FREE) n++;
+    }
   }
   return n;
 }
@@ -174,11 +261,18 @@ static void mark_drain(void) {
 }
 
 long jacl_gc_collect(void) {
-  /* 1. clear marks */
-  for (uint32_t off = JACL_GRANULE; off < jacl_bump; ) {
-    JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-    o->mark = 0;
-    off += o->size;
+  uint32_t hi = (uint32_t)jacl_region_bump;
+  uint32_t nbytes = (hi / JACL_GRANULE + 7) / 8;
+  /* 1. clear marks (walk the start bitmap) */
+  for (uint32_t byte = 0; byte < nbytes; byte++) {
+    uint8_t bits = jacl_startmap[byte];
+    if (!bits) continue;
+    for (uint32_t b = 0; b < 8; b++) {
+      if (!(bits & (1u << b))) continue;
+      uint32_t off = (byte * 8 + b) * JACL_GRANULE;
+      if (off >= hi) break;
+      ((JaclObj*)&jacl_heap_mem[off])->mark = 0;
+    }
   }
   /* 2. roots from the svm gc.roots op.
    * Stack roots are tagged JaclVals (tag in the high byte: STRING<<56, VECTOR<<56,
@@ -197,19 +291,28 @@ long jacl_gc_collect(void) {
   jacl_mark_runtime_roots();
   /* 3. trace */
   mark_drain();
-  /* 4. sweep: unmarked live cells -> free list */
+  /* 4. sweep: unmarked live cells -> their owning worker's free list */
   long swept = 0;
-  for (uint32_t off = JACL_GRANULE; off < jacl_bump; ) {
-    JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-    uint32_t next = off + o->size;
-    if (o->obj_type != JOBJ_FREE && !o->mark) {
-      uint32_t cls = o->size / JACL_GRANULE;
-      o->obj_type = JOBJ_FREE;
-      startbit_clear(off);
-      if (cls <= JACL_NCLASS) { *free_next_slot(o) = jacl_freelist[cls]; jacl_freelist[cls] = off; }
-      swept++;
+  for (uint32_t byte = 0; byte < nbytes; byte++) {
+    uint8_t bits = jacl_startmap[byte];
+    if (!bits) continue;
+    for (uint32_t b = 0; b < 8; b++) {
+      if (!(bits & (1u << b))) continue;
+      uint32_t off = (byte * 8 + b) * JACL_GRANULE;
+      if (off >= hi) break;
+      JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
+      if (o->obj_type != JOBJ_FREE && !o->mark) {
+        uint32_t cls = o->size / JACL_GRANULE;
+        int owner = jacl_region_owner[off / JACL_REGION_BYTES];
+        o->obj_type = JOBJ_FREE;
+        startbit_clear(off);
+        if (cls <= JACL_NCLASS) {
+          *free_next_slot(o) = jacl_worker[owner].freelist[cls];
+          jacl_worker[owner].freelist[cls] = off;
+        }
+        swept++;
+      }
     }
-    off = next;
   }
   return swept;
 }
