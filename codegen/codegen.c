@@ -60,6 +60,7 @@ typedef struct {
   uint32_t    len;
   IrFunc     *func;
   int         arity;
+  int         is_generator; /* body contains `yield` → a fiber generator (sp, arg) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
 } Proc;
 
@@ -418,6 +419,7 @@ static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNod
  * (`[proc {x} …]`); both flatten to type/name tokens (types skipped). */
 static int closure_param_names(AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
   AstNode *toks[CG_MAX_PARAMS * 2 + 4]; int nt = 0;
+  if (!pnode) return 0; /* a parameterless closure (e.g. a spawn block) */
   if (in_block) {
     if (pnode->type != AST_BLOCK) return 0;
     for (uint32_t i = 0; i < pnode->data.block.count; i++) {
@@ -654,6 +656,54 @@ static IrVal compile_while(Cx *cx, AstNode *node) {
  * The leading control byte can't appear in a `$ident` var-ref, so it never collides. */
 #define FOR_END_SENTINEL "\x01""for-end"
 #define FOR_END_SENTINEL_LEN 8
+#define FOR_GEN_SENTINEL "\x01""for-gen"
+#define FOR_GEN_SENTINEL_LEN 8
+
+/* [for GEN_CALL name { body }] — drive a generator (a fiber): resume it each iteration,
+ * bind `name` to the yielded value, stop when it returns (done). */
+static IrVal compile_for_generator(Cx *cx, AstNode *gen_call, const char *name, uint32_t nlen, AstNode *body) {
+  scope_enter(cx);
+  IrVal gen = compile_expr(cx, gen_call); /* jacl_gen_new(...) — the generator object */
+  if (cx->failed) { scope_exit(cx); return 0; }
+  env_define(cx, FOR_GEN_SENTINEL, FOR_GEN_SENTINEL_LEN, gen, /*is_mut=*/0, /*is_cell=*/0);
+  env_define(cx, name, nlen, gen, /*is_mut=*/1, /*is_cell=*/0); /* loop var, set each iter */
+  if (cx->failed) { scope_exit(cx); return 0; }
+  if (!frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  /* header: v = gen_next(g); name = v; if gen_done(g) -> exit else body */
+  enter_frame_block(cx, header);
+  {
+    Binding *bg = env_lookup(cx, FOR_GEN_SENTINEL, FOR_GEN_SENTINEL_LEN);
+    IrVal na[] = {cx->sp, bg->value};
+    IrVal v = emit_rt_call(cx, "jacl_gen_next", na, 2);
+    env_lookup(cx, name, nlen)->value = v;
+    IrVal da[] = {cx->sp, bg->value};
+    IrVal d = emit_rt_call(cx, "jacl_gen_done", da, 2);
+    IrVal truth = emit_truthy(cx, d);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, truth, exit_blk, frame, w, body_blk, frame, w);
+  }
+
+  /* body: run with $name bound, loop back */
+  enter_frame_block(cx, body_blk);
+  (void)compile_expr(cx, body);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  enter_frame_block(cx, exit_blk);
+  scope_exit(cx);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
 
 /* [for NAME in RANGE { body }] over an integer range, desugared onto the loop
  * machinery: `i = start; while i < end { body; i = i + 1 }`. The induction var (bound
@@ -714,6 +764,17 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
 static IrVal compile_for(Cx *cx, AstNode *node) {
   uint32_t argc = node->data.command.arg_count;
   AstNode **args = node->data.command.args;
+  /* Canonical `for COLLECTION name { body }` over a generator (collection is a call to
+   * a generator proc). Other canonical collections are reconciled in Phase 4. */
+  if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK &&
+      args[0]->type == AST_COMMAND && args[0]->data.command.head &&
+      args[0]->data.command.head->type == AST_LIT_STRING) {
+    Proc *p = proc_lookup(cx, args[0]->data.command.head->data.lit_string.value,
+                          args[0]->data.command.head->data.lit_string.length);
+    if (p && p->is_generator)
+      return compile_for_generator(cx, args[0], args[1]->data.lit_string.value,
+                                   args[1]->data.lit_string.length, args[2]);
+  }
   if (argc >= 4 && args[0]->type == AST_LIT_STRING && kw_is(args[1], "in", 2)) {
     const char *name = args[0]->data.lit_string.value;
     uint32_t nlen = args[0]->data.lit_string.length;
@@ -799,6 +860,68 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
 
+      /* `yield V` — suspend the current fiber, yielding V; result is the resume arg. */
+      if (hid == HEAD_YIELD) {
+        IrVal v = (node->data.command.arg_count >= 1)
+                      ? compile_expr(cx, node->data.command.args[0])
+                      : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        if (cx->failed) return 0;
+        return irb_suspend(cx->f, cx->cur, v);
+      }
+
+      /* `spawn { block }` — the block is a 0-param closure (capturing free vars) run on
+       * a task fiber; returns a future. */
+      if (hid == HEAD_SPAWN) {
+        if (node->data.command.arg_count != 1 || node->data.command.args[0]->type != AST_BLOCK) {
+          cx_fail(cx, "spawn needs a single { block }"); return 0;
+        }
+        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, clos};
+        return emit_rt_call(cx, "jacl_spawn", a, 2);
+      }
+      /* `await $f` — drive the future to completion, yielding its value. */
+      if (hid == HEAD_AWAIT) {
+        if (node->data.command.arg_count != 1) { cx_fail(cx, "await needs one argument"); return 0; }
+        IrVal f = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, f};
+        return emit_rt_call(cx, "jacl_await", a, 2);
+      }
+      /* `parallel { } { } …` — run each block (a 0-param closure) on the worker pool,
+       * returning a vector of their results in order. Real parallelism across vCPUs. */
+      if (hid == HEAD_PARALLEL) {
+        uint32_t n = node->data.command.arg_count;
+        IrVal ve[] = {cx->sp};
+        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
+        for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
+          if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "parallel takes { blocks }"); return 0; }
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal pa[] = {cx->sp, vec, clos};
+          vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+        }
+        IrVal pa[] = {cx->sp, vec};
+        return emit_rt_call(cx, "jacl_parallel", pa, 2);
+      }
+      /* `race { } { } …` — run each block on the pool; return the first block's result
+       * (deterministic; cancellation of the losers is a follow-on). */
+      if (hid == HEAD_RACE) {
+        uint32_t n = node->data.command.arg_count;
+        if (n == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        IrVal ve[] = {cx->sp};
+        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
+        for (uint32_t i = 0; i < n; i++) {
+          if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "race takes { blocks }"); return 0; }
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal pa[] = {cx->sp, vec, clos};
+          vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+        }
+        IrVal pa[] = {cx->sp, vec};
+        return emit_rt_call(cx, "jacl_race", pa, 2);
+      }
+
       /* Closure literals. Lambda `[\ {params} {body}]`: head is the bare word "\",
        * params in a BLOCK. Anonymous proc `[proc {params} {body}]`: an empty name. */
       {
@@ -840,6 +963,29 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
         IrType r1[] = {IRB_I64};
         return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+      }
+
+      /* Positional destructuring `def [a b …] V` — bind each name to V[i]. */
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_COMMAND) {
+        AstNode *tgt = node->data.command.args[0];
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        AstNode *toks[CG_MAX_PARAMS]; int nt = 0;
+        if (tgt->data.command.head && nt < CG_MAX_PARAMS) toks[nt++] = tgt->data.command.head;
+        for (uint32_t i = 0; i < tgt->data.command.arg_count && nt < CG_MAX_PARAMS; i++)
+          toks[nt++] = tgt->data.command.args[i];
+        for (int i = 0; i < nt; i++) {
+          if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "destructuring name must be a bare word"); return 0; }
+          IrType sig[] = {IRB_I64, IRB_I64, IRB_I32};
+          IrType r1[] = {IRB_I64};
+          IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+          IrVal idx = irb_const_i32(cx->f, cx->cur, i);
+          IrVal ga[] = {cx->sp, v, idx};
+          IrVal elem = irb_call_import(cx->f, cx->cur, "jacl_vec_get", sig, 3, r1, 1, h, ga, 3);
+          env_define(cx, toks[i]->data.lit_string.value, toks[i]->data.lit_string.length, elem, /*is_mut=*/0, /*is_cell=*/0);
+        }
+        return v;
       }
 
       if (hid == HEAD_DEF || hid == HEAD_MUT) {
@@ -928,6 +1074,17 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
                      head->data.lit_string.value, head->data.lit_string.length);
             return 0;
+          }
+          /* A generator proc-call constructs a generator object (a fiber over the
+           * function), not a direct call: jacl_gen_new(ref.func, arg). */
+          if (p->is_generator) {
+            IrVal fnref = irb_ref_func(cx->f, cx->cur, p->func);
+            IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+            IrVal arg = (argc >= 1) ? compile_expr(cx, node->data.command.args[0])
+                                    : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+            if (cx->failed) return 0;
+            IrVal a[] = {cx->sp, fnref64, arg};
+            return emit_rt_call(cx, "jacl_gen_new", a, 3);
           }
           IrVal args[1 + CG_MAX_PARAMS];
           args[0] = cx->sp; /* data-SP ABI: thread sp as the leading argument */
@@ -1048,6 +1205,30 @@ static void compile_tail(Cx *cx, AstNode *node) {
   if (!cx->failed) emit_return_value(cx, v);
 }
 
+/* Does `node` contain a `yield` (making its proc a generator)? Does not descend into
+ * nested procs/closures — their yields make *them* generators. */
+static int contains_yield(AstNode *node) {
+  if (!node) return 0;
+  if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    if (hid == HEAD_YIELD) return 1;
+    if (hid == HEAD_PROC) return 0;
+    AstNode *h = node->data.command.head;
+    if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 && h->data.lit_string.value[0] == '\\') return 0;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++)
+      if (contains_yield(node->data.command.args[i])) return 1;
+    return 0;
+  }
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++)
+      if (contains_yield(node->data.block.commands[i])) return 1;
+    return 0;
+  }
+  if (node->type == AST_RETURN)
+    return node->data.return_stmt.value ? contains_yield(node->data.return_stmt.value) : 0;
+  return 0;
+}
+
 static int is_proc_def(AstNode *n) {
   return n->type == AST_COMMAND && n->data.command.head_id == HEAD_PROC;
 }
@@ -1074,16 +1255,22 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     int arity = extract_param_names(cx, def->data.command.args[1], names, lens);
     if (arity < 0) return;
 
+    /* A generator (body has `yield`) is a fiber function `(i64 sp, i64 arg) -> i64`:
+     * the single declared param binds to the resume arg. Otherwise a plain proc
+     * `(i64 sp, i64 a0…)`. */
+    int gen = contains_yield(def->data.command.args[argc - 1]);
+    if (gen && arity > 1) { cx_failf(cx, "codegen: generator '%.*s' may take at most one parameter (yet)", pname, plen); return; }
+    int nparams = gen ? 1 : arity;
     ptypes[0] = IRB_I64; /* sp */
-    for (int k = 0; k < arity; k++) ptypes[k + 1] = IRB_I64;
-    IrFunc *func = irb_func_new(m, ptypes, arity + 1, r1, 1);
+    for (int k = 0; k < nparams; k++) ptypes[k + 1] = IRB_I64;
+    IrFunc *func = irb_func_new(m, ptypes, nparams + 1, r1, 1);
 
     if (cx->nprocs == cx->cap_procs) {
       cx->cap_procs = cx->cap_procs ? cx->cap_procs * 2 : 8;
       cx->procs = realloc(cx->procs, (size_t)cx->cap_procs * sizeof(Proc));
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
-    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, def};
+    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, gen, def};
   }
 }
 
@@ -1102,17 +1289,21 @@ static void compile_procs(Cx *cx) {
     int arity = extract_param_names(cx, def->data.command.args[1], names, lens);
     if (arity < 0) return;
 
+    /* A generator function is (sp, arg); its single declared param binds to arg. */
+    int nparams = p->is_generator ? 1 : arity;
     IrType ptypes[1 + CG_MAX_PARAMS];
-    for (int k = 0; k <= arity; k++) ptypes[k] = IRB_I64;
+    for (int k = 0; k <= nparams; k++) ptypes[k] = IRB_I64;
     cx->f = p->func;
-    cx->cur = irb_block(p->func, ptypes, arity + 1);
+    cx->cur = irb_block(p->func, ptypes, nparams + 1);
     cx->sp = 0; /* param 0 */
     env_reset(cx);
     capset_reset(cx); capset_scan(cx, body); /* which muts a nested closure captures */
     scope_enter(cx);
-    for (int k = 0; k < arity; k++) env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+    /* params bind to fn params 1..; for a generator (arity<=1) the param is the arg */
+    for (int k = 0; k < arity; k++)
+      env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
 
-    compile_tail(cx, body); /* emits the proc's return / return_call */
+    compile_tail(cx, body); /* emits the proc's return / return_call (done) */
     scope_exit(cx);
     if (cx->failed) return;
   }

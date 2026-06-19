@@ -124,6 +124,27 @@ static const char *source_for(const char *name) {
     return "proc add {a, b} {+ $a $b}\nproc dbl {n} {* $n 2}\n[dbl [add 19 2]]";
   if (!strcmp(name, "bring_recur_sum")) /* sum 1..n recursively */
     return "proc sumto {n} {[if [<= $n 0] { 0 } { [+ $n [sumto [- $n 1]]] }]}\n[sumto 10]";
+  /* P3.1 generators (yield) on fibers, driven by canonical for-over-generator */
+  if (!strcmp(name, "gen_count"))
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [upto 5] x { set s [+ $s $x] }]\n[+ $s 0]";
+  if (!strcmp(name, "gen_squares"))
+    return "proc sq {n} { mut i 1\n[while [<= $i $n] { yield [* $i $i]\nset i [+ $i 1] }] }\nmut s 0\n[for [sq 4] x { set s [+ $s $x] }]\n[+ $s 0]";
+  /* P3.2 spawn / await (futures over fibers) */
+  if (!strcmp(name, "spawn_await"))
+    return "def f [spawn { [+ 40 2] }]\n[await $f]";
+  if (!strcmp(name, "spawn_capture"))
+    return "def y 30\ndef f [spawn { [+ $y 12] }]\n[await $f]";
+  if (!strcmp(name, "spawn_two"))
+    return "def a [spawn { [* 6 7] }]\ndef b [spawn { [+ 1 2] }]\n[+ [await $a] [await $b]]";
+  if (!strcmp(name, "spawn_await_twice")) /* future resolves once, cached */
+    return "def f [spawn { [+ 20 1] }]\n[+ [await $f] [await $f]]";
+  /* P3.3 parallel / race */
+  if (!strcmp(name, "parallel"))
+    return "def [a b] [parallel { [* 6 7] } { [+ 1 2] }]\n[+ $a $b]";
+  if (!strcmp(name, "parallel3"))
+    return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
+  if (!strcmp(name, "race"))
+    return "[race { [+ 40 2] } { [+ 100 100] }]";
   return NULL;
 }
 

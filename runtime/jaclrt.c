@@ -6,3 +6,6 @@
 #include "stream.c"
 #include "builtins.c"
 #include "closure.c"
+#include "fiber.c"
+#include "sched.c"
+#include "io.c"

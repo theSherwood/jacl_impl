@@ -149,7 +149,34 @@ long   jacl_live_count(void);                             /* #live (non-free) ce
 long   jacl_heap_lo(void);                                /* window-offset bounds, for gc.roots */
 long   jacl_heap_hi(void);
 void   jacl_gc_mark(JaclVal v);                           /* mark a heap value as reachable (for runtime roots) */
+void   jacl_gc_mark_word(long w);                         /* conservatively mark a tagged-or-raw heap word */
 static inline void*    jacl_obj_payload(JaclObj* o) { return (void*)((uint8_t*)o + sizeof(JaclObj)); }
+
+/* Multi-vCPU stop-the-world quiesce over the fiber scheduler (P3.4c). A worker (vCPU)
+ * registers before it allocates and unregisters before it blocks off a safepoint or
+ * exits. The scheduler brackets each task resume with task_begin/end and calls
+ * worker_park_if_requested at its loop top; a task safepoint (jacl_alloc + loop
+ * back-edges) suspends the task to the scheduler so its roots are scannable. Any worker
+ * in jacl_gc_collect becomes the collector, stops the others, scans, and resumes. The
+ * main thread is worker 0, registered by jacl_heap_init. */
+void   jacl_gc_worker_register(void);
+void   jacl_gc_worker_unregister(void);
+void   jacl_gc_task_begin(void);                         /* scheduler: a task fiber is now running */
+void   jacl_gc_task_end(void);                           /* scheduler: the task suspended/returned */
+void   jacl_gc_safepoint(void);                          /* task code: suspend if a collection is in progress */
+void   jacl_gc_worker_park_if_requested(void);           /* scheduler loop top: park the vCPU if stopping */
+long   jacl_gc_violation_count(void);                    /* STW mutual-exclusion violations (must be 0) */
+
+/* Reusable worker-pool batch scheduler (P3.4d, sched.c): run n task fibers across
+ * nworkers vCPU workers, GC-safe via the quiesce primitives above. The substrate
+ * parallel/race/await move onto. */
+typedef long (*JaclTaskFn)(long);
+void   jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers);
+JaclVal jacl_parallel(JaclVal closures);   /* run each 0-arg closure on the pool → vector of results */
+JaclVal jacl_race(JaclVal closures);       /* run each on the pool → first block's result */
+JaclVal jacl_spawn(JaclVal closure);       /* record a pending task; returns a future */
+JaclVal jacl_await(JaclVal future);        /* flush pending tasks onto the pool; return this one's result */
+void   jacl_sched_mark_roots(void);        /* GC: root pending futures during a flush (STW hook) */
 
 /* Runtime-internal roots the collector must also mark (intern table, …) — JACL
  * obligation #3. Defined in string.c (extends as more runtime state lands). */
@@ -158,6 +185,9 @@ void   jacl_mark_runtime_roots(void);
 /* ===================================================================
  * Strings (P1.4) — inline / heap / interned. Defined in string.c.
  * =================================================================== */
+/* Host I/O (P3.5, io.c) — through the svm powerbox Stream capability. */
+JaclVal  jacl_print(JaclVal v);                           /* write V's text + newline to stdout; -> nil */
+
 void     jacl_intern_init(void);                          /* reset the intern table */
 JaclVal  jacl_str_new(const char *s, uint32_t len);       /* inline if <=7, else a fresh heap string */
 JaclVal  jacl_str_intern(const char *s, uint32_t len);    /* canonical (pointer-equal) string */
@@ -238,5 +268,14 @@ JaclVal jacl_closure_upval(JaclVal c, JaclVal i);
 JaclVal jacl_cell_new(JaclVal v);
 JaclVal jacl_cell_get(JaclVal c);
 JaclVal jacl_cell_set(JaclVal c, JaclVal v);
+
+/* P3.1 generators on fibers (see fiber.c). fnref is a raw funcref (from ref.func). */
+JaclVal jacl_gen_new(JaclVal fnref, JaclVal arg);
+JaclVal jacl_gen_next(JaclVal gen);
+JaclVal jacl_gen_done(JaclVal gen);
+
+/* P3.2 spawn/await: a future is a task fiber driven to completion by await. */
+JaclVal jacl_spawn(JaclVal closure);
+JaclVal jacl_await(JaclVal future);
 
 #endif /* JACLRT_H */
