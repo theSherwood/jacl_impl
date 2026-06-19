@@ -17,6 +17,13 @@ fn sched_batch() {
 }
 
 #[test]
+fn batch_heap() {
+    let r = run_test("test_batch_heap.c", 0);
+    assert_eq!(r, 808,
+        "batch scheduler roots in-flight heap args + heap results across a collection (diag {r})");
+}
+
+#[test]
 fn gc_sched() {
     let r = run_test("test_gc_sched.c", 0);
     assert_eq!(r, 999,

@@ -347,6 +347,15 @@ void jacl_gc_mark(JaclVal v) {
   if (jaclrt_is_heap(v)) mark_push_word((long)(v & JACL_PAYLOAD_MASK));
 }
 
+/* Public: conservatively mark a raw word that may be a tagged JaclVal OR a bare heap
+ * pointer (tag byte 0). Used by the scheduler's batch buffers, which hold either (a tagged
+ * closure / heap result, or a raw JaclObj* arg). Tries both interpretations; non-heap
+ * words fall outside the heap range and are ignored, exactly like a conservative root. */
+void jacl_gc_mark_word(long w) {
+  mark_push_word(w & (long)JACL_PAYLOAD_MASK);
+  mark_push_word(w);
+}
+
 static void mark_drain(void) {
   while (mark_sp) {
     uint32_t off = mark_stack[--mark_sp];

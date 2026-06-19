@@ -23,14 +23,19 @@ long __vm_vcpu_tls_get(void);
 
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
+#define JACL_BATCH_MAX         64
 
-/* the current batch (set up by jacl_sched_run_batch before the workers start) */
-static JaclTaskFn *jacl_batch_fn;
-static long       *jacl_batch_arg;
-static long       *jacl_batch_result;
-static long        jacl_batch_n;
-static long        jacl_batch_next;   /* atomic: next task index to claim */
-static char        jacl_worker_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
+/* the current batch — in guest-global buffers (not caller-stack arrays) so the collector
+ * can root the in-flight args (task closures) and completed results during a mid-batch
+ * collection: the main thread is parked in thread_join with its stack unscanned, a task's
+ * arg is only on its own fiber once it starts, and a heap result is unrooted between the
+ * task returning and the caller consuming it. jacl_sched_mark_roots scans these. */
+static JaclTaskFn jacl_batch_fn[JACL_BATCH_MAX];
+static long       jacl_batch_arg[JACL_BATCH_MAX];
+static long       jacl_batch_result[JACL_BATCH_MAX];
+static long       jacl_batch_n;
+static long       jacl_batch_next;   /* atomic: next task index to claim */
+static char       jacl_worker_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
 
 /* A worker vCPU: claim tasks until the batch is drained, running each as a task fiber to
  * completion. The scheduler-loop safepoint (park_if_requested) quiesces this root-free
@@ -64,31 +69,34 @@ static long jacl_sched_worker(long arg) {
 
 /* Run `n` tasks (`fn[i](arg[i]) -> result[i]`) across `nworkers` vCPU workers, returning
  * once every task has completed. GC-safe: a collection triggered by any task quiesces the
- * whole pool. The caller (main) leaves the quiesce set while it blocks in join, then
- * rejoins — it cannot answer a stop while parked in thread_join. */
+ * whole pool, and the in-flight args + completed results are rooted via the global batch
+ * buffers (jacl_sched_mark_roots). The caller (main) leaves the quiesce set while it blocks
+ * in join, then rejoins — it cannot answer a stop while parked in thread_join. */
 void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers) {
   if (nworkers < 1) nworkers = 1;
   if (nworkers > JACL_SCHED_MAX_WORKERS) nworkers = JACL_SCHED_MAX_WORKERS;
-  jacl_batch_fn = fn;
-  jacl_batch_arg = arg;
-  jacl_batch_result = result;
-  jacl_batch_n = n;
+  if (n > JACL_BATCH_MAX) n = JACL_BATCH_MAX;
+  for (long i = 0; i < n; i++) { jacl_batch_fn[i] = fn[i]; jacl_batch_arg[i] = arg[i]; jacl_batch_result[i] = 0; }
   jacl_batch_next = 0;
+  jacl_batch_n = n;            /* publish last: mark_roots scans [0, jacl_batch_n) */
 
   jacl_gc_worker_unregister();   /* main only orchestrates; not a mutator while joining */
   int h[JACL_SCHED_MAX_WORKERS];
   for (int k = 0; k < nworkers; k++) h[k] = __vm_thread_spawn(jacl_sched_worker, (void *)0, 0);
   for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
   jacl_gc_worker_register();     /* main rejoins the set for any later single-thread GC */
+
+  for (long i = 0; i < n; i++) result[i] = jacl_batch_result[i];
+  jacl_batch_n = 0;            /* batch over: stop rooting its buffers */
 }
 
 /* ---- parallel / race on the real worker pool (P3.4d) ----
  *
  * A block is a 0-param closure (capturing its free vars); its task runs the closure's
  * function on a task fiber with the closure passed as `self` (the resume arg), exactly as
- * the cooperative jacl_spawn does — only now across real vCPU workers. Results are i32 in
- * the current corpus (inline values, no heap roots in the result array); heap-valued
- * results that must survive a mid-batch collection are a follow-on (root them per task).
+ * the cooperative jacl_spawn does — only now across real vCPU workers. The closures (batch
+ * args) and any heap-valued results survive a mid-batch collection: run_batch keeps them in
+ * the global batch buffers, which jacl_sched_mark_roots scans during STW.
  *
  * NB: each batch spawns fresh vCPU workers and joins them, and svm vCPU ids are not
  * reused, so a program with very many parallel/race constructs would grow ids past the
@@ -150,13 +158,18 @@ JaclVal jacl_race(JaclVal closures) {
 static JaclObj *jacl_pending[JACL_PENDING_MAX];   /* futures awaiting their first flush */
 static long     jacl_npending;
 
-/* Root the pending futures during a collection: while a flush is running, the main thread
- * is parked in thread_join (its stack unscanned) and the pending list is plain globals, so
- * without this the futures (and the closures they hold) could be collected mid-flush. The
- * collector calls this during STW (see jacl_gc_collect_stw). */
+/* Root the in-flight scheduler state during a collection: the pending spawn futures, and
+ * the current batch's args (task closures) + completed results. While a batch/flush runs,
+ * the main thread is parked in thread_join (its stack unscanned) and these live in plain
+ * globals, so without this a task closure or a heap result could be collected mid-batch.
+ * The collector calls this during STW (see jacl_gc_collect_stw). */
 void jacl_sched_mark_roots(void) {
   for (long i = 0; i < jacl_npending; i++)
     jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_pending[i]));
+  for (long i = 0; i < jacl_batch_n; i++) {
+    jacl_gc_mark_word(jacl_batch_arg[i]);     /* task closures / raw arg ptrs (non-heap ignored) */
+    jacl_gc_mark_word(jacl_batch_result[i]);  /* completed results, tagged or raw (i32 ignored) */
+  }
 }
 
 JaclVal jacl_spawn(JaclVal closure) {

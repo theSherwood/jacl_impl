@@ -149,6 +149,7 @@ long   jacl_live_count(void);                             /* #live (non-free) ce
 long   jacl_heap_lo(void);                                /* window-offset bounds, for gc.roots */
 long   jacl_heap_hi(void);
 void   jacl_gc_mark(JaclVal v);                           /* mark a heap value as reachable (for runtime roots) */
+void   jacl_gc_mark_word(long w);                         /* conservatively mark a tagged-or-raw heap word */
 static inline void*    jacl_obj_payload(JaclObj* o) { return (void*)((uint8_t*)o + sizeof(JaclObj)); }
 
 /* Multi-vCPU stop-the-world quiesce over the fiber scheduler (P3.4c). A worker (vCPU)
