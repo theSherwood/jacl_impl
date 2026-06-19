@@ -97,15 +97,35 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **PENDING (needs a thread-safe runtime)**
+### P3.4 — Re-platform the M:N scheduler — **IN PROGRESS (per-vCPU heaps)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
-- **Status / blocker:** the concurrency *semantics* are already correct via the
-  cooperative single-thread scheduler (P3.2/P3.3). Real parallelism requires making the
-  runtime **thread-safe** first — a locked/per-thread allocator and a multi-vCPU STW GC
-  (the quiesce of P3.6) — before tasks can run on `thread.spawn` workers. That substrate
-  is a substantial, carefully-tested effort (concurrent allocation + STW across vCPUs);
-  it is the largest remaining piece of Phase 3 and is tracked as dedicated follow-up.
+
+**Allocator + GC design (decided).** Real parallelism needs a thread-safe runtime. We
+adopt JACL's existing approach — **per-worker (per-vCPU) heaps with a lock-free bump
+fast path** — adapted to SVM's simpler collector. *Not* a per-allocation lock.
+
+- **Per-vCPU heaps, lock-free fast path.** Each worker owns its own heap region and
+  bump-allocates within it with no lock (the way `gc__bump_alloc` does today — "no lock
+  needed"). The only coordination is refilling a worker's region from a shared free-region
+  pool when it fills — amortized once per region (~tens of KB), a coarse mutex (or a
+  lock-free Treiber free-list later). Per-worker free lists for swept cells, same idea.
+- **No C thread-locals.** svm-llvm has no TLS and exposes no "current-vCPU-id"
+  intrinsic, so a worker is given a small **worker id** as its `__vm_thread_spawn`
+  startup argument and indexes `per_worker[id]`. The id threads through explicitly (fits
+  the data-SP ABI); the main thread is worker 0, preserving the single-thread path.
+- **GC: cooperative STW, conservative, non-moving (extends P2.9/P3.6).** Workers reach a
+  safe point at allocation; a collection **quiesces all worker threads** via a guest
+  futex barrier (reference: svm's `gc_quiesce.rs`; no new svm primitive — "quiescing the
+  N threads quiesces the M fibers"), then conservative `gc.roots` scans every thread's
+  and fiber's stack (svm already does), sweeps each per-worker heap, and resumes. No
+  generations / write barriers / concurrent marking — far simpler than the old VM.
+
+**Sub-steps.** P3.4a — refactor the runtime allocator to per-worker heaps (worker-id
+indexed; lock-free bump; shared region pool), preserving the single-worker path. P3.4b —
+real `__vm_thread_spawn` workers that allocate concurrently (validate no corruption).
+P3.4c — the multi-vCPU STW quiesce barrier in `jacl_gc_collect`. P3.4d — run `parallel`
+on worker threads + work-stealing deques + fiber parking on `await`.
 
 ### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
