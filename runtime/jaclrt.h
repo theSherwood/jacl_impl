@@ -171,6 +171,8 @@ long   jacl_gc_violation_count(void);                    /* STW mutual-exclusion
  * parallel/race/await move onto. */
 typedef long (*JaclTaskFn)(long);
 void   jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers);
+JaclVal jacl_parallel(JaclVal closures);   /* run each 0-arg closure on the pool → vector of results */
+JaclVal jacl_race(JaclVal closures);       /* run each on the pool → first block's result */
 
 /* Runtime-internal roots the collector must also mark (intern table, …) — JACL
  * obligation #3. Defined in string.c (extends as more runtime state lands). */

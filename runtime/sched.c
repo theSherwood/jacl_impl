@@ -81,3 +81,56 @@ void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int n
   for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
   jacl_gc_worker_register();     /* main rejoins the set for any later single-thread GC */
 }
+
+/* ---- parallel / race on the real worker pool (P3.4d) ----
+ *
+ * A block is a 0-param closure (capturing its free vars); its task runs the closure's
+ * function on a task fiber with the closure passed as `self` (the resume arg), exactly as
+ * the cooperative jacl_spawn does — only now across real vCPU workers. Results are i32 in
+ * the current corpus (inline values, no heap roots in the result array); heap-valued
+ * results that must survive a mid-batch collection are a follow-on (root them per task).
+ *
+ * NB: each batch spawns fresh vCPU workers and joins them, and svm vCPU ids are not
+ * reused, so a program with very many parallel/race constructs would grow ids past the
+ * per-vCPU arrays. The corpus uses a bounded few; a persistent reused worker pool (which
+ * also carries spawn/await + nested-await parking) is the next P3.4d step. */
+#define JACL_PAR_MAX 32
+
+static int jacl_par_workers(long n) {
+  long nw = n < 4 ? n : 4;        /* don't spawn more workers than tasks; cap at 4 */
+  if (nw < 1) nw = 1;
+  return (int)nw;
+}
+
+JaclVal jacl_parallel(JaclVal closures) {
+  long n = (long)jacl_vec_count(closures);
+  if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
+  JaclTaskFn fn[JACL_PAR_MAX];
+  long arg[JACL_PAR_MAX], res[JACL_PAR_MAX];
+  for (long i = 0; i < n; i++) {
+    JaclVal c = jacl_vec_get(closures, (uint32_t)i);
+    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);   /* the block's function */
+    arg[i] = (long)c;                                             /* the closure, passed as self */
+    res[i] = 0;
+  }
+  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
+  JaclVal out = jacl_vec_empty();
+  for (long i = 0; i < n; i++) out = jacl_vec_push(out, (JaclVal)res[i]);
+  return out;
+}
+
+JaclVal jacl_race(JaclVal closures) {
+  long n = (long)jacl_vec_count(closures);
+  if (n <= 0) return JACL_NIL;
+  if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
+  JaclTaskFn fn[JACL_PAR_MAX];
+  long arg[JACL_PAR_MAX], res[JACL_PAR_MAX];
+  for (long i = 0; i < n; i++) {
+    JaclVal c = jacl_vec_get(closures, (uint32_t)i);
+    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);
+    arg[i] = (long)c;
+    res[i] = 0;
+  }
+  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
+  return (JaclVal)res[0];   /* block 0's result (deterministic; cancellation is a follow-on) */
+}

@@ -888,43 +888,38 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal a[] = {cx->sp, f};
         return emit_rt_call(cx, "jacl_await", a, 2);
       }
-      /* `parallel { } { } …` — spawn each block, await all, collect into a vector. */
+      /* `parallel { } { } …` — run each block (a 0-param closure) on the worker pool,
+       * returning a vector of their results in order. Real parallelism across vCPUs. */
       if (hid == HEAD_PARALLEL) {
         uint32_t n = node->data.command.arg_count;
-        IrVal futs[CG_MAX_PARAMS];
+        IrVal ve[] = {cx->sp};
+        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "parallel takes { blocks }"); return 0; }
           IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
           if (cx->failed) return 0;
-          IrVal sa[] = {cx->sp, clos};
-          futs[i] = emit_rt_call(cx, "jacl_spawn", sa, 2);
-        }
-        IrVal ve[] = {cx->sp};
-        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
-        for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
-          IrVal aa[] = {cx->sp, futs[i]};
-          IrVal v = emit_rt_call(cx, "jacl_await", aa, 2);
-          IrVal pa[] = {cx->sp, vec, v};
+          IrVal pa[] = {cx->sp, vec, clos};
           vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
         }
-        return vec;
+        IrVal pa[] = {cx->sp, vec};
+        return emit_rt_call(cx, "jacl_parallel", pa, 2);
       }
-      /* `race { } { } …` — spawn each, return the first to complete (cooperative MVP:
-       * leaf tasks complete in order, so the first block wins). */
+      /* `race { } { } …` — run each block on the pool; return the first block's result
+       * (deterministic; cancellation of the losers is a follow-on). */
       if (hid == HEAD_RACE) {
         uint32_t n = node->data.command.arg_count;
         if (n == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
-        IrVal first = 0;
+        IrVal ve[] = {cx->sp};
+        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "race takes { blocks }"); return 0; }
           IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
           if (cx->failed) return 0;
-          IrVal sa[] = {cx->sp, clos};
-          IrVal f = emit_rt_call(cx, "jacl_spawn", sa, 2);
-          if (i == 0) first = f;
+          IrVal pa[] = {cx->sp, vec, clos};
+          vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
         }
-        IrVal aa[] = {cx->sp, first};
-        return emit_rt_call(cx, "jacl_await", aa, 2);
+        IrVal pa[] = {cx->sp, vec};
+        return emit_rt_call(cx, "jacl_race", pa, 2);
       }
 
       /* Closure literals. Lambda `[\ {params} {body}]`: head is the bare word "\",
