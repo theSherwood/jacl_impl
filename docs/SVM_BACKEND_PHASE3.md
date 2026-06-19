@@ -97,9 +97,21 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **IN PROGRESS (per-vCPU heaps)**
+### P3.4 — Re-platform the M:N scheduler — **PAUSED (blocked on svm self-id)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
+
+> **Blocker (decided to wait).** The per-vCPU allocator (below) needs each worker
+> to know its own vCPU id cheaply, anywhere — but svm-llvm has **no TLS, no
+> self-id intrinsic, and no frame-address** (verified against the full `__vm_*`
+> surface). Threading a worker id through the data-SP ABI is possible but invasive
+> and goes *stale* under work-stealing (a migrated fiber would carry its old id).
+> Per the agreed plan we **file the svm ask** (`docs/SVM_PHASE3_ASKS.md` — Ask 1:
+> `__vm_thread_self_id()` or TLS), pause P3.4 coding, bump the submodule when it
+> lands, then implement per-vCPU TLABs **directly** — no throwaway global-allocator
+> work. svm already provides everything else P3.4 needs (`__vm_thread_spawn`/`join`,
+> atomics + futex, multi-vCPU STW via `gc_quiesce.rs`, conservative roots over
+> parked fibers).
 
 **Allocator + GC design (decided).** Real parallelism needs a thread-safe runtime. We
 adopt JACL's existing approach — **per-worker (per-vCPU) heaps with a lock-free bump
