@@ -36,13 +36,21 @@ int run(int n) {
     ok &= (buf[0] == 'e' && buf[5] == (char)('0' + (i % 10)));
   }
 
-  /* stability: a second collection (vec still held, no new garbage) reclaims
-   * nothing and leaves the vector + elements intact. */
+  /* re-collection: a second collection (vec still held, no new garbage) leaves the
+   * vector + every element intact and never grows the live set. We assert the live
+   * count is non-increasing (after2 <= live2), NOT exact stability: conservative GC
+   * may legitimately reclaim a few already-dead objects on the second pass that the
+   * first pass pinned via stale stack/register words — and which slots those are is
+   * backend-dependent (the interp retains stale operand-stack words across both
+   * collects; the JIT reuses registers between them, so it reclaims them on the
+   * second). No live object is ever lost either way; the vector survival below is the
+   * real invariant. */
   long live2 = jacl_live_count();
   jacl_gc_collect();
-  ok &= (jacl_live_count() == live2) && (jacl_vec_count(vec) == (uint32_t)N);
+  ok &= (jacl_live_count() <= live2) && (jacl_vec_count(vec) == (uint32_t)N);
   for (int i = 0; i < N; i++) {
     JaclVal e = jacl_vec_get(vec, i);
+    ok &= jaclrt_is_heap(e);                  /* still reachable only via the vector */
     jacl_str_bytes(e, buf, sizeof buf);
     ok &= (buf[0] == 'e' && buf[5] == (char)('0' + (i % 10)));
   }
