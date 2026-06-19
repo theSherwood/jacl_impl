@@ -888,6 +888,44 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal a[] = {cx->sp, f};
         return emit_rt_call(cx, "jacl_await", a, 2);
       }
+      /* `parallel { } { } …` — spawn each block, await all, collect into a vector. */
+      if (hid == HEAD_PARALLEL) {
+        uint32_t n = node->data.command.arg_count;
+        IrVal futs[CG_MAX_PARAMS];
+        for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
+          if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "parallel takes { blocks }"); return 0; }
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal sa[] = {cx->sp, clos};
+          futs[i] = emit_rt_call(cx, "jacl_spawn", sa, 2);
+        }
+        IrVal ve[] = {cx->sp};
+        IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
+        for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
+          IrVal aa[] = {cx->sp, futs[i]};
+          IrVal v = emit_rt_call(cx, "jacl_await", aa, 2);
+          IrVal pa[] = {cx->sp, vec, v};
+          vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+        }
+        return vec;
+      }
+      /* `race { } { } …` — spawn each, return the first to complete (cooperative MVP:
+       * leaf tasks complete in order, so the first block wins). */
+      if (hid == HEAD_RACE) {
+        uint32_t n = node->data.command.arg_count;
+        if (n == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        IrVal first = 0;
+        for (uint32_t i = 0; i < n; i++) {
+          if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "race takes { blocks }"); return 0; }
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal sa[] = {cx->sp, clos};
+          IrVal f = emit_rt_call(cx, "jacl_spawn", sa, 2);
+          if (i == 0) first = f;
+        }
+        IrVal aa[] = {cx->sp, first};
+        return emit_rt_call(cx, "jacl_await", aa, 2);
+      }
 
       /* Closure literals. Lambda `[\ {params} {body}]`: head is the bare word "\",
        * params in a BLOCK. Anonymous proc `[proc {params} {body}]`: an empty name. */
@@ -930,6 +968,29 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
         IrType r1[] = {IRB_I64};
         return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+      }
+
+      /* Positional destructuring `def [a b …] V` — bind each name to V[i]. */
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_COMMAND) {
+        AstNode *tgt = node->data.command.args[0];
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        AstNode *toks[CG_MAX_PARAMS]; int nt = 0;
+        if (tgt->data.command.head && nt < CG_MAX_PARAMS) toks[nt++] = tgt->data.command.head;
+        for (uint32_t i = 0; i < tgt->data.command.arg_count && nt < CG_MAX_PARAMS; i++)
+          toks[nt++] = tgt->data.command.args[i];
+        for (int i = 0; i < nt; i++) {
+          if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "destructuring name must be a bare word"); return 0; }
+          IrType sig[] = {IRB_I64, IRB_I64, IRB_I32};
+          IrType r1[] = {IRB_I64};
+          IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+          IrVal idx = irb_const_i32(cx->f, cx->cur, i);
+          IrVal ga[] = {cx->sp, v, idx};
+          IrVal elem = irb_call_import(cx->f, cx->cur, "jacl_vec_get", sig, 3, r1, 1, h, ga, 3);
+          env_define(cx, toks[i]->data.lit_string.value, toks[i]->data.lit_string.length, elem, /*is_mut=*/0, /*is_cell=*/0);
+        }
+        return v;
       }
 
       if (hid == HEAD_DEF || hid == HEAD_MUT) {

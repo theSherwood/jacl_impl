@@ -453,6 +453,17 @@ fn spawn_await_matches_old_vm() {
     }
 }
 
+// ---- P3.3: parallel / race ----
+
+#[test]
+fn parallel_race_matches_old_vm() {
+    // parallel returns a vector (consumed via destructuring `def [a b] …`); race returns
+    // the first block's result.
+    for case in ["parallel", "parallel3", "race"] {
+        run_case(case, i32_val(old_vm_result(case)));
+    }
+}
+
 #[test]
 fn typed_proc_body_is_unboxed() {
     // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.

@@ -138,6 +138,13 @@ static const char *source_for(const char *name) {
     return "def a [spawn { [* 6 7] }]\ndef b [spawn { [+ 1 2] }]\n[+ [await $a] [await $b]]";
   if (!strcmp(name, "spawn_await_twice")) /* future resolves once, cached */
     return "def f [spawn { [+ 20 1] }]\n[+ [await $f] [await $f]]";
+  /* P3.3 parallel / race */
+  if (!strcmp(name, "parallel"))
+    return "def [a b] [parallel { [* 6 7] } { [+ 1 2] }]\n[+ $a $b]";
+  if (!strcmp(name, "parallel3"))
+    return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
+  if (!strcmp(name, "race"))
+    return "[race { [+ 40 2] } { [+ 100 100] }]";
   return NULL;
 }
 

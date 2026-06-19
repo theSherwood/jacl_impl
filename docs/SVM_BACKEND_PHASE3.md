@@ -70,15 +70,21 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   must not hold heap roots across a `yield` until multi-fiber GC quiesce (P3.6) scans
   parked fibers' data stacks (i32 generators are safe); the data-stack pool is fixed.
 
-### P3.2 — `spawn` / `await` + a minimal fiber scheduler
-- `spawn { block }` → schedule a task fiber, return a **future**. `await $f` parks the
-  current fiber until the future resolves, then yields its value.
-- Stand up a single-thread fiber **scheduler** (run queue of ready fibers; park/unpark
-  on futures) before the full M:N work-stealing version.
+### P3.2 — `spawn` / `await` — **DONE (cooperative, single-thread)**
+- `spawn { block }` → a future; `await $f` drives it to completion, caching the result.
+- **Done:** `spawn { block }` lowers the block to a **0-param closure** (capturing free
+  vars) and `jacl_spawn` runs it on a task fiber; `jacl_await` resumes to `done`, caches
+  and returns the value (so a future resolves once, awaitable repeatedly). Validated on
+  interp + JIT vs the old VM: spawn+await (42), capturing spawn, two spawns, double-await.
+- **Limit:** a task that awaits another task's *unresolved* future needs the run-queue
+  scheduler (P3.4); leaf and yield-internal tasks run to completion here.
 
-### P3.3 — `parallel` / `race`
-- `parallel { } …` spawns N task fibers, awaits all, returns a vector of results.
-- `race` returns the first to complete (others cancelled).
+### P3.3 — `parallel` / `race` — **DONE (cooperative)**
+- `parallel { } …` spawns N task fibers, awaits all, returns a **vector** of results
+  (consumed via positional destructuring `def [a b] …`, also added). `race { } …`
+  returns the first block's result (cooperative: leaf tasks complete in order, so the
+  first wins). Validated vs the old VM: `parallel` (45), 3-way `parallel` (42), `race` (42).
+- **Limit:** true parallelism / cancellation lands with the M:N scheduler (P3.4).
 
 ### P3.4 — Re-platform the M:N scheduler
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
