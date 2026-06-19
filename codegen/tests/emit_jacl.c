@@ -129,6 +129,15 @@ static const char *source_for(const char *name) {
     return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [upto 5] x { set s [+ $s $x] }]\n[+ $s 0]";
   if (!strcmp(name, "gen_squares"))
     return "proc sq {n} { mut i 1\n[while [<= $i $n] { yield [* $i $i]\nset i [+ $i 1] }] }\nmut s 0\n[for [sq 4] x { set s [+ $s $x] }]\n[+ $s 0]";
+  /* P3.2 spawn / await (futures over fibers) */
+  if (!strcmp(name, "spawn_await"))
+    return "def f [spawn { [+ 40 2] }]\n[await $f]";
+  if (!strcmp(name, "spawn_capture"))
+    return "def y 30\ndef f [spawn { [+ $y 12] }]\n[await $f]";
+  if (!strcmp(name, "spawn_two"))
+    return "def a [spawn { [* 6 7] }]\ndef b [spawn { [+ 1 2] }]\n[+ [await $a] [await $b]]";
+  if (!strcmp(name, "spawn_await_twice")) /* future resolves once, cached */
+    return "def f [spawn { [+ 20 1] }]\n[+ [await $f] [await $f]]";
   return NULL;
 }
 

@@ -244,4 +244,8 @@ JaclVal jacl_gen_new(JaclVal fnref, JaclVal arg);
 JaclVal jacl_gen_next(JaclVal gen);
 JaclVal jacl_gen_done(JaclVal gen);
 
+/* P3.2 spawn/await: a future is a task fiber driven to completion by await. */
+JaclVal jacl_spawn(JaclVal closure);
+JaclVal jacl_await(JaclVal future);
+
 #endif /* JACLRT_H */

@@ -419,6 +419,7 @@ static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNod
  * (`[proc {x} …]`); both flatten to type/name tokens (types skipped). */
 static int closure_param_names(AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
   AstNode *toks[CG_MAX_PARAMS * 2 + 4]; int nt = 0;
+  if (!pnode) return 0; /* a parameterless closure (e.g. a spawn block) */
   if (in_block) {
     if (pnode->type != AST_BLOCK) return 0;
     for (uint32_t i = 0; i < pnode->data.block.count; i++) {
@@ -866,6 +867,26 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                       : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
         if (cx->failed) return 0;
         return irb_suspend(cx->f, cx->cur, v);
+      }
+
+      /* `spawn { block }` — the block is a 0-param closure (capturing free vars) run on
+       * a task fiber; returns a future. */
+      if (hid == HEAD_SPAWN) {
+        if (node->data.command.arg_count != 1 || node->data.command.args[0]->type != AST_BLOCK) {
+          cx_fail(cx, "spawn needs a single { block }"); return 0;
+        }
+        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, clos};
+        return emit_rt_call(cx, "jacl_spawn", a, 2);
+      }
+      /* `await $f` — drive the future to completion, yielding its value. */
+      if (hid == HEAD_AWAIT) {
+        if (node->data.command.arg_count != 1) { cx_fail(cx, "await needs one argument"); return 0; }
+        IrVal f = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, f};
+        return emit_rt_call(cx, "jacl_await", a, 2);
       }
 
       /* Closure literals. Lambda `[\ {params} {body}]`: head is the bare word "\",

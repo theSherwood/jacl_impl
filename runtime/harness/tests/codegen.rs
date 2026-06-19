@@ -444,6 +444,15 @@ fn generator_squares_matches_old_vm() {
     run_case("gen_squares", i32_val(old_vm_result("gen_squares")));
 }
 
+// ---- P3.2: spawn / await (futures over fibers) ----
+
+#[test]
+fn spawn_await_matches_old_vm() {
+    for case in ["spawn_await", "spawn_capture", "spawn_two", "spawn_await_twice"] {
+        run_case(case, i32_val(old_vm_result(case)));
+    }
+}
+
 #[test]
 fn typed_proc_body_is_unboxed() {
     // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.
