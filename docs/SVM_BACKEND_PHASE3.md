@@ -12,8 +12,10 @@
 > GC quiesce (P3.6) are **done and tested interp==jit==old VM**, and all four concurrency
 > constructs now run on **real vCPU worker threads** (P3.4d). The **DoD is met** for
 > representative concurrent programs. Two items remain:
-> - **P3.5 async (parking) builtins — BLOCKED** on the host powerbox (not built; same
->   prerequisite as Phase 2's `print`). A hard external blocker.
+> - **P3.5 host I/O — IN PROGRESS** (the powerbox was *not* a blocker — it is complete in
+>   svm; only JACL's integration was missing). The harness host-run path and the runtime
+>   `jacl_print` work end-to-end (interp==jit); remaining is the codegen `[print]` wiring
+>   (uniform powerbox entry) and async/parking builtins (which need the deferred scheduler).
 > - **The full M:N scheduler** (persistent pool + main-as-a-job + nested-await parking +
 >   work-stealing) — a deferred, **corpus-unobservable** refinement that removes the
 >   batch model's GC-soundness boundary (see P3.4d). Its own focused slice.
@@ -250,14 +252,40 @@ fall together, because GC-soundness for the general case forces them:
   very many concurrency constructs would outgrow the per-vCPU arrays; the persistent reused
   pool fixes this.
 
-### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
-- Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
-  that park the fiber instead of blocking the worker thread.
-- **Blocker:** these are *host I/O* and depend on the **powerbox / capability layer**
-  (the host-capability surface), which is not yet built — the same prerequisite that
-  kept `print` out of the Phase-2 codegen. Async builtins land once the powerbox exists
-  (it pairs naturally with P3.4's worker threads). Pure-compute concurrency (generators,
-  spawn/await, parallel/race) needs none of it and is already done.
+### P3.5 — Host I/O + async (parking) builtins — **IN PROGRESS (powerbox NOT a blocker)**
+
+**Correction to the earlier "blocked" note:** the svm powerbox is **complete**, not
+missing. svm-llvm has a built-in libc layer (`write`/`read`/`puts`/`printf` → `Stream`
+cap.calls on stashed handles), synthesizes a `_start` powerbox entry that stashes the
+granted handles + calls `main`, and svm provides `Host::grant_stream`/`grant_host_fn`/
+`grant_io_ring`, `run_with_host` / `compile_and_run_with_host`, and stdout capture — all
+differential-tested interp==jit (svm's `run_c_full`). What was missing was JACL's
+*integration*, which is now under way.
+
+**Done:**
+- **Harness host-run path** (`run_powerbox`): translate, lower §7 capability imports to
+  cap.calls (`svm_run::resolve_capability_imports`, required before verify), grant the
+  standard powerbox prefix sized to `_start`'s arity, run func 0 on interp + jit under
+  identical hosts, assert stdout agrees, return it. Proven by `test_print.c` (raw
+  `write(1,…)` → "hi\n", interp==jit).
+- **Runtime `jacl_print`** (`io.c`): writes a value's text + newline to stdout via the
+  libc `write` (→ Stream.write), matching the old VM. Works end-to-end through
+  `run_powerbox` (`test_jacl_print.c` → "hello\n42\n", interp==jit). The tag dispatch goes
+  through a noinline helper so clang can't reassociate it into a sparse switch svm-llvm
+  rejects. Capability imports are resolved in every existing run path (`run_test`,
+  `translate_runtime`), so adding `write` to the shared runtime left the whole suite green.
+
+**Remaining:**
+- **Codegen `print` head → a JACL `[print …]` program.** `HEAD_PRINT` already exists; the
+  codegen path emits SVM-IR directly (no svm-llvm `_start` synth), so a printing program
+  needs: the codegen→runtime **link to reserve the `[0,32)` powerbox stash** (today the
+  first unit's data sits at offset 0, which collides with the stash `jacl_print` reads the
+  handle from), the **entry to stash the stdout handle** at offset 0 (uniform powerbox
+  entry — chosen approach: every codegen program runs through it), and **`run_case` to
+  become a host-run path** (grant + capture stdout, diff vs the old VM's `print`).
+- **Async (parking) builtins** (`sleep`, channels): the io_ring submit/complete capability
+  exists in svm, but builtins that **park** the fiber on completion need the deferred
+  parking scheduler (P3.4d). They can be done as synchronous blocking host calls first.
 
 ## Carried constraints
 - **No SM transform** (deleted) — generators are fibers (Spike-3).
