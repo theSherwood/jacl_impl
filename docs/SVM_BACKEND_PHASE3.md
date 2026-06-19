@@ -97,15 +97,32 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b DONE; P3.4c+d merged (need the fiber scheduler)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c DONE; P3.4d remaining (reusable scheduler + parallel/await on threads)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
-> **Status.** P3.4a (per-vCPU TLAB allocator) and P3.4b (concurrent allocation across
-> real `thread.spawn` workers) are **done** and tested (interp==jit): see
-> `runtime/heap_gc.c` and `runtime/tests/test_alloc_mt.c`. P3.4c (sound multi-vCPU STW
-> GC) turned out to be **inseparable from P3.4d** (the fiber scheduler) — see the
-> finding below — so they are merged into one step.
+> **Status.** P3.4a (per-vCPU TLAB allocator), P3.4b (concurrent allocation across real
+> `thread.spawn` workers), and **P3.4c (sound multi-vCPU STW GC over the fiber scheduler)**
+> are **done** and tested (interp==jit): `runtime/heap_gc.c`,
+> `runtime/tests/test_alloc_mt.c`, `runtime/tests/test_gc_sched.c`. The remaining P3.4d
+> work — a *reusable* scheduler (worker pool + task queue), moving `spawn`/`await`/
+> `parallel`/`race` onto real worker threads, fiber parking on `await`, and work-stealing
+> deques — builds directly on the P3.4c quiesce primitives.
+>
+> **P3.4c done — the quiesce barrier + scheduler-loop primitives.** The runtime now
+> exposes the pure-guest STW barrier (svm GC.md §2.1) over the fiber scheduler:
+> `jacl_gc_worker_register`/`unregister`, `jacl_gc_task_begin`/`end` (bracket a task
+> resume), `jacl_gc_safepoint` (in `jacl_alloc` + loop back-edges: **suspends** the task
+> to the scheduler so its roots are scannable), `jacl_gc_worker_park_if_requested`
+> (scheduler-loop top: parks the root-free vCPU), and the `jacl_gc_collect` collector
+> (elect via CAS → bump epoch → wait for all to suspend+park → scan+sweep STOPPED →
+> resume). The collector is the `gc.roots` caller, so its own task's roots are covered;
+> all other tasks are suspended fibers, which `gc.roots` scans. The parked flag is
+> **epoch-stamped** (not a sticky boolean), which was the load-bearing fix — a sticky flag
+> let a next collection mistake a stale park for a fresh one and a worker mutated during
+> STW. Validated by `test_gc_sched.c`: each worker's on-stack-of-its-fiber keeper survives
+> a collection run by a different worker, mutual-exclusion violations are 0, stress-tested
+> under heavy contention; single-thread path unchanged.
 >
 > **P3.4c finding — STW root scanning needs suspend-to-scheduler, not futex-park.**
 > A first cut put the GC safepoint at the allocation point and **parked the worker in
