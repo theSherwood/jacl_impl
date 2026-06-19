@@ -97,9 +97,39 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **UNBLOCKED (svm TLS landed)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b DONE; P3.4c+d merged (need the fiber scheduler)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
+
+> **Status.** P3.4a (per-vCPU TLAB allocator) and P3.4b (concurrent allocation across
+> real `thread.spawn` workers) are **done** and tested (interp==jit): see
+> `runtime/heap_gc.c` and `runtime/tests/test_alloc_mt.c`. P3.4c (sound multi-vCPU STW
+> GC) turned out to be **inseparable from P3.4d** (the fiber scheduler) — see the
+> finding below — so they are merged into one step.
+>
+> **P3.4c finding — STW root scanning needs suspend-to-scheduler, not futex-park.**
+> A first cut put the GC safepoint at the allocation point and **parked the worker in
+> `__vm_wait32`** while it held roots on its bare `thread.spawn` C stack. That is
+> **unsound**: a worker blocked in `__vm_wait32` is *not* in the set `gc.roots` scans.
+> svm's own cross-vCPU STW test (`crates/svm/tests/gc_roots.rs::
+> gc_roots_cross_vcpu_stop_the_world_scan`) holds the root on a **suspended fiber**
+> (`cont.new`/`resume`/`suspend`) and only *then* parks the vCPU in `atomic.wait`; the
+> collector's `gc.roots` finds it there. GC.md §2/§3.1 confirms: `gc.roots` scans
+> **every suspended fiber + the caller**, and the prescribed safepoint is *"the mutator
+> fiber **suspends** to its vCPU's scheduler"* (suspend is call-clobbering, so it flushes
+> live roots onto the fiber's control stack → scannable); the scheduler then parks the
+> vCPU. A draft barrier proved this empirically — with futex-park, a worker's genuinely
+> live on-stack keeper was **collected** on one backend (a true root missed), confirming
+> the bare-vCPU stack is not scanned.
+>
+> **Consequence.** Sound STW GC requires roots to live on **fibers** and the safepoint
+> to **`suspend`**, which only exists once worker vCPUs run a **scheduler loop** that
+> resumes task fibers. So P3.4c (quiesce + scan) and P3.4d (the M:N scheduler) must land
+> together: the safepoint poll lives in the scheduler, a task fiber suspends on a stop
+> request, and the vCPU parks with no fiber running — at which point the collector's
+> `gc.roots` sees all roots. The futex barrier itself (epoch/park/release, mutual
+> exclusion) is the right mechanism (svm's `gc_quiesce.rs`); it just has to drive
+> fiber-suspend, not block the bare worker.
 
 > **Unblocked (svm `7a82f64`, PR #79).** The per-vCPU allocator needs each worker
 > to know its own vCPU id cheaply, anywhere. svm shipped the ambient per-vCPU TLS
@@ -140,10 +170,15 @@ fast path** — adapted to SVM's simpler collector. *Not* a per-allocation lock.
   generations / write barriers / concurrent marking — far simpler than the old VM.
 
 **Sub-steps.** P3.4a — refactor the runtime allocator to per-worker heaps (worker-id
-indexed; lock-free bump; shared region pool), preserving the single-worker path. P3.4b —
-real `__vm_thread_spawn` workers that allocate concurrently (validate no corruption).
-P3.4c — the multi-vCPU STW quiesce barrier in `jacl_gc_collect`. P3.4d — run `parallel`
-on worker threads + work-stealing deques + fiber parking on `await`.
+indexed; lock-free bump; shared region pool), preserving the single-worker path. **(DONE.)**
+P3.4b — real `__vm_thread_spawn` workers that allocate concurrently (validate no
+corruption). **(DONE** — `test_alloc_mt.c`, interp==jit.**)** P3.4c+d **(merged)** — the
+fiber-based M:N scheduler: worker vCPUs run a resume loop over task fibers; a GC safepoint
+(loop back-edge / alloc) **suspends** the running task fiber to the scheduler, which parks
+the vCPU on a futex when `gc_epoch` is set (epoch/park/release barrier per `gc_quiesce.rs`);
+once all vCPUs are parked with no fiber running, the collector's `gc.roots` scans every
+suspended fiber + itself and sweeps each per-worker heap. Then `parallel`/`race` run on
+worker threads, work-stealing deques balance tasks, and `await` parks the awaiting fiber.
 
 ### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
