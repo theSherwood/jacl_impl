@@ -97,7 +97,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (parallel/race on threads; spawn/await pending)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (parallel/race/spawn/await on threads; persistent pool + work-stealing pending)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -199,21 +199,31 @@ worker threads, work-stealing deques balance tasks, and `await` parks the awaiti
 
 **P3.4d progress.** A reusable batch scheduler (`sched.c`,
 `jacl_sched_run_batch`) runs a batch of task fibers across N vCPU workers, GC-safe via the
-P3.4c primitives (`test_sched_mt.c`). **`parallel`/`race` now run on it** — codegen builds
-a vector of the block closures and calls `jacl_parallel`/`jacl_race`, which run each block
-on the pool (real parallelism) and return the ordered result vector / block-0's result,
-still matching the old VM (`parallel_race_matches_old_vm`). **Remaining:**
-- **`spawn`/`await` on a persistent pool** (still cooperative for now). They are
-  future-shaped (a future awaited later), so they need a pool that lives for the whole
-  program — which must be **shut down before the root returns** (an svm run completes only
-  when *every* vCPU finishes, so idle workers on a futex would hang it), plus futures with
-  waiter queues and **nested-await parking** (a task awaiting an unresolved future suspends
-  to its worker and is re-enqueued on completion).
+P3.4c primitives (`test_sched_mt.c`). **All four concurrency constructs now run on it**,
+still matching the old VM:
+- **`parallel`/`race`** — codegen builds a vector of the block closures and calls
+  `jacl_parallel`/`jacl_race`, which run each block on the pool (real parallelism) and
+  return the ordered result vector / block-0's result (`parallel_race_matches_old_vm`).
+- **`spawn`/`await`** — lazy futures: `jacl_spawn` records the block closure as a pending
+  task and returns a future; the first `jacl_await` flushes all pending tasks onto the pool
+  and caches results (`spawn_await_matches_old_vm`). Value-equivalent to eager scheduling
+  for the pure-compute corpus (independent tasks; only overlap differs). The collector
+  roots pending futures during a flush (`jacl_sched_mark_roots`, since main is parked in
+  join with its stack unscanned).
+
+**Remaining:**
+- **Persistent pool** (spawn once, reuse) with per-future **waiter queues** and
+  **nested-await parking** (a task awaiting an *unresolved* future suspends to its worker
+  and is re-enqueued on completion). This replaces both the transient per-construct pools
+  and the lazy-flush, enabling eager spawn execution and arbitrary await nesting. It must
+  be **shut down before the root returns** (an svm run completes only when *every* vCPU
+  finishes, so idle workers on a futex would hang it) — i.e. a program entry/exit hook.
 - **Work-stealing deques** to replace the fixed-batch atomic-counter dispatch.
 - **vCPU-id growth**: each batch spawns fresh vCPUs (svm ids aren't reused), so very many
-  `parallel`/`race` constructs would outgrow the per-vCPU arrays; the persistent reused
-  pool fixes this too.
-- **Heap-valued results** surviving a mid-batch collection (the corpus returns i32).
+  concurrency constructs would outgrow the per-vCPU arrays; the persistent reused pool
+  fixes this too.
+- **Heap-valued results** surviving a mid-batch collection (the corpus returns i32; root
+  each result as its task completes, or have workers retain them).
 
 ### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
