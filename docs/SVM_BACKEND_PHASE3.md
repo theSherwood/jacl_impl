@@ -97,7 +97,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c DONE; P3.4d remaining (reusable scheduler + parallel/await on threads)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (parallel/race on threads; spawn/await pending)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -196,6 +196,24 @@ the vCPU on a futex when `gc_epoch` is set (epoch/park/release barrier per `gc_q
 once all vCPUs are parked with no fiber running, the collector's `gc.roots` scans every
 suspended fiber + itself and sweeps each per-worker heap. Then `parallel`/`race` run on
 worker threads, work-stealing deques balance tasks, and `await` parks the awaiting fiber.
+
+**P3.4d progress.** A reusable batch scheduler (`sched.c`,
+`jacl_sched_run_batch`) runs a batch of task fibers across N vCPU workers, GC-safe via the
+P3.4c primitives (`test_sched_mt.c`). **`parallel`/`race` now run on it** — codegen builds
+a vector of the block closures and calls `jacl_parallel`/`jacl_race`, which run each block
+on the pool (real parallelism) and return the ordered result vector / block-0's result,
+still matching the old VM (`parallel_race_matches_old_vm`). **Remaining:**
+- **`spawn`/`await` on a persistent pool** (still cooperative for now). They are
+  future-shaped (a future awaited later), so they need a pool that lives for the whole
+  program — which must be **shut down before the root returns** (an svm run completes only
+  when *every* vCPU finishes, so idle workers on a futex would hang it), plus futures with
+  waiter queues and **nested-await parking** (a task awaiting an unresolved future suspends
+  to its worker and is re-enqueued on completion).
+- **Work-stealing deques** to replace the fixed-batch atomic-counter dispatch.
+- **vCPU-id growth**: each batch spawns fresh vCPUs (svm ids aren't reused), so very many
+  `parallel`/`race` constructs would outgrow the per-vCPU arrays; the persistent reused
+  pool fixes this too.
+- **Heap-valued results** surviving a mid-batch collection (the corpus returns i32).
 
 ### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
