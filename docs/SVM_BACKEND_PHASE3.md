@@ -97,21 +97,24 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   point before collecting) is only needed once P3.4 introduces real OS-thread workers;
   svm provides the STW barrier to build it on.
 
-### P3.4 — Re-platform the M:N scheduler — **PAUSED (blocked on svm self-id)**
+### P3.4 — Re-platform the M:N scheduler — **UNBLOCKED (svm TLS landed)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
-> **Blocker (decided to wait).** The per-vCPU allocator (below) needs each worker
-> to know its own vCPU id cheaply, anywhere — but svm-llvm has **no TLS, no
-> self-id intrinsic, and no frame-address** (verified against the full `__vm_*`
-> surface). Threading a worker id through the data-SP ABI is possible but invasive
-> and goes *stale* under work-stealing (a migrated fiber would carry its old id).
-> Per the agreed plan we **file the svm ask** (`docs/SVM_PHASE3_ASKS.md` — Ask 1:
-> `__vm_thread_self_id()` or TLS), pause P3.4 coding, bump the submodule when it
-> lands, then implement per-vCPU TLABs **directly** — no throwaway global-allocator
-> work. svm already provides everything else P3.4 needs (`__vm_thread_spawn`/`join`,
-> atomics + futex, multi-vCPU STW via `gc_quiesce.rs`, conservative roots over
-> parked fibers).
+> **Unblocked (svm `7a82f64`, PR #79).** The per-vCPU allocator needs each worker
+> to know its own vCPU id cheaply, anywhere. svm shipped the ambient per-vCPU TLS
+> register we asked for (`docs/SVM_PHASE3_ASKS.md` — RESOLVED): C intrinsics
+> `long __vm_vcpu_tls_get(void)` / `void __vm_vcpu_tls_set(long)`, **read at the
+> execution point** so a migrated fiber reads the *current* vCPU's word
+> (work-stealing-correct), **seeded to a dense vCPU id** (so a bare `get` is the
+> `per_worker[id]` index), and **overwritable with a per-CPU block pointer** for
+> full `__thread`-style TLS. We implement per-vCPU TLABs **directly** on it — no
+> throwaway global allocator. svm already provides the rest (`__vm_thread_spawn`/
+> `join`, atomics + futex, multi-vCPU STW via `gc_quiesce.rs`, conservative roots
+> over parked fibers).
+>
+> Same bump widened **fiber handles i32 → i64**; `runtime/fiber.c` updated to store
+> i64 handles (required to verify against the new pin).
 
 **Allocator + GC design (decided).** Real parallelism needs a thread-safe runtime. We
 adopt JACL's existing approach — **per-worker (per-vCPU) heaps with a lock-free bump
@@ -122,10 +125,13 @@ fast path** — adapted to SVM's simpler collector. *Not* a per-allocation lock.
   needed"). The only coordination is refilling a worker's region from a shared free-region
   pool when it fills — amortized once per region (~tens of KB), a coarse mutex (or a
   lock-free Treiber free-list later). Per-worker free lists for swept cells, same idea.
-- **No C thread-locals.** svm-llvm has no TLS and exposes no "current-vCPU-id"
-  intrinsic, so a worker is given a small **worker id** as its `__vm_thread_spawn`
-  startup argument and indexes `per_worker[id]`. The id threads through explicitly (fits
-  the data-SP ABI); the main thread is worker 0, preserving the single-thread path.
+- **Worker identity via the per-vCPU TLS register.** Each worker indexes
+  `per_worker[id]` where `id = __vm_vcpu_tls_get()` — the ambient per-vCPU word svm
+  seeds to a dense vCPU id (root 0, children sequential). It is **read at the
+  execution point**, so a fiber that migrated under work-stealing reads its
+  *current* vCPU, not a stale spawn-time id; the main thread is vCPU 0, preserving
+  the single-thread path. (Optionally `__vm_vcpu_tls_set` a pointer to the worker's
+  per-CPU block for direct `ThreadHeap*` access, `__thread`-style.)
 - **GC: cooperative STW, conservative, non-moving (extends P2.9/P3.6).** Workers reach a
   safe point at allocation; a collection **quiesces all worker threads** via a guest
   futex barrier (reference: svm's `gc_quiesce.rs`; no new svm primitive — "quiescing the

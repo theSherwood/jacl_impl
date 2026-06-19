@@ -1,5 +1,10 @@
 # Asks for svm — Phase 3 prerequisite (per-vCPU heap identity)
 
+> **STATUS: RESOLVED** (svm `main` ≥ `7a82f64`, PR #79 "per-vCPU TLS register").
+> svm shipped exactly Ask 1 — and a touch better than option 1. See the
+> "Resolution" note at the bottom; the rest of this doc is kept as the original
+> ask for the record.
+
 > For the svm side. **One** change unblocks JACL's Phase 3 P3.4 (the M:N
 > work-stealing scheduler with real OS-thread workers): a way for guest code to
 > learn **which worker/vCPU it is running on**. The runtime and codegen are
@@ -92,3 +97,36 @@ With Ask 1, JACL implements per-vCPU TLAB allocation (lock-free bump, shared
 region pool, cooperative STW quiesce) directly — the agreed best-perf design —
 with no throwaway global-allocator step. Until it lands, P3.4 implementation is
 paused; P3.1–P3.3 + P3.6 (cooperative concurrency) are done and unaffected.
+
+## Resolution (svm `7a82f64`, PR #79)
+
+svm added an **ambient per-vCPU TLS register**, exposed to C exactly as the ask's
+preferred option (and slightly stronger):
+
+```c
+long __vm_vcpu_tls_get(void);   // current vCPU's i64 TLS word
+void __vm_vcpu_tls_set(long x); // overwrite it
+```
+
+- **Read at the execution point**, so a fiber that migrated to another vCPU reads
+  the *current* vCPU's word — the migration-correctness property we specifically
+  called out for work-stealing (svm's `vcpu_tls_tracks_current_vcpu_across_migration`
+  test covers exactly this).
+- **Seeded to a dense id** at vCPU creation (root 0, children sequential), so a
+  bare `get` before any `set` doubles as a `vcpu.id` — what we'd index
+  `per_worker[id]` with.
+- **Or a full per-CPU pointer:** the guest may `set` it to a pointer to its own
+  per-CPU block, giving `__thread`-style TLS (lets us stash a whole `ThreadHeap*`
+  the way the old VM does, without C TLS).
+
+Wired through ir / encode (`0xEB`/`0xEC`) / text (`vcpu.tls.get|set`) / verify /
+interp / jit / svm-llvm (`__vm_vcpu_tls_get` / `__vm_vcpu_tls_set`) / peval.
+Verified on the JACL side: the C intrinsics translate (svm-llvm
+`vm_vcpu_tls_round_trip`) and the svm migration/seed tests pass at the pinned
+commit. **P3.4 is unblocked.**
+
+> Note: the same bump (svm `9b0d163`) also **widened fiber handles i32 → i64**
+> (`cont.new` yields i64, `cont.resume` takes an i64 handle, status stays i32; the
+> C on-ramp is now `long __vm_fiber_new` / `long __vm_fiber_resume(long, …)`).
+> `runtime/fiber.c` was updated to store i64 handles accordingly — required for the
+> module to verify against the new pin.

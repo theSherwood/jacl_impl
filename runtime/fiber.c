@@ -12,9 +12,10 @@
  */
 #include "jaclrt.h"
 
-/* svm fiber intrinsics (svm-llvm lowers these to cont.new / cont.resume). */
-int  __vm_fiber_new(long (*f)(long), void *stack);
-long __vm_fiber_resume(int k, long arg, int *done);
+/* svm fiber intrinsics (svm-llvm lowers these to cont.new / cont.resume). The guest
+ * fiber handle is an i64 (16-bit slot + 48-bit generation); the resume status stays i32. */
+long __vm_fiber_new(long (*f)(long), void *stack);
+long __vm_fiber_resume(long k, long arg, int *done);
 
 #define JACL_GEN_STACKS      32
 #define JACL_GEN_STACK_BYTES (1u << 16)
@@ -28,32 +29,32 @@ static void *jacl_grab_fiber_stack(void) {
   return jacl_gen_stacks[jacl_gen_stack_next++];
 }
 
-/* generator payload (int32 words): [0] fiber handle, [1] done, [2] started, [3] pad,
- * [4..5] the i64 prime arg passed on the first resume. */
+/* generator payload (24 bytes): i64 [0..1] fiber handle, int32 [2] done, [3] started,
+ * i64 [4..5] the prime arg passed on the first resume. */
 JaclVal jacl_gen_new(JaclVal fnref, JaclVal arg) {
   void *stk = jacl_grab_fiber_stack();
   if (!stk) return jaclrt_error();
-  int h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
+  long h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_BLOB, 24);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
-  p[0] = h; p[1] = 0; p[2] = 0;
+  *(int64_t *)(p + 0) = h; p[2] = 0; p[3] = 0;
   *(int64_t *)(p + 4) = (int64_t)arg;
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
 }
 
 JaclVal jacl_gen_next(JaclVal gen) {
   int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(gen));
-  long resume_arg = p[2] ? 0 : (long)*(int64_t *)(p + 4); /* prime once */
-  p[2] = 1;
+  long resume_arg = p[3] ? 0 : (long)*(int64_t *)(p + 4); /* prime once */
+  p[3] = 1;
   int done = 0;
-  long v = __vm_fiber_resume(p[0], resume_arg, &done);
-  p[1] = done;
+  long v = __vm_fiber_resume(*(int64_t *)(p + 0), resume_arg, &done);
+  p[2] = done;
   return (JaclVal)v;
 }
 
 JaclVal jacl_gen_done(JaclVal gen) {
   int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(gen));
-  return jaclrt_bool(p[1] != 0);
+  return jaclrt_bool(p[2] != 0);
 }
 
 /* ---- P3.2 spawn / await (futures over fibers) ----
@@ -65,16 +66,16 @@ JaclVal jacl_gen_done(JaclVal gen) {
  * P3.4; leaf and yield-internal tasks run to completion here.)
  *
  * future payload (JOBJ_NODE; closure + cached value are heap pointers, so traced):
- *   int32 [0] fiber handle, [1] resolved, [2] started; i64 [4..5] closure (prime arg),
- *   i64 [6..7] cached result. */
+ *   i64 [0..1] fiber handle, int32 [2] resolved, [3] started; i64 [4..5] closure
+ *   (prime arg), i64 [6..7] cached result. */
 JaclVal jacl_spawn(JaclVal closure) {
   void *stk = jacl_grab_fiber_stack();
   if (!stk) return jaclrt_error();
   JaclVal fnref = jacl_closure_fn(closure); /* raw funcref of the block function */
-  int h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
+  long h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 32);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
-  p[0] = h; p[1] = 0; p[2] = 0;
+  *(int64_t *)(p + 0) = h; p[2] = 0; p[3] = 0;
   *(int64_t *)(p + 4) = (int64_t)closure; /* primed as `self` on the first resume */
   *(int64_t *)(p + 6) = 0;
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
@@ -82,16 +83,16 @@ JaclVal jacl_spawn(JaclVal closure) {
 
 JaclVal jacl_await(JaclVal future) {
   int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(future));
-  if (p[1]) return (JaclVal) * (int64_t *)(p + 6); /* already resolved */
-  long prime = p[2] ? 0 : (long)*(int64_t *)(p + 4);
-  p[2] = 1;
+  if (p[2]) return (JaclVal) * (int64_t *)(p + 6); /* already resolved */
+  long prime = p[3] ? 0 : (long)*(int64_t *)(p + 4);
+  p[3] = 1;
   int done = 0;
   long v = 0;
   do {
-    v = __vm_fiber_resume(p[0], prime, &done);
+    v = __vm_fiber_resume(*(int64_t *)(p + 0), prime, &done);
     prime = 0;
   } while (!done);
-  p[1] = 1;
+  p[2] = 1;
   *(int64_t *)(p + 6) = (int64_t)v;
   return (JaclVal)v;
 }
