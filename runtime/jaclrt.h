@@ -185,6 +185,9 @@ void   jacl_mark_runtime_roots(void);
 /* ===================================================================
  * Strings (P1.4) — inline / heap / interned. Defined in string.c.
  * =================================================================== */
+/* Host I/O (P3.5, io.c) — through the svm powerbox Stream capability. */
+JaclVal  jacl_print(JaclVal v);                           /* write V's text + newline to stdout; -> nil */
+
 void     jacl_intern_init(void);                          /* reset the intern table */
 JaclVal  jacl_str_new(const char *s, uint32_t len);       /* inline if <=7, else a fresh heap string */
 JaclVal  jacl_str_intern(const char *s, uint32_t len);    /* canonical (pointer-equal) string */

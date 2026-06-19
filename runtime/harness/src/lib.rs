@@ -54,7 +54,13 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
 /// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
 pub fn translate_runtime() -> svm_llvm::Translated {
     let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+    let mut t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime");
+    // The runtime references `write` (jacl_print) → a §7 capability import. Lower it to a
+    // cap.call here so the linked program module verifies (the runtime defines all jacl_*, so
+    // its only import is the cap; resolving leaves the jacl_* exports intact). A program that
+    // never calls print never executes it; one that does is run via `run_powerbox`.
+    t.module = svm_run::resolve_capability_imports(t.module).expect("resolve runtime cap imports");
+    t
 }
 
 /// Translate the runtime with a custom `JACL_HEAP_BYTES` (a small heap makes the
@@ -62,7 +68,9 @@ pub fn translate_runtime() -> svm_llvm::Translated {
 pub fn translate_runtime_heap(heap_bytes: u32) -> svm_llvm::Translated {
     let def = format!("JACL_HEAP_BYTES={heap_bytes}u");
     let bc = compile_driver_defs(&format!("{RUNTIME_DIR}/jaclrt.c"), &[&def]);
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
+    let mut t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)");
+    t.module = svm_run::resolve_capability_imports(t.module).expect("resolve runtime cap imports");
+    t
 }
 
 /// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run
@@ -73,9 +81,12 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
     let bc = compile_driver(&driver_abs);
 
     let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
-    let module = t.module;
+    // The runtime now references `write` (jacl_print), so even non-printing programs carry a
+    // §7 capability import; lower it to a (here dead) cap.call before verify. A program that
+    // never calls print never executes it. Programs that DO print are powerbox programs — run
+    // them via `run_powerbox`, not this path.
+    let module = svm_run::resolve_capability_imports(t.module).expect("resolve capability imports");
     svm_verify::verify_module(&module).expect("verify translated IR");
-    assert!(module.imports.is_empty(), "unexpected unresolved imports: {:?}", module.imports);
 
     let results = module.funcs[0].results.clone();
     let full = vec![Value::I64(t.entry_sp as i64), Value::I32(n)];
