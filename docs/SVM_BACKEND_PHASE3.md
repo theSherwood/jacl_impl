@@ -278,11 +278,22 @@ differential-tested interp==jit (svm's `run_c_full`). What was missing was JACL'
 **Remaining:**
 - **Codegen `print` head → a JACL `[print …]` program.** `HEAD_PRINT` already exists; the
   codegen path emits SVM-IR directly (no svm-llvm `_start` synth), so a printing program
-  needs: the codegen→runtime **link to reserve the `[0,32)` powerbox stash** (today the
-  first unit's data sits at offset 0, which collides with the stash `jacl_print` reads the
-  handle from), the **entry to stash the stdout handle** at offset 0 (uniform powerbox
-  entry — chosen approach: every codegen program runs through it), and **`run_case` to
-  become a host-run path** (grant + capture stdout, diff vs the old VM's `print`).
+  needs: the entry to **stash the stdout handle at window offset 0** (where `jacl_print`'s
+  `Stream.write` reloads it), window page 0 reserved writable, and **`run_case` as a
+  host-run path** (grant + capture stdout, diff vs the old VM's `print`).
+  - **Attempted (uniform entry) + reverted — open obstacle:** I wired the entry to take
+    `(sp, stdout_handle)` and `irb_store` it at offset 0, prepended a 0-function reservation
+    unit to reserve page 0, and made `run_case` host-run (grant stdout, pass the handle,
+    `compile_and_run_with_host` + `svm_run::cap_thunk`). **The store to window offset 0
+    faulted (`MemoryFault`)** on interp — page 0 is not writable in the *hand-linked*
+    not-synth layout, even though svm-llvm's *synthesized* `_start` writes the stash at
+    offset 0 fine (run_powerbox). So the obstacle is the **memory layout**: the synth path
+    maps/init's the page-0 stash scratch; a hand-linked module of the not-synth runtime
+    (globals at `DATA_BASE=16`) does not. Resolving it needs matching svm's stash-page
+    mapping (the right `Memory` mapped region / a writable page-0 scratch), an svm
+    memory-model detail to pin down next. Reverted to keep the 57 codegen tests green; the
+    runtime `jacl_print` + `run_powerbox` path is unaffected and remains the proven
+    foundation.
 - **Async (parking) builtins** (`sleep`, channels): the io_ring submit/complete capability
   exists in svm, but builtins that **park** the fiber on completion need the deferred
   parking scheduler (P3.4d). They can be done as synchronous blocking host calls first.
