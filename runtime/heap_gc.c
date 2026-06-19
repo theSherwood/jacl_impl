@@ -39,11 +39,19 @@
  * host address can be folded into the heap window. */
 long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
-/* svm §12 atomics + §12 per-vCPU TLS register (svm-llvm lowers these). The TLS word
- * is seeded to a dense vCPU id (root 0, children sequential) and read at the
- * execution point, so it is the current worker's index even across fiber migration. */
-long __vm_atomic_add(void *p, long v);   /* returns the previous value */
+/* svm §12 atomics + futex, the per-vCPU TLS register, and fiber suspend (svm-llvm
+ * lowers these). The TLS word is seeded to a dense vCPU id (root 0, children
+ * sequential) and read at the execution point, so it is the current worker's index
+ * even across fiber migration. */
+long __vm_atomic_add(void *p, long v);                    /* returns the previous value */
+int  __vm_atomic_add32(void *p, int v);
+int  __vm_atomic_load32(void *p);
+void __vm_atomic_store32(void *p, int v);
+int  __vm_atomic_cas32(void *p, int expected, int desired);   /* returns the previous value */
+int  __vm_wait32(void *p, int expected, long timeout_ns);     /* 0 woken / 1 mismatch / 2 timeout */
+int  __vm_notify(void *p, int count);                         /* number woken */
 long __vm_vcpu_tls_get(void);
+long __vm_fiber_suspend(long value);                          /* suspend the running task fiber */
 
 #ifndef JACL_HEAP_BYTES
 #define JACL_HEAP_BYTES   (16u << 20)   /* 16 MiB backing region (override for tests) */
@@ -77,6 +85,34 @@ typedef struct {
 } JaclWorker;
 static JaclWorker jacl_worker[JACL_MAX_WORKERS];
 
+/* ---- multi-vCPU stop-the-world quiesce (P3.4c) ----
+ * A pure-guest futex barrier (svm GC.md §2.1) over the fiber scheduler. Roots live on
+ * task **fibers**, and the GC safepoint **suspends** the running task back to its worker's
+ * scheduler loop (suspend flushes live roots onto the fiber's control stack, so gc.roots
+ * scans them — svm scans every *suspended* fiber + the collector, GC.md §3.1; a worker
+ * merely blocked in a futex on its bare stack is NOT scanned, which is why the safepoint
+ * must suspend, not just park). The scheduler loop then parks the (root-free) vCPU.
+ *
+ * A collection is "in progress" iff epoch != done. Each per-worker slot has a single
+ * writer (the worker), so no RMW is needed there. `lock` (CAS) elects one collector;
+ * `stopped` is 1 only inside the stopped window (the mutual-exclusion probe). */
+static int32_t jacl_gc_active[JACL_MAX_WORKERS];   /* worker is in the quiesce set */
+static int32_t jacl_gc_parked[JACL_MAX_WORKERS];   /* highest epoch this worker has parked FOR (monotonic) */
+static int32_t jacl_gc_in_task[JACL_MAX_WORKERS];  /* worker is currently running a task fiber */
+static int32_t jacl_gc_epoch;
+static int32_t jacl_gc_done;
+static int32_t jacl_gc_lock;
+static int32_t jacl_gc_collector = -1;
+static int32_t jacl_gc_stopped;
+static int32_t jacl_gc_violations;
+#define JACL_GC_WAIT_NS 1000000L   /* 1 ms futex timeout: every wait re-checks (hang-proof) */
+
+/* The current worker (vCPU) index: the per-vCPU TLS word svm seeds to a dense id. */
+static int jacl_gc_self(void) {
+  int w = (int)__vm_vcpu_tls_get();
+  return (w < 0 || w >= JACL_MAX_WORKERS) ? 0 : w;
+}
+
 /* a free cell stores the next free offset in the word right after its header */
 static inline uint32_t* free_next_slot(JaclObj* o) { return (uint32_t*)((uint8_t*)o + sizeof(JaclObj)); }
 
@@ -95,6 +131,11 @@ void jacl_heap_init(void) {
   }
   memset(jacl_startmap, 0, sizeof(jacl_startmap));
   memset(jacl_region_owner, 0, sizeof(jacl_region_owner));
+  /* quiesce state: the main thread is worker 0 and joins the quiesce set */
+  for (int w = 0; w < JACL_MAX_WORKERS; w++) { jacl_gc_active[w] = 0; jacl_gc_parked[w] = 0; jacl_gc_in_task[w] = 0; }
+  jacl_gc_epoch = 0; jacl_gc_done = 0; jacl_gc_lock = 0; jacl_gc_collector = -1;
+  jacl_gc_stopped = 0; jacl_gc_violations = 0;
+  jacl_gc_active[jacl_gc_self()] = 1;
 }
 
 /* svm-llvm rejects a *constant* ptrtoint of a global address; route the cast
@@ -129,8 +170,14 @@ static uint32_t jacl_grab_regions(int w, uint32_t bytes) {
  * exact-size free list, its current region's bump, or a freshly claimed region.
  * Returns 0 (the null sentinel offset) when the shared pool is exhausted. */
 static uint32_t jacl_alloc_off(uint32_t cell) {
-  int w = (int)__vm_vcpu_tls_get();
-  if (w < 0 || w >= JACL_MAX_WORKERS) w = 0;   /* defensive: stay on worker 0 */
+  int w = jacl_gc_self();
+  /* Mutual-exclusion probe: we are about to mutate the heap (bump / free list / region
+   * grab / start bitmap). The safepoint at jacl_alloc entry suspends any mutator while a
+   * collection runs, so reaching here means the world is NOT stopped — unless it is the
+   * collector itself (which never reaches here: collect_stw does not allocate). A non-zero
+   * count is a real STW violation (concurrent mutation during a collection). */
+  if (__vm_atomic_load32(&jacl_gc_stopped) && w != __vm_atomic_load32(&jacl_gc_collector))
+    __vm_atomic_add32(&jacl_gc_violations, 1);
   JaclWorker* wh = &jacl_worker[w];
   uint32_t cls = cell / JACL_GRANULE;
 
@@ -164,19 +211,77 @@ static uint32_t jacl_alloc_off(uint32_t cell) {
   return off;
 }
 
+/* ---- worker lifecycle + safepoints (the quiesce protocol) ---- */
+
+/* A worker (vCPU) joins the quiesce set before it allocates; it leaves before it
+ * blocks on anything that is not a GC safepoint (thread_join, a long host call) or
+ * exits, so the collector never waits on a worker that cannot answer a stop. */
+void jacl_gc_worker_register(void) {
+  int w = jacl_gc_self();
+  __vm_atomic_store32(&jacl_gc_in_task[w], 0);
+  __vm_atomic_store32(&jacl_gc_active[w], 1);   /* parked-epoch is monotonic; never reset (ids are not reused) */
+}
+void jacl_gc_worker_unregister(void) {
+  int w = jacl_gc_self();
+  __vm_atomic_store32(&jacl_gc_active[w], 0);
+  __vm_notify(&jacl_gc_parked[w], 1);   /* wake a collector waiting for us to park */
+}
+
+/* The scheduler tells the runtime when it is running a task fiber: only then may a
+ * safepoint suspend (there is a scheduler resume to return to). */
+void jacl_gc_task_begin(void) { __vm_atomic_store32(&jacl_gc_in_task[jacl_gc_self()], 1); }
+void jacl_gc_task_end(void)   { __vm_atomic_store32(&jacl_gc_in_task[jacl_gc_self()], 0); }
+
+/* Task safepoint (called from jacl_alloc and from compiler-inserted loop back-edges):
+ * if a collection is in progress and we are a mutator task (not the collector), SUSPEND
+ * the running fiber back to the scheduler — which flushes our live roots onto the fiber
+ * control stack and yields the vCPU so its scheduler can park. On resume the collection
+ * is over and we continue. */
+void jacl_gc_safepoint(void) {
+  int w = jacl_gc_self();
+  if (__vm_atomic_load32(&jacl_gc_epoch) == __vm_atomic_load32(&jacl_gc_done)) return;
+  if (!__vm_atomic_load32(&jacl_gc_in_task[w])) return;   /* not in a fiber: scheduler will park us */
+  if (w == __vm_atomic_load32(&jacl_gc_collector)) return; /* the collector drives the collection */
+  __vm_fiber_suspend(0);                                 /* yield to the scheduler for the duration */
+}
+
+/* Scheduler-loop safepoint (called at the loop top, between tasks): if a collection is
+ * in progress, park the (root-free) vCPU until it finishes. Publishing parked[w]=1 here
+ * means this worker's task is suspended and its vCPU is quiesced. */
+void jacl_gc_worker_park_if_requested(void) {
+  int w = jacl_gc_self();
+  int e = __vm_atomic_load32(&jacl_gc_epoch);
+  if (e == __vm_atomic_load32(&jacl_gc_done)) return;
+  /* publish "parked for epoch e" — monotonic, so a later collection can't mistake a
+   * stale flag from this cycle for a fresh park (the sticky-boolean bug). */
+  __vm_atomic_store32(&jacl_gc_parked[w], e);
+  __vm_notify(&jacl_gc_parked[w], 1);
+  for (;;) {
+    int d = __vm_atomic_load32(&jacl_gc_done);
+    if (d == e) break;
+    __vm_wait32(&jacl_gc_done, d, JACL_GC_WAIT_NS);
+  }
+}
+
+long jacl_gc_violation_count(void) { return __vm_atomic_load32(&jacl_gc_violations); }
+
 __attribute__((noinline))
 void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
   uint32_t cell = round_granule((uint32_t)sizeof(JaclObj) + payload);
+  jacl_gc_safepoint();                                 /* yield if another worker is collecting */
   uint32_t off = jacl_alloc_off(cell);
-  if (!off) {
-    /* Out of room: a stop-the-world, conservative, non-moving collection. The calling
-     * fiber is at this allocation — a safe point — and gc.roots conservatively scans
-     * the whole control stack, so every live root is found without precise stack maps.
-     * (Multi-vCPU quiescing of the other workers is P3.4c.) */
-    jacl_gc_collect();
+  for (int tries = 0; !off && tries < 64; tries++) {
+    /* Out of room: a stop-the-world, conservative, non-moving collection. We become the
+     * collector (quiescing every other worker — each suspends its task and parks its
+     * vCPU) or yield while another worker collects; gc.roots then scans all suspended
+     * fibers + us, so every live root is found without precise stack maps. */
+    long r = jacl_gc_collect();
     off = jacl_alloc_off(cell);
-    if (!off) return 0;                               /* genuine OOM after collection */
+    if (off) break;
+    if (r == 0) return 0;                              /* we collected, reclaimed nothing → OOM */
+    /* r < 0: another worker collected; retry. r > 0: reclaimed but no fit yet; retry/bound. */
   }
+  if (!off) return 0;
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
   o->size = cell;
   o->obj_type = (uint8_t)obj_type;
@@ -260,7 +365,11 @@ static void mark_drain(void) {
   }
 }
 
-long jacl_gc_collect(void) {
+/* The mark-sweep itself, run only while the world is stopped (every other worker has
+ * suspended its task and parked its vCPU). gc.roots scans all suspended fibers + this
+ * collector's own (caller) frames, so all roots are found; single-threaded by
+ * construction here, so it reuses the P1 algorithm verbatim. */
+static long jacl_gc_collect_stw(void) {
   uint32_t hi = (uint32_t)jacl_region_bump;
   uint32_t nbytes = (hi / JACL_GRANULE + 7) / 8;
   /* 1. clear marks (walk the start bitmap) */
@@ -314,5 +423,42 @@ long jacl_gc_collect(void) {
       }
     }
   }
+  return swept;
+}
+
+/* The collector: elect one collector (CAS), stop every other registered worker (each
+ * suspends its task at a safepoint and parks its vCPU), run the STW mark-sweep, then
+ * resume everyone. Returns the swept count when this call did the collection, or -1 when
+ * another worker was already collecting (this call yielded as a mutator instead — the
+ * caller should retry). On the single-thread path (only worker 0 registered) the barrier
+ * is a no-op and this is just the P1 collection. */
+long jacl_gc_collect(void) {
+  int w = jacl_gc_self();
+  if (__vm_atomic_cas32(&jacl_gc_lock, 0, 1) != 0) {
+    jacl_gc_safepoint();                 /* another collector is running: yield as a mutator */
+    return -1;
+  }
+  __vm_atomic_store32(&jacl_gc_collector, w);
+  /* request a stop: epoch != done now signals "collection in progress" */
+  int e = __vm_atomic_add32(&jacl_gc_epoch, 1) + 1;
+  /* barrier: wait for every other registered worker to suspend its task and park */
+  for (int i = 0; i < JACL_MAX_WORKERS; i++) {
+    if (i == w) continue;
+    for (;;) {
+      if (!__vm_atomic_load32(&jacl_gc_active[i])) break;     /* not in the set (or exited) */
+      int pe = __vm_atomic_load32(&jacl_gc_parked[i]);
+      if (pe >= e) break;                                     /* parked for this epoch (or later) */
+      __vm_wait32(&jacl_gc_parked[i], pe, JACL_GC_WAIT_NS);   /* block while still < e (re-checks active) */
+    }
+  }
+  /* — world stopped — all other tasks suspended (scannable), all other vCPUs parked */
+  __vm_atomic_store32(&jacl_gc_stopped, 1);
+  long swept = jacl_gc_collect_stw();
+  __vm_atomic_store32(&jacl_gc_stopped, 0);
+  /* publish completion and resume the parked workers */
+  __vm_atomic_store32(&jacl_gc_collector, -1);
+  __vm_atomic_store32(&jacl_gc_done, e);
+  __vm_notify(&jacl_gc_done, JACL_MAX_WORKERS);
+  __vm_atomic_store32(&jacl_gc_lock, 0);
   return swept;
 }

@@ -151,6 +151,21 @@ long   jacl_heap_hi(void);
 void   jacl_gc_mark(JaclVal v);                           /* mark a heap value as reachable (for runtime roots) */
 static inline void*    jacl_obj_payload(JaclObj* o) { return (void*)((uint8_t*)o + sizeof(JaclObj)); }
 
+/* Multi-vCPU stop-the-world quiesce over the fiber scheduler (P3.4c). A worker (vCPU)
+ * registers before it allocates and unregisters before it blocks off a safepoint or
+ * exits. The scheduler brackets each task resume with task_begin/end and calls
+ * worker_park_if_requested at its loop top; a task safepoint (jacl_alloc + loop
+ * back-edges) suspends the task to the scheduler so its roots are scannable. Any worker
+ * in jacl_gc_collect becomes the collector, stops the others, scans, and resumes. The
+ * main thread is worker 0, registered by jacl_heap_init. */
+void   jacl_gc_worker_register(void);
+void   jacl_gc_worker_unregister(void);
+void   jacl_gc_task_begin(void);                         /* scheduler: a task fiber is now running */
+void   jacl_gc_task_end(void);                           /* scheduler: the task suspended/returned */
+void   jacl_gc_safepoint(void);                          /* task code: suspend if a collection is in progress */
+void   jacl_gc_worker_park_if_requested(void);           /* scheduler loop top: park the vCPU if stopping */
+long   jacl_gc_violation_count(void);                    /* STW mutual-exclusion violations (must be 0) */
+
 /* Runtime-internal roots the collector must also mark (intern table, …) — JACL
  * obligation #3. Defined in string.c (extends as more runtime state lands). */
 void   jacl_mark_runtime_roots(void);
