@@ -66,9 +66,10 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   and the **canonical** `for [g a] name { body }` drives it (resume/`done` loop, binding
   `name` to each yielded value). Validated on interp + JIT against the old VM:
   `[for [upto 5] x …]` → 10 and a squares generator → 30.
-- **Limits (current):** a generator takes ≤1 param (the single resume arg); a generator
-  must not hold heap roots across a `yield` until multi-fiber GC quiesce (P3.6) scans
-  parked fibers' data stacks (i32 generators are safe); the data-stack pool is fixed.
+- **Limits (current):** a generator takes ≤1 param (the single resume arg); the
+  data-stack pool is fixed. (Heap roots held across a `yield` **are** safe in the
+  single-thread model: svm's `gc.roots` scans suspended fibers' stacks — see the svm
+  `gc_roots_scans_suspended_fiber_stack` test — so a parked generator's roots are found.)
 
 ### P3.2 — `spawn` / `await` — **DONE (cooperative, single-thread)**
 - `spawn { block }` → a future; `await $f` drives it to completion, caching the result.
@@ -86,18 +87,34 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   first wins). Validated vs the old VM: `parallel` (45), 3-way `parallel` (42), `race` (42).
 - **Limit:** true parallelism / cancellation lands with the M:N scheduler (P3.4).
 
-### P3.4 — Re-platform the M:N scheduler
+### P3.6 — Multi-fiber GC quiesce — **DONE for single-thread (svm-provided)**
+- The cooperative scheduler (P3.1–P3.3) runs all fibers on one OS thread, so GC is
+  already a correct STW collection: svm's `gc.roots` scans **every** suspended fiber's
+  stack (control + data — proven by svm's `gc_roots_scans_suspended_fiber_stack` /
+  `gc_roots_enumerates_every_parked_fiber`), so a parked generator's or task's
+  conservative roots are found with no extra protocol.
+- **Remaining:** a multi-**vCPU** quiesce barrier (stop all worker threads at a safe
+  point before collecting) is only needed once P3.4 introduces real OS-thread workers;
+  svm provides the STW barrier to build it on.
+
+### P3.4 — Re-platform the M:N scheduler — **PENDING (needs a thread-safe runtime)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
+- **Status / blocker:** the concurrency *semantics* are already correct via the
+  cooperative single-thread scheduler (P3.2/P3.3). Real parallelism requires making the
+  runtime **thread-safe** first — a locked/per-thread allocator and a multi-vCPU STW GC
+  (the quiesce of P3.6) — before tasks can run on `thread.spawn` workers. That substrate
+  is a substantial, carefully-tested effort (concurrent allocation + STW across vCPUs);
+  it is the largest remaining piece of Phase 3 and is tracked as dedicated follow-up.
 
-### P3.5 — Async (parking) builtins
+### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
   that park the fiber instead of blocking the worker thread.
-
-### P3.6 — Multi-fiber GC quiesce
-- The P2.9 collector is STW for one fiber. Here: a safe point that **quiesces all
-  vCPUs/fibers** before collecting (svm's stop-the-world barrier), so conservative
-  `gc.roots` scans every parked fiber's stack.
+- **Blocker:** these are *host I/O* and depend on the **powerbox / capability layer**
+  (the host-capability surface), which is not yet built — the same prerequisite that
+  kept `print` out of the Phase-2 codegen. Async builtins land once the powerbox exists
+  (it pairs naturally with P3.4's worker threads). Pure-compute concurrency (generators,
+  spawn/await, parallel/race) needs none of it and is already done.
 
 ## Carried constraints
 - **No SM transform** (deleted) — generators are fibers (Spike-3).
