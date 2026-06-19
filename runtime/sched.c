@@ -134,3 +134,65 @@ JaclVal jacl_race(JaclVal closures) {
   jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
   return (JaclVal)res[0];   /* block 0's result (deterministic; cancellation is a follow-on) */
 }
+
+/* ---- spawn / await: lazy futures flushed onto the worker pool (P3.4d) ----
+ *
+ * `spawn { block }` records the block closure as a PENDING task and returns a future;
+ * it does not run yet. The first `await` FLUSHES all pending tasks onto the pool
+ * (jacl_sched_run_batch — real parallelism), caches each result in its future, and
+ * returns. For the pure-compute corpus this is value-equivalent to eager scheduling
+ * (tasks are independent; only the degree of overlap differs, not the result). A true
+ * persistent pool with per-future waiter queues + nested-await parking (a task awaiting
+ * an unresolved future) is the follow-on.
+ *
+ * future payload (JOBJ_NODE, traced): int32 [0] done; i64 [2..3] closure; i64 [4..5] result. */
+#define JACL_PENDING_MAX 64
+static JaclObj *jacl_pending[JACL_PENDING_MAX];   /* futures awaiting their first flush */
+static long     jacl_npending;
+
+/* Root the pending futures during a collection: while a flush is running, the main thread
+ * is parked in thread_join (its stack unscanned) and the pending list is plain globals, so
+ * without this the futures (and the closures they hold) could be collected mid-flush. The
+ * collector calls this during STW (see jacl_gc_collect_stw). */
+void jacl_sched_mark_roots(void) {
+  for (long i = 0; i < jacl_npending; i++)
+    jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_pending[i]));
+}
+
+JaclVal jacl_spawn(JaclVal closure) {
+  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 24);
+  int32_t *p = (int32_t *)jacl_obj_payload(o);
+  p[0] = 0;                                  /* pending */
+  *(int64_t *)(p + 2) = (int64_t)closure;    /* the block closure (traced) */
+  *(int64_t *)(p + 4) = 0;
+  if (jacl_npending < JACL_PENDING_MAX) jacl_pending[jacl_npending++] = o;
+  return jaclrt_from_ptr(JACL_TAG_STREAM, o);
+}
+
+JaclVal jacl_await(JaclVal future) {
+  JaclObj *fo = (JaclObj *)jaclrt_as_ptr(future);
+  int32_t *fp = (int32_t *)jacl_obj_payload(fo);
+  if (fp[0]) return (JaclVal) * (int64_t *)(fp + 4);   /* already resolved */
+
+  /* flush every currently-pending task onto the pool, then cache results */
+  long n = jacl_npending;
+  JaclTaskFn fn[JACL_PENDING_MAX];
+  long arg[JACL_PENDING_MAX], res[JACL_PENDING_MAX];
+  for (long i = 0; i < n; i++) {
+    int32_t *pp = (int32_t *)jacl_obj_payload(jacl_pending[i]);
+    JaclVal c = (JaclVal) * (int64_t *)(pp + 2);
+    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);
+    arg[i] = (long)c;
+    res[i] = 0;
+  }
+  /* keep jacl_pending intact across the batch so jacl_sched_mark_roots can root the
+   * futures during any collection a task triggers; clear it only after. */
+  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
+  for (long i = 0; i < n; i++) {
+    int32_t *pp = (int32_t *)jacl_obj_payload(jacl_pending[i]);
+    pp[0] = 1;                               /* done */
+    *(int64_t *)(pp + 4) = (int64_t)res[i];  /* cache the result (i32 in the corpus) */
+  }
+  jacl_npending = 0;
+  return (JaclVal) * (int64_t *)(fp + 4);
+}

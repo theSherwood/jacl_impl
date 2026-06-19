@@ -398,6 +398,7 @@ static long jacl_gc_collect_stw(void) {
   for (long i = 0; i < scan; i++) mark_push_word(rootbuf[i]);
   /* 2b. runtime-internal roots (intern table, …) — not visible to gc.roots */
   jacl_mark_runtime_roots();
+  jacl_sched_mark_roots();   /* pending spawn futures (main is parked in join during a flush) */
   /* 3. trace */
   mark_drain();
   /* 4. sweep: unmarked live cells -> their owning worker's free list */

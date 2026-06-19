@@ -57,42 +57,5 @@ JaclVal jacl_gen_done(JaclVal gen) {
   return jaclrt_bool(p[2] != 0);
 }
 
-/* ---- P3.2 spawn / await (futures over fibers) ----
- *
- * `spawn { block }` is a no-param closure (capturing free vars) run on a task fiber;
- * the future is that fiber. `await` drives it to completion and caches the result, so
- * a future resolves once and is awaitable repeatedly. (Single-thread cooperative: a
- * task that itself awaits an *unresolved* future of another task needs the scheduler —
- * P3.4; leaf and yield-internal tasks run to completion here.)
- *
- * future payload (JOBJ_NODE; closure + cached value are heap pointers, so traced):
- *   i64 [0..1] fiber handle, int32 [2] resolved, [3] started; i64 [4..5] closure
- *   (prime arg), i64 [6..7] cached result. */
-JaclVal jacl_spawn(JaclVal closure) {
-  void *stk = jacl_grab_fiber_stack();
-  if (!stk) return jaclrt_error();
-  JaclVal fnref = jacl_closure_fn(closure); /* raw funcref of the block function */
-  long h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
-  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 32);
-  int32_t *p = (int32_t *)jacl_obj_payload(o);
-  *(int64_t *)(p + 0) = h; p[2] = 0; p[3] = 0;
-  *(int64_t *)(p + 4) = (int64_t)closure; /* primed as `self` on the first resume */
-  *(int64_t *)(p + 6) = 0;
-  return jaclrt_from_ptr(JACL_TAG_STREAM, o);
-}
-
-JaclVal jacl_await(JaclVal future) {
-  int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(future));
-  if (p[2]) return (JaclVal) * (int64_t *)(p + 6); /* already resolved */
-  long prime = p[3] ? 0 : (long)*(int64_t *)(p + 4);
-  p[3] = 1;
-  int done = 0;
-  long v = 0;
-  do {
-    v = __vm_fiber_resume(*(int64_t *)(p + 0), prime, &done);
-    prime = 0;
-  } while (!done);
-  p[2] = 1;
-  *(int64_t *)(p + 6) = (int64_t)v;
-  return (JaclVal)v;
-}
+/* spawn / await live in sched.c (P3.4d): they run their tasks on the real worker pool
+ * rather than cooperatively on this thread. */
