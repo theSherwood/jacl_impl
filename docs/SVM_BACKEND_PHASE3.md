@@ -1,12 +1,22 @@
 # JACL on SVM — Phase 3 scope: concurrency on fibers
 
-> Status: **in progress.** Branch: `svm-backend-phase3` (off merged `main`, svm pin
-> `a7cbcf1`). Companions: `SVM_BACKEND_DESIGN.md` §4.3, `SVM_BACKEND_PLAN.md` §5,
-> `SVM_BACKEND_PHASE2.md` (the sequential codegen this builds on).
+> Status: **DoD met; one hard blocker + one deferred refinement.** Branch:
+> `svm-backend-phase3` (off merged `main`, svm pin `7a82f64`). Companions:
+> `SVM_BACKEND_DESIGN.md` §4.3, `SVM_BACKEND_PLAN.md` §5, `SVM_BACKEND_PHASE2.md`.
 >
-> Phase 2 (sequential codegen: literals → closures, type-driven lowering, strings/
-> vectors, STW conservative GC) is merged. Phase 3 makes JACL **concurrent** on svm's
+> Phase 2 (sequential codegen) is merged. Phase 3 makes JACL **concurrent** on svm's
 > **stackful fibers** (`cont.*`), deleting the compile-time state-machine transform.
+>
+> **Where it stands:** generators (P3.1), `spawn`/`await` (P3.2), `parallel`/`race`
+> (P3.3), the per-vCPU allocator + sound multi-vCPU STW GC (P3.4a–c), and the multi-fiber
+> GC quiesce (P3.6) are **done and tested interp==jit==old VM**, and all four concurrency
+> constructs now run on **real vCPU worker threads** (P3.4d). The **DoD is met** for
+> representative concurrent programs. Two items remain:
+> - **P3.5 async (parking) builtins — BLOCKED** on the host powerbox (not built; same
+>   prerequisite as Phase 2's `print`). A hard external blocker.
+> - **The full M:N scheduler** (persistent pool + main-as-a-job + nested-await parking +
+>   work-stealing) — a deferred, **corpus-unobservable** refinement that removes the
+>   batch model's GC-soundness boundary (see P3.4d). Its own focused slice.
 
 ## Goal
 
@@ -87,15 +97,15 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   first wins). Validated vs the old VM: `parallel` (45), 3-way `parallel` (42), `race` (42).
 - **Limit:** true parallelism / cancellation lands with the M:N scheduler (P3.4).
 
-### P3.6 — Multi-fiber GC quiesce — **DONE for single-thread (svm-provided)**
-- The cooperative scheduler (P3.1–P3.3) runs all fibers on one OS thread, so GC is
-  already a correct STW collection: svm's `gc.roots` scans **every** suspended fiber's
-  stack (control + data — proven by svm's `gc_roots_scans_suspended_fiber_stack` /
-  `gc_roots_enumerates_every_parked_fiber`), so a parked generator's or task's
-  conservative roots are found with no extra protocol.
-- **Remaining:** a multi-**vCPU** quiesce barrier (stop all worker threads at a safe
-  point before collecting) is only needed once P3.4 introduces real OS-thread workers;
-  svm provides the STW barrier to build it on.
+### P3.6 — Multi-fiber GC quiesce — **DONE**
+- Single-thread: the cooperative scheduler (P3.1–P3.3) runs all fibers on one OS thread,
+  so GC is already a correct STW collection — svm's `gc.roots` scans **every** suspended
+  fiber's stack (proven by `gc_roots_scans_suspended_fiber_stack` /
+  `gc_roots_enumerates_every_parked_fiber`).
+- Multi-**vCPU**: delivered by **P3.4c** — the pure-guest STW quiesce barrier
+  (`heap_gc.c`): a collection on any worker stops every other worker (each suspends its
+  task and parks its vCPU), then `gc.roots` scans all suspended fibers + the collector.
+  Validated by `test_gc_sched.c` (cross-worker keeper survival, zero violations).
 
 ### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (parallel/race/spawn/await on threads; persistent pool + work-stealing pending)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
@@ -211,19 +221,34 @@ still matching the old VM:
   roots pending futures during a flush (`jacl_sched_mark_roots`, since main is parked in
   join with its stack unscanned).
 
-**Remaining:**
-- **Persistent pool** (spawn once, reuse) with per-future **waiter queues** and
-  **nested-await parking** (a task awaiting an *unresolved* future suspends to its worker
-  and is re-enqueued on completion). This replaces both the transient per-construct pools
-  and the lazy-flush, enabling eager spawn execution and arbitrary await nesting. It must
-  be **shut down before the root returns** (an svm run completes only when *every* vCPU
-  finishes, so idle workers on a futex would hang it) — i.e. a program entry/exit hook.
+**GC-safety of the batch model — done for the corpus, with a known boundary.** The
+collector roots, during a mid-batch collection: every parked/suspended task fiber (svm
+`gc.roots`), the pending spawn futures, and the in-flight **batch args (task closures) +
+results** (`jacl_sched_mark_roots` over the global batch buffers; `jacl_gc_mark_word`
+handles both tagged JaclVals and raw heap pointers). So heap closures and heap results
+survive (`test_batch_heap.c`). **Boundary:** while a batch/flush runs, the main thread is
+parked in `thread_join` with its **bare stack unscanned**, so a heap value held in a main
+local *across* a concurrency construct (not itself a batch arg/future) would be unrooted.
+The corpus never does this (the await/parallel results feed straight out); full generality
+needs main's roots on a scannable fiber — i.e. the full scheduler below.
+
+**Remaining (the full M:N scheduler — one coupled piece).** All of the following stand or
+fall together, because GC-soundness for the general case forces them:
+- **Main-as-a-job + persistent pool + nested-await parking.** For a worker-triggered
+  collection to find *all* roots, **main's roots must live on a fiber** (svm scans only
+  suspended fibers + the collector). That means the program body runs as a **job** on the
+  root vCPU's scheduler loop, and `await` **suspends** (parks) rather than blocking in
+  `thread_join` — so the pool is **persistent** (spawn once, reuse), with per-future
+  **waiter queues** (a parked awaiter is re-enqueued when its future completes) and a
+  **shutdown before the root returns** (an svm run ends only when *every* vCPU finishes).
+  This also enables eager spawn execution and arbitrary await nesting, and removes the
+  boundary above. It is a sizable codegen-entry + runtime restructure (every program runs
+  under the scheduler), so it is its own focused slice — **not corpus-observable** (the DoD
+  is already met), which is why it is sequenced last.
 - **Work-stealing deques** to replace the fixed-batch atomic-counter dispatch.
-- **vCPU-id growth**: each batch spawns fresh vCPUs (svm ids aren't reused), so very many
-  concurrency constructs would outgrow the per-vCPU arrays; the persistent reused pool
-  fixes this too.
-- **Heap-valued results** surviving a mid-batch collection (the corpus returns i32; root
-  each result as its task completes, or have workers retain them).
+- **vCPU-id reuse**: each transient batch spawns fresh vCPUs (svm ids aren't reused), so
+  very many concurrency constructs would outgrow the per-vCPU arrays; the persistent reused
+  pool fixes this.
 
 ### P3.5 — Async (parking) builtins — **BLOCKED on the host powerbox**
 - Convert blocking builtins (I/O, `sleep`, channel ops) to **async-form** capabilities
