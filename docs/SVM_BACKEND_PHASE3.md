@@ -16,10 +16,11 @@
 >   reactor; `docs/SVM_POWERBOX_ASK.md` delivered). `print` works end-to-end, interp==jit:
 >   runtime `jacl_print`, and JACL `[print …]` programs through codegen via the uniform
 >   powerbox entry (`synth_powerbox_start` + `instantiate` + `run_diff`). Remaining: only the
->   **async/parking** builtins (sleep/channels), which need the deferred parking scheduler.
-> - **The full M:N scheduler** (persistent pool + main-as-a-job + nested-await parking +
->   work-stealing) — a deferred, **corpus-unobservable** refinement that removes the
->   batch model's GC-soundness boundary (see P3.4d). Its own focused slice.
+>   **async/parking** builtins (sleep/channels), which need the worker-threads pool (P3.4d).
+> - **The M:N scheduler keystone** (P3.4d), in sub-slices: **nested await** (demand-driven
+>   `await`) and **program-as-a-job** (the GC-soundness foundation) are **done**; the
+>   **worker-threads pool** (persistent queue + helping-`await` + work-stealing) for parallel
+>   spawn execution is the remaining piece, built on that foundation.
 
 ## Goal
 
@@ -110,7 +111,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   task and parks its vCPU), then `gc.roots` scans all suspended fibers + the collector.
   Validated by `test_gc_sched.c` (cross-worker keeper survival, zero violations).
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (parallel/race/spawn/await on threads; persistent pool + work-stealing pending)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (nested await + program-as-a-job done; worker-threads pool + work-stealing pending)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -235,23 +236,32 @@ local *across* a concurrency construct (not itself a batch arg/future) would be 
 The corpus never does this (the await/parallel results feed straight out); full generality
 needs main's roots on a scannable fiber — i.e. the full scheduler below.
 
-**Remaining (the full M:N scheduler — one coupled piece).** All of the following stand or
-fall together, because GC-soundness for the general case forces them:
-- **Main-as-a-job + persistent pool + nested-await parking.** For a worker-triggered
-  collection to find *all* roots, **main's roots must live on a fiber** (svm scans only
-  suspended fibers + the collector). That means the program body runs as a **job** on the
-  root vCPU's scheduler loop, and `await` **suspends** (parks) rather than blocking in
-  `thread_join` — so the pool is **persistent** (spawn once, reuse), with per-future
-  **waiter queues** (a parked awaiter is re-enqueued when its future completes) and a
-  **shutdown before the root returns** (an svm run ends only when *every* vCPU finishes).
-  This also enables eager spawn execution and arbitrary await nesting, and removes the
-  boundary above. It is a sizable codegen-entry + runtime restructure (every program runs
-  under the scheduler), so it is its own focused slice — **not corpus-observable** (the DoD
-  is already met), which is why it is sequenced last.
-- **Work-stealing deques** to replace the fixed-batch atomic-counter dispatch.
-- **vCPU-id reuse**: each transient batch spawns fresh vCPUs (svm ids aren't reused), so
-  very many concurrency constructs would outgrow the per-vCPU arrays; the persistent reused
-  pool fixes this.
+**Keystone progress (the M:N scheduler, built in sub-slices):**
+- **Nested await — DONE (demand-driven `await`).** `spawn` records the block closure as a
+  future; `await` runs the awaited task **on demand** on a fresh fiber and caches the result.
+  A nested `await` inside a task re-enters for the inner future on another fiber while the
+  outer task is suspended at the resume (how a generator drives a sub-fiber), so a task
+  awaiting *another task's* future works — the case the prior lazy-flush raced on (errored
+  or returned 0). `nested_await` test → 42. Single-threaded for now: `spawn`/`await` trade
+  the lazy-flush's parallelism (corpus is value-identical) for correct nesting; `parallel`/
+  `race` keep their real parallelism (`run_batch`).
+- **Program-as-a-job — DONE.** The program body compiles into `__jacl_main(sp, arg)` and runs
+  as the **root task on a fiber** (`jacl_sched_run_main`), not inline on the entry's bare
+  vCPU stack. So the program's roots live on a scannable fiber and the body can be quiesced
+  like any task — the prerequisite for sound GC once worker threads run spawned tasks
+  concurrently (a worker-collector can't see/quiesce a program on a bare vCPU). This removes
+  the GC-soundness boundary noted above.
+
+**Remaining:**
+- **The worker-threads pool.** A persistent pool of vCPU workers + a shared MPMC queue:
+  `spawn` enqueues, workers run tasks **in parallel**, with **helping-`await`** (an awaiting
+  worker drains the queue, keeping nested await working), the GC quiesce extended to
+  idle/await waits, and a **clean shutdown** before the root returns (an svm run ends only
+  when every vCPU finishes). `jacl_sched_run_main` becomes the pool driver (main = worker 0).
+  Built on the program-as-a-job foundation above. Verified via concurrent-execution + GC
+  tests (`alloc_mt`/`gc_sched`-style), since the value-diff oracle can't see parallelism.
+- **Work-stealing deques** to replace the queue's coarse dispatch.
+- **vCPU-id reuse**: the persistent reused pool also fixes the transient-batch id growth.
 
 ### P3.5 — Host I/O + async (parking) builtins — **host I/O DONE; async/parking pending**
 
