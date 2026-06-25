@@ -502,3 +502,12 @@ fn print_two_statements() {
     let (_, out) = run_case_full("print_two"); // [print "hi"] [print 7]
     assert_eq!(out, b"hi\n7\n");
 }
+
+#[test]
+#[ignore = "nested await (a task awaiting another task's future) needs the parking scheduler; \
+            the lazy-flush spawn/await races (errors or returns 0). Un-ignore when P3.4d lands."]
+fn nested_await_needs_parking_scheduler() {
+    // def a [spawn {42}]; def b [spawn {[await $a]}]; [await $b]  -> should be 42.
+    let (iv, _) = run_case_full("nested_await");
+    assert_eq!(iv, i32_val(42), "nested await result");
+}
