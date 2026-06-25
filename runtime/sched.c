@@ -143,29 +143,57 @@ JaclVal jacl_race(JaclVal closures) {
   return (JaclVal)res[0];   /* block 0's result (deterministic; cancellation is a follow-on) */
 }
 
-/* ---- spawn / await: lazy futures flushed onto the worker pool (P3.4d) ----
+/* ---- spawn / await: demand-driven futures (P3.4d, sub-slice 1: nested await) ----
  *
- * `spawn { block }` records the block closure as a PENDING task and returns a future;
- * it does not run yet. The first `await` FLUSHES all pending tasks onto the pool
- * (jacl_sched_run_batch — real parallelism), caches each result in its future, and
- * returns. For the pure-compute corpus this is value-equivalent to eager scheduling
- * (tasks are independent; only the degree of overlap differs, not the result). A true
- * persistent pool with per-future waiter queues + nested-await parking (a task awaiting
- * an unresolved future) is the follow-on.
+ * `spawn { block }` records the block closure as a future and returns it; nothing runs
+ * yet. `await $f` runs `f`'s task **on demand** to completion — on a fresh fiber, with the
+ * closure as `self` — and caches the result. If the task itself `await`s another future,
+ * that nests: this `jacl_await` re-enters for the inner future, running its task on another
+ * fiber while the outer task is suspended at the resume (exactly how a generator drives a
+ * sub-fiber). So a task awaiting another task's future works — the case the prior
+ * lazy-flush model raced on. A future resolves once and is awaitable repeatedly.
  *
- * future payload (JOBJ_NODE, traced): int32 [0] done; i64 [2..3] closure; i64 [4..5] result. */
-#define JACL_PENDING_MAX 64
-static JaclObj *jacl_pending[JACL_PENDING_MAX];   /* futures awaiting their first flush */
-static long     jacl_npending;
+ * This is single-threaded (correctness first); spawn/await lose the lazy-flush's
+ * parallelism (the corpus is value-identical either way). Restoring multi-threaded
+ * spawn/await on a persistent pool with work-stealing is the next keystone sub-slice;
+ * `parallel`/`race` keep their real parallelism (run_batch) meanwhile.
+ *
+ * future payload (JOBJ_NODE, traced): int32 [0] state (0 NEW / 1 RUNNING / 2 DONE);
+ * i64 [2..3] closure; i64 [4..5] result. */
+enum { JACL_FUT_NEW = 0, JACL_FUT_RUNNING = 1, JACL_FUT_DONE = 2 };
 
-/* Root the in-flight scheduler state during a collection: the pending spawn futures, and
- * the current batch's args (task closures) + completed results. While a batch/flush runs,
- * the main thread is parked in thread_join (its stack unscanned) and these live in plain
- * globals, so without this a task closure or a heap result could be collected mid-batch.
- * The collector calls this during STW (see jacl_gc_collect_stw). */
+/* fiber data-stack pool for on-demand task runs (grab/release; nesting = await depth). */
+#define JACL_TASK_STACKS 64
+#define JACL_TASK_STACK_BYTES (1u << 16)
+static char  jacl_task_stack[JACL_TASK_STACKS][JACL_TASK_STACK_BYTES] __attribute__((aligned(16)));
+static int   jacl_task_stack_free[JACL_TASK_STACKS];
+static int   jacl_task_stack_nfree = -1;   /* -1 = uninitialized */
+
+static void *jacl_grab_task_stack(void) {
+  if (jacl_task_stack_nfree < 0) {           /* lazy init: all free */
+    for (int i = 0; i < JACL_TASK_STACKS; i++) jacl_task_stack_free[i] = i;
+    jacl_task_stack_nfree = JACL_TASK_STACKS;
+  }
+  if (jacl_task_stack_nfree == 0) return 0;
+  return jacl_task_stack[jacl_task_stack_free[--jacl_task_stack_nfree]];
+}
+static void jacl_release_task_stack(void *stk) {
+  long idx = ((char *)stk - (char *)jacl_task_stack) / JACL_TASK_STACK_BYTES;
+  if (idx >= 0 && idx < JACL_TASK_STACKS) jacl_task_stack_free[jacl_task_stack_nfree++] = (int)idx;
+}
+
+/* Live futures registry — rooted during a collection (a future may be reachable only via a
+ * program local on an unscanned bare stack while a demand-run task collects). Bounded. */
+#define JACL_FUT_MAX 256
+static JaclObj *jacl_futures[JACL_FUT_MAX];
+static long     jacl_nfutures;
+
+/* Root the in-flight scheduler state during a collection: live spawn futures + the current
+ * parallel/race batch's args (task closures) and completed results (the batch path keeps
+ * these in globals while main is parked in thread_join with its stack unscanned). */
 void jacl_sched_mark_roots(void) {
-  for (long i = 0; i < jacl_npending; i++)
-    jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_pending[i]));
+  for (long i = 0; i < jacl_nfutures; i++)
+    jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_futures[i]));
   for (long i = 0; i < jacl_batch_n; i++) {
     jacl_gc_mark_word(jacl_batch_arg[i]);     /* task closures / raw arg ptrs (non-heap ignored) */
     jacl_gc_mark_word(jacl_batch_result[i]);  /* completed results, tagged or raw (i32 ignored) */
@@ -175,37 +203,36 @@ void jacl_sched_mark_roots(void) {
 JaclVal jacl_spawn(JaclVal closure) {
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 24);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
-  p[0] = 0;                                  /* pending */
+  p[0] = JACL_FUT_NEW;
   *(int64_t *)(p + 2) = (int64_t)closure;    /* the block closure (traced) */
   *(int64_t *)(p + 4) = 0;
-  if (jacl_npending < JACL_PENDING_MAX) jacl_pending[jacl_npending++] = o;
+  if (jacl_nfutures < JACL_FUT_MAX) jacl_futures[jacl_nfutures++] = o;
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
 }
 
 JaclVal jacl_await(JaclVal future) {
   JaclObj *fo = (JaclObj *)jaclrt_as_ptr(future);
   int32_t *fp = (int32_t *)jacl_obj_payload(fo);
-  if (fp[0]) return (JaclVal) * (int64_t *)(fp + 4);   /* already resolved */
+  if (fp[0] == JACL_FUT_DONE) return (JaclVal) * (int64_t *)(fp + 4);  /* cached */
+  if (fp[0] == JACL_FUT_RUNNING) return JACL_NIL;                      /* cycle guard */
 
-  /* flush every currently-pending task onto the pool, then cache results */
-  long n = jacl_npending;
-  JaclTaskFn fn[JACL_PENDING_MAX];
-  long arg[JACL_PENDING_MAX], res[JACL_PENDING_MAX];
-  for (long i = 0; i < n; i++) {
-    int32_t *pp = (int32_t *)jacl_obj_payload(jacl_pending[i]);
-    JaclVal c = (JaclVal) * (int64_t *)(pp + 2);
-    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);
-    arg[i] = (long)c;
-    res[i] = 0;
-  }
-  /* keep jacl_pending intact across the batch so jacl_sched_mark_roots can root the
-   * futures during any collection a task triggers; clear it only after. */
-  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
-  for (long i = 0; i < n; i++) {
-    int32_t *pp = (int32_t *)jacl_obj_payload(jacl_pending[i]);
-    pp[0] = 1;                               /* done */
-    *(int64_t *)(pp + 4) = (int64_t)res[i];  /* cache the result (i32 in the corpus) */
-  }
-  jacl_npending = 0;
-  return (JaclVal) * (int64_t *)(fp + 4);
+  /* NEW: run the task on demand. A nested await inside the task re-enters here for the
+   * inner future on another fiber (the outer task suspends at this resume). */
+  fp[0] = JACL_FUT_RUNNING;
+  JaclVal closure = (JaclVal) * (int64_t *)(fp + 2);
+  JaclVal fnref = jacl_closure_fn(closure);
+  void *stk = jacl_grab_task_stack();
+  if (!stk) { fp[0] = JACL_FUT_NEW; return jaclrt_error(); }
+  long k = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
+  long prime = (long)closure;   /* primed as `self` on the first resume */
+  int done = 0;
+  long v = 0;
+  do { v = __vm_fiber_resume(k, prime, &done); prime = 0; } while (!done);
+  jacl_release_task_stack(stk);
+
+  /* re-read the payload pointer (a collection during the run may have run the conservative
+   * sweep, but the non-moving GC keeps `fo` valid) and cache the result. */
+  *(int64_t *)(fp + 4) = (int64_t)v;
+  fp[0] = JACL_FUT_DONE;
+  return v;
 }
