@@ -200,6 +200,23 @@ void jacl_sched_mark_roots(void) {
   }
 }
 
+/* Run the program body `fnref` as the ROOT TASK on a fiber (program-as-a-job) and return
+ * its result. The body then runs with its roots on a scannable fiber stack — so a
+ * collection triggered anywhere in the program (or, later, by a pool worker) finds them —
+ * rather than on the bare entry vCPU stack the collector cannot see. The codegen entry
+ * calls this after initializing the runtime. (Single-worker for now; the persistent worker
+ * pool that runs spawned tasks in parallel is the next sub-slice, built on this.) */
+JaclVal jacl_sched_run_main(JaclVal fnref) {
+  void *stk = jacl_grab_task_stack();
+  if (!stk) return jaclrt_error();
+  long k = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
+  int done = 0;
+  long v = 0, prime = 0;   /* __jacl_main(sp, arg): arg unused, primed with 0 */
+  do { v = __vm_fiber_resume(k, prime, &done); prime = 0; } while (!done);
+  jacl_release_task_stack(stk);
+  return (JaclVal)v;
+}
+
 JaclVal jacl_spawn(JaclVal closure) {
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 24);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
