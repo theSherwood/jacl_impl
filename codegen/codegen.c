@@ -869,6 +869,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return irb_suspend(cx->f, cx->cur, v);
       }
 
+      /* `print V` — write V's text + newline to stdout via the powerbox Stream capability
+       * (jacl_print → libc write → Stream.write). The harness wraps the program with svm's
+       * synth_powerbox_start, so the stdout handle is stashed before the program runs. */
+      if (hid == HEAD_PRINT) {
+        IrVal v = (node->data.command.arg_count >= 1)
+                      ? compile_expr(cx, node->data.command.args[0])
+                      : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v};
+        return emit_rt_call(cx, "jacl_print", a, 2);
+      }
+
       /* `spawn { block }` — the block is a 0-param closure (capturing free vars) run on
        * a task fiber; returns a future. */
       if (hid == HEAD_SPAWN) {

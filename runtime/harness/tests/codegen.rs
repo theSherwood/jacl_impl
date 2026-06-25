@@ -88,38 +88,48 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
     }
 }
 
-/// Compile `case` from JACL source, link it against the runtime, run on interp + JIT,
-/// and assert the returned JaclVal equals `want`.
-fn run_case(case: &str, want: i64) {
+/// Compile `case`, link it against the runtime, wrap it with svm's powerbox entry
+/// (`synth_powerbox_start`), instantiate, and run the powerbox entry on interp + JIT
+/// (`run_diff` enforces they agree). Returns the program's returned JaclVal and captured
+/// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
+/// `[print …]` program's host I/O works the same way a pure-compute one returns a value.
+fn run_case_full(case: &str) -> (i64, Vec<u8>) {
     let raw = emit(case);
     let (text, relocs) = split_relocs(&raw);
     let program = svm_text::parse_module(text).unwrap_or_else(|e| panic!("parse {case}: {e:?}"));
 
     let rt = translate_runtime();
-    let entry_sp = rt.entry_sp;
-    let entry = rt.module.funcs.len() as u32; // the program function lands after the runtime
+    let entry = rt.module.funcs.len() as u32; // the program entry lands after the runtime
     let linked = link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: program, relocations: relocs, ..Default::default() },
     ])
     .unwrap_or_else(|e| panic!("link {case}: {e:?}"));
     assert!(linked.imports.is_empty(), "{case}: unresolved imports {:?}", linked.imports);
-    svm_verify::verify_module(&linked).unwrap_or_else(|e| panic!("verify {case}: {e:?}"));
 
-    let args = [Value::I64(entry_sp as i64)];
-    let mut fuel = 2_000_000_000u64;
-    let interp = svm_interp::run(&linked, entry, &args, &mut fuel).expect("interp run");
-    let iv = match interp[0] {
-        Value::I64(x) => x,
-        ref other => panic!("{case}: unexpected interp value {other:?}"),
+    // Wrap with the powerbox _start (stdout/stdin/exit handle stash); svm lays out the
+    // writable stash + memory. `entry` is the program entry's index in `linked` (synth
+    // prepends _start as func 0 and reindexes).
+    let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false)
+        .unwrap_or_else(|e| panic!("synth_powerbox_start {case}: {e}"));
+    let inst = svm_run::instantiate(pb).unwrap_or_else(|e| panic!("instantiate {case}: {e}"));
+    let run = inst
+        .run_diff(&svm_run::RunConfig::default())
+        .unwrap_or_else(|e| panic!("run {case}: {e}"));
+    let result = match run.outcome {
+        svm_run::Outcome::Returned(ref v) => match v.first() {
+            Some(Value::I64(x)) => *x,
+            other => panic!("{case}: unexpected returned value {other:?}"),
+        },
+        svm_run::Outcome::Exited(c) => panic!("{case}: program exited({c})"),
     };
-    assert_eq!(iv, want, "interp {case}");
+    (result, run.stdout)
+}
 
-    let jv = match svm_jit::compile_and_run(&linked, entry, &[entry_sp as i64]).expect("jit run") {
-        svm_jit::JitOutcome::Returned(s) => s[0],
-        other => panic!("{case}: jit did not return: {other:?}"),
-    };
-    assert_eq!(jv, want, "jit {case}");
+/// Compile + run `case`, asserting the returned JaclVal equals `want` (stdout unused).
+fn run_case(case: &str, want: i64) {
+    let (iv, _) = run_case_full(case);
+    assert_eq!(iv, want, "{case}");
 }
 
 #[test]
@@ -471,4 +481,24 @@ fn typed_proc_body_is_unboxed() {
     assert!(ir.contains("i32.add"), "typed proc body should use native i32.add:\n{ir}");
     assert!(!ir.contains("jacl_add"), "typed proc body should not call jacl_add:\n{ir}");
     run_case("proc_typed", i32_val(42));
+}
+
+// ---- P3.5 host I/O: print through the powerbox (stdout captured, interp == jit) ----
+
+#[test]
+fn print_string_to_stdout() {
+    let (_, out) = run_case_full("print_str"); // [print "hello"]
+    assert_eq!(out, b"hello\n", "print of a string reaches stdout via the powerbox");
+}
+
+#[test]
+fn print_int_to_stdout() {
+    let (_, out) = run_case_full("print_int"); // [print [+ 40 2]]
+    assert_eq!(out, b"42\n");
+}
+
+#[test]
+fn print_two_statements() {
+    let (_, out) = run_case_full("print_two"); // [print "hi"] [print 7]
+    assert_eq!(out, b"hi\n7\n");
 }

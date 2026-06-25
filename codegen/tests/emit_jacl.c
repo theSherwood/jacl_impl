@@ -145,6 +145,13 @@ static const char *source_for(const char *name) {
     return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
   if (!strcmp(name, "race"))
     return "[race { [+ 40 2] } { [+ 100 100] }]";
+  /* P3.5 host I/O — print through the powerbox */
+  if (!strcmp(name, "print_str"))
+    return "[print \"hello\"]";
+  if (!strcmp(name, "print_int"))
+    return "[print [+ 40 2]]";
+  if (!strcmp(name, "print_two"))
+    return "[print \"hi\"]\n[print 7]";
   return NULL;
 }
 
