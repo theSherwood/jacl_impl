@@ -174,6 +174,7 @@ typedef long (*JaclTaskFn)(long);
 void   jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers);
 JaclVal jacl_parallel(JaclVal closures);   /* run each 0-arg closure on the pool → vector of results */
 JaclVal jacl_race(JaclVal closures);       /* run each on the pool → first block's result */
+JaclVal jacl_sched_run_main(JaclVal fnref);/* run the program body as the root task fiber (program-as-a-job) */
 JaclVal jacl_spawn(JaclVal closure);       /* record a pending task; returns a future */
 JaclVal jacl_await(JaclVal future);        /* flush pending tasks onto the pool; return this one's result */
 void   jacl_sched_mark_roots(void);        /* GC: root pending futures during a flush (STW hook) */

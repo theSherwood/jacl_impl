@@ -502,3 +502,12 @@ fn print_two_statements() {
     let (_, out) = run_case_full("print_two"); // [print "hi"] [print 7]
     assert_eq!(out, b"hi\n7\n");
 }
+
+#[test]
+fn nested_await() {
+    // def a [spawn {42}]; def b [spawn {[await $a]}]; [await $b]  -> 42.
+    // A task awaiting another task's future: demand-driven await runs the inner task on a
+    // nested fiber while the outer task is suspended at the resume.
+    let (iv, _) = run_case_full("nested_await");
+    assert_eq!(iv, i32_val(42), "nested await result");
+}

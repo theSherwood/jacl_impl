@@ -145,6 +145,9 @@ static const char *source_for(const char *name) {
     return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
   if (!strcmp(name, "race"))
     return "[race { [+ 40 2] } { [+ 100 100] }]";
+  /* nested await: a spawned task awaits another task's future (needs the parking scheduler) */
+  if (!strcmp(name, "nested_await"))
+    return "def a [spawn { [+ 40 2] }]\ndef b [spawn { [+ [await $a] 0] }]\n[await $b]";
   /* P3.5 host I/O — print through the powerbox */
   if (!strcmp(name, "print_str"))
     return "[print \"hello\"]";

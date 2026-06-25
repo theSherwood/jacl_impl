@@ -1356,25 +1356,24 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   IrModule *m = irb_module_new();
   cx.m = m;
 
-  /* Entry must be program function 0 (the harness runs it). Create it first, compile
-   * its body last so it can call procs defined anywhere at top level. */
+  /* func 0 = the entry the harness runs. func 1 = __jacl_main(sp, arg), the program body.
+   * The entry inits the runtime, then runs __jacl_main as the ROOT TASK on a fiber
+   * (program-as-a-job): the program's roots then live on a scannable fiber stack, and the
+   * body can be quiesced like any task — the prerequisite for sound GC under the M:N pool. */
   IrType i64_1[] = {IRB_I64};
+  IrType i64_2[] = {IRB_I64, IRB_I64};
   IrType r1[] = {IRB_I64};
   IrFunc *entry = irb_func_new(m, i64_1, 1, r1, 1);
   IrBlock entry_block = irb_block(entry, i64_1, 1);
+  IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, arg) — arg is the fiber resume arg (unused) */
+  IrBlock main_block = irb_block(mainf, i64_2, 2);
 
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
-  /* Entry body: the non-proc top-level forms, in order; value = last. */
+  /* The program body — the non-proc top-level forms, in order; value = last — into __jacl_main. */
   if (!cx.failed) {
-    cx.f = entry; cx.cur = entry_block; cx.sp = 0;
-    /* Initialize the runtime before anything allocates: reset the heap (so GC's
-     * sweep walks well-formed cells), the string intern table, and the map key
-     * handlers. Without this the program runs on an uninitialized heap. */
-    emit_void_call(&cx, "jacl_heap_init");
-    emit_void_call(&cx, "jacl_intern_init");
-    emit_void_call(&cx, "jacl_map_init");
+    cx.f = mainf; cx.cur = main_block; cx.sp = 0;
     env_reset(&cx);
     capset_reset(&cx);
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
@@ -1389,6 +1388,20 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
     scope_exit(&cx);
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
+  }
+
+  /* The entry: init the runtime (before anything allocates), then run __jacl_main as the
+   * root task on a fiber and return its result. */
+  if (!cx.failed) {
+    cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    emit_void_call(&cx, "jacl_heap_init");
+    emit_void_call(&cx, "jacl_intern_init");
+    emit_void_call(&cx, "jacl_map_init");
+    IrVal fnref = irb_ref_func(entry, entry_block, mainf);
+    IrVal fnref64 = irb_convert(entry, entry_block, IRB_EXTEND_I32U, fnref); /* funcref i32 -> i64 (JaclVal) */
+    IrVal a[] = {cx.sp, fnref64};
+    IrVal v = emit_rt_call(&cx, "jacl_sched_run_main", a, 2);
+    if (!cx.failed) { IrVal ret[] = {v}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 
   if (!cx.failed) compile_pending_closures(&cx); /* closure bodies (incl. nested) */
