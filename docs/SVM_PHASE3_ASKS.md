@@ -177,3 +177,52 @@ migration — `await`/wait suspends the awaiting fiber to a bare per-worker loop
 busy-cycling; workers resume ready fibers (migrating them); keep #1's global-buffer rooting and
 #2's atomic handoff. Then `parallel`/`race`/`spawn`/`await` move onto the persistent pool and
 the async/parking builtins (`sleep`/channels) follow. Tracked in `SVM_BACKEND_PHASE3.md` P3.4d.
+
+---
+
+## Ask 3 — `gc.roots` coverage contract for guest values on stacks/registers
+
+> **STATUS: OPEN.** Not a blocker (JACL works around it), but it forces a guest-side wart: an
+> explicit, hand-marked, un-reclaimable global root table for scheduler jobs (a cap + leak).
+> Closing it lets a guest keep its roots in normal locals.
+>
+> *Not contradicted by Ask 2.* `gc.roots` correctly scans a suspended fiber's **spilled** stack
+> (Ask 2 confirmed that). This ask is about what it does **not** cover: values in unspilled
+> registers, and possibly a non-collector worker vCPU's bare native frames.
+
+**Context.** JACL runs an M:N scheduler on `cont.*`: a persistent pool of `thread.spawn` vCPU
+workers, each running a bare worker loop that resumes job fibers. The guest GC finds heap roots
+via `gc.roots` at a stop-the-world safepoint.
+
+**Problem.** We cannot rely on `gc.roots` to find guest heap pointers that live on stacks — they
+get swept mid-collection. Confirmed with a reproducer: when scheduler "job" objects are rooted
+only via their natural references (a worker-loop local, a `parallel` block's `futs[]` array on
+the awaiting fiber, the program root reachable through a waiter chain), live jobs — including the
+program root — get collected, hanging/corrupting the run. Marking the obvious guest globals
+(ready queues, per-worker current-job, root-job pointer) is **not** enough; only copying *every*
+job pointer into a guest-global array and marking it by hand works. That array can't be safely
+reclaimed (a DONE job may be a held, re-awaitable future whose only reference is a stack slot we
+can't prove dead), so it leaks / is capped.
+
+`gc.roots`' own doc already flags one gap: *"live roots a caller holds only in unspilled
+callee-saved registers … are out of scope (a register-flush shim is a future follow-up)."*
+
+**Please confirm coverage at a STW `gc.roots` (driven by one vCPU) for each:**
+1. Values live only in **unspilled callee-saved registers** — of the calling frame, of suspended
+   fibers, and of resume-chain ancestors.
+2. A **non-collector spawned vCPU's bare native-thread (root-computation) stack** — i.e. its
+   `thread.spawn` entry frames (our worker loop), where a job pointer sits between dequeuing it
+   and resuming its fiber. Is `root_entry_sp` recorded and that region scanned for spawned vCPUs,
+   not just the main one?
+3. A **suspended fiber's full saved C-frame chain** (e.g. a `parallel` local array on a fiber
+   parked in `await`).
+
+**Ask.** Document the exact `gc.roots` coverage contract (which locations × which vCPUs/fibers are
+guaranteed scanned at STW), and close the gaps — in particular the already-flagged register-flush
+shim, and (2) if spawned-worker native stacks are not covered. Then a guest scheduler can keep
+roots in normal locals instead of a hand-marked, un-reclaimable global table.
+
+**Repro (JACL, this repo).** `spikes/svm_pool_gc/` (analysis) + `runtime/tests/test_par_gc.c` via
+`cargo test --release --test mt par_gc` (JIT). With the explicit job registry it passes 10/10;
+relying on the stack scan (registry removed, queues+running+root marked) it hangs 0/8 —
+`runtime/sched.c` `jacl_sched_mark_roots` / `jacl_all_jobs`.
