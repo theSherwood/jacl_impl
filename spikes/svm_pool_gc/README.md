@@ -1,11 +1,14 @@
 # Spike — persistent worker pool for parallel/race under multi-vCPU GC
 
-**Status: root-caused; not shipped.** This spike chased a flaky GC corruption in a *persistent*
-worker pool for `parallel`/`race`, isolated it to three distinct causes, fixed the two that are
-JACL-side, and pinned the remaining one to a structural property that the shipped (transient)
-pool avoids and that a persistent M:N pool needs svm **fiber migration** to solve cleanly.
+**Status: root-caused; not shipped; no svm dependency.** This spike chased a flaky GC corruption
+in a *persistent* worker pool for `parallel`/`race`, isolated it to three distinct causes, fixed
+the two that are straightforward, and pinned the remaining one to a structural property the
+shipped (transient) pool avoids. All three are **JACL-side**: the clean fix for the last one is a
+continuation scheduler riding on svm's **already-implemented, already-tested** cross-vCPU fiber
+migration — so the persistent M:N pool is **not** blocked on svm.
 
-It corrects an earlier wrong conclusion: svm's `gc.roots` is **not** buggy. The proven transient
+It corrects two earlier wrong conclusions: svm's `gc.roots` is **not** buggy, and fiber
+migration is **not** a missing primitive (it exists and is tested). The proven transient
 pool (`runtime/sched.c` `jacl_sched_run_batch`, exercised by `mt.rs::{sched_batch,batch_heap,
 gc_sched}`) uses the same `gc.roots` and is rock-solid. The failures were in how the *persistent*
 pool used it.
@@ -62,9 +65,12 @@ collections.
 Eliminating #3 needs the program fiber to step **entirely off** the workers during a wait — a
 **continuation scheduler**: `await` suspends the task fiber back to a bare scheduler loop (so it
 is never a RUNNING fiber mid-collection) and a ready fiber resumes on whatever worker grabs it.
-That requires svm **fiber migration** (`__vm_fiber_resume` of a fiber from a different vCPU than
-suspended it, with `gc.roots` covering migrated-but-suspended fibers). See
-`docs/SVM_PHASE3_ASKS.md` Ask 2.
+That rides on cross-vCPU fiber **migration** (resume a fiber on a different vCPU than suspended
+it, with `gc.roots` covering migrated-but-suspended fibers) — which **svm already implements and
+tests** on both backends (`cont.resume` "any vCPU may resume … even when another OS thread
+suspended it"; `svm/tests/fiber_migrate.rs::fiber_suspended_on_root_resumes_on_spawned_vcpu`,
+`gc_roots.rs` cross-vCPU scan). So #3 is **not** blocked on svm — it is remaining JACL-side
+work. `docs/SVM_PHASE3_ASKS.md` Ask 2 (which earlier requested migration) is **withdrawn**.
 
 ## Reproduce
 

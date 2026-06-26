@@ -133,43 +133,47 @@ commit. **P3.4 is unblocked.**
 
 ---
 
-## Ask 2 — fiber migration, for a persistent M:N pool (the P3.4d ask)
+## Ask 2 — persistent M:N pool — **WITHDRAWN: no svm change needed**
 
-> **STATUS: OPEN (one clean ask).** This is what a *persistent* M:N worker pool needs —
-> the P3.4d keystone, and the foundation for multi-threaded `spawn`/`await` + the
-> async/parking builtins (`sleep`/channels). The rest of Phase 3 is done; `parallel`/`race`
-> ship on the proven **transient** pool (`jacl_sched_run_batch`) meanwhile. Full root-cause
-> analysis + a runnable reproducer: `spikes/svm_pool_gc/`.
->
-> **Correction.** An earlier draft of this ask claimed a `gc.roots` *coverage bug*. That was
-> wrong: `gc.roots` is sound — the transient pool uses it and is rock-solid
-> (`mt.rs::gc_sched`, hundreds of runs). Root-causing the persistent-pool corruption found
-> the failures were **JACL-side** (see below), plus one structural property that needs the
-> ask here. Keeping the corrected analysis for the record.
+> **STATUS: WITHDRAWN.** Two earlier drafts of this ask were both wrong. (a) "`gc.roots`
+> coverage bug" — wrong: `gc.roots` is sound (the transient `jacl_sched_run_batch` uses it and
+> is rock-solid, `mt.rs::gc_sched`). (b) "need fiber migration" — wrong: **svm already provides
+> cross-vCPU fiber migration, and it is tested *with* GC.** So the persistent M:N pool (the
+> P3.4d keystone) is **not blocked on svm at all** — the remaining work is entirely JACL-side.
+> Kept here, withdrawn, for the record. Full root-cause + reproducer: `spikes/svm_pool_gc/`.
 
-**What root-causing found.** The persistent-pool corruption had three causes (`spikes/svm_pool_gc/`):
+**Why the persistent pool corrupted (root cause — all JACL-side).** Three causes, found by
+isolation in `spikes/svm_pool_gc/`:
 1. *main-side roots* — `jacl_parallel` held in-flight roots (the closures vector, freshly
    allocated futures, the result vector, register transients) on **main's** fiber stack while
-   pool workers collected; `gc.roots` doesn't reliably cover the main thread's stack for a
-   collection elected on another vCPU. **JACL-side; fixed** by global root buffers + doing
-   main-side allocation only when main is the sole mutator.
-2. *result handoff ordering* — a plain i64 result store wasn't ordered before the atomic DONE
-   flag under svm-llvm + real JIT threads. **JACL-side; fixed** by atomic-halves publish/read.
-3. *main's program-fiber in the multi-worker quiesce set* — unlike the transient pool (where
-   main unregisters and parks on its bare thread, never a running fiber during a collection),
-   the persistent pool keeps main running the program as a task fiber that **cycles
-   suspend/resume** while it awaits. That leaves narrow windows the strict `gc.roots` trips
-   (`FiberFault`, ~1/40 on real-thread JIT). This is the structural one.
+   pool workers collected; `gc.roots` doesn't cover the main thread's stack for a collection
+   elected on another vCPU. **Fixed** by global root buffers + main-allocates-only-when-sole-mutator.
+2. *result-handoff ordering* — a plain i64 result store wasn't ordered before the atomic DONE
+   flag under svm-llvm + real JIT threads. **Fixed** by atomic-halves publish/read.
+3. *main's program-fiber in the multi-worker quiesce set* — unlike the transient pool (main
+   unregisters and parks on its bare thread, never a running fiber during a collection), the
+   persistent pool runs main as a program fiber that **cycles suspend/resume** while awaiting,
+   leaving rare windows the strict `gc.roots` trips (`FiberFault`, ~1/40 on real-thread JIT).
 
-**The ask: sound fiber migration.** `__vm_fiber_resume(k, …)` callable from a vCPU **other
-than** the one that created/suspended `k`, with `gc.roots` covering a migrated-but-suspended
-fiber. That enables a **continuation scheduler**: an `await`/wait suspends the program/task
-fiber back to a bare scheduler loop — so it is **never a RUNNING fiber while a worker
-collects** (dissolving cause #3) — and a ready fiber is resumed by whatever worker grabs it.
-This is the clean substrate for the persistent pool and for multi-threaded `spawn`/`await` +
-the async/parking builtins, verifiable on the differential oracle.
+**Why #3 needs no svm change.** The clean fix for #3 is a **continuation scheduler**: a wait
+suspends the program/task fiber back to a bare scheduler loop (so it is `RUNNABLE`, *off* the
+workers — never `RUNNING` while a worker collects), and a ready fiber is resumed by whatever
+worker grabs it. That needs cross-vCPU fiber **migration** (resume a fiber on a different vCPU
+than suspended it), which **svm already implements and tests on both backends**:
 
-(If migration is infeasible, the alternative is entirely JACL-side: replicate the transient
-pool's "main steps off the fibers during the concurrent phase" structure for `parallel`/`race`
-— but without migration that means main cannot be running the program fiber while it waits,
-which the current program-as-a-job model doesn't allow. Migration is the smaller change.)
+- `cont.resume` claims a fiber from a run-shared registry, "**possibly one suspended on another
+  vCPU (D57 migration)**" — interp `svm-interp/src/bytecode.rs`; JIT `fiber_rt::fiber_resume`:
+  "**any vCPU may resume** a fresh (`OWNED`) or suspended (`RUNNABLE`) fiber … even when another
+  OS thread suspended it (the migration edge)."
+- Tests: `svm/tests/fiber_migrate.rs::fiber_suspended_on_root_resumes_on_spawned_vcpu`,
+  `foreign_vcpu_claim_succeeds_without_a_race`, `racing_resumes_have_exactly_one_winner`;
+  `fiber_fuzz.rs::generated_migration_schedules_agree_on_interp_and_jit`; and `gc_roots.rs` /
+  `gc_quiesce.rs` exercise a stop-the-world `gc.roots` scan **across spawned vCPUs** (with the
+  §3.3 "refuse if another vCPU holds a *running* fiber" check verified *not* to fire when fibers
+  are properly suspended — exactly the continuation scheduler's invariant).
+
+**Remaining work (JACL-side, no ask):** build the continuation scheduler on svm's existing
+migration — `await`/wait suspends the awaiting fiber to a bare per-worker loop instead of
+busy-cycling; workers resume ready fibers (migrating them); keep #1's global-buffer rooting and
+#2's atomic handoff. Then `parallel`/`race`/`spawn`/`await` move onto the persistent pool and
+the async/parking builtins (`sleep`/channels) follow. Tracked in `SVM_BACKEND_PHASE3.md` P3.4d.
