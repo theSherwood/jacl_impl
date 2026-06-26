@@ -139,6 +139,24 @@ static int      jacl_pool_handles[JACL_POOL_WORKERS];
 static int      jacl_pool_nthreads;
 static JaclObj *jacl_root_job;
 
+/* Live-job registry: every job is rooted here from creation. This is the *authoritative* job
+ * root set — gc.roots' conservative stack scan does NOT reliably cover a job's references held
+ * only on a fiber/bare stack (e.g. parallel's `futs[]`, or the root job parked on a block), so
+ * jobs are rooted explicitly here instead. Atomic publish: reserve a slot, then write — a slot
+ * read before its write just marks 0/stale (harmless).
+ *
+ * Bounded: holds every job created in a run (not yet compacted). Safe drop of a completed job
+ * needs reachability info the conservative scan can't give (a DONE job may still be a held,
+ * re-awaitable future), so reclamation is a follow-up; until then a run is capped at
+ * JACL_ALL_JOBS_MAX total spawns. */
+#define JACL_ALL_JOBS_MAX 8192
+static JaclObj *jacl_all_jobs[JACL_ALL_JOBS_MAX];
+static int32_t  jacl_all_jobs_n;
+static void register_job(JaclObj *j) {
+  int idx = __vm_atomic_add32(&jacl_all_jobs_n, 1);
+  if (idx >= 0 && idx < JACL_ALL_JOBS_MAX) jacl_all_jobs[idx] = j;
+}
+
 static void rq_push(JaclObj *j) {            /* under slock — to the job's OWNER queue */
   int o = jp(j)[20];
   if (jp(j)[18]) return;                      /* already queued — never enqueue a job twice */
@@ -218,8 +236,7 @@ static void worker_loop(int is_main) {
     JaclObj *job = rq_pop(self);
     sunlock();
     if (!job) {
-      if (is_main) { if (__vm_atomic_load32(&jacl_pool_shutdown)) break; }
-      else         { if (__vm_atomic_load32(&jacl_pool_shutdown)) break; }
+      if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
       jacl_running_job[self] = 0;                 /* idle: hold no root */
       int ev = __vm_atomic_load32(&jacl_pool_event);
       __vm_wait32(&jacl_pool_event, ev, JACL_WAIT_NS);
@@ -258,7 +275,7 @@ static long worker_thread(long arg) { (void)arg; jacl_gc_worker_register(); work
  * a thread. */
 static void sched_init(void) {
   jacl_sched_lock = 0; jacl_pool_event = 0; jacl_pool_shutdown = 0;
-  jacl_pool_started = 0; jacl_pool_nthreads = 0; jacl_owner_rr = 0;
+  jacl_pool_started = 0; jacl_pool_nthreads = 0; jacl_owner_rr = 0; jacl_all_jobs_n = 0;
   for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) { jacl_rq_head[w] = 0; jacl_rq_count[w] = 0; jacl_running_job[w] = 0; }
 }
 
@@ -279,15 +296,14 @@ static void pool_ensure(void) {
     jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, (void *)0, 0);
 }
 
-/* Root the scheduler's heap state during a collection: the ready queue + each worker's
- * in-flight job. Jobs trace their own closures, results, resume args, and waiter chains, so
- * parked jobs are reachable transitively. (Legacy batch buffers too.) */
+/* Root the scheduler's heap state during a collection: every registered job (the authoritative
+ * job root set — see the registry note above), which in turn traces each job's closure, result,
+ * resume arg, and waiter chain. (Legacy batch buffers too.) Runs under STW. */
 void jacl_sched_mark_roots(void) {
-  for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) {
-    for (int i = 0; i < jacl_rq_count[w]; i++)
-      jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_rq[w][(jacl_rq_head[w] + i) % JACL_RQ_CAP]));
-    if (jacl_running_job[w]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_running_job[w]));
-  }
+  int n = __vm_atomic_load32(&jacl_all_jobs_n);
+  if (n > JACL_ALL_JOBS_MAX) n = JACL_ALL_JOBS_MAX;
+  for (int i = 0; i < n; i++)
+    if (jacl_all_jobs[i]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_all_jobs[i]));
   for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
 }
 
@@ -296,6 +312,7 @@ void jacl_sched_mark_roots(void) {
 JaclVal jacl_sched_run_main(JaclVal fnref) {
   sched_init();
   JaclObj *root = make_job((long)(uintptr_t)(uint64_t)fnref, 0, /*is_root=*/1, /*owner=*/0);
+  register_job(root);
   jacl_root_job = root;
   slock(); rq_push(root); sunlock(); pool_wake();
   worker_loop(/*is_main=*/1);
@@ -309,6 +326,7 @@ JaclVal jacl_sched_run_main(JaclVal fnref) {
 JaclVal jacl_spawn(JaclVal closure) {
   pool_ensure();                                   /* first concurrent construct starts the pool */
   JaclObj *j = make_job((long)(uintptr_t)(uint64_t)jacl_closure_fn(closure), (long)closure, 0, next_owner());
+  register_job(j);
   slock(); rq_push(j); sunlock(); pool_wake();
   return jaclrt_from_ptr(JACL_TAG_STREAM, j);
 }

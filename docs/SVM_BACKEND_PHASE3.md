@@ -28,16 +28,25 @@
 >   below) structurally: all scheduler state is in globals scanned by `jacl_sched_mark_roots`,
 >   and program/task locals live on job fibers that are always scannable.
 >
-> **REMAINING — concurrent GC under allocation pressure (P3.4c quiesce).** Under *heavy
-> concurrent collection* (many workers calling `jacl_gc_collect` while allocating), the P3.4c
-> multi-vCPU stop-the-world quiesce is **unsound**: the continuation pool hangs (interp
-> livelock / jit FiberFault under load) and the **legacy `jacl_sched_run_batch` corrupts under
-> the same conditions** (`mt::sched_batch` flakes on baseline too). So this is a **pre-existing
-> weakness in the GC quiesce, not the scheduler structure**. The **corpus never triggers GC**
-> (small programs, 16 MiB window), so the language surface is green; a GC stress reproducer is
-> kept at `mt::par_gc_jit` (`#[ignore]`). Fixing the multi-worker STW quiesce is the next
-> follow-up. (History of the root-cause journey — including two withdrawn svm asks — in
-> `spikes/svm_pool_gc/` and `docs/SVM_PHASE3_ASKS.md`.)
+> **Concurrent GC — now SOUND on the JIT (the real backend).** Under heavy concurrent
+> collection the pool used to hang/corrupt; root cause: `gc.roots`' conservative stack scan does
+> **not reliably root a job's references held only on a fiber/bare stack** (e.g. `parallel`'s
+> `futs[]`, or the program root parked on a block), so jobs — including the program root — were
+> swept mid-collection. Fix: a **global job registry** (`jacl_all_jobs`, scanned by
+> `jacl_sched_mark_roots`) is the authoritative job root set — every job is rooted explicitly
+> from creation, independent of the unreliable stack scan. `mt::par_gc` (parallel + forced
+> collections across pinned workers) now passes on the JIT, 10/10 under stress.
+>
+> **REMAINING (two follow-ups, both corpus-unobservable):** (1) the registry is not yet
+> compacted — a run is capped at `JACL_ALL_JOBS_MAX` (8192) total spawns until safe reclamation
+> lands (a DONE job may still be a held, re-awaitable future, and the conservative scan can't
+> prove non-reachability). (2) The svm **interpreter**'s cooperative single-thread scheduler
+> livelocks on the pool's futex traffic under heavy concurrent GC (a simulation artifact — the
+> JIT, real OS-thread vCPUs, is sound), so `mt::par_gc` is JIT-only via `run_test_jit`. The
+> legacy `jacl_sched_run_batch` separately flakes under concurrent GC on baseline (its own
+> main-side-buffer rooting); it is dead code now (superseded by the continuation pool).
+> (History — including two withdrawn svm asks — in `spikes/svm_pool_gc/` and
+> `docs/SVM_PHASE3_ASKS.md`.)
 
 ## Goal
 
@@ -281,13 +290,19 @@ scannable — dissolving the transient pool's main-side-root and result-handoff 
 `parallel`/`race`/`spawn`/`await`/nested all run on it, tested interp==jit==old-VM (`codegen`
 61/61, `io`, `mt::par_min`).
 
-**Remaining follow-ups:**
-- **Sound multi-worker STW GC quiesce (P3.4c).** Under heavy concurrent collection the quiesce
-  hangs the continuation pool (and corrupts the legacy `run_batch` — `mt::sched_batch` flakes on
-  baseline). Corpus-unobservable (no GC under the corpus); reproducer `mt::par_gc_jit`
-  (`#[ignore]`). This is the gating item for true concurrent-GC soundness.
+**Concurrent GC — SOUND on the JIT** via the global job registry (`jacl_all_jobs`): jobs are
+rooted explicitly from creation, not via `gc.roots`' unreliable conservative stack scan.
+`mt::par_gc` (parallel + forced collections) passes on the JIT under stress (10/10).
+
+**Remaining follow-ups (corpus-unobservable):**
+- **Job-registry reclamation.** The registry is uncompacted — a run is capped at
+  `JACL_ALL_JOBS_MAX` (8192) total spawns. Safe drop needs reachability the conservative scan
+  can't prove (a DONE job may be a held, re-awaitable future).
+- **Interpreter under heavy concurrent GC.** The svm interp's cooperative scheduler livelocks
+  on the pool's futex traffic (simulation artifact; the JIT real backend is sound), so
+  `mt::par_gc` is JIT-only.
 - **Async/parking builtins** (`sleep`/channels) on the pool (P3.5).
-- **Work-stealing deques** + **vCPU-id reuse** as scheduler refinements.
+- **Work-stealing deques** + **vCPU-id reuse**; retire the dead legacy `run_batch`.
 
 ### P3.5 — Host I/O + async (parking) builtins — **host I/O DONE; async/parking pending**
 

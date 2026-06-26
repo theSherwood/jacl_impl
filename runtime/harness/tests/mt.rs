@@ -38,14 +38,15 @@ fn par_min() {
 }
 
 #[test]
-#[ignore = "concurrent GC under heavy allocation is unsound in the P3.4c quiesce (affects the legacy run_batch path too — sched_batch flakes on baseline); the continuation pool exposes it as a hang/FiberFault on both backends. Kept as a reproducer; fixing the multi-worker STW quiesce is a separate follow-up. The corpus never triggers GC, so the language surface is green."]
-fn par_gc_jit() {
-    // JIT-only (real OS-thread vCPUs): the continuation pool is GC-sound under concurrent
-    // collection on the real backend. The svm interpreter's cooperative scheduler flakily
-    // livelocks on the futex GC barrier here (simulation artifact), so we can't use the
-    // differential oracle for this case — see run_test_jit.
+fn par_gc() {
+    // JIT-only: the continuation pool is now GC-sound under heavy concurrent collection on the
+    // real backend (real OS-thread vCPUs) — the job registry roots every live job so a job (incl.
+    // the program root) is never swept mid-collection. The svm *interpreter*'s cooperative
+    // single-thread scheduler livelocks on the pool's futex traffic under this load (a simulation
+    // artifact — see run_test_jit), so the differential oracle can't drive this case.
     let r = jacl_runtime_harness::run_test_jit("test_par_gc.c", 0);
     assert_eq!(r, 555,
         "continuation pool: parallel runs NT allocating blocks across pinned workers while they \
          force collections; every keeper survives, results match, no violation (diag {r})");
 }
+
