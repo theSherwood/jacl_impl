@@ -133,47 +133,43 @@ commit. **P3.4 is unblocked.**
 
 ---
 
-## Ask 2 — a `gc.roots` contract for a persistent multi-worker pool (the P3.4d blocker)
+## Ask 2 — fiber migration, for a persistent M:N pool (the P3.4d ask)
 
-> **STATUS: OPEN.** This blocks the *persistent* M:N worker pool — the keystone of
-> P3.4d — and everything that rides on it (multi-threaded `spawn`/`await`, the
-> async/parking builtins `sleep`/channels). The rest of Phase 3 is done. The
-> `parallel`/`race` surface meanwhile runs on the proven **transient** pool
-> (`jacl_sched_run_batch`). Full analysis + a runnable reproducer:
-> `spikes/svm_pool_gc/`.
+> **STATUS: OPEN (one clean ask).** This is what a *persistent* M:N worker pool needs —
+> the P3.4d keystone, and the foundation for multi-threaded `spawn`/`await` + the
+> async/parking builtins (`sleep`/channels). The rest of Phase 3 is done; `parallel`/`race`
+> ship on the proven **transient** pool (`jacl_sched_run_batch`) meanwhile. Full root-cause
+> analysis + a runnable reproducer: `spikes/svm_pool_gc/`.
+>
+> **Correction.** An earlier draft of this ask claimed a `gc.roots` *coverage bug*. That was
+> wrong: `gc.roots` is sound — the transient pool uses it and is rock-solid
+> (`mt.rs::gc_sched`, hundreds of runs). Root-causing the persistent-pool corruption found
+> the failures were **JACL-side** (see below), plus one structural property that needs the
+> ask here. Keeping the corrected analysis for the record.
 
-**Problem.** A stop-the-world, conservative collector elected on one spawned vCPU must
-scan the live roots of every *other* worker's in-flight task fiber. svm's `gc.roots`
-scans parked fibers + the collector's own resume chain, and refuses if a fiber is
-`RUNNING` on another vCPU. For the **transient** batch pool (workers spawned per
-construct, each running one flat fiber, joined at the end) JACL's P3.4c futex barrier
-quiesces every worker before the collector scans, and it is rock-solid
-(`mt.rs::gc_sched`, hundreds of runs).
+**What root-causing found.** The persistent-pool corruption had three causes (`spikes/svm_pool_gc/`):
+1. *main-side roots* — `jacl_parallel` held in-flight roots (the closures vector, freshly
+   allocated futures, the result vector, register transients) on **main's** fiber stack while
+   pool workers collected; `gc.roots` doesn't reliably cover the main thread's stack for a
+   collection elected on another vCPU. **JACL-side; fixed** by global root buffers + doing
+   main-side allocation only when main is the sole mutator.
+2. *result handoff ordering* — a plain i64 result store wasn't ordered before the atomic DONE
+   flag under svm-llvm + real JIT threads. **JACL-side; fixed** by atomic-halves publish/read.
+3. *main's program-fiber in the multi-worker quiesce set* — unlike the transient pool (where
+   main unregisters and parks on its bare thread, never a running fiber during a collection),
+   the persistent pool keeps main running the program as a task fiber that **cycles
+   suspend/resume** while it awaits. That leaves narrow windows the strict `gc.roots` trips
+   (`FiberFault`, ~1/40 on real-thread JIT). This is the structural one.
 
-For a **persistent** pool — workers that stay registered while idle (parking on a
-1 ms-timeout futex between tasks) and pull tasks off a shared queue, with task data
-stacks recycled from a shared pool across workers — the same barrier leaves a narrow
-window: a non-collector worker's task fiber is intermittently **not** scanned, so a
-live root (a cell on its fiber stack) is swept. It is timing-dependent (interp vs jit
-diverge: e.g. `1000001` vs `555`), and it is a root-**coverage** gap, not a
-mutual-exclusion violation. Single-worker (`-DJACL_POOL_WORKERS=1`) is fully sound;
-the hazard is specifically concurrent task fibers on *spawned* vCPUs.
+**The ask: sound fiber migration.** `__vm_fiber_resume(k, …)` callable from a vCPU **other
+than** the one that created/suspended `k`, with `gc.roots` covering a migrated-but-suspended
+fiber. That enables a **continuation scheduler**: an `await`/wait suspends the program/task
+fiber back to a bare scheduler loop — so it is **never a RUNNING fiber while a worker
+collects** (dissolving cause #3) — and a ready fiber is resumed by whatever worker grabs it.
+This is the clean substrate for the persistent pool and for multi-threaded `spawn`/`await` +
+the async/parking builtins, verifiable on the differential oracle.
 
-**Ask (either unblocks it).**
-
-1. **A documented + tested `gc.roots` quiescence handshake for a persistent pool:** a
-   guest-visible way for an idle/blocked worker to declare "my last fiber's roots are
-   spilled and scannable at SP=X," so a collector on another vCPU is guaranteed to
-   scan that fiber independent of the park/futex timing. Equivalently: confirm and
-   add a test that a fiber suspended via `cont.*` and then *not resumed* has its full
-   live extent scanned by `gc.roots` regardless of which vCPU suspended it, and that a
-   worker idle in `__vm_wait32` between tasks never hides a still-live last fiber.
-
-2. **Sound fiber migration:** `__vm_fiber_resume(k, …)` callable from a vCPU other than
-   the one that created/suspended `k`, with `gc.roots` covering migrated-but-suspended
-   fibers. This enables a **continuation scheduler** (await suspends the task back to
-   the bare worker loop; a ready fiber resumes on whatever worker grabs it) — no nested
-   fiber chains on any worker, which is the clean way to dodge the coverage gap.
-
-Either makes the persistent pool — and multi-threaded `spawn`/`await` + the async/parking
-builtins that ride on it — implementable and verifiable on the differential oracle.
+(If migration is infeasible, the alternative is entirely JACL-side: replicate the transient
+pool's "main steps off the fibers during the concurrent phase" structure for `parallel`/`race`
+— but without migration that means main cannot be running the program fiber while it waits,
+which the current program-as-a-job model doesn't allow. Migration is the smaller change.)

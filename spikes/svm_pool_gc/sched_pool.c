@@ -175,6 +175,24 @@ static JaclObj *q_pop_claim(int self) {
   return f;
 }
 
+/* Publish a future's i64 result then mark it DONE, with proper release ordering so an awaiter
+ * that observes DONE also observes the result. The result is written as two atomic 32-bit
+ * halves *before* the DONE store: a plain i64 store is not reliably ordered before the atomic
+ * DONE store under svm-llvm + the JIT's real threads (the awaiter could see DONE with a stale
+ * 0 result). All three stores are SeqCst, so the total order guarantees visibility. */
+static void fut_publish(int32_t *p, long v) {
+  __vm_atomic_store32(&p[4], (int)(uint32_t)(uint64_t)v);
+  __vm_atomic_store32(&p[5], (int)(uint32_t)((uint64_t)v >> 32));
+  __vm_atomic_store32(&p[0], JACL_FUT_DONE);
+  __vm_notify(&p[0], JACL_POOL_WORKERS);
+}
+/* Read a DONE future's i64 result via the matching atomic halves (acquire side). */
+static long fut_result(int32_t *p) {
+  uint64_t lo = (uint32_t)__vm_atomic_load32(&p[4]);
+  uint64_t hi = (uint32_t)__vm_atomic_load32(&p[5]);
+  return (long)(lo | (hi << 32));
+}
+
 /* Run a claimed (RUNNING) future to completion, store + publish its result, wake awaiters.
  * `on_fiber` describes the caller's context (see run_child). */
 static void run_task(JaclObj *t, int on_fiber) {
@@ -182,9 +200,7 @@ static void run_task(JaclObj *t, int on_fiber) {
   JaclVal closure = (JaclVal) * (int64_t *)(p + 2);
   long fnptr = (long)(uintptr_t)(uint64_t)jacl_closure_fn(closure);
   long v = run_child(fnptr, (long)closure, on_fiber);   /* closure passed as `self` */
-  *(int64_t *)(p + 4) = (long)v;
-  __vm_atomic_store32(&p[0], JACL_FUT_DONE);
-  __vm_notify(&p[0], JACL_POOL_WORKERS);
+  fut_publish(p, v);
 }
 
 /* ---- worker loop + pool lifecycle ---- */
@@ -251,6 +267,17 @@ static long     jacl_nfutures;
 /* Root the in-flight scheduler state during a collection: live spawn futures + the legacy
  * batch buffers. parallel/race futures need no entry here — they sit in a local array on the
  * calling (root) fiber's stack, which gc.roots scans directly. */
+/* In-flight parallel/race state — GLOBAL buffers (not main's fiber stack), so a collection
+ * driven by a pool worker roots them via jacl_sched_mark_roots. This mirrors the proven
+ * jacl_batch_* buffers: gc.roots does NOT reliably cover the main thread's stack/registers for
+ * a collection elected on another vCPU, so jacl_parallel must not hold its roots there. The
+ * input closures vector is rooted through the caller's pointer while the call is in flight. */
+#define JACL_PAR_MAX 32
+static JaclObj *jacl_par_fut[JACL_PAR_MAX];     /* the per-block future objects (traced) */
+static JaclVal  jacl_par_result[JACL_PAR_MAX];  /* collected results (may be heap) */
+static long     jacl_par_n;
+static JaclVal *jacl_par_closures;              /* the input closures vector, in flight */
+
 void jacl_sched_mark_roots(void) {
   for (long i = 0; i < jacl_nfutures; i++)
     jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_futures[i]));
@@ -258,6 +285,11 @@ void jacl_sched_mark_roots(void) {
     jacl_gc_mark_word(jacl_batch_arg[i]);
     jacl_gc_mark_word(jacl_batch_result[i]);
   }
+  for (long i = 0; i < jacl_par_n; i++) {
+    if (jacl_par_fut[i]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_par_fut[i]));
+    jacl_gc_mark(jacl_par_result[i]);
+  }
+  if (jacl_par_closures) jacl_gc_mark(*jacl_par_closures);
 }
 
 /* Run the program body `fnref` as the ROOT TASK fiber on the main thread (program-as-a-job),
@@ -300,71 +332,87 @@ JaclVal jacl_await(JaclVal future) {
 
 /* ---- parallel / race on the persistent pool ----
  *
- * Each block is a 0-param closure; `parallel` spawns them all onto the pool (so idle workers
- * run them in parallel) then helping-awaits each, returning the result vector; `race` spawns
- * all and returns block 0's result (the rest run to completion before shutdown; cancellation
- * is a follow-on). The per-call future array lives on this (root) fiber's scannable stack, so
- * the in-flight futures + their heap results are rooted by gc.roots — no global registry. */
-#define JACL_PAR_MAX 32
+ * Each block is a 0-param closure. The implementation mirrors the proven run_batch discipline
+ * so that gc.roots never has to scan the main thread's stack for a collection a pool worker
+ * elects (it doesn't cover that reliably):
+ *   1. allocate the per-block futures into the GLOBAL jacl_par_fut[] buffer (rooted by
+ *      jacl_sched_mark_roots) — done while no worker is running a block, so no concurrent
+ *      collection races the allocation;
+ *   2. enqueue + wait, collecting each result into the GLOBAL jacl_par_result[] buffer — the
+ *      caller does NO heap allocation in this concurrent phase, so it holds no main-stack root;
+ *   3. once every block is done (workers idle), build the result vector — now the main thread
+ *      is the sole mutator, so a collection it triggers scans its own (collector) frames.
+ * `parallel` returns the vector of results; `race` returns block 0's (all still run to
+ * completion — cancellation is a follow-on). */
 
-/* Allocate a future over `closure` and enqueue it for the pool (spin GC-cooperatively if the
- * queue is momentarily full). Used only by parallel/race; not registered globally. */
-static JaclObj *par_spawn(JaclVal closure) {
+/* Allocate a NEW future over `closure` into global slot `i` (rooted from publication). */
+static JaclObj *par_alloc_future(long i, JaclVal closure) {
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 24);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
   p[0] = JACL_FUT_NEW;
   p[1] = -1;
-  *(int64_t *)(p + 2) = (int64_t)closure;
+  *(int64_t *)(p + 2) = (int64_t)closure;   /* the block closure (traced) */
   *(int64_t *)(p + 4) = 0;
-  while (!q_push(o)) { jacl_gc_safepoint(); __vm_wait32(&jacl_pool_event, __vm_atomic_load32(&jacl_pool_event), JACL_WAIT_NS); }
+  jacl_par_fut[i] = o;
+  if (i + 1 > jacl_par_n) jacl_par_n = i + 1;   /* publish: now rooted by mark_roots */
   return o;
 }
 
-/* Await a pool future. parallel/race blocks are flat and independent — they never block-wait
- * on each other — so the spawned workers always drain them and the caller need only wait
- * (GC-cooperatively): no fiber nesting on any worker, the configuration proven GC-sound. The
- * one exception is a pool with no spawned workers (size 1): then the caller must run the
- * blocks itself, which it does by draining + running them flat-equivalently on its own fiber
- * (nesting on the main root fiber, also sound). A target RUNNING on *this* worker is a
- * self-cycle (nil). */
+/* Wait for a pool future to resolve, GC-cooperatively. The caller allocates nothing here. With
+ * spawned workers (the normal case) the blocks are flat + independent, so workers always drain
+ * them and the caller only waits — no fiber nesting on any worker. A size-1 pool (no spawned
+ * workers) has the caller run the blocks itself on its own root fiber (sound: main-only
+ * nesting). A future RUNNING on *this* worker is a self-cycle (nil). */
 static JaclVal par_await(JaclObj *fo) {
   int32_t *p = (int32_t *)jacl_obj_payload(fo);
   int self = jacl_sched_self();
-  int run_self = (jacl_pool_nthreads == 0);    /* size-1 pool: the caller is the only runner */
+  int run_self = (jacl_pool_nthreads == 0);
   for (;;) {
-    jacl_gc_safepoint();                       /* yield to an in-progress collection first */
+    jacl_gc_safepoint();
     int st = __vm_atomic_load32(&p[0]);
-    if (st == JACL_FUT_DONE) return (JaclVal) * (int64_t *)(p + 4);
+    if (st == JACL_FUT_DONE) return (JaclVal)fut_result(p);
     if (st == JACL_FUT_RUNNING && __vm_atomic_load32(&p[1]) == self) return JACL_NIL;
-    if (run_self && self == 0) {               /* no spawned workers: main runs the blocks */
+    if (run_self && self == 0) {
       JaclObj *t = q_pop_claim(self);
       if (t) { run_task(t, /*on_fiber=*/1); continue; }
     }
     int s = __vm_atomic_load32(&p[0]);
-    if (s == JACL_FUT_DONE) return (JaclVal) * (int64_t *)(p + 4);
-    __vm_wait32(&p[0], s, JACL_WAIT_NS);       /* woken by the producer's DONE notify, or 1 ms */
+    if (s == JACL_FUT_DONE) return (JaclVal)fut_result(p);
+    __vm_wait32(&p[0], s, JACL_WAIT_NS);
   }
 }
 
-JaclVal jacl_parallel(JaclVal closures) {
-  pool_ensure();
-  long n = (long)jacl_vec_count(closures);
+/* Phase 1+2: build futures (global, no concurrent collection yet), start the pool, enqueue,
+ * and collect every result into the global buffer. On return all blocks are done and workers
+ * are idle, so the caller can allocate freely. */
+static long par_run(JaclVal closures, long n) {
   if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
-  JaclObj *futs[JACL_PAR_MAX];
-  for (long i = 0; i < n; i++) futs[i] = par_spawn(jacl_vec_get(closures, (uint32_t)i));
-  JaclVal out = jacl_vec_empty();
-  for (long i = 0; i < n; i++) out = jacl_vec_push(out, par_await(futs[i]));
+  jacl_par_closures = &closures;
+  jacl_par_n = 0;
+  for (long i = 0; i < n; i++) { jacl_par_result[i] = JACL_NIL; jacl_par_fut[i] = 0; }
+  for (long i = 0; i < n; i++) par_alloc_future(i, jacl_vec_get(closures, (uint32_t)i));
+  pool_ensure();                                   /* idempotent; first call starts the workers */
+  for (long i = 0; i < n; i++)
+    while (!q_push(jacl_par_fut[i])) { jacl_gc_safepoint(); __vm_wait32(&jacl_pool_event, __vm_atomic_load32(&jacl_pool_event), JACL_WAIT_NS); }
+  for (long i = 0; i < n; i++) jacl_par_result[i] = par_await(jacl_par_fut[i]);
+  return n;
+}
+
+JaclVal jacl_parallel(JaclVal closures) {
+  long n = par_run(closures, (long)jacl_vec_count(closures));
+  JaclVal out = jacl_vec_empty();                  /* workers idle now: main is sole mutator */
+  for (long i = 0; i < n; i++) out = jacl_vec_push(out, jacl_par_result[i]);
+  jacl_par_n = 0; jacl_par_closures = 0;
   return out;
 }
 
 JaclVal jacl_race(JaclVal closures) {
-  pool_ensure();
-  long n = (long)jacl_vec_count(closures);
-  if (n <= 0) return JACL_NIL;
-  if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
-  JaclObj *futs[JACL_PAR_MAX];
-  for (long i = 0; i < n; i++) futs[i] = par_spawn(jacl_vec_get(closures, (uint32_t)i));
-  return par_await(futs[0]);
+  long total = (long)jacl_vec_count(closures);
+  if (total <= 0) return JACL_NIL;
+  par_run(closures, total);                         /* runs all to completion (drains the pool) */
+  JaclVal first = jacl_par_result[0];
+  jacl_par_n = 0; jacl_par_closures = 0;
+  return first;
 }
 
 /* ---- legacy transient batch scheduler (test-only) ----

@@ -22,17 +22,22 @@
 >   **worker-threads pool** (persistent queue + helping-`await` + work-stealing) for parallel
 >   spawn execution is **BLOCKED on svm** — see below.
 >
-> **BLOCKER (persistent worker pool).** Building `parallel`/`race`/`spawn`/`await` on a
-> *persistent* pool of spawned vCPU workers intermittently **misses a GC root**: a task
-> fiber's live cell is not scanned by a stop-the-world `gc.roots` elected on another spawned
-> vCPU, and gets swept (timing-dependent; interp vs jit diverge, e.g. `1000001` vs `555`).
-> The structurally identical **transient** pool (`jacl_sched_run_batch`, on which
-> `parallel`/`race` ship today) is rock-solid, and single-worker is fully sound — the hazard
-> is specifically concurrent task fibers on *spawned* vCPUs under STW. It needs an svm-level
-> `gc.roots` quiescence contract for a persistent pool, or sound fiber migration (for a
-> continuation scheduler). Full analysis + a runnable reproducer: **`spikes/svm_pool_gc/`**;
-> the precise ask: **`docs/SVM_PHASE3_ASKS.md` Ask 2**. Until it lands, `parallel`/`race` keep
-> the transient pool and `spawn`/`await` stay demand-driven (single-threaded, on the main
+> **BLOCKER (persistent worker pool) — root-caused.** A persistent pool for
+> `parallel`/`race` corrupted under concurrent GC. Isolation (`spikes/svm_pool_gc/`) found
+> three causes, NOT the `gc.roots` bug first suspected — `gc.roots` is sound (the transient
+> `jacl_sched_run_batch` uses it and is rock-solid; `mt.rs::gc_sched`). (1) **main-side roots:**
+> `jacl_parallel` held its in-flight roots on main's fiber stack while workers collected, and
+> `gc.roots` doesn't reliably cover the main thread's stack for a foreign-vCPU collection —
+> **JACL-side, fixed** via global root buffers + main-allocates-only-when-sole-mutator.
+> (2) **result-handoff ordering** on real JIT threads — **JACL-side, fixed** via atomic-halves
+> publish/read. (3) **main's program-fiber in the multi-worker quiesce set:** the transient
+> pool keeps main off the fibers (parked on its bare thread) during the concurrent phase; the
+> persistent pool runs main as a program fiber that cycles suspend/resume while awaiting,
+> leaving rare windows the strict `gc.roots` trips (`FiberFault`, ~1/40, real-thread JIT). #3 is
+> the structural one and needs **svm fiber migration** for a continuation scheduler (program
+> fiber steps off the workers during a wait). Ask: **`docs/SVM_PHASE3_ASKS.md` Ask 2**. Until
+> it lands, `parallel`/`race` keep the transient pool and `spawn`/`await` stay demand-driven
+> (single-threaded, on the main
 > root fiber) — all proven and tested interp==jit.
 
 ## Goal
@@ -272,15 +277,20 @@ needs main's roots on a scannable fiber — i.e. the full scheduler below.
   idle/await waits, and a **clean shutdown** before the root returns (an svm run ends only
   when every vCPU finishes). `jacl_sched_run_main` becomes the pool driver (main = worker 0).
   Built on the program-as-a-job foundation above. **Was implemented and runs the corpus
-  interp==jit, but is GC-unsound under load:** a stop-the-world `gc.roots` on a spawned vCPU
-  intermittently misses a live root on another worker's concurrent task fiber (the transient
-  `run_batch` path with the same primitives is rock-solid; single-worker is sound). It needs
-  an svm-level fix (Ask 2). The full experimental implementation + a runnable reproducer are
-  preserved in `spikes/svm_pool_gc/`. Until then `parallel`/`race` keep the transient pool
-  and `spawn`/`await` stay demand-driven.
-- **Continuation scheduler** (the clean fix once svm supports fiber migration): `await`
-  suspends its task back to the bare worker loop and a ready fiber resumes on whatever worker
-  grabs it — no nested fiber chains on any worker, sidestepping the coverage gap.
+  interp==jit, but corrupted under GC load.** Root-cause (`spikes/svm_pool_gc/`): NOT a
+  `gc.roots` bug (it is sound — the transient `run_batch` uses it and is rock-solid). Three
+  causes: (1) `jacl_parallel` held its in-flight roots on **main's** fiber stack while workers
+  collected, which `gc.roots` doesn't cover for a foreign-vCPU collection — **fixed** via global
+  root buffers; (2) **result-handoff ordering** on real JIT threads — **fixed** via atomic
+  halves; (3) main's program-fiber cycling suspend/resume inside the multi-worker quiesce set
+  leaves rare windows the strict `gc.roots` trips (`FiberFault`, ~1/40 on JIT) — the transient
+  pool avoids this by keeping main off the fibers during the concurrent phase. #3 needs svm
+  fiber migration (Ask 2). The experimental impl (with #1/#2 fixed) + reproducer are in
+  `spikes/svm_pool_gc/`. Until #3 is resolved `parallel`/`race` keep the transient pool and
+  `spawn`/`await` stay demand-driven.
+- **Continuation scheduler** (the clean fix once svm supports fiber migration): a wait suspends
+  the program/task fiber back to a bare scheduler loop — so it is never a RUNNING fiber while a
+  worker collects (dissolving cause #3) — and a ready fiber resumes on whatever worker grabs it.
 - **Work-stealing deques** to replace the queue's coarse dispatch.
 - **vCPU-id reuse**: the persistent reused pool also fixes the transient-batch id growth.
 
