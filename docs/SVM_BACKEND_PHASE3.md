@@ -20,7 +20,20 @@
 > - **The M:N scheduler keystone** (P3.4d), in sub-slices: **nested await** (demand-driven
 >   `await`) and **program-as-a-job** (the GC-soundness foundation) are **done**; the
 >   **worker-threads pool** (persistent queue + helping-`await` + work-stealing) for parallel
->   spawn execution is the remaining piece, built on that foundation.
+>   spawn execution is **BLOCKED on svm** — see below.
+>
+> **BLOCKER (persistent worker pool).** Building `parallel`/`race`/`spawn`/`await` on a
+> *persistent* pool of spawned vCPU workers intermittently **misses a GC root**: a task
+> fiber's live cell is not scanned by a stop-the-world `gc.roots` elected on another spawned
+> vCPU, and gets swept (timing-dependent; interp vs jit diverge, e.g. `1000001` vs `555`).
+> The structurally identical **transient** pool (`jacl_sched_run_batch`, on which
+> `parallel`/`race` ship today) is rock-solid, and single-worker is fully sound — the hazard
+> is specifically concurrent task fibers on *spawned* vCPUs under STW. It needs an svm-level
+> `gc.roots` quiescence contract for a persistent pool, or sound fiber migration (for a
+> continuation scheduler). Full analysis + a runnable reproducer: **`spikes/svm_pool_gc/`**;
+> the precise ask: **`docs/SVM_PHASE3_ASKS.md` Ask 2**. Until it lands, `parallel`/`race` keep
+> the transient pool and `spawn`/`await` stay demand-driven (single-threaded, on the main
+> root fiber) — all proven and tested interp==jit.
 
 ## Goal
 
@@ -111,7 +124,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   task and parks its vCPU), then `gc.roots` scans all suspended fibers + the collector.
   Validated by `test_gc_sched.c` (cross-worker keeper survival, zero violations).
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (nested await + program-as-a-job done; worker-threads pool + work-stealing pending)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d: nested await + program-as-a-job done; persistent worker-threads pool BLOCKED on svm (see top-of-doc BLOCKER + `spikes/svm_pool_gc/` + `docs/SVM_PHASE3_ASKS.md` Ask 2)**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -252,14 +265,22 @@ needs main's roots on a scannable fiber — i.e. the full scheduler below.
   concurrently (a worker-collector can't see/quiesce a program on a bare vCPU). This removes
   the GC-soundness boundary noted above.
 
-**Remaining:**
+**Remaining — BLOCKED on svm (see `spikes/svm_pool_gc/`, `docs/SVM_PHASE3_ASKS.md` Ask 2):**
 - **The worker-threads pool.** A persistent pool of vCPU workers + a shared MPMC queue:
   `spawn` enqueues, workers run tasks **in parallel**, with **helping-`await`** (an awaiting
   worker drains the queue, keeping nested await working), the GC quiesce extended to
   idle/await waits, and a **clean shutdown** before the root returns (an svm run ends only
   when every vCPU finishes). `jacl_sched_run_main` becomes the pool driver (main = worker 0).
-  Built on the program-as-a-job foundation above. Verified via concurrent-execution + GC
-  tests (`alloc_mt`/`gc_sched`-style), since the value-diff oracle can't see parallelism.
+  Built on the program-as-a-job foundation above. **Was implemented and runs the corpus
+  interp==jit, but is GC-unsound under load:** a stop-the-world `gc.roots` on a spawned vCPU
+  intermittently misses a live root on another worker's concurrent task fiber (the transient
+  `run_batch` path with the same primitives is rock-solid; single-worker is sound). It needs
+  an svm-level fix (Ask 2). The full experimental implementation + a runnable reproducer are
+  preserved in `spikes/svm_pool_gc/`. Until then `parallel`/`race` keep the transient pool
+  and `spawn`/`await` stay demand-driven.
+- **Continuation scheduler** (the clean fix once svm supports fiber migration): `await`
+  suspends its task back to the bare worker loop and a ready fiber resumes on whatever worker
+  grabs it — no nested fiber chains on any worker, sidestepping the coverage gap.
 - **Work-stealing deques** to replace the queue's coarse dispatch.
 - **vCPU-id reuse**: the persistent reused pool also fixes the transient-batch id growth.
 

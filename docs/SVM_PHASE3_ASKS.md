@@ -130,3 +130,50 @@ commit. **P3.4 is unblocked.**
 > C on-ramp is now `long __vm_fiber_new` / `long __vm_fiber_resume(long, …)`).
 > `runtime/fiber.c` was updated to store i64 handles accordingly — required for the
 > module to verify against the new pin.
+
+---
+
+## Ask 2 — a `gc.roots` contract for a persistent multi-worker pool (the P3.4d blocker)
+
+> **STATUS: OPEN.** This blocks the *persistent* M:N worker pool — the keystone of
+> P3.4d — and everything that rides on it (multi-threaded `spawn`/`await`, the
+> async/parking builtins `sleep`/channels). The rest of Phase 3 is done. The
+> `parallel`/`race` surface meanwhile runs on the proven **transient** pool
+> (`jacl_sched_run_batch`). Full analysis + a runnable reproducer:
+> `spikes/svm_pool_gc/`.
+
+**Problem.** A stop-the-world, conservative collector elected on one spawned vCPU must
+scan the live roots of every *other* worker's in-flight task fiber. svm's `gc.roots`
+scans parked fibers + the collector's own resume chain, and refuses if a fiber is
+`RUNNING` on another vCPU. For the **transient** batch pool (workers spawned per
+construct, each running one flat fiber, joined at the end) JACL's P3.4c futex barrier
+quiesces every worker before the collector scans, and it is rock-solid
+(`mt.rs::gc_sched`, hundreds of runs).
+
+For a **persistent** pool — workers that stay registered while idle (parking on a
+1 ms-timeout futex between tasks) and pull tasks off a shared queue, with task data
+stacks recycled from a shared pool across workers — the same barrier leaves a narrow
+window: a non-collector worker's task fiber is intermittently **not** scanned, so a
+live root (a cell on its fiber stack) is swept. It is timing-dependent (interp vs jit
+diverge: e.g. `1000001` vs `555`), and it is a root-**coverage** gap, not a
+mutual-exclusion violation. Single-worker (`-DJACL_POOL_WORKERS=1`) is fully sound;
+the hazard is specifically concurrent task fibers on *spawned* vCPUs.
+
+**Ask (either unblocks it).**
+
+1. **A documented + tested `gc.roots` quiescence handshake for a persistent pool:** a
+   guest-visible way for an idle/blocked worker to declare "my last fiber's roots are
+   spilled and scannable at SP=X," so a collector on another vCPU is guaranteed to
+   scan that fiber independent of the park/futex timing. Equivalently: confirm and
+   add a test that a fiber suspended via `cont.*` and then *not resumed* has its full
+   live extent scanned by `gc.roots` regardless of which vCPU suspended it, and that a
+   worker idle in `__vm_wait32` between tasks never hides a still-live last fiber.
+
+2. **Sound fiber migration:** `__vm_fiber_resume(k, …)` callable from a vCPU other than
+   the one that created/suspended `k`, with `gc.roots` covering migrated-but-suspended
+   fibers. This enables a **continuation scheduler** (await suspends the task back to
+   the bare worker loop; a ready fiber resumes on whatever worker grabs it) — no nested
+   fiber chains on any worker, which is the clean way to dodge the coverage gap.
+
+Either makes the persistent pool — and multi-threaded `spawn`/`await` + the async/parking
+builtins that ride on it — implementable and verifiable on the differential oracle.
