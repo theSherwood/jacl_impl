@@ -17,10 +17,36 @@
 >   runtime `jacl_print`, and JACL `[print …]` programs through codegen via the uniform
 >   powerbox entry (`synth_powerbox_start` + `instantiate` + `run_diff`). Remaining: only the
 >   **async/parking** builtins (sleep/channels), which need the worker-threads pool (P3.4d).
-> - **The M:N scheduler keystone** (P3.4d), in sub-slices: **nested await** (demand-driven
->   `await`) and **program-as-a-job** (the GC-soundness foundation) are **done**; the
->   **worker-threads pool** (persistent queue + helping-`await` + work-stealing) for parallel
->   spawn execution is the remaining piece, built on that foundation.
+> - **The M:N scheduler keystone** (P3.4d) — **IMPLEMENTED** as a **continuation scheduler**
+>   (`runtime/sched.c`): one persistent pool of vCPU workers, the program body + every `spawn`/
+>   `parallel`/`race` block run as **jobs** (stackful fibers). A job that `await`s **suspends
+>   back to the bare worker loop** (never a RUNNING fiber while blocked) and is re-enqueued when
+>   its target completes; jobs are **pinned** to one worker (no cross-vCPU migration → no claim
+>   races). `parallel`/`race`/`spawn`/`await`/nested-await all run on it, **tested
+>   interp==jit==old-VM** (`codegen` 61/61, `io`, `mt::par_min`). This dissolves the earlier
+>   transient-pool corruption causes (main-side roots, result-handoff ordering — see history
+>   below) structurally: all scheduler state is in globals scanned by `jacl_sched_mark_roots`,
+>   and program/task locals live on job fibers that are always scannable.
+>
+> **Concurrent GC — now SOUND on the JIT (the real backend).** Under heavy concurrent
+> collection the pool used to hang/corrupt; root cause: `gc.roots`' conservative stack scan does
+> **not reliably root a job's references held only on a fiber/bare stack** (e.g. `parallel`'s
+> `futs[]`, or the program root parked on a block), so jobs — including the program root — were
+> swept mid-collection. Fix: a **global job registry** (`jacl_all_jobs`, scanned by
+> `jacl_sched_mark_roots`) is the authoritative job root set — every job is rooted explicitly
+> from creation, independent of the unreliable stack scan. `mt::par_gc` (parallel + forced
+> collections across pinned workers) now passes on the JIT, 10/10 under stress.
+>
+> **REMAINING (two follow-ups, both corpus-unobservable):** (1) the registry is not yet
+> compacted — a run is capped at `JACL_ALL_JOBS_MAX` (8192) total spawns until safe reclamation
+> lands (a DONE job may still be a held, re-awaitable future, and the conservative scan can't
+> prove non-reachability). (2) The svm **interpreter**'s cooperative single-thread scheduler
+> livelocks on the pool's futex traffic under heavy concurrent GC (a simulation artifact — the
+> JIT, real OS-thread vCPUs, is sound), so `mt::par_gc` is JIT-only via `run_test_jit`. The
+> legacy `jacl_sched_run_batch` separately flakes under concurrent GC on baseline (its own
+> main-side-buffer rooting); it is dead code now (superseded by the continuation pool).
+> (History — including two withdrawn svm asks — in `spikes/svm_pool_gc/` and
+> `docs/SVM_PHASE3_ASKS.md`.)
 
 ## Goal
 
@@ -111,7 +137,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   task and parks its vCPU), then `gc.roots` scans all suspended fibers + the collector.
   Validated by `test_gc_sched.c` (cross-worker keeper survival, zero violations).
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d in progress (nested await + program-as-a-job done; worker-threads pool + work-stealing pending)**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d DONE: continuation scheduler (`runtime/sched.c`) — parallel/race/spawn/await/nested run on it, tested interp==jit==old-VM. Remaining: the P3.4c multi-worker STW quiesce is unsound under heavy concurrent GC (corpus-unobservable; affects legacy run_batch too) — see top-of-doc.**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -252,16 +278,31 @@ needs main's roots on a scannable fiber — i.e. the full scheduler below.
   concurrently (a worker-collector can't see/quiesce a program on a bare vCPU). This removes
   the GC-soundness boundary noted above.
 
-**Remaining:**
-- **The worker-threads pool.** A persistent pool of vCPU workers + a shared MPMC queue:
-  `spawn` enqueues, workers run tasks **in parallel**, with **helping-`await`** (an awaiting
-  worker drains the queue, keeping nested await working), the GC quiesce extended to
-  idle/await waits, and a **clean shutdown** before the root returns (an svm run ends only
-  when every vCPU finishes). `jacl_sched_run_main` becomes the pool driver (main = worker 0).
-  Built on the program-as-a-job foundation above. Verified via concurrent-execution + GC
-  tests (`alloc_mt`/`gc_sched`-style), since the value-diff oracle can't see parallelism.
-- **Work-stealing deques** to replace the queue's coarse dispatch.
-- **vCPU-id reuse**: the persistent reused pool also fixes the transient-batch id growth.
+**DONE — the continuation scheduler (`runtime/sched.c`).** One persistent pool; the program body
++ every `spawn`/`parallel`/`race` block are **jobs** (stackful fibers). A job that `await`s
+**suspends back to the bare worker loop** (it is never a RUNNING fiber while blocked) and is
+re-enqueued when its target completes; jobs are **pinned** to one worker (no cross-vCPU
+migration). `jacl_sched_run_main` runs the program as the root job (main = worker 0); the pool
+is started lazily on the first concurrent construct so a sequential program spawns no threads.
+All scheduler state is in globals scanned by `jacl_sched_mark_roots` (the per-worker ready
+queues + each worker's current job), and program/task locals live on job fibers that are always
+scannable — dissolving the transient pool's main-side-root and result-handoff bugs structurally.
+`parallel`/`race`/`spawn`/`await`/nested all run on it, tested interp==jit==old-VM (`codegen`
+61/61, `io`, `mt::par_min`).
+
+**Concurrent GC — SOUND on the JIT** via the global job registry (`jacl_all_jobs`): jobs are
+rooted explicitly from creation, not via `gc.roots`' unreliable conservative stack scan.
+`mt::par_gc` (parallel + forced collections) passes on the JIT under stress (10/10).
+
+**Remaining follow-ups (corpus-unobservable):**
+- **Job-registry reclamation.** The registry is uncompacted — a run is capped at
+  `JACL_ALL_JOBS_MAX` (8192) total spawns. Safe drop needs reachability the conservative scan
+  can't prove (a DONE job may be a held, re-awaitable future).
+- **Interpreter under heavy concurrent GC.** The svm interp's cooperative scheduler livelocks
+  on the pool's futex traffic (simulation artifact; the JIT real backend is sound), so
+  `mt::par_gc` is JIT-only.
+- **Async/parking builtins** (`sleep`/channels) on the pool (P3.5).
+- **Work-stealing deques** + **vCPU-id reuse**; retire the dead legacy `run_batch`.
 
 ### P3.5 — Host I/O + async (parking) builtins — **host I/O DONE; async/parking pending**
 

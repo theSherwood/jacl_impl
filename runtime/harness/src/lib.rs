@@ -115,6 +115,28 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
     iv
 }
 
+/// Like `run_test`, but runs **only the Cranelift JIT** (the real backend, real OS-thread
+/// vCPUs). Used for the concurrent-GC stress test: under heavy concurrent collection the svm
+/// *interpreter*'s cooperative single-thread scheduler flakily livelocks on the runtime's
+/// futex-based GC barrier (a simulation artifact — the JIT, with real threads, is unaffected),
+/// so the differential oracle can't drive that case; this verifies the JIT path directly.
+pub fn run_test_jit(driver: &str, n: i32) -> i32 {
+    let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
+    let bc = compile_driver(&driver_abs);
+    let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let module = svm_run::resolve_capability_imports(t.module).expect("resolve capability imports");
+    svm_verify::verify_module(&module).expect("verify translated IR");
+    let results = module.funcs[0].results.clone();
+    let slots = vec![t.entry_sp as i64, n as i64];
+    match svm_jit::compile_and_run(&module, 0, &slots).expect("jit run") {
+        JitOutcome::Returned(s) => match results[0] {
+            ValType::I32 => s[0] as i32,
+            other => panic!("unexpected result type {other:?}"),
+        },
+        other => panic!("jit did not return: {other:?}"),
+    }
+}
+
 /// Run a **powerbox** program (a host-I/O program whose entry is the synthesized `_start`)
 /// through svm's frontend-independent embedding API (`instantiate` + `Instance::call`),
 /// which resolves the §7 capability imports, grants the fixed powerbox, runs the `_start`

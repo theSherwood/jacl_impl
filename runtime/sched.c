@@ -1,16 +1,32 @@
-/* sched.c — P3.4d reusable worker pool (batch scheduler).
+/* sched.c — P3.4d persistent M:N scheduler (continuation style).
  *
- * Runs a batch of independent task fibers across N vCPU workers (real OS threads via
- * thread.spawn), GC-safe through the P3.4c quiesce primitives: each worker registers in
- * the quiesce set, parks at its scheduler-loop top while a collection runs, and brackets
- * every task resume with task_begin/end so a task that hits a GC safepoint suspends to
- * the worker (its roots scannable) and is re-resumed after the collection.
+ * One persistent pool of vCPU workers (real OS threads via thread.spawn) runs the whole
+ * program. The program body itself is the root "job" (program-as-a-job); `spawn` creates more
+ * jobs; `parallel`/`race` create a batch of jobs. Every job is a stackful fiber that runs to
+ * completion across the workers. When a job must wait (`await` an unresolved job), it
+ * **suspends back to the bare worker loop** — it does not busy-cycle and it is not nested on
+ * another fiber — and is re-enqueued (and resumed by whatever worker grabs it — svm fiber
+ * migration) once its target completes. So at any instant a job is either RUNNING on exactly
+ * one worker or RUNNABLE-suspended (parked on a target / waiting in the ready queue); it is
+ * **never a RUNNING fiber while it is logically blocked**.
  *
- * This is the substrate `parallel`/`race`/`await` move onto: submit a batch of 0-arg
- * task functions, run them to completion across the pool, collect their results. Workers
- * claim tasks with a single atomic counter (a fixed batch — dynamic queues + work-
- * stealing + nested await/park are the next P3.4d steps). The main thread orchestrates
- * (spawns + joins) and is not a mutator during the batch.
+ * This is the keystone the earlier transient pool couldn't reach. Root-causing the transient
+ * attempt (`spikes/svm_pool_gc/`) showed its corruption came from keeping the program on the
+ * main thread as a *busy-cycling* fiber in the multi-worker quiesce set, with its roots on
+ * main's bare stack. The continuation model dissolves all of that:
+ *  - GC roots: all scheduler state lives in globals scanned by `jacl_sched_mark_roots` (the
+ *    ready queue + each worker's current job); every program/task local lives on a job fiber
+ *    that is always either RUNNING-and-will-suspend-at-its-next-safepoint or RUNNABLE-suspended
+ *    (and svm `gc.roots` scans suspended fibers). No root ever lives only on a bare OS stack.
+ *  - GC quiesce (P3.4c): a worker resuming a job brackets it with task_begin/end; a GC
+ *    safepoint suspends the running fiber (value 0) and the worker re-resumes it after the
+ *    collection. An `await` suspends with the target job pointer (non-zero), which the worker
+ *    distinguishes from a GC suspend.
+ *  - Result handoff: a job's completion (store result, mark DONE, wake waiters) runs under the
+ *    one scheduler lock, so a waiter that observes DONE also observes the result.
+ *
+ * Relies only on svm primitives that already exist and are tested, including cross-vCPU fiber
+ * migration (`svm/tests/fiber_migrate.rs`, `gc_roots.rs`).
  */
 #include "jaclrt.h"
 
@@ -18,112 +34,326 @@ int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
 long __vm_thread_join(int h);
 long __vm_fiber_new(long (*f)(long), void *stack);
 long __vm_fiber_resume(long k, long arg, int *done);
+long __vm_fiber_suspend(long value);
 long __vm_atomic_add(void *p, long v);
+int  __vm_atomic_add32(void *p, int v);
+int  __vm_atomic_load32(void *p);
+void __vm_atomic_store32(void *p, int v);
+int  __vm_atomic_cas32(void *p, int expected, int desired);
+int  __vm_wait32(void *p, int expected, long timeout_ns);
+int  __vm_notify(void *p, int count);
 long __vm_vcpu_tls_get(void);
 
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
-#define JACL_BATCH_MAX         64
+#ifndef JACL_POOL_WORKERS
+#define JACL_POOL_WORKERS      4            /* persistent pool size (main = worker 0) */
+#endif
+#define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
 
-/* the current batch — in guest-global buffers (not caller-stack arrays) so the collector
- * can root the in-flight args (task closures) and completed results during a mid-batch
- * collection: the main thread is parked in thread_join with its stack unscanned, a task's
- * arg is only on its own fiber once it starts, and a heap result is unrooted between the
- * task returning and the caller consuming it. jacl_sched_mark_roots scans these. */
-static JaclTaskFn jacl_batch_fn[JACL_BATCH_MAX];
-static long       jacl_batch_arg[JACL_BATCH_MAX];
-static long       jacl_batch_result[JACL_BATCH_MAX];
-static long       jacl_batch_n;
-static long       jacl_batch_next;   /* atomic: next task index to claim */
-static char       jacl_worker_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
-
-/* A worker vCPU: claim tasks until the batch is drained, running each as a task fiber to
- * completion. The scheduler-loop safepoint (park_if_requested) quiesces this root-free
- * vCPU for GC; task_begin/end bracket each resume so the running task's roots live on a
- * fiber the collector can scan, and a GC-suspended task is simply re-resumed. */
-static long jacl_sched_worker(long arg) {
-  (void)arg;
+static int jacl_sched_self(void) {
   int w = (int)__vm_vcpu_tls_get();
-  if (w < 0 || w >= JACL_SCHED_MAX_WORKERS) return -1;
-  jacl_gc_worker_register();
+  return (w < 0 || w >= JACL_SCHED_MAX_WORKERS) ? 0 : w;
+}
+
+/* legacy transient-batch globals (defined at the bottom; forward-declared for the root scan). */
+#define JACL_BATCH_MAX 64
+extern long jacl_batch_arg[JACL_BATCH_MAX];
+extern long jacl_batch_result[JACL_BATCH_MAX];
+extern long jacl_batch_n;
+
+/* ---- fiber data-stack pool ---- */
+#define JACL_TASK_STACKS 64
+#define JACL_TASK_STACK_BYTES (1u << 16)
+static char  jacl_task_stack[JACL_TASK_STACKS][JACL_TASK_STACK_BYTES] __attribute__((aligned(16)));
+static int   jacl_task_stack_free[JACL_TASK_STACKS];
+static int   jacl_task_stack_nfree = -1;   /* -1 = uninitialized */
+
+/* ---- the one scheduler lock (futex mutex) ----
+ * Guards the ready queue, every job state transition, and the stack-pool free list. Held only
+ * for short non-allocating critical sections — never across a fiber resume or a GC safepoint —
+ * so it cannot deadlock a collection. Acquisition is GC-cooperative (park while contended). */
+static int32_t jacl_sched_lock;
+static void slock(void) {
+  while (__vm_atomic_cas32(&jacl_sched_lock, 0, 1) != 0) {
+    jacl_gc_worker_park_if_requested();
+    __vm_wait32(&jacl_sched_lock, 1, JACL_WAIT_NS);
+  }
+}
+static void sunlock(void) { __vm_atomic_store32(&jacl_sched_lock, 0); __vm_notify(&jacl_sched_lock, 1); }
+
+/* stack pool (called under slock) */
+static void *grab_task_stack(void) {
+  if (jacl_task_stack_nfree < 0) {
+    for (int i = 0; i < JACL_TASK_STACKS; i++) jacl_task_stack_free[i] = i;
+    jacl_task_stack_nfree = JACL_TASK_STACKS;
+  }
+  if (jacl_task_stack_nfree == 0) return 0;
+  return jacl_task_stack[jacl_task_stack_free[--jacl_task_stack_nfree]];
+}
+static void release_task_stack(void *stk) {
+  if (!stk) return;
+  long idx = ((char *)stk - (char *)jacl_task_stack) / JACL_TASK_STACK_BYTES;
+  if (idx >= 0 && idx < JACL_TASK_STACKS) jacl_task_stack_free[jacl_task_stack_nfree++] = (int)idx;
+}
+
+/* ---- jobs ----
+ * A job is a JOBJ_NODE (traced). Payload (int32_t *p):
+ *   p[0]  state (NEW/DONE)            p[1]  is_root
+ *   i64@(p+2)  fn (fiber funcref)     i64@(p+4)  prime (closure for blocks; 0 for root)
+ *   i64@(p+6)  fiber handle (0=unstarted)   i64@(p+8)  result
+ *   i64@(p+10) resume_arg (await result, set when woken)
+ *   i64@(p+12) next_waiter (job link) i64@(p+14) waiters_head (jobs parked on this)
+ *   i64@(p+16) stack ptr
+ * Conservative tracing keeps prime/closure, result, resume_arg, and the waiter chain alive;
+ * fn/fiber/stack are out-of-heap small/addresses and are ignored. */
+enum { JACL_JOB_NEW = 0, JACL_JOB_DONE = 2 };
+#define JOB_PAYLOAD 88     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker */
+static inline int32_t *jp(JaclObj *j)              { return (int32_t *)jacl_obj_payload(j); }
+static inline long  job_get(JaclObj *j, int i)     { return *(int64_t *)(jp(j) + i); }
+static inline void  job_set(JaclObj *j, int i, long v) { *(int64_t *)(jp(j) + i) = v; }
+
+static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
+  JaclObj *j = (JaclObj *)jacl_alloc(JOBJ_NODE, JOB_PAYLOAD);
+  int32_t *p = jp(j);
+  p[0] = JACL_JOB_NEW; p[1] = is_root;
+  job_set(j, 2, fn); job_set(j, 4, prime);
+  job_set(j, 6, 0); job_set(j, 8, 0); job_set(j, 10, 0);
+  job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
+  p[18] = 0; p[19] = 0; p[20] = owner;
+  return j;
+}
+
+/* ---- per-worker ready queues + pool state (all under slock unless noted) ----
+ * Each job is PINNED to an owner worker (round-robin at creation) and runs only on that worker
+ * — no fiber ever migrates between vCPUs, so svm's cross-vCPU claim is never contended. */
+#define JACL_RQ_CAP 1024
+static JaclObj *jacl_rq[JACL_SCHED_MAX_WORKERS][JACL_RQ_CAP];
+static int32_t  jacl_rq_head[JACL_SCHED_MAX_WORKERS], jacl_rq_count[JACL_SCHED_MAX_WORKERS];
+static JaclObj *jacl_running_job[JACL_SCHED_MAX_WORKERS];  /* each worker's in-flight job (rooted) */
+static int32_t  jacl_pool_event;     /* bumped+notified on enqueue/shutdown (wakeups) */
+static int32_t  jacl_pool_shutdown;
+static int32_t  jacl_pool_started;
+static int32_t  jacl_owner_rr;       /* round-robin owner assignment */
+static int      jacl_pool_handles[JACL_POOL_WORKERS];
+static int      jacl_pool_nthreads;
+static JaclObj *jacl_root_job;
+
+/* Live-job registry: every job is rooted here from creation. This is the *authoritative* job
+ * root set — gc.roots' conservative stack scan does NOT reliably cover a job's references held
+ * only on a fiber/bare stack (e.g. parallel's `futs[]`, or the root job parked on a block), so
+ * jobs are rooted explicitly here instead. Atomic publish: reserve a slot, then write — a slot
+ * read before its write just marks 0/stale (harmless).
+ *
+ * Bounded: holds every job created in a run (not yet compacted). Safe drop of a completed job
+ * needs reachability info the conservative scan can't give (a DONE job may still be a held,
+ * re-awaitable future), so reclamation is a follow-up; until then a run is capped at
+ * JACL_ALL_JOBS_MAX total spawns. */
+#define JACL_ALL_JOBS_MAX 8192
+static JaclObj *jacl_all_jobs[JACL_ALL_JOBS_MAX];
+static int32_t  jacl_all_jobs_n;
+static void register_job(JaclObj *j) {
+  int idx = __vm_atomic_add32(&jacl_all_jobs_n, 1);
+  if (idx >= 0 && idx < JACL_ALL_JOBS_MAX) jacl_all_jobs[idx] = j;
+}
+
+static void rq_push(JaclObj *j) {            /* under slock — to the job's OWNER queue */
+  int o = jp(j)[20];
+  if (jp(j)[18]) return;                      /* already queued — never enqueue a job twice */
+  if (jacl_rq_count[o] < JACL_RQ_CAP) {
+    jacl_rq[o][(jacl_rq_head[o] + jacl_rq_count[o]) % JACL_RQ_CAP] = j;
+    jacl_rq_count[o]++; jp(j)[18] = 1;
+  }
+}
+static JaclObj *rq_pop(int self) {           /* under slock — from THIS worker's queue */
+  if (jacl_rq_count[self] == 0) return 0;
+  JaclObj *j = jacl_rq[self][jacl_rq_head[self]];
+  jacl_rq_head[self] = (jacl_rq_head[self] + 1) % JACL_RQ_CAP; jacl_rq_count[self]--;
+  jp(j)[18] = 0;
+  return j;
+}
+static void pool_wake(void) { __vm_atomic_add32(&jacl_pool_event, 1); __vm_notify(&jacl_pool_event, JACL_POOL_WORKERS); }
+
+/* Complete a job (under slock): publish result, mark DONE, move its waiters to the ready
+ * queue (each gets the result as its resume arg). The lock orders the result write before any
+ * waiter observes DONE. The root job's completion triggers shutdown. */
+static void complete_job(JaclObj *j, long v) {
+  job_set(j, 8, v);
+  __vm_atomic_store32(&jp(j)[0], JACL_JOB_DONE);
+  JaclObj *w = (JaclObj *)job_get(j, 14);
+  job_set(j, 14, 0);
+  while (w) {
+    JaclObj *next = (JaclObj *)job_get(w, 12);
+    job_set(w, 12, 0);
+    job_set(w, 10, v);          /* resume_arg = result */
+    rq_push(w);
+    w = next;
+  }
+  if (jp(j)[1]) __vm_atomic_store32(&jacl_pool_shutdown, 1);   /* root done → shut the pool */
+}
+
+/* ---- the GC-cooperative resume ----
+ * Resume job `j` once (continuing past GC safepoints). Returns 0 (RETURNED; *out=result),
+ * 1 (AWAIT; *out=target-job-ptr), or 2 (SKIP — a concurrent claim is already running this
+ * job's fiber; svm would FiberFault a second claimant, so we bail and let the owner finish).
+ * p[19] is the single-claim guard: exactly one worker may resume a given job at a time. */
+static int resume_job(JaclObj *j, long *out) {
+  int self = jacl_sched_self();
+  if (__vm_atomic_cas32(&jp(j)[19], 0, 1) != 0) return 2;   /* already being resumed elsewhere */
+  long arg;
+  if (job_get(j, 6) == 0) {                    /* not started: create fiber + stack */
+    slock();
+    void *stk = grab_task_stack();
+    sunlock();
+    job_set(j, 16, (long)stk);
+    job_set(j, 6, __vm_fiber_new((long (*)(long))(uintptr_t)job_get(j, 2), stk));
+    arg = job_get(j, 4);                        /* prime */
+  } else {
+    arg = job_get(j, 10);                       /* resume_arg (await result), or 0 */
+  }
+  int d = 0; long v = 0;
+  for (;;) {
+    jacl_gc_worker_park_if_requested();         /* never resume into an in-progress collection */
+    jacl_running_job[self] = j;
+    jacl_gc_task_begin();
+    v = __vm_fiber_resume(job_get(j, 6), arg, &d);
+    jacl_gc_task_end();
+    arg = 0;
+    if (d) { __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
+    if (v == 0) continue;                        /* GC safepoint suspend → re-resume after park */
+    __vm_atomic_store32(&jp(j)[19], 0);          /* await: v = target job ptr */
+    *out = v;
+    return 1;
+  }
+}
+
+/* ---- worker loop ---- */
+static void worker_loop(int is_main) {
+  int self = jacl_sched_self();
   for (;;) {
     jacl_gc_worker_park_if_requested();
-    long i = __vm_atomic_add(&jacl_batch_next, 1);
-    if (i >= jacl_batch_n) break;
-    long task = __vm_fiber_new(jacl_batch_fn[i], jacl_worker_stack[w]);
-    long prime = jacl_batch_arg[i];
-    int done = 0;
-    long v = 0;
-    do {
-      jacl_gc_worker_park_if_requested();   /* park before (re)resuming if a collection runs */
-      jacl_gc_task_begin();
-      v = __vm_fiber_resume(task, prime, &done);
-      jacl_gc_task_end();
-      prime = 0;
-    } while (!done);                         /* a GC-suspended task returns !done; re-resume it */
-    jacl_batch_result[i] = v;
+    slock();
+    JaclObj *job = rq_pop(self);
+    sunlock();
+    if (!job) {
+      if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
+      jacl_running_job[self] = 0;                 /* idle: hold no root */
+      int ev = __vm_atomic_load32(&jacl_pool_event);
+      __vm_wait32(&jacl_pool_event, ev, JACL_WAIT_NS);
+      continue;
+    }
+    jacl_running_job[self] = job;                 /* root it before resume (closes the pop→resume window) */
+    long out;
+    int oc = resume_job(job, &out);               /* 0=returned, 1=await, 2=skip(claim lost) */
+    slock();
+    if (oc == 2) {
+      /* a concurrent claim already owns this job's fiber — nothing to do here */
+    } else if (oc == 0) {
+      release_task_stack((void *)job_get(job, 16));
+      complete_job(job, out);
+    } else {
+      JaclObj *target = (JaclObj *)out;
+      if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
+        /* self-cycle, or target already finished: re-run us with the result (nil for a cycle) */
+        job_set(job, 10, (target == job) ? (long)JACL_NIL : job_get(target, 8));
+        rq_push(job);
+      } else {
+        job_set(job, 12, job_get(target, 14));    /* park job on target's waiter list */
+        job_set(target, 14, (long)job);
+      }
+    }
+    sunlock();
+    pool_wake();                                   /* newly-ready jobs / shutdown */
+    if (is_main && __vm_atomic_load32(&jp(jacl_root_job)[0]) == JACL_JOB_DONE) break;
   }
-  jacl_gc_worker_unregister();
-  return 0;
 }
 
-/* Run `n` tasks (`fn[i](arg[i]) -> result[i]`) across `nworkers` vCPU workers, returning
- * once every task has completed. GC-safe: a collection triggered by any task quiesces the
- * whole pool, and the in-flight args + completed results are rooted via the global batch
- * buffers (jacl_sched_mark_roots). The caller (main) leaves the quiesce set while it blocks
- * in join, then rejoins — it cannot answer a stop while parked in thread_join. */
-void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers) {
-  if (nworkers < 1) nworkers = 1;
-  if (nworkers > JACL_SCHED_MAX_WORKERS) nworkers = JACL_SCHED_MAX_WORKERS;
-  if (n > JACL_BATCH_MAX) n = JACL_BATCH_MAX;
-  for (long i = 0; i < n; i++) { jacl_batch_fn[i] = fn[i]; jacl_batch_arg[i] = arg[i]; jacl_batch_result[i] = 0; }
-  jacl_batch_next = 0;
-  jacl_batch_n = n;            /* publish last: mark_roots scans [0, jacl_batch_n) */
+static long worker_thread(long arg) { (void)arg; jacl_gc_worker_register(); worker_loop(0); jacl_gc_worker_unregister(); return 0; }
 
-  jacl_gc_worker_unregister();   /* main only orchestrates; not a mutator while joining */
-  int h[JACL_SCHED_MAX_WORKERS];
-  for (int k = 0; k < nworkers; k++) h[k] = __vm_thread_spawn(jacl_sched_worker, (void *)0, 0);
-  for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
-  jacl_gc_worker_register();     /* main rejoins the set for any later single-thread GC */
-
-  for (long i = 0; i < n; i++) result[i] = jacl_batch_result[i];
-  jacl_batch_n = 0;            /* batch over: stop rooting its buffers */
+/* Initialize the scheduler state (queue, lock, flags). No worker threads yet — a purely
+ * sequential program (no spawn/parallel/race) runs its root job on main alone and never spawns
+ * a thread. */
+static void sched_init(void) {
+  jacl_sched_lock = 0; jacl_pool_event = 0; jacl_pool_shutdown = 0;
+  jacl_pool_started = 0; jacl_pool_nthreads = 0; jacl_owner_rr = 0; jacl_all_jobs_n = 0;
+  for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) { jacl_rq_head[w] = 0; jacl_rq_count[w] = 0; jacl_running_job[w] = 0; }
 }
 
-/* ---- parallel / race on the real worker pool (P3.4d) ----
- *
- * A block is a 0-param closure (capturing its free vars); its task runs the closure's
- * function on a task fiber with the closure passed as `self` (the resume arg), exactly as
- * the cooperative jacl_spawn does — only now across real vCPU workers. The closures (batch
- * args) and any heap-valued results survive a mid-batch collection: run_batch keeps them in
- * the global batch buffers, which jacl_sched_mark_roots scans during STW.
- *
- * NB: each batch spawns fresh vCPU workers and joins them, and svm vCPU ids are not
- * reused, so a program with very many parallel/race constructs would grow ids past the
- * per-vCPU arrays. The corpus uses a bounded few; a persistent reused worker pool (which
- * also carries spawn/await + nested-await parking) is the next P3.4d step. */
+/* Round-robin owner for a newly spawned job (pinning). pool_ensure has set nthreads. */
+static int next_owner(void) {
+  int nw = jacl_pool_nthreads + 1;
+  return (int)((unsigned)__vm_atomic_add32(&jacl_owner_rr, 1) % (unsigned)nw);
+}
+
+/* Lazily spawn the worker threads on the first concurrent construct. Idempotent. Does NOT touch
+ * the queue (the root job is already enqueued by the time this runs). */
+static void pool_ensure(void) {
+  if (__vm_atomic_cas32(&jacl_pool_started, 0, 1) != 0) return;
+  int nw = JACL_POOL_WORKERS;
+  if (nw > JACL_SCHED_MAX_WORKERS) nw = JACL_SCHED_MAX_WORKERS;
+  jacl_pool_nthreads = nw - 1;
+  for (int k = 0; k < jacl_pool_nthreads; k++)
+    jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, (void *)0, 0);
+}
+
+/* Root the scheduler's heap state during a collection: every registered job (the authoritative
+ * job root set — see the registry note above), which in turn traces each job's closure, result,
+ * resume arg, and waiter chain. (Legacy batch buffers too.) Runs under STW. */
+void jacl_sched_mark_roots(void) {
+  int n = __vm_atomic_load32(&jacl_all_jobs_n);
+  if (n > JACL_ALL_JOBS_MAX) n = JACL_ALL_JOBS_MAX;
+  for (int i = 0; i < n; i++)
+    if (jacl_all_jobs[i]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_all_jobs[i]));
+  for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
+}
+
+/* Run the program body as the root job on the persistent pool; main is worker 0 and returns
+ * the root job's result once it (and thus the program) completes. */
+JaclVal jacl_sched_run_main(JaclVal fnref) {
+  sched_init();
+  JaclObj *root = make_job((long)(uintptr_t)(uint64_t)fnref, 0, /*is_root=*/1, /*owner=*/0);
+  register_job(root);
+  jacl_root_job = root;
+  slock(); rq_push(root); sunlock(); pool_wake();
+  worker_loop(/*is_main=*/1);
+  jacl_gc_worker_unregister();                     /* leave the set while joining */
+  for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k]);
+  jacl_gc_worker_register();
+  return (JaclVal)job_get(root, 8);
+}
+
+/* ---- spawn / await (multi-threaded, on the pool) ---- */
+JaclVal jacl_spawn(JaclVal closure) {
+  pool_ensure();                                   /* first concurrent construct starts the pool */
+  JaclObj *j = make_job((long)(uintptr_t)(uint64_t)jacl_closure_fn(closure), (long)closure, 0, next_owner());
+  register_job(j);
+  slock(); rq_push(j); sunlock(); pool_wake();
+  return jaclrt_from_ptr(JACL_TAG_STREAM, j);
+}
+
+JaclVal jacl_await(JaclVal future) {
+  JaclObj *j = (JaclObj *)jaclrt_as_ptr(future);
+  /* Always suspend back to the worker loop, asking to be parked on `j`. The worker re-checks
+   * `j` under the scheduler lock and either parks us (re-resumed with j's result when it
+   * completes) or, if `j` is already done, re-runs us immediately with the result. Routing the
+   * result through the lock-ordered resume_arg keeps every result read synchronized — no
+   * lockless DONE/result fast path (that pairing reorders under svm-llvm + the JIT). */
+  return (JaclVal)__vm_fiber_suspend((long)j);
+}
+
+/* ---- parallel / race ----
+ * Run on the calling job's fiber: create the block jobs, enqueue them, await each. The locals
+ * (futs[], out) live on the calling fiber, which is always scannable (RUNNING-and-will-suspend
+ * or suspended), so they need no global rooting. */
 #define JACL_PAR_MAX 32
-
-static int jacl_par_workers(long n) {
-  long nw = n < 4 ? n : 4;        /* don't spawn more workers than tasks; cap at 4 */
-  if (nw < 1) nw = 1;
-  return (int)nw;
-}
 
 JaclVal jacl_parallel(JaclVal closures) {
   long n = (long)jacl_vec_count(closures);
   if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
-  JaclTaskFn fn[JACL_PAR_MAX];
-  long arg[JACL_PAR_MAX], res[JACL_PAR_MAX];
-  for (long i = 0; i < n; i++) {
-    JaclVal c = jacl_vec_get(closures, (uint32_t)i);
-    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);   /* the block's function */
-    arg[i] = (long)c;                                             /* the closure, passed as self */
-    res[i] = 0;
-  }
-  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
+  JaclVal futs[JACL_PAR_MAX];
+  for (long i = 0; i < n; i++) futs[i] = jacl_spawn(jacl_vec_get(closures, (uint32_t)i));
   JaclVal out = jacl_vec_empty();
-  for (long i = 0; i < n; i++) out = jacl_vec_push(out, (JaclVal)res[i]);
+  for (long i = 0; i < n; i++) out = jacl_vec_push(out, jacl_await(futs[i]));
   return out;
 }
 
@@ -131,125 +361,62 @@ JaclVal jacl_race(JaclVal closures) {
   long n = (long)jacl_vec_count(closures);
   if (n <= 0) return JACL_NIL;
   if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
-  JaclTaskFn fn[JACL_PAR_MAX];
-  long arg[JACL_PAR_MAX], res[JACL_PAR_MAX];
-  for (long i = 0; i < n; i++) {
-    JaclVal c = jacl_vec_get(closures, (uint32_t)i);
-    fn[i] = (JaclTaskFn)(uintptr_t)(uint64_t)jacl_closure_fn(c);
-    arg[i] = (long)c;
-    res[i] = 0;
+  JaclVal futs[JACL_PAR_MAX];
+  for (long i = 0; i < n; i++) futs[i] = jacl_spawn(jacl_vec_get(closures, (uint32_t)i));
+  JaclVal first = jacl_await(futs[0]);             /* await all so they finish before we return */
+  for (long i = 1; i < n; i++) (void)jacl_await(futs[i]);
+  return first;
+}
+
+/* ---- legacy transient batch scheduler (test-only) ----
+ * The original P3.4d substrate (spawn fresh vCPU threads, run a fixed batch, join). Retained
+ * because the multi-vCPU GC tests (test_sched_mt / test_batch_heap / test_gc_sched) drive it
+ * directly; not used by the language surface. */
+JaclTaskFn jacl_batch_fn[JACL_BATCH_MAX];
+long       jacl_batch_arg[JACL_BATCH_MAX];
+long       jacl_batch_result[JACL_BATCH_MAX];
+long       jacl_batch_n;
+static long jacl_batch_next;
+static char jacl_batch_worker_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
+
+static long jacl_batch_worker(long arg) {
+  (void)arg;
+  int w = jacl_sched_self();
+  if (w < 0 || w >= JACL_SCHED_MAX_WORKERS) return -1;
+  jacl_gc_worker_register();
+  for (;;) {
+    jacl_gc_worker_park_if_requested();
+    long i = __vm_atomic_add(&jacl_batch_next, 1);
+    if (i >= jacl_batch_n) break;
+    long task = __vm_fiber_new(jacl_batch_fn[i], jacl_batch_worker_stack[w]);
+    long prime = jacl_batch_arg[i];
+    int done = 0;
+    long v = 0;
+    do {
+      jacl_gc_worker_park_if_requested();
+      jacl_gc_task_begin();
+      v = __vm_fiber_resume(task, prime, &done);
+      jacl_gc_task_end();
+      prime = 0;
+    } while (!done);
+    jacl_batch_result[i] = v;
   }
-  jacl_sched_run_batch(fn, arg, res, n, jacl_par_workers(n));
-  return (JaclVal)res[0];   /* block 0's result (deterministic; cancellation is a follow-on) */
+  jacl_gc_worker_unregister();
+  return 0;
 }
 
-/* ---- spawn / await: demand-driven futures (P3.4d, sub-slice 1: nested await) ----
- *
- * `spawn { block }` records the block closure as a future and returns it; nothing runs
- * yet. `await $f` runs `f`'s task **on demand** to completion — on a fresh fiber, with the
- * closure as `self` — and caches the result. If the task itself `await`s another future,
- * that nests: this `jacl_await` re-enters for the inner future, running its task on another
- * fiber while the outer task is suspended at the resume (exactly how a generator drives a
- * sub-fiber). So a task awaiting another task's future works — the case the prior
- * lazy-flush model raced on. A future resolves once and is awaitable repeatedly.
- *
- * This is single-threaded (correctness first); spawn/await lose the lazy-flush's
- * parallelism (the corpus is value-identical either way). Restoring multi-threaded
- * spawn/await on a persistent pool with work-stealing is the next keystone sub-slice;
- * `parallel`/`race` keep their real parallelism (run_batch) meanwhile.
- *
- * future payload (JOBJ_NODE, traced): int32 [0] state (0 NEW / 1 RUNNING / 2 DONE);
- * i64 [2..3] closure; i64 [4..5] result. */
-enum { JACL_FUT_NEW = 0, JACL_FUT_RUNNING = 1, JACL_FUT_DONE = 2 };
-
-/* fiber data-stack pool for on-demand task runs (grab/release; nesting = await depth). */
-#define JACL_TASK_STACKS 64
-#define JACL_TASK_STACK_BYTES (1u << 16)
-static char  jacl_task_stack[JACL_TASK_STACKS][JACL_TASK_STACK_BYTES] __attribute__((aligned(16)));
-static int   jacl_task_stack_free[JACL_TASK_STACKS];
-static int   jacl_task_stack_nfree = -1;   /* -1 = uninitialized */
-
-static void *jacl_grab_task_stack(void) {
-  if (jacl_task_stack_nfree < 0) {           /* lazy init: all free */
-    for (int i = 0; i < JACL_TASK_STACKS; i++) jacl_task_stack_free[i] = i;
-    jacl_task_stack_nfree = JACL_TASK_STACKS;
-  }
-  if (jacl_task_stack_nfree == 0) return 0;
-  return jacl_task_stack[jacl_task_stack_free[--jacl_task_stack_nfree]];
-}
-static void jacl_release_task_stack(void *stk) {
-  long idx = ((char *)stk - (char *)jacl_task_stack) / JACL_TASK_STACK_BYTES;
-  if (idx >= 0 && idx < JACL_TASK_STACKS) jacl_task_stack_free[jacl_task_stack_nfree++] = (int)idx;
-}
-
-/* Live futures registry — rooted during a collection (a future may be reachable only via a
- * program local on an unscanned bare stack while a demand-run task collects). Bounded. */
-#define JACL_FUT_MAX 256
-static JaclObj *jacl_futures[JACL_FUT_MAX];
-static long     jacl_nfutures;
-
-/* Root the in-flight scheduler state during a collection: live spawn futures + the current
- * parallel/race batch's args (task closures) and completed results (the batch path keeps
- * these in globals while main is parked in thread_join with its stack unscanned). */
-void jacl_sched_mark_roots(void) {
-  for (long i = 0; i < jacl_nfutures; i++)
-    jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_futures[i]));
-  for (long i = 0; i < jacl_batch_n; i++) {
-    jacl_gc_mark_word(jacl_batch_arg[i]);     /* task closures / raw arg ptrs (non-heap ignored) */
-    jacl_gc_mark_word(jacl_batch_result[i]);  /* completed results, tagged or raw (i32 ignored) */
-  }
-}
-
-/* Run the program body `fnref` as the ROOT TASK on a fiber (program-as-a-job) and return
- * its result. The body then runs with its roots on a scannable fiber stack — so a
- * collection triggered anywhere in the program (or, later, by a pool worker) finds them —
- * rather than on the bare entry vCPU stack the collector cannot see. The codegen entry
- * calls this after initializing the runtime. (Single-worker for now; the persistent worker
- * pool that runs spawned tasks in parallel is the next sub-slice, built on this.) */
-JaclVal jacl_sched_run_main(JaclVal fnref) {
-  void *stk = jacl_grab_task_stack();
-  if (!stk) return jaclrt_error();
-  long k = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
-  int done = 0;
-  long v = 0, prime = 0;   /* __jacl_main(sp, arg): arg unused, primed with 0 */
-  do { v = __vm_fiber_resume(k, prime, &done); prime = 0; } while (!done);
-  jacl_release_task_stack(stk);
-  return (JaclVal)v;
-}
-
-JaclVal jacl_spawn(JaclVal closure) {
-  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, 24);
-  int32_t *p = (int32_t *)jacl_obj_payload(o);
-  p[0] = JACL_FUT_NEW;
-  *(int64_t *)(p + 2) = (int64_t)closure;    /* the block closure (traced) */
-  *(int64_t *)(p + 4) = 0;
-  if (jacl_nfutures < JACL_FUT_MAX) jacl_futures[jacl_nfutures++] = o;
-  return jaclrt_from_ptr(JACL_TAG_STREAM, o);
-}
-
-JaclVal jacl_await(JaclVal future) {
-  JaclObj *fo = (JaclObj *)jaclrt_as_ptr(future);
-  int32_t *fp = (int32_t *)jacl_obj_payload(fo);
-  if (fp[0] == JACL_FUT_DONE) return (JaclVal) * (int64_t *)(fp + 4);  /* cached */
-  if (fp[0] == JACL_FUT_RUNNING) return JACL_NIL;                      /* cycle guard */
-
-  /* NEW: run the task on demand. A nested await inside the task re-enters here for the
-   * inner future on another fiber (the outer task suspends at this resume). */
-  fp[0] = JACL_FUT_RUNNING;
-  JaclVal closure = (JaclVal) * (int64_t *)(fp + 2);
-  JaclVal fnref = jacl_closure_fn(closure);
-  void *stk = jacl_grab_task_stack();
-  if (!stk) { fp[0] = JACL_FUT_NEW; return jaclrt_error(); }
-  long k = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
-  long prime = (long)closure;   /* primed as `self` on the first resume */
-  int done = 0;
-  long v = 0;
-  do { v = __vm_fiber_resume(k, prime, &done); prime = 0; } while (!done);
-  jacl_release_task_stack(stk);
-
-  /* re-read the payload pointer (a collection during the run may have run the conservative
-   * sweep, but the non-moving GC keeps `fo` valid) and cache the result. */
-  *(int64_t *)(fp + 4) = (int64_t)v;
-  fp[0] = JACL_FUT_DONE;
-  return v;
+void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int nworkers) {
+  if (nworkers < 1) nworkers = 1;
+  if (nworkers > JACL_SCHED_MAX_WORKERS) nworkers = JACL_SCHED_MAX_WORKERS;
+  if (n > JACL_BATCH_MAX) n = JACL_BATCH_MAX;
+  for (long i = 0; i < n; i++) { jacl_batch_fn[i] = fn[i]; jacl_batch_arg[i] = arg[i]; jacl_batch_result[i] = 0; }
+  jacl_batch_next = 0;
+  jacl_batch_n = n;
+  jacl_gc_worker_unregister();
+  int h[JACL_SCHED_MAX_WORKERS];
+  for (int k = 0; k < nworkers; k++) h[k] = __vm_thread_spawn(jacl_batch_worker, (void *)0, 0);
+  for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
+  jacl_gc_worker_register();
+  for (long i = 0; i < n; i++) result[i] = jacl_batch_result[i];
+  jacl_batch_n = 0;
 }

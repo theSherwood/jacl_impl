@@ -130,3 +130,99 @@ commit. **P3.4 is unblocked.**
 > C on-ramp is now `long __vm_fiber_new` / `long __vm_fiber_resume(long, …)`).
 > `runtime/fiber.c` was updated to store i64 handles accordingly — required for the
 > module to verify against the new pin.
+
+---
+
+## Ask 2 — persistent M:N pool — **WITHDRAWN: no svm change needed**
+
+> **STATUS: WITHDRAWN.** Two earlier drafts of this ask were both wrong. (a) "`gc.roots`
+> coverage bug" — wrong: `gc.roots` is sound (the transient `jacl_sched_run_batch` uses it and
+> is rock-solid, `mt.rs::gc_sched`). (b) "need fiber migration" — wrong: **svm already provides
+> cross-vCPU fiber migration, and it is tested *with* GC.** So the persistent M:N pool (the
+> P3.4d keystone) is **not blocked on svm at all** — the remaining work is entirely JACL-side.
+> Kept here, withdrawn, for the record. Full root-cause + reproducer: `spikes/svm_pool_gc/`.
+
+**Why the persistent pool corrupted (root cause — all JACL-side).** Three causes, found by
+isolation in `spikes/svm_pool_gc/`:
+1. *main-side roots* — `jacl_parallel` held in-flight roots (the closures vector, freshly
+   allocated futures, the result vector, register transients) on **main's** fiber stack while
+   pool workers collected; `gc.roots` doesn't cover the main thread's stack for a collection
+   elected on another vCPU. **Fixed** by global root buffers + main-allocates-only-when-sole-mutator.
+2. *result-handoff ordering* — a plain i64 result store wasn't ordered before the atomic DONE
+   flag under svm-llvm + real JIT threads. **Fixed** by atomic-halves publish/read.
+3. *main's program-fiber in the multi-worker quiesce set* — unlike the transient pool (main
+   unregisters and parks on its bare thread, never a running fiber during a collection), the
+   persistent pool runs main as a program fiber that **cycles suspend/resume** while awaiting,
+   leaving rare windows the strict `gc.roots` trips (`FiberFault`, ~1/40 on real-thread JIT).
+
+**Why #3 needs no svm change.** The clean fix for #3 is a **continuation scheduler**: a wait
+suspends the program/task fiber back to a bare scheduler loop (so it is `RUNNABLE`, *off* the
+workers — never `RUNNING` while a worker collects), and a ready fiber is resumed by whatever
+worker grabs it. That needs cross-vCPU fiber **migration** (resume a fiber on a different vCPU
+than suspended it), which **svm already implements and tests on both backends**:
+
+- `cont.resume` claims a fiber from a run-shared registry, "**possibly one suspended on another
+  vCPU (D57 migration)**" — interp `svm-interp/src/bytecode.rs`; JIT `fiber_rt::fiber_resume`:
+  "**any vCPU may resume** a fresh (`OWNED`) or suspended (`RUNNABLE`) fiber … even when another
+  OS thread suspended it (the migration edge)."
+- Tests: `svm/tests/fiber_migrate.rs::fiber_suspended_on_root_resumes_on_spawned_vcpu`,
+  `foreign_vcpu_claim_succeeds_without_a_race`, `racing_resumes_have_exactly_one_winner`;
+  `fiber_fuzz.rs::generated_migration_schedules_agree_on_interp_and_jit`; and `gc_roots.rs` /
+  `gc_quiesce.rs` exercise a stop-the-world `gc.roots` scan **across spawned vCPUs** (with the
+  §3.3 "refuse if another vCPU holds a *running* fiber" check verified *not* to fire when fibers
+  are properly suspended — exactly the continuation scheduler's invariant).
+
+**Remaining work (JACL-side, no ask):** build the continuation scheduler on svm's existing
+migration — `await`/wait suspends the awaiting fiber to a bare per-worker loop instead of
+busy-cycling; workers resume ready fibers (migrating them); keep #1's global-buffer rooting and
+#2's atomic handoff. Then `parallel`/`race`/`spawn`/`await` move onto the persistent pool and
+the async/parking builtins (`sleep`/channels) follow. Tracked in `SVM_BACKEND_PHASE3.md` P3.4d.
+
+---
+
+## Ask 3 — `gc.roots` coverage contract for guest values on stacks/registers
+
+> **STATUS: OPEN.** Not a blocker (JACL works around it), but it forces a guest-side wart: an
+> explicit, hand-marked, un-reclaimable global root table for scheduler jobs (a cap + leak).
+> Closing it lets a guest keep its roots in normal locals.
+>
+> *Not contradicted by Ask 2.* `gc.roots` correctly scans a suspended fiber's **spilled** stack
+> (Ask 2 confirmed that). This ask is about what it does **not** cover: values in unspilled
+> registers, and possibly a non-collector worker vCPU's bare native frames.
+
+**Context.** JACL runs an M:N scheduler on `cont.*`: a persistent pool of `thread.spawn` vCPU
+workers, each running a bare worker loop that resumes job fibers. The guest GC finds heap roots
+via `gc.roots` at a stop-the-world safepoint.
+
+**Problem.** We cannot rely on `gc.roots` to find guest heap pointers that live on stacks — they
+get swept mid-collection. Confirmed with a reproducer: when scheduler "job" objects are rooted
+only via their natural references (a worker-loop local, a `parallel` block's `futs[]` array on
+the awaiting fiber, the program root reachable through a waiter chain), live jobs — including the
+program root — get collected, hanging/corrupting the run. Marking the obvious guest globals
+(ready queues, per-worker current-job, root-job pointer) is **not** enough; only copying *every*
+job pointer into a guest-global array and marking it by hand works. That array can't be safely
+reclaimed (a DONE job may be a held, re-awaitable future whose only reference is a stack slot we
+can't prove dead), so it leaks / is capped.
+
+`gc.roots`' own doc already flags one gap: *"live roots a caller holds only in unspilled
+callee-saved registers … are out of scope (a register-flush shim is a future follow-up)."*
+
+**Please confirm coverage at a STW `gc.roots` (driven by one vCPU) for each:**
+1. Values live only in **unspilled callee-saved registers** — of the calling frame, of suspended
+   fibers, and of resume-chain ancestors.
+2. A **non-collector spawned vCPU's bare native-thread (root-computation) stack** — i.e. its
+   `thread.spawn` entry frames (our worker loop), where a job pointer sits between dequeuing it
+   and resuming its fiber. Is `root_entry_sp` recorded and that region scanned for spawned vCPUs,
+   not just the main one?
+3. A **suspended fiber's full saved C-frame chain** (e.g. a `parallel` local array on a fiber
+   parked in `await`).
+
+**Ask.** Document the exact `gc.roots` coverage contract (which locations × which vCPUs/fibers are
+guaranteed scanned at STW), and close the gaps — in particular the already-flagged register-flush
+shim, and (2) if spawned-worker native stacks are not covered. Then a guest scheduler can keep
+roots in normal locals instead of a hand-marked, un-reclaimable global table.
+
+**Repro (JACL, this repo).** `spikes/svm_pool_gc/` (analysis) + `runtime/tests/test_par_gc.c` via
+`cargo test --release --test mt par_gc` (JIT). With the explicit job registry it passes 10/10;
+relying on the stack scan (registry removed, queues+running+root marked) it hangs 0/8 —
+`runtime/sched.c` `jacl_sched_mark_roots` / `jacl_all_jobs`.

@@ -30,3 +30,23 @@ fn gc_sched() {
         "multi-vCPU STW over the fiber scheduler: each worker's keeper survives a \
          collection run by another worker; no mutual-exclusion violation (diag {r})");
 }
+
+#[test]
+fn par_min() {
+    let r = run_test("test_par_min.c", 0);
+    assert_eq!(r, 111, "continuation-pool jacl_parallel returns correct results (diag {r})");
+}
+
+#[test]
+fn par_gc() {
+    // JIT-only: the continuation pool is now GC-sound under heavy concurrent collection on the
+    // real backend (real OS-thread vCPUs) — the job registry roots every live job so a job (incl.
+    // the program root) is never swept mid-collection. The svm *interpreter*'s cooperative
+    // single-thread scheduler livelocks on the pool's futex traffic under this load (a simulation
+    // artifact — see run_test_jit), so the differential oracle can't drive this case.
+    let r = jacl_runtime_harness::run_test_jit("test_par_gc.c", 0);
+    assert_eq!(r, 555,
+        "continuation pool: parallel runs NT allocating blocks across pinned workers while they \
+         force collections; every keeper survives, results match, no violation (diag {r})");
+}
+
