@@ -50,7 +50,7 @@ JaclVal jacl_print(JaclVal v) {
   } else if (t == 0x01) {                          /* bool */
     if (jaclrt_as_bool(v)) write(1, "true\n", 5);
     else write(1, "false\n", 6);
-  } else if (t == 0x06 || t == 0x07) {             /* vec / map: constructor syntax */
+  } else if (t == 0x06 || t == 0x07 || t == 0x12 || t == 0x1A) { /* vec/map/struct/arr: constructor syntax */
     JaclVal s = jacl_to_string(v);
     uint32_t len = jacl_str_len(s);
     char sb[2048];
