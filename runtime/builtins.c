@@ -53,15 +53,45 @@ JaclVal jacl_neg(JaclVal a) {
 }
 
 /* ---- comparisons ---- */
-JaclVal jacl_eq(JaclVal a, JaclVal b) {                 /* bitwise type+payload (mirrors value.c) */
-  ERR_IF_ERR(a, b);
+/* Structural equality: strings by content, vectors elementwise, maps by content
+ * (order-independent; both must have the same count and every (k,v) of `a` must
+ * match in `b`), everything else bitwise type+payload. Recursive, so nested
+ * collections compare deeply. Also the map key-equality handler (jmap_key_eq). */
+#define JACL_EQ_MAP_CAP 64
+int jacl_val_equal(JaclVal a, JaclVal b) {
   uint64_t mask = JACL_TYPE_MASK | JACL_PAYLOAD_MASK;
-  return jaclrt_bool((a & mask) == (b & mask)) | prop_flags(a, b);
+  if (((a ^ b) & mask) == 0) return 1;
+  if (jaclrt_is_string(a) && jaclrt_is_string(b)) return jacl_str_eq(a, b);
+  uint32_t t = jaclrt_type_index(a);
+  if (t != jaclrt_type_index(b)) return 0;
+  if (t == 0x06) {                                       /* VECTOR */
+    uint32_t n = jacl_vec_count(a);
+    if (n != jacl_vec_count(b)) return 0;
+    for (uint32_t i = 0; i < n; i++)
+      if (!jacl_val_equal(jacl_vec_get(a, i), jacl_vec_get(b, i))) return 0;
+    return 1;
+  }
+  if (t == 0x07) {                                       /* MAP */
+    uint32_t n = jacl_map_count(a);
+    if (n != jacl_map_count(b)) return 0;
+    if (n > JACL_EQ_MAP_CAP) return 0;                   /* over cap: conservative not-equal */
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t m = jacl_map_entries(a, ks, vs, JACL_EQ_MAP_CAP);
+    for (uint32_t i = 0; i < m; i++) {
+      if (!jacl_map_has(b, ks[i])) return 0;
+      if (!jacl_val_equal(vs[i], jacl_map_get(b, ks[i]))) return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+JaclVal jacl_eq(JaclVal a, JaclVal b) {
+  ERR_IF_ERR(a, b);
+  return jaclrt_bool(jacl_val_equal(a, b) != 0) | prop_flags(a, b);
 }
 JaclVal jacl_ne(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  uint64_t mask = JACL_TYPE_MASK | JACL_PAYLOAD_MASK;
-  return jaclrt_bool((a & mask) != (b & mask)) | prop_flags(a, b);
+  return jaclrt_bool(jacl_val_equal(a, b) == 0) | prop_flags(a, b);
 }
 JaclVal jacl_lt(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
@@ -124,23 +154,93 @@ JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
   if (jaclrt_is_error(m)) return m;
   return jaclrt_bool(jacl_map_has(m, k) != 0);
 }
+JaclVal jacl_is_error_v(JaclVal v) { return jaclrt_bool(jaclrt_is_error(v)); }
+JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (i < 0) return jaclrt_error();
+  return jacl_vec_set(v, (uint32_t)i, elem);
+}
+JaclVal jacl_map_keys_v(JaclVal m) {
+  if (jaclrt_is_error(m)) return m;
+  JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+  uint32_t n = jacl_map_entries(m, ks, vs, JACL_EQ_MAP_CAP);
+  JaclVal out = jacl_vec_empty();
+  for (uint32_t i = 0; i < n; i++) out = jacl_vec_push(out, ks[i]);
+  return out;
+}
+JaclVal jacl_map_vals_v(JaclVal m) {
+  if (jaclrt_is_error(m)) return m;
+  JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+  uint32_t n = jacl_map_entries(m, ks, vs, JACL_EQ_MAP_CAP);
+  JaclVal out = jacl_vec_empty();
+  for (uint32_t i = 0; i < n; i++) out = jacl_vec_push(out, vs[i]);
+  return out;
+}
+/* Recursive text form (constructor syntax for collections, matching the old VM's
+ * print: `[vec 1 2 3]`, `[map "a" 1]` — strings QUOTED inside collections, raw at
+ * top level). Renders into a bounded buffer (truncates past cap; corpus-scale
+ * values are small). */
+typedef struct { char *p; uint32_t n, cap; } JaclRepr;
+static void repr_put(JaclRepr *rb, const char *s, uint32_t n) {
+  for (uint32_t i = 0; i < n && rb->n < rb->cap; i++) rb->p[rb->n++] = s[i];
+}
+static void repr_i32(JaclRepr *rb, int32_t x) {
+  char tmp[16]; int j = 0;
+  int neg = x < 0;
+  uint32_t u = neg ? (uint32_t)(-(int64_t)x) : (uint32_t)x;
+  if (u == 0) tmp[j++] = '0';
+  while (u) { tmp[j++] = (char)('0' + (u % 10)); u /= 10; }
+  if (neg) repr_put(rb, "-", 1);
+  while (j) { j--; repr_put(rb, &tmp[j], 1); }
+}
+static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
+  if (jaclrt_is_string(v)) {
+    char sb[1024];
+    uint32_t len = jacl_str_len(v);
+    if (len > sizeof sb - 1) len = sizeof sb - 1;
+    jacl_str_bytes(v, sb, sizeof sb);
+    if (quote_strings) repr_put(rb, "\"", 1);
+    repr_put(rb, sb, len);
+    if (quote_strings) repr_put(rb, "\"", 1);
+    return;
+  }
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x00) { repr_put(rb, "nil", 3); return; }
+  if (t == 0x01) { if (jaclrt_as_bool(v)) repr_put(rb, "true", 4); else repr_put(rb, "false", 5); return; }
+  if (t == 0x02) { repr_i32(rb, jaclrt_as_i32(v)); return; }
+  if (t == 0x06) {                                       /* VECTOR: [vec e0 e1 …] */
+    repr_put(rb, "[vec", 4);
+    uint32_t n = jacl_vec_count(v);
+    for (uint32_t i = 0; i < n; i++) {
+      repr_put(rb, " ", 1);
+      repr_val(rb, jacl_vec_get(v, i), 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
+  if (t == 0x07) {                                       /* MAP: [map k0 v0 …] */
+    repr_put(rb, "[map", 4);
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t m = jacl_map_entries(v, ks, vs, JACL_EQ_MAP_CAP);
+    for (uint32_t i = 0; i < m; i++) {
+      repr_put(rb, " ", 1);
+      repr_val(rb, ks[i], 1);
+      repr_put(rb, " ", 1);
+      repr_val(rb, vs[i], 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
+  repr_put(rb, "?", 1);
+}
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
-  switch (jaclrt_type_index(v)) {
-    case 0x00: return jacl_str_new("nil", 3);
-    case 0x01: return jaclrt_as_bool(v) ? jacl_str_new("true", 4) : jacl_str_new("false", 5);
-    case 0x02: {
-      char tmp[16]; int j = 0;
-      int32_t x = jaclrt_as_i32(v);
-      int neg = x < 0;
-      uint32_t u = neg ? (uint32_t)(-(int64_t)x) : (uint32_t)x;
-      if (u == 0) tmp[j++] = '0';
-      while (u) { tmp[j++] = (char)('0' + (u % 10)); u /= 10; }
-      char out[16]; int i = 0;
-      if (neg) out[i++] = '-';
-      while (j) out[i++] = tmp[--j];
-      return jacl_str_new(out, (uint32_t)i);
-    }
-    default: return jaclrt_error();
-  }
+  uint32_t t = jaclrt_type_index(v);
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07) return jaclrt_error();
+  char buf[2048];
+  JaclRepr rb = {buf, 0, sizeof buf};
+  repr_val(&rb, v, 1);
+  return jacl_str_new(buf, rb.n);
 }

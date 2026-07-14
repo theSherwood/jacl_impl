@@ -66,17 +66,23 @@ static void* jmap_gc_alloc(int obj_type, unsigned long sz) {
   return jacl_obj_payload((JaclObj*)jacl_alloc(JOBJ_NODE, (uint32_t)sz));
 }
 
-/* value-aware key hash/eq: strings by content, everything else by bits */
+/* value-aware key hash/eq: strings by content, vectors structurally (elementwise,
+ * recursive — consistent with jacl_val_equal so composite keys work), everything
+ * else by bits. jacl_val_equal lives in builtins.c (later in the unity TU). */
+int jacl_val_equal(JaclVal a, JaclVal b); /* fwd (unity) */
 static uint32_t jmap_key_hash(JaclVal k) {
   if (jaclrt_is_string(k)) return jacl_str_hash(k);
+  if (jaclrt_type_index(k) == 0x06) {              /* VECTOR: FNV over element hashes */
+    uint32_t n = jacl_vec_count(k);
+    uint32_t h = 0x811c9dc5u ^ n;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ jmap_key_hash(jacl_vec_get(k, i))) * 16777619u;
+    return h;
+  }
   uint64_t x = k;                                  /* scalar: mix the bits (splitmix64-ish) */
   x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
   return (uint32_t)x;
 }
-static bool jmap_key_eq(JaclVal a, JaclVal b) {
-  if (jaclrt_is_string(a) && jaclrt_is_string(b)) return jacl_str_eq(a, b);
-  return a == b;
-}
+static bool jmap_key_eq(JaclVal a, JaclVal b) { return jacl_val_equal(a, b) != 0; }
 
 #define HAMT_KEY_T              JaclVal
 #define HAMT_VAL_T              JaclVal
@@ -107,6 +113,29 @@ __attribute__((noinline)) JaclVal jacl_map_get(JaclVal m, JaclVal key) {
 __attribute__((noinline)) JaclVal jacl_map_remove(JaclVal m, JaclVal key) {
   jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
   return jaclrt_from_ptr(JACL_TAG_MAP, jmap_unset(r, key));
+}
+/* Persistent element update: a new vector with v[idx] = elem (nil-vec/OOB -> error). */
+__attribute__((noinline)) JaclVal jacl_vec_set(JaclVal vec, uint32_t idx, JaclVal elem) {
+  jvec_root *r = (jvec_root*)jaclrt_as_ptr(vec);
+  jvec_root *out = jvec_set(r, idx, elem);
+  if (!out) return jaclrt_error();
+  return jaclrt_from_ptr(JACL_TAG_VECTOR, out);
+}
+/* Copy up to `cap` (key, value) entries into ks/vs; returns the number written.
+ * Structural equality, rendering, and map-keys/vals build on this. */
+__attribute__((noinline)) uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, JaclVal *vs, uint32_t cap) {
+  jmap_node *root = (jmap_node*)jaclrt_as_ptr(m);
+  if (!root) return 0;
+  jmap_iter it = jmap_iter_init(root);
+  uint32_t n = 0;
+  while (n < cap) {
+    jmap_iter_result r = jmap_next_leaf(&it);
+    if (r.done) break;
+    ks[n] = r.item->slots[0];
+    vs[n] = *(JaclVal *)((char *)r.item->slots + sizeof(JaclVal) * r.item->key_stride);
+    n++;
+  }
+  return n;
 }
 __attribute__((noinline)) uint32_t jacl_map_count(JaclVal m) {
   return (uint32_t)jmap_count((jmap_node*)jaclrt_as_ptr(m));

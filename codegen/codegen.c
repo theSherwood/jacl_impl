@@ -1153,12 +1153,16 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_TO_STRING,  "jacl_to_string",  1},
           {HEAD_VEC_GET,    "jacl_vec_get_at", 2},
           {HEAD_VEC_PUSH,   "jacl_vec_push",   2},
+          {HEAD_VEC_SET,    "jacl_vec_set_at", 3},
           {HEAD_VEC_LEN,    "jacl_len",        1},
           {HEAD_MAP_GET,    "jacl_map_get",    2},
           {HEAD_MAP_SET,    "jacl_map_set",    3},
           {HEAD_MAP_HAS,    "jacl_map_has_v",  2},
           {HEAD_MAP_LEN,    "jacl_len",        1},
           {HEAD_MAP_REMOVE, "jacl_map_remove", 2},
+          {HEAD_MAP_KEYS,   "jacl_map_keys_v", 1},
+          {HEAD_MAP_VALS,   "jacl_map_vals_v", 1},
+          {HEAD_ERROR_Q,    "jacl_is_error_v", 1},
         };
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;

@@ -260,6 +260,13 @@ JaclVal jacl_typeof(JaclVal v);            /* -> type-name string */
 JaclVal jacl_len(JaclVal v);               /* string/vec/map length -> i32 (else error) */
 JaclVal jacl_vec_get_at(JaclVal v, JaclVal idx);   /* JaclVal-uniform vec-get (i32 index) */
 JaclVal jacl_map_has_v(JaclVal m, JaclVal k);      /* JaclVal-uniform map-has? -> bool */
+int     jacl_val_equal(JaclVal a, JaclVal b);      /* structural equality (vec/map recursive) */
+JaclVal jacl_vec_set(JaclVal v, uint32_t idx, JaclVal elem);       /* persistent update */
+uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, JaclVal *vs, uint32_t cap);
+JaclVal jacl_is_error_v(JaclVal v);                /* error? -> bool */
+JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
+JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
+JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are
