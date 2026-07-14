@@ -7,15 +7,15 @@
 
 | stage | count |
 |---|---|
-| emit-fail | 110 |
-| err-no-fail | 74 |
+| emit-fail | 108 |
+| err-no-fail | 76 |
 | err-pass | 8 |
-| err-wrong-msg | 46 |
+| err-wrong-msg | 44 |
 | hang | 66 |
 | pass | 181 |
 | run-fail | 8 |
 | text-parse-fail | 2 |
-| wrong-output | 61 |
+| wrong-output | 63 |
 
 ## By category (pass/total)
 
@@ -104,7 +104,6 @@
 | count | first error line |
 |---|---|
 | 27 | `codegen: unsupported command head (non-name head)` |
-| 8 | `codegen: unsupported command head '.'` |
 | 8 | `codegen: unsupported command head 'addr'` |
 | 7 | `codegen: unsupported command head 'lines'` |
 | 5 | `codegen: internal: captured mutable not boxed` |
@@ -112,6 +111,7 @@
 | 5 | `parse errors: 1` |
 | 4 | `codegen: for: unsupported form (ranges, `for COLL name {body}`, `for COLL $cb`)` |
 | 4 | `codegen: operator needs at least 2 arguments` |
+| 4 | `codegen: unsupported command head '.'` |
 | 4 | `codegen: unsupported command head 'ptr-cast'` |
 | 4 | `codegen: unsupported command head 'vec-concat'` |
 | 4 | `codegen: unsupported command head 'write-file'` |
@@ -169,6 +169,9 @@
 - `buf_arrow_set_value_type_mismatch` — err-no-fail: -
 - `buf_bounds_runtime` — err-no-fail: -
 - `buf_boxed_struct_dyn_gc` — wrong-output: want 5 line(s) [30…], got 0 […]
+- `buf_dynamic_chain` — wrong-output: want 6 line(s) [0…], got 1 [nil…]
+- `buf_dynamic_chain_oob` — err-no-fail: -
+- `buf_dynamic_chain_oob_neg` — err-no-fail: -
 - `buf_field_builtin_head_oob` — err-no-fail: -
 - `buf_field_elf_header` — wrong-output: want 5 line(s) [127…], got 0 […]
 - `buf_literal_mismatch` — err-no-fail: -
@@ -190,6 +193,7 @@
 - `buf_proc_param_value_size_cap` — err-no-fail: -
 - `buf_set_typed_vec_mismatch` — err-no-fail: -
 - `buf_set_value_type_mismatch` — err-no-fail: -
+- `buf_slice_pass` — wrong-output: want 6 line(s) [11…], got 0 […]
 - `buf_struct_get_set` — wrong-output: want 3 line(s) [[Point x 0 y 0]…], got 3 [0…]
 - `buf_struct_literal_init` — wrong-output: want 4 line(s) [[Point x 1 y 2]…], got 4 [[Point x 1 y 2]…]
 - `buf_traced_decay_reject` — err-no-fail: -
@@ -298,13 +302,13 @@
 - `spawn_susp_proc` — hang: -
 - `stream_each_named_cb` — wrong-output: want 3 line(s) [1000000000…], got 3 [1000000000…]
 - `stream_each_typed` — wrong-output: want 4 line(s) [2000000000…], got 4 [2000000000…]
-- `stream_filter_typed` — run-fail: instantiate: verify failed (fail-closed): TypeMismatch { func: 136, block: 7, expected: I64, found: I32 }
+- `stream_filter_typed` — run-fail: instantiate: verify failed (fail-closed): TypeMismatch { func: 138, block: 7, expected: I64, found: I32 }
 - `stream_pipeline` — run-fail: guest trapped (IndirectCallType) — detect-and-kill (§5)
 - `stream_struct_collect` — wrong-output: want 4 line(s) [[[Pt x 1 y 2], [Pt x 3 y 4]]…], got 4 [[vec [Pt x 1 y 2] [Pt x 3 y 4]]…]
 - `stream_struct_hof` — run-fail: guest trapped (IndirectCallType) — detect-and-kill (§5)
 - `stream_struct_hof_named_error` — err-no-fail: -
 - `stream_struct_yield_dyn_error` — err-no-fail: -
-- `stream_transform_typed` — run-fail: instantiate: verify failed (fail-closed): TypeMismatch { func: 136, block: 42, expected: I64, found: I32 }
+- `stream_transform_typed` — run-fail: instantiate: verify failed (fail-closed): TypeMismatch { func: 138, block: 42, expected: I64, found: I32 }
 - `stream_transform_wide_return` — wrong-output: want 2 line(s) [6000000000…], got 2 [1705032704…]
 - `stream_unannotated_typed_yield_error` — err-no-fail: -
 - `stream_wide_f64_u64` — run-fail: guest trapped (IndirectCallType) — detect-and-kill (§5)

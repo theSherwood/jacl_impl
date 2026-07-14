@@ -1564,6 +1564,17 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal a[] = {cx->sp, bv, idx};
         return emit_rt_call(cx, "jacl_index_get", a, 3);
       }
+      /* Dynamic dot `[. EXPR $k]` — the key expression decides index vs field. */
+      if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
+          node->data.command.args[1]->type != AST_LIT_STRING &&
+          node->data.command.args[1]->type != AST_LIT_INT) {
+        IrVal sv = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal kv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, sv, kv};
+        return emit_rt_call(cx, "jacl_dot_dyn", a, 3);
+      }
       /* Field access `[. EXPR field]` (from `$e->field`). */
       if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
           node->data.command.args[1]->type == AST_LIT_STRING) {
@@ -1775,6 +1786,22 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           if (cx->failed) return 0;
           IrVal a[] = {cx->sp, bv, idx, val};
           return emit_rt_call(cx, "jacl_arr_set_at", a, 4);
+        }
+        /* `set $b->$k V` — dynamic dot target (index or struct field). */
+        if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
+            node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+            node->data.command.args[0]->data.command.arg_count == 2 &&
+            node->data.command.args[0]->data.command.args[1]->type != AST_LIT_STRING &&
+            node->data.command.args[0]->data.command.args[1]->type != AST_LIT_INT) {
+          AstNode *dot = node->data.command.args[0];
+          IrVal sv = compile_expr(cx, dot->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal kv = compile_expr(cx, dot->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal val = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, sv, kv, val};
+          return emit_rt_call(cx, "jacl_dot_dyn_set", a, 4);
         }
         /* `set $p->x V` — in-place struct field mutation. */
         if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&

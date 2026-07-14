@@ -469,6 +469,20 @@ JaclVal jacl_assert_type(JaclVal v, JaclVal tname) {
   return type_name_matches(v, tn, tl) ? v : jaclrt_error();
 }
 
+/* Dynamic dot: `\$v->\$k` — an i32 key indexes (buf/arr/vec), a string key reads a
+ * field/entry (struct/map). */
+JaclVal jacl_dot_dyn(JaclVal v, JaclVal k) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_i32(k)) return jacl_index_get(v, k);
+  return jacl_field_get(v, k);
+}
+JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_i32(k)) return jacl_arr_set_at(v, k, nv);
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x12) return jacl_struct_put(v, k, nv);
+  return jaclrt_error();
+}
 /* Named-field access across record-like values: struct field or map entry (string key). */
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
