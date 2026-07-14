@@ -488,6 +488,19 @@ JaclVal jacl_assert_type(JaclVal v, JaclVal tname) {
   return type_name_matches(v, tn, tl) ? v : jaclrt_error();
 }
 
+/* `[?. V KEY]` — optional chaining: nil short-circuits to nil, a map reads the entry
+ * (missing key -> nil), and any other indexable/record value falls through to the
+ * dynamic dot. (Structs are a compile error in the old VM — `use -> instead`; here a
+ * struct value yields an error at runtime.) */
+JaclVal jacl_qdot(JaclVal v, JaclVal key) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_nil(v)) return jaclrt_nil();
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x07) return jacl_map_get(v, key);   /* map: value or nil */
+  if (t == 0x12) return jaclrt_error();          /* struct: -> is required */
+  return jacl_dot_dyn(v, key);
+}
+
 /* Dynamic dot: `\$v->\$k` — an i32 key indexes (buf/arr/vec), a string key reads a
  * field/entry (struct/map). */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k) {
@@ -516,6 +529,69 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   int32_t i = jaclrt_as_i32(idx);
   if (i < 0) return jaclrt_error();
   return jacl_vec_set(v, (uint32_t)i, elem);
+}
+/* `[vec-push V E]` — error-propagating push wrapper (the core jacl_vec_push is also
+ * used to build literals / accumulate results, where inputs are never errors, so the
+ * propagation lives here on the builtin edge). */
+JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(elem)) return elem;
+  if (jaclrt_type_index(v) != 0x06) return jaclrt_error();
+  return jacl_vec_push(v, elem);
+}
+/* `[vec-slice V START END]` — a fresh vector of V[START..END) (half-open). START/END
+ * are clamped to [0, len]; START past END yields an empty vector. */
+JaclVal jacl_vec_slice(JaclVal v, JaclVal start, JaclVal end) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(start)) return start;
+  if (jaclrt_is_error(end)) return end;
+  if (jaclrt_type_index(v) != 0x06 || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
+    return jaclrt_error();
+  int32_t n = (int32_t)jacl_vec_count(v);
+  int32_t s = jaclrt_as_i32(start), e = jaclrt_as_i32(end);
+  if (s < 0) s = 0;
+  if (e > n) e = n;
+  JaclVal out = jacl_vec_empty();
+  for (int32_t i = s; i < e; i++) out = jacl_vec_push(out, jacl_vec_get(v, (uint32_t)i));
+  return out;
+}
+/* for-over-collection accessors: the i-th VALUE and KEY of any iterable. A vector/arr
+ * yields (index -> element) with the index itself as the key; a map yields its i-th
+ * (key, value) entry in deterministic HAMT order (stable across the two calls, so a
+ * two-name `for $m k v` binds a consistent pair). */
+JaclVal jacl_iter_val_at(JaclVal c, JaclVal idx) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (jaclrt_type_index(c) == 0x07) {                    /* MAP: i-th value */
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t n = jacl_map_entries(c, ks, vs, JACL_EQ_MAP_CAP);
+    if (i < 0 || (uint32_t)i >= n) return jaclrt_error();
+    return vs[i];
+  }
+  return jacl_index_get(c, idx);                          /* vec / arr element */
+}
+JaclVal jacl_iter_key_at(JaclVal c, JaclVal idx) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (jaclrt_type_index(c) == 0x07) {                    /* MAP: i-th key */
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t n = jacl_map_entries(c, ks, vs, JACL_EQ_MAP_CAP);
+    if (i < 0 || (uint32_t)i >= n) return jaclrt_error();
+    return ks[i];
+  }
+  return idx;                                             /* vec / arr: key is the index */
+}
+/* `[range-inclusive A B]` — [A, B] as a vector (the closed-interval sibling of range). */
+JaclVal jacl_range_inclusive(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
+  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
+  int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
+  JaclVal out = jacl_vec_empty();
+  for (int32_t i = lo; i <= hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
+  return out;
 }
 JaclVal jacl_map_keys_v(JaclVal m) {
   if (jaclrt_is_error(m)) return m;

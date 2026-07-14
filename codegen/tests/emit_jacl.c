@@ -221,8 +221,20 @@ int main(int argc, char **argv) {
   if (parse.error_count) { fprintf(stderr, "parse errors: %u\n", parse.error_count); return 1; }
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
-   * type-driven (unboxed) lowering. */
-  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
+   * type-driven (unboxed) lowering. The typer also proves the corpus's static type
+   * errors (typed def/set/arith/proc-arg/convert mismatches); surface its first error
+   * so `# expect-error:` oracles for those cases are met (parity with the old VM's
+   * compile-time rejection). */
+  TyperResult tres;
+  typer_infer(parse.nodes, parse.count, &tres, NULL, 0, NULL, 0);
+  /* Narrowing a `dyn` value into a typed binding is a runtime check on the SVM
+   * backend (the loop/stream element bindings the codegen carries stay dyn), not a
+   * static error — the old VM narrows those bindings and accepts the program. Skip
+   * the typer's "cannot assign dyn to …" so those dynamic-but-correct programs still
+   * compile; genuine concrete mismatches (str→i64, i64+f64, …) still surface. */
+  if (tres.error_count && !strstr(tres.first_error, "assign dyn to")) {
+    fprintf(stderr, "%s\n", tres.first_error); arena_destroy(&arena); return 1;
+  }
 
   char err[256] = {0};
   IrModule *m = svm_codegen_program(parse.nodes, parse.count, err, sizeof err);

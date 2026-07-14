@@ -99,6 +99,9 @@ __attribute__((noinline)) JaclVal jacl_map_empty(void) {
   return jaclrt_from_ptr(JACL_TAG_MAP, (void*)0);
 }
 __attribute__((noinline)) JaclVal jacl_map_set(JaclVal m, JaclVal key, JaclVal val) {
+  if (jaclrt_is_error(m)) return m;
+  if (jaclrt_is_error(key)) return key;
+  if (jaclrt_is_error(val)) return val;
   jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
   return jaclrt_from_ptr(JACL_TAG_MAP, jmap_set(r, key, val));
 }
@@ -106,11 +109,15 @@ __attribute__((noinline)) int jacl_map_has(JaclVal m, JaclVal key) {
   return jmap_has((jmap_node*)jaclrt_as_ptr(m), key);
 }
 __attribute__((noinline)) JaclVal jacl_map_get(JaclVal m, JaclVal key) {
+  if (jaclrt_is_error(m)) return m;
+  if (jaclrt_is_error(key)) return key;
   jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
   if (!jmap_has(r, key)) return JACL_NIL;
   return jmap_get(r, key);
 }
 __attribute__((noinline)) JaclVal jacl_map_remove(JaclVal m, JaclVal key) {
+  if (jaclrt_is_error(m)) return m;
+  if (jaclrt_is_error(key)) return key;
   jmap_node *r = (jmap_node*)jaclrt_as_ptr(m);
   return jaclrt_from_ptr(JACL_TAG_MAP, jmap_unset(r, key));
 }

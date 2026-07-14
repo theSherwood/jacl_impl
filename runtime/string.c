@@ -105,6 +105,8 @@ JaclVal jacl_str_intern(const char *s, uint32_t len) {
 
 /* a ++ b. Inline if the result is <=7 bytes, else a fresh heap string. */
 JaclVal jacl_str_concat(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
   uint32_t la = jacl_str_len(a), lb = jacl_str_len(b), n = la + lb;
   if (n <= 7) {
     char tmp[8];

@@ -280,6 +280,9 @@ JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeou
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
+JaclVal jacl_range_inclusive(JaclVal a, JaclVal b);/* [range-inclusive A B] as a vector */
+JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem);  /* error-propagating [vec-push V E] */
+JaclVal jacl_vec_slice(JaclVal v, JaclVal s, JaclVal e); /* [vec-slice V S E) sub-vector */
 JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / error */
 JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
 JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
@@ -288,6 +291,7 @@ JaclVal jacl_wide_new(uint32_t tidx, int64_t bits); /* heap i64/u64/f64 cell */
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname);     /* [to TYPE V] */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k);         /* dynamic ->: index or field */
+JaclVal jacl_qdot(JaclVal v, JaclVal key);          /* [?. V KEY] optional chaining */
 JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv);
 JaclVal jacl_vec_concat(JaclVal a, JaclVal b);      /* persistent vector concat */
 JaclVal jacl_lines(JaclVal s);                      /* split on newlines -> vec */
@@ -303,6 +307,8 @@ JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
 uint32_t jacl_arr_count(JaclVal a);
 JaclVal jacl_arr_get(JaclVal a, uint32_t i);       /* raw-index get (internal users) */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx); /* vec OR arr element (for-each) */
+JaclVal jacl_iter_val_at(JaclVal c, JaclVal idx);  /* i-th value (vec/arr/map) */
+JaclVal jacl_iter_key_at(JaclVal c, JaclVal idx);  /* i-th key (vec/arr index; map key) */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are
