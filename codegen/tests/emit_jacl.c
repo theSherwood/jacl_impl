@@ -220,21 +220,45 @@ int main(int argc, char **argv) {
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) { fprintf(stderr, "parse errors: %u\n", parse.error_count); return 1; }
 
-  /* Type inference: annotates each node's inferred_type, which the codegen uses for
-   * type-driven (unboxed) lowering. The typer also proves the corpus's static type
-   * errors (typed def/set/arith/proc-arg/convert mismatches); surface its first error
-   * so `# expect-error:` oracles for those cases are met (parity with the old VM's
-   * compile-time rejection). */
-  TyperResult tres;
-  typer_infer(parse.nodes, parse.count, &tres, NULL, 0, NULL, 0);
-  /* Narrowing a `dyn` value into a typed binding is a runtime check on the SVM
-   * backend (the loop/stream element bindings the codegen carries stay dyn), not a
-   * static error — the old VM narrows those bindings and accepts the program. Skip
-   * the typer's "cannot assign dyn to …" so those dynamic-but-correct programs still
-   * compile; genuine concrete mismatches (str→i64, i64+f64, …) still surface. */
-  if (tres.error_count && !strstr(tres.first_error, "assign dyn to")) {
-    fprintf(stderr, "%s\n", tres.first_error); arena_destroy(&arena); return 1;
+  /* Static-error oracle: run the old VM's full compiler purely for its compile-time
+   * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
+   * generator/typed-closure conformance, …). Every corpus program is written for the
+   * old VM, so the compiler accepts each passing case and rejects each `# expect-error`
+   * case with its canonical message — exactly the accept/reject the SVM backend should
+   * mirror. On rejection we surface the message and stop before codegen.
+   *
+   * The compiler runs on its OWN re-lexed/re-parsed AST (a second parse into chk's
+   * arena): both the compiler's conformance pass and the SVM codegen mutate their AST
+   * in place, so sharing one tree cross-contaminates them. Isolating the two parses
+   * lets the compiler give its canonical message while codegen still sees pristine
+   * nodes. */
+  {
+    JaclVM *chk = jacl_vm_new();
+    LexResult ctoks = lexer_lex(src, &chk->arena);
+    ParseResult cparse = parser_parse(ctoks, &chk->arena);
+    if (!ctoks.error_count && !cparse.error_count) {
+      ExpandState es;
+      memset(&es, 0, sizeof(es));
+      jacl_ctx_saved_t macro_saved;
+      jacl_ctx_save(&macro_saved);
+      jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
+      es.ctx = macro_ctx;
+      CompileResult cr = compiler_compile(cparse, &chk->arena, &chk->intern_table,
+                                          &chk->vm.heap, chk->persistent_struct_registry,
+                                          &es, JACL_NIL, &chk->persistent_arities, &chk->arena);
+      jacl_ctx_destroy(macro_ctx);
+      es.ctx = NULL;
+      jacl_ctx_restore(macro_saved);
+      if (cr.error_count > 0) {
+        fprintf(stderr, "%s\n", cr.error_message ? cr.error_message : "compile error");
+        return 1;   /* chk leaked deliberately: its arena may back cr.error_message */
+      }
+    }
   }
+
+  /* Type inference: annotates each node's inferred_type, which the codegen uses for
+   * type-driven (unboxed) lowering. */
+  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
   IrModule *m = svm_codegen_program(parse.nodes, parse.count, err, sizeof err);

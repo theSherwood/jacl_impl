@@ -2098,6 +2098,38 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_vec_slice", a, 4);
       }
 
+      /* Typed pointers as raw addresses (u64 at runtime). `[ptr-null [Ptr T]]` is a
+       * null address (0); `[ptr-cast [Ptr T] $addr]` wraps a u64 address; `[ptr-addr
+       * $p]` unwraps back to the address. The `[Ptr T]` type token is erased here — the
+       * address round-trips through all three, which is what the corpus checks. */
+      if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
+        return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+      }
+      if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
+        IrVal v = compile_expr(cx, node->data.command.args[1]);   /* args[0] = [Ptr T] */
+        return cx->failed ? 0 : v;
+      }
+      if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
+        IrVal v = compile_expr(cx, node->data.command.args[0]);
+        return cx->failed ? 0 : v;
+      }
+
+      /* `[first SRC]` / `[count SRC]` — the first element / element count of a stream.
+       * A generator source is drained into a vector first (finite corpus generators). */
+      if ((hid == HEAD_FIRST || hid == HEAD_COUNT) && node->data.command.arg_count == 1) {
+        IrVal src;
+        if (generator_call(cx, node->data.command.args[0])) {
+          IrVal g = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          src = stream_into_vec(cx, g, /*is_gen=*/1, /*clo=*/0, /*is_filter=*/0);
+        } else {
+          src = compile_expr(cx, node->data.command.args[0]);
+        }
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, src};
+        return emit_rt_call(cx, hid == HEAD_FIRST ? "jacl_first" : "jacl_len", a, 2);
+      }
+
       /* Mutable-array constructor: `[[Arr T] e0 e1 …]` (typed head — element type is
        * dynamic for now) and the untyped literal `[arr e0 e1 …]`. */
       {
@@ -2294,6 +2326,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_VEC_SLICE,  "jacl_vec_slice",  3},
           {HEAD_RANGE_INCLUSIVE, "jacl_range_inclusive", 2},
           {HEAD_TILDE,      "jacl_not",        1},
+          {HEAD_INDEX,      "jacl_index_op",   2},
+          {HEAD_SLICE,      "jacl_slice_op",   3},
           {HEAD_MAP_GET,    "jacl_map_get",    2},
           {HEAD_MAP_SET,    "jacl_map_set",    3},
           {HEAD_MAP_HAS,    "jacl_map_has_v",  2},

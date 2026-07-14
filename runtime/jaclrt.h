@@ -309,6 +309,11 @@ JaclVal jacl_arr_get(JaclVal a, uint32_t i);       /* raw-index get (internal us
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx); /* vec OR arr element (for-each) */
 JaclVal jacl_iter_val_at(JaclVal c, JaclVal idx);  /* i-th value (vec/arr/map) */
 JaclVal jacl_iter_key_at(JaclVal c, JaclVal idx);  /* i-th key (vec/arr index; map key) */
+JaclVal jacl_str_index(JaclVal s, JaclVal idx);    /* [index STR i] -> 1-char string */
+JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b); /* [slice STR a b) substring */
+JaclVal jacl_index_op(JaclVal x, JaclVal idx);     /* [index X i] string/vec/arr */
+JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b); /* [slice X a b) string/vec */
+JaclVal jacl_first(JaclVal c);                     /* [first C] first element */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are

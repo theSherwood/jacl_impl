@@ -555,6 +555,24 @@ JaclVal jacl_vec_slice(JaclVal v, JaclVal start, JaclVal end) {
   for (int32_t i = s; i < e; i++) out = jacl_vec_push(out, jacl_vec_get(v, (uint32_t)i));
   return out;
 }
+/* `[index X i]` — a string yields its i-th byte as a 1-char string; a vector/arr
+ * yields element i. `[slice X a b]` — a string yields the substring, a vector the
+ * sub-vector. Dispatched on X's runtime type so one head serves both. */
+JaclVal jacl_index_op(JaclVal x, JaclVal idx) {
+  if (jaclrt_is_error(x)) return x;
+  if (jaclrt_is_string(x)) return jacl_str_index(x, idx);
+  return jacl_index_get(x, idx);
+}
+JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(x)) return x;
+  if (jaclrt_is_string(x)) return jacl_str_slice(x, a, b);
+  return jacl_vec_slice(x, a, b);
+}
+/* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
+JaclVal jacl_first(JaclVal c) {
+  if (jaclrt_is_error(c)) return c;
+  return jacl_iter_val_at(c, jaclrt_i32(0));
+}
 /* for-over-collection accessors: the i-th VALUE and KEY of any iterable. A vector/arr
  * yields (index -> element) with the index itself as the key; a map yields its i-th
  * (key, value) entry in deterministic HAMT order (stable across the two calls, so a
