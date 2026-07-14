@@ -182,24 +182,31 @@ the async/parking builtins (`sleep`/channels) follow. Tracked in `SVM_BACKEND_PH
 
 ## Ask 3 — `gc.roots` coverage contract for guest values on stacks/registers
 
-> **STATUS: RESOLVED — by contract, not a VM change.** svm's answer: **a vCPU top (its bare
-> native / `thread.spawn`-entry stack, e.g. our worker loop) must hold no heap roots at a
-> safepoint — push them into a fiber or the window before parking.** `gc.roots` scans suspended
-> fibers + the window (marked guest memory); it does **not** scan vCPU-top native frames or
-> unspilled registers, and won't (no register-flush shim). This is the existing model, now
-> written down as a contract. That's exactly the "give JACL a contract to target" option of this
-> ask, so it's answered.
+> **STATUS: RESOLVED — contract + svm #217.** The final division of labor, verified at svm
+> `57e20b1`:
 >
-> **JACL already complies, and is sound.** The `jacl_all_jobs` registry + ready queues +
-> `running_job` are the "window": every job root lives in marked guest memory, never relied upon
-> from a bare vCPU stack. `mt::par_gc` passes 10/10 on the JIT. (The earlier experiment that
-> *relied* on the implicit stack scan for jobs held only in a runtime C local — `parallel`'s
-> `futs[]` — hung, which is precisely the contract's point: don't hold roots there.)
+> - **svm scans the native side.** Parked fibers' control stacks `[ctx, top)` (the fiber switch
+>   spills all callee-saved registers — a suspending fiber gets its "register flush" for free);
+>   running resume-chain ancestors; the collector's root frames. And **#217 shipped the
+>   register-flush shim** this ask requested (`svm_gc_roots_flush`, one naked trampoline per
+>   target): the collector's own call-surviving roots in callee-saved registers — the confirmed
+>   gap (A/B: 13 of 17 roots found without it) — now land in the scanned region by construction.
+> - **The guest reports the guest-memory side.** The contract: **a vCPU top (bare
+>   `thread.spawn`-entry native stack, e.g. our worker loop) holds no heap roots at a safepoint —
+>   push them into a fiber or the window before parking.** And guest-memory locations are the
+>   guest's own to mark: scheduler globals **and the fiber DATA stacks** (`jacl_task_stack`),
+>   where svm-llvm places address-taken locals like `parallel`'s `futs[]`. `gc.roots` never sees
+>   those — they're ordinary guest memory.
 >
-> **Remaining is JACL-side, not svm:** the registry's cap/leak is a *reclamation* problem (a
-> DONE job may be a held, re-awaitable future) — solved by refcounting jobs or moving result
-> ownership out of the job object, both independent of svm. Original ask kept below for the
-> record.
+> **Outcome in JACL (`runtime/sched.c`):** the `jacl_all_jobs` force-root registry (cap 8192 +
+> leak) is **deleted** — jobs are ordinary GC objects. `jacl_sched_mark_roots` marks the window
+> (ready queues, `running_job`, root job) and conservatively scans the in-use fiber data stacks
+> (`mark_task_stacks`; released stacks are zeroed against stale retention). Isolation that pinned
+> the final gap: without the registry, `par_gc` hung even single-worker until the data-stack scan
+> landed — the swept jobs were exactly the ones referenced only by `futs[]`. Verified at
+> `57e20b1`: `mt::par_gc` + `mt::job_gc` (reclamation bound + a future held/re-awaited across ~34
+> collections) 12/12 under stress, and the old `mt::sched_batch` baseline flake (a keeper in a
+> callee-saved register, missed pre-#217) is gone (8/8). Original ask kept below for the record.
 
 ---
 

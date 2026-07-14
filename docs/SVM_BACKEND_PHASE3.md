@@ -28,25 +28,34 @@
 >   below) structurally: all scheduler state is in globals scanned by `jacl_sched_mark_roots`,
 >   and program/task locals live on job fibers that are always scannable.
 >
-> **Concurrent GC — now SOUND on the JIT (the real backend).** Under heavy concurrent
-> collection the pool used to hang/corrupt; root cause: `gc.roots`' conservative stack scan does
-> **not reliably root a job's references held only on a fiber/bare stack** (e.g. `parallel`'s
-> `futs[]`, or the program root parked on a block), so jobs — including the program root — were
-> swept mid-collection. Fix: a **global job registry** (`jacl_all_jobs`, scanned by
-> `jacl_sched_mark_roots`) is the authoritative job root set — every job is rooted explicitly
-> from creation, independent of the unreliable stack scan. `mt::par_gc` (parallel + forced
-> collections across pinned workers) now passes on the JIT, 10/10 under stress.
+> **Concurrent GC — SOUND, jobs are ordinary GC objects (svm pin `57e20b1`, incl. vm#217).**
+> The interim force-root registry (`jacl_all_jobs`, 8192-spawn cap, leaked completed jobs) is
+> **gone**. The root-coverage contract that replaced it (Ask 3 resolution,
+> `docs/SVM_PHASE3_ASKS.md`):
+> - **svm scans the native side** — parked fibers' control stacks (the fiber switch spills all
+>   callee-saved registers), running resume-chain ancestors, the collector's frames, and (vm#217)
+>   a register-flush trampoline so the collector's own call-surviving register roots are scanned.
+>   #217 also fixed the old `mt::sched_batch` baseline flake (a keeper in a callee-saved
+>   register), now 8/8.
+> - **JACL reports the guest-memory side** — `jacl_sched_mark_roots` marks the window (ready
+>   queues, `running_job`, root job) and conservatively scans the **in-use fiber data stacks**
+>   (`mark_task_stacks`) — svm-llvm puts address-taken locals (`parallel`'s `futs[]`) on those
+>   guest-memory stacks, which `gc.roots` rightly never sees. Released stacks are zeroed against
+>   stale retention. And per the vCPU-top contract, bare worker loops hold no unmirrored roots
+>   (the current job is mirrored into `running_job` before any park point); a fiber context
+>   quiesces by suspending, never by parking its vCPU (`park_if_requested` refuses in-task).
 >
-> **REMAINING (two follow-ups, both corpus-unobservable):** (1) the registry is not yet
-> compacted — a run is capped at `JACL_ALL_JOBS_MAX` (8192) total spawns until safe reclamation
-> lands (a DONE job may still be a held, re-awaitable future, and the conservative scan can't
-> prove non-reachability). (2) The svm **interpreter**'s cooperative single-thread scheduler
-> livelocks on the pool's futex traffic under heavy concurrent GC (a simulation artifact — the
-> JIT, real OS-thread vCPUs, is sound), so `mt::par_gc` is JIT-only via `run_test_jit`. The
-> legacy `jacl_sched_run_batch` separately flakes under concurrent GC on baseline (its own
-> main-side-buffer rooting); it is dead code now (superseded by the continuation pool).
-> (History — including two withdrawn svm asks — in `spikes/svm_pool_gc/` and
-> `docs/SVM_PHASE3_ASKS.md`.)
+> Verified under stress on the JIT: `mt::par_gc` and `mt::job_gc` — the latter proves
+> **reclamation** (16 rounds × 16 jobs; final live count bounded far below total spawns) and
+> **held-future liveness** (a round-0 future re-awaited after ~34 collections) — 12/12 mixed.
+>
+> **REMAINING (corpus-unobservable):** the svm **interpreter**'s cooperative single-thread
+> scheduler still livelocks occasionally on the pool's futex traffic under heavy concurrent GC
+> (rarer at `57e20b1`: 2/3 differential probes passed vs 0/6 before; a simulation artifact — the
+> JIT, real OS-thread vCPUs, is sound), so `mt::par_gc`/`mt::job_gc` are JIT-only via
+> `run_test_jit`. The legacy `jacl_sched_run_batch` is dead code (superseded; retire it with the
+> work-stealing refinement). (History — including two withdrawn svm asks — in
+> `spikes/svm_pool_gc/` and `docs/SVM_PHASE3_ASKS.md`.)
 
 ## Goal
 
@@ -290,17 +299,18 @@ scannable — dissolving the transient pool's main-side-root and result-handoff 
 `parallel`/`race`/`spawn`/`await`/nested all run on it, tested interp==jit==old-VM (`codegen`
 61/61, `io`, `mt::par_min`).
 
-**Concurrent GC — SOUND on the JIT** via the global job registry (`jacl_all_jobs`): jobs are
-rooted explicitly from creation, not via `gc.roots`' unreliable conservative stack scan.
-`mt::par_gc` (parallel + forced collections) passes on the JIT under stress (10/10).
+**Concurrent GC — SOUND; jobs are ordinary GC objects** (no registry, no cap, no leak — svm pin
+`57e20b1` incl. vm#217; see the top-of-doc contract note and Ask 3 in
+`docs/SVM_PHASE3_ASKS.md`). `jacl_sched_mark_roots` = window (queues, `running_job`, root job) +
+a conservative scan of the in-use fiber DATA stacks (`mark_task_stacks` — where svm-llvm puts
+address-taken locals like `futs[]`). `mt::par_gc` (parallel + forced collections) and
+`mt::job_gc` (reclamation bound + held-future re-await across ~34 collections) pass under
+stress, 12/12 mixed.
 
 **Remaining follow-ups (corpus-unobservable):**
-- **Job-registry reclamation.** The registry is uncompacted — a run is capped at
-  `JACL_ALL_JOBS_MAX` (8192) total spawns. Safe drop needs reachability the conservative scan
-  can't prove (a DONE job may be a held, re-awaitable future).
-- **Interpreter under heavy concurrent GC.** The svm interp's cooperative scheduler livelocks
-  on the pool's futex traffic (simulation artifact; the JIT real backend is sound), so
-  `mt::par_gc` is JIT-only.
+- **Interpreter under heavy concurrent GC.** The svm interp's cooperative scheduler still
+  livelocks occasionally on the pool's futex traffic (rarer at `57e20b1`; simulation artifact —
+  the JIT real backend is sound), so `mt::par_gc`/`mt::job_gc` are JIT-only.
 - **Async/parking builtins** (`sleep`/channels) on the pool (P3.5).
 - **Work-stealing deques** + **vCPU-id reuse**; retire the dead legacy `run_batch`.
 

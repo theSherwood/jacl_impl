@@ -247,9 +247,21 @@ void jacl_gc_safepoint(void) {
 
 /* Scheduler-loop safepoint (called at the loop top, between tasks): if a collection is
  * in progress, park the (root-free) vCPU until it finishes. Publishing parked[w]=1 here
- * means this worker's task is suspended and its vCPU is quiesced. */
+ * means this worker's task is suspended and its vCPU is quiesced.
+ *
+ * Refuses in-task: a vCPU with a RUNNING fiber must quiesce by SUSPENDING that fiber
+ * (jacl_gc_safepoint) — the fiber switch spills its registers into the scanned table —
+ * never by parking (the collector's gc.roots would fault on a fiber running on another
+ * vCPU, and the fiber's roots would be unscanned). The worker parks once the suspend
+ * unwinds to its bare loop (in_task=0). */
 void jacl_gc_worker_park_if_requested(void) {
   int w = jacl_gc_self();
+  /* Refuse in-task: a vCPU with a RUNNING fiber quiesces by SUSPENDING that fiber
+   * (jacl_gc_safepoint) — the fiber switch spills its registers into the scanned
+   * table — never by parking (the collector's gc.roots would fault on a fiber
+   * running on another vCPU, and the fiber's roots would go unscanned). The worker
+   * parks once the suspend unwinds to its bare loop (in_task=0). */
+  if (__vm_atomic_load32(&jacl_gc_in_task[w])) return;
   int e = __vm_atomic_load32(&jacl_gc_epoch);
   if (e == __vm_atomic_load32(&jacl_gc_done)) return;
   /* publish "parked for epoch e" — monotonic, so a later collection can't mistake a

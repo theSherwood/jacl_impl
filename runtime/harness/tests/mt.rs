@@ -50,3 +50,12 @@ fn par_gc() {
          force collections; every keeper survives, results match, no violation (diag {r})");
 }
 
+
+#[test]
+fn job_gc() {
+    // JIT-only for the same reason as par_gc (interp cooperative-scheduler livelock under
+    // heavy concurrent GC). Jobs are plain GC objects: completed rounds get reclaimed
+    // (live-count bound) and a future held across many collections stays re-awaitable.
+    let r = jacl_runtime_harness::run_test_jit("test_job_gc.c", 0);
+    assert_eq!(r, 555, "jobs are GC'd when dead, live while held (diag {r})");
+}
