@@ -97,6 +97,27 @@ This slice alone moved `err-pass` from 8 → 115.
 - **Early `return` in generators.** Mid-body `[return]` that exhausts a stream needs the
   generator state machine to model an early-exit edge.
 
+## Difficulty map (where the remaining points are)
+
+Rough guide to what each open cluster costs, to help pick the next slice. "codegen"
+means breadth work in `codegen/codegen.c` (+ maybe a fail-closed `jacl_*` entry point);
+"runtime" means new C machinery; "infra" means harness / powerbox / scheduler work.
+
+| cluster | size | kind | notes |
+|---|---|---|---|
+| concurrency hangs | ~69 | runtime/infra | scheduler + fibers must quiesce under interp==jit; biggest single bucket |
+| buffers + pointers | ~15 | runtime | needs linear-memory-backed `[Buf N T]` so `addr`/`ptr-deref`/`ptr-offset` read raw bytes |
+| typed-collection wrong-output | ~10 | runtime | distinguish typed `[Vec T]` (prints `[a, b]`) from untyped `[vec …]` |
+| atom watchers (`watch`) | 5 | runtime | trampoline to call a guest closure from runtime C on reset/swap |
+| file I/O (`read/write-file`) | ~6 | infra | grant a Filesystem powerbox cap through the harness |
+| generator early `return` | ~4 | codegen | model an early-exit edge in the generator state machine |
+| runtime-checked `expect-error` | ~6 | driver | const-fold computed indices so a negative/OOB index rejects at compile time |
+
+The compiler-check oracle already covers the *statically* rejectable `expect-error`
+corpus, so most remaining error cases are runtime-checked (they need either const-folding
+in the compile path or a harness that scores an expect-error program's *run*, not just its
+compile).
+
 ## Adding a slice
 
 1. Pick a cluster from the scoreboard (prefer the largest `emit-fail` bucket or a

@@ -126,6 +126,41 @@ Phase 4 works that scoreboard cluster by cluster. Slices landed so far:
   `<error: PAYLOAD>`; error propagation flows through `map-get`/`set`/`remove`,
   `str-concat`, and `vec-push`.
 
+- **Variadic proc params** `..rest` and **argument spread** `..$v` — a variadic proc
+  packs its trailing call args into a vector; a spread supplies a fixed-arity proc's
+  params (or folds an arithmetic operator) from a vector at the call site.
+
+### How a slice lowers (worked example)
+
+`for`-over-map is representative of how a new head threads the block-local-SSA frame.
+The source
+
+```jacl
+def m [[Map str i64] "a" 1 "b" 2]
+for $m k v { print [+ $k v-marker] }   # illustrative
+```
+
+lowers (conceptually) to an index loop whose induction variable, accumulator frame, and
+the freshly-bound `k` / `v` are all carried as block parameters across every edge:
+
+```
+header(sp, …locals, i):
+  cond = jacl_lt(i, jacl_len(m))
+  br_if cond=true -> body(sp, …locals, i) else exit(sp, …locals)
+body(sp, …locals, i):
+  k = jacl_iter_key_at(m, i)     # map key (or vec index)
+  v = jacl_iter_val_at(m, i)     # map value (or vec element)
+  … compile the user body with k, v bound …
+  br step(sp, …locals, i)
+step(sp, …locals, i):
+  br header(sp, …locals, jacl_add(i, 1))
+exit(sp, …locals):
+  nil
+```
+
+The uniform `jacl_iter_*_at` accessors are what let the *same* lowering serve vectors,
+arrays, and maps — the runtime picks element-vs-entry semantics from the value's tag.
+
 ## Testing
 
 `runtime/harness/tests/irbuilder.rs` compiles the builder + demo natively, emits each

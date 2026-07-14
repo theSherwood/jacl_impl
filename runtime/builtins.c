@@ -320,11 +320,14 @@ static JaclVal *struct_field_slot(JaclVal s, JaclVal name) {
 }
 JaclVal jacl_struct_get(JaclVal s, JaclVal name) {
   if (jaclrt_is_error(s)) return s;
+  if (jaclrt_is_error(name)) return name;
   JaclVal *slot = struct_field_slot(s, name);
   return slot ? *slot : jaclrt_error();
 }
 JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place field mutation */
   if (jaclrt_is_error(s)) return s;
+  if (jaclrt_is_error(name)) return name;
+  if (jaclrt_is_error(v)) return v;
   JaclVal *slot = struct_field_slot(s, name);
   if (!slot) return jaclrt_error();
   *slot = v;
@@ -505,11 +508,14 @@ JaclVal jacl_qdot(JaclVal v, JaclVal key) {
  * field/entry (struct/map). */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(k)) return k;
   if (jaclrt_is_i32(k)) return jacl_index_get(v, k);
   return jacl_field_get(v, k);
 }
 JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(k)) return k;
+  if (jaclrt_is_error(nv)) return nv;
   if (jaclrt_is_i32(k)) return jacl_arr_set_at(v, k, nv);
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_put(v, k, nv);
@@ -518,6 +524,7 @@ JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv) {
 /* Named-field access across record-like values: struct field or map entry (string key). */
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(name)) return name;
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_get(v, name);
   if (t == 0x07) return jacl_map_get(v, name);
