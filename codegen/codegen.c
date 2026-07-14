@@ -52,6 +52,9 @@ typedef struct {
   IrVal       value;   /* SSA value, or (when is_cell) the cell pointer */
   int         is_mut;
   int         is_cell; /* a captured `mut`: backed by a heap cell, shared on capture */
+  /* static annotation carried from a typed [Arr T]/[Buf N T] def (compile-time checks) */
+  const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
+  int32_t     buf_size;                            /* fixed Buf length, or -1 */
 } Binding;
 
 /* A top-level proc: name -> its SVM function + arity. Registered before any body is
@@ -98,6 +101,8 @@ typedef struct {
 
   /* innermost enclosing loop (break/continue targets); width = frame at loop entry */
   IrBlock loop_continue, loop_break; int loop_width; int in_loop;
+  /* innermost enclosing try (statement errors branch to the handler, not return) */
+  IrBlock try_target; int try_width; int in_try;
 
   /* struct declarations (dynamic name-based records): name -> ordered field names */
   struct SDef {
@@ -172,7 +177,7 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
     cx->locals = realloc(cx->locals, (size_t)cx->cap_locals * sizeof(Binding));
     if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
   }
-  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell};
+  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1};
 }
 
 /* ---- top-level procs ---- */
@@ -445,7 +450,10 @@ static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNod
     return 0;
   }
   if (node->data.command.head_id == HEAD_PROC && argc >= 3 &&
-      node->data.command.args[0]->type == AST_LIT_STRING && node->data.command.args[0]->data.lit_string.length == 0) {
+      node->data.command.args[0]->type == AST_LIT_STRING) {
+    /* Anonymous ([proc {x} {…}]) or NESTED NAMED procs — both compile as closures,
+     * so both count for the enclosing function's capture scan. (Top-level named
+     * procs never reach this: they're filtered by is_proc_def before scanning.) */
     *pnode = node->data.command.args[1]; *in_block = 0; *body = node->data.command.args[argc - 1]; return 1;
   }
   return 0;
@@ -967,15 +975,24 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
   IrVal e = emit_rt_call(cx, "jacl_is_error_v", ea, 2);
   IrVal truth = emit_truthy(cx, e);
   int w = frame_width(cx);
-  IrBlock err_blk = new_i64_block(cx, 1);
   IrBlock cont = new_i64_block(cx, w);
   IrVal frame[IRB_MAX_FRAME + 2];
   fill_frame(cx, frame);
-  IrVal ef[1] = {v};
-  irb_br_if(cx->f, cx->cur, truth, err_blk, ef, 1, cont, frame, w);
-  cx->cur = err_blk;
-  IrVal rv[1] = {(IrVal)0};        /* err_blk's single param: the error value */
-  irb_return(cx->f, err_blk, rv, 1);
+  if (cx->in_try) {
+    /* inside [try …]: route the error (appended after the try-entry frame prefix)
+     * to the handler block instead of returning from the function. */
+    IrVal hf[IRB_MAX_FRAME + 2];
+    for (int i = 0; i < cx->try_width; i++) hf[i] = frame[i];
+    hf[cx->try_width] = v;
+    irb_br_if(cx->f, cx->cur, truth, cx->try_target, hf, cx->try_width + 1, cont, frame, w);
+  } else {
+    IrBlock err_blk = new_i64_block(cx, 1);
+    IrVal ef[1] = {v};
+    irb_br_if(cx->f, cx->cur, truth, err_blk, ef, 1, cont, frame, w);
+    cx->cur = err_blk;
+    IrVal rv[1] = {(IrVal)0};      /* err_blk's single param: the error value */
+    irb_return(cx->f, err_blk, rv, 1);
+  }
   enter_frame_block(cx, cont);
 }
 
@@ -990,6 +1007,53 @@ static IrVal emit_buf_new(Cx *cx, int32_t n) {
   }
   return av;
 }
+/* Record a typed collection annotation on the just-defined binding. */
+static void bind_annotate(Cx *cx, const char *name, uint32_t len,
+                          const char *et, uint32_t etl, int32_t bufn) {
+  Binding *b = env_lookup(cx, name, len);
+  if (!b) return;
+  b->elem_type = et; b->elem_type_len = etl; b->buf_size = bufn;
+}
+/* The element-type token of an `[Arr T]` / `[Buf N T]` / `[Vec T]` annotation. */
+static AstNode *ann_elem_type(AstNode *ann) {
+  if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
+      ann->data.command.head->type != AST_LIT_STRING) return NULL;
+  uint32_t hl = ann->data.command.head->data.lit_string.length;
+  const char *hn = ann->data.command.head->data.lit_string.value;
+  uint32_t ti = 0;
+  if ((hl == 3 && (!memcmp(hn, "Arr", 3) || !memcmp(hn, "Vec", 3)))) ti = 0;
+  else if (hl == 3 && !memcmp(hn, "Buf", 3)) ti = 1;      /* [Buf N T] */
+  else return NULL;
+  if (ann->data.command.arg_count <= ti) return NULL;
+  AstNode *t = ann->data.command.args[ti];
+  return (t->type == AST_LIT_STRING) ? t : NULL;
+}
+/* Statically check a literal element against a declared numeric/str element type.
+ * Only literals are checked (everything else is dynamic). Fails compilation with
+ * old-VM-shaped messages on a provable mismatch. */
+static int check_elem_literal(Cx *cx, AstNode *e, const char *et, uint32_t etl) {
+  int decl_str = (etl == 3 && memcmp(et, "str", 3) == 0);
+  /* Only enforce for types we understand statically: numerics + str. `dyn` (and any
+   * compound/unknown type) accepts everything. */
+  if (!decl_str && !cg_is_type_kw(et, etl)) return 1;
+  if (etl == 3 && memcmp(et, "dyn", 3) == 0) return 1;
+  if (e->type == AST_LIT_INT && decl_str) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "element type i32 does not match the declared %.*s element",
+             (int)etl, et);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  if (e->type == AST_LIT_STRING && !decl_str) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "\"%.*s\" is not a %.*s value",
+             (int)e->data.lit_string.length, e->data.lit_string.value, (int)etl, et);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  return 1;
+}
+
 /* Is this annotation command a `[Buf N T]`? Returns N (or -1). */
 static int32_t buf_ann_size(AstNode *ann) {
   if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
@@ -1094,6 +1158,52 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
+/* [try { body } e { handler }] — the body's value (or any statement-position
+ * error inside it) routes to the handler with `e` bound to the raw error value;
+ * otherwise try evaluates to the body's value. Join carries the result. */
+static IrVal compile_try(Cx *cx, AstNode *node) {
+  uint32_t argc = node->data.command.arg_count;
+  AstNode **args = node->data.command.args;
+  if (argc != 3 || args[0]->type != AST_BLOCK || args[1]->type != AST_LIT_STRING ||
+      args[2]->type != AST_BLOCK) {
+    cx_fail(cx, "try needs `{ body } name { handler }`");
+    return 0;
+  }
+  if (!frame_guard(cx)) return 0;
+  int w = frame_width(cx);
+  IrBlock err_h = new_i64_block(cx, w + 1);      /* frame + the error value */
+  IrBlock join = new_i64_block(cx, w + 1);       /* frame + the try result  */
+  IrVal frame[IRB_MAX_FRAME + 2];
+
+  int st = cx->in_try; IrBlock stt = cx->try_target; int stw = cx->try_width;
+  cx->in_try = 1; cx->try_target = err_h; cx->try_width = w;
+  IrVal bv = compile_expr(cx, args[0]);
+  cx->in_try = st; cx->try_target = stt; cx->try_width = stw;
+  if (cx->failed) return 0;
+  /* the body VALUE may itself be an error: route it too */
+  IrVal ea[] = {cx->sp, bv};
+  IrVal e = emit_rt_call(cx, "jacl_is_error_v", ea, 2);
+  IrVal truth = emit_truthy(cx, e);
+  fill_frame(cx, frame);
+  frame[w] = bv;
+  irb_br_if(cx->f, cx->cur, truth, err_h, frame, w + 1, join, frame, w + 1);
+
+  /* handler: e = error value (flag intact, so error-val / error? work on it) */
+  enter_frame_block(cx, err_h);
+  scope_enter(cx);
+  env_define(cx, args[1]->data.lit_string.value, args[1]->data.lit_string.length,
+             (IrVal)w, /*is_mut=*/0, /*is_cell=*/0);
+  IrVal hv = compile_expr(cx, args[2]);
+  scope_exit(cx);
+  if (cx->failed) return 0;
+  fill_frame(cx, frame);
+  frame[w] = hv;
+  irb_br(cx->f, cx->cur, join, frame, w + 1);
+
+  enter_frame_block(cx, join);
+  return (IrVal)w;                                /* the join's result param */
+}
+
 /* [for NAME in <range> { body }] — scaffold supports integer ranges only:
  * `in [range A B]` / `in [range-inclusive A B]` is rejected for now, and the flat
  * `A .. B` form. General iteration over collections (the stream protocol) is later. */
@@ -1186,6 +1296,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_LIT_INT:
       return irb_const_i64(cx->f, cx->cur, jaclval_i32(node->data.lit_int.value));
 
+    case AST_LIT_FLOAT: {
+      /* inline f32 JaclVal: tag 0x03 over the float's bit pattern */
+      union { float f; uint32_t u; } fb;
+      fb.f = (float)node->data.lit_float.value;
+      return irb_const_i64(cx->f, cx->cur, (int64_t)(((uint64_t)0x03 << 56) | fb.u));
+    }
+
     case AST_VAR_REF: {
       Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
       if (!bd) {
@@ -1194,6 +1311,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (nl == 4 && memcmp(nm, "true", 4) == 0)  return irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
         if (nl == 5 && memcmp(nm, "false", 5) == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
         if (nl == 3 && memcmp(nm, "nil", 3) == 0)   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        if (nl == 3 && memcmp(nm, "ctx", 3) == 0) {   /* the ambient context map */
+          IrVal a[] = {cx->sp};
+          return emit_rt_call(cx, "jacl_ctx_get", a, 1);
+        }
         /* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter. */
         Proc *pv = proc_lookup(cx, nm, nl);
         if (pv && !pv->is_generator) {
@@ -1223,6 +1344,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       IrBlock dead = new_i64_block(cx, frame_width(cx));
       enter_frame_block(cx, dead);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    }
+
+    case AST_CTX_DECL: {
+      /* `ctx [mut] TYPE name DEFAULT` — install the field into the ambient context. */
+      IrVal dv = node->data.ctx_decl.default_expr
+                     ? compile_expr(cx, node->data.ctx_decl.default_expr)
+                     : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+      if (cx->failed) return 0;
+      IrVal fname = compile_string_literal(cx, node->data.ctx_decl.field_name,
+                                           node->data.ctx_decl.field_name_len);
+      IrVal a[] = {cx->sp, fname, dv};
+      return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
     }
 
     case AST_DEFSTRUCT:
@@ -1270,6 +1403,34 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_IF) return compile_if(cx, node);
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
+      if (hid == HEAD_TRY) return compile_try(cx, node);
+      if (hid == HEAD_WITH_CTX && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_BLOCK &&
+          node->data.command.args[1]->type == AST_BLOCK) {
+        /* [with-ctx {field VAL …} { body }] — override fields for the block, restore after. */
+        IrVal ga[] = {cx->sp};
+        IrVal old = emit_rt_call(cx, "jacl_ctx_get", ga, 1);
+        AstNode *ov = node->data.command.args[0];
+        for (uint32_t i = 0; i < ov->data.block.count; i++) {
+          AstNode *cmd = ov->data.block.commands[i];
+          if (cmd->type != AST_COMMAND || !cmd->data.command.head ||
+              cmd->data.command.head->type != AST_LIT_STRING || cmd->data.command.arg_count != 1) {
+            cx_fail(cx, "with-ctx overrides must be `field VALUE` pairs");
+            return 0;
+          }
+          IrVal fname = compile_string_literal(cx, cmd->data.command.head->data.lit_string.value,
+                                               cmd->data.command.head->data.lit_string.length);
+          IrVal v = compile_expr(cx, cmd->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal sa[] = {cx->sp, fname, v};
+          (void)emit_rt_call(cx, "jacl_ctx_set_field", sa, 3);
+        }
+        IrVal bv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal ra[] = {cx->sp, old};
+        (void)emit_rt_call(cx, "jacl_ctx_swap", ra, 2);
+        return bv;
+      }
 
       /* `yield V` — suspend the current fiber, yielding V; result is the resume arg. */
       if (hid == HEAD_YIELD) {
@@ -1369,21 +1530,53 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (hid == HEAD_PROC) {
           int anon = argc >= 3 && node->data.command.args[0]->type == AST_LIT_STRING &&
                      node->data.command.args[0]->data.lit_string.length == 0;
-          if (!anon) { cx_fail(cx, "nested named procs not supported (use a lambda / anonymous proc)"); return 0; }
+          if (!anon) {
+            /* Nested named proc: compile as a closure bound to the name. */
+            IrVal cl = compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
+                                       node->data.command.args[argc - 1]);
+            if (cx->failed) return 0;
+            env_define(cx, node->data.command.args[0]->data.lit_string.value,
+                       node->data.command.args[0]->data.lit_string.length, cl, 0, 0);
+            return cl;
+          }
           return compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
                                  node->data.command.args[argc - 1]);
         }
       }
 
-      /* Indexed arrow access `$b->7` — [. EXPR INT] over a buf/arr/vec. */
+      /* Indexed arrow access `$b->7` — [. EXPR INT] over a buf/arr/vec. A constant
+       * index against a fixed [Buf N T] binding is bounds-checked at compile time. */
       if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
           node->data.command.args[1]->type == AST_LIT_INT) {
+        if (node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          int32_t ix = (int32_t)node->data.command.args[1]->data.lit_int.value;
+          if (bb && bb->buf_size >= 0 && (ix < 0 || ix >= bb->buf_size)) {
+            char msg[128];
+            snprintf(msg, sizeof msg, "buf index %d out of bounds for [Buf %d %.*s]",
+                     ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
+            cx_fail(cx, msg);
+            return 0;
+          }
+        }
         IrVal bv = compile_expr(cx, node->data.command.args[0]);
         if (cx->failed) return 0;
         IrVal idx = irb_const_i64(cx->f, cx->cur,
                                   jaclval_i32((int32_t)node->data.command.args[1]->data.lit_int.value));
         IrVal a[] = {cx->sp, bv, idx};
         return emit_rt_call(cx, "jacl_index_get", a, 3);
+      }
+      /* Dynamic dot `[. EXPR $k]` — the key expression decides index vs field. */
+      if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
+          node->data.command.args[1]->type != AST_LIT_STRING &&
+          node->data.command.args[1]->type != AST_LIT_INT) {
+        IrVal sv = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal kv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, sv, kv};
+        return emit_rt_call(cx, "jacl_dot_dyn", a, 3);
       }
       /* Field access `[. EXPR field]` (from `$e->field`). */
       if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
@@ -1393,7 +1586,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal fname = compile_string_literal(cx, node->data.command.args[1]->data.lit_string.value,
                                              node->data.command.args[1]->data.lit_string.length);
         IrVal a[] = {cx->sp, sv, fname};
-        return emit_rt_call(cx, "jacl_struct_get", a, 3);
+        return emit_rt_call(cx, "jacl_field_get", a, 3);
       }
 
       /* Calling a closure value: the head is an expression (e.g. `[$f x]`). */
@@ -1424,6 +1617,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]));
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
+        {
+          AstNode *tt = ann_elem_type(node->data.command.args[0]);
+          if (tt) bind_annotate(cx, node->data.command.args[1]->data.lit_string.value,
+                                node->data.command.args[1]->data.lit_string.length,
+                                tt->data.lit_string.value, tt->data.lit_string.length,
+                                buf_ann_size(node->data.command.args[0]));
+        }
         return bv;
       }
 
@@ -1537,6 +1737,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         uint32_t len = bargs[tshift]->data.lit_string.length;
         IrVal val = compile_expr(cx, bargs[tshift + 1]);
         if (cx->failed) return 0;
+        /* `def i64/u64/f64 x V` — widen the value to the declared wide scalar so
+         * arithmetic on it promotes past 32 bits. */
+        if (tshift && bargs[0]->type == AST_LIT_STRING && bargs[0]->data.lit_string.length == 3) {
+          const char *tw = bargs[0]->data.lit_string.value;
+          int kind = !memcmp(tw, "i64", 3) ? 0x0E : !memcmp(tw, "u64", 3) ? 0x0F
+                   : !memcmp(tw, "f64", 3) ? 0x10 : 0;
+          if (kind) {
+            IrVal kc = irb_const_i64(cx->f, cx->cur, jaclval_i32(kind));
+            IrVal wa[] = {cx->sp, val, kc};
+            val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
+          }
+        }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
         if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
@@ -1545,6 +1757,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
         } else {
           env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
+          /* Carry a typed-collection stamp onto the binding: from the def's own
+           * annotation (`def [Arr T] a V`) or from a typed constructor value
+           * (`def a [[Arr T] …]` — the ctor's head IS the annotation). */
+          AstNode *annsrc = NULL;
+          if (tshift && bargs[0]->type == AST_COMMAND) annsrc = bargs[0];
+          else if (bargs[tshift + 1]->type == AST_COMMAND &&
+                   bargs[tshift + 1]->data.command.head &&
+                   bargs[tshift + 1]->data.command.head->type == AST_COMMAND)
+            annsrc = bargs[tshift + 1]->data.command.head;
+          if (annsrc) {
+            AstNode *tt = ann_elem_type(annsrc);
+            if (tt) bind_annotate(cx, name, len, tt->data.lit_string.value,
+                                  tt->data.lit_string.length, buf_ann_size(annsrc));
+          }
         }
         return val;
       }
@@ -1563,6 +1789,22 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           if (cx->failed) return 0;
           IrVal a[] = {cx->sp, bv, idx, val};
           return emit_rt_call(cx, "jacl_arr_set_at", a, 4);
+        }
+        /* `set $b->$k V` — dynamic dot target (index or struct field). */
+        if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
+            node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+            node->data.command.args[0]->data.command.arg_count == 2 &&
+            node->data.command.args[0]->data.command.args[1]->type != AST_LIT_STRING &&
+            node->data.command.args[0]->data.command.args[1]->type != AST_LIT_INT) {
+          AstNode *dot = node->data.command.args[0];
+          IrVal sv = compile_expr(cx, dot->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal kv = compile_expr(cx, dot->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal val = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, sv, kv, val};
+          return emit_rt_call(cx, "jacl_dot_dyn_set", a, 4);
         }
         /* `set $p->x V` — in-place struct field mutation. */
         if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
@@ -1585,7 +1827,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (cx->failed) return 0;
         Binding *bd = env_lookup(cx, name, len);
         if (!bd) { cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0; }
-        if (!bd->is_mut) { cx_failf(cx, "codegen: cannot set immutable variable '%.*s'", name, len); return 0; }
+        if (!bd->is_mut) { cx_failf(cx, "codegen: cannot mutate immutable binding '%.*s'", name, len); return 0; }
         if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
         else bd->value = val; /* uncaptured: plain SSA rebind */
         return val;
@@ -1663,8 +1905,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (p) {
           uint32_t argc = node->data.command.arg_count;
           if ((int)argc != p->arity) {
-            cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
-                     head->data.lit_string.value, head->data.lit_string.length);
+            {
+              char msg[160];
+              snprintf(msg, sizeof msg, "proc '%.*s' expects %d arguments but got %u",
+                       (int)head->data.lit_string.length, head->data.lit_string.value,
+                       p->arity, argc);
+              cx_fail(cx, msg);
+            }
             return 0;
           }
           /* A generator proc-call constructs a generator object (a fiber over the
@@ -1744,18 +1991,41 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         AstNode *h2 = node->data.command.head;
         int is_arr_ctor = (hid == HEAD_ARR);
         int32_t bufn = -1;
+        int is_vec_ctor = 0;
         if (!is_arr_ctor && h2 && h2->type == AST_COMMAND && h2->data.command.head &&
             h2->data.command.head->type == AST_LIT_STRING &&
-            h2->data.command.head->data.lit_string.length == 3 &&
-            memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0)
-          is_arr_ctor = 1;
-        if (!is_arr_ctor) bufn = buf_ann_size(h2);
+            h2->data.command.head->data.lit_string.length == 3) {
+          if (memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0) is_arr_ctor = 1;
+          else if (memcmp(h2->data.command.head->data.lit_string.value, "Vec", 3) == 0) is_vec_ctor = 1;
+        }
+        if (!is_arr_ctor && !is_vec_ctor) bufn = buf_ann_size(h2);
+        if (is_vec_ctor) {
+          /* `[[Vec T] e0 e1 …]` — a persistent vector with literal element checks. */
+          AstNode *vtt = ann_elem_type(h2);
+          IrVal ea[] = {cx->sp};
+          IrVal acc = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (vtt && !check_elem_literal(cx, node->data.command.args[i],
+                                           vtt->data.lit_string.value, vtt->data.lit_string.length))
+              return 0;
+            IrVal e = compile_expr(cx, node->data.command.args[i]);
+            if (cx->failed) return 0;
+            IrVal pa[] = {cx->sp, acc, e};
+            acc = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+          }
+          return acc;
+        }
         if (bufn >= 0) {
           /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero. */
+          AstNode *btt = ann_elem_type(h2);
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           uint32_t given = node->data.command.arg_count;
           for (int32_t k = 0; k < bufn; k++) {
+            if ((uint32_t)k < given && btt &&
+                !check_elem_literal(cx, node->data.command.args[k],
+                                    btt->data.lit_string.value, btt->data.lit_string.length))
+              return 0;
             IrVal e = ((uint32_t)k < given) ? compile_expr(cx, node->data.command.args[k])
                                             : irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
             if (cx->failed) return 0;
@@ -1765,9 +2035,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           return av;
         }
         if (is_arr_ctor) {
+          AstNode *att = (h2 && h2->type == AST_COMMAND) ? ann_elem_type(h2) : NULL;
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (att && !check_elem_literal(cx, node->data.command.args[i],
+                                           att->data.lit_string.value, att->data.lit_string.length))
+              return 0;
             IrVal e = compile_expr(cx, node->data.command.args[i]);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, av, e};
@@ -1811,6 +2085,49 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* `[to TYPE V]` — cast (the TYPE word compiles as a string). */
+      if (hid == HEAD_TO && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_LIT_STRING) {
+        IrVal tn = compile_string_literal(cx, node->data.command.args[0]->data.lit_string.value,
+                                          node->data.command.args[0]->data.lit_string.length);
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v, tn};
+        return emit_rt_call(cx, "jacl_to_cast", a, 3);
+      }
+      /* `[swap $ref $f]` — apply the closure to the deref'd value, store it back,
+       * and yield the new value (box or atom). */
+      if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
+        IrVal ref = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal clo = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal da[] = {cx->sp, ref};
+        IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
+        IrVal fa[] = {cx->sp, clo};
+        IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+        IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+        IrType r1[] = {IRB_I64};
+        IrVal cargs[] = {cx->sp, clo, cur};
+        IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+        IrVal sa[] = {cx->sp, ref, nv};
+        (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
+        return nv;
+      }
+
+      /* `[assert COND]` — by name (no interned head id): nil or an error (which the
+       * statement-position auto-return then propagates). */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
+          node->data.command.head->data.lit_string.length == 6 &&
+          memcmp(node->data.command.head->data.lit_string.value, "assert", 6) == 0 &&
+          node->data.command.arg_count == 1) {
+        IrVal v = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v};
+        return emit_rt_call(cx, "jacl_assert", a, 2);
+      }
+
       /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
        * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
       {
@@ -1843,7 +2160,42 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
           {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
           {HEAD_BUF_LEN,    "jacl_len",        1},
+          {HEAD_SLEEP,      "jacl_sleep",      1},
+          {HEAD_ATOM,       "jacl_atom_new",   1},
+          {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
+          {HEAD_RANGE,      "jacl_range_vec",  2},
+          {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
+          {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
+          {HEAD_LINES,      "jacl_lines",      1},
         };
+        /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
+        if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *ab = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          int ann_dyn = ab && ab->elem_type && ab->elem_type_len == 3 &&
+                        memcmp(ab->elem_type, "dyn", 3) == 0;
+          if (ab && ab->elem_type && !ann_dyn && cg_is_type_kw(ab->elem_type, ab->elem_type_len)) {
+            AstNode *e = node->data.command.args[1];
+            int decl_str = (ab->elem_type_len == 3 && memcmp(ab->elem_type, "str", 3) == 0);
+            if (e->type == AST_LIT_INT && decl_str) {
+              char msg[160];
+              snprintf(msg, sizeof msg,
+                       "arr-push: element type i32 does not match the declared %.*s element",
+                       (int)ab->elem_type_len, ab->elem_type);
+              cx_fail(cx, msg);
+              return 0;
+            }
+            if (e->type == AST_LIT_STRING && !decl_str) {
+              char msg[160];
+              snprintf(msg, sizeof msg,
+                       "arr-push: element type str does not match the declared %.*s element",
+                       (int)ab->elem_type_len, ab->elem_type);
+              cx_fail(cx, msg);
+              return 0;
+            }
+          }
+        }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
           if (node->data.command.arg_count != BI[bi].arity) {
@@ -1855,7 +2207,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal a[1 + 4];
           a[0] = cx->sp;
           for (uint32_t i = 0; i < BI[bi].arity; i++) {
-            a[1 + i] = compile_expr(cx, node->data.command.args[i]);
+            AstNode *an = node->data.command.args[i];
+            /* assert-type's TYPE argument is a bare word: pass it as a string. */
+            if ((HeadId)hid == HEAD_ASSERT_TYPE && i == 1 && an->type == AST_LIT_STRING)
+              a[1 + i] = compile_string_literal(cx, an->data.lit_string.value,
+                                                an->data.lit_string.length);
+            else
+              a[1 + i] = compile_expr(cx, an);
             if (cx->failed) return 0;
           }
           return emit_rt_call(cx, BI[bi].fn, a, (int)BI[bi].arity + 1);

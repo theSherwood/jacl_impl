@@ -276,6 +276,22 @@ JaclVal jacl_box_get(JaclVal b);                   /* [deref B] */
 JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
 JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
+JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
+JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
+JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
+JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
+JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / error */
+JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
+JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
+JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v);
+JaclVal jacl_wide_new(uint32_t tidx, int64_t bits); /* heap i64/u64/f64 cell */
+JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */
+JaclVal jacl_to_cast(JaclVal v, JaclVal tname);     /* [to TYPE V] */
+JaclVal jacl_dot_dyn(JaclVal v, JaclVal k);         /* dynamic ->: index or field */
+JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv);
+JaclVal jacl_vec_concat(JaclVal a, JaclVal b);      /* persistent vector concat */
+JaclVal jacl_lines(JaclVal s);                      /* split on newlines -> vec */
+JaclVal jacl_assert_type(JaclVal v, JaclVal tname);/* dynamic type assertion */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
