@@ -335,6 +335,7 @@ void jacl_sched_mark_roots(void) {
     if (jacl_running_job[w]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_running_job[w]));
   }
   if (jacl_root_job) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_root_job));
+  { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
   mark_task_stacks();   /* guest-memory roots on fiber data stacks (futs[] etc.) */
   for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
 }

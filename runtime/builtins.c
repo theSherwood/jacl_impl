@@ -307,6 +307,24 @@ JaclVal jacl_atom_new(JaclVal v) {
 }
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
 
+/* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
+ * The global holds a heap value, so it is reported as a GC root from
+ * jacl_sched_mark_roots (guest-memory roots are the guest's to report). */
+JaclVal jacl_ctx_cur;   /* nil until first use (nil -> empty map lazily) */
+JaclVal jacl_ctx_get(void) {
+  if (jaclrt_is_nil(jacl_ctx_cur)) jacl_ctx_cur = jacl_map_empty();
+  return jacl_ctx_cur;
+}
+JaclVal jacl_ctx_swap(JaclVal m) {
+  JaclVal old = jacl_ctx_get();
+  jacl_ctx_cur = m;
+  return old;
+}
+JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v) {
+  jacl_ctx_cur = jacl_map_set(jacl_ctx_get(), name, v);
+  return v;
+}
+
 /* [assert COND] — nil when truthy, an error otherwise. */
 JaclVal jacl_assert(JaclVal v) {
   if (jaclrt_is_error(v)) return v;

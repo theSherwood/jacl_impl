@@ -281,6 +281,9 @@ JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
 JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / error */
+JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
+JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
+JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v);
 JaclVal jacl_assert_type(JaclVal v, JaclVal tname);/* dynamic type assertion */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */

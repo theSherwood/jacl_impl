@@ -1308,6 +1308,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (nl == 4 && memcmp(nm, "true", 4) == 0)  return irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
         if (nl == 5 && memcmp(nm, "false", 5) == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
         if (nl == 3 && memcmp(nm, "nil", 3) == 0)   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        if (nl == 3 && memcmp(nm, "ctx", 3) == 0) {   /* the ambient context map */
+          IrVal a[] = {cx->sp};
+          return emit_rt_call(cx, "jacl_ctx_get", a, 1);
+        }
         /* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter. */
         Proc *pv = proc_lookup(cx, nm, nl);
         if (pv && !pv->is_generator) {
@@ -1337,6 +1341,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       IrBlock dead = new_i64_block(cx, frame_width(cx));
       enter_frame_block(cx, dead);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    }
+
+    case AST_CTX_DECL: {
+      /* `ctx [mut] TYPE name DEFAULT` — install the field into the ambient context. */
+      IrVal dv = node->data.ctx_decl.default_expr
+                     ? compile_expr(cx, node->data.ctx_decl.default_expr)
+                     : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+      if (cx->failed) return 0;
+      IrVal fname = compile_string_literal(cx, node->data.ctx_decl.field_name,
+                                           node->data.ctx_decl.field_name_len);
+      IrVal a[] = {cx->sp, fname, dv};
+      return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
     }
 
     case AST_DEFSTRUCT:
@@ -1385,6 +1401,33 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
       if (hid == HEAD_TRY) return compile_try(cx, node);
+      if (hid == HEAD_WITH_CTX && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_BLOCK &&
+          node->data.command.args[1]->type == AST_BLOCK) {
+        /* [with-ctx {field VAL …} { body }] — override fields for the block, restore after. */
+        IrVal ga[] = {cx->sp};
+        IrVal old = emit_rt_call(cx, "jacl_ctx_get", ga, 1);
+        AstNode *ov = node->data.command.args[0];
+        for (uint32_t i = 0; i < ov->data.block.count; i++) {
+          AstNode *cmd = ov->data.block.commands[i];
+          if (cmd->type != AST_COMMAND || !cmd->data.command.head ||
+              cmd->data.command.head->type != AST_LIT_STRING || cmd->data.command.arg_count != 1) {
+            cx_fail(cx, "with-ctx overrides must be `field VALUE` pairs");
+            return 0;
+          }
+          IrVal fname = compile_string_literal(cx, cmd->data.command.head->data.lit_string.value,
+                                               cmd->data.command.head->data.lit_string.length);
+          IrVal v = compile_expr(cx, cmd->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal sa[] = {cx->sp, fname, v};
+          (void)emit_rt_call(cx, "jacl_ctx_set_field", sa, 3);
+        }
+        IrVal bv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal ra[] = {cx->sp, old};
+        (void)emit_rt_call(cx, "jacl_ctx_swap", ra, 2);
+        return bv;
+      }
 
       /* `yield V` — suspend the current fiber, yielding V; result is the resume arg. */
       if (hid == HEAD_YIELD) {
@@ -1906,12 +1949,30 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         AstNode *h2 = node->data.command.head;
         int is_arr_ctor = (hid == HEAD_ARR);
         int32_t bufn = -1;
+        int is_vec_ctor = 0;
         if (!is_arr_ctor && h2 && h2->type == AST_COMMAND && h2->data.command.head &&
             h2->data.command.head->type == AST_LIT_STRING &&
-            h2->data.command.head->data.lit_string.length == 3 &&
-            memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0)
-          is_arr_ctor = 1;
-        if (!is_arr_ctor) bufn = buf_ann_size(h2);
+            h2->data.command.head->data.lit_string.length == 3) {
+          if (memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0) is_arr_ctor = 1;
+          else if (memcmp(h2->data.command.head->data.lit_string.value, "Vec", 3) == 0) is_vec_ctor = 1;
+        }
+        if (!is_arr_ctor && !is_vec_ctor) bufn = buf_ann_size(h2);
+        if (is_vec_ctor) {
+          /* `[[Vec T] e0 e1 …]` — a persistent vector with literal element checks. */
+          AstNode *vtt = ann_elem_type(h2);
+          IrVal ea[] = {cx->sp};
+          IrVal acc = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (vtt && !check_elem_literal(cx, node->data.command.args[i],
+                                           vtt->data.lit_string.value, vtt->data.lit_string.length))
+              return 0;
+            IrVal e = compile_expr(cx, node->data.command.args[i]);
+            if (cx->failed) return 0;
+            IrVal pa[] = {cx->sp, acc, e};
+            acc = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+          }
+          return acc;
+        }
         if (bufn >= 0) {
           /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero. */
           AstNode *btt = ann_elem_type(h2);
