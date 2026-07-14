@@ -1280,6 +1280,31 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* Calling a named BINDING that holds a closure (`def f [\\ …]; [f x]`): the head
+       * word resolves in the environment (no proc matched above) → closure call. */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING) {
+        Binding *hb = env_lookup(cx, node->data.command.head->data.lit_string.value,
+                                 node->data.command.head->data.lit_string.length);
+        if (hb) {
+          IrVal cval = hb->value;
+          if (hb->is_cell) { IrVal a[] = {cx->sp, cval}; cval = emit_rt_call(cx, "jacl_cell_get", a, 2); }
+          uint32_t argc2 = node->data.command.arg_count;
+          IrVal fnargs[] = {cx->sp, cval};
+          IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
+          IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+          IrVal cargs[2 + CG_MAX_PARAMS];
+          IrType sig[2 + CG_MAX_PARAMS];
+          cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
+          for (uint32_t i = 0; i < argc2 && i < CG_MAX_PARAMS; i++) {
+            cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
+            sig[2 + i] = IRB_I64;
+            if (cx->failed) return 0;
+          }
+          IrType r1[] = {IRB_I64};
+          return irb_call_indirect(cx->f, cx->cur, sig, (int)argc2 + 2, r1, 1, fnw, cargs, (int)argc2 + 2);
+        }
+      }
+
       /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
        * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
       {
@@ -1297,6 +1322,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_MAP_KEYS,   "jacl_map_keys_v", 1},
           {HEAD_MAP_VALS,   "jacl_map_vals_v", 1},
           {HEAD_ERROR_Q,    "jacl_is_error_v", 1},
+          {HEAD_ERROR,      "jacl_error_new",  1},
+          {HEAD_ERROR_VAL,  "jacl_error_val",  1},
         };
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;

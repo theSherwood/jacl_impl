@@ -264,6 +264,8 @@ int     jacl_val_equal(JaclVal a, JaclVal b);      /* structural equality (vec/m
 JaclVal jacl_vec_set(JaclVal v, uint32_t idx, JaclVal elem);       /* persistent update */
 uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, JaclVal *vs, uint32_t cap);
 JaclVal jacl_is_error_v(JaclVal v);                /* error? -> bool */
+JaclVal jacl_error_new(JaclVal v);                 /* [error V]: set the error flag */
+JaclVal jacl_error_val(JaclVal v);                 /* payload with the error flag cleared */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */

@@ -155,6 +155,8 @@ JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
   return jaclrt_bool(jacl_map_has(m, k) != 0);
 }
 JaclVal jacl_is_error_v(JaclVal v) { return jaclrt_bool(jaclrt_is_error(v)); }
+JaclVal jacl_error_new(JaclVal v) { return jaclrt_set_error(v); }          /* [error V] */
+JaclVal jacl_error_val(JaclVal v) { return v & ~JACL_FLAG_ERROR; }         /* payload, flag cleared */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();
