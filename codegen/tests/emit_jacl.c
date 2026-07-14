@@ -175,6 +175,22 @@ static int run_old_vm(const char *src) {
   return rc;
 }
 
+/* Read a whole source file (for `--file`: the parity runner drives the corpus
+ * `test/jacl/*.jacl` through the same pipeline as the named snippets). */
+static char *read_whole_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { fclose(f); return NULL; }
+  if (n > 0 && fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+  buf[n] = 0;
+  fclose(f);
+  return buf;
+}
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
@@ -182,9 +198,17 @@ int main(int argc, char **argv) {
     if (!src) { fprintf(stderr, "unknown case: %s\n", argv[2]); return 2; }
     return run_old_vm(src);
   }
-  if (argc != 2) { fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --oldvm <case>\n"); return 2; }
-  const char *src = source_for(argv[1]);
-  if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
+  const char *src = NULL;
+  if (argc == 3 && !strcmp(argv[1], "--file")) {
+    src = read_whole_file(argv[2]);
+    if (!src) { fprintf(stderr, "cannot read: %s\n", argv[2]); return 2; }
+  } else if (argc == 2) {
+    src = source_for(argv[1]);
+    if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
+  } else {
+    fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --file <path> | emit_jacl --oldvm <case>\n");
+    return 2;
+  }
 
   arena_t arena = {0};
   LexResult toks = lexer_lex(src, &arena);

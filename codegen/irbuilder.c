@@ -112,8 +112,12 @@ static IrVal take_val(Block *blk) { return blk->next_val++; }
 
 IrModule *irb_module_new(void) {
   IrModule *m = xmalloc(sizeof(*m));
-  m->funcs = NULL; m->nfuncs = 0; m->cap_funcs = 0;
-  m->has_memory = 0; m->mem_log2 = 0;
+  /* Zero the WHOLE struct: irb_module_free / irb_add_data also touch data/ndata/
+   * cap_data/relocs/nrelocs/cap_relocs, which the field-by-field init here used to
+   * miss — leaving heap garbage that free()/realloc() blew up on whenever the
+   * allocator handed back a dirty chunk (latent until the embedder did any malloc
+   * before irb_module_new; the parity runner's file read exposed it). */
+  memset(m, 0, sizeof(*m));
   return m;
 }
 
