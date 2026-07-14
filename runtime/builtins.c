@@ -111,6 +111,19 @@ JaclVal jacl_len(JaclVal v) {
   if (t == 0x07) return jaclrt_i32((int32_t)jacl_map_count(v));   /* MAP    */
   return jaclrt_error();
 }
+/* JaclVal-uniform wrappers over ops whose native signatures take/return raw ints —
+ * the codegen's builtin-dispatch ABI is (JaclVal args…) -> JaclVal throughout. */
+JaclVal jacl_vec_get_at(JaclVal v, JaclVal idx) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();      /* index must be i32 */
+  int32_t i = jaclrt_as_i32(idx);
+  if (i < 0) return jaclrt_error();
+  return jacl_vec_get(v, (uint32_t)i);
+}
+JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
+  if (jaclrt_is_error(m)) return m;
+  return jaclrt_bool(jacl_map_has(m, k) != 0);
+}
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   switch (jaclrt_type_index(v)) {

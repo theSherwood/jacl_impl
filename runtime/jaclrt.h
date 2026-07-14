@@ -258,6 +258,8 @@ JaclVal jacl_ge(JaclVal a, JaclVal b);
 JaclVal jacl_not(JaclVal a);               /* bool negation */
 JaclVal jacl_typeof(JaclVal v);            /* -> type-name string */
 JaclVal jacl_len(JaclVal v);               /* string/vec/map length -> i32 (else error) */
+JaclVal jacl_vec_get_at(JaclVal v, JaclVal idx);   /* JaclVal-uniform vec-get (i32 index) */
+JaclVal jacl_map_has_v(JaclVal m, JaclVal k);      /* JaclVal-uniform map-has? -> bool */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are

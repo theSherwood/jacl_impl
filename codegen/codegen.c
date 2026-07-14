@@ -174,6 +174,9 @@ static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint3
 
   int np = 0, i = 0;
   while (i < nt) {
+    /* A compound type annotation (`[Vec T] xs`, `[Map K V] m`, `[Proc …] f`) arrives
+     * as a COMMAND token before the name — skip it like a scalar type keyword. */
+    if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 1;
     if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "proc param must be a name"); return -1; }
     const char *s = toks[i]->data.lit_string.value;
     uint32_t n = toks[i]->data.lit_string.length;
@@ -437,6 +440,7 @@ static int closure_param_names(AstNode *pnode, int in_block, const char **ns, ui
   if (nt == 1 && toks[0]->type == AST_LIT_STRING && toks[0]->data.lit_string.length == 0) return 0;
   int np = 0, i = 0;
   while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 1;
     if (toks[i]->type != AST_LIT_STRING) return np;
     const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
     AstNode *nmtok = toks[i];
@@ -1001,9 +1005,25 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       }
 
       if (hid == HEAD_DEF || hid == HEAD_MUT) {
-        const char *name; uint32_t len;
-        if (!binding_name(cx, node, &name, &len)) return 0;
-        IrVal val = compile_expr(cx, node->data.command.args[1]);
+        /* Optional leading type annotation — `def i64 x V` (scalar keyword) or
+         * `def [Vec T] xs V` (compound) — is skipped: every value is a uniform
+         * JaclVal here; the typer's inferred types drive unboxed lowering. */
+        AstNode **bargs = node->data.command.args;
+        uint32_t bargc = node->data.command.arg_count;
+        uint32_t tshift = 0;
+        if (bargc >= 3 && bargs[1]->type == AST_LIT_STRING) {
+          if (bargs[0]->type == AST_COMMAND) tshift = 1;
+          else if (bargs[0]->type == AST_LIT_STRING &&
+                   cg_is_type_kw(bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length))
+            tshift = 1;
+        }
+        if (bargc < 2 + tshift || bargs[tshift]->type != AST_LIT_STRING) {
+          cx_fail(cx, "binding form needs a name and a value");
+          return 0;
+        }
+        const char *name = bargs[tshift]->data.lit_string.value;
+        uint32_t len = bargs[tshift]->data.lit_string.length;
+        IrVal val = compile_expr(cx, bargs[tshift + 1]);
         if (cx->failed) return 0;
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
@@ -1038,6 +1058,24 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           if (cx->failed) return 0;
           IrVal a[] = {cx->sp, acc, e};
           acc = emit_rt_call(cx, "jacl_vec_push", a, 3);
+        }
+        return acc;
+      }
+      /* Map literal `[map k0 v0 k1 v1 …]` → empty + set each pair. */
+      if (hid == HEAD_MAP) {
+        if (node->data.command.arg_count % 2 != 0) {
+          cx_fail(cx, "map literal needs an even number of arguments (key value …)");
+          return 0;
+        }
+        IrVal empty[] = {cx->sp};
+        IrVal acc = emit_rt_call(cx, "jacl_map_empty", empty, 1);
+        for (uint32_t i = 0; i + 1 < node->data.command.arg_count; i += 2) {
+          IrVal k = compile_expr(cx, node->data.command.args[i]);
+          if (cx->failed) return 0;
+          IrVal v = compile_expr(cx, node->data.command.args[i + 1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, acc, k, v};
+          acc = emit_rt_call(cx, "jacl_map_set", a, 4);
         }
         return acc;
       }
@@ -1105,6 +1143,38 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             if (cx->failed) return 0;
           }
           return irb_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
+        }
+      }
+
+      /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
+       * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
+      {
+        static const struct { HeadId hid; const char *fn; uint32_t arity; } BI[] = {
+          {HEAD_TO_STRING,  "jacl_to_string",  1},
+          {HEAD_VEC_GET,    "jacl_vec_get_at", 2},
+          {HEAD_VEC_PUSH,   "jacl_vec_push",   2},
+          {HEAD_VEC_LEN,    "jacl_len",        1},
+          {HEAD_MAP_GET,    "jacl_map_get",    2},
+          {HEAD_MAP_SET,    "jacl_map_set",    3},
+          {HEAD_MAP_HAS,    "jacl_map_has_v",  2},
+          {HEAD_MAP_LEN,    "jacl_len",        1},
+          {HEAD_MAP_REMOVE, "jacl_map_remove", 2},
+        };
+        for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
+          if (BI[bi].hid != (HeadId)hid) continue;
+          if (node->data.command.arg_count != BI[bi].arity) {
+            cx_failf(cx, "codegen: builtin arity mismatch (%.*s)",
+                     node->data.command.head->data.lit_string.value,
+                     node->data.command.head->data.lit_string.length);
+            return 0;
+          }
+          IrVal a[1 + 4];
+          a[0] = cx->sp;
+          for (uint32_t i = 0; i < BI[bi].arity; i++) {
+            a[1 + i] = compile_expr(cx, node->data.command.args[i]);
+            if (cx->failed) return 0;
+          }
+          return emit_rt_call(cx, BI[bi].fn, a, (int)BI[bi].arity + 1);
         }
       }
 
