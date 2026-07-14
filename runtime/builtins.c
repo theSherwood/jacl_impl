@@ -307,6 +307,50 @@ JaclVal jacl_atom_new(JaclVal v) {
 }
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
 
+/* [assert COND] — nil when truthy, an error otherwise. */
+JaclVal jacl_assert(JaclVal v) {
+  if (jaclrt_is_error(v)) return v;
+  int truthy = !(v == JACL_FALSE || v == JACL_NIL);
+  return truthy ? JACL_NIL : jaclrt_error();
+}
+/* [range A B] as a value: the vector [A, B) of i32s (for `for`/transform sources). */
+JaclVal jacl_range_vec(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
+  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
+  int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
+  JaclVal out = jacl_vec_empty();
+  for (int32_t i = lo; i < hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
+  return out;
+}
+/* [assert-type V T] — dynamic type assertion: V when it matches the named type,
+ * an error otherwise. (The old compiler proves many of these statically; the
+ * dynamic check preserves the passing corpus behavior.) */
+static int type_name_matches(JaclVal v, const char *tn, uint32_t tl) {
+  uint32_t t = jaclrt_type_index(v);
+  if (tl == 3 && !memcmp(tn, "str", 3)) return t == 0x04 || t == 0x05 || t == 0x14;
+  if (tl == 3 && !memcmp(tn, "i32", 3)) return t == 0x02;
+  if (tl == 3 && !memcmp(tn, "f32", 3)) return t == 0x03;
+  if (tl == 3 && !memcmp(tn, "f64", 3)) return t == 0x03 || t == 0x10;
+  if (tl == 3 && !memcmp(tn, "i64", 3)) return t == 0x02 || t == 0x0E;
+  if (tl == 3 && !memcmp(tn, "u64", 3)) return t == 0x02 || t == 0x0F;
+  if (tl == 3 && !memcmp(tn, "vec", 3)) return t == 0x06;
+  if (tl == 3 && !memcmp(tn, "map", 3)) return t == 0x07;
+  if (tl == 3 && !memcmp(tn, "arr", 3)) return t == 0x1A;
+  if (tl == 3 && !memcmp(tn, "dyn", 3)) return 1;
+  if (tl == 4 && !memcmp(tn, "bool", 4)) return t == 0x01;
+  if (tl == 3 && !memcmp(tn, "nil", 3)) return t == 0x00;
+  return 1;   /* unknown names (struct types, compounds): accept */
+}
+JaclVal jacl_assert_type(JaclVal v, JaclVal tname) {
+  if (jaclrt_is_error(v)) return v;
+  char tn[32];
+  uint32_t tl = jacl_str_len(tname);
+  if (tl > sizeof tn - 1) tl = sizeof tn - 1;
+  jacl_str_bytes(tname, tn, sizeof tn);
+  return type_name_matches(v, tn, tl) ? v : jaclrt_error();
+}
+
 /* Named-field access across record-like values: struct field or map entry (string key). */
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;

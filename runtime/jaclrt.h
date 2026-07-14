@@ -279,6 +279,9 @@ JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry b
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
+JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
+JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / error */
+JaclVal jacl_assert_type(JaclVal v, JaclVal tname);/* dynamic type assertion */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */

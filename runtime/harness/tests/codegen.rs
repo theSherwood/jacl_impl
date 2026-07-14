@@ -302,7 +302,7 @@ fn proc_with_local_loop() {
 #[test]
 fn proc_arity_mismatch_is_an_error() {
     let err = emit_expecting_error("proc_arity_err"); // [add 1] for a 2-arg proc
-    assert!(err.contains("arity"), "unexpected error: {err}");
+    assert!(err.contains("expects 2 arguments but got 1"), "unexpected error: {err}");
 }
 
 #[test]
