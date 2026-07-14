@@ -808,6 +808,156 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
+/* Synthesized AST nodes (heap-allocated; live for the compile) for sugar forms. */
+HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
+static AstNode *synth_word(const char *v, uint32_t len) {
+  AstNode *n = calloc(1, sizeof(AstNode));
+  n->type = AST_LIT_STRING;
+  n->data.lit_string.value = v;
+  n->data.lit_string.length = len;
+  return n;
+}
+static AstNode *synth_command(AstNode *head, AstNode **args, uint32_t argc) {
+  AstNode *n = calloc(1, sizeof(AstNode));
+  n->type = AST_COMMAND;
+  n->data.command.head = head;
+  n->data.command.args = args;
+  n->data.command.arg_count = argc;
+  n->data.command.head_id = jacl_compute_head_id_bridge(head);
+  return n;
+}
+
+/* Is this node a call to a registered generator proc? */
+static Proc *generator_call(Cx *cx, AstNode *n) {
+  if (!n || n->type != AST_COMMAND || !n->data.command.head ||
+      n->data.command.head->type != AST_LIT_STRING) return NULL;
+  Proc *p = proc_lookup(cx, n->data.command.head->data.lit_string.value,
+                        n->data.command.head->data.lit_string.length);
+  return (p && p->is_generator) ? p : NULL;
+}
+
+/* Eagerly drain a source (an already-evaluated generator object or vec-like) into a
+ * fresh vector, optionally applying a closure per element (transform) or using its
+ * truthiness as a keep test (filter). Frame-threaded like the other loops. */
+#define ST_SRC "\x01""st-src"
+#define ST_ACC "\x01""st-acc"
+#define ST_CLO "\x01""st-clo"
+#define ST_IDX "\x01""st-idx"
+static IrVal stream_into_vec(Cx *cx, IrVal src, int is_gen, IrVal clo, int is_filter) {
+  scope_enter(cx);
+  IrVal ea[] = {cx->sp};
+  IrVal acc0 = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+  env_define(cx, ST_SRC, 7, src, 0, 0);
+  env_define(cx, ST_ACC, 7, acc0, 1, 0);
+  if (clo) env_define(cx, ST_CLO, 7, clo, 0, 0);
+  if (!is_gen) {
+    IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+    env_define(cx, ST_IDX, 7, zero, 1, 0);
+  }
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  /* gen mode threads the header-produced element into the body as an extra param
+   * (block-local SSA: header values are invisible in the body otherwise). */
+  IrBlock body_blk = new_i64_block(cx, is_gen ? w + 1 : w);
+  IrBlock push_blk = new_i64_block(cx, w + 1);   /* extra param: the value to push */
+  IrBlock next_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  IrVal elem = 0;
+  enter_frame_block(cx, header);
+  if (is_gen) {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    IrVal na[] = {cx->sp, bs->value};
+    elem = emit_rt_call(cx, "jacl_gen_next", na, 2);
+    IrVal da[] = {cx->sp, bs->value};
+    IrVal d = emit_rt_call(cx, "jacl_gen_done", da, 2);
+    IrVal truth = emit_truthy(cx, d);
+    fill_frame(cx, frame);
+    frame[w] = elem;
+    irb_br_if(cx->f, cx->cur, truth, exit_blk, frame, w, body_blk, frame, w + 1);
+  } else {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    IrVal la[] = {cx->sp, bs->value};
+    IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
+    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, len);
+    IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+    IrVal is_true = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, cond, ctrue);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, is_true, body_blk, frame, w, exit_blk, frame, w);
+  }
+
+  /* body: fetch elem (vec mode), apply the closure, decide push vs skip */
+  enter_frame_block(cx, body_blk);
+  {
+    if (!is_gen) {
+      Binding *bs = env_lookup(cx, ST_SRC, 7);
+      Binding *bi = env_lookup(cx, ST_IDX, 7);
+      IrVal ga[] = {cx->sp, bs->value, bi->value};
+      elem = emit_rt_call(cx, "jacl_index_get", ga, 3);
+    } else {
+      elem = (IrVal)w;   /* the threaded extra block param (see body_blk creation) */
+    }
+    IrVal keep = elem;
+    if (clo) {
+      Binding *bc = env_lookup(cx, ST_CLO, 7);
+      IrVal fa[] = {cx->sp, bc->value};
+      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+      IrType r1[] = {IRB_I64};
+      IrVal cargs[] = {cx->sp, bc->value, elem};
+      IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      if (is_filter) {
+        IrVal truth = emit_truthy(cx, r);
+        fill_frame(cx, frame);
+        frame[w] = elem;
+        irb_br_if(cx->f, cx->cur, truth, push_blk, frame, w + 1, next_blk, frame, w);
+        goto after_branch;
+      }
+      keep = r;
+    }
+    fill_frame(cx, frame);
+    frame[w] = keep;
+    irb_br(cx->f, cx->cur, push_blk, frame, w + 1);
+  }
+after_branch:
+
+  /* push: acc = vec_push(acc, value-param) */
+  enter_frame_block(cx, push_blk);
+  {
+    Binding *ba = env_lookup(cx, ST_ACC, 7);
+    IrVal pushed = (IrVal)w;   /* the extra block param */
+    IrVal pa[] = {cx->sp, ba->value, pushed};
+    ba->value = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, next_blk, frame, w);
+  }
+
+  /* next: advance (vec mode) and loop */
+  enter_frame_block(cx, next_blk);
+  {
+    if (!is_gen) {
+      Binding *bi = env_lookup(cx, ST_IDX, 7);
+      IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
+      bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
+    }
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, header, frame, w);
+  }
+
+  enter_frame_block(cx, exit_blk);
+  Binding *ba = env_lookup(cx, ST_ACC, 7);
+  IrVal out = ba->value;
+  scope_exit(cx);
+  return out;
+}
+
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
 static IrVal emit_buf_new(Cx *cx, int32_t n) {
   IrVal ea[] = {cx->sp};
@@ -960,8 +1110,10 @@ static IrVal compile_for(Cx *cx, AstNode *node) {
     return compile_for_each(cx, args[0], args[1]->data.lit_string.value,
                             args[1]->data.lit_string.length, args[2], NULL);
   }
-  /* `for COLL { body }` — implicit `$it` element binding. */
+  /* `for COLL { body }` — implicit `$it` element binding (generator or vec-like). */
   if (argc == 2 && args[1]->type == AST_BLOCK) {
+    if (generator_call(cx, args[0]))
+      return compile_for_generator(cx, args[0], "it", 2, args[1]);
     return compile_for_each(cx, args[0], "it", 2, args[1], NULL);
   }
   /* `for COLL $cb` — call a closure per element. */
@@ -1177,6 +1329,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         uint32_t argc = node->data.command.arg_count;
         if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 &&
             h->data.lit_string.value[0] == '\\') {
+          if (argc >= 1 && node->data.command.args[0]->type != AST_BLOCK) {
+            /* `[\\ * $it 2]` — implicit-`it` lambda whose body is the given command. */
+            AstNode *body = synth_command(node->data.command.args[0],
+                                          node->data.command.args + 1, argc - 1);
+            AstNode *pn = synth_command(synth_word("it", 2), NULL, 0);
+            return compile_closure(cx, pn, /*in_block=*/0, body);
+          }
           if (argc != 2 || node->data.command.args[0]->type != AST_BLOCK ||
               node->data.command.args[1]->type != AST_BLOCK) {
             cx_fail(cx, "lambda must be [\\ {params} {body}]"); return 0;
@@ -1463,6 +1622,31 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrType r1[] = {IRB_I64};
           return irb_call_indirect(cx->f, cx->cur, sig, (int)argc2 + 2, r1, 1, fnw, cargs, (int)argc2 + 2);
         }
+      }
+
+      /* Streams, EAGER for now: [collect S] / [transform S C] / [filter S C] evaluate
+       * to a vector immediately (the corpus collects lazily-built pipelines right
+       * away, so eager evaluation is output-equivalent; true laziness is a later
+       * pass). S may be a generator call, a nested transform/filter, or vec-like. */
+      if ((hid == HEAD_COLLECT && node->data.command.arg_count == 1) ||
+          ((hid == HEAD_TRANSFORM || hid == HEAD_FILTER) && node->data.command.arg_count == 2)) {
+        AstNode *srcn = node->data.command.args[0];
+        IrVal clo = 0;
+        if (hid != HEAD_COLLECT) {
+          clo = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+        }
+        IrVal src;
+        int is_gen = 0;
+        if (generator_call(cx, srcn)) {
+          src = compile_expr(cx, srcn);        /* jacl_gen_new(...) */
+          is_gen = 1;
+        } else {
+          src = compile_expr(cx, srcn);        /* vec-like (incl. nested eager stream) */
+        }
+        if (cx->failed) return 0;
+        if (hid == HEAD_COLLECT && !is_gen) return src;   /* collect of a vec is itself */
+        return stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
       }
 
       /* Mutable-array constructor: `[[Arr T] e0 e1 …]` (typed head — element type is

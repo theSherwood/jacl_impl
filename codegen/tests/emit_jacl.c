@@ -9,6 +9,10 @@
  * frontend's toolchain); the unity src/jacl.c provides lexer_lex / parser_parse. */
 #include "../../src/jacl.c"   /* full JACL frontend (defines the parse pipeline) */
 
+/* Bridge: codegen synthesizes sugar AST nodes (implicit-`it` lambda bodies) and
+ * needs head-id interning, which is static inside the frontend unity. */
+HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(head); }
+
 #include "../codegen.h"
 #include "../irbuilder.h"
 
