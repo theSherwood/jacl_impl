@@ -95,7 +95,36 @@ typedef struct {
   /* Names captured by some closure in the function currently being compiled — a `mut`
    * among them is boxed in a heap cell so mutations are shared with the closure. */
   const char *capset[CG_MAX_PARAMS]; uint32_t capsetlen[CG_MAX_PARAMS]; int ncapset;
+
+  /* struct declarations (dynamic name-based records): name -> ordered field names */
+  struct SDef {
+    const char *name; uint32_t len;
+    const char *fn[CG_MAX_PARAMS]; uint32_t fl[CG_MAX_PARAMS]; int nf;
+  } sdefs[32];
+  int nsdefs;
 } Cx;
+typedef struct SDef SDef;
+
+static void cx_fail(Cx *cx, const char *msg); /* fwd */
+
+static SDef *sdef_lookup(Cx *cx, const char *name, uint32_t len) {
+  for (int i = 0; i < cx->nsdefs; i++)
+    if (cx->sdefs[i].len == len && memcmp(cx->sdefs[i].name, name, len) == 0) return &cx->sdefs[i];
+  return NULL;
+}
+static void sdef_register(Cx *cx, AstNode *node) {
+  if (sdef_lookup(cx, node->data.defstruct.name, node->data.defstruct.name_len)) return;
+  if (cx->nsdefs >= 32) { cx_fail(cx, "too many struct declarations"); return; }
+  SDef *sd = &cx->sdefs[cx->nsdefs++];
+  sd->name = node->data.defstruct.name;
+  sd->len = node->data.defstruct.name_len;
+  sd->nf = 0;
+  for (uint32_t k = 0; k < node->data.defstruct.field_count && sd->nf < CG_MAX_PARAMS; k++) {
+    sd->fn[sd->nf] = node->data.defstruct.field_names[k];
+    sd->fl[sd->nf] = node->data.defstruct.field_name_lens[k];
+    sd->nf++;
+  }
+}
 
 static void cx_fail(Cx *cx, const char *msg) {
   if (!cx->failed && cx->err && cx->errcap) snprintf(cx->err, cx->errcap, "codegen: %s", msg);
@@ -958,6 +987,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       return bd->value;
     }
 
+    case AST_DEFSTRUCT:
+      sdef_register(cx, node);
+      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+
     case AST_RETURN:
       /* Tail-position return: evaluate to the value; the proc wraps the body value in
        * a single `return`. Early/mid-block return (out of loops) is not yet supported. */
@@ -1095,6 +1128,17 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* Field access `[. EXPR field]` (from `$e->field`). */
+      if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
+          node->data.command.args[1]->type == AST_LIT_STRING) {
+        IrVal sv = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal fname = compile_string_literal(cx, node->data.command.args[1]->data.lit_string.value,
+                                             node->data.command.args[1]->data.lit_string.length);
+        IrVal a[] = {cx->sp, sv, fname};
+        return emit_rt_call(cx, "jacl_struct_get", a, 3);
+      }
+
       /* Calling a closure value: the head is an expression (e.g. `[$f x]`). */
       if (node->data.command.head && node->data.command.head->type == AST_VAR_REF) {
         IrVal cval = compile_expr(cx, node->data.command.head);
@@ -1171,6 +1215,21 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return val;
       }
       if (hid == HEAD_SET) {
+        /* `set $p->x V` — in-place struct field mutation. */
+        if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
+            node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+            node->data.command.args[0]->data.command.arg_count == 2 &&
+            node->data.command.args[0]->data.command.args[1]->type == AST_LIT_STRING) {
+          AstNode *dot = node->data.command.args[0];
+          IrVal sv = compile_expr(cx, dot->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal fname = compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
+                                               dot->data.command.args[1]->data.lit_string.length);
+          IrVal val = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, sv, fname, val};
+          return emit_rt_call(cx, "jacl_struct_put", a, 4);
+        }
         const char *name; uint32_t len;
         if (!binding_name(cx, node, &name, &len)) return 0;
         IrVal val = compile_expr(cx, node->data.command.args[1]);
@@ -1305,6 +1364,40 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* Struct constructor `[Point x 1 y 2]` — named (field value) pairs; declared
+       * fields not given stay nil. Field slots are initialized in declaration order
+       * (names + nil), then the provided pairs overwrite by name. */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING) {
+        SDef *sd = sdef_lookup(cx, node->data.command.head->data.lit_string.value,
+                               node->data.command.head->data.lit_string.length);
+        if (sd) {
+          IrVal tn = compile_string_literal(cx, sd->name, sd->len);
+          IrVal nf = irb_const_i64(cx->f, cx->cur, jaclval_i32(sd->nf));
+          IrVal na[] = {cx->sp, tn, nf};
+          IrVal sv = emit_rt_call(cx, "jacl_struct_new", na, 3);
+          for (int k = 0; k < sd->nf; k++) {
+            IrVal fname = compile_string_literal(cx, sd->fn[k], sd->fl[k]);
+            IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
+            IrVal nil = irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+            IrVal ia[] = {cx->sp, sv, idx, fname, nil};
+            sv = emit_rt_call(cx, "jacl_struct_init_field", ia, 5);
+          }
+          uint32_t argc2 = node->data.command.arg_count;
+          for (uint32_t i = 0; i + 1 < argc2; i += 2) {
+            if (node->data.command.args[i]->type != AST_LIT_STRING) {
+              cx_fail(cx, "struct constructor expects `field value` pairs"); return 0;
+            }
+            IrVal fname = compile_string_literal(cx, node->data.command.args[i]->data.lit_string.value,
+                                                 node->data.command.args[i]->data.lit_string.length);
+            IrVal val = compile_expr(cx, node->data.command.args[i + 1]);
+            if (cx->failed) return 0;
+            IrVal pa[] = {cx->sp, sv, fname, val};
+            (void)emit_rt_call(cx, "jacl_struct_put", pa, 4);
+          }
+          return sv;
+        }
+      }
+
       /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
        * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
       {
@@ -1324,6 +1417,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ERROR_Q,    "jacl_is_error_v", 1},
           {HEAD_ERROR,      "jacl_error_new",  1},
           {HEAD_ERROR_VAL,  "jacl_error_val",  1},
+          {HEAD_BOX,        "jacl_box_new",    1},
+          {HEAD_DEREF,      "jacl_box_get",    1},
+          {HEAD_UNBOX,      "jacl_box_get",    1},
+          {HEAD_RESET,      "jacl_box_set",    2},
+          {HEAD_BOX_Q,      "jacl_is_box_v",   1},
         };
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
@@ -1612,6 +1710,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, arg) — arg is the fiber resume arg (unused) */
   IrBlock main_block = irb_block(mainf, i64_2, 2);
 
+  for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 

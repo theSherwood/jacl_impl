@@ -71,6 +71,18 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
       if (!jacl_val_equal(jacl_vec_get(a, i), jacl_vec_get(b, i))) return 0;
     return 1;
   }
+  if (t == 0x12) {                                       /* STRUCT */
+    JaclVal *pa = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(a));
+    JaclVal *pb = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(b));
+    if (!jacl_str_eq(pa[0], pb[0])) return 0;
+    int32_t n = jaclrt_as_i32(pa[1]);
+    if (n != jaclrt_as_i32(pb[1])) return 0;
+    for (int32_t k = 0; k < n; k++) {
+      if (!jacl_str_eq(pa[2 + 2 * k], pb[2 + 2 * k])) return 0;
+      if (!jacl_val_equal(pa[3 + 2 * k], pb[3 + 2 * k])) return 0;
+    }
+    return 1;
+  }
   if (t == 0x07) {                                       /* MAP */
     uint32_t n = jacl_map_count(a);
     if (n != jacl_map_count(b)) return 0;
@@ -157,6 +169,72 @@ JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
 JaclVal jacl_is_error_v(JaclVal v) { return jaclrt_bool(jaclrt_is_error(v)); }
 JaclVal jacl_error_new(JaclVal v) { return jaclrt_set_error(v); }          /* [error V] */
 JaclVal jacl_error_val(JaclVal v) { return v & ~JACL_FLAG_ERROR; }         /* payload, flag cleared */
+
+/* ---- structs (dynamic, name-based; typed/unboxed lowering is a later pass) ----
+ * A struct instance is a traced heap cell (JACL_TAG_STRUCT over JOBJ_NODE):
+ *   payload JaclVals: [0] type name (string), [1] field count (i32),
+ *                     [2 + 2k] field-k name (string), [3 + 2k] field-k value.
+ * All slots are JaclVals, so conservative payload tracing keeps fields alive. */
+JaclVal jacl_struct_new(JaclVal typename_, JaclVal nfields) {
+  int32_t n = jaclrt_is_i32(nfields) ? jaclrt_as_i32(nfields) : 0;
+  if (n < 0) n = 0;
+  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, (uint32_t)((2 + 2 * n) * 8));
+  JaclVal *p = (JaclVal *)jacl_obj_payload(o);
+  p[0] = typename_;
+  p[1] = jaclrt_i32(n);
+  for (int32_t k = 0; k < n; k++) { p[2 + 2 * k] = JACL_NIL; p[3 + 2 * k] = JACL_NIL; }
+  return jaclrt_from_ptr(JACL_TAG_STRUCT, o);
+}
+/* Initialize field slot `idx` (construction): sets name + value in place, returns s. */
+JaclVal jacl_struct_init_field(JaclVal s, JaclVal idx, JaclVal name, JaclVal value) {
+  if (jaclrt_is_error(s)) return s;
+  JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(s));
+  int32_t n = jaclrt_as_i32(p[1]), i = jaclrt_is_i32(idx) ? jaclrt_as_i32(idx) : -1;
+  if (i < 0 || i >= n) return jaclrt_error();
+  p[2 + 2 * i] = name;
+  p[3 + 2 * i] = value;
+  return s;
+}
+static JaclVal *struct_field_slot(JaclVal s, JaclVal name) {
+  if (jaclrt_type_index(s) != 0x12) return 0;
+  JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(s));
+  int32_t n = jaclrt_as_i32(p[1]);
+  for (int32_t k = 0; k < n; k++)
+    if (jacl_str_eq(p[2 + 2 * k], name)) return &p[3 + 2 * k];
+  return 0;
+}
+JaclVal jacl_struct_get(JaclVal s, JaclVal name) {
+  if (jaclrt_is_error(s)) return s;
+  JaclVal *slot = struct_field_slot(s, name);
+  return slot ? *slot : jaclrt_error();
+}
+JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place field mutation */
+  if (jaclrt_is_error(s)) return s;
+  JaclVal *slot = struct_field_slot(s, name);
+  if (!slot) return jaclrt_error();
+  *slot = v;
+  return v;
+}
+
+/* ---- box / deref / reset — a mutable single-slot ref (over the cell object) ---- */
+JaclVal jacl_box_new(JaclVal v) {
+  JaclVal c = jacl_cell_new(v);
+  return jaclrt_from_ptr(JACL_TAG_BOX, jaclrt_as_ptr(c));
+}
+JaclVal jacl_box_get(JaclVal b) {
+  if (jaclrt_is_error(b)) return b;
+  uint32_t t = jaclrt_type_index(b);
+  if (t != 0x0B && t != 0x0A && t != 0x0C) return jaclrt_error();  /* box / cell / atom */
+  return jacl_cell_get(jaclrt_from_ptr(JACL_TAG_CELL, jaclrt_as_ptr(b)));
+}
+JaclVal jacl_box_set(JaclVal b, JaclVal v) {
+  if (jaclrt_is_error(b)) return b;
+  uint32_t t = jaclrt_type_index(b);
+  if (t != 0x0B && t != 0x0A && t != 0x0C) return jaclrt_error();
+  (void)jacl_cell_set(jaclrt_from_ptr(JACL_TAG_CELL, jaclrt_as_ptr(b)), v);
+  return v;
+}
+JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0B); }
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();
@@ -235,12 +313,26 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x12) {                                       /* STRUCT: [Type f0 v0 …] */
+    JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
+    repr_put(rb, "[", 1);
+    repr_val(rb, p[0], 0);                               /* type name, unquoted */
+    int32_t n = jaclrt_as_i32(p[1]);
+    for (int32_t k = 0; k < n; k++) {
+      repr_put(rb, " ", 1);
+      repr_val(rb, p[2 + 2 * k], 0);                     /* field name, unquoted */
+      repr_put(rb, " ", 1);
+      repr_val(rb, p[3 + 2 * k], 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
   repr_put(rb, "?", 1);
 }
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07 && t != 0x12) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

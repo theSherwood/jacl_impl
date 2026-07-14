@@ -266,6 +266,14 @@ uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, JaclVal *vs, uint32_t cap);
 JaclVal jacl_is_error_v(JaclVal v);                /* error? -> bool */
 JaclVal jacl_error_new(JaclVal v);                 /* [error V]: set the error flag */
 JaclVal jacl_error_val(JaclVal v);                 /* payload with the error flag cleared */
+JaclVal jacl_struct_new(JaclVal typename_, JaclVal nfields);
+JaclVal jacl_struct_init_field(JaclVal s, JaclVal idx, JaclVal name, JaclVal value);
+JaclVal jacl_struct_get(JaclVal s, JaclVal name);
+JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v);
+JaclVal jacl_box_new(JaclVal v);                   /* [box V] — mutable single-slot ref */
+JaclVal jacl_box_get(JaclVal b);                   /* [deref B] */
+JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
+JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
