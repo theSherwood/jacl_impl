@@ -96,6 +96,9 @@ typedef struct {
    * among them is boxed in a heap cell so mutations are shared with the closure. */
   const char *capset[CG_MAX_PARAMS]; uint32_t capsetlen[CG_MAX_PARAMS]; int ncapset;
 
+  /* innermost enclosing loop (break/continue targets); width = frame at loop entry */
+  IrBlock loop_continue, loop_break; int loop_width; int in_loop;
+
   /* struct declarations (dynamic name-based records): name -> ordered field names */
   struct SDef {
     const char *name; uint32_t len;
@@ -677,7 +680,10 @@ static IrVal compile_while(Cx *cx, AstNode *node) {
 
   /* body: run, then loop back with the updated frame */
   enter_frame_block(cx, body);
-  (void)compile_expr(cx, args[1]); /* body value discarded */
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width;
+    cx->in_loop = 1; cx->loop_continue = header; cx->loop_break = exit_blk; cx->loop_width = w;
+    (void)compile_expr(cx, args[1]); /* body value discarded */
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; }
   if (cx->failed) return 0;
   fill_frame(cx, frame);
   irb_br(cx->f, cx->cur, header, frame, w);
@@ -758,6 +764,7 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   int w = frame_width(cx);
   IrBlock header = new_i64_block(cx, w);
   IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock step_blk = new_i64_block(cx, w);   /* i = i + 1 (continue lands here) */
   IrBlock exit_blk = new_i64_block(cx, w);
 
   IrVal frame[IRB_MAX_FRAME + 2];
@@ -775,10 +782,18 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
     irb_br_if(cx->f, cx->cur, truth, body_blk, frame, w, exit_blk, frame, w);
   }
 
-  /* body: run, then i = i + 1, loop back */
+  /* body: run, then fall into the step */
   enter_frame_block(cx, body_blk);
-  (void)compile_expr(cx, body); /* body value discarded; may read NAME */
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w;
+    (void)compile_expr(cx, body); /* body value discarded; may read NAME */
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; }
   if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, step_blk, frame, w);
+
+  /* step: i = i + 1, loop back */
+  enter_frame_block(cx, step_blk);
   {
     Binding *bi = env_lookup(cx, name, nlen);
     IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
@@ -791,6 +806,27 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   enter_frame_block(cx, exit_blk);
   scope_exit(cx);
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+
+/* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
+static IrVal emit_buf_new(Cx *cx, int32_t n) {
+  IrVal ea[] = {cx->sp};
+  IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+  for (int32_t k = 0; k < n; k++) {
+    IrVal pa[] = {cx->sp, av, zero};
+    (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
+  }
+  return av;
+}
+/* Is this annotation command a `[Buf N T]`? Returns N (or -1). */
+static int32_t buf_ann_size(AstNode *ann) {
+  if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
+      ann->data.command.head->type != AST_LIT_STRING) return -1;
+  if (ann->data.command.head->data.lit_string.length != 3 ||
+      memcmp(ann->data.command.head->data.lit_string.value, "Buf", 3) != 0) return -1;
+  if (ann->data.command.arg_count < 1 || ann->data.command.args[0]->type != AST_LIT_INT) return -1;
+  return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
 #define FOR_IDX_SENTINEL "\x01""for-idx"
@@ -825,6 +861,7 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   int w = frame_width(cx);
   IrBlock header = new_i64_block(cx, w);
   IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock step_blk = new_i64_block(cx, w);
   IrBlock exit_blk = new_i64_block(cx, w);
   IrVal frame[IRB_MAX_FRAME + 2];
   fill_frame(cx, frame);
@@ -849,6 +886,8 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
     Binding *bc = env_lookup(cx, FOR_COLL_SENTINEL, FOR_COLL_SENTINEL_LEN);
     IrVal ga[] = {cx->sp, bc->value, bi->value};
     IrVal elem = emit_rt_call(cx, "jacl_index_get", ga, 3);
+    int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb2 = cx->loop_break; int sw = cx->loop_width;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w;
     if (name) {
       Binding *bn = env_lookup(cx, name, nlen);
       bn->value = elem;
@@ -863,8 +902,16 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
       IrVal cargs[] = {cx->sp, bcb->value, elem};
       (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
     }
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw;
     if (cx->failed) { scope_exit(cx); return 0; }
-    bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, step_blk, frame, w);
+  }
+
+  /* step: i = i + 1, back to the header */
+  enter_frame_block(cx, step_blk);
+  {
+    Binding *bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
     IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
     bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
     fill_frame(cx, frame);
@@ -989,6 +1036,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       }
       if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
       return bd->value;
+    }
+
+    case AST_BREAK:
+    case AST_CONTINUE: {
+      if (!cx->in_loop) { cx_fail(cx, "break/continue outside a loop"); return 0; }
+      IrVal frame[IRB_MAX_FRAME + 2];
+      fill_frame(cx, frame);   /* first loop_width slots align with the loop's frame */
+      irb_br(cx->f, cx->cur, node->type == AST_BREAK ? cx->loop_break : cx->loop_continue,
+             frame, cx->loop_width);
+      /* Continue emitting into an unreachable continuation block with the current
+       * frame shape, so an enclosing if/loop join can still terminate normally. */
+      IrBlock dead = new_i64_block(cx, frame_width(cx));
+      enter_frame_block(cx, dead);
+      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
     }
 
     case AST_DEFSTRUCT:
@@ -1132,6 +1193,16 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* Indexed arrow access `$b->7` — [. EXPR INT] over a buf/arr/vec. */
+      if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
+          node->data.command.args[1]->type == AST_LIT_INT) {
+        IrVal bv = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal idx = irb_const_i64(cx->f, cx->cur,
+                                  jaclval_i32((int32_t)node->data.command.args[1]->data.lit_int.value));
+        IrVal a[] = {cx->sp, bv, idx};
+        return emit_rt_call(cx, "jacl_index_get", a, 3);
+      }
       /* Field access `[. EXPR field]` (from `$e->field`). */
       if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
           node->data.command.args[1]->type == AST_LIT_STRING) {
@@ -1161,6 +1232,17 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
         IrType r1[] = {IRB_I64};
         return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+      }
+
+      /* `def [Buf N T] name` — zero-filled fixed buffer declaration (no initializer). */
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_COMMAND &&
+          node->data.command.args[1]->type == AST_LIT_STRING &&
+          buf_ann_size(node->data.command.args[0]) >= 0) {
+        IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]));
+        env_define(cx, node->data.command.args[1]->data.lit_string.value,
+                   node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
+        return bv;
       }
 
       /* Positional destructuring `def [a b …] V` — bind each name to V[i]. */
@@ -1219,6 +1301,21 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return val;
       }
       if (hid == HEAD_SET) {
+        /* `set $b->7 V` — indexed in-place element mutation (buf/arr). */
+        if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
+            node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+            node->data.command.args[0]->data.command.arg_count == 2 &&
+            node->data.command.args[0]->data.command.args[1]->type == AST_LIT_INT) {
+          AstNode *dot = node->data.command.args[0];
+          IrVal bv = compile_expr(cx, dot->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal idx = irb_const_i64(cx->f, cx->cur,
+                                    jaclval_i32((int32_t)dot->data.command.args[1]->data.lit_int.value));
+          IrVal val = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, bv, idx, val};
+          return emit_rt_call(cx, "jacl_arr_set_at", a, 4);
+        }
         /* `set $p->x V` — in-place struct field mutation. */
         if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
             node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
@@ -1373,11 +1470,27 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       {
         AstNode *h2 = node->data.command.head;
         int is_arr_ctor = (hid == HEAD_ARR);
+        int32_t bufn = -1;
         if (!is_arr_ctor && h2 && h2->type == AST_COMMAND && h2->data.command.head &&
             h2->data.command.head->type == AST_LIT_STRING &&
             h2->data.command.head->data.lit_string.length == 3 &&
             memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0)
           is_arr_ctor = 1;
+        if (!is_arr_ctor) bufn = buf_ann_size(h2);
+        if (bufn >= 0) {
+          /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero. */
+          IrVal ea[] = {cx->sp};
+          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+          uint32_t given = node->data.command.arg_count;
+          for (int32_t k = 0; k < bufn; k++) {
+            IrVal e = ((uint32_t)k < given) ? compile_expr(cx, node->data.command.args[k])
+                                            : irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+            if (cx->failed) return 0;
+            IrVal pa[] = {cx->sp, av, e};
+            (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
+          }
+          return av;
+        }
         if (is_arr_ctor) {
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
@@ -1454,6 +1567,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ARR_PUSH,   "jacl_arr_push",   2},
           {HEAD_ARR_POP,    "jacl_arr_pop",    1},
           {HEAD_ARR_LEN,    "jacl_len",        1},
+          {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
+          {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
+          {HEAD_BUF_LEN,    "jacl_len",        1},
         };
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
