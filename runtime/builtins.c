@@ -243,6 +243,14 @@ JaclVal jacl_box_set(JaclVal b, JaclVal v) {
   return v;
 }
 JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0B); }
+/* Named-field access across record-like values: struct field or map entry (string key). */
+JaclVal jacl_field_get(JaclVal v, JaclVal name) {
+  if (jaclrt_is_error(v)) return v;
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x12) return jacl_struct_get(v, name);
+  if (t == 0x07) return jacl_map_get(v, name);
+  return jaclrt_error();
+}
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();

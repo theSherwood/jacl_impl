@@ -958,6 +958,27 @@ after_branch:
   return out;
 }
 
+/* Statement-position error auto-return (old-VM semantics): if a non-tail statement
+ * evaluates to an error-flagged value, return it from the enclosing function now.
+ * Splits the current block: err path returns, cont path carries the frame on. */
+static void emit_stmt_error_check(Cx *cx, IrVal v) {
+  if (cx->failed || !frame_guard(cx)) return;
+  IrVal ea[] = {cx->sp, v};
+  IrVal e = emit_rt_call(cx, "jacl_is_error_v", ea, 2);
+  IrVal truth = emit_truthy(cx, e);
+  int w = frame_width(cx);
+  IrBlock err_blk = new_i64_block(cx, 1);
+  IrBlock cont = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  IrVal ef[1] = {v};
+  irb_br_if(cx->f, cx->cur, truth, err_blk, ef, 1, cont, frame, w);
+  cx->cur = err_blk;
+  IrVal rv[1] = {(IrVal)0};        /* err_blk's single param: the error value */
+  irb_return(cx->f, err_blk, rv, 1);
+  enter_frame_block(cx, cont);
+}
+
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
 static IrVal emit_buf_new(Cx *cx, int32_t n) {
   IrVal ea[] = {cx->sp};
@@ -1236,6 +1257,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       for (uint32_t i = 0; i < bn; i++) {
         last = compile_expr(cx, node->data.block.commands[i]);
         if (cx->failed) break;
+        if (i + 1 < bn) emit_stmt_error_check(cx, last);   /* error auto-return */
+        if (cx->failed) break;
       }
       scope_exit(cx);
       return last;
@@ -1402,6 +1425,72 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
         return bv;
+      }
+
+      /* Named destructuring `def {x, y} V` — the target parses as a BLOCK of name
+       * tokens (like a closure param list); bind each name to V's field/entry. */
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_BLOCK &&
+          node->data.command.args[1]->type != AST_BLOCK) {
+        AstNode *blk = node->data.command.args[0];
+        AstNode *toks[CG_MAX_PARAMS]; int nt = 0;
+        for (uint32_t i = 0; i < blk->data.block.count; i++) {
+          AstNode *cmd = blk->data.block.commands[i];
+          if (cmd->type != AST_COMMAND) { nt = -1; break; }
+          if (cmd->data.command.head && nt < CG_MAX_PARAMS) toks[nt++] = cmd->data.command.head;
+          for (uint32_t j = 0; j < cmd->data.command.arg_count && nt < CG_MAX_PARAMS; j++)
+            toks[nt++] = cmd->data.command.args[j];
+        }
+        int all_words = nt > 0;
+        for (int i = 0; i < nt; i++) if (toks[i]->type != AST_LIT_STRING) all_words = 0;
+        if (all_words) {
+          IrVal v = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          for (int k = 0; k < nt; k++) {
+            IrVal fname = compile_string_literal(cx, toks[k]->data.lit_string.value,
+                                                 toks[k]->data.lit_string.length);
+            IrVal ga[] = {cx->sp, v, fname};
+            IrVal fv = emit_rt_call(cx, "jacl_field_get", ga, 3);
+            env_define(cx, toks[k]->data.lit_string.value, toks[k]->data.lit_string.length,
+                       fv, /*is_mut=*/0, /*is_cell=*/0);
+            if (cx->failed) return 0;
+          }
+          return v;
+        }
+      }
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_DESTRUCTURE_NAMED) {
+        AstNode *d = node->data.command.args[0];
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        for (uint32_t k = 0; k < d->data.destructure_named.count; k++) {
+          const char *nm = d->data.destructure_named.names[k];
+          uint32_t nl = d->data.destructure_named.name_lens[k];
+          IrVal fname = compile_string_literal(cx, nm, nl);
+          IrVal ga[] = {cx->sp, v, fname};
+          IrVal fv = emit_rt_call(cx, "jacl_field_get", ga, 3);
+          env_define(cx, nm, nl, fv, /*is_mut=*/0, /*is_cell=*/0);
+          if (cx->failed) return 0;
+        }
+        return v;
+      }
+      /* Node-form vec destructuring `def [a b …] V` (AST_DESTRUCTURE_VEC). */
+      if (hid == HEAD_DEF && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_DESTRUCTURE_VEC) {
+        AstNode *d = node->data.command.args[0];
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        for (uint32_t k = 0; k < d->data.destructure_vec.count; k++) {
+          const char *nm = d->data.destructure_vec.names[k];
+          uint32_t nl = d->data.destructure_vec.name_lens[k];
+          if (nl == 1 && nm[0] == '_') continue;           /* wildcard */
+          IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+          IrVal ga[] = {cx->sp, v, idx};
+          IrVal ev = emit_rt_call(cx, "jacl_index_get", ga, 3);
+          env_define(cx, nm, nl, ev, /*is_mut=*/0, /*is_cell=*/0);
+          if (cx->failed) return 0;
+        }
+        return v;
       }
 
       /* Positional destructuring `def [a b …] V` — bind each name to V[i]. */
@@ -1852,7 +1941,10 @@ static void compile_tail(Cx *cx, AstNode *node) {
     uint32_t bn = node->data.block.count;
     if (bn == 0) { emit_return_value(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))); return; }
     scope_enter(cx);
-    for (uint32_t i = 0; i + 1 < bn && !cx->failed; i++) compile_expr(cx, node->data.block.commands[i]);
+    for (uint32_t i = 0; i + 1 < bn && !cx->failed; i++) {
+      IrVal sv = compile_expr(cx, node->data.block.commands[i]);
+      if (!cx->failed) emit_stmt_error_check(cx, sv);      /* error auto-return */
+    }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
     scope_exit(cx);
     return;
