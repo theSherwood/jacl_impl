@@ -630,49 +630,82 @@ typedef enum {
  * external consumers. Keep these enums in sync. */
 typedef enum {
   HEAD_NONE = 0,
+
+  /* Operators */
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
   HEAD_DOT, HEAD_QDOT,
+
+  /* Bindings & defs */
   HEAD_DEF, HEAD_MUT, HEAD_SET, HEAD_PROC,
   HEAD_DEFSTRUCT, HEAD_DEFMACRO,
+
+  /* Control flow */
   HEAD_IF, HEAD_WHILE, HEAD_FOR,
   HEAD_BREAK, HEAD_CONTINUE, HEAD_RETURN,
   HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
+
+  /* Concurrency / suspension */
   HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE, HEAD_SLEEP,
+
+  /* Vec ops */
   HEAD_VEC,
   HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
   HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
-  /* Arr ops (mutable [Arr T]; see ARR_DESIGN.md). Must mirror ast.c. */
+
+  /* Arr ops (mutable [Arr T]; see ARR_DESIGN.md) */
   HEAD_ARR,
   HEAD_ARR_GET, HEAD_ARR_SET, HEAD_ARR_PUSH, HEAD_ARR_POP, HEAD_ARR_LEN,
+
+  /* Map ops */
   HEAD_MAP,
   HEAD_MAP_GET, HEAD_MAP_HAS, HEAD_MAP_LEN, HEAD_MAP_SET,
   HEAD_MAP_REMOVE, HEAD_MAP_KEYS, HEAD_MAP_VALS,
+
+  /* Builtins */
   HEAD_PRINT, HEAD_LENGTH, HEAD_BYTE_LENGTH,
   HEAD_INDEX, HEAD_SLICE, HEAD_CONCAT,
   HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
+
+  /* Errors */
   HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE, HEAD_PANIC,
-  HEAD_ASSERT_TYPE,
+  HEAD_ASSERT_TYPE,  /* compile-time static type check; emits no runtime code */
+
+  /* Boxes / atoms / coercion */
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
   HEAD_WATCH, HEAD_UNWATCH,
-  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF, HEAD_PTR_NULL,
+
+  /* Typed pointers (Stage 5a/5b/5c) */
+  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
-  HEAD_ADDR,
+  HEAD_ADDR,  /* [addr $p->field->...] — takes the address of a chain leaf */
+  HEAD_PTR_NULL,  /* [ptr-null [Ptr T]] — typed null pointer literal */
+
+  /* Buffer ops (Stage 6 — see BUFFER_DESIGN.md) */
   HEAD_BUF_LEN,
   HEAD_BUF_GET,
   HEAD_BUF_SET,
+  HEAD_BUF_UGET,  /* buf-unchecked-get — bounds-check-elided escape hatch */
+  HEAD_BUF_USET,  /* buf-unchecked-set — bounds-check-elided escape hatch */
+
+  /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
+
+  /* Streams / async / shell */
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
   HEAD_READ_FILE, HEAD_WRITE_FILE, HEAD_APPEND_FILE,
+
+  /* Quote / syntax / macros */
   HEAD_QUOTE, HEAD_SYNTAX_QUOTE, HEAD_INTERPRET, HEAD_INTERPRET_PRELUDE,
   HEAD_SYNTAX_KIND, HEAD_SYNTAX_DATUM, HEAD_SYNTAX_HEAD,
   HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
   HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
-  HEAD_ID_COUNT
+
+  HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
 typedef struct {

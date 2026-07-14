@@ -275,6 +275,7 @@ JaclVal jacl_box_new(JaclVal v);                   /* [box V] — mutable single
 JaclVal jacl_box_get(JaclVal b);                   /* [deref B] */
 JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
 JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
+JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
