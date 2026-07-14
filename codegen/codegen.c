@@ -1723,6 +1723,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         uint32_t len = bargs[tshift]->data.lit_string.length;
         IrVal val = compile_expr(cx, bargs[tshift + 1]);
         if (cx->failed) return 0;
+        /* `def i64/u64/f64 x V` — widen the value to the declared wide scalar so
+         * arithmetic on it promotes past 32 bits. */
+        if (tshift && bargs[0]->type == AST_LIT_STRING && bargs[0]->data.lit_string.length == 3) {
+          const char *tw = bargs[0]->data.lit_string.value;
+          int kind = !memcmp(tw, "i64", 3) ? 0x0E : !memcmp(tw, "u64", 3) ? 0x0F
+                   : !memcmp(tw, "f64", 3) ? 0x10 : 0;
+          if (kind) {
+            IrVal kc = irb_const_i64(cx->f, cx->cur, jaclval_i32(kind));
+            IrVal wa[] = {cx->sp, val, kc};
+            val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
+          }
+        }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
         if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
@@ -2041,6 +2053,37 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           }
           return sv;
         }
+      }
+
+      /* `[to TYPE V]` — cast (the TYPE word compiles as a string). */
+      if (hid == HEAD_TO && node->data.command.arg_count == 2 &&
+          node->data.command.args[0]->type == AST_LIT_STRING) {
+        IrVal tn = compile_string_literal(cx, node->data.command.args[0]->data.lit_string.value,
+                                          node->data.command.args[0]->data.lit_string.length);
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v, tn};
+        return emit_rt_call(cx, "jacl_to_cast", a, 3);
+      }
+      /* `[swap $ref $f]` — apply the closure to the deref'd value, store it back,
+       * and yield the new value (box or atom). */
+      if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
+        IrVal ref = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal clo = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal da[] = {cx->sp, ref};
+        IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
+        IrVal fa[] = {cx->sp, clo};
+        IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+        IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+        IrType r1[] = {IRB_I64};
+        IrVal cargs[] = {cx->sp, clo, cur};
+        IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+        IrVal sa[] = {cx->sp, ref, nv};
+        (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
+        return nv;
       }
 
       /* `[assert COND]` — by name (no interned head id): nil or an error (which the

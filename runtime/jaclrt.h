@@ -284,6 +284,9 @@ JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / err
 JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
 JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
 JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v);
+JaclVal jacl_wide_new(uint32_t tidx, int64_t bits); /* heap i64/u64/f64 cell */
+JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */
+JaclVal jacl_to_cast(JaclVal v, JaclVal tname);     /* [to TYPE V] */
 JaclVal jacl_assert_type(JaclVal v, JaclVal tname);/* dynamic type assertion */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
