@@ -182,13 +182,28 @@ the async/parking builtins (`sleep`/channels) follow. Tracked in `SVM_BACKEND_PH
 
 ## Ask 3 — `gc.roots` coverage contract for guest values on stacks/registers
 
-> **STATUS: OPEN.** Not a blocker (JACL works around it), but it forces a guest-side wart: an
-> explicit, hand-marked, un-reclaimable global root table for scheduler jobs (a cap + leak).
-> Closing it lets a guest keep its roots in normal locals.
+> **STATUS: RESOLVED — by contract, not a VM change.** svm's answer: **a vCPU top (its bare
+> native / `thread.spawn`-entry stack, e.g. our worker loop) must hold no heap roots at a
+> safepoint — push them into a fiber or the window before parking.** `gc.roots` scans suspended
+> fibers + the window (marked guest memory); it does **not** scan vCPU-top native frames or
+> unspilled registers, and won't (no register-flush shim). This is the existing model, now
+> written down as a contract. That's exactly the "give JACL a contract to target" option of this
+> ask, so it's answered.
 >
-> *Not contradicted by Ask 2.* `gc.roots` correctly scans a suspended fiber's **spilled** stack
-> (Ask 2 confirmed that). This ask is about what it does **not** cover: values in unspilled
-> registers, and possibly a non-collector worker vCPU's bare native frames.
+> **JACL already complies, and is sound.** The `jacl_all_jobs` registry + ready queues +
+> `running_job` are the "window": every job root lives in marked guest memory, never relied upon
+> from a bare vCPU stack. `mt::par_gc` passes 10/10 on the JIT. (The earlier experiment that
+> *relied* on the implicit stack scan for jobs held only in a runtime C local — `parallel`'s
+> `futs[]` — hung, which is precisely the contract's point: don't hold roots there.)
+>
+> **Remaining is JACL-side, not svm:** the registry's cap/leak is a *reclamation* problem (a
+> DONE job may be a held, re-awaitable future) — solved by refcounting jobs or moving result
+> ownership out of the job object, both independent of svm. Original ask kept below for the
+> record.
+
+---
+
+### Original ask (answered above by the vCPU-top contract)
 
 **Context.** JACL runs an M:N scheduler on `cont.*`: a persistent pool of `thread.spawn` vCPU
 workers, each running a bare worker loop that resumes job fibers. The guest GC finds heap roots
