@@ -45,6 +45,14 @@ JaclVal jacl_print(JaclVal v) {
     int len = jacl_itoa((long)jaclrt_as_i32(v), buf);
     buf[len++] = '\n';
     write(1, buf, len);
+  } else if (t == 0x03) {                          /* f32: shared repr via to_string */
+    JaclVal s = jacl_to_string(v);
+    uint32_t len = jacl_str_len(s);
+    char fb[64];
+    if (len > sizeof fb - 1) len = sizeof fb - 1;
+    jacl_str_bytes(v ? s : s, fb, sizeof fb);
+    write(1, fb, (long)len);
+    write(1, "\n", 1);
   } else if (t == 0x00) {                          /* nil */
     write(1, "nil\n", 4);
   } else if (t == 0x01) {                          /* bool */

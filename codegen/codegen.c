@@ -1236,6 +1236,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_LIT_INT:
       return irb_const_i64(cx->f, cx->cur, jaclval_i32(node->data.lit_int.value));
 
+    case AST_LIT_FLOAT: {
+      /* inline f32 JaclVal: tag 0x03 over the float's bit pattern */
+      union { float f; uint32_t u; } fb;
+      fb.f = (float)node->data.lit_float.value;
+      return irb_const_i64(cx->f, cx->cur, (int64_t)(((uint64_t)0x03 << 56) | fb.u));
+    }
+
     case AST_VAR_REF: {
       Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
       if (!bd) {
@@ -1936,6 +1943,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
           {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
           {HEAD_BUF_LEN,    "jacl_len",        1},
+          {HEAD_SLEEP,      "jacl_sleep",      1},
+          {HEAD_ATOM,       "jacl_atom_new",   1},
+          {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
         };
         /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
         if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&

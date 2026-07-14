@@ -12,26 +12,53 @@
 static inline uint64_t prop_flags(JaclVal a, JaclVal b) {
   return (a | b) & (JACL_FLAG_TAINTED | JACL_FLAG_SECRET);
 }
+/* ---- inline f32 (tag 0x03, bits in the low payload word) ---- */
+static inline JaclVal jaclrt_f32v(float f) {
+  union { float f; uint32_t u; } c; c.f = f;
+  return JACL_TAG_F32 | (uint64_t)c.u;
+}
+static inline float jaclrt_as_f32(JaclVal v) {
+  union { float f; uint32_t u; } c; c.u = (uint32_t)(v & 0xFFFFFFFFu);
+  return c.f;
+}
+static inline int jacl_is_num(JaclVal v) {
+  uint32_t t = jaclrt_type_index(v);
+  return t == 0x02 || t == 0x03;
+}
+static inline float jacl_num_f32(JaclVal v) {
+  return jaclrt_is_i32(v) ? (float)jaclrt_as_i32(v) : jaclrt_as_f32(v);
+}
 #define ERR_IF_ERR(a, b) do { if (jaclrt_is_error(a)) return (a); if (jaclrt_is_error(b)) return (b); } while (0)
 
 /* ---- arithmetic (i32) ---- */
 JaclVal jacl_add(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_i32(jaclrt_as_i32(a) + jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32(jaclrt_as_i32(a) + jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_f32v(jacl_num_f32(a) + jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_sub(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_i32(jaclrt_as_i32(a) - jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32(jaclrt_as_i32(a) - jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_f32v(jacl_num_f32(a) - jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_mul(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_i32(jaclrt_as_i32(a) * jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32(jaclrt_as_i32(a) * jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_f32v(jacl_num_f32(a) * jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_div(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b) && !(jaclrt_is_i32(a) && jaclrt_is_i32(b)))
+    return jaclrt_f32v(jacl_num_f32(a) / jacl_num_f32(b)) | prop_flags(a, b);
   if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
   int32_t x = jaclrt_as_i32(a), y = jaclrt_as_i32(b);
   if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
@@ -114,23 +141,35 @@ JaclVal jacl_ne(JaclVal a, JaclVal b) {
 }
 JaclVal jacl_lt(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_bool(jaclrt_as_i32(a) < jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_bool(jaclrt_as_i32(a) < jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_bool(jacl_num_f32(a) < jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_le(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_bool(jaclrt_as_i32(a) <= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_bool(jaclrt_as_i32(a) <= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_bool(jacl_num_f32(a) <= jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_gt(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_bool(jaclrt_as_i32(a) > jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_bool(jaclrt_as_i32(a) > jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_bool(jacl_num_f32(a) > jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_ge(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
-  return jaclrt_bool(jaclrt_as_i32(a) >= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_bool(jaclrt_as_i32(a) >= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_num(a) && jacl_is_num(b))
+    return jaclrt_bool(jacl_num_f32(a) >= jacl_num_f32(b)) | prop_flags(a, b);
+  return jaclrt_error();
 }
 JaclVal jacl_not(JaclVal a) {
   if (jaclrt_is_error(a)) return a;
@@ -243,6 +282,31 @@ JaclVal jacl_box_set(JaclVal b, JaclVal v) {
   return v;
 }
 JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0B); }
+/* [sleep S] — S seconds (i32 or f32): park on a private futex word until the
+ * timeout elapses (the futex wait re-checks GC, so a sleeping fiber's worker
+ * still answers stop-the-world requests through the scheduler loop). */
+int __vm_wait32(void *p, int expected, long timeout_ns);
+static int32_t jacl_sleep_word;
+JaclVal jacl_sleep(JaclVal secs) {
+  if (jaclrt_is_error(secs)) return secs;
+  double s = jaclrt_is_i32(secs) ? (double)jaclrt_as_i32(secs)
+           : (jaclrt_type_index(secs) == 0x03 ? (double)jaclrt_as_f32(secs) : -1.0);
+  if (s < 0) return jaclrt_error();
+  long total = (long)(s * 1e9);
+  while (total > 0) {
+    long chunk = total > 1000000L ? 1000000L : total;   /* 1 ms slices: stay GC-responsive */
+    (void)__vm_wait32(&jacl_sleep_word, 0, chunk);
+    total -= chunk;
+  }
+  return JACL_NIL;
+}
+/* Atoms: a mutable ref like box, tagged JACL_TAG_ATOM (deref/reset accept both). */
+JaclVal jacl_atom_new(JaclVal v) {
+  JaclVal c = jacl_cell_new(v);
+  return jaclrt_from_ptr(JACL_TAG_ATOM, jaclrt_as_ptr(c));
+}
+JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
+
 /* Named-field access across record-like values: struct field or map entry (string key). */
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
@@ -282,6 +346,28 @@ typedef struct { char *p; uint32_t n, cap; } JaclRepr;
 static void repr_put(JaclRepr *rb, const char *s, uint32_t n) {
   for (uint32_t i = 0; i < n && rb->n < rb->cap; i++) rb->p[rb->n++] = s[i];
 }
+/* Format an f32 like the old VM's display: up to 6 fractional digits, trailing
+ * zeros stripped; integral values print without a decimal point. */
+static void repr_f32(JaclRepr *rb, float fv) {
+  double v = (double)fv;
+  if (v != v) { repr_put(rb, "nan", 3); return; }
+  if (v < 0) { repr_put(rb, "-", 1); v = -v; }
+  if (v > 2147483000.0) { repr_put(rb, "inf", 3); return; }
+  uint64_t scaled = (uint64_t)(v * 1000000.0 + 0.5);
+  uint64_t ip = scaled / 1000000u, fp = scaled % 1000000u;
+  char tmp[24]; int j = 0;
+  if (ip == 0) tmp[j++] = '0';
+  while (ip) { tmp[j++] = (char)('0' + (ip % 10)); ip /= 10; }
+  while (j) { j--; repr_put(rb, &tmp[j], 1); }
+  if (fp) {
+    char fd[6];
+    for (int k = 5; k >= 0; k--) { fd[k] = (char)('0' + (fp % 10)); fp /= 10; }
+    int last = 5;
+    while (last >= 0 && fd[last] == '0') last--;
+    repr_put(rb, ".", 1);
+    for (int k = 0; k <= last; k++) repr_put(rb, &fd[k], 1);
+  }
+}
 static void repr_i32(JaclRepr *rb, int32_t x) {
   char tmp[16]; int j = 0;
   int neg = x < 0;
@@ -306,6 +392,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
   if (t == 0x00) { repr_put(rb, "nil", 3); return; }
   if (t == 0x01) { if (jaclrt_as_bool(v)) repr_put(rb, "true", 4); else repr_put(rb, "false", 5); return; }
   if (t == 0x02) { repr_i32(rb, jaclrt_as_i32(v)); return; }
+  if (t == 0x03) { repr_f32(rb, jaclrt_as_f32(v)); return; }
   if (t == 0x06) {                                       /* VECTOR: [vec e0 e1 …] */
     repr_put(rb, "[vec", 4);
     uint32_t n = jacl_vec_count(v);
@@ -358,7 +445,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);
