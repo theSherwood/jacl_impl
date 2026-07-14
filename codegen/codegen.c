@@ -52,6 +52,9 @@ typedef struct {
   IrVal       value;   /* SSA value, or (when is_cell) the cell pointer */
   int         is_mut;
   int         is_cell; /* a captured `mut`: backed by a heap cell, shared on capture */
+  /* static annotation carried from a typed [Arr T]/[Buf N T] def (compile-time checks) */
+  const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
+  int32_t     buf_size;                            /* fixed Buf length, or -1 */
 } Binding;
 
 /* A top-level proc: name -> its SVM function + arity. Registered before any body is
@@ -172,7 +175,7 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
     cx->locals = realloc(cx->locals, (size_t)cx->cap_locals * sizeof(Binding));
     if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
   }
-  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell};
+  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1};
 }
 
 /* ---- top-level procs ---- */
@@ -990,6 +993,53 @@ static IrVal emit_buf_new(Cx *cx, int32_t n) {
   }
   return av;
 }
+/* Record a typed collection annotation on the just-defined binding. */
+static void bind_annotate(Cx *cx, const char *name, uint32_t len,
+                          const char *et, uint32_t etl, int32_t bufn) {
+  Binding *b = env_lookup(cx, name, len);
+  if (!b) return;
+  b->elem_type = et; b->elem_type_len = etl; b->buf_size = bufn;
+}
+/* The element-type token of an `[Arr T]` / `[Buf N T]` / `[Vec T]` annotation. */
+static AstNode *ann_elem_type(AstNode *ann) {
+  if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
+      ann->data.command.head->type != AST_LIT_STRING) return NULL;
+  uint32_t hl = ann->data.command.head->data.lit_string.length;
+  const char *hn = ann->data.command.head->data.lit_string.value;
+  uint32_t ti = 0;
+  if ((hl == 3 && (!memcmp(hn, "Arr", 3) || !memcmp(hn, "Vec", 3)))) ti = 0;
+  else if (hl == 3 && !memcmp(hn, "Buf", 3)) ti = 1;      /* [Buf N T] */
+  else return NULL;
+  if (ann->data.command.arg_count <= ti) return NULL;
+  AstNode *t = ann->data.command.args[ti];
+  return (t->type == AST_LIT_STRING) ? t : NULL;
+}
+/* Statically check a literal element against a declared numeric/str element type.
+ * Only literals are checked (everything else is dynamic). Fails compilation with
+ * old-VM-shaped messages on a provable mismatch. */
+static int check_elem_literal(Cx *cx, AstNode *e, const char *et, uint32_t etl) {
+  int decl_str = (etl == 3 && memcmp(et, "str", 3) == 0);
+  /* Only enforce for types we understand statically: numerics + str. `dyn` (and any
+   * compound/unknown type) accepts everything. */
+  if (!decl_str && !cg_is_type_kw(et, etl)) return 1;
+  if (etl == 3 && memcmp(et, "dyn", 3) == 0) return 1;
+  if (e->type == AST_LIT_INT && decl_str) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "element type i32 does not match the declared %.*s element",
+             (int)etl, et);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  if (e->type == AST_LIT_STRING && !decl_str) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "\"%.*s\" is not a %.*s value",
+             (int)e->data.lit_string.length, e->data.lit_string.value, (int)etl, et);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  return 1;
+}
+
 /* Is this annotation command a `[Buf N T]`? Returns N (or -1). */
 static int32_t buf_ann_size(AstNode *ann) {
   if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
@@ -1375,9 +1425,22 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
-      /* Indexed arrow access `$b->7` — [. EXPR INT] over a buf/arr/vec. */
+      /* Indexed arrow access `$b->7` — [. EXPR INT] over a buf/arr/vec. A constant
+       * index against a fixed [Buf N T] binding is bounds-checked at compile time. */
       if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
           node->data.command.args[1]->type == AST_LIT_INT) {
+        if (node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          int32_t ix = (int32_t)node->data.command.args[1]->data.lit_int.value;
+          if (bb && bb->buf_size >= 0 && (ix < 0 || ix >= bb->buf_size)) {
+            char msg[128];
+            snprintf(msg, sizeof msg, "buf index %d out of bounds for [Buf %d %.*s]",
+                     ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
+            cx_fail(cx, msg);
+            return 0;
+          }
+        }
         IrVal bv = compile_expr(cx, node->data.command.args[0]);
         if (cx->failed) return 0;
         IrVal idx = irb_const_i64(cx->f, cx->cur,
@@ -1393,7 +1456,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal fname = compile_string_literal(cx, node->data.command.args[1]->data.lit_string.value,
                                              node->data.command.args[1]->data.lit_string.length);
         IrVal a[] = {cx->sp, sv, fname};
-        return emit_rt_call(cx, "jacl_struct_get", a, 3);
+        return emit_rt_call(cx, "jacl_field_get", a, 3);
       }
 
       /* Calling a closure value: the head is an expression (e.g. `[$f x]`). */
@@ -1424,6 +1487,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]));
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
+        {
+          AstNode *tt = ann_elem_type(node->data.command.args[0]);
+          if (tt) bind_annotate(cx, node->data.command.args[1]->data.lit_string.value,
+                                node->data.command.args[1]->data.lit_string.length,
+                                tt->data.lit_string.value, tt->data.lit_string.length,
+                                buf_ann_size(node->data.command.args[0]));
+        }
         return bv;
       }
 
@@ -1545,6 +1615,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
         } else {
           env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
+          /* Carry a typed-collection stamp onto the binding: from the def's own
+           * annotation (`def [Arr T] a V`) or from a typed constructor value
+           * (`def a [[Arr T] …]` — the ctor's head IS the annotation). */
+          AstNode *annsrc = NULL;
+          if (tshift && bargs[0]->type == AST_COMMAND) annsrc = bargs[0];
+          else if (bargs[tshift + 1]->type == AST_COMMAND &&
+                   bargs[tshift + 1]->data.command.head &&
+                   bargs[tshift + 1]->data.command.head->type == AST_COMMAND)
+            annsrc = bargs[tshift + 1]->data.command.head;
+          if (annsrc) {
+            AstNode *tt = ann_elem_type(annsrc);
+            if (tt) bind_annotate(cx, name, len, tt->data.lit_string.value,
+                                  tt->data.lit_string.length, buf_ann_size(annsrc));
+          }
         }
         return val;
       }
@@ -1752,10 +1836,15 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (!is_arr_ctor) bufn = buf_ann_size(h2);
         if (bufn >= 0) {
           /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero. */
+          AstNode *btt = ann_elem_type(h2);
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           uint32_t given = node->data.command.arg_count;
           for (int32_t k = 0; k < bufn; k++) {
+            if ((uint32_t)k < given && btt &&
+                !check_elem_literal(cx, node->data.command.args[k],
+                                    btt->data.lit_string.value, btt->data.lit_string.length))
+              return 0;
             IrVal e = ((uint32_t)k < given) ? compile_expr(cx, node->data.command.args[k])
                                             : irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
             if (cx->failed) return 0;
@@ -1765,9 +1854,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           return av;
         }
         if (is_arr_ctor) {
+          AstNode *att = (h2 && h2->type == AST_COMMAND) ? ann_elem_type(h2) : NULL;
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (att && !check_elem_literal(cx, node->data.command.args[i],
+                                           att->data.lit_string.value, att->data.lit_string.length))
+              return 0;
             IrVal e = compile_expr(cx, node->data.command.args[i]);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, av, e};
@@ -1844,6 +1937,34 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
           {HEAD_BUF_LEN,    "jacl_len",        1},
         };
+        /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
+        if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *ab = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          int ann_dyn = ab && ab->elem_type && ab->elem_type_len == 3 &&
+                        memcmp(ab->elem_type, "dyn", 3) == 0;
+          if (ab && ab->elem_type && !ann_dyn && cg_is_type_kw(ab->elem_type, ab->elem_type_len)) {
+            AstNode *e = node->data.command.args[1];
+            int decl_str = (ab->elem_type_len == 3 && memcmp(ab->elem_type, "str", 3) == 0);
+            if (e->type == AST_LIT_INT && decl_str) {
+              char msg[160];
+              snprintf(msg, sizeof msg,
+                       "arr-push: element type i32 does not match the declared %.*s element",
+                       (int)ab->elem_type_len, ab->elem_type);
+              cx_fail(cx, msg);
+              return 0;
+            }
+            if (e->type == AST_LIT_STRING && !decl_str) {
+              char msg[160];
+              snprintf(msg, sizeof msg,
+                       "arr-push: element type str does not match the declared %.*s element",
+                       (int)ab->elem_type_len, ab->elem_type);
+              cx_fail(cx, msg);
+              return 0;
+            }
+          }
+        }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
           if (node->data.command.arg_count != BI[bi].arity) {
