@@ -450,7 +450,10 @@ static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNod
     return 0;
   }
   if (node->data.command.head_id == HEAD_PROC && argc >= 3 &&
-      node->data.command.args[0]->type == AST_LIT_STRING && node->data.command.args[0]->data.lit_string.length == 0) {
+      node->data.command.args[0]->type == AST_LIT_STRING) {
+    /* Anonymous ([proc {x} {…}]) or NESTED NAMED procs — both compile as closures,
+     * so both count for the enclosing function's capture scan. (Top-level named
+     * procs never reach this: they're filtered by is_proc_def before scanning.) */
     *pnode = node->data.command.args[1]; *in_block = 0; *body = node->data.command.args[argc - 1]; return 1;
   }
   return 0;
