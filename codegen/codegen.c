@@ -2165,6 +2165,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
           {HEAD_RANGE,      "jacl_range_vec",  2},
           {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
+          {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
+          {HEAD_LINES,      "jacl_lines",      1},
         };
         /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
         if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&

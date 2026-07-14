@@ -121,6 +121,13 @@ __attribute__((noinline)) JaclVal jacl_vec_set(JaclVal vec, uint32_t idx, JaclVa
   if (!out) return jaclrt_error();
   return jaclrt_from_ptr(JACL_TAG_VECTOR, out);
 }
+/* Persistent concatenation of two vectors. */
+__attribute__((noinline)) JaclVal jacl_vec_concat(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
+  jvec_root *ra = (jvec_root*)jaclrt_as_ptr(a), *rb = (jvec_root*)jaclrt_as_ptr(b);
+  return jaclrt_from_ptr(JACL_TAG_VECTOR, jvec_concat(ra, rb));
+}
 /* Copy up to `cap` (key, value) entries into ks/vs; returns the number written.
  * Structural equality, rendering, and map-keys/vals build on this. */
 __attribute__((noinline)) uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, JaclVal *vs, uint32_t cap) {

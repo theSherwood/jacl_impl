@@ -425,6 +425,25 @@ JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   return jaclrt_error();
 }
 
+/* [lines S] — split a string on newlines into a vector of strings. */
+JaclVal jacl_lines(JaclVal s) {
+  if (jaclrt_is_error(s)) return s;
+  if (!jaclrt_is_string(s)) return jaclrt_error();
+  char buf[2048];
+  uint32_t len = jacl_str_len(s);
+  if (len > sizeof buf - 1) len = sizeof buf - 1;
+  jacl_str_bytes(s, buf, sizeof buf);
+  JaclVal out = jacl_vec_empty();
+  uint32_t start = 0;
+  for (uint32_t i = 0; i <= len; i++) {
+    if (i == len || buf[i] == '\n') {
+      out = jacl_vec_push(out, jacl_str_new(buf + start, i - start));
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
 /* [assert COND] — nil when truthy, an error otherwise. */
 JaclVal jacl_assert(JaclVal v) {
   if (jaclrt_is_error(v)) return v;

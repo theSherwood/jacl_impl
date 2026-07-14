@@ -289,6 +289,8 @@ JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname);     /* [to TYPE V] */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k);         /* dynamic ->: index or field */
 JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv);
+JaclVal jacl_vec_concat(JaclVal a, JaclVal b);      /* persistent vector concat */
+JaclVal jacl_lines(JaclVal s);                      /* split on newlines -> vec */
 JaclVal jacl_assert_type(JaclVal v, JaclVal tname);/* dynamic type assertion */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
