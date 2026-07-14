@@ -218,7 +218,20 @@ int main(int argc, char **argv) {
   LexResult toks = lexer_lex(src, &arena);
   if (toks.error_count) { fprintf(stderr, "lex errors: %u\n", toks.error_count); return 1; }
   ParseResult parse = parser_parse(toks, &arena);
-  if (parse.error_count) { fprintf(stderr, "parse errors: %u\n", parse.error_count); return 1; }
+  if (parse.error_count) {
+    /* Surface the first AST_ERROR's message (as jacl_eval does) so `# expect-error`
+     * oracles for parse-level rejections match, instead of a generic "parse errors: N". */
+    const char *first_err = NULL;
+    for (uint32_t i = 0; i < parse.count; i++)
+      if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
+        first_err = parse.nodes[i]->data.error.message;
+        break;
+      }
+    /* Prefix `parse error:` — the corpus's parse-level oracles are written that way. */
+    if (first_err) fprintf(stderr, "parse error: %s\n", first_err);
+    else fprintf(stderr, "parse errors: %u\n", parse.error_count);
+    return 1;
+  }
 
   /* Static-error oracle: run the old VM's full compiler purely for its compile-time
    * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
