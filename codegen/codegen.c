@@ -10,6 +10,7 @@
 /* JaclVal encodings (see runtime/jaclrt.h). */
 #define JACL_TAG_I32_SHIFTED ((uint64_t)0x02 << 56)
 #define JACLVAL_FALSE        ((int64_t)((uint64_t)0x01 << 56))   /* JACL_FALSE */
+#define JACLVAL_TRUE         ((int64_t)(((uint64_t)0x01 << 56) | 1)) /* JACL_TRUE */
 #define JACLVAL_NIL          ((int64_t)0)                        /* JACL_NIL   */
 static int64_t jaclval_i32(int32_t x) {
   return (int64_t)(JACL_TAG_I32_SHIFTED | (uint64_t)(uint32_t)x);
@@ -62,6 +63,7 @@ typedef struct {
   int         arity;
   int         is_generator; /* body contains `yield` → a fiber generator (sp, arg) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
+  IrFunc     *wrapper; /* lazily-created closure-ABI adapter for `$proc` value refs */
 } Proc;
 
 /* A closure literal whose body is compiled after its creation site (a worklist, so
@@ -762,6 +764,89 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
+#define FOR_IDX_SENTINEL "\x01""for-idx"
+#define FOR_IDX_SENTINEL_LEN 8
+#define FOR_COLL_SENTINEL "\x01""for-coll"
+#define FOR_COLL_SENTINEL_LEN 9
+
+/* `for COLL name { body }` (bind each element) / `for COLL $cb` (call a closure per
+ * element): an index loop over a VECTOR — i in 0..len, elem = coll[i]. The header
+ * exits when `i < len` is false OR errors (a non-vector's jacl_len yields error, so
+ * iteration over an unsupported collection terminates instead of spinning). */
+static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint32_t nlen,
+                              AstNode *body, AstNode *cb_node) {
+  scope_enter(cx);
+  IrVal coll = compile_expr(cx, coll_node);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  IrVal cb = 0;
+  if (cb_node) {
+    cb = compile_expr(cx, cb_node);
+    if (cx->failed) { scope_exit(cx); return 0; }
+  }
+  IrVal la[] = {cx->sp, coll};
+  IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+  env_define(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN, zero, /*is_mut=*/1, /*is_cell=*/0);
+  env_define(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN, len, 0, 0);
+  env_define(cx, FOR_COLL_SENTINEL, FOR_COLL_SENTINEL_LEN, coll, 0, 0);
+  if (cb_node) env_define(cx, "\x01""for-cb", 7, cb, 0, 0);
+  if (name) env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  /* header: continue iff (i < len) is exactly true (an error compare exits) */
+  enter_frame_block(cx, header);
+  {
+    Binding *bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
+    Binding *be = env_lookup(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN);
+    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, be->value);
+    IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+    IrVal is_true = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, cond, ctrue);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, is_true, body_blk, frame, w, exit_blk, frame, w);
+  }
+
+  /* body: elem = coll[i]; run body / call cb; i = i + 1 */
+  enter_frame_block(cx, body_blk);
+  {
+    Binding *bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
+    Binding *bc = env_lookup(cx, FOR_COLL_SENTINEL, FOR_COLL_SENTINEL_LEN);
+    IrVal ga[] = {cx->sp, bc->value, bi->value};
+    IrVal elem = emit_rt_call(cx, "jacl_vec_get_at", ga, 3);
+    if (name) {
+      Binding *bn = env_lookup(cx, name, nlen);
+      bn->value = elem;
+      (void)compile_expr(cx, body);
+    } else {
+      Binding *bcb = env_lookup(cx, "\x01""for-cb", 7);
+      IrVal fa[] = {cx->sp, bcb->value};
+      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+      IrType r1[] = {IRB_I64};
+      IrVal cargs[] = {cx->sp, bcb->value, elem};
+      (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+    }
+    if (cx->failed) { scope_exit(cx); return 0; }
+    bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
+    IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
+    bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, header, frame, w);
+  }
+
+  enter_frame_block(cx, exit_blk);
+  scope_exit(cx);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+
 /* [for NAME in <range> { body }] — scaffold supports integer ranges only:
  * `in [range A B]` / `in [range-inclusive A B]` is rejected for now, and the flat
  * `A .. B` form. General iteration over collections (the stream protocol) is later. */
@@ -794,7 +879,16 @@ static IrVal compile_for(Cx *cx, AstNode *node) {
       return compile_for_range(cx, name, nlen, args[2], args[4], args[5]);
     }
   }
-  cx_fail(cx, "for: scaffold supports `for NAME in A..B { body }` (integer ranges) only");
+  /* `for COLL name { body }` — element iteration (COLL is any expression). */
+  if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK) {
+    return compile_for_each(cx, args[0], args[1]->data.lit_string.value,
+                            args[1]->data.lit_string.length, args[2], NULL);
+  }
+  /* `for COLL $cb` — call a closure per element. */
+  if (argc == 2 && args[1]->type != AST_BLOCK && args[1]->type != AST_LIT_STRING) {
+    return compile_for_each(cx, args[0], NULL, 0, NULL, args[1]);
+  }
+  cx_fail(cx, "for: unsupported form (ranges, `for COLL name {body}`, `for COLL $cb`)");
   return 0;
 }
 
@@ -809,6 +903,29 @@ static int binding_name(Cx *cx, AstNode *cmd, const char **name, uint32_t *len) 
   return 1;
 }
 
+/* A top-level proc referenced as a VALUE (`$cb`): a zero-capture closure over a
+ * lazily-created adapter with the closure ABI (sp, self, a…) that calls the proc
+ * (sp, a…). Built once per proc; safe mid-compilation (saves/restores cx). */
+static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
+  if (p->wrapper) return p->wrapper;
+  IrType pt[2 + CG_MAX_PARAMS];
+  IrType r1[] = {IRB_I64};
+  int n = 2 + p->arity;
+  for (int k = 0; k < n; k++) pt[k] = IRB_I64;
+  IrFunc *w = irb_func_new(cx->m, pt, n, r1, 1);
+  IrFunc *sf = cx->f; IrBlock sb = cx->cur; IrVal ssp = cx->sp;
+  cx->f = w;
+  cx->cur = irb_block(w, pt, n);
+  IrVal cargs[1 + CG_MAX_PARAMS];
+  cargs[0] = 0;                                     /* sp (param 0; self at 1 is dropped) */
+  for (int k = 0; k < p->arity; k++) cargs[1 + k] = (IrVal)(2 + k);
+  IrVal r = irb_call(w, cx->cur, p->func, cargs, 1 + p->arity);
+  irb_return(w, cx->cur, &r, 1);
+  p->wrapper = w;
+  cx->f = sf; cx->cur = sb; cx->sp = ssp;
+  return w;
+}
+
 /* Lower one expression to an i64 SSA value (a JaclVal) in the current block. */
 static IrVal compile_expr(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
@@ -818,8 +935,25 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
 
     case AST_VAR_REF: {
       Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
-      if (!bd) { cx_failf(cx, "codegen: undefined variable '%.*s'",
-                          node->data.var_ref.name, node->data.var_ref.length); return 0; }
+      if (!bd) {
+        const char *nm = node->data.var_ref.name; uint32_t nl = node->data.var_ref.length;
+        /* Bare constant words: true / false / nil. */
+        if (nl == 4 && memcmp(nm, "true", 4) == 0)  return irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+        if (nl == 5 && memcmp(nm, "false", 5) == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
+        if (nl == 3 && memcmp(nm, "nil", 3) == 0)   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+        /* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter. */
+        Proc *pv = proc_lookup(cx, nm, nl);
+        if (pv && !pv->is_generator) {
+          IrFunc *w = proc_value_wrapper(cx, pv);
+          IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
+          IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+          IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
+          IrVal na[] = {cx->sp, fnref64, nupv};
+          return emit_rt_call(cx, "jacl_closure_new", na, 3);
+        }
+        cx_failf(cx, "codegen: undefined variable '%.*s'", nm, nl);
+        return 0;
+      }
       if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
       return bd->value;
     }
@@ -1182,12 +1316,21 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
-      cx_fail(cx, "unsupported command head (scaffold: + - * / %, comparisons, def/mut/set, if/while/for, proc calls)");
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING)
+        cx_failf(cx, "codegen: unsupported command head '%.*s'",
+                 node->data.command.head->data.lit_string.value,
+                 node->data.command.head->data.lit_string.length);
+      else
+        cx_fail(cx, "unsupported command head (non-name head)");
       return 0;
     }
 
     default:
-      cx_fail(cx, "unsupported AST node (scaffold: literals, vars, arithmetic, bindings, if, while)");
+      {
+        char msg[64];
+        snprintf(msg, sizeof msg, "unsupported AST node (type %d)", (int)node->type);
+        cx_fail(cx, msg);
+      }
       return 0;
   }
 }
@@ -1356,7 +1499,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
       cx->procs = realloc(cx->procs, (size_t)cx->cap_procs * sizeof(Proc));
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
-    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, gen, def};
+    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, gen, def, NULL};
   }
 }
 
