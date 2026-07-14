@@ -573,6 +573,33 @@ JaclVal jacl_first(JaclVal c) {
   if (jaclrt_is_error(c)) return c;
   return jacl_iter_val_at(c, jaclrt_i32(0));
 }
+/* Left-fold an arithmetic operator over a collection's elements — the runtime side of
+ * spreading a vector into a variadic operator call (`[+ ..$v]` -> reduce). `opid`
+ * selects add/sub/mul/div/mod; an empty collection yields the additive identity for +
+ * (0) and an error otherwise (matching a nullary operator). */
+JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(opid)) return jaclrt_error();
+  int32_t op = jaclrt_as_i32(opid);
+  uint32_t t = jaclrt_type_index(c);
+  if (t != 0x06 && t != 0x1A) return jaclrt_error();     /* vectors / arrays only */
+  uint32_t n = t == 0x1A ? jacl_arr_count(c) : jacl_vec_count(c);
+  if (n == 0) return op == 0 ? jaclrt_i32(0) : jaclrt_error();
+  JaclVal acc = jacl_iter_val_at(c, jaclrt_i32(0));
+  for (uint32_t i = 1; i < n; i++) {
+    JaclVal e = jacl_iter_val_at(c, jaclrt_i32((int32_t)i));
+    switch (op) {
+      case 0: acc = jacl_add(acc, e); break;
+      case 1: acc = jacl_sub(acc, e); break;
+      case 2: acc = jacl_mul(acc, e); break;
+      case 3: acc = jacl_div(acc, e); break;
+      case 4: acc = jacl_mod(acc, e); break;
+      default: return jaclrt_error();
+    }
+    if (jaclrt_is_error(acc)) return acc;
+  }
+  return acc;
+}
 /* for-over-collection accessors: the i-th VALUE and KEY of any iterable. A vector/arr
  * yields (index -> element) with the index itself as the key; a map yields its i-th
  * (key, value) entry in deterministic HAMT order (stable across the two calls, so a

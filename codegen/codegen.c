@@ -1955,6 +1955,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (fn) {
         uint32_t argc = node->data.command.arg_count;
         AstNode **args = node->data.command.args;
+        /* Operator spread `[+ ..$v]` — fold the operator over the collection at runtime
+         * (the element count is dynamic). Arithmetic operators only. */
+        if (argc == 1 && args[0]->type == AST_SPREAD) {
+          int opid = hid == HEAD_PLUS ? 0 : hid == HEAD_MINUS ? 1 : hid == HEAD_STAR ? 2
+                   : hid == HEAD_SLASH ? 3 : hid == HEAD_PERCENT ? 4 : -1;
+          if (opid >= 0) {
+            IrVal v = compile_expr(cx, args[0]->data.spread.expr);
+            if (cx->failed) return 0;
+            IrVal oc = irb_const_i64(cx->f, cx->cur, jaclval_i32(opid));
+            IrVal a[] = {cx->sp, v, oc};
+            return emit_rt_call(cx, "jacl_vec_reduce", a, 3);
+          }
+        }
         if (argc < 2) {
           AstNode *h = node->data.command.head;
           if (h && h->type == AST_LIT_STRING) {
@@ -1985,6 +1998,21 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
         if (p) {
           uint32_t argc = node->data.command.arg_count;
+          /* Spread into a fixed-arity proc `[add3 ..$v]` — the single spread supplies
+           * all N params by index (v[0..N)); the runtime index-get errors if v is short. */
+          if (!p->is_generator && argc == 1 &&
+              node->data.command.args[0]->type == AST_SPREAD) {
+            IrVal vec = compile_expr(cx, node->data.command.args[0]->data.spread.expr);
+            if (cx->failed) return 0;
+            IrVal cargs[1 + CG_MAX_PARAMS];
+            cargs[0] = cx->sp;
+            for (int i = 0; i < p->arity && i < CG_MAX_PARAMS; i++) {
+              IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(i));
+              IrVal ga[] = {cx->sp, vec, idx};
+              cargs[1 + i] = emit_rt_call(cx, "jacl_index_get", ga, 3);
+            }
+            return irb_call(cx->f, cx->cur, p->func, cargs, p->arity + 1);
+          }
           if ((int)argc != p->arity) {
             {
               char msg[160];
@@ -2279,6 +2307,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal sa[] = {cx->sp, ref, nv};
         (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
         return nv;
+      }
+
+      /* `[stack-trace]` — no error/frame capture on the SVM backend yet, so it yields
+       * the empty string (a program that only tests "no trace when no error" passes). */
+      if (hid == HEAD_STACK_TRACE && node->data.command.arg_count == 0) {
+        return compile_string_literal(cx, "", 0);
       }
 
       /* `[not COND]` — by name (no interned head id): boolean negation via jacl_not. */

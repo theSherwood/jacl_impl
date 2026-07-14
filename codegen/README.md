@@ -88,6 +88,44 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`,
   printing the program module's svm-text. Built with **gcc** (the frontend's toolchain).
 
+## Phase 4 — corpus bring-up (parity scoreboard)
+
+`runtime/harness/src/bin/parity.rs` drives the whole `test/jacl/*.jacl` corpus through
+the real pipeline (frontend → svm codegen → link → interp==jit) and scores each case
+against its inline `# expect:` / `# expect-error:` oracle, writing `docs/SVM_PARITY.md`.
+Phase 4 works that scoreboard cluster by cluster. Slices landed so far:
+
+- **Static-error oracle (the driver).** `tests/emit_jacl.c` runs the old VM's full
+  `compiler_compile` purely for its compile-time diagnostics, on its OWN re-lexed/
+  re-parsed AST (so the compiler's conformance pass and the SVM codegen never mutate a
+  shared tree). Every corpus program is written for the old VM, so the compiler accepts
+  each passing case and rejects each `# expect-error` case with its canonical message —
+  exactly the accept/reject the SVM backend must mirror. This resolves the bulk of the
+  typed/struct/ctx/buf/generator/typed-closure `expect-error` corpus without duplicating
+  those checks in the codegen. On rejection the emitted module is discarded.
+
+- **New command heads.** `?.` (optional chaining), `not` / `~`, `vec-slice`,
+  `range-inclusive`, `index` / `slice` (string + collection), `first` / `count`
+  (draining a generator source), `take` (bounded stream drain), the 3-arg dot mutation
+  `[. EXPR key VALUE]`, typed pointers as raw u64 addresses (`ptr-null` / `ptr-cast` /
+  `ptr-addr`), and a `stack-trace` stub (empty string).
+
+- **Typed `Map` constructor** `[[Map K V] k0 v0 …]`, alongside the existing typed
+  `Vec`/`Arr`/`Buf` constructors.
+
+- **`for`-over-map.** One name binds the value; two names bind key + value. Iteration
+  goes through uniform `jacl_iter_val_at` / `jacl_iter_key_at` accessors (vec/arr index
+  → element, map → i-th key/value in deterministic HAMT order), so the two-name form
+  also works over vectors and arrays (index + element).
+
+- **`assert` predicate form** `[assert OP a b …]` (evaluate `[OP a b …]`, assert truth).
+
+- **Old-VM-shaped arity messages** for builtins and operators (correct singular/plural).
+
+- **Runtime error semantics.** `print` / `to-string` render error-flagged values as
+  `<error: PAYLOAD>`; error propagation flows through `map-get`/`set`/`remove`,
+  `str-concat`, and `vec-push`.
+
 ## Testing
 
 `runtime/harness/tests/irbuilder.rs` compiles the builder + demo natively, emits each
@@ -99,4 +137,10 @@ runtime artifact. Run from `runtime/harness/`:
 ```sh
 cargo test --test irbuilder
 cargo test --test codegen
+```
+
+The full corpus scoreboard is regenerated with:
+
+```sh
+cargo run --release --bin parity      # writes docs/SVM_PARITY.md
 ```

@@ -314,6 +314,7 @@ JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b); /* [slice STR a b) subs
 JaclVal jacl_index_op(JaclVal x, JaclVal idx);     /* [index X i] string/vec/arr */
 JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b); /* [slice X a b) string/vec */
 JaclVal jacl_first(JaclVal c);                     /* [first C] first element */
+JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are
