@@ -140,3 +140,87 @@ __attribute__((noinline)) uint32_t jacl_map_entries(JaclVal m, JaclVal *ks, Jacl
 __attribute__((noinline)) uint32_t jacl_map_count(JaclVal m) {
   return (uint32_t)jmap_count((jmap_node*)jaclrt_as_ptr(m));
 }
+
+/* ===================================================================
+ * Mutable array (JACL_TAG_ARR, mirrors the old VM's [Arr T] semantics
+ * dynamically): a HEADER cell so every alias sees mutations —
+ *   header (JOBJ_NODE): [0] count (JaclVal i32), [1] cap (JaclVal i32),
+ *                       [2] data (JaclVal -> data cell)
+ *   data   (JOBJ_NODE): cap JaclVal element slots (traced).
+ * Growth allocates a doubled data cell and repoints the header, so
+ * outstanding references (aliases) keep observing the same array.
+ * =================================================================== */
+#define JACL_ARR_MIN_CAP 8
+static JaclVal arr_data_new(int32_t cap) {
+  JaclObj *d = (JaclObj *)jacl_alloc(JOBJ_NODE, (uint32_t)cap * 8u);
+  return jaclrt_from_ptr(JACL_TAG_VECTOR, d);   /* tag irrelevant; traced via header */
+}
+__attribute__((noinline)) JaclVal jacl_arr_new(void) {
+  JaclObj *h = (JaclObj *)jacl_alloc(JOBJ_NODE, 3 * 8u);
+  JaclVal *p = (JaclVal *)jacl_obj_payload(h);
+  p[0] = jaclrt_i32(0);
+  p[1] = jaclrt_i32(JACL_ARR_MIN_CAP);
+  p[2] = arr_data_new(JACL_ARR_MIN_CAP);
+  return jaclrt_from_ptr(JACL_TAG_ARR, h);
+}
+static JaclVal *arr_hdr(JaclVal a) {
+  if (jaclrt_type_index(a) != 0x1A) return 0;
+  return (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(a));
+}
+__attribute__((noinline)) uint32_t jacl_arr_count(JaclVal a) {
+  JaclVal *h = arr_hdr(a);
+  return h ? (uint32_t)jaclrt_as_i32(h[0]) : 0;
+}
+__attribute__((noinline)) JaclVal jacl_arr_get(JaclVal a, uint32_t i) {
+  JaclVal *h = arr_hdr(a);
+  if (!h || i >= (uint32_t)jaclrt_as_i32(h[0])) return jaclrt_error();
+  return ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i];
+}
+__attribute__((noinline)) JaclVal jacl_arr_push(JaclVal a, JaclVal v) {
+  JaclVal *h = arr_hdr(a);
+  if (!h) return jaclrt_error();
+  int32_t n = jaclrt_as_i32(h[0]), cap = jaclrt_as_i32(h[1]);
+  if (n == cap) {                                  /* grow: copy into a doubled data cell */
+    int32_t ncap = cap * 2;
+    JaclVal nd = arr_data_new(ncap);
+    JaclVal *src = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2]));
+    JaclVal *dst = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(nd));
+    for (int32_t k = 0; k < n; k++) dst[k] = src[k];
+    h = arr_hdr(a);                                /* re-read: alloc may have collected */
+    h[2] = nd;
+    h[1] = jaclrt_i32(ncap);
+  }
+  ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[n] = v;
+  h[0] = jaclrt_i32(n + 1);
+  return a;
+}
+__attribute__((noinline)) JaclVal jacl_arr_pop(JaclVal a) {
+  JaclVal *h = arr_hdr(a);
+  if (!h) return jaclrt_error();
+  int32_t n = jaclrt_as_i32(h[0]);
+  if (n <= 0) return jaclrt_error();
+  JaclVal *d = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2]));
+  JaclVal v = d[n - 1];
+  d[n - 1] = JACL_NIL;
+  h[0] = jaclrt_i32(n - 1);
+  return v;
+}
+JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx) {
+  if (jaclrt_is_error(a)) return a;
+  if (!jaclrt_is_i32(idx) || jaclrt_as_i32(idx) < 0) return jaclrt_error();
+  return jacl_arr_get(a, (uint32_t)jaclrt_as_i32(idx));
+}
+JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
+  JaclVal *h = arr_hdr(a);
+  if (jaclrt_is_error(a)) return a;
+  if (!h || !jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx), n = jaclrt_as_i32(h[0]);
+  if (i < 0 || i >= n) return jaclrt_error();
+  ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i] = v;
+  return v;
+}
+/* Element access across index-able collections (for-each's accessor). */
+JaclVal jacl_index_get(JaclVal coll, JaclVal idx) {
+  if (jaclrt_type_index(coll) == 0x1A) return jacl_arr_get_at(coll, idx);
+  return jacl_vec_get_at(coll, idx);
+}

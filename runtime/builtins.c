@@ -71,6 +71,13 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
       if (!jacl_val_equal(jacl_vec_get(a, i), jacl_vec_get(b, i))) return 0;
     return 1;
   }
+  if (t == 0x1A) {                                       /* ARR (mutable): elementwise */
+    uint32_t n = jacl_arr_count(a);
+    if (n != jacl_arr_count(b)) return 0;
+    for (uint32_t i = 0; i < n; i++)
+      if (!jacl_val_equal(jacl_arr_get(a, i), jacl_arr_get(b, i))) return 0;
+    return 1;
+  }
   if (t == 0x12) {                                       /* STRUCT */
     JaclVal *pa = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(a));
     JaclVal *pb = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(b));
@@ -151,6 +158,7 @@ JaclVal jacl_len(JaclVal v) {
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x06) return jaclrt_i32((int32_t)jacl_vec_count(v));   /* VECTOR */
   if (t == 0x07) return jaclrt_i32((int32_t)jacl_map_count(v));   /* MAP    */
+  if (t == 0x1A) return jaclrt_i32((int32_t)jacl_arr_count(v));   /* ARR    */
   return jaclrt_error();
 }
 /* JaclVal-uniform wrappers over ops whose native signatures take/return raw ints —
@@ -313,6 +321,16 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x1A) {                                       /* ARR: [arr e0 e1 …] */
+    repr_put(rb, "[arr", 4);
+    uint32_t n = jacl_arr_count(v);
+    for (uint32_t i = 0; i < n; i++) {
+      repr_put(rb, " ", 1);
+      repr_val(rb, jacl_arr_get(v, i), 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
   if (t == 0x12) {                                       /* STRUCT: [Type f0 v0 …] */
     JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
     repr_put(rb, "[", 1);
@@ -332,7 +350,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07 && t != 0x12) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

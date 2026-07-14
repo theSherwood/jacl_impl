@@ -43,11 +43,12 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_STRUCT        ((uint64_t)0x12 << JACL_TAG_SHIFT)
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
+#define JACL_TAG_ARR           ((uint64_t)0x1A << JACL_TAG_SHIFT)   /* mutable array (mirrors src/jacl.h) */
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
  * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21) added since
  * the runtime's streams are GC objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15))
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
@@ -277,6 +278,14 @@ JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem);     /* uniform vec-set */
 JaclVal jacl_map_keys_v(JaclVal m);                /* keys as a vector */
 JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
+JaclVal jacl_arr_new(void);                        /* mutable array (aliasing-visible) */
+JaclVal jacl_arr_push(JaclVal a, JaclVal v);       /* in-place append -> a */
+JaclVal jacl_arr_pop(JaclVal a);                   /* remove + return last (error if empty) */
+JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx);   /* i32 index -> element */
+JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
+uint32_t jacl_arr_count(JaclVal a);
+JaclVal jacl_arr_get(JaclVal a, uint32_t i);       /* raw-index get (internal users) */
+JaclVal jacl_index_get(JaclVal coll, JaclVal idx); /* vec OR arr element (for-each) */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are

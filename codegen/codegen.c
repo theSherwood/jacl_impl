@@ -848,7 +848,7 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
     Binding *bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
     Binding *bc = env_lookup(cx, FOR_COLL_SENTINEL, FOR_COLL_SENTINEL_LEN);
     IrVal ga[] = {cx->sp, bc->value, bi->value};
-    IrVal elem = emit_rt_call(cx, "jacl_vec_get_at", ga, 3);
+    IrVal elem = emit_rt_call(cx, "jacl_index_get", ga, 3);
     if (name) {
       Binding *bn = env_lookup(cx, name, nlen);
       bn->value = elem;
@@ -912,6 +912,10 @@ static IrVal compile_for(Cx *cx, AstNode *node) {
   if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK) {
     return compile_for_each(cx, args[0], args[1]->data.lit_string.value,
                             args[1]->data.lit_string.length, args[2], NULL);
+  }
+  /* `for COLL { body }` — implicit `$it` element binding. */
+  if (argc == 2 && args[1]->type == AST_BLOCK) {
+    return compile_for_each(cx, args[0], "it", 2, args[1], NULL);
   }
   /* `for COLL $cb` — call a closure per element. */
   if (argc == 2 && args[1]->type != AST_BLOCK && args[1]->type != AST_LIT_STRING) {
@@ -1364,6 +1368,29 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
       }
 
+      /* Mutable-array constructor: `[[Arr T] e0 e1 …]` (typed head — element type is
+       * dynamic for now) and the untyped literal `[arr e0 e1 …]`. */
+      {
+        AstNode *h2 = node->data.command.head;
+        int is_arr_ctor = (hid == HEAD_ARR);
+        if (!is_arr_ctor && h2 && h2->type == AST_COMMAND && h2->data.command.head &&
+            h2->data.command.head->type == AST_LIT_STRING &&
+            h2->data.command.head->data.lit_string.length == 3 &&
+            memcmp(h2->data.command.head->data.lit_string.value, "Arr", 3) == 0)
+          is_arr_ctor = 1;
+        if (is_arr_ctor) {
+          IrVal ea[] = {cx->sp};
+          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            IrVal e = compile_expr(cx, node->data.command.args[i]);
+            if (cx->failed) return 0;
+            IrVal pa[] = {cx->sp, av, e};
+            (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
+          }
+          return av;
+        }
+      }
+
       /* Struct constructor `[Point x 1 y 2]` — named (field value) pairs; declared
        * fields not given stay nil. Field slots are initialized in declaration order
        * (names + nil), then the provided pairs overwrite by name. */
@@ -1422,6 +1449,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_UNBOX,      "jacl_box_get",    1},
           {HEAD_RESET,      "jacl_box_set",    2},
           {HEAD_BOX_Q,      "jacl_is_box_v",   1},
+          {HEAD_ARR_GET,    "jacl_arr_get_at", 2},
+          {HEAD_ARR_SET,    "jacl_arr_set_at", 3},
+          {HEAD_ARR_PUSH,   "jacl_arr_push",   2},
+          {HEAD_ARR_POP,    "jacl_arr_pop",    1},
+          {HEAD_ARR_LEN,    "jacl_len",        1},
         };
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
