@@ -65,6 +65,8 @@ typedef struct {
   IrFunc     *func;
   int         arity;
   int         is_generator; /* body contains `yield` → a fiber generator (sp, arg) */
+  int         variadic;     /* last param is `..rest`: extra call args pack into a vec */
+  int         fixed_arity;  /* count of fixed params before the rest (variadic only) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
   IrFunc     *wrapper; /* lazily-created closure-ABI adapter for `$proc` value refs */
 } Proc;
@@ -199,7 +201,9 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
  * name (`{i32 x, i32 y}` -> i32 x i32 y), untyped are bare (`{x, y}` -> x y), and a
  * single empty-string token means zero params (`{}`). Returns the count, or -1 on
  * error. Types are skipped (codegen treats every value as an i64 JaclVal). */
-static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint32_t *lens) {
+static int extract_param_names_v(Cx *cx, AstNode *plist, const char **names, uint32_t *lens,
+                                 int *variadic_out) {
+  if (variadic_out) *variadic_out = 0;
   if (!plist || plist->type != AST_COMMAND) { cx_fail(cx, "proc params must be a { list }"); return -1; }
   AstNode *toks[CG_MAX_PARAMS * 2 + 2];
   int nt = 0;
@@ -213,6 +217,14 @@ static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint3
 
   int np = 0, i = 0;
   while (i < nt) {
+    /* `..rest` — the trailing rest param collects extra call args into a vector. The
+     * `..` arrives as its own bare token before the name; mark variadic and skip it. */
+    if (toks[i]->type == AST_LIT_STRING && toks[i]->data.lit_string.length == 2 &&
+        memcmp(toks[i]->data.lit_string.value, "..", 2) == 0) {
+      if (variadic_out) *variadic_out = 1;
+      i += 1;
+      if (i >= nt) { cx_fail(cx, "proc `..` needs a rest-param name"); return -1; }
+    }
     /* A compound type annotation (`[Vec T] xs`, `[Map K V] m`, `[Proc …] f`) arrives
      * as a COMMAND token before the name — skip it like a scalar type keyword. */
     if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 1;
@@ -231,6 +243,10 @@ static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint3
     np++;
   }
   return np;
+}
+/* Back-compat wrapper for callers that don't care about the variadic flag. */
+static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint32_t *lens) {
+  return extract_param_names_v(cx, plist, names, lens, NULL);
 }
 
 static Proc *proc_lookup(Cx *cx, const char *name, uint32_t len) {
@@ -1998,6 +2014,34 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
         if (p) {
           uint32_t argc = node->data.command.arg_count;
+          /* Variadic proc `[f a b c]` (proc has `..rest`): pass the fixed params
+           * directly and pack the trailing args into the rest vector. */
+          if (!p->is_generator && p->variadic) {
+            if ((int)argc < p->fixed_arity) {
+              char msg[160];
+              snprintf(msg, sizeof msg, "proc '%.*s' expects at least %d arguments but got %u",
+                       (int)head->data.lit_string.length, head->data.lit_string.value,
+                       p->fixed_arity, argc);
+              cx_fail(cx, msg);
+              return 0;
+            }
+            IrVal cargs[1 + CG_MAX_PARAMS];
+            cargs[0] = cx->sp;
+            for (int i = 0; i < p->fixed_arity; i++) {
+              cargs[1 + i] = compile_expr(cx, node->data.command.args[i]);
+              if (cx->failed) return 0;
+            }
+            IrVal ve[] = {cx->sp};
+            IrVal rest = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
+            for (uint32_t i = (uint32_t)p->fixed_arity; i < argc; i++) {
+              IrVal e = compile_expr(cx, node->data.command.args[i]);
+              if (cx->failed) return 0;
+              IrVal pa[] = {cx->sp, rest, e};
+              rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+            }
+            cargs[1 + p->fixed_arity] = rest;
+            return irb_call(cx->f, cx->cur, p->func, cargs, p->fixed_arity + 2);
+          }
           /* Spread into a fixed-arity proc `[add3 ..$v]` — the single spread supplies
            * all N params by index (v[0..N)); the runtime index-get errors if v is short. */
           if (!p->is_generator && argc == 1 &&
@@ -2545,7 +2589,9 @@ static void compile_tail(Cx *cx, AstNode *node) {
     if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING) {
       AstNode *head = node->data.command.head;
       Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
-      if (p) {
+      /* Variadic procs pack a rest vector at the call site (handled in compile_expr);
+       * skip the fixed-arity tail-call fast path and use the value+return fallback. */
+      if (p && !p->variadic) {
         uint32_t argc = node->data.command.arg_count;
         if ((int)argc != p->arity) {
           cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
@@ -2616,14 +2662,17 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     if (proc_lookup(cx, pname, plen)) { cx_failf(cx, "codegen: proc '%.*s' already defined", pname, plen); return; }
 
     const char *names[CG_MAX_PARAMS]; uint32_t lens[CG_MAX_PARAMS];
-    int arity = extract_param_names(cx, def->data.command.args[1], names, lens);
+    int variadic = 0;
+    int arity = extract_param_names_v(cx, def->data.command.args[1], names, lens, &variadic);
     if (arity < 0) return;
 
     /* A generator (body has `yield`) is a fiber function `(i64 sp, i64 arg) -> i64`:
      * the single declared param binds to the resume arg. Otherwise a plain proc
-     * `(i64 sp, i64 a0…)`. */
+     * `(i64 sp, i64 a0…)`. A variadic proc's declared params already count the rest
+     * slot (its last name), which the SVM function receives as the packed vector. */
     int gen = contains_yield(def->data.command.args[argc - 1]);
     if (gen && arity > 1) { cx_failf(cx, "codegen: generator '%.*s' may take at most one parameter (yet)", pname, plen); return; }
+    if (gen && variadic) { cx_failf(cx, "codegen: variadic generator '%.*s' unsupported", pname, plen); return; }
     int nparams = gen ? 1 : arity;
     ptypes[0] = IRB_I64; /* sp */
     for (int k = 0; k < nparams; k++) ptypes[k + 1] = IRB_I64;
@@ -2634,7 +2683,8 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
       cx->procs = realloc(cx->procs, (size_t)cx->cap_procs * sizeof(Proc));
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
-    cx->procs[cx->nprocs++] = (Proc){pname, plen, func, arity, gen, def, NULL};
+    cx->procs[cx->nprocs++] =
+        (Proc){pname, plen, func, arity, gen, variadic, variadic ? arity - 1 : arity, def, NULL};
   }
 }
 
