@@ -315,6 +315,9 @@ JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b); /* [slice STR a b) subs
 JaclVal jacl_index_op(JaclVal x, JaclVal idx);     /* [index X i] string/vec/arr */
 JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b); /* [slice X a b) string/vec */
 JaclVal jacl_first(JaclVal c);                     /* [first C] first element */
+JaclVal jacl_addr_of(JaclVal base, JaclVal idx);   /* [addr $buf->i] -> fat pointer */
+JaclVal jacl_ptr_deref(JaclVal p);                 /* [ptr-deref P] -> base[offset] */
+JaclVal jacl_ptr_offset(JaclVal p, JaclVal n);     /* [ptr-offset P N] -> advanced ptr */
 JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */
 JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */

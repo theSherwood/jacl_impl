@@ -378,6 +378,23 @@ static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len) {
 static IrVal emit_struct_zero(Cx *cx, SDef *sd, int depth);
 static IrVal emit_field_default(Cx *cx, const char *tn, uint32_t tl, int depth) {
   if (!tn || tl == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  /* A struct field of type `[Buf N T]` is stored by the parser as "Buf{N,T}"; zero-init
+   * it as a fresh N-element buffer (recursively defaulting each element). */
+  if (tl > 4 && memcmp(tn, "Buf{", 4) == 0 && depth < 8) {
+    int32_t n = 0; uint32_t i = 4;
+    while (i < tl && tn[i] >= '0' && tn[i] <= '9') { n = n * 10 + (tn[i] - '0'); i++; }
+    if (i < tl && tn[i] == ',') i++;
+    const char *et = tn + i; uint32_t etl = 0;
+    while (i + etl < tl && tn[i + etl] != '}') etl++;
+    IrVal ea[] = {cx->sp};
+    IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+    for (int32_t k = 0; k < n; k++) {
+      IrVal e = emit_field_default(cx, et, etl, depth + 1);
+      IrVal pa[] = {cx->sp, av, e};
+      (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
+    }
+    return av;
+  }
   if (cg_is_type_kw(tn, tl)) {
     if (tl == 4 && memcmp(tn, "bool", 4) == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
     if (tl == 3 && memcmp(tn, "str", 3) == 0) return compile_string_literal(cx, "", 0);
@@ -2347,6 +2364,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal v = compile_expr(cx, node->data.command.args[0]);
         return cx->failed ? 0 : v;
       }
+      /* `[addr $buf->i]` — a fat pointer { base, offset } over a buffer element. The
+       * arg is a dot access `[. base idx]`; take base + index and build the pointer. */
+      if (hid == HEAD_ADDR && node->data.command.arg_count == 1 &&
+          node->data.command.args[0]->type == AST_COMMAND &&
+          node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+          node->data.command.args[0]->data.command.arg_count == 2) {
+        AstNode *dot = node->data.command.args[0];
+        IrVal base = compile_expr(cx, dot->data.command.args[0]);
+        if (cx->failed) return 0;
+        AstNode *ixn = dot->data.command.args[1];
+        IrVal idx = (ixn->type == AST_LIT_INT)
+                        ? irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)ixn->data.lit_int.value))
+                        : compile_expr(cx, ixn);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, base, idx};
+        return emit_rt_call(cx, "jacl_addr_of", a, 3);
+      }
 
       /* `[first SRC]` / `[count SRC]` — the first element / element count of a stream.
        * A generator source is drained into a vector first (finite corpus generators). */
@@ -2560,6 +2594,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_VEC_SLICE,  "jacl_vec_slice",  3},
           {HEAD_RANGE_INCLUSIVE, "jacl_range_inclusive", 2},
           {HEAD_TILDE,      "jacl_not",        1},
+          {HEAD_PTR_DEREF,  "jacl_ptr_deref",  1},
+          {HEAD_PTR_OFFSET, "jacl_ptr_offset", 2},
           {HEAD_INDEX,      "jacl_index_op",   2},
           {HEAD_SLICE,      "jacl_slice_op",   3},
           {HEAD_MAP_GET,    "jacl_map_get",    2},

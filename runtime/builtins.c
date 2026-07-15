@@ -591,6 +591,36 @@ JaclVal jacl_arr_push_v(JaclVal a, JaclVal e) {
   if (jaclrt_is_error(r)) return r;
   return jaclrt_i32((int32_t)jacl_arr_count(a));
 }
+/* ---- buffer pointers (fat pointer over an array-backed buffer) ----
+ * `addr $buf->i` yields a pointer = a small 2-slot object { base, offset }; ptr-deref
+ * reads base[offset]; ptr-offset advances the offset. On the SVM backend buffers are
+ * JaclVal arrays (not raw memory), so a pointer carries (array, index) rather than a
+ * machine address — enough to walk a buffer's elements the way a C extern would. The
+ * object is a 2-element vector internally (traced, so the base survives GC). */
+JaclVal jacl_addr_of(JaclVal base, JaclVal idx) {
+  if (jaclrt_is_error(base)) return base;
+  if (jaclrt_is_error(idx)) return idx;
+  JaclVal p = jacl_vec_empty();
+  p = jacl_vec_push(p, base);
+  p = jacl_vec_push(p, jaclrt_is_i32(idx) ? idx : jaclrt_i32(0));
+  return p;
+}
+JaclVal jacl_ptr_deref(JaclVal p) {
+  if (jaclrt_is_error(p)) return p;
+  if (jaclrt_type_index(p) != 0x06) return jaclrt_error();
+  return jacl_index_get(jacl_vec_get(p, 0), jacl_vec_get(p, 1));
+}
+JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
+  if (jaclrt_is_error(p)) return p;
+  if (jaclrt_is_error(n)) return n;
+  if (jaclrt_type_index(p) != 0x06 || !jaclrt_is_i32(n)) return jaclrt_error();
+  JaclVal base = jacl_vec_get(p, 0), off = jacl_vec_get(p, 1);
+  JaclVal noff = jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(n));
+  JaclVal np = jacl_vec_empty();
+  np = jacl_vec_push(np, base);
+  np = jacl_vec_push(np, noff);
+  return np;
+}
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
   if (jaclrt_is_error(c)) return c;
