@@ -30,6 +30,70 @@ static int jacl_itoa(long v, char *buf) {
   return len;
 }
 
+/* ---- in-memory virtual filesystem ----
+ * The svm powerbox exposes only stdout/stdin/exit — there is no host filesystem capability
+ * (its sandbox deliberately excludes arbitrary FS). So file I/O is modelled guest-side: a
+ * runtime map keyed by absolute path holds each file's contents. This reproduces the corpus's
+ * observable behaviour (write→read round-trips, a missing read → error, a write into a
+ * nonexistent directory → error) without touching the real host FS, and is identical on the
+ * interpreter and the JIT (the map lives in guest memory, fresh per run). The global holds a
+ * heap value, so it is a GC root (jacl_vfs_mark_root, from jacl_sched_mark_roots). */
+JaclVal jacl_vfs;   /* path(string) -> content(string); nil == empty */
+static JaclVal jacl_vfs_map(void) {
+  if (jaclrt_is_nil(jacl_vfs)) jacl_vfs = jacl_map_empty();
+  return jacl_vfs;
+}
+
+/* A write succeeds only if the path's parent directory "exists": the model knows just the
+ * root and /tmp (where the corpus writes), so a path like /tmp/foo.txt is writable but
+ * /tmp/no_such_dir/out.txt is not — mirroring open()'s ENOENT on a missing directory. */
+static int jacl_vfs_parent_ok(JaclVal path) {
+  char p[1024];
+  uint32_t len = jacl_str_len(path);
+  if (len >= sizeof p) return 0;
+  jacl_str_bytes(path, p, sizeof p);
+  p[len] = 0;
+  int slash = -1;
+  for (uint32_t i = 0; i < len; i++) if (p[i] == '/') slash = (int)i;
+  if (slash < 0) return 0;                 /* no directory component */
+  if (slash == 0) return 1;                /* parent is "/" */
+  return slash == 4 && p[0] == '/' && p[1] == 't' && p[2] == 'm' && p[3] == 'p';  /* "/tmp" */
+}
+
+/* `[read-file PATH]` — the file's contents, or an error value if it was never written. */
+JaclVal jacl_read_file(JaclVal path) {
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path)) return jaclrt_error();
+  JaclVal v = jacl_map_get(jacl_vfs_map(), path);
+  if (jaclrt_is_nil(v)) return jaclrt_error();   /* no such file → error (try/catch-able) */
+  return v;
+}
+
+/* `[write-file CONTENT PATH]` — create/truncate; error if the parent directory is unknown. */
+JaclVal jacl_write_file(JaclVal content, JaclVal path) {
+  if (jaclrt_is_error(content)) return content;
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
+  if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
+  jacl_vfs = jacl_map_set(jacl_vfs_map(), path, content);
+  return jaclrt_nil();
+}
+
+/* `[append-file CONTENT PATH]` — extend an existing file, or create it like write-file. */
+JaclVal jacl_append_file(JaclVal content, JaclVal path) {
+  if (jaclrt_is_error(content)) return content;
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
+  JaclVal cur = jacl_map_get(jacl_vfs_map(), path);
+  if (jaclrt_is_nil(cur)) {                    /* new file: same rule as write-file */
+    if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
+    jacl_vfs = jacl_map_set(jacl_vfs_map(), path, content);
+  } else {
+    jacl_vfs = jacl_map_set(jacl_vfs_map(), path, jacl_str_concat(cur, content));
+  }
+  return jaclrt_nil();
+}
+
 /* `print V` — write V's text form + newline to stdout; returns nil (like the old VM). */
 JaclVal jacl_print(JaclVal v) {
   char buf[64];
