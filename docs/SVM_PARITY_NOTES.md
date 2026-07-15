@@ -98,6 +98,10 @@ program's *run*, not just its compile — neither is wired today.
   head that evaluates to a closure — call through the closure ABI like a `[$f x]` var head,
   guarded so typed collection constructors (`[[Vec T] …]`) keep their own path.
 - **`buf-unchecked-get`/`-set`** map to the lenient array get/set.
+- **Struct-name type prefixes** (`Point p` params, `def Point p V`) — a Capitalized
+  identifier is now recognized as a type token, not a param/binding name.
+- **By-value `[Buf N T]` proc params** — copied once in the callee prologue
+  (`jacl_arr_copy`, deep over nested buffers), so callee mutations don't escape.
 
 ## Remaining clusters (and why they're hard)
 
@@ -135,14 +139,14 @@ means breadth work in `codegen/codegen.c` (+ maybe a fail-closed `jacl_*` entry 
 | cluster | size | kind | notes |
 |---|---|---|---|
 | concurrency hangs | ~72 | runtime/infra | scheduler + fibers must quiesce under interp==jit; biggest single bucket |
-| buffers + pointers | ~12 | runtime | needs linear-memory-backed `[Buf N T]` so `addr`/`ptr-deref`/`ptr-offset` read raw bytes; fat-pointer arrow-index + `Ptr<T>(0x…)` print need a pointer runtime type |
+| buffers + pointers | ~11 | runtime | needs linear-memory-backed `[Buf N T]` so `addr`/`ptr-deref`/`ptr-offset` read raw bytes; fat-pointer arrow-index + `Ptr<T>(0x…)` print need a pointer runtime type. (By-value buf params + `buf-unchecked-*` are done.) |
 | typed-collection print | ~3 | runtime (GC) | distinguish typed `[Vec T]` from `[vec …]`; blocked on the root-scan tag contract (see above) |
 | pointer print format | 2 | runtime | `Ptr<i32>(0x…)` needs a first-class pointer type carrying the pointee type + address |
 | stack traces | 2 | runtime | capture the call chain + line numbers at error creation |
 | atom watchers (`watch`) | 5 | runtime | trampoline to call a guest closure from runtime C on reset/swap |
 | file I/O (`read/write-file`) | ~5 | infra | grant a Filesystem powerbox cap through the harness |
 | module-global proc capture | ~3 | codegen | a top-level `proc` reading a top-level `def` needs module-global slots (procs are standalone functions today) |
-| nested compound proc params | ~4 | codegen | flatten `[Proc [Point] i32]`-style nested brackets in the param extractor |
+| nested compound proc params | ~2 | codegen | flatten deeper `[Proc [Point] i32]`-style nested brackets (the scalar `Point p` prefix is now handled) |
 | runtime-checked `expect-error` | ~6 | driver | const-fold computed indices, or score an expect-error program's *run* |
 
 The compiler-check oracle already covers the *statically* rejectable `expect-error`

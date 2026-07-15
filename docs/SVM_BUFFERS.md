@@ -61,9 +61,17 @@ current tag scheme doesn't carry.
 - **`$p->N` arrow indexing on fat pointers** and the `Ptr<T>(0xADDR)` print form — both need
   a first-class pointer runtime type (a new heap tag), so `jacl_index_get` and the printer
   can recognise a pointer and act on it.
-- **By-value buffer proc params** (`[Buf N T]` passed by value, mutations not escaping) —
-  the array model is a reference, so a copy would have to be inserted at the call site from
-  the param's declared type.
-
 These are the buffer/pointer entries in `docs/SVM_PARITY_NOTES.md`'s difficulty map; the
 element-access and zero-init half of the surface is done, the raw-memory half is not.
+
+## By-value buffer params (done)
+
+A `[Buf N T]` proc param is **passed by value**: the callee sees its own buffer, and any
+`buf-set` / `set $b->i` it performs does not escape to the caller's buffer. Because the
+array model is a reference, this is implemented by **copying once in the callee prologue**
+(`jacl_arr_copy`, which recurses into nested-buffer elements so a `[Buf N [Buf M T]]` is
+deep by value) rather than inserting a copy at every call site. `scan_buf_params` walks the
+proc's param tokens — the same walk the name extractor uses, so indices line up — and flags
+which params are buffer-typed; the prologue rebinds each flagged param to its copy. A
+non-array argument passes through `jacl_arr_copy` unchanged, so the copy is a no-op for
+anything that isn't actually a buffer.
