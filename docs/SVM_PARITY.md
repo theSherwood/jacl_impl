@@ -111,7 +111,7 @@
 | 2 | `codegen: proc 'applyp' expects 3 arguments but got 2` |
 | 2 | `codegen: set of undefined variable 'x'` |
 | 2 | `codegen: undefined variable 'base'` |
-| 2 | `codegen: unsupported command head 'buf-unchecked-set'` |
+| 2 | `codegen: unsupported command head 'buf-unchecked-get'` |
 | 2 | `codegen: unsupported command head 'future?'` |
 | 2 | `codegen: unsupported command head 'return'` |
 | 2 | `codegen: unsupported command head 'timeout'` |

@@ -2620,6 +2620,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ARR_LEN,    "jacl_len",        1},
           {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
           {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
+          {HEAD_BUF_USET,   "jacl_arr_set_at", 3},
           {HEAD_BUF_LEN,    "jacl_len",        1},
           {HEAD_SLEEP,      "jacl_sleep",      1},
           {HEAD_ATOM,       "jacl_atom_new",   1},
