@@ -32,6 +32,7 @@ runtime internals.
 | `vec-get` / `vec-set` / `vec-len` | `jacl_vec_get_at` / `jacl_vec_set_at` / `jacl_len` |
 | `vec-slice` / `vec-concat` | `jacl_vec_slice` / `jacl_vec_concat` |
 | `arr` / `arr-push` / `arr-get` / `arr-set` / `arr-pop` | `jacl_arr_new` / `jacl_arr_push_v` / `jacl_arr_get_at` / `jacl_arr_set_at` / `jacl_arr_pop` |
+| by-value `[Buf N T]` param copy | `jacl_arr_copy` (deep over nested buffers; no-op on non-arrays) |
 | `map` literal / `map-get` / `map-set` / `map-has` / `map-remove` / `map-keys` / `map-vals` | `jacl_map_*` |
 | `index` / `slice` | `jacl_index_op` / `jacl_slice_op` (string vs vec/arr) |
 | `first` / `count` / `length` | `jacl_first` / `jacl_len` |
@@ -65,6 +66,12 @@ Array bounds are lenient (vec-style): OOB get → nil, OOB set grows with fill, 
 (a `{base, offset}` fat pointer); `ptr-deref` → `jacl_ptr_deref`; `ptr-offset` →
 `jacl_ptr_offset`. `ptr-cast` / `ptr-null` / `ptr-addr` treat pointers as raw addresses
 (identity / 0).
+
+A `[Buf N T]` passed to a proc expecting `[Ptr T]` **decays** to the bare array (C-style,
+the pointer is `&buf[0]`): `jacl_ptr_deref` reads element 0 of a bare array, and
+`jacl_ptr_offset` treats it as `{buf, 0}` before advancing, so a decayed buffer walks
+element-by-element exactly like a fat pointer. A `[Buf N T]` param proper (not `[Ptr T]`)
+is copied by value in the callee prologue (`jacl_arr_copy`), so callee writes don't escape.
 
 ## Control, streams, concurrency, host
 
