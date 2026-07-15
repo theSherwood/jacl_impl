@@ -1142,6 +1142,20 @@ static int32_t buf_ann_size(AstNode *ann) {
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
+/* Is `h` a type-constructor head — `[Arr T]` / `[Vec T]` / `[Map K V]` / `[Buf N T]`?
+ * These share the AST_COMMAND-head shape with a closure-valued expression head
+ * (e.g. `[vec-get $fns i]`), so the direct-call path must skip them and let the typed
+ * collection-constructor path handle them. */
+static int is_type_ctor_head(AstNode *h) {
+  if (!h || h->type != AST_COMMAND) return 0;
+  AstNode *ih = h->data.command.head;
+  if (ih && ih->type == AST_LIT_STRING && ih->data.lit_string.length == 3) {
+    const char *s = ih->data.lit_string.value;
+    if (!memcmp(s, "Arr", 3) || !memcmp(s, "Vec", 3) || !memcmp(s, "Map", 3)) return 1;
+  }
+  return buf_ann_size(h) >= 0;   /* [Buf N T] */
+}
+
 /* The element type NODE of an `[Arr T]`/`[Vec T]`/`[Buf N T]` annotation — unlike
  * ann_elem_type, this returns compound element types (e.g. a nested `[Buf M U]`) too. */
 static AstNode *ann_elem_node(AstNode *ann) {
@@ -1814,7 +1828,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       }
 
       /* Calling a closure value: the head is an expression (e.g. `[$f x]`). */
-      if (node->data.command.head && node->data.command.head->type == AST_VAR_REF) {
+      /* A closure-valued head: either `[$f a…]` (var-ref) or a general expression head
+       * `[[vec-get $fns i] a…]` / `[[pick-fn] a…]` (a command that evaluates to a
+       * closure). Both compile the head to a value and call it through the closure ABI
+       * (sp, self, args…) via call_indirect. */
+      if (node->data.command.head && (node->data.command.head->type == AST_VAR_REF ||
+              (node->data.command.head->type == AST_COMMAND &&
+               !is_type_ctor_head(node->data.command.head)))) {
         IrVal cval = compile_expr(cx, node->data.command.head);
         if (cx->failed) return 0;
         uint32_t argc = node->data.command.arg_count;
