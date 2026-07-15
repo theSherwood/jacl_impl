@@ -47,8 +47,27 @@ long __vm_vcpu_tls_get(void);
 
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
+/* Pool size. The DEFAULT is 1 — a single cooperative worker (main) — because that is the
+ * only configuration correct on BOTH svm backends, and the reference interpreter (the
+ * parity oracle) is one of them:
+ *
+ *   - The svm interpreter multiplexes every `thread.spawn`ed vCPU cooperatively onto one
+ *     OS thread (it is `#![forbid(unsafe_code)]`, no native stack switching). With >1
+ *     worker, jobs are pinned round-robin to per-worker queues that only their owner drains
+ *     (next_owner / rq_pop), and the cross-vCPU park/wake handshake livelocks under that
+ *     cooperative driver — every spawn/await/parallel/race program hangs.
+ *   - With a single worker, all jobs land on worker 0's queue and main's worker_loop drains
+ *     them inline: `await` suspends the fiber back to the loop (jacl_await), the loop runs
+ *     the awaited job to completion, then re-enqueues and resumes the waiter with the
+ *     result. No cross-vCPU wakeup is ever needed, so it makes progress under the
+ *     interpreter AND produces identical output under the JIT — exactly what the
+ *     interp==jit differential oracle requires.
+ *
+ * The multi-worker real-parallelism pool below is retained unchanged and is opt-in: build
+ * with -DJACL_POOL_WORKERS=N for a genuinely OS-threaded JIT deployment. Cooperative mode
+ * gives up parallelism (a performance property), not correctness. */
 #ifndef JACL_POOL_WORKERS
-#define JACL_POOL_WORKERS      4            /* persistent pool size (main = worker 0) */
+#define JACL_POOL_WORKERS      1            /* main = worker 0; cooperative single-thread default */
 #endif
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
 
