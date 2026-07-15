@@ -1052,11 +1052,14 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
-static IrVal emit_buf_new(Cx *cx, int32_t n) {
+static IrVal emit_field_default(Cx *cx, const char *tn, uint32_t tl, int depth); /* fwd */
+static IrVal emit_buf_new(Cx *cx, int32_t n, const char *et, uint32_t etl) {
   IrVal ea[] = {cx->sp};
   IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
-  IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
   for (int32_t k = 0; k < n; k++) {
+    /* Each slot takes its element type's zero: a struct-element buf zero-inits a
+     * fresh struct per slot; numeric/other elements take a plain zero. */
+    IrVal zero = emit_field_default(cx, et, etl, 0);
     IrVal pa[] = {cx->sp, av, zero};
     (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
   }
@@ -1748,7 +1751,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           node->data.command.args[0]->type == AST_COMMAND &&
           node->data.command.args[1]->type == AST_LIT_STRING &&
           buf_ann_size(node->data.command.args[0]) >= 0) {
-        IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]));
+        AstNode *bet = ann_elem_type(node->data.command.args[0]);
+        IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]),
+                                bet ? bet->data.lit_string.value : NULL,
+                                bet ? bet->data.lit_string.length : 0);
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
         {
@@ -2337,8 +2343,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                 !check_elem_literal(cx, node->data.command.args[k],
                                     btt->data.lit_string.value, btt->data.lit_string.length))
               return 0;
-            IrVal e = ((uint32_t)k < given) ? compile_expr(cx, node->data.command.args[k])
-                                            : irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+            IrVal e = ((uint32_t)k < given)
+                          ? compile_expr(cx, node->data.command.args[k])
+                          : emit_field_default(cx, btt ? btt->data.lit_string.value : NULL,
+                                               btt ? btt->data.lit_string.length : 0, 0);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, av, e};
             (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
