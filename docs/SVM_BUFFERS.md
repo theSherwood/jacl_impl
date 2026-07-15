@@ -58,9 +58,22 @@ current tag scheme doesn't carry.
   multi-byte word through a `u8` pointer, and `ptr-cast` between element widths all assume
   a byte-addressable buffer. These need a linear-memory-backed buffer (an svm `memory`
   region + a bump allocator) rather than the `JaclVal`-array model.
-- **`$p->N` arrow indexing on fat pointers** and the `Ptr<T>(0xADDR)` print form — both need
-  a first-class pointer runtime type (a new heap tag), so `jacl_index_get` and the printer
-  can recognise a pointer and act on it.
+- **`$p->…` arrow access on fat pointers** and the `Ptr<T>(0xADDR)` print form — both need
+  a first-class pointer runtime type (a new heap tag), so `jacl_index_get`, the field
+  get/set path, and the printer can recognise a pointer and act on it. Two concrete corpus
+  cases sit on this gap:
+  - `buf_ptr_arrow`: `$p->0` on a fat pointer reads the *whole base array* (the get lowers
+    to `jacl_index_get({base, off}, 0)` → element 0 of the 2-slot pointer vec = `base`)
+    instead of `base[off + 0]`.
+  - `buf_struct_addr`: `set $p->x 99` — a field *write* through a pointer to a struct — sets
+    field `x` on the `{base, off}` pointer vec (a no-op) rather than dereferencing to the
+    struct and mutating it, so the pointee is unchanged.
+
+  The fat pointer *is* a recognisable shape (a 2-slot vec of `{array-or-struct, i32}`), but
+  keying arrow access off that shape is fragile — a legitimate `{array, i32}` vec would be
+  misread. The sound fix is a distinct pointer heap tag whose access site derefs
+  `base[off (+ idx)]` for an index and `deref-then-field` for a name; `ptr-deref` /
+  `ptr-offset` already model the deref/advance, so the arrow forms would reuse them.
 These are the buffer/pointer entries in `docs/SVM_PARITY_NOTES.md`'s difficulty map; the
 element-access and zero-init half of the surface is done, the raw-memory half is not.
 
