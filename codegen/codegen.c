@@ -190,8 +190,11 @@ static Binding *env_lookup(Cx *cx, const char *name, uint32_t len) {
 
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
-  /* `_` is the throwaway binding — re-binding it is always allowed (never an error). */
-  if (!(len == 1 && name[0] == '_'))
+  /* Re-binding is allowed for the throwaway `_`, and at the outermost module scope where a
+   * top-level `def` is reassignment (the old VM permits `def y 10` then `def y 42`). Inside
+   * any nested block/proc scope, same-scope shadowing of an immutable binding is an error. */
+  int module_scope = cx->at_top_level && cx->nmarks <= 1;
+  if (!module_scope && !(len == 1 && name[0] == '_'))
   for (int i = mark; i < cx->nlocals; i++)
     if (name_eq(&cx->locals[i], name, len) && !cx->locals[i].is_mut) {
       cx_failf(cx, "codegen: variable '%.*s' already defined in this scope", name, len);
