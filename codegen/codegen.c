@@ -103,6 +103,7 @@ typedef struct {
 
   /* innermost enclosing loop (break/continue targets); width = frame at loop entry */
   IrBlock loop_continue, loop_break; int loop_width; int in_loop;
+  int loop_brk_ok;  /* innermost loop carries a `break V` result slot (BRK_SENTINEL) */
   /* innermost enclosing try (statement errors branch to the handler, not return) */
   IrBlock try_target; int try_width; int in_try;
 
@@ -743,10 +744,10 @@ static IrVal compile_while(Cx *cx, AstNode *node) {
 
   /* body: run, then loop back with the updated frame */
   enter_frame_block(cx, body);
-  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width;
-    cx->in_loop = 1; cx->loop_continue = header; cx->loop_break = exit_blk; cx->loop_width = w;
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
+    cx->in_loop = 1; cx->loop_continue = header; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 0;
     (void)compile_expr(cx, args[1]); /* body value discarded */
-    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; }
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; cx->loop_brk_ok = sk; }
   if (cx->failed) return 0;
   fill_frame(cx, frame);
   irb_br(cx->f, cx->cur, header, frame, w);
@@ -847,10 +848,10 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
 
   /* body: run, then fall into the step */
   enter_frame_block(cx, body_blk);
-  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width;
-    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w;
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 0;
     (void)compile_expr(cx, body); /* body value discarded; may read NAME */
-    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; }
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; cx->loop_brk_ok = sk; }
   if (cx->failed) { scope_exit(cx); return 0; }
   fill_frame(cx, frame);
   irb_br(cx->f, cx->cur, step_blk, frame, w);
@@ -1165,6 +1166,8 @@ static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth) {
 #define FOR_IDX_SENTINEL_LEN 8
 #define FOR_COLL_SENTINEL "\x01""for-coll"
 #define FOR_COLL_SENTINEL_LEN 9
+#define BRK_SENTINEL "\x01""brk"
+#define BRK_SENTINEL_LEN 4
 
 /* `for COLL name { body }` (bind each element) / `for COLL $cb` (call a closure per
  * element): an index loop over a VECTOR — i in 0..len, elem = coll[i]. The header
@@ -1191,6 +1194,10 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   /* Two-name form `for COLL k v { body }` binds the key alongside the value. */
   if (key_name) env_define(cx, key_name, klen, zero, /*is_mut=*/1, /*is_cell=*/0);
   if (name) env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  /* `break V` result slot: a hidden mutable local (nil by default) that a `break`
+   * inside the body writes; the loop evaluates to it. Threaded like any frame local. */
+  env_define(cx, BRK_SENTINEL, BRK_SENTINEL_LEN, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL),
+             /*is_mut=*/1, /*is_cell=*/0);
   if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
 
   int w = frame_width(cx);
@@ -1222,8 +1229,8 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
     /* iter-val-at handles vec/arr (index -> element) and map (i-th value) uniformly. */
     IrVal ga[] = {cx->sp, bc->value, bi->value};
     IrVal elem = emit_rt_call(cx, "jacl_iter_val_at", ga, 3);
-    int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb2 = cx->loop_break; int sw = cx->loop_width;
-    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w;
+    int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb2 = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 1;
     if (name) {
       if (key_name) {   /* two-name: bind the key to the i-th key (map key / vec index) */
         IrVal ka[] = {cx->sp, bc->value, bi->value};
@@ -1242,7 +1249,7 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
       IrVal cargs[] = {cx->sp, bcb->value, elem};
       (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
     }
-    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw;
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw; cx->loop_brk_ok = sk;
     if (cx->failed) { scope_exit(cx); return 0; }
     fill_frame(cx, frame);
     irb_br(cx->f, cx->cur, step_blk, frame, w);
@@ -1259,8 +1266,9 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   }
 
   enter_frame_block(cx, exit_blk);
+  IrVal brkv = env_lookup(cx, BRK_SENTINEL, BRK_SENTINEL_LEN)->value;   /* break V result */
   scope_exit(cx);
-  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  return brkv;
 }
 
 /* [try { body } e { handler }] — the body's value (or any statement-position
@@ -1454,6 +1462,14 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_BREAK:
     case AST_CONTINUE: {
       if (!cx->in_loop) { cx_fail(cx, "break/continue outside a loop"); return 0; }
+      /* `break V` — write the loop's hidden result slot before branching (only when the
+       * innermost loop carries one; the value is captured into the exit-edge frame). */
+      if (node->type == AST_BREAK && node->data.break_stmt.value && cx->loop_brk_ok) {
+        IrVal bv = compile_expr(cx, node->data.break_stmt.value);
+        if (cx->failed) return 0;
+        Binding *bb = env_lookup(cx, BRK_SENTINEL, BRK_SENTINEL_LEN);
+        if (bb) bb->value = bv;
+      }
       IrVal frame[IRB_MAX_FRAME + 2];
       fill_frame(cx, frame);   /* first loop_width slots align with the loop's frame */
       irb_br(cx->f, cx->cur, node->type == AST_BREAK ? cx->loop_break : cx->loop_continue,
