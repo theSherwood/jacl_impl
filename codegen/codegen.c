@@ -612,6 +612,21 @@ static void capset_scan(Cx *cx, AstNode *node) {
   if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
   if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
   if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    /* spawn/parallel/race run each { block } as a 0-param closure (compile_closure). Treat
+     * those blocks like closure bodies here so a `mut` they capture is boxed at its
+     * declaration — otherwise the capture site hits "captured mutable not boxed". */
+    if (hid == HEAD_SPAWN || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        AstNode *blk = node->data.command.args[i];
+        if (blk->type == AST_BLOCK) {
+          const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
+          collect_bound(blk, bound, blen, &nb);
+          add_free_varrefs(blk, bound, blen, nb, cx->capset, cx->capsetlen, &cx->ncapset);
+        } else capset_scan(cx, blk);
+      }
+      return;
+    }
     if (node->data.command.head) capset_scan(cx, node->data.command.head);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) capset_scan(cx, node->data.command.args[i]);
   }
@@ -2709,6 +2724,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_SLEEP,      "jacl_sleep",      1},
           {HEAD_ATOM,       "jacl_atom_new",   1},
           {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
+          {HEAD_FUTURE_Q,   "jacl_is_future_v", 1},
           {HEAD_RANGE,      "jacl_range_vec",  2},
           {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
           {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},

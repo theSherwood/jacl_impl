@@ -385,6 +385,8 @@ JaclVal jacl_atom_new(JaclVal v) {
   return jaclrt_from_ptr(JACL_TAG_ATOM, jaclrt_as_ptr(c));
 }
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
+/* `[future? V]` — a spawn/parallel/race future is a job carried under the STREAM tag. */
+JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
 
 /* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
  * The global holds a heap value, so it is reported as a GC root from
