@@ -2865,7 +2865,15 @@ static void compile_tail(Cx *cx, AstNode *node) {
         compile_tail(cx, stmt); scope_exit(cx); return;
       }
       IrVal sv = compile_expr(cx, stmt);
-      if (!cx->failed) emit_stmt_error_check(cx, sv);      /* error auto-return */
+      /* A binding statement (def/mut/set) CAPTURES its value — an error bound to a name
+       * does not auto-return; it propagates only when the name is later USED unhandled
+       * (matching the old VM, where a def leaves no error on the stack for CHECK_ERROR).
+       * So `def r [await $f]` / `def e [error …]` can be inspected with error?/error-val. */
+      int is_binding = stmt->type == AST_COMMAND &&
+                       (stmt->data.command.head_id == HEAD_DEF ||
+                        stmt->data.command.head_id == HEAD_MUT ||
+                        stmt->data.command.head_id == HEAD_SET);
+      if (!cx->failed && !is_binding) emit_stmt_error_check(cx, sv);  /* error auto-return */
     }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
     scope_exit(cx);

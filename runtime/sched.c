@@ -402,9 +402,16 @@ JaclVal jacl_parallel(JaclVal closures) {
   if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
   JaclVal futs[JACL_PAR_MAX];
   for (long i = 0; i < n; i++) futs[i] = jacl_spawn(jacl_vec_get(closures, (uint32_t)i));
+  /* Await every block (so all finish), collecting results. First-error-wins: if any block
+   * errored, the whole `parallel` result IS that first error, not the vector of results. */
   JaclVal out = jacl_vec_empty();
-  for (long i = 0; i < n; i++) out = jacl_vec_push(out, jacl_await(futs[i]));
-  return out;
+  JaclVal firsterr = JACL_NIL; int have_err = 0;
+  for (long i = 0; i < n; i++) {
+    JaclVal r = jacl_await(futs[i]);
+    if (!have_err && jaclrt_is_error(r)) { firsterr = r; have_err = 1; }
+    out = jacl_vec_push(out, r);
+  }
+  return have_err ? firsterr : out;
 }
 
 JaclVal jacl_race(JaclVal closures) {
