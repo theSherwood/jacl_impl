@@ -217,6 +217,22 @@ __attribute__((noinline)) JaclVal jacl_arr_push(JaclVal a, JaclVal v) {
   h[0] = jaclrt_i32(n + 1);
   return a;
 }
+/* A fresh independent copy of an array (the by-value `[Buf N T]` proc-param model): the
+ * new array has the same length/contents, and any nested array element (an inner buffer)
+ * is copied recursively so a `[Buf N [Buf M T]]` is deep by-value. Non-array elements are
+ * shared by value (they are immutable JaclVals). A non-array input is returned unchanged. */
+__attribute__((noinline)) JaclVal jacl_arr_copy(JaclVal a) {
+  JaclVal *h = arr_hdr(a);
+  if (!h) return a;
+  uint32_t n = (uint32_t)jaclrt_as_i32(h[0]);
+  JaclVal out = jacl_arr_new();
+  for (uint32_t i = 0; i < n; i++) {
+    JaclVal e = jacl_arr_get(a, i);
+    if (jaclrt_type_index(e) == 0x1A) e = jacl_arr_copy(e);   /* nested buffer: deep copy */
+    out = jacl_arr_push(out, e);
+  }
+  return out;
+}
 __attribute__((noinline)) JaclVal jacl_arr_pop(JaclVal a) {
   JaclVal *h = arr_hdr(a);
   if (!h) return jaclrt_error();

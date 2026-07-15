@@ -303,6 +303,7 @@ JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
 JaclVal jacl_arr_new(void);                        /* mutable array (aliasing-visible) */
 JaclVal jacl_arr_push(JaclVal a, JaclVal v);       /* in-place append -> a */
 JaclVal jacl_arr_pop(JaclVal a);                   /* remove + return last (error if empty) */
+JaclVal jacl_arr_copy(JaclVal a);                  /* deep-by-value copy (by-value buf params) */
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx);   /* i32 index -> element */
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
 uint32_t jacl_arr_count(JaclVal a);

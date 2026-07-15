@@ -1148,6 +1148,34 @@ static int32_t buf_ann_size(AstNode *ann) {
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
+/* Flag which params are declared `[Buf N T]` — those are passed by value (the callee
+ * works on a copy). Walks the param tokens the same way extract_param_names_v counts them,
+ * so is_buf[k] lines up with param k. */
+static void scan_buf_params(AstNode *plist, int *is_buf, int cap) {
+  for (int j = 0; j < cap; j++) is_buf[j] = 0;
+  if (!plist || plist->type != AST_COMMAND) return;
+  AstNode *toks[CG_MAX_PARAMS * 2]; int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < cap) {
+    if (toks[i]->type == AST_LIT_STRING && toks[i]->data.lit_string.length == 2 &&
+        memcmp(toks[i]->data.lit_string.value, "..", 2) == 0) { i += 1; if (i >= nt) break; }
+    int buf = 0;
+    if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      if (buf_ann_size(toks[i]) >= 0) buf = 1;   /* `[Buf N T] name` */
+      i += 1;                                     /* skip the compound type; toks[i] is the name */
+    }
+    if (i >= nt || toks[i]->type != AST_LIT_STRING) return;
+    const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2;
+    else i += 1;
+    is_buf[np++] = buf;
+  }
+}
+
 /* Is `h` a type-constructor head — `[Arr T]` / `[Vec T]` / `[Map K V]` / `[Buf N T]`?
  * These share the AST_COMMAND-head shape with a closure-valued expression head
  * (e.g. `[vec-get $fns i]`), so the direct-call path must skip them and let the typed
@@ -2981,6 +3009,20 @@ static void compile_procs(Cx *cx) {
     /* params bind to fn params 1..; for a generator (arity<=1) the param is the arg */
     for (int k = 0; k < arity; k++)
       env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+
+    /* By-value `[Buf N T]` params: copy the caller's array into a fresh one so callee
+     * mutations don't escape (BUFFER_DESIGN.md Tier 2). Non-array args pass through. */
+    if (!p->is_generator) {
+      int bufp[CG_MAX_PARAMS];
+      scan_buf_params(def->data.command.args[1], bufp, arity);
+      for (int k = 0; k < arity; k++) {
+        if (!bufp[k]) continue;
+        IrVal ca[] = {cx->sp, (IrVal)(k + 1)};
+        IrVal copy = emit_rt_call(cx, "jacl_arr_copy", ca, 2);
+        Binding *b = env_lookup(cx, names[k], lens[k]);
+        if (b) b->value = copy;
+      }
+    }
 
     compile_tail(cx, body); /* emits the proc's return / return_call (done) */
     scope_exit(cx);
