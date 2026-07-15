@@ -1364,13 +1364,29 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
       (void)compile_expr(cx, body);
     } else {
       Binding *bcb = env_lookup(cx, "\x01""for-cb", 7);
+      /* A 2-param callback `cb {k, v}` gets (key, value) — over a map the key/value pair,
+       * over a vec/arr the index/element; a 1-param callback gets just the value. Read the
+       * arity from the callback proc when it is a named proc value; default to 1. */
+      int cbarity = 1;
+      if (cb_node->type == AST_VAR_REF) {
+        Proc *cp = proc_lookup(cx, cb_node->data.var_ref.name, cb_node->data.var_ref.length);
+        if (cp && !cp->variadic && cp->arity >= 1 && cp->arity <= 2) cbarity = cp->arity;
+      }
       IrVal fa[] = {cx->sp, bcb->value};
       IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
       IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
       IrType r1[] = {IRB_I64};
-      IrVal cargs[] = {cx->sp, bcb->value, elem};
-      (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      if (cbarity == 2) {
+        IrVal ka[] = {cx->sp, bc->value, bi->value};
+        IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+        IrVal cargs[] = {cx->sp, bcb->value, key, elem};
+        (void)irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+      } else {
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+        IrVal cargs[] = {cx->sp, bcb->value, elem};
+        (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      }
     }
     cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw; cx->loop_brk_ok = sk;
     if (cx->failed) { scope_exit(cx); return 0; }
