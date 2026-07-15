@@ -1692,13 +1692,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal a[] = {cx->sp, clos};
         return emit_rt_call(cx, "jacl_spawn", a, 2);
       }
-      /* `await $f` — drive the future to completion, yielding its value. */
+      /* `await $f` — suspend THIS fiber with the future's raw job pointer (the STREAM tag
+       * masked off); the scheduler resumes it in place with the result. Emitting the
+       * `suspend` op inline — rather than suspending inside the jacl_await import — is what
+       * makes the resume continue past the await instead of replaying the fiber's prefix
+       * (a suspend that unwinds through an import frame restarts the caller on resume; a
+       * direct suspend op resumes at the suspend point, exactly as `yield` does). */
       if (hid == HEAD_AWAIT) {
         if (node->data.command.arg_count != 1) { cx_fail(cx, "await needs one argument"); return 0; }
         IrVal f = compile_expr(cx, node->data.command.args[0]);
         if (cx->failed) return 0;
-        IrVal a[] = {cx->sp, f};
-        return emit_rt_call(cx, "jacl_await", a, 2);
+        IrVal mask = irb_const_i64(cx->f, cx->cur, (int64_t)0x00FFFFFFFFFFFFFFLL);  /* JACL_PAYLOAD_MASK */
+        IrVal raw = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, f, mask);
+        return irb_suspend(cx->f, cx->cur, raw);
       }
       /* `parallel { } { } …` — run each block (a 0-param closure) on the worker pool,
        * returning a vector of their results in order. Real parallelism across vCPUs. */
@@ -3094,6 +3100,10 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   /* The program body — the non-proc top-level forms, in order; value = last — into __jacl_main. */
   if (!cx.failed) {
     cx.f = mainf; cx.cur = main_block; cx.sp = 0;
+    /* Prime the root fiber: one entry-block `suspend(-1)` forces a full round-trip through
+     * the scheduler loop before the body runs, so a later `await` in a non-entry block
+     * resumes in place instead of replaying the fiber from the top (see worker_loop). */
+    (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
     env_reset(&cx);
     capset_reset(&cx);
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);

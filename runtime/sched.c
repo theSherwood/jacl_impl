@@ -75,6 +75,7 @@ extern JaclVal jacl_ctx_cur;
 #define JACL_POOL_WORKERS      1            /* main = worker 0; cooperative single-thread default */
 #endif
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
+#define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
 
 static int jacl_sched_self(void) {
   int w = (int)__vm_vcpu_tls_get();
@@ -309,6 +310,13 @@ static void worker_loop(int is_main) {
     } else if (oc == 0) {
       release_task_stack((void *)job_get(job, 16));
       complete_job(job, out);
+    } else if (out == JACL_SCHED_PRIME) {
+      /* Fiber-entry prime: the codegen emits one `suspend(-1)` at a fiber entry so the fiber
+       * completes a full suspend->loop->resume round-trip before its body runs. Without it, a
+       * job fiber whose FIRST real suspend (an await) lands in a non-entry block replays from
+       * the top when the bare scheduler loop re-resumes it. Re-queue immediately with nil. */
+      job_set(job, 10, (long)JACL_NIL);
+      rq_push(job);
     } else {
       JaclObj *target = (JaclObj *)out;
       if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
