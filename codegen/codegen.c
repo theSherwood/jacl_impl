@@ -106,6 +106,7 @@ typedef struct {
   int loop_brk_ok;  /* innermost loop carries a `break V` result slot (BRK_SENTINEL) */
   /* innermost enclosing try (statement errors branch to the handler, not return) */
   IrBlock try_target; int try_width; int in_try;
+  int cur_is_generator; /* the proc currently being compiled contains `yield` */
 
   /* struct declarations (dynamic name-based records): name -> ordered field names + types */
   struct SDef {
@@ -1590,6 +1591,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return bv;
       }
 
+      /* bracket-form `[return]` / `[return V]`. A value-returning return inside a
+       * generator is illegal (stream consumers discard it). A top-level bare `[return]`
+       * as a block statement is intercepted by compile_tail's block loop (which ends the
+       * body / exhausts the generator); reaching here means a nested/mid-expression
+       * position, where we mirror AST_RETURN's fallback: evaluate to the value (or nil). */
+      if (hid == HEAD_RETURN) {
+        AstNode *rv = node->data.command.arg_count >= 1 ? node->data.command.args[0] : NULL;
+        if (cx->cur_is_generator && rv) {
+          cx_fail(cx, "cannot return a value from a generator (proc contains `yield`)");
+          return 0;
+        }
+        return rv ? compile_expr(cx, rv) : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+      }
+
       /* `yield V` — suspend the current fiber, yielding V; result is the resume arg. */
       if (hid == HEAD_YIELD) {
         IrVal v = (node->data.command.arg_count >= 1)
@@ -2619,6 +2634,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ARR_POP,    "jacl_arr_pop",    1},
           {HEAD_ARR_LEN,    "jacl_len",        1},
           {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
+          {HEAD_BUF_UGET,   "jacl_arr_get_at", 2},
           {HEAD_BUF_SET,    "jacl_arr_set_at", 3},
           {HEAD_BUF_USET,   "jacl_arr_set_at", 3},
           {HEAD_BUF_LEN,    "jacl_len",        1},
@@ -2760,6 +2776,18 @@ static void compile_tail(Cx *cx, AstNode *node) {
     return;
   }
 
+  /* bracket-form `[return]` / `[return V]` in tail position (mirrors AST_RETURN). */
+  if (node->type == AST_COMMAND && node->data.command.head_id == HEAD_RETURN) {
+    AstNode *rv = node->data.command.arg_count >= 1 ? node->data.command.args[0] : NULL;
+    if (cx->cur_is_generator && rv) {
+      cx_fail(cx, "cannot return a value from a generator (proc contains `yield`)");
+      return;
+    }
+    if (rv) compile_tail(cx, rv);
+    else emit_return_value(cx, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL));
+    return;
+  }
+
   if (node->type == AST_BLOCK) {
     uint32_t bn = node->data.block.count;
     if (bn == 0) { emit_return_value(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))); return; }
@@ -2770,7 +2798,10 @@ static void compile_tail(Cx *cx, AstNode *node) {
        * (which, in a generator, ends the fiber, exhausting the stream) and drop the
        * rest of the block as unreachable. Early returns nested inside a loop/if are
        * still unsupported; only a direct block statement is handled. */
-      if (stmt->type == AST_RETURN) { compile_tail(cx, stmt); scope_exit(cx); return; }
+      if (stmt->type == AST_RETURN ||
+          (stmt->type == AST_COMMAND && stmt->data.command.head_id == HEAD_RETURN)) {
+        compile_tail(cx, stmt); scope_exit(cx); return;
+      }
       IrVal sv = compile_expr(cx, stmt);
       if (!cx->failed) emit_stmt_error_check(cx, sv);      /* error auto-return */
     }
@@ -2909,6 +2940,7 @@ static void compile_procs(Cx *cx) {
     cx->f = p->func;
     cx->cur = irb_block(p->func, ptypes, nparams + 1);
     cx->sp = 0; /* param 0 */
+    cx->cur_is_generator = p->is_generator;
     env_reset(cx);
     capset_reset(cx); capset_scan(cx, body); /* which muts a nested closure captures */
     scope_enter(cx);
@@ -2933,6 +2965,7 @@ static void compile_pending_closures(Cx *cx) {
     cx->f = p.func;
     cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
     cx->sp = 0; /* param 0; self is param 1 */
+    cx->cur_is_generator = 0;
     env_reset(cx);
     capset_reset(cx); capset_scan(cx, p.body); /* muts captured by this closure's own nested closures */
     scope_enter(cx);
