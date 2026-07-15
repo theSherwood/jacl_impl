@@ -2765,7 +2765,13 @@ static void compile_tail(Cx *cx, AstNode *node) {
     if (bn == 0) { emit_return_value(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))); return; }
     scope_enter(cx);
     for (uint32_t i = 0; i + 1 < bn && !cx->failed; i++) {
-      IrVal sv = compile_expr(cx, node->data.block.commands[i]);
+      AstNode *stmt = node->data.block.commands[i];
+      /* A top-level early `return` terminates the body here — emit the real return
+       * (which, in a generator, ends the fiber, exhausting the stream) and drop the
+       * rest of the block as unreachable. Early returns nested inside a loop/if are
+       * still unsupported; only a direct block statement is handled. */
+      if (stmt->type == AST_RETURN) { compile_tail(cx, stmt); scope_exit(cx); return; }
+      IrVal sv = compile_expr(cx, stmt);
       if (!cx->failed) emit_stmt_error_check(cx, sv);      /* error auto-return */
     }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
