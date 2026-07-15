@@ -130,6 +130,32 @@ Phase 4 works that scoreboard cluster by cluster. Slices landed so far:
   packs its trailing call args into a vector; a spread supplies a fixed-arity proc's
   params (or folds an arithmetic operator) from a vector at the call site.
 
+- **Overflow-promoting i32 arithmetic.** `+` / `-` / `*` on two i32 operands stay unboxed
+  i32, but promote the result to a heap i64 **only when the operation actually overflows**
+  (`__builtin_{add,sub,mul}_overflow` in `runtime/builtins.c`). This keeps hot integer
+  loops allocation-free — the single-threaded interpreter's conservative GC livelocks if a
+  loop body allocates every iteration — while still giving `[* n 1000000000]` its true
+  `6_000_000_000` instead of a 32-bit-truncated `1705032704`. Unary `[- x]` lowers to
+  `0 - x`, so it inherits the same promotion.
+
+- **Early `return`.** A `return` / bracket `[return]` that is a *direct block statement*
+  now emits the real return and drops the unreachable tail (the block loop in
+  `compile_tail` intercepts it before the fall-through). In a generator this ends the
+  fiber, so a `return` ahead of a later `yield` exhausts the stream; `[return V]` inside a
+  generator is the old VM's compile error (tracked via `Cx.cur_is_generator`). Early
+  returns nested inside a loop/if are still unsupported.
+
+- **Closure-valued expression heads.** A command head that is itself an expression which
+  evaluates to a closure — `[[vec-get $fns i] x]`, `[[pick-fn] x]` — is called through the
+  closure ABI just like a `[$f x]` var-ref head. An `is_type_ctor_head` guard keeps typed
+  collection constructors (`[[Vec T] …]` / `[[Arr T] …]` / `[[Map K V] …]` / `[Buf N T]`)
+  on their own constructor path rather than being mistaken for a call.
+
+- **Struct-name type prefixes in bindings.** `cg_is_type_prefix` extends the lowercase
+  builtin-keyword check to Capitalized identifiers, so a struct-typed proc param
+  (`proc apply {[Proc [Point] i32] f, Point p}`) counts as one param, not two, and a typed
+  def (`def Point p V`) binds `p`, not `Point`.
+
 ### How a slice lowers (worked example)
 
 `for`-over-map is representative of how a new head threads the block-local-SSA frame.
@@ -160,6 +186,25 @@ exit(sp, …locals):
 
 The uniform `jacl_iter_*_at` accessors are what let the *same* lowering serve vectors,
 arrays, and maps — the runtime picks element-vs-entry semantics from the value's tag.
+
+### A second example — calling a closure-valued expression head
+
+`[[vec-get $fns 0] 6]` (call the closure stored at `$fns[0]` with `6`) has no name head to
+dispatch on, so it takes the indirect-call path. The head expression is compiled to a
+closure value, its code pointer is read out, and the call goes through `call_indirect` with
+the closure ABI `(sp, self, args…)`:
+
+```
+cval = <compile [vec-get $fns 0]>       # the closure JaclVal
+fn   = jacl_closure_fn(sp, cval)         # its code pointer (unwrapped to a func ref)
+call_indirect fn (sp, /*self=*/cval, 6)  # self = the closure itself, so upvalues resolve
+```
+
+This is the exact shape a `[$f 6]` var-ref head uses; broadening the head test from
+"var-ref only" to "var-ref **or** a non-type-constructor command" is all it took to cover
+`[[vec-get …] x]`, `[[arr-get …] x]`, and `[[pick-fn] x]`. The `self` operand is what makes
+the call work for a real closure: the callee reads its captured upvalues back out of
+`self`, so a wide-i64 body like `[* x 1000000000]` returns unboxed through the same path.
 
 ## Testing
 

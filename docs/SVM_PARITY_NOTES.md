@@ -4,6 +4,18 @@ Working notes for grinding `docs/SVM_PARITY.md` (the generated scoreboard) towar
 full corpus parity. This is the *how* and *why* behind the slices; the scoreboard
 itself is the *what's-left*.
 
+## Related references
+
+- `docs/SVM_PARITY.md` — the generated scoreboard (what's left, bucketed by stage).
+- `docs/SVM_RUNTIME_BUILTINS.md` — the codegen↔runtime `jacl_*` ABI, grouped by category.
+- `docs/SVM_NUMERICS.md` — the numeric tower: inline vs boxed widths, overflow promotion,
+  comparison/equality, error-flag propagation, print formatting.
+- `docs/SVM_BUFFERS.md` — `[Buf N T]` / `[Ptr T]` model, zero-init, by-value params,
+  buffer→pointer decay, and the fat-pointer arrow-access gaps.
+- `docs/SVM_STREAMS.md` — generators-as-fibers, eager stream collection, and why the
+  concurrency primitives score as hangs under the single-threaded oracle.
+- `codegen/README.md` — the codegen phases and worked lowering examples.
+
 ## The pipeline under test
 
 `runtime/harness/src/bin/parity.rs` drives every `test/jacl/*.jacl` through the real
@@ -61,7 +73,14 @@ parity. Two subtleties matter:
    compiler's canonical message win for the `err-wrong-msg` cases, while codegen still
    sees pristine nodes — so there are *zero* regressions on passing programs.
 
-This slice alone moved `err-pass` from 8 → 115.
+This slice alone moved `err-pass` from 8 → 117.
+
+Note a **structural limit** of this oracle: it only sees *compile-time* rejections. An
+`expect-error` program whose error is a *runtime* trap (calling a non-callable, a computed
+negative index, a runtime bounds fault) compiles cleanly, so the driver exits 0 and the
+case scores `err-no-fail`. Those cases can only be won by (a) const-folding the offending
+value so the static compiler rejects it, or (b) a harness that scores an `expect-error`
+program's *run*, not just its compile — neither is wired today.
 
 ## Completed slices (Phase 4)
 
@@ -76,6 +95,25 @@ This slice alone moved `err-pass` from 8 → 115.
 - **Variadic proc params** `..rest` (pack trailing call args into a vector).
 - **`assert` predicate form** `[assert OP a b]`.
 - **Old-VM-shaped arity messages** (correct singular/plural).
+- **Overflow-promoting i32 arithmetic.** `+`/`-`/`*` widen an i32 result to i64 **only
+  when the op actually overflows** (via `__builtin_{add,sub,mul}_overflow`). Non-overflowing
+  arithmetic stays unboxed i32 with zero extra allocation, so GC-stress hot loops don't trip
+  the single-threaded interpreter's collector — the livelock that sank an earlier
+  *unconditional*-widen attempt. Fixed the wide-i64 truncation across the typed-closure and
+  typed-stream clusters (`* n 1000000000` → `6000000000`, not `1705032704`).
+- **Unary minus `[- x]`** lowered as `0 - x`, so it inherits the same promotion.
+- **Early `return`.** A top-level `return` / bracket `[return]` statement now emits the
+  real return and drops the unreachable tail; in a generator this ends the fiber, so a
+  `return` before a later `yield` exhausts the stream. `[return V]` inside a generator is
+  the old VM's compile error. (Early returns nested inside a loop/if remain unsupported.)
+- **Closure-valued expression heads.** `[[vec-get $fns i] x]`, `[[pick-fn] x]` — a command
+  head that evaluates to a closure — call through the closure ABI like a `[$f x]` var head,
+  guarded so typed collection constructors (`[[Vec T] …]`) keep their own path.
+- **`buf-unchecked-get`/`-set`** map to the lenient array get/set.
+- **Struct-name type prefixes** (`Point p` params, `def Point p V`) — a Capitalized
+  identifier is now recognized as a type token, not a param/binding name.
+- **By-value `[Buf N T]` proc params** — copied once in the callee prologue
+  (`jacl_arr_copy`, deep over nested buffers), so callee mutations don't escape.
 
 ## Remaining clusters (and why they're hard)
 
@@ -93,9 +131,16 @@ This slice alone moved `err-pass` from 8 → 115.
   through the harness; only the stdout Stream cap is granted today.
 - **Typed-collection printing.** The old VM prints a typed `[Vec T]` as `[1, 2, 3]` and an
   untyped `[vec …]` as `[vec 1 2 3]`. Matching this needs the runtime to distinguish
-  typed vectors, which the current single vector representation does not.
-- **Early `return` in generators.** Mid-body `[return]` that exhausts a stream needs the
-  generator state machine to model an early-exit edge.
+  typed vectors from dynamic ones — a *distinct* runtime type. The clean way is a new 5-bit
+  tag aliased to the vector representation, but the primary stack-root scanner
+  (`__vm_gc_roots`, an opaque svm op) can't be verified to mask an unfamiliar tag byte off a
+  candidate root, so a novel tag risks an *unscanned* live root → use-after-free. Under the
+  no-memory-corruption rule this is left alone until the root-scan contract is pinned down;
+  the ~3 affected cases (`range_*`, `stream_struct_collect`) aren't worth the risk.
+- **Nested compound proc params.** `proc apply {[Proc [Point] i32] f, Point p}` — a
+  `[Proc …]` param with a *nested* bracketed type (`[Point]`) — miscounts params in the
+  proc-param extractor, so the call reads as an arity mismatch. Flattening the nested
+  brackets in `extract_param_names` is the fix.
 
 ## Difficulty map (where the remaining points are)
 
@@ -105,13 +150,16 @@ means breadth work in `codegen/codegen.c` (+ maybe a fail-closed `jacl_*` entry 
 
 | cluster | size | kind | notes |
 |---|---|---|---|
-| concurrency hangs | ~69 | runtime/infra | scheduler + fibers must quiesce under interp==jit; biggest single bucket |
-| buffers + pointers | ~15 | runtime | needs linear-memory-backed `[Buf N T]` so `addr`/`ptr-deref`/`ptr-offset` read raw bytes |
-| typed-collection wrong-output | ~10 | runtime | distinguish typed `[Vec T]` (prints `[a, b]`) from untyped `[vec …]` |
+| concurrency hangs | ~72 | runtime/infra | scheduler + fibers must quiesce under interp==jit; biggest single bucket |
+| buffers + pointers | ~11 | runtime | needs linear-memory-backed `[Buf N T]` so `addr`/`ptr-deref`/`ptr-offset` read raw bytes; fat-pointer arrow-index + `Ptr<T>(0x…)` print need a pointer runtime type. (By-value buf params + `buf-unchecked-*` are done.) |
+| typed-collection print | ~3 | runtime (GC) | distinguish typed `[Vec T]` from `[vec …]`; blocked on the root-scan tag contract (see above) |
+| pointer print format | 2 | runtime | `Ptr<i32>(0x…)` needs a first-class pointer type carrying the pointee type + address |
+| stack traces | 2 | runtime | capture the call chain + line numbers at error creation |
 | atom watchers (`watch`) | 5 | runtime | trampoline to call a guest closure from runtime C on reset/swap |
-| file I/O (`read/write-file`) | ~6 | infra | grant a Filesystem powerbox cap through the harness |
-| generator early `return` | ~4 | codegen | model an early-exit edge in the generator state machine |
-| runtime-checked `expect-error` | ~6 | driver | const-fold computed indices so a negative/OOB index rejects at compile time |
+| file I/O (`read/write-file`) | ~5 | infra | grant a Filesystem powerbox cap through the harness |
+| module-global proc capture | ~3 | codegen | a top-level `proc` reading a top-level `def` needs module-global slots (procs are standalone functions today) |
+| nested compound proc params | ~2 | codegen | flatten deeper `[Proc [Point] i32]`-style nested brackets (the scalar `Point p` prefix is now handled) |
+| runtime-checked `expect-error` | ~6 | driver | const-fold computed indices, or score an expect-error program's *run* |
 
 The compiler-check oracle already covers the *statically* rejectable `expect-error`
 corpus, so most remaining error cases are runtime-checked (they need either const-folding

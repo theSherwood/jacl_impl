@@ -276,6 +276,7 @@ JaclVal jacl_box_get(JaclVal b);                   /* [deref B] */
 JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
 JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
+JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructure: name|pos */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
@@ -302,6 +303,7 @@ JaclVal jacl_map_vals_v(JaclVal m);                /* values as a vector */
 JaclVal jacl_arr_new(void);                        /* mutable array (aliasing-visible) */
 JaclVal jacl_arr_push(JaclVal a, JaclVal v);       /* in-place append -> a */
 JaclVal jacl_arr_pop(JaclVal a);                   /* remove + return last (error if empty) */
+JaclVal jacl_arr_copy(JaclVal a);                  /* deep-by-value copy (by-value buf params) */
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx);   /* i32 index -> element */
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
 uint32_t jacl_arr_count(JaclVal a);
@@ -314,6 +316,10 @@ JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b); /* [slice STR a b) subs
 JaclVal jacl_index_op(JaclVal x, JaclVal idx);     /* [index X i] string/vec/arr */
 JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b); /* [slice X a b) string/vec */
 JaclVal jacl_first(JaclVal c);                     /* [first C] first element */
+JaclVal jacl_addr_of(JaclVal base, JaclVal idx);   /* [addr $buf->i] -> fat pointer */
+JaclVal jacl_ptr_deref(JaclVal p);                 /* [ptr-deref P] -> base[offset] */
+JaclVal jacl_ptr_offset(JaclVal p, JaclVal n);     /* [ptr-offset P N] -> advanced ptr */
+JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */
 JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 

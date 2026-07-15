@@ -124,9 +124,17 @@ __attribute__((noinline)) JaclVal jacl_map_remove(JaclVal m, JaclVal key) {
 /* Persistent element update: a new vector with v[idx] = elem (nil-vec/OOB -> error). */
 __attribute__((noinline)) JaclVal jacl_vec_set(JaclVal vec, uint32_t idx, JaclVal elem) {
   jvec_root *r = (jvec_root*)jaclrt_as_ptr(vec);
-  jvec_root *out = jvec_set(r, idx, elem);
-  if (!out) return jaclrt_error();
-  return jaclrt_from_ptr(JACL_TAG_VECTOR, out);
+  uint32_t n = jvec_count(r);
+  if (idx < n) {                                   /* in-bounds persistent update */
+    jvec_root *out = jvec_set(r, idx, elem);
+    if (!out) return jaclrt_error();
+    return jaclrt_from_ptr(JACL_TAG_VECTOR, out);
+  }
+  if (idx - n > (1u << 20)) return jaclrt_error();  /* absurd grow */
+  /* lenient: setting past the end grows the vector with nil gaps, then places elem. */
+  JaclVal v = vec;
+  for (uint32_t i = n; i < idx; i++) v = jacl_vec_push(v, JACL_NIL);
+  return jacl_vec_push(v, elem);
 }
 /* Persistent concatenation of two vectors. */
 __attribute__((noinline)) JaclVal jacl_vec_concat(JaclVal a, JaclVal b) {
@@ -187,7 +195,8 @@ __attribute__((noinline)) uint32_t jacl_arr_count(JaclVal a) {
 }
 __attribute__((noinline)) JaclVal jacl_arr_get(JaclVal a, uint32_t i) {
   JaclVal *h = arr_hdr(a);
-  if (!h || i >= (uint32_t)jaclrt_as_i32(h[0])) return jaclrt_error();
+  if (!h) return jaclrt_error();                                  /* not an array */
+  if (i >= (uint32_t)jaclrt_as_i32(h[0])) return JACL_NIL;        /* lenient OOB -> nil */
   return ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i];
 }
 __attribute__((noinline)) JaclVal jacl_arr_push(JaclVal a, JaclVal v) {
@@ -208,11 +217,27 @@ __attribute__((noinline)) JaclVal jacl_arr_push(JaclVal a, JaclVal v) {
   h[0] = jaclrt_i32(n + 1);
   return a;
 }
+/* A fresh independent copy of an array (the by-value `[Buf N T]` proc-param model): the
+ * new array has the same length/contents, and any nested array element (an inner buffer)
+ * is copied recursively so a `[Buf N [Buf M T]]` is deep by-value. Non-array elements are
+ * shared by value (they are immutable JaclVals). A non-array input is returned unchanged. */
+__attribute__((noinline)) JaclVal jacl_arr_copy(JaclVal a) {
+  JaclVal *h = arr_hdr(a);
+  if (!h) return a;
+  uint32_t n = (uint32_t)jaclrt_as_i32(h[0]);
+  JaclVal out = jacl_arr_new();
+  for (uint32_t i = 0; i < n; i++) {
+    JaclVal e = jacl_arr_get(a, i);
+    if (jaclrt_type_index(e) == 0x1A) e = jacl_arr_copy(e);   /* nested buffer: deep copy */
+    out = jacl_arr_push(out, e);
+  }
+  return out;
+}
 __attribute__((noinline)) JaclVal jacl_arr_pop(JaclVal a) {
   JaclVal *h = arr_hdr(a);
   if (!h) return jaclrt_error();
   int32_t n = jaclrt_as_i32(h[0]);
-  if (n <= 0) return jaclrt_error();
+  if (n <= 0) return JACL_NIL;                     /* lenient: pop empty -> nil */
   JaclVal *d = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2]));
   JaclVal v = d[n - 1];
   d[n - 1] = JACL_NIL;
@@ -221,15 +246,20 @@ __attribute__((noinline)) JaclVal jacl_arr_pop(JaclVal a) {
 }
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx) {
   if (jaclrt_is_error(a)) return a;
-  if (!jaclrt_is_i32(idx) || jaclrt_as_i32(idx) < 0) return jaclrt_error();
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  if (jaclrt_as_i32(idx) < 0) return JACL_NIL;     /* lenient: negative index -> nil */
   return jacl_arr_get(a, (uint32_t)jaclrt_as_i32(idx));
 }
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
-  JaclVal *h = arr_hdr(a);
   if (jaclrt_is_error(a)) return a;
-  if (!h || !jaclrt_is_i32(idx)) return jaclrt_error();
-  int32_t i = jaclrt_as_i32(idx), n = jaclrt_as_i32(h[0]);
-  if (i < 0 || i >= n) return jaclrt_error();
+  if (!arr_hdr(a) || !jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (i < 0) return jaclrt_error();                /* negative set stays an error */
+  if (i - jaclrt_as_i32(arr_hdr(a)[0]) > (1 << 20)) return jaclrt_error();  /* absurd grow */
+  /* lenient: setting past the end grows the array with nil gaps (re-read the header
+   * after each push — growth may reallocate the data cell / trigger a collection). */
+  while (jaclrt_as_i32(arr_hdr(a)[0]) <= i) jacl_arr_push(a, JACL_NIL);
+  JaclVal *h = arr_hdr(a);
   ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i] = v;
   return v;
 }
