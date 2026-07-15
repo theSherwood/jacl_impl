@@ -1823,10 +1823,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (all_words) {
           IrVal v = compile_expr(cx, node->data.command.args[1]);
           if (cx->failed) return 0;
-          for (int k = 0; k < nt; k++) {
+          for (int k = 0, pos = 0; k < nt; k++, pos++) {
+            /* `..rest` — the trailing name collects V[pos..] into a fresh vector
+             * (positional; the `..` marker token precedes the rest name). */
+            if (toks[k]->data.lit_string.length == 2 &&
+                memcmp(toks[k]->data.lit_string.value, "..", 2) == 0 && k + 1 < nt) {
+              AstNode *rn = toks[k + 1];
+              IrVal start = irb_const_i64(cx->f, cx->cur, jaclval_i32(pos));
+              IrVal big = irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff));
+              IrVal sa[] = {cx->sp, v, start, big};
+              IrVal rest = emit_rt_call(cx, "jacl_vec_slice", sa, 4);
+              env_define(cx, rn->data.lit_string.value, rn->data.lit_string.length,
+                         rest, /*is_mut=*/0, /*is_cell=*/0);
+              break;   /* rest is always last */
+            }
             IrVal fname = compile_string_literal(cx, toks[k]->data.lit_string.value,
                                                  toks[k]->data.lit_string.length);
-            IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
+            IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(pos));
             IrVal ga[] = {cx->sp, v, fname, idx};   /* struct/map by name, vec/arr by pos */
             IrVal fv = emit_rt_call(cx, "jacl_field_or_index", ga, 4);
             env_define(cx, toks[k]->data.lit_string.value, toks[k]->data.lit_string.length,
@@ -1883,6 +1896,22 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         for (uint32_t i = 0; i < tgt->data.command.arg_count && nt < CG_MAX_PARAMS; i++)
           toks[nt++] = tgt->data.command.args[i];
         for (int i = 0; i < nt; i++) {
+          /* `..rest` (an AST_SPREAD token) binds the remaining elements V[i..] as a
+           * fresh vector; it is the final pattern element. */
+          if (toks[i]->type == AST_SPREAD && toks[i]->data.spread.expr) {
+            AstNode *rn = toks[i]->data.spread.expr;
+            const char *rnm = rn->type == AST_VAR_REF ? rn->data.var_ref.name
+                            : rn->type == AST_LIT_STRING ? rn->data.lit_string.value : NULL;
+            uint32_t rnl = rn->type == AST_VAR_REF ? rn->data.var_ref.length
+                         : rn->type == AST_LIT_STRING ? rn->data.lit_string.length : 0;
+            if (!rnm) { cx_fail(cx, "rest pattern needs a name"); return 0; }
+            IrVal start = irb_const_i64(cx->f, cx->cur, jaclval_i32(i));
+            IrVal big = irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff));
+            IrVal sa[] = {cx->sp, v, start, big};
+            IrVal rest = emit_rt_call(cx, "jacl_vec_slice", sa, 4);
+            env_define(cx, rnm, rnl, rest, 0, 0);
+            break;
+          }
           if (toks[i]->type != AST_LIT_STRING) { cx_fail(cx, "destructuring name must be a bare word"); return 0; }
           IrType sig[] = {IRB_I64, IRB_I64, IRB_I32};
           IrType r1[] = {IRB_I64};
