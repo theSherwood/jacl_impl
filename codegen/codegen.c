@@ -1052,14 +1052,15 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
-static IrVal emit_field_default(Cx *cx, const char *tn, uint32_t tl, int depth); /* fwd */
-static IrVal emit_buf_new(Cx *cx, int32_t n, const char *et, uint32_t etl) {
+static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth); /* fwd */
+static IrVal emit_buf_new(Cx *cx, int32_t n, AstNode *elem_node) {
   IrVal ea[] = {cx->sp};
   IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
   for (int32_t k = 0; k < n; k++) {
-    /* Each slot takes its element type's zero: a struct-element buf zero-inits a
-     * fresh struct per slot; numeric/other elements take a plain zero. */
-    IrVal zero = emit_field_default(cx, et, etl, 0);
+    /* Each slot takes its element type's zero: a struct-element buf zero-inits a fresh
+     * struct per slot, a nested [Buf M U] element a fresh zero inner buffer, numeric
+     * elements a plain 0. */
+    IrVal zero = emit_type_default(cx, elem_node, 0);
     IrVal pa[] = {cx->sp, av, zero};
     (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
   }
@@ -1120,6 +1121,44 @@ static int32_t buf_ann_size(AstNode *ann) {
       memcmp(ann->data.command.head->data.lit_string.value, "Buf", 3) != 0) return -1;
   if (ann->data.command.arg_count < 1 || ann->data.command.args[0]->type != AST_LIT_INT) return -1;
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
+}
+
+/* The element type NODE of an `[Arr T]`/`[Vec T]`/`[Buf N T]` annotation — unlike
+ * ann_elem_type, this returns compound element types (e.g. a nested `[Buf M U]`) too. */
+static AstNode *ann_elem_node(AstNode *ann) {
+  if (!ann || ann->type != AST_COMMAND || !ann->data.command.head ||
+      ann->data.command.head->type != AST_LIT_STRING) return NULL;
+  uint32_t hl = ann->data.command.head->data.lit_string.length;
+  const char *hn = ann->data.command.head->data.lit_string.value;
+  uint32_t ti;
+  if (hl == 3 && (memcmp(hn, "Arr", 3) == 0 || memcmp(hn, "Vec", 3) == 0)) ti = 0;
+  else if (hl == 3 && memcmp(hn, "Buf", 3) == 0) ti = 1;   /* [Buf N T] */
+  else return NULL;
+  return ann->data.command.arg_count > ti ? ann->data.command.args[ti] : NULL;
+}
+
+/* The zero value for a declared type NODE: a scalar/str/struct name via the field-
+ * default path, and a nested `[Buf M U]` as a fresh zero inner buffer (recursively). */
+static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth) {
+  if (!tnode || depth > 8) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  if (tnode->type == AST_LIT_STRING)
+    return emit_field_default(cx, tnode->data.lit_string.value,
+                              tnode->data.lit_string.length, depth);
+  if (tnode->type == AST_COMMAND) {
+    int32_t m = buf_ann_size(tnode);
+    if (m >= 0) {
+      AstNode *inner = ann_elem_node(tnode);
+      IrVal ea[] = {cx->sp};
+      IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+      for (int32_t k = 0; k < m; k++) {
+        IrVal e = emit_type_default(cx, inner, depth + 1);
+        IrVal pa[] = {cx->sp, av, e};
+        (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
+      }
+      return av;
+    }
+  }
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
 #define FOR_IDX_SENTINEL "\x01""for-idx"
@@ -1751,10 +1790,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           node->data.command.args[0]->type == AST_COMMAND &&
           node->data.command.args[1]->type == AST_LIT_STRING &&
           buf_ann_size(node->data.command.args[0]) >= 0) {
-        AstNode *bet = ann_elem_type(node->data.command.args[0]);
         IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]),
-                                bet ? bet->data.lit_string.value : NULL,
-                                bet ? bet->data.lit_string.length : 0);
+                                ann_elem_node(node->data.command.args[0]));
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
         {
@@ -2333,8 +2370,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           return acc;
         }
         if (bufn >= 0) {
-          /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero. */
-          AstNode *btt = ann_elem_type(h2);
+          /* `[[Buf N T] e0 e1 …]`: fixed length N — given elements, rest zero-by-type
+           * (nested `[Buf M U]` elements get fresh zero inner buffers, recursively). */
+          AstNode *btt = ann_elem_type(h2);           /* scalar element name (for checks) */
+          AstNode *bnode = ann_elem_node(h2);         /* element type node (incl. compound) */
           IrVal ea[] = {cx->sp};
           IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           uint32_t given = node->data.command.arg_count;
@@ -2345,8 +2384,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               return 0;
             IrVal e = ((uint32_t)k < given)
                           ? compile_expr(cx, node->data.command.args[k])
-                          : emit_field_default(cx, btt ? btt->data.lit_string.value : NULL,
-                                               btt ? btt->data.lit_string.length : 0, 0);
+                          : emit_type_default(cx, bnode, 0);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, av, e};
             (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
