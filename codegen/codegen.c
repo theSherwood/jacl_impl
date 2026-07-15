@@ -201,6 +201,12 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
     if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return 1;
   return 0;
 }
+/* A scalar type prefix in a `<type> <name>` param: a builtin type keyword or a
+ * Capitalized identifier (a struct/type name, e.g. `Point p`). Distinguishes a typed
+ * param's type token from the name that follows it (param names are lowercase). */
+static int cg_is_type_prefix(const char *s, uint32_t n) {
+  return cg_is_type_kw(s, n) || (n > 0 && s[0] >= 'A' && s[0] <= 'Z');
+}
 
 /* Read a proc's param NAMES from its params command (args[1]). Params are flattened
  * into the command's head + args; typed params interleave a type token before each
@@ -238,8 +244,8 @@ static int extract_param_names_v(Cx *cx, AstNode *plist, const char **names, uin
     const char *s = toks[i]->data.lit_string.value;
     uint32_t n = toks[i]->data.lit_string.length;
     AstNode *name_tok = toks[i];
-    if (cg_is_type_kw(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
-      name_tok = toks[i + 1]; i += 2; /* `<type> <name>` */
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      name_tok = toks[i + 1]; i += 2; /* `<type> <name>` (incl. `Point p`) */
     } else {
       i += 1;
     }
@@ -560,7 +566,7 @@ static int closure_param_names(AstNode *pnode, int in_block, const char **ns, ui
     if (toks[i]->type != AST_LIT_STRING) return np;
     const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
     AstNode *nmtok = toks[i];
-    if (cg_is_type_kw(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) { nmtok = toks[i + 1]; i += 2; }
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) { nmtok = toks[i + 1]; i += 2; }
     else i += 1;
     ns[np] = nmtok->data.lit_string.value; ls[np] = nmtok->data.lit_string.length; np++;
   }
