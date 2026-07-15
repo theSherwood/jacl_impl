@@ -106,10 +106,12 @@ typedef struct {
   /* innermost enclosing try (statement errors branch to the handler, not return) */
   IrBlock try_target; int try_width; int in_try;
 
-  /* struct declarations (dynamic name-based records): name -> ordered field names */
+  /* struct declarations (dynamic name-based records): name -> ordered field names + types */
   struct SDef {
     const char *name; uint32_t len;
-    const char *fn[CG_MAX_PARAMS]; uint32_t fl[CG_MAX_PARAMS]; int nf;
+    const char *fn[CG_MAX_PARAMS]; uint32_t fl[CG_MAX_PARAMS];
+    const char *ft[CG_MAX_PARAMS]; uint32_t ftl[CG_MAX_PARAMS];   /* field type name/len */
+    int nf;
   } sdefs[32];
   int nsdefs;
 } Cx;
@@ -132,6 +134,8 @@ static void sdef_register(Cx *cx, AstNode *node) {
   for (uint32_t k = 0; k < node->data.defstruct.field_count && sd->nf < CG_MAX_PARAMS; k++) {
     sd->fn[sd->nf] = node->data.defstruct.field_names[k];
     sd->fl[sd->nf] = node->data.defstruct.field_name_lens[k];
+    sd->ft[sd->nf] = node->data.defstruct.field_types ? node->data.defstruct.field_types[k] : NULL;
+    sd->ftl[sd->nf] = node->data.defstruct.field_type_lens ? node->data.defstruct.field_type_lens[k] : 0;
     sd->nf++;
   }
 }
@@ -364,6 +368,41 @@ static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len) {
   IrVal h = irb_const_i32(cx->f, cx->cur, 0);
   IrVal args[] = {cx->sp, addr, lv};
   return irb_call_import(cx->f, cx->cur, "jacl_str_new", sig, 3, r1, 1, h, args, 3);
+}
+
+/* ---- struct field defaults ----
+ * A struct field left unset by the constructor takes its TYPE's zero: numeric -> 0,
+ * bool -> false, str -> "", a struct type -> a recursively zero-initialized struct,
+ * everything else -> nil. Mirrors the old VM's `[Type]` (all-defaults) semantics. */
+static IrVal emit_struct_zero(Cx *cx, SDef *sd, int depth);
+static IrVal emit_field_default(Cx *cx, const char *tn, uint32_t tl, int depth) {
+  if (!tn || tl == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  if (cg_is_type_kw(tn, tl)) {
+    if (tl == 4 && memcmp(tn, "bool", 4) == 0) return irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);
+    if (tl == 3 && memcmp(tn, "str", 3) == 0) return compile_string_literal(cx, "", 0);
+    if ((tl == 3 && (memcmp(tn, "vec", 3) == 0 || memcmp(tn, "map", 3) == 0 ||
+                     memcmp(tn, "dyn", 3) == 0)) ||
+        (tl == 6 && memcmp(tn, "stream", 6) == 0))
+      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));   /* numeric scalar zero */
+  }
+  SDef *inner = sdef_lookup(cx, tn, tl);
+  if (inner && depth < 8) return emit_struct_zero(cx, inner, depth + 1);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+static IrVal emit_struct_zero(Cx *cx, SDef *sd, int depth) {
+  IrVal tn = compile_string_literal(cx, sd->name, sd->len);
+  IrVal nf = irb_const_i64(cx->f, cx->cur, jaclval_i32(sd->nf));
+  IrVal na[] = {cx->sp, tn, nf};
+  IrVal sv = emit_rt_call(cx, "jacl_struct_new", na, 3);
+  for (int k = 0; k < sd->nf; k++) {
+    IrVal fname = compile_string_literal(cx, sd->fn[k], sd->fl[k]);
+    IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
+    IrVal dv = emit_field_default(cx, sd->ft[k], sd->ftl[k], depth);
+    IrVal ia[] = {cx->sp, sv, idx, fname, dv};
+    sv = emit_rt_call(cx, "jacl_struct_init_field", ia, 5);
+  }
+  return sv;
 }
 
 /* One segment of an interpolated string: a literal → a string; an expression →
@@ -1445,28 +1484,34 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_WITH_CTX && node->data.command.arg_count == 2 &&
           node->data.command.args[0]->type == AST_BLOCK &&
           node->data.command.args[1]->type == AST_BLOCK) {
-        /* [with-ctx {field VAL …} { body }] — override fields for the block, restore after. */
+        /* [with-ctx {field VAL …} { body }] — override fields for the block, restore
+         * after. The saved `old` context must survive the body's control flow (a nested
+         * with-ctx / if / loop opens new blocks), so it is bound as a frame-threaded
+         * local rather than a bare SSA value in the entry block. */
+        scope_enter(cx);
         IrVal ga[] = {cx->sp};
         IrVal old = emit_rt_call(cx, "jacl_ctx_get", ga, 1);
+        env_define(cx, "\x01""wctx-old", 9, old, /*is_mut=*/0, /*is_cell=*/0);
         AstNode *ov = node->data.command.args[0];
         for (uint32_t i = 0; i < ov->data.block.count; i++) {
           AstNode *cmd = ov->data.block.commands[i];
           if (cmd->type != AST_COMMAND || !cmd->data.command.head ||
               cmd->data.command.head->type != AST_LIT_STRING || cmd->data.command.arg_count != 1) {
             cx_fail(cx, "with-ctx overrides must be `field VALUE` pairs");
-            return 0;
+            scope_exit(cx); return 0;
           }
           IrVal fname = compile_string_literal(cx, cmd->data.command.head->data.lit_string.value,
                                                cmd->data.command.head->data.lit_string.length);
           IrVal v = compile_expr(cx, cmd->data.command.args[0]);
-          if (cx->failed) return 0;
+          if (cx->failed) { scope_exit(cx); return 0; }
           IrVal sa[] = {cx->sp, fname, v};
           (void)emit_rt_call(cx, "jacl_ctx_set_field", sa, 3);
         }
         IrVal bv = compile_expr(cx, node->data.command.args[1]);
-        if (cx->failed) return 0;
-        IrVal ra[] = {cx->sp, old};
+        if (cx->failed) { scope_exit(cx); return 0; }
+        IrVal ra[] = {cx->sp, env_lookup(cx, "\x01""wctx-old", 9)->value};
         (void)emit_rt_call(cx, "jacl_ctx_swap", ra, 2);
+        scope_exit(cx);
         return bv;
       }
 
@@ -1477,6 +1522,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                       : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
         if (cx->failed) return 0;
         return irb_suspend(cx->f, cx->cur, v);
+      }
+
+      /* `[assert-type EXPR TYPE]` — a purely static check (the compiler proves the
+       * inferred type matches). It has NO runtime effect and, crucially, must NOT
+       * evaluate EXPR — so codegen drops it entirely, yielding nil. */
+      if (hid == HEAD_ASSERT_TYPE) {
+        return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
       }
 
       /* `print V` — write V's text + newline to stdout via the powerbox Stream capability
@@ -1731,8 +1783,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           for (int k = 0; k < nt; k++) {
             IrVal fname = compile_string_literal(cx, toks[k]->data.lit_string.value,
                                                  toks[k]->data.lit_string.length);
-            IrVal ga[] = {cx->sp, v, fname};
-            IrVal fv = emit_rt_call(cx, "jacl_field_get", ga, 3);
+            IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
+            IrVal ga[] = {cx->sp, v, fname, idx};   /* struct/map by name, vec/arr by pos */
+            IrVal fv = emit_rt_call(cx, "jacl_field_or_index", ga, 4);
             env_define(cx, toks[k]->data.lit_string.value, toks[k]->data.lit_string.length,
                        fv, /*is_mut=*/0, /*is_cell=*/0);
             if (cx->failed) return 0;
@@ -1749,8 +1802,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           const char *nm = d->data.destructure_named.names[k];
           uint32_t nl = d->data.destructure_named.name_lens[k];
           IrVal fname = compile_string_literal(cx, nm, nl);
-          IrVal ga[] = {cx->sp, v, fname};
-          IrVal fv = emit_rt_call(cx, "jacl_field_get", ga, 3);
+          IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+          IrVal ga[] = {cx->sp, v, fname, idx};   /* struct/map by name, vec/arr by pos */
+          IrVal fv = emit_rt_call(cx, "jacl_field_or_index", ga, 4);
           env_define(cx, nm, nl, fv, /*is_mut=*/0, /*is_cell=*/0);
           if (cx->failed) return 0;
         }
@@ -1887,6 +1941,26 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           if (cx->failed) return 0;
           IrVal a[] = {cx->sp, sv, kv, val};
           return emit_rt_call(cx, "jacl_dot_dyn_set", a, 4);
+        }
+        /* `set $ctx->field V` — the ambient context is a map (not a struct), so route
+         * to jacl_ctx_set_field, which updates the runtime-global ctx in place (so a
+         * later `$ctx->field` read observes it). Only when `ctx` is the ambient keyword
+         * (no local binding shadows it). */
+        if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
+            node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
+            node->data.command.args[0]->data.command.arg_count == 2 &&
+            node->data.command.args[0]->data.command.args[1]->type == AST_LIT_STRING &&
+            node->data.command.args[0]->data.command.args[0]->type == AST_VAR_REF &&
+            node->data.command.args[0]->data.command.args[0]->data.var_ref.length == 3 &&
+            memcmp(node->data.command.args[0]->data.command.args[0]->data.var_ref.name, "ctx", 3) == 0 &&
+            !env_lookup(cx, "ctx", 3)) {
+          AstNode *dot = node->data.command.args[0];
+          IrVal fname = compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
+                                               dot->data.command.args[1]->data.lit_string.length);
+          IrVal val = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, fname, val};
+          return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
         }
         /* `set $p->x V` — in-place struct field mutation. */
         if (node->data.command.arg_count == 2 && node->data.command.args[0]->type == AST_COMMAND &&
@@ -2295,17 +2369,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         SDef *sd = sdef_lookup(cx, node->data.command.head->data.lit_string.value,
                                node->data.command.head->data.lit_string.length);
         if (sd) {
-          IrVal tn = compile_string_literal(cx, sd->name, sd->len);
-          IrVal nf = irb_const_i64(cx->f, cx->cur, jaclval_i32(sd->nf));
-          IrVal na[] = {cx->sp, tn, nf};
-          IrVal sv = emit_rt_call(cx, "jacl_struct_new", na, 3);
-          for (int k = 0; k < sd->nf; k++) {
-            IrVal fname = compile_string_literal(cx, sd->fn[k], sd->fl[k]);
-            IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
-            IrVal nil = irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
-            IrVal ia[] = {cx->sp, sv, idx, fname, nil};
-            sv = emit_rt_call(cx, "jacl_struct_init_field", ia, 5);
-          }
+          /* Base: every field at its type's zero default (structs zero recursively). */
+          IrVal sv = emit_struct_zero(cx, sd, 0);
           uint32_t argc2 = node->data.command.arg_count;
           for (uint32_t i = 0; i + 1 < argc2; i += 2) {
             if (node->data.command.args[i]->type != AST_LIT_STRING) {
@@ -2423,7 +2488,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_BOX_Q,      "jacl_is_box_v",   1},
           {HEAD_ARR_GET,    "jacl_arr_get_at", 2},
           {HEAD_ARR_SET,    "jacl_arr_set_at", 3},
-          {HEAD_ARR_PUSH,   "jacl_arr_push",   2},
+          {HEAD_ARR_PUSH,   "jacl_arr_push_v", 2},
           {HEAD_ARR_POP,    "jacl_arr_pop",    1},
           {HEAD_ARR_LEN,    "jacl_len",        1},
           {HEAD_BUF_GET,    "jacl_arr_get_at", 2},
