@@ -1103,6 +1103,149 @@ after_branch:
   return out;
 }
 
+/* filter/transform over a MAP: iterate its entries (i-th key/value), call the 2-param
+ * callback cb(k, v), and build a NEW map. filter keeps (k, v) where cb is truthy; transform
+ * maps each entry to cb's returned `[vec newk newv]` pair. Mirrors the old VM, which
+ * dispatches filter/transform on the source's runtime type (map -> map, vec -> vec). */
+static IrVal stream_into_map(Cx *cx, IrVal src, IrVal clo, int is_filter) {
+  scope_enter(cx);
+  IrVal ea[] = {cx->sp};
+  IrVal acc0 = emit_rt_call(cx, "jacl_map_empty", ea, 1);
+  env_define(cx, ST_SRC, 7, src, 0, 0);
+  env_define(cx, ST_ACC, 7, acc0, 1, 0);
+  env_define(cx, ST_CLO, 7, clo, 0, 0);
+  env_define(cx, ST_IDX, 7, irb_const_i64(cx->f, cx->cur, jaclval_i32(0)), 1, 0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock next_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  /* header: i < len(src) (entry count) */
+  enter_frame_block(cx, header);
+  {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    IrVal la[] = {cx->sp, bs->value};
+    IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
+    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, len);
+    IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+    IrVal is_true = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, cond, ctrue);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, is_true, body_blk, frame, w, exit_blk, frame, w);
+  }
+
+  /* body: k/v = i-th entry; r = cb(sp, cb, k, v) */
+  enter_frame_block(cx, body_blk);
+  {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    Binding *bc = env_lookup(cx, ST_CLO, 7);
+    IrVal ka[] = {cx->sp, bs->value, bi->value};
+    IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
+    IrVal va[] = {cx->sp, bs->value, bi->value};
+    IrVal val = emit_rt_call(cx, "jacl_iter_val_at", va, 3);
+    IrVal fa[] = {cx->sp, bc->value};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+    IrType r1[] = {IRB_I64};
+    IrVal cargs[] = {cx->sp, bc->value, key, val};
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+    if (is_filter) {
+      /* keep the ORIGINAL (k, v) when cb is truthy. Recompute k/v in the keep block from
+       * the frame-carried src + i (block-local SSA — body's key/val aren't visible there). */
+      IrVal truth = emit_truthy(cx, r);
+      IrBlock keep_blk = new_i64_block(cx, w);
+      fill_frame(cx, frame);
+      irb_br_if(cx->f, cx->cur, truth, keep_blk, frame, w, next_blk, frame, w);
+      enter_frame_block(cx, keep_blk);
+      Binding *ks = env_lookup(cx, ST_SRC, 7);
+      Binding *ki = env_lookup(cx, ST_IDX, 7);
+      Binding *ba = env_lookup(cx, ST_ACC, 7);
+      IrVal ka2[] = {cx->sp, ks->value, ki->value};
+      IrVal k2 = emit_rt_call(cx, "jacl_iter_key_at", ka2, 3);
+      IrVal va2[] = {cx->sp, ks->value, ki->value};
+      IrVal v2 = emit_rt_call(cx, "jacl_iter_val_at", va2, 3);
+      IrVal sa[] = {cx->sp, ba->value, k2, v2};
+      ba->value = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      fill_frame(cx, frame);
+      irb_br(cx->f, cx->cur, next_blk, frame, w);
+    } else {
+      /* transform: cb returned [vec newk newv]; put (newk, newv) into the result map. */
+      Binding *ba = env_lookup(cx, ST_ACC, 7);
+      IrVal g0[] = {cx->sp, r, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))};
+      IrVal nk = emit_rt_call(cx, "jacl_vec_get_at", g0, 3);
+      IrVal g1[] = {cx->sp, r, irb_const_i64(cx->f, cx->cur, jaclval_i32(1))};
+      IrVal nv = emit_rt_call(cx, "jacl_vec_get_at", g1, 3);
+      IrVal sa[] = {cx->sp, ba->value, nk, nv};
+      ba->value = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      fill_frame(cx, frame);
+      irb_br(cx->f, cx->cur, next_blk, frame, w);
+    }
+  }
+
+  /* next: i = i + 1 */
+  enter_frame_block(cx, next_blk);
+  {
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
+    bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, header, frame, w);
+  }
+
+  enter_frame_block(cx, exit_blk);
+  IrVal out = env_lookup(cx, ST_ACC, 7)->value;
+  scope_exit(cx);
+  return out;
+}
+
+/* filter/transform: dispatch on the source's runtime type — a map builds a map (2-param
+ * callback over key/value), anything else builds a vec via stream_into_vec. src and clo are
+ * carried as frame locals so both branches can read them across the block split. */
+static IrVal compile_filter_transform(Cx *cx, IrVal src, IrVal clo, int is_filter) {
+  scope_enter(cx);
+  env_define(cx, "\x01""ft-src", 7, src, 0, 0);
+  env_define(cx, "\x01""ft-clo", 7, clo, 0, 0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+  int w = frame_width(cx);
+  IrVal ma[] = {cx->sp, src};
+  IrVal is_map = emit_rt_call(cx, "jacl_is_map_v", ma, 2);
+  IrVal truth = emit_truthy(cx, is_map);
+  IrBlock map_blk = new_i64_block(cx, w);
+  IrBlock vec_blk = new_i64_block(cx, w);
+  IrBlock merge = new_i64_block(cx, w + 1);   /* extra param: the result collection */
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, map_blk, frame, w, vec_blk, frame, w);
+
+  enter_frame_block(cx, map_blk);
+  {
+    IrVal s = env_lookup(cx, "\x01""ft-src", 7)->value;
+    IrVal c = env_lookup(cx, "\x01""ft-clo", 7)->value;
+    IrVal rm = stream_into_map(cx, s, c, is_filter);
+    fill_frame(cx, frame); frame[w] = rm;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, vec_blk);
+  {
+    IrVal s = env_lookup(cx, "\x01""ft-src", 7)->value;
+    IrVal c = env_lookup(cx, "\x01""ft-clo", 7)->value;
+    IrVal rv = stream_into_vec(cx, s, /*is_gen=*/0, c, is_filter);
+    fill_frame(cx, frame); frame[w] = rv;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, merge);
+  scope_exit(cx);
+  return (IrVal)w;   /* the merge block's extra param = the result */
+}
+
 /* Statement-position error auto-return (old-VM semantics): if a non-tail statement
  * evaluates to an error-flagged value, return it from the enclosing function now.
  * Splits the current block: err path returns, cont path carries the frame on. */
@@ -2502,6 +2645,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         }
         if (cx->failed) return 0;
         if (hid == HEAD_COLLECT && !is_gen) return src;   /* collect of a vec is itself */
+        /* filter/transform over a non-generator source dispatch on runtime type: a map
+         * builds a map (2-param key/value callback), else a vec. */
+        if ((hid == HEAD_FILTER || hid == HEAD_TRANSFORM) && !is_gen)
+          return compile_filter_transform(cx, src, clo, hid == HEAD_FILTER);
         return stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
       }
 

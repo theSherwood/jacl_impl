@@ -281,6 +281,7 @@ JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeou
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_is_future_v(JaclVal v);               /* future? */
+JaclVal jacl_is_map_v(JaclVal v);                  /* is-map (filter/transform dispatch) */
 JaclVal jacl_global_get(JaclVal name);             /* module global read */
 JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
 JaclVal jacl_read_file(JaclVal path);                     /* read-file (in-memory VFS) */
