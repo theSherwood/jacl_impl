@@ -4,6 +4,18 @@ Working notes for grinding `docs/SVM_PARITY.md` (the generated scoreboard) towar
 full corpus parity. This is the *how* and *why* behind the slices; the scoreboard
 itself is the *what's-left*.
 
+## Related references
+
+- `docs/SVM_PARITY.md` — the generated scoreboard (what's left, bucketed by stage).
+- `docs/SVM_RUNTIME_BUILTINS.md` — the codegen↔runtime `jacl_*` ABI, grouped by category.
+- `docs/SVM_NUMERICS.md` — the numeric tower: inline vs boxed widths, overflow promotion,
+  comparison/equality, error-flag propagation, print formatting.
+- `docs/SVM_BUFFERS.md` — `[Buf N T]` / `[Ptr T]` model, zero-init, by-value params,
+  buffer→pointer decay, and the fat-pointer arrow-access gaps.
+- `docs/SVM_STREAMS.md` — generators-as-fibers, eager stream collection, and why the
+  concurrency primitives score as hangs under the single-threaded oracle.
+- `codegen/README.md` — the codegen phases and worked lowering examples.
+
 ## The pipeline under test
 
 `runtime/harness/src/bin/parity.rs` drives every `test/jacl/*.jacl` through the real
