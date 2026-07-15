@@ -104,7 +104,35 @@ JaclVal jacl_str_intern(const char *s, uint32_t len) {
 }
 
 /* a ++ b. Inline if the result is <=7 bytes, else a fresh heap string. */
+/* `[index STR i]` on a string — the 1-byte substring at byte i (ASCII char access). */
+JaclVal jacl_str_index(JaclVal s, JaclVal idx) {
+  if (jaclrt_is_error(s)) return s;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  uint32_t n = jacl_str_len(s);
+  if (i < 0 || (uint32_t)i >= n) return jaclrt_error();
+  char buf[8];
+  jacl_str_bytes(s, buf, sizeof buf > n + 1 ? n + 1 : sizeof buf);
+  char c[1] = { buf[i] };
+  return jacl_str_new(c, 1);
+}
+/* `[slice STR a b]` on a string — the substring [a, b) (clamped to the string). */
+JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(s)) return s;
+  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
+  uint32_t n = jacl_str_len(s);
+  int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
+  if (lo < 0) lo = 0;
+  if (hi > (int32_t)n) hi = (int32_t)n;
+  if (lo >= hi) return jacl_str_new("", 0);
+  char tmp[1024];
+  uint32_t copy = n + 1 > sizeof tmp ? sizeof tmp : n + 1;
+  jacl_str_bytes(s, tmp, copy);
+  return jacl_str_new(tmp + lo, (uint32_t)(hi - lo));
+}
 JaclVal jacl_str_concat(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
   uint32_t la = jacl_str_len(a), lb = jacl_str_len(b), n = la + lb;
   if (n <= 7) {
     char tmp[8];

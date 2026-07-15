@@ -33,6 +33,21 @@ static int jacl_itoa(long v, char *buf) {
 /* `print V` — write V's text form + newline to stdout; returns nil (like the old VM). */
 JaclVal jacl_print(JaclVal v) {
   char buf[64];
+  /* Error-flagged values print as `<error: PAYLOAD>` (payload rendered by the shared
+   * repr, flag cleared) — matches the old VM's error display. Checked before the tag
+   * dispatch since the flag is orthogonal to the value's type index. */
+  if (jaclrt_is_error(v)) {
+    JaclVal payload = jacl_error_val(v);
+    JaclVal s = jacl_to_string(payload);
+    char sb[1024];
+    uint32_t len = jaclrt_is_string(s) ? jacl_str_len(s) : 0;
+    if (len > sizeof sb - 1) len = sizeof sb - 1;
+    if (len) jacl_str_bytes(s, sb, sizeof sb);
+    write(1, "<error: ", 8);
+    write(1, sb, (long)len);
+    write(1, ">\n", 2);
+    return jaclrt_nil();
+  }
   uint32_t t = jacl_tag_of(v);
   if (t == 0x04 || t == 0x05 || t == 0x14) {     /* inline / heap / rope string */
     uint32_t len = jacl_str_len(v);

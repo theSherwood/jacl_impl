@@ -320,11 +320,14 @@ static JaclVal *struct_field_slot(JaclVal s, JaclVal name) {
 }
 JaclVal jacl_struct_get(JaclVal s, JaclVal name) {
   if (jaclrt_is_error(s)) return s;
+  if (jaclrt_is_error(name)) return name;
   JaclVal *slot = struct_field_slot(s, name);
   return slot ? *slot : jaclrt_error();
 }
 JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place field mutation */
   if (jaclrt_is_error(s)) return s;
+  if (jaclrt_is_error(name)) return name;
+  if (jaclrt_is_error(v)) return v;
   JaclVal *slot = struct_field_slot(s, name);
   if (!slot) return jaclrt_error();
   *slot = v;
@@ -488,15 +491,31 @@ JaclVal jacl_assert_type(JaclVal v, JaclVal tname) {
   return type_name_matches(v, tn, tl) ? v : jaclrt_error();
 }
 
+/* `[?. V KEY]` — optional chaining: nil short-circuits to nil, a map reads the entry
+ * (missing key -> nil), and any other indexable/record value falls through to the
+ * dynamic dot. (Structs are a compile error in the old VM — `use -> instead`; here a
+ * struct value yields an error at runtime.) */
+JaclVal jacl_qdot(JaclVal v, JaclVal key) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_nil(v)) return jaclrt_nil();
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x07) return jacl_map_get(v, key);   /* map: value or nil */
+  if (t == 0x12) return jaclrt_error();          /* struct: -> is required */
+  return jacl_dot_dyn(v, key);
+}
+
 /* Dynamic dot: `\$v->\$k` — an i32 key indexes (buf/arr/vec), a string key reads a
  * field/entry (struct/map). */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(k)) return k;
   if (jaclrt_is_i32(k)) return jacl_index_get(v, k);
   return jacl_field_get(v, k);
 }
 JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(k)) return k;
+  if (jaclrt_is_error(nv)) return nv;
   if (jaclrt_is_i32(k)) return jacl_arr_set_at(v, k, nv);
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_put(v, k, nv);
@@ -505,6 +524,7 @@ JaclVal jacl_dot_dyn_set(JaclVal v, JaclVal k, JaclVal nv) {
 /* Named-field access across record-like values: struct field or map entry (string key). */
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(name)) return name;
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_get(v, name);
   if (t == 0x07) return jacl_map_get(v, name);
@@ -516,6 +536,114 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   int32_t i = jaclrt_as_i32(idx);
   if (i < 0) return jaclrt_error();
   return jacl_vec_set(v, (uint32_t)i, elem);
+}
+/* `[vec-push V E]` — error-propagating push wrapper (the core jacl_vec_push is also
+ * used to build literals / accumulate results, where inputs are never errors, so the
+ * propagation lives here on the builtin edge). */
+JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(elem)) return elem;
+  if (jaclrt_type_index(v) != 0x06) return jaclrt_error();
+  return jacl_vec_push(v, elem);
+}
+/* `[vec-slice V START END]` — a fresh vector of V[START..END) (half-open). START/END
+ * are clamped to [0, len]; START past END yields an empty vector. */
+JaclVal jacl_vec_slice(JaclVal v, JaclVal start, JaclVal end) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_is_error(start)) return start;
+  if (jaclrt_is_error(end)) return end;
+  if (jaclrt_type_index(v) != 0x06 || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
+    return jaclrt_error();
+  int32_t n = (int32_t)jacl_vec_count(v);
+  int32_t s = jaclrt_as_i32(start), e = jaclrt_as_i32(end);
+  if (s < 0) s = 0;
+  if (e > n) e = n;
+  JaclVal out = jacl_vec_empty();
+  for (int32_t i = s; i < e; i++) out = jacl_vec_push(out, jacl_vec_get(v, (uint32_t)i));
+  return out;
+}
+/* `[index X i]` — a string yields its i-th byte as a 1-char string; a vector/arr
+ * yields element i. `[slice X a b]` — a string yields the substring, a vector the
+ * sub-vector. Dispatched on X's runtime type so one head serves both. */
+JaclVal jacl_index_op(JaclVal x, JaclVal idx) {
+  if (jaclrt_is_error(x)) return x;
+  if (jaclrt_is_string(x)) return jacl_str_index(x, idx);
+  return jacl_index_get(x, idx);
+}
+JaclVal jacl_slice_op(JaclVal x, JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(x)) return x;
+  if (jaclrt_is_string(x)) return jacl_str_slice(x, a, b);
+  return jacl_vec_slice(x, a, b);
+}
+/* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
+JaclVal jacl_first(JaclVal c) {
+  if (jaclrt_is_error(c)) return c;
+  return jacl_iter_val_at(c, jaclrt_i32(0));
+}
+/* Left-fold an arithmetic operator over a collection's elements — the runtime side of
+ * spreading a vector into a variadic operator call (`[+ ..$v]` -> reduce). `opid`
+ * selects add/sub/mul/div/mod; an empty collection yields the additive identity for +
+ * (0) and an error otherwise (matching a nullary operator). */
+JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(opid)) return jaclrt_error();
+  int32_t op = jaclrt_as_i32(opid);
+  uint32_t t = jaclrt_type_index(c);
+  if (t != 0x06 && t != 0x1A) return jaclrt_error();     /* vectors / arrays only */
+  uint32_t n = t == 0x1A ? jacl_arr_count(c) : jacl_vec_count(c);
+  if (n == 0) return op == 0 ? jaclrt_i32(0) : jaclrt_error();
+  JaclVal acc = jacl_iter_val_at(c, jaclrt_i32(0));
+  for (uint32_t i = 1; i < n; i++) {
+    JaclVal e = jacl_iter_val_at(c, jaclrt_i32((int32_t)i));
+    switch (op) {
+      case 0: acc = jacl_add(acc, e); break;
+      case 1: acc = jacl_sub(acc, e); break;
+      case 2: acc = jacl_mul(acc, e); break;
+      case 3: acc = jacl_div(acc, e); break;
+      case 4: acc = jacl_mod(acc, e); break;
+      default: return jaclrt_error();
+    }
+    if (jaclrt_is_error(acc)) return acc;
+  }
+  return acc;
+}
+/* for-over-collection accessors: the i-th VALUE and KEY of any iterable. A vector/arr
+ * yields (index -> element) with the index itself as the key; a map yields its i-th
+ * (key, value) entry in deterministic HAMT order (stable across the two calls, so a
+ * two-name `for $m k v` binds a consistent pair). */
+JaclVal jacl_iter_val_at(JaclVal c, JaclVal idx) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (jaclrt_type_index(c) == 0x07) {                    /* MAP: i-th value */
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t n = jacl_map_entries(c, ks, vs, JACL_EQ_MAP_CAP);
+    if (i < 0 || (uint32_t)i >= n) return jaclrt_error();
+    return vs[i];
+  }
+  return jacl_index_get(c, idx);                          /* vec / arr element */
+}
+JaclVal jacl_iter_key_at(JaclVal c, JaclVal idx) {
+  if (jaclrt_is_error(c)) return c;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (jaclrt_type_index(c) == 0x07) {                    /* MAP: i-th key */
+    JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
+    uint32_t n = jacl_map_entries(c, ks, vs, JACL_EQ_MAP_CAP);
+    if (i < 0 || (uint32_t)i >= n) return jaclrt_error();
+    return ks[i];
+  }
+  return idx;                                             /* vec / arr: key is the index */
+}
+/* `[range-inclusive A B]` — [A, B] as a vector (the closed-interval sibling of range). */
+JaclVal jacl_range_inclusive(JaclVal a, JaclVal b) {
+  if (jaclrt_is_error(a)) return a;
+  if (jaclrt_is_error(b)) return b;
+  if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
+  int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
+  JaclVal out = jacl_vec_empty();
+  for (int32_t i = lo; i <= hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
+  return out;
 }
 JaclVal jacl_map_keys_v(JaclVal m) {
   if (jaclrt_is_error(m)) return m;

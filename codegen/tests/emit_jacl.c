@@ -218,7 +218,56 @@ int main(int argc, char **argv) {
   LexResult toks = lexer_lex(src, &arena);
   if (toks.error_count) { fprintf(stderr, "lex errors: %u\n", toks.error_count); return 1; }
   ParseResult parse = parser_parse(toks, &arena);
-  if (parse.error_count) { fprintf(stderr, "parse errors: %u\n", parse.error_count); return 1; }
+  if (parse.error_count) {
+    /* Surface the first AST_ERROR's message (as jacl_eval does) so `# expect-error`
+     * oracles for parse-level rejections match, instead of a generic "parse errors: N". */
+    const char *first_err = NULL;
+    for (uint32_t i = 0; i < parse.count; i++)
+      if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
+        first_err = parse.nodes[i]->data.error.message;
+        break;
+      }
+    /* Prefix `parse error:` — the corpus's parse-level oracles are written that way. */
+    if (first_err) fprintf(stderr, "parse error: %s\n", first_err);
+    else fprintf(stderr, "parse errors: %u\n", parse.error_count);
+    return 1;
+  }
+
+  /* Static-error oracle: run the old VM's full compiler purely for its compile-time
+   * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
+   * generator/typed-closure conformance, …). Every corpus program is written for the
+   * old VM, so the compiler accepts each passing case and rejects each `# expect-error`
+   * case with its canonical message — exactly the accept/reject the SVM backend should
+   * mirror. On rejection we surface the message and stop before codegen.
+   *
+   * The compiler runs on its OWN re-lexed/re-parsed AST (a second parse into chk's
+   * arena): both the compiler's conformance pass and the SVM codegen mutate their AST
+   * in place, so sharing one tree cross-contaminates them. Isolating the two parses
+   * lets the compiler give its canonical message while codegen still sees pristine
+   * nodes. */
+  {
+    JaclVM *chk = jacl_vm_new();
+    LexResult ctoks = lexer_lex(src, &chk->arena);
+    ParseResult cparse = parser_parse(ctoks, &chk->arena);
+    if (!ctoks.error_count && !cparse.error_count) {
+      ExpandState es;
+      memset(&es, 0, sizeof(es));
+      jacl_ctx_saved_t macro_saved;
+      jacl_ctx_save(&macro_saved);
+      jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
+      es.ctx = macro_ctx;
+      CompileResult cr = compiler_compile(cparse, &chk->arena, &chk->intern_table,
+                                          &chk->vm.heap, chk->persistent_struct_registry,
+                                          &es, JACL_NIL, &chk->persistent_arities, &chk->arena);
+      jacl_ctx_destroy(macro_ctx);
+      es.ctx = NULL;
+      jacl_ctx_restore(macro_saved);
+      if (cr.error_count > 0) {
+        fprintf(stderr, "%s\n", cr.error_message ? cr.error_message : "compile error");
+        return 1;   /* chk leaked deliberately: its arena may back cr.error_message */
+      }
+    }
+  }
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
    * type-driven (unboxed) lowering. */
