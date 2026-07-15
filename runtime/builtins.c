@@ -406,6 +406,20 @@ JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v) {
   return v;
 }
 
+/* ---- module globals — top-level def/mut names visible from any proc/closure ----
+ * A persistent map keyed by name; like $ctx, the global holds a heap value so it is a GC
+ * root (jacl_globals_mark_root, called from jacl_sched_mark_roots). */
+JaclVal jacl_module_globals;   /* nil -> empty map lazily */
+static JaclVal jacl_globals_map(void) {
+  if (jaclrt_is_nil(jacl_module_globals)) jacl_module_globals = jacl_map_empty();
+  return jacl_module_globals;
+}
+JaclVal jacl_global_get(JaclVal name) { return jacl_map_get(jacl_globals_map(), name); }
+JaclVal jacl_global_set(JaclVal name, JaclVal v) {
+  jacl_module_globals = jacl_map_set(jacl_globals_map(), name, v);
+  return v;
+}
+
 /* Widen a value to a declared wide scalar kind (typed defs): 14=i64, 15=u64, 16=f64. */
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
   if (jaclrt_is_error(v) || !jaclrt_is_i32(kind)) return v;

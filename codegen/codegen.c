@@ -116,8 +116,23 @@ typedef struct {
     int nf;
   } sdefs[32];
   int nsdefs;
+
+  /* module globals — names bound at top level, visible from any proc/closure via the
+   * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
+  const char *globals[128]; uint32_t globalslen[128]; int nglobals;
+  int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
 } Cx;
 typedef struct SDef SDef;
+
+static int is_global_name(Cx *cx, const char *s, uint32_t l) {
+  for (int i = 0; i < cx->nglobals; i++)
+    if (cx->globalslen[i] == l && memcmp(cx->globals[i], s, l) == 0) return 1;
+  return 0;
+}
+static void global_add(Cx *cx, const char *s, uint32_t l) {
+  if (is_global_name(cx, s, l) || cx->nglobals >= 128) return;
+  cx->globals[cx->nglobals] = s; cx->globalslen[cx->nglobals] = l; cx->nglobals++;
+}
 
 static void cx_fail(Cx *cx, const char *msg); /* fwd */
 
@@ -175,6 +190,8 @@ static Binding *env_lookup(Cx *cx, const char *name, uint32_t len) {
 
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
+  /* `_` is the throwaway binding — re-binding it is always allowed (never an error). */
+  if (!(len == 1 && name[0] == '_'))
   for (int i = mark; i < cx->nlocals; i++)
     if (name_eq(&cx->locals[i], name, len) && !cx->locals[i].is_mut) {
       cx_failf(cx, "codegen: variable '%.*s' already defined in this scope", name, len);
@@ -206,6 +223,28 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
  * param's type token from the name that follows it (param names are lowercase). */
 static int cg_is_type_prefix(const char *s, uint32_t n) {
   return cg_is_type_kw(s, n) || (n > 0 && s[0] >= 'A' && s[0] <= 'Z');
+}
+
+/* Pre-scan the top-level forms for `def`/`mut` NAME bindings; those names become module
+ * globals visible from any proc/closure. Runs before proc bodies compile so a proc that
+ * references a top-level binding resolves it to the global map instead of erroring. */
+static void scan_top_globals(Cx *cx, AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    AstNode *n = nodes[i];
+    if (n->type != AST_COMMAND) continue;
+    uint8_t hid = n->data.command.head_id;
+    if (hid != HEAD_DEF && hid != HEAD_MUT) continue;
+    AstNode **a = n->data.command.args; uint32_t ac = n->data.command.arg_count;
+    if (ac < 2) continue;
+    uint32_t ni = 0;   /* skip a leading type annotation: `def i64 x V` / `def [Vec T] xs V` */
+    if (ac >= 3 && a[1]->type == AST_LIT_STRING &&
+        (a[0]->type == AST_COMMAND ||
+         (a[0]->type == AST_LIT_STRING &&
+          cg_is_type_prefix(a[0]->data.lit_string.value, a[0]->data.lit_string.length))))
+      ni = 1;
+    if (a[ni]->type == AST_LIT_STRING)
+      global_add(cx, a[ni]->data.lit_string.value, a[ni]->data.lit_string.length);
+  }
 }
 
 /* Read a proc's param NAMES from its params command (args[1]). Params are flattened
@@ -1533,6 +1572,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal na[] = {cx->sp, fnref64, nupv};
           return emit_rt_call(cx, "jacl_closure_new", na, 3);
         }
+        /* A top-level (module-global) binding, read from anywhere via the global map. */
+        if (is_global_name(cx, nm, nl)) {
+          IrVal key = compile_string_literal(cx, nm, nl);
+          IrVal a[] = {cx->sp, key};
+          return emit_rt_call(cx, "jacl_global_get", a, 2);
+        }
         cx_failf(cx, "codegen: undefined variable '%.*s'", nm, nl);
         return 0;
       }
@@ -2103,6 +2148,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                                   tt->data.lit_string.length, buf_ann_size(annsrc));
           }
         }
+        /* A top-level binding mirrors into the module-global map so procs/closures see it. */
+        if (cx->at_top_level && is_global_name(cx, name, len)) {
+          IrVal key = compile_string_literal(cx, name, len);
+          IrVal ga[] = {cx->sp, key, val};
+          (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
+        }
         return val;
       }
       if (hid == HEAD_SET) {
@@ -2177,7 +2228,15 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal val = compile_expr(cx, node->data.command.args[1]);
         if (cx->failed) return 0;
         Binding *bd = env_lookup(cx, name, len);
-        if (!bd) { cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0; }
+        if (!bd) {
+          /* `set` of a top-level (module-global) binding: write the global map. */
+          if (is_global_name(cx, name, len)) {
+            IrVal key = compile_string_literal(cx, name, len);
+            IrVal a[] = {cx->sp, key, val};
+            return emit_rt_call(cx, "jacl_global_set", a, 3);
+          }
+          cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0;
+        }
         if (!bd->is_mut) { cx_failf(cx, "codegen: cannot mutate immutable binding '%.*s'", name, len); return 0; }
         if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
         else bd->value = val; /* uncaptured: plain SSA rebind */
@@ -3110,6 +3169,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+  scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
@@ -3122,6 +3182,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
     env_reset(&cx);
     capset_reset(&cx);
+    cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
     IrVal last = 0; int have = 0;
@@ -3133,6 +3194,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     }
     if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
     scope_exit(&cx);
+    cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 
