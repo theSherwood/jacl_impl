@@ -41,22 +41,34 @@ prints a `[Vec T]` as `[1, 2, 3]` (comma form) while the backend prints the dyna
 `[vec 1 2 3]`. Closing that needs a distinct typed-vector runtime type — see the GC-tag
 discussion in `docs/SVM_PARITY_NOTES.md`.
 
-## Concurrency: correct on the JIT, unscorable on the interpreter
+## Concurrency: cooperative single-worker scheduling
 
 `spawn` / `await` / `parallel` / `race` lower to `jacl_spawn` / `jacl_await` /
-`jacl_parallel` / `jacl_race` over the runtime's M:N worker pool (`runtime/sched.c`).
-`spawn { … }` packages the block as a zero-arg closure (capturing its free variables) run
-on a task fiber and returns a future; `await` drives that future to completion.
+`jacl_parallel` / `jacl_race` in `runtime/sched.c`. `spawn { … }` packages the block as a
+zero-arg closure (capturing its free variables) as a *job* fiber and returns a future;
+`await` drives that future to completion.
 
-These run correctly under the **JIT**, which has a real OS-thread worker pool. But the
-parity harness scores each case with a differential `run_diff` that requires the
-**interpreter** and JIT to agree, and the interpreter is single-threaded — it cannot spin
-up the worker pool, so any program that actually blocks on cross-task progress never
-terminates under interp. The harness records these as `hang` (~72 cases: the `spawn` /
-`await` / `parallel` / `race` / `cps` / `gc`-stress / `sleep` families). They are not
-codegen breadth gaps — the IR is emitted fine — but scheduler/runtime work that has to make
-the interpreter quiesce under the differential oracle. This is the single largest bucket on
-the scoreboard and the one least addressable from the codegen side.
+The scheduler runs in **cooperative single-worker mode** (`JACL_POOL_WORKERS` defaults to
+1). This is the configuration correct on BOTH svm backends — and the reference
+interpreter, which the differential `run_diff` oracle requires to agree with the JIT, is
+one of them. The interpreter multiplexes every `thread.spawn`ed vCPU cooperatively onto one
+OS thread, so the multi-worker pool (jobs pinned round-robin to per-worker queues that only
+their owner drains) livelocks there — historically these ~72 cases all hung. With one
+worker, every job lands on worker 0's queue and `worker_loop` drains it inline: `await`
+suspends the fiber back to the loop (a fiber `suspend`, not a spin), the loop runs the
+awaited job to completion, then resumes the waiter with the result. No cross-vCPU wakeup is
+needed, so it progresses under the interpreter and gives identical output under the JIT.
+The multi-worker real-parallelism pool is retained and opt-in via `-DJACL_POOL_WORKERS=N`.
+
+Semantics layered on top: an **error raised in a task** surfaces through `await` (a binding
+captures it for `error?`/`error-val` rather than auto-returning); `parallel` is
+**first-error-wins**; and each task **snapshots `$ctx`** at spawn so dynamic scope is
+task-isolated (`resume_job` installs/captures the snapshot per slice).
+
+What remains: the **CPS / state-machine lowering** for a proc that suspends mid-body
+(`sm_*`, some `cps_*`, wide-scalar-across-suspension) still re-executes statements before
+the suspension point on resume — a codegen problem in the suspend-checkpoint transform, not
+a scheduler one — and the heaviest `gc`-under-concurrency stress cases.
 
 `print` is the one host effect that *is* scored: it lowers to `jacl_print` → the powerbox
 `Stream.write` on the stdout handle the harness stashes before the program body runs as the
