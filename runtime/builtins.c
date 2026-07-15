@@ -619,14 +619,20 @@ JaclVal jacl_addr_of(JaclVal base, JaclVal idx) {
 }
 JaclVal jacl_ptr_deref(JaclVal p) {
   if (jaclrt_is_error(p)) return p;
+  /* A buffer that decayed to a pointer at a proc-param boundary arrives as the bare
+   * array (0x1A) — deref reads element 0 (C-style decay: the pointer is `&buf[0]`). */
+  if (jaclrt_type_index(p) == 0x1A) return jacl_arr_get(p, 0);
   if (jaclrt_type_index(p) != 0x06) return jaclrt_error();
   return jacl_index_get(jacl_vec_get(p, 0), jacl_vec_get(p, 1));
 }
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (jaclrt_is_error(p)) return p;
   if (jaclrt_is_error(n)) return n;
-  if (jaclrt_type_index(p) != 0x06 || !jaclrt_is_i32(n)) return jaclrt_error();
-  JaclVal base = jacl_vec_get(p, 0), off = jacl_vec_get(p, 1);
+  if (!jaclrt_is_i32(n)) return jaclrt_error();
+  JaclVal base, off;
+  if (jaclrt_type_index(p) == 0x1A) { base = p; off = jaclrt_i32(0); }   /* decayed buffer */
+  else if (jaclrt_type_index(p) == 0x06) { base = jacl_vec_get(p, 0); off = jacl_vec_get(p, 1); }
+  else return jaclrt_error();
   JaclVal noff = jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(n));
   JaclVal np = jacl_vec_empty();
   np = jacl_vec_push(np, base);
