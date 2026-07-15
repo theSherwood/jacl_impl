@@ -2008,8 +2008,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (bargc >= 3 && bargs[1]->type == AST_LIT_STRING) {
           if (bargs[0]->type == AST_COMMAND) tshift = 1;
           else if (bargs[0]->type == AST_LIT_STRING &&
-                   cg_is_type_kw(bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length))
-            tshift = 1;
+                   cg_is_type_prefix(bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length))
+            tshift = 1;   /* `def i64 x V`, `def Point p V` (struct type prefix) */
         }
         if (bargc < 2 + tshift || bargs[tshift]->type != AST_LIT_STRING) {
           cx_fail(cx, "binding form needs a name and a value");
