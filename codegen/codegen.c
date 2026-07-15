@@ -2198,6 +2198,14 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             return emit_rt_call(cx, "jacl_vec_reduce", a, 3);
           }
         }
+        /* Unary minus `[- x]` — negate via `0 - x`, so it inherits jacl_sub's full
+         * numeric promotion (i32 → i64 on overflow, f64, …) instead of an i32-only path. */
+        if (argc == 1 && hid == HEAD_MINUS) {
+          IrVal x = compile_expr(cx, args[0]);
+          if (cx->failed) return 0;
+          IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+          return emit_binop_call(cx, "jacl_sub", zero, x);
+        }
         if (argc < 2) {
           AstNode *h = node->data.command.head;
           if (h && h->type == AST_LIT_STRING) {
