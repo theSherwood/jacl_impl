@@ -45,6 +45,11 @@ int  __vm_wait32(void *p, int expected, long timeout_ns);
 int  __vm_notify(void *p, int count);
 long __vm_vcpu_tls_get(void);
 
+/* The ambient dynamic-scope $ctx (a persistent map). Each task snapshots it at spawn and
+ * runs with its own copy, so a parent's later `set $ctx->…` doesn't reach an in-flight task
+ * and a task's mutations don't leak back — resume_job installs/captures it per slice. */
+extern JaclVal jacl_ctx_cur;
+
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
 /* Pool size. The DEFAULT is 1 — a single cooperative worker (main) — because that is the
@@ -157,7 +162,7 @@ static void mark_task_stacks(void) {
  * Conservative tracing keeps prime/closure, result, resume_arg, and the waiter chain alive;
  * fn/fiber/stack are out-of-heap small/addresses and are ignored. */
 enum { JACL_JOB_NEW = 0, JACL_JOB_DONE = 2 };
-#define JOB_PAYLOAD 88     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker */
+#define JOB_PAYLOAD 96     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker; i64@22=ctx snapshot */
 static inline int32_t *jp(JaclObj *j)              { return (int32_t *)jacl_obj_payload(j); }
 static inline long  job_get(JaclObj *j, int i)     { return *(int64_t *)(jp(j) + i); }
 static inline void  job_set(JaclObj *j, int i, long v) { *(int64_t *)(jp(j) + i) = v; }
@@ -170,6 +175,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
   job_set(j, 6, 0); job_set(j, 8, 0); job_set(j, 10, 0);
   job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
   p[18] = 0; p[19] = 0; p[20] = owner;
+  job_set(j, 22, (long)jacl_ctx_cur);   /* snapshot the spawner's $ctx (nil for the root) */
   return j;
 }
 
@@ -257,6 +263,10 @@ static int resume_job(JaclObj *j, long *out) {
   } else {
     arg = job_get(j, 10);                       /* resume_arg (await result), or 0 */
   }
+  /* Install this job's $ctx snapshot for the slice; capture any mutations back into the job
+   * and restore the worker-ambient ctx on the way out, so ctx stays task-isolated. */
+  JaclVal saved_ctx = jacl_ctx_cur;
+  jacl_ctx_cur = (JaclVal)job_get(j, 22);
   int d = 0; long v = 0;
   for (;;) {
     jacl_gc_worker_park_if_requested();         /* never resume into an in-progress collection */
@@ -265,8 +275,10 @@ static int resume_job(JaclObj *j, long *out) {
     v = __vm_fiber_resume(job_get(j, 6), arg, &d);
     jacl_gc_task_end();
     arg = 0;
-    if (d) { __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
+    if (d) { job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;
+             __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
     if (v == 0) continue;                        /* GC safepoint suspend → re-resume after park */
+    job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;   /* await: park ctx, restore */
     __vm_atomic_store32(&jp(j)[19], 0);          /* await: v = target job ptr */
     *out = v;
     return 1;
