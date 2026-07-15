@@ -66,8 +66,12 @@ static inline uint32_t jacl_iwide_tag(JaclVal a, JaclVal b) {
 /* ---- arithmetic (i32) ---- */
 JaclVal jacl_add(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
-    return jaclrt_i32(jaclrt_as_i32(a) + jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b)) {
+    int32_t r;
+    if (!__builtin_add_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
+      return jaclrt_i32(r) | prop_flags(a, b);
+    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) + (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+  }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) + jacl_num_f64(b)) | prop_flags(a, b);
@@ -79,8 +83,12 @@ JaclVal jacl_add(JaclVal a, JaclVal b) {
 }
 JaclVal jacl_sub(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
-    return jaclrt_i32(jaclrt_as_i32(a) - jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b)) {
+    int32_t r;
+    if (!__builtin_sub_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
+      return jaclrt_i32(r) | prop_flags(a, b);
+    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) - (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+  }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) - jacl_num_f64(b)) | prop_flags(a, b);
@@ -92,8 +100,12 @@ JaclVal jacl_sub(JaclVal a, JaclVal b) {
 }
 JaclVal jacl_mul(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
-  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
-    return jaclrt_i32(jaclrt_as_i32(a) * jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b)) {
+    int32_t r;
+    if (!__builtin_mul_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
+      return jaclrt_i32(r) | prop_flags(a, b);
+    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) * (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+  }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) * jacl_num_f64(b)) | prop_flags(a, b);
