@@ -45,12 +45,37 @@ int  __vm_wait32(void *p, int expected, long timeout_ns);
 int  __vm_notify(void *p, int count);
 long __vm_vcpu_tls_get(void);
 
+/* The ambient dynamic-scope $ctx (a persistent map). Each task snapshots it at spawn and
+ * runs with its own copy, so a parent's later `set $ctx->…` doesn't reach an in-flight task
+ * and a task's mutations don't leak back — resume_job installs/captures it per slice. */
+extern JaclVal jacl_ctx_cur;
+
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
+/* Pool size. The DEFAULT is 1 — a single cooperative worker (main) — because that is the
+ * only configuration correct on BOTH svm backends, and the reference interpreter (the
+ * parity oracle) is one of them:
+ *
+ *   - The svm interpreter multiplexes every `thread.spawn`ed vCPU cooperatively onto one
+ *     OS thread (it is `#![forbid(unsafe_code)]`, no native stack switching). With >1
+ *     worker, jobs are pinned round-robin to per-worker queues that only their owner drains
+ *     (next_owner / rq_pop), and the cross-vCPU park/wake handshake livelocks under that
+ *     cooperative driver — every spawn/await/parallel/race program hangs.
+ *   - With a single worker, all jobs land on worker 0's queue and main's worker_loop drains
+ *     them inline: `await` suspends the fiber back to the loop (jacl_await), the loop runs
+ *     the awaited job to completion, then re-enqueues and resumes the waiter with the
+ *     result. No cross-vCPU wakeup is ever needed, so it makes progress under the
+ *     interpreter AND produces identical output under the JIT — exactly what the
+ *     interp==jit differential oracle requires.
+ *
+ * The multi-worker real-parallelism pool below is retained unchanged and is opt-in: build
+ * with -DJACL_POOL_WORKERS=N for a genuinely OS-threaded JIT deployment. Cooperative mode
+ * gives up parallelism (a performance property), not correctness. */
 #ifndef JACL_POOL_WORKERS
-#define JACL_POOL_WORKERS      4            /* persistent pool size (main = worker 0) */
+#define JACL_POOL_WORKERS      1            /* main = worker 0; cooperative single-thread default */
 #endif
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
+#define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
 
 static int jacl_sched_self(void) {
   int w = (int)__vm_vcpu_tls_get();
@@ -138,7 +163,7 @@ static void mark_task_stacks(void) {
  * Conservative tracing keeps prime/closure, result, resume_arg, and the waiter chain alive;
  * fn/fiber/stack are out-of-heap small/addresses and are ignored. */
 enum { JACL_JOB_NEW = 0, JACL_JOB_DONE = 2 };
-#define JOB_PAYLOAD 88     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker */
+#define JOB_PAYLOAD 96     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker; i64@22=ctx snapshot */
 static inline int32_t *jp(JaclObj *j)              { return (int32_t *)jacl_obj_payload(j); }
 static inline long  job_get(JaclObj *j, int i)     { return *(int64_t *)(jp(j) + i); }
 static inline void  job_set(JaclObj *j, int i, long v) { *(int64_t *)(jp(j) + i) = v; }
@@ -151,6 +176,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
   job_set(j, 6, 0); job_set(j, 8, 0); job_set(j, 10, 0);
   job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
   p[18] = 0; p[19] = 0; p[20] = owner;
+  job_set(j, 22, (long)jacl_ctx_cur);   /* snapshot the spawner's $ctx (nil for the root) */
   return j;
 }
 
@@ -238,6 +264,10 @@ static int resume_job(JaclObj *j, long *out) {
   } else {
     arg = job_get(j, 10);                       /* resume_arg (await result), or 0 */
   }
+  /* Install this job's $ctx snapshot for the slice; capture any mutations back into the job
+   * and restore the worker-ambient ctx on the way out, so ctx stays task-isolated. */
+  JaclVal saved_ctx = jacl_ctx_cur;
+  jacl_ctx_cur = (JaclVal)job_get(j, 22);
   int d = 0; long v = 0;
   for (;;) {
     jacl_gc_worker_park_if_requested();         /* never resume into an in-progress collection */
@@ -246,8 +276,10 @@ static int resume_job(JaclObj *j, long *out) {
     v = __vm_fiber_resume(job_get(j, 6), arg, &d);
     jacl_gc_task_end();
     arg = 0;
-    if (d) { __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
+    if (d) { job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;
+             __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
     if (v == 0) continue;                        /* GC safepoint suspend → re-resume after park */
+    job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;   /* await: park ctx, restore */
     __vm_atomic_store32(&jp(j)[19], 0);          /* await: v = target job ptr */
     *out = v;
     return 1;
@@ -278,6 +310,13 @@ static void worker_loop(int is_main) {
     } else if (oc == 0) {
       release_task_stack((void *)job_get(job, 16));
       complete_job(job, out);
+    } else if (out == JACL_SCHED_PRIME) {
+      /* Fiber-entry prime: the codegen emits one `suspend(-1)` at a fiber entry so the fiber
+       * completes a full suspend->loop->resume round-trip before its body runs. Without it, a
+       * job fiber whose FIRST real suspend (an await) lands in a non-entry block replays from
+       * the top when the bare scheduler loop re-resumes it. Re-queue immediately with nil. */
+      job_set(job, 10, (long)JACL_NIL);
+      rq_push(job);
     } else {
       JaclObj *target = (JaclObj *)out;
       if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
@@ -336,6 +375,7 @@ void jacl_sched_mark_roots(void) {
   }
   if (jacl_root_job) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_root_job));
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
+  { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
   mark_task_stacks();   /* guest-memory roots on fiber data stacks (futs[] etc.) */
   for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
 }
@@ -383,9 +423,16 @@ JaclVal jacl_parallel(JaclVal closures) {
   if (n > JACL_PAR_MAX) n = JACL_PAR_MAX;
   JaclVal futs[JACL_PAR_MAX];
   for (long i = 0; i < n; i++) futs[i] = jacl_spawn(jacl_vec_get(closures, (uint32_t)i));
+  /* Await every block (so all finish), collecting results. First-error-wins: if any block
+   * errored, the whole `parallel` result IS that first error, not the vector of results. */
   JaclVal out = jacl_vec_empty();
-  for (long i = 0; i < n; i++) out = jacl_vec_push(out, jacl_await(futs[i]));
-  return out;
+  JaclVal firsterr = JACL_NIL; int have_err = 0;
+  for (long i = 0; i < n; i++) {
+    JaclVal r = jacl_await(futs[i]);
+    if (!have_err && jaclrt_is_error(r)) { firsterr = r; have_err = 1; }
+    out = jacl_vec_push(out, r);
+  }
+  return have_err ? firsterr : out;
 }
 
 JaclVal jacl_race(JaclVal closures) {

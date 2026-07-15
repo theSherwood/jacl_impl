@@ -280,6 +280,9 @@ JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructur
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
+JaclVal jacl_is_future_v(JaclVal v);               /* future? */
+JaclVal jacl_global_get(JaclVal name);             /* module global read */
+JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
 JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
 JaclVal jacl_range_inclusive(JaclVal a, JaclVal b);/* [range-inclusive A B] as a vector */
 JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem);  /* error-propagating [vec-push V E] */

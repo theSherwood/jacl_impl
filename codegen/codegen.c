@@ -116,8 +116,23 @@ typedef struct {
     int nf;
   } sdefs[32];
   int nsdefs;
+
+  /* module globals — names bound at top level, visible from any proc/closure via the
+   * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
+  const char *globals[128]; uint32_t globalslen[128]; int nglobals;
+  int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
 } Cx;
 typedef struct SDef SDef;
+
+static int is_global_name(Cx *cx, const char *s, uint32_t l) {
+  for (int i = 0; i < cx->nglobals; i++)
+    if (cx->globalslen[i] == l && memcmp(cx->globals[i], s, l) == 0) return 1;
+  return 0;
+}
+static void global_add(Cx *cx, const char *s, uint32_t l) {
+  if (is_global_name(cx, s, l) || cx->nglobals >= 128) return;
+  cx->globals[cx->nglobals] = s; cx->globalslen[cx->nglobals] = l; cx->nglobals++;
+}
 
 static void cx_fail(Cx *cx, const char *msg); /* fwd */
 
@@ -175,6 +190,11 @@ static Binding *env_lookup(Cx *cx, const char *name, uint32_t len) {
 
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
+  /* Re-binding is allowed for the throwaway `_`, and at the outermost module scope where a
+   * top-level `def` is reassignment (the old VM permits `def y 10` then `def y 42`). Inside
+   * any nested block/proc scope, same-scope shadowing of an immutable binding is an error. */
+  int module_scope = cx->at_top_level && cx->nmarks <= 1;
+  if (!module_scope && !(len == 1 && name[0] == '_'))
   for (int i = mark; i < cx->nlocals; i++)
     if (name_eq(&cx->locals[i], name, len) && !cx->locals[i].is_mut) {
       cx_failf(cx, "codegen: variable '%.*s' already defined in this scope", name, len);
@@ -206,6 +226,28 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
  * param's type token from the name that follows it (param names are lowercase). */
 static int cg_is_type_prefix(const char *s, uint32_t n) {
   return cg_is_type_kw(s, n) || (n > 0 && s[0] >= 'A' && s[0] <= 'Z');
+}
+
+/* Pre-scan the top-level forms for `def`/`mut` NAME bindings; those names become module
+ * globals visible from any proc/closure. Runs before proc bodies compile so a proc that
+ * references a top-level binding resolves it to the global map instead of erroring. */
+static void scan_top_globals(Cx *cx, AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    AstNode *n = nodes[i];
+    if (n->type != AST_COMMAND) continue;
+    uint8_t hid = n->data.command.head_id;
+    if (hid != HEAD_DEF && hid != HEAD_MUT) continue;
+    AstNode **a = n->data.command.args; uint32_t ac = n->data.command.arg_count;
+    if (ac < 2) continue;
+    uint32_t ni = 0;   /* skip a leading type annotation: `def i64 x V` / `def [Vec T] xs V` */
+    if (ac >= 3 && a[1]->type == AST_LIT_STRING &&
+        (a[0]->type == AST_COMMAND ||
+         (a[0]->type == AST_LIT_STRING &&
+          cg_is_type_prefix(a[0]->data.lit_string.value, a[0]->data.lit_string.length))))
+      ni = 1;
+    if (a[ni]->type == AST_LIT_STRING)
+      global_add(cx, a[ni]->data.lit_string.value, a[ni]->data.lit_string.length);
+  }
 }
 
 /* Read a proc's param NAMES from its params command (args[1]). Params are flattened
@@ -612,6 +654,21 @@ static void capset_scan(Cx *cx, AstNode *node) {
   if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
   if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
   if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    /* spawn/parallel/race run each { block } as a 0-param closure (compile_closure). Treat
+     * those blocks like closure bodies here so a `mut` they capture is boxed at its
+     * declaration — otherwise the capture site hits "captured mutable not boxed". */
+    if (hid == HEAD_SPAWN || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        AstNode *blk = node->data.command.args[i];
+        if (blk->type == AST_BLOCK) {
+          const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
+          collect_bound(blk, bound, blen, &nb);
+          add_free_varrefs(blk, bound, blen, nb, cx->capset, cx->capsetlen, &cx->ncapset);
+        } else capset_scan(cx, blk);
+      }
+      return;
+    }
     if (node->data.command.head) capset_scan(cx, node->data.command.head);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) capset_scan(cx, node->data.command.args[i]);
   }
@@ -1307,13 +1364,29 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
       (void)compile_expr(cx, body);
     } else {
       Binding *bcb = env_lookup(cx, "\x01""for-cb", 7);
+      /* A 2-param callback `cb {k, v}` gets (key, value) — over a map the key/value pair,
+       * over a vec/arr the index/element; a 1-param callback gets just the value. Read the
+       * arity from the callback proc when it is a named proc value; default to 1. */
+      int cbarity = 1;
+      if (cb_node->type == AST_VAR_REF) {
+        Proc *cp = proc_lookup(cx, cb_node->data.var_ref.name, cb_node->data.var_ref.length);
+        if (cp && !cp->variadic && cp->arity >= 1 && cp->arity <= 2) cbarity = cp->arity;
+      }
       IrVal fa[] = {cx->sp, bcb->value};
       IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
       IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
       IrType r1[] = {IRB_I64};
-      IrVal cargs[] = {cx->sp, bcb->value, elem};
-      (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      if (cbarity == 2) {
+        IrVal ka[] = {cx->sp, bc->value, bi->value};
+        IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+        IrVal cargs[] = {cx->sp, bcb->value, key, elem};
+        (void)irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+      } else {
+        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+        IrVal cargs[] = {cx->sp, bcb->value, elem};
+        (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      }
     }
     cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw; cx->loop_brk_ok = sk;
     if (cx->failed) { scope_exit(cx); return 0; }
@@ -1518,6 +1591,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal na[] = {cx->sp, fnref64, nupv};
           return emit_rt_call(cx, "jacl_closure_new", na, 3);
         }
+        /* A top-level (module-global) binding, read from anywhere via the global map. */
+        if (is_global_name(cx, nm, nl)) {
+          IrVal key = compile_string_literal(cx, nm, nl);
+          IrVal a[] = {cx->sp, key};
+          return emit_rt_call(cx, "jacl_global_get", a, 2);
+        }
         cx_failf(cx, "codegen: undefined variable '%.*s'", nm, nl);
         return 0;
       }
@@ -1692,13 +1771,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal a[] = {cx->sp, clos};
         return emit_rt_call(cx, "jacl_spawn", a, 2);
       }
-      /* `await $f` — drive the future to completion, yielding its value. */
+      /* `await $f` — suspend THIS fiber with the future's raw job pointer (the STREAM tag
+       * masked off); the scheduler resumes it in place with the result. Emitting the
+       * `suspend` op inline — rather than suspending inside the jacl_await import — is what
+       * makes the resume continue past the await instead of replaying the fiber's prefix
+       * (a suspend that unwinds through an import frame restarts the caller on resume; a
+       * direct suspend op resumes at the suspend point, exactly as `yield` does). */
       if (hid == HEAD_AWAIT) {
         if (node->data.command.arg_count != 1) { cx_fail(cx, "await needs one argument"); return 0; }
         IrVal f = compile_expr(cx, node->data.command.args[0]);
         if (cx->failed) return 0;
-        IrVal a[] = {cx->sp, f};
-        return emit_rt_call(cx, "jacl_await", a, 2);
+        IrVal mask = irb_const_i64(cx->f, cx->cur, (int64_t)0x00FFFFFFFFFFFFFFLL);  /* JACL_PAYLOAD_MASK */
+        IrVal raw = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, f, mask);
+        return irb_suspend(cx->f, cx->cur, raw);
       }
       /* `parallel { } { } …` — run each block (a 0-param closure) on the worker pool,
        * returning a vector of their results in order. Real parallelism across vCPUs. */
@@ -2082,6 +2167,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                                   tt->data.lit_string.length, buf_ann_size(annsrc));
           }
         }
+        /* A top-level binding mirrors into the module-global map so procs/closures see it. */
+        if (cx->at_top_level && is_global_name(cx, name, len)) {
+          IrVal key = compile_string_literal(cx, name, len);
+          IrVal ga[] = {cx->sp, key, val};
+          (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
+        }
         return val;
       }
       if (hid == HEAD_SET) {
@@ -2156,7 +2247,15 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal val = compile_expr(cx, node->data.command.args[1]);
         if (cx->failed) return 0;
         Binding *bd = env_lookup(cx, name, len);
-        if (!bd) { cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0; }
+        if (!bd) {
+          /* `set` of a top-level (module-global) binding: write the global map. */
+          if (is_global_name(cx, name, len)) {
+            IrVal key = compile_string_literal(cx, name, len);
+            IrVal a[] = {cx->sp, key, val};
+            return emit_rt_call(cx, "jacl_global_set", a, 3);
+          }
+          cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0;
+        }
         if (!bd->is_mut) { cx_failf(cx, "codegen: cannot mutate immutable binding '%.*s'", name, len); return 0; }
         if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
         else bd->value = val; /* uncaptured: plain SSA rebind */
@@ -2703,6 +2802,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_SLEEP,      "jacl_sleep",      1},
           {HEAD_ATOM,       "jacl_atom_new",   1},
           {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
+          {HEAD_FUTURE_Q,   "jacl_is_future_v", 1},
           {HEAD_RANGE,      "jacl_range_vec",  2},
           {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
           {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
@@ -2865,7 +2965,15 @@ static void compile_tail(Cx *cx, AstNode *node) {
         compile_tail(cx, stmt); scope_exit(cx); return;
       }
       IrVal sv = compile_expr(cx, stmt);
-      if (!cx->failed) emit_stmt_error_check(cx, sv);      /* error auto-return */
+      /* A binding statement (def/mut/set) CAPTURES its value — an error bound to a name
+       * does not auto-return; it propagates only when the name is later USED unhandled
+       * (matching the old VM, where a def leaves no error on the stack for CHECK_ERROR).
+       * So `def r [await $f]` / `def e [error …]` can be inspected with error?/error-val. */
+      int is_binding = stmt->type == AST_COMMAND &&
+                       (stmt->data.command.head_id == HEAD_DEF ||
+                        stmt->data.command.head_id == HEAD_MUT ||
+                        stmt->data.command.head_id == HEAD_SET);
+      if (!cx->failed && !is_binding) emit_stmt_error_check(cx, sv);  /* error auto-return */
     }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
     scope_exit(cx);
@@ -3080,14 +3188,20 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+  scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
   /* The program body — the non-proc top-level forms, in order; value = last — into __jacl_main. */
   if (!cx.failed) {
     cx.f = mainf; cx.cur = main_block; cx.sp = 0;
+    /* Prime the root fiber: one entry-block `suspend(-1)` forces a full round-trip through
+     * the scheduler loop before the body runs, so a later `await` in a non-entry block
+     * resumes in place instead of replaying the fiber from the top (see worker_loop). */
+    (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
     env_reset(&cx);
     capset_reset(&cx);
+    cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
     IrVal last = 0; int have = 0;
@@ -3099,6 +3213,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     }
     if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
     scope_exit(&cx);
+    cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 

@@ -385,6 +385,8 @@ JaclVal jacl_atom_new(JaclVal v) {
   return jaclrt_from_ptr(JACL_TAG_ATOM, jaclrt_as_ptr(c));
 }
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
+/* `[future? V]` — a spawn/parallel/race future is a job carried under the STREAM tag. */
+JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
 
 /* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
  * The global holds a heap value, so it is reported as a GC root from
@@ -401,6 +403,20 @@ JaclVal jacl_ctx_swap(JaclVal m) {
 }
 JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v) {
   jacl_ctx_cur = jacl_map_set(jacl_ctx_get(), name, v);
+  return v;
+}
+
+/* ---- module globals — top-level def/mut names visible from any proc/closure ----
+ * A persistent map keyed by name; like $ctx, the global holds a heap value so it is a GC
+ * root (jacl_globals_mark_root, called from jacl_sched_mark_roots). */
+JaclVal jacl_module_globals;   /* nil -> empty map lazily */
+static JaclVal jacl_globals_map(void) {
+  if (jaclrt_is_nil(jacl_module_globals)) jacl_module_globals = jacl_map_empty();
+  return jacl_module_globals;
+}
+JaclVal jacl_global_get(JaclVal name) { return jacl_map_get(jacl_globals_map(), name); }
+JaclVal jacl_global_set(JaclVal name, JaclVal v) {
+  jacl_module_globals = jacl_map_set(jacl_globals_map(), name, v);
   return v;
 }
 
