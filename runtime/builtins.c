@@ -161,9 +161,13 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
     if (jacl_is_anyint(a) && jacl_is_anyint(b)) return jacl_int_val(a) == jacl_int_val(b);
     return jacl_num_f64(a) == jacl_num_f64(b);
   }
-  uint32_t t = jaclrt_type_index(a);
-  if (t != jaclrt_type_index(b)) return 0;
-  if (t == 0x06) {                                       /* VECTOR */
+  uint32_t t = jaclrt_type_index(a), tb2 = jaclrt_type_index(b);
+  /* A typed vector `[Vec T]` (0x1B) shares the vector representation and compares equal to
+   * a dynamic vector (0x06) with the same elements — normalize both to the vector kind. */
+  if (t == 0x1B) t = 0x06;
+  if (tb2 == 0x1B) tb2 = 0x06;
+  if (t != tb2) return 0;
+  if (t == 0x06) {                                       /* VECTOR (dynamic or typed) */
     uint32_t n = jacl_vec_count(a);
     if (n != jacl_vec_count(b)) return 0;
     for (uint32_t i = 0; i < n; i++)
@@ -271,7 +275,7 @@ JaclVal jacl_len(JaclVal v) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_string(v)) return jaclrt_i32((int32_t)jacl_str_len(v));
   uint32_t t = jaclrt_type_index(v);
-  if (t == 0x06) return jaclrt_i32((int32_t)jacl_vec_count(v));   /* VECTOR */
+  if (t == 0x06 || t == 0x1B) return jaclrt_i32((int32_t)jacl_vec_count(v));  /* VECTOR / typed vec */
   if (t == 0x07) return jaclrt_i32((int32_t)jacl_map_count(v));   /* MAP    */
   if (t == 0x1A) return jaclrt_i32((int32_t)jacl_arr_count(v));   /* ARR    */
   return jaclrt_error();
@@ -482,6 +486,12 @@ JaclVal jacl_assert(JaclVal v) {
   return truthy ? JACL_NIL : jaclrt_error();
 }
 /* [range A B] as a value: the vector [A, B) of i32s (for `for`/transform sources). */
+/* Re-tag a vector as a TYPED vector (`[Vec T]`) — same root cell, distinct tag so it prints
+ * comma-style. A non-vector passes through unchanged. */
+JaclVal jacl_tvec_mark(JaclVal v) {
+  if (jaclrt_type_index(v) != 0x06) return v;
+  return jaclrt_from_ptr(JACL_TAG_TVEC, jaclrt_as_ptr(v));
+}
 JaclVal jacl_range_vec(JaclVal a, JaclVal b) {
   if (jaclrt_is_error(a)) return a;
   if (jaclrt_is_error(b)) return b;
@@ -489,7 +499,7 @@ JaclVal jacl_range_vec(JaclVal a, JaclVal b) {
   int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
   JaclVal out = jacl_vec_empty();
   for (int32_t i = lo; i < hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
-  return out;
+  return jacl_tvec_mark(out);   /* range produces a typed [Vec i64] */
 }
 /* [assert-type V T] — dynamic type assertion: V when it matches the named type,
  * an error otherwise. (The old compiler proves many of these statically; the
@@ -580,7 +590,8 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
 JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(elem)) return elem;
-  if (jaclrt_type_index(v) != 0x06) return jaclrt_error();
+  uint32_t tv = jaclrt_type_index(v);
+  if (tv != 0x06 && tv != 0x1B) return jaclrt_error();   /* dynamic or typed vec */
   return jacl_vec_push(v, elem);
 }
 /* `[vec-slice V START END]` — a fresh vector of V[START..END) (half-open). START/END
@@ -589,8 +600,9 @@ JaclVal jacl_vec_slice(JaclVal v, JaclVal start, JaclVal end) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(start)) return start;
   if (jaclrt_is_error(end)) return end;
-  if (jaclrt_type_index(v) != 0x06 || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
-    return jaclrt_error();
+  { uint32_t tv = jaclrt_type_index(v);
+    if ((tv != 0x06 && tv != 0x1B) || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
+      return jaclrt_error(); }                             /* dynamic or typed vec */
   int32_t n = (int32_t)jacl_vec_count(v);
   int32_t s = jaclrt_as_i32(start), e = jaclrt_as_i32(end);
   if (s < 0) s = 0;
@@ -744,7 +756,7 @@ JaclVal jacl_range_inclusive(JaclVal a, JaclVal b) {
   int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
   JaclVal out = jacl_vec_empty();
   for (int32_t i = lo; i <= hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
-  return out;
+  return jacl_tvec_mark(out);   /* range-inclusive produces a typed [Vec i64] */
 }
 JaclVal jacl_map_keys_v(JaclVal m) {
   if (jaclrt_is_error(m)) return m;
@@ -839,6 +851,16 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x1B) {                                       /* TYPED VECTOR: [e0, e1, …] */
+    repr_put(rb, "[", 1);
+    uint32_t n = jacl_vec_count(v);
+    for (uint32_t i = 0; i < n; i++) {
+      if (i) repr_put(rb, ", ", 2);
+      repr_val(rb, jacl_vec_get(v, i), 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
   if (t == 0x07) {                                       /* MAP: [map k0 v0 …] */
     repr_put(rb, "[map", 4);
     JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
@@ -893,7 +915,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

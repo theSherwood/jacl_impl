@@ -44,11 +44,15 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_ARR           ((uint64_t)0x1A << JACL_TAG_SHIFT)   /* mutable array (mirrors src/jacl.h) */
+/* Typed vector `[Vec T]` — SAME representation as a plain vector (RRB root cell), a distinct
+ * tag only so print renders it comma-style (`[1, 2, 3]`) vs a dynamic `[vec 1 2 3]`. svm's
+ * conservative root scan is tag-agnostic (masks the top byte), so a fresh tag is GC-safe. */
+#define JACL_TAG_TVEC          ((uint64_t)0x1B << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
- * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21) added since
- * the runtime's streams are GC objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A))
+ * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21) and TVEC (0x1B) added
+ * since the runtime's streams / typed vectors are GC objects that hold heap references. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
@@ -282,6 +286,7 @@ JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_is_future_v(JaclVal v);               /* future? */
 JaclVal jacl_is_map_v(JaclVal v);                  /* is-map (filter/transform dispatch) */
+JaclVal jacl_tvec_mark(JaclVal v);                 /* re-tag a vec as typed [Vec T] */
 JaclVal jacl_global_get(JaclVal name);             /* module global read */
 JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
 JaclVal jacl_read_file(JaclVal path);                     /* read-file (in-memory VFS) */

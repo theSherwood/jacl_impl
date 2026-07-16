@@ -137,9 +137,9 @@ JaclVal jacl_print(JaclVal v) {
   } else if (t == 0x01) {                          /* bool */
     if (jaclrt_as_bool(v)) write(1, "true\n", 5);
     else write(1, "false\n", 6);
-  } else if (t == 0x06 || t == 0x07 || t == 0x12 || t == 0x1A ||
+  } else if (t == 0x06 || t == 0x07 || t == 0x12 || t == 0x1A || t == 0x1B ||
              t == 0x0E || t == 0x0F || t == 0x10 ||
-             t == 0x0B || t == 0x0C) {   /* collections + wide numbers + box/atom: shared repr */
+             t == 0x0B || t == 0x0C) {   /* collections (incl. typed vec) + wide + box/atom: shared repr */
     JaclVal s = jacl_to_string(v);
     uint32_t len = jacl_str_len(s);
     char sb[2048];
