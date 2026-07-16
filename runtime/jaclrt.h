@@ -292,6 +292,8 @@ JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
 JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructure: name|pos */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
+JaclVal jacl_timeout_begin(JaclVal secs);          /* [timeout D { body }] — open a deadline */
+JaclVal jacl_timeout_end(JaclVal body_val);        /* close it: error if the deadline fired */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_atom_watchers(JaclVal a);             /* the atom's [k0 cb0 …] watcher list or nil */

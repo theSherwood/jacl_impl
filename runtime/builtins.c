@@ -451,12 +451,47 @@ JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x
  * still answers stop-the-world requests through the scheduler loop). */
 int __vm_wait32(void *p, int expected, long timeout_ns);
 static int32_t jacl_sleep_word;
+
+/* ---- `[timeout D { body }]` — a cooperative deadline over a body's sleeping ----
+ * The scheduler is single-threaded and cooperative, so a body can only block by sleeping
+ * (or awaiting). `timeout` therefore bounds the body's total SLEEP time to D: `jacl_sleep`
+ * clamps against the innermost active budget and, if a sleep would overrun, marks the
+ * timeout fired and returns early. When the body finishes, jacl_timeout_end yields an error
+ * value if the deadline fired, otherwise the body's value. A small stack supports nesting. */
+#define JACL_TIMEOUT_MAX 16
+static long jacl_to_budget[JACL_TIMEOUT_MAX];   /* remaining sleep budget (ns) per level */
+static int  jacl_to_fired[JACL_TIMEOUT_MAX];
+static int  jacl_to_depth;
+static double jacl_secs(JaclVal v) {
+  if (jaclrt_is_i32(v)) return (double)jaclrt_as_i32(v);
+  if (jaclrt_type_index(v) == 0x03) return (double)jaclrt_as_f32(v);
+  return jacl_is_f64(v) ? jacl_num_f64(v) : -1.0;
+}
+JaclVal jacl_timeout_begin(JaclVal secs) {
+  double s = jacl_secs(secs);
+  if (jacl_to_depth < JACL_TIMEOUT_MAX) {
+    jacl_to_budget[jacl_to_depth] = (s < 0) ? 0 : (long)(s * 1e9);
+    jacl_to_fired[jacl_to_depth] = 0;
+    jacl_to_depth++;
+  }
+  return JACL_NIL;
+}
+JaclVal jacl_timeout_end(JaclVal body_val) {
+  int fired = 0;
+  if (jacl_to_depth > 0) { jacl_to_depth--; fired = jacl_to_fired[jacl_to_depth]; }
+  if (fired) return jaclrt_set_error(jacl_str_new("timeout", 7));
+  return body_val;
+}
 JaclVal jacl_sleep(JaclVal secs) {
   if (jaclrt_is_error(secs)) return secs;
-  double s = jaclrt_is_i32(secs) ? (double)jaclrt_as_i32(secs)
-           : (jaclrt_type_index(secs) == 0x03 ? (double)jaclrt_as_f32(secs) : -1.0);
+  double s = jacl_secs(secs);
   if (s < 0) return jaclrt_error();
   long total = (long)(s * 1e9);
+  if (jacl_to_depth > 0) {                     /* clamp to the innermost timeout budget */
+    int lvl = jacl_to_depth - 1;
+    if (total > jacl_to_budget[lvl]) { total = jacl_to_budget[lvl]; jacl_to_fired[lvl] = 1; }
+    jacl_to_budget[lvl] -= total;
+  }
   while (total > 0) {
     long chunk = total > 1000000L ? 1000000L : total;   /* 1 ms slices: stay GC-responsive */
     (void)__vm_wait32(&jacl_sleep_word, 0, chunk);

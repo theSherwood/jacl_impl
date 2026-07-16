@@ -3195,6 +3195,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_stack_trace", a, 1);
       }
 
+      /* `[timeout D { body }]` — bound the body's sleep time to D. Opens a deadline, runs the
+       * body inline, and closes it: an error value if the deadline fired, else the body value.
+       * Cooperative (single-threaded), so only the body's sleeping is bounded, not CPU work. */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
+          node->data.command.head->data.lit_string.length == 7 &&
+          memcmp(node->data.command.head->data.lit_string.value, "timeout", 7) == 0 &&
+          node->data.command.arg_count == 2 && node->data.command.args[1]->type == AST_BLOCK) {
+        IrVal d = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal ba[] = {cx->sp, d};
+        (void)emit_rt_call(cx, "jacl_timeout_begin", ba, 2);
+        IrVal bv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal ea[] = {cx->sp, bv};
+        return emit_rt_call(cx, "jacl_timeout_end", ea, 2);
+      }
+
       /* `[not COND]` — by name (no interned head id): boolean negation via jacl_not. */
       if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
           node->data.command.head->data.lit_string.length == 3 &&
