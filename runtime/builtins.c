@@ -350,9 +350,33 @@ JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place fiel
   return v;
 }
 
+/* A by-value snapshot of a mutable aggregate: an array/buffer is deep-copied (recursively,
+ * via jacl_arr_copy), a struct gets a fresh instance with each field value copied the same
+ * way; everything else (scalars, strings, vectors, maps — immutable JaclVals) is shared.
+ * The non-moving mark-sweep heap keeps raw payload pointers valid across the nested allocs,
+ * and every in-flight JaclVal lives in a scanned stack slot, so a mid-copy GC is safe. */
+JaclVal jacl_deep_copy(JaclVal v) {
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x1A) return jacl_arr_copy(v);
+  if (t == 0x12) {
+    JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
+    JaclVal ns = jacl_struct_new(p[0], p[1]);
+    int32_t n = jaclrt_as_i32(p[1]);
+    for (int32_t k = 0; k < n; k++) {
+      JaclVal fv = jacl_deep_copy(p[3 + 2 * k]);       /* alloc first, then store */
+      JaclVal *np = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(ns));
+      np[2 + 2 * k] = p[2 + 2 * k];                     /* field name (shared string) */
+      np[3 + 2 * k] = fv;
+    }
+    return ns;
+  }
+  return v;
+}
 /* ---- box / deref / reset — a mutable single-slot ref (over the cell object) ---- */
 JaclVal jacl_box_new(JaclVal v) {
-  JaclVal c = jacl_cell_new(v);
+  /* `box` snapshots its argument by value: a boxed struct/buffer is independent of the
+   * original, so later mutation of the source does not leak into the box. */
+  JaclVal c = jacl_cell_new(jacl_deep_copy(v));
   return jaclrt_from_ptr(JACL_TAG_BOX, jaclrt_as_ptr(c));
 }
 JaclVal jacl_box_get(JaclVal b) {
