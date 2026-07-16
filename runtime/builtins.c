@@ -669,6 +669,25 @@ JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   np = jacl_vec_push(np, noff);
   return np;
 }
+/* ---- typed pointers (ptr-cast / ptr-null) ----
+ * A `[Ptr T]` produced by ptr-cast/ptr-null wraps a raw u64 address as an opaque handle
+ * that round-trips through ptr-addr and prints `Ptr<T>(0xADDR)`. Unlike an addr-of fat
+ * pointer (base+offset into a buffer), it is never deref'd — the address is a bare number.
+ * Represented as a 2-slot vector { address, pointee-name(string) } tagged JACL_TAG_PTR so
+ * print can recover both the address and the pointee type name recorded at the cast site. */
+JaclVal jacl_ptr_cast(JaclVal addr, JaclVal name) {
+  if (jaclrt_is_error(addr)) return addr;
+  JaclVal p = jacl_vec_empty();
+  p = jacl_vec_push(p, addr);
+  p = jacl_vec_push(p, name);
+  return jaclrt_from_ptr(JACL_TAG_PTR, jaclrt_as_ptr(p));
+}
+JaclVal jacl_ptr_addr(JaclVal p) {
+  if (jaclrt_is_error(p)) return p;
+  if (jaclrt_type_index(p) != 0x1C) return p;   /* already a raw address (untyped/decayed) */
+  JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
+  return jacl_vec_get(vec, 0);
+}
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
   if (jaclrt_is_error(c)) return c;
@@ -861,6 +880,21 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x1C) {                                       /* TYPED PTR: Ptr<name>(0xADDR) */
+    JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(v));
+    JaclVal addr = jacl_vec_get(vec, 0);
+    JaclVal name = jacl_vec_get(vec, 1);
+    repr_put(rb, "Ptr<", 4);
+    repr_val(rb, name, 0);                               /* pointee type name, unquoted */
+    repr_put(rb, ">(0x", 4);
+    uint64_t u = (uint64_t)jacl_int_val(addr);
+    char tmp[16]; int j = 0;
+    if (u == 0) tmp[j++] = '0';
+    while (u) { int d = (int)(u & 0xF); tmp[j++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u >>= 4; }
+    while (j) { j--; repr_put(rb, &tmp[j], 1); }
+    repr_put(rb, ")", 1);
+    return;
+  }
   if (t == 0x07) {                                       /* MAP: [map k0 v0 …] */
     repr_put(rb, "[map", 4);
     JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
@@ -915,7 +949,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

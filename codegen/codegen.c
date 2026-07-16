@@ -2717,20 +2717,31 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_vec_slice", a, 4);
       }
 
-      /* Typed pointers as raw addresses (u64 at runtime). `[ptr-null [Ptr T]]` is a
-       * null address (0); `[ptr-cast [Ptr T] $addr]` wraps a u64 address; `[ptr-addr
-       * $p]` unwraps back to the address. The `[Ptr T]` type token is erased here — the
-       * address round-trips through all three, which is what the corpus checks. */
-      if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
-        return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
-      }
-      if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
-        IrVal v = compile_expr(cx, node->data.command.args[1]);   /* args[0] = [Ptr T] */
-        return cx->failed ? 0 : v;
+      /* Typed pointers. `[ptr-null [Ptr T]]` is a null (0) address; `[ptr-cast [Ptr T]
+       * $addr]` wraps a u64 address; both carry the pointee type name `T` so the value
+       * prints `Ptr<T>(0xADDR)`. `[ptr-addr $p]` recovers the raw address. The name comes
+       * from the `[Ptr T]` annotation (args[0]): a bracket command whose sole arg is T. */
+      if ((hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) ||
+          (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2)) {
+        AstNode *ptr_ty = node->data.command.args[0];
+        const char *pn = "?"; uint32_t pnl = 1;
+        if (ptr_ty->type == AST_COMMAND && ptr_ty->data.command.arg_count >= 1 &&
+            ptr_ty->data.command.args[0]->type == AST_LIT_STRING) {
+          pn = ptr_ty->data.command.args[0]->data.lit_string.value;
+          pnl = ptr_ty->data.command.args[0]->data.lit_string.length;
+        }
+        IrVal addr = (hid == HEAD_PTR_NULL) ? irb_const_i64(cx->f, cx->cur, jaclval_i32(0))
+                                            : compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal name = compile_string_literal(cx, pn, pnl);
+        IrVal a[] = {cx->sp, addr, name};
+        return emit_rt_call(cx, "jacl_ptr_cast", a, 3);
       }
       if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
         IrVal v = compile_expr(cx, node->data.command.args[0]);
-        return cx->failed ? 0 : v;
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v};
+        return emit_rt_call(cx, "jacl_ptr_addr", a, 2);
       }
       /* `[addr $buf->i]` — a fat pointer { base, offset } over a buffer element. The
        * arg is a dot access `[. base idx]`; take base + index and build the pointer. */
