@@ -377,6 +377,8 @@ void jacl_sched_mark_roots(void) {
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
   { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
   { extern JaclVal jacl_vfs; jacl_gc_mark(jacl_vfs); }   /* in-memory virtual filesystem */
+  { extern JaclVal jacl_proc_sigs; jacl_gc_mark(jacl_proc_sigs); }   /* fnref -> proc signature */
+  jacl_trace_mark_roots();   /* call-stack shadow frames + last snapshot */
   mark_task_stacks();   /* guest-memory roots on fiber data stacks (futs[] etc.) */
   for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
 }
@@ -392,7 +394,12 @@ JaclVal jacl_sched_run_main(JaclVal fnref) {
   jacl_gc_worker_unregister();                     /* leave the set while joining */
   for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k]);
   jacl_gc_worker_register();
-  return (JaclVal)job_get(root, 8);
+  JaclVal result = (JaclVal)job_get(root, 8);
+  /* Surface an uncaught runtime error: if the program value escaped error-flagged (never
+   * caught by a try), print it (`<error: MESSAGE>`) so the failure — and its message — is
+   * observable, rather than exiting silently with a discarded error value. */
+  if (jaclrt_is_error(result)) { extern JaclVal jacl_print(JaclVal); (void)jacl_print(result); }
+  return result;
 }
 
 /* ---- spawn / await (multi-threaded, on the pool) ---- */

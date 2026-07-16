@@ -144,17 +144,46 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
     }
 }
 
+/// Build (link + powerbox) and run an emitted program, returning its stdout lines on a
+/// clean run or a failure description (link error / trap / interp≠jit divergence) — the
+/// latter is what a runtime `expect-error` case matches against.
+fn build_and_run(rt: &svm_llvm::Translated, driver_stdout: &[u8]) -> Result<Vec<String>, String> {
+    let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
+    let (text, relocs) = split_relocs(&raw);
+    let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
+    let entry = rt.module.funcs.len() as u32;
+    let linked = link(&[
+        LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
+        LinkUnit { module: program, relocations: relocs, ..Default::default() },
+    ])
+    .map_err(|e| format!("{e:?}"))?;
+    if !linked.imports.is_empty() {
+        return Err(format!("unresolved imports {:?}", linked.imports));
+    }
+    let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false).map_err(|e| format!("powerbox: {e}"))?;
+    let inst = svm_run::instantiate(pb).map_err(|e| format!("instantiate: {e}"))?;
+    let run = inst.run_diff(&svm_run::RunConfig::default()).map_err(|e| format!("{e}"))?;
+    Ok(String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect())
+}
+
 fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, case: &Case) -> Stage {
     let out = Command::new(driver).arg("--file").arg(&case.path).output().expect("run emit driver");
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     if let Some(want_err) = &case.expect_error {
-        return if out.status.success() {
-            Stage::ErrNoFail
-        } else if stderr.contains(want_err.as_str()) {
-            Stage::ErrPass
-        } else {
-            Stage::ErrWrongMsg(brief(&stderr))
+        // A compile-time error: the emit driver fails and prints the message to stderr.
+        if !out.status.success() {
+            return if stderr.contains(want_err.as_str()) { Stage::ErrPass } else { Stage::ErrWrongMsg(brief(&stderr)) };
+        }
+        // Otherwise the program must surface the error at RUNTIME: run it and look for the
+        // expected message in its output (an uncaught error prints `<error: …>`) or in a trap.
+        return match build_and_run(rt, &out.stdout) {
+            Ok(lines) => {
+                if lines.iter().any(|l| l.contains(want_err.as_str())) { Stage::ErrPass } else { Stage::ErrNoFail }
+            }
+            Err(e) => {
+                if e.contains(want_err.as_str()) { Stage::ErrPass } else { Stage::ErrWrongMsg(brief(&e)) }
+            }
         };
     }
     if !out.status.success() {

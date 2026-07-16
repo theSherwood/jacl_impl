@@ -296,6 +296,48 @@ JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
 JaclVal jacl_is_error_v(JaclVal v) { return jaclrt_bool(jaclrt_is_error(v)); }
 JaclVal jacl_error_new(JaclVal v) { return jaclrt_set_error(v); }          /* [error V] */
 JaclVal jacl_error_val(JaclVal v) { return v & ~JACL_FLAG_ERROR; }         /* payload, flag cleared */
+/* Build an error carrying the message `prefix` + decimal(n) — for runtime errors the corpus
+ * surfaces with a specific message (e.g. "vec-set: negative index -1"). */
+JaclVal jacl_error_msg_i(const char *prefix, int32_t n) {
+  char buf[160]; uint32_t o = 0;
+  for (const char *p = prefix; *p && o < sizeof buf - 1; p++) buf[o++] = *p;
+  char nb[16]; int dn = 0; int neg = (n < 0);
+  uint32_t un = neg ? (uint32_t)(-(int64_t)n) : (uint32_t)n;
+  if (un == 0) nb[dn++] = '0';
+  while (un && dn < 16) { nb[dn++] = (char)('0' + un % 10); un /= 10; }
+  if (neg && o < sizeof buf - 1) buf[o++] = '-';
+  for (int k = dn - 1; k >= 0 && o < sizeof buf - 1; k--) buf[o++] = nb[k];
+  return jaclrt_set_error(jacl_str_new(buf, o));
+}
+/* Like jacl_error_msg_i but with a trailing string (a compile-time suffix), e.g.
+ * "index " + 7 + " out of bounds for [Buf 4 u8]". */
+JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix) {
+  char buf[224]; uint32_t o = 0;
+  for (const char *p = prefix; *p && o < sizeof buf - 1; p++) buf[o++] = *p;
+  char nb[16]; int dn = 0; int neg = (n < 0);
+  uint32_t un = neg ? (uint32_t)(-(int64_t)n) : (uint32_t)n;
+  if (un == 0) nb[dn++] = '0';
+  while (un && dn < 16) { nb[dn++] = (char)('0' + un % 10); un /= 10; }
+  if (neg && o < sizeof buf - 1) buf[o++] = '-';
+  for (int k = dn - 1; k >= 0 && o < sizeof buf - 1; k--) buf[o++] = nb[k];
+  if (jaclrt_is_string(suffix)) {
+    char sb[160]; uint32_t sl = jacl_str_len(suffix);
+    if (sl > sizeof sb) sl = sizeof sb;
+    jacl_str_bytes(suffix, sb, sizeof sb);
+    for (uint32_t k = 0; k < sl && o < sizeof buf - 1; k++) buf[o++] = sb[k];
+  }
+  return jaclrt_set_error(jacl_str_new(buf, o));
+}
+/* `[buf-get $b $i]` with runtime bounds checking against the fixed length: an OOB index
+ * errors `index N out of bounds for <TYPE>` (the type string is supplied by the codegen,
+ * which knows the buffer's declared `[Buf N T]` shape). Unchecked access uses buf-unchecked-get. */
+JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr) {
+  if (jaclrt_is_error(buf)) return buf;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx), n = jaclrt_is_i32(size) ? jaclrt_as_i32(size) : 0;
+  if (i < 0 || i >= n) return jacl_error_msg_i_s("index ", i, typestr);
+  return jacl_arr_get_at(buf, idx);
+}
 
 /* ---- structs (dynamic, name-based; typed/unboxed lowering is a later pass) ----
  * A struct instance is a traced heap cell (JACL_TAG_STRUCT over JOBJ_NODE):
@@ -421,6 +463,11 @@ JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0
 JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
 /* Is V a map? (0x07) — the runtime dispatch for filter/transform over a map vs a vec. */
 JaclVal jacl_is_map_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x07); }
+/* Is V a closure? (0x08) — guards an indirect call so calling a non-callable errors cleanly
+ * ("cannot call") instead of reading a garbage function index. */
+JaclVal jacl_is_closure_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x08); }
+/* The `cannot call` error for a non-callable head value. */
+JaclVal jacl_cannot_call(void) { return jaclrt_set_error(jacl_str_new("cannot call", 11)); }
 
 /* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
  * The global holds a heap value, so it is reported as a GC root from
@@ -610,7 +657,7 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();
   int32_t i = jaclrt_as_i32(idx);
-  if (i < 0) return jaclrt_error();
+  if (i < 0) return jacl_error_msg_i("vec-set: negative index ", i);
   return jacl_vec_set(v, (uint32_t)i, elem);
 }
 /* `[vec-push V E]` — error-propagating push wrapper (the core jacl_vec_push is also
@@ -726,6 +773,83 @@ JaclVal jacl_ptr_addr(JaclVal p) {
   if (jaclrt_type_index(p) != 0x1C) return p;   /* already a raw address (untyped/decayed) */
   JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
   return jacl_vec_get(vec, 0);
+}
+/* ---- proc-signature registry (runtime introspection) ----
+ * Printing a proc value / closure shows its signature (`<proc add(i64, i64) -> i64>`).
+ * The signature is fully known at compile time, so the codegen registers a formatted
+ * string keyed by the closure's SVM function index (fnref) at each creation site; print
+ * looks it up by the fnref stashed in the closure. A map keyed by i32(fnref); the global
+ * is a GC root (jacl_sched_mark_roots). */
+JaclVal jacl_proc_sigs;
+JaclVal jacl_proc_sig_register(JaclVal fnref, JaclVal sig) {
+  if (jaclrt_is_nil(jacl_proc_sigs)) jacl_proc_sigs = jacl_map_empty();
+  jacl_proc_sigs = jacl_map_set(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref), sig);
+  return jaclrt_nil();
+}
+JaclVal jacl_proc_sig_get(JaclVal fnref) {
+  if (jaclrt_is_nil(jacl_proc_sigs)) return jaclrt_nil();
+  return jacl_map_get(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref));
+}
+
+/* ---- call-stack trace capture (for `[stack-trace]`) ----
+ * A shadow call stack of (proc-name, current-line) frames, maintained ONLY when the
+ * program uses `[stack-trace]` (the codegen gates the instrumentation). The codegen pushes
+ * a frame at each proc entry, sets the top frame's line before each call, and `error`
+ * snapshots the whole stack into jacl_last_trace, which `[stack-trace]` returns. Depth is a
+ * plain counter (may exceed the cap); array writes are bounded so deep recursion truncates
+ * the trace rather than corrupting memory. The name strings + snapshot are GC roots. */
+#define JACL_TRACE_MAX 256
+static JaclVal jacl_trace_names[JACL_TRACE_MAX];
+static int32_t jacl_trace_lines[JACL_TRACE_MAX];
+static int32_t jacl_trace_depth_;
+JaclVal jacl_last_trace;
+JaclVal jacl_trace_push(JaclVal name) {
+  if (jacl_trace_depth_ >= 0 && jacl_trace_depth_ < JACL_TRACE_MAX) {
+    jacl_trace_names[jacl_trace_depth_] = name;
+    jacl_trace_lines[jacl_trace_depth_] = 0;
+  }
+  jacl_trace_depth_++;
+  return jaclrt_nil();
+}
+JaclVal jacl_trace_line(JaclVal line) {
+  int32_t d = jacl_trace_depth_ - 1;
+  if (d >= 0 && d < JACL_TRACE_MAX) jacl_trace_lines[d] = jaclrt_as_i32(line);
+  return jaclrt_nil();
+}
+JaclVal jacl_trace_snapshot(void) {
+  char buf[2048]; uint32_t o = 0;
+  int32_t n = jacl_trace_depth_ < JACL_TRACE_MAX ? jacl_trace_depth_ : JACL_TRACE_MAX;
+  for (int32_t i = n - 1; i >= 0; i--) {                    /* innermost frame first */
+    if (o && o < sizeof buf) buf[o++] = '\n';
+    const char *at = "  at ";
+    for (int k = 0; k < 5 && o < sizeof buf; k++) buf[o++] = at[k];
+    JaclVal name = jacl_trace_names[i];
+    if (jaclrt_is_string(name)) {
+      char nb[256]; uint32_t nl = jacl_str_len(name);
+      if (nl > sizeof nb) nl = sizeof nb;
+      jacl_str_bytes(name, nb, sizeof nb);
+      for (uint32_t k = 0; k < nl && o < sizeof buf; k++) buf[o++] = nb[k];
+    }
+    const char *ln = " (line ";
+    for (int k = 0; k < 7 && o < sizeof buf; k++) buf[o++] = ln[k];
+    char db[12]; int dn = 0; int32_t v = jacl_trace_lines[i];
+    if (v == 0) db[dn++] = '0';
+    while (v > 0 && dn < 12) { db[dn++] = (char)('0' + v % 10); v /= 10; }
+    for (int k = dn - 1; k >= 0 && o < sizeof buf; k--) buf[o++] = db[k];
+    if (o < sizeof buf) buf[o++] = ')';
+  }
+  jacl_last_trace = jacl_str_new(buf, o);
+  return jaclrt_nil();
+}
+/* `[stack-trace]` — the most recently captured trace, or "" if no error has been raised. */
+JaclVal jacl_stack_trace(void) {
+  return jaclrt_is_string(jacl_last_trace) ? jacl_last_trace : jacl_str_new("", 0);
+}
+/* Mark the shadow stack's name strings + the last snapshot (called from mark_roots). */
+void jacl_trace_mark_roots(void) {
+  int32_t n = jacl_trace_depth_ < JACL_TRACE_MAX ? jacl_trace_depth_ : JACL_TRACE_MAX;
+  for (int32_t i = 0; i < n; i++) jacl_gc_mark(jacl_trace_names[i]);
+  jacl_gc_mark(jacl_last_trace);
 }
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
@@ -919,6 +1043,12 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x08) {                                       /* CLOSURE / proc value */
+    JaclVal sig = jacl_proc_sig_get(jacl_closure_fn(v));
+    if (jaclrt_is_string(sig)) { repr_val(rb, sig, 0); return; }
+    repr_put(rb, "<closure>", 9);
+    return;
+  }
   if (t == 0x1C) {                                       /* TYPED PTR: Ptr<name>(0xADDR) */
     JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(v));
     JaclVal addr = jacl_vec_get(vec, 0);
@@ -988,7 +1118,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

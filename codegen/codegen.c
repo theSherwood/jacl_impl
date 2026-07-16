@@ -122,6 +122,8 @@ typedef struct {
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
   const char *globals[128]; uint32_t globalslen[128]; int nglobals;
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
+  int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
+  const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
 } Cx;
 typedef struct SDef SDef;
 
@@ -312,6 +314,75 @@ static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint3
   return extract_param_names_v(cx, plist, names, lens, NULL);
 }
 
+/* Declared type token for each param (`i64 a` -> "i64", `Point p` -> "Point", bare `a` ->
+ * NULL). Mirrors extract_param_names_v's token walk but captures the type, not the name;
+ * used to format a proc/closure signature for runtime introspection. Returns the count. */
+static int extract_param_types(AstNode *plist, const char **types, uint32_t *tlens) {
+  if (!plist || plist->type != AST_COMMAND) return 0;
+  AstNode *toks[CG_MAX_PARAMS * 2 + 2];
+  int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 0 &&
+      plist->data.command.arg_count == 0)
+    return 0; /* {} */
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type == AST_LIT_STRING && toks[i]->data.lit_string.length == 2 &&
+        memcmp(toks[i]->data.lit_string.value, "..", 2) == 0) {
+      i += 1;
+      if (i >= nt) break;
+    }
+    if (toks[i]->type == AST_COMMAND) {   /* compound type token (`[Buf N T] b`) */
+      types[np] = NULL; tlens[np] = 0; np++;
+      if (i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2; else i += 1;
+      continue;
+    }
+    if (toks[i]->type != AST_LIT_STRING) { i += 1; continue; }
+    const char *s = toks[i]->data.lit_string.value;
+    uint32_t n = toks[i]->data.lit_string.length;
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      types[np] = s; tlens[np] = n; np++; i += 2;   /* `<type> <name>` */
+    } else {
+      types[np] = NULL; tlens[np] = 0; np++; i += 1; /* untyped `<name>` */
+    }
+  }
+  return np;
+}
+
+/* Format a proc/closure signature into buf, returning its length. A typed subject (has a
+ * return annotation or any typed param) reads `<proc name(t0, t1) -> ret>` — or `<closure
+ * (…) -> ret>` when anonymous; an untyped one is just `<proc name>` / `<closure>`. */
+static size_t format_proc_sig(char *buf, size_t cap, const char *name, uint32_t namelen,
+                              int is_closure, AstNode *params, AstNode *ret) {
+  const char *types[CG_MAX_PARAMS]; uint32_t tlens[CG_MAX_PARAMS];
+  int np = extract_param_types(params, types, tlens);
+  int ret_typed = ret && ret->type == AST_LIT_STRING;
+  int any_typed = ret_typed;
+  for (int k = 0; k < np; k++) if (types[k]) any_typed = 1;
+  size_t o = 0;
+#define SIG_PUT(str, n) do { for (uint32_t _i = 0; _i < (uint32_t)(n) && o < cap - 1; _i++) buf[o++] = (str)[_i]; } while (0)
+  SIG_PUT("<", 1);
+  if (is_closure) SIG_PUT("closure", 7);
+  else { SIG_PUT("proc ", 5); SIG_PUT(name, namelen); }
+  if (!any_typed) { SIG_PUT(">", 1); buf[o] = 0; return o; }
+  SIG_PUT("(", 1);
+  for (int k = 0; k < np; k++) {
+    if (k) SIG_PUT(", ", 2);
+    if (types[k]) SIG_PUT(types[k], tlens[k]); else SIG_PUT("dyn", 3);
+  }
+  SIG_PUT(")", 1);
+  SIG_PUT(" -> ", 4);
+  if (ret_typed) SIG_PUT(ret->data.lit_string.value, ret->data.lit_string.length);
+  else SIG_PUT("dyn", 3);
+  SIG_PUT(">", 1);
+  buf[o] = 0;
+#undef SIG_PUT
+  return o;
+}
+
 static Proc *proc_lookup(Cx *cx, const char *name, uint32_t len) {
   for (int i = 0; i < cx->nprocs; i++)
     if (cx->procs[i].len == len && memcmp(cx->procs[i].name, name, len) == 0) return &cx->procs[i];
@@ -368,6 +439,44 @@ static void emit_void_call(Cx *cx, const char *fn) {
   IrVal h = irb_const_i32(cx->f, cx->cur, 0);
   IrVal args[] = {cx->sp};
   (void)irb_call_import(cx->f, cx->cur, fn, sig, 1, NULL, 0, h, args, 1);
+}
+
+static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len);  /* fwd */
+
+/* Does the AST contain a `[stack-trace]`? When it does, the codegen instruments proc
+ * entries and call sites to maintain a shadow call stack; otherwise that overhead (and its
+ * regression surface) is skipped entirely. */
+static int contains_stack_trace(AstNode *n) {
+  if (!n) return 0;
+  if (n->type == AST_COMMAND) {
+    if (n->data.command.head_id == HEAD_STACK_TRACE) return 1;
+    if (n->data.command.head && contains_stack_trace(n->data.command.head)) return 1;
+    for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+      if (contains_stack_trace(n->data.command.args[i])) return 1;
+    return 0;
+  }
+  if (n->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < n->data.block.count; i++)
+      if (contains_stack_trace(n->data.block.commands[i])) return 1;
+    return 0;
+  }
+  if (n->type == AST_RETURN)
+    return n->data.return_stmt.value ? contains_stack_trace(n->data.return_stmt.value) : 0;
+  return 0;
+}
+/* Push a call-stack frame for the proc/entry being entered (only when tracing). */
+static void emit_trace_push(Cx *cx, const char *name, uint32_t len) {
+  if (!cx->wants_trace) return;
+  IrVal nm = compile_string_literal(cx, name, len);
+  IrVal a[] = {cx->sp, nm};
+  (void)emit_rt_call(cx, "jacl_trace_push", a, 2);
+}
+/* Record the current line on the top frame before a call / at an error (only when tracing). */
+static void emit_trace_line(Cx *cx, uint32_t line) {
+  if (!cx->wants_trace) return;
+  IrVal lv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)line));
+  IrVal a[] = {cx->sp, lv};
+  (void)emit_rt_call(cx, "jacl_trace_line", a, 2);
 }
 
 /* ---- type-driven (unboxed) i32 arithmetic ----
@@ -503,6 +612,54 @@ static IrVal emit_truthy(Cx *cx, IrVal cond) {
 static int frame_guard(Cx *cx) {
   if (frame_width(cx) > IRB_MAX_FRAME) { cx_fail(cx, "too many live locals for control flow"); return 0; }
   return 1;
+}
+
+/* Call `cval` as a closure with `argc` args (compiled inside the call arm), guarding against
+ * a non-closure head: `[42 1]` would otherwise read a garbage function index and trap, so
+ * branch on is-closure and yield a clean `cannot call` error. The result flows through a
+ * merge block (block-local SSA); cval is threaded into the call arm as an extra param. */
+static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint32_t argc) {
+  IrVal isc = emit_rt_call(cx, "jacl_is_closure_v", (IrVal[]){cx->sp, cval}, 2);
+  IrVal truth = emit_truthy(cx, isc);
+  if (!frame_guard(cx)) return 0;
+  int w = frame_width(cx);
+  IrBlock call_blk = new_i64_block(cx, w + 1);   /* frame + cval */
+  IrBlock err_blk = new_i64_block(cx, w);
+  IrBlock merge = new_i64_block(cx, w + 1);      /* frame + result */
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  frame[w] = cval;
+  irb_br_if(cx->f, cx->cur, truth, call_blk, frame, w + 1, err_blk, frame, w);
+
+  enter_frame_block(cx, call_blk);
+  {
+    IrVal cv = (IrVal)w;                          /* threaded cval */
+    IrVal fnargs[] = {cx->sp, cv};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+    IrVal cargs[2 + CG_MAX_PARAMS];
+    IrType sig[2 + CG_MAX_PARAMS];
+    cargs[0] = cx->sp; cargs[1] = cv; sig[0] = sig[1] = IRB_I64;
+    for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
+      cargs[2 + i] = compile_expr(cx, args[i]);
+      sig[2 + i] = IRB_I64;
+      if (cx->failed) return 0;
+    }
+    IrType r1[] = {IRB_I64};
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+    fill_frame(cx, frame);
+    frame[w] = r;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, err_blk);
+  {
+    IrVal err = emit_rt_call(cx, "jacl_cannot_call", (IrVal[]){cx->sp}, 1);
+    fill_frame(cx, frame);
+    frame[w] = err;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, merge);
+  return (IrVal)w;                                 /* the merged result */
 }
 
 static int kw_is(AstNode *n, const char *kw, uint32_t kl) {
@@ -705,7 +862,7 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
 /* Compile a closure literal: build the closure object (ref.func + captured values) at
  * the current site, and enqueue its body for deferred compilation. `pnode` holds the
  * params (a BLOCK for `\`, a command for `proc`). Returns the closure JaclVal. */
-static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body) {
+static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body, AstNode *ret_ann) {
   const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
   int np = closure_param_names(pnode, in_block, pn, pl);
 
@@ -738,6 +895,16 @@ static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body
     IrVal idx = irb_const_i64(cx->f, cx->cur, i);
     IrVal set_args[] = {cx->sp, clos, idx, b->value}; /* cell pointer or by-value */
     (void)emit_rt_call(cx, "jacl_closure_set", set_args, 4);
+  }
+  /* Record the signature for runtime introspection (print of the closure value). Only
+   * proc-style params (a command list) carry type annotations; `\`-lambda params arrive as
+   * a BLOCK and are untyped, so they fall back to `<closure>` at print time. */
+  if (!in_block) {
+    char sig[256];
+    size_t sl = format_proc_sig(sig, sizeof sig, "", 0, /*is_closure=*/1, pnode, ret_ann);
+    IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
+    IrVal ra[] = {cx->sp, fnref64, sigv};
+    (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
   }
   pending_add(cx, fn, body, pn, pl, np, cn, cl, ccell, nc);
   return clos;
@@ -1768,7 +1935,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
           IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
           IrVal na[] = {cx->sp, fnref64, nupv};
-          return emit_rt_call(cx, "jacl_closure_new", na, 3);
+          IrVal clos = emit_rt_call(cx, "jacl_closure_new", na, 3);
+          /* Register the proc's signature so `print $proc` shows `<proc name(types) -> ret>`. */
+          {
+            uint32_t pargc = pv->def->data.command.arg_count;
+            AstNode *params = pv->def->data.command.args[1];
+            AstNode *ret_ann = (pargc >= 4) ? pv->def->data.command.args[pargc - 2] : NULL;
+            char sig[256];
+            size_t sl = format_proc_sig(sig, sizeof sig, pv->name, pv->len, /*is_closure=*/0, params, ret_ann);
+            IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
+            IrVal ra[] = {cx->sp, fnref64, sigv};
+            (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
+          }
+          return clos;
         }
         /* A top-level (module-global) binding, read from anywhere via the global map. */
         if (is_global_name(cx, nm, nl)) {
@@ -1945,7 +2124,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (node->data.command.arg_count != 1 || node->data.command.args[0]->type != AST_BLOCK) {
           cx_fail(cx, "spawn needs a single { block }"); return 0;
         }
-        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0]);
+        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0], NULL);
         if (cx->failed) return 0;
         IrVal a[] = {cx->sp, clos};
         return emit_rt_call(cx, "jacl_spawn", a, 2);
@@ -1972,7 +2151,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "parallel takes { blocks }"); return 0; }
-          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i], NULL);
           if (cx->failed) return 0;
           IrVal pa[] = {cx->sp, vec, clos};
           vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -1989,7 +2168,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "race takes { blocks }"); return 0; }
-          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i], NULL);
           if (cx->failed) return 0;
           IrVal pa[] = {cx->sp, vec, clos};
           vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -2010,29 +2189,30 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             AstNode *body = synth_command(node->data.command.args[0],
                                           node->data.command.args + 1, argc - 1);
             AstNode *pn = synth_command(synth_word("it", 2), NULL, 0);
-            return compile_closure(cx, pn, /*in_block=*/0, body);
+            return compile_closure(cx, pn, /*in_block=*/0, body, NULL);
           }
           if (argc != 2 || node->data.command.args[0]->type != AST_BLOCK ||
               node->data.command.args[1]->type != AST_BLOCK) {
             cx_fail(cx, "lambda must be [\\ {params} {body}]"); return 0;
           }
           return compile_closure(cx, node->data.command.args[0], /*in_block=*/1,
-                                 node->data.command.args[1]);
+                                 node->data.command.args[1], NULL);
         }
         if (hid == HEAD_PROC) {
           int anon = argc >= 3 && node->data.command.args[0]->type == AST_LIT_STRING &&
                      node->data.command.args[0]->data.lit_string.length == 0;
+          AstNode *ret_ann = (argc >= 4) ? node->data.command.args[argc - 2] : NULL;
           if (!anon) {
             /* Nested named proc: compile as a closure bound to the name. */
             IrVal cl = compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
-                                       node->data.command.args[argc - 1]);
+                                       node->data.command.args[argc - 1], ret_ann);
             if (cx->failed) return 0;
             env_define(cx, node->data.command.args[0]->data.lit_string.value,
                        node->data.command.args[0]->data.lit_string.length, cl, 0, 0);
             return cl;
           }
           return compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
-                                 node->data.command.args[argc - 1]);
+                                 node->data.command.args[argc - 1], ret_ann);
         }
       }
 
@@ -2135,20 +2315,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                !is_type_ctor_head(node->data.command.head)))) {
         IrVal cval = compile_expr(cx, node->data.command.head);
         if (cx->failed) return 0;
-        uint32_t argc = node->data.command.arg_count;
-        IrVal fnargs[] = {cx->sp, cval};
-        IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-        IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-        IrVal cargs[2 + CG_MAX_PARAMS];
-        IrType sig[2 + CG_MAX_PARAMS];
-        cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
-        for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
-          cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
-          sig[2 + i] = IRB_I64;
-          if (cx->failed) return 0;
-        }
-        IrType r1[] = {IRB_I64};
-        return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+        return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
       }
 
       /* `def [Buf N T] name` — zero-filled fixed buffer declaration (no initializer). */
@@ -2574,6 +2741,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
             }
             cargs[1 + p->fixed_arity] = rest;
+            emit_trace_line(cx, node->start.line);
             return irb_call(cx->f, cx->cur, p->func, cargs, p->fixed_arity + 2);
           }
           /* Spread into a fixed-arity proc `[add3 ..$v]` — the single spread supplies
@@ -2589,6 +2757,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               IrVal ga[] = {cx->sp, vec, idx};
               cargs[1 + i] = emit_rt_call(cx, "jacl_index_get", ga, 3);
             }
+            emit_trace_line(cx, node->start.line);
             return irb_call(cx->f, cx->cur, p->func, cargs, p->arity + 1);
           }
           if ((int)argc != p->arity) {
@@ -2618,6 +2787,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             args[i + 1] = compile_expr(cx, node->data.command.args[i]);
             if (cx->failed) return 0;
           }
+          emit_trace_line(cx, node->start.line);  /* record the call site on the caller frame */
           return irb_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
         }
       }
@@ -2630,20 +2800,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (hb) {
           IrVal cval = hb->value;
           if (hb->is_cell) { IrVal a[] = {cx->sp, cval}; cval = emit_rt_call(cx, "jacl_cell_get", a, 2); }
-          uint32_t argc2 = node->data.command.arg_count;
-          IrVal fnargs[] = {cx->sp, cval};
-          IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-          IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-          IrVal cargs[2 + CG_MAX_PARAMS];
-          IrType sig[2 + CG_MAX_PARAMS];
-          cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
-          for (uint32_t i = 0; i < argc2 && i < CG_MAX_PARAMS; i++) {
-            cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
-            sig[2 + i] = IRB_I64;
-            if (cx->failed) return 0;
-          }
-          IrType r1[] = {IRB_I64};
-          return irb_call_indirect(cx->f, cx->cur, sig, (int)argc2 + 2, r1, 1, fnw, cargs, (int)argc2 + 2);
+          return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
         }
       }
 
@@ -2930,10 +3087,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return nv;
       }
 
-      /* `[stack-trace]` — no error/frame capture on the SVM backend yet, so it yields
-       * the empty string (a program that only tests "no trace when no error" passes). */
+      /* `[stack-trace]` — the trace captured at the most recent `error` (empty string if
+       * none). Frames are recorded by the call-stack instrumentation (gated on wants_trace). */
       if (hid == HEAD_STACK_TRACE && node->data.command.arg_count == 0) {
-        return compile_string_literal(cx, "", 0);
+        IrVal a[] = {cx->sp};
+        return emit_rt_call(cx, "jacl_stack_trace", a, 1);
       }
 
       /* `[not COND]` — by name (no interned head id): boolean negation via jacl_not. */
@@ -3066,6 +3224,35 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             IrVal a[] = {cx->sp, av, iv, vv};
             return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
           }
+        }
+        /* `buf-get $b $i` on a typed fixed buffer: bounds-check against the declared length
+         * at runtime, erroring `index N out of bounds for [Buf N T]`. (Literal-index arrow
+         * access is checked at compile time; `buf-unchecked-get` skips the check entirely.) */
+        if ((HeadId)hid == HEAD_BUF_GET && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          if (bb && bb->buf_size >= 0 && bb->elem_type) {
+            char ts[96];
+            int tn = snprintf(ts, sizeof ts, " out of bounds for [Buf %d %.*s]",
+                              bb->buf_size, (int)bb->elem_type_len, bb->elem_type);
+            IrVal bv = compile_expr(cx, node->data.command.args[0]);
+            if (cx->failed) return 0;
+            IrVal iv = compile_expr(cx, node->data.command.args[1]);
+            if (cx->failed) return 0;
+            IrVal sz = irb_const_i64(cx->f, cx->cur, jaclval_i32(bb->buf_size));
+            IrVal tsv = compile_string_literal(cx, ts, (uint32_t)tn);
+            IrVal a[] = {cx->sp, bv, iv, sz, tsv};
+            return emit_rt_call(cx, "jacl_buf_get_checked", a, 5);
+          }
+        }
+        /* `error V` while tracing: stamp the error line on the top frame and snapshot the
+         * call stack, so a later `[stack-trace]` in the handler shows where it was raised.
+         * Falls through to the BI table, which emits the actual jacl_error_new. */
+        if (cx->wants_trace && (HeadId)hid == HEAD_ERROR && node->data.command.arg_count == 1) {
+          emit_trace_line(cx, node->start.line);
+          IrVal sa[] = {cx->sp};
+          (void)emit_rt_call(cx, "jacl_trace_snapshot", sa, 1);
         }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
@@ -3235,6 +3422,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
           args[i + 1] = compile_expr(cx, node->data.command.args[i]);
           if (cx->failed) return;
         }
+        emit_trace_line(cx, node->start.line);  /* tail call: record site on caller frame */
         irb_return_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
         return;
       }
@@ -3374,6 +3562,8 @@ static void compile_procs(Cx *cx) {
       }
     }
 
+    cx->cur_proc = p->name; cx->cur_proc_len = p->len;
+    if (!p->is_generator) emit_trace_push(cx, p->name, p->len);  /* call-stack frame (tracing) */
     compile_tail(cx, body); /* emits the proc's return / return_call (done) */
     scope_exit(cx);
     if (cx->failed) return;
@@ -3431,6 +3621,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
+  for (uint32_t i = 0; i < count && !cx.wants_trace; i++)   /* gate: instrument only if used */
+    if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
@@ -3443,6 +3635,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
     env_reset(&cx);
     capset_reset(&cx);
+    cx.cur_proc = "<main>"; cx.cur_proc_len = 6;
+    emit_trace_push(&cx, "<main>", 6);   /* root frame for top-level code (only when tracing) */
     cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
