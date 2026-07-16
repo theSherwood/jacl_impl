@@ -1460,7 +1460,18 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
                               AstNode *body, AstNode *cb_node,
                               const char *key_name, uint32_t klen) {
   scope_enter(cx);
-  IrVal coll = compile_expr(cx, coll_node);
+  /* A generator source (`for [gen] $cb`, `for [gen] k v {body}`) has no jacl_len — drain
+   * it into a vector first so the index-based iteration below sees the elements. The
+   * canonical single-name generator forms are handled earlier by compile_for_generator;
+   * this covers the callback and two-name shapes. */
+  IrVal coll;
+  if (generator_call(cx, coll_node)) {
+    IrVal g = compile_expr(cx, coll_node);
+    if (cx->failed) { scope_exit(cx); return 0; }
+    coll = stream_into_vec(cx, g, /*is_gen=*/1, /*clo=*/0, /*is_filter=*/0);
+  } else {
+    coll = compile_expr(cx, coll_node);
+  }
   if (cx->failed) { scope_exit(cx); return 0; }
   IrVal cb = 0;
   if (cb_node) {
