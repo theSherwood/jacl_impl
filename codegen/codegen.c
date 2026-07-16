@@ -65,6 +65,7 @@ typedef struct {
   IrFunc     *func;
   int         arity;
   int         is_generator; /* body contains `yield` → a fiber generator (sp, arg) */
+  int         returns_stream; /* return annotation is `[Stream T]` → a typed stream */
   int         variadic;     /* last param is `..rest`: extra call args pack into a vec */
   int         fixed_arity;  /* count of fixed params before the rest (variadic only) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
@@ -979,6 +980,22 @@ static Proc *generator_call(Cx *cx, AstNode *n) {
   Proc *p = proc_lookup(cx, n->data.command.head->data.lit_string.value,
                         n->data.command.head->data.lit_string.length);
   return (p && p->is_generator) ? p : NULL;
+}
+
+/* Does this expression evaluate to a *typed* stream — i.e. one whose materialized
+ * (collected/transformed/filtered/taken) form is a `[Vec T]` that prints comma-style?
+ * The leaf is a generator proc annotated `[Stream T]`; the stream combinators preserve
+ * the typedness of their source. Used to stamp the result vector with JACL_TAG_TVEC. */
+static int expr_is_typed_stream(Cx *cx, AstNode *n) {
+  if (!n || n->type != AST_COMMAND) return 0;
+  uint8_t hid = n->data.command.head_id;
+  AstNode **a = n->data.command.args;
+  uint32_t ac = n->data.command.arg_count;
+  if (hid == HEAD_COLLECT && ac == 1) return expr_is_typed_stream(cx, a[0]);
+  if ((hid == HEAD_TRANSFORM || hid == HEAD_FILTER || hid == HEAD_TAKE) && ac == 2)
+    return expr_is_typed_stream(cx, a[0]);
+  Proc *p = generator_call(cx, n);
+  return p && p->returns_stream;
 }
 
 /* Eagerly drain a source (an already-evaluated generator object or vec-like) into a
@@ -2648,12 +2665,25 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           clo = compile_expr(cx, node->data.command.args[1]);
           if (cx->failed) return 0;
         }
-        if (hid == HEAD_COLLECT && !is_gen) return src;   /* collect of a vec is itself */
-        /* filter/transform over a non-generator source dispatch on runtime type: a map
-         * builds a map (2-param key/value callback), else a vec. */
-        if ((hid == HEAD_FILTER || hid == HEAD_TRANSFORM) && !is_gen)
-          return compile_filter_transform(cx, src, clo, hid == HEAD_FILTER);
-        return stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
+        IrVal result;
+        if (hid == HEAD_COLLECT && !is_gen) {
+          result = src;   /* collect of a vec is itself */
+        } else if ((hid == HEAD_FILTER || hid == HEAD_TRANSFORM) && !is_gen) {
+          /* filter/transform over a non-generator source dispatch on runtime type: a map
+           * builds a map (2-param key/value callback), else a vec. */
+          result = compile_filter_transform(cx, src, clo, hid == HEAD_FILTER);
+        } else {
+          result = stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
+        }
+        if (cx->failed) return 0;
+        /* Stamp the materialized vector as a typed vec when the underlying stream is typed
+         * (a `[Stream T]` generator). jacl_tvec_mark only re-tags a plain vec, so a map
+         * result or an already-typed source vec passes through unchanged (idempotent). */
+        if (expr_is_typed_stream(cx, node)) {
+          IrVal ta[] = {cx->sp, result};
+          result = emit_rt_call(cx, "jacl_tvec_mark", ta, 2);
+        }
+        return result;
       }
 
       /* `[take SRC N]` — first N elements of a stream, eagerly. A generator source is
@@ -3197,6 +3227,14 @@ static int is_proc_def(AstNode *n) {
   return n->type == AST_COMMAND && n->data.command.head_id == HEAD_PROC;
 }
 
+/* A `[Stream T]` type annotation: a bracket command whose head word is "Stream". */
+static int node_is_stream_type(AstNode *n) {
+  if (!n || n->type != AST_COMMAND) return 0;
+  AstNode *h = n->data.command.head;
+  return h && h->type == AST_LIT_STRING && h->data.lit_string.length == 6 &&
+         memcmp(h->data.lit_string.value, "Stream", 6) == 0;
+}
+
 /* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
  * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
  * resolve before any body is compiled. */
@@ -3225,6 +3263,9 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
      * `(i64 sp, i64 a0…)`. A variadic proc's declared params already count the rest
      * slot (its last name), which the SVM function receives as the packed vector. */
     int gen = contains_yield(def->data.command.args[argc - 1]);
+    /* Return annotation (between params and body) of the form `[Stream T]` marks a typed
+     * stream: its collected/transformed/filtered results are typed vectors (comma print). */
+    int returns_stream = (argc >= 4) && node_is_stream_type(def->data.command.args[argc - 2]);
     if (gen && arity > 1) { cx_failf(cx, "codegen: generator '%.*s' may take at most one parameter (yet)", pname, plen); return; }
     if (gen && variadic) { cx_failf(cx, "codegen: variadic generator '%.*s' unsupported", pname, plen); return; }
     int nparams = gen ? 1 : arity;
@@ -3238,7 +3279,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
     cx->procs[cx->nprocs++] =
-        (Proc){pname, plen, func, arity, gen, variadic, variadic ? arity - 1 : arity, def, NULL};
+        (Proc){pname, plen, func, arity, gen, returns_stream, variadic, variadic ? arity - 1 : arity, def, NULL};
   }
 }
 
