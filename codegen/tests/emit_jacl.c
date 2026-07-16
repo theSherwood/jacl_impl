@@ -195,6 +195,28 @@ static char *read_whole_file(const char *path) {
   return buf;
 }
 
+/* Recursively find the first AST_ERROR node's message anywhere in the tree (parser errors
+ * are frequently nested inside a command arg, block, return, or interpolation segment). */
+static const char *find_ast_error(AstNode *n) {
+  if (!n) return NULL;
+  if (n->type == AST_ERROR) return n->data.error.message;
+  const char *m;
+  if (n->type == AST_COMMAND) {
+    if ((m = find_ast_error(n->data.command.head))) return m;
+    for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+      if ((m = find_ast_error(n->data.command.args[i]))) return m;
+  } else if (n->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < n->data.block.count; i++)
+      if ((m = find_ast_error(n->data.block.commands[i]))) return m;
+  } else if (n->type == AST_RETURN) {
+    if ((m = find_ast_error(n->data.return_stmt.value))) return m;
+  } else if (n->type == AST_INTERP_STRING) {
+    for (uint32_t i = 0; i < n->data.interp_string.count; i++)
+      if ((m = find_ast_error(n->data.interp_string.segments[i]))) return m;
+  }
+  return NULL;
+}
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
@@ -220,13 +242,12 @@ int main(int argc, char **argv) {
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) {
     /* Surface the first AST_ERROR's message (as jacl_eval does) so `# expect-error`
-     * oracles for parse-level rejections match, instead of a generic "parse errors: N". */
+     * oracles for parse-level rejections match, instead of a generic "parse errors: N".
+     * The error node is often NESTED (a ctx decl inside a block, a `(` inside an
+     * expression), so search recursively rather than only the top-level forms. */
     const char *first_err = NULL;
-    for (uint32_t i = 0; i < parse.count; i++)
-      if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
-        first_err = parse.nodes[i]->data.error.message;
-        break;
-      }
+    for (uint32_t i = 0; i < parse.count && !first_err; i++)
+      first_err = find_ast_error(parse.nodes[i]);
     /* Prefix `parse error:` — the corpus's parse-level oracles are written that way. */
     if (first_err) fprintf(stderr, "parse error: %s\n", first_err);
     else fprintf(stderr, "parse errors: %u\n", parse.error_count);

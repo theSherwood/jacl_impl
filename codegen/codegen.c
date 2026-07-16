@@ -65,6 +65,7 @@ typedef struct {
   IrFunc     *func;
   int         arity;
   int         is_generator; /* body contains `yield` → a fiber generator (sp, arg) */
+  int         returns_stream; /* return annotation is `[Stream T]` → a typed stream */
   int         variadic;     /* last param is `..rest`: extra call args pack into a vec */
   int         fixed_arity;  /* count of fixed params before the rest (variadic only) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
@@ -226,6 +227,14 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
  * param's type token from the name that follows it (param names are lowercase). */
 static int cg_is_type_prefix(const char *s, uint32_t n) {
   return cg_is_type_kw(s, n) || (n > 0 && s[0] >= 'A' && s[0] <= 'Z');
+}
+/* An integer scalar type keyword — a `[Arr <int>]` back-fills OOB grows with 0, not nil. */
+static int cg_is_int_scalar(const char *s, uint32_t n) {
+  static const struct { const char *k; uint32_t n; } T[] = {
+    {"i8", 2}, {"u8", 2}, {"i16", 3}, {"u16", 3}, {"i32", 3}, {"i64", 3}, {"u32", 3}, {"u64", 3}};
+  for (size_t i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+    if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return 1;
+  return 0;
 }
 
 /* Pre-scan the top-level forms for `def`/`mut` NAME bindings; those names become module
@@ -981,6 +990,22 @@ static Proc *generator_call(Cx *cx, AstNode *n) {
   return (p && p->is_generator) ? p : NULL;
 }
 
+/* Does this expression evaluate to a *typed* stream — i.e. one whose materialized
+ * (collected/transformed/filtered/taken) form is a `[Vec T]` that prints comma-style?
+ * The leaf is a generator proc annotated `[Stream T]`; the stream combinators preserve
+ * the typedness of their source. Used to stamp the result vector with JACL_TAG_TVEC. */
+static int expr_is_typed_stream(Cx *cx, AstNode *n) {
+  if (!n || n->type != AST_COMMAND) return 0;
+  uint8_t hid = n->data.command.head_id;
+  AstNode **a = n->data.command.args;
+  uint32_t ac = n->data.command.arg_count;
+  if (hid == HEAD_COLLECT && ac == 1) return expr_is_typed_stream(cx, a[0]);
+  if ((hid == HEAD_TRANSFORM || hid == HEAD_FILTER || hid == HEAD_TAKE) && ac == 2)
+    return expr_is_typed_stream(cx, a[0]);
+  Proc *p = generator_call(cx, n);
+  return p && p->returns_stream;
+}
+
 /* Eagerly drain a source (an already-evaluated generator object or vec-like) into a
  * fresh vector, optionally applying a closure per element (transform) or using its
  * truthiness as a keep test (filter). Frame-threaded like the other loops. */
@@ -1101,6 +1126,149 @@ after_branch:
   IrVal out = ba->value;
   scope_exit(cx);
   return out;
+}
+
+/* filter/transform over a MAP: iterate its entries (i-th key/value), call the 2-param
+ * callback cb(k, v), and build a NEW map. filter keeps (k, v) where cb is truthy; transform
+ * maps each entry to cb's returned `[vec newk newv]` pair. Mirrors the old VM, which
+ * dispatches filter/transform on the source's runtime type (map -> map, vec -> vec). */
+static IrVal stream_into_map(Cx *cx, IrVal src, IrVal clo, int is_filter) {
+  scope_enter(cx);
+  IrVal ea[] = {cx->sp};
+  IrVal acc0 = emit_rt_call(cx, "jacl_map_empty", ea, 1);
+  env_define(cx, ST_SRC, 7, src, 0, 0);
+  env_define(cx, ST_ACC, 7, acc0, 1, 0);
+  env_define(cx, ST_CLO, 7, clo, 0, 0);
+  env_define(cx, ST_IDX, 7, irb_const_i64(cx->f, cx->cur, jaclval_i32(0)), 1, 0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock next_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  /* header: i < len(src) (entry count) */
+  enter_frame_block(cx, header);
+  {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    IrVal la[] = {cx->sp, bs->value};
+    IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
+    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, len);
+    IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+    IrVal is_true = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, cond, ctrue);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, is_true, body_blk, frame, w, exit_blk, frame, w);
+  }
+
+  /* body: k/v = i-th entry; r = cb(sp, cb, k, v) */
+  enter_frame_block(cx, body_blk);
+  {
+    Binding *bs = env_lookup(cx, ST_SRC, 7);
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    Binding *bc = env_lookup(cx, ST_CLO, 7);
+    IrVal ka[] = {cx->sp, bs->value, bi->value};
+    IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
+    IrVal va[] = {cx->sp, bs->value, bi->value};
+    IrVal val = emit_rt_call(cx, "jacl_iter_val_at", va, 3);
+    IrVal fa[] = {cx->sp, bc->value};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+    IrType r1[] = {IRB_I64};
+    IrVal cargs[] = {cx->sp, bc->value, key, val};
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+    if (is_filter) {
+      /* keep the ORIGINAL (k, v) when cb is truthy. Recompute k/v in the keep block from
+       * the frame-carried src + i (block-local SSA — body's key/val aren't visible there). */
+      IrVal truth = emit_truthy(cx, r);
+      IrBlock keep_blk = new_i64_block(cx, w);
+      fill_frame(cx, frame);
+      irb_br_if(cx->f, cx->cur, truth, keep_blk, frame, w, next_blk, frame, w);
+      enter_frame_block(cx, keep_blk);
+      Binding *ks = env_lookup(cx, ST_SRC, 7);
+      Binding *ki = env_lookup(cx, ST_IDX, 7);
+      Binding *ba = env_lookup(cx, ST_ACC, 7);
+      IrVal ka2[] = {cx->sp, ks->value, ki->value};
+      IrVal k2 = emit_rt_call(cx, "jacl_iter_key_at", ka2, 3);
+      IrVal va2[] = {cx->sp, ks->value, ki->value};
+      IrVal v2 = emit_rt_call(cx, "jacl_iter_val_at", va2, 3);
+      IrVal sa[] = {cx->sp, ba->value, k2, v2};
+      ba->value = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      fill_frame(cx, frame);
+      irb_br(cx->f, cx->cur, next_blk, frame, w);
+    } else {
+      /* transform: cb returned [vec newk newv]; put (newk, newv) into the result map. */
+      Binding *ba = env_lookup(cx, ST_ACC, 7);
+      IrVal g0[] = {cx->sp, r, irb_const_i64(cx->f, cx->cur, jaclval_i32(0))};
+      IrVal nk = emit_rt_call(cx, "jacl_vec_get_at", g0, 3);
+      IrVal g1[] = {cx->sp, r, irb_const_i64(cx->f, cx->cur, jaclval_i32(1))};
+      IrVal nv = emit_rt_call(cx, "jacl_vec_get_at", g1, 3);
+      IrVal sa[] = {cx->sp, ba->value, nk, nv};
+      ba->value = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      fill_frame(cx, frame);
+      irb_br(cx->f, cx->cur, next_blk, frame, w);
+    }
+  }
+
+  /* next: i = i + 1 */
+  enter_frame_block(cx, next_blk);
+  {
+    Binding *bi = env_lookup(cx, ST_IDX, 7);
+    IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
+    bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, header, frame, w);
+  }
+
+  enter_frame_block(cx, exit_blk);
+  IrVal out = env_lookup(cx, ST_ACC, 7)->value;
+  scope_exit(cx);
+  return out;
+}
+
+/* filter/transform: dispatch on the source's runtime type — a map builds a map (2-param
+ * callback over key/value), anything else builds a vec via stream_into_vec. src and clo are
+ * carried as frame locals so both branches can read them across the block split. */
+static IrVal compile_filter_transform(Cx *cx, IrVal src, IrVal clo, int is_filter) {
+  scope_enter(cx);
+  env_define(cx, "\x01""ft-src", 7, src, 0, 0);
+  env_define(cx, "\x01""ft-clo", 7, clo, 0, 0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+  int w = frame_width(cx);
+  IrVal ma[] = {cx->sp, src};
+  IrVal is_map = emit_rt_call(cx, "jacl_is_map_v", ma, 2);
+  IrVal truth = emit_truthy(cx, is_map);
+  IrBlock map_blk = new_i64_block(cx, w);
+  IrBlock vec_blk = new_i64_block(cx, w);
+  IrBlock merge = new_i64_block(cx, w + 1);   /* extra param: the result collection */
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, map_blk, frame, w, vec_blk, frame, w);
+
+  enter_frame_block(cx, map_blk);
+  {
+    IrVal s = env_lookup(cx, "\x01""ft-src", 7)->value;
+    IrVal c = env_lookup(cx, "\x01""ft-clo", 7)->value;
+    IrVal rm = stream_into_map(cx, s, c, is_filter);
+    fill_frame(cx, frame); frame[w] = rm;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, vec_blk);
+  {
+    IrVal s = env_lookup(cx, "\x01""ft-src", 7)->value;
+    IrVal c = env_lookup(cx, "\x01""ft-clo", 7)->value;
+    IrVal rv = stream_into_vec(cx, s, /*is_gen=*/0, c, is_filter);
+    fill_frame(cx, frame); frame[w] = rv;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, merge);
+  scope_exit(cx);
+  return (IrVal)w;   /* the merge block's extra param = the result */
 }
 
 /* Statement-position error auto-return (old-VM semantics): if a non-tail statement
@@ -1300,7 +1468,18 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
                               AstNode *body, AstNode *cb_node,
                               const char *key_name, uint32_t klen) {
   scope_enter(cx);
-  IrVal coll = compile_expr(cx, coll_node);
+  /* A generator source (`for [gen] $cb`, `for [gen] k v {body}`) has no jacl_len — drain
+   * it into a vector first so the index-based iteration below sees the elements. The
+   * canonical single-name generator forms are handled earlier by compile_for_generator;
+   * this covers the callback and two-name shapes. */
+  IrVal coll;
+  if (generator_call(cx, coll_node)) {
+    IrVal g = compile_expr(cx, coll_node);
+    if (cx->failed) { scope_exit(cx); return 0; }
+    coll = stream_into_vec(cx, g, /*is_gen=*/1, /*clo=*/0, /*is_filter=*/0);
+  } else {
+    coll = compile_expr(cx, coll_node);
+  }
   if (cx->failed) { scope_exit(cx); return 0; }
   IrVal cb = 0;
   if (cb_node) {
@@ -2487,11 +2666,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if ((hid == HEAD_COLLECT && node->data.command.arg_count == 1) ||
           ((hid == HEAD_TRANSFORM || hid == HEAD_FILTER) && node->data.command.arg_count == 2)) {
         AstNode *srcn = node->data.command.args[0];
-        IrVal clo = 0;
-        if (hid != HEAD_COLLECT) {
-          clo = compile_expr(cx, node->data.command.args[1]);
-          if (cx->failed) return 0;
-        }
+        /* Compile the SOURCE before the closure. A source that is itself a multi-block
+         * stream expression (nested filter/transform, or a generator drain) leaves the
+         * cursor in a later block; a closure compiled first would be an SSA value from an
+         * earlier block, invalid there (block-local SSA) — the frame would carry garbage. */
         IrVal src;
         int is_gen = 0;
         if (generator_call(cx, srcn)) {
@@ -2501,8 +2679,30 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           src = compile_expr(cx, srcn);        /* vec-like (incl. nested eager stream) */
         }
         if (cx->failed) return 0;
-        if (hid == HEAD_COLLECT && !is_gen) return src;   /* collect of a vec is itself */
-        return stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
+        IrVal clo = 0;
+        if (hid != HEAD_COLLECT) {
+          clo = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+        }
+        IrVal result;
+        if (hid == HEAD_COLLECT && !is_gen) {
+          result = src;   /* collect of a vec is itself */
+        } else if ((hid == HEAD_FILTER || hid == HEAD_TRANSFORM) && !is_gen) {
+          /* filter/transform over a non-generator source dispatch on runtime type: a map
+           * builds a map (2-param key/value callback), else a vec. */
+          result = compile_filter_transform(cx, src, clo, hid == HEAD_FILTER);
+        } else {
+          result = stream_into_vec(cx, src, is_gen, clo, hid == HEAD_FILTER);
+        }
+        if (cx->failed) return 0;
+        /* Stamp the materialized vector as a typed vec when the underlying stream is typed
+         * (a `[Stream T]` generator). jacl_tvec_mark only re-tags a plain vec, so a map
+         * result or an already-typed source vec passes through unchanged (idempotent). */
+        if (expr_is_typed_stream(cx, node)) {
+          IrVal ta[] = {cx->sp, result};
+          result = emit_rt_call(cx, "jacl_tvec_mark", ta, 2);
+        }
+        return result;
       }
 
       /* `[take SRC N]` — first N elements of a stream, eagerly. A generator source is
@@ -2525,20 +2725,31 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_vec_slice", a, 4);
       }
 
-      /* Typed pointers as raw addresses (u64 at runtime). `[ptr-null [Ptr T]]` is a
-       * null address (0); `[ptr-cast [Ptr T] $addr]` wraps a u64 address; `[ptr-addr
-       * $p]` unwraps back to the address. The `[Ptr T]` type token is erased here — the
-       * address round-trips through all three, which is what the corpus checks. */
-      if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
-        return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
-      }
-      if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
-        IrVal v = compile_expr(cx, node->data.command.args[1]);   /* args[0] = [Ptr T] */
-        return cx->failed ? 0 : v;
+      /* Typed pointers. `[ptr-null [Ptr T]]` is a null (0) address; `[ptr-cast [Ptr T]
+       * $addr]` wraps a u64 address; both carry the pointee type name `T` so the value
+       * prints `Ptr<T>(0xADDR)`. `[ptr-addr $p]` recovers the raw address. The name comes
+       * from the `[Ptr T]` annotation (args[0]): a bracket command whose sole arg is T. */
+      if ((hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) ||
+          (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2)) {
+        AstNode *ptr_ty = node->data.command.args[0];
+        const char *pn = "?"; uint32_t pnl = 1;
+        if (ptr_ty->type == AST_COMMAND && ptr_ty->data.command.arg_count >= 1 &&
+            ptr_ty->data.command.args[0]->type == AST_LIT_STRING) {
+          pn = ptr_ty->data.command.args[0]->data.lit_string.value;
+          pnl = ptr_ty->data.command.args[0]->data.lit_string.length;
+        }
+        IrVal addr = (hid == HEAD_PTR_NULL) ? irb_const_i64(cx->f, cx->cur, jaclval_i32(0))
+                                            : compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal name = compile_string_literal(cx, pn, pnl);
+        IrVal a[] = {cx->sp, addr, name};
+        return emit_rt_call(cx, "jacl_ptr_cast", a, 3);
       }
       if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
         IrVal v = compile_expr(cx, node->data.command.args[0]);
-        return cx->failed ? 0 : v;
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, v};
+        return emit_rt_call(cx, "jacl_ptr_addr", a, 2);
       }
       /* `[addr $buf->i]` — a fat pointer { base, offset } over a buffer element. The
        * arg is a dot access `[. base idx]`; take base + index and build the pointer. */
@@ -2803,6 +3014,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ATOM,       "jacl_atom_new",   1},
           {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
           {HEAD_FUTURE_Q,   "jacl_is_future_v", 1},
+          {HEAD_READ_FILE,   "jacl_read_file",   1},
+          {HEAD_WRITE_FILE,  "jacl_write_file",  2},
+          {HEAD_APPEND_FILE, "jacl_append_file", 2},
           {HEAD_RANGE,      "jacl_range_vec",  2},
           {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
           {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
@@ -2834,6 +3048,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               cx_fail(cx, msg);
               return 0;
             }
+          }
+        }
+        /* `arr-set` into a typed integer-scalar array: an OOB set grows with 0 (the typed
+         * default) rather than nil, so a later in-bounds read returns 0. */
+        if ((HeadId)hid == HEAD_ARR_SET && node->data.command.arg_count == 3 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *ab = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          if (ab && ab->elem_type && cg_is_int_scalar(ab->elem_type, ab->elem_type_len)) {
+            IrVal av = compile_expr(cx, node->data.command.args[0]);
+            if (cx->failed) return 0;
+            IrVal iv = compile_expr(cx, node->data.command.args[1]);
+            if (cx->failed) return 0;
+            IrVal vv = compile_expr(cx, node->data.command.args[2]);
+            if (cx->failed) return 0;
+            IrVal a[] = {cx->sp, av, iv, vv};
+            return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
           }
         }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
@@ -3043,6 +3274,14 @@ static int is_proc_def(AstNode *n) {
   return n->type == AST_COMMAND && n->data.command.head_id == HEAD_PROC;
 }
 
+/* A `[Stream T]` type annotation: a bracket command whose head word is "Stream". */
+static int node_is_stream_type(AstNode *n) {
+  if (!n || n->type != AST_COMMAND) return 0;
+  AstNode *h = n->data.command.head;
+  return h && h->type == AST_LIT_STRING && h->data.lit_string.length == 6 &&
+         memcmp(h->data.lit_string.value, "Stream", 6) == 0;
+}
+
 /* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
  * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
  * resolve before any body is compiled. */
@@ -3071,6 +3310,9 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
      * `(i64 sp, i64 a0…)`. A variadic proc's declared params already count the rest
      * slot (its last name), which the SVM function receives as the packed vector. */
     int gen = contains_yield(def->data.command.args[argc - 1]);
+    /* Return annotation (between params and body) of the form `[Stream T]` marks a typed
+     * stream: its collected/transformed/filtered results are typed vectors (comma print). */
+    int returns_stream = (argc >= 4) && node_is_stream_type(def->data.command.args[argc - 2]);
     if (gen && arity > 1) { cx_failf(cx, "codegen: generator '%.*s' may take at most one parameter (yet)", pname, plen); return; }
     if (gen && variadic) { cx_failf(cx, "codegen: variadic generator '%.*s' unsupported", pname, plen); return; }
     int nparams = gen ? 1 : arity;
@@ -3084,7 +3326,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
     cx->procs[cx->nprocs++] =
-        (Proc){pname, plen, func, arity, gen, variadic, variadic ? arity - 1 : arity, def, NULL};
+        (Proc){pname, plen, func, arity, gen, returns_stream, variadic, variadic ? arity - 1 : arity, def, NULL};
   }
 }
 

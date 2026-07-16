@@ -161,9 +161,13 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
     if (jacl_is_anyint(a) && jacl_is_anyint(b)) return jacl_int_val(a) == jacl_int_val(b);
     return jacl_num_f64(a) == jacl_num_f64(b);
   }
-  uint32_t t = jaclrt_type_index(a);
-  if (t != jaclrt_type_index(b)) return 0;
-  if (t == 0x06) {                                       /* VECTOR */
+  uint32_t t = jaclrt_type_index(a), tb2 = jaclrt_type_index(b);
+  /* A typed vector `[Vec T]` (0x1B) shares the vector representation and compares equal to
+   * a dynamic vector (0x06) with the same elements — normalize both to the vector kind. */
+  if (t == 0x1B) t = 0x06;
+  if (tb2 == 0x1B) tb2 = 0x06;
+  if (t != tb2) return 0;
+  if (t == 0x06) {                                       /* VECTOR (dynamic or typed) */
     uint32_t n = jacl_vec_count(a);
     if (n != jacl_vec_count(b)) return 0;
     for (uint32_t i = 0; i < n; i++)
@@ -271,7 +275,7 @@ JaclVal jacl_len(JaclVal v) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_string(v)) return jaclrt_i32((int32_t)jacl_str_len(v));
   uint32_t t = jaclrt_type_index(v);
-  if (t == 0x06) return jaclrt_i32((int32_t)jacl_vec_count(v));   /* VECTOR */
+  if (t == 0x06 || t == 0x1B) return jaclrt_i32((int32_t)jacl_vec_count(v));  /* VECTOR / typed vec */
   if (t == 0x07) return jaclrt_i32((int32_t)jacl_map_count(v));   /* MAP    */
   if (t == 0x1A) return jaclrt_i32((int32_t)jacl_arr_count(v));   /* ARR    */
   return jaclrt_error();
@@ -336,15 +340,43 @@ JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place fiel
   if (jaclrt_is_error(s)) return s;
   if (jaclrt_is_error(name)) return name;
   if (jaclrt_is_error(v)) return v;
+  /* `set $p->field V` through a fat pointer: deref to the pointed-to struct, then mutate
+   * its field in place. The struct is shared (stored by reference in the buffer), so the
+   * write is visible through the buffer without a write-back. */
+  if (jaclrt_type_index(s) == 0x1D) s = jacl_ptr_deref(s);
   JaclVal *slot = struct_field_slot(s, name);
   if (!slot) return jaclrt_error();
   *slot = v;
   return v;
 }
 
+/* A by-value snapshot of a mutable aggregate: an array/buffer is deep-copied (recursively,
+ * via jacl_arr_copy), a struct gets a fresh instance with each field value copied the same
+ * way; everything else (scalars, strings, vectors, maps — immutable JaclVals) is shared.
+ * The non-moving mark-sweep heap keeps raw payload pointers valid across the nested allocs,
+ * and every in-flight JaclVal lives in a scanned stack slot, so a mid-copy GC is safe. */
+JaclVal jacl_deep_copy(JaclVal v) {
+  uint32_t t = jaclrt_type_index(v);
+  if (t == 0x1A) return jacl_arr_copy(v);
+  if (t == 0x12) {
+    JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
+    JaclVal ns = jacl_struct_new(p[0], p[1]);
+    int32_t n = jaclrt_as_i32(p[1]);
+    for (int32_t k = 0; k < n; k++) {
+      JaclVal fv = jacl_deep_copy(p[3 + 2 * k]);       /* alloc first, then store */
+      JaclVal *np = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(ns));
+      np[2 + 2 * k] = p[2 + 2 * k];                     /* field name (shared string) */
+      np[3 + 2 * k] = fv;
+    }
+    return ns;
+  }
+  return v;
+}
 /* ---- box / deref / reset — a mutable single-slot ref (over the cell object) ---- */
 JaclVal jacl_box_new(JaclVal v) {
-  JaclVal c = jacl_cell_new(v);
+  /* `box` snapshots its argument by value: a boxed struct/buffer is independent of the
+   * original, so later mutation of the source does not leak into the box. */
+  JaclVal c = jacl_cell_new(jacl_deep_copy(v));
   return jaclrt_from_ptr(JACL_TAG_BOX, jaclrt_as_ptr(c));
 }
 JaclVal jacl_box_get(JaclVal b) {
@@ -387,6 +419,8 @@ JaclVal jacl_atom_new(JaclVal v) {
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
 /* `[future? V]` — a spawn/parallel/race future is a job carried under the STREAM tag. */
 JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
+/* Is V a map? (0x07) — the runtime dispatch for filter/transform over a map vs a vec. */
+JaclVal jacl_is_map_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x07); }
 
 /* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
  * The global holds a heap value, so it is reported as a GC root from
@@ -480,6 +514,12 @@ JaclVal jacl_assert(JaclVal v) {
   return truthy ? JACL_NIL : jaclrt_error();
 }
 /* [range A B] as a value: the vector [A, B) of i32s (for `for`/transform sources). */
+/* Re-tag a vector as a TYPED vector (`[Vec T]`) — same root cell, distinct tag so it prints
+ * comma-style. A non-vector passes through unchanged. */
+JaclVal jacl_tvec_mark(JaclVal v) {
+  if (jaclrt_type_index(v) != 0x06) return v;
+  return jaclrt_from_ptr(JACL_TAG_TVEC, jaclrt_as_ptr(v));
+}
 JaclVal jacl_range_vec(JaclVal a, JaclVal b) {
   if (jaclrt_is_error(a)) return a;
   if (jaclrt_is_error(b)) return b;
@@ -487,7 +527,7 @@ JaclVal jacl_range_vec(JaclVal a, JaclVal b) {
   int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
   JaclVal out = jacl_vec_empty();
   for (int32_t i = lo; i < hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
-  return out;
+  return jacl_tvec_mark(out);   /* range produces a typed [Vec i64] */
 }
 /* [assert-type V T] — dynamic type assertion: V when it matches the named type,
  * an error otherwise. (The old compiler proves many of these statically; the
@@ -560,6 +600,7 @@ JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx) {
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(name)) return name;
+  if (jaclrt_type_index(v) == 0x1D) v = jacl_ptr_deref(v);  /* `$p->field` through a fat ptr */
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_get(v, name);
   if (t == 0x07) return jacl_map_get(v, name);
@@ -578,7 +619,8 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
 JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(elem)) return elem;
-  if (jaclrt_type_index(v) != 0x06) return jaclrt_error();
+  uint32_t tv = jaclrt_type_index(v);
+  if (tv != 0x06 && tv != 0x1B) return jaclrt_error();   /* dynamic or typed vec */
   return jacl_vec_push(v, elem);
 }
 /* `[vec-slice V START END]` — a fresh vector of V[START..END) (half-open). START/END
@@ -587,8 +629,9 @@ JaclVal jacl_vec_slice(JaclVal v, JaclVal start, JaclVal end) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(start)) return start;
   if (jaclrt_is_error(end)) return end;
-  if (jaclrt_type_index(v) != 0x06 || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
-    return jaclrt_error();
+  { uint32_t tv = jaclrt_type_index(v);
+    if ((tv != 0x06 && tv != 0x1B) || !jaclrt_is_i32(start) || !jaclrt_is_i32(end))
+      return jaclrt_error(); }                             /* dynamic or typed vec */
   int32_t n = (int32_t)jacl_vec_count(v);
   int32_t s = jaclrt_as_i32(start), e = jaclrt_as_i32(end);
   if (s < 0) s = 0;
@@ -631,15 +674,26 @@ JaclVal jacl_addr_of(JaclVal base, JaclVal idx) {
   JaclVal p = jacl_vec_empty();
   p = jacl_vec_push(p, base);
   p = jacl_vec_push(p, jaclrt_is_i32(idx) ? idx : jaclrt_i32(0));
-  return p;
+  return jaclrt_from_ptr(JACL_TAG_FATPTR, jaclrt_as_ptr(p));
+}
+/* Read a fat pointer's { base, offset } (accepts both the tagged 0x1D form and, for
+ * back-compat, a bare 2-slot 0x06 vector). Returns 0 on a non-pointer input. */
+int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off) {
+  uint32_t t = jaclrt_type_index(p);
+  if (t != 0x1D && t != 0x06) return 0;
+  JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
+  *base = jacl_vec_get(vec, 0);
+  *off = jacl_vec_get(vec, 1);
+  return 1;
 }
 JaclVal jacl_ptr_deref(JaclVal p) {
   if (jaclrt_is_error(p)) return p;
   /* A buffer that decayed to a pointer at a proc-param boundary arrives as the bare
    * array (0x1A) — deref reads element 0 (C-style decay: the pointer is `&buf[0]`). */
   if (jaclrt_type_index(p) == 0x1A) return jacl_arr_get(p, 0);
-  if (jaclrt_type_index(p) != 0x06) return jaclrt_error();
-  return jacl_index_get(jacl_vec_get(p, 0), jacl_vec_get(p, 1));
+  JaclVal base, off;
+  if (!jacl_fatptr_parts(p, &base, &off)) return jaclrt_error();
+  return jacl_index_get(base, off);
 }
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (jaclrt_is_error(p)) return p;
@@ -647,13 +701,31 @@ JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (!jaclrt_is_i32(n)) return jaclrt_error();
   JaclVal base, off;
   if (jaclrt_type_index(p) == 0x1A) { base = p; off = jaclrt_i32(0); }   /* decayed buffer */
-  else if (jaclrt_type_index(p) == 0x06) { base = jacl_vec_get(p, 0); off = jacl_vec_get(p, 1); }
-  else return jaclrt_error();
+  else if (!jacl_fatptr_parts(p, &base, &off)) return jaclrt_error();
   JaclVal noff = jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(n));
   JaclVal np = jacl_vec_empty();
   np = jacl_vec_push(np, base);
   np = jacl_vec_push(np, noff);
-  return np;
+  return jaclrt_from_ptr(JACL_TAG_FATPTR, jaclrt_as_ptr(np));
+}
+/* ---- typed pointers (ptr-cast / ptr-null) ----
+ * A `[Ptr T]` produced by ptr-cast/ptr-null wraps a raw u64 address as an opaque handle
+ * that round-trips through ptr-addr and prints `Ptr<T>(0xADDR)`. Unlike an addr-of fat
+ * pointer (base+offset into a buffer), it is never deref'd — the address is a bare number.
+ * Represented as a 2-slot vector { address, pointee-name(string) } tagged JACL_TAG_PTR so
+ * print can recover both the address and the pointee type name recorded at the cast site. */
+JaclVal jacl_ptr_cast(JaclVal addr, JaclVal name) {
+  if (jaclrt_is_error(addr)) return addr;
+  JaclVal p = jacl_vec_empty();
+  p = jacl_vec_push(p, addr);
+  p = jacl_vec_push(p, name);
+  return jaclrt_from_ptr(JACL_TAG_PTR, jaclrt_as_ptr(p));
+}
+JaclVal jacl_ptr_addr(JaclVal p) {
+  if (jaclrt_is_error(p)) return p;
+  if (jaclrt_type_index(p) != 0x1C) return p;   /* already a raw address (untyped/decayed) */
+  JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
+  return jacl_vec_get(vec, 0);
 }
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
@@ -742,7 +814,7 @@ JaclVal jacl_range_inclusive(JaclVal a, JaclVal b) {
   int32_t lo = jaclrt_as_i32(a), hi = jaclrt_as_i32(b);
   JaclVal out = jacl_vec_empty();
   for (int32_t i = lo; i <= hi; i++) out = jacl_vec_push(out, jaclrt_i32(i));
-  return out;
+  return jacl_tvec_mark(out);   /* range-inclusive produces a typed [Vec i64] */
 }
 JaclVal jacl_map_keys_v(JaclVal m) {
   if (jaclrt_is_error(m)) return m;
@@ -837,6 +909,31 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x1B) {                                       /* TYPED VECTOR: [e0, e1, …] */
+    repr_put(rb, "[", 1);
+    uint32_t n = jacl_vec_count(v);
+    for (uint32_t i = 0; i < n; i++) {
+      if (i) repr_put(rb, ", ", 2);
+      repr_val(rb, jacl_vec_get(v, i), 1);
+    }
+    repr_put(rb, "]", 1);
+    return;
+  }
+  if (t == 0x1C) {                                       /* TYPED PTR: Ptr<name>(0xADDR) */
+    JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(v));
+    JaclVal addr = jacl_vec_get(vec, 0);
+    JaclVal name = jacl_vec_get(vec, 1);
+    repr_put(rb, "Ptr<", 4);
+    repr_val(rb, name, 0);                               /* pointee type name, unquoted */
+    repr_put(rb, ">(0x", 4);
+    uint64_t u = (uint64_t)jacl_int_val(addr);
+    char tmp[16]; int j = 0;
+    if (u == 0) tmp[j++] = '0';
+    while (u) { int d = (int)(u & 0xF); tmp[j++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u >>= 4; }
+    while (j) { j--; repr_put(rb, &tmp[j], 1); }
+    repr_put(rb, ")", 1);
+    return;
+  }
   if (t == 0x07) {                                       /* MAP: [map k0 v0 …] */
     repr_put(rb, "[map", 4);
     JaclVal ks[JACL_EQ_MAP_CAP], vs[JACL_EQ_MAP_CAP];
@@ -891,7 +988,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

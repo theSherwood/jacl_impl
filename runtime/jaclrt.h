@@ -44,11 +44,25 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_ARR           ((uint64_t)0x1A << JACL_TAG_SHIFT)   /* mutable array (mirrors src/jacl.h) */
+/* Typed vector `[Vec T]` — SAME representation as a plain vector (RRB root cell), a distinct
+ * tag only so print renders it comma-style (`[1, 2, 3]`) vs a dynamic `[vec 1 2 3]`. svm's
+ * conservative root scan is tag-agnostic (masks the top byte), so a fresh tag is GC-safe. */
+#define JACL_TAG_TVEC          ((uint64_t)0x1B << JACL_TAG_SHIFT)
+/* Typed pointer `[Ptr T]` produced by ptr-cast / ptr-null — a 2-slot object
+ * { address, pointee-name(string) } so print renders `Ptr<T>(0xADDR)` while ptr-addr
+ * recovers the raw address. Same GC-safe story as TVEC (top-byte tag, conservative scan). */
+#define JACL_TAG_PTR           ((uint64_t)0x1C << JACL_TAG_SHIFT)
+/* Fat pointer produced by `[addr $buf->i]` — a 2-slot object { base(array), offset } into
+ * a buffer. A distinct tag (vs a plain vector) so arrow ops (`$p->N`, `set $p->N`,
+ * `set $p->field`) dispatch to a deref/write-through rather than reading the object's own
+ * slots. GC-safe like the other top-byte tags (conservative scan traces the base). */
+#define JACL_TAG_FATPTR        ((uint64_t)0x1D << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
- * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21) added since
- * the runtime's streams are GC objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A))
+ * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21), TVEC (0x1B),
+ * PTR (0x1C) and FATPTR (0x1D) added since the runtime's streams / typed vectors / typed
+ * pointers / fat pointers are GC objects that hold heap references. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
@@ -281,8 +295,13 @@ JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeou
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
 JaclVal jacl_is_future_v(JaclVal v);               /* future? */
+JaclVal jacl_is_map_v(JaclVal v);                  /* is-map (filter/transform dispatch) */
+JaclVal jacl_tvec_mark(JaclVal v);                 /* re-tag a vec as typed [Vec T] */
 JaclVal jacl_global_get(JaclVal name);             /* module global read */
 JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
+JaclVal jacl_read_file(JaclVal path);                     /* read-file (in-memory VFS) */
+JaclVal jacl_write_file(JaclVal content, JaclVal path);   /* write-file */
+JaclVal jacl_append_file(JaclVal content, JaclVal path);  /* append-file */
 JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
 JaclVal jacl_range_inclusive(JaclVal a, JaclVal b);/* [range-inclusive A B] as a vector */
 JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem);  /* error-propagating [vec-push V E] */
@@ -309,6 +328,7 @@ JaclVal jacl_arr_pop(JaclVal a);                   /* remove + return last (erro
 JaclVal jacl_arr_copy(JaclVal a);                  /* deep-by-value copy (by-value buf params) */
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx);   /* i32 index -> element */
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
+JaclVal jacl_arr_set_at_zero(JaclVal a, JaclVal idx, JaclVal v); /* OOB grow zero-fills */
 uint32_t jacl_arr_count(JaclVal a);
 JaclVal jacl_arr_get(JaclVal a, uint32_t i);       /* raw-index get (internal users) */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx); /* vec OR arr element (for-each) */
@@ -322,6 +342,9 @@ JaclVal jacl_first(JaclVal c);                     /* [first C] first element */
 JaclVal jacl_addr_of(JaclVal base, JaclVal idx);   /* [addr $buf->i] -> fat pointer */
 JaclVal jacl_ptr_deref(JaclVal p);                 /* [ptr-deref P] -> base[offset] */
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n);     /* [ptr-offset P N] -> advanced ptr */
+JaclVal jacl_ptr_cast(JaclVal addr, JaclVal name); /* [ptr-cast [Ptr T] A] -> typed pointer */
+JaclVal jacl_ptr_addr(JaclVal p);                  /* [ptr-addr P] -> raw address */
+int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off); /* fat-ptr { base, offset } */
 JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */
 JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
