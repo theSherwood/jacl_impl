@@ -1739,7 +1739,16 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   if (cb_node) env_define(cx, "\x01""for-cb", 7, cb, 0, 0);
   /* Two-name form `for COLL k v { body }` binds the key alongside the value. */
   if (key_name) env_define(cx, key_name, klen, zero, /*is_mut=*/1, /*is_cell=*/0);
-  if (name) env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  /* A loop variable captured by a closure in the body (e.g. `for … i { spawn { … $i … } }`)
+   * is boxed in a heap cell so the closure sees each iteration's value; each step writes the
+   * cell rather than rebinding the SSA slot. */
+  if (name && is_captured_name(cx, name, nlen)) {
+    IrVal zc[] = {cx->sp, zero};
+    IrVal cell = emit_rt_call(cx, "jacl_cell_new", zc, 2);
+    env_define(cx, name, nlen, cell, /*is_mut=*/1, /*is_cell=*/1);
+  } else if (name) {
+    env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  }
   /* `break V` result slot: a hidden mutable local (nil by default) that a `break`
    * inside the body writes; the loop evaluates to it. Threaded like any frame local. */
   env_define(cx, BRK_SENTINEL, BRK_SENTINEL_LEN, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL),
@@ -1783,7 +1792,8 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
         env_lookup(cx, key_name, klen)->value = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
       }
       Binding *bn = env_lookup(cx, name, nlen);
-      bn->value = elem;
+      if (bn->is_cell) { IrVal a[] = {cx->sp, bn->value, elem}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
+      else bn->value = elem;
       (void)compile_expr(cx, body);
     } else {
       Binding *bcb = env_lookup(cx, "\x01""for-cb", 7);
