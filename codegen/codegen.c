@@ -2324,6 +2324,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (cx->failed) return 0;
         IrVal kv = compile_expr(cx, node->data.command.args[1]);
         if (cx->failed) return 0;
+        /* A dynamic index into a nested-buffer dimension (the typer stamped the dimension's
+         * static size on this arrow node) is bounds-checked at runtime. */
+        if (node->inferred_buf_len > 0) {
+          IrVal dv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)node->inferred_buf_len));
+          IrVal a[] = {cx->sp, sv, kv, dv};
+          return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
+        }
         IrVal a[] = {cx->sp, sv, kv};
         return emit_rt_call(cx, "jacl_dot_dyn", a, 3);
       }

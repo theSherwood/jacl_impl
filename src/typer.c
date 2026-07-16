@@ -815,8 +815,10 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
                                             AstNode* outer_int,
                                             JaclType* out_type,
                                             uint32_t* out_sidx,
-                                            uint32_t* out_remaining_shape_idx) {
+                                            uint32_t* out_remaining_shape_idx,
+                                            uint32_t* out_index_dim) {
   if (out_remaining_shape_idx) *out_remaining_shape_idx = UINT32_MAX;
+  if (out_index_dim) *out_index_dim = 0;
   /* Index-arrow check: anything other than a name field (LIT_STRING)
    * counts as an index. Dynamic indices like `$slice->$i` parse with
    * AST_VAR_REF here. */
@@ -924,6 +926,19 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
     *out_sidx = UINT32_MAX;
     if (out_remaining_shape_idx) {
       *out_remaining_shape_idx = shape_after[chain_depth];
+    }
+  }
+  /* The static size of the dimension this arrow's OUTERMOST index (idx_nodes[0], i.e.
+   * `outer_int`) steps into: dim 0 is the base buffer's length, deeper dims read the
+   * TYPE_SHAPE_BUF length. Used to bounds-check a dynamic index at runtime. */
+  if (out_index_dim) {
+    int d = chain_depth - 1;
+    if (d == 0) {
+      *out_index_dim = (b->type == TYPE_BUF) ? b->buf_len
+                     : tc->shared_reg->shapes[b->struct_idx].u.buf.len;
+    } else if (typer__is_shape_idx(tc, shape_after[d]) &&
+               tc->shared_reg->shapes[shape_after[d]].kind == TYPE_SHAPE_BUF) {
+      *out_index_dim = tc->shared_reg->shapes[shape_after[d]].u.buf.len;
     }
   }
   return true;
@@ -2067,7 +2082,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       AstNode* fld  = value_node->data.command.args[1];
       if (typer__nested_buf_chain_result(tc, recv, fld,
                                          &chain_t, &chain_sidx,
-                                         &remaining_shape) &&
+                                         &remaining_shape, NULL) &&
           chain_t == TYPE_PTR && remaining_shape != UINT32_MAX) {
         struct_idx = remaining_shape;
       }
@@ -6550,10 +6565,23 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         JaclType chain_t = TYPE_DYN;
         uint32_t chain_sidx = UINT32_MAX;
         if (typer__nested_buf_chain_result(tc, tgt, fld,
-                                           &chain_t, &chain_sidx, NULL)) {
+                                           &chain_t, &chain_sidx, NULL, NULL)) {
           node->inferred_type       = chain_t;
           node->inferred_struct_idx = chain_sidx;
           return;
+        }
+      }
+      /* A dynamic index into a nested-buf dimension (`$cube->$j`): stamp the dimension's
+       * static size on the node (as inferred_buf_len — a plain length, not a shape idx, so
+       * it may cross to the compiler) so the codegen can emit a runtime bounds check. The
+       * node's inferred type is left to the existing dynamic-dot handling below. */
+      if (fld->type != AST_LIT_INT && fld->type != AST_LIT_STRING) {
+        JaclType chain_t = TYPE_DYN;
+        uint32_t chain_sidx = UINT32_MAX, index_dim = 0;
+        if (typer__nested_buf_chain_result(tc, tgt, fld,
+                                           &chain_t, &chain_sidx, NULL, &index_dim) &&
+            index_dim > 0) {
+          node->inferred_buf_len = index_dim;
         }
       }
 

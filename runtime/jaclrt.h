@@ -356,6 +356,7 @@ JaclVal jacl_trace_snapshot(void);       /* capture the stack into jacl_last_tra
 JaclVal jacl_error_msg_i(const char *prefix, int32_t n);  /* error carrying prefix + decimal(n) */
 JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix);  /* + trailing string */
 JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr);
+JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim);  /* dim-checked step */
 JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
 JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */

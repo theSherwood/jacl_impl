@@ -338,6 +338,17 @@ JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typ
   if (i < 0 || i >= n) return jacl_error_msg_i_s("index ", i, typestr);
   return jacl_arr_get_at(buf, idx);
 }
+/* A dynamic index step into a nested-buffer dimension (`$cube->$j`, `[buf-get $h->field $i]`),
+ * bounds-checked against the dimension's declared size: an OOB (or negative) index errors
+ * `out of bounds for dimension size N`. `dim` is the static length the codegen read from the
+ * typer's stamp on the arrow node. */
+JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim) {
+  if (jaclrt_is_error(buf)) return buf;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx), n = jaclrt_is_i32(dim) ? jaclrt_as_i32(dim) : 0;
+  if (i < 0 || i >= n) return jacl_error_msg_i("out of bounds for dimension size ", n);
+  return jacl_index_get(buf, idx);
+}
 
 /* ---- structs (dynamic, name-based; typed/unboxed lowering is a later pass) ----
  * A struct instance is a traced heap cell (JACL_TAG_STRUCT over JOBJ_NODE):
