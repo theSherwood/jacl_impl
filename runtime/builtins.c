@@ -296,6 +296,48 @@ JaclVal jacl_map_has_v(JaclVal m, JaclVal k) {
 JaclVal jacl_is_error_v(JaclVal v) { return jaclrt_bool(jaclrt_is_error(v)); }
 JaclVal jacl_error_new(JaclVal v) { return jaclrt_set_error(v); }          /* [error V] */
 JaclVal jacl_error_val(JaclVal v) { return v & ~JACL_FLAG_ERROR; }         /* payload, flag cleared */
+/* Build an error carrying the message `prefix` + decimal(n) — for runtime errors the corpus
+ * surfaces with a specific message (e.g. "vec-set: negative index -1"). */
+JaclVal jacl_error_msg_i(const char *prefix, int32_t n) {
+  char buf[160]; uint32_t o = 0;
+  for (const char *p = prefix; *p && o < sizeof buf - 1; p++) buf[o++] = *p;
+  char nb[16]; int dn = 0; int neg = (n < 0);
+  uint32_t un = neg ? (uint32_t)(-(int64_t)n) : (uint32_t)n;
+  if (un == 0) nb[dn++] = '0';
+  while (un && dn < 16) { nb[dn++] = (char)('0' + un % 10); un /= 10; }
+  if (neg && o < sizeof buf - 1) buf[o++] = '-';
+  for (int k = dn - 1; k >= 0 && o < sizeof buf - 1; k--) buf[o++] = nb[k];
+  return jaclrt_set_error(jacl_str_new(buf, o));
+}
+/* Like jacl_error_msg_i but with a trailing string (a compile-time suffix), e.g.
+ * "index " + 7 + " out of bounds for [Buf 4 u8]". */
+JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix) {
+  char buf[224]; uint32_t o = 0;
+  for (const char *p = prefix; *p && o < sizeof buf - 1; p++) buf[o++] = *p;
+  char nb[16]; int dn = 0; int neg = (n < 0);
+  uint32_t un = neg ? (uint32_t)(-(int64_t)n) : (uint32_t)n;
+  if (un == 0) nb[dn++] = '0';
+  while (un && dn < 16) { nb[dn++] = (char)('0' + un % 10); un /= 10; }
+  if (neg && o < sizeof buf - 1) buf[o++] = '-';
+  for (int k = dn - 1; k >= 0 && o < sizeof buf - 1; k--) buf[o++] = nb[k];
+  if (jaclrt_is_string(suffix)) {
+    char sb[160]; uint32_t sl = jacl_str_len(suffix);
+    if (sl > sizeof sb) sl = sizeof sb;
+    jacl_str_bytes(suffix, sb, sizeof sb);
+    for (uint32_t k = 0; k < sl && o < sizeof buf - 1; k++) buf[o++] = sb[k];
+  }
+  return jaclrt_set_error(jacl_str_new(buf, o));
+}
+/* `[buf-get $b $i]` with runtime bounds checking against the fixed length: an OOB index
+ * errors `index N out of bounds for <TYPE>` (the type string is supplied by the codegen,
+ * which knows the buffer's declared `[Buf N T]` shape). Unchecked access uses buf-unchecked-get. */
+JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr) {
+  if (jaclrt_is_error(buf)) return buf;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx), n = jaclrt_is_i32(size) ? jaclrt_as_i32(size) : 0;
+  if (i < 0 || i >= n) return jacl_error_msg_i_s("index ", i, typestr);
+  return jacl_arr_get_at(buf, idx);
+}
 
 /* ---- structs (dynamic, name-based; typed/unboxed lowering is a later pass) ----
  * A struct instance is a traced heap cell (JACL_TAG_STRUCT over JOBJ_NODE):
@@ -421,6 +463,11 @@ JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0
 JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
 /* Is V a map? (0x07) — the runtime dispatch for filter/transform over a map vs a vec. */
 JaclVal jacl_is_map_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x07); }
+/* Is V a closure? (0x08) — guards an indirect call so calling a non-callable errors cleanly
+ * ("cannot call") instead of reading a garbage function index. */
+JaclVal jacl_is_closure_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x08); }
+/* The `cannot call` error for a non-callable head value. */
+JaclVal jacl_cannot_call(void) { return jaclrt_set_error(jacl_str_new("cannot call", 11)); }
 
 /* ---- ambient context (`\$ctx`) — a persistent map in a runtime global ----
  * The global holds a heap value, so it is reported as a GC root from
@@ -610,7 +657,7 @@ JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();
   int32_t i = jaclrt_as_i32(idx);
-  if (i < 0) return jaclrt_error();
+  if (i < 0) return jacl_error_msg_i("vec-set: negative index ", i);
   return jacl_vec_set(v, (uint32_t)i, elem);
 }
 /* `[vec-push V E]` — error-propagating push wrapper (the core jacl_vec_push is also

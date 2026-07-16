@@ -394,7 +394,12 @@ JaclVal jacl_sched_run_main(JaclVal fnref) {
   jacl_gc_worker_unregister();                     /* leave the set while joining */
   for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k]);
   jacl_gc_worker_register();
-  return (JaclVal)job_get(root, 8);
+  JaclVal result = (JaclVal)job_get(root, 8);
+  /* Surface an uncaught runtime error: if the program value escaped error-flagged (never
+   * caught by a try), print it (`<error: MESSAGE>`) so the failure — and its message — is
+   * observable, rather than exiting silently with a discarded error value. */
+  if (jaclrt_is_error(result)) { extern JaclVal jacl_print(JaclVal); (void)jacl_print(result); }
+  return result;
 }
 
 /* ---- spawn / await (multi-threaded, on the pool) ---- */

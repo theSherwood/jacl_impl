@@ -350,6 +350,11 @@ JaclVal jacl_proc_sig_get(JaclVal fnref);                     /* look up a proc/
 JaclVal jacl_trace_push(JaclVal name);   /* push a call-stack frame (name; line 0) */
 JaclVal jacl_trace_line(JaclVal line);   /* set the top frame's current line */
 JaclVal jacl_trace_snapshot(void);       /* capture the stack into jacl_last_trace */
+JaclVal jacl_error_msg_i(const char *prefix, int32_t n);  /* error carrying prefix + decimal(n) */
+JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix);  /* + trailing string */
+JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr);
+JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
+JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */
 void    jacl_trace_mark_roots(void);     /* GC-mark the shadow stack + last snapshot */
 JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */

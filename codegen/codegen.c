@@ -614,6 +614,54 @@ static int frame_guard(Cx *cx) {
   return 1;
 }
 
+/* Call `cval` as a closure with `argc` args (compiled inside the call arm), guarding against
+ * a non-closure head: `[42 1]` would otherwise read a garbage function index and trap, so
+ * branch on is-closure and yield a clean `cannot call` error. The result flows through a
+ * merge block (block-local SSA); cval is threaded into the call arm as an extra param. */
+static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint32_t argc) {
+  IrVal isc = emit_rt_call(cx, "jacl_is_closure_v", (IrVal[]){cx->sp, cval}, 2);
+  IrVal truth = emit_truthy(cx, isc);
+  if (!frame_guard(cx)) return 0;
+  int w = frame_width(cx);
+  IrBlock call_blk = new_i64_block(cx, w + 1);   /* frame + cval */
+  IrBlock err_blk = new_i64_block(cx, w);
+  IrBlock merge = new_i64_block(cx, w + 1);      /* frame + result */
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  frame[w] = cval;
+  irb_br_if(cx->f, cx->cur, truth, call_blk, frame, w + 1, err_blk, frame, w);
+
+  enter_frame_block(cx, call_blk);
+  {
+    IrVal cv = (IrVal)w;                          /* threaded cval */
+    IrVal fnargs[] = {cx->sp, cv};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+    IrVal cargs[2 + CG_MAX_PARAMS];
+    IrType sig[2 + CG_MAX_PARAMS];
+    cargs[0] = cx->sp; cargs[1] = cv; sig[0] = sig[1] = IRB_I64;
+    for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
+      cargs[2 + i] = compile_expr(cx, args[i]);
+      sig[2 + i] = IRB_I64;
+      if (cx->failed) return 0;
+    }
+    IrType r1[] = {IRB_I64};
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+    fill_frame(cx, frame);
+    frame[w] = r;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, err_blk);
+  {
+    IrVal err = emit_rt_call(cx, "jacl_cannot_call", (IrVal[]){cx->sp}, 1);
+    fill_frame(cx, frame);
+    frame[w] = err;
+    irb_br(cx->f, cx->cur, merge, frame, w + 1);
+  }
+  enter_frame_block(cx, merge);
+  return (IrVal)w;                                 /* the merged result */
+}
+
 static int kw_is(AstNode *n, const char *kw, uint32_t kl) {
   return n->type == AST_LIT_STRING && n->data.lit_string.length == kl &&
          memcmp(n->data.lit_string.value, kw, kl) == 0;
@@ -2267,20 +2315,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                !is_type_ctor_head(node->data.command.head)))) {
         IrVal cval = compile_expr(cx, node->data.command.head);
         if (cx->failed) return 0;
-        uint32_t argc = node->data.command.arg_count;
-        IrVal fnargs[] = {cx->sp, cval};
-        IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-        IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-        IrVal cargs[2 + CG_MAX_PARAMS];
-        IrType sig[2 + CG_MAX_PARAMS];
-        cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
-        for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
-          cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
-          sig[2 + i] = IRB_I64;
-          if (cx->failed) return 0;
-        }
-        IrType r1[] = {IRB_I64};
-        return irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+        return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
       }
 
       /* `def [Buf N T] name` — zero-filled fixed buffer declaration (no initializer). */
@@ -2765,20 +2800,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (hb) {
           IrVal cval = hb->value;
           if (hb->is_cell) { IrVal a[] = {cx->sp, cval}; cval = emit_rt_call(cx, "jacl_cell_get", a, 2); }
-          uint32_t argc2 = node->data.command.arg_count;
-          IrVal fnargs[] = {cx->sp, cval};
-          IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-          IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-          IrVal cargs[2 + CG_MAX_PARAMS];
-          IrType sig[2 + CG_MAX_PARAMS];
-          cargs[0] = cx->sp; cargs[1] = cval; sig[0] = sig[1] = IRB_I64;
-          for (uint32_t i = 0; i < argc2 && i < CG_MAX_PARAMS; i++) {
-            cargs[2 + i] = compile_expr(cx, node->data.command.args[i]);
-            sig[2 + i] = IRB_I64;
-            if (cx->failed) return 0;
-          }
-          IrType r1[] = {IRB_I64};
-          return irb_call_indirect(cx->f, cx->cur, sig, (int)argc2 + 2, r1, 1, fnw, cargs, (int)argc2 + 2);
+          return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
         }
       }
 
@@ -3201,6 +3223,27 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             if (cx->failed) return 0;
             IrVal a[] = {cx->sp, av, iv, vv};
             return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
+          }
+        }
+        /* `buf-get $b $i` on a typed fixed buffer: bounds-check against the declared length
+         * at runtime, erroring `index N out of bounds for [Buf N T]`. (Literal-index arrow
+         * access is checked at compile time; `buf-unchecked-get` skips the check entirely.) */
+        if ((HeadId)hid == HEAD_BUF_GET && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          if (bb && bb->buf_size >= 0 && bb->elem_type) {
+            char ts[96];
+            int tn = snprintf(ts, sizeof ts, " out of bounds for [Buf %d %.*s]",
+                              bb->buf_size, (int)bb->elem_type_len, bb->elem_type);
+            IrVal bv = compile_expr(cx, node->data.command.args[0]);
+            if (cx->failed) return 0;
+            IrVal iv = compile_expr(cx, node->data.command.args[1]);
+            if (cx->failed) return 0;
+            IrVal sz = irb_const_i64(cx->f, cx->cur, jaclval_i32(bb->buf_size));
+            IrVal tsv = compile_string_literal(cx, ts, (uint32_t)tn);
+            IrVal a[] = {cx->sp, bv, iv, sz, tsv};
+            return emit_rt_call(cx, "jacl_buf_get_checked", a, 5);
           }
         }
         /* `error V` while tracing: stamp the error line on the top frame and snapshot the
