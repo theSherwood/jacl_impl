@@ -122,6 +122,8 @@ typedef struct {
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
   const char *globals[128]; uint32_t globalslen[128]; int nglobals;
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
+  int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
+  const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
 } Cx;
 typedef struct SDef SDef;
 
@@ -437,6 +439,44 @@ static void emit_void_call(Cx *cx, const char *fn) {
   IrVal h = irb_const_i32(cx->f, cx->cur, 0);
   IrVal args[] = {cx->sp};
   (void)irb_call_import(cx->f, cx->cur, fn, sig, 1, NULL, 0, h, args, 1);
+}
+
+static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len);  /* fwd */
+
+/* Does the AST contain a `[stack-trace]`? When it does, the codegen instruments proc
+ * entries and call sites to maintain a shadow call stack; otherwise that overhead (and its
+ * regression surface) is skipped entirely. */
+static int contains_stack_trace(AstNode *n) {
+  if (!n) return 0;
+  if (n->type == AST_COMMAND) {
+    if (n->data.command.head_id == HEAD_STACK_TRACE) return 1;
+    if (n->data.command.head && contains_stack_trace(n->data.command.head)) return 1;
+    for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+      if (contains_stack_trace(n->data.command.args[i])) return 1;
+    return 0;
+  }
+  if (n->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < n->data.block.count; i++)
+      if (contains_stack_trace(n->data.block.commands[i])) return 1;
+    return 0;
+  }
+  if (n->type == AST_RETURN)
+    return n->data.return_stmt.value ? contains_stack_trace(n->data.return_stmt.value) : 0;
+  return 0;
+}
+/* Push a call-stack frame for the proc/entry being entered (only when tracing). */
+static void emit_trace_push(Cx *cx, const char *name, uint32_t len) {
+  if (!cx->wants_trace) return;
+  IrVal nm = compile_string_literal(cx, name, len);
+  IrVal a[] = {cx->sp, nm};
+  (void)emit_rt_call(cx, "jacl_trace_push", a, 2);
+}
+/* Record the current line on the top frame before a call / at an error (only when tracing). */
+static void emit_trace_line(Cx *cx, uint32_t line) {
+  if (!cx->wants_trace) return;
+  IrVal lv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)line));
+  IrVal a[] = {cx->sp, lv};
+  (void)emit_rt_call(cx, "jacl_trace_line", a, 2);
 }
 
 /* ---- type-driven (unboxed) i32 arithmetic ----
@@ -2666,6 +2706,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
             }
             cargs[1 + p->fixed_arity] = rest;
+            emit_trace_line(cx, node->start.line);
             return irb_call(cx->f, cx->cur, p->func, cargs, p->fixed_arity + 2);
           }
           /* Spread into a fixed-arity proc `[add3 ..$v]` — the single spread supplies
@@ -2681,6 +2722,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               IrVal ga[] = {cx->sp, vec, idx};
               cargs[1 + i] = emit_rt_call(cx, "jacl_index_get", ga, 3);
             }
+            emit_trace_line(cx, node->start.line);
             return irb_call(cx->f, cx->cur, p->func, cargs, p->arity + 1);
           }
           if ((int)argc != p->arity) {
@@ -2710,6 +2752,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             args[i + 1] = compile_expr(cx, node->data.command.args[i]);
             if (cx->failed) return 0;
           }
+          emit_trace_line(cx, node->start.line);  /* record the call site on the caller frame */
           return irb_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
         }
       }
@@ -3022,10 +3065,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return nv;
       }
 
-      /* `[stack-trace]` — no error/frame capture on the SVM backend yet, so it yields
-       * the empty string (a program that only tests "no trace when no error" passes). */
+      /* `[stack-trace]` — the trace captured at the most recent `error` (empty string if
+       * none). Frames are recorded by the call-stack instrumentation (gated on wants_trace). */
       if (hid == HEAD_STACK_TRACE && node->data.command.arg_count == 0) {
-        return compile_string_literal(cx, "", 0);
+        IrVal a[] = {cx->sp};
+        return emit_rt_call(cx, "jacl_stack_trace", a, 1);
       }
 
       /* `[not COND]` — by name (no interned head id): boolean negation via jacl_not. */
@@ -3158,6 +3202,14 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             IrVal a[] = {cx->sp, av, iv, vv};
             return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
           }
+        }
+        /* `error V` while tracing: stamp the error line on the top frame and snapshot the
+         * call stack, so a later `[stack-trace]` in the handler shows where it was raised.
+         * Falls through to the BI table, which emits the actual jacl_error_new. */
+        if (cx->wants_trace && (HeadId)hid == HEAD_ERROR && node->data.command.arg_count == 1) {
+          emit_trace_line(cx, node->start.line);
+          IrVal sa[] = {cx->sp};
+          (void)emit_rt_call(cx, "jacl_trace_snapshot", sa, 1);
         }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
           if (BI[bi].hid != (HeadId)hid) continue;
@@ -3327,6 +3379,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
           args[i + 1] = compile_expr(cx, node->data.command.args[i]);
           if (cx->failed) return;
         }
+        emit_trace_line(cx, node->start.line);  /* tail call: record site on caller frame */
         irb_return_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
         return;
       }
@@ -3466,6 +3519,8 @@ static void compile_procs(Cx *cx) {
       }
     }
 
+    cx->cur_proc = p->name; cx->cur_proc_len = p->len;
+    if (!p->is_generator) emit_trace_push(cx, p->name, p->len);  /* call-stack frame (tracing) */
     compile_tail(cx, body); /* emits the proc's return / return_call (done) */
     scope_exit(cx);
     if (cx->failed) return;
@@ -3523,6 +3578,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
+  for (uint32_t i = 0; i < count && !cx.wants_trace; i++)   /* gate: instrument only if used */
+    if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
@@ -3535,6 +3592,8 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
     (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
     env_reset(&cx);
     capset_reset(&cx);
+    cx.cur_proc = "<main>"; cx.cur_proc_len = 6;
+    emit_trace_push(&cx, "<main>", 6);   /* root frame for top-level code (only when tracing) */
     cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);

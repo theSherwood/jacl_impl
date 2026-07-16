@@ -743,6 +743,67 @@ JaclVal jacl_proc_sig_get(JaclVal fnref) {
   if (jaclrt_is_nil(jacl_proc_sigs)) return jaclrt_nil();
   return jacl_map_get(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref));
 }
+
+/* ---- call-stack trace capture (for `[stack-trace]`) ----
+ * A shadow call stack of (proc-name, current-line) frames, maintained ONLY when the
+ * program uses `[stack-trace]` (the codegen gates the instrumentation). The codegen pushes
+ * a frame at each proc entry, sets the top frame's line before each call, and `error`
+ * snapshots the whole stack into jacl_last_trace, which `[stack-trace]` returns. Depth is a
+ * plain counter (may exceed the cap); array writes are bounded so deep recursion truncates
+ * the trace rather than corrupting memory. The name strings + snapshot are GC roots. */
+#define JACL_TRACE_MAX 256
+static JaclVal jacl_trace_names[JACL_TRACE_MAX];
+static int32_t jacl_trace_lines[JACL_TRACE_MAX];
+static int32_t jacl_trace_depth_;
+JaclVal jacl_last_trace;
+JaclVal jacl_trace_push(JaclVal name) {
+  if (jacl_trace_depth_ >= 0 && jacl_trace_depth_ < JACL_TRACE_MAX) {
+    jacl_trace_names[jacl_trace_depth_] = name;
+    jacl_trace_lines[jacl_trace_depth_] = 0;
+  }
+  jacl_trace_depth_++;
+  return jaclrt_nil();
+}
+JaclVal jacl_trace_line(JaclVal line) {
+  int32_t d = jacl_trace_depth_ - 1;
+  if (d >= 0 && d < JACL_TRACE_MAX) jacl_trace_lines[d] = jaclrt_as_i32(line);
+  return jaclrt_nil();
+}
+JaclVal jacl_trace_snapshot(void) {
+  char buf[2048]; uint32_t o = 0;
+  int32_t n = jacl_trace_depth_ < JACL_TRACE_MAX ? jacl_trace_depth_ : JACL_TRACE_MAX;
+  for (int32_t i = n - 1; i >= 0; i--) {                    /* innermost frame first */
+    if (o && o < sizeof buf) buf[o++] = '\n';
+    const char *at = "  at ";
+    for (int k = 0; k < 5 && o < sizeof buf; k++) buf[o++] = at[k];
+    JaclVal name = jacl_trace_names[i];
+    if (jaclrt_is_string(name)) {
+      char nb[256]; uint32_t nl = jacl_str_len(name);
+      if (nl > sizeof nb) nl = sizeof nb;
+      jacl_str_bytes(name, nb, sizeof nb);
+      for (uint32_t k = 0; k < nl && o < sizeof buf; k++) buf[o++] = nb[k];
+    }
+    const char *ln = " (line ";
+    for (int k = 0; k < 7 && o < sizeof buf; k++) buf[o++] = ln[k];
+    char db[12]; int dn = 0; int32_t v = jacl_trace_lines[i];
+    if (v == 0) db[dn++] = '0';
+    while (v > 0 && dn < 12) { db[dn++] = (char)('0' + v % 10); v /= 10; }
+    for (int k = dn - 1; k >= 0 && o < sizeof buf; k--) buf[o++] = db[k];
+    if (o < sizeof buf) buf[o++] = ')';
+  }
+  jacl_last_trace = jacl_str_new(buf, o);
+  return jaclrt_nil();
+}
+/* `[stack-trace]` — the most recently captured trace, or "" if no error has been raised. */
+JaclVal jacl_stack_trace(void) {
+  return jaclrt_is_string(jacl_last_trace) ? jacl_last_trace : jacl_str_new("", 0);
+}
+/* Mark the shadow stack's name strings + the last snapshot (called from mark_roots). */
+void jacl_trace_mark_roots(void) {
+  int32_t n = jacl_trace_depth_ < JACL_TRACE_MAX ? jacl_trace_depth_ : JACL_TRACE_MAX;
+  for (int32_t i = 0; i < n; i++) jacl_gc_mark(jacl_trace_names[i]);
+  jacl_gc_mark(jacl_last_trace);
+}
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
   if (jaclrt_is_error(c)) return c;
