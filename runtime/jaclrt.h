@@ -52,12 +52,17 @@ typedef uint64_t JaclVal;
  * { address, pointee-name(string) } so print renders `Ptr<T>(0xADDR)` while ptr-addr
  * recovers the raw address. Same GC-safe story as TVEC (top-byte tag, conservative scan). */
 #define JACL_TAG_PTR           ((uint64_t)0x1C << JACL_TAG_SHIFT)
+/* Fat pointer produced by `[addr $buf->i]` — a 2-slot object { base(array), offset } into
+ * a buffer. A distinct tag (vs a plain vector) so arrow ops (`$p->N`, `set $p->N`,
+ * `set $p->field`) dispatch to a deref/write-through rather than reading the object's own
+ * slots. GC-safe like the other top-byte tags (conservative scan traces the base). */
+#define JACL_TAG_FATPTR        ((uint64_t)0x1D << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
- * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21), TVEC (0x1B) and
- * PTR (0x1C) added since the runtime's streams / typed vectors / typed pointers are GC
- * objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C))
+ * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21), TVEC (0x1B),
+ * PTR (0x1C) and FATPTR (0x1D) added since the runtime's streams / typed vectors / typed
+ * pointers / fat pointers are GC objects that hold heap references. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
@@ -338,6 +343,7 @@ JaclVal jacl_ptr_deref(JaclVal p);                 /* [ptr-deref P] -> base[offs
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n);     /* [ptr-offset P N] -> advanced ptr */
 JaclVal jacl_ptr_cast(JaclVal addr, JaclVal name); /* [ptr-cast [Ptr T] A] -> typed pointer */
 JaclVal jacl_ptr_addr(JaclVal p);                  /* [ptr-addr P] -> raw address */
+int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off); /* fat-ptr { base, offset } */
 JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */
 JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */

@@ -252,6 +252,12 @@ JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx) {
 }
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
   if (jaclrt_is_error(a)) return a;
+  /* A fat pointer target (`set $p->N V`) writes base[offset+N] in place. */
+  if (jaclrt_type_index(a) == 0x1D && jaclrt_is_i32(idx)) {
+    JaclVal base, off;
+    if (!jacl_fatptr_parts(a, &base, &off)) return jaclrt_error();
+    return jacl_arr_set_at(base, jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(idx)), v);
+  }
   if (!arr_hdr(a) || !jaclrt_is_i32(idx)) return jaclrt_error();
   int32_t i = jaclrt_as_i32(idx);
   if (i < 0) return jaclrt_error();                /* negative set stays an error */
@@ -265,6 +271,12 @@ JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
 }
 /* Element access across index-able collections (for-each's accessor). */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx) {
+  /* A fat pointer (`$p->N`) reads base[offset+N] — a deref, not a slot read. */
+  if (jaclrt_type_index(coll) == 0x1D && jaclrt_is_i32(idx)) {
+    JaclVal base, off;
+    if (!jacl_fatptr_parts(coll, &base, &off)) return jaclrt_error();
+    return jacl_index_get(base, jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(idx)));
+  }
   if (jaclrt_type_index(coll) == 0x1A) return jacl_arr_get_at(coll, idx);
   return jacl_vec_get_at(coll, idx);
 }

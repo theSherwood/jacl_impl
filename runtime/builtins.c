@@ -340,6 +340,10 @@ JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place fiel
   if (jaclrt_is_error(s)) return s;
   if (jaclrt_is_error(name)) return name;
   if (jaclrt_is_error(v)) return v;
+  /* `set $p->field V` through a fat pointer: deref to the pointed-to struct, then mutate
+   * its field in place. The struct is shared (stored by reference in the buffer), so the
+   * write is visible through the buffer without a write-back. */
+  if (jaclrt_type_index(s) == 0x1D) s = jacl_ptr_deref(s);
   JaclVal *slot = struct_field_slot(s, name);
   if (!slot) return jaclrt_error();
   *slot = v;
@@ -572,6 +576,7 @@ JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx) {
 JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_is_error(name)) return name;
+  if (jaclrt_type_index(v) == 0x1D) v = jacl_ptr_deref(v);  /* `$p->field` through a fat ptr */
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x12) return jacl_struct_get(v, name);
   if (t == 0x07) return jacl_map_get(v, name);
@@ -645,15 +650,26 @@ JaclVal jacl_addr_of(JaclVal base, JaclVal idx) {
   JaclVal p = jacl_vec_empty();
   p = jacl_vec_push(p, base);
   p = jacl_vec_push(p, jaclrt_is_i32(idx) ? idx : jaclrt_i32(0));
-  return p;
+  return jaclrt_from_ptr(JACL_TAG_FATPTR, jaclrt_as_ptr(p));
+}
+/* Read a fat pointer's { base, offset } (accepts both the tagged 0x1D form and, for
+ * back-compat, a bare 2-slot 0x06 vector). Returns 0 on a non-pointer input. */
+int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off) {
+  uint32_t t = jaclrt_type_index(p);
+  if (t != 0x1D && t != 0x06) return 0;
+  JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
+  *base = jacl_vec_get(vec, 0);
+  *off = jacl_vec_get(vec, 1);
+  return 1;
 }
 JaclVal jacl_ptr_deref(JaclVal p) {
   if (jaclrt_is_error(p)) return p;
   /* A buffer that decayed to a pointer at a proc-param boundary arrives as the bare
    * array (0x1A) — deref reads element 0 (C-style decay: the pointer is `&buf[0]`). */
   if (jaclrt_type_index(p) == 0x1A) return jacl_arr_get(p, 0);
-  if (jaclrt_type_index(p) != 0x06) return jaclrt_error();
-  return jacl_index_get(jacl_vec_get(p, 0), jacl_vec_get(p, 1));
+  JaclVal base, off;
+  if (!jacl_fatptr_parts(p, &base, &off)) return jaclrt_error();
+  return jacl_index_get(base, off);
 }
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (jaclrt_is_error(p)) return p;
@@ -661,13 +677,12 @@ JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (!jaclrt_is_i32(n)) return jaclrt_error();
   JaclVal base, off;
   if (jaclrt_type_index(p) == 0x1A) { base = p; off = jaclrt_i32(0); }   /* decayed buffer */
-  else if (jaclrt_type_index(p) == 0x06) { base = jacl_vec_get(p, 0); off = jacl_vec_get(p, 1); }
-  else return jaclrt_error();
+  else if (!jacl_fatptr_parts(p, &base, &off)) return jaclrt_error();
   JaclVal noff = jaclrt_i32(jaclrt_as_i32(off) + jaclrt_as_i32(n));
   JaclVal np = jacl_vec_empty();
   np = jacl_vec_push(np, base);
   np = jacl_vec_push(np, noff);
-  return np;
+  return jaclrt_from_ptr(JACL_TAG_FATPTR, jaclrt_as_ptr(np));
 }
 /* ---- typed pointers (ptr-cast / ptr-null) ----
  * A `[Ptr T]` produced by ptr-cast/ptr-null wraps a raw u64 address as an opaque handle
