@@ -294,6 +294,9 @@ JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructur
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
+JaclVal jacl_atom_watchers(JaclVal a);             /* the atom's [k0 cb0 …] watcher list or nil */
+JaclVal jacl_watch(JaclVal a, JaclVal key, JaclVal cb);  /* [watch $atom KEY CB] */
+JaclVal jacl_unwatch(JaclVal a, JaclVal key);            /* [unwatch $atom KEY] */
 JaclVal jacl_is_future_v(JaclVal v);               /* future? */
 JaclVal jacl_is_map_v(JaclVal v);                  /* is-map (filter/transform dispatch) */
 JaclVal jacl_tvec_mark(JaclVal v);                 /* re-tag a vec as typed [Vec T] */
