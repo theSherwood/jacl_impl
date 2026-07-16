@@ -2630,11 +2630,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if ((hid == HEAD_COLLECT && node->data.command.arg_count == 1) ||
           ((hid == HEAD_TRANSFORM || hid == HEAD_FILTER) && node->data.command.arg_count == 2)) {
         AstNode *srcn = node->data.command.args[0];
-        IrVal clo = 0;
-        if (hid != HEAD_COLLECT) {
-          clo = compile_expr(cx, node->data.command.args[1]);
-          if (cx->failed) return 0;
-        }
+        /* Compile the SOURCE before the closure. A source that is itself a multi-block
+         * stream expression (nested filter/transform, or a generator drain) leaves the
+         * cursor in a later block; a closure compiled first would be an SSA value from an
+         * earlier block, invalid there (block-local SSA) — the frame would carry garbage. */
         IrVal src;
         int is_gen = 0;
         if (generator_call(cx, srcn)) {
@@ -2644,6 +2643,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           src = compile_expr(cx, srcn);        /* vec-like (incl. nested eager stream) */
         }
         if (cx->failed) return 0;
+        IrVal clo = 0;
+        if (hid != HEAD_COLLECT) {
+          clo = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+        }
         if (hid == HEAD_COLLECT && !is_gen) return src;   /* collect of a vec is itself */
         /* filter/transform over a non-generator source dispatch on runtime type: a map
          * builds a map (2-param key/value callback), else a vec. */
