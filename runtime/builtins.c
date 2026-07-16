@@ -727,6 +727,22 @@ JaclVal jacl_ptr_addr(JaclVal p) {
   JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(p));
   return jacl_vec_get(vec, 0);
 }
+/* ---- proc-signature registry (runtime introspection) ----
+ * Printing a proc value / closure shows its signature (`<proc add(i64, i64) -> i64>`).
+ * The signature is fully known at compile time, so the codegen registers a formatted
+ * string keyed by the closure's SVM function index (fnref) at each creation site; print
+ * looks it up by the fnref stashed in the closure. A map keyed by i32(fnref); the global
+ * is a GC root (jacl_sched_mark_roots). */
+JaclVal jacl_proc_sigs;
+JaclVal jacl_proc_sig_register(JaclVal fnref, JaclVal sig) {
+  if (jaclrt_is_nil(jacl_proc_sigs)) jacl_proc_sigs = jacl_map_empty();
+  jacl_proc_sigs = jacl_map_set(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref), sig);
+  return jaclrt_nil();
+}
+JaclVal jacl_proc_sig_get(JaclVal fnref) {
+  if (jaclrt_is_nil(jacl_proc_sigs)) return jaclrt_nil();
+  return jacl_map_get(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref));
+}
 /* `[first C]` — the first element of a vector/arr/map (nil-safe via iter accessor). */
 JaclVal jacl_first(JaclVal c) {
   if (jaclrt_is_error(c)) return c;
@@ -919,6 +935,12 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
+  if (t == 0x08) {                                       /* CLOSURE / proc value */
+    JaclVal sig = jacl_proc_sig_get(jacl_closure_fn(v));
+    if (jaclrt_is_string(sig)) { repr_val(rb, sig, 0); return; }
+    repr_put(rb, "<closure>", 9);
+    return;
+  }
   if (t == 0x1C) {                                       /* TYPED PTR: Ptr<name>(0xADDR) */
     JaclVal vec = jaclrt_from_ptr(JACL_TAG_VECTOR, jaclrt_as_ptr(v));
     JaclVal addr = jacl_vec_get(vec, 0);
@@ -988,7 +1010,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

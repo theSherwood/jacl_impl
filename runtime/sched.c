@@ -377,6 +377,7 @@ void jacl_sched_mark_roots(void) {
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
   { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
   { extern JaclVal jacl_vfs; jacl_gc_mark(jacl_vfs); }   /* in-memory virtual filesystem */
+  { extern JaclVal jacl_proc_sigs; jacl_gc_mark(jacl_proc_sigs); }   /* fnref -> proc signature */
   mark_task_stacks();   /* guest-memory roots on fiber data stacks (futs[] etc.) */
   for (long i = 0; i < jacl_batch_n; i++) { jacl_gc_mark_word(jacl_batch_arg[i]); jacl_gc_mark_word(jacl_batch_result[i]); }
 }

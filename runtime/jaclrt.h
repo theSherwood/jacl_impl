@@ -345,6 +345,8 @@ JaclVal jacl_ptr_offset(JaclVal p, JaclVal n);     /* [ptr-offset P N] -> advanc
 JaclVal jacl_ptr_cast(JaclVal addr, JaclVal name); /* [ptr-cast [Ptr T] A] -> typed pointer */
 JaclVal jacl_ptr_addr(JaclVal p);                  /* [ptr-addr P] -> raw address */
 int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off); /* fat-ptr { base, offset } */
+JaclVal jacl_proc_sig_register(JaclVal fnref, JaclVal sig);   /* record a proc/closure signature */
+JaclVal jacl_proc_sig_get(JaclVal fnref);                     /* look up a proc/closure signature */
 JaclVal jacl_arr_push_v(JaclVal a, JaclVal e);     /* [arr-push A E] -> new length */
 JaclVal jacl_vec_reduce(JaclVal c, JaclVal opid);  /* fold an arith op over a collection */
 JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */

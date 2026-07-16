@@ -312,6 +312,75 @@ static int extract_param_names(Cx *cx, AstNode *plist, const char **names, uint3
   return extract_param_names_v(cx, plist, names, lens, NULL);
 }
 
+/* Declared type token for each param (`i64 a` -> "i64", `Point p` -> "Point", bare `a` ->
+ * NULL). Mirrors extract_param_names_v's token walk but captures the type, not the name;
+ * used to format a proc/closure signature for runtime introspection. Returns the count. */
+static int extract_param_types(AstNode *plist, const char **types, uint32_t *tlens) {
+  if (!plist || plist->type != AST_COMMAND) return 0;
+  AstNode *toks[CG_MAX_PARAMS * 2 + 2];
+  int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 0 &&
+      plist->data.command.arg_count == 0)
+    return 0; /* {} */
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type == AST_LIT_STRING && toks[i]->data.lit_string.length == 2 &&
+        memcmp(toks[i]->data.lit_string.value, "..", 2) == 0) {
+      i += 1;
+      if (i >= nt) break;
+    }
+    if (toks[i]->type == AST_COMMAND) {   /* compound type token (`[Buf N T] b`) */
+      types[np] = NULL; tlens[np] = 0; np++;
+      if (i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2; else i += 1;
+      continue;
+    }
+    if (toks[i]->type != AST_LIT_STRING) { i += 1; continue; }
+    const char *s = toks[i]->data.lit_string.value;
+    uint32_t n = toks[i]->data.lit_string.length;
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      types[np] = s; tlens[np] = n; np++; i += 2;   /* `<type> <name>` */
+    } else {
+      types[np] = NULL; tlens[np] = 0; np++; i += 1; /* untyped `<name>` */
+    }
+  }
+  return np;
+}
+
+/* Format a proc/closure signature into buf, returning its length. A typed subject (has a
+ * return annotation or any typed param) reads `<proc name(t0, t1) -> ret>` — or `<closure
+ * (…) -> ret>` when anonymous; an untyped one is just `<proc name>` / `<closure>`. */
+static size_t format_proc_sig(char *buf, size_t cap, const char *name, uint32_t namelen,
+                              int is_closure, AstNode *params, AstNode *ret) {
+  const char *types[CG_MAX_PARAMS]; uint32_t tlens[CG_MAX_PARAMS];
+  int np = extract_param_types(params, types, tlens);
+  int ret_typed = ret && ret->type == AST_LIT_STRING;
+  int any_typed = ret_typed;
+  for (int k = 0; k < np; k++) if (types[k]) any_typed = 1;
+  size_t o = 0;
+#define SIG_PUT(str, n) do { for (uint32_t _i = 0; _i < (uint32_t)(n) && o < cap - 1; _i++) buf[o++] = (str)[_i]; } while (0)
+  SIG_PUT("<", 1);
+  if (is_closure) SIG_PUT("closure", 7);
+  else { SIG_PUT("proc ", 5); SIG_PUT(name, namelen); }
+  if (!any_typed) { SIG_PUT(">", 1); buf[o] = 0; return o; }
+  SIG_PUT("(", 1);
+  for (int k = 0; k < np; k++) {
+    if (k) SIG_PUT(", ", 2);
+    if (types[k]) SIG_PUT(types[k], tlens[k]); else SIG_PUT("dyn", 3);
+  }
+  SIG_PUT(")", 1);
+  SIG_PUT(" -> ", 4);
+  if (ret_typed) SIG_PUT(ret->data.lit_string.value, ret->data.lit_string.length);
+  else SIG_PUT("dyn", 3);
+  SIG_PUT(">", 1);
+  buf[o] = 0;
+#undef SIG_PUT
+  return o;
+}
+
 static Proc *proc_lookup(Cx *cx, const char *name, uint32_t len) {
   for (int i = 0; i < cx->nprocs; i++)
     if (cx->procs[i].len == len && memcmp(cx->procs[i].name, name, len) == 0) return &cx->procs[i];
@@ -705,7 +774,7 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
 /* Compile a closure literal: build the closure object (ref.func + captured values) at
  * the current site, and enqueue its body for deferred compilation. `pnode` holds the
  * params (a BLOCK for `\`, a command for `proc`). Returns the closure JaclVal. */
-static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body) {
+static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body, AstNode *ret_ann) {
   const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
   int np = closure_param_names(pnode, in_block, pn, pl);
 
@@ -738,6 +807,16 @@ static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body
     IrVal idx = irb_const_i64(cx->f, cx->cur, i);
     IrVal set_args[] = {cx->sp, clos, idx, b->value}; /* cell pointer or by-value */
     (void)emit_rt_call(cx, "jacl_closure_set", set_args, 4);
+  }
+  /* Record the signature for runtime introspection (print of the closure value). Only
+   * proc-style params (a command list) carry type annotations; `\`-lambda params arrive as
+   * a BLOCK and are untyped, so they fall back to `<closure>` at print time. */
+  if (!in_block) {
+    char sig[256];
+    size_t sl = format_proc_sig(sig, sizeof sig, "", 0, /*is_closure=*/1, pnode, ret_ann);
+    IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
+    IrVal ra[] = {cx->sp, fnref64, sigv};
+    (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
   }
   pending_add(cx, fn, body, pn, pl, np, cn, cl, ccell, nc);
   return clos;
@@ -1768,7 +1847,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
           IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
           IrVal na[] = {cx->sp, fnref64, nupv};
-          return emit_rt_call(cx, "jacl_closure_new", na, 3);
+          IrVal clos = emit_rt_call(cx, "jacl_closure_new", na, 3);
+          /* Register the proc's signature so `print $proc` shows `<proc name(types) -> ret>`. */
+          {
+            uint32_t pargc = pv->def->data.command.arg_count;
+            AstNode *params = pv->def->data.command.args[1];
+            AstNode *ret_ann = (pargc >= 4) ? pv->def->data.command.args[pargc - 2] : NULL;
+            char sig[256];
+            size_t sl = format_proc_sig(sig, sizeof sig, pv->name, pv->len, /*is_closure=*/0, params, ret_ann);
+            IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
+            IrVal ra[] = {cx->sp, fnref64, sigv};
+            (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
+          }
+          return clos;
         }
         /* A top-level (module-global) binding, read from anywhere via the global map. */
         if (is_global_name(cx, nm, nl)) {
@@ -1945,7 +2036,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (node->data.command.arg_count != 1 || node->data.command.args[0]->type != AST_BLOCK) {
           cx_fail(cx, "spawn needs a single { block }"); return 0;
         }
-        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0]);
+        IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[0], NULL);
         if (cx->failed) return 0;
         IrVal a[] = {cx->sp, clos};
         return emit_rt_call(cx, "jacl_spawn", a, 2);
@@ -1972,7 +2063,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n && i < CG_MAX_PARAMS; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "parallel takes { blocks }"); return 0; }
-          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i], NULL);
           if (cx->failed) return 0;
           IrVal pa[] = {cx->sp, vec, clos};
           vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -1989,7 +2080,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = 0; i < n; i++) {
           if (node->data.command.args[i]->type != AST_BLOCK) { cx_fail(cx, "race takes { blocks }"); return 0; }
-          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i]);
+          IrVal clos = compile_closure(cx, NULL, 0, node->data.command.args[i], NULL);
           if (cx->failed) return 0;
           IrVal pa[] = {cx->sp, vec, clos};
           vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -2010,29 +2101,30 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             AstNode *body = synth_command(node->data.command.args[0],
                                           node->data.command.args + 1, argc - 1);
             AstNode *pn = synth_command(synth_word("it", 2), NULL, 0);
-            return compile_closure(cx, pn, /*in_block=*/0, body);
+            return compile_closure(cx, pn, /*in_block=*/0, body, NULL);
           }
           if (argc != 2 || node->data.command.args[0]->type != AST_BLOCK ||
               node->data.command.args[1]->type != AST_BLOCK) {
             cx_fail(cx, "lambda must be [\\ {params} {body}]"); return 0;
           }
           return compile_closure(cx, node->data.command.args[0], /*in_block=*/1,
-                                 node->data.command.args[1]);
+                                 node->data.command.args[1], NULL);
         }
         if (hid == HEAD_PROC) {
           int anon = argc >= 3 && node->data.command.args[0]->type == AST_LIT_STRING &&
                      node->data.command.args[0]->data.lit_string.length == 0;
+          AstNode *ret_ann = (argc >= 4) ? node->data.command.args[argc - 2] : NULL;
           if (!anon) {
             /* Nested named proc: compile as a closure bound to the name. */
             IrVal cl = compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
-                                       node->data.command.args[argc - 1]);
+                                       node->data.command.args[argc - 1], ret_ann);
             if (cx->failed) return 0;
             env_define(cx, node->data.command.args[0]->data.lit_string.value,
                        node->data.command.args[0]->data.lit_string.length, cl, 0, 0);
             return cl;
           }
           return compile_closure(cx, node->data.command.args[1], /*in_block=*/0,
-                                 node->data.command.args[argc - 1]);
+                                 node->data.command.args[argc - 1], ret_ann);
         }
       }
 
