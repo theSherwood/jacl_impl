@@ -2574,6 +2574,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
           }
         }
+        /* Re-declaring an existing mutable inside a proc rebinds it rather than block-
+         * shadowing: `mut` is function-scoped, so `mut n 7` in an if-branch updates the
+         * enclosing `n` (matching the reference VM, where a suspending proc's locals are
+         * deduped state fields). Top-level redeclaration keeps its own path (the global
+         * mirror); a same-name def is left to error via env_define. */
+        if (hid == HEAD_MUT && !cx->at_top_level) {
+          Binding *ex = env_lookup(cx, name, len);
+          if (ex && ex->is_mut) {
+            if (ex->is_cell) { IrVal a[] = {cx->sp, ex->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
+            else ex->value = val;
+            return val;
+          }
+        }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
         if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
