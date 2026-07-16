@@ -228,6 +228,14 @@ static int cg_is_type_kw(const char *s, uint32_t n) {
 static int cg_is_type_prefix(const char *s, uint32_t n) {
   return cg_is_type_kw(s, n) || (n > 0 && s[0] >= 'A' && s[0] <= 'Z');
 }
+/* An integer scalar type keyword — a `[Arr <int>]` back-fills OOB grows with 0, not nil. */
+static int cg_is_int_scalar(const char *s, uint32_t n) {
+  static const struct { const char *k; uint32_t n; } T[] = {
+    {"i8", 2}, {"u8", 2}, {"i16", 3}, {"u16", 3}, {"i32", 3}, {"i64", 3}, {"u32", 3}, {"u64", 3}};
+  for (size_t i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+    if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return 1;
+  return 0;
+}
 
 /* Pre-scan the top-level forms for `def`/`mut` NAME bindings; those names become module
  * globals visible from any proc/closure. Runs before proc bodies compile so a proc that
@@ -3040,6 +3048,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
               cx_fail(cx, msg);
               return 0;
             }
+          }
+        }
+        /* `arr-set` into a typed integer-scalar array: an OOB set grows with 0 (the typed
+         * default) rather than nil, so a later in-bounds read returns 0. */
+        if ((HeadId)hid == HEAD_ARR_SET && node->data.command.arg_count == 3 &&
+            node->data.command.args[0]->type == AST_VAR_REF) {
+          Binding *ab = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
+                                   node->data.command.args[0]->data.var_ref.length);
+          if (ab && ab->elem_type && cg_is_int_scalar(ab->elem_type, ab->elem_type_len)) {
+            IrVal av = compile_expr(cx, node->data.command.args[0]);
+            if (cx->failed) return 0;
+            IrVal iv = compile_expr(cx, node->data.command.args[1]);
+            if (cx->failed) return 0;
+            IrVal vv = compile_expr(cx, node->data.command.args[2]);
+            if (cx->failed) return 0;
+            IrVal a[] = {cx->sp, av, iv, vv};
+            return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
           }
         }
         for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {

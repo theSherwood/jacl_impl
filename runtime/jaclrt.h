@@ -328,6 +328,7 @@ JaclVal jacl_arr_pop(JaclVal a);                   /* remove + return last (erro
 JaclVal jacl_arr_copy(JaclVal a);                  /* deep-by-value copy (by-value buf params) */
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx);   /* i32 index -> element */
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v); /* in-place -> v */
+JaclVal jacl_arr_set_at_zero(JaclVal a, JaclVal idx, JaclVal v); /* OOB grow zero-fills */
 uint32_t jacl_arr_count(JaclVal a);
 JaclVal jacl_arr_get(JaclVal a, uint32_t i);       /* raw-index get (internal users) */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx); /* vec OR arr element (for-each) */

@@ -269,6 +269,19 @@ JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
   ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i] = v;
   return v;
 }
+/* Like jacl_arr_set_at but back-fills an OOB grow with 0 rather than nil — the typed
+ * default for a `[Arr <int>]`, so a subsequent in-bounds read returns 0, not nil. */
+JaclVal jacl_arr_set_at_zero(JaclVal a, JaclVal idx, JaclVal v) {
+  if (jaclrt_is_error(a)) return a;
+  if (!arr_hdr(a) || !jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx);
+  if (i < 0) return jaclrt_error();
+  if (i - jaclrt_as_i32(arr_hdr(a)[0]) > (1 << 20)) return jaclrt_error();
+  while (jaclrt_as_i32(arr_hdr(a)[0]) <= i) jacl_arr_push(a, jaclrt_i32(0));
+  JaclVal *h = arr_hdr(a);
+  ((JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(h[2])))[i] = v;
+  return v;
+}
 /* Element access across index-able collections (for-each's accessor). */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx) {
   /* A fat pointer (`$p->N`) reads base[offset+N] — a deref, not a slot read. */
