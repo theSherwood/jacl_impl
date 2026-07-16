@@ -95,6 +95,9 @@ typedef struct {
    * tc->structs (so chained `$x.field.subfield` can resolve the
    * subfield's type). UINT32_MAX for non-struct fields or unresolved. */
   uint32_t    field_struct_idxs[TYPER_MAX_STRUCT_FIELDS];
+  /* For TYPE_BUF fields, the declared fixed length N of `[Buf N T]`; 0 otherwise. Lets a
+   * field access (`$h->magic`) carry the buffer size for a runtime bounds check. */
+  uint32_t    field_buf_lens[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
 /* Imported entity from an AST_USE — see jacl.h forward declaration.
@@ -3391,6 +3394,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       uint32_t    tl = node->data.defstruct.field_type_lens[i];
       JaclType ft;
       uint32_t f_sidx = UINT32_MAX;
+      uint32_t f_buflen = 0;
       if (is_type_keyword(tn, tl)) {
         ft = type_from_keyword(tn, tl);
       } else if (tl > 4 && memcmp(tn, "Buf{", 4) == 0 &&
@@ -3401,7 +3405,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
         ft = TYPE_BUF;
         const char* p = tn + 4;
         const char* end = tn + tl - 1;
-        while (p < end && *p >= '0' && *p <= '9') p++;
+        while (p < end && *p >= '0' && *p <= '9') { f_buflen = f_buflen * 10 + (uint32_t)(*p - '0'); p++; }
         if (p < end && *p == ',') {
           p++;
           uint32_t elen = (uint32_t)(end - p);
@@ -3421,6 +3425,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       s->field_names[i]        = node->data.defstruct.field_names[i];
       s->field_name_lens[i]    = node->data.defstruct.field_name_lens[i];
       s->field_struct_idxs[i]  = f_sidx;
+      s->field_buf_lens[i]     = f_buflen;
     }
   }
   /* Pass 2: for each struct registered in pass 1, resolve struct-
@@ -6797,9 +6802,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             if (ft == TYPE_BUF) {
               /* Buf field access: $h->field returns [Ptr ElemType]
                * pointing at the field's first byte. See
-               * BUFFER_DESIGN.md M4.3. */
+               * BUFFER_DESIGN.md M4.3. The field's fixed length rides
+               * along as inferred_buf_len so `[buf-get $h->field $i]`
+               * can bounds-check the index at runtime. */
               node->inferred_type       = TYPE_PTR;
               node->inferred_struct_idx = sd->field_struct_idxs[fi];
+              node->inferred_buf_len    = sd->field_buf_lens[fi];
             } else {
               node->inferred_type = (uint8_t)ft;
               if (ft == TYPE_STRUCT) {

@@ -3349,6 +3349,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             return emit_rt_call(cx, "jacl_buf_get_checked", a, 5);
           }
         }
+        /* `buf-get EXPR $i` where EXPR is a typed buffer with a static length carried on the
+         * node (a struct field, `[buf-get $h->magic $i]`): dimension-checked at runtime. */
+        if ((HeadId)hid == HEAD_BUF_GET && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type != AST_VAR_REF &&
+            node->data.command.args[0]->inferred_buf_len > 0) {
+          uint32_t dim = node->data.command.args[0]->inferred_buf_len;
+          IrVal bv = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal iv = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal dv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)dim));
+          IrVal a[] = {cx->sp, bv, iv, dv};
+          return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
+        }
         /* `error V` while tracing: stamp the error line on the top frame and snapshot the
          * call stack, so a later `[stack-trace]` in the handler shows where it was raised.
          * Falls through to the BI table, which emits the actual jacl_error_new. */
