@@ -153,3 +153,10 @@ JaclVal jacl_fptr_raw(JaclVal p) {
   if (jaclrt_type_index(p) == 0x1E) return jacl_wide_new(0x0F, jacl_fb_pti(fb_data(p)));
   return p;
 }
+/* The bare i64 address a buffer / flat pointer decays to at a C-ABI extern boundary — the
+ * unboxed form of jacl_fptr_raw (no heap cell), passed straight as a machine pointer arg. */
+long jacl_raw_ptr(JaclVal p) {
+  if (jaclrt_type_index(p) == 0x1F) return (long)jacl_int_val(fb_hdr(p)[0]);
+  if (jaclrt_type_index(p) == 0x1E) return jacl_fb_pti(fb_data(p));
+  return 0;
+}

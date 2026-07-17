@@ -118,6 +118,15 @@ typedef struct {
   } sdefs[32];
   int nsdefs;
 
+  /* extern (FFI) declarations: name -> C-ABI signature. A pointer param ([Ptr T]/[Buf N T])
+   * decays to a raw i64 address; a scalar param passes as a native i32. See docs/SVM_BUFFERS.md. */
+  struct EDef {
+    char name[64]; uint32_t len;   /* NUL-terminated (the import symbol passed to the linker) */
+    int arity;
+    int8_t pkind[CG_MAX_PARAMS];   /* 0 = scalar i32, 1 = pointer (raw address) */
+  } edefs[64];
+  int nedefs;
+
   /* module globals — names bound at top level, visible from any proc/closure via the
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
   const char *globals[128]; uint32_t globalslen[128]; int nglobals;
@@ -138,6 +147,13 @@ static void global_add(Cx *cx, const char *s, uint32_t l) {
 }
 
 static void cx_fail(Cx *cx, const char *msg); /* fwd */
+typedef struct EDef EDef;
+
+static EDef *edef_lookup(Cx *cx, const char *name, uint32_t len) {
+  for (int i = 0; i < cx->nedefs; i++)
+    if (cx->edefs[i].len == len && memcmp(cx->edefs[i].name, name, len) == 0) return &cx->edefs[i];
+  return NULL;
+}
 
 static SDef *sdef_lookup(Cx *cx, const char *name, uint32_t len) {
   for (int i = 0; i < cx->nsdefs; i++)
@@ -352,6 +368,37 @@ static int extract_param_types(AstNode *plist, const char **types, uint32_t *tle
   return np;
 }
 
+/* Classify an extern's params for the C-ABI: a compound type token (`[Ptr T]` / `[Buf N T]`)
+ * decays to a raw address (kind 1); a scalar keyword or bare name passes as a native i32
+ * (kind 0). Mirrors extract_param_types' token walk. Returns the arity. */
+static int extract_extern_kinds(AstNode *plist, int8_t *kind) {
+  if (!plist || plist->type != AST_COMMAND) return 0;
+  AstNode *toks[CG_MAX_PARAMS * 2 + 2];
+  int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 0 &&
+      plist->data.command.arg_count == 0)
+    return 0; /* {} */
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type == AST_COMMAND) {   /* compound type ([Ptr T]/[Buf N T]) -> pointer */
+      kind[np++] = 1;
+      if (i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2; else i += 1;
+      continue;
+    }
+    if (toks[i]->type != AST_LIT_STRING) { i += 1; continue; }
+    const char *s = toks[i]->data.lit_string.value;
+    uint32_t n = toks[i]->data.lit_string.length;
+    kind[np++] = 0;                       /* scalar-typed or untyped -> i32 */
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2;
+    else i += 1;
+  }
+  return np;
+}
+
 /* Format a proc/closure signature into buf, returning its length. A typed subject (has a
  * return annotation or any typed param) reads `<proc name(t0, t1) -> ret>` — or `<closure
  * (…) -> ret>` when anonymous; an untyped one is just `<proc name>` / `<closure>`. */
@@ -442,6 +489,7 @@ static void emit_void_call(Cx *cx, const char *fn) {
 }
 
 static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len);  /* fwd */
+static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node);              /* fwd */
 
 /* Does the AST contain a `[stack-trace]`? When it does, the codegen instruments proc
  * entries and call sites to maintain a shadow call stack; otherwise that overhead (and its
@@ -1547,7 +1595,16 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
 static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth); /* fwd */
+static int buf_scalar_code(AstNode *inner);   /* fwd */
 static IrVal emit_buf_new(Cx *cx, int32_t n, AstNode *elem_node) {
+  /* A scalar-leaf buffer is a flat, zeroed, C-ABI blob (same as emit_type_default) — so
+   * `def [Buf N T] b` with no initializer decays to a real address like the literal form. */
+  int code = buf_scalar_code(elem_node);
+  if (code >= 0) {
+    IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(n)),
+                 irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+    return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
+  }
   IrVal ea[] = {cx->sp};
   IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
   for (int32_t k = 0; k < n; k++) {
@@ -2145,6 +2202,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_COMMAND: {
       uint8_t hid = node->data.command.head_id;
 
+      /* An `extern` declaration is a compile-time signature record (registered in pass 0b);
+       * as a statement it produces nil. */
+      if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
       if (hid == HEAD_IF) return compile_if(cx, node);
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
@@ -2838,6 +2898,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       /* A call to a user-defined proc (matched by name — may collide with a builtin
        * head id like `count`, which we route to the user proc). */
       AstNode *head = node->data.command.head;
+      /* A call to a declared extern (FFI): resolve to a C-ABI `call.import`. Checked before
+       * user procs — an extern name can't collide with a proc (both live in one namespace). */
+      if (head && head->type == AST_LIT_STRING) {
+        EDef *e = edef_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
+        if (e) return emit_extern_call(cx, e, node);
+      }
       if (head && head->type == AST_LIT_STRING) {
         Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
         if (p) {
@@ -3664,6 +3730,64 @@ static int node_is_stream_type(AstNode *n) {
          memcmp(h->data.lit_string.value, "Stream", 6) == 0;
 }
 
+/* Pass 0b: record each top-level `extern name {params} ret` so call sites resolve to a
+ * C-ABI `call.import name`. The catalog implementations are linked as a separate module
+ * (the parity harness supplies them); an unresolved extern surfaces as a link error. */
+static void register_externs(Cx *cx, AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count && !cx->failed; i++) {
+    AstNode *n = nodes[i];
+    if (n->type != AST_COMMAND || n->data.command.head_id != HEAD_EXTERN) continue;
+    if (n->data.command.arg_count < 2 || n->data.command.args[0]->type != AST_LIT_STRING) {
+      cx_fail(cx, "malformed extern (expected `extern name {params}`)"); return;
+    }
+    const char *nm = n->data.command.args[0]->data.lit_string.value;
+    uint32_t nl = n->data.command.args[0]->data.lit_string.length;
+    if (edef_lookup(cx, nm, nl)) { cx_failf(cx, "codegen: extern '%.*s' already declared", nm, nl); return; }
+    if (cx->nedefs >= 64) { cx_fail(cx, "too many extern declarations"); return; }
+    if (nl >= sizeof cx->edefs[0].name) { cx_fail(cx, "extern name too long"); return; }
+    EDef *e = &cx->edefs[cx->nedefs];
+    memcpy(e->name, nm, nl); e->name[nl] = 0; e->len = nl;   /* NUL-terminated import symbol */
+    e->arity = extract_extern_kinds(n->data.command.args[1], e->pkind);
+    cx->nedefs++;
+  }
+}
+
+/* Emit a C-ABI call to an extern: pointer args ([Ptr T]/[Buf N T]) decay to a raw i64
+ * address (jacl_raw_ptr), scalar args pass as native i32. The result (i32) is re-boxed. */
+static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
+  uint32_t argc = node->data.command.arg_count;
+  if ((int)argc != e->arity) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "extern '%.*s' expects %d arguments but got %u",
+             (int)e->len, e->name, e->arity, argc);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  /* svm-llvm gives every translated C function an implicit leading data-SP param, so the
+   * catalog's `t_*` are `(i64 sp, args…)` at the IR level — thread sp as arg 0. */
+  IrType sig[1 + CG_MAX_PARAMS];
+  IrVal cargs[1 + CG_MAX_PARAMS];
+  sig[0] = IRB_I64; cargs[0] = cx->sp;
+  for (int i = 0; i < e->arity; i++) {
+    if (e->pkind[i]) {                                   /* pointer: decay to a raw address */
+      IrVal v = compile_expr(cx, node->data.command.args[i]);
+      if (cx->failed) return 0;
+      IrVal ra[] = {cx->sp, v};
+      cargs[1 + i] = emit_rt_call(cx, "jacl_raw_ptr", ra, 2);  /* i64 machine address */
+      sig[1 + i] = IRB_I64;
+    } else {                                             /* scalar: native i32 */
+      cargs[1 + i] = compile_i32(cx, node->data.command.args[i]);
+      if (cx->failed) return 0;
+      sig[1 + i] = IRB_I32;
+    }
+  }
+  emit_trace_line(cx, node->start.line);
+  IrType r1[] = {IRB_I32};
+  IrVal handle = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal ret = irb_call_import(cx->f, cx->cur, e->name, sig, e->arity + 1, r1, 1, handle, cargs, e->arity + 1);
+  return box_i32(cx, ret);
+}
+
 /* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
  * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
  * resolve before any body is compiled. */
@@ -3814,6 +3938,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+  register_externs(&cx, nodes, count);  /* pass 0b: extern (FFI) declarations */
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   for (uint32_t i = 0; i < count && !cx.wants_trace; i++)   /* gate: instrument only if used */
     if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;

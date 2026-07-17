@@ -381,6 +381,7 @@ JaclVal jacl_fptr_offset(JaclVal p, JaclVal n);
 JaclVal jacl_fptr_get(JaclVal p, JaclVal idx);             /* $p->i read through flat pointer */
 JaclVal jacl_fptr_set(JaclVal p, JaclVal idx, JaclVal v);  /* set $p->i through flat pointer */
 JaclVal jacl_fptr_raw(JaclVal p);                          /* raw address for a C-ABI decay */
+long    jacl_raw_ptr(JaclVal p);                           /* bare i64 address for an extern arg */
 JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
 JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */

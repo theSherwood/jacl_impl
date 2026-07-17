@@ -63,6 +63,17 @@ pub fn translate_runtime() -> svm_llvm::Translated {
     t
 }
 
+/// Translate the test-only native `extern` catalog (`extern_catalog.c`) as its own
+/// module. Its exports name `t_sumi` / `t_fill` / `t_xor` so a program module's
+/// `call.import "t_*"` (emitted for an `extern` call) resolves against it through
+/// `svm_ir::link`. The catalog is pure (no capability imports); it takes raw
+/// linear-memory addresses and dereferences them with C semantics — the fidelity
+/// point of the flat-buffer decay path (see docs/SVM_BUFFERS.md).
+pub fn translate_catalog() -> svm_llvm::Translated {
+    let bc = compile_driver(&format!("{}/extern_catalog.c", env!("CARGO_MANIFEST_DIR")));
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate extern catalog")
+}
+
 /// Translate the runtime with a custom `JACL_HEAP_BYTES` (a small heap makes the
 /// collect-on-pressure path fire after a modest number of allocations).
 pub fn translate_runtime_heap(heap_bytes: u32) -> svm_llvm::Translated {
