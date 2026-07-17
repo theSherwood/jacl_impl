@@ -57,12 +57,21 @@ typedef uint64_t JaclVal;
  * `set $p->field`) dispatch to a deref/write-through rather than reading the object's own
  * slots. GC-safe like the other top-byte tags (conservative scan traces the base). */
 #define JACL_TAG_FATPTR        ((uint64_t)0x1D << JACL_TAG_SHIFT)
+/* Flat scalar buffer — a `[Buf N T]` with a scalar element type, backed by REAL contiguous
+ * memory: a traced 3-slot header { count, elem-code, data-blob } over a JOBJ_BLOB of
+ * N*sizeof(T) raw bytes. `[addr $b]` yields the blob's genuine linear-memory address, so a
+ * compiled-to-SVM extern can dereference it with C semantics. Heap-element buffers keep the
+ * JaclVal-array model (their slots are real references the GC must follow). */
+#define JACL_TAG_FBUF          ((uint64_t)0x1E << JACL_TAG_SHIFT)
+/* Flat pointer into a scalar buffer — a 2-slot { address, elem-code } produced by `[addr]`;
+ * ptr-deref/ptr-offset read/stride raw memory at the address. */
+#define JACL_TAG_FPTR          ((uint64_t)0x1F << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
  * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21), TVEC (0x1B),
- * PTR (0x1C) and FATPTR (0x1D) added since the runtime's streams / typed vectors / typed
- * pointers / fat pointers are GC objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D))
+ * PTR (0x1C), FATPTR (0x1D) and flat buffers/pointers (0x1E/0x1F) added since the runtime's
+ * streams / typed vectors / typed pointers / fat pointers / flat buffers are GC objects. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D) | (1u << 0x1E) | (1u << 0x1F))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
