@@ -368,6 +368,16 @@ JaclVal jacl_error_msg_i(const char *prefix, int32_t n);  /* error carrying pref
 JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix);  /* + trailing string */
 JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr);
 JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim);  /* dim-checked step */
+/* ---- flat, C-ABI scalar buffers (flatbuf.c) ---- */
+JaclVal jacl_fbuf_new(JaclVal count, JaclVal elem_code);   /* zeroed [Buf N T] over a raw blob */
+JaclVal jacl_fbuf_len(JaclVal b);
+JaclVal jacl_fbuf_get(JaclVal b, JaclVal idx);
+JaclVal jacl_fbuf_set(JaclVal b, JaclVal idx, JaclVal v);
+JaclVal jacl_fbuf_addr(JaclVal b, JaclVal idx);            /* [addr $b->i] -> flat pointer */
+int     jacl_is_fptr(JaclVal p);
+JaclVal jacl_fptr_deref(JaclVal p);
+JaclVal jacl_fptr_offset(JaclVal p, JaclVal n);
+JaclVal jacl_fptr_raw(JaclVal p);                          /* raw address for a C-ABI decay */
 JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
 JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */
