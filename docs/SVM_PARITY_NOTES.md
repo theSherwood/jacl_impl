@@ -14,6 +14,8 @@ itself is the *what's-left*.
   buffer→pointer decay, and the fat-pointer arrow-access gaps.
 - `docs/SVM_STREAMS.md` — generators-as-fibers, eager stream collection, and why the
   concurrency primitives score as hangs under the single-threaded oracle.
+- `docs/SVM_FS_DESIGN.md` — the capability design for real file I/O (and named caps
+  generally): guest-VFS fallback, `svm-fs` backends, data-image bundling, host policy.
 - `codegen/README.md` — the codegen phases and worked lowering examples.
 
 ## The pipeline under test
@@ -157,15 +159,17 @@ would regress correct behaviour or require a capability the sandbox deliberately
 - **Concurrency hangs (~69).** `spawn`/`await`/`parallel`/`race`/`cps`/`gc`/`sleep`
   stress. The M:N scheduler + fiber machinery needs to terminate cleanly under the
   differential (interp==jit) oracle; this is scheduler/runtime work, not codegen breadth.
-- **Buffers + pointers (`addr`, `ptr-deref`, `ptr-offset`, `buf-unchecked-set`).** These
-  need real linear-memory-backed buffers and address arithmetic; today `[Buf N T]` lowers
-  to a JaclVal array, so `addr`/`ptr-deref` can't read raw element bytes. Round-trip-only
-  pointer ops (`ptr-null`/`ptr-cast`/`ptr-addr`) are done; memory-walking ones are not.
-- **Atom watchers (`watch`).** Fire a JACL closure synchronously from inside a runtime C
-  `reset`/`swap`. Closures dispatch via `call_indirect` in generated IR, so calling back
-  into guest code from the runtime needs a trampoline that doesn't exist yet.
-- **File I/O (`read-file`/`write-file`).** Needs Filesystem powerbox capabilities wired
-  through the harness; only the stdout Stream cap is granted today.
+- **Buffers + pointers — DONE.** Scalar-leaf `[Buf N T]` (any nesting depth) is now a
+  flat linear-memory blob with genuine addresses; `addr`/`ptr-deref`/`ptr-offset` walk
+  raw bytes, and C externs dereference decayed buffer pointers. See `SVM_BUFFERS.md`.
+- **Atom watchers (`watch`) — DONE.** Codegen emits the watcher-firing loop at the
+  mutation site (reset/swap), calling each watcher closure through the normal
+  `call_indirect` dispatch — no runtime→guest trampoline needed.
+- **File I/O (`read-file`/`write-file`) — passing, via the guest VFS.** The runtime
+  models files as a pure-guest in-memory map (`io.c`), so the `io_*` cluster passes with
+  zero filesystem authority. Real filesystem access is a capability-granting design, not
+  a parity gap — see `SVM_FS_DESIGN.md` for the layered plan (guest VFS fallback ·
+  `mem_fs` · seeded data image · `host_fs(root)`).
 - **Typed-collection printing.** The old VM prints a typed `[Vec T]` as `[1, 2, 3]` and an
   untyped `[vec …]` as `[vec 1 2 3]`. Matching this needs the runtime to distinguish
   typed vectors from dynamic ones — a *distinct* runtime type. The clean way is a new 5-bit
@@ -193,7 +197,7 @@ means breadth work in `codegen/codegen.c` (+ maybe a fail-closed `jacl_*` entry 
 | pointer print format | 2 | runtime | `Ptr<i32>(0x…)` needs a first-class pointer type carrying the pointee type + address |
 | stack traces | 2 | runtime | capture the call chain + line numbers at error creation |
 | atom watchers (`watch`) | 5 | runtime | trampoline to call a guest closure from runtime C on reset/swap |
-| file I/O (`read/write-file`) | ~5 | infra | grant a Filesystem powerbox cap through the harness |
+| file I/O (`read/write-file`) | 0 (passing) | infra | guest VFS serves; real fs is the capability design in `SVM_FS_DESIGN.md` |
 | module-global proc capture | ~3 | codegen | a top-level `proc` reading a top-level `def` needs module-global slots (procs are standalone functions today) |
 | nested compound proc params | ~2 | codegen | flatten deeper `[Proc [Point] i32]`-style nested brackets (the scalar `Point p` prefix is now handled) |
 | runtime-checked `expect-error` | ~6 | driver | const-fold computed indices, or score an expect-error program's *run* |

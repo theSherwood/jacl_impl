@@ -144,10 +144,35 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
     }
 }
 
+/// The fs-granted analogue of `run_diff`: run the powerbox entry on the tree-walker AND the
+/// JIT with a named `"fs"` capability granted — a `mem_fs` seeded with `dirs=["tmp"]` (the
+/// directory model the guest VFS exposes) — and require the two legs to agree. Each grant
+/// clones the seed fresh (the `HostCap` `make` builder), so the legs can't leak filesystem
+/// state into each other. `run_diff` itself doesn't take extra caps (yet), hence the
+/// hand-rolled two-leg diff via `run_with_caps`.
+fn run_fs_granted(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
+    let cfg = svm_run::RunConfig::default();
+    let cap = || svm_run::fs::mem_fs_seeded(Vec::new(), vec!["tmp".to_string()]);
+    let i = inst
+        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &[("fs", cap())])
+        .map_err(|e| format!("{e}"))?;
+    let j = inst
+        .run_with_caps(svm_run::Backend::Jit, &cfg, &[("fs", cap())])
+        .map_err(|e| format!("{e}"))?;
+    if i.outcome != j.outcome {
+        return Err("interp/JIT outcome diverge (fs-granted)".into());
+    }
+    if i.stdout != j.stdout {
+        return Err("interp/JIT stdout diverge (fs-granted)".into());
+    }
+    Ok(i)
+}
+
 /// Build (link + powerbox) and run an emitted program, returning its stdout lines on a
 /// clean run or a failure description (link error / trap / interp≠jit divergence) — the
-/// latter is what a runtime `expect-error` case matches against.
-fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8]) -> Result<Vec<String>, String> {
+/// latter is what a runtime `expect-error` case matches against. `fs_granted` picks the
+/// plain `run_diff` or the [`run_fs_granted`] two-leg.
+fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
     let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
     let (text, relocs) = split_relocs(&raw);
     let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
@@ -163,7 +188,11 @@ fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_s
     }
     let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false).map_err(|e| format!("powerbox: {e}"))?;
     let inst = svm_run::instantiate(pb).map_err(|e| format!("instantiate: {e}"))?;
-    let run = inst.run_diff(&svm_run::RunConfig::default()).map_err(|e| format!("{e}"))?;
+    let run = if fs_granted {
+        run_fs_granted(&inst)?
+    } else {
+        inst.run_diff(&svm_run::RunConfig::default()).map_err(|e| format!("{e}"))?
+    };
     Ok(String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect())
 }
 
@@ -178,7 +207,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         }
         // Otherwise the program must surface the error at RUNTIME: run it and look for the
         // expected message in its output (an uncaught error prints `<error: …>`) or in a trap.
-        return match build_and_run(rt, cat, &out.stdout) {
+        let score = |fs_granted: bool| match build_and_run(rt, cat, &out.stdout, fs_granted) {
             Ok(lines) => {
                 if lines.iter().any(|l| l.contains(want_err.as_str())) { Stage::ErrPass } else { Stage::ErrNoFail }
             }
@@ -186,6 +215,21 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
                 if e.contains(want_err.as_str()) { Stage::ErrPass } else { Stage::ErrWrongMsg(brief(&e)) }
             }
         };
+        let ungranted = score(false);
+        // Dual-mode gate (SVM_FS_DESIGN.md phase 2): an io_* case must score identically
+        // with and without the "fs" capability granted — the adapter may not change
+        // observable semantics, only the backing store.
+        if case.name.starts_with("io_") {
+            let granted = score(true);
+            if granted.key() != ungranted.key() {
+                return Stage::ErrWrongMsg(brief(&format!(
+                    "fs-granted mode diverged: ungranted={} granted={}",
+                    ungranted.key(),
+                    granted.key()
+                )));
+            }
+        }
+        return ungranted;
     }
     if !out.status.success() {
         return Stage::EmitFail(brief(&stderr));
@@ -229,6 +273,21 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
 
     let got: Vec<String> =
         String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect();
+    // Dual-mode gate (SVM_FS_DESIGN.md phase 2): an io_* case must produce the same output
+    // with the "fs" capability granted (seeded mem_fs) as without it (guest VFS).
+    if case.name.starts_with("io_") {
+        match build_and_run(rt, cat, raw.as_bytes(), /*fs_granted=*/ true) {
+            Ok(glines) if glines == got => {}
+            Ok(glines) => {
+                return Stage::WrongOutput(brief(&format!(
+                    "fs-granted mode diverged: ungranted [{}…], granted [{}…]",
+                    got.first().map(String::as_str).unwrap_or(""),
+                    glines.first().map(String::as_str).unwrap_or("")
+                )));
+            }
+            Err(e) => return Stage::RunFail(brief(&format!("fs-granted mode: {e}"))),
+        }
+    }
     if got == case.expects {
         Stage::Pass
     } else {

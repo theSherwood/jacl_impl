@@ -9,4 +9,5 @@
 #include "closure.c"
 #include "fiber.c"
 #include "sched.c"
+#include "fscap.c"
 #include "io.c"
