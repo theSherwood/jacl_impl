@@ -278,6 +278,7 @@ JaclVal jacl_len(JaclVal v) {
   if (t == 0x06 || t == 0x1B) return jaclrt_i32((int32_t)jacl_vec_count(v));  /* VECTOR / typed vec */
   if (t == 0x07) return jaclrt_i32((int32_t)jacl_map_count(v));   /* MAP    */
   if (t == 0x1A) return jaclrt_i32((int32_t)jacl_arr_count(v));   /* ARR    */
+  if (t == 0x1E) return jacl_fbuf_len(v);                         /* flat scalar buffer */
   return jaclrt_error();
 }
 /* JaclVal-uniform wrappers over ops whose native signatures take/return raw ints —
@@ -813,6 +814,8 @@ JaclVal jacl_arr_push_v(JaclVal a, JaclVal e) {
 JaclVal jacl_addr_of(JaclVal base, JaclVal idx) {
   if (jaclrt_is_error(base)) return base;
   if (jaclrt_is_error(idx)) return idx;
+  if (jaclrt_type_index(base) == 0x1E) return jacl_fbuf_addr(base, idx);  /* flat buffer: real addr */
+  if (jaclrt_type_index(base) == 0x1F) return jacl_fptr_offset(base, idx); /* &($p->i): stride the fptr */
   JaclVal p = jacl_vec_empty();
   p = jacl_vec_push(p, base);
   p = jacl_vec_push(p, jaclrt_is_i32(idx) ? idx : jaclrt_i32(0));
@@ -830,6 +833,8 @@ int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off) {
 }
 JaclVal jacl_ptr_deref(JaclVal p) {
   if (jaclrt_is_error(p)) return p;
+  if (jaclrt_type_index(p) == 0x1F) return jacl_fptr_deref(p);   /* flat pointer: raw load */
+  if (jaclrt_type_index(p) == 0x1E) return jacl_fbuf_get(p, jaclrt_i32(0));  /* decayed flat buf */
   /* A buffer that decayed to a pointer at a proc-param boundary arrives as the bare
    * array (0x1A) — deref reads element 0 (C-style decay: the pointer is `&buf[0]`). */
   if (jaclrt_type_index(p) == 0x1A) return jacl_arr_get(p, 0);
@@ -840,6 +845,8 @@ JaclVal jacl_ptr_deref(JaclVal p) {
 JaclVal jacl_ptr_offset(JaclVal p, JaclVal n) {
   if (jaclrt_is_error(p)) return p;
   if (jaclrt_is_error(n)) return n;
+  if (jaclrt_type_index(p) == 0x1F) return jacl_fptr_offset(p, n);   /* flat pointer: raw stride */
+  if (jaclrt_type_index(p) == 0x1E) return jacl_fbuf_addr(p, n);   /* decayed flat buf: &buf[n] */
   if (!jaclrt_is_i32(n)) return jaclrt_error();
   JaclVal base, off;
   if (jaclrt_type_index(p) == 0x1A) { base = p; off = jaclrt_i32(0); }   /* decayed buffer */
@@ -1172,12 +1179,12 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     repr_put(rb, "]", 1);
     return;
   }
-  if (t == 0x1A) {                                       /* ARR: [arr e0 e1 …] */
+  if (t == 0x1A || t == 0x1E) {                          /* ARR / flat buffer: [arr e0 e1 …] */
     repr_put(rb, "[arr", 4);
-    uint32_t n = jacl_arr_count(v);
+    uint32_t n = (uint32_t)jaclrt_as_i32(jacl_len(v));
     for (uint32_t i = 0; i < n; i++) {
       repr_put(rb, " ", 1);
-      repr_val(rb, jacl_arr_get(v, i), 1);
+      repr_val(rb, jacl_arr_get_at(v, jaclrt_i32((int32_t)i)), 1);
     }
     repr_put(rb, "]", 1);
     return;
@@ -1213,7 +1220,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x1E && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

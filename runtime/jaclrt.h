@@ -57,12 +57,21 @@ typedef uint64_t JaclVal;
  * `set $p->field`) dispatch to a deref/write-through rather than reading the object's own
  * slots. GC-safe like the other top-byte tags (conservative scan traces the base). */
 #define JACL_TAG_FATPTR        ((uint64_t)0x1D << JACL_TAG_SHIFT)
+/* Flat scalar buffer — a `[Buf N T]` with a scalar element type, backed by REAL contiguous
+ * memory: a traced 3-slot header { count, elem-code, data-blob } over a JOBJ_BLOB of
+ * N*sizeof(T) raw bytes. `[addr $b]` yields the blob's genuine linear-memory address, so a
+ * compiled-to-SVM extern can dereference it with C semantics. Heap-element buffers keep the
+ * JaclVal-array model (their slots are real references the GC must follow). */
+#define JACL_TAG_FBUF          ((uint64_t)0x1E << JACL_TAG_SHIFT)
+/* Flat pointer into a scalar buffer — a 2-slot { address, elem-code } produced by `[addr]`;
+ * ptr-deref/ptr-offset read/stride raw memory at the address. */
+#define JACL_TAG_FPTR          ((uint64_t)0x1F << JACL_TAG_SHIFT)
 
 /* Bitmask of heap-managed type indices (after >> shift) — O(1) is-heap test.
  * Mirrors src/jacl.h's JACL_HEAP_TAG_MASK, with STREAM (0x15, bit 21), TVEC (0x1B),
- * PTR (0x1C) and FATPTR (0x1D) added since the runtime's streams / typed vectors / typed
- * pointers / fat pointers are GC objects that hold heap references. */
-#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D))
+ * PTR (0x1C), FATPTR (0x1D) and flat buffers/pointers (0x1E/0x1F) added since the runtime's
+ * streams / typed vectors / typed pointers / fat pointers / flat buffers are GC objects. */
+#define JACL_HEAP_TAG_MASK     (0x07D7DFE0u | (1u << 0x15) | (1u << 0x1A) | (1u << 0x1B) | (1u << 0x1C) | (1u << 0x1D) | (1u << 0x1E) | (1u << 0x1F))
 
 /* Flag bits (61..63), above the 5-bit type (mirrors src/value.c). */
 #define JACL_FLAG_TAINTED      ((uint64_t)1 << 63)
@@ -359,6 +368,22 @@ JaclVal jacl_error_msg_i(const char *prefix, int32_t n);  /* error carrying pref
 JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix);  /* + trailing string */
 JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr);
 JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim);  /* dim-checked step */
+/* ---- flat, C-ABI scalar buffers (flatbuf.c) ---- */
+JaclVal jacl_fbuf_new(JaclVal count, JaclVal elem_code);   /* zeroed [Buf N T] over a raw blob */
+JaclVal jacl_fbuf_new_nd(JaclVal code, JaclVal ndims, JaclVal d0, JaclVal d1,
+                         JaclVal d2, JaclVal d3, JaclVal d4, JaclVal d5);  /* nested [Buf …] */
+JaclVal jacl_fbuf_copy(JaclVal b);                         /* independent by-value copy */
+JaclVal jacl_fbuf_len(JaclVal b);
+JaclVal jacl_fbuf_get(JaclVal b, JaclVal idx);
+JaclVal jacl_fbuf_set(JaclVal b, JaclVal idx, JaclVal v);
+JaclVal jacl_fbuf_addr(JaclVal b, JaclVal idx);            /* [addr $b->i] -> flat pointer */
+int     jacl_is_fptr(JaclVal p);
+JaclVal jacl_fptr_deref(JaclVal p);
+JaclVal jacl_fptr_offset(JaclVal p, JaclVal n);
+JaclVal jacl_fptr_get(JaclVal p, JaclVal idx);             /* $p->i read through flat pointer */
+JaclVal jacl_fptr_set(JaclVal p, JaclVal idx, JaclVal v);  /* set $p->i through flat pointer */
+JaclVal jacl_fptr_raw(JaclVal p);                          /* raw address for a C-ABI decay */
+long    jacl_raw_ptr(JaclVal p);                           /* bare i64 address for an extern arg */
 JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
 JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */

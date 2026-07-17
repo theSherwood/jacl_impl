@@ -118,6 +118,15 @@ typedef struct {
   } sdefs[32];
   int nsdefs;
 
+  /* extern (FFI) declarations: name -> C-ABI signature. A pointer param ([Ptr T]/[Buf N T])
+   * decays to a raw i64 address; a scalar param passes as a native i32. See docs/SVM_BUFFERS.md. */
+  struct EDef {
+    char name[64]; uint32_t len;   /* NUL-terminated (the import symbol passed to the linker) */
+    int arity;
+    int8_t pkind[CG_MAX_PARAMS];   /* 0 = scalar i32, 1 = pointer (raw address) */
+  } edefs[64];
+  int nedefs;
+
   /* module globals — names bound at top level, visible from any proc/closure via the
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
   const char *globals[128]; uint32_t globalslen[128]; int nglobals;
@@ -138,6 +147,13 @@ static void global_add(Cx *cx, const char *s, uint32_t l) {
 }
 
 static void cx_fail(Cx *cx, const char *msg); /* fwd */
+typedef struct EDef EDef;
+
+static EDef *edef_lookup(Cx *cx, const char *name, uint32_t len) {
+  for (int i = 0; i < cx->nedefs; i++)
+    if (cx->edefs[i].len == len && memcmp(cx->edefs[i].name, name, len) == 0) return &cx->edefs[i];
+  return NULL;
+}
 
 static SDef *sdef_lookup(Cx *cx, const char *name, uint32_t len) {
   for (int i = 0; i < cx->nsdefs; i++)
@@ -352,6 +368,37 @@ static int extract_param_types(AstNode *plist, const char **types, uint32_t *tle
   return np;
 }
 
+/* Classify an extern's params for the C-ABI: a compound type token (`[Ptr T]` / `[Buf N T]`)
+ * decays to a raw address (kind 1); a scalar keyword or bare name passes as a native i32
+ * (kind 0). Mirrors extract_param_types' token walk. Returns the arity. */
+static int extract_extern_kinds(AstNode *plist, int8_t *kind) {
+  if (!plist || plist->type != AST_COMMAND) return 0;
+  AstNode *toks[CG_MAX_PARAMS * 2 + 2];
+  int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 0 &&
+      plist->data.command.arg_count == 0)
+    return 0; /* {} */
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < CG_MAX_PARAMS) {
+    if (toks[i]->type == AST_COMMAND) {   /* compound type ([Ptr T]/[Buf N T]) -> pointer */
+      kind[np++] = 1;
+      if (i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2; else i += 1;
+      continue;
+    }
+    if (toks[i]->type != AST_LIT_STRING) { i += 1; continue; }
+    const char *s = toks[i]->data.lit_string.value;
+    uint32_t n = toks[i]->data.lit_string.length;
+    kind[np++] = 0;                       /* scalar-typed or untyped -> i32 */
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2;
+    else i += 1;
+  }
+  return np;
+}
+
 /* Format a proc/closure signature into buf, returning its length. A typed subject (has a
  * return annotation or any typed param) reads `<proc name(t0, t1) -> ret>` — or `<closure
  * (…) -> ret>` when anonymous; an untyped one is just `<proc name>` / `<closure>`. */
@@ -442,6 +489,7 @@ static void emit_void_call(Cx *cx, const char *fn) {
 }
 
 static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len);  /* fwd */
+static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node);              /* fwd */
 
 /* Does the AST contain a `[stack-trace]`? When it does, the codegen instruments proc
  * entries and call sites to maintain a shadow call stack; otherwise that overhead (and its
@@ -1546,8 +1594,23 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
+#define CG_MAX_BUF_DIMS 6   /* mirrors flatbuf.c FB_MAX_DIMS (jacl_fbuf_new_nd's arity) */
 static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth); /* fwd */
-static IrVal emit_buf_new(Cx *cx, int32_t n, AstNode *elem_node) {
+static int buf_scalar_code(AstNode *inner);   /* fwd */
+static int buf_flat_dims(AstNode *ann, int32_t *dims, int *ndims);         /* fwd */
+static IrVal emit_fbuf_ctor(Cx *cx, int code, const int32_t *dims, int ndims); /* fwd */
+static int32_t buf_ann_size(AstNode *ann);    /* fwd */
+static AstNode *ann_elem_node(AstNode *ann);  /* fwd */
+static IrVal emit_buf_new(Cx *cx, AstNode *ann) {
+  /* A scalar-leaf buffer (any nesting depth) is a flat, zeroed, C-ABI blob (same as
+   * emit_type_default) — so `def [Buf N …] b` with no initializer decays to a real address
+   * like the literal form, and a nested one lays out row-major/contiguous. */
+  int32_t dims[CG_MAX_BUF_DIMS]; int ndims;
+  int code = buf_flat_dims(ann, dims, &ndims);
+  if (code >= 0) return emit_fbuf_ctor(cx, code, dims, ndims);
+  /* Non-scalar leaf (dyn/str/struct/…): the JaclVal-array model, one zero element per slot. */
+  int32_t n = buf_ann_size(ann);
+  AstNode *elem_node = ann_elem_node(ann);
   IrVal ea[] = {cx->sp};
   IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
   for (int32_t k = 0; k < n; k++) {
@@ -1617,6 +1680,86 @@ static int32_t buf_ann_size(AstNode *ann) {
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
+/* The flat-buffer element code for a scalar element type keyword (i8=0 … f64=9), or -1 for
+ * a non-scalar element (dyn/str/struct/nested buffer) — those stay on the JaclVal-array
+ * model. Drives whether a `[Buf N T]` is lowered to a flat, C-ABI blob. */
+static int buf_scalar_code(AstNode *inner) {
+  if (!inner || inner->type != AST_LIT_STRING) return -1;
+  const char *s = inner->data.lit_string.value; uint32_t n = inner->data.lit_string.length;
+  static const struct { const char *k; uint32_t n; int code; } T[] = {
+    {"i8", 2, 0}, {"u8", 2, 1}, {"i16", 3, 2}, {"u16", 3, 3}, {"i32", 3, 4},
+    {"u32", 3, 5}, {"i64", 3, 6}, {"u64", 3, 7}, {"f32", 3, 8}, {"f64", 3, 9}};
+  for (size_t i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+    if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return T[i].code;
+  return -1;
+}
+
+/* Walk a (possibly nested) `[Buf N1 [Buf N2 … T]]` annotation, collecting each dimension
+ * size into dims[] until a scalar leaf. Returns the leaf scalar code (0..9) and sets *ndims;
+ * returns -1 if the leaf is non-scalar (dyn/str/struct) or the nesting exceeds CG_MAX_BUF_DIMS
+ * — those stay on the JaclVal-array model. */
+static int buf_flat_dims(AstNode *ann, int32_t *dims, int *ndims) {
+  *ndims = 0;
+  AstNode *cur = ann;
+  while (cur) {
+    int32_t n = buf_ann_size(cur);
+    if (n < 0) return -1;                       /* not a [Buf N …] */
+    if (*ndims >= CG_MAX_BUF_DIMS) return -1;    /* too deep for the flat model */
+    dims[(*ndims)++] = n;
+    AstNode *inner = ann_elem_node(cur);
+    int code = buf_scalar_code(inner);
+    if (code >= 0) return code;                 /* scalar leaf reached */
+    if (buf_ann_size(inner) >= 0) { cur = inner; continue; }  /* another [Buf M …] level */
+    return -1;                                  /* non-scalar, non-buf leaf -> array model */
+  }
+  return -1;
+}
+/* Emit the constructor for a flat scalar-leaf buffer of shape dims[0..ndims). A 1-D buffer
+ * uses jacl_fbuf_new(count, code); a nested one uses jacl_fbuf_new_nd(code, ndims, d0…d5). */
+static IrVal emit_fbuf_ctor(Cx *cx, int code, const int32_t *dims, int ndims) {
+  if (ndims <= 1) {
+    IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(dims[0])),
+                 irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+    return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
+  }
+  IrVal a[2 + CG_MAX_BUF_DIMS];
+  a[0] = cx->sp;
+  a[1] = irb_const_i64(cx->f, cx->cur, jaclval_i32(code));
+  a[2] = irb_const_i64(cx->f, cx->cur, jaclval_i32(ndims));
+  for (int k = 0; k < CG_MAX_BUF_DIMS; k++)
+    a[3 + k] = irb_const_i64(cx->f, cx->cur, jaclval_i32(k < ndims ? dims[k] : 0));
+  return emit_rt_call(cx, "jacl_fbuf_new_nd", a, 3 + CG_MAX_BUF_DIMS);
+}
+/* Fill a flat scalar-leaf buffer from a (possibly nested) literal `[[Buf Nk …] a0 a1 …]`.
+ * `buf_view` is the IR value of the buffer (or, in recursion, a sub-view) to fill; trailing
+ * or missing elements stay zero. At the scalar-leaf level each element is written with
+ * jacl_fbuf_set; at an inner level it descends into sub-view k (jacl_fbuf_get, which aliases
+ * the shared blob) and recurses on the child literal. Returns 0 (cx->failed) on error. */
+static int emit_nd_literal_fill(Cx *cx, IrVal buf_view, AstNode *lit, int ndims_remaining) {
+  AstNode *h = lit->data.command.head;
+  AstNode *btt = ann_elem_type(h);            /* leaf scalar name (checks); NULL at inner levels */
+  int32_t nk = buf_ann_size(h);
+  uint32_t given = lit->data.command.arg_count;
+  for (uint32_t k = 0; k < given && (int32_t)k < nk; k++) {
+    AstNode *a = lit->data.command.args[k];
+    IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+    if (ndims_remaining <= 1) {               /* scalar leaf: write the element in place */
+      if (btt && !check_elem_literal(cx, a, btt->data.lit_string.value, btt->data.lit_string.length))
+        return 0;
+      IrVal e = compile_expr(cx, a);
+      if (cx->failed) return 0;
+      IrVal sa[] = {cx->sp, buf_view, idx, e};
+      (void)emit_rt_call(cx, "jacl_fbuf_set", sa, 4);
+    } else {                                  /* inner level: descend into the sub-view and recurse */
+      if (a->type != AST_COMMAND) { cx_fail(cx, "nested buffer literal expected an inner [Buf …] literal"); return 0; }
+      IrVal ga[] = {cx->sp, buf_view, idx};
+      IrVal sub = emit_rt_call(cx, "jacl_fbuf_get", ga, 3);
+      if (!emit_nd_literal_fill(cx, sub, a, ndims_remaining - 1)) return 0;
+    }
+  }
+  return 1;
+}
+
 /* Flag which params are declared `[Buf N T]` — those are passed by value (the callee
  * works on a copy). Walks the param tokens the same way extract_param_names_v counts them,
  * so is_buf[k] lines up with param k. */
@@ -1683,9 +1826,13 @@ static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth) {
   if (tnode->type == AST_COMMAND) {
     int32_t m = buf_ann_size(tnode);
     if (m >= 0) {
+      int32_t dims[CG_MAX_BUF_DIMS]; int ndims;
+      int code = buf_flat_dims(tnode, dims, &ndims);
+      if (code >= 0)   /* scalar-leaf buffer (any depth) -> a flat, zeroed, C-ABI blob */
+        return emit_fbuf_ctor(cx, code, dims, ndims);
       AstNode *inner = ann_elem_node(tnode);
       IrVal ea[] = {cx->sp};
-      IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+      IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);   /* nested / heap-element: array model */
       for (int32_t k = 0; k < m; k++) {
         IrVal e = emit_type_default(cx, inner, depth + 1);
         IrVal pa[] = {cx->sp, av, e};
@@ -2125,6 +2272,9 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_COMMAND: {
       uint8_t hid = node->data.command.head_id;
 
+      /* An `extern` declaration is a compile-time signature record (registered in pass 0b);
+       * as a statement it produces nil. */
+      if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
       if (hid == HEAD_IF) return compile_if(cx, node);
       if (hid == HEAD_WHILE) return compile_while(cx, node);
       if (hid == HEAD_FOR) return compile_for(cx, node);
@@ -2417,8 +2567,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           node->data.command.args[0]->type == AST_COMMAND &&
           node->data.command.args[1]->type == AST_LIT_STRING &&
           buf_ann_size(node->data.command.args[0]) >= 0) {
-        IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]),
-                                ann_elem_node(node->data.command.args[0]));
+        IrVal bv = emit_buf_new(cx, node->data.command.args[0]);
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
         {
@@ -2818,6 +2967,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       /* A call to a user-defined proc (matched by name — may collide with a builtin
        * head id like `count`, which we route to the user proc). */
       AstNode *head = node->data.command.head;
+      /* A call to a declared extern (FFI): resolve to a C-ABI `call.import`. Checked before
+       * user procs — an extern name can't collide with a proc (both live in one namespace). */
+      if (head && head->type == AST_LIT_STRING) {
+        EDef *e = edef_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
+        if (e) return emit_extern_call(cx, e, node);
+      }
       if (head && head->type == AST_LIT_STRING) {
         Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
         if (p) {
@@ -3104,9 +3259,34 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
            * (nested `[Buf M U]` elements get fresh zero inner buffers, recursively). */
           AstNode *btt = ann_elem_type(h2);           /* scalar element name (for checks) */
           AstNode *bnode = ann_elem_node(h2);         /* element type node (incl. compound) */
-          IrVal ea[] = {cx->sp};
-          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           uint32_t given = node->data.command.arg_count;
+          int32_t fdims[CG_MAX_BUF_DIMS]; int fndims;
+          int fcode = buf_flat_dims(h2, fdims, &fndims);
+          if (fcode >= 0 && fndims > 1) {
+            /* Nested scalar-leaf literal -> one flat blob, filled recursively (row-major);
+             * missing sub-buffers / trailing elements stay zero. */
+            IrVal av = emit_fbuf_ctor(cx, fcode, fdims, fndims);
+            if (!emit_nd_literal_fill(cx, av, node, fndims)) return 0;
+            return av;
+          }
+          if (fcode >= 0) {   /* depth-1 scalar-leaf buffer -> flat blob; write given elements in place */
+            IrVal na[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(bufn)),
+                          irb_const_i64(cx->f, cx->cur, jaclval_i32(fcode))};
+            IrVal av = emit_rt_call(cx, "jacl_fbuf_new", na, 3);
+            for (uint32_t k = 0; k < given && (int32_t)k < bufn; k++) {
+              if (btt && !check_elem_literal(cx, node->data.command.args[k],
+                                             btt->data.lit_string.value, btt->data.lit_string.length))
+                return 0;
+              IrVal e = compile_expr(cx, node->data.command.args[k]);
+              if (cx->failed) return 0;
+              IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+              IrVal sa[] = {cx->sp, av, idx, e};
+              (void)emit_rt_call(cx, "jacl_fbuf_set", sa, 4);
+            }
+            return av;
+          }
+          IrVal ea[] = {cx->sp};
+          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);   /* nested / heap-element: array model */
           for (int32_t k = 0; k < bufn; k++) {
             if ((uint32_t)k < given && btt &&
                 !check_elem_literal(cx, node->data.command.args[k],
@@ -3627,6 +3807,64 @@ static int node_is_stream_type(AstNode *n) {
          memcmp(h->data.lit_string.value, "Stream", 6) == 0;
 }
 
+/* Pass 0b: record each top-level `extern name {params} ret` so call sites resolve to a
+ * C-ABI `call.import name`. The catalog implementations are linked as a separate module
+ * (the parity harness supplies them); an unresolved extern surfaces as a link error. */
+static void register_externs(Cx *cx, AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count && !cx->failed; i++) {
+    AstNode *n = nodes[i];
+    if (n->type != AST_COMMAND || n->data.command.head_id != HEAD_EXTERN) continue;
+    if (n->data.command.arg_count < 2 || n->data.command.args[0]->type != AST_LIT_STRING) {
+      cx_fail(cx, "malformed extern (expected `extern name {params}`)"); return;
+    }
+    const char *nm = n->data.command.args[0]->data.lit_string.value;
+    uint32_t nl = n->data.command.args[0]->data.lit_string.length;
+    if (edef_lookup(cx, nm, nl)) { cx_failf(cx, "codegen: extern '%.*s' already declared", nm, nl); return; }
+    if (cx->nedefs >= 64) { cx_fail(cx, "too many extern declarations"); return; }
+    if (nl >= sizeof cx->edefs[0].name) { cx_fail(cx, "extern name too long"); return; }
+    EDef *e = &cx->edefs[cx->nedefs];
+    memcpy(e->name, nm, nl); e->name[nl] = 0; e->len = nl;   /* NUL-terminated import symbol */
+    e->arity = extract_extern_kinds(n->data.command.args[1], e->pkind);
+    cx->nedefs++;
+  }
+}
+
+/* Emit a C-ABI call to an extern: pointer args ([Ptr T]/[Buf N T]) decay to a raw i64
+ * address (jacl_raw_ptr), scalar args pass as native i32. The result (i32) is re-boxed. */
+static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
+  uint32_t argc = node->data.command.arg_count;
+  if ((int)argc != e->arity) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "extern '%.*s' expects %d arguments but got %u",
+             (int)e->len, e->name, e->arity, argc);
+    cx_fail(cx, msg);
+    return 0;
+  }
+  /* svm-llvm gives every translated C function an implicit leading data-SP param, so the
+   * catalog's `t_*` are `(i64 sp, args…)` at the IR level — thread sp as arg 0. */
+  IrType sig[1 + CG_MAX_PARAMS];
+  IrVal cargs[1 + CG_MAX_PARAMS];
+  sig[0] = IRB_I64; cargs[0] = cx->sp;
+  for (int i = 0; i < e->arity; i++) {
+    if (e->pkind[i]) {                                   /* pointer: decay to a raw address */
+      IrVal v = compile_expr(cx, node->data.command.args[i]);
+      if (cx->failed) return 0;
+      IrVal ra[] = {cx->sp, v};
+      cargs[1 + i] = emit_rt_call(cx, "jacl_raw_ptr", ra, 2);  /* i64 machine address */
+      sig[1 + i] = IRB_I64;
+    } else {                                             /* scalar: native i32 */
+      cargs[1 + i] = compile_i32(cx, node->data.command.args[i]);
+      if (cx->failed) return 0;
+      sig[1 + i] = IRB_I32;
+    }
+  }
+  emit_trace_line(cx, node->start.line);
+  IrType r1[] = {IRB_I32};
+  IrVal handle = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal ret = irb_call_import(cx->f, cx->cur, e->name, sig, e->arity + 1, r1, 1, handle, cargs, e->arity + 1);
+  return box_i32(cx, ret);
+}
+
 /* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
  * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
  * resolve before any body is compiled. */
@@ -3777,6 +4015,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+  register_externs(&cx, nodes, count);  /* pass 0b: extern (FFI) declarations */
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   for (uint32_t i = 0; i < count && !cx.wants_trace; i++)   /* gate: instrument only if used */
     if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;

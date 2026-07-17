@@ -147,13 +147,14 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
 /// Build (link + powerbox) and run an emitted program, returning its stdout lines on a
 /// clean run or a failure description (link error / trap / interp≠jit divergence) — the
 /// latter is what a runtime `expect-error` case matches against.
-fn build_and_run(rt: &svm_llvm::Translated, driver_stdout: &[u8]) -> Result<Vec<String>, String> {
+fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8]) -> Result<Vec<String>, String> {
     let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
     let (text, relocs) = split_relocs(&raw);
     let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
-    let entry = rt.module.funcs.len() as u32;
+    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
     let linked = link(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
+        LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
         LinkUnit { module: program, relocations: relocs, ..Default::default() },
     ])
     .map_err(|e| format!("{e:?}"))?;
@@ -166,7 +167,7 @@ fn build_and_run(rt: &svm_llvm::Translated, driver_stdout: &[u8]) -> Result<Vec<
     Ok(String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect())
 }
 
-fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, case: &Case) -> Stage {
+fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, case: &Case) -> Stage {
     let out = Command::new(driver).arg("--file").arg(&case.path).output().expect("run emit driver");
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -177,7 +178,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, case: &Case) -> Stage {
         }
         // Otherwise the program must surface the error at RUNTIME: run it and look for the
         // expected message in its output (an uncaught error prints `<error: …>`) or in a trap.
-        return match build_and_run(rt, &out.stdout) {
+        return match build_and_run(rt, cat, &out.stdout) {
             Ok(lines) => {
                 if lines.iter().any(|l| l.contains(want_err.as_str())) { Stage::ErrPass } else { Stage::ErrNoFail }
             }
@@ -200,9 +201,10 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, case: &Case) -> Stage {
         Err(e) => return Stage::TextParseFail(brief(&format!("{e:?}"))),
     };
 
-    let entry = rt.module.funcs.len() as u32;
+    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
     let linked = match link(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
+        LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
         LinkUnit { module: program, relocations: relocs, ..Default::default() },
     ]) {
         Ok(l) => l,
@@ -259,6 +261,8 @@ fn main() {
     let driver = build_driver();
     eprintln!("[parity] translating runtime…");
     let rt = jacl_runtime_harness::translate_runtime();
+    eprintln!("[parity] translating extern catalog…");
+    let cat = jacl_runtime_harness::translate_catalog();
 
     let dir = format!("{ROOT}/test/jacl");
     let mut cases: Vec<Case> = std::fs::read_dir(&dir)
@@ -287,13 +291,16 @@ fn main() {
         let (tx, rx) = mpsc::channel();
         let c = case.clone();
         let d = driver.clone();
-        // Per-case clone of the translated runtime so a hung case can't poison the shared one.
+        // Per-case clone of the translated runtime + catalog so a hung case can't poison the shared one.
         let rt_mod = rt.module.clone();
         let rt_exp = rt.exports.clone();
+        let cat_mod = cat.module.clone();
+        let cat_exp = cat.exports.clone();
         std::thread::spawn(move || {
             let stage = catch_unwind(AssertUnwindSafe(|| {
                 let t = svm_llvm::Translated { module: rt_mod, entry_sp: 0, exports: rt_exp };
-                run_case(&d, &t, &c)
+                let ct = svm_llvm::Translated { module: cat_mod, entry_sp: 0, exports: cat_exp };
+                run_case(&d, &t, &ct, &c)
             }))
             .unwrap_or_else(|p| {
                 let msg = p
