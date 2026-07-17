@@ -82,6 +82,43 @@ case scores `err-no-fail`. Those cases can only be won by (a) const-folding the 
 value so the static compiler rejects it, or (b) a harness that scores an `expect-error`
 program's *run*, not just its compile — neither is wired today.
 
+## Deliberate divergences from the reference VM
+
+A handful of corpus cases will not be "fixed" because the SVM backend's behaviour is a
+considered choice, not a bug. They stay on the scoreboard as a reminder, but chasing them
+would regress correct behaviour or require a capability the sandbox deliberately withholds.
+
+- **`overflow_call_depth` (scores `hang`).** The program is unbounded self-recursion in
+  tail position:
+
+  ```
+  proc rec {n} { rec [+ $n 1] }
+  rec 0
+  ```
+
+  The reference VM has no tail-call optimization: every call consumes a frame, so this hits
+  its `VM_FRAMES_MAX` (256) cap and surfaces `call depth exceeded`. The SVM codegen **does**
+  perform proper TCO — a self-call in tail position lowers to `irb_return_call` (a real tail
+  call), so `rec` runs in constant stack and loops forever rather than growing a frame stack
+  to overflow. Under the harness's per-case timeout that reads as `hang`.
+
+  This is TCO working as intended, and TCO is a property the backend wants to keep (it lets
+  iterative algorithms expressed as tail recursion run in O(1) stack). Reproducing the
+  reference's error would mean either disabling TCO for self-recursion or bounding tail-call
+  iteration count — both of which break *legitimate* long/indefinite tail loops (event
+  loops, state machines) that should run forever or to completion. Because the reference caps
+  depth at 256, no passing corpus program relies on a tail loop longer than that, so there is
+  nothing to gain and real behaviour to lose. We accept the divergence: the SVM backend is
+  strictly more capable here.
+
+  (Non-tail deep recursion is a different story — that grows the fiber stack and trips the
+  JIT's software stack-limit check as a `StackOverflow` trap, i.e. it *is* bounded. Only the
+  tail-recursive form loops, and only because TCO makes it correct to.)
+
+- **Shell-out (`io_pipe_to_file`, part of `tour`).** `!cmd` / `| write-file` need a host
+  process-exec capability. The SVM powerbox grants stdout/stdin/exit only, by design — there
+  is no subprocess cap to spawn `echo`. Blocked on a sandbox-capability decision, not codegen.
+
 ## Completed slices (Phase 4)
 
 - **Runtime error semantics.** `print`/`to-string` render error-flagged values as
