@@ -1,0 +1,47 @@
+# Scaled via an outer repeat (bounded live structure per round to stay within
+# the VM's recursive-mark limit); total churn scales with the round count.
+proc round {} {
+  mut n 400
+  mut m [map]
+  mut i 0
+  while [< $i $n] {
+    set m [map-set $m $i $i]
+    set i [+ $i 1]
+  }
+  set i 0
+  while [< $i $n] {
+    set m [map-set $m $i [* $i 2]]
+    set i [+ $i 1]
+  }
+  mut ms 0
+  set i 0
+  while [< $i $n] {
+    set ms [+ $ms [map-get $m $i]]
+    set i [+ $i 1]
+  }
+  mut v [vec]
+  set i 0
+  while [< $i $n] {
+    set v [vec-push $v $i]
+    set i [+ $i 1]
+  }
+  set i 0
+  while [< $i $n] {
+    set v [vec-set $v $i [* $i 2]]
+    set i [+ $i 1]
+  }
+  mut vs 0
+  set i 0
+  while [< $i $n] {
+    set vs [+ $vs [vec-get $v $i]]
+    set i [+ $i 1]
+  }
+  + $ms $vs
+}
+mut acc 0
+mut r 0
+while [< $r 300] {
+  set acc [+ $acc [round]]
+  set r [+ $r 1]
+}
+print $acc

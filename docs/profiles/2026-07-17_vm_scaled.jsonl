@@ -1,0 +1,5 @@
+{"scenario":"fib","status":"ok","output":"5702887","wall_ns_min":964741444,"wall_ns_median":984913824,"iters":15}
+{"scenario":"sieve","status":"ok","output":"6057","wall_ns_min":747404715,"wall_ns_median":769472588,"iters":15}
+{"scenario":"map_lookup","status":"ok","output":"493733","wall_ns_min":447296644,"wall_ns_median":462605013,"iters":15}
+{"scenario":"box_churn","status":"ok","output":"21000000","wall_ns_min":272808916,"wall_ns_median":277341731,"iters":15}
+{"scenario":"string_concat","status":"ok","output":"160400","wall_ns_min":115468742,"wall_ns_median":118983446,"iters":15}

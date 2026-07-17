@@ -1,0 +1,18 @@
+# Scaled via an outer repeat (bounded rope depth per round to stay within the
+# VM's recursive-rope limit); total concat work scales with the round count.
+proc round {} {
+  mut s "x"
+  mut i 0
+  while [< $i 400] {
+    set s [concat $s "y"]
+    set i [+ $i 1]
+  }
+  length $s
+}
+mut acc 0
+mut r 0
+while [< $r 400] {
+  set acc [+ $acc [round]]
+  set r [+ $r 1]
+}
+print $acc

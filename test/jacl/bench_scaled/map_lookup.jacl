@@ -1,0 +1,14 @@
+mut m [map]
+mut i 0
+while [< $i 200] {
+  set m [map-set $m $i [* $i 7]]
+  set i [+ $i 1]
+}
+mut acc 0
+mut j 0
+while [< $j 3000000] {
+  def k [% [+ [* $j 73] 11] 200]
+  set acc [% [+ $acc [map-get $m $k]] 1000003]
+  set j [+ $j 1]
+}
+print $acc
