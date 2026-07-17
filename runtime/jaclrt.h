@@ -370,6 +370,8 @@ JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typ
 JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim);  /* dim-checked step */
 /* ---- flat, C-ABI scalar buffers (flatbuf.c) ---- */
 JaclVal jacl_fbuf_new(JaclVal count, JaclVal elem_code);   /* zeroed [Buf N T] over a raw blob */
+JaclVal jacl_fbuf_new_nd(JaclVal code, JaclVal ndims, JaclVal d0, JaclVal d1,
+                         JaclVal d2, JaclVal d3, JaclVal d4, JaclVal d5);  /* nested [Buf …] */
 JaclVal jacl_fbuf_copy(JaclVal b);                         /* independent by-value copy */
 JaclVal jacl_fbuf_len(JaclVal b);
 JaclVal jacl_fbuf_get(JaclVal b, JaclVal idx);

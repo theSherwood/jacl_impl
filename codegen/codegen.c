@@ -1594,17 +1594,23 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
+#define CG_MAX_BUF_DIMS 6   /* mirrors flatbuf.c FB_MAX_DIMS (jacl_fbuf_new_nd's arity) */
 static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth); /* fwd */
 static int buf_scalar_code(AstNode *inner);   /* fwd */
-static IrVal emit_buf_new(Cx *cx, int32_t n, AstNode *elem_node) {
-  /* A scalar-leaf buffer is a flat, zeroed, C-ABI blob (same as emit_type_default) — so
-   * `def [Buf N T] b` with no initializer decays to a real address like the literal form. */
-  int code = buf_scalar_code(elem_node);
-  if (code >= 0) {
-    IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(n)),
-                 irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
-    return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
-  }
+static int buf_flat_dims(AstNode *ann, int32_t *dims, int *ndims);         /* fwd */
+static IrVal emit_fbuf_ctor(Cx *cx, int code, const int32_t *dims, int ndims); /* fwd */
+static int32_t buf_ann_size(AstNode *ann);    /* fwd */
+static AstNode *ann_elem_node(AstNode *ann);  /* fwd */
+static IrVal emit_buf_new(Cx *cx, AstNode *ann) {
+  /* A scalar-leaf buffer (any nesting depth) is a flat, zeroed, C-ABI blob (same as
+   * emit_type_default) — so `def [Buf N …] b` with no initializer decays to a real address
+   * like the literal form, and a nested one lays out row-major/contiguous. */
+  int32_t dims[CG_MAX_BUF_DIMS]; int ndims;
+  int code = buf_flat_dims(ann, dims, &ndims);
+  if (code >= 0) return emit_fbuf_ctor(cx, code, dims, ndims);
+  /* Non-scalar leaf (dyn/str/struct/…): the JaclVal-array model, one zero element per slot. */
+  int32_t n = buf_ann_size(ann);
+  AstNode *elem_node = ann_elem_node(ann);
   IrVal ea[] = {cx->sp};
   IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
   for (int32_t k = 0; k < n; k++) {
@@ -1688,6 +1694,72 @@ static int buf_scalar_code(AstNode *inner) {
   return -1;
 }
 
+/* Walk a (possibly nested) `[Buf N1 [Buf N2 … T]]` annotation, collecting each dimension
+ * size into dims[] until a scalar leaf. Returns the leaf scalar code (0..9) and sets *ndims;
+ * returns -1 if the leaf is non-scalar (dyn/str/struct) or the nesting exceeds CG_MAX_BUF_DIMS
+ * — those stay on the JaclVal-array model. */
+static int buf_flat_dims(AstNode *ann, int32_t *dims, int *ndims) {
+  *ndims = 0;
+  AstNode *cur = ann;
+  while (cur) {
+    int32_t n = buf_ann_size(cur);
+    if (n < 0) return -1;                       /* not a [Buf N …] */
+    if (*ndims >= CG_MAX_BUF_DIMS) return -1;    /* too deep for the flat model */
+    dims[(*ndims)++] = n;
+    AstNode *inner = ann_elem_node(cur);
+    int code = buf_scalar_code(inner);
+    if (code >= 0) return code;                 /* scalar leaf reached */
+    if (buf_ann_size(inner) >= 0) { cur = inner; continue; }  /* another [Buf M …] level */
+    return -1;                                  /* non-scalar, non-buf leaf -> array model */
+  }
+  return -1;
+}
+/* Emit the constructor for a flat scalar-leaf buffer of shape dims[0..ndims). A 1-D buffer
+ * uses jacl_fbuf_new(count, code); a nested one uses jacl_fbuf_new_nd(code, ndims, d0…d5). */
+static IrVal emit_fbuf_ctor(Cx *cx, int code, const int32_t *dims, int ndims) {
+  if (ndims <= 1) {
+    IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(dims[0])),
+                 irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+    return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
+  }
+  IrVal a[2 + CG_MAX_BUF_DIMS];
+  a[0] = cx->sp;
+  a[1] = irb_const_i64(cx->f, cx->cur, jaclval_i32(code));
+  a[2] = irb_const_i64(cx->f, cx->cur, jaclval_i32(ndims));
+  for (int k = 0; k < CG_MAX_BUF_DIMS; k++)
+    a[3 + k] = irb_const_i64(cx->f, cx->cur, jaclval_i32(k < ndims ? dims[k] : 0));
+  return emit_rt_call(cx, "jacl_fbuf_new_nd", a, 3 + CG_MAX_BUF_DIMS);
+}
+/* Fill a flat scalar-leaf buffer from a (possibly nested) literal `[[Buf Nk …] a0 a1 …]`.
+ * `buf_view` is the IR value of the buffer (or, in recursion, a sub-view) to fill; trailing
+ * or missing elements stay zero. At the scalar-leaf level each element is written with
+ * jacl_fbuf_set; at an inner level it descends into sub-view k (jacl_fbuf_get, which aliases
+ * the shared blob) and recurses on the child literal. Returns 0 (cx->failed) on error. */
+static int emit_nd_literal_fill(Cx *cx, IrVal buf_view, AstNode *lit, int ndims_remaining) {
+  AstNode *h = lit->data.command.head;
+  AstNode *btt = ann_elem_type(h);            /* leaf scalar name (checks); NULL at inner levels */
+  int32_t nk = buf_ann_size(h);
+  uint32_t given = lit->data.command.arg_count;
+  for (uint32_t k = 0; k < given && (int32_t)k < nk; k++) {
+    AstNode *a = lit->data.command.args[k];
+    IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+    if (ndims_remaining <= 1) {               /* scalar leaf: write the element in place */
+      if (btt && !check_elem_literal(cx, a, btt->data.lit_string.value, btt->data.lit_string.length))
+        return 0;
+      IrVal e = compile_expr(cx, a);
+      if (cx->failed) return 0;
+      IrVal sa[] = {cx->sp, buf_view, idx, e};
+      (void)emit_rt_call(cx, "jacl_fbuf_set", sa, 4);
+    } else {                                  /* inner level: descend into the sub-view and recurse */
+      if (a->type != AST_COMMAND) { cx_fail(cx, "nested buffer literal expected an inner [Buf …] literal"); return 0; }
+      IrVal ga[] = {cx->sp, buf_view, idx};
+      IrVal sub = emit_rt_call(cx, "jacl_fbuf_get", ga, 3);
+      if (!emit_nd_literal_fill(cx, sub, a, ndims_remaining - 1)) return 0;
+    }
+  }
+  return 1;
+}
+
 /* Flag which params are declared `[Buf N T]` — those are passed by value (the callee
  * works on a copy). Walks the param tokens the same way extract_param_names_v counts them,
  * so is_buf[k] lines up with param k. */
@@ -1754,13 +1826,11 @@ static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth) {
   if (tnode->type == AST_COMMAND) {
     int32_t m = buf_ann_size(tnode);
     if (m >= 0) {
+      int32_t dims[CG_MAX_BUF_DIMS]; int ndims;
+      int code = buf_flat_dims(tnode, dims, &ndims);
+      if (code >= 0)   /* scalar-leaf buffer (any depth) -> a flat, zeroed, C-ABI blob */
+        return emit_fbuf_ctor(cx, code, dims, ndims);
       AstNode *inner = ann_elem_node(tnode);
-      int code = buf_scalar_code(inner);
-      if (code >= 0) {   /* scalar-leaf buffer -> a flat, zeroed, C-ABI blob */
-        IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(m)),
-                     irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
-        return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
-      }
       IrVal ea[] = {cx->sp};
       IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);   /* nested / heap-element: array model */
       for (int32_t k = 0; k < m; k++) {
@@ -2497,8 +2567,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           node->data.command.args[0]->type == AST_COMMAND &&
           node->data.command.args[1]->type == AST_LIT_STRING &&
           buf_ann_size(node->data.command.args[0]) >= 0) {
-        IrVal bv = emit_buf_new(cx, buf_ann_size(node->data.command.args[0]),
-                                ann_elem_node(node->data.command.args[0]));
+        IrVal bv = emit_buf_new(cx, node->data.command.args[0]);
         env_define(cx, node->data.command.args[1]->data.lit_string.value,
                    node->data.command.args[1]->data.lit_string.length, bv, 0, 0);
         {
@@ -3191,10 +3260,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           AstNode *btt = ann_elem_type(h2);           /* scalar element name (for checks) */
           AstNode *bnode = ann_elem_node(h2);         /* element type node (incl. compound) */
           uint32_t given = node->data.command.arg_count;
-          int code = buf_scalar_code(bnode);
-          if (code >= 0) {   /* scalar-leaf buffer -> flat blob; write the given elements in place */
+          int32_t fdims[CG_MAX_BUF_DIMS]; int fndims;
+          int fcode = buf_flat_dims(h2, fdims, &fndims);
+          if (fcode >= 0 && fndims > 1) {
+            /* Nested scalar-leaf literal -> one flat blob, filled recursively (row-major);
+             * missing sub-buffers / trailing elements stay zero. */
+            IrVal av = emit_fbuf_ctor(cx, fcode, fdims, fndims);
+            if (!emit_nd_literal_fill(cx, av, node, fndims)) return 0;
+            return av;
+          }
+          if (fcode >= 0) {   /* depth-1 scalar-leaf buffer -> flat blob; write given elements in place */
             IrVal na[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(bufn)),
-                          irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+                          irb_const_i64(cx->f, cx->cur, jaclval_i32(fcode))};
             IrVal av = emit_rt_call(cx, "jacl_fbuf_new", na, 3);
             for (uint32_t k = 0; k < given && (int32_t)k < bufn; k++) {
               if (btt && !check_elem_literal(cx, node->data.command.args[k],

@@ -19,10 +19,16 @@ uniform (every element is a traced slot) but gives up the raw-address / C-ABI se
 **This was an implementation shortcut, not an SVM constraint.** The JACL heap *is* SVM
 linear memory (`jacl_heap_mem[]` in `runtime/heap_gc.c`), `jacl_pti(ptr)` yields a real
 usable offset into it, the collector is non-moving (addresses stay stable), and `JOBJ_BLOB`
-objects hold raw untraced bytes. So a scalar `[Buf N T]` can be — and is being migrated to
-be — a flat `N * sizeof(T)`-byte blob whose address is a genuine C-like pointer. Only
-heap-element buffers (`[Buf N dyn]`, struct/vec/ptr elements) need the traced-array model,
-because their slots are real references the GC must follow.
+objects hold raw untraced bytes. So a **scalar-leaf `[Buf N T]` — at any nesting depth — is
+a flat blob** whose address is a genuine C-like pointer (`runtime/flatbuf.c`, tag `0x1E`).
+A depth-1 `[Buf N T]` is `N * sizeof(T)` contiguous bytes; a nested `[Buf N1 [Buf N2 … T]]`
+is a single `N1*N2*…*sizeof(T)` row-major blob, and `$m->i` returns a **sub-view** — a fresh
+header over the *same* blob at base `i * stride` with one fewer dimension — so arrow chains,
+`buf-len` (the outer dimension), by-element `[addr]` + flat `ptr-offset` walk, and aliasing
+through a bound sub-view (`def p $cube->1; set $cube->1… ` visible via `$p`) all fall out of
+one contiguous layout. Only **heap-element** buffers (`[Buf N dyn]`, struct/vec/ptr elements)
+keep the traced-array model, because their slots are real references the GC must follow; the
+codegen picks the model by walking the annotation to its leaf (`buf_flat_dims`).
 
 What follows from that choice:
 
@@ -32,8 +38,9 @@ What follows from that choice:
 - **Zero-init is type-aware and recursive** (`emit_type_default` / `emit_field_default`).
   A declared `[Buf N T]` fills each slot with `T`'s zero: a numeric `0`, a `bool` `false`,
   a `str` `""`, a **struct** zeroed recursively (so `$pts->0` reads `[Point x 0 y 0]`), and
-  a **nested `[Buf M U]`** as a fresh zero inner buffer (so `[Buf N [Buf M T]]` lays out
-  real inner rows and `$m->i->j` chains through index access). A struct field of buffer type
+  a **nested `[Buf M U]`** with a scalar leaf as part of the enclosing flat blob (so
+  `[Buf N [Buf M T]]` lays out one contiguous `N*M` region and `$m->i->j` chains through
+  sub-views), or a nested `[Buf M dyn]`/struct-leaf buffer as a fresh zero inner array. A struct field of buffer type
   is stored by the parser as the canonical string `Buf{N,T}`, which `emit_field_default`
   parses back to build the inner buffer.
 
