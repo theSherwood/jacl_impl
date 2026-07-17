@@ -705,6 +705,9 @@ typedef enum {
   HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
   HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
 
+  /* File-system surface growth (docs/SVM_FS_DESIGN.md phase 4) */
+  HEAD_DELETE_FILE, HEAD_FILE_EXISTS, HEAD_LIST_DIR,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 

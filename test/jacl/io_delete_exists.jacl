@@ -1,0 +1,27 @@
+# expect: false
+# expect: true
+# expect: gone
+# expect: false
+# expect: error
+# expect: true
+# delete-file removes a written file (missing -> error value, like unlink's
+# ENOENT); file-exists? reports files and the model directories without
+# erroring on absence. Self-cleaning: the file is deleted before the end,
+# so re-runs (and the real-fs reference VM) stay deterministic.
+print [file-exists? "/tmp/jacl_p4_del_47291.txt"]
+[write-file "payload" "/tmp/jacl_p4_del_47291.txt"]
+print [file-exists? "/tmp/jacl_p4_del_47291.txt"]
+def r [delete-file "/tmp/jacl_p4_del_47291.txt"]
+if [error? $r] {
+  print "err"
+} else {
+  print "gone"
+}
+print [file-exists? "/tmp/jacl_p4_del_47291.txt"]
+def r2 [delete-file "/tmp/jacl_p4_del_47291.txt"]
+if [error? $r2] {
+  print "error"
+} else {
+  print "ok"
+}
+print [file-exists? "/tmp"]

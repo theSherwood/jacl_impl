@@ -133,3 +133,77 @@ JaclVal jacl_fscap_write_file(JaclVal content, JaclVal path) {
 JaclVal jacl_fscap_append_file(JaclVal content, JaclVal path) {
   return jacl_fscap_spill(content, path, JFS_O_WRITE | JFS_O_APPEND | JFS_O_CREATE);
 }
+
+/* Bytewise compare of two JACL strings (entry-name-sized; drives sorted listings). */
+static int jacl_fs_name_cmp(JaclVal a, JaclVal b) {
+  char ab[512], bb[512];
+  uint32_t al = jacl_str_len(a), bl = jacl_str_len(b);
+  if (al > sizeof ab - 1) al = sizeof ab - 1;
+  if (bl > sizeof bb - 1) bl = sizeof bb - 1;
+  jacl_str_bytes(a, ab, sizeof ab);
+  jacl_str_bytes(b, bb, sizeof bb);
+  uint32_t m = al < bl ? al : bl;
+  int c = memcmp(ab, bb, m);
+  return c ? c : (int)al - (int)bl;
+}
+/* Insertion-sort an arr of name strings in place, then freeze it into a vec — the shared
+ * tail of both list-dir backends (readdir order and VFS map order are both arbitrary; a
+ * sorted listing is the deterministic contract, matching the reference VM's qsort). */
+JaclVal jacl_names_sorted_vec(JaclVal arr) {
+  int32_t n = jaclrt_as_i32(jacl_len(arr));
+  for (int32_t i = 1; i < n; i++) {
+    JaclVal x = jacl_arr_get_at(arr, jaclrt_i32(i));
+    int32_t j = i - 1;
+    while (j >= 0 && jacl_fs_name_cmp(jacl_arr_get_at(arr, jaclrt_i32(j)), x) > 0) {
+      (void)jacl_arr_set_at(arr, jaclrt_i32(j + 1), jacl_arr_get_at(arr, jaclrt_i32(j)));
+      j--;
+    }
+    (void)jacl_arr_set_at(arr, jaclrt_i32(j + 1), x);
+  }
+  JaclVal vec = jacl_vec_empty();
+  for (int32_t i = 0; i < n; i++) vec = jacl_vec_push(vec, jacl_arr_get_at(arr, jaclrt_i32(i)));
+  return vec;
+}
+
+/* `[delete-file PATH]` through the cap: op 5 remove — 0 -> nil, -errno (missing) -> error. */
+JaclVal jacl_fscap_delete_file(JaclVal path) {
+  int h = jacl_fs();
+  char p[1024];
+  long plen = jacl_fs_path(path, p, sizeof p);
+  if (plen < 0) return jaclrt_error();
+  long r = __vm_host_call(h, 5 /*remove*/, jacl_fs_pti(p), plen, 0, 0);
+  return r == 0 ? jaclrt_nil() : jaclrt_error();
+}
+/* `[file-exists? PATH]` through the cap: op 14 stat — a file or directory. The bare root
+ * ("/" -> empty mapped path) exists by definition (the capability IS the root). */
+JaclVal jacl_fscap_file_exists(JaclVal path) {
+  int h = jacl_fs();
+  char p[1024];
+  long plen = jacl_fs_path(path, p, sizeof p);
+  if (plen < 0) return jaclrt_error();
+  if (plen == 0) return jaclrt_bool(1);
+  char sb[JFS_STATBUF_LEN];
+  long r = __vm_host_call(h, 14 /*stat*/, jacl_fs_pti(p), plen, jacl_fs_pti(sb), JFS_STATBUF_LEN);
+  return jaclrt_bool(r == 0);
+}
+/* `[list-dir PATH]` through the cap: opendir/readdir/closedir (ops 17/18/19), sorted.
+ * "/" maps to "." (svm-fs's read_path admits CurDir; norm() folds it to the root). */
+JaclVal jacl_fscap_list_dir(JaclVal path) {
+  int h = jacl_fs();
+  char p[1024];
+  long plen = jacl_fs_path(path, p, sizeof p);
+  if (plen < 0) return jaclrt_error();
+  if (plen == 0) { p[0] = '.'; p[1] = 0; plen = 1; }
+  long dh = __vm_host_call(h, 17 /*opendir*/, jacl_fs_pti(p), plen, 0, 0);
+  if (dh < 0) return jaclrt_error();                    /* missing dir -> error */
+  JaclVal arr = jacl_arr_new();
+  char nb[512];
+  for (;;) {
+    long n = __vm_host_call(h, 18 /*readdir*/, dh, jacl_fs_pti(nb), (long)sizeof nb, 0);
+    if (n <= 0) break;                                  /* 0 = exhausted; <0 = give up */
+    JaclVal s = jacl_str_new(nb, (uint32_t)n);
+    (void)jacl_arr_push(arr, s);
+  }
+  (void)__vm_host_call(h, 19 /*closedir*/, dh, 0, 0, 0);
+  return jacl_names_sorted_vec(arr);
+}

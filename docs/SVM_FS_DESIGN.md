@@ -199,8 +199,13 @@ Design rules that keep this coherent as caps accumulate:
    clone); interp and JIT agree. Program-module serialization (compile once, run later)
    is deliberately deferred — the fs image is the shippable half; the program half can
    ride svm-encode when a consumer needs it.
-4. **Surface growth** (as needed, each corpus-driven): `list-dir`/`stat`/`delete-file`
-   builtins over ops 5/14/17–19; then the `exec` capability ask upstream.
+4. **Surface growth — DONE for the first tranche.** `delete-file` (op 5),
+   `file-exists?` (op 14 stat), and `list-dir` (ops 17–19, sorted) are full builtins in
+   BOTH VMs: the reference VM (real POSIX — `unlink`/`access`/sorted `readdir`; one
+   `OP_FILE_OP` opcode with a sub-op byte, since the u8 opcode space had one free slot)
+   and the SVM runtime (guest-VFS model over the map + cap path), driven by corpus tests
+   (`io_delete_exists`, `io_list_dir`) that the harness's dual-mode gate runs granted and
+   ungranted. The `exec` capability ask is written up in `docs/SVM_EXEC_ASK.md`.
 
 ## Non-goals
 

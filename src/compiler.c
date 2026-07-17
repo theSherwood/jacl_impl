@@ -7251,6 +7251,7 @@ const char *jacl_non_core_builtins[] = {
   "lines", "stream_next",
   "exec", "signal", "cancel",
   "read-file", "write-file", "append-file",
+  "delete-file", "file-exists?", "list-dir",
   NULL
 };
 
@@ -16244,6 +16245,49 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_APPEND_FILE, line);
     c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* delete-file — [delete-file path] → nil (or error value on a missing file). */
+  if (hid == HEAD_DELETE_FILE) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "delete-file", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_FILE_OP, line);
+    compiler__emit_byte(c, 0 /*delete-file*/, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* file-exists? — [file-exists? path] → bool (a file or directory at path). */
+  if (hid == HEAD_FILE_EXISTS) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "file-exists?", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_FILE_OP, line);
+    compiler__emit_byte(c, 1 /*file-exists?*/, line);
+    c->last_expr_type = TYPE_BOOL;
+    return;
+  }
+
+  /* list-dir — [list-dir path] → sorted vector of entry names (no "."/".."),
+   * or an error value on a missing directory. */
+  if (hid == HEAD_LIST_DIR) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "list-dir", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_FILE_OP, line);
+    compiler__emit_byte(c, 2 /*list-dir*/, line);
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 

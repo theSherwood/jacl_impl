@@ -99,6 +99,71 @@ JaclVal jacl_append_file(JaclVal content, JaclVal path) {
   return jaclrt_nil();
 }
 
+/* Is PATH one of the guest VFS's model directories ("/" and "/tmp" exist; nothing else)? */
+static int jacl_vfs_is_dir(JaclVal path) {
+  char p[16];
+  uint32_t len = jacl_str_len(path);
+  if (len >= sizeof p) return 0;
+  jacl_str_bytes(path, p, sizeof p);
+  if (len == 1 && p[0] == '/') return 1;
+  return len == 4 && memcmp(p, "/tmp", 4) == 0;
+}
+
+/* `[delete-file PATH]` — remove; error value on a missing file (unlink's ENOENT). */
+JaclVal jacl_delete_file(JaclVal path) {
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_delete_file(path);
+  JaclVal v = jacl_map_get(jacl_vfs_map(), path);
+  if (jaclrt_is_nil(v)) return jaclrt_error();
+  jacl_vfs = jacl_map_remove(jacl_vfs_map(), path);
+  return jaclrt_nil();
+}
+
+/* `[file-exists? PATH]` — a file or directory at PATH (bool; never errors on missing). */
+JaclVal jacl_file_exists(JaclVal path) {
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_file_exists(path);
+  if (!jaclrt_is_nil(jacl_map_get(jacl_vfs_map(), path))) return jaclrt_bool(1);
+  return jaclrt_bool(jacl_vfs_is_dir(path));
+}
+
+/* `[list-dir PATH]` — sorted vector of PATH's immediate entry names (no "."/".."), or an
+ * error value on a missing directory. On the guest VFS the children are the map keys one
+ * level under PATH (deduped through their first '/'); the model dirs are "/" and "/tmp". */
+JaclVal jacl_list_dir(JaclVal path) {
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_list_dir(path);
+  if (!jacl_vfs_is_dir(path)) return jaclrt_error();
+  char prefix[8];
+  uint32_t plen = jacl_str_len(path);
+  jacl_str_bytes(path, prefix, sizeof prefix);
+  uint32_t pl = plen;                       /* bytes before a child name starts */
+  if (!(plen == 1 && prefix[0] == '/')) prefix[pl++] = '/';   /* "/tmp" -> "/tmp/" */
+  JaclVal keys = jacl_map_keys_v(jacl_vfs_map());
+  JaclVal arr = jacl_arr_new();
+  int32_t nk = jaclrt_as_i32(jacl_len(keys));
+  for (int32_t i = 0; i < nk; i++) {
+    JaclVal k = jacl_vec_get(keys, (uint32_t)i);
+    char kb[1024];
+    uint32_t klen = jacl_str_len(k);
+    if (klen <= pl || klen >= sizeof kb) continue;
+    jacl_str_bytes(k, kb, sizeof kb);
+    if (memcmp(kb, prefix, pl) != 0) continue;
+    uint32_t end = pl;                      /* the child name: up to the next '/' (a subdir) */
+    while (end < klen && kb[end] != '/') end++;
+    JaclVal name = jacl_str_new(kb + pl, end - pl);
+    int dup = 0;                            /* dedupe (two files under one subdir) */
+    int32_t na = jaclrt_as_i32(jacl_len(arr));
+    for (int32_t j = 0; j < na && !dup; j++)
+      dup = jacl_str_eq(jacl_arr_get_at(arr, jaclrt_i32(j)), name);
+    if (!dup) (void)jacl_arr_push(arr, name);
+  }
+  return jacl_names_sorted_vec(arr);
+}
+
 /* `print V` — write V's text form + newline to stdout; returns nil (like the old VM). */
 JaclVal jacl_print(JaclVal v) {
   char buf[64];
