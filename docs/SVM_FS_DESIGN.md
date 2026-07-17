@@ -143,7 +143,7 @@ just gets the fallback. Grants are per-platform launcher policy:
 
 | platform | grant |
 |---|---|
-| dev CLI (`jacl run`) | `host_fs(--fs-root DIR)`, defaulting to a per-project dir; `--no-fs` for hermetic runs |
+| dev CLI (`jacl_svm run`) | explicit `--fs-root DIR` (`host_fs`, `DIR/tmp` pre-created) or `--fs-image FILE`; **no flag = no grant** (default-deny — rule 1 wins over convenience) |
 | test / parity harness | `mem_fs` seeded with `dirs=["tmp"]` (and, dual-mode, no grant at all — both must pass) |
 | browser / wasm | `mem_fs_seeded` from the bundle's data image (svm-fs builds for wasm; no real fs exists) |
 | locked-down deploy | nothing — guest VFS serves; program still runs |
@@ -187,8 +187,18 @@ Design rules that keep this coherent as caps accumulate:
    seed makes the gate report `fs-granted mode diverged` (the granted leg's parent gate
    errors where the VFS succeeds), proving the cap path is exercised, not silently
    falling back.
-3. **Bundle tooling**: `jacl bundle` builds program + `encode_image`'d asset dir;
-   `jacl run` grows `--fs-root DIR` / `--fs-image FILE` / `--no-fs`.
+3. **CLI + bundle tooling — DONE** (`runtime/harness/src/bin/jacl_svm.rs`):
+   `jacl_svm run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp]`
+   compiles through the real pipeline and runs with the chosen grant (default-deny);
+   `jacl_svm bundle <assets-dir> -o <out.fsimg>` walks a host directory into an
+   `encode_image` data image that `--fs-image` mounts. Verified end-to-end: a program's
+   `write-file` lands as a **real host file** under `--fs-root` and a separate process
+   reads it back (cross-run persistence the VFS cannot provide); the same program under
+   `--no-fs` errors cleanly; bundled reads (incl. nested paths) work under `--fs-image`,
+   in-run writes are visible, and a second run sees the pristine image (per-grant seed
+   clone); interp and JIT agree. Program-module serialization (compile once, run later)
+   is deliberately deferred — the fs image is the shippable half; the program half can
+   ride svm-encode when a consumer needs it.
 4. **Surface growth** (as needed, each corpus-driven): `list-dir`/`stat`/`delete-file`
    builtins over ops 5/14/17–19; then the `exec` capability ask upstream.
 
