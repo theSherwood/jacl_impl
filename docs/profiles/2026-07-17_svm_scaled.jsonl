@@ -1,0 +1,7 @@
+{"scenario":"_baseline","status":"ok","output":"0","jit_ns_min":231319939,"jit_ns_median":239424424,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"fib","status":"ok","output":"5702887","jit_ns_min":520377376,"jit_ns_median":537620269,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"sieve","status":"ok","output":"6057","jit_ns_min":549611867,"jit_ns_median":557643111,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"map_lookup","status":"ok","output":"493733","jit_ns_min":498283640,"jit_ns_median":510202729,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"box_churn","status":"ok","output":"21000000","jit_ns_min":368990473,"jit_ns_median":378356471,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"string_concat","status":"ok","output":"160400","jit_ns_min":289900511,"jit_ns_median":302174350,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
+{"scenario":"collection_churn","status":"ok","output":"95760000","jit_ns_min":443471873,"jit_ns_median":461051262,"interp_ns_min":0,"interp_ns_median":0,"jit_iters":8,"interp_iters":0}
