@@ -1617,6 +1617,20 @@ static int32_t buf_ann_size(AstNode *ann) {
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
+/* The flat-buffer element code for a scalar element type keyword (i8=0 … f64=9), or -1 for
+ * a non-scalar element (dyn/str/struct/nested buffer) — those stay on the JaclVal-array
+ * model. Drives whether a `[Buf N T]` is lowered to a flat, C-ABI blob. */
+static int buf_scalar_code(AstNode *inner) {
+  if (!inner || inner->type != AST_LIT_STRING) return -1;
+  const char *s = inner->data.lit_string.value; uint32_t n = inner->data.lit_string.length;
+  static const struct { const char *k; uint32_t n; int code; } T[] = {
+    {"i8", 2, 0}, {"u8", 2, 1}, {"i16", 3, 2}, {"u16", 3, 3}, {"i32", 3, 4},
+    {"u32", 3, 5}, {"i64", 3, 6}, {"u64", 3, 7}, {"f32", 3, 8}, {"f64", 3, 9}};
+  for (size_t i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+    if (T[i].n == n && memcmp(T[i].k, s, n) == 0) return T[i].code;
+  return -1;
+}
+
 /* Flag which params are declared `[Buf N T]` — those are passed by value (the callee
  * works on a copy). Walks the param tokens the same way extract_param_names_v counts them,
  * so is_buf[k] lines up with param k. */
@@ -1684,8 +1698,14 @@ static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth) {
     int32_t m = buf_ann_size(tnode);
     if (m >= 0) {
       AstNode *inner = ann_elem_node(tnode);
+      int code = buf_scalar_code(inner);
+      if (code >= 0) {   /* scalar-leaf buffer -> a flat, zeroed, C-ABI blob */
+        IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(m)),
+                     irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+        return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
+      }
       IrVal ea[] = {cx->sp};
-      IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
+      IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);   /* nested / heap-element: array model */
       for (int32_t k = 0; k < m; k++) {
         IrVal e = emit_type_default(cx, inner, depth + 1);
         IrVal pa[] = {cx->sp, av, e};
@@ -3104,9 +3124,26 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
            * (nested `[Buf M U]` elements get fresh zero inner buffers, recursively). */
           AstNode *btt = ann_elem_type(h2);           /* scalar element name (for checks) */
           AstNode *bnode = ann_elem_node(h2);         /* element type node (incl. compound) */
-          IrVal ea[] = {cx->sp};
-          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);
           uint32_t given = node->data.command.arg_count;
+          int code = buf_scalar_code(bnode);
+          if (code >= 0) {   /* scalar-leaf buffer -> flat blob; write the given elements in place */
+            IrVal na[] = {cx->sp, irb_const_i64(cx->f, cx->cur, jaclval_i32(bufn)),
+                          irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
+            IrVal av = emit_rt_call(cx, "jacl_fbuf_new", na, 3);
+            for (uint32_t k = 0; k < given && (int32_t)k < bufn; k++) {
+              if (btt && !check_elem_literal(cx, node->data.command.args[k],
+                                             btt->data.lit_string.value, btt->data.lit_string.length))
+                return 0;
+              IrVal e = compile_expr(cx, node->data.command.args[k]);
+              if (cx->failed) return 0;
+              IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
+              IrVal sa[] = {cx->sp, av, idx, e};
+              (void)emit_rt_call(cx, "jacl_fbuf_set", sa, 4);
+            }
+            return av;
+          }
+          IrVal ea[] = {cx->sp};
+          IrVal av = emit_rt_call(cx, "jacl_arr_new", ea, 1);   /* nested / heap-element: array model */
           for (int32_t k = 0; k < bufn; k++) {
             if ((uint32_t)k < given && btt &&
                 !check_elem_literal(cx, node->data.command.args[k],

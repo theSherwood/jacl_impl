@@ -222,6 +222,7 @@ __attribute__((noinline)) JaclVal jacl_arr_push(JaclVal a, JaclVal v) {
  * is copied recursively so a `[Buf N [Buf M T]]` is deep by-value. Non-array elements are
  * shared by value (they are immutable JaclVals). A non-array input is returned unchanged. */
 __attribute__((noinline)) JaclVal jacl_arr_copy(JaclVal a) {
+  if (jaclrt_type_index(a) == 0x1E) return jacl_fbuf_copy(a);   /* flat buffer: independent copy */
   JaclVal *h = arr_hdr(a);
   if (!h) return a;
   uint32_t n = (uint32_t)jaclrt_as_i32(h[0]);
@@ -246,12 +247,16 @@ __attribute__((noinline)) JaclVal jacl_arr_pop(JaclVal a) {
 }
 JaclVal jacl_arr_get_at(JaclVal a, JaclVal idx) {
   if (jaclrt_is_error(a)) return a;
+  if (jaclrt_type_index(a) == 0x1E) return jacl_fbuf_get(a, idx);   /* flat scalar buffer */
+  if (jaclrt_type_index(a) == 0x1F) return jacl_fptr_get(a, idx);   /* flat pointer: $p->i */
   if (!jaclrt_is_i32(idx)) return jaclrt_error();
   if (jaclrt_as_i32(idx) < 0) return JACL_NIL;     /* lenient: negative index -> nil */
   return jacl_arr_get(a, (uint32_t)jaclrt_as_i32(idx));
 }
 JaclVal jacl_arr_set_at(JaclVal a, JaclVal idx, JaclVal v) {
   if (jaclrt_is_error(a)) return a;
+  if (jaclrt_type_index(a) == 0x1E) return jacl_fbuf_set(a, idx, v);   /* flat scalar buffer */
+  if (jaclrt_type_index(a) == 0x1F) return jacl_fptr_set(a, idx, v);   /* flat pointer: set $p->i */
   /* A fat pointer target (`set $p->N V`) writes base[offset+N] in place. */
   if (jaclrt_type_index(a) == 0x1D && jaclrt_is_i32(idx)) {
     JaclVal base, off;
@@ -284,6 +289,8 @@ JaclVal jacl_arr_set_at_zero(JaclVal a, JaclVal idx, JaclVal v) {
 }
 /* Element access across index-able collections (for-each's accessor). */
 JaclVal jacl_index_get(JaclVal coll, JaclVal idx) {
+  if (jaclrt_type_index(coll) == 0x1E) return jacl_fbuf_get(coll, idx);   /* flat scalar buffer */
+  if (jaclrt_type_index(coll) == 0x1F) return jacl_fptr_get(coll, idx);   /* flat pointer: $p->N */
   /* A fat pointer (`$p->N`) reads base[offset+N] — a deref, not a slot read. */
   if (jaclrt_type_index(coll) == 0x1D && jaclrt_is_i32(idx)) {
     JaclVal base, off;

@@ -69,6 +69,15 @@ JaclVal jacl_fbuf_new(JaclVal count, JaclVal elem_code) {
   h[2] = jaclrt_from_ptr(JACL_TAG_FBUF, data);
   return jaclrt_from_ptr(JACL_TAG_FBUF, hdr);
 }
+/* An independent copy — a fresh header + blob with the same bytes (by-value buffer params). */
+JaclVal jacl_fbuf_copy(JaclVal b) {
+  if (jaclrt_type_index(b) != 0x1E) return b;
+  JaclVal *h = fb_hdr(b);
+  int32_t n = jaclrt_as_i32(h[0]), code = jaclrt_as_i32(h[1]);
+  JaclVal out = jacl_fbuf_new(jaclrt_i32(n), jaclrt_i32(code));
+  memcpy(fb_data(out), fb_data(b), (size_t)((long)n * fb_esize(code)));
+  return out;
+}
 JaclVal jacl_fbuf_len(JaclVal b) {
   if (jaclrt_type_index(b) != 0x1E) return jaclrt_error();
   return jaclrt_i32(jaclrt_as_i32(fb_hdr(b)[0]));
@@ -108,6 +117,22 @@ JaclVal jacl_fptr_deref(JaclVal p) {
   long addr = (long)jacl_int_val(pp[0]);
   int code = jaclrt_as_i32(pp[1]);
   return fb_load((const void *)(uintptr_t)addr, code);
+}
+/* `$p->i` read / write through a flat pointer (0x1F): scalar at addr + i*esize. */
+JaclVal jacl_fptr_get(JaclVal p, JaclVal idx) {
+  if (jaclrt_type_index(p) != 0x1F || !jaclrt_is_i32(idx)) return jaclrt_error();
+  JaclVal *pp = fb_hdr(p);
+  long addr = (long)jacl_int_val(pp[0]);
+  int code = jaclrt_as_i32(pp[1]);
+  return fb_load((const void *)(uintptr_t)(addr + (long)jaclrt_as_i32(idx) * fb_esize(code)), code);
+}
+JaclVal jacl_fptr_set(JaclVal p, JaclVal idx, JaclVal v) {
+  if (jaclrt_type_index(p) != 0x1F || !jaclrt_is_i32(idx)) return jaclrt_error();
+  JaclVal *pp = fb_hdr(p);
+  long addr = (long)jacl_int_val(pp[0]);
+  int code = jaclrt_as_i32(pp[1]);
+  fb_store((void *)(uintptr_t)(addr + (long)jaclrt_as_i32(idx) * fb_esize(code)), code, v);
+  return v;
 }
 JaclVal jacl_fptr_offset(JaclVal p, JaclVal n) {
   if (!jaclrt_is_i32(n)) return jaclrt_error();
