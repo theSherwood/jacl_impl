@@ -364,9 +364,18 @@ typedef enum {
   OP_STREAM_NEXT_INLINE,    /* u16 type_idx; pop stream, pull one struct elem:
                                value → push N inline slots (bitmap-marked);
                                exhausted → push nil (1 slot) */
-  OP_IS_MAP                 /* pop value, push true if it is a (plain) map, else
+  OP_IS_MAP,                /* pop value, push true if it is a (plain) map, else
                                false. Drives the for-loop's runtime dyn-
                                collection dispatch (dyn map vs dyn vec). */
+
+  /* --- File-system surface growth (SVM_FS_DESIGN.md phase 4). ONE opcode with a
+   * sub-op operand byte: the opcode space is a u8 and this entry takes the last
+   * free slot (255 total), so all present and future fs surface ops share it. --- */
+  OP_FILE_OP                /* u8 sub; pop path (string). sub 0 = delete-file
+                               (unlink; push nil or error value), sub 1 =
+                               file-exists? (push bool), sub 2 = list-dir (push
+                               sorted vector of entry names, no "."/"..", or an
+                               error value on a missing dir). */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -676,6 +685,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_PTR_STORE_INLINE:       return "OP_PTR_STORE_INLINE";
     case OP_PRINT_PTR:              return "OP_PRINT_PTR";
     case OP_READ_FILE:              return "OP_READ_FILE";
+    case OP_FILE_OP:                return "OP_FILE_OP";
     case OP_WRITE_FILE:             return "OP_WRITE_FILE";
     case OP_APPEND_FILE:            return "OP_APPEND_FILE";
     case OP_WATCH:                  return "OP_WATCH";

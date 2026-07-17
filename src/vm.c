@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
+#include <dirent.h>
 #include <assert.h>
 #include <limits.h>
 
@@ -482,6 +483,12 @@ static inline bool vm__arr_is_dyn(uint32_t elem_idx) {
 }
 
 /* --- Type name helper for error messages --- */
+
+/* qsort comparator for list-dir's entry names (bytewise — deterministic across
+ * filesystems, matching the SVM backend's sorted listing). */
+static int vm__dirname_cmp(const void* a, const void* b) {
+  return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
 
 const char* vm__type_name(JaclVal v) {
   if (jacl_is_nil(v))           return "nil";
@@ -2994,6 +3001,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
     [OP_READ_FILE] = &&L_OP_READ_FILE,
     [OP_WRITE_FILE] = &&L_OP_WRITE_FILE,
     [OP_APPEND_FILE] = &&L_OP_APPEND_FILE,
+    [OP_FILE_OP] = &&L_OP_FILE_OP,
     [OP_WATCH] = &&L_OP_WATCH,
     [OP_UNWATCH] = &&L_OP_UNWATCH,
     [OP_BUF_ZERO_LOCAL] = &&L_OP_BUF_ZERO_LOCAL,
@@ -9724,6 +9732,110 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         DISPATCH();
+      }
+
+      CASE(OP_FILE_OP): {
+        /* One opcode, sub-op operand byte: 0 delete-file, 1 file-exists?, 2 list-dir
+         * (the u8 opcode space is full — see bytecode.c). All three pop a path. */
+        uint8_t file_sub = vm__read_byte(vm);
+        const char* file_op_name = file_sub == 0 ? "delete-file"
+                                 : file_sub == 1 ? "file-exists?" : "list-dir";
+        JaclVal path_val;
+        result = vm__pop(vm, &path_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_string(path_val)) {
+          vm__set_error(vm, "%s: path must be a string, got %s",
+                       file_op_name, vm__type_name(path_val));
+          return VM_RUNTIME_ERROR;
+        }
+        char path_buf[PATH_MAX + 1];
+        uint32_t path_len = jacl_string_byte_len(path_val);
+        if (path_len > PATH_MAX) {
+          vm__set_error(vm, "%s: path too long (%u bytes)", file_op_name, path_len);
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_string_data(path_val, path_buf, sizeof(path_buf));
+        path_buf[path_len] = '\0';
+
+        if (file_sub == 0) {          /* delete-file: nil, or error value (unlink ENOENT) */
+          gc__current_heap = &vm->heap;
+          if (unlink(path_buf) != 0) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "delete-file: %s: %s",
+                     path_buf, strerror(errno));
+            JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                          msg, strlen(msg));
+            if (err == JACL_NIL) err = jacl_inline_string("del err", 7);
+            result = vm__push(vm, jacl_set_error(err));
+            if (result != VM_OK) return result;
+            DISPATCH();
+          }
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+
+        if (file_sub == 1) {          /* file-exists?: bool, never errors on missing */
+          result = vm__push(vm, access(path_buf, F_OK) == 0 ? JACL_TRUE : JACL_FALSE);
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+
+        /* list-dir */
+        gc__current_heap = &vm->heap;
+        DIR* dirp = opendir(path_buf);
+        if (!dirp) {
+          char msg[256];
+          snprintf(msg, sizeof(msg), "list-dir: %s: %s",
+                   path_buf, strerror(errno));
+          JaclVal err = jacl_string_new(&vm->heap, vm->intern_table,
+                                        msg, strlen(msg));
+          if (err == JACL_NIL) err = jacl_inline_string("dir err", 7);
+          result = vm__push(vm, jacl_set_error(err));
+          if (result != VM_OK) return result;
+          DISPATCH();
+        }
+        /* Collect names host-side first (no guest alloc while the dirent stream
+         * is open), then sort — readdir order is fs-dependent and a deterministic
+         * listing is what corpus oracles (and users) want. */
+        size_t names_cap = 16, names_n = 0;
+        char** names = (char**)malloc(names_cap * sizeof(char*));
+        if (!names) { closedir(dirp); vm__set_error(vm, "list-dir: out of memory"); return VM_RUNTIME_ERROR; }
+        struct dirent* de;
+        while ((de = readdir(dirp)) != NULL) {
+          if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+          if (names_n == names_cap) {
+            names_cap *= 2;
+            char** nn = (char**)realloc(names, names_cap * sizeof(char*));
+            if (!nn) goto list_dir_oom;
+            names = nn;
+          }
+          names[names_n] = strdup(de->d_name);
+          if (!names[names_n]) goto list_dir_oom;
+          names_n++;
+        }
+        closedir(dirp);
+        dirp = NULL;
+        qsort(names, names_n, sizeof(char*), vm__dirname_cmp);
+        {
+          jacl_vec_root* vec = jacl_vec_empty();
+          for (size_t ni = 0; ni < names_n; ni++) {
+            JaclVal s = jacl_string_new(&vm->heap, vm->intern_table,
+                                        names[ni], strlen(names[ni]));
+            if (s != JACL_NIL) vec = jacl_vec_push_back(vec, s);
+          }
+          for (size_t ni = 0; ni < names_n; ni++) free(names[ni]);
+          free(names);
+          result = vm__push(vm, jacl_vector_ptr(vec));
+          if (result != VM_OK) return result;
+        }
+        DISPATCH();
+      list_dir_oom:
+        for (size_t ni = 0; ni < names_n; ni++) free(names[ni]);
+        free(names);
+        if (dirp) closedir(dirp);
+        vm__set_error(vm, "list-dir: out of memory");
+        return VM_RUNTIME_ERROR;
       }
 
       CASE(OP_LOAD_INLINE_UPVALUE): {

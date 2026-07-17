@@ -132,6 +132,9 @@ typedef enum {
   HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
   HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
 
+  /* File-system surface growth (docs/SVM_FS_DESIGN.md phase 4) */
+  HEAD_DELETE_FILE, HEAD_FILE_EXISTS, HEAD_LIST_DIR,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -253,6 +256,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "ptr-addr", 8) == 0) return HEAD_PTR_ADDR;
       if (memcmp(s, "ptr-diff", 8) == 0) return HEAD_PTR_DIFF;
       if (memcmp(s, "ptr-null", 8) == 0) return HEAD_PTR_NULL;
+      if (memcmp(s, "list-dir", 8) == 0) return HEAD_LIST_DIR;
       return HEAD_NONE;
     case 9:
       if (memcmp(s, "transform", 9) == 0) return HEAD_TRANSFORM;
@@ -282,11 +286,13 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "make-syntax", 11) == 0) return HEAD_MAKE_SYNTAX;
       if (memcmp(s, "append-file", 11) == 0) return HEAD_APPEND_FILE;
       if (memcmp(s, "assert-type", 11) == 0) return HEAD_ASSERT_TYPE;
+      if (memcmp(s, "delete-file", 11) == 0) return HEAD_DELETE_FILE;
       return HEAD_NONE;
     case 12:
       if (memcmp(s, "syntax-quote", 12) == 0) return HEAD_SYNTAX_QUOTE;
       if (memcmp(s, "syntax-datum", 12) == 0) return HEAD_SYNTAX_DATUM;
       if (memcmp(s, "syntax-error", 12) == 0) return HEAD_SYNTAX_ERROR;
+      if (memcmp(s, "file-exists?", 12) == 0) return HEAD_FILE_EXISTS;
       return HEAD_NONE;
     case 15:
       if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;

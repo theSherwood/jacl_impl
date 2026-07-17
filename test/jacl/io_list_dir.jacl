@@ -1,0 +1,43 @@
+# expect: 2
+# expect: ab
+# expect: 0
+# expect: error
+# list-dir yields a directory's entry names (sorted, no "."/".."). The
+# reference VM lists the real /tmp — which contains arbitrary other files —
+# so the oracle counts only this test's uniquely-named entries rather than
+# expecting an exact listing. Sortedness is observed via the concatenation
+# order of the matched names (a before b). Self-cleaning like io_delete_exists.
+[write-file "a" "/tmp/jacl_p4_ls_a_47291.txt"]
+[write-file "b" "/tmp/jacl_p4_ls_b_47291.txt"]
+mut n 0
+mut order ""
+for [list-dir "/tmp"] name {
+  if [== $name "jacl_p4_ls_a_47291.txt"] {
+    set n [+ $n 1]
+    set order [concat $order "a"]
+  }
+  if [== $name "jacl_p4_ls_b_47291.txt"] {
+    set n [+ $n 1]
+    set order [concat $order "b"]
+  }
+}
+print $n
+print $order
+def _da [delete-file "/tmp/jacl_p4_ls_a_47291.txt"]
+def _db [delete-file "/tmp/jacl_p4_ls_b_47291.txt"]
+mut m 0
+for [list-dir "/tmp"] name {
+  if [== $name "jacl_p4_ls_a_47291.txt"] {
+    set m [+ $m 1]
+  }
+  if [== $name "jacl_p4_ls_b_47291.txt"] {
+    set m [+ $m 1]
+  }
+}
+print $m
+def r [list-dir "/tmp/jacl_p4_no_such_dir_47291"]
+if [error? $r] {
+  print "error"
+} else {
+  print "ok"
+}

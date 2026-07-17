@@ -6064,6 +6064,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_READ_FILE,   TYPE_STR    },
       { HEAD_WRITE_FILE,  TYPE_NIL    },
       { HEAD_APPEND_FILE, TYPE_NIL    },
+      { HEAD_DELETE_FILE, TYPE_NIL    },
+      { HEAD_FILE_EXISTS, TYPE_BOOL   },
+      { HEAD_LIST_DIR,    TYPE_VEC    },
       /* Atom watchers — both side-effecting, return nil. */
       { HEAD_WATCH,       TYPE_NIL    },
       { HEAD_UNWATCH,     TYPE_NIL    },

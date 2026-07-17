@@ -119,7 +119,9 @@ would regress correct behaviour or require a capability the sandbox deliberately
 
 - **Shell-out (`io_pipe_to_file`, part of `tour`).** `!cmd` / `| write-file` need a host
   process-exec capability. The SVM powerbox grants stdout/stdin/exit only, by design — there
-  is no subprocess cap to spawn `echo`. Blocked on a sandbox-capability decision, not codegen.
+  is no subprocess cap to spawn `echo`. Blocked on a sandbox-capability decision, not codegen;
+  the upstream ask (an `exec` cap in the svm-fs mold, with a deterministic scripted backend)
+  is written up in `docs/SVM_EXEC_ASK.md`.
 
 ## Completed slices (Phase 4)
 
