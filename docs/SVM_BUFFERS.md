@@ -12,11 +12,17 @@ memory. A `[Ptr T]` is a machine address into that memory; `addr`, `ptr-deref`,
 `ptr-offset`, and `ptr-diff` are pointer arithmetic over raw bytes, and a struct with a
 buffer field embeds the bytes inline in the struct's payload.
 
-The SVM backend has no exposed guest heap for JACL values to point into — every JACL value
-is a tagged 64-bit `JaclVal`, and aggregates are GC objects. So a buffer is modelled as a
-**`JaclVal` array** (the mutable-array runtime type, tag `0x1A`): `N` slots, each holding
-one element's `JaclVal`. This keeps the GC sound (every element is a traced slot) at the
-cost of the raw-address semantics.
+Early SVM-backend work modelled a buffer as a **`JaclVal` array** (the mutable-array runtime
+type, tag `0x1A`): `N` slots, each holding one element's tagged `JaclVal`. This keeps the GC
+uniform (every element is a traced slot) but gives up the raw-address / C-ABI semantics.
+
+**This was an implementation shortcut, not an SVM constraint.** The JACL heap *is* SVM
+linear memory (`jacl_heap_mem[]` in `runtime/heap_gc.c`), `jacl_pti(ptr)` yields a real
+usable offset into it, the collector is non-moving (addresses stay stable), and `JOBJ_BLOB`
+objects hold raw untraced bytes. So a scalar `[Buf N T]` can be — and is being migrated to
+be — a flat `N * sizeof(T)`-byte blob whose address is a genuine C-like pointer. Only
+heap-element buffers (`[Buf N dyn]`, struct/vec/ptr elements) need the traced-array model,
+because their slots are real references the GC must follow.
 
 What follows from that choice:
 
