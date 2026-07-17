@@ -60,10 +60,13 @@ static int jacl_vfs_parent_ok(JaclVal path) {
   return slash == 4 && p[0] == '/' && p[1] == 't' && p[2] == 'm' && p[3] == 'p';  /* "/tmp" */
 }
 
-/* `[read-file PATH]` — the file's contents, or an error value if it was never written. */
+/* `[read-file PATH]` — the file's contents, or an error value on a missing file. With an
+ * embedder-granted "fs" capability the read goes through real cap ops (fscap.c); without
+ * one the pure-guest VFS map serves — same observable semantics either way. */
 JaclVal jacl_read_file(JaclVal path) {
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_read_file(path);
   JaclVal v = jacl_map_get(jacl_vfs_map(), path);
   if (jaclrt_is_nil(v)) return jaclrt_error();   /* no such file → error (try/catch-able) */
   return v;
@@ -74,6 +77,7 @@ JaclVal jacl_write_file(JaclVal content, JaclVal path) {
   if (jaclrt_is_error(content)) return content;
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_write_file(content, path);
   if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
   jacl_vfs = jacl_map_set(jacl_vfs_map(), path, content);
   return jaclrt_nil();
@@ -84,6 +88,7 @@ JaclVal jacl_append_file(JaclVal content, JaclVal path) {
   if (jaclrt_is_error(content)) return content;
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_append_file(content, path);
   JaclVal cur = jacl_map_get(jacl_vfs_map(), path);
   if (jaclrt_is_nil(cur)) {                    /* new file: same rule as write-file */
     if (!jacl_vfs_parent_ok(path)) return jaclrt_error();

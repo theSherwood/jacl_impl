@@ -174,12 +174,19 @@ Design rules that keep this coherent as caps accumulate:
 
 ## Phasing
 
-1. **Adapter** (`runtime/io.c` + a small `runtime/fscap.c`): probe + cap-routed
-   read/write/append behind the granted handle; guest VFS untouched as fallback.
-   Corpus-neutral by construction (harness grants nothing yet).
-2. **Harness dual-mode**: grant seeded `mem_fs` in the parity harness's own two-leg
-   differential; run the `io_*` cluster both granted and ungranted — both must score
-   identically. This is the regression gate for the adapter.
+1. **Adapter — DONE** (`runtime/fscap.c`, routed from `io.c`): probe + cap-routed
+   read/write/append behind the granted handle; guest VFS untouched as fallback. The
+   adapter also enforces the parent-directory gate on create-opens (`FS_STAT` the parent,
+   require `S_IFDIR`) because `mem_fs`'s own `open(O_CREATE)` creates at any depth —
+   without the gate, `write-file` into a missing directory would succeed granted and
+   error ungranted.
+2. **Harness dual-mode — DONE** (`parity.rs`): every `io_*` case runs twice — plain
+   `run_diff` (ungranted) and a hand-rolled two-leg `run_with_caps(TreeWalk/Jit)`
+   differential granting `mem_fs` seeded with `dirs=["tmp"]` — and fails on any score or
+   output divergence between the modes. Verified live: deliberately dropping the `tmp`
+   seed makes the gate report `fs-granted mode diverged` (the granted leg's parent gate
+   errors where the VFS succeeds), proving the cap path is exercised, not silently
+   falling back.
 3. **Bundle tooling**: `jacl bundle` builds program + `encode_image`'d asset dir;
    `jacl run` grows `--fs-root DIR` / `--fs-image FILE` / `--no-fs`.
 4. **Surface growth** (as needed, each corpus-driven): `list-dir`/`stat`/`delete-file`
