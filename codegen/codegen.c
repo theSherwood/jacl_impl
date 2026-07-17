@@ -1788,6 +1788,70 @@ static void scan_buf_params(AstNode *plist, int *is_buf, int cap) {
   }
 }
 
+/* Declared fixed `[Buf N T]` length of each param (or -1 if the param isn't a fixed buffer),
+ * so a call site can reject a size-mismatched by-value buffer argument. Mirrors
+ * scan_buf_params' token walk, capturing N instead of a flag. */
+static void scan_buf_param_sizes(AstNode *plist, int32_t *sizes, int cap) {
+  for (int j = 0; j < cap; j++) sizes[j] = -1;
+  if (!plist || plist->type != AST_COMMAND) return;
+  AstNode *toks[CG_MAX_PARAMS * 2]; int nt = 0;
+  AstNode *h = plist->data.command.head;
+  if (h) toks[nt++] = h;
+  for (uint32_t i = 0; i < plist->data.command.arg_count && nt < CG_MAX_PARAMS * 2; i++)
+    toks[nt++] = plist->data.command.args[i];
+  int np = 0, i = 0;
+  while (i < nt && np < cap) {
+    if (toks[i]->type == AST_LIT_STRING && toks[i]->data.lit_string.length == 2 &&
+        memcmp(toks[i]->data.lit_string.value, "..", 2) == 0) { i += 1; if (i >= nt) break; }
+    int32_t bs = -1;
+    if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) {
+      bs = buf_ann_size(toks[i]);   /* `[Buf N T] name` -> N (or -1 for a non-Buf compound) */
+      i += 1;
+    }
+    if (i >= nt || toks[i]->type != AST_LIT_STRING) return;
+    const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
+    if (cg_is_type_prefix(s, n) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 2;
+    else i += 1;
+    sizes[np++] = bs;
+  }
+}
+/* The statically-known `[Buf N T]` outer length of an argument expression, or -1 if unknown
+ * (a runtime-computed buffer isn't checked). Covers a bound buffer var and a buffer literal. */
+static int32_t arg_static_buf_size(Cx *cx, AstNode *arg) {
+  if (!arg) return -1;
+  if (arg->type == AST_VAR_REF) {
+    Binding *b = env_lookup(cx, arg->data.var_ref.name, arg->data.var_ref.length);
+    return b ? b->buf_size : -1;
+  }
+  if (arg->type == AST_COMMAND && arg->data.command.head &&
+      arg->data.command.head->type == AST_COMMAND)
+    return buf_ann_size(arg->data.command.head);   /* `[[Buf N T] …]` literal */
+  return -1;
+}
+/* Reject a size-mismatched by-value `[Buf N T]` argument at a user-proc call (a [Buf 4]
+ * where [Buf 16] is declared). The reference VM catches this as a slot-level arity mismatch
+ * and surfaces its arity message, which renders the user-visible param count on both sides
+ * ("expected N arguments but got N") — we match that observable text. Only fires when both
+ * the param's and the argument's buffer sizes are statically known. Returns 0 on a mismatch
+ * (compilation failed); 1 otherwise. */
+static int check_buf_arg_sizes(Cx *cx, Proc *p, AstNode *node) {
+  if (p->is_generator || p->variadic) return 1;
+  uint32_t argc = node->data.command.arg_count;
+  int32_t psz[CG_MAX_PARAMS];
+  scan_buf_param_sizes(p->def->data.command.args[1], psz, p->arity);
+  for (uint32_t i = 0; i < argc && (int)i < p->arity; i++) {
+    if (psz[i] < 0) continue;
+    int32_t asz = arg_static_buf_size(cx, node->data.command.args[i]);
+    if (asz >= 0 && asz != psz[i]) {
+      char msg[160];
+      snprintf(msg, sizeof msg, "expected %d arguments but got %u", p->arity, argc);
+      cx_fail(cx, msg);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 /* Is `h` a type-constructor head — `[Arr T]` / `[Vec T]` / `[Map K V]` / `[Buf N T]`?
  * These share the AST_COMMAND-head shape with a closure-valued expression head
  * (e.g. `[vec-get $fns i]`), so the direct-call path must skip them and let the typed
@@ -3032,6 +3096,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             }
             return 0;
           }
+          /* A by-value `[Buf N T]` param rejects a differently-sized buffer argument. */
+          if (!check_buf_arg_sizes(cx, p, node)) return 0;
           /* A generator proc-call constructs a generator object (a fiber over the
            * function), not a direct call: jacl_gen_new(ref.func, arg). */
           if (p->is_generator) {
@@ -3753,6 +3819,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
                    head->data.lit_string.value, head->data.lit_string.length);
           return;
         }
+        if (!check_buf_arg_sizes(cx, p, node)) return;   /* by-value buffer size mismatch */
         IrVal args[1 + CG_MAX_PARAMS];
         args[0] = cx->sp;
         for (uint32_t i = 0; i < argc; i++) {
