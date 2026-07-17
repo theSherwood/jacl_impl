@@ -1,0 +1,5 @@
+{"scenario": "box_churn", "git_sha": "cd9ebdf", "runtime": "python", "python_version": "3.11.15", "warmup_iters": 1, "timed_iters": 5, "wall_ns_min": 130009044, "wall_ns_median": 149230186, "wall_ns_max": 187705172, "result": 21000000}
+{"scenario": "fib", "git_sha": "cd9ebdf", "runtime": "python", "python_version": "3.11.15", "warmup_iters": 1, "timed_iters": 5, "wall_ns_min": 706811102, "wall_ns_median": 718276429, "wall_ns_max": 727702779, "result": 5702887}
+{"scenario": "map_lookup", "git_sha": "cd9ebdf", "runtime": "python", "python_version": "3.11.15", "warmup_iters": 1, "timed_iters": 5, "wall_ns_min": 224135378, "wall_ns_median": 229879451, "wall_ns_max": 230955834, "result": 493733}
+{"scenario": "sieve", "git_sha": "cd9ebdf", "runtime": "python", "python_version": "3.11.15", "warmup_iters": 1, "timed_iters": 5, "wall_ns_min": 577392471, "wall_ns_median": 579524538, "wall_ns_max": 585000200, "result": 6057}
+{"scenario": "string_concat", "git_sha": "cd9ebdf", "runtime": "python", "python_version": "3.11.15", "warmup_iters": 1, "timed_iters": 5, "wall_ns_min": 5368186, "wall_ns_median": 5444758, "wall_ns_max": 5473263, "result": 160400}
