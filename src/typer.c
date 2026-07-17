@@ -95,6 +95,9 @@ typedef struct {
    * tc->structs (so chained `$x.field.subfield` can resolve the
    * subfield's type). UINT32_MAX for non-struct fields or unresolved. */
   uint32_t    field_struct_idxs[TYPER_MAX_STRUCT_FIELDS];
+  /* For TYPE_BUF fields, the declared fixed length N of `[Buf N T]`; 0 otherwise. Lets a
+   * field access (`$h->magic`) carry the buffer size for a runtime bounds check. */
+  uint32_t    field_buf_lens[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
 /* Imported entity from an AST_USE — see jacl.h forward declaration.
@@ -815,8 +818,10 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
                                             AstNode* outer_int,
                                             JaclType* out_type,
                                             uint32_t* out_sidx,
-                                            uint32_t* out_remaining_shape_idx) {
+                                            uint32_t* out_remaining_shape_idx,
+                                            uint32_t* out_index_dim) {
   if (out_remaining_shape_idx) *out_remaining_shape_idx = UINT32_MAX;
+  if (out_index_dim) *out_index_dim = 0;
   /* Index-arrow check: anything other than a name field (LIT_STRING)
    * counts as an index. Dynamic indices like `$slice->$i` parse with
    * AST_VAR_REF here. */
@@ -924,6 +929,19 @@ static bool typer__nested_buf_chain_result(TyperCtx* tc,
     *out_sidx = UINT32_MAX;
     if (out_remaining_shape_idx) {
       *out_remaining_shape_idx = shape_after[chain_depth];
+    }
+  }
+  /* The static size of the dimension this arrow's OUTERMOST index (idx_nodes[0], i.e.
+   * `outer_int`) steps into: dim 0 is the base buffer's length, deeper dims read the
+   * TYPE_SHAPE_BUF length. Used to bounds-check a dynamic index at runtime. */
+  if (out_index_dim) {
+    int d = chain_depth - 1;
+    if (d == 0) {
+      *out_index_dim = (b->type == TYPE_BUF) ? b->buf_len
+                     : tc->shared_reg->shapes[b->struct_idx].u.buf.len;
+    } else if (typer__is_shape_idx(tc, shape_after[d]) &&
+               tc->shared_reg->shapes[shape_after[d]].kind == TYPE_SHAPE_BUF) {
+      *out_index_dim = tc->shared_reg->shapes[shape_after[d]].u.buf.len;
     }
   }
   return true;
@@ -2067,7 +2085,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       AstNode* fld  = value_node->data.command.args[1];
       if (typer__nested_buf_chain_result(tc, recv, fld,
                                          &chain_t, &chain_sidx,
-                                         &remaining_shape) &&
+                                         &remaining_shape, NULL) &&
           chain_t == TYPE_PTR && remaining_shape != UINT32_MAX) {
         struct_idx = remaining_shape;
       }
@@ -3376,6 +3394,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       uint32_t    tl = node->data.defstruct.field_type_lens[i];
       JaclType ft;
       uint32_t f_sidx = UINT32_MAX;
+      uint32_t f_buflen = 0;
       if (is_type_keyword(tn, tl)) {
         ft = type_from_keyword(tn, tl);
       } else if (tl > 4 && memcmp(tn, "Buf{", 4) == 0 &&
@@ -3386,7 +3405,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
         ft = TYPE_BUF;
         const char* p = tn + 4;
         const char* end = tn + tl - 1;
-        while (p < end && *p >= '0' && *p <= '9') p++;
+        while (p < end && *p >= '0' && *p <= '9') { f_buflen = f_buflen * 10 + (uint32_t)(*p - '0'); p++; }
         if (p < end && *p == ',') {
           p++;
           uint32_t elen = (uint32_t)(end - p);
@@ -3406,6 +3425,7 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       s->field_names[i]        = node->data.defstruct.field_names[i];
       s->field_name_lens[i]    = node->data.defstruct.field_name_lens[i];
       s->field_struct_idxs[i]  = f_sidx;
+      s->field_buf_lens[i]     = f_buflen;
     }
   }
   /* Pass 2: for each struct registered in pass 1, resolve struct-
@@ -6550,10 +6570,23 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         JaclType chain_t = TYPE_DYN;
         uint32_t chain_sidx = UINT32_MAX;
         if (typer__nested_buf_chain_result(tc, tgt, fld,
-                                           &chain_t, &chain_sidx, NULL)) {
+                                           &chain_t, &chain_sidx, NULL, NULL)) {
           node->inferred_type       = chain_t;
           node->inferred_struct_idx = chain_sidx;
           return;
+        }
+      }
+      /* A dynamic index into a nested-buf dimension (`$cube->$j`): stamp the dimension's
+       * static size on the node (as inferred_buf_len — a plain length, not a shape idx, so
+       * it may cross to the compiler) so the codegen can emit a runtime bounds check. The
+       * node's inferred type is left to the existing dynamic-dot handling below. */
+      if (fld->type != AST_LIT_INT && fld->type != AST_LIT_STRING) {
+        JaclType chain_t = TYPE_DYN;
+        uint32_t chain_sidx = UINT32_MAX, index_dim = 0;
+        if (typer__nested_buf_chain_result(tc, tgt, fld,
+                                           &chain_t, &chain_sidx, NULL, &index_dim) &&
+            index_dim > 0) {
+          node->inferred_buf_len = index_dim;
         }
       }
 
@@ -6769,9 +6802,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             if (ft == TYPE_BUF) {
               /* Buf field access: $h->field returns [Ptr ElemType]
                * pointing at the field's first byte. See
-               * BUFFER_DESIGN.md M4.3. */
+               * BUFFER_DESIGN.md M4.3. The field's fixed length rides
+               * along as inferred_buf_len so `[buf-get $h->field $i]`
+               * can bounds-check the index at runtime. */
               node->inferred_type       = TYPE_PTR;
               node->inferred_struct_idx = sd->field_struct_idxs[fi];
+              node->inferred_buf_len    = sd->field_buf_lens[fi];
             } else {
               node->inferred_type = (uint8_t)ft;
               if (ft == TYPE_STRUCT) {

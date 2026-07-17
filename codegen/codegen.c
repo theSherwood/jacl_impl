@@ -1176,6 +1176,83 @@ static int expr_is_typed_stream(Cx *cx, AstNode *n) {
 /* Eagerly drain a source (an already-evaluated generator object or vec-like) into a
  * fresh vector, optionally applying a closure per element (transform) or using its
  * truthiness as a keep test (filter). Frame-threaded like the other loops. */
+/* Emit the synchronous fire of an atom's watchers after a commit: for each (key, cb) pair
+ * in the atom's watcher list, call `cb(old, new)` in registration order. A frame-threaded
+ * loop (like the stream drains). Re-entrancy — a watcher that itself resets/swaps the atom —
+ * works for free: that nested commit runs its own emitted firing loop during the call. On a
+ * box (no watcher slot) jacl_atom_watchers yields nil and the loop exits immediately. */
+#define WT_W   "\x01""wt-w"
+#define WT_OLD "\x01""wt-old"
+#define WT_NEW "\x01""wt-new"
+#define WT_IDX "\x01""wt-idx"
+#define WT_CAR "\x01""wt-carry"
+/* Returns `carry` threaded through the loop so it stays a valid SSA value in the block the
+ * caller resumes in (the exit block); callers use it as the reset/swap result. */
+static IrVal emit_fire_watchers(Cx *cx, IrVal atom, IrVal oldv, IrVal newv, IrVal carry) {
+  IrVal wa[] = {cx->sp, atom};
+  IrVal w = emit_rt_call(cx, "jacl_atom_watchers", wa, 2);
+  scope_enter(cx);
+  env_define(cx, WT_W, 5, w, 0, 0);
+  env_define(cx, WT_OLD, 7, oldv, 0, 0);
+  env_define(cx, WT_NEW, 7, newv, 0, 0);
+  env_define(cx, WT_CAR, 9, carry, 0, 0);
+  env_define(cx, WT_IDX, 7, irb_const_i64(cx->f, cx->cur, jaclval_i32(0)), /*is_mut=*/1, 0);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return carry; }
+  int wd = frame_width(cx);
+  IrBlock header = new_i64_block(cx, wd);
+  IrBlock body = new_i64_block(cx, wd);
+  IrBlock next = new_i64_block(cx, wd);
+  IrBlock exit_blk = new_i64_block(cx, wd);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, wd);
+
+  enter_frame_block(cx, header);
+  {
+    Binding *bw = env_lookup(cx, WT_W, 5);
+    Binding *bi = env_lookup(cx, WT_IDX, 7);
+    IrVal la[] = {cx->sp, bw->value};
+    IrVal len = emit_rt_call(cx, "jacl_len", la, 2);       /* nil watchers -> error -> exit */
+    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, len);
+    IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+    IrVal is_true = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, cond, ctrue);
+    fill_frame(cx, frame);
+    irb_br_if(cx->f, cx->cur, is_true, body, frame, wd, exit_blk, frame, wd);
+  }
+  enter_frame_block(cx, body);
+  {
+    Binding *bw = env_lookup(cx, WT_W, 5);
+    Binding *bi = env_lookup(cx, WT_IDX, 7);
+    Binding *bo = env_lookup(cx, WT_OLD, 7);
+    Binding *bn = env_lookup(cx, WT_NEW, 7);
+    IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
+    IrVal idx1 = emit_binop_call(cx, "jacl_add", bi->value, one);
+    IrVal ga[] = {cx->sp, bw->value, idx1};
+    IrVal cb = emit_rt_call(cx, "jacl_index_get", ga, 3);   /* the callback at [idx+1] */
+    IrVal fa[] = {cx->sp, cb};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
+    IrType r1[] = {IRB_I64};
+    IrVal cargs[] = {cx->sp, cb, bo->value, bn->value};
+    (void)irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, next, frame, wd);
+  }
+  enter_frame_block(cx, next);
+  {
+    Binding *bi = env_lookup(cx, WT_IDX, 7);
+    IrVal two = irb_const_i64(cx->f, cx->cur, jaclval_i32(2));
+    bi->value = emit_binop_call(cx, "jacl_add", bi->value, two);
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, header, frame, wd);
+  }
+  enter_frame_block(cx, exit_blk);
+  IrVal result = env_lookup(cx, WT_CAR, 9)->value;   /* carry, rebound to the exit block */
+  scope_exit(cx);
+  return result;
+}
+
 #define ST_SRC "\x01""st-src"
 #define ST_ACC "\x01""st-acc"
 #define ST_CLO "\x01""st-clo"
@@ -1662,7 +1739,16 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   if (cb_node) env_define(cx, "\x01""for-cb", 7, cb, 0, 0);
   /* Two-name form `for COLL k v { body }` binds the key alongside the value. */
   if (key_name) env_define(cx, key_name, klen, zero, /*is_mut=*/1, /*is_cell=*/0);
-  if (name) env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  /* A loop variable captured by a closure in the body (e.g. `for … i { spawn { … $i … } }`)
+   * is boxed in a heap cell so the closure sees each iteration's value; each step writes the
+   * cell rather than rebinding the SSA slot. */
+  if (name && is_captured_name(cx, name, nlen)) {
+    IrVal zc[] = {cx->sp, zero};
+    IrVal cell = emit_rt_call(cx, "jacl_cell_new", zc, 2);
+    env_define(cx, name, nlen, cell, /*is_mut=*/1, /*is_cell=*/1);
+  } else if (name) {
+    env_define(cx, name, nlen, zero, /*is_mut=*/1, /*is_cell=*/0);
+  }
   /* `break V` result slot: a hidden mutable local (nil by default) that a `break`
    * inside the body writes; the loop evaluates to it. Threaded like any frame local. */
   env_define(cx, BRK_SENTINEL, BRK_SENTINEL_LEN, irb_const_i64(cx->f, cx->cur, JACLVAL_NIL),
@@ -1706,7 +1792,8 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
         env_lookup(cx, key_name, klen)->value = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
       }
       Binding *bn = env_lookup(cx, name, nlen);
-      bn->value = elem;
+      if (bn->is_cell) { IrVal a[] = {cx->sp, bn->value, elem}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
+      else bn->value = elem;
       (void)compile_expr(cx, body);
     } else {
       Binding *bcb = env_lookup(cx, "\x01""for-cb", 7);
@@ -2247,6 +2334,13 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (cx->failed) return 0;
         IrVal kv = compile_expr(cx, node->data.command.args[1]);
         if (cx->failed) return 0;
+        /* A dynamic index into a nested-buffer dimension (the typer stamped the dimension's
+         * static size on this arrow node) is bounds-checked at runtime. */
+        if (node->inferred_buf_len > 0) {
+          IrVal dv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)node->inferred_buf_len));
+          IrVal a[] = {cx->sp, sv, kv, dv};
+          return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
+        }
         IrVal a[] = {cx->sp, sv, kv};
         return emit_rt_call(cx, "jacl_dot_dyn", a, 3);
       }
@@ -2488,6 +2582,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             IrVal kc = irb_const_i64(cx->f, cx->cur, jaclval_i32(kind));
             IrVal wa[] = {cx->sp, val, kc};
             val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
+          }
+        }
+        /* Re-declaring an existing mutable inside a proc rebinds it rather than block-
+         * shadowing: `mut` is function-scoped, so `mut n 7` in an if-branch updates the
+         * enclosing `n` (matching the reference VM, where a suspending proc's locals are
+         * deduped state fields). Top-level redeclaration keeps its own path (the global
+         * mirror); a same-name def is left to error via env_define. */
+        if (hid == HEAD_MUT && !cx->at_top_level) {
+          Binding *ex = env_lookup(cx, name, len);
+          if (ex && ex->is_mut) {
+            if (ex->is_cell) { IrVal a[] = {cx->sp, ex->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
+            else ex->value = val;
+            return val;
           }
         }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
@@ -3084,7 +3191,24 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
         IrVal sa[] = {cx->sp, ref, nv};
         (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
-        return nv;
+        IrVal r = emit_fire_watchers(cx, ref, cur, nv, nv);   /* atoms notify watchers (old, new) */
+        if (cx->failed) return 0;
+        return r;
+      }
+
+      /* `[reset $ref V]` — set the value and, for an atom, notify watchers (old, new). */
+      if (hid == HEAD_RESET && node->data.command.arg_count == 2) {
+        IrVal ref = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal v = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal da[] = {cx->sp, ref};
+        IrVal old = emit_rt_call(cx, "jacl_box_get", da, 2);
+        IrVal sa[] = {cx->sp, ref, v};
+        (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
+        IrVal r = emit_fire_watchers(cx, ref, old, v, v);
+        if (cx->failed) return 0;
+        return r;
       }
 
       /* `[stack-trace]` — the trace captured at the most recent `error` (empty string if
@@ -3092,6 +3216,23 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_STACK_TRACE && node->data.command.arg_count == 0) {
         IrVal a[] = {cx->sp};
         return emit_rt_call(cx, "jacl_stack_trace", a, 1);
+      }
+
+      /* `[timeout D { body }]` — bound the body's sleep time to D. Opens a deadline, runs the
+       * body inline, and closes it: an error value if the deadline fired, else the body value.
+       * Cooperative (single-threaded), so only the body's sleeping is bounded, not CPU work. */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
+          node->data.command.head->data.lit_string.length == 7 &&
+          memcmp(node->data.command.head->data.lit_string.value, "timeout", 7) == 0 &&
+          node->data.command.arg_count == 2 && node->data.command.args[1]->type == AST_BLOCK) {
+        IrVal d = compile_expr(cx, node->data.command.args[0]);
+        if (cx->failed) return 0;
+        IrVal ba[] = {cx->sp, d};
+        (void)emit_rt_call(cx, "jacl_timeout_begin", ba, 2);
+        IrVal bv = compile_expr(cx, node->data.command.args[1]);
+        if (cx->failed) return 0;
+        IrVal ea[] = {cx->sp, bv};
+        return emit_rt_call(cx, "jacl_timeout_end", ea, 2);
       }
 
       /* `[not COND]` — by name (no interned head id): boolean negation via jacl_not. */
@@ -3171,6 +3312,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_SLEEP,      "jacl_sleep",      1},
           {HEAD_ATOM,       "jacl_atom_new",   1},
           {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
+          {HEAD_WATCH,      "jacl_watch",      3},
+          {HEAD_UNWATCH,    "jacl_unwatch",    2},
           {HEAD_FUTURE_Q,   "jacl_is_future_v", 1},
           {HEAD_READ_FILE,   "jacl_read_file",   1},
           {HEAD_WRITE_FILE,  "jacl_write_file",  2},
@@ -3245,6 +3388,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             IrVal a[] = {cx->sp, bv, iv, sz, tsv};
             return emit_rt_call(cx, "jacl_buf_get_checked", a, 5);
           }
+        }
+        /* `buf-get EXPR $i` where EXPR is a typed buffer with a static length carried on the
+         * node (a struct field, `[buf-get $h->magic $i]`): dimension-checked at runtime. */
+        if ((HeadId)hid == HEAD_BUF_GET && node->data.command.arg_count == 2 &&
+            node->data.command.args[0]->type != AST_VAR_REF &&
+            node->data.command.args[0]->inferred_buf_len > 0) {
+          uint32_t dim = node->data.command.args[0]->inferred_buf_len;
+          IrVal bv = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal iv = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal dv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)dim));
+          IrVal a[] = {cx->sp, bv, iv, dv};
+          return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
         }
         /* `error V` while tracing: stamp the error line on the top frame and snapshot the
          * call stack, so a later `[stack-trace]` in the handler shows where it was raised.

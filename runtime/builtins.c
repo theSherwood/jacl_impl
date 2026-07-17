@@ -338,6 +338,17 @@ JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typ
   if (i < 0 || i >= n) return jacl_error_msg_i_s("index ", i, typestr);
   return jacl_arr_get_at(buf, idx);
 }
+/* A dynamic index step into a nested-buffer dimension (`$cube->$j`, `[buf-get $h->field $i]`),
+ * bounds-checked against the dimension's declared size: an OOB (or negative) index errors
+ * `out of bounds for dimension size N`. `dim` is the static length the codegen read from the
+ * typer's stamp on the arrow node. */
+JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim) {
+  if (jaclrt_is_error(buf)) return buf;
+  if (!jaclrt_is_i32(idx)) return jaclrt_error();
+  int32_t i = jaclrt_as_i32(idx), n = jaclrt_is_i32(dim) ? jaclrt_as_i32(dim) : 0;
+  if (i < 0 || i >= n) return jacl_error_msg_i("out of bounds for dimension size ", n);
+  return jacl_index_get(buf, idx);
+}
 
 /* ---- structs (dynamic, name-based; typed/unboxed lowering is a later pass) ----
  * A struct instance is a traced heap cell (JACL_TAG_STRUCT over JOBJ_NODE):
@@ -440,12 +451,47 @@ JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x
  * still answers stop-the-world requests through the scheduler loop). */
 int __vm_wait32(void *p, int expected, long timeout_ns);
 static int32_t jacl_sleep_word;
+
+/* ---- `[timeout D { body }]` — a cooperative deadline over a body's sleeping ----
+ * The scheduler is single-threaded and cooperative, so a body can only block by sleeping
+ * (or awaiting). `timeout` therefore bounds the body's total SLEEP time to D: `jacl_sleep`
+ * clamps against the innermost active budget and, if a sleep would overrun, marks the
+ * timeout fired and returns early. When the body finishes, jacl_timeout_end yields an error
+ * value if the deadline fired, otherwise the body's value. A small stack supports nesting. */
+#define JACL_TIMEOUT_MAX 16
+static long jacl_to_budget[JACL_TIMEOUT_MAX];   /* remaining sleep budget (ns) per level */
+static int  jacl_to_fired[JACL_TIMEOUT_MAX];
+static int  jacl_to_depth;
+static double jacl_secs(JaclVal v) {
+  if (jaclrt_is_i32(v)) return (double)jaclrt_as_i32(v);
+  if (jaclrt_type_index(v) == 0x03) return (double)jaclrt_as_f32(v);
+  return jacl_is_f64(v) ? jacl_num_f64(v) : -1.0;
+}
+JaclVal jacl_timeout_begin(JaclVal secs) {
+  double s = jacl_secs(secs);
+  if (jacl_to_depth < JACL_TIMEOUT_MAX) {
+    jacl_to_budget[jacl_to_depth] = (s < 0) ? 0 : (long)(s * 1e9);
+    jacl_to_fired[jacl_to_depth] = 0;
+    jacl_to_depth++;
+  }
+  return JACL_NIL;
+}
+JaclVal jacl_timeout_end(JaclVal body_val) {
+  int fired = 0;
+  if (jacl_to_depth > 0) { jacl_to_depth--; fired = jacl_to_fired[jacl_to_depth]; }
+  if (fired) return jaclrt_set_error(jacl_str_new("timeout", 7));
+  return body_val;
+}
 JaclVal jacl_sleep(JaclVal secs) {
   if (jaclrt_is_error(secs)) return secs;
-  double s = jaclrt_is_i32(secs) ? (double)jaclrt_as_i32(secs)
-           : (jaclrt_type_index(secs) == 0x03 ? (double)jaclrt_as_f32(secs) : -1.0);
+  double s = jacl_secs(secs);
   if (s < 0) return jaclrt_error();
   long total = (long)(s * 1e9);
+  if (jacl_to_depth > 0) {                     /* clamp to the innermost timeout budget */
+    int lvl = jacl_to_depth - 1;
+    if (total > jacl_to_budget[lvl]) { total = jacl_to_budget[lvl]; jacl_to_fired[lvl] = 1; }
+    jacl_to_budget[lvl] -= total;
+  }
   while (total > 0) {
     long chunk = total > 1000000L ? 1000000L : total;   /* 1 ms slices: stay GC-responsive */
     (void)__vm_wait32(&jacl_sleep_word, 0, chunk);
@@ -453,12 +499,61 @@ JaclVal jacl_sleep(JaclVal secs) {
   }
   return JACL_NIL;
 }
-/* Atoms: a mutable ref like box, tagged JACL_TAG_ATOM (deref/reset accept both). */
+/* Atoms: a mutable ref like box, tagged JACL_TAG_ATOM (deref/reset accept both). Unlike a
+ * box, an atom is a 2-slot object { value, watchers }: slot 0 is the value (so box-get/set,
+ * which read slot 0 of the cell, work unchanged), slot 1 holds a keyed watcher list — a
+ * flat vector [k0, cb0, k1, cb1, …] in registration order, nil when empty. The whole object
+ * is a JOBJ_NODE, so conservative tracing keeps both the value and the watchers alive. */
 JaclVal jacl_atom_new(JaclVal v) {
-  JaclVal c = jacl_cell_new(v);
-  return jaclrt_from_ptr(JACL_TAG_ATOM, jaclrt_as_ptr(c));
+  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_NODE, (uint32_t)(2 * sizeof(int64_t)));
+  int64_t *p = (int64_t *)jacl_obj_payload(o);
+  p[0] = (int64_t)v;
+  p[1] = (int64_t)JACL_NIL;
+  return jaclrt_from_ptr(JACL_TAG_ATOM, o);
 }
 JaclVal jacl_is_atom_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0C); }
+/* The atom's watcher list (nil for a box or a watcher-free atom). */
+JaclVal jacl_atom_watchers(JaclVal a) {
+  if (jaclrt_type_index(a) != 0x0C) return JACL_NIL;
+  return (JaclVal)((int64_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(a)))[1];
+}
+static void jacl_atom_set_watchers(JaclVal a, JaclVal w) {
+  ((int64_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(a)))[1] = (int64_t)w;
+}
+/* `watch $atom KEY CB` — register CB under KEY (replacing an existing KEY in place, else
+ * appended so firing order follows registration order). */
+JaclVal jacl_watch(JaclVal a, JaclVal key, JaclVal cb) {
+  if (jaclrt_type_index(a) != 0x0C) return jaclrt_error();
+  JaclVal w = jacl_atom_watchers(a);
+  if (jaclrt_is_nil(w)) w = jacl_vec_empty();
+  uint32_t n = jacl_vec_count(w);
+  for (uint32_t i = 0; i + 1 < n; i += 2) {
+    if (jacl_val_equal(jacl_vec_get(w, i), key)) {          /* replace in place */
+      jacl_atom_set_watchers(a, jacl_vec_set(w, i + 1, cb));
+      return jaclrt_nil();
+    }
+  }
+  w = jacl_vec_push(w, key);
+  w = jacl_vec_push(w, cb);
+  jacl_atom_set_watchers(a, w);
+  return jaclrt_nil();
+}
+/* `unwatch $atom KEY` — drop KEY's watcher; subsequent commits no longer fire it. */
+JaclVal jacl_unwatch(JaclVal a, JaclVal key) {
+  if (jaclrt_type_index(a) != 0x0C) return jaclrt_error();
+  JaclVal w = jacl_atom_watchers(a);
+  if (jaclrt_is_nil(w)) return jaclrt_nil();
+  uint32_t n = jacl_vec_count(w);
+  JaclVal nw = jacl_vec_empty();
+  for (uint32_t i = 0; i + 1 < n; i += 2) {
+    if (!jacl_val_equal(jacl_vec_get(w, i), key)) {
+      nw = jacl_vec_push(nw, jacl_vec_get(w, i));
+      nw = jacl_vec_push(nw, jacl_vec_get(w, i + 1));
+    }
+  }
+  jacl_atom_set_watchers(a, nw);
+  return jaclrt_nil();
+}
 /* `[future? V]` — a spawn/parallel/race future is a job carried under the STREAM tag. */
 JaclVal jacl_is_future_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x15); }
 /* Is V a map? (0x07) — the runtime dispatch for filter/transform over a map vs a vec. */

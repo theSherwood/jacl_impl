@@ -292,8 +292,13 @@ JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
 JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructure: name|pos */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
+JaclVal jacl_timeout_begin(JaclVal secs);          /* [timeout D { body }] — open a deadline */
+JaclVal jacl_timeout_end(JaclVal body_val);        /* close it: error if the deadline fired */
 JaclVal jacl_atom_new(JaclVal v);                  /* [atom V] */
 JaclVal jacl_is_atom_v(JaclVal v);                 /* atom? */
+JaclVal jacl_atom_watchers(JaclVal a);             /* the atom's [k0 cb0 …] watcher list or nil */
+JaclVal jacl_watch(JaclVal a, JaclVal key, JaclVal cb);  /* [watch $atom KEY CB] */
+JaclVal jacl_unwatch(JaclVal a, JaclVal key);            /* [unwatch $atom KEY] */
 JaclVal jacl_is_future_v(JaclVal v);               /* future? */
 JaclVal jacl_is_map_v(JaclVal v);                  /* is-map (filter/transform dispatch) */
 JaclVal jacl_tvec_mark(JaclVal v);                 /* re-tag a vec as typed [Vec T] */
@@ -353,6 +358,7 @@ JaclVal jacl_trace_snapshot(void);       /* capture the stack into jacl_last_tra
 JaclVal jacl_error_msg_i(const char *prefix, int32_t n);  /* error carrying prefix + decimal(n) */
 JaclVal jacl_error_msg_i_s(const char *prefix, int32_t n, JaclVal suffix);  /* + trailing string */
 JaclVal jacl_buf_get_checked(JaclVal buf, JaclVal idx, JaclVal size, JaclVal typestr);
+JaclVal jacl_buf_offset_checked(JaclVal buf, JaclVal idx, JaclVal dim);  /* dim-checked step */
 JaclVal jacl_is_closure_v(JaclVal v);    /* is V a closure (0x08)? */
 JaclVal jacl_cannot_call(void);          /* the "cannot call" error value */
 JaclVal jacl_stack_trace(void);          /* [stack-trace] -> last captured trace or "" */
