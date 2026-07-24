@@ -424,7 +424,11 @@ static void out_inst(Out *o, const Inst *in) {
     case K_CALL:
       out_fmt(o, "call %u", in->callee); out_arglist(o, in->args, in->nargs); break;
     case K_CALL_IMPORT:
-      out_fmt(o, "call.import \"%s\" (", in->name);
+      /* Name-inline link-form symbolic call: `call.sym "name" (sig) v<h> (args)` — the
+       * linker (`link_with_manifest`) resolves the name against the runtime's exports.
+       * (`call.import <idx>` is now the manifest capability form, emitted by svm-llvm for
+       * the runtime's own `write`/`exit`; the program only makes symbolic runtime calls.) */
+      out_fmt(o, "call.sym \"%s\" (", in->name);
       out_typelist(o, in->sig_params, in->sig_np);
       out_str(o, ") -> (");
       out_typelist(o, in->sig_results, in->sig_nr);
@@ -453,11 +457,11 @@ static void out_inst(Out *o, const Inst *in) {
 static void out_term(Out *o, const Term *t) {
   switch (t->kind) {
     case T_BR:
-      out_fmt(o, "br block%d", t->target); out_arglist(o, t->args, t->nargs); break;
+      out_fmt(o, "br %d", t->target); out_arglist(o, t->args, t->nargs); break;
     case T_BRIF:
-      out_fmt(o, "br_if v%u block%d", t->cond, t->then_blk);
+      out_fmt(o, "br_if v%u %d", t->cond, t->then_blk);
       out_arglist(o, t->then_args, t->nthen);
-      out_fmt(o, " block%d", t->else_blk);
+      out_fmt(o, " %d", t->else_blk);
       out_arglist(o, t->else_args, t->nelse);
       break;
     case T_RETURN:
@@ -486,12 +490,16 @@ static void out_func(Out *o, const IrFunc *f) {
   out_str(o, ") -> (");
   out_typelist(o, f->results, f->nresults);
   out_str(o, ") {\n");
+  /* Block header/terminator syntax (svm-text, post the label retirement): a block is
+   * `block <n> (params) { … }` with a closing brace (the legacy `blockN(…):` form is gone),
+   * and a branch names its target block by bare index — `br <n>(args)` / `br_if v<c>
+   * <then>(args) <else>(args)`. */
   for (int bi = 0; bi < f->nblocks; bi++) {
     const Block *blk = &f->blocks[bi];
-    out_fmt(o, "block%d(", bi);
+    out_fmt(o, "block %d (", bi);
     for (int i = 0; i < blk->nparams; i++)
       out_fmt(o, "%sv%d: %s", i ? ", " : "", i, type_name(blk->params[i]));
-    out_str(o, "):\n");
+    out_str(o, ") {\n");
     uint32_t next = (uint32_t)blk->nparams;   /* recompute numbering, as svm-text does */
     for (int ii = 0; ii < blk->ninsts; ii++) {
       const Inst *in = &blk->insts[ii];
@@ -505,7 +513,7 @@ static void out_func(Out *o, const IrFunc *f) {
     }
     out_str(o, "  ");
     out_term(o, &blk->term);
-    out_str(o, "\n");
+    out_str(o, "\n}\n");
   }
   out_str(o, "}\n");
 }

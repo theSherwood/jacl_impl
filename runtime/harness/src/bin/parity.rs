@@ -28,7 +28,52 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use svm_ir::{link, LinkUnit};
+use svm_ir::{link_with_manifest, LinkUnit};
+
+/// The program-module export the harness pins its entry to, so `resolve_export` recovers the
+/// entry funcidx after linking reshuffles function indices (the program's entry is its func 0).
+const ENTRY_SYM: &str = "__jacl_entry";
+
+/// The fixed powerbox names a jacl program's runtime imports (`write` from `jacl_print`; `exit`
+/// when a program halts), bound by name at instantiation. `stdin` is provided defensively — a
+/// name the module doesn't import is simply unused (`instantiate_with_imports` only requires that
+/// every *declared* import is covered).
+fn powerbox_imports() -> svm_run::Imports {
+    svm_run::Imports::new()
+        .provide("write", svm_run::HostCap::stdout())
+        .provide("exit", svm_run::HostCap::exit())
+        .provide("stdin", svm_run::HostCap::stdin())
+}
+
+/// Link `[runtime, catalog, program]` retaining the runtime's manifest capability imports
+/// (`link_with_manifest`), wrap the program's entry (its func 0, pinned as [`ENTRY_SYM`]) in the
+/// paramless powerbox `_start` (`synth_manifest_start`), and instantiate with the powerbox names
+/// bound. The post-IMPORTS.md-phase-4 embedding path (docs/SVM_IMPORT_MIGRATION_ASK.md; svm's
+/// `link_manifest.rs` is the reference). Returns a runnable manifest module instance.
+fn link_instantiate(
+    rt: &svm_llvm::Translated,
+    cat: &svm_llvm::Translated,
+    text: &str,
+    relocs: Vec<svm_ir::DataReloc>,
+) -> Result<svm_run::Instance, String> {
+    let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
+    let linked = link_with_manifest(&[
+        LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
+        LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
+        LinkUnit {
+            module: program,
+            exports: vec![(ENTRY_SYM.to_string(), 0)],
+            relocations: relocs,
+            ..Default::default()
+        },
+    ])
+    .map_err(|e| format!("{e:?}"))?;
+    let entry = linked
+        .resolve_export(ENTRY_SYM)
+        .ok_or_else(|| "entry export missing after link".to_string())?;
+    let module = svm_ir::synth_manifest_start(linked, entry, false).map_err(|e| format!("powerbox: {e}"))?;
+    svm_run::instantiate_with_imports(module, powerbox_imports()).map_err(|e| format!("instantiate: {e}"))
+}
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -175,19 +220,7 @@ fn run_fs_granted(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
 fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
     let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
     let (text, relocs) = split_relocs(&raw);
-    let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
-    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
-    let linked = link(&[
-        LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
-        LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
-        LinkUnit { module: program, relocations: relocs, ..Default::default() },
-    ])
-    .map_err(|e| format!("{e:?}"))?;
-    if !linked.imports.is_empty() {
-        return Err(format!("unresolved imports {:?}", linked.imports));
-    }
-    let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false).map_err(|e| format!("powerbox: {e}"))?;
-    let inst = svm_run::instantiate(pb).map_err(|e| format!("instantiate: {e}"))?;
+    let inst = link_instantiate(rt, cat, text, relocs)?;
     let run = if fs_granted {
         run_fs_granted(&inst)?
     } else {
@@ -240,31 +273,13 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         Err(_) => return Stage::TextParseFail("driver output not UTF-8".into()),
     };
     let (text, relocs) = split_relocs(&raw);
-    let program = match svm_text::parse_module(text) {
-        Ok(m) => m,
-        Err(e) => return Stage::TextParseFail(brief(&format!("{e:?}"))),
-    };
 
-    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
-    let linked = match link(&[
-        LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
-        LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
-        LinkUnit { module: program, relocations: relocs, ..Default::default() },
-    ]) {
-        Ok(l) => l,
-        Err(e) => return Stage::LinkFail(brief(&format!("{e:?}"))),
-    };
-    if !linked.imports.is_empty() {
-        return Stage::LinkFail(brief(&format!("unresolved imports {:?}", linked.imports)));
-    }
-
-    let pb = match svm_ir::synth_powerbox_start(linked, entry, 3, false) {
-        Ok(m) => m,
-        Err(e) => return Stage::LinkFail(brief(&format!("powerbox: {e}"))),
-    };
-    let inst = match svm_run::instantiate(pb) {
+    let inst = match link_instantiate(rt, cat, text, relocs) {
         Ok(i) => i,
-        Err(e) => return Stage::RunFail(brief(&format!("instantiate: {e}"))),
+        Err(e) if e.starts_with("instantiate") || e.starts_with("powerbox") => {
+            return Stage::RunFail(brief(&e))
+        }
+        Err(e) => return Stage::LinkFail(brief(&e)),
     };
     let run = match inst.run_diff(&svm_run::RunConfig::default()) {
         Ok(r) => r,
