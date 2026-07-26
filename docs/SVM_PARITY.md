@@ -106,7 +106,7 @@
 
 | count | first error line |
 |---|---|
-| 1 | `codegen: generator 'count-up' may take at most one parameter (yet)` |
+| 1 | `codegen: unsupported command head 'interpret'` |
 
 ## Non-emit failures
 

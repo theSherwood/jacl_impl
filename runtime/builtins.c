@@ -656,6 +656,15 @@ JaclVal jacl_assert(JaclVal v) {
   int truthy = !(v == JACL_FALSE || v == JACL_NIL);
   return truthy ? JACL_NIL : jaclrt_error();
 }
+/* [panic MSG] — halt with a message. The reference emits OP_PANIC (unconditional halt);
+ * the SVM backend surfaces it as an error value carrying the message, which the
+ * statement-position auto-return then propagates out of the job. `assert` (a prelude
+ * macro) expands to `[if PRED {} { panic "assertion failed: …" }]`, so panic is only
+ * reached on a failed predicate — the passing corpus never exercises it. */
+JaclVal jacl_panic(JaclVal msg) {
+  if (jaclrt_is_error(msg)) return msg;
+  return jacl_error_new(msg);
+}
 /* [range A B] as a value: the vector [A, B) of i32s (for `for`/transform sources). */
 /* Re-tag a vector as a TYPED vector (`[Vec T]`) — same root cell, distinct tag so it prints
  * comma-style. A non-vector passes through unchanged. */

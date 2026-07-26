@@ -1024,6 +1024,39 @@ static IrVal compile_if(Cx *cx, AstNode *node) {
   return compile_if_chain(cx, node->data.command.args, node->data.command.arg_count, 0);
 }
 
+/* Short-circuit `&&` / `||` over two operands: `a && b` → `if a { b } { false }`,
+ * `a || b` → `if a { true } { b }` — b is compiled only on the branch that needs it. */
+static IrVal compile_short_circuit(Cx *cx, AstNode *a, AstNode *b, int is_and) {
+  if (!frame_guard(cx)) return 0;
+  IrVal cond = compile_expr(cx, a);
+  if (cx->failed) return 0;
+  IrVal truth = emit_truthy(cx, cond);
+  int w = frame_width(cx);
+  IrBlock then_blk = new_i64_block(cx, w);
+  IrBlock else_blk = new_i64_block(cx, w);
+  IrBlock join_blk = new_i64_block(cx, w + 1);
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, then_blk, frame, w, else_blk, frame, w);
+
+  enter_frame_block(cx, then_blk);
+  IrVal then_res = is_and ? compile_expr(cx, b) : irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+  if (cx->failed) return 0;
+  IrVal targs[IRB_MAX_FRAME + 2];
+  fill_frame(cx, targs); targs[w] = then_res;
+  irb_br(cx->f, cx->cur, join_blk, targs, w + 1);
+
+  enter_frame_block(cx, else_blk);
+  IrVal else_res = is_and ? irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE) : compile_expr(cx, b);
+  if (cx->failed) return 0;
+  IrVal eargs[IRB_MAX_FRAME + 2];
+  fill_frame(cx, eargs); eargs[w] = else_res;
+  irb_br(cx->f, cx->cur, join_blk, eargs, w + 1);
+
+  enter_frame_block(cx, join_blk);
+  return (IrVal)w;
+}
+
 /* [while COND { BODY }] — header carries the frame and merges the preheader edge with
  * the body back-edge; the loop value is nil. */
 static IrVal compile_while(Cx *cx, AstNode *node) {
@@ -2313,6 +2346,12 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       sdef_register(cx, node);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
+    case AST_DEFMACRO:
+      /* A compile-time macro definition — already consumed by the expansion pass
+       * (ast_expand_macros). It emits no runtime code; the node lingers in the form
+       * list, so evaluate it to nil. */
+      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+
     case AST_RETURN:
       /* Tail-position return: evaluate to the value; the proc wraps the body value in
        * a single `return`. Early/mid-block return (out of loops) is not yet supported. */
@@ -2375,6 +2414,22 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
       if (hid == HEAD_IF) return compile_if(cx, node);
       if (hid == HEAD_WHILE) return compile_while(cx, node);
+      if (hid == HEAD_AMP_AMP || hid == HEAD_PIPE_PIPE) {
+        /* `[&& a b …]` / `[|| a b …]` — short-circuit logical fold. Reference lowers
+         * `&& L R` as `if L {R} {false}` and `|| L R` as `if L {true} {R}`. With more than
+         * two operands it right-folds: `[&& a b c]` == `a && (b && c)`. */
+        int is_and = (hid == HEAD_AMP_AMP);
+        AstNode **args = node->data.command.args;
+        uint32_t ac = node->data.command.arg_count;
+        if (ac == 0)
+          return irb_const_i64(cx->f, cx->cur, is_and ? JACLVAL_TRUE : JACLVAL_FALSE);
+        if (ac == 1) return compile_expr(cx, args[0]);
+        if (ac == 2) return compile_short_circuit(cx, args[0], args[1], is_and);
+        AstNode **rest = (AstNode **)calloc(ac - 1, sizeof(AstNode *));
+        for (uint32_t i = 1; i < ac; i++) rest[i - 1] = args[i];
+        AstNode *tail = synth_command(node->data.command.head, rest, ac - 1);
+        return compile_short_circuit(cx, args[0], tail, is_and);
+      }
       if (hid == HEAD_FOR) return compile_for(cx, node);
       if (hid == HEAD_TRY) return compile_try(cx, node);
       if (hid == HEAD_WITH_CTX && node->data.command.arg_count == 2 &&
@@ -3602,6 +3657,18 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         if (cx->failed) return 0;
         IrVal a[] = {cx->sp, v};
         return emit_rt_call(cx, "jacl_assert", a, 2);
+      }
+
+      /* `[panic]` / `[panic MSG]` — halt with a message (surfaced as a propagating error).
+       * With no arg the message defaults to "panic". The prelude's `assert` macro expands
+       * to `[if PRED {} { panic … }]`, so this is the failure sink for user macros. */
+      if (hid == HEAD_PANIC) {
+        IrVal msg = node->data.command.arg_count >= 1
+                        ? compile_expr(cx, node->data.command.args[0])
+                        : compile_string_literal(cx, "panic", 5);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, msg};
+        return emit_rt_call(cx, "jacl_panic", a, 2);
       }
 
       /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →

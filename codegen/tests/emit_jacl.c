@@ -273,6 +273,35 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
   return out;
 }
 
+/* Expand compile-time macros in place, matching the reference pipeline (which runs
+ * `ast_expand_macros` after parsing, before codegen). This registers the prelude macros
+ * (assert / timeout / not / and / or / incr / \) AND any user `defmacro`s from the source,
+ * then rewrites every macro call site into its expansion — so the SVM codegen sees the same
+ * post-expansion AST the reference compiler does. User macros (e.g. tour's `unless`) that the
+ * name-based head handlers can't know about are handled here for free. Fatal on a macro error.
+ * A fresh VM supplies the GC heap / intern table the staged macro evaluator needs; the new
+ * template nodes are allocated into `arena` (the same arena backing `nodes`). */
+static void expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+  JaclVM *evm = jacl_vm_new();
+  MacroTable mt;
+  macro_table_init(&mt);
+  ExpandState es;
+  memset(&es, 0, sizeof(es));
+  jacl_ctx_saved_t saved;
+  jacl_ctx_save(&saved);
+  jacl_context_t *ctx = jacl_ctx_new(NULL);
+  es.ctx = ctx;
+  uint32_t err_line = 0, err_col = 0;
+  jacl_expand_skip_prelude = 1;   /* only user defmacros; prelude macros stay name-handled */
+  const char *err = ast_expand_macros(nodes, count, &mt, &evm->vm.heap,
+                                      &evm->intern_table, arena, &es, &err_line, &err_col);
+  jacl_expand_skip_prelude = 0;
+  jacl_ctx_destroy(ctx);
+  es.ctx = NULL;
+  jacl_ctx_restore(saved);
+  if (err) { fprintf(stderr, "%s\n", err); exit(1); }
+}
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
@@ -372,6 +401,11 @@ int main(int argc, char **argv) {
       }
     }
   }
+
+  /* Macro expansion: rewrite compile-time macro call sites (prelude + user `defmacro`s)
+   * into their expansions, exactly as the reference compiler does before codegen. Runs on
+   * the codegen AST after module concatenation so cross-module macro uses expand too. */
+  expand_macros_inplace(cg_nodes, cg_count, &arena);
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
    * type-driven (unboxed) lowering. */
