@@ -2338,6 +2338,25 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_COMMAND: {
       uint8_t hid = node->data.command.head_id;
 
+      /* Pipe `[| LHS RHS]` threads the LHS result as the first argument of the RHS command
+       * (`[| L [f a]]` → `[f L a]`; `[| L val]` → `[val L]`) — so `!cmd | write-file path`
+       * becomes `write-file <cmd-output> path`. Matches the reference's synthetic-command
+       * lowering (compiler__compile_pipe_op). */
+      if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
+        AstNode *lhs = node->data.command.args[0];
+        AstNode *rhs = node->data.command.args[1];
+        if (rhs->type == AST_COMMAND) {
+          uint32_t oc = rhs->data.command.arg_count;
+          AstNode **na = (AstNode **)calloc(oc + 1, sizeof(AstNode *));
+          na[0] = lhs;
+          for (uint32_t i = 0; i < oc; i++) na[1 + i] = rhs->data.command.args[i];
+          return compile_expr(cx, synth_command(rhs->data.command.head, na, oc + 1));
+        }
+        AstNode **na = (AstNode **)calloc(1, sizeof(AstNode *));
+        na[0] = lhs;
+        return compile_expr(cx, synth_command(rhs, na, 1));
+      }
+
       /* An `extern` declaration is a compile-time signature record (registered in pass 0b);
        * as a statement it produces nil. */
       if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
@@ -3745,6 +3764,24 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       env_define(cx, node->data.use_decl.binding_name, node->data.use_decl.binding_name_len,
                  map, /*is_mut=*/0, /*is_cell=*/0);
       return map;
+    }
+
+    case AST_SHELL_CMD: {
+      /* `!cmd args...` — build argv [name, arg1, ...] and run it through the "exec" capability,
+       * capturing stdout as a string. Ungranted, jacl_exec_capture returns a catchable error. */
+      IrVal empty[] = {cx->sp};
+      IrVal argv = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+      IrVal headv = compile_expr(cx, node->data.shell_cmd.head);
+      if (cx->failed) return 0;
+      { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        IrVal e = compile_expr(cx, node->data.shell_cmd.args[i]);
+        if (cx->failed) return 0;
+        IrVal a[] = {cx->sp, argv, e};
+        argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
+      }
+      IrVal ca[] = {cx->sp, argv};
+      return emit_rt_call(cx, "jacl_exec_capture", ca, 2);
     }
 
     default:
