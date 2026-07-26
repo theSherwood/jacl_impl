@@ -1188,6 +1188,19 @@ static AstNode *synth_word(const char *v, uint32_t len) {
   n->data.lit_string.length = len;
   return n;
 }
+static AstNode *synth_varref(const char *v, uint32_t len) {
+  AstNode *n = calloc(1, sizeof(AstNode));
+  n->type = AST_VAR_REF;
+  n->data.var_ref.name = v;
+  n->data.var_ref.length = len;
+  return n;
+}
+static AstNode *synth_int(int32_t v) {
+  AstNode *n = calloc(1, sizeof(AstNode));
+  n->type = AST_LIT_INT;
+  n->data.lit_int.value = v;
+  return n;
+}
 static AstNode *synth_command(AstNode *head, AstNode **args, uint32_t argc) {
   AstNode *n = calloc(1, sizeof(AstNode));
   n->type = AST_COMMAND;
@@ -3095,10 +3108,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             IrVal ve[] = {cx->sp};
             IrVal rest = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
             for (uint32_t i = (uint32_t)p->fixed_arity; i < argc; i++) {
-              IrVal e = compile_expr(cx, node->data.command.args[i]);
-              if (cx->failed) return 0;
-              IrVal pa[] = {cx->sp, rest, e};
-              rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+              AstNode *an = node->data.command.args[i];
+              if (an->type == AST_SPREAD) {
+                /* `..$xs` at the call site — splice the collection's elements into the rest
+                 * vector rather than pushing the collection itself. */
+                IrVal sv = compile_expr(cx, an->data.spread.expr);
+                if (cx->failed) return 0;
+                IrVal ca[] = {cx->sp, rest, sv};
+                rest = emit_rt_call(cx, "jacl_vec_concat", ca, 3);
+              } else {
+                IrVal e = compile_expr(cx, an);
+                if (cx->failed) return 0;
+                IrVal pa[] = {cx->sp, rest, e};
+                rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+              }
             }
             cargs[1 + p->fixed_arity] = rest;
             emit_trace_line(cx, node->start.line);
@@ -3137,9 +3160,24 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           if (p->is_generator) {
             IrVal fnref = irb_ref_func(cx->f, cx->cur, p->func);
             IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
-            IrVal arg = (argc >= 1) ? compile_expr(cx, node->data.command.args[0])
-                                    : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
-            if (cx->failed) return 0;
+            IrVal arg;
+            if (argc <= 1) {
+              arg = (argc == 1) ? compile_expr(cx, node->data.command.args[0])
+                                : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+              if (cx->failed) return 0;
+            } else {
+              /* Multi-parameter generator: the fiber ABI carries a single resume arg, so pack
+               * the N args into one vector — the fiber's prologue unpacks it into the params. */
+              IrVal empty[] = {cx->sp};
+              IrVal vec = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+              for (uint32_t gi = 0; gi < argc; gi++) {
+                IrVal e = compile_expr(cx, node->data.command.args[gi]);
+                if (cx->failed) return 0;
+                IrVal pa[] = {cx->sp, vec, e};
+                vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+              }
+              arg = vec;
+            }
             IrVal a[] = {cx->sp, fnref64, arg};
             return emit_rt_call(cx, "jacl_gen_new", a, 3);
           }
@@ -3526,6 +3564,24 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_not", a, 2);
       }
 
+      /* `[incr NAME]` / `[incr NAME AMOUNT]` — the prelude's counted-loop step sugar, by name:
+       * increment the mutable binding NAME in place (`set NAME [+ $NAME amount]`, amount = 1). */
+      if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
+          node->data.command.head->data.lit_string.length == 4 &&
+          memcmp(node->data.command.head->data.lit_string.value, "incr", 4) == 0 &&
+          node->data.command.arg_count >= 1 &&
+          node->data.command.args[0]->type == AST_LIT_STRING) {
+        AstNode *namew = node->data.command.args[0];
+        AstNode *vref = synth_varref(namew->data.lit_string.value, namew->data.lit_string.length);
+        AstNode *amount = (node->data.command.arg_count >= 2) ? node->data.command.args[1] : synth_int(1);
+        AstNode **plusargs = (AstNode **)calloc(2, sizeof(AstNode *));
+        plusargs[0] = vref; plusargs[1] = amount;
+        AstNode *plus = synth_command(synth_word("+", 1), plusargs, 2);
+        AstNode **setargs = (AstNode **)calloc(2, sizeof(AstNode *));
+        setargs[0] = namew; setargs[1] = plus;
+        return compile_expr(cx, synth_command(synth_word("set", 3), setargs, 2));
+      }
+
       /* `[assert COND]` — by name (no interned head id): nil or an error (which the
        * statement-position auto-return then propagates). */
       if (node->data.command.head && node->data.command.head->type == AST_LIT_STRING &&
@@ -3786,8 +3842,8 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
 
     default:
       {
-        char msg[64];
-        snprintf(msg, sizeof msg, "unsupported AST node (type %d)", (int)node->type);
+        char msg[96];
+        snprintf(msg, sizeof msg, "unsupported AST node (type %d) at line %u", (int)node->type, node->start.line);
         cx_fail(cx, msg);
       }
       return 0;
@@ -4054,7 +4110,6 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     /* Return annotation (between params and body) of the form `[Stream T]` marks a typed
      * stream: its collected/transformed/filtered results are typed vectors (comma print). */
     int returns_stream = (argc >= 4) && node_is_stream_type(def->data.command.args[argc - 2]);
-    if (gen && arity > 1) { cx_failf(cx, "codegen: generator '%.*s' may take at most one parameter (yet)", pname, plen); return; }
     if (gen && variadic) { cx_failf(cx, "codegen: variadic generator '%.*s' unsupported", pname, plen); return; }
     int nparams = gen ? 1 : arity;
     ptypes[0] = IRB_I64; /* sp */
@@ -4097,9 +4152,20 @@ static void compile_procs(Cx *cx) {
     env_reset(cx);
     capset_reset(cx); capset_scan(cx, body); /* which muts a nested closure captures */
     scope_enter(cx);
-    /* params bind to fn params 1..; for a generator (arity<=1) the param is the arg */
-    for (int k = 0; k < arity; k++)
-      env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+    /* params bind to fn params 1..; a generator's single fiber arg (param 1) carries either the
+     * lone declared param, or — for a multi-param generator — a packed vector the caller built,
+     * which we unpack here into the declared params. */
+    if (p->is_generator && arity > 1) {
+      for (int k = 0; k < arity; k++) {
+        IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32(k));
+        IrVal ga[] = {cx->sp, (IrVal)1, idx};
+        IrVal v = emit_rt_call(cx, "jacl_vec_get_at", ga, 3);
+        env_define(cx, names[k], lens[k], v, /*is_mut=*/0, /*is_cell=*/0);
+      }
+    } else {
+      for (int k = 0; k < arity; k++)
+        env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+    }
 
     /* By-value `[Buf N T]` params: copy the caller's array into a fresh one so callee
      * mutations don't escape (BUFFER_DESIGN.md Tier 2). Non-array args pass through. */
