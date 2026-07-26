@@ -133,6 +133,8 @@ typedef struct {
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
   int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
+  int module_mode;   /* compiling a multi-module program: top-level `mut` globals are boxed so a
+                      * cross-module import shares one cell (deref/reset), matching the reference. */
 } Cx;
 typedef struct SDef SDef;
 
@@ -2810,6 +2812,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             return val;
           }
         }
+        /* A module-scope top-level `mut` becomes one boxed cell, bound both locally and in
+         * the global map, so the defining module and any importer (`use {x}`) share it —
+         * `deref`/`reset` on either side see each other's writes (the reference's module box).
+         * Bound before the plain/captured paths so it wins for a module program's globals. */
+        if (cx->module_mode && hid == HEAD_MUT && cx->at_top_level && is_global_name(cx, name, len)) {
+          IrVal ba[] = {cx->sp, val};
+          IrVal box = emit_rt_call(cx, "jacl_box_new", ba, 2);
+          env_define(cx, name, len, box, /*is_mut=*/1, /*is_cell=*/0);
+          IrVal key = compile_string_literal(cx, name, len);
+          IrVal ga[] = {cx->sp, key, box};
+          (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
+          return box;
+        }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
         if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
@@ -4063,9 +4078,10 @@ static void compile_pending_closures(Cx *cx) {
   }
 }
 
-IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t errcap) {
+IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
+  cx.module_mode = module_mode;
   cx.err = err; cx.errcap = errcap;
 
   IrModule *m = irb_module_new();

@@ -350,7 +350,7 @@ int main(int argc, char **argv) {
   typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(cg_nodes, cg_count, err, sizeof err);
+  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   char *text = irb_to_text(m);
