@@ -567,6 +567,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "svm-exec"
+version = "0.0.0"
+dependencies = [
+ "svm-interp",
+]
+
+[[package]]
 name = "svm-fiber"
 version = "0.0.0"
 dependencies = [
@@ -658,6 +665,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "svm-encode",
+ "svm-exec",
  "svm-fs",
  "svm-interp",
  "svm-ir",

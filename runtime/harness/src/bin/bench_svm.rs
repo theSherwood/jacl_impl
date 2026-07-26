@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use svm_ir::{link, LinkUnit};
+use svm_ir::LinkUnit;
 use svm_run::{Backend, Instance, RunConfig};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -97,8 +97,7 @@ fn build_instance(
     let (text, relocs) = split_relocs(&raw);
     let program = svm_text::parse_module(text).map_err(|e| format!("parse IR: {e:?}"))?;
 
-    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
-    let linked = link(&[
+    let linked = svm_ir::link_with_manifest(&[
         LinkUnit {
             module: rt.module.clone(),
             exports: rt.exports.clone(),
@@ -111,17 +110,22 @@ fn build_instance(
         },
         LinkUnit {
             module: program,
+            exports: vec![("__jacl_entry".to_string(), 0)],
             relocations: relocs,
             ..Default::default()
         },
     ])
     .map_err(|e| format!("link: {e:?}"))?;
-    if !linked.imports.is_empty() {
-        return Err(format!("unresolved imports {:?}", linked.imports));
-    }
-    let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false)
+    let entry = linked
+        .resolve_export("__jacl_entry")
+        .ok_or_else(|| "entry export missing after link".to_string())?;
+    let module = svm_ir::synth_manifest_start(linked, entry, false)
         .map_err(|e| format!("powerbox: {e}"))?;
-    svm_run::instantiate(pb).map_err(|e| format!("instantiate: {e}"))
+    let imports = svm_run::Imports::new()
+        .provide("write", svm_run::HostCap::stdout())
+        .provide("exit", svm_run::HostCap::exit())
+        .provide("stdin", svm_run::HostCap::stdin());
+    svm_run::instantiate_with_imports(module, imports).map_err(|e| format!("instantiate: {e}"))
 }
 
 fn run_once(inst: &Instance, backend: Backend, cfg: &RunConfig) -> Result<Vec<u8>, String> {

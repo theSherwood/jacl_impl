@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use svm_ir::{link, LinkUnit};
+use svm_ir::LinkUnit;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -143,19 +143,31 @@ fn cmd_run(args: &[String]) -> ! {
     eprintln!("jacl-svm: translating runtime…");
     let rt = jacl_runtime_harness::translate_runtime();
     let cat = jacl_runtime_harness::translate_catalog();
-    let entry = (rt.module.funcs.len() + cat.module.funcs.len()) as u32;
-    let linked = link(&[
+    // Retain the runtime's manifest capability imports through link (post-IMPORTS.md-phase-4;
+    // docs/SVM_IMPORT_MIGRATION_ASK.md), wrap the program entry (its func 0) in the paramless
+    // powerbox `_start`, and bind the powerbox names.
+    let linked = svm_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
-        LinkUnit { module: program, relocations: relocs, ..Default::default() },
+        LinkUnit {
+            module: program,
+            exports: vec![("__jacl_entry".to_string(), 0)],
+            relocations: relocs,
+            ..Default::default()
+        },
     ])
     .unwrap_or_else(|e| die(&format!("link: {e:?}")));
-    if !linked.imports.is_empty() {
-        die(&format!("unresolved imports {:?}", linked.imports));
-    }
-    let pb = svm_ir::synth_powerbox_start(linked, entry, 3, false)
+    let entry = linked
+        .resolve_export("__jacl_entry")
+        .unwrap_or_else(|| die("entry export missing after link"));
+    let module = svm_ir::synth_manifest_start(linked, entry, false)
         .unwrap_or_else(|e| die(&format!("powerbox: {e}")));
-    let inst = svm_run::instantiate(pb).unwrap_or_else(|e| die(&format!("instantiate: {e}")));
+    let imports = svm_run::Imports::new()
+        .provide("write", svm_run::HostCap::stdout())
+        .provide("exit", svm_run::HostCap::exit())
+        .provide("stdin", svm_run::HostCap::stdin());
+    let inst = svm_run::instantiate_with_imports(module, imports)
+        .unwrap_or_else(|e| die(&format!("instantiate: {e}")));
 
     // The grant (SVM_FS_DESIGN.md host-policy ladder). Explicit, default-deny.
     let caps: Vec<(&str, svm_run::HostCap)> = match &grant {

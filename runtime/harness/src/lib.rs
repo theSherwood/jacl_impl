@@ -54,13 +54,11 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
 /// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
 pub fn translate_runtime() -> svm_llvm::Translated {
     let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
-    let mut t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime");
-    // The runtime references `write` (jacl_print) → a §7 capability import. Lower it to a
-    // cap.call here so the linked program module verifies (the runtime defines all jacl_*, so
-    // its only import is the cap; resolving leaves the jacl_* exports intact). A program that
-    // never calls print never executes it; one that does is run via `run_powerbox`.
-    t.module = svm_run::resolve_capability_imports(t.module).expect("resolve runtime cap imports");
-    t
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+    // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
+    // through `svm_ir::link_with_manifest` (which retains an import no unit exports), and the host
+    // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call
+    // via the now-deleted `resolve_capability_imports`; the manifest path is the phase-4 model.)
 }
 
 /// Translate the test-only native `extern` catalog (`extern_catalog.c`) as its own
@@ -79,9 +77,7 @@ pub fn translate_catalog() -> svm_llvm::Translated {
 pub fn translate_runtime_heap(heap_bytes: u32) -> svm_llvm::Translated {
     let def = format!("JACL_HEAP_BYTES={heap_bytes}u");
     let bc = compile_driver_defs(&format!("{RUNTIME_DIR}/jaclrt.c"), &[&def]);
-    let mut t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)");
-    t.module = svm_run::resolve_capability_imports(t.module).expect("resolve runtime cap imports");
-    t
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
 }
 
 /// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run
@@ -92,11 +88,10 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
     let bc = compile_driver(&driver_abs);
 
     let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
-    // The runtime now references `write` (jacl_print), so even non-printing programs carry a
-    // §7 capability import; lower it to a (here dead) cap.call before verify. A program that
-    // never calls print never executes it. Programs that DO print are powerbox programs — run
-    // them via `run_powerbox`, not this path.
-    let module = svm_run::resolve_capability_imports(t.module).expect("resolve capability imports");
+    // A non-printing runtime test carries the `write` capability import but never calls it, so the
+    // module runs func 0 directly with the import declared-but-unbound (dead). Programs that DO
+    // print are powerbox programs — run them via `run_powerbox`.
+    let module = t.module;
     svm_verify::verify_module(&module).expect("verify translated IR");
 
     let results = module.funcs[0].results.clone();
@@ -135,7 +130,7 @@ pub fn run_test_jit(driver: &str, n: i32) -> i32 {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
     let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
-    let module = svm_run::resolve_capability_imports(t.module).expect("resolve capability imports");
+    let module = t.module;
     svm_verify::verify_module(&module).expect("verify translated IR");
     let results = module.funcs[0].results.clone();
     let slots = vec![t.entry_sp as i64, n as i64];
