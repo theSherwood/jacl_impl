@@ -225,9 +225,11 @@ int main(int argc, char **argv) {
     return run_old_vm(src);
   }
   const char *src = NULL;
+  const char *file_path = NULL;   /* set in --file mode; enables module-aware compilation */
   if (argc == 3 && !strcmp(argv[1], "--file")) {
     src = read_whole_file(argv[2]);
     if (!src) { fprintf(stderr, "cannot read: %s\n", argv[2]); return 2; }
+    file_path = argv[2];
   } else if (argc == 2) {
     src = source_for(argv[1]);
     if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
@@ -254,6 +256,27 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  /* A program with a top-level `use` is a module program: its error oracle must be the
+   * module-aware compiler (import-graph resolution, circular-import + cross-module type/arity
+   * checks), not the single-file pass, which rejects any `use` as "requires module context". */
+  int is_module_program = 0;
+  for (uint32_t i = 0; i < parse.count; i++)
+    if (parse.nodes[i]->type == AST_USE) { is_module_program = 1; break; }
+
+  if (is_module_program && file_path) {
+    char abs_path[4096];
+    if (!realpath(file_path, abs_path)) {
+      fprintf(stderr, "module not found: %s\n", file_path);
+      return 1;
+    }
+    JaclVM *mvm = jacl_vm_new();
+    ProgramResult prog =
+        jacl_compile_program(abs_path, &mvm->arena, &mvm->intern_table, &mvm->vm.heap);
+    if (prog.error_count > 0) {
+      fprintf(stderr, "%s\n", prog.error_message ? prog.error_message : "compile error");
+      return 1;   /* mvm leaked deliberately: its arena may back prog.error_message */
+    }
+  } else
   /* Static-error oracle: run the old VM's full compiler purely for its compile-time
    * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
    * generator/typed-closure conformance, …). Every corpus program is written for the
