@@ -217,6 +217,34 @@ static const char *find_ast_error(AstNode *n) {
   return NULL;
 }
 
+/* Concatenate a compiled program's modules into one flat top-level form list for SVM codegen.
+ * The reference module model is a single flat global namespace: every module's procs, globals,
+ * and structs share it, disambiguated only by name, and modules execute deps-first (topo order,
+ * root last) into that one env. So a destructuring `use "path" {names}` is a no-op for codegen —
+ * the imported names are already defined by the (concatenated) dependency — and cross-module
+ * calls / shared mutable globals / run-once side-effects all fall out of the concatenation.
+ * (`jacl_compile_program` already validated privacy / unknown-export / arity / type errors.)
+ * AST_USE nodes are dropped; the whole-module binding form (`use "path" name`) is not yet
+ * lowered, so a program using it will fail later in codegen on the undefined `name`. */
+static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *out_count) {
+  ParseResult parses[MODULE_CACHE_MAX];
+  uint32_t n = prog->module_count < MODULE_CACHE_MAX ? prog->module_count : MODULE_CACHE_MAX;
+  uint32_t total = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    LexResult t = lexer_lex(prog->modules[i]->source, arena);
+    parses[i] = parser_parse(t, arena);
+    for (uint32_t j = 0; j < parses[i].count; j++)
+      if (parses[i].nodes[j]->type != AST_USE) total++;
+  }
+  AstNode **out = (AstNode **)arena_alloc(arena, (uint32_t)(total * sizeof(AstNode *)));
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < n; i++)
+    for (uint32_t j = 0; j < parses[i].count; j++)
+      if (parses[i].nodes[j]->type != AST_USE) out[k++] = parses[i].nodes[j];
+  *out_count = total;
+  return out;
+}
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
@@ -259,6 +287,8 @@ int main(int argc, char **argv) {
   /* A program with a top-level `use` is a module program: its error oracle must be the
    * module-aware compiler (import-graph resolution, circular-import + cross-module type/arity
    * checks), not the single-file pass, which rejects any `use` as "requires module context". */
+  AstNode **cg_nodes = parse.nodes;   /* what codegen compiles: the root file, or (for a module */
+  uint32_t cg_count = parse.count;    /* program) all modules' forms concatenated in topo order */
   int is_module_program = 0;
   for (uint32_t i = 0; i < parse.count; i++)
     if (parse.nodes[i]->type == AST_USE) { is_module_program = 1; break; }
@@ -276,6 +306,8 @@ int main(int argc, char **argv) {
       fprintf(stderr, "%s\n", prog.error_message ? prog.error_message : "compile error");
       return 1;   /* mvm leaked deliberately: its arena may back prog.error_message */
     }
+    /* Compile the whole import graph as one flat program (deps first, root last). */
+    cg_nodes = combine_modules(&prog, &arena, &cg_count);
   } else
   /* Static-error oracle: run the old VM's full compiler purely for its compile-time
    * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
@@ -315,10 +347,10 @@ int main(int argc, char **argv) {
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
    * type-driven (unboxed) lowering. */
-  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
+  typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, err, sizeof err);
+  IrModule *m = svm_codegen_program(cg_nodes, cg_count, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   char *text = irb_to_text(m);
