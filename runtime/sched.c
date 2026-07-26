@@ -34,8 +34,16 @@
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
 long __vm_thread_join(int h);
 long __vm_fiber_new(long (*f)(long), void *stack);
-long __vm_fiber_resume(long k, long arg, int *done);
+long __vm_fiber_resume(long k, long arg, int *done);   /* *done = cont.resume status (see JACL_FIBER_*) */
 long __vm_fiber_suspend(long value);
+
+/* svm `cont.resume` status delivered through `__vm_fiber_resume`'s `*done` (svm-interp FIBER_*).
+ * A fiber that blocks on a `memory.wait` (jacl's `sleep`) parks the FIBER, not the vCPU: the
+ * resume reports JACL_FIBER_PARKED and the resumer must re-poll (svm >= vm#442, §3.6 5a). Older
+ * svm only ever wrote 0/1, so the historical `if (done)` test conflated a park with a return. */
+#define JACL_FIBER_SUSPENDED 0   /* voluntary suspend (GC safepoint = value 0, await = target ptr) */
+#define JACL_FIBER_RETURNED  1   /* the fiber ran to completion; the value is its result */
+#define JACL_FIBER_PARKED    3   /* blocked on a VM wait (timeout/notify) — re-poll to make progress */
 long __vm_atomic_add(void *p, long v);
 int  __vm_atomic_add32(void *p, int v);
 int  __vm_atomic_load32(void *p);
@@ -194,6 +202,11 @@ static int32_t  jacl_owner_rr;       /* round-robin owner assignment */
 static int      jacl_pool_handles[JACL_POOL_WORKERS];
 static int      jacl_pool_nthreads;
 static JaclObj *jacl_root_job;
+/* Per-worker list of VM-wait-parked fibers (jobs whose fiber reported JACL_FIBER_PARKED, e.g. a
+ * `sleep`), linked through the job's own next-waiter slot (p[12], unused while VM-parked since
+ * such a job is on no target's await chain). Re-polled by the OWNER worker (jobs are pinned) at
+ * its idle cadence, so a parked fiber never busy-spins and never blocks its sibling jobs. */
+static JaclObj *jacl_blocked_head[JACL_SCHED_MAX_WORKERS];
 
 /* Jobs are ordinary GC objects — no global registry, no cap, no leak. Root coverage, per the
  * Ask 3 contract (docs/SVM_PHASE3_ASKS.md; svm >= vm#217):
@@ -276,8 +289,12 @@ static int resume_job(JaclObj *j, long *out) {
     v = __vm_fiber_resume(job_get(j, 6), arg, &d);
     jacl_gc_task_end();
     arg = 0;
-    if (d) { job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;
-             __vm_atomic_store32(&jp(j)[19], 0); *out = v; return 0; }
+    if (d == JACL_FIBER_RETURNED || d == JACL_FIBER_PARKED) {
+      job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;   /* park $ctx, restore worker's */
+      __vm_atomic_store32(&jp(j)[19], 0);                             /* release the resume claim */
+      if (d == JACL_FIBER_PARKED) { *out = 0; return 3; }             /* blocked on a VM wait → re-poll */
+      *out = v; return 0;                                             /* fiber completed */
+    }
     if (v == 0) continue;                        /* GC safepoint suspend → re-resume after park */
     job_set(j, 22, (long)jacl_ctx_cur); jacl_ctx_cur = saved_ctx;   /* await: park ctx, restore */
     __vm_atomic_store32(&jp(j)[19], 0);          /* await: v = target job ptr */
@@ -287,6 +304,66 @@ static int resume_job(JaclObj *j, long *out) {
 }
 
 /* ---- worker loop ---- */
+
+/* Apply a NON-parked `resume_job` outcome (oc != 3) under slock: complete, re-queue a primed
+ * fiber, or park on an awaited job. Split out of worker_loop so the blocked-fiber re-poll sweep
+ * shares the exact same handling. Wakes the pool if it produced newly-ready work. */
+static void finish_job_outcome(JaclObj *job, int oc, long out) {
+  slock();
+  if (oc == 2) {
+    /* a concurrent claim already owns this job's fiber — nothing to do here */
+  } else if (oc == 0) {
+    release_task_stack((void *)job_get(job, 16));
+    complete_job(job, out);
+  } else if (out == JACL_SCHED_PRIME) {
+    /* Fiber-entry prime: the codegen emits one `suspend(-1)` at a fiber entry so the fiber
+     * completes a full suspend->loop->resume round-trip before its body runs. Without it, a
+     * job fiber whose FIRST real suspend (an await) lands in a non-entry block replays from
+     * the top when the bare scheduler loop re-resumes it. Re-queue immediately with nil. */
+    job_set(job, 10, (long)JACL_NIL);
+    rq_push(job);
+  } else {
+    JaclObj *target = (JaclObj *)out;
+    if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
+      /* self-cycle, or target already finished: re-run us with the result (nil for a cycle) */
+      job_set(job, 10, (target == job) ? (long)JACL_NIL : job_get(target, 8));
+      rq_push(job);
+    } else {
+      job_set(job, 12, job_get(target, 14));    /* park job on target's waiter list */
+      job_set(target, 14, (long)job);
+    }
+  }
+  sunlock();
+  pool_wake();                                   /* newly-ready jobs / shutdown */
+}
+
+/* Re-poll this worker's VM-wait-parked fibers once each (§3.6 5a: the poll fires a passed
+ * deadline / delivers a notify). Fibers that progress leave the list and are handled normally;
+ * still-parked ones stay linked in place. Walked in place so the whole list stays GC-reachable
+ * from `jacl_blocked_head` across a resume's safepoints. Returns 1 if any fiber progressed. */
+static int repoll_blocked(int self) {
+  int progressed = 0;
+  JaclObj *prev = 0, *job = jacl_blocked_head[self];
+  while (job) {
+    JaclObj *next = (JaclObj *)job_get(job, 12);
+    jacl_running_job[self] = job;                 /* root it across the resume */
+    long out;
+    int oc = resume_job(job, &out);
+    if (oc == 3) {                                /* still parked → keep it on the list */
+      prev = job;
+    } else {                                      /* progressed → unlink, then handle */
+      slock();
+      if (prev) job_set(prev, 12, (long)next); else jacl_blocked_head[self] = next;
+      sunlock();
+      job_set(job, 12, 0);
+      finish_job_outcome(job, oc, out);
+      progressed = 1;
+    }
+    job = next;
+  }
+  return progressed;
+}
+
 static void worker_loop(int is_main) {
   int self = jacl_sched_self();
   for (;;) {
@@ -295,6 +372,20 @@ static void worker_loop(int is_main) {
     JaclObj *job = rq_pop(self);
     sunlock();
     if (!job) {
+      /* No ready job. Drive any VM-wait-parked fibers (e.g. sleepers) by re-polling them; if a
+       * whole sweep made no progress, idle one JACL_WAIT_NS tick (lets wall-clock advance toward
+       * their deadlines) before sweeping again — a cooperative wait, never a busy spin. */
+      if (jacl_blocked_head[self]) {
+        int progressed = repoll_blocked(self);
+        if (is_main && __vm_atomic_load32(&jp(jacl_root_job)[0]) == JACL_JOB_DONE) break;
+        if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
+        if (!progressed && jacl_blocked_head[self]) {
+          jacl_running_job[self] = 0;             /* idle: hold no root */
+          int ev = __vm_atomic_load32(&jacl_pool_event);
+          __vm_wait32(&jacl_pool_event, ev, JACL_WAIT_NS);
+        }
+        continue;
+      }
       if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
       jacl_running_job[self] = 0;                 /* idle: hold no root */
       int ev = __vm_atomic_load32(&jacl_pool_event);
@@ -303,33 +394,15 @@ static void worker_loop(int is_main) {
     }
     jacl_running_job[self] = job;                 /* root it before resume (closes the pop→resume window) */
     long out;
-    int oc = resume_job(job, &out);               /* 0=returned, 1=await, 2=skip(claim lost) */
-    slock();
-    if (oc == 2) {
-      /* a concurrent claim already owns this job's fiber — nothing to do here */
-    } else if (oc == 0) {
-      release_task_stack((void *)job_get(job, 16));
-      complete_job(job, out);
-    } else if (out == JACL_SCHED_PRIME) {
-      /* Fiber-entry prime: the codegen emits one `suspend(-1)` at a fiber entry so the fiber
-       * completes a full suspend->loop->resume round-trip before its body runs. Without it, a
-       * job fiber whose FIRST real suspend (an await) lands in a non-entry block replays from
-       * the top when the bare scheduler loop re-resumes it. Re-queue immediately with nil. */
-      job_set(job, 10, (long)JACL_NIL);
-      rq_push(job);
+    int oc = resume_job(job, &out);               /* 0=returned, 1=await, 2=skip, 3=VM-wait-parked */
+    if (oc == 3) {                                /* sleep etc.: defer to the blocked-fiber list */
+      slock();
+      job_set(job, 12, (long)jacl_blocked_head[self]);
+      jacl_blocked_head[self] = job;
+      sunlock();
     } else {
-      JaclObj *target = (JaclObj *)out;
-      if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
-        /* self-cycle, or target already finished: re-run us with the result (nil for a cycle) */
-        job_set(job, 10, (target == job) ? (long)JACL_NIL : job_get(target, 8));
-        rq_push(job);
-      } else {
-        job_set(job, 12, job_get(target, 14));    /* park job on target's waiter list */
-        job_set(target, 14, (long)job);
-      }
+      finish_job_outcome(job, oc, out);
     }
-    sunlock();
-    pool_wake();                                   /* newly-ready jobs / shutdown */
     if (is_main && __vm_atomic_load32(&jp(jacl_root_job)[0]) == JACL_JOB_DONE) break;
   }
 }
@@ -342,7 +415,7 @@ static long worker_thread(long arg) { (void)arg; jacl_gc_worker_register(); work
 static void sched_init(void) {
   jacl_sched_lock = 0; jacl_pool_event = 0; jacl_pool_shutdown = 0;
   jacl_pool_started = 0; jacl_pool_nthreads = 0; jacl_owner_rr = 0;
-  for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) { jacl_rq_head[w] = 0; jacl_rq_count[w] = 0; jacl_running_job[w] = 0; }
+  for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) { jacl_rq_head[w] = 0; jacl_rq_count[w] = 0; jacl_running_job[w] = 0; jacl_blocked_head[w] = 0; }
 }
 
 /* Round-robin owner for a newly spawned job (pinning). pool_ensure has set nthreads. */
@@ -372,6 +445,8 @@ void jacl_sched_mark_roots(void) {
     for (int i = 0; i < jacl_rq_count[w]; i++)
       jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_rq[w][(jacl_rq_head[w] + i) % JACL_RQ_CAP]));
     if (jacl_running_job[w]) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_running_job[w]));
+    for (JaclObj *b = jacl_blocked_head[w]; b; b = (JaclObj *)job_get(b, 12))
+      jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, b));   /* VM-wait-parked fibers awaiting re-poll */
   }
   if (jacl_root_job) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_root_job));
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
@@ -484,7 +559,7 @@ static long jacl_batch_worker(long arg) {
       v = __vm_fiber_resume(task, prime, &done);
       jacl_gc_task_end();
       prime = 0;
-    } while (!done);
+    } while (done != JACL_FIBER_RETURNED);   /* re-poll on GC-safepoint (0) or VM-wait park (3) */
     jacl_batch_result[i] = v;
   }
   jacl_gc_worker_unregister();
