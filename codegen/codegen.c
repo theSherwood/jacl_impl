@@ -3711,6 +3711,42 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       return 0;
     }
 
+    case AST_USE: {
+      /* Whole-module binding `use "path" name`: bind `name` to a runtime map of the module's
+       * exports — procs as zero-capture closures, values via the global map — so `$name->member`
+       * is a map lookup (jacl_field_get) that also works when the binding is passed as a value
+       * (module_binding_runtime). The export names are attached to the node by `combine_modules`
+       * (the reference resolves them at compile time; we materialize the map). Destructuring
+       * imports never reach here — they are dropped during concatenation. */
+      if (!node->data.use_decl.is_module_binding) return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+      IrVal empty[] = {cx->sp};
+      IrVal map = emit_rt_call(cx, "jacl_map_empty", empty, 1);
+      for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
+        const char *en = node->data.use_decl.names[i];
+        uint32_t el = node->data.use_decl.name_lens[i];
+        IrVal key = compile_string_literal(cx, en, el);
+        IrVal val;
+        Proc *pv = proc_lookup(cx, en, el);
+        if (pv && !pv->is_generator) {
+          IrFunc *w = proc_value_wrapper(cx, pv);
+          IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
+          IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+          IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
+          IrVal na[] = {cx->sp, fnref64, nupv};
+          val = emit_rt_call(cx, "jacl_closure_new", na, 3);
+        } else {
+          IrVal gk = compile_string_literal(cx, en, el);
+          IrVal ga[] = {cx->sp, gk};
+          val = emit_rt_call(cx, "jacl_global_get", ga, 2);
+        }
+        IrVal sa[] = {cx->sp, map, key, val};
+        map = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      }
+      env_define(cx, node->data.use_decl.binding_name, node->data.use_decl.binding_name_len,
+                 map, /*is_mut=*/0, /*is_cell=*/0);
+      return map;
+    }
+
     default:
       {
         char msg[64];

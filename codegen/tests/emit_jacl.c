@@ -224,8 +224,28 @@ static const char *find_ast_error(AstNode *n) {
  * the imported names are already defined by the (concatenated) dependency — and cross-module
  * calls / shared mutable globals / run-once side-effects all fall out of the concatenation.
  * (`jacl_compile_program` already validated privacy / unknown-export / arity / type errors.)
- * AST_USE nodes are dropped; the whole-module binding form (`use "path" name`) is not yet
- * lowered, so a program using it will fail later in codegen on the undefined `name`. */
+ * Destructuring `use {names}` nodes are dropped. A whole-module binding `use "path" name` is
+ * kept and its `names[]` filled with the dependency's export names (resolved here, where the
+ * ProgramResult is in scope) so codegen can materialize the export map. */
+static void fill_module_binding_exports(AstNode *use, ProgramResult *prog,
+                                        const char *importer_path, arena_t *arena) {
+  const char *resolved = module__resolve_path(importer_path, use->data.use_decl.path, arena);
+  if (!resolved) return;
+  Module *dep = NULL;
+  for (uint32_t i = 0; i < prog->module_count; i++)
+    if (prog->modules[i]->path && !strcmp(prog->modules[i]->path, resolved)) { dep = prog->modules[i]; break; }
+  if (!dep) return;
+  const char **names = (const char **)arena_alloc(arena, (uint32_t)(dep->export_count * sizeof(char *)));
+  uint32_t *lens = (uint32_t *)arena_alloc(arena, (uint32_t)(dep->export_count * sizeof(uint32_t)));
+  for (uint32_t j = 0; j < dep->export_count; j++) {
+    names[j] = dep->exports[j].name;
+    lens[j] = dep->exports[j].name_len;
+  }
+  use->data.use_decl.names = names;
+  use->data.use_decl.name_lens = lens;
+  use->data.use_decl.name_count = dep->export_count;
+}
+
 static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *out_count) {
   ParseResult parses[MODULE_CACHE_MAX];
   uint32_t n = prog->module_count < MODULE_CACHE_MAX ? prog->module_count : MODULE_CACHE_MAX;
@@ -233,15 +253,23 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
   for (uint32_t i = 0; i < n; i++) {
     LexResult t = lexer_lex(prog->modules[i]->source, arena);
     parses[i] = parser_parse(t, arena);
-    for (uint32_t j = 0; j < parses[i].count; j++)
-      if (parses[i].nodes[j]->type != AST_USE) total++;
+    for (uint32_t j = 0; j < parses[i].count; j++) {
+      AstNode *nd = parses[i].nodes[j];
+      if (nd->type != AST_USE || nd->data.use_decl.is_module_binding) total++;
+    }
   }
   AstNode **out = (AstNode **)arena_alloc(arena, (uint32_t)(total * sizeof(AstNode *)));
   uint32_t k = 0;
   for (uint32_t i = 0; i < n; i++)
-    for (uint32_t j = 0; j < parses[i].count; j++)
-      if (parses[i].nodes[j]->type != AST_USE) out[k++] = parses[i].nodes[j];
-  *out_count = total;
+    for (uint32_t j = 0; j < parses[i].count; j++) {
+      AstNode *nd = parses[i].nodes[j];
+      if (nd->type == AST_USE) {
+        if (!nd->data.use_decl.is_module_binding) continue;   /* destructuring: no-op, drop */
+        fill_module_binding_exports(nd, prog, prog->modules[i]->path, arena);
+      }
+      out[k++] = nd;
+    }
+  *out_count = k;
   return out;
 }
 
