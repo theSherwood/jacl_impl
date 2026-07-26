@@ -197,18 +197,45 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
 /// hand-rolled two-leg diff via `run_with_caps`.
 fn run_fs_granted(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
     let cfg = svm_run::RunConfig::default();
-    let cap = || svm_run::fs::mem_fs_seeded(Vec::new(), vec!["tmp".to_string()]);
+    let caps = || -> Vec<(&str, svm_run::HostCap)> {
+        vec![
+            ("fs", svm_run::fs::mem_fs_seeded(Vec::new(), vec!["tmp".to_string()])),
+            ("exec", svm_run::exec::host_exec(&["echo"])),
+        ]
+    };
     let i = inst
-        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &[("fs", cap())])
+        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &caps())
         .map_err(|e| format!("{e}"))?;
     let j = inst
-        .run_with_caps(svm_run::Backend::Jit, &cfg, &[("fs", cap())])
+        .run_with_caps(svm_run::Backend::Jit, &cfg, &caps())
         .map_err(|e| format!("{e}"))?;
     if i.outcome != j.outcome {
         return Err("interp/JIT outcome diverge (fs-granted)".into());
     }
     if i.stdout != j.stdout {
         return Err("interp/JIT stdout diverge (fs-granted)".into());
+    }
+    Ok(i)
+}
+
+/// The default differential run with the deterministic `exec` capability granted (`host_exec`
+/// runs the real `echo`, whose output is deterministic, so interp == jit holds). A program that
+/// never shells out never resolves `"exec"`, so this matches `run_diff` for the whole non-exec
+/// corpus; a shell-out program (`!cmd`) can run instead of hitting the ungranted catchable error.
+fn run_diff_exec(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
+    let cfg = svm_run::RunConfig::default();
+    let cap = || svm_run::exec::host_exec(&["echo"]);
+    let i = inst
+        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &[("exec", cap())])
+        .map_err(|e| format!("{e}"))?;
+    let j = inst
+        .run_with_caps(svm_run::Backend::Jit, &cfg, &[("exec", cap())])
+        .map_err(|e| format!("{e}"))?;
+    if i.outcome != j.outcome {
+        return Err("interp/JIT outcome diverge".into());
+    }
+    if i.stdout != j.stdout {
+        return Err("interp/JIT stdout diverge".into());
     }
     Ok(i)
 }
@@ -224,7 +251,7 @@ fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_s
     let run = if fs_granted {
         run_fs_granted(&inst)?
     } else {
-        inst.run_diff(&svm_run::RunConfig::default()).map_err(|e| format!("{e}"))?
+        run_diff_exec(&inst)?
     };
     Ok(String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect())
 }
@@ -281,7 +308,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         }
         Err(e) => return Stage::LinkFail(brief(&e)),
     };
-    let run = match inst.run_diff(&svm_run::RunConfig::default()) {
+    let run = match run_diff_exec(&inst) {
         Ok(r) => r,
         Err(e) => return Stage::RunFail(brief(&format!("{e}"))),
     };

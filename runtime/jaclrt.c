@@ -10,4 +10,5 @@
 #include "fiber.c"
 #include "sched.c"
 #include "fscap.c"
+#include "execcap.c"
 #include "io.c"
