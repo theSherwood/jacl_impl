@@ -22,9 +22,10 @@
 //! check (pre-existing svm debug assertion, benign in release).
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -189,18 +190,83 @@ fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
     }
 }
 
+/// The **`interp` capability** — the host backend of `[interpret …]` (runtime/interpcap.c). A
+/// JACL-specific powerbox built on the generic `HOST_FN` escape hatch (`HostCap::host_fn`), so it
+/// needs nothing from svm-run beyond that hook. The guest ships the source (and, for the sandbox
+/// form, the allowed prelude names) in one request buffer; this spawns the emit driver in `--interp`
+/// mode — which runs the source on a reference VM — and writes an 8-byte tag + 8-byte value back
+/// into the guest's 16-byte out buffer. op 0 = default prelude, op 1 = closed-world sandbox.
+fn interp_cap(driver: PathBuf) -> svm_run::HostCap {
+    svm_run::HostCap::host_fn(0, move || {
+        let driver = driver.clone();
+        Box::new(
+            move |op: u32, args: &[i64], mem: Option<&mut dyn svm_interp::GuestMem>| {
+                Ok(vec![interp_dispatch(&driver, op, args, mem)])
+            },
+        ) as svm_interp::HostFn
+    })
+}
+
+fn interp_dispatch(
+    driver: &Path,
+    op: u32,
+    args: &[i64],
+    mem: Option<&mut dyn svm_interp::GuestMem>,
+) -> i64 {
+    if args.len() < 4 {
+        return -1;
+    }
+    let (req_ptr, src_len, names_len, out_ptr) =
+        (args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64);
+    let Some(mem) = mem else { return -1 };
+    let Some(buf) = mem.read_bytes(req_ptr, src_len + names_len) else { return -1 };
+    let (src, names_blob) = buf.split_at(src_len as usize);
+
+    let mut cmd = Command::new(driver);
+    cmd.arg("--interp");
+    if op == 1 {
+        cmd.arg("sandbox");
+        for name in names_blob.split(|&b| b == 0) {
+            if !name.is_empty() {
+                cmd.arg(String::from_utf8_lossy(name).into_owned());
+            }
+        }
+    } else {
+        cmd.arg("default");
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else { return -1 };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(src);
+    }
+    let Ok(out) = child.wait_with_output() else { return -1 };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or("");
+    // `INT <n>` → integer result; anything else (`ERR`, empty) → an error value.
+    let (tag, val): (i64, i64) = match line.strip_prefix("INT ") {
+        Some(rest) => (1, rest.trim().parse().unwrap_or(0)),
+        None => (0, 0),
+    };
+    let mut outb = [0u8; 16];
+    outb[..8].copy_from_slice(&tag.to_le_bytes());
+    outb[8..].copy_from_slice(&val.to_le_bytes());
+    mem.write_bytes(out_ptr, &outb);
+    0
+}
+
 /// The fs-granted analogue of `run_diff`: run the powerbox entry on the tree-walker AND the
 /// JIT with a named `"fs"` capability granted — a `mem_fs` seeded with `dirs=["tmp"]` (the
 /// directory model the guest VFS exposes) — and require the two legs to agree. Each grant
 /// clones the seed fresh (the `HostCap` `make` builder), so the legs can't leak filesystem
 /// state into each other. `run_diff` itself doesn't take extra caps (yet), hence the
 /// hand-rolled two-leg diff via `run_with_caps`.
-fn run_fs_granted(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
+fn run_fs_granted(driver: &PathBuf, inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
     let cfg = svm_run::RunConfig::default();
     let caps = || -> Vec<(&str, svm_run::HostCap)> {
         vec![
             ("fs", svm_run::fs::mem_fs_seeded(Vec::new(), vec!["tmp".to_string()])),
             ("exec", svm_run::exec::host_exec(&["echo"])),
+            ("interp", interp_cap(driver.clone())),
         ]
     };
     let i = inst
@@ -222,14 +288,19 @@ fn run_fs_granted(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
 /// runs the real `echo`, whose output is deterministic, so interp == jit holds). A program that
 /// never shells out never resolves `"exec"`, so this matches `run_diff` for the whole non-exec
 /// corpus; a shell-out program (`!cmd`) can run instead of hitting the ungranted catchable error.
-fn run_diff_exec(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
+fn run_diff_exec(driver: &PathBuf, inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
     let cfg = svm_run::RunConfig::default();
-    let cap = || svm_run::exec::host_exec(&["echo"]);
+    let caps = || -> Vec<(&str, svm_run::HostCap)> {
+        vec![
+            ("exec", svm_run::exec::host_exec(&["echo"])),
+            ("interp", interp_cap(driver.clone())),
+        ]
+    };
     let i = inst
-        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &[("exec", cap())])
+        .run_with_caps(svm_run::Backend::TreeWalk, &cfg, &caps())
         .map_err(|e| format!("{e}"))?;
     let j = inst
-        .run_with_caps(svm_run::Backend::Jit, &cfg, &[("exec", cap())])
+        .run_with_caps(svm_run::Backend::Jit, &cfg, &caps())
         .map_err(|e| format!("{e}"))?;
     if i.outcome != j.outcome {
         return Err("interp/JIT outcome diverge".into());
@@ -244,14 +315,14 @@ fn run_diff_exec(inst: &svm_run::Instance) -> Result<svm_run::Run, String> {
 /// clean run or a failure description (link error / trap / interp≠jit divergence) — the
 /// latter is what a runtime `expect-error` case matches against. `fs_granted` picks the
 /// plain `run_diff` or the [`run_fs_granted`] two-leg.
-fn build_and_run(rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
+fn build_and_run(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
     let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
     let (text, relocs) = split_relocs(&raw);
     let inst = link_instantiate(rt, cat, text, relocs)?;
     let run = if fs_granted {
-        run_fs_granted(&inst)?
+        run_fs_granted(driver, &inst)?
     } else {
-        run_diff_exec(&inst)?
+        run_diff_exec(driver, &inst)?
     };
     Ok(String::from_utf8_lossy(&run.stdout).lines().map(|l| l.trim_end().to_string()).collect())
 }
@@ -267,7 +338,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         }
         // Otherwise the program must surface the error at RUNTIME: run it and look for the
         // expected message in its output (an uncaught error prints `<error: …>`) or in a trap.
-        let score = |fs_granted: bool| match build_and_run(rt, cat, &out.stdout, fs_granted) {
+        let score = |fs_granted: bool| match build_and_run(driver, rt, cat, &out.stdout, fs_granted) {
             Ok(lines) => {
                 if lines.iter().any(|l| l.contains(want_err.as_str())) { Stage::ErrPass } else { Stage::ErrNoFail }
             }
@@ -308,7 +379,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         }
         Err(e) => return Stage::LinkFail(brief(&e)),
     };
-    let run = match run_diff_exec(&inst) {
+    let run = match run_diff_exec(driver, &inst) {
         Ok(r) => r,
         Err(e) => return Stage::RunFail(brief(&format!("{e}"))),
     };
@@ -318,7 +389,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     // Dual-mode gate (SVM_FS_DESIGN.md phase 2): an io_* case must produce the same output
     // with the "fs" capability granted (seeded mem_fs) as without it (guest VFS).
     if case.name.starts_with("io_") {
-        match build_and_run(rt, cat, raw.as_bytes(), /*fs_granted=*/ true) {
+        match build_and_run(driver, rt, cat, raw.as_bytes(), /*fs_granted=*/ true) {
             Ok(glines) if glines == got => {}
             Ok(glines) => {
                 return Stage::WrongOutput(brief(&format!(

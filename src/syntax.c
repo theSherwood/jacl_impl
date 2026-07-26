@@ -1148,6 +1148,14 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     return NULL;
 }
 
+/* Opt-in: when set, ast_expand_macros skips registering the built-in prelude macros
+ * (assert / timeout / not / and / or / incr / \), so only user `defmacro`s are expanded.
+ * The reference VM leaves this 0 (prelude always registered — unchanged behavior); the SVM
+ * codegen driver sets it, because it lowers the prelude macros by name at codegen time (e.g.
+ * `timeout` → jacl_timeout_begin/end, which the race/sleep/error expansion can't match) and
+ * only needs macro expansion for user-defined macros the name handlers can't know about. */
+int jacl_expand_skip_prelude = 0;
+
 const char *ast_expand_macros(AstNode **program, uint32_t count,
                               MacroTable *macros, ThreadHeap *heap,
                               JaclInternTable *intern, arena_t *arena,
@@ -1194,7 +1202,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     static uint32_t         expand__prelude_count   = 0;
     static bool             expand__prelude_ready   = false;
 
-    {
+    if (!jacl_expand_skip_prelude) {
         if (!expand__prelude_ready) {
             /* Use prelude source from generated prelude_source.h */
 

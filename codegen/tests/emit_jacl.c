@@ -273,6 +273,91 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
   return out;
 }
 
+/* Expand compile-time macros in place, matching the reference pipeline (which runs
+ * `ast_expand_macros` after parsing, before codegen). This registers the prelude macros
+ * (assert / timeout / not / and / or / incr / \) AND any user `defmacro`s from the source,
+ * then rewrites every macro call site into its expansion — so the SVM codegen sees the same
+ * post-expansion AST the reference compiler does. User macros (e.g. tour's `unless`) that the
+ * name-based head handlers can't know about are handled here for free. Fatal on a macro error.
+ * A fresh VM supplies the GC heap / intern table the staged macro evaluator needs; the new
+ * template nodes are allocated into `arena` (the same arena backing `nodes`). */
+static void expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+  JaclVM *evm = jacl_vm_new();
+  MacroTable mt;
+  macro_table_init(&mt);
+  ExpandState es;
+  memset(&es, 0, sizeof(es));
+  jacl_ctx_saved_t saved;
+  jacl_ctx_save(&saved);
+  jacl_context_t *ctx = jacl_ctx_new(NULL);
+  es.ctx = ctx;
+  uint32_t err_line = 0, err_col = 0;
+  jacl_expand_skip_prelude = 1;   /* only user defmacros; prelude macros stay name-handled */
+  const char *err = ast_expand_macros(nodes, count, &mt, &evm->vm.heap,
+                                      &evm->intern_table, arena, &es, &err_line, &err_col);
+  jacl_expand_skip_prelude = 0;
+  jacl_ctx_destroy(ctx);
+  es.ctx = NULL;
+  jacl_ctx_restore(saved);
+  if (err) { fprintf(stderr, "%s\n", err); exit(1); }
+}
+
+/* Host side of the `interp` powerbox capability (runtime/interpcap.c). Reads JACL source on
+ * stdin, runs it on a reference VM, and prints the scalar/error result as one line:
+ *   `INT <n>`  — an integer result   |   `ERR` — an error value or an unsupported result type
+ *
+ *   emit_jacl --interp default                 # [interpret SRC], full prelude
+ *   emit_jacl --interp sandbox NAME NAME …     # [interpret PRELUDE SRC], NAMEs = allowed prelude
+ *
+ * The sandbox form reuses the reference `interpret` opcode for faithful closed-world semantics:
+ * it evaluates a wrapper that takes `[interpret-prelude]`, drops every non-core name NOT in the
+ * allow-list, and calls `[interpret $p "<src>"]`. (v1 marshals integer + error results — all the
+ * corpus's interpret sites return; a non-scalar result reports ERR.) */
+static void interp_emit_result(JaclVal v) {
+  if (jacl_is_error(v)) { puts("ERR"); return; }
+  if (jacl_is_i32(v))   { printf("INT %d\n", jacl_as_i32(v)); return; }
+  if (jacl_is_i64(v))   { printf("INT %lld\n", (long long)jacl_as_i64(v)); return; }
+  puts("ERR");
+}
+
+static int run_interp(int argc, char **argv) {
+  /* Slurp the source from stdin. */
+  static char src[1 << 16];
+  size_t n = fread(src, 1, sizeof src - 1, stdin);
+  src[n] = '\0';
+
+  JaclVM *jvm = jacl_vm_new();
+  const char *mode = argc >= 3 ? argv[2] : "default";
+
+  if (!strcmp(mode, "default")) {
+    interp_emit_result(jacl_eval(jvm, src));
+    return 0;
+  }
+
+  /* Sandbox: allowed names are argv[3..]. Build a wrapper that restricts the default prelude to
+   * the allow-list, then interprets the (escaped) source under it. */
+  static char wrap[1 << 17];
+  size_t w = 0;
+  w += (size_t)snprintf(wrap + w, sizeof wrap - w, "mut __jp [interpret-prelude]\n");
+  for (int i = 0; jacl_non_core_builtins[i]; i++) {
+    const char *nm = jacl_non_core_builtins[i];
+    int allowed = 0;
+    for (int a = 3; a < argc; a++) if (!strcmp(nm, argv[a])) { allowed = 1; break; }
+    if (!allowed)
+      w += (size_t)snprintf(wrap + w, sizeof wrap - w,
+                            "set __jp [map-remove $__jp \"%s\"]\n", nm);
+  }
+  w += (size_t)snprintf(wrap + w, sizeof wrap - w, "[interpret $__jp \"");
+  for (size_t i = 0; i < n && w + 2 < sizeof wrap; i++) {
+    char c = src[i];
+    if (c == '\\' || c == '"') wrap[w++] = '\\';
+    wrap[w++] = c;
+  }
+  w += (size_t)snprintf(wrap + w, sizeof wrap - w, "\"]\n");
+  interp_emit_result(jacl_eval(jvm, wrap));
+  return 0;
+}
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
@@ -280,6 +365,8 @@ int main(int argc, char **argv) {
     if (!src) { fprintf(stderr, "unknown case: %s\n", argv[2]); return 2; }
     return run_old_vm(src);
   }
+  /* `--interp <mode> [names…]`: the host backend of the interp capability (reads stdin). */
+  if (argc >= 2 && !strcmp(argv[1], "--interp")) return run_interp(argc, argv);
   const char *src = NULL;
   const char *file_path = NULL;   /* set in --file mode; enables module-aware compilation */
   if (argc == 3 && !strcmp(argv[1], "--file")) {
@@ -372,6 +459,11 @@ int main(int argc, char **argv) {
       }
     }
   }
+
+  /* Macro expansion: rewrite compile-time macro call sites (prelude + user `defmacro`s)
+   * into their expansions, exactly as the reference compiler does before codegen. Runs on
+   * the codegen AST after module concatenation so cross-module macro uses expand too. */
+  expand_macros_inplace(cg_nodes, cg_count, &arena);
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
    * type-driven (unboxed) lowering. */
