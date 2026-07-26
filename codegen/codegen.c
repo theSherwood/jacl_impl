@@ -133,6 +133,8 @@ typedef struct {
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
   int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
+  int module_mode;   /* compiling a multi-module program: top-level `mut` globals are boxed so a
+                      * cross-module import shares one cell (deref/reset), matching the reference. */
 } Cx;
 typedef struct SDef SDef;
 
@@ -2810,6 +2812,19 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
             return val;
           }
         }
+        /* A module-scope top-level `mut` becomes one boxed cell, bound both locally and in
+         * the global map, so the defining module and any importer (`use {x}`) share it —
+         * `deref`/`reset` on either side see each other's writes (the reference's module box).
+         * Bound before the plain/captured paths so it wins for a module program's globals. */
+        if (cx->module_mode && hid == HEAD_MUT && cx->at_top_level && is_global_name(cx, name, len)) {
+          IrVal ba[] = {cx->sp, val};
+          IrVal box = emit_rt_call(cx, "jacl_box_new", ba, 2);
+          env_define(cx, name, len, box, /*is_mut=*/1, /*is_cell=*/0);
+          IrVal key = compile_string_literal(cx, name, len);
+          IrVal ga[] = {cx->sp, key, box};
+          (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
+          return box;
+        }
         /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
          * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
         if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
@@ -3696,6 +3711,42 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       return 0;
     }
 
+    case AST_USE: {
+      /* Whole-module binding `use "path" name`: bind `name` to a runtime map of the module's
+       * exports — procs as zero-capture closures, values via the global map — so `$name->member`
+       * is a map lookup (jacl_field_get) that also works when the binding is passed as a value
+       * (module_binding_runtime). The export names are attached to the node by `combine_modules`
+       * (the reference resolves them at compile time; we materialize the map). Destructuring
+       * imports never reach here — they are dropped during concatenation. */
+      if (!node->data.use_decl.is_module_binding) return irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+      IrVal empty[] = {cx->sp};
+      IrVal map = emit_rt_call(cx, "jacl_map_empty", empty, 1);
+      for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
+        const char *en = node->data.use_decl.names[i];
+        uint32_t el = node->data.use_decl.name_lens[i];
+        IrVal key = compile_string_literal(cx, en, el);
+        IrVal val;
+        Proc *pv = proc_lookup(cx, en, el);
+        if (pv && !pv->is_generator) {
+          IrFunc *w = proc_value_wrapper(cx, pv);
+          IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
+          IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+          IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
+          IrVal na[] = {cx->sp, fnref64, nupv};
+          val = emit_rt_call(cx, "jacl_closure_new", na, 3);
+        } else {
+          IrVal gk = compile_string_literal(cx, en, el);
+          IrVal ga[] = {cx->sp, gk};
+          val = emit_rt_call(cx, "jacl_global_get", ga, 2);
+        }
+        IrVal sa[] = {cx->sp, map, key, val};
+        map = emit_rt_call(cx, "jacl_map_set", sa, 4);
+      }
+      env_define(cx, node->data.use_decl.binding_name, node->data.use_decl.binding_name_len,
+                 map, /*is_mut=*/0, /*is_cell=*/0);
+      return map;
+    }
+
     default:
       {
         char msg[64];
@@ -4063,9 +4114,10 @@ static void compile_pending_closures(Cx *cx) {
   }
 }
 
-IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, char *err, size_t errcap) {
+IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
+  cx.module_mode = module_mode;
   cx.err = err; cx.errcap = errcap;
 
   IrModule *m = irb_module_new();

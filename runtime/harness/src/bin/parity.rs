@@ -357,6 +357,28 @@ fn main() {
             Some(Case { name, path: p, expects, expect_error })
         })
         .collect();
+    // Module-system tests: test/jacl/modules/<name>/main.jacl (+ dependency files). The emit
+    // driver compiles them module-aware (relative `use` imports resolved from main.jacl's dir),
+    // so each subdir is one case keyed by its name; its oracle lives in main.jacl.
+    let modules_dir = format!("{ROOT}/test/jacl/modules");
+    if let Ok(entries) = std::fs::read_dir(&modules_dir) {
+        for e in entries.flatten() {
+            let sub = e.path();
+            let main = sub.join("main.jacl");
+            if !main.exists() {
+                continue;
+            }
+            let Some(name) = sub.file_name().and_then(|s| s.to_str()).map(String::from) else { continue };
+            if let Some(f) = &filter {
+                if !name.contains(f.as_str()) {
+                    continue;
+                }
+            }
+            let Ok(src) = std::fs::read_to_string(&main) else { continue };
+            let (expects, expect_error) = parse_expects(&src);
+            cases.push(Case { name, path: main, expects, expect_error });
+        }
+    }
     cases.sort_by(|a, b| a.name.cmp(&b.name));
     eprintln!("[parity] {} cases, timeout {timeout}s each", cases.len());
 

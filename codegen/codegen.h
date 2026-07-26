@@ -26,7 +26,7 @@ struct AstNode;
  *
  * Returns the module (caller frees with irb_module_free), or NULL on an unsupported
  * construct — in which case a message is written to `err` (when `errcap > 0`). */
-IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count,
+IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode,
                                char *err, size_t errcap);
 
 #endif /* JACL_CODEGEN_H */
