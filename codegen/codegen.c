@@ -3671,6 +3671,28 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
         return emit_rt_call(cx, "jacl_panic", a, 2);
       }
 
+      /* `[interpret SRC]` / `[interpret PRELUDE SRC]` — metacircular eval. There is no JACL
+       * compiler in the AOT guest, so this resolves the "interp" host capability and ships the
+       * source (and, for the 2-arg form, the allowed-name set) to the embedder. */
+      if (hid == HEAD_INTERPRET) {
+        if (node->data.command.arg_count == 1) {
+          IrVal src = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, src};
+          return emit_rt_call(cx, "jacl_interpret1", a, 2);
+        }
+        if (node->data.command.arg_count == 2) {
+          IrVal prelude = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal src = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, prelude, src};
+          return emit_rt_call(cx, "jacl_interpret2", a, 3);
+        }
+        cx_fail(cx, "interpret expects 1 or 2 arguments");
+        return 0;
+      }
+
       /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
        * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
       {
@@ -3728,6 +3750,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},
           {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
           {HEAD_LINES,      "jacl_lines",      1},
+          {HEAD_INTERPRET_PRELUDE, "jacl_interpret_prelude", 0},
         };
         /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
         if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&

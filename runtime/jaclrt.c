@@ -11,4 +11,5 @@
 #include "sched.c"
 #include "fscap.c"
 #include "execcap.c"
+#include "interpcap.c"
 #include "io.c"
