@@ -18,3 +18,4 @@ svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
 svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
 svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
 svm-run    = { path = "../../vendor/svm/crates/svm-run" }
+svm-encode = { path = "../../vendor/svm/crates/svm-encode" }
