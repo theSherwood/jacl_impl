@@ -1,0 +1,83 @@
+name: Deploy Playground to Pages
+
+# NOTE (SVM migration): this builds the playground on the OLD backend.
+# build_wasm.sh compiles src/jacl.c (embed.c -> jacl_eval), i.e. the
+# in-tree compiler+VM. The new SVM backend (codegen/ + runtime/ +
+# vendor/svm) has no wasm embedding yet, so the playground can't run on
+# it. Retarget the wasm build here once an SVM->wasm path exists.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Grant GITHUB_TOKEN the permissions required for Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build playground
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      # Produces build_wasm/jacl.js + build_wasm/jacl.wasm.
+      - name: Build WASM module
+        run: bash build_wasm.sh
+
+      # Symlinks wasm/, bundles the CodeMirror editor via esbuild
+      # (npm ci on first run), and regenerates examples.json from
+      # test/jacl/*.jacl. Produces demo/dist/playground.js.
+      - name: Build demo assets
+        run: bash build_demo.sh
+        working-directory: demo
+
+      # Assemble a self-contained site directory with real files (the
+      # demo/wasm/* entries are symlinks into build_wasm/, which don't
+      # survive artifact upload — copy the real files into place).
+      - name: Assemble site
+        run: |
+          rm -rf _site
+          mkdir -p _site/wasm _site/dist
+          cp demo/index.html      _site/index.html
+          cp demo/examples.json   _site/examples.json
+          cp demo/dist/playground.js _site/dist/playground.js
+          cp build_wasm/jacl.js   _site/wasm/jacl.js
+          cp build_wasm/jacl.wasm _site/wasm/jacl.wasm
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
