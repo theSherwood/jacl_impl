@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc libffi-dev pkg-config
+
+      - name: Build and run tests
+        # build.sh compiles every test then runs it, exiting non-zero on
+        # any failure. --parallel uses all cores. The outer `timeout`
+        # guards against the chaos suite livelocking on rare seeds
+        # (see AGENTS.md); a timeout surfaces as a CI failure, which is
+        # what we want.
+        run: timeout 900 ./build.sh --parallel
+
+  workflow-sync:
+    name: Workflow sync check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The privileged copy of each workflow lives in .github/workflows/,
+      # but .github/workflows_src/ is the source of truth (see its
+      # README). This guards against the two drifting: if someone edits a
+      # source file but forgets to promote it (or vice versa), fail with a
+      # pointer to the fix. Only *.yml is compared; README.md is ignored.
+      - name: Verify .github/workflows matches workflows_src
+        run: |
+          status=0
+          for src in .github/workflows_src/*.yml; do
+            name=$(basename "$src")
+            dst=".github/workflows/$name"
+            if [ ! -f "$dst" ]; then
+              echo "::error file=$src::$dst is missing — promote it from workflows_src/"
+              status=1
+            elif ! diff -u "$dst" "$src" >/dev/null; then
+              echo "::error file=$src::$dst is out of sync with $src"
+              diff -u "$dst" "$src" || true
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo ""
+            echo "Workflows in .github/workflows/ have drifted from .github/workflows_src/."
+            echo "Re-run the copy documented in .github/workflows_src/README.md and commit."
+          fi
+          exit $status
