@@ -92,8 +92,30 @@ returned for the link step).
 codegen/selfhost/macro_staging/run_macro_body_test.sh   # macro body -> __jacl_macro
 ```
 
-Next (Phase 3 integration): a C wrapper (`stdin` arg-syntax → `syn_rt` decode → call
-`__jacl_macro` → `syn_rt` encode → `stdout`), linked with the runtime + the codegen'd body
-and run on SVM via the on-ramp — the first point the whole chain executes and produces a
-real staged expansion. Then `~@` splicing, the hygiene ABI (Phase 4), the staging pipeline
-behind `JACL_STAGE_ON_SVM` (Phase 5), and dropping the legacy VM (Phase 6).
+## Phase 3 — end-to-end on real SVM
+
+`run_svm_e2e.sh` compiles a runtime `syntax-quote` program with the SVM codegen and
+**runs it on SVM** (`jacl_svm --interp`), asserting it builds the expected plain-data
+syntax vec. Proven on the real engine:
+
+```
+print syntax-quote [+ 1 2]
+  ->  [vec 0 0 0 1 [vec 3 0 0 "+"] [vec 1 0 0 1] [vec 1 0 0 2]]
+
+print syntax-quote [if [== 1 2] {} { foo }]
+  ->  [vec 0 0 0 26 [vec 3 0 0 "if"] [vec 0 0 0 10 [vec 3 0 0 "=="] …] [vec 5 0 0 0] [vec 5 0 0 0 …]]
+```
+
+Exactly the `syn_rt` schema — commands, nested commands, string heads, empty/non-empty
+blocks (`5` = BLOCK), literals. So the codegen `syntax-quote` lowering + jaclrt vec
+construction execute correctly on the real engine. (`run_svm_e2e.sh` is heavy — builds the
+Rust harness + translates the runtime — and skips cleanly without cargo/gcc/clang.)
+
+```sh
+codegen/selfhost/macro_staging/run_svm_e2e.sh   # syntax-quote runs on real SVM
+```
+
+Remaining Phase 3 integration (full staged macro): a wrapper that reads arg-syntax on
+`stdin` (`syn_rt` decode), calls `__jacl_macro`, and encodes the result to `stdout` — so a
+real macro body runs on SVM with real args. Then `~@` splicing, the hygiene ABI (Phase 4),
+the staging pipeline behind `JACL_STAGE_ON_SVM` (Phase 5), and dropping the legacy VM (Phase 6).
