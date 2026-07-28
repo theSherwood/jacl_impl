@@ -17,22 +17,23 @@ runtime emits. The sole reason `compile_module` returns `None` is a single
 module for both `print "hi"` and a generator program compiles with zero per-op
 declines.
 
-That reframes the work as a **layered gap list** discovered one at a time, not the cap
-ops the spike named:
+That was a **layered gap list**, discovered one at a time, not the cap ops the spike
+named — and it is now **fully closed** by two small bytecode-engine slices:
 
-1. **Compile-time:** the `gc.roots + thread` seam veto (declines the module).
-2. **Runtime (veto lifted):** `vcpu.tls` (`VcpuTlsGet`) — the fused bytecode engine had
-   no `Op` for it and trapped `Malformed`. **Now fixed** (see "Op::VcpuTlsGet/Set").
-3. **…nothing.** With `vcpu.tls` lowered *and* the veto lifted, `print "hi"` **and** a
-   generator now run to completion on the bytecode engine — single- **and** multi-vCPU —
-   with correct output (`"hi\n"`, `"1\n2\n"`). **There is no gate #3 for this class.**
+1. **Compile-time:** the `gc.roots + thread` seam veto (declined the module). **Removed**
+   — `gc.roots` is per-vCPU conservative root enumeration (caller + the run-shared fiber
+   registry), a sound superset of the tree-walker (`tw ⊆ bc`); cross-thread GC soundness
+   is the guest's quiesce, not this op's. See "the veto".
+2. **Runtime:** `vcpu.tls` (`VcpuTlsGet`) — the fused bytecode engine had no `Op` for it
+   and trapped `Malformed`. **Lowered** (see "Op::VcpuTlsGet/Set").
+3. **…nothing.**
 
-So after the `vcpu.tls` slice, the **only** remaining blocker for simple programs is the
-`gc.roots + thread` compile-time veto — and lifting it needs a *sound* fix (a bytecode
-`gc.roots` that scans every vCPU, matching the tree-walker), not just the env-gated
-bypass the probe uses. The multi-vCPU path is the right execution *destination* but was
-**not** a shortcut — it shares the same fused-op coverage (both engines trapped
-identically before the fix, and both run green after).
+**End state: the linked JACL runtime compiles and runs on the wasm-safe bytecode engine.**
+With both slices in the vendored svm, `bytecode::compile_module` **accepts** the linked
+module (no env hack) and `jacl_svm run --bytecode` prints `hi` / `1\n2` on the bytecode
+engine — single- **and** multi-vCPU. The multi-vCPU path was the right execution
+*destination* but was **not** a shortcut: it shares the same fused-op coverage (both
+engines failed identically before the fix, both run green after).
 
 ## Method
 
@@ -135,55 +136,56 @@ engine`): `compile_inst` now lowers `Inst::VcpuTlsGet`/`Set` to dedicated
 spawned thread to its index), and a differential test (`crates/svm-interp/tests/vcpu_tls.rs`)
 pins it to the tree-walker. Full svm-interp suite green.
 
-Re-running `probe_svmb` with that engine change and the veto lifted:
+## The veto — removed, soundly
+
+The `gc.roots + thread` term of `compile_module_with`'s seam veto is dropped (vm repo,
+`interp: admit gc.roots + thread on the bytecode engine`). It was over-conservative:
+`gc.roots` is per-vCPU conservative root enumeration, and the bytecode `step_vcpu` scans
+the caller's continuation **plus the run-shared fiber registry** — exactly the
+tree-walker's documented scope (`crates/svm/tests/gc_roots.rs`), a sound superset
+(`tw ⊆ bc`, GC.md §3.2). Neither engine scans a *sibling thread's* own frames, and neither
+has to: cross-thread GC soundness is the guest's stop-the-world quiesce
+(`crates/svm/tests/gc_quiesce.rs`), and JACL's roots live in the migratable fibers the
+shared registry covers. `drive_parallel` uses a per-thread fiber set, so there is no
+cross-thread race. New tests (`crates/svm/tests/bytecode_gc_roots.rs`) pin that `gc.roots +
+thread` and the JACL-shaped `gc.roots + thread + parked-fiber` run natively and stay sound;
+full svm-interp + svm gc/concurrency suites green.
+
+## End state — JACL runs on the wasm-safe engine
+
+With both slices in the vendored svm (submodule bumped to the PR head), no env hack:
 
 ```
-imports: ["write"]
+$ bash runtime/build.sh && cargo run --bin jacl_svm -- run --bytecode prog.jacl
+# print "hi"  → hi
+# generator   → 1 / 2
+$ cargo run --bin probe_svmb -- prog.jacl
+bytecode::compile_module (all-or-nothing): ACCEPTED ✓
 single-vCPU  (compile_and_run_with_host):  Ok([I64(0)])   stdout="hi\n"
 multi-vCPU   (drive_parallel):             Ok([I64(0)])   stdout="hi\n"
 ```
 
-and the generator prints `"1\n2\n"` on both engines. **The gap list bottoms out — no
-gate #3.** Once `vcpu.tls` is lowered, the only thing standing between the bytecode
-engine and a running JACL program is the compile-time `gc.roots + thread` veto.
+## Remaining work (beyond the engine gates, now closed)
 
-## Recommended next steps (revised)
-
-1. **Sound-lift the `gc.roots + thread` veto — the sole remaining blocker.** The probe
-   lifts it with an env-gated bypass, which is unsound for a *real* multi-worker run: the
-   bytecode `gc.roots` driver scans only the calling vCPU's continuation, so a sibling
-   worker's roots go unscanned. The proper fix is a bytecode `gc.roots` that scans **every**
-   vCPU (the tree-walker's behaviour), after which the veto term can be removed. For the
-   **browser tier specifically** — single-OS-thread cooperative, one worker — there are no
-   siblings, so a narrower "single-worker ⇒ sound" lift may suffice; either way it is one
-   focused TCB slice, differentially tested. This unblocks the whole simple-program class.
-
-2. **The multi-vCPU driver is the right execution *destination*** (it services threads and
-   scans all-vCPU `gc.roots`), but it was **not** a shortcut — before the `vcpu.tls` fix
-   both engines trapped identically; after it, both run green. Route JACL through it once
-   the veto is sound.
-
-3. **Independently useful:** narrow `dead_func_elim`'s indirect-dispatch gate. It bails on
-   `cont.new`/`ref.func`, whose targets are statically known; only true `call_indirect`
-   needs the conservative bail. Letting DCE fire shrinks the linked module and helps the
-   `svm-wasm-jit` mixed tier regardless of the veto.
-
-> **Reproduction note.** The `vcpu.tls` lowering lives on the vm repo's
-> `claude/jacl-svm-backend-migration-1hulv3` branch; the `vendor/svm` submodule here still
-> pins the pre-change commit, so reproducing the "runs green" rows needs a vendored svm that
-> includes that commit (plus the env-gated veto lift). Bumping the submodule pin is a
-> follow-up once the veto is soundly lifted.
+1. **Multi-OS-thread fiber-migration `vcpu.tls` re-seed.** A fiber resumed on a *different*
+   worker under `drive_parallel` work-stealing should read that worker's TLS word; today the
+   `Vm.tls` seed follows creation, not migration. Not exercised by the browser tier
+   (single-OS-thread cooperative, worker 0), so every browser read is a faithful `0`.
+2. **The rest of the browser story** (unchanged from `SVM_BROWSER_PLAN.md`): the cdylib
+   entry, Emscripten frontend→IR, `print`→JS, Pages CI. The *engine* blocker this doc chased
+   is closed; that work is integration.
+3. **Independently useful:** narrow `dead_func_elim`'s indirect-dispatch gate (bails on
+   `cont.new`/`ref.func`, whose targets are statically known) so DCE prunes the linked module
+   and helps the `svm-wasm-jit` mixed tier.
 
 ## Reproduction
 
 ```sh
 bash runtime/build.sh                                   # -> runtime/build/jaclrt.svm
 cd runtime/harness
-cargo run --bin probe_svmb -- /path/to/prog.jacl        # measures the linked module
-cargo run --bin jacl_svm -- run --bytecode prog.jacl    # exercise the wasm-safe engine
+cargo run --bin probe_svmb -- /path/to/prog.jacl        # measures + runs the linked module
+cargo run --bin jacl_svm -- run --bytecode prog.jacl    # runs on the wasm-safe engine
 ```
 
-The "veto lifted → ACCEPTED" and "→ `Malformed`" rows require temporarily guarding
-the seam-veto terms in `vendor/svm/crates/svm-interp/src/bytecode.rs`
-(`compile_module_with`); `probe_svmb` and `jacl_svm --bytecode` report the result
-unmodified.
+No engine patch or env var is needed: the vendored svm carries the `vcpu.tls` lowering and
+the veto removal.

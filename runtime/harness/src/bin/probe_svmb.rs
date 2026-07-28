@@ -10,11 +10,10 @@
 //!
 //!   probe_svmb <prog.jacl>
 //!
-//! Findings + method: docs/SVM_BROWSER_SPIKE_FINDINGS.md. To reproduce the
-//! "veto lifted -> compile_module ACCEPTED" measurement, temporarily guard the
-//! `has_gc && has_thread` (and sibling) terms of `compile_module_with`'s seam veto
-//! in `vendor/svm/crates/svm-interp/src/bytecode.rs` and re-run; this probe reports
-//! the result unmodified.
+//! Findings + method: docs/SVM_BROWSER_SPIKE_FINDINGS.md. As of the `vcpu.tls` lowering
+//! and the `gc.roots + thread` veto removal (vendored svm), a linked JACL program now
+//! **compiles and runs on the bytecode engine** with no engine patch — the EXECUTION
+//! section below reports `compile_module ACCEPTED` and correct stdout directly.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -275,11 +274,11 @@ fn powerbox_host(m: &Module) -> svm_interp::Host {
 
 /// Run `_start` (func 0) on the single-vCPU engine vs the multi-vCPU cooperative/parallel driver
 /// (`drive_parallel`, the native stand-in for the browser's per-vCPU Workers), both over a real
-/// powerbox with `write` bound to a captured stdout. The single-vCPU `run` has no scheduler, so a
-/// `thread.spawn`/`gc.roots` escape traps `Malformed`; `drive_parallel` services those. Requires the
-/// seam veto to be lifted (env `PROBE_LIFT_VETOS=1`), else both decline to `None` at compile.
+/// powerbox with `write` bound to a captured stdout. With the vendored svm carrying the `vcpu.tls`
+/// lowering and the `gc.roots + thread` veto removal, both engines run a linked JACL program to
+/// completion (correct stdout); before those two slices they returned `None` / trapped `Malformed`.
 fn run_compare(m: &Module) {
-    println!("\n===== EXECUTION: single-vCPU vs multi-vCPU (powerbox bound, veto must be lifted) =====");
+    println!("\n===== EXECUTION: single-vCPU vs multi-vCPU (powerbox bound) =====");
     println!("imports: {:?}", m.imports.iter().map(|i| i.name.as_str()).collect::<Vec<_>>());
 
     let mut host = powerbox_host(m);
@@ -368,7 +367,7 @@ fn run_compare(m: &Module) {
 
 fn describe(r: &Option<Result<Vec<Value>, svm_interp::Trap>>) -> String {
     match r {
-        None => "None (compile declined — is PROBE_LIFT_VETOS set?)".into(),
+        None => "None (compile declined — a remaining seam veto fired)".into(),
         Some(Ok(v)) => format!("Ok({v:?})"),
         Some(Err(t)) => format!("Trap::{t:?}"),
     }
