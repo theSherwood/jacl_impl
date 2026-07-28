@@ -38,6 +38,7 @@ const jaclHighlight = HighlightStyle.define([
   { tag: t.operator,                 color: "#905" },
 ]);
 import { JaclVM, RunResult } from "./jacl-wasm";
+import { SvmJaclRunner } from "./svm-jacl-wasm";
 import { initSplitter } from "./splitter";
 
 // --- DOM refs ---
@@ -146,6 +147,37 @@ function setSource(view: EditorView, text: string) {
 // --- VM + run pipeline ---
 let vm: JaclVM | null = null;
 
+// --- SVM backend (the wasm-safe bytecode engine via the svm-browser cdylib) ---
+// Opt-in via the "Engine" toggle. It runs **precompiled** example `.svmb` blobs (built by
+// demo/svm/build_assets.sh); running edited source needs the in-browser frontend, so when the
+// current source isn't an unedited manifest example we fall back to the Classic VM with a note.
+let useSvm = false;
+let svmRunner: SvmJaclRunner | null = null;
+let svmManifest: { name: string; svmb: string }[] | null = null;
+/** The example currently loaded verbatim in the editor (cleared once the user edits it). */
+let currentExample: Example | null = null;
+
+async function ensureSvm(): Promise<SvmJaclRunner | null> {
+  if (svmRunner && svmManifest) return svmRunner;
+  try {
+    if (!svmManifest) {
+      const resp = await fetch("svm/svmb/manifest.json");
+      svmManifest = resp.ok ? await resp.json() : [];
+    }
+    if (!svmRunner) svmRunner = await SvmJaclRunner.create("wasm/svm_browser.wasm");
+    return svmRunner;
+  } catch {
+    return null; // assets not built / not shipped → caller falls back to Classic
+  }
+}
+
+/** The manifest entry for the current source iff it is an *unedited* precompiled example. */
+function svmEntryForCurrentSource(source: string): { name: string; svmb: string } | null {
+  if (!currentExample || !svmManifest) return null;
+  if (source !== currentExample.code) return null; // edited → not precompiled
+  return svmManifest.find((e) => e.name === currentExample!.name) ?? null;
+}
+
 async function initVM(): Promise<void> {
   try {
     vm = await JaclVM.create();
@@ -172,6 +204,10 @@ function handleRun() {
   }
 
   setStatus("Running...", "");
+  if (useSvm) {
+    void runOnSvm(source);
+    return;
+  }
   // Double-rAF so the "Running..." status paints before we block on eval.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     try {
@@ -206,6 +242,40 @@ function displayResult(result: RunResult, elapsedMs: number) {
   }
   const ms = elapsedMs.toFixed(1);
   setStatus(result.isError ? `Error (${ms}ms)` : `Done (${ms}ms)`, result.isError ? "error" : "ok");
+}
+
+/** Run the current source on the SVM backend, if it is an unedited precompiled example. */
+async function runOnSvm(source: string) {
+  const runner = await ensureSvm();
+  const entry = runner ? svmEntryForCurrentSource(source) : null;
+  if (!runner || !entry) {
+    // No SVM assets, or the source is edited / not precompiled: fall back to the Classic VM.
+    output.textContent = "";
+    const note = document.createElement("span");
+    note.className = "placeholder";
+    note.textContent = runner
+      ? "SVM backend runs precompiled examples — select one (unedited) to run it on the wasm-safe engine. Running on the Classic VM instead."
+      : "SVM assets not built (run demo/svm/build_assets.sh). Running on the Classic VM instead.";
+    output.appendChild(note);
+    if (vm) {
+      const t0 = performance.now();
+      displayResult(vm.runFresh(source), performance.now() - t0);
+    }
+    return;
+  }
+  try {
+    const t0 = performance.now();
+    const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
+    const result: RunResult = runner.runSvmb(bytes);
+    displayResult(result, performance.now() - t0);
+  } catch (e) {
+    output.textContent = "";
+    const span = document.createElement("span");
+    span.className = "error-line";
+    span.textContent = "SVM run failed: " + (e instanceof Error ? e.message : String(e));
+    output.appendChild(span);
+    setStatus("Crashed", "error");
+  }
 }
 
 function setStatus(text: string, kind: "ok" | "error" | "") {
@@ -289,6 +359,7 @@ function renderDropdown(filter: string) {
 
 function selectExample(ex: Example) {
   setSource(view, ex.code);
+  currentExample = ex; // remember it so the SVM backend can run its precompiled .svmb
   searchInput.value = "";
   closeDropdown();
   view.focus();
@@ -328,6 +399,15 @@ clearBtn.addEventListener("click", () => {
   setStatus("Ready", "ok");
 });
 vimToggleBtn.addEventListener("click", () => setVim(!vimEnabled, view));
+
+const engineToggleBtn = document.getElementById("engine-toggle") as HTMLButtonElement;
+engineToggleBtn.addEventListener("click", () => {
+  useSvm = !useSvm;
+  engineToggleBtn.textContent = useSvm ? "Engine: SVM" : "Engine: Classic";
+  engineToggleBtn.classList.toggle("btn-primary", useSvm);
+  if (useSvm) void ensureSvm(); // warm the cdylib + manifest so the first Run is instant
+  setStatus(useSvm ? "SVM backend (precompiled examples)" : "Ready", "ok");
+});
 
 searchInput.addEventListener("focus", openDropdown);
 searchInput.addEventListener("input", () => {
