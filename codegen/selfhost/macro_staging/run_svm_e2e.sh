@@ -16,8 +16,8 @@ mode="${1:-check}"; fail=0
 for prog in "$DIR"/corpus_svm/*.jacl; do
   n="$(basename "$prog" .jacl)"
   got="$("$BIN" run "$prog" --interp 2>/dev/null | tail -1)"
-  if [ "$mode" = "--update" ]; then printf '%s\n' "$got" > "$DIR/golden_svm/$n.out"; echo "  updated $n"; continue; fi
-  want="$(cat "$DIR/golden_svm/$n.out" 2>/dev/null || true)"
+  if [ "$mode" = "--update" ]; then printf '%s\n' "$got" > "$DIR/golden_svm/$n.golden"; echo "  updated $n"; continue; fi
+  want="$(cat "$DIR/golden_svm/$n.golden" 2>/dev/null || true)"
   if [ "$got" = "$want" ]; then echo "  PASS  $n  ->  $got"; else echo "  FAIL  $n" >&2; echo "    got:  $got" >&2; echo "    want: $want" >&2; fail=1; fi
 done
 [ "$mode" = "--update" ] && { echo "golden regenerated."; exit 0; }
