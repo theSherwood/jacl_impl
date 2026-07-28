@@ -74,5 +74,26 @@ Hygiene note: `scope_mark` is currently baked from the template node (correct fo
 top-level `syntax-quote`, scope_mark 0). A staged macro needs the *runtime* expansion
 mark instead — the Phase 4 hygiene ABI.
 
-Next bricks: `~@` splicing; the macro-body module entry (Phase 3, so the lowering runs on
-SVM and returns a syntax value); then the staging pipeline behind `JACL_STAGE_ON_SVM`.
+## Phase 3 — macro-body module entry (codegen half)
+
+`svm_codegen_macro_body(names, lens, nparams, body, …)` (in `codegen/codegen.c`) compiles
+one macro body to a module with a single `__jacl_macro(sp, args…) → syntax-vec` function:
+the params bind the macro's parameters, and the body lowers normally — `syntax-quote`
+becomes vec construction, `~unquote` holes read the params (incoming syntax values). No
+entry/scheduler; a host wrapper will provide `_start`, and `__jacl_macro` resolves by name
+at link time (codegen output carries no named exports in its IR text — the func index is
+returned for the link step).
+
+| File | Role |
+|---|---|
+| `macro_body_test.c` + `run_macro_body_test.sh` | Compiles `twice {x} = [+ ~x ~x]` and checks the structure: exactly 2 `jacl_vec_empty` (the constant nodes command + `"+"`), while the two `~x` holes splice param `x` rather than build constant vecs. |
+
+```sh
+codegen/selfhost/macro_staging/run_macro_body_test.sh   # macro body -> __jacl_macro
+```
+
+Next (Phase 3 integration): a C wrapper (`stdin` arg-syntax → `syn_rt` decode → call
+`__jacl_macro` → `syn_rt` encode → `stdout`), linked with the runtime + the codegen'd body
+and run on SVM via the on-ramp — the first point the whole chain executes and produces a
+real staged expansion. Then `~@` splicing, the hygiene ABI (Phase 4), the staging pipeline
+behind `JACL_STAGE_ON_SVM` (Phase 5), and dropping the legacy VM (Phase 6).

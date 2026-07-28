@@ -29,4 +29,13 @@ struct AstNode;
 IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode,
                                char *err, size_t errcap);
 
+/* Compile one macro body to a module with a single `__jacl_macro(sp, args…) -> syntax-vec`
+ * function — the codegen half of staged macro evaluation (docs/SVM_MACRO_STAGING_PLAN.md,
+ * Phase 3). `names`/`lens` are the macro's parameter names; `body` is its AST. The func's
+ * index is written to `*out_func_idx` (for the link step, since codegen output carries no
+ * named exports in the IR text). NULL on an unsupported construct (message in `err`). */
+IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint32_t nparams,
+                                 struct AstNode *body, uint32_t *out_func_idx,
+                                 char *err, size_t errcap);
+
 #endif /* JACL_CODEGEN_H */

@@ -4458,3 +4458,52 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   if (failed) { irb_module_free(m); return NULL; }
   return m;
 }
+
+/* Compile a single macro body to a module with ONE function
+ *   __jacl_macro(sp, arg0, arg1, …) -> syntax-vec
+ * whose params bind the macro's parameters and whose body is lowered normally — a
+ * `syntax-quote` template becomes plain-data vec construction (compile_synquote), with
+ * `~unquote` holes reading the corresponding param (an incoming syntax value). This is
+ * the codegen half of staged macro evaluation (docs/SVM_MACRO_STAGING_PLAN.md, Phase 3):
+ * a host wrapper decodes the argument syntax values, calls this function, and encodes the
+ * returned syntax value. No entry/scheduler here — the wrapper module provides `_start`;
+ * `__jacl_macro` is resolved by name at link time (like the runtime's exports). Returns
+ * the func's index via `*out_func_idx` for the link step. */
+IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint32_t nparams,
+                                 AstNode *body, uint32_t *out_func_idx,
+                                 char *err, size_t errcap) {
+  Cx cx;
+  memset(&cx, 0, sizeof cx);
+  cx.err = err; cx.errcap = errcap;
+
+  IrModule *m = irb_module_new();
+  cx.m = m;
+
+  IrType ptypes[1 + CG_MAX_PARAMS];
+  uint32_t np = nparams < CG_MAX_PARAMS ? nparams : CG_MAX_PARAMS;
+  for (uint32_t k = 0; k < 1 + np; k++) ptypes[k] = IRB_I64;   /* sp + params, all i64 */
+  IrType r1[] = {IRB_I64};
+  IrFunc *f = irb_func_new(m, ptypes, (int)(1 + np), r1, 1);
+  if (out_func_idx) *out_func_idx = (uint32_t)irb_func_index(m, f);
+
+  cx.f = f;
+  cx.cur = irb_block(f, ptypes, (int)(1 + np));
+  cx.sp = 0;                                   /* param 0 */
+  env_reset(&cx);
+  capset_reset(&cx); capset_scan(&cx, body);
+  scope_enter(&cx);
+  for (uint32_t k = 0; k < np; k++)
+    env_define(&cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+  IrVal v = compile_expr(&cx, body);
+  scope_exit(&cx);
+  if (!cx.failed) { IrVal ret[] = {v}; irb_return(cx.f, cx.cur, ret, 1); }
+  if (!cx.failed) compile_pending_closures(&cx);   /* if the body defines closures */
+
+  int failed = cx.failed;
+  free(cx.locals);
+  free(cx.marks);
+  free(cx.procs);
+  free(cx.pending);
+  if (failed) { irb_module_free(m); return NULL; }
+  return m;
+}
