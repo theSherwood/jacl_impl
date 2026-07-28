@@ -33,6 +33,14 @@ interface SvmBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
+  svm_link_run_jacl(
+    progPtr: number | bigint,
+    progLen: number | bigint,
+    rtPtr: number | bigint,
+    rtLen: number | bigint,
+    stdinPtr: number | bigint,
+    stdinLen: number | bigint,
+  ): bigint;
   svm_status(): number;
   svm_exit_code(): number;
   svm_stdout_ptr(): number | bigint;
@@ -141,5 +149,78 @@ export class SvmJaclRunner {
       return { output: stdout, error: detail, isError: true };
     }
     return { output: stdout + stderr, error: null, isError: false };
+  }
+
+  /**
+   * The **live-editing** path: link the SVM IR text a browser frontend emitted (`jacl_emit_ir`; see
+   * {@link JaclFrontend}) against the JACL runtime (`jaclrt.svm` bytes) and run it — no precompiled
+   * `.svmb` needed. `programIr` is the raw frontend output (IR text + optional `%%RELOCS%%`).
+   */
+  linkRun(programIr: string, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
+    const ex = this.ex;
+    const prog = new TextEncoder().encode(programIr);
+    const progPtr = this.load(prog);
+    const rtPtr = this.load(runtime);
+    let inPtr: number | bigint = this.usize(0);
+    let inLen: number | bigint = this.usize(0);
+    if (stdin && stdin.length > 0) {
+      inPtr = this.load(stdin);
+      inLen = this.usize(stdin.length);
+    }
+    ex.svm_link_run_jacl(progPtr, this.usize(prog.length), rtPtr, this.usize(runtime.length), inPtr, inLen);
+
+    const status = ex.svm_status();
+    const stdout = this.readCapture(ex.svm_stdout_ptr(), ex.svm_stdout_len());
+    const stderr = this.readCapture(ex.svm_stderr_ptr(), ex.svm_stderr_len());
+    if (status !== STATUS.OK) {
+      const detail = stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status);
+      return { output: stdout, error: detail, isError: true };
+    }
+    return { output: stdout + stderr, error: null, isError: false };
+  }
+}
+
+/**
+ * The in-browser JACL **frontend**: the LLVM-free lexer+parser+codegen (`src/jacl.c` +
+ * `codegen/*.c`) compiled to wasm by Emscripten (`demo/svm/build_emit_wasm.sh`), exposing
+ * `jacl_emit_ir(source) -> SVM IR text`. Loaded via a `<script src="wasm/jacl_emit.js">` tag, which
+ * puts `createJaclEmit` on the global (like the old backend's `createJACL`).
+ */
+declare global {
+  function createJaclEmit(init?: {
+    locateFile?: (path: string) => string;
+  }): Promise<JaclEmitModule>;
+}
+interface JaclEmitModule {
+  cwrap(name: string, ret: string, args: string[]): (...a: unknown[]) => number;
+  UTF8ToString(ptr: number): string;
+  _free(ptr: number): void;
+}
+
+/** Frontend output: either the SVM IR text, or a compile diagnostic (syntax/type/codegen error). */
+export type EmitResult = { ir: string } | { error: string };
+
+export class JaclFrontend {
+  private readonly emit: (src: string) => number;
+  private readonly mod: JaclEmitModule;
+
+  private constructor(mod: JaclEmitModule) {
+    this.mod = mod;
+    this.emit = (src: string) => mod.cwrap("jacl_emit_ir", "number", ["string"])(src);
+  }
+
+  static async create(): Promise<JaclFrontend> {
+    const mod = await createJaclEmit();
+    return new JaclFrontend(mod);
+  }
+
+  /** Compile a single JACL source string to SVM IR text, or return its compile diagnostic. */
+  emitIr(source: string): EmitResult {
+    const ptr = this.emit(source);
+    const out = this.mod.UTF8ToString(ptr);
+    this.mod._free(ptr);
+    const MARK = "%%ERROR%%\n";
+    if (out.startsWith(MARK)) return { error: out.slice(MARK.length) };
+    return { ir: out };
   }
 }

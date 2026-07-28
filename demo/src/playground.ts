@@ -38,7 +38,7 @@ const jaclHighlight = HighlightStyle.define([
   { tag: t.operator,                 color: "#905" },
 ]);
 import { JaclVM, RunResult } from "./jacl-wasm";
-import { SvmJaclRunner } from "./svm-jacl-wasm";
+import { SvmJaclRunner, JaclFrontend } from "./svm-jacl-wasm";
 import { initSplitter } from "./splitter";
 
 // --- DOM refs ---
@@ -154,6 +154,8 @@ let vm: JaclVM | null = null;
 let useSvm = false;
 let svmRunner: SvmJaclRunner | null = null;
 let svmManifest: { name: string; svmb: string }[] | null = null;
+let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
+let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
 let currentExample: Example | null = null;
 
@@ -168,6 +170,21 @@ async function ensureSvm(): Promise<SvmJaclRunner | null> {
     return svmRunner;
   } catch {
     return null; // assets not built / not shipped → caller falls back to Classic
+  }
+}
+
+/** Load the live-editing pieces (frontend wasm + runtime blob) on demand; null if not shipped. */
+async function ensureLive(): Promise<{ frontend: JaclFrontend; runtime: Uint8Array } | null> {
+  try {
+    if (!svmFrontend) svmFrontend = await JaclFrontend.create();
+    if (!svmRuntime) {
+      const resp = await fetch("svm/jaclrt.svm");
+      if (!resp.ok) return null;
+      svmRuntime = new Uint8Array(await resp.arrayBuffer());
+    }
+    return { frontend: svmFrontend, runtime: svmRuntime };
+  } catch {
+    return null;
   }
 }
 
@@ -244,30 +261,35 @@ function displayResult(result: RunResult, elapsedMs: number) {
   setStatus(result.isError ? `Error (${ms}ms)` : `Done (${ms}ms)`, result.isError ? "error" : "ok");
 }
 
-/** Run the current source on the SVM backend, if it is an unedited precompiled example. */
+/** Run the current source on the SVM backend: a precompiled example verbatim, else compile+link live. */
 async function runOnSvm(source: string) {
   const runner = await ensureSvm();
-  const entry = runner ? svmEntryForCurrentSource(source) : null;
-  if (!runner || !entry) {
-    // No SVM assets, or the source is edited / not precompiled: fall back to the Classic VM.
-    output.textContent = "";
-    const note = document.createElement("span");
-    note.className = "placeholder";
-    note.textContent = runner
-      ? "SVM backend runs precompiled examples — select one (unedited) to run it on the wasm-safe engine. Running on the Classic VM instead."
-      : "SVM assets not built (run demo/svm/build_assets.sh). Running on the Classic VM instead.";
-    output.appendChild(note);
-    if (vm) {
-      const t0 = performance.now();
-      displayResult(vm.runFresh(source), performance.now() - t0);
-    }
+  if (!runner) {
+    svmFallback(source, "SVM assets not built (run demo/svm/build_assets.sh). Running on the Classic VM instead.");
     return;
   }
   try {
+    // Fast path: an *unedited* precompiled example runs its shipped .svmb directly.
+    const entry = svmEntryForCurrentSource(source);
+    if (entry) {
+      const t0 = performance.now();
+      const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
+      displayResult(runner.runSvmb(bytes), performance.now() - t0);
+      return;
+    }
+    // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
+    const live = await ensureLive();
+    if (!live) {
+      svmFallback(source, "Live SVM compile needs jacl_emit.wasm + jaclrt.svm (run demo/svm/build_*). Running on the Classic VM instead.");
+      return;
+    }
     const t0 = performance.now();
-    const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
-    const result: RunResult = runner.runSvmb(bytes);
-    displayResult(result, performance.now() - t0);
+    const emitted = live.frontend.emitIr(source);
+    if ("error" in emitted) {
+      displayResult({ output: "", error: emitted.error, isError: true }, performance.now() - t0);
+      return;
+    }
+    displayResult(runner.linkRun(emitted.ir, live.runtime), performance.now() - t0);
   } catch (e) {
     output.textContent = "";
     const span = document.createElement("span");
@@ -275,6 +297,19 @@ async function runOnSvm(source: string) {
     span.textContent = "SVM run failed: " + (e instanceof Error ? e.message : String(e));
     output.appendChild(span);
     setStatus("Crashed", "error");
+  }
+}
+
+/** Show a note and run on the Classic VM (used when SVM assets are missing). */
+function svmFallback(source: string, note: string) {
+  output.textContent = "";
+  const span = document.createElement("span");
+  span.className = "placeholder";
+  span.textContent = note;
+  output.appendChild(span);
+  if (vm) {
+    const t0 = performance.now();
+    displayResult(vm.runFresh(source), performance.now() - t0);
   }
 }
 

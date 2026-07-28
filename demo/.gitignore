@@ -1,5 +1,8 @@
 node_modules/
 dist/*.map
-# SVM-backend generated assets (produced by svm/build_assets.sh, built in CI)
+# SVM-backend generated assets (produced by svm/build_assets.sh + svm/build_emit_wasm.sh, built in CI)
 wasm/svm_browser.wasm
+wasm/jacl_emit.js
+wasm/jacl_emit.wasm
 svm/svmb/
+svm/jaclrt.svm

@@ -11,9 +11,10 @@ dropped in the vendored svm).
 
 | File | Role |
 |---|---|
-| `build_assets.sh` | Build `svm_browser.wasm` (cdylib → wasm32) into `demo/wasm/`, and link+encode example programs to `svm/svmb/*.svmb` at build time (+ `manifest.json`). |
-| `run_svmb.mjs` | Headless Node driver — runs a `.svmb` through `svm_run_onramp` and prints captured stdout. CI gate for the run path. |
-| `../src/svm-jacl-wasm.ts` | Browser module: `SvmJaclRunner.create(wasmUrl)` + `runSvmb(bytes) → RunResult` — the same `RunResult` shape as `jacl-wasm.ts`, so `playground.ts` stays backend-agnostic. |
+| `build_assets.sh` | Build `svm_browser.wasm` (cdylib → wasm32) + `jacl_emit.wasm` (frontend) into `demo/wasm/`, ship `jaclrt.svm`, and link+encode example programs to `svm/svmb/*.svmb` (+ `manifest.json`). |
+| `build_emit_wasm.sh` | Build just `jacl_emit.wasm` — the LLVM-free frontend+codegen (Emscripten), exposing `jacl_emit_ir(source) → SVM IR text`. Needs emsdk on PATH. |
+| `run_svmb.mjs` | Headless Node driver — runs a `.svmb` through `svm_run_onramp` and prints captured stdout. CI gate for the precompiled run path. |
+| `../src/svm-jacl-wasm.ts` | Browser modules: `SvmJaclRunner` (`runSvmb` precompiled / `linkRun` live) and `JaclFrontend` (`emitIr`) — the same `RunResult` shape as `jacl-wasm.ts`, so `playground.ts` stays backend-agnostic. |
 
 Generated assets (`wasm/svm_browser.wasm`, `svm/svmb/`) are git-ignored and rebuilt by CI.
 
@@ -36,25 +37,22 @@ encode) reaches `print` through a **manifest import** `write` (`call.import "wri
 is the ABI that module expects. `svm_run_pb`'s arity-slot powerbox leaves `write` unbound,
 so the guest traps (`STATUS_TRAP`).
 
-## Wiring into the editor UI (the remaining slice)
+## In the editor
 
-The run path is proven; the last mile is the editor. Two steps:
+`playground.ts` has an **Engine: Classic ⇄ SVM** toggle. In SVM mode `runOnSvm` does:
 
-1. **Now (precompiled examples).** `playground.ts` can run built-in examples on the SVM
-   backend today: load the runner once, fetch the example's `.svmb` from `manifest.json`,
-   and hand its bytes to `runSvmb` — the returned `RunResult` flows into the existing
-   `displayResult` unchanged:
+1. **Precompiled example (unedited):** fetch its `.svmb` from `manifest.json` and run it
+   through `SvmJaclRunner.runSvmb` — fast, no compile.
+2. **Edited source (live):** `JaclFrontend.emitIr(source)` compiles it to SVM IR text in
+   the browser (`jacl_emit.wasm`); a compile error is shown as-is; otherwise
+   `SvmJaclRunner.linkRun(ir, jaclrt.svm)` links it against the runtime and runs it
+   (`svm_link_run_jacl`). Both return the existing `RunResult`, so `displayResult` is
+   unchanged.
 
-   ```ts
-   import { SvmJaclRunner } from "./svm-jacl-wasm";
-   const svm = await SvmJaclRunner.create("wasm/svm_browser.wasm");
-   const svmb = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
-   displayResult(svm.runSvmb(svmb), elapsedMs);
-   ```
+The whole live pipeline (source → IR → link → run → stdout) is verified headless — see the
+Node checks: `jacl_emit_ir("print \"hi\"")` → IR, then `svm_link_run_jacl` → `"hi\n"`; a
+generator → `"1\n2\n"`; malformed input is rejected with the frontend's own diagnostic.
 
-2. **Live editing (needs the in-browser frontend).** Running *edited* source requires the
-   LLVM-free frontend+codegen (`src/jacl.c` + `codegen/*.c`) compiled to `jacl_emit.wasm`
-   via Emscripten, exposing `jacl_emit_ir(source) → SVM IR text`, then linked against
-   `jaclrt.svm` and encoded in the browser (`SVM_BROWSER_PLAN.md` option (b)). That module
-   does **not** exist yet — it is the next slice. Until it lands, free-form editing stays on
-   the old backend and the SVM backend serves the precompiled example set.
+**Limitations.** Single-file only — a module program (top-level `use`) needs filesystem
+import resolution and is rejected by the browser frontend for now. If the SVM assets aren't
+built/shipped, SVM mode falls back to the Classic VM with a note.

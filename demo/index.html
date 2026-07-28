@@ -373,6 +373,9 @@ body {
 </div>
 
 <script src="wasm/jacl.js"></script>
+<!-- SVM in-browser frontend (defines createJaclEmit); harmless 404 if the SVM assets aren't built.
+     The heavy wasm only instantiates on demand when the SVM engine's live path first runs. -->
+<script src="wasm/jacl_emit.js"></script>
 <script type="module" src="dist/playground.js"></script>
 </body>
 </html>
