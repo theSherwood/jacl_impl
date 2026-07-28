@@ -33,6 +33,18 @@ interface SvmBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
+  svm_link_run(
+    progPtr: number | bigint,
+    progLen: number | bigint,
+    libPtr: number | bigint,
+    libLen: number | bigint,
+    entryPtr: number | bigint,
+    entryLen: number | bigint,
+    relocPtr: number | bigint,
+    relocLen: number | bigint,
+    stdinPtr: number | bigint,
+    stdinLen: number | bigint,
+  ): bigint;
   svm_status(): number;
   svm_exit_code(): number;
   svm_stdout_ptr(): number | bigint;
@@ -70,6 +82,36 @@ function statusMessage(status: number): string {
     default:
       return `svm_status ${status}`;
   }
+}
+
+/**
+ * The export the JACL frontend names its program entry (`jacl_emit_ir` emits the program body as
+ * func 0; the native link path resolves it under this symbol). Passed to the generic `svm_link_run`
+ * so nothing about this name lives in the language-agnostic cdylib.
+ */
+const JACL_ENTRY = "__jacl_entry";
+
+/**
+ * Decompose the JACL frontend's raw output into the two generic inputs `svm_link_run` wants: the SVM
+ * IR **module text**, and the program's own-data **relocations** as a flat little-endian `u32` triple
+ * buffer `(func, block, inst)`. The frontend appends `\n%%RELOCS%%\n` followed by whitespace-separated
+ * triples (the same wire format the native `--file` path reads); no sentinel ⇒ no relocs. This split
+ * is the JACL-frontend contract and deliberately lives here, not in the cdylib.
+ */
+function splitJaclEmit(programIr: string): { moduleText: string; relocs: Uint8Array } {
+  const i = programIr.indexOf("%%RELOCS%%");
+  if (i < 0) return { moduleText: programIr, relocs: new Uint8Array(0) };
+  const moduleText = programIr.slice(0, i);
+  const triples: number[] = [];
+  for (const line of programIr.slice(i).split("\n").slice(1)) {
+    const n = line.trim().split(/\s+/).filter((t) => t.length > 0).map(Number);
+    if (n.length === 3 && n.every((x) => Number.isInteger(x) && x >= 0)) triples.push(...n);
+  }
+  const relocs = new Uint8Array(triples.length * 4);
+  const dv = new DataView(relocs.buffer);
+  triples.forEach((v, k) => dv.setUint32(k * 4, v >>> 0, true)); // little-endian
+
+  return { moduleText, relocs };
 }
 
 export class SvmJaclRunner {
@@ -141,5 +183,102 @@ export class SvmJaclRunner {
       return { output: stdout, error: detail, isError: true };
     }
     return { output: stdout + stderr, error: null, isError: false };
+  }
+
+  /**
+   * The **live-editing** path: link the SVM IR text the JACL frontend emitted (`jacl_emit_ir`; see
+   * {@link JaclFrontend}) against the JACL runtime (`jaclrt.svm` bytes) and run it — no precompiled
+   * `.svmb` needed. `programIr` is the raw frontend output (IR text + optional `%%RELOCS%%`).
+   *
+   * The generic cdylib entry (`svm_link_run`) is language-agnostic — it takes a program module, a
+   * library module, an entry-export name, and a flat reloc buffer. The JACL-frontend specifics live
+   * here: the {@link splitJaclEmit} wire format and the `__jacl_entry` entry name.
+   */
+  linkRun(programIr: string, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
+    const ex = this.ex;
+    const { moduleText, relocs } = splitJaclEmit(programIr);
+    const prog = new TextEncoder().encode(moduleText);
+    const entry = new TextEncoder().encode(JACL_ENTRY);
+    const progPtr = this.load(prog);
+    const rtPtr = this.load(runtime);
+    const entryPtr = this.load(entry);
+    let relPtr: number | bigint = this.usize(0);
+    let relLen: number | bigint = this.usize(0);
+    if (relocs.length > 0) {
+      relPtr = this.load(relocs);
+      relLen = this.usize(relocs.length);
+    }
+    let inPtr: number | bigint = this.usize(0);
+    let inLen: number | bigint = this.usize(0);
+    if (stdin && stdin.length > 0) {
+      inPtr = this.load(stdin);
+      inLen = this.usize(stdin.length);
+    }
+    ex.svm_link_run(
+      progPtr,
+      this.usize(prog.length),
+      rtPtr,
+      this.usize(runtime.length),
+      entryPtr,
+      this.usize(entry.length),
+      relPtr,
+      relLen,
+      inPtr,
+      inLen,
+    );
+
+    const status = ex.svm_status();
+    const stdout = this.readCapture(ex.svm_stdout_ptr(), ex.svm_stdout_len());
+    const stderr = this.readCapture(ex.svm_stderr_ptr(), ex.svm_stderr_len());
+    if (status !== STATUS.OK) {
+      const detail = stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status);
+      return { output: stdout, error: detail, isError: true };
+    }
+    return { output: stdout + stderr, error: null, isError: false };
+  }
+}
+
+/**
+ * The in-browser JACL **frontend**: the LLVM-free lexer+parser+codegen (`src/jacl.c` +
+ * `codegen/*.c`) compiled to wasm by Emscripten (`demo/svm/build_emit_wasm.sh`), exposing
+ * `jacl_emit_ir(source) -> SVM IR text`. Loaded via a `<script src="wasm/jacl_emit.js">` tag, which
+ * puts `createJaclEmit` on the global (like the old backend's `createJACL`).
+ */
+declare global {
+  function createJaclEmit(init?: {
+    locateFile?: (path: string) => string;
+  }): Promise<JaclEmitModule>;
+}
+interface JaclEmitModule {
+  cwrap(name: string, ret: string, args: string[]): (...a: unknown[]) => number;
+  UTF8ToString(ptr: number): string;
+  _free(ptr: number): void;
+}
+
+/** Frontend output: either the SVM IR text, or a compile diagnostic (syntax/type/codegen error). */
+export type EmitResult = { ir: string } | { error: string };
+
+export class JaclFrontend {
+  private readonly emit: (src: string) => number;
+  private readonly mod: JaclEmitModule;
+
+  private constructor(mod: JaclEmitModule) {
+    this.mod = mod;
+    this.emit = (src: string) => mod.cwrap("jacl_emit_ir", "number", ["string"])(src);
+  }
+
+  static async create(): Promise<JaclFrontend> {
+    const mod = await createJaclEmit();
+    return new JaclFrontend(mod);
+  }
+
+  /** Compile a single JACL source string to SVM IR text, or return its compile diagnostic. */
+  emitIr(source: string): EmitResult {
+    const ptr = this.emit(source);
+    const out = this.mod.UTF8ToString(ptr);
+    this.mod._free(ptr);
+    const MARK = "%%ERROR%%\n";
+    if (out.startsWith(MARK)) return { error: out.slice(MARK.length) };
+    return { ir: out };
   }
 }

@@ -3319,6 +3319,10 @@ struct Compiler {
  * Returns true iff the typer-annotated arg type matches the
  * expected element type. Caller emits the error on false. */
 void compiler__compile_node(Compiler* c, AstNode* node); /* fwd decl */
+/* Defined at "Auto-box unboxed types" below but called earlier; without this prototype the first
+ * call synthesizes an implicit `int` declaration that conflicts with the real `void` definition —
+ * a hard error under strict compilers (clang/emcc), which the Emscripten frontend build needs. */
+void compiler__ensure_boxed(Compiler* c, uint32_t line);
 
 static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
                                              uint32_t expected_type_idx) {

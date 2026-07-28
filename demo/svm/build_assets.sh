@@ -30,11 +30,21 @@ mkdir -p "$DEMO/wasm"
 cp "$SVM/browser/target/wasm32-unknown-unknown/release/svm_browser.wasm" "$DEMO/wasm/svm_browser.wasm"
 echo "  -> demo/wasm/svm_browser.wasm ($(wc -c < "$DEMO/wasm/svm_browser.wasm") bytes)"
 
-# --- 2. example programs -> .svmb (build-time link + encode) ---------------------------------------
-# jaclrt.svm must exist (bake it once with runtime/build.sh).
+# --- 1b. runtime IR (jaclrt.svm): baked once, shipped for in-browser live linking -----------------
 if [ ! -f "$ROOT/runtime/build/jaclrt.svm" ]; then
   echo "Baking runtime IR (runtime/build.sh)…"
   bash "$ROOT/runtime/build.sh"
+fi
+cp "$ROOT/runtime/build/jaclrt.svm" "$DEMO/svm/jaclrt.svm"
+echo "  -> demo/svm/jaclrt.svm ($(wc -c < "$DEMO/svm/jaclrt.svm") bytes; the live-editing link target)"
+
+# --- 1c. frontend (jacl_emit.wasm): the LLVM-free lexer+parser+codegen, for live editing ----------
+# Requires the Emscripten SDK on PATH. Skipped (fail-soft) if emcc is absent — the playground then
+# runs precompiled examples only, and the SVM live path falls back to the Classic VM.
+if command -v emcc >/dev/null 2>&1; then
+  bash "$DIR/build_emit_wasm.sh"
+else
+  echo "  (emcc not found — skipping jacl_emit.wasm; live editing on SVM needs it. Precompiled examples still run.)"
 fi
 
 OUT="$DIR/svmb"

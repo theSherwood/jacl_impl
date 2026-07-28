@@ -358,6 +358,95 @@ static int run_interp(int argc, char **argv) {
   return 0;
 }
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+/* Browser frontend entry (docs/SVM_BROWSER_PLAN.md, option b): compile a single JACL source
+ * string to SVM IR text, entirely client-side. Returns a malloc'd C string the JS host reads via
+ * UTF8ToString and frees via `_free`. On success the string is the IR text, optionally followed by
+ * a `%%RELOCS%%\n` sentinel + SelfData relocs (same wire format the native `--file` path prints, so
+ * the JS linker splits it identically). On failure it begins with `%%ERROR%%\n` then the diagnostic
+ * — the same messages the native path prints to stderr, so `# expect-error` semantics are preserved.
+ * Module programs (top-level `use`) need filesystem import resolution and are rejected here for now
+ * (single-file live editing). Never returns NULL (OOM aside). */
+static char *emit_dup(const char *s) {
+  char *p = (char *)malloc(strlen(s) + 1);
+  if (p) strcpy(p, s);
+  return p;
+}
+static char *emit_err(const char *prefix, const char *msg) {
+  size_t n = strlen("%%ERROR%%\n") + strlen(prefix) + strlen(msg) + 1;
+  char *p = (char *)malloc(n);
+  /* `%%%%` → literal `%%` under snprintf, so the string begins with the `%%ERROR%%` marker the JS
+   * host tests for (a bare `%%ERROR%%` in the format would collapse to `%ERROR%`). */
+  if (p) snprintf(p, n, "%%%%ERROR%%%%\n%s%s", prefix, msg);
+  return p;
+}
+EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
+  arena_t arena = {0};
+  LexResult toks = lexer_lex(source, &arena);
+  if (toks.error_count) { arena_destroy(&arena); return emit_err("lex error", ""); }
+  ParseResult parse = parser_parse(toks, &arena);
+  if (parse.error_count) {
+    const char *fe = NULL;
+    for (uint32_t i = 0; i < parse.count && !fe; i++) fe = find_ast_error(parse.nodes[i]);
+    char *out = emit_err("parse error: ", fe ? fe : "parse errors");
+    arena_destroy(&arena);
+    return out;
+  }
+  for (uint32_t i = 0; i < parse.count; i++) {
+    if (parse.nodes[i]->type == AST_USE) {
+      arena_destroy(&arena);
+      return emit_err("module `use` is not supported in the browser frontend yet", "");
+    }
+  }
+  /* Static-error oracle: the reference compiler's diagnostics (own re-parse, as in `main`). */
+  {
+    JaclVM *chk = jacl_vm_new();
+    LexResult ctoks = lexer_lex(source, &chk->arena);
+    ParseResult cparse = parser_parse(ctoks, &chk->arena);
+    if (!ctoks.error_count && !cparse.error_count) {
+      ExpandState es;
+      memset(&es, 0, sizeof(es));
+      jacl_ctx_saved_t macro_saved;
+      jacl_ctx_save(&macro_saved);
+      jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
+      es.ctx = macro_ctx;
+      CompileResult cr = compiler_compile(cparse, &chk->arena, &chk->intern_table, &chk->vm.heap,
+                                          chk->persistent_struct_registry, &es, JACL_NIL,
+                                          &chk->persistent_arities, &chk->arena);
+      jacl_ctx_destroy(macro_ctx);
+      es.ctx = NULL;
+      jacl_ctx_restore(macro_saved);
+      if (cr.error_count > 0) {
+        char *out = emit_err("", cr.error_message ? cr.error_message : "compile error");
+        arena_destroy(&arena);
+        return out; /* chk leaked deliberately (its arena may back the message), as in `main` */
+      }
+    }
+  }
+  expand_macros_inplace(parse.nodes, parse.count, &arena);
+  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
+  char err[256] = {0};
+  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, err, sizeof err);
+  if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
+  char *text = irb_to_text(m);
+  char *relocs = irb_relocs_text(m);
+  char *out;
+  if (relocs[0]) {
+    size_t n = strlen(text) + strlen("%%RELOCS%%\n") + strlen(relocs) + 1;
+    out = (char *)malloc(n);
+    if (out) snprintf(out, n, "%s%%%%RELOCS%%%%\n%s", text, relocs);
+  } else {
+    out = emit_dup(text);
+  }
+  free(text);
+  free(relocs);
+  irb_module_free(m);
+  arena_destroy(&arena);
+  return out;
+}
+#endif /* __EMSCRIPTEN__ */
+
 int main(int argc, char **argv) {
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
