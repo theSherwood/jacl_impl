@@ -1,0 +1,4 @@
+defmacro twice {x} {
+  syntax-quote [+ ~x ~x]
+}
+twice 21

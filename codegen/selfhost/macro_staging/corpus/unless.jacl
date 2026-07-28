@@ -1,0 +1,6 @@
+defmacro unless {cond body} {
+  syntax-quote [if ~cond {} ~body]
+}
+mut hit 0
+unless [== 1 2] { set hit 5 }
+hit

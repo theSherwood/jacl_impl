@@ -1,0 +1,30 @@
+func (i64) -> (i64) {
+block 0 (v0: i64) {
+  v1 = i32.const 0
+  call.sym "jacl_heap_init" (i64) -> () v1(v0)
+  v2 = i32.const 0
+  call.sym "jacl_intern_init" (i64) -> () v2(v0)
+  v3 = i32.const 0
+  call.sym "jacl_map_init" (i64) -> () v3(v0)
+  v4 = ref.func 1
+  v5 = i64.extend_i32_u v4
+  v6 = i32.const 0
+  v7 = call.sym "jacl_sched_run_main" (i64, i64) -> (i64) v6(v0, v5)
+  return v7
+}
+}
+
+func (i64, i64) -> (i64) {
+block 0 (v0: i64, v1: i64) {
+  v2 = i64.const -1
+  v3 = suspend v2
+  v4 = i64.const 0
+  v5 = i32.const 21
+  v6 = i32.const 21
+  v7 = i32.add v5 v6
+  v8 = i64.extend_i32_u v7
+  v9 = i64.const 144115188075855872
+  v10 = i64.or v8 v9
+  return v10
+}
+}
