@@ -111,6 +111,7 @@ fn cmd_run(args: &[String]) -> ! {
     let mut prog: Option<PathBuf> = None;
     let mut grant = FsGrant::None;
     let mut interp = false;
+    let mut bytecode = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -122,6 +123,7 @@ fn cmd_run(args: &[String]) -> ! {
             }
             "--no-fs" => grant = FsGrant::None,
             "--interp" => interp = true,
+            "--bytecode" => bytecode = true,
             other if prog.is_none() => prog = Some(PathBuf::from(other)),
             other => die(&format!("run: unexpected argument '{other}'")),
         }
@@ -188,7 +190,15 @@ fn cmd_run(args: &[String]) -> ! {
         }
     };
 
-    let backend = if interp { svm_run::Backend::TreeWalk } else { svm_run::Backend::Jit };
+    // `--bytecode` selects the wasm-safe bytecode engine (the browser tier). For JACL modules it
+    // currently falls back to the tree-walker at compile time — the `gc.roots + thread` seam veto
+    // (docs/SVM_BROWSER_SPIKE_FINDINGS.md) declines the linked runtime — so output matches
+    // `--interp`; the flag exists to exercise that path directly as the browser migration proceeds.
+    let backend = match (bytecode, interp) {
+        (true, _) => svm_run::Backend::Bytecode,
+        (false, true) => svm_run::Backend::TreeWalk,
+        (false, false) => svm_run::Backend::Jit,
+    };
     let run = inst
         .run_with_caps(backend, &svm_run::RunConfig::default(), &caps)
         .unwrap_or_else(|e| die(&format!("run: {e}")));

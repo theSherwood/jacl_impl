@@ -19,3 +19,5 @@ svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
 svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
 svm-run    = { path = "../../vendor/svm/crates/svm-run" }
 svm-encode = { path = "../../vendor/svm/crates/svm-encode" }
+svm-opt      = { path = "../../vendor/svm/crates/svm-opt" }
+svm-wasm-jit = { path = "../../vendor/svm/crates/svm-wasm-jit" }
