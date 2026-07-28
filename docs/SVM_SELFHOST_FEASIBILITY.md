@@ -173,8 +173,14 @@ Slices, smallest-useful first. Each is independently landable.
    (`emit_driver.c`), and the emit-path shim (`emit_shim.c`). Guards on
    `clang-18`/svm-llvm; skips cleanly when absent (like the svm Tcl demo). This
    pins the spike as a repeatable artifact.
-2. **Emit-only build** — a frontend TU that does **not** drag in `vm.c`/`runtime.c`
-   (no `jacl_vm_new`), so the dead-runtime symbol surface and module size shrink.
+2. **Macro-staging migration** — the substantive one. Compile-time macro
+   evaluation currently runs on JACL's **legacy** bytecode VM (`src/vm.c` executing
+   `BytecodeChunk` closures via `jacl_ctx_run_closure`), which is why `vm.c` links
+   in — it is *not* dead. Post-SVM, macros should be **staged on SVM**: compile the
+   macro body through the same `codegen/` path and execute it on the SVM engine at
+   compile time, so `vm.c` + the bytecode half of `compiler.c` drop out and the
+   toolchain has **one backend**. Full multiphase plan:
+   [`SVM_MACRO_STAGING_PLAN.md`](SVM_MACRO_STAGING_PLAN.md).
 3. **Real shims + `use` provider** — replace the hand-rolled shim with the reused
    `printf`/string shims; add an in-memory `name → source` module provider (or keep
    single-file for the first browser cut).
@@ -184,6 +190,12 @@ Slices, smallest-useful first. Each is independently landable.
    (emcc) as the fallback until parity is proven.
 5. **Tier selection** — measure bytecode vs wasm-JIT on current svm; adopt tier-up
    if the module emits.
+
+> **Note (corrected):** an earlier draft listed "emit-only build that doesn't link
+> `vm.c`/`runtime.c`" as a quick slice. That was wrong — macros depend on `vm.c`, so
+> the legacy VM only drops out *after* the macro-staging migration (Slice 2). We are
+> doing Slice 2 before the browser wiring so the compiler that ships is already
+> single-backend.
 
 ## Reproduce
 

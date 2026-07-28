@@ -465,6 +465,7 @@ static void enter_frame_block(Cx *cx, IrBlock blk) {
 /* ---- expression / statement lowering ---- */
 
 static IrVal compile_expr(Cx *cx, AstNode *node);
+static IrVal compile_synquote(Cx *cx, AstNode *t);   /* syntax-quote -> plain-data syntax vec */
 
 /* Emit a `call.import` to a runtime function with all-i64 args (args[0] is sp) and a
  * single i64 result. */
@@ -2248,9 +2249,78 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
 }
 
 /* Lower one expression to an i64 SSA value (a JaclVal) in the current block. */
+/* Lower a `syntax-quote` template into runtime construction of a plain-data syntax
+ * value — a jaclrt vector [kind, scope_mark, flags, ...payload], the representation
+ * codegen/selfhost/macro_staging/syn_rt.c decodes/encodes (docs/SVM_MACRO_STAGING_PLAN.md,
+ * option B). An `~unquote` hole evaluates its child (already a syntax value) and splices
+ * it in. Node kinds are corpus-scoped (command/block/literal/var-ref); others fail.
+ *
+ * NOTE (hygiene, Phase 4): scope_mark is baked from the template node here. A real staged
+ * macro needs the *runtime* macro-expansion mark instead — a later ABI addition. Correct
+ * as-is for a top-level `syntax-quote` (scope_mark 0). */
+static IrVal syn_i32(Cx *cx, int32_t x) {
+  return irb_const_i64(cx->f, cx->cur, jaclval_i32(x));
+}
+static IrVal syn_vpush(Cx *cx, IrVal vec, IrVal elem) {
+  IrVal a[] = {cx->sp, vec, elem};
+  return emit_rt_call(cx, "jacl_vec_push", a, 3);
+}
+static IrVal compile_synquote(Cx *cx, AstNode *t) {
+  if (cx->failed) return 0;
+  if (!t) { cx_fail(cx, "syntax-quote: null template node"); return 0; }
+  if (t->type == AST_UNQUOTE)
+    return compile_expr(cx, t->data.unquote.child);   /* hole: evaluate -> a syntax value */
+  if (t->type == AST_UNQUOTE_SPLICING) {
+    cx_fail(cx, "syntax-quote: ~@ splicing not yet supported on the SVM backend");
+    return 0;
+  }
+  IrVal empty[] = {cx->sp};
+  IrVal v = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+  v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->type));
+  v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->scope_mark));
+  v = syn_vpush(cx, v, syn_i32(cx, (t->is_caret ? 1 : 0) | (t->is_gensym ? 2 : 0)));
+  switch (t->type) {
+    case AST_LIT_INT:
+      v = syn_vpush(cx, v, syn_i32(cx, t->data.lit_int.value));
+      break;
+    case AST_LIT_FLOAT: {
+      union { float f; uint32_t u; } fb; fb.f = (float)t->data.lit_float.value;
+      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)fb.u));
+      break;
+    }
+    case AST_LIT_STRING:
+      v = syn_vpush(cx, v, compile_string_literal(cx, t->data.lit_string.value, t->data.lit_string.length));
+      break;
+    case AST_VAR_REF:
+      v = syn_vpush(cx, v, compile_string_literal(cx, t->data.var_ref.name, t->data.var_ref.length));
+      break;
+    case AST_COMMAND: {
+      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.command.head_id));
+      IrVal head = t->data.command.head ? compile_synquote(cx, t->data.command.head)
+                                        : irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL */);
+      v = syn_vpush(cx, v, head);
+      for (uint32_t i = 0; i < t->data.command.arg_count && !cx->failed; i++)
+        v = syn_vpush(cx, v, compile_synquote(cx, t->data.command.args[i]));
+      break;
+    }
+    case AST_BLOCK: {
+      v = syn_vpush(cx, v, syn_i32(cx, t->data.block.trailing_semi ? 1 : 0));
+      for (uint32_t i = 0; i < t->data.block.count && !cx->failed; i++)
+        v = syn_vpush(cx, v, compile_synquote(cx, t->data.block.commands[i]));
+      break;
+    }
+    default:
+      cx_fail(cx, "syntax-quote: unsupported template node kind");
+      break;
+  }
+  return v;
+}
+
 static IrVal compile_expr(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
   switch (node->type) {
+    case AST_SYNTAX_QUOTE:
+      return compile_synquote(cx, node->data.syntax_quote.child);
     case AST_LIT_INT:
       return irb_const_i64(cx->f, cx->cur, jaclval_i32(node->data.lit_int.value));
 
@@ -4379,6 +4449,55 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   }
 
   if (!cx.failed) compile_pending_closures(&cx); /* closure bodies (incl. nested) */
+
+  int failed = cx.failed;
+  free(cx.locals);
+  free(cx.marks);
+  free(cx.procs);
+  free(cx.pending);
+  if (failed) { irb_module_free(m); return NULL; }
+  return m;
+}
+
+/* Compile a single macro body to a module with ONE function
+ *   __jacl_macro(sp, arg0, arg1, …) -> syntax-vec
+ * whose params bind the macro's parameters and whose body is lowered normally — a
+ * `syntax-quote` template becomes plain-data vec construction (compile_synquote), with
+ * `~unquote` holes reading the corresponding param (an incoming syntax value). This is
+ * the codegen half of staged macro evaluation (docs/SVM_MACRO_STAGING_PLAN.md, Phase 3):
+ * a host wrapper decodes the argument syntax values, calls this function, and encodes the
+ * returned syntax value. No entry/scheduler here — the wrapper module provides `_start`;
+ * `__jacl_macro` is resolved by name at link time (like the runtime's exports). Returns
+ * the func's index via `*out_func_idx` for the link step. */
+IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint32_t nparams,
+                                 AstNode *body, uint32_t *out_func_idx,
+                                 char *err, size_t errcap) {
+  Cx cx;
+  memset(&cx, 0, sizeof cx);
+  cx.err = err; cx.errcap = errcap;
+
+  IrModule *m = irb_module_new();
+  cx.m = m;
+
+  IrType ptypes[1 + CG_MAX_PARAMS];
+  uint32_t np = nparams < CG_MAX_PARAMS ? nparams : CG_MAX_PARAMS;
+  for (uint32_t k = 0; k < 1 + np; k++) ptypes[k] = IRB_I64;   /* sp + params, all i64 */
+  IrType r1[] = {IRB_I64};
+  IrFunc *f = irb_func_new(m, ptypes, (int)(1 + np), r1, 1);
+  if (out_func_idx) *out_func_idx = (uint32_t)irb_func_index(m, f);
+
+  cx.f = f;
+  cx.cur = irb_block(f, ptypes, (int)(1 + np));
+  cx.sp = 0;                                   /* param 0 */
+  env_reset(&cx);
+  capset_reset(&cx); capset_scan(&cx, body);
+  scope_enter(&cx);
+  for (uint32_t k = 0; k < np; k++)
+    env_define(&cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+  IrVal v = compile_expr(&cx, body);
+  scope_exit(&cx);
+  if (!cx.failed) { IrVal ret[] = {v}; irb_return(cx.f, cx.cur, ret, 1); }
+  if (!cx.failed) compile_pending_closures(&cx);   /* if the body defines closures */
 
   int failed = cx.failed;
   free(cx.locals);
