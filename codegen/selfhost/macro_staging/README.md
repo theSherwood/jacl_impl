@@ -54,5 +54,25 @@ no special GC type). Compiled to SVM as runtime code for real macros; built nati
 codegen/selfhost/macro_staging/run_rt_codec_test.sh   # syn_wire ≡ syn_rt on the wire
 ```
 
-Next bricks: codegen lowering of `syntax-quote`/`~splice` into plain-data construction,
-then the staging pipeline behind `JACL_STAGE_ON_SVM`.
+## Phase 1(B) — codegen lowering of `syntax-quote`
+
+`codegen/codegen.c` now lowers `AST_SYNTAX_QUOTE` (via `compile_synquote`) into runtime
+construction of a plain-data syntax vec — the exact `[kind, scope_mark, flags, …payload]`
+schema `syn_rt` uses. A `~unquote` hole evaluates its child (already a syntax value) and
+splices it in. So a macro body compiled by the SVM codegen *builds* the same plain-data
+a staged macro reads/writes.
+
+| File | Role |
+|---|---|
+| `run_synquote_test.sh` | Structural test: `syntax-quote <template>` must emit one `jacl_vec_empty` per syntax node (a correct quasiquote fingerprint). All shapes pass; the differential gate confirms no regression to existing output. |
+
+```sh
+codegen/selfhost/macro_staging/run_synquote_test.sh   # syntax-quote -> plain-data vec
+```
+
+Hygiene note: `scope_mark` is currently baked from the template node (correct for a
+top-level `syntax-quote`, scope_mark 0). A staged macro needs the *runtime* expansion
+mark instead — the Phase 4 hygiene ABI.
+
+Next bricks: `~@` splicing; the macro-body module entry (Phase 3, so the lowering runs on
+SVM and returns a syntax value); then the staging pipeline behind `JACL_STAGE_ON_SVM`.
