@@ -57,17 +57,11 @@ generator → `"1\n2\n"`; malformed input is rejected with the frontend's own di
 import resolution and is rejected by the browser frontend for now. If the SVM assets aren't
 built/shipped, SVM mode falls back to the Classic VM with a note.
 
-## Pages CI (`pages-workflow.patch`)
+## Pages CI
 
-The GitHub Pages workflow change lives in `demo/svm/pages-workflow.patch` rather than
-directly in `.github/workflows/` — pushing workflow files needs the `workflow` OAuth scope,
-which the automation here lacks. Apply it with a workflow-scoped account:
-
-```sh
-git apply demo/svm/pages-workflow.patch      # patches .github/workflows/pages.yml
-git add .github/workflows/pages.yml && git commit -m "ci: build + deploy SVM backend on Pages"
-```
-
-It adds submodule checkout, Rust + `wasm32-unknown-unknown`, clang/LLVM-18, a `Build SVM
-assets` step (`demo/svm/build_assets.sh`), and copies `svm_browser.wasm` / `jacl_emit.{js,wasm}`
-/ `jaclrt.svm` into `_site` alongside the Classic `jacl.{js,wasm}`.
+The Pages workflow change is in `.github/workflows_src/pages.yml` (the repo's unprivileged
+source of truth for workflows — see that dir's `README.md`). It adds submodule checkout,
+Rust + `wasm32-unknown-unknown`, clang/LLVM-18, a `Build SVM assets` step
+(`demo/svm/build_assets.sh`), and copies `svm_browser.wasm` / `jacl_emit.{js,wasm}` /
+`jaclrt.svm` into `_site` alongside the Classic `jacl.{js,wasm}`. Promote it into
+`.github/workflows/` with the copy step documented in `.github/workflows_src/README.md`.
