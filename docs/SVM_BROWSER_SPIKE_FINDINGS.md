@@ -17,11 +17,15 @@ runtime emits. The sole reason `compile_module` returns `None` is a single
 module for both `print "hi"` and a generator program compiles with zero per-op
 declines.
 
-That reframes the work from "extend the engine's op coverage (fibers / cap.self)"
-to "**one seam** — `gc.roots` coexisting with threads at runtime startup — gates
-every JACL program." It is real engine/TCB work (the veto guards a genuine runtime
-trap, not just conservatism), but it is one well-localized capability, and there is
-an existing multi-vCPU path that may already clear it.
+That reframes the work: the compile-time gate is **one seam** (`gc.roots` coexisting
+with threads), not the cap ops the spike named. But a follow-up experiment (below)
+lifted that veto and drove the module through both the single- and multi-vCPU engines,
+and both trap `Malformed` at runtime on a **different** op — `vcpu.tls`
+(`VcpuTlsGet`), which the fused bytecode engine has no `Op` for. So the blocker is a
+**layered op-coverage list** discovered one gap at a time (`gc.roots+thread` veto →
+`vcpu.tls` → …), all real bytecode-engine/TCB slices differentially tested against the
+tree-walker. The multi-vCPU path is the right execution *destination* but **not a
+shortcut** — it shares the same fused-op coverage.
 
 ## Method
 
@@ -78,23 +82,62 @@ Two programs: `print "hi"` and a two-`yield` generator driven by `for [g] n { pr
   scanning / driving the scheduler seam) is genuinely not wired in the wasm-safe
   fast path. So the fix is engine work, not deleting a guard.
 
-## Recommended next steps
+## Follow-up experiment: the multi-vCPU path (REFUTED) and the deeper trap
 
-1. **Try the multi-vCPU path first (cheapest possible unlock).** The browser's
-   `svm_run_pb` uses the **single-vCPU** powerbox (`compile_and_run_with_host`) —
-   exactly what traps. The cdylib also exposes a **multi-vCPU resumable** path
-   (`VcpuProgram` / `svm_par_run`) that already drives `thread.spawn`/join. Route
-   the linked JACL module through it and re-check `print "hi"` + the generator.
-   This may run green with no engine change.
+The single-vCPU powerbox (`compile_and_run_with_host`, what `svm_run_pb` uses) traps
+`Malformed` once the compile-time veto is lifted. The obvious shortcut was to route
+the linked module through the **multi-vCPU** driver (`drive_parallel` /
+`compile_and_run_capture_over_parallel_with_host`, the native stand-in for the
+browser's per-vCPU Workers, which already drives `thread.spawn`/join and scans
+`gc.roots` across all vCPUs). `probe_svmb`'s `run_compare` tests both, with `write`
+bound to a captured stdout:
 
-2. **If not, the parity slice is specific:** make the wasm-safe interpreter drive
-   JACL's `gc.roots`-with-threads startup — teach the fast path's `gc.roots` to scan
-   sibling vCPU continuations and service the scheduler seam — so the `gc.roots +
-   thread` veto can be lifted soundly. One capability, differentially tested against
-   the tree-walker, gating the whole JACL class at once.
+```
+imports: ["write"]
+single-vCPU  (compile_and_run_with_host):  Trap::Malformed   stdout=""
+multi-vCPU   (drive_parallel):             Trap::Malformed   stdout=""
+```
 
-3. **Independently useful:** narrow `dead_func_elim`'s indirect-dispatch gate. It
-   bails on `cont.new`/`ref.func`, whose targets are statically known; only true
+**The multi-vCPU path is not a shortcut — it traps identically, before any output.**
+
+A traced run locates the trap precisely, and it is **not** the `gc.roots + thread`
+machinery the compile-time veto guards:
+
+```
+trapping frame: func 1 block 1 inst 38   (VcpuTlsGet; the trailing ConstI64 is the persisted cursor)
+backtrace (inner→outer): [1, 236, 0]      (_start → f236 → f1)
+```
+
+The JACL runtime reads **per-vCPU thread-local storage** (`vcpu.tls`, `Inst::VcpuTlsGet`)
+during startup. The tree-walker services it (`svm-interp/src/lib.rs:9183`, where the
+stepper holds the `tls` register). The **fused bytecode engine has no dedicated `Op`
+for it**, so it routes the instruction through the generic `eval_inst` fallback —
+which returns `Trap::Malformed` for `VcpuTlsGet`/`VcpuTlsSet` unconditionally
+(`svm-interp/src/lib.rs:10046`), because the pure evaluator has no vCPU context. Same
+gap on single- and multi-vCPU, which is exactly why `drive_parallel` didn't help.
+
+So there are (at least) **two layered bytecode-engine gaps** for JACL, and they are
+discovered one at a time:
+
+1. **Compile-time:** the `gc.roots + thread` seam-combination veto (declines the module).
+2. **Runtime (once the veto is lifted):** `vcpu.tls` (`VcpuTlsGet`/`VcpuTlsSet`) has no
+   fused `Op` and traps `Malformed` via `eval_inst`. Likely more gaps sit behind it.
+
+## Recommended next steps (revised)
+
+1. **The parity work is an op-coverage list, discovered iteratively — not one seam.**
+   Add a dedicated fused `Op::VcpuTlsGet`/`Op::VcpuTlsSet` to the bytecode engine
+   (mirroring the tree-walker's `tls`-register handling), lift the `gc.roots + thread`
+   compile veto behind a soundly-driven all-vCPU root scan, re-run `probe_svmb`, and
+   read off the next gap. Each is a small, differentially-tested slice against the
+   tree-walker oracle; iterate until `print "hi"` runs green on the bytecode engine.
+
+2. **The multi-vCPU driver is still the right execution model** (it services threads
+   and scans all-vCPU `gc.roots`), but it shares the same fused-op coverage as the
+   single-vCPU path — so it is a *destination*, not a shortcut around the op work.
+
+3. **Independently useful:** narrow `dead_func_elim`'s indirect-dispatch gate. It bails
+   on `cont.new`/`ref.func`, whose targets are statically known; only true
    `call_indirect` needs the conservative bail. Letting DCE fire shrinks the linked
    module and helps the `svm-wasm-jit` mixed tier regardless of the veto.
 

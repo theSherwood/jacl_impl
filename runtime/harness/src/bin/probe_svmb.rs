@@ -19,8 +19,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use std::sync::Arc;
+
 use svm_ir::{Inst, LinkUnit, Module};
-use svm_interp::{bytecode, cap_id};
+use svm_interp::{bytecode, cap_id, Region, Value};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const CAP_SELF: u32 = u32::MAX;
@@ -243,6 +245,133 @@ fn report(tag: &str, m: &Module) {
     }
 }
 
+/// Build a powerbox `Host` with the module's manifest imports bound by name (`write`→stdout,
+/// `stdin`→stdin, `exit`→exit), mirroring `svm_run`'s manifest binding — so `print` actually routes
+/// to a captured stdout buffer instead of faulting.
+fn powerbox_host(m: &Module) -> svm_interp::Host {
+    use svm_interp::{Host, StreamRole};
+    let mut host = Host::new();
+    let mut bindings = Vec::with_capacity(m.imports.len());
+    for imp in &m.imports {
+        let b = match imp.name.as_str() {
+            "write" => (cap_id::STREAM, 1u32, host.grant_stream(StreamRole::Out)),
+            "read" | "stdin" => (cap_id::STREAM, 0u32, host.grant_stream(StreamRole::In)),
+            "exit" => (cap_id::EXIT, 0u32, host.grant_exit()),
+            other => {
+                eprintln!("probe: unbound import '{other}' — leaving CapFault");
+                bindings.push(svm_interp::BoundImport {
+                    type_id: 0, op: 0, handle: -1, bound: false, rebindable: false,
+                });
+                continue;
+            }
+        };
+        bindings.push(svm_interp::BoundImport {
+            type_id: b.0, op: b.1, handle: b.2, bound: true, rebindable: false,
+        });
+    }
+    host.set_import_bindings(bindings);
+    host
+}
+
+/// Run `_start` (func 0) on the single-vCPU engine vs the multi-vCPU cooperative/parallel driver
+/// (`drive_parallel`, the native stand-in for the browser's per-vCPU Workers), both over a real
+/// powerbox with `write` bound to a captured stdout. The single-vCPU `run` has no scheduler, so a
+/// `thread.spawn`/`gc.roots` escape traps `Malformed`; `drive_parallel` services those. Requires the
+/// seam veto to be lifted (env `PROBE_LIFT_VETOS=1`), else both decline to `None` at compile.
+fn run_compare(m: &Module) {
+    println!("\n===== EXECUTION: single-vCPU vs multi-vCPU (powerbox bound, veto must be lifted) =====");
+    println!("imports: {:?}", m.imports.iter().map(|i| i.name.as_str()).collect::<Vec<_>>());
+
+    let mut host = powerbox_host(m);
+    let mut fuel = u64::MAX;
+    let single = bytecode::compile_and_run_with_host(m, 0, &[], &mut fuel, &mut host);
+    println!("single-vCPU  (compile_and_run_with_host):  {}   stdout={:?}",
+        describe(&single), String::from_utf8_lossy(&host.stdout));
+
+    let size = 1usize << 20;
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let base = unsafe { std::alloc::alloc_zeroed(layout) };
+    assert!(!base.is_null());
+    let back = Arc::new(unsafe { Region::shared(base, size as u64) });
+    let mut host = powerbox_host(m);
+    let mut fuel = u64::MAX;
+    let par = bytecode::compile_and_run_capture_over_parallel_with_host(
+        m, 0, &[], &mut fuel, &[], Arc::clone(&back), &mut host,
+    ).map(|(r, _)| r);
+    println!("multi-vCPU   (drive_parallel):             {}   stdout={:?}",
+        describe(&par), String::from_utf8_lossy(&host.stdout));
+    drop(back);
+    unsafe { std::alloc::dealloc(base, layout) };
+
+    println!("(correct stdout on the multi-vCPU path = the gc.roots+thread machinery ran green;");
+    println!(" Malformed = that engine cannot service JACL's startup.)");
+
+    // Locate the trap: traced single-vCPU run gives the backtrace (innermost frame first).
+    let mut host = powerbox_host(m);
+    let mut fuel = u64::MAX;
+    match bytecode::compile_and_run_with_host_traced(m, 0, &[], &mut fuel, &mut host) {
+        None => println!("\ntraced run: declined (None) — the trap is at/after a concurrency seam the traced path won't cross"),
+        Some((res, bt, _)) => {
+            println!("\ntraced run: {}", describe(&Some(res)));
+            if let Some(pc) = bt.first() {
+                let f = pc.func as usize;
+                println!("trapping frame: func {} block {} inst {}", pc.func, pc.block, pc.inst);
+                // What distinctive ops does the trapping function contain?
+                if let Some(func) = m.funcs.get(f) {
+                    let mut kinds = std::collections::BTreeSet::new();
+                    for b in &func.blocks {
+                        for inst in &b.insts {
+                            let k = match inst {
+                                Inst::GcRoots { .. } => "gc.roots",
+                                Inst::ThreadSpawn { .. } => "thread.spawn",
+                                Inst::ThreadJoin { .. } => "thread.join",
+                                Inst::MemoryWait { .. } => "memory.wait",
+                                Inst::ContNew { .. } => "cont.new",
+                                Inst::ContResume { .. } => "cont.resume",
+                                Inst::Suspend { .. } => "suspend",
+                                Inst::CapCall { type_id, .. } => {
+                                    if *type_id == cap_id::INSTANTIATOR { "cap.instantiator" }
+                                    else if *type_id == cap_id::YIELDER { "cap.yielder" }
+                                    else if *type_id == CAP_SELF { "cap.self" }
+                                    else { "cap.call" }
+                                }
+                                Inst::CallImport { .. } => "call.import",
+                                _ => continue,
+                            };
+                            kinds.insert(k);
+                        }
+                    }
+                    println!("trapping func's notable ops: {:?}", kinds);
+                }
+                println!("backtrace (func indices, inner→outer): {:?}",
+                    bt.iter().map(|p| p.func).collect::<Vec<_>>());
+                // Dump the exact trapping instruction (and a couple around it).
+                if let Some(func) = m.funcs.get(f) {
+                    if let Some(blk) = func.blocks.get(pc.block) {
+                        let i = pc.inst;
+                        let lo = i.saturating_sub(2);
+                        for (j, inst) in blk.insts.iter().enumerate().skip(lo).take(5) {
+                            let marker = if j == i { " <== TRAP" } else { "" };
+                            println!("   f{}.b{}.i{}: {:?}{}", f, pc.block, j, inst, marker);
+                        }
+                        if i >= blk.insts.len() {
+                            println!("   (inst {i} is the block terminator: {:?})", blk.term);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn describe(r: &Option<Result<Vec<Value>, svm_interp::Trap>>) -> String {
+    match r {
+        None => "None (compile declined — is PROBE_LIFT_VETOS set?)".into(),
+        Some(Ok(v)) => format!("Ok({v:?})"),
+        Some(Err(t)) => format!("Trap::{t:?}"),
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1).expect("usage: probe_svmb <prog.jacl>");
     let module = link_program(&PathBuf::from(&arg));
@@ -256,4 +385,6 @@ fn main() {
     let mut outlined = opt.clone();
     svm_wasm_jit::outline_cap_calls(&mut outlined);
     report("AFTER optimize_module + outline_cap_calls (mixed-tier prep)", &outlined);
+
+    run_compare(&module);
 }
