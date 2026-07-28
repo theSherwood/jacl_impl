@@ -4,7 +4,7 @@ name: Deploy Playground to Pages
 #   - Classic: build_wasm.sh → src/jacl.c (jacl_eval), the in-tree compiler+VM.
 #   - SVM (the migration target): the wasm-safe bytecode engine. The playground's
 #     "Engine: SVM" toggle runs edited source client-side — jacl_emit.wasm (the
-#     LLVM-free frontend → SVM IR) → svm_link_run_jacl in svm_browser.wasm (link vs
+#     LLVM-free frontend → SVM IR) → svm_link_run in svm_browser.wasm (generic link vs
 #     jaclrt.svm + run). See demo/svm/README.md.
 
 on:

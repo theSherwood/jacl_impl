@@ -71,7 +71,7 @@ goes red, re-run the copy above and commit.
      the runtime blob (`jaclrt.svm`). Needs submodule checkout (`vendor/svm`),
      Rust + `wasm32-unknown-unknown`, and clang/LLVM-18 (svm-llvm bakes the
      runtime). The playground's "Engine: SVM" toggle then runs edited source
-     entirely client-side: `jacl_emit.wasm` → `svm_link_run_jacl` (link vs
+     entirely client-side: `jacl_emit.wasm` → `svm_link_run` (generic link vs
      `jaclrt.svm` + run). See `demo/svm/README.md`.
   3. `demo/build_demo.sh` bundles the CodeMirror 6 editor with esbuild
      and regenerates `examples.json` from `test/jacl/*.jacl`.

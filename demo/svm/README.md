@@ -45,12 +45,14 @@ so the guest traps (`STATUS_TRAP`).
    through `SvmJaclRunner.runSvmb` — fast, no compile.
 2. **Edited source (live):** `JaclFrontend.emitIr(source)` compiles it to SVM IR text in
    the browser (`jacl_emit.wasm`); a compile error is shown as-is; otherwise
-   `SvmJaclRunner.linkRun(ir, jaclrt.svm)` links it against the runtime and runs it
-   (`svm_link_run_jacl`). Both return the existing `RunResult`, so `displayResult` is
-   unchanged.
+   `SvmJaclRunner.linkRun(ir, jaclrt.svm)` links it against the runtime and runs it. `linkRun`
+   splits the frontend's `%%RELOCS%%` wire format and passes the module text, the `jaclrt.svm`
+   library, the `__jacl_entry` entry name, and the relocs to the cdylib's **generic**
+   `svm_link_run` (nothing JACL-specific lives in the cdylib). Both return the existing
+   `RunResult`, so `displayResult` is unchanged.
 
 The whole live pipeline (source → IR → link → run → stdout) is verified headless — see the
-Node checks: `jacl_emit_ir("print \"hi\"")` → IR, then `svm_link_run_jacl` → `"hi\n"`; a
+Node checks: `jacl_emit_ir("print \"hi\"")` → IR, then `svm_link_run` → `"hi\n"`; a
 generator → `"1\n2\n"`; malformed input is rejected with the frontend's own diagnostic.
 
 **Limitations.** Single-file only — a module program (top-level `use`) needs filesystem
