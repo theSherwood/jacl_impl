@@ -36,5 +36,23 @@ across the host↔staged-macro boundary by **serialization**, not shared heap ob
 codegen/selfhost/macro_staging/run_wire_test.sh   # syn_wire round-trips
 ```
 
-The macro side of the ABI (jaclrt plain-data ↔ the same bytes) and codegen lowering
-of `syntax-quote`/`~splice` into plain-data construction are the next bricks.
+## Phase 1(B) — macro side of the ABI (`syn_rt`)
+
+The mirror of `syn_wire` for code running **inside** a staged macro on the SVM
+runtime: it converts the same wire bytes to/from the **plain-data** syntax
+representation — a jaclrt **vector** `[kind, scope_mark, flags, …payload]` (option B:
+no special GC type). Compiled to SVM as runtime code for real macros; built natively
+(with an `__vm_*` shim) for the test.
+
+| File | Role |
+|---|---|
+| `syn_rt.{h,c}` | `syn_wire bytes ↔ jaclrt plain-data vec`. Wire format identical to `syn_wire.c`. |
+| `rt_native_shim.c` | Native single-threaded stubs for the SVM `__vm_*` intrinsics, so the runtime value/string/collection subset runs off-SVM for tests. |
+| `gen_wire.c` / `rt_roundtrip.c` + `run_rt_codec_test.sh` | Cross-codec test: `AST → wire` (compiler side) then `wire → vec → wire` (runtime side), asserting **byte-identical** output. Proves the two codecs share one ABI. |
+
+```sh
+codegen/selfhost/macro_staging/run_rt_codec_test.sh   # syn_wire ≡ syn_rt on the wire
+```
+
+Next bricks: codegen lowering of `syntax-quote`/`~splice` into plain-data construction,
+then the staging pipeline behind `JACL_STAGE_ON_SVM`.
