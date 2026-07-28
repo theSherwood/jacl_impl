@@ -288,7 +288,9 @@ fn run_compare(m: &Module) {
     println!("single-vCPU  (compile_and_run_with_host):  {}   stdout={:?}",
         describe(&single), String::from_utf8_lossy(&host.stdout));
 
-    let size = 1usize << 20;
+    // Size the shared backing to the module's declared window (`1 << size_log2`); JACL declares a
+    // multi-MiB heap, so a fixed small Region would let the guest write past it and segfault.
+    let size = m.memory.as_ref().map_or(1usize << 20, |mc| 1usize << mc.size_log2);
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
     let base = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!base.is_null());
