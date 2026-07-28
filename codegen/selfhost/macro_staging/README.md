@@ -20,3 +20,21 @@ codegen/selfhost/macro_staging/run_diff.sh --update   # after an intentional cor
 
 Later phases run the same gate with `JACL_STAGE_ON_SVM=1` (macros evaluated on SVM);
 green means parity with the `vm.c` oracle.
+
+## Phase 1(B) — syntax-value ABI (`syn_wire`)
+
+Chosen approach (option B): represent syntax objects as plain data and pass them
+across the host↔staged-macro boundary by **serialization**, not shared heap objects
+(the two heaps use native pointers vs SVM window offsets, so objects aren't portable).
+
+| File | Role |
+|---|---|
+| `syn_wire.{h,c}` | Compiler side of the ABI: `AstNode ↔ bytes`. Self-describing, preserves hygiene fields (`scope_mark`/`is_caret`/`is_gensym`). Corpus-scoped node kinds (command/block/literal/var-ref); unsupported kinds return NULL, grow as needed. |
+| `syn_wire_test.c` + `run_wire_test.sh` | Round-trip test: parse → encode → decode → assert pretty-print equal **and** re-encode byte-identical. |
+
+```sh
+codegen/selfhost/macro_staging/run_wire_test.sh   # syn_wire round-trips
+```
+
+The macro side of the ABI (jaclrt plain-data ↔ the same bytes) and codegen lowering
+of `syntax-quote`/`~splice` into plain-data construction are the next bricks.
