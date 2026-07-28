@@ -115,7 +115,29 @@ Rust harness + translates the runtime — and skips cleanly without cargo/gcc/cl
 codegen/selfhost/macro_staging/run_svm_e2e.sh   # syntax-quote runs on real SVM
 ```
 
-Remaining Phase 3 integration (full staged macro): a wrapper that reads arg-syntax on
-`stdin` (`syn_rt` decode), calls `__jacl_macro`, and encodes the result to `stdout` — so a
-real macro body runs on SVM with real args. Then `~@` splicing, the hygiene ABI (Phase 4),
-the staging pipeline behind `JACL_STAGE_ON_SVM` (Phase 5), and dropping the legacy VM (Phase 6).
+## Phase 3 — staged-macro wrapper + data flow
+
+`macro_main.c` is the staged-macro module entry (arity-1): read the argument syntax value
+on `stdin` (`synrt_decode`), call `__jacl_macro`, write the encoded result on `stdout`
+(`synrt_encode`). `read(0)`/`write(1)` are POSIX natively and the on-ramp Stream caps on
+SVM, so the one source serves both. `__jacl_macro` resolves by name at link time
+(`svm_codegen_macro_body`'s export).
+
+`run_wrapper_test.sh` exercises the whole marshalling round-trip natively with the real
+codecs, for a `twice {x} = [+ ~x ~x]`-shaped macro:
+
+```
+gen_wire ARG (AST→wire) | macro_main (decode→__jacl_macro→encode) | wire_to_ast (wire→AST)
+  twice 21       ->  [+ 21 21]
+  twice [* 3 4]  ->  [+ [* 3 4] [* 3 4]]     (compound arg spliced twice)
+  twice foo      ->  [+ [foo] [foo]]
+```
+
+Only `__jacl_macro` is a hand-written stand-in (`fake_twice.c`) mirroring the codegen'd
+body — which is itself proven by `run_macro_body_test.sh` (IR) and `run_svm_e2e.sh` (real
+SVM). So both halves of Phase 3 are validated; what remains is the **final link**: join
+`macro_main` + a real codegen'd `__jacl_macro` + `jaclrt` + `syn_rt` into one SVM module
+and run it on the engine (a Rust link driver, like `jacl_svm`, with an explicit
+`__jacl_macro` export). Then: arity>1 (args frame), `~@` splicing, the hygiene ABI (Phase
+4), the staging pipeline behind `JACL_STAGE_ON_SVM` (Phase 5), and dropping the legacy VM
+(Phase 6).
