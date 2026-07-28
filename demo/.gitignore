@@ -1,2 +1,5 @@
 node_modules/
 dist/*.map
+# SVM-backend generated assets (produced by svm/build_assets.sh, built in CI)
+wasm/svm_browser.wasm
+svm/svmb/
