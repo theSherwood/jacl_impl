@@ -171,9 +171,13 @@ multi-vCPU   (drive_parallel):             Ok([I64(0)])   stdout="hi\n"
    worker under `drive_parallel` work-stealing should read that worker's TLS word; today the
    `Vm.tls` seed follows creation, not migration. Not exercised by the browser tier
    (single-OS-thread cooperative, worker 0), so every browser read is a faithful `0`.
-2. **The rest of the browser story** (unchanged from `SVM_BROWSER_PLAN.md`): the cdylib
-   entry, Emscripten frontend→IR, `print`→JS, Pages CI. The *engine* blocker this doc chased
-   is closed; that work is integration.
+2. **The browser run path is wired** (`demo/svm/`, `demo/src/svm-jacl-wasm.ts`): a JACL
+   `.svmb` runs through the `svm-browser` cdylib's `svm_run_onramp` on `wasm32` and the
+   captured stdout comes back as the playground's existing `RunResult`. Proven headless —
+   `print "hi"` → `"hi\n"`, a generator → `"1\n2\n"`, `svm_status=0`. What's left is the
+   editor UI swap and, for *live* editing, the Emscripten frontend→IR module
+   (`jacl_emit.wasm`) so edited source can be linked+encoded in the browser
+   (`SVM_BROWSER_PLAN.md` option (b)); precompiled examples run today.
 3. **Independently useful:** narrow `dead_func_elim`'s indirect-dispatch gate (bails on
    `cont.new`/`ref.func`, whose targets are statically known) so DCE prunes the linked module
    and helps the `svm-wasm-jit` mixed tier.
