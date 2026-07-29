@@ -4531,17 +4531,14 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
  * Unlike `svm_codegen_macro_body`, the entry is codegen'd (so `synrt_read_arg` /
  * `synrt_write_result` / `jacl_*` are `call.sym` imports, resolved against the staging-
  * extended runtime) — svm-llvm C cannot emit those cross-unit imports. Links like any JACL
- * program. Arity-1 for now (the wire carries one syntax value; multi-arg is a frame,
- * follow-up). NULL on an unsupported construct (message in `err`). */
+ * program. Any arity: the argument wire carries the N parameter syntax values back-to-back,
+ * and the entry reads them in order (stateful `synrt_read_arg`). NULL on an unsupported
+ * construct (message in `err`). */
 IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
                                    AstNode *body, char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
-  if (nparams != 1) {
-    if (errcap) snprintf(err, errcap, "staged macro: only arity-1 supported for now (got %u)", nparams);
-    return NULL;
-  }
 
   IrModule *m = irb_module_new();
   cx.m = m;
@@ -4554,18 +4551,19 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, resume-arg) */
   IrBlock main_block = irb_block(mainf, i64_2, 2);
 
-  /* func 1 = the scheduler root: read the argument syntax value, bind the param, run the
-   * macro body, write the result syntax value. Runs on a fiber like a normal program body,
-   * so allocation / GC behave as usual. */
+  /* func 1 = the scheduler root: read the N argument syntax values (one per macro param,
+   * in order), bind them, run the macro body, write the result syntax value. Runs on a
+   * fiber like a normal program body, so allocation / GC behave as usual. `synrt_read_arg`
+   * is stateful — call k returns the k-th value off the one argument wire. */
   cx.f = mainf; cx.cur = main_block; cx.sp = 0;
   (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
   env_reset(&cx);
   capset_reset(&cx); capset_scan(&cx, body);
   scope_enter(&cx);
-  {
+  for (uint32_t k = 0; k < nparams && !cx.failed; k++) {
     IrVal ra[] = {cx.sp};
     IrVal x = emit_rt_call(&cx, "synrt_read_arg", ra, 1);
-    env_define(&cx, names[0], lens[0], x, /*is_mut=*/0, /*is_cell=*/0);
+    env_define(&cx, names[k], lens[k], x, /*is_mut=*/0, /*is_cell=*/0);
   }
   IrVal res = compile_expr(&cx, body);
   if (!cx.failed) {

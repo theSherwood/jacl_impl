@@ -34,15 +34,28 @@ void *realloc(void *p, size_t n) {
 
 extern long read(int fd, void *buf, long n);
 
+/* Stateful across calls: the argument wire is `version byte, then N syntax values
+ * back-to-back` (N = the macro's arity). The first call slurps stdin and skips the
+ * version byte; each call decodes and returns the next syntax value. A 1-arg macro
+ * reads once (the original single-value behaviour); an N-arg macro's codegen entry
+ * calls this once per parameter, in order. */
+static unsigned char *g_arg_buf;
+static size_t g_arg_len, g_arg_pos;
+static int g_arg_ready;
 JaclVal synrt_read_arg(void) {
-  size_t cap = 1 << 16, len = 0; unsigned char *buf = (unsigned char *)malloc(cap);
-  for (;;) {
-    if (len == cap) { cap *= 2; buf = (unsigned char *)realloc(buf, cap); }
-    long r = read(0, buf + len, (long)(cap - len));
-    if (r <= 0) break;
-    len += (size_t)r;
+  if (!g_arg_ready) {
+    size_t cap = 1 << 16, len = 0; unsigned char *buf = (unsigned char *)malloc(cap);
+    for (;;) {
+      if (len == cap) { cap *= 2; buf = (unsigned char *)realloc(buf, cap); }
+      long r = read(0, buf + len, (long)(cap - len));
+      if (r <= 0) break;
+      len += (size_t)r;
+    }
+    g_arg_buf = buf; g_arg_len = len; g_arg_pos = 0; g_arg_ready = 1;
+    if (len < 1 || buf[0] != (unsigned char)synrt_wire_version()) return JACL_NIL;
+    g_arg_pos = 1;   /* skip the shared version byte */
   }
-  return synrt_decode(buf, len);
+  return synrt_decode_node(g_arg_buf, g_arg_len, &g_arg_pos);
 }
 
 /* Returns `v` (not void) so a codegen `call.sym` — which expects a single i64 result —

@@ -199,9 +199,21 @@ two real defects, both now fixed:
 The alignment fix noted earlier (guest bump-allocator `g_arena` now `aligned(16)`, so its
 `*(size_t*)base` size-header write doesn't fault) stands and is still required.
 
-**Still out of scope for this slice** (tracked for later phases): `~@` unquote-splicing,
-multi-arity macros (the wire carries one syntax value; multi-arg needs an args frame), and
-hygiene / scope-mark propagation (Phase 4).
+## Multi-arity macros — done
+
+The staged path now handles macros of any arity, so the whole Phase 0 corpus (including
+`unless {cond body}`) stages on SVM. The design keeps the wire flat: the argument wire is a
+single version byte followed by the N parameter syntax values **back-to-back** (arity-1 is
+exactly the original format). `synrt_read_arg` is stateful — the first call slurps stdin and
+skips the version byte, and each call decodes the next value (`synrt_decode_node`); the
+codegen entry (`svm_codegen_staged_macro`) calls it once per parameter, in order, and binds
+each. No args frame or per-arg func parameters — the SVM func signature is unchanged; the
+parameters arrive over the wire. `run_stage_test.sh` covers the arity-2 case
+`unless [== 1 2] { set hit 5 } → [if [== 1 2] {} { set hit 5 }]`.
+
+**Still out of scope** (tracked for later phases): `~@` unquote-splicing and hygiene /
+scope-mark propagation (Phase 4), then wiring the staged path into `expand__node` behind
+`JACL_STAGE_ON_SVM` so the whole compiler pipeline stages on SVM (Phase 5).
 
 ## Sequencing note
 

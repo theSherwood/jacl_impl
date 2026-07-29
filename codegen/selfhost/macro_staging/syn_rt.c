@@ -76,6 +76,18 @@ JaclVal synrt_decode(const unsigned char *buf, size_t len) {
   return r.err ? JACL_NIL : v;
 }
 
+int synrt_wire_version(void) { return SYNW_VERSION; }
+
+/* Decode ONE node from `buf` starting at *pos (no version byte); advances *pos past the
+ * node. For reading a sequence of N syntax values from one buffer (multi-arity macro
+ * args, whose wire is: version byte, then N nodes back-to-back). JACL_NIL on error. */
+JaclVal synrt_decode_node(const unsigned char *buf, size_t len, size_t *pos) {
+  R r = { buf, len, *pos, 0 };
+  JaclVal v = r_node(&r);
+  *pos = r.pos;
+  return r.err ? JACL_NIL : v;
+}
+
 /* ---- byte writer ----------------------------------------------------------- */
 
 typedef struct { unsigned char *buf; size_t len, cap; int err; } W;
