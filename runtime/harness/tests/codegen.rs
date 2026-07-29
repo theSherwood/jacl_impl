@@ -49,13 +49,6 @@ fn emit(case: &str) -> String {
     String::from_utf8(out.stdout).expect("emit_jacl output is UTF-8")
 }
 
-/// The old bytecode VM's integer result for a case (the bring-up oracle).
-fn old_vm_result(case: &str) -> i32 {
-    let out = Command::new(driver()).arg("--oldvm").arg(case).output().expect("run --oldvm");
-    assert!(out.status.success(), "old vm {case} failed: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or_else(|e| panic!("old vm {case} output: {e}"))
-}
-
 /// Run a case expected to fail codegen; returns the emitted error (stderr).
 fn emit_expecting_error(case: &str) -> String {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
@@ -438,27 +431,27 @@ fn vector_literal_length_four() {
 }
 
 
-// ---- P2.10: bring-up — combined programs diffed against the old bytecode VM ----
+// ---- P2.10: bring-up — combined programs, expected values frozen from the old bytecode VM ----
+// The expected integers below were the old VM's outputs (Phase 6.3 retired the live `--oldvm`
+// oracle; the values are frozen here so the check is preserved without linking `vm.c`). run_case
+// still asserts interp == jit == want, so each stays a 3-way agreement against the reference.
 
 #[test]
 fn bringup_matches_old_vm() {
-    // Each program uses only canonical JACL the old VM accepts and the new codegen
-    // supports; the new codegen (interp + JIT) must produce the same integer the old
-    // VM does. run_case asserts interp == jit == want, so this is a 3-way agreement.
-    for case in [
-        "bring_bindings",      // def + dynamic arithmetic
-        "bring_nested_arith",  // typed (unboxed) nested arithmetic
-        "bring_factorial",     // recursion + if/else
-        "bring_while_sum",     // while + mut + set
-        "bring_if",            // if expression
-        "bring_closure",       // anonymous proc capturing an outer binding
-        "bring_counter",       // anonymous proc capturing a mutable (cell)
-        "bring_str",           // string concat + length
-        "bring_hof",           // higher-order: proc taking a closure arg
-        "bring_proc_chain",    // nested proc calls
-        "bring_recur_sum",     // recursion + accumulation
+    for (case, want) in [
+        ("bring_bindings", 42),     // def + dynamic arithmetic
+        ("bring_nested_arith", 11), // typed (unboxed) nested arithmetic
+        ("bring_factorial", 720),   // recursion + if/else
+        ("bring_while_sum", 55),    // while + mut + set
+        ("bring_if", 100),          // if expression
+        ("bring_closure", 42),      // anonymous proc capturing an outer binding
+        ("bring_counter", 3),       // anonymous proc capturing a mutable (cell)
+        ("bring_str", 9),           // string concat + length
+        ("bring_hof", 42),          // higher-order: proc taking a closure arg
+        ("bring_proc_chain", 42),   // nested proc calls
+        ("bring_recur_sum", 55),    // recursion + accumulation
     ] {
-        run_case(case, i32_val(old_vm_result(case)));
+        run_case(case, i32_val(want));
     }
 }
 
@@ -467,21 +460,26 @@ fn bringup_matches_old_vm() {
 #[test]
 fn generator_count_matches_old_vm() {
     // proc upto {n} { … yield $i … }; [for [upto 5] x { sum }] -> 0+1+2+3+4 = 10
-    run_case("gen_count", i32_val(old_vm_result("gen_count")));
+    run_case("gen_count", i32_val(10));
 }
 
 #[test]
 fn generator_squares_matches_old_vm() {
-    // a generator yielding i*i, driven by for-over-generator
-    run_case("gen_squares", i32_val(old_vm_result("gen_squares")));
+    // a generator yielding i*i, driven by for-over-generator -> 0+1+4+9+16 = 30
+    run_case("gen_squares", i32_val(30));
 }
 
 // ---- P3.2: spawn / await (futures over fibers) ----
 
 #[test]
 fn spawn_await_matches_old_vm() {
-    for case in ["spawn_await", "spawn_capture", "spawn_two", "spawn_await_twice"] {
-        run_case(case, i32_val(old_vm_result(case)));
+    for (case, want) in [
+        ("spawn_await", 42),
+        ("spawn_capture", 42),
+        ("spawn_two", 45),
+        ("spawn_await_twice", 42),
+    ] {
+        run_case(case, i32_val(want));
     }
 }
 
@@ -491,8 +489,8 @@ fn spawn_await_matches_old_vm() {
 fn parallel_race_matches_old_vm() {
     // parallel returns a vector (consumed via destructuring `def [a b] …`); race returns
     // the first block's result.
-    for case in ["parallel", "parallel3", "race"] {
-        run_case(case, i32_val(old_vm_result(case)));
+    for (case, want) in [("parallel", 45), ("parallel3", 42), ("race", 42)] {
+        run_case(case, i32_val(want));
     }
 }
 
