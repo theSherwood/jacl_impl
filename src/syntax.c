@@ -1387,17 +1387,24 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         entry->is_builtin     = false;
     }
 
-    /* Phase 2: Compile macro bodies */
-    for (uint32_t i = 0; i < macros->count; i++) {
-        MacroEntry *entry = &macros->entries[i];
-        if (entry->closure) continue;
-        const char *err = expand__compile_staged_body(entry, heap,
-                                                       intern, arena);
-        if (err) {
-            *out_error_line = 0;
-            *out_error_col  = 0;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
-            return err;
+    /* Phase 2: Compile macro bodies into legacy bytecode closures — for the legacy VM's
+     * `jacl_ctx_run_closure` (Phase 3). Skipped entirely when the SVM staging hook is active
+     * (JACL_STAGE_ON_SVM): staging codegens each body onto the SVM engine per call, so no
+     * legacy closure is needed. This is the first Phase-6 cut of the macro path's dependence
+     * on `compiler.c` / `bytecode.c` / `vm.c` (docs/SVM_MACRO_STAGING_PLAN.md, Phase 6). */
+    int staging_active = jacl_macro_stage_hook && jacl_stage_on_svm_enabled();
+    if (!staging_active) {
+        for (uint32_t i = 0; i < macros->count; i++) {
+            MacroEntry *entry = &macros->entries[i];
+            if (entry->closure) continue;
+            const char *err = expand__compile_staged_body(entry, heap,
+                                                           intern, arena);
+            if (err) {
+                *out_error_line = 0;
+                *out_error_col  = 0;
+                if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
+                return err;
+            }
         }
     }
 

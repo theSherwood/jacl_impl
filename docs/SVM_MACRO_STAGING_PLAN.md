@@ -275,10 +275,35 @@ would otherwise capture a call-site binding, and no codegen-able corpus program 
 stays out until a concrete capture-sensitive corpus program makes it observable; the ABI
 (runtime scope-mark stamped by `compile_synquote`) is sketched for then.
 
-## Phase 6 — drop the legacy VM
+## Phase 6 — drop the legacy VM (in progress)
 
-Once staging is the only macro evaluator, flip the `JACL_STAGE_ON_SVM` gate to always-on, then
-remove `jacl_ctx_run_closure` / the bytecode macro path / `vm.c`.
+Goal: the frontend/codegen path stops linking `vm.c` (and the bytecode half of `compiler.c` +
+`bytecode.c`), so `jacl_compiler.svmb` shrinks and no longer carries the legacy interpreter.
+`src/jacl.c` currently pulls all three into every build. The legacy VM has **three** users on
+the emit path (`codegen/tests/emit_jacl.c`):
+
+1. **Macro expansion** — `ast_expand_macros` compiles each macro body to a bytecode closure
+   (`expand__compile_staged_body` → `compiler.c`) and runs it with `jacl_ctx_run_closure`
+   (`vm.c`). *This is what Phase 5 staging replaces.*
+2. **The `--oldvm` bring-up oracle** — `run_old_vm` (`jacl_vm_new` + `jacl_eval`), used only by
+   `codegen.rs`'s `bringup_matches_old_vm`; superseded by the interp==jit `run_diff` oracle.
+3. **The `--interp` capability host round-trip** — `jacl_eval` again, backing the `interpret`
+   powerbox in the corpus.
+
+Removal order (each a slice):
+
+- **6.1 — cut the macro path's legacy dependency under staging (done).** When the SVM staging
+  hook is active (`JACL_STAGE_ON_SVM`), `ast_expand_macros` now **skips** Phase 2 entirely — no
+  bytecode closures are compiled; the hook codegens each body onto SVM per call. Verified: the
+  whole corpus still emits byte-identical IR through `run_diff.sh --svm` with zero legacy
+  closure compilation, proving staging is a complete standalone macro evaluator.
+- **6.2 — make staging the default** (always link the SVM stage bridge into the frontend / use
+  guest-JIT in the `.svmb`), so the legacy macro path is never taken; then delete
+  `expand__compile_staged_body`, the `jacl_ctx_run_closure` call, and `OP_SYNTAX_OP`.
+- **6.3 — retire the other two legacy-VM users**: drop `--oldvm` (and its `codegen.rs` test),
+  and move `--interp` off `jacl_eval` (or excise it from the codegen build).
+- **6.4 — drop `vm.c` / `bytecode.c` / the bytecode half of `compiler.c` from `src/jacl.c`**;
+  verify `jacl_compiler.svmb` builds, shrinks, and the corpus still matches.
 
 ## Sequencing note
 
