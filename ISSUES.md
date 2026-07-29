@@ -2,26 +2,34 @@
 
 Track flaky and broken test gates here (per AGENTS.md) so they stay visible.
 
-## `runtime/harness/tests/codegen.rs` — stale vs the manifest-import link model (broken)
+## `runtime/harness/tests/codegen.rs` — restored, with 6 pre-existing failures `#[ignore]`d
 
-**Status:** broken, pre-existing (predates the macro-staging work).
+**Status:** the suite builds and runs again (was completely dark — it didn't compile against
+the current `svm` API). **55 pass, 6 `#[ignore]`d.**
 
-The codegen differential suite (`cargo test -p jacl-runtime-harness --test codegen`) does not
-build/run against the current `svm` API:
+**What was fixed.** The harness used the pre-`IMPORTS.md`-phase-4 link/run model
+(`svm_ir::link` + `synth_powerbox_start(linked, entry, 3, false)` + `instantiate`), which no
+longer exists / no longer works: the translated runtime now keeps its `write` capability as a
+**manifest import**. `run_case_full` was migrated to the model the shipping binaries use
+(`bin/jacl_svm.rs`): `link_with_manifest` → export + `resolve_export` the program entry →
+`synth_manifest_start` → `instantiate_with_imports` (bind `write`/`exit`/`stdin`) → `run_diff`
+(preserving the interp == jit differential). Several stale test-case *sources* in
+`codegen/tests/emit_jacl.c` that used removed syntax were also updated to current syntax:
+the `else` keyword (`[if C {t} else {e}]` → `[if C {t} {e}]`, and `elif` → nested `if`) and a
+proc named `count` that now collides with a builtin (renamed to `cnt`).
 
-- It calls `svm_ir::synth_powerbox_start(linked, entry, 3, false)`, which no longer exists —
-  it was renamed to `synth_manifest_start(module, entry, seed_heap)` (the `3` param is gone).
-- After fixing that name, it still fails: it links with `svm_ir::link` and asserts
-  `linked.imports.is_empty()`, but the translated runtime now keeps its `write` capability as a
-  **manifest import** (resolved by `link_with_manifest` + bound at `instantiate_with_imports`,
-  not by plain `link`). So every `run_case` panics at that assert with an unresolved `write`.
+**The 6 still `#[ignore]`d are pre-existing codegen gaps/drift** (they fail identically on
+`main` — the dark suite just never surfaced them), not regressions from the macro-staging work:
 
-**Fix (not yet done):** migrate `run_case_full` to the manifest model the shipping binaries
-already use (`runtime/harness/src/bin/jacl_svm.rs`): `link_with_manifest` →
-`synth_manifest_start` → `instantiate_with_imports` (bind `write`/`read`/`exit`), and run on
-interp + JIT preserving the differential (`run_diff`) check. Left as a follow-up because it is
-a test-harness migration unrelated to the macro-staging slices.
+- `for_over_range_sum` / `for_over_range_command` / `for_over_dotdot_range` /
+  `for_with_nested_if` — the `for NAME in COLL { body }` loop form no longer codegens
+  ("for requires: …"); the `in`-keyword form drifted from what `compile_for` accepts. Needs a
+  for-loop parser/codegen reconciliation.
+- `arithmetic_variadic_fold` — `[+ 1 2 3 4]`; `+` is binary-only in this codegen (no variadic
+  fold).
+- `binding_same_scope_shadow_is_an_error` — top-level `def x 1; def x 2` no longer errors
+  ("already defined in this scope") in this codegen.
 
-Meanwhile the codegen path is covered differentially by
-`codegen/selfhost/macro_staging/run_diff.sh` (legacy oracle) and `--svm` (staged), and by the
-`jacl_svm` binary on the `test/jacl` corpus.
+Un-ignore each as its underlying gap is fixed. Meanwhile the codegen path also stays covered
+by `codegen/selfhost/macro_staging/run_diff.sh` (legacy oracle) and `--svm` (staged), and by
+the `jacl_svm` binary on the `test/jacl` corpus.
