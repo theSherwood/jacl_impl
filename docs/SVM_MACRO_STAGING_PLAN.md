@@ -328,6 +328,13 @@ Removal order (each a slice):
   to stage (bridge-linked native, or guest-JIT in the `.svmb`). Verify `jacl_compiler.svmb`
   builds, shrinks, and the corpus still matches the frozen golden.
 
+  Its two prerequisites — **guest-JIT macro staging** for the `.svmb` and **`interpret` off
+  the legacy VM** — are scoped in **`docs/SVM_GUEST_JIT_STAGING.md`**: the target SVM `Jit`
+  capability (cap 11), the JACL-side gaps (a binary `svm-encode` serializer for `irbuilder`;
+  a data-segment-free literal lowering; the staging runtime in the guest image + a
+  `compile_linked` symtab), and the `interpret` isolation fork (host-cap-SVM-backed vs
+  same-domain guest-JIT vs `Instantiator`-confined), with a work breakdown.
+
 ## Sequencing note
 
 Chosen over "ship the self-hosted compiler first (legacy VM bundled), purify later."
