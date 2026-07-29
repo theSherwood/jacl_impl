@@ -39,24 +39,6 @@ fn build_driver() -> PathBuf {
     out
 }
 
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
-}
-
 fn parse_expects(src: &str) -> (Vec<String>, Option<String>) {
     let mut expects = Vec::new();
     let mut expect_error = None;
@@ -143,14 +125,9 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     if case.expect_error.is_some() {
         return Stage::ErrNoFail; // emit succeeded but a compile error was expected
     }
-    let raw = match String::from_utf8(out.stdout) {
-        Ok(s) => s,
-        Err(_) => return Stage::EmitFail,
-    };
-    let (text, relocs) = split_relocs(&raw);
-    let program = match svm_text::parse_module(text) {
-        Ok(m) => m,
-        Err(_) => return Stage::TextParseFail,
+    let (program, relocs) = match jacl_runtime_harness::decode_emitted(&out.stdout) {
+        Ok(pr) => pr,
+        Err(_) => return Stage::TextParseFail, // decode of the binary emit container failed
     };
 
     // 2. link vs runtime + catalog, powerbox `_start`

@@ -163,4 +163,9 @@ char *irb_relocs_text(const IrModule *m);
  * `call.sym`, so both paths reference the same indices. */
 uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len);
 
+/* Binary form of the data relocations: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
+ * u32 inst)]`, little-endian. Rides ahead of the module bytes in the emit driver's binary
+ * container (the default `emit_jacl` output). malloc'd; caller frees. */
+uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len);
+
 #endif /* JACL_IRBUILDER_H */

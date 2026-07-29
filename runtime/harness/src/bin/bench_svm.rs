@@ -51,30 +51,6 @@ fn build_driver() -> PathBuf {
     out
 }
 
-/// Split the driver's stdout into module text + SelfData relocs (matches parity.rs).
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc {
-                        func: n[0],
-                        block: n[1],
-                        inst: n[2],
-                        kind: svm_ir::RelocKind::SelfData,
-                    }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
-}
-
 /// Compile a scenario `.jacl` all the way to an instantiated `Instance` (untimed).
 fn build_instance(
     driver: &Path,
@@ -93,9 +69,7 @@ fn build_instance(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let raw = String::from_utf8(out.stdout).map_err(|_| "emit output not UTF-8".to_string())?;
-    let (text, relocs) = split_relocs(&raw);
-    let program = svm_text::parse_module(text).map_err(|e| format!("parse IR: {e:?}"))?;
+    let (program, relocs) = jacl_runtime_harness::decode_emitted(&out.stdout)?;
 
     let linked = svm_ir::link_with_manifest(&[
         LinkUnit {

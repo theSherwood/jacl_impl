@@ -69,7 +69,9 @@ redir_err() { if [ "$mode" = "--svm" ]; then "$@" 2>/dev/null; else "$@" 2>&1; f
 fail=0
 for f in "$CORPUS"/*.jacl; do
   n="$(basename "$f" .jacl)"
-  got="$(redir_err env $STAGE_ENV "$EMIT" --file "$f")"
+  # --text: the goldens are human-readable svm-text; the driver now defaults to the binary
+  # svm-encode container (guest-JIT staging item 7).
+  got="$(redir_err env $STAGE_ENV "$EMIT" --text --file "$f")"
   if [ "$mode" = "--update" ]; then
     printf '%s\n' "$got" > "$GOLDEN/$n.ir"
     echo "  updated golden/$n.ir"

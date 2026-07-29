@@ -32,24 +32,6 @@ fn build_driver() -> PathBuf {
     out
 }
 
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() != 2 {
@@ -64,9 +46,8 @@ fn main() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
-    let raw = String::from_utf8(out.stdout).expect("emit driver output not UTF-8");
-    let (text, relocs) = split_relocs(&raw);
-    let program = svm_text::parse_module(text).expect("parse emitted IR");
+    let (program, relocs) =
+        jacl_runtime_harness::decode_emitted(&out.stdout).expect("decode emitted IR");
 
     eprintln!("emit_svmb: translating runtime + catalog…");
     let rt = jacl_runtime_harness::translate_runtime();

@@ -571,6 +571,13 @@ static void out_raw(Out *o, const void *p, size_t n) {
   o->len += n;
   o->buf[o->len] = '\0';
 }
+/* Fixed 32-bit little-endian (the reloc-triple wire, shared with the JS host). */
+static void out_u32le(Out *o, uint32_t v) {
+  out_u8(o, (uint8_t)(v & 0xff));
+  out_u8(o, (uint8_t)((v >> 8) & 0xff));
+  out_u8(o, (uint8_t)((v >> 16) & 0xff));
+  out_u8(o, (uint8_t)((v >> 24) & 0xff));
+}
 /* Unsigned LEB128 (svm-encode `write_uleb`). */
 static void out_uleb(Out *o, uint64_t v) {
   for (;;) {
@@ -788,6 +795,22 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   free(tab.types);
   free(tab.imports);
 
+  if (!o.buf) { o.buf = xmalloc(1); }
+  *out_len = o.len;
+  return (uint8_t *)o.buf;
+}
+
+/* The binary form of irb_relocs_text: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
+ * u32 inst)]`, all little-endian — the count-prefixed SelfData relocs that ride ahead of
+ * the module bytes in the emit driver's binary container. Malloc'd; caller frees. */
+uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len) {
+  Out o = {0};
+  out_u32le(&o, (uint32_t)m->nrelocs);
+  for (int i = 0; i < m->nrelocs; i++) {
+    out_u32le(&o, m->relocs[i].func);
+    out_u32le(&o, m->relocs[i].block);
+    out_u32le(&o, m->relocs[i].inst);
+  }
   if (!o.buf) { o.buf = xmalloc(1); }
   *out_len = o.len;
   return (uint8_t *)o.buf;

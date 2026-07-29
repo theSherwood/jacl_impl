@@ -29,7 +29,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use svm_ir::{link_with_manifest, LinkUnit};
+use jacl_runtime_harness::decode_emitted;
+use svm_ir::{link_with_manifest, LinkUnit, Module};
 
 /// The program-module export the harness pins its entry to, so `resolve_export` recovers the
 /// entry funcidx after linking reshuffles function indices (the program's entry is its func 0).
@@ -54,10 +55,9 @@ fn powerbox_imports() -> svm_run::Imports {
 fn link_instantiate(
     rt: &svm_llvm::Translated,
     cat: &svm_llvm::Translated,
-    text: &str,
+    program: Module,
     relocs: Vec<svm_ir::DataReloc>,
 ) -> Result<svm_run::Instance, String> {
-    let program = svm_text::parse_module(text).map_err(|e| format!("{e:?}"))?;
     let linked = link_with_manifest(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
         LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
@@ -169,25 +169,6 @@ fn parse_expects(src: &str) -> (Vec<String>, Option<String>) {
         }
     }
     (expects, expect_error)
-}
-
-/// Split the driver's output into module text + SelfData relocs (matches tests/codegen.rs).
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
 }
 
 /// The **`interp` capability** — the host backend of `[interpret …]` (runtime/interpcap.c). A
@@ -316,9 +297,8 @@ fn run_diff_exec(driver: &PathBuf, inst: &svm_run::Instance) -> Result<svm_run::
 /// latter is what a runtime `expect-error` case matches against. `fs_granted` picks the
 /// plain `run_diff` or the [`run_fs_granted`] two-leg.
 fn build_and_run(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
-    let raw = String::from_utf8(driver_stdout.to_vec()).map_err(|_| "driver output not UTF-8".to_string())?;
-    let (text, relocs) = split_relocs(&raw);
-    let inst = link_instantiate(rt, cat, text, relocs)?;
+    let (program, relocs) = decode_emitted(driver_stdout)?;
+    let inst = link_instantiate(rt, cat, program, relocs)?;
     let run = if fs_granted {
         run_fs_granted(driver, &inst)?
     } else {
@@ -366,13 +346,12 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         return Stage::EmitFail(brief(&stderr));
     }
 
-    let raw = match String::from_utf8(out.stdout) {
-        Ok(s) => s,
-        Err(_) => return Stage::TextParseFail("driver output not UTF-8".into()),
+    let (program, relocs) = match decode_emitted(&out.stdout) {
+        Ok(pr) => pr,
+        Err(e) => return Stage::TextParseFail(brief(&e)),
     };
-    let (text, relocs) = split_relocs(&raw);
 
-    let inst = match link_instantiate(rt, cat, text, relocs) {
+    let inst = match link_instantiate(rt, cat, program, relocs) {
         Ok(i) => i,
         Err(e) if e.starts_with("instantiate") || e.starts_with("powerbox") => {
             return Stage::RunFail(brief(&e))
@@ -389,7 +368,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     // Dual-mode gate (SVM_FS_DESIGN.md phase 2): an io_* case must produce the same output
     // with the "fs" capability granted (seeded mem_fs) as without it (guest VFS).
     if case.name.starts_with("io_") {
-        match build_and_run(driver, rt, cat, raw.as_bytes(), /*fs_granted=*/ true) {
+        match build_and_run(driver, rt, cat, &out.stdout, /*fs_granted=*/ true) {
             Ok(glines) if glines == got => {}
             Ok(glines) => {
                 return Stage::WrongOutput(brief(&format!(
