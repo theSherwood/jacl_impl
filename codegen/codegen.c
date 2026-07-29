@@ -4507,3 +4507,77 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
   if (failed) { irb_module_free(m); return NULL; }
   return m;
 }
+
+/* Compile a macro into a complete, runnable **staged-macro program**: a module whose
+ * scheduler-root body reads the argument syntax value from stdin, runs the macro body with
+ * the parameter bound to it, and writes the result syntax value to stdout — evaluating the
+ * macro on the SVM engine (docs/SVM_MACRO_STAGING_PLAN.md, "final link", corrected design).
+ * Unlike `svm_codegen_macro_body`, the entry is codegen'd (so `synrt_read_arg` /
+ * `synrt_write_result` / `jacl_*` are `call.sym` imports, resolved against the staging-
+ * extended runtime) — svm-llvm C cannot emit those cross-unit imports. Links like any JACL
+ * program. Arity-1 for now (the wire carries one syntax value; multi-arg is a frame,
+ * follow-up). NULL on an unsupported construct (message in `err`). */
+IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
+                                   AstNode *body, char *err, size_t errcap) {
+  Cx cx;
+  memset(&cx, 0, sizeof cx);
+  cx.err = err; cx.errcap = errcap;
+  if (nparams != 1) {
+    if (errcap) snprintf(err, errcap, "staged macro: only arity-1 supported for now (got %u)", nparams);
+    return NULL;
+  }
+
+  IrModule *m = irb_module_new();
+  cx.m = m;
+
+  IrType i64_1[] = {IRB_I64};
+  IrType i64_2[] = {IRB_I64, IRB_I64};
+  IrType r1[] = {IRB_I64};
+  IrFunc *entry = irb_func_new(m, i64_1, 1, r1, 1);
+  IrBlock entry_block = irb_block(entry, i64_1, 1);
+  IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, resume-arg) */
+  IrBlock main_block = irb_block(mainf, i64_2, 2);
+
+  /* func 1 = the scheduler root: read the argument syntax value, bind the param, run the
+   * macro body, write the result syntax value. Runs on a fiber like a normal program body,
+   * so allocation / GC behave as usual. */
+  cx.f = mainf; cx.cur = main_block; cx.sp = 0;
+  (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
+  env_reset(&cx);
+  capset_reset(&cx); capset_scan(&cx, body);
+  scope_enter(&cx);
+  {
+    IrVal ra[] = {cx.sp};
+    IrVal x = emit_rt_call(&cx, "synrt_read_arg", ra, 1);
+    env_define(&cx, names[0], lens[0], x, /*is_mut=*/0, /*is_cell=*/0);
+  }
+  IrVal res = compile_expr(&cx, body);
+  if (!cx.failed) {
+    IrVal wa[] = {cx.sp, res};
+    (void)emit_rt_call(&cx, "synrt_write_result", wa, 2);   /* returns v; ignored */
+  }
+  scope_exit(&cx);
+  if (!cx.failed) { IrVal ret[] = {res}; irb_return(cx.f, cx.cur, ret, 1); }
+
+  /* func 0 = entry: init the runtime, run func 1 as the scheduler root, return its result. */
+  if (!cx.failed) {
+    cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    emit_void_call(&cx, "jacl_heap_init");
+    emit_void_call(&cx, "jacl_intern_init");
+    emit_void_call(&cx, "jacl_map_init");
+    IrVal fnref = irb_ref_func(entry, entry_block, mainf);
+    IrVal fnref64 = irb_convert(entry, entry_block, IRB_EXTEND_I32U, fnref);
+    IrVal a[] = {cx.sp, fnref64};
+    IrVal v = emit_rt_call(&cx, "jacl_sched_run_main", a, 2);
+    if (!cx.failed) { IrVal ret[] = {v}; irb_return(cx.f, cx.cur, ret, 1); }
+  }
+  if (!cx.failed) compile_pending_closures(&cx);
+
+  int failed = cx.failed;
+  free(cx.locals);
+  free(cx.marks);
+  free(cx.procs);
+  free(cx.pending);
+  if (failed) { irb_module_free(m); return NULL; }
+  return m;
+}

@@ -160,6 +160,40 @@ The `emit_macro_body` tool (codegen a body → `__jacl_macro` svm-text) is reusa
 the rest of the first attempt (`stage_entry.c` wrapper + `stage_macro.rs` importing across
 units) is superseded by the above and not kept.
 
+## Phase 3 final link — implemented; runs on SVM; one memory bug open
+
+The corrected design is built and **the whole pipeline compiles, links, and runs on the
+SVM engine**:
+
+- **Runtime glue** — `codegen/selfhost/macro_staging/{stage_glue.c,jaclrt_staging.c}`:
+  `syn_rt` + `synrt_read_arg()` / `synrt_write_result(vec)`, translated *with* jaclrt
+  (`translate_runtime_staging()` in the harness). Its `jacl_vec_*` are in-unit; only
+  `read`/`write` cross the boundary.
+- **Codegen entry** — `svm_codegen_staged_macro` (`codegen/codegen.c`): emits func 0 =
+  `{init; x=synrt_read_arg(); res=<body(x)>; synrt_write_result(res)}` + func 1 = the body.
+  `emit_macro_body --staged` drives it.
+- **Driver** — `runtime/harness/src/bin/stage_macro.rs`: link vs the staging runtime,
+  `synth_manifest_start`, run with the arg wire on stdin (`call_with_stdin`), emit the
+  result wire on stdout. Reduces to `jacl_svm`'s link path.
+
+**What works, verified on SVM:** the module builds, links, and runs (`Returned`, no trap);
+`read(0)` receives the argument wire (echo test round-trips the 11-byte `21` wire);
+`write(1)` reaches captured stdout; `synrt_encode` on a **freshly hand-built** jaclrt vec
+produces correct wire.
+
+**Open bug:** `synrt_encode` of the **decoded / body-built** vec faults or returns NULL,
+where a fresh vec in the same spot succeeds. Diagnosed factors:
+1. **Alignment (fixed):** the guest bump-allocator's `char g_arena[]` was unaligned, so its
+   `*(size_t*)base` size-header write faulted; `g_arena` is now `aligned(16)`.
+2. **Remaining:** a `MemoryFault` / `w.err` when `syn_rt` reads back a vec it (or the
+   codegen'd body) built earlier in the run, isolated to the `syn_rt`-on-SVM path — not the
+   arena size (small aligned arena still fails), not GC pressure (16 MiB heap), not the
+   `memory` directive (normal programs emit none either). The likely culprit is the custom
+   guest `malloc`/`realloc` (unknown-old-size copy) interacting with `syn_rt`'s growable
+   buffer; the fix is to drop the custom allocator for a **two-pass fixed-buffer encode**
+   (measure length, then fill a single static buffer — no `realloc`) or a jaclrt-backed
+   flat buffer. Focused next step; everything around it is in place and runs.
+
 ## Sequencing note
 
 Chosen over "ship the self-hosted compiler first (legacy VM bundled), purify later."
