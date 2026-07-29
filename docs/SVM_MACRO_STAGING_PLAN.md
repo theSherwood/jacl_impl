@@ -235,8 +235,21 @@ The seam is a hook, so `src/` gains no codegen/SVM dependency:
 - **`run_diff.sh --svm`** is the committed gate: it builds that driver and diffs the
   `JACL_STAGE_ON_SVM=1` output against the same `golden/` the legacy path matches.
 
-**Still out of scope** (Phase 4 correctness-completeness, pulled in as a future corpus needs
-it): `~@` unquote-splicing and hygiene / scope-mark + gensym propagation across the boundary.
+## Phase 4a — `~@` unquote-splicing + variadic macros — done
+
+Splicing needs a vec-of-syntax to splice, which is a variadic macro's rest parameter, so the
+two land together. `compile_synquote` now handles `~@x` in command/block position by
+concatenating the operand vec into the args (`jacl_vec_concat`), mirroring the legacy
+compiler's `OP_VEC_CONCAT` vs `OP_VEC_PUSH` split. The wire carries a variadic macro's rest
+parameter as a `u32 count` then that many syntax values; `synrt_read_rest` collects them into
+a jaclrt vec (the splice operand), and the staged entry (`svm_codegen_staged_macro`, now
+taking a `variadic` flag) binds the fixed params via `synrt_read_arg` and the rest param via
+`synrt_read_rest`. `run_diff.sh --svm` covers the corpus's `splice.jacl`
+(`pack {first ..rest} = [vec ~first ~@rest]`) — byte-identical to the oracle.
+
+**Still out of scope** — Phase 4b (hygiene): stamping the per-expansion `macro_scope_mark` on
+staged output nodes and the `[gensym]` builtin + gensym-counter round-trip. Only observable in
+capture scenarios, so the current corpus doesn't force it; it comes in with a hygiene corpus.
 And Phase 6: drop the legacy VM from the macro path once staging is the only evaluator (the
 `JACL_STAGE_ON_SVM` gate flips to always-on, then `jacl_ctx_run_closure` / `vm.c` come out).
 

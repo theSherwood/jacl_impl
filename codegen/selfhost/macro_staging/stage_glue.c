@@ -34,28 +34,41 @@ void *realloc(void *p, size_t n) {
 
 extern long read(int fd, void *buf, long n);
 
-/* Stateful across calls: the argument wire is `version byte, then N syntax values
- * back-to-back` (N = the macro's arity). The first call slurps stdin and skips the
- * version byte; each call decodes and returns the next syntax value. A 1-arg macro
- * reads once (the original single-value behaviour); an N-arg macro's codegen entry
- * calls this once per parameter, in order. */
+/* Stateful across calls: the argument wire is `version byte, then the parameter values`.
+ * Fixed parameters are one syntax value each; a variadic macro's trailing rest parameter is
+ * `u32 count, then count syntax values`. The codegen entry calls `synrt_read_arg` once per
+ * fixed parameter (in order) and `synrt_read_rest` for the rest parameter. The first read
+ * slurps stdin and skips the shared version byte. */
 static unsigned char *g_arg_buf;
 static size_t g_arg_len, g_arg_pos;
 static int g_arg_ready;
-JaclVal synrt_read_arg(void) {
-  if (!g_arg_ready) {
-    size_t cap = 1 << 16, len = 0; unsigned char *buf = (unsigned char *)malloc(cap);
-    for (;;) {
-      if (len == cap) { cap *= 2; buf = (unsigned char *)realloc(buf, cap); }
-      long r = read(0, buf + len, (long)(cap - len));
-      if (r <= 0) break;
-      len += (size_t)r;
-    }
-    g_arg_buf = buf; g_arg_len = len; g_arg_pos = 0; g_arg_ready = 1;
-    if (len < 1 || buf[0] != (unsigned char)synrt_wire_version()) return JACL_NIL;
-    g_arg_pos = 1;   /* skip the shared version byte */
+static void synrt_args_ensure(void) {
+  if (g_arg_ready) return;
+  size_t cap = 1 << 16, len = 0; unsigned char *buf = (unsigned char *)malloc(cap);
+  for (;;) {
+    if (len == cap) { cap *= 2; buf = (unsigned char *)realloc(buf, cap); }
+    long r = read(0, buf + len, (long)(cap - len));
+    if (r <= 0) break;
+    len += (size_t)r;
   }
+  g_arg_buf = buf; g_arg_len = len; g_arg_ready = 1;
+  /* Skip the shared version byte; a bad/empty header leaves the cursor at end (reads -> nil). */
+  g_arg_pos = (len >= 1 && buf[0] == (unsigned char)synrt_wire_version()) ? 1 : len;
+}
+JaclVal synrt_read_arg(void) {
+  synrt_args_ensure();
   return synrt_decode_node(g_arg_buf, g_arg_len, &g_arg_pos);
+}
+/* Read a variadic rest parameter: a u32 count followed by that many syntax values, collected
+ * into a jaclrt vector (the plain-data representation of a vec-of-syntax that `~@` splices). */
+JaclVal synrt_read_rest(void) {
+  synrt_args_ensure();
+  uint32_t count = 0;
+  if (g_arg_pos + 4 <= g_arg_len) { memcpy(&count, g_arg_buf + g_arg_pos, 4); g_arg_pos += 4; }
+  JaclVal vec = jacl_vec_empty();
+  for (uint32_t i = 0; i < count; i++)
+    vec = jacl_vec_push(vec, synrt_decode_node(g_arg_buf, g_arg_len, &g_arg_pos));
+  return vec;
 }
 
 /* Returns `v` (not void) so a codegen `call.sym` — which expects a single i64 result —

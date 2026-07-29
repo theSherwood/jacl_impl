@@ -48,22 +48,37 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
   /* 1. codegen the staged-macro module for this body. */
   IrModule *m = svm_codegen_staged_macro((const char **)entry->param_names,
                                          entry->param_name_lens, entry->param_count,
-                                         entry->body, errbuf, sizeof errbuf);
+                                         entry->variadic, entry->body, errbuf, sizeof errbuf);
   if (!m) return errbuf[0] ? errbuf : "staged codegen failed";
   char *text  = irb_to_text(m);
   char *rtext = irb_relocs_text(m);
   size_t nrelocs = 0; unsigned *relocs = (rtext && rtext[0]) ? stage__parse_relocs(rtext, &nrelocs) : NULL;
 
-  /* 2. encode the argument ASTs: one version byte, then each arg node back-to-back. */
+  /* 2. encode the argument ASTs to the wire the staged entry reads: one shared version byte,
+   * then a syntax node per fixed parameter, then (variadic only) a u32 count and that many
+   * rest-argument nodes. `synw_encode` prepends the version byte, so strip it off each node. */
+  uint32_t nfixed = (entry->variadic && entry->param_count > 0) ? entry->param_count - 1 : entry->param_count;
   size_t cap = 256, wlen = 0; unsigned char *wire = (unsigned char *)malloc(cap);
+  wire[wlen++] = (unsigned char)SYNW_VERSION;
+  #define STAGE_APPEND(PTR, N) do { \
+      while (wlen + (N) > cap) { cap *= 2; wire = (unsigned char *)realloc(wire, cap); } \
+      memcpy(wire + wlen, (PTR), (N)); wlen += (N); } while (0)
   for (uint32_t i = 0; i < argc; i++) {
+    if (i == nfixed) {   /* start of the rest section: emit the u32 count of rest args */
+      uint32_t rest_count = argc - nfixed;
+      STAGE_APPEND(&rest_count, sizeof rest_count);
+    }
     size_t bn; unsigned char *b = synw_encode(args[i], &bn);
     if (!b) { free(wire); free(relocs); return "staged arg encode failed"; }
-    size_t off = (i == 0) ? 0 : 1;   /* drop the repeated version byte on nodes after the first */
-    while (wlen + (bn - off) > cap) { cap *= 2; wire = (unsigned char *)realloc(wire, cap); }
-    memcpy(wire + wlen, b + off, bn - off); wlen += bn - off;
+    STAGE_APPEND(b + 1, bn - 1);   /* drop synw_encode's per-node version byte */
     free(b);
   }
+  /* A variadic macro called with no rest args still needs the (zero) count written. */
+  if (entry->variadic && argc == nfixed) {
+    uint32_t rest_count = 0;
+    STAGE_APPEND(&rest_count, sizeof rest_count);
+  }
+  #undef STAGE_APPEND
 
   /* 3. run on SVM. */
   unsigned char *res = NULL; size_t reslen = 0;
