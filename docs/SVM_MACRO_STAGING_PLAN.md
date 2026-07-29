@@ -247,28 +247,33 @@ taking a `variadic` flag) binds the fixed params via `synrt_read_arg` and the re
 `synrt_read_rest`. `run_diff.sh --svm` covers the corpus's `splice.jacl`
 (`pack {first ..rest} = [vec ~first ~@rest]`) — byte-identical to the oracle.
 
-## Phase 4b — hygiene (scope marks + gensym) — deferred, and here is why
+## Phase 4b — gensym + computed binding names — done
 
-Hygiene is **not yet motivated or fully unblocked**, so building its ABI now would be
-speculative machinery with no test to exercise it. Two concrete findings:
+The gensym half of hygiene is implemented, and the codegen-backend blocker that stood in its
+way is removed:
 
-- **gensym is blocked in the codegen backend, not in staging.** A `[gensym]` in a template
-  expands to a `VAR_REF` used as e.g. a `mut` binding name. But `svm_codegen_program`'s
-  `binding_name` (`codegen/codegen.c`) requires a binding name to be a bare-word
-  `AST_LIT_STRING`, so it rejects gensym output — `emit_jacl --file` on a gensym macro fails
-  with "binding form needs a name and a value" on **both** the legacy and SVM-staged paths.
-  There is no passing oracle to match until the codegen backend accepts a computed/var-ref
-  binding name. Staging-side gensym would just produce output the backend can't consume.
-- **scope marks are invisible to the IR absent capture.** Every legacy make-syntax op stamps
-  `macro_scope_mark`, yet the whole corpus emits identical IR with the SVM path stamping 0 —
-  the final codegen only distinguishes scope marks when a macro-introduced `$name` would
-  otherwise capture a call-site binding, and no codegen-able corpus program does that today.
+- **Computed binding names in the codegen backend.** `svm_codegen_program`'s binding forms
+  (`def`/`mut`/`set`) now accept a `VAR_REF` name — a `[gensym]` expands to a gensym'd var-ref
+  used as a binding name — via a shared `binding_ident` helper (`codegen/codegen.c`), not only
+  a bare-word `AST_LIT_STRING`. This fixes **both** the legacy and staged paths, so the gensym
+  macro now has a real oracle. (Gensym names are globally unique, so binding by that name is
+  already hygienic — no scope-mark plumbing needed for it.)
+- **gensym in the staged path.** `[gensym]` / `[gensym "prefix"]` inside a staged-macro
+  syntax-quote lowers to a runtime `synrt_gensym` call (gated on `cx->staged_macro`, since in
+  the normal path macros are pre-expanded and `compile_synquote` never sees `[gensym]`).
+  `synrt_gensym` (stage_glue) mints a `prefix__N` var-ref syntax value. Because gensym'd
+  bindings are single-use and end up **dead in the emitted IR**, the exact counter value is not
+  observable, so a per-run counter suffices — no wire-header/counter round-trip is needed.
 
-So Phase 4b waits on: (a) codegen-backend support for computed binding names (which unblocks
-gensym and gives a real oracle), and/or (b) a concrete hygiene-sensitive corpus program that
-makes scope marks observable. The ABI is designed (wire header: `scope_mark` + `gensym_counter`
-in, updated counter out; `compile_synquote` stamps a runtime mark; `[gensym]` lowers to a
-runtime name-mint) and can be added when one of those lands.
+`run_diff.sh --svm` covers `corpus/gensym.jacl` (`fresh {v} = [mut [gensym] ~v]`) —
+byte-identical to the oracle.
+
+**Still deferred — scope-mark capture-hygiene.** Every legacy make-syntax op stamps
+`macro_scope_mark`, yet the whole corpus (gensym included) emits identical IR with the SVM path
+stamping 0: the final codegen only distinguishes scope marks when a macro-introduced `$name`
+would otherwise capture a call-site binding, and no codegen-able corpus program does that. It
+stays out until a concrete capture-sensitive corpus program makes it observable; the ABI
+(runtime scope-mark stamped by `compile_synquote`) is sketched for then.
 
 ## Phase 6 — drop the legacy VM
 

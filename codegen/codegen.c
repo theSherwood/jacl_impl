@@ -135,6 +135,9 @@ typedef struct {
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
   int module_mode;   /* compiling a multi-module program: top-level `mut` globals are boxed so a
                       * cross-module import shares one cell (deref/reset), matching the reference. */
+  int staged_macro;  /* compiling a staged-macro body (svm_codegen_staged_macro): a `[gensym]`
+                      * inside syntax-quote lowers to a runtime name-mint (synrt_gensym). In the
+                      * normal path macros are pre-expanded, so compile_synquote never sees it. */
 } Cx;
 typedef struct SDef SDef;
 
@@ -2214,14 +2217,22 @@ static IrVal compile_for(Cx *cx, AstNode *node) {
   return 0;
 }
 
-/* The binding name of a def/mut/set: args[0] must be a bare word (AST_LIT_STRING). */
+/* Extract a binding identifier from a node. A bare word (AST_LIT_STRING) is the usual case;
+ * a var-ref (AST_VAR_REF) is a macro-introduced name — a `[gensym]` expands to a gensym'd
+ * var-ref used as a binding name, and gensym names are globally unique, so binding by that
+ * name string is already hygienic. Returns 0 if the node is neither. */
+static int binding_ident(AstNode *n, const char **name, uint32_t *len) {
+  if (n->type == AST_LIT_STRING) { *name = n->data.lit_string.value; *len = n->data.lit_string.length; return 1; }
+  if (n->type == AST_VAR_REF)    { *name = n->data.var_ref.name;     *len = n->data.var_ref.length;     return 1; }
+  return 0;
+}
+
+/* The binding name of a def/mut/set: args[0] must be a bare word or a macro-introduced name. */
 static int binding_name(Cx *cx, AstNode *cmd, const char **name, uint32_t *len) {
-  if (cmd->data.command.arg_count < 2 || cmd->data.command.args[0]->type != AST_LIT_STRING) {
+  if (cmd->data.command.arg_count < 2 || !binding_ident(cmd->data.command.args[0], name, len)) {
     cx_fail(cx, "binding form needs a name and a value");
     return 0;
   }
-  *name = cmd->data.command.args[0]->data.lit_string.value;
-  *len = cmd->data.command.args[0]->data.lit_string.length;
   return 1;
 }
 
@@ -2297,6 +2308,23 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
      * meaningful in that position (handled in the COMMAND/BLOCK cases below). */
     cx_fail(cx, "syntax-quote: ~@ (unquote-splicing) can only appear in a command or block");
     return 0;
+  }
+  /* `[gensym]` / `[gensym "prefix"]` inside a staged-macro syntax-quote mints a fresh
+   * hygienic var-ref name at runtime (mirrors the legacy compiler's OP_SYNTAX_OP subop 16),
+   * rather than being built as a literal `gensym` command. */
+  if (cx->staged_macro && t->type == AST_COMMAND && t->data.command.head &&
+      t->data.command.head->type == AST_LIT_STRING &&
+      t->data.command.head->data.lit_string.length == 6 &&
+      memcmp(t->data.command.head->data.lit_string.value, "gensym", 6) == 0 &&
+      t->data.command.arg_count <= 1) {
+    IrVal prefix;
+    if (t->data.command.arg_count == 1 && t->data.command.args[0]->type == AST_LIT_STRING)
+      prefix = compile_string_literal(cx, t->data.command.args[0]->data.lit_string.value,
+                                      t->data.command.args[0]->data.lit_string.length);
+    else
+      prefix = irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL -> default prefix "g" */);
+    IrVal ga[] = {cx->sp, prefix};
+    return emit_rt_call(cx, "synrt_gensym", ga, 2);
   }
   IrVal empty[] = {cx->sp};
   IrVal v = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
@@ -2972,12 +3000,11 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
                    cg_is_type_prefix(bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length))
             tshift = 1;   /* `def i64 x V`, `def Point p V` (struct type prefix) */
         }
-        if (bargc < 2 + tshift || bargs[tshift]->type != AST_LIT_STRING) {
+        const char *name; uint32_t len;
+        if (bargc < 2 + tshift || !binding_ident(bargs[tshift], &name, &len)) {
           cx_fail(cx, "binding form needs a name and a value");
           return 0;
         }
-        const char *name = bargs[tshift]->data.lit_string.value;
-        uint32_t len = bargs[tshift]->data.lit_string.length;
         IrVal val = compile_expr(cx, bargs[tshift + 1]);
         if (cx->failed) return 0;
         /* `def i64/u64/f64 x V` — widen the value to the declared wide scalar so
@@ -4559,6 +4586,7 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
+  cx.staged_macro = 1;   /* enables the `[gensym]` -> synrt_gensym lowering in compile_synquote */
 
   IrModule *m = irb_module_new();
   cx.m = m;

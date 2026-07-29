@@ -71,6 +71,38 @@ JaclVal synrt_read_rest(void) {
   return vec;
 }
 
+/* `[gensym]` / `[gensym "prefix"]` inside a staged-macro syntax-quote: mint a fresh hygienic
+ * name and return it as a plain-data var-ref syntax value `[VAR_REF, scope_mark, is_gensym,
+ * name]` (the codegen entry emits a `synrt_gensym` call.sym here). The name is `prefix__N`,
+ * matching jacl_gensym_next's format; N comes from a per-run counter. Gensym'd binding names
+ * are unique and end up dead in the emitted IR, so the exact counter value is not observable
+ * — a per-run counter (each macro invocation is its own staged run) is sufficient. */
+JaclVal synrt_gensym(JaclVal prefix) {
+  static uint32_t g_gensym_ctr;
+  static char name[80];
+  uint32_t plen = 0;
+  if (!jaclrt_is_nil(prefix)) {
+    plen = jacl_str_len(prefix);
+    if (plen > 64) plen = 64;
+    jacl_str_bytes(prefix, name, sizeof name);   /* prefix bytes land at name[0..plen) */
+  }
+  if (plen == 0) { name[0] = 'g'; plen = 1; }
+  uint32_t nl = plen;
+  name[nl++] = '_'; name[nl++] = '_';
+  uint32_t n = g_gensym_ctr++;
+  char d[16]; int dc = 0;
+  if (n == 0) d[dc++] = '0';
+  while (n > 0) { d[dc++] = (char)('0' + (n % 10)); n /= 10; }
+  for (int i = dc - 1; i >= 0; i--) name[nl++] = d[i];
+  JaclVal namev = jacl_str_new(name, nl);
+  JaclVal v = jacl_vec_empty();
+  v = jacl_vec_push(v, jaclrt_i32(4));   /* AST_VAR_REF */
+  v = jacl_vec_push(v, jaclrt_i32(0));   /* scope_mark (unique name already hygienic) */
+  v = jacl_vec_push(v, jaclrt_i32(2));   /* flags: is_gensym */
+  v = jacl_vec_push(v, namev);
+  return v;
+}
+
 /* Returns `v` (not void) so a codegen `call.sym` — which expects a single i64 result —
  * has a matching signature; the caller ignores it. */
 JaclVal synrt_write_result(JaclVal v) {
