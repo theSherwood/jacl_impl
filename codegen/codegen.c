@@ -2268,8 +2268,24 @@ static IrVal syn_vpush(Cx *cx, IrVal vec, IrVal elem) {
 static IrVal compile_synquote(Cx *cx, AstNode *t) {
   if (cx->failed) return 0;
   if (!t) { cx_fail(cx, "syntax-quote: null template node"); return 0; }
-  if (t->type == AST_UNQUOTE)
-    return compile_expr(cx, t->data.unquote.child);   /* hole: evaluate -> a syntax value */
+  if (t->type == AST_UNQUOTE) {
+    /* hole: evaluate the child -> a syntax value. Inside a syntax-quote, a bare word
+     * `~x` parses as AST_UNQUOTE(AST_LIT_STRING "x"); resolve it as a variable reference
+     * to the parameter/local `x` (mirrors the legacy VM's syntax__compile_unquote_child). */
+    AstNode *child = t->data.unquote.child;
+    if (child && child->type == AST_LIT_STRING) {
+      AstNode vref;
+      memset(&vref, 0, sizeof vref);
+      vref.type = AST_VAR_REF;
+      vref.start = child->start;
+      vref.end = child->end;
+      vref.scope_mark = child->scope_mark;
+      vref.data.var_ref.name = child->data.lit_string.value;
+      vref.data.var_ref.length = child->data.lit_string.length;
+      return compile_expr(cx, &vref);
+    }
+    return compile_expr(cx, child);
+  }
   if (t->type == AST_UNQUOTE_SPLICING) {
     cx_fail(cx, "syntax-quote: ~@ splicing not yet supported on the SVM backend");
     return 0;

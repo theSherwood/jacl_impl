@@ -160,10 +160,10 @@ The `emit_macro_body` tool (codegen a body → `__jacl_macro` svm-text) is reusa
 the rest of the first attempt (`stage_entry.c` wrapper + `stage_macro.rs` importing across
 units) is superseded by the above and not kept.
 
-## Phase 3 final link — implemented; runs on SVM; one memory bug open
+## Phase 3 final link — done; the arity-1 corpus runs end-to-end on SVM
 
-The corrected design is built and **the whole pipeline compiles, links, and runs on the
-SVM engine**:
+The corrected design is built and **the whole pipeline compiles, links, runs on the SVM
+engine, and reproduces the legacy VM's expansions**:
 
 - **Runtime glue** — `codegen/selfhost/macro_staging/{stage_glue.c,jaclrt_staging.c}`:
   `syn_rt` + `synrt_read_arg()` / `synrt_write_result(vec)`, translated *with* jaclrt
@@ -176,23 +176,32 @@ SVM engine**:
   `synth_manifest_start`, run with the arg wire on stdin (`call_with_stdin`), emit the
   result wire on stdout. Reduces to `jacl_svm`'s link path.
 
-**What works, verified on SVM:** the module builds, links, and runs (`Returned`, no trap);
-`read(0)` receives the argument wire (echo test round-trips the 11-byte `21` wire);
-`write(1)` reaches captured stdout; `synrt_encode` on a **freshly hand-built** jaclrt vec
-produces correct wire.
+**Verified on SVM** (`run_stage_test.sh` — the committed e2e gate): `k → 42`,
+`s → [+ 1 2]`, `t → 21`, `twice 21 → [+ 21 21]`, `dq 7 → [+ 7 1]`, `idd 21 → 21`, and a
+compound argument `twice [* 3 4] → [+ [* 3 4] [* 3 4]]`. Each expansion matches the legacy
+oracle (`run_diff.sh`), so the migration is observationally transparent for this corpus.
 
-**Open bug:** `synrt_encode` of the **decoded / body-built** vec faults or returns NULL,
-where a fresh vec in the same spot succeeds. Diagnosed factors:
-1. **Alignment (fixed):** the guest bump-allocator's `char g_arena[]` was unaligned, so its
-   `*(size_t*)base` size-header write faulted; `g_arena` is now `aligned(16)`.
-2. **Remaining:** a `MemoryFault` / `w.err` when `syn_rt` reads back a vec it (or the
-   codegen'd body) built earlier in the run, isolated to the `syn_rt`-on-SVM path — not the
-   arena size (small aligned arena still fails), not GC pressure (16 MiB heap), not the
-   `memory` directive (normal programs emit none either). The likely culprit is the custom
-   guest `malloc`/`realloc` (unknown-old-size copy) interacting with `syn_rt`'s growable
-   buffer; the fix is to drop the custom allocator for a **two-pass fixed-buffer encode**
-   (measure length, then fill a single static buffer — no `realloc`) or a jaclrt-backed
-   flat buffer. Focused next step; everything around it is in place and runs.
+**The bug that was blocking it** (previously mis-diagnosed as a `malloc`/`realloc` fault) was
+two real defects, both now fixed:
+1. **Missing SelfData relocations.** String/data literals lower to data-segment references
+   whose `i64.const <offset>` must be relocated to the segment's linked address. `emit_macro_body`
+   dropped the reloc table and `stage_macro.rs` never applied it, so every string resolved to
+   empty (`syntax-quote [+ 1 2]` → `["" 1 2]`). Fix: emit the relocs after a `%%RELOCS%%`
+   sentinel (as the frontend's `--file` path does) and pass them in the program `LinkUnit`
+   (`relocations:`), exactly like `jacl_svm`'s `split_relocs`.
+2. **Unquote of a bare word didn't resolve the parameter.** `~x` parses as
+   `AST_UNQUOTE(AST_LIT_STRING "x")` (bare words in command position are strings), so
+   `compile_synquote` compiled the *string* "x" instead of a reference to the macro parameter
+   `x` — the arg came out as the inline string "x" (vec-count 0), and `synrt_encode` rejected
+   it. Fix: when an unquote child is a bare `AST_LIT_STRING`, synthesize an `AST_VAR_REF` and
+   compile that — mirroring the legacy VM's `syntax__compile_unquote_child` (`src/compiler.c`).
+
+The alignment fix noted earlier (guest bump-allocator `g_arena` now `aligned(16)`, so its
+`*(size_t*)base` size-header write doesn't fault) stands and is still required.
+
+**Still out of scope for this slice** (tracked for later phases): `~@` unquote-splicing,
+multi-arity macros (the wire carries one syntax value; multi-arg needs an args frame), and
+hygiene / scope-mark propagation (Phase 4).
 
 ## Sequencing note
 
