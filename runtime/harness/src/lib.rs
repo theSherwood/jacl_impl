@@ -24,6 +24,38 @@ pub mod stage_ffi;
 
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
+/// Decode the emit driver's default **binary container** (guest-JIT staging item 7): a
+/// 4-byte `JSB1` magic, the count-prefixed SelfData relocations (little-endian `u32`
+/// triples), then the svm-encode module bytes to the end. Returns the decoded program
+/// module and its relocations — the binary-path replacement for the old
+/// `split_relocs` + `svm_text::parse_module`, so no compile pays a text round-trip.
+/// (`emit_jacl --text` still emits the svm-text + `%%RELOCS%%` form for goldens.)
+pub fn decode_emitted(bytes: &[u8]) -> Result<(svm_ir::Module, Vec<svm_ir::DataReloc>), String> {
+    if bytes.len() < 8 || &bytes[..4] != b"JSB1" {
+        return Err("emit container: bad magic (expected JSB1 — is the driver in --text mode?)".into());
+    }
+    let rd = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let nrelocs = rd(4) as usize;
+    let need = nrelocs.checked_mul(12).ok_or("emit container: reloc count overflow")?;
+    if bytes.len() < 8 + need {
+        return Err("emit container: truncated reloc table".into());
+    }
+    let mut relocs = Vec::with_capacity(nrelocs);
+    let mut off = 8;
+    for _ in 0..nrelocs {
+        relocs.push(svm_ir::DataReloc {
+            func: rd(off),
+            block: rd(off + 4),
+            inst: rd(off + 8),
+            kind: svm_ir::RelocKind::SelfData,
+        });
+        off += 12;
+    }
+    let module =
+        svm_encode::decode_module(&bytes[off..]).map_err(|e| format!("decode module: {e:?}"))?;
+    Ok((module, relocs))
+}
+
 fn compile_driver(driver_abs: &str) -> PathBuf {
     compile_driver_defs(driver_abs, &[])
 }

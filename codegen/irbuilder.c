@@ -484,36 +484,37 @@ static void out_term(Out *o, const Term *t) {
   }
 }
 
-static void out_func(Out *o, const IrFunc *f) {
-  out_str(o, "func (");
+static void out_func(Out *o, const IrFunc *f, int idx) {
+  /* §3.5 settled surface (matches svm-text's canonical printer): every definition carries
+   * its positional label and one brace construct nests everything —
+   * `func N (…) -> (…) { block N (…) { … } }`. Blocks indent 2 spaces, their bodies 4; a
+   * branch names its target block by bare index (`br <n>(args)` / `br_if v<c> <then>(args)
+   * <else>(args)`). */
+  out_fmt(o, "func %d (", idx);
   out_typelist(o, f->params, f->nparams);
   out_str(o, ") -> (");
   out_typelist(o, f->results, f->nresults);
   out_str(o, ") {\n");
-  /* Block header/terminator syntax (svm-text, post the label retirement): a block is
-   * `block <n> (params) { … }` with a closing brace (the legacy `blockN(…):` form is gone),
-   * and a branch names its target block by bare index — `br <n>(args)` / `br_if v<c>
-   * <then>(args) <else>(args)`. */
   for (int bi = 0; bi < f->nblocks; bi++) {
     const Block *blk = &f->blocks[bi];
-    out_fmt(o, "block %d (", bi);
+    out_fmt(o, "  block %d (", bi);
     for (int i = 0; i < blk->nparams; i++)
       out_fmt(o, "%sv%d: %s", i ? ", " : "", i, type_name(blk->params[i]));
     out_str(o, ") {\n");
     uint32_t next = (uint32_t)blk->nparams;   /* recompute numbering, as svm-text does */
     for (int ii = 0; ii < blk->ninsts; ii++) {
       const Inst *in = &blk->insts[ii];
-      if (in->nresults == 0) { out_str(o, "  "); out_inst(o, in); out_str(o, "\n"); }
+      if (in->nresults == 0) { out_str(o, "    "); out_inst(o, in); out_str(o, "\n"); }
       else {
-        out_fmt(o, "  v%u = ", next);
+        out_fmt(o, "    v%u = ", next);
         out_inst(o, in);
         out_str(o, "\n");
         next += in->nresults;
       }
     }
-    out_str(o, "  ");
+    out_str(o, "    ");
     out_term(o, &blk->term);
-    out_str(o, "\n}\n");
+    out_str(o, "\n  }\n");
   }
   out_str(o, "}\n");
 }
@@ -536,11 +537,10 @@ char *irb_to_text(const IrModule *m) {
     out_data_bytes(&o, m->data[i].bytes, m->data[i].len);
     out_str(&o, "\"\n");
   }
-  if (m->ndata) out_str(&o, "\n");
   if (m->has_memory) out_fmt(&o, "memory %u\n\n", (unsigned)m->mem_log2);
   for (int i = 0; i < m->nfuncs; i++) {
     if (i > 0) out_str(&o, "\n");
-    out_func(&o, m->funcs[i]);
+    out_func(&o, m->funcs[i], i);
   }
   if (!o.buf) { o.buf = xmalloc(1); o.buf[0] = '\0'; }
   return o.buf;
@@ -552,6 +552,268 @@ char *irb_relocs_text(const IrModule *m) {
     out_fmt(&o, "%u %u %u\n", m->relocs[i].func, m->relocs[i].block, m->relocs[i].inst);
   if (!o.buf) { o.buf = xmalloc(1); o.buf[0] = '\0'; }
   return o.buf;
+}
+
+/* ---- binary (svm-encode) serialization ---- */
+
+/* Byte-oriented writers over the same growable buffer as the text path. Unlike
+ * out_str these are NUL-safe (length-tracked), mirroring svm-encode's write_* helpers
+ * (crates/svm-encode/src/lib.rs). The `\0` sentinel out_reserve keeps past `len` is
+ * inert here — binary content is delimited by `len`, never by a terminator. */
+static void out_u8(Out *o, uint8_t b) {
+  out_reserve(o, 1);
+  o->buf[o->len++] = (char)b;
+  o->buf[o->len] = '\0';
+}
+static void out_raw(Out *o, const void *p, size_t n) {
+  out_reserve(o, n);
+  memcpy(o->buf + o->len, p, n);
+  o->len += n;
+  o->buf[o->len] = '\0';
+}
+/* Fixed 32-bit little-endian (the reloc-triple wire, shared with the JS host). */
+static void out_u32le(Out *o, uint32_t v) {
+  out_u8(o, (uint8_t)(v & 0xff));
+  out_u8(o, (uint8_t)((v >> 8) & 0xff));
+  out_u8(o, (uint8_t)((v >> 16) & 0xff));
+  out_u8(o, (uint8_t)((v >> 24) & 0xff));
+}
+/* Unsigned LEB128 (svm-encode `write_uleb`). */
+static void out_uleb(Out *o, uint64_t v) {
+  for (;;) {
+    uint8_t byte = (uint8_t)(v & 0x7f);
+    v >>= 7;
+    if (v) out_u8(o, byte | 0x80);
+    else { out_u8(o, byte); break; }
+  }
+}
+/* Signed LEB128 (svm-encode `write_sleb`): arithmetic shift, sign-terminated. */
+static void out_sleb(Out *o, int64_t v) {
+  for (;;) {
+    uint8_t byte = (uint8_t)(v & 0x7f);
+    v >>= 7; /* arithmetic (sign-extending) shift */
+    int sign = (byte & 0x40) != 0;
+    if ((v == 0 && !sign) || (v == -1 && sign)) { out_u8(o, byte); break; }
+    out_u8(o, byte | 0x80);
+  }
+}
+/* Type list: count, then one tag per type. IrType's ordinal is the svm ValType tag
+ * (I32=0,I64=1,F32=2,F64=3,V128=4,REF=5 — verified against svm-ir::ValType). */
+static void out_types_bin(Out *o, const IrType *ts, int n) {
+  out_uleb(o, (uint64_t)n);
+  for (int i = 0; i < n; i++) out_u8(o, (uint8_t)ts[i]);
+}
+/* Value-index list: count, then one uleb per index (svm-encode `write_idxs`). */
+static void out_idxs(Out *o, const IrVal *idxs, int n) {
+  out_uleb(o, (uint64_t)n);
+  for (int i = 0; i < n; i++) out_uleb(o, idxs[i]);
+}
+/* Length-prefixed string (svm-encode `write_str`). */
+static void out_str_bin(Out *o, const char *s) {
+  size_t n = strlen(s);
+  out_uleb(o, n);
+  out_raw(o, s, n);
+}
+
+/* The import + type sections `svm_text::parse_module` interns from name-inline
+ * `call.sym "name" (sig) v<h> (args)` — reconstructed here so the binary references the
+ * same indices the text path would (round-trip equality). A `call.sym` first interns its
+ * signature as a `TypeEntry::Func` (dedup by structural equality), then an import keyed by
+ * (name, that type index); both in first-encounter order over funcs→blocks→insts, exactly
+ * the source order irb_to_text emits and parse_module walks. */
+typedef struct { IrType *params; int np; IrType *results; int nr; } SigEntry;
+typedef struct { const char *name; uint32_t type_idx; } ImpEntry;
+typedef struct {
+  SigEntry *types; int ntypes, cap_types;
+  ImpEntry *imports; int nimports, cap_imports;
+} ImportTable;
+
+static int sig_eq(const SigEntry *e, const IrType *p, int np, const IrType *r, int nr) {
+  if (e->np != np || e->nr != nr) return 0;
+  for (int i = 0; i < np; i++) if (e->params[i] != p[i]) return 0;
+  for (int i = 0; i < nr; i++) if (e->results[i] != r[i]) return 0;
+  return 1;
+}
+static uint32_t intern_type(ImportTable *t, const IrType *p, int np, const IrType *r, int nr) {
+  for (int i = 0; i < t->ntypes; i++) if (sig_eq(&t->types[i], p, np, r, nr)) return (uint32_t)i;
+  if (t->ntypes == t->cap_types) {
+    t->cap_types = t->cap_types ? t->cap_types * 2 : 4;
+    t->types = realloc(t->types, (size_t)t->cap_types * sizeof(SigEntry));
+    if (!t->types) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+  }
+  SigEntry *e = &t->types[t->ntypes];
+  e->params = dup_types(p, np); e->np = np;
+  e->results = dup_types(r, nr); e->nr = nr;
+  return (uint32_t)t->ntypes++;
+}
+static uint32_t intern_import(ImportTable *t, const char *name, uint32_t type_idx) {
+  for (int i = 0; i < t->nimports; i++)
+    if (t->imports[i].type_idx == type_idx && !strcmp(t->imports[i].name, name)) return (uint32_t)i;
+  if (t->nimports == t->cap_imports) {
+    t->cap_imports = t->cap_imports ? t->cap_imports * 2 : 4;
+    t->imports = realloc(t->imports, (size_t)t->cap_imports * sizeof(ImpEntry));
+    if (!t->imports) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+  }
+  t->imports[t->nimports] = (ImpEntry){name, type_idx};
+  return (uint32_t)t->nimports++;
+}
+
+static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
+  switch (in->kind) {
+    case K_CONST_I32: out_u8(o, 0x10); out_sleb(o, (int64_t)in->c32); break;
+    case K_CONST_I64: out_u8(o, 0x11); out_sleb(o, in->c64); break;
+    case K_INTBIN:
+      out_u8(o, (uint8_t)((in->ty == IRB_I32 ? 0x20 : 0x40) + in->op));
+      out_uleb(o, in->a); out_uleb(o, in->x); break;
+    case K_INTCMP:
+      out_u8(o, (uint8_t)((in->ty == IRB_I32 ? 0x31 : 0x51) + in->op));
+      out_uleb(o, in->a); out_uleb(o, in->x); break;
+    case K_LOAD:
+      out_u8(o, (uint8_t)(0xF0 + in->op));
+      out_uleb(o, in->addr); out_uleb(o, in->offset); out_u8(o, in->align); break;
+    case K_STORE:
+      out_u8(o, (uint8_t)(0x84 + in->op));
+      out_uleb(o, in->addr); out_uleb(o, in->value); out_uleb(o, in->offset); out_u8(o, in->align); break;
+    case K_CALL:
+      out_u8(o, 0x73); out_uleb(o, in->callee); out_idxs(o, in->args, in->nargs); break;
+    case K_CALL_IMPORT: {
+      /* Name-inline `call.sym` -> CALL_SYM (0x0E) by interned import index. */
+      uint32_t ti = intern_type(tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
+      uint32_t idx = intern_import(tab, in->name, ti);
+      out_u8(o, 0x0E);
+      out_uleb(o, idx);
+      out_types_bin(o, in->sig_params, in->sig_np);
+      out_types_bin(o, in->sig_results, in->sig_nr);
+      out_uleb(o, in->handle);
+      out_idxs(o, in->args, in->nargs);
+      break;
+    }
+    case K_REF_FUNC: out_u8(o, 0x75); out_uleb(o, in->callee); break;
+    case K_CONVERT:
+      out_u8(o, in->op == IRB_EXTEND_I32S ? 0x60 : in->op == IRB_EXTEND_I32U ? 0x61 : 0x62);
+      out_uleb(o, in->a); break;
+    case K_CALL_INDIRECT:
+      out_u8(o, 0x74);
+      out_types_bin(o, in->sig_params, in->sig_np);
+      out_types_bin(o, in->sig_results, in->sig_nr);
+      out_uleb(o, in->addr); /* the index operand reuses the `addr` slot */
+      out_idxs(o, in->args, in->nargs); break;
+    case K_SUSPEND: out_u8(o, 0xCC); out_uleb(o, in->a); break;
+  }
+}
+
+static void enc_term(Out *o, const Term *t) {
+  switch (t->kind) {
+    case T_BR:
+      out_u8(o, 0x80); out_uleb(o, (uint32_t)t->target); out_idxs(o, t->args, t->nargs); break;
+    case T_BRIF:
+      out_u8(o, 0x81); out_uleb(o, t->cond);
+      out_uleb(o, (uint32_t)t->then_blk); out_idxs(o, t->then_args, t->nthen);
+      out_uleb(o, (uint32_t)t->else_blk); out_idxs(o, t->else_args, t->nelse); break;
+    case T_RETURN:
+      out_u8(o, 0x83); out_idxs(o, t->ret_vals, t->nret); break;
+    case T_RETURN_CALL:
+      out_u8(o, 0x85); out_uleb(o, t->rc_func); out_idxs(o, t->args, t->nargs); break;
+    case T_NONE:
+    default:
+      out_u8(o, 0x8F); break; /* UNREACHABLE — matches irb_to_text's missing-terminator fallback */
+  }
+}
+
+static void enc_func(Out *o, const IrFunc *f, ImportTable *tab) {
+  out_types_bin(o, f->params, f->nparams);
+  out_types_bin(o, f->results, f->nresults);
+  out_uleb(o, (uint64_t)f->nblocks);
+  for (int bi = 0; bi < f->nblocks; bi++) {
+    const Block *blk = &f->blocks[bi];
+    out_types_bin(o, blk->params, blk->nparams);
+    out_uleb(o, (uint64_t)blk->ninsts);
+    for (int ii = 0; ii < blk->ninsts; ii++) enc_inst(o, &blk->insts[ii], tab);
+    enc_term(o, &blk->term);
+  }
+}
+
+uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
+  /* Pre-pass: build the import/type tables (first-encounter order) before writing the
+   * sections, since they precede the funcs on the wire but are discovered from call sites. */
+  ImportTable tab; memset(&tab, 0, sizeof tab);
+  for (int fi = 0; fi < m->nfuncs; fi++) {
+    IrFunc *f = m->funcs[fi];
+    for (int bi = 0; bi < f->nblocks; bi++) {
+      Block *blk = &f->blocks[bi];
+      for (int ii = 0; ii < blk->ninsts; ii++) {
+        const Inst *in = &blk->insts[ii];
+        if (in->kind == K_CALL_IMPORT) {
+          uint32_t ti = intern_type(&tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
+          intern_import(&tab, in->name, ti);
+        }
+      }
+    }
+  }
+
+  Out o = {0};
+  static const uint8_t magic[4] = {'S', 'V', 'M', 0};
+  out_raw(&o, magic, 4);
+  out_u8(&o, 8);                                   /* VERSION */
+  /* Memory descriptor: presence flag, then size_log2. */
+  if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); }
+  else out_u8(&o, 0);
+  /* Data segments: count, then each `readonly` flag (irb data is always `ro`), offset,
+   * length-prefixed bytes. */
+  out_uleb(&o, (uint64_t)m->ndata);
+  for (int i = 0; i < m->ndata; i++) {
+    out_u8(&o, 1);
+    out_uleb(&o, m->data[i].off);
+    out_uleb(&o, m->data[i].len);
+    out_raw(&o, m->data[i].bytes, m->data[i].len);
+  }
+  /* Import section: name, shape tag (0=func) + type index, mode byte (0=required). */
+  out_uleb(&o, (uint64_t)tab.nimports);
+  for (int i = 0; i < tab.nimports; i++) {
+    out_str_bin(&o, tab.imports[i].name);
+    out_u8(&o, 0);
+    out_uleb(&o, tab.imports[i].type_idx);
+    out_u8(&o, 0);
+  }
+  /* Export section: none (irb emits no named entry points). */
+  out_uleb(&o, 0);
+  /* Type section: each entry tagged (0=func), then param + result type lists. */
+  out_uleb(&o, (uint64_t)tab.ntypes);
+  for (int i = 0; i < tab.ntypes; i++) {
+    out_u8(&o, 0);
+    out_types_bin(&o, tab.types[i].params, tab.types[i].np);
+    out_types_bin(&o, tab.types[i].results, tab.types[i].nr);
+  }
+  /* Impl-export section: none. */
+  out_uleb(&o, 0);
+  /* Functions. */
+  out_uleb(&o, (uint64_t)m->nfuncs);
+  for (int i = 0; i < m->nfuncs; i++) enc_func(&o, m->funcs[i], &tab);
+  /* No debug section: decode treats "no bytes after funcs" as no debug info. */
+
+  for (int i = 0; i < tab.ntypes; i++) { free(tab.types[i].params); free(tab.types[i].results); }
+  free(tab.types);
+  free(tab.imports);
+
+  if (!o.buf) { o.buf = xmalloc(1); }
+  *out_len = o.len;
+  return (uint8_t *)o.buf;
+}
+
+/* The binary form of irb_relocs_text: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
+ * u32 inst)]`, all little-endian — the count-prefixed SelfData relocs that ride ahead of
+ * the module bytes in the emit driver's binary container. Malloc'd; caller frees. */
+uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len) {
+  Out o = {0};
+  out_u32le(&o, (uint32_t)m->nrelocs);
+  for (int i = 0; i < m->nrelocs; i++) {
+    out_u32le(&o, m->relocs[i].func);
+    out_u32le(&o, m->relocs[i].block);
+    out_u32le(&o, m->relocs[i].inst);
+  }
+  if (!o.buf) { o.buf = xmalloc(1); }
+  *out_len = o.len;
+  return (uint8_t *)o.buf;
 }
 
 /* ---- teardown ---- */

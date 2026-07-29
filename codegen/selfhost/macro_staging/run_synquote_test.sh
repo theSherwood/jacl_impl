@@ -31,8 +31,8 @@ fail=0
 for c in "${cases[@]}"; do
   prog="${c%|*}"; want="${c#*|}"
   printf '%s\n' "$prog" > "$B/sq.jacl"
-  out="$("$EMIT" --file "$B/sq.jacl" 2>&1)"
-  if ! printf '%s' "$out" | grep -qE '^func \('; then
+  out="$("$EMIT" --text --file "$B/sq.jacl" 2>&1)"
+  if ! printf '%s' "$out" | grep -qE '^func [0-9]+ \('; then
     echo "  FAIL  '$prog' — did not lower:"; printf '%s\n' "$out" | head -2; fail=1; continue
   fi
   got="$(printf '%s' "$out" | grep -cE 'jacl_vec_empty')"

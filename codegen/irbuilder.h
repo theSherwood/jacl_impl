@@ -5,7 +5,8 @@
  * `svm_text::parse_module` accepts. This is the target of JACL's Phase-2 codegen:
  * the AST walk emits into a builder, which serializes to text, which links against
  * the runtime artifact (see runtime/harness/tests/link_artifact.rs) and runs on
- * interp + JIT. A binary (svm-encode) serializer can later sit behind the same API.
+ * interp + JIT. A binary (svm-encode) serializer (`irb_to_encoded`) sits behind the same
+ * API, round-trip-gated against the text path — the bytes the §22 `Jit` capability consumes.
  *
  * Discipline (carried from Spike-1): SVM is **block-local SSA** — an instruction may
  * reference only its own block's params and earlier results; a value needed in
@@ -153,5 +154,18 @@ char *irb_to_text(const IrModule *m);
 /* Serialize the data relocations (one `<func> <block> <inst>` line each) — the linker
  * applies these as SelfData relocs on this unit. malloc'd; "" if none; caller frees. */
 char *irb_relocs_text(const IrModule *m);
+
+/* Serialize the whole module to the svm-encode **binary** format (VERSION 8) — the bytes
+ * the §22 `Jit` capability consumes directly (no text round-trip). Returns a malloc'd
+ * buffer of `*out_len` bytes; the caller frees it. Round-trip-equal to the text path:
+ * `svm_encode::decode_module(irb_to_encoded(m))` equals `svm_text::parse_module(irb_to_text(m))`.
+ * The import/type sections are interned exactly as parse_module interns name-inline
+ * `call.sym`, so both paths reference the same indices. */
+uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len);
+
+/* Binary form of the data relocations: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
+ * u32 inst)]`, little-endian. Rides ahead of the module bytes in the emit driver's binary
+ * container (the default `emit_jacl` output). malloc'd; caller frees. */
+uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len);
 
 #endif /* JACL_IRBUILDER_H */

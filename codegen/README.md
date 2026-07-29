@@ -7,10 +7,12 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
 ## Contents
 
 - `irbuilder.h` / `irbuilder.c` — **P2.1: the IR builder.** An in-memory SVM-IR
-  module/func/block/inst representation mirroring `svm-ir`'s shape, with a text
-  serializer (`irb_to_text`) emitting the svm-text form that `svm_text::parse_module`
-  accepts. The target of the codegen walk (P2.2+); a binary (`svm-encode`) serializer
-  can later sit behind the same API.
+  module/func/block/inst representation mirroring `svm-ir`'s shape, with two serializers
+  behind one API: `irb_to_text` (the svm-text form `svm_text::parse_module` accepts, for
+  goldens/human diffs) and `irb_to_encoded` (the `svm-encode` **binary** form
+  `svm_encode::decode_module` accepts — the default interchange since guest-JIT staging
+  item 7). `irb_relocs_text` / `irb_relocs_encoded` are the matching reloc serializers.
+  The two are round-trip-gated against each other (`runtime/harness/tests/irbuilder.rs`).
 
   Instruction surface: `i32/i64.const`, integer binops + comparisons, `load`/`store`
   (with a `memory` declaration), direct `call`, name-inline `call.import`, and the
@@ -64,8 +66,9 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     `jacl_str_concat` (with `jacl_to_string` of expression segments). `[vec …]` →
     `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`. The IR builder gained
     data segments + `SelfData` relocations (`irb_add_data`/`irb_data_addr`/
-    `irb_relocs_text`); the driver emits relocs after a `%%RELOCS%%` sentinel and the
-    harness passes them to `svm_ir::link`.
+    `irb_relocs_text`/`irb_relocs_encoded`); the driver rides the relocs ahead of the
+    module bytes in its binary container (`--text` mode uses a `%%RELOCS%%` sentinel), and
+    the harness (`decode_emitted`) passes them to `svm_ir::link`.
 
   - **P2.9 (GC):** the codegen entry initializes the runtime (`jacl_heap_init` /
     `jacl_intern_init` / `jacl_map_init`) before the program runs. GC is stop-the-world,
@@ -85,8 +88,9 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   svm-text (selected by argv), the C side of the IR-builder round-trip test.
 
 - `tests/emit_jacl.c` — parses a JACL source snippet through the real frontend
-  (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`,
-  printing the program module's svm-text. Built with **gcc** (the frontend's toolchain).
+  (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`, writing
+  the program module as the default **binary container** (`--text` for svm-text). Built
+  with **gcc** (the frontend's toolchain).
 
 ## Phase 4 — corpus bring-up (parity scoreboard)
 
@@ -209,10 +213,11 @@ the call work for a real closure: the callee reads its captured upvalues back ou
 ## Testing
 
 `runtime/harness/tests/irbuilder.rs` compiles the builder + demo natively, emits each
-module, then parses → verifies → runs it on interp + JIT (and checks import-free
-output is canonical svm-text). `runtime/harness/tests/codegen.rs` does the same from
-real JACL source through `svm_codegen_program`, linking each program against the
-runtime artifact. Run from `runtime/harness/`:
+module, then parses → verifies → runs it on interp + JIT (and checks import-free output
+is canonical svm-text, plus that `irb_to_encoded` decodes to the same `Module` as the text
+path). `runtime/harness/tests/codegen.rs` does the same from real JACL source through
+`svm_codegen_program`, decoding the binary emit container (`decode_emitted`) and linking
+each program against the runtime artifact. Run from `runtime/harness/`:
 
 ```sh
 cargo test --test irbuilder

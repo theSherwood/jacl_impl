@@ -447,6 +447,11 @@ int main(int argc, char **argv) {
 #endif
   /* `--interp <mode> [names…]`: the host backend of the interp capability (reads stdin). */
   if (argc >= 2 && !strcmp(argv[1], "--interp")) return run_interp(argc, argv);
+  /* Output format. The default is the **binary** svm-encode container (guest-JIT staging
+   * item 7 — the interchange format the harness decodes with `svm_encode::decode_module`,
+   * no parse round-trip). `--text` restores the human/golden svm-text form. */
+  int text_mode = 0;
+  if (argc >= 2 && !strcmp(argv[1], "--text")) { text_mode = 1; argv++; argc--; }
   const char *src = NULL;
   const char *file_path = NULL;   /* set in --file mode; enables module-aware compilation */
   if (argc == 3 && !strcmp(argv[1], "--file")) {
@@ -457,7 +462,7 @@ int main(int argc, char **argv) {
     src = source_for(argv[1]);
     if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
   } else {
-    fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --file <path>\n");
+    fprintf(stderr, "usage: emit_jacl [--text] <case> | emit_jacl [--text] --file <path>\n");
     return 2;
   }
 
@@ -553,14 +558,32 @@ int main(int argc, char **argv) {
   IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
-  char *text = irb_to_text(m);
-  fputs(text, stdout);
-  free(text);
-  /* Data relocations follow the module after a sentinel (the harness splits on it and
-   * feeds them to svm_ir::link as SelfData relocs). */
-  char *relocs = irb_relocs_text(m);
-  if (relocs[0]) { fputs("%%RELOCS%%\n", stdout); fputs(relocs, stdout); }
-  free(relocs);
+  if (text_mode) {
+    /* svm-text form (goldens / human diffs). Data relocations follow the module after a
+     * sentinel; the harness splits on it and feeds them to svm_ir::link as SelfData relocs. */
+    char *text = irb_to_text(m);
+    fputs(text, stdout);
+    free(text);
+    char *relocs = irb_relocs_text(m);
+    if (relocs[0]) { fputs("%%RELOCS%%\n", stdout); fputs(relocs, stdout); }
+    free(relocs);
+  } else {
+    /* Binary container (default): a 4-byte magic, the count-prefixed SelfData relocs, then
+     * the svm-encode module bytes to EOF. Length-framed (relocs carry their own count), so
+     * it needs no text sentinel — safe over arbitrary module bytes. Decoded by the harness's
+     * `decode_emitted` (runtime/harness/src/lib.rs). */
+    size_t mlen = 0, rlen = 0;
+    uint8_t *mod = irb_to_encoded(m, &mlen);
+    uint8_t *rel = irb_relocs_encoded(m, &rlen);
+    if (fwrite("JSB1", 1, 4, stdout) != 4 ||
+        (rlen && fwrite(rel, 1, rlen, stdout) != rlen) ||
+        (mlen && fwrite(mod, 1, mlen, stdout) != mlen)) {
+      perror("emit_jacl: write");
+      free(mod); free(rel); irb_module_free(m); arena_destroy(&arena); return 1;
+    }
+    free(mod);
+    free(rel);
+  }
   irb_module_free(m);
   arena_destroy(&arena);
   return 0;

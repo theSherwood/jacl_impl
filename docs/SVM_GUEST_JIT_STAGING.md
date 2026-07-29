@@ -222,16 +222,21 @@ structure; pick it unless a concrete need forces in-program linking.
    (behind the emit-only build), remove the now-orphaned `expand__compile_staged_body` /
    `jacl_ctx_run_closure` / `OP_SYNTAX_OP`, and verify the `.svmb` builds, shrinks
    (feasibility §2's ~33 dead externals go away), and the corpus still matches the golden.
-7. **Make binary `svmb` the default codegen output** — once `irb_to_encoded` (item 1) is
-   solid, flip the toolchain so codegen emits the binary `svm-encode` module directly
-   rather than svm-text. svm-text becomes a debug/inspection format (behind a flag), not
-   the interchange default: the emit driver, the harness link paths (`svm_text::parse_module`
-   → `svm_encode::decode_module`), `jacl_svm`, `stage_macro`, the `.svmb` self-host build,
-   and `run_diff` all move to bytes. Text stays for goldens/human diffs. This removes a
-   parse round-trip on every compile, shrinks the wire, and makes the guest-JIT path
-   (which needs bytes) the same path as the normal path — no special-casing. Sequence it
-   right after item 1 proves the encoder round-trips; the migration of each consumer is
-   mechanical once the encoder exists.
+7. **Make binary `svmb` the default codegen output** — **DONE** (this slice). The emit
+   driver (`emit_jacl` `main`) now defaults to a **binary container**: a 4-byte `JSB1`
+   magic, the count-prefixed SelfData relocs (LE `u32` triples, via `irb_relocs_encoded`),
+   then the `irb_to_encoded` module bytes. `--text` restores the svm-text + `%%RELOCS%%`
+   form for goldens/human diffs. A shared `jacl_runtime_harness::decode_emitted` decodes the
+   container (`svm_encode::decode_module`, no `svm_text::parse_module` round-trip); the
+   native consumers moved to it — `codegen.rs`, `jacl_svm`, `emit_svmb`, `probe_svmb`,
+   `bench_svm`, `parity`, `browser_coverage`. The golden scripts (`run_diff.sh`,
+   `run_synquote_test.sh`) pass `--text`. This removes the parse round-trip on every compile
+   and makes the guest-JIT path (which needs bytes) the same path as the normal path.
+
+   *Deliberately still on text (separate producers / follow-ups, not this slice):* the
+   browser frontend `jacl_emit_ir` (the JS host has no svm-encode decoder yet — a
+   `svm_browser` cdylib change), and the macro-staging emitter `emit_macro_body.c` /
+   `stage_macro` / `stage_ffi` (a distinct `--staged` producer, coupled to items 3–5).
 
 Items 1–2 are self-contained and low-risk (**start with 1**). Item 7 (binary-default)
 follows immediately once item 1's encoder round-trips — it is the higher-leverage payoff

@@ -1,16 +1,17 @@
 //! P2.2 — codegen scaffold proof (real JACL source → SVM-IR → run).
 //!
 //! Builds the JACL frontend + the P2.2 codegen (`codegen/codegen.c`) into a driver
-//! (`codegen/tests/emit_jacl.c`, compiled with gcc — the frontend's toolchain),
-//! which parses a JACL snippet and emits the program module's svm-text. Each program
-//! is linked against the separately-translated runtime (the P2.0 path) and run on
+//! (`codegen/tests/emit_jacl.c`, compiled with gcc — the frontend's toolchain), which
+//! parses a JACL snippet and emits the program module as the default **binary container**
+//! (`decode_emitted`; `--text` still gives svm-text for the IR-inspection tests). Each
+//! program is linked against the separately-translated runtime (the P2.0 path) and run on
 //! interp + JIT; the result (an i32 JaclVal) is checked against the expected value.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use jacl_runtime_harness::translate_runtime;
+use jacl_runtime_harness::{decode_emitted, translate_runtime};
 use svm_interp::Value;
 use svm_ir::{link_with_manifest, LinkUnit};
 
@@ -38,15 +39,27 @@ fn driver() -> &'static Path {
     .as_path()
 }
 
-/// Emit one case's program svm-text via the codegen.
-fn emit(case: &str) -> String {
+/// Emit one case's program as the default **binary container** (magic + relocs + svm-encode
+/// bytes) via the codegen. Decoded by `decode_emitted`.
+fn emit(case: &str) -> Vec<u8> {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
     assert!(
         out.status.success(),
         "emit_jacl {case} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).expect("emit_jacl output is UTF-8")
+    out.stdout
+}
+
+/// Emit one case's program as **svm-text** (`--text`), for tests that inspect the emitted IR.
+fn emit_text(case: &str) -> String {
+    let out = Command::new(driver()).arg("--text").arg(case).output().expect("run emit_jacl");
+    assert!(
+        out.status.success(),
+        "emit_jacl --text {case} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("emit_jacl --text output is UTF-8")
 }
 
 /// Run a case expected to fail codegen; returns the emitted error (stderr).
@@ -61,35 +74,14 @@ fn i32_val(x: i32) -> i64 {
     ((0x02u64 << 56) | (x as u32 as u64)) as i64
 }
 
-/// Split the driver's output into the module text and any data relocations (emitted
-/// after a `%%RELOCS%%` sentinel as `<func> <block> <inst>` lines — SelfData relocs).
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
-}
-
 /// Compile `case`, link it against the runtime, wrap it with svm's powerbox entry
 /// (`synth_manifest_start`), instantiate, and run the powerbox entry on interp + JIT
 /// (`run_diff` enforces they agree). Returns the program's returned JaclVal and captured
 /// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
 /// `[print …]` program's host I/O works the same way a pure-compute one returns a value.
 fn run_case_full(case: &str) -> (i64, Vec<u8>) {
-    let raw = emit(case);
-    let (text, relocs) = split_relocs(&raw);
-    let program = svm_text::parse_module(text).unwrap_or_else(|e| panic!("parse {case}: {e:?}"));
+    let (program, relocs) =
+        decode_emitted(&emit(case)).unwrap_or_else(|e| panic!("decode {case}: {e}"));
 
     let rt = translate_runtime();
     // Retain the runtime's manifest capability imports (`write`, …) through the link
@@ -389,7 +381,7 @@ fn closures_share_one_mutable_cell() {
 #[test]
 fn typed_arithmetic_lowers_to_native_i32() {
     // [+ 1 [* 2 3]] — the typer proves i32, so native i32 ops with no runtime calls.
-    let ir = emit("nested");
+    let ir = emit_text("nested");
     assert!(ir.contains("i32.mul") && ir.contains("i32.add"), "expected native i32 ops:\n{ir}");
     assert!(!ir.contains("jacl_mul") && !ir.contains("jacl_add"), "should not call the runtime:\n{ir}");
     run_case("nested", i32_val(7)); // and it's still correct
@@ -398,7 +390,7 @@ fn typed_arithmetic_lowers_to_native_i32() {
 #[test]
 fn dynamic_arithmetic_keeps_runtime_calls() {
     // def x 5; [+ $x 10] — x is dyn, so the dynamic jacl_add path is used.
-    let ir = emit("bind_read");
+    let ir = emit_text("bind_read");
     assert!(ir.contains("jacl_add"), "dynamic arithmetic should call jacl_add:\n{ir}");
     run_case("bind_read", i32_val(15));
 }
@@ -497,7 +489,7 @@ fn parallel_race_matches_old_vm() {
 #[test]
 fn typed_proc_body_is_unboxed() {
     // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.
-    let ir = emit("proc_typed");
+    let ir = emit_text("proc_typed");
     assert!(ir.contains("i32.add"), "typed proc body should use native i32.add:\n{ir}");
     assert!(!ir.contains("jacl_add"), "typed proc body should not call jacl_add:\n{ir}");
     run_case("proc_typed", i32_val(42));

@@ -44,25 +44,6 @@ fn build_driver() -> PathBuf {
     out
 }
 
-/// Split the driver's output into module text + SelfData relocs (matches parity.rs).
-fn split_relocs(raw: &str) -> (&str, Vec<svm_ir::DataReloc>) {
-    match raw.find("%%RELOCS%%") {
-        None => (raw, Vec::new()),
-        Some(i) => {
-            let relocs = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-                    svm_ir::DataReloc { func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData }
-                })
-                .collect();
-            (&raw[..i], relocs)
-        }
-    }
-}
-
 fn die(msg: &str) -> ! {
     eprintln!("jacl-svm: {msg}");
     std::process::exit(1);
@@ -137,9 +118,8 @@ fn cmd_run(args: &[String]) -> ! {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
-    let raw = String::from_utf8(out.stdout).unwrap_or_else(|_| die("emit driver output not UTF-8"));
-    let (text, relocs) = split_relocs(&raw);
-    let program = svm_text::parse_module(text).unwrap_or_else(|e| die(&format!("parse emitted IR: {e:?}")));
+    let (program, relocs) = jacl_runtime_harness::decode_emitted(&out.stdout)
+        .unwrap_or_else(|e| die(&format!("decode emitted IR: {e}")));
 
     // Link against the translated runtime + extern catalog; powerbox; instantiate.
     eprintln!("jacl-svm: translating runtime…");
