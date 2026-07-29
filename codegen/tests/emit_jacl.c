@@ -49,14 +49,17 @@ static const char *source_for(const char *name) {
     return "[if [> 1 2] { 1 } { [if [> 3 2] { 22 } { 33 }] }]";
   if (!strcmp(name, "if_expr_bind"))
     return "def x [if [> 5 3] { 9 } { 0 }]\n[+ $x 0]";
+  /* Current `for` syntax: `[for COLLECTION binding { body }]` (collection first, no `in`).
+   * The collection is a `[vec …]` literal (i32 elements, so the sum stays an inline i32 —
+   * `[range A B]` yields i64/heap-wide values that aren't a scalar the tests can assert). */
   if (!strcmp(name, "for_sum"))
-    return "mut acc 0\n[for i in [range 0 5] { set acc [+ $acc $i] }]\n[+ $acc 0]";
+    return "mut acc 0\n[for [vec 0 1 2 3 4] i { set acc [+ $acc $i] }]\n[+ $acc 0]";
   if (!strcmp(name, "for_range_cmd"))
-    return "mut acc 0\n[for i in [range 1 4] { set acc [+ $acc $i] }]\n[+ $acc 0]";
+    return "mut acc 0\n[for [vec 1 2 3] i { set acc [+ $acc $i] }]\n[+ $acc 0]";
   if (!strcmp(name, "for_dotdot"))
     return "mut acc 0\nfor i in 0..5 { set acc [+ $acc $i] }\n[+ $acc 0]";
   if (!strcmp(name, "for_with_if"))
-    return "mut acc 0\n[for i in [range 0 5] { [if [> $i 2] { set acc [+ $acc $i] }] }]\n[+ $acc 0]";
+    return "mut acc 0\n[for [vec 0 1 2 3 4] i { [if [> $i 2] { set acc [+ $acc $i] }] }]\n[+ $acc 0]";
   /* P2.5 procs & calls */
   if (!strcmp(name, "proc_add"))
     return "proc add {x, y} {+ $x $y}\n[add 40 2]";
