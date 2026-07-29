@@ -61,6 +61,17 @@ pub fn translate_runtime() -> svm_llvm::Translated {
     // via the now-deleted `resolve_capability_imports`; the manifest path is the phase-4 model.)
 }
 
+/// Translate the runtime **plus the staged-macro I/O glue** (`syn_rt` + `synrt_read_arg` /
+/// `synrt_write_result`) as one module, so a codegen'd staged-macro program resolves those
+/// (and `jacl_*`) by name at link. The glue's `jacl_vec_*` calls are in-unit; only
+/// `read`/`write` cross the boundary (the recognized Stream caps). See
+/// `docs/SVM_MACRO_STAGING_PLAN.md` "final link".
+pub fn translate_runtime_staging() -> svm_llvm::Translated {
+    let unity = format!("{RUNTIME_DIR}/../codegen/selfhost/macro_staging/jaclrt_staging.c");
+    let bc = compile_driver(&unity);
+    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate staging runtime")
+}
+
 /// Translate the test-only native `extern` catalog (`extern_catalog.c`) as its own
 /// module. Its exports name `t_sumi` / `t_fill` / `t_xor` so a program module's
 /// `call.import "t_*"` (emitted for an `extern` call) resolves against it through

@@ -160,6 +160,49 @@ The `emit_macro_body` tool (codegen a body → `__jacl_macro` svm-text) is reusa
 the rest of the first attempt (`stage_entry.c` wrapper + `stage_macro.rs` importing across
 units) is superseded by the above and not kept.
 
+## Phase 3 final link — done; the arity-1 corpus runs end-to-end on SVM
+
+The corrected design is built and **the whole pipeline compiles, links, runs on the SVM
+engine, and reproduces the legacy VM's expansions**:
+
+- **Runtime glue** — `codegen/selfhost/macro_staging/{stage_glue.c,jaclrt_staging.c}`:
+  `syn_rt` + `synrt_read_arg()` / `synrt_write_result(vec)`, translated *with* jaclrt
+  (`translate_runtime_staging()` in the harness). Its `jacl_vec_*` are in-unit; only
+  `read`/`write` cross the boundary.
+- **Codegen entry** — `svm_codegen_staged_macro` (`codegen/codegen.c`): emits func 0 =
+  `{init; x=synrt_read_arg(); res=<body(x)>; synrt_write_result(res)}` + func 1 = the body.
+  `emit_macro_body --staged` drives it.
+- **Driver** — `runtime/harness/src/bin/stage_macro.rs`: link vs the staging runtime,
+  `synth_manifest_start`, run with the arg wire on stdin (`call_with_stdin`), emit the
+  result wire on stdout. Reduces to `jacl_svm`'s link path.
+
+**Verified on SVM** (`run_stage_test.sh` — the committed e2e gate): `k → 42`,
+`s → [+ 1 2]`, `t → 21`, `twice 21 → [+ 21 21]`, `dq 7 → [+ 7 1]`, `idd 21 → 21`, and a
+compound argument `twice [* 3 4] → [+ [* 3 4] [* 3 4]]`. Each expansion matches the legacy
+oracle (`run_diff.sh`), so the migration is observationally transparent for this corpus.
+
+**The bug that was blocking it** (previously mis-diagnosed as a `malloc`/`realloc` fault) was
+two real defects, both now fixed:
+1. **Missing SelfData relocations.** String/data literals lower to data-segment references
+   whose `i64.const <offset>` must be relocated to the segment's linked address. `emit_macro_body`
+   dropped the reloc table and `stage_macro.rs` never applied it, so every string resolved to
+   empty (`syntax-quote [+ 1 2]` → `["" 1 2]`). Fix: emit the relocs after a `%%RELOCS%%`
+   sentinel (as the frontend's `--file` path does) and pass them in the program `LinkUnit`
+   (`relocations:`), exactly like `jacl_svm`'s `split_relocs`.
+2. **Unquote of a bare word didn't resolve the parameter.** `~x` parses as
+   `AST_UNQUOTE(AST_LIT_STRING "x")` (bare words in command position are strings), so
+   `compile_synquote` compiled the *string* "x" instead of a reference to the macro parameter
+   `x` — the arg came out as the inline string "x" (vec-count 0), and `synrt_encode` rejected
+   it. Fix: when an unquote child is a bare `AST_LIT_STRING`, synthesize an `AST_VAR_REF` and
+   compile that — mirroring the legacy VM's `syntax__compile_unquote_child` (`src/compiler.c`).
+
+The alignment fix noted earlier (guest bump-allocator `g_arena` now `aligned(16)`, so its
+`*(size_t*)base` size-header write doesn't fault) stands and is still required.
+
+**Still out of scope for this slice** (tracked for later phases): `~@` unquote-splicing,
+multi-arity macros (the wire carries one syntax value; multi-arg needs an args frame), and
+hygiene / scope-mark propagation (Phase 4).
+
 ## Sequencing note
 
 Chosen over "ship the self-hosted compiler first (legacy VM bundled), purify later."
