@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
     m = svm_codegen_staged_macro((const char **)dm->data.defmacro.param_names,
                                  dm->data.defmacro.param_name_lens,
                                  dm->data.defmacro.param_count,
+                                 dm->data.defmacro.variadic,
                                  dm->data.defmacro.body, err, sizeof err);
   } else {
     uint32_t idx = 0;

@@ -199,9 +199,81 @@ two real defects, both now fixed:
 The alignment fix noted earlier (guest bump-allocator `g_arena` now `aligned(16)`, so its
 `*(size_t*)base` size-header write doesn't fault) stands and is still required.
 
-**Still out of scope for this slice** (tracked for later phases): `~@` unquote-splicing,
-multi-arity macros (the wire carries one syntax value; multi-arg needs an args frame), and
-hygiene / scope-mark propagation (Phase 4).
+## Multi-arity macros — done
+
+The staged path now handles macros of any arity, so the whole Phase 0 corpus (including
+`unless {cond body}`) stages on SVM. The design keeps the wire flat: the argument wire is a
+single version byte followed by the N parameter syntax values **back-to-back** (arity-1 is
+exactly the original format). `synrt_read_arg` is stateful — the first call slurps stdin and
+skips the version byte, and each call decodes the next value (`synrt_decode_node`); the
+codegen entry (`svm_codegen_staged_macro`) calls it once per parameter, in order, and binds
+each. No args frame or per-arg func parameters — the SVM func signature is unchanged; the
+parameters arrive over the wire. `run_stage_test.sh` covers the arity-2 case
+`unless [== 1 2] { set hit 5 } → [if [== 1 2] {} { set hit 5 }]`.
+
+## Phase 5 — the compiler stages macros on SVM (behind `JACL_STAGE_ON_SVM`) — done
+
+The frontend's macro expander now runs macro bodies on the **SVM engine** instead of the
+legacy bytecode VM, and the whole Phase 0 corpus (`twice`, `nested` — a macro calling a
+macro, `unless` — arity-2 with blocks) emits IR **byte-identical to the oracle**. That is the
+Phase 5 acceptance criterion: nothing observable changes except which engine runs the macro.
+
+The seam is a hook, so `src/` gains no codegen/SVM dependency:
+
+- **`src/syntax.c`** declares `jacl_macro_stage_hook` (NULL by default). In `expand__node`,
+  when the hook is installed *and* `JACL_STAGE_ON_SVM` is set, a macro call is expanded through
+  it — producing the expanded AST directly — instead of `jacl_ctx_run_closure`. The splice +
+  re-expand tail is shared, so iterative expansion (a macro whose output calls another macro)
+  works unchanged. Hook unset or env unset ⇒ the legacy path, bit-for-bit.
+- **`runtime/harness`** now also builds a `staticlib` exposing a C ABI, `jacl_svm_stage`
+  (`src/stage_ffi.rs`): link a codegen'd staged-macro module against the staging runtime
+  (translated **once**, cached), run it, return the result wire. This is the in-process
+  embedding of "run on an SVM runtime instance."
+- **`codegen/selfhost/macro_staging/stage_bridge.c`** is the hook body (codegen the body →
+  `synw_encode` the argument ASTs → `jacl_svm_stage` → `synw_decode`), installed by the driver
+  (`emit_jacl`, built with `-DJACL_STAGE_ON_SVM_BUILD`).
+- **`run_diff.sh --svm`** is the committed gate: it builds that driver and diffs the
+  `JACL_STAGE_ON_SVM=1` output against the same `golden/` the legacy path matches.
+
+## Phase 4a — `~@` unquote-splicing + variadic macros — done
+
+Splicing needs a vec-of-syntax to splice, which is a variadic macro's rest parameter, so the
+two land together. `compile_synquote` now handles `~@x` in command/block position by
+concatenating the operand vec into the args (`jacl_vec_concat`), mirroring the legacy
+compiler's `OP_VEC_CONCAT` vs `OP_VEC_PUSH` split. The wire carries a variadic macro's rest
+parameter as a `u32 count` then that many syntax values; `synrt_read_rest` collects them into
+a jaclrt vec (the splice operand), and the staged entry (`svm_codegen_staged_macro`, now
+taking a `variadic` flag) binds the fixed params via `synrt_read_arg` and the rest param via
+`synrt_read_rest`. `run_diff.sh --svm` covers the corpus's `splice.jacl`
+(`pack {first ..rest} = [vec ~first ~@rest]`) — byte-identical to the oracle.
+
+## Phase 4b — hygiene (scope marks + gensym) — deferred, and here is why
+
+Hygiene is **not yet motivated or fully unblocked**, so building its ABI now would be
+speculative machinery with no test to exercise it. Two concrete findings:
+
+- **gensym is blocked in the codegen backend, not in staging.** A `[gensym]` in a template
+  expands to a `VAR_REF` used as e.g. a `mut` binding name. But `svm_codegen_program`'s
+  `binding_name` (`codegen/codegen.c`) requires a binding name to be a bare-word
+  `AST_LIT_STRING`, so it rejects gensym output — `emit_jacl --file` on a gensym macro fails
+  with "binding form needs a name and a value" on **both** the legacy and SVM-staged paths.
+  There is no passing oracle to match until the codegen backend accepts a computed/var-ref
+  binding name. Staging-side gensym would just produce output the backend can't consume.
+- **scope marks are invisible to the IR absent capture.** Every legacy make-syntax op stamps
+  `macro_scope_mark`, yet the whole corpus emits identical IR with the SVM path stamping 0 —
+  the final codegen only distinguishes scope marks when a macro-introduced `$name` would
+  otherwise capture a call-site binding, and no codegen-able corpus program does that today.
+
+So Phase 4b waits on: (a) codegen-backend support for computed binding names (which unblocks
+gensym and gives a real oracle), and/or (b) a concrete hygiene-sensitive corpus program that
+makes scope marks observable. The ABI is designed (wire header: `scope_mark` + `gensym_counter`
+in, updated counter out; `compile_synquote` stamps a runtime mark; `[gensym]` lowers to a
+runtime name-mint) and can be added when one of those lands.
+
+## Phase 6 — drop the legacy VM
+
+Once staging is the only macro evaluator, flip the `JACL_STAGE_ON_SVM` gate to always-on, then
+remove `jacl_ctx_run_closure` / the bytecode macro path / `vm.c`.
 
 ## Sequencing note
 

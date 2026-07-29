@@ -447,7 +447,18 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
 }
 #endif /* __EMSCRIPTEN__ */
 
+#ifdef JACL_STAGE_ON_SVM_BUILD
+/* Staged build: link the SVM staging bridge (stage_bridge.c + the runtime/harness staticlib)
+ * and install the macro-staging hook. Activation is still gated by the JACL_STAGE_ON_SVM env
+ * var inside the expander, so this build behaves identically to the normal one unless the env
+ * var is set. Built by run_diff.sh's --svm mode. */
+extern void jacl_install_svm_stage_hook(void);
+#endif
+
 int main(int argc, char **argv) {
+#ifdef JACL_STAGE_ON_SVM_BUILD
+  jacl_install_svm_stage_hook();
+#endif
   /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
   if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
     const char *src = source_for(argv[2]);

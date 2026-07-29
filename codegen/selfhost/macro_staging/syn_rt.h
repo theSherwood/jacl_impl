@@ -29,6 +29,13 @@
  * malformed/truncated buffer. */
 JaclVal synrt_decode(const unsigned char *buf, size_t len);
 
+/* The wire-format version byte (the leading byte of a syn_wire buffer). */
+int synrt_wire_version(void);
+
+/* Decode ONE node from `buf` starting at *pos (no version byte); advances *pos. For
+ * reading a sequence of N syntax values (multi-arity macro args). JACL_NIL on error. */
+JaclVal synrt_decode_node(const unsigned char *buf, size_t len, size_t *pos);
+
 /* A plain-data syntax value -> syn_wire bytes (malloc'd; free with `free`). NULL on
  * error. */
 unsigned char *synrt_encode(JaclVal syn, size_t *out_len);

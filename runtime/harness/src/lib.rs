@@ -18,6 +18,10 @@ use svm_interp::Value;
 use svm_ir::ValType;
 use svm_jit::JitOutcome;
 
+/// C-ABI bridge (`jacl_svm_stage`) that runs a codegen'd staged-macro module on SVM
+/// in-process, for the native frontend's `JACL_STAGE_ON_SVM` path.
+pub mod stage_ffi;
+
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 fn compile_driver(driver_abs: &str) -> PathBuf {

@@ -1,0 +1,38 @@
+func (i64) -> (i64) {
+block 0 (v0: i64) {
+  v1 = i32.const 0
+  call.sym "jacl_heap_init" (i64) -> () v1(v0)
+  v2 = i32.const 0
+  call.sym "jacl_intern_init" (i64) -> () v2(v0)
+  v3 = i32.const 0
+  call.sym "jacl_map_init" (i64) -> () v3(v0)
+  v4 = ref.func 1
+  v5 = i64.extend_i32_u v4
+  v6 = i32.const 0
+  v7 = call.sym "jacl_sched_run_main" (i64, i64) -> (i64) v6(v0, v5)
+  return v7
+}
+}
+
+func (i64, i64) -> (i64) {
+block 0 (v0: i64, v1: i64) {
+  v2 = i64.const -1
+  v3 = suspend v2
+  v4 = i64.const 0
+  v5 = i32.const 0
+  v6 = call.sym "jacl_vec_empty" (i64) -> (i64) v5(v0)
+  v7 = i64.const 144115188075855882
+  v8 = i32.const 0
+  v9 = call.sym "jacl_vec_push" (i64, i64, i64) -> (i64) v8(v0, v6, v7)
+  v10 = i64.const 144115188075855892
+  v11 = i32.const 0
+  v12 = call.sym "jacl_vec_push" (i64, i64, i64) -> (i64) v11(v0, v9, v10)
+  v13 = i64.const 144115188075855902
+  v14 = i32.const 0
+  v15 = call.sym "jacl_vec_push" (i64, i64, i64) -> (i64) v14(v0, v12, v13)
+  v16 = i64.const 144115188075855912
+  v17 = i32.const 0
+  v18 = call.sym "jacl_vec_push" (i64, i64, i64) -> (i64) v17(v0, v15, v16)
+  return v18
+}
+}

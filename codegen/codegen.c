@@ -2265,29 +2265,37 @@ static IrVal syn_vpush(Cx *cx, IrVal vec, IrVal elem) {
   IrVal a[] = {cx->sp, vec, elem};
   return emit_rt_call(cx, "jacl_vec_push", a, 3);
 }
+static IrVal syn_vconcat(Cx *cx, IrVal a_vec, IrVal b_vec) {
+  IrVal a[] = {cx->sp, a_vec, b_vec};
+  return emit_rt_call(cx, "jacl_vec_concat", a, 3);
+}
+/* Compile an unquote/unquote-splicing operand -> a syntax value (or, for splicing, a vec of
+ * syntax values). A bare word `~x` / `~@x` parses as AST_LIT_STRING "x"; resolve it as a
+ * variable reference to the parameter/local (mirrors the legacy VM's
+ * syntax__compile_unquote_child). Any other expression compiles normally. */
+static IrVal compile_unquote_operand(Cx *cx, AstNode *child) {
+  if (child && child->type == AST_LIT_STRING) {
+    AstNode vref;
+    memset(&vref, 0, sizeof vref);
+    vref.type = AST_VAR_REF;
+    vref.start = child->start;
+    vref.end = child->end;
+    vref.scope_mark = child->scope_mark;
+    vref.data.var_ref.name = child->data.lit_string.value;
+    vref.data.var_ref.length = child->data.lit_string.length;
+    return compile_expr(cx, &vref);
+  }
+  return compile_expr(cx, child);
+}
 static IrVal compile_synquote(Cx *cx, AstNode *t) {
   if (cx->failed) return 0;
   if (!t) { cx_fail(cx, "syntax-quote: null template node"); return 0; }
-  if (t->type == AST_UNQUOTE) {
-    /* hole: evaluate the child -> a syntax value. Inside a syntax-quote, a bare word
-     * `~x` parses as AST_UNQUOTE(AST_LIT_STRING "x"); resolve it as a variable reference
-     * to the parameter/local `x` (mirrors the legacy VM's syntax__compile_unquote_child). */
-    AstNode *child = t->data.unquote.child;
-    if (child && child->type == AST_LIT_STRING) {
-      AstNode vref;
-      memset(&vref, 0, sizeof vref);
-      vref.type = AST_VAR_REF;
-      vref.start = child->start;
-      vref.end = child->end;
-      vref.scope_mark = child->scope_mark;
-      vref.data.var_ref.name = child->data.lit_string.value;
-      vref.data.var_ref.length = child->data.lit_string.length;
-      return compile_expr(cx, &vref);
-    }
-    return compile_expr(cx, child);
-  }
+  if (t->type == AST_UNQUOTE)
+    return compile_unquote_operand(cx, t->data.unquote.child);   /* hole -> a syntax value */
   if (t->type == AST_UNQUOTE_SPLICING) {
-    cx_fail(cx, "syntax-quote: ~@ splicing not yet supported on the SVM backend");
+    /* `~@x` splices a vec of syntax values into the enclosing command/block, so it is only
+     * meaningful in that position (handled in the COMMAND/BLOCK cases below). */
+    cx_fail(cx, "syntax-quote: ~@ (unquote-splicing) can only appear in a command or block");
     return 0;
   }
   IrVal empty[] = {cx->sp};
@@ -2315,14 +2323,26 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
       IrVal head = t->data.command.head ? compile_synquote(cx, t->data.command.head)
                                         : irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL */);
       v = syn_vpush(cx, v, head);
-      for (uint32_t i = 0; i < t->data.command.arg_count && !cx->failed; i++)
-        v = syn_vpush(cx, v, compile_synquote(cx, t->data.command.args[i]));
+      /* A `~@x` arg concatenates its vec-of-syntax into the args; a normal arg is pushed
+       * (mirrors the legacy compiler's has-splice branch: OP_VEC_CONCAT vs OP_VEC_PUSH). */
+      for (uint32_t i = 0; i < t->data.command.arg_count && !cx->failed; i++) {
+        AstNode *arg = t->data.command.args[i];
+        if (arg->type == AST_UNQUOTE_SPLICING)
+          v = syn_vconcat(cx, v, compile_unquote_operand(cx, arg->data.unquote_splicing.child));
+        else
+          v = syn_vpush(cx, v, compile_synquote(cx, arg));
+      }
       break;
     }
     case AST_BLOCK: {
       v = syn_vpush(cx, v, syn_i32(cx, t->data.block.trailing_semi ? 1 : 0));
-      for (uint32_t i = 0; i < t->data.block.count && !cx->failed; i++)
-        v = syn_vpush(cx, v, compile_synquote(cx, t->data.block.commands[i]));
+      for (uint32_t i = 0; i < t->data.block.count && !cx->failed; i++) {
+        AstNode *cmd = t->data.block.commands[i];
+        if (cmd->type == AST_UNQUOTE_SPLICING)
+          v = syn_vconcat(cx, v, compile_unquote_operand(cx, cmd->data.unquote_splicing.child));
+        else
+          v = syn_vpush(cx, v, compile_synquote(cx, cmd));
+      }
       break;
     }
     default:
@@ -4531,17 +4551,14 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
  * Unlike `svm_codegen_macro_body`, the entry is codegen'd (so `synrt_read_arg` /
  * `synrt_write_result` / `jacl_*` are `call.sym` imports, resolved against the staging-
  * extended runtime) — svm-llvm C cannot emit those cross-unit imports. Links like any JACL
- * program. Arity-1 for now (the wire carries one syntax value; multi-arg is a frame,
- * follow-up). NULL on an unsupported construct (message in `err`). */
+ * program. Any arity: the argument wire carries the N parameter syntax values back-to-back,
+ * and the entry reads them in order (stateful `synrt_read_arg`). NULL on an unsupported
+ * construct (message in `err`). */
 IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
-                                   AstNode *body, char *err, size_t errcap) {
+                                   int variadic, AstNode *body, char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
-  if (nparams != 1) {
-    if (errcap) snprintf(err, errcap, "staged macro: only arity-1 supported for now (got %u)", nparams);
-    return NULL;
-  }
 
   IrModule *m = irb_module_new();
   cx.m = m;
@@ -4554,18 +4571,26 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, resume-arg) */
   IrBlock main_block = irb_block(mainf, i64_2, 2);
 
-  /* func 1 = the scheduler root: read the argument syntax value, bind the param, run the
-   * macro body, write the result syntax value. Runs on a fiber like a normal program body,
-   * so allocation / GC behave as usual. */
+  /* func 1 = the scheduler root: read the argument syntax values (one per fixed macro param,
+   * in order; the trailing rest param, if variadic, is a vec of the remaining values), bind
+   * them, run the macro body, write the result syntax value. Runs on a fiber like a normal
+   * program body, so allocation / GC behave as usual. `synrt_read_arg` / `synrt_read_rest`
+   * are stateful — successive calls consume the one argument wire in order. */
   cx.f = mainf; cx.cur = main_block; cx.sp = 0;
   (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
   env_reset(&cx);
   capset_reset(&cx); capset_scan(&cx, body);
   scope_enter(&cx);
-  {
+  uint32_t nfixed = (variadic && nparams > 0) ? nparams - 1 : nparams;
+  for (uint32_t k = 0; k < nfixed && !cx.failed; k++) {
     IrVal ra[] = {cx.sp};
     IrVal x = emit_rt_call(&cx, "synrt_read_arg", ra, 1);
-    env_define(&cx, names[0], lens[0], x, /*is_mut=*/0, /*is_cell=*/0);
+    env_define(&cx, names[k], lens[k], x, /*is_mut=*/0, /*is_cell=*/0);
+  }
+  if (variadic && nparams > 0 && !cx.failed) {
+    IrVal ra[] = {cx.sp};
+    IrVal rest = emit_rt_call(&cx, "synrt_read_rest", ra, 1);   /* -> vec of syntax values */
+    env_define(&cx, names[nparams - 1], lens[nparams - 1], rest, /*is_mut=*/0, /*is_cell=*/0);
   }
   IrVal res = compile_expr(&cx, body);
   if (!cx.failed) {
