@@ -10,6 +10,12 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# `rlib` for the bins (jacl_svm, stage_macro, …); `staticlib` for `libjacl_runtime_harness.a`,
+# which the native JACL frontend links to stage macros on SVM in-process (`jacl_svm_stage`,
+# behind JACL_STAGE_ON_SVM — the Phase 5 embedding). See src/stage_ffi.rs.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
 svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }

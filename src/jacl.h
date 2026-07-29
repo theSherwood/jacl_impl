@@ -2249,6 +2249,12 @@ extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 /* --- syntax.c --- */
 extern JaclVal syntax_from_ast (AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
 extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
+/* Phase 5 staging hook: install a function that expands a macro call by running its body on
+ * the SVM engine (see syntax.c). When installed and `JACL_STAGE_ON_SVM` is set, the expander
+ * uses it in place of the legacy VM. NULL by default — the driver (which owns codegen + the
+ * SVM bridge) installs it, keeping src/ free of any codegen/SVM dependency. */
+extern const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
+                                            arena_t *arena, AstNode **out);
 extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      MacroTable *macros, ThreadHeap *heap,
                                      JaclInternTable *intern, arena_t *arena,

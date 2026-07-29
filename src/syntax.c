@@ -900,6 +900,23 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 
 
 
+/* Optional staging hook (Phase 5 of docs/SVM_MACRO_STAGING_PLAN.md). When installed by the
+ * codegen driver AND `JACL_STAGE_ON_SVM` is set in the environment, a macro call is expanded
+ * by running the macro body on the **SVM engine** (codegen the body → run in-process via the
+ * `jacl_svm_stage` bridge → decode the result) instead of the legacy bytecode VM. The hook
+ * takes the macro entry and the call's argument ASTs and returns the expanded AST in `*out`
+ * (allocated in `arena`); it returns NULL on success or an error string. Left NULL — and the
+ * env var left unset — the behaviour is exactly the legacy path (nothing changes). This is
+ * the seam that keeps `src/` free of any codegen/SVM dependency: the driver installs it. */
+const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
+                                     arena_t *arena, AstNode **out) = NULL;
+
+static int jacl_stage_on_svm_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *v = getenv("JACL_STAGE_ON_SVM"); cached = (v && v[0] && v[0] != '0'); }
+    return cached;
+}
+
 /* Forward declare the recursive expansion helper */
 static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                          ThreadHeap *heap, JaclInternTable *intern,
@@ -956,6 +973,36 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     expand__set_error(es, err, node->start.line,
                                       node->start.column, arena);
                     return false;
+                }
+
+                /* Phase 5: stage the macro body on the SVM engine instead of the legacy VM.
+                 * Produces the expanded AST directly (no jaclrt syntax value / syntax_to_ast),
+                 * then splices + re-expands exactly like the legacy tail below. */
+                if (jacl_macro_stage_hook && jacl_stage_on_svm_enabled()) {
+                    AstNode *expanded = NULL;
+                    const char *serr = jacl_macro_stage_hook(
+                        entry, node->data.command.args, argc, arena, &expanded);
+                    if (serr) {
+                        char err[256];
+                        snprintf(err, sizeof(err), "macro '%.*s': %s",
+                                 (int)name_len, name, serr);
+                        expand__set_error(es, err, node->start.line,
+                                          node->start.column, arena);
+                        return false;
+                    }
+                    if (!expanded) {
+                        expand__set_error(es, "staged macro produced invalid syntax",
+                                          node->start.line, node->start.column, arena);
+                        return false;
+                    }
+                    uint32_t orig_line = node->start.line;
+                    uint32_t orig_col  = node->start.column;
+                    *node_ptr = expanded;
+                    expand__push_frame(es, name, name_len, orig_line, orig_col);
+                    bool ok = expand__node(node_ptr, macros, heap, intern, arena,
+                                           es, depth + 1);
+                    expand__pop_frame(es);
+                    return ok;
                 }
 
                 if (!entry->closure || !es->ctx) {

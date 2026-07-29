@@ -11,9 +11,13 @@
 #
 #   run_diff.sh            # build oracle, diff every corpus program vs golden
 #   run_diff.sh --update   # regenerate golden/ from the current frontend
-#   JACL_STAGE_ON_SVM=1 run_diff.sh   # (future) diff the SVM-staged path vs golden
+#   run_diff.sh --svm      # diff the SVM-staged path (JACL_STAGE_ON_SVM) vs golden — Phase 5
 #
-# Needs gcc. Skips cleanly (exit 0) if absent.
+# The default/`--update` modes need gcc only. `--svm` additionally needs cargo+clang: it links
+# the frontend against the SVM staging bridge (stage_bridge.c + the runtime/harness staticlib),
+# runs expansion with JACL_STAGE_ON_SVM=1 so the macro evaluator runs on the SVM engine, and
+# asserts the emitted IR still matches the byte-for-byte oracle — the Phase 5 acceptance gate.
+# Skips cleanly (exit 0) if a required tool is absent.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"          # codegen/selfhost/macro_staging
@@ -30,19 +34,42 @@ if ! command -v "$CC" >/dev/null; then
   exit 0
 fi
 
-EMIT="$BUILD/emit_jacl_native"
-if [ ! -x "$EMIT" ] || [ "$CODEGEN/tests/emit_jacl.c" -nt "$EMIT" ]; then
-  echo "=== building native frontend oracle ==="
-  "$CC" -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$CODEGEN" \
+mode="${1:-check}"
+
+# Pick the frontend binary + the env that activates staging. Default modes use the native
+# oracle build; --svm uses a build that links the SVM bridge and sets JACL_STAGE_ON_SVM.
+STAGE_ENV=""
+if [ "$mode" = "--svm" ]; then
+  for t in cargo clang; do command -v "$t" >/dev/null || { echo "note: $t not found — skipping SVM-staged diff."; exit 0; }; done
+  echo "=== building staging runtime staticlib (cargo) ==="
+  ( cd "$ROOT/runtime/harness" && cargo build --release >/dev/null 2>&1 )
+  LIB="$ROOT/runtime/harness/target/release"
+  EMIT="$BUILD/emit_jacl_svm"
+  echo "=== building SVM-staged frontend ==="
+  "$CC" -DJACL_STAGE_ON_SVM_BUILD -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$CODEGEN" \
     "$CODEGEN/tests/emit_jacl.c" "$CODEGEN/codegen.c" "$CODEGEN/irbuilder.c" \
-    -lpthread -lm -o "$EMIT"
+    "$DIR/stage_bridge.c" \
+    -L "$LIB" -ljacl_runtime_harness -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc \
+    -o "$EMIT"
+  STAGE_ENV="JACL_STAGE_ON_SVM=1"
+else
+  EMIT="$BUILD/emit_jacl_native"
+  if [ ! -x "$EMIT" ] || [ "$CODEGEN/tests/emit_jacl.c" -nt "$EMIT" ]; then
+    echo "=== building native frontend oracle ==="
+    "$CC" -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$CODEGEN" \
+      "$CODEGEN/tests/emit_jacl.c" "$CODEGEN/codegen.c" "$CODEGEN/irbuilder.c" \
+      -lpthread -lm -o "$EMIT"
+  fi
 fi
 
-mode="${1:-check}"
+# Default/--update fold stderr into the compared output (error-case goldens include it); --svm
+# drops stderr (clang emits translation warnings while building the staging runtime).
+redir_err() { if [ "$mode" = "--svm" ]; then "$@" 2>/dev/null; else "$@" 2>&1; fi; }
+
 fail=0
 for f in "$CORPUS"/*.jacl; do
   n="$(basename "$f" .jacl)"
-  got="$("$EMIT" --file "$f" 2>&1)"
+  got="$(redir_err env $STAGE_ENV "$EMIT" --file "$f")"
   if [ "$mode" = "--update" ]; then
     printf '%s\n' "$got" > "$GOLDEN/$n.ir"
     echo "  updated golden/$n.ir"
@@ -60,4 +87,12 @@ for f in "$CORPUS"/*.jacl; do
   fi
 done
 [ "$mode" = "--update" ] && { echo "golden regenerated."; exit 0; }
-[ "$fail" = 0 ] && echo "macro-staging diff: all corpus programs match the oracle." || exit 1
+if [ "$fail" = 0 ]; then
+  if [ "$mode" = "--svm" ]; then
+    echo "macro-staging diff (--svm): the SVM-staged expander matches the oracle byte-for-byte."
+  else
+    echo "macro-staging diff: all corpus programs match the oracle."
+  fi
+else
+  exit 1
+fi

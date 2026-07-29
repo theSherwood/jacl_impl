@@ -211,9 +211,34 @@ each. No args frame or per-arg func parameters — the SVM func signature is unc
 parameters arrive over the wire. `run_stage_test.sh` covers the arity-2 case
 `unless [== 1 2] { set hit 5 } → [if [== 1 2] {} { set hit 5 }]`.
 
-**Still out of scope** (tracked for later phases): `~@` unquote-splicing and hygiene /
-scope-mark propagation (Phase 4), then wiring the staged path into `expand__node` behind
-`JACL_STAGE_ON_SVM` so the whole compiler pipeline stages on SVM (Phase 5).
+## Phase 5 — the compiler stages macros on SVM (behind `JACL_STAGE_ON_SVM`) — done
+
+The frontend's macro expander now runs macro bodies on the **SVM engine** instead of the
+legacy bytecode VM, and the whole Phase 0 corpus (`twice`, `nested` — a macro calling a
+macro, `unless` — arity-2 with blocks) emits IR **byte-identical to the oracle**. That is the
+Phase 5 acceptance criterion: nothing observable changes except which engine runs the macro.
+
+The seam is a hook, so `src/` gains no codegen/SVM dependency:
+
+- **`src/syntax.c`** declares `jacl_macro_stage_hook` (NULL by default). In `expand__node`,
+  when the hook is installed *and* `JACL_STAGE_ON_SVM` is set, a macro call is expanded through
+  it — producing the expanded AST directly — instead of `jacl_ctx_run_closure`. The splice +
+  re-expand tail is shared, so iterative expansion (a macro whose output calls another macro)
+  works unchanged. Hook unset or env unset ⇒ the legacy path, bit-for-bit.
+- **`runtime/harness`** now also builds a `staticlib` exposing a C ABI, `jacl_svm_stage`
+  (`src/stage_ffi.rs`): link a codegen'd staged-macro module against the staging runtime
+  (translated **once**, cached), run it, return the result wire. This is the in-process
+  embedding of "run on an SVM runtime instance."
+- **`codegen/selfhost/macro_staging/stage_bridge.c`** is the hook body (codegen the body →
+  `synw_encode` the argument ASTs → `jacl_svm_stage` → `synw_decode`), installed by the driver
+  (`emit_jacl`, built with `-DJACL_STAGE_ON_SVM_BUILD`).
+- **`run_diff.sh --svm`** is the committed gate: it builds that driver and diffs the
+  `JACL_STAGE_ON_SVM=1` output against the same `golden/` the legacy path matches.
+
+**Still out of scope** (Phase 4 correctness-completeness, pulled in as a future corpus needs
+it): `~@` unquote-splicing and hygiene / scope-mark + gensym propagation across the boundary.
+And Phase 6: drop the legacy VM from the macro path once staging is the only evaluator (the
+`JACL_STAGE_ON_SVM` gate flips to always-on, then `jacl_ctx_run_closure` / `vm.c` come out).
 
 ## Sequencing note
 
