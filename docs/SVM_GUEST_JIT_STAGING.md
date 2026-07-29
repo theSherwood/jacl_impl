@@ -172,13 +172,22 @@ Three models, with the tradeoff explicit:
   host-granted modules), so this needs an **SVM feature** (accept a re-verified
   guest-authored module into a carve). The strongest end state; the largest dependency.
 
-**Recommendation:** use **guest-JIT for macro staging** (§3 — trusted, self-contained,
-same-domain is fine) and **model (A) for `interpret`** initially (drops `vm.c`, keeps
-isolation, smallest change), revisiting (C) if/when isolated self-contained interpret is
-a requirement. This still retires `vm.c` from every path; it just doesn't force
-interpret through guest-JIT where the isolation tradeoff is real. **Open decision for the
-owner** — the user's steer was "interpret should probably use guest-JIT too," which is
-model (B); worth confirming against the isolation cost before committing.
+**Decision (owner): model (B) — `interpret` uses guest-JIT, same-domain**, unifying it
+with macro staging on one mechanism. The same-domain memory tradeoff is accepted:
+interpreted code is re-verified (cannot escape the sandbox) but shares the caller's
+window, so `interpret` provides escape-freedom, not memory isolation from the calling
+program — appropriate for cooperative/metacircular use, and callers that need hard
+isolation should run untrusted code as a separate powerbox program instead. This retires
+`vm.c` from `interpret` via the *same* guest-JIT path macro staging uses, so the two
+share the encode + `compile_linked` + invoke machinery (§3, §5).
+
+One consequence to resolve in implementation (§4a): `interpret` runs in arbitrary
+programs that don't link `codegen.c`. Model B therefore needs the compiler reachable
+in-guest — either the `interp` cap is a **compiler-as-a-capability** (the SVM-native
+compiler + guest-JIT runner, granted by the host and running same-domain) that programs
+`__vm_host_call`, or `codegen` is linked into interpret-using programs. The
+compiler-as-a-cap shape keeps programs unbloated and matches the existing granted-cap
+structure; pick it unless a concrete need forces in-program linking.
 
 ## 5. Work breakdown
 
@@ -193,17 +202,21 @@ model (B); worth confirming against the isolation cost before committing.
    symtab)` → feed the arg wire / `__vm_jit_invoke2` → read the result wire → `release`.
    Compiled into the `.svmb`. Verify: `run_diff` against the frozen golden with the
    `.svmb` doing the expansion, no `vm.c`.
-5. **`interpret` model (A)** — swap the host `interp` cap backend to the SVM engine;
-   delete its `jacl_eval` dependency. (Independent of 1–4.)
+5. **`interpret` via guest-JIT (model B)** — reuses 1–4: compile the source in-guest
+   (`codegen` reached through the `interp` compiler-as-a-cap, §4a) → `irb_to_encoded` →
+   `__vm_jit_compile_linked` → `invoke` → marshal the scalar/error result back through the
+   `interp` wire (`interpcap.c`). Deletes the cap's `jacl_eval` backend. Shares the encode +
+   link + invoke path with staging, so it lands after 1–4 (not independent).
 6. **Drop `vm.c`** — once 4 (staging) and 5 (interpret) land, `src/jacl.c` stops needing
    `vm.c` / `bytecode.c` / the bytecode half of `compiler.c` on the emit path; remove them
    (behind the emit-only build), remove the now-orphaned `expand__compile_staged_body` /
    `jacl_ctx_run_closure` / `OP_SYNTAX_OP`, and verify the `.svmb` builds, shrinks
    (feasibility §2's ~33 dead externals go away), and the corpus still matches the golden.
 
-Items 1–2 are self-contained and low-risk (start here). Item 3 carries the memory-layout
-decision. Item 5 is independent and arguably the cleanest single win (isolated,
-vm.c-free interpret) — it could land before the guest-JIT work.
+Items 1–2 are self-contained and low-risk (**start with 1**). Item 3 carries the
+memory-layout decision and is the largest. With model B, item 5 (`interpret`) reuses the
+same encode/link/invoke path, so it follows 1–4 rather than standing alone — the payoff
+is that staging and `interpret` share one mechanism end to end.
 
 ## 6. Risks / open questions
 
