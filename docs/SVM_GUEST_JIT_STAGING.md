@@ -83,10 +83,20 @@ API."* The native bridge sidesteps this by parsing the text in Rust
 
 **Work item:** add `irb_to_encoded(const IrModule*, size_t *out_len)` — a C serializer
 emitting the `svm-encode` binary format (LEB128 + one-byte opcodes; magic `SVM\0`,
-version, memory descriptor, funcs/blocks/insts) that `__vm_jit_compile` decodes. This is
-the single most reusable piece — it also unblocks a smaller/faster native path. Validate
-it by round-tripping `irb_to_encoded` → `svm_encode::decode_module` == the text-parsed
-module, for the whole corpus.
+version 8, memory descriptor, then data / import / export / type / impl-export sections,
+then funcs → blocks → insts → terminator) that `__vm_jit_compile` decodes. This is the
+single most reusable piece — it also unblocks the binary-default output (item 7) and a
+faster native path. Validate it by round-tripping `irb_to_encoded` →
+`svm_encode::decode_module` == the text-parsed module, over the whole corpus.
+
+**Non-obvious sub-problem (scoped):** svm-text writes `call.sym "name" (sig) …` with the
+name and signature **inline**, but the binary `CallSym` carries an **import-section index**
+and imports reference a **type-section** entry (`ImportShape::Func(type_idx)`). So the
+encoder must, before writing instructions, walk the module and construct the **import
+section** (unique `call.sym` names) and **type section** (deduped signatures) in the *same
+order* `svm_text::parse_module` assigns them — otherwise the decoded module's `CallSym`
+indices won't equal the text-parsed module and the round-trip fails. This ordering-match is
+the trickiest part of item 1; the round-trip test is the oracle that pins it down.
 
 ### 3b. `Jit` forbids **data segments**; `compile_synquote` uses them (blocker)
 
@@ -212,11 +222,23 @@ structure; pick it unless a concrete need forces in-program linking.
    (behind the emit-only build), remove the now-orphaned `expand__compile_staged_body` /
    `jacl_ctx_run_closure` / `OP_SYNTAX_OP`, and verify the `.svmb` builds, shrinks
    (feasibility §2's ~33 dead externals go away), and the corpus still matches the golden.
+7. **Make binary `svmb` the default codegen output** — once `irb_to_encoded` (item 1) is
+   solid, flip the toolchain so codegen emits the binary `svm-encode` module directly
+   rather than svm-text. svm-text becomes a debug/inspection format (behind a flag), not
+   the interchange default: the emit driver, the harness link paths (`svm_text::parse_module`
+   → `svm_encode::decode_module`), `jacl_svm`, `stage_macro`, the `.svmb` self-host build,
+   and `run_diff` all move to bytes. Text stays for goldens/human diffs. This removes a
+   parse round-trip on every compile, shrinks the wire, and makes the guest-JIT path
+   (which needs bytes) the same path as the normal path — no special-casing. Sequence it
+   right after item 1 proves the encoder round-trips; the migration of each consumer is
+   mechanical once the encoder exists.
 
-Items 1–2 are self-contained and low-risk (**start with 1**). Item 3 carries the
-memory-layout decision and is the largest. With model B, item 5 (`interpret`) reuses the
-same encode/link/invoke path, so it follows 1–4 rather than standing alone — the payoff
-is that staging and `interpret` share one mechanism end to end.
+Items 1–2 are self-contained and low-risk (**start with 1**). Item 7 (binary-default)
+follows immediately once item 1's encoder round-trips — it is the higher-leverage payoff
+of item 1 (every compile, not just guest-JIT, stops paying the text round-trip). Item 3
+carries the memory-layout decision and is the largest. With model B, item 5 (`interpret`)
+reuses the same encode/link/invoke path, so it follows 1–4 rather than standing alone —
+the payoff is that staging and `interpret` share one mechanism end to end.
 
 ## 6. Risks / open questions
 
