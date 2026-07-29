@@ -129,6 +129,37 @@ path so the `vm.c` path stays the default (and the oracle) until parity is prove
 6. Bootstrapping order: a macro body may reference other procs/macros; staging is a
    mini pipeline that compiles+runs each body before the main program codegen (Phase 5).
 
+## Phase 3 final link — blocker found, design corrected
+
+The first attempt made the staged-macro entry a **C wrapper** (`stage_entry.c`) that
+imports the codegen'd `__jacl_macro` and calls `jaclrt`/`syn_rt`. That does **not** link:
+`svm-llvm` only emits SVM imports for a **known capability / `__vm_*` family**
+(`read`/`write`/`exit`, memory, io, jit, region — `collect_cap_imports` &c.); a call to any
+*other* undefined external (`jacl_vec_empty`, `__jacl_macro`, `synrt_*`) is rejected —
+`svm-llvm/src/lib.rs:477`: "a call to one needs import support (a later slice)". So
+**C-via-svm-llvm code cannot import another unit**; only **codegen** output emits arbitrary
+`call.sym` imports (that's how every JACL program already calls `jaclrt`).
+
+**Corrected design — the entry is codegen'd, the glue is in the runtime:**
+
+- Extend the runtime (`jaclrt` translate) with `syn_rt` + two self-contained helpers:
+  `synrt_read_arg()` (read stdin → `synrt_decode` → syntax vec) and
+  `synrt_write_result(vec)` (`synrt_encode` → write stdout). These live in a C unit
+  translated *with* `jaclrt`, so their `jacl_vec_*` calls are in-unit and `read`/`write`
+  are the recognized `Stream` caps — no cross-unit import.
+- A new codegen entry `svm_codegen_staged_macro(names, lens, n, body)` emits a whole
+  module: func 0 = `{ init; x = call.sym synrt_read_arg(); res = __jacl_macro(x);
+  call.sym synrt_write_result(res) }`, func 1 = `__jacl_macro(sp, x)` (the body). Both are
+  codegen'd, so the `synrt_*` + `jacl_*` calls are `call.sym` imports and `__jacl_macro` is
+  a direct in-module call — no funcref, no cross-unit C import.
+- The Rust driver then reduces to `jacl_svm`'s exact path: link the codegen'd module
+  against the (staging-extended) runtime, `synth_manifest_start`, run with the arg wire on
+  stdin.
+
+The `emit_macro_body` tool (codegen a body → `__jacl_macro` svm-text) is reusable as-is;
+the rest of the first attempt (`stage_entry.c` wrapper + `stage_macro.rs` importing across
+units) is superseded by the above and not kept.
+
 ## Sequencing note
 
 Chosen over "ship the self-hosted compiler first (legacy VM bundled), purify later."
