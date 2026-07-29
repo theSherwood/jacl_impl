@@ -259,31 +259,29 @@ fn while_countdown_loop() {
     run_case("while_countdown", i32_val(30)); // 3 iterations × 10
 }
 
-// The `for NAME in COLL { body }` cases below fail codegen ("for requires: …") in the current
-// backend — the `in`-keyword loop form drifted while this suite was dark. Pre-existing; tracked
-// in ISSUES.md. Un-ignore once the for-loop codegen/parser reconciliation lands.
+// `for` iteration, current syntax `[for COLLECTION binding { body }]` (collection first, no
+// `in` keyword). The collection is a `[vec …]` literal so its i32 elements sum to an inline
+// i32 the test can assert (a `[range A B]` collection yields i64/heap-wide — see ISSUES.md).
 #[test]
-#[ignore = "pre-existing: `for i in [range …]` form no longer codegens (see ISSUES.md)"]
 fn for_over_range_command() {
-    run_case("for_range_cmd", i32_val(6)); // for i in [range 1 4]: 1+2+3
+    run_case("for_range_cmd", i32_val(6)); // for [vec 1 2 3] i: 1+2+3
 }
 
 #[test]
-#[ignore = "pre-existing: `for i in [range …]` form no longer codegens (see ISSUES.md)"]
 fn for_over_range_sum() {
-    run_case("for_sum", i32_val(10)); // for i in [range 0 5]: 0+1+2+3+4
+    run_case("for_sum", i32_val(10)); // for [vec 0 1 2 3 4] i: 0+1+2+3+4
 }
 
 #[test]
-#[ignore = "pre-existing: `for i in 0..5` form no longer codegens (see ISSUES.md)"]
+#[ignore = "the `A..B` dotdot form is not a valid for-collection in the current syntax \
+            (parses as separate args); use `[range A B]` / `[vec …]`. See ISSUES.md"]
 fn for_over_dotdot_range() {
     run_case("for_dotdot", i32_val(10)); // for i in 0..5: 0+1+2+3+4
 }
 
 #[test]
-#[ignore = "pre-existing: `for i in [range …]` form no longer codegens (see ISSUES.md)"]
 fn for_with_nested_if() {
-    run_case("for_with_if", i32_val(7)); // sum i in 0..5 where i > 2: 3+4
+    run_case("for_with_if", i32_val(7)); // for [vec 0 1 2 3 4] i where i > 2: 3+4
 }
 
 // ---- P2.5 procs & calls ----
