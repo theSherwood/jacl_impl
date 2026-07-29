@@ -275,10 +275,65 @@ would otherwise capture a call-site binding, and no codegen-able corpus program 
 stays out until a concrete capture-sensitive corpus program makes it observable; the ABI
 (runtime scope-mark stamped by `compile_synquote`) is sketched for then.
 
-## Phase 6 — drop the legacy VM
+## Phase 6 — drop the legacy VM (in progress)
 
-Once staging is the only macro evaluator, flip the `JACL_STAGE_ON_SVM` gate to always-on, then
-remove `jacl_ctx_run_closure` / the bytecode macro path / `vm.c`.
+Goal: the frontend/codegen path stops linking `vm.c` (and the bytecode half of `compiler.c` +
+`bytecode.c`), so `jacl_compiler.svmb` shrinks and no longer carries the legacy interpreter.
+`src/jacl.c` currently pulls all three into every build. The legacy VM has **three** users on
+the emit path (`codegen/tests/emit_jacl.c`):
+
+1. **Macro expansion** — `ast_expand_macros` compiles each macro body to a bytecode closure
+   (`expand__compile_staged_body` → `compiler.c`) and runs it with `jacl_ctx_run_closure`
+   (`vm.c`). *This is what Phase 5 staging replaces.*
+2. **The `--oldvm` bring-up oracle** — `run_old_vm` (`jacl_vm_new` + `jacl_eval`), used only by
+   `codegen.rs`'s `bringup_matches_old_vm`; superseded by the interp==jit `run_diff` oracle.
+3. **The `--interp` capability host round-trip** — `jacl_eval` again, backing the `interpret`
+   powerbox in the corpus.
+
+Removal order (each a slice):
+
+- **6.1 — cut the macro path's legacy dependency under staging (done).** When the SVM staging
+  hook is active (`JACL_STAGE_ON_SVM`), `ast_expand_macros` now **skips** Phase 2 entirely — no
+  bytecode closures are compiled; the hook codegens each body onto SVM per call. Verified: the
+  whole corpus still emits byte-identical IR through `run_diff.sh --svm` with zero legacy
+  closure compilation, proving staging is a complete standalone macro evaluator.
+- **6.2 — make staging the default (done, minus the deletions — see below).** When the stage
+  bridge is linked (the hook is installed), macros stage on SVM **by default**;
+  `JACL_STAGE_ON_SVM=0` is the opt-out (used to regenerate the legacy oracle). A build without
+  the bridge leaves the hook NULL and always takes the legacy path, so nothing else changes.
+  Verified: the bridged frontend produces the whole corpus byte-identical to the golden with no
+  env var set.
+
+  **Correction to the original plan: the macro-path *deletions* cannot happen here.** They are
+  blocked on retiring the reference VM, because `ast_expand_macros` — and therefore
+  `expand__compile_staged_body` / `jacl_ctx_run_closure` / `OP_SYNTAX_OP` — is **shared**: the
+  reference compile/eval path (`src/compiler.c`'s `jacl_compile_program`, the interpreter behind
+  `jacl_eval` / `--interp`) calls the same `ast_expand_macros`, and its non-bridged builds have
+  no staging hook, so they still need the legacy closure evaluator. Deleting it would break the
+  reference interpreter's macros. So the deletions fold into 6.4 (below), once the reference VM
+  and its non-bridged builds are gone.
+- **6.3 — retire the standalone legacy-VM users that do *not* share the macro path** (partly
+  done). **`--oldvm` retired:** `run_old_vm` (`jacl_vm_new` + `jacl_eval`) and its `--oldvm`
+  dispatch are removed from `emit_jacl.c`; the ~20 `codegen.rs` tests that pulled expected values
+  from it (`bringup_matches_old_vm`, the generator/spawn/parallel groups) now assert the old VM's
+  outputs **frozen as constants** — same interp==jit==want 3-way check, no live `vm.c` call.
+  **`--interp` deferred, not removable:** it is *not* dead — `parity.rs` spawns `emit_jacl
+  --interp` as the host backend of the `[interpret …]` capability (used by `test/jacl/tour.jacl`).
+  "Moving it off `jacl_eval`" means **reimplementing `interpret` on SVM** (running guest JACL
+  inside the sandbox), a real feature migration tracked separately — it's the last non-macro
+  `vm.c` user in the codegen frontend, and 6.4 waits on it.
+- **6.4 — drop `vm.c` / `bytecode.c` / the bytecode half of `compiler.c` from `src/jacl.c`**,
+  removing the shared legacy macro evaluator (`expand__compile_staged_body`,
+  `jacl_ctx_run_closure`, `OP_SYNTAX_OP`) with it — which requires every macro-expanding build
+  to stage (bridge-linked native, or guest-JIT in the `.svmb`). Verify `jacl_compiler.svmb`
+  builds, shrinks, and the corpus still matches the frozen golden.
+
+  Its two prerequisites — **guest-JIT macro staging** for the `.svmb` and **`interpret` off
+  the legacy VM** — are scoped in **`docs/SVM_GUEST_JIT_STAGING.md`**: the target SVM `Jit`
+  capability (cap 11), the JACL-side gaps (a binary `svm-encode` serializer for `irbuilder`;
+  a data-segment-free literal lowering; the staging runtime in the guest image + a
+  `compile_linked` symtab), and the `interpret` isolation fork (host-cap-SVM-backed vs
+  same-domain guest-JIT vs `Instantiator`-confined), with a work breakdown.
 
 ## Sequencing note
 

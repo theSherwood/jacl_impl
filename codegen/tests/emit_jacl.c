@@ -165,23 +165,6 @@ static const char *source_for(const char *name) {
   return NULL;
 }
 
-/* Run `src` through the old bytecode VM and print its i32 result — the reference for
- * the P2.10 diff (the driver already links the whole frontend + VM). */
-static int run_old_vm(const char *src) {
-  JaclVM *vm = jacl_vm_new();
-  JaclVal r = jacl_eval(vm, src);
-  int rc = 0;
-  /* Accept any integer width — a `dyn` result (closures, recursion, if-exprs) is often
-   * i64 in the VM. We compare the numeric value, which the codegen models in i32. */
-  if (jacl_is_i32(r))      printf("%d\n", jacl_as_i32(r));
-  else if (jacl_is_u32(r)) printf("%lld\n", (long long)(uint32_t)jacl_as_i64(r));
-  else if (jacl_is_i64(r)) printf("%lld\n", (long long)jacl_as_i64(r));
-  else if (jacl_is_u64(r)) printf("%llu\n", (unsigned long long)jacl_as_u64(r));
-  else { fprintf(stderr, "old vm result is not an integer\n"); rc = 3; }
-  jacl_vm_free(vm);
-  return rc;
-}
-
 /* Read a whole source file (for `--file`: the parity runner drives the corpus
  * `test/jacl/*.jacl` through the same pipeline as the named snippets). */
 static char *read_whole_file(const char *path) {
@@ -462,12 +445,6 @@ int main(int argc, char **argv) {
 #ifdef JACL_STAGE_ON_SVM_BUILD
   jacl_install_svm_stage_hook();
 #endif
-  /* `--oldvm <case>`: print the old VM's i32 result (the P2.10 oracle). */
-  if (argc == 3 && !strcmp(argv[1], "--oldvm")) {
-    const char *src = source_for(argv[2]);
-    if (!src) { fprintf(stderr, "unknown case: %s\n", argv[2]); return 2; }
-    return run_old_vm(src);
-  }
   /* `--interp <mode> [names…]`: the host backend of the interp capability (reads stdin). */
   if (argc >= 2 && !strcmp(argv[1], "--interp")) return run_interp(argc, argv);
   const char *src = NULL;
@@ -480,7 +457,7 @@ int main(int argc, char **argv) {
     src = source_for(argv[1]);
     if (!src) { fprintf(stderr, "unknown case: %s\n", argv[1]); return 2; }
   } else {
-    fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --file <path> | emit_jacl --oldvm <case>\n");
+    fprintf(stderr, "usage: emit_jacl <case> | emit_jacl --file <path>\n");
     return 2;
   }
 
