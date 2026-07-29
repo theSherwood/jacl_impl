@@ -901,19 +901,24 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 
 
 /* Optional staging hook (Phase 5 of docs/SVM_MACRO_STAGING_PLAN.md). When installed by the
- * codegen driver AND `JACL_STAGE_ON_SVM` is set in the environment, a macro call is expanded
- * by running the macro body on the **SVM engine** (codegen the body → run in-process via the
- * `jacl_svm_stage` bridge → decode the result) instead of the legacy bytecode VM. The hook
- * takes the macro entry and the call's argument ASTs and returns the expanded AST in `*out`
- * (allocated in `arena`); it returns NULL on success or an error string. Left NULL — and the
- * env var left unset — the behaviour is exactly the legacy path (nothing changes). This is
- * the seam that keeps `src/` free of any codegen/SVM dependency: the driver installs it. */
+ * codegen driver, a macro call is expanded by running the macro body on the **SVM engine**
+ * (codegen the body → run in-process via the `jacl_svm_stage` bridge → decode the result)
+ * instead of the legacy bytecode VM. The hook takes the macro entry and the call's argument
+ * ASTs and returns the expanded AST in `*out` (allocated in `arena`); it returns NULL on
+ * success or an error string. Left NULL (a build that does not link the SVM stage bridge) the
+ * behaviour is exactly the legacy path. This is the seam that keeps `src/` free of any
+ * codegen/SVM dependency: the driver installs it. */
 const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
                                      arena_t *arena, AstNode **out) = NULL;
 
+/* Whether to stage macros on SVM (Phase 6.2: staging is the **default** once the bridge is
+ * linked). It applies only where `jacl_macro_stage_hook` is installed — a build without the
+ * bridge leaves the hook NULL and always takes the legacy path regardless. Set
+ * `JACL_STAGE_ON_SVM=0` to force the legacy path even in a bridged build (e.g. to regenerate
+ * the legacy oracle). Any other value — or unset — means staging. */
 static int jacl_stage_on_svm_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *v = getenv("JACL_STAGE_ON_SVM"); cached = (v && v[0] && v[0] != '0'); }
+    if (cached < 0) { const char *v = getenv("JACL_STAGE_ON_SVM"); cached = !(v && v[0] == '0'); }
     return cached;
 }
 
