@@ -54,13 +54,17 @@ echo "=== compiling frontend + driver + shim to LLVM IR ==="
 # glue (jaclrt_staging_guest.c) and the Jit-capability hook (stage_bridge_guest.c), linked in so
 # macros expand on the SVM engine in this same domain instead of the reference VM. Needs `-I runtime`.
 MS="$DIR/macro_staging"
-"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c" -o "$OUT/jaclrt_staging_guest.ll"
-"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"   -o "$OUT/stage_bridge_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c"    -o "$OUT/jaclrt_staging_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"      -o "$OUT/stage_bridge_guest.ll"
+# In-guest `[interpret …]` (docs/SVM_GUEST_JIT_STAGING.md §5, model B): compile+run the source on the
+# Jit cap in this same window (jacl_interpret_hook), retiring vm.c from the interpret path.
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/interpret_bridge_guest.c" -o "$OUT/interpret_bridge_guest.ll"
 
 echo "=== linking whole program ==="
 "$LLVM_LINK" -S "$OUT/emit_driver.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
              "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
-             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
+             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+             "$OUT/interpret_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
 
 echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,
@@ -140,6 +144,49 @@ EOF
     echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym) expanded in-guest via the Jit capability."
   else
     echo "STAGETEST FAIL — a corpus case did not expand as expected in-guest." >&2
+    exit 1
+  fi
+
+  echo "=== interptest: run [interpret SRC] IN-GUEST via the Jit capability (model B, §5) ==="
+  # `[interpret SRC]` with the in-guest interpret hook installed: SRC is compiled (svm_codegen_program
+  # in_guest=1) and run on the Jit cap in this same window (interpret_bridge_guest.c), returning the
+  # result as a live JaclVal — no host round-trip, no reference VM. Two cases, both printing a tagged
+  # int (high byte 0x02, low bits the value):
+  #   PLAIN  [+ 1 [* 2 3]]                          -> 7
+  #   MACRO  defmacro dbl {x} {…[+ ~x ~x]}; dbl 5   -> 10  (the macro expands IN-GUEST via the staging
+  #                                                         hook, then the program [+ 5 5] runs in-guest)
+  cat > "$OUT/interptest_main.c" <<'EOF'
+#include <stdio.h>
+extern void jacl_install_svm_stage_hook(void);
+extern void jacl_install_svm_interpret_hook(void);
+extern long jacl_interpret1(long src);                 /* JaclVal jacl_interpret1(JaclVal) */
+extern long jacl_str_new(const char *s, unsigned len); /* JaclVal jacl_str_new(const char*, uint32) */
+extern void jacl_heap_init(void);
+extern void jacl_intern_init(void);
+extern void jacl_map_init(void);
+static void run(const char *label, const char *prog, unsigned len) {
+  long r = jacl_interpret1(jacl_str_new(prog, len));
+  printf("%s TAG=%d RESULT=%d\n", label, (int)((unsigned long)r >> 56), (int)(r & 0xffffffff));
+}
+int main(void) {
+  jacl_heap_init(); jacl_intern_init(); jacl_map_init();
+  jacl_install_svm_stage_hook();       /* so macros in interpreted source expand in-guest */
+  jacl_install_svm_interpret_hook();
+  run("PLAIN", "[+ 1 [* 2 3]]", 13);
+  const char *mac = "defmacro dbl {x} { syntax-quote [+ ~x ~x] }\ndbl 5\n";
+  run("MACRO", mac, (unsigned)__builtin_strlen(mac));
+  return 0;
+}
+EOF
+  "$CLANG" "${CF[@]}" "$OUT/interptest_main.c" -o "$OUT/interptest_main.ll"
+  "$LLVM_LINK" -S "$OUT/interptest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
+               "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+               "$OUT/interpret_bridge_guest.ll" -o "$OUT/interptest.ll"
+  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
+  if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out"; then
+    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10), returning live JaclVals."
+  else
+    echo "INTERPTEST FAIL — expected in-guest interpret: [+ 1 [* 2 3]] -> 7 and 'dbl 5' -> 10." >&2
     exit 1
   fi
 fi

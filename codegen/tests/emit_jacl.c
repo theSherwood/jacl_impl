@@ -267,7 +267,11 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
  * name-based head handlers can't know about are handled here for free. Fatal on a macro error.
  * A fresh VM supplies the GC heap / intern table the staged macro evaluator needs; the new
  * template nodes are allocated into `arena` (the same arena backing `nodes`). */
-static void expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+/* Expand user `defmacro`s into their expansions (in place). Returns NULL on success, else the
+ * expansion error message (arena/heap-backed). Non-static + error-returning so the in-guest
+ * `[interpret …]` bridge (interpret_bridge_guest.c) can reuse the exact expansion the compiler runs
+ * — with the macro-staging hook it expands macro bodies on the SVM engine, no reference VM. */
+const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
   JaclVM *evm = jacl_vm_new();
   MacroTable mt;
   macro_table_init(&mt);
@@ -285,7 +289,7 @@ static void expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *aren
   jacl_ctx_destroy(ctx);
   es.ctx = NULL;
   jacl_ctx_restore(saved);
-  if (err) { fprintf(stderr, "%s\n", err); exit(1); }
+  return err;
 }
 
 /* Host side of the `interp` powerbox capability (runtime/interpcap.c). Reads JACL source on
@@ -410,10 +414,11 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
       }
     }
   }
-  expand_macros_inplace(parse.nodes, parse.count, &arena);
+  { const char *me = expand_macros_inplace(parse.nodes, parse.count, &arena);
+    if (me) { char *o = emit_err("macro error: ", me); arena_destroy(&arena); return o; } }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, err, sizeof err);
+  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, /*in_guest=*/0, err, sizeof err);
   if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
   /* Own-data addresses are now inline `data.self` instructions (v9), so the text is
    * self-contained — no separate `%%RELOCS%%` section. (The JS link path decodes/links
@@ -542,14 +547,15 @@ int main(int argc, char **argv) {
   /* Macro expansion: rewrite compile-time macro call sites (prelude + user `defmacro`s)
    * into their expansions, exactly as the reference compiler does before codegen. Runs on
    * the codegen AST after module concatenation so cross-module macro uses expand too. */
-  expand_macros_inplace(cg_nodes, cg_count, &arena);
+  { const char *me = expand_macros_inplace(cg_nodes, cg_count, &arena);
+    if (me) { fprintf(stderr, "%s\n", me); arena_destroy(&arena); return 1; } }
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
    * type-driven (unboxed) lowering. */
   typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, err, sizeof err);
+  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, /*in_guest=*/0, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   if (text_mode) {

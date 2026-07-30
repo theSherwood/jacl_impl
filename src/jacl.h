@@ -2255,6 +2255,13 @@ extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
  * SVM bridge) installs it, keeping src/ free of any codegen/SVM dependency. */
 extern const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
                                             arena_t *arena, AstNode **out);
+/* In-guest `[interpret SRC]` hook (docs/SVM_GUEST_JIT_STAGING.md §5, model B). When installed
+ * (`jacl_install_svm_interpret_hook`, the driver that owns codegen + the SVM bridge),
+ * `jacl_interpret1` compiles + runs SRC on the §22 Jit capability in this window instead of the host
+ * `interp` capability, returning a live JaclVal. NULL by default (host-cap path), keeping src/ and
+ * ordinary AOT programs free of any codegen/SVM dependency. */
+extern JaclVal (*jacl_interpret_hook)(JaclVal src);
+extern void jacl_install_svm_interpret_hook(void);
 extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      MacroTable *macros, ThreadHeap *heap,
                                      JaclInternTable *intern, arena_t *arena,

@@ -4465,26 +4465,33 @@ static void compile_pending_closures(Cx *cx) {
   }
 }
 
-IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, char *err, size_t errcap) {
+IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, int in_guest,
+                              char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.module_mode = module_mode;
+  cx.data_free = in_guest;   /* in-guest (interpret via Jit cap): string literals data-segment-free (§3b) */
   cx.err = err; cx.errcap = errcap;
 
   IrModule *m = irb_module_new();
   cx.m = m;
 
-  /* func 0 = the entry the harness runs. func 1 = __jacl_main(sp, arg), the program body.
-   * The entry inits the runtime, then runs __jacl_main as the ROOT TASK on a fiber
-   * (program-as-a-job): the program's roots then live on a scannable fiber stack, and the
-   * body can be quiesced like any task — the prerequisite for sound GC under the M:N pool. */
+  /* Native: func 0 = entry `(sp)` inits the runtime and runs func 1 = __jacl_main(sp, arg) as the
+   * ROOT TASK on a scheduler fiber (program-as-a-job; roots live on a scannable fiber stack, GC-safe).
+   *
+   * in_guest (`[interpret …]` run on the Jit cap, docs/SVM_GUEST_JIT_STAGING.md §5): the §22 `Jit`
+   * capability forbids §12 concurrency ops, so the program runs **inline** in the arity-2 entry
+   * `(sp, _)` — init the runtime, run the top-level forms, return the last value (a live JaclVal in
+   * the shared window). No scheduler/`suspend`; concurrent source (spawn/await) is a later slice. */
   IrType i64_1[] = {IRB_I64};
   IrType i64_2[] = {IRB_I64, IRB_I64};
   IrType r1[] = {IRB_I64};
-  IrFunc *entry = irb_func_new(m, i64_1, 1, r1, 1);
-  IrBlock entry_block = irb_block(entry, i64_1, 1);
-  IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, arg) — arg is the fiber resume arg (unused) */
-  IrBlock main_block = irb_block(mainf, i64_2, 2);
+  int entry_nparams = in_guest ? 2 : 1;
+  IrType *entry_params = in_guest ? i64_2 : i64_1;
+  IrFunc *entry = irb_func_new(m, entry_params, entry_nparams, r1, 1);
+  IrBlock entry_block = irb_block(entry, entry_params, entry_nparams);
+  IrFunc *mainf = in_guest ? entry : irb_func_new(m, i64_2, 2, r1, 1);
+  IrBlock main_block = in_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
@@ -4495,13 +4502,21 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   register_procs(&cx, m, nodes, count); /* pass 1 */
   if (!cx.failed) compile_procs(&cx);   /* pass 2: proc bodies */
 
-  /* The program body — the non-proc top-level forms, in order; value = last — into __jacl_main. */
+  /* The program body — the non-proc top-level forms, in order; value = last. Runs on the scheduler
+   * root fiber (native, in __jacl_main) or directly in the entry (in_guest). */
   if (!cx.failed) {
     cx.f = mainf; cx.cur = main_block; cx.sp = 0;
-    /* Prime the root fiber: one entry-block `suspend(-1)` forces a full round-trip through
-     * the scheduler loop before the body runs, so a later `await` in a non-entry block
-     * resumes in place instead of replaying the fiber from the top (see worker_loop). */
-    (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
+    if (in_guest) {
+      /* Bring up the runtime here (no scheduler): heap, interns, map registry. */
+      emit_void_call(&cx, "jacl_heap_init");
+      emit_void_call(&cx, "jacl_intern_init");
+      emit_void_call(&cx, "jacl_map_init");
+    } else {
+      /* Prime the root fiber: one entry-block `suspend(-1)` forces a full round-trip through
+       * the scheduler loop before the body runs, so a later `await` in a non-entry block
+       * resumes in place instead of replaying the fiber from the top (see worker_loop). */
+      (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));
+    }
     env_reset(&cx);
     capset_reset(&cx);
     cx.cur_proc = "<main>"; cx.cur_proc_len = 6;
@@ -4522,9 +4537,9 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 
-  /* The entry: init the runtime (before anything allocates), then run __jacl_main as the
-   * root task on a fiber and return its result. */
-  if (!cx.failed) {
+  /* Native func 0 = entry: init the runtime (before anything allocates), then run __jacl_main as the
+   * root task on a fiber and return its result. (in_guest ran it all inline in the entry above.) */
+  if (!in_guest && !cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
     emit_void_call(&cx, "jacl_heap_init");
     emit_void_call(&cx, "jacl_intern_init");
