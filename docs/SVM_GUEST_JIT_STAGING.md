@@ -249,12 +249,18 @@ structure; pick it unless a concrete need forces in-program linking.
 1. **`irb_to_encoded` (svm-encode binary serializer in C)** — §3a. Standalone, testable
    by round-trip against `svm_encode::decode_module`. Unblocks everything and helps the
    native path too. *Prereq for all guest-JIT work.*
-2. **Data-segment-free literal lowering** under a `staged_macro` codegen flag — §3b. **Now
-   the gating item.** With 3+4 landed, a data-*free* macro (e.g. `id`) expands in-guest end
-   to end; a macro with string/symbol literals still emits a `data` segment the `Jit` cap
-   rejects (`jit_resolve_and_validate`: `!m.data.is_empty()`), so the operator/symbol name
-   lowering must build those `JaclVal`s without a `data.self`/data segment (e.g. from
-   immediate bytes) before the corpus stages in-guest.
+2. **Data-segment-free literal lowering** under a `staged_macro` codegen flag — §3b. **DONE.**
+   With 3+4 landed, a data-*free* macro (e.g. `id`) expanded in-guest end to end, but a macro
+   with string/symbol literals still emitted a `data` segment the `Jit` cap rejects
+   (`jit_resolve_and_validate`: `!m.data.is_empty()`). `compile_string_literal` now honors a
+   `cx->data_free` flag (set from `in_guest`): instead of `irb_add_data` + `jacl_str_new(ptr,
+   len)`, it builds the string from **immediate byte constants** — `synrt_str_empty()` then one
+   `synrt_str_push_byte(s, b)` per byte (the glue helpers do the pointer-based construction in
+   the compiler, so the macro object carries no `data.self`). The native path (`in_guest=0`,
+   `data_free=0`) is unchanged and keeps the data-segment lowering. Proven on the SVM engine:
+   `twice 21` (whose `syntax-quote [+ ~x ~x]` body has the `+` symbol literal) → `[+ 21 21]`
+   in-guest (`build_compiler_svmb.sh --selftest` STAGETEST). This unlocks the string-bearing
+   corpus in-guest.
 3. **Staging runtime in the guest image + symtab for `compile_linked`** — §3c. **DONE.**
    jaclrt (+`syn_rt`+`stage_glue_guest`) is linked into the `.svmb` (`jrtg_`-renamed to
    dodge the reference VM's 10 value-op collisions), and `synrt_build_symtab` emits the
@@ -263,9 +269,9 @@ structure; pick it unless a concrete need forces in-program linking.
    (`in_guest`: arity-2 entry, body run inline — no fiber/`suspend`, which the `Jit` cap
    forbids) → `irb_to_encoded` (runnable when data-free) → `synrt_build_symtab` →
    `__vm_jit_compile_linked` → set arg wire → `__vm_jit_invoke2` → `synrt_take_result` →
-   `synw_decode`. Proven on the SVM engine: `id 21` → `21` (`build_compiler_svmb.sh
-   --selftest` STAGETEST). The frozen-golden differential for the whole corpus follows once
-   item 2 makes the string-bearing macros data-free.
+   `synw_decode`. Proven on the SVM engine: `id 21` → `21`, and with item 2 landed
+   `twice 21` → `[+ 21 21]` (`build_compiler_svmb.sh --selftest` STAGETEST). The
+   frozen-golden differential for the whole corpus can now run in-guest.
 5. **`interpret` via guest-JIT (model B)** — reuses 1–4: compile the source in-guest
    (`codegen` reached through the `interp` compiler-as-a-cap, §4a) → `irb_to_encoded` →
    `__vm_jit_compile_linked` → `invoke` → marshal the scalar/error result back through the

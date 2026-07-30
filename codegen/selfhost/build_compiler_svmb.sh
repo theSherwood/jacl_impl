@@ -90,18 +90,18 @@ EOF
   fi
 
   echo "=== stagetest: expand a macro IN-GUEST via the Jit capability ==="
-  # `id 21` runs the whole compile — including the macro expansion — on the SVM engine, with the
+  # `twice 21` runs the whole compile — including the macro expansion — on the SVM engine, with the
   # in-guest staging hook (stage_bridge_guest.c) doing the expansion via __vm_jit_compile_linked +
-  # invoke2. A data-free macro (no string/symbol literals -> no data segments the Jit cap forbids,
-  # §3b) so it round-trips today; string-bearing macros await item 2 (data-free lowering).
-  # 0x0200000000000015 = 144115188075855893 is the JaclVal for i32 21 — the expansion of `id 21`.
+  # invoke2. `twice` builds `[+ ~x ~x]`, so its body has the `+` symbol literal — exercising the
+  # item-2 data-free string lowering (synrt_str_* instead of a data segment the Jit cap forbids, §3b).
+  # The expansion `[+ 21 21]` type-lowers to `i32.const 21` (twice) + `i32.add` in the emitted IR.
   cat > "$OUT/stagetest_main.c" <<'EOF'
 #include <stdio.h>
 extern char *jacl_emit_ir(const char *source);
 extern void jacl_install_svm_stage_hook(void);
 int main(void) {
   jacl_install_svm_stage_hook();
-  char *ir = jacl_emit_ir("defmacro id {x} {\n  syntax-quote ~x\n}\nid 21\n");
+  char *ir = jacl_emit_ir("defmacro twice {x} {\n  syntax-quote [+ ~x ~x]\n}\ntwice 21\n");
   fputs(ir ? ir : "NULL", stdout);
   return 0;
 }
@@ -111,10 +111,11 @@ EOF
                "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
                -o "$OUT/stagetest.ll"
   SVM_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
-  if grep -q '144115188075855893' "$OUT/stagetest.out" && ! grep -q '%%ERROR%%' "$OUT/stagetest.out"; then
-    echo "STAGETEST PASS — macro expanded in-guest via the Jit capability."
+  if grep -q 'i32.add' "$OUT/stagetest.out" && [ "$(grep -c 'i32.const 21' "$OUT/stagetest.out")" -ge 2 ] \
+       && ! grep -q '%%ERROR%%' "$OUT/stagetest.out"; then
+    echo "STAGETEST PASS — string-bearing macro expanded in-guest via the Jit capability."
   else
-    echo "STAGETEST FAIL — expected the expansion of 'id 21' (21) with no error." >&2
+    echo "STAGETEST FAIL — expected 'twice 21' -> [+ 21 21] (i32.add of two 21s) with no error." >&2
     exit 1
   fi
 fi
