@@ -285,10 +285,13 @@ structure; pick it unless a concrete need forces in-program linking.
    `JaclVal` — **no marshalling**, and a rich value (int/vec/map/string), not the host wire's
    scalar. `jacl_interpret1` **falls back** to the host `interp` cap when no hook is installed, so
    ordinary AOT programs are unchanged. Proven: `[interpret "[+ 1 [* 2 3]]"]` → live int `7`
-   in-guest (`build_compiler_svmb.sh --selftest` INTERPTEST). **Remaining:** macro expansion inside
-   `interpret` (the frontend's `expand_macros_inplace` is `static` + reference-VM-backed — expose a
-   linkable/in-guest path); the sandbox form (`jacl_interpret2`, still host-cap); and concurrent
-   source (spawn/await), which needs the embedder to grant the fiber-hosting `Jit` cap
+   in-guest (`build_compiler_svmb.sh --selftest` INTERPTEST). **Slice 2 DONE** — macro expansion
+   inside `interpret`: `expand_macros_inplace` (emit_jacl.c) is now linkable + error-returning, so
+   the bridge runs the *same* expansion the compiler does; with the staging hook installed, macro
+   bodies expand **in-guest** (no reference VM), then the expanded program runs in-guest. Proven:
+   `defmacro dbl {x} {…[+ ~x ~x]}; dbl 5` → live int `10` (INTERPTEST MACRO case). **Remaining:**
+   the sandbox form (`jacl_interpret2` — enforce the closed-world prelude in-guest at codegen); and
+   concurrent source (spawn/await), which needs the embedder to grant the fiber-hosting `Jit` cap
    (`grant_jit_fibers`, now supported by the engine — svm §22).
 6. **Drop `vm.c`** — once 4 (staging) and 5 (interpret) land, `src/jacl.c` stops needing
    `vm.c` / `bytecode.c` / the bytecode half of `compiler.c` on the emit path; remove them

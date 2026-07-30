@@ -44,6 +44,10 @@ extern unsigned char synrt_window_log2(void);
 extern uint32_t jacl_str_len(JaclVal s);
 extern void jacl_str_bytes(JaclVal s, char *out, uint32_t cap);
 
+/* The frontend's macro expander (emit_jacl.c) — NULL on success, else an error message. Declared
+ * here (not implicit) because it returns a pointer: an implicit `int` return would truncate it. */
+extern const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena);
+
 #define INTERP_ERR ((JaclVal)(JACL_NIL | JACL_FLAG_ERROR))
 
 /* `jacl_interpret_hook`-shaped: compile SRC and run it on the Jit cap, returning its value (a live
@@ -65,10 +69,10 @@ static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
   if (toks.error_count) { arena_destroy(&arena); return INTERP_ERR; }
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) { arena_destroy(&arena); return INTERP_ERR; }
-  /* NOTE (slice 1): macro expansion is intentionally not run yet. The frontend's
-   * `expand_macros_inplace` is `static` (emit_jacl.c) and spins up a throwaway reference VM for the
-   * expansion heap; wiring an in-guest expansion (or exposing a linkable entry) is a follow-up, so
-   * for now `[interpret …]` handles macro-free source. */
+  /* Expand user `defmacro`s exactly as the compiler does before codegen (expand_macros_inplace,
+   * emit_jacl.c). With the macro-staging hook installed (jacl_install_svm_stage_hook), macro bodies
+   * expand on the SVM engine in this same domain — no reference VM. NULL == success. */
+  if (expand_macros_inplace(parse.nodes, parse.count, &arena)) { arena_destroy(&arena); return INTERP_ERR; }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
 
   /* 2-3. codegen a runnable in-guest module and serialize it. */
