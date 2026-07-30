@@ -133,15 +133,25 @@ shared call_indirect table**, not by address.
 
 **Work item (revised):** make the staging runtime (jaclrt + `syn_rt` + `stage_glue`) part
 of the compiler guest's image — linked into the `.svmb` so `jacl_vec_push`/`synrt_*`/… are
-real functions in the guest module — then populate the shared function table with those
-functions (each a table slot) and build the `{name → Slot(N)}` symtab `compile_linked`
-consumes. This is the in-guest analogue of `link_with_manifest` (dynamic-link form), and
-the biggest single chunk. **Open sub-question:** the exact guest-side mechanism to place a
-guest function into the shared table and learn its slot index (ref.func + a table
-install, vs. the module's own function-table indices) — confirm against a real
-`compile_linked`+`invoke` integration before building. Its heap (`jacl_heap_init`)
-coexists with the compiler's memory in one window — tractable, but needs a memory-layout
-decision (see §4b).
+real functions in the guest module — then build the `{name → Slot(N)}` symtab `compile_linked`
+consumes. This is the in-guest analogue of `link_with_manifest` (dynamic-link form).
+
+**Table-slot mechanism (confirmed).** No `__vm_jit_install` is needed for the compiler's
+*own* linked functions: the domain's `call_indirect` table is `[real module functions
+(0..n_real_funcs) | padding slots]` (`svm-jit::CompiledModule::fn_table`), so a module
+function's funcref index **is** its slot. svm-llvm lowers a taken function address to its
+funcref index (widened to i64; lib.rs §G/§K), so in the compiler C we get each runtime
+symbol's slot directly as `(unsigned long)(void *)&jacl_vec_push`. (`install` is only for
+units JIT-compiled at *runtime*, as in `demos/jit/jit_link.c`.) So the symtab is just
+`{name → Slot((unsigned long)&fn)}`; no install/uninstall bookkeeping.
+
+**The real remaining work** is therefore (a) linking jaclrt (+ `syn_rt` + `stage_glue`) into
+the `.svmb` without a `malloc`/`read` symbol collision — `stage_glue.c` currently redefines
+`malloc`/`free`/`realloc` (a 256 KiB bump arena) and `read`, which must not clobber the
+compiler's own allocator/stdin; and (b) arg/result marshaling — `__vm_jit_invoke2` uses the
+`(i64,i64)` ABI, so `synrt_read_arg`/`synrt_write_result` must read/write a guest **buffer**,
+not stdin/stdout. Its heap (`jacl_heap_init`) coexists with the compiler's memory in one
+window — needs a memory-layout decision (see §4b).
 
 ### 3d. Memory-match + ABI plumbing (plumbing)
 
