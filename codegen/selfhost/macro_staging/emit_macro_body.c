@@ -48,11 +48,12 @@ int main(int argc, char **argv) {
                                dm->data.defmacro.body, &idx, err, sizeof err);
   }
   if (!m) { fprintf(stderr, "codegen: %s\n", err); return 1; }
-  fputs(irb_to_text(m), stdout);
-  /* String/data literals lower to data-segment references that need SelfData relocations;
-   * emit them after a %%RELOCS%% sentinel (same wire format the frontend --file path uses),
-   * so the linker (stage_macro.rs) can apply them. Without this, strings come out empty. */
-  char *relocs = irb_relocs_text(m);
-  if (relocs && relocs[0]) { fputs("%%RELOCS%%\n", stdout); fputs(relocs, stdout); }
+  /* Emit the svm-encode **object** (v9); stage_macro.rs decodes it with `decode_emitted`.
+   * String/data literals lower to inline `data.self` addresses that `link` resolves — no
+   * separate relocation section (the object carries everything). */
+  size_t len = 0;
+  uint8_t *bytes = irb_to_encoded(m, &len);
+  if (len && fwrite(bytes, 1, len, stdout) != len) { perror("fwrite"); free(bytes); return 1; }
+  free(bytes);
   return 0;
 }

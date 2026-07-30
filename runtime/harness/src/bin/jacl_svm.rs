@@ -118,7 +118,7 @@ fn cmd_run(args: &[String]) -> ! {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
-    let (program, relocs) = jacl_runtime_harness::decode_emitted(&out.stdout)
+    let program = jacl_runtime_harness::decode_emitted(&out.stdout)
         .unwrap_or_else(|e| die(&format!("decode emitted IR: {e}")));
 
     // Link against the translated runtime + extern catalog; powerbox; instantiate.
@@ -134,7 +134,6 @@ fn cmd_run(args: &[String]) -> ! {
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

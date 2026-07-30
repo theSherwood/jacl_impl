@@ -46,7 +46,7 @@ fn main() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
-    let (program, relocs) =
+    let program =
         jacl_runtime_harness::decode_emitted(&out.stdout).expect("decode emitted IR");
 
     eprintln!("emit_svmb: translating runtime + catalog…");
@@ -59,7 +59,6 @@ fn main() {
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

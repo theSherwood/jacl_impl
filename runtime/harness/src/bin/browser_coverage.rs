@@ -125,7 +125,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     if case.expect_error.is_some() {
         return Stage::ErrNoFail; // emit succeeded but a compile error was expected
     }
-    let (program, relocs) = match jacl_runtime_harness::decode_emitted(&out.stdout) {
+    let program = match jacl_runtime_harness::decode_emitted(&out.stdout) {
         Ok(pr) => pr,
         Err(_) => return Stage::TextParseFail, // decode of the binary emit container failed
     };
@@ -134,7 +134,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     let linked = match link_with_manifest(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
         LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
-        LinkUnit { module: program, exports: vec![("__jacl_entry".to_string(), 0)], relocations: relocs, ..Default::default() },
+        LinkUnit { module: program, exports: vec![("__jacl_entry".to_string(), 0)], ..Default::default() },
     ]) {
         Ok(m) => m,
         Err(_) => return Stage::LinkFail,

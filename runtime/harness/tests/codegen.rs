@@ -2,8 +2,8 @@
 //!
 //! Builds the JACL frontend + the P2.2 codegen (`codegen/codegen.c`) into a driver
 //! (`codegen/tests/emit_jacl.c`, compiled with gcc — the frontend's toolchain), which
-//! parses a JACL snippet and emits the program module as the default **binary container**
-//! (`decode_emitted`; `--text` still gives svm-text for the IR-inspection tests). Each
+//! parses a JACL snippet and emits the program as a v9 svm-encode **object** (decoded by
+//! `decode_emitted`; `--text` still gives svm-text for the IR-inspection tests). Each
 //! program is linked against the separately-translated runtime (the P2.0 path) and run on
 //! interp + JIT; the result (an i32 JaclVal) is checked against the expected value.
 
@@ -39,8 +39,8 @@ fn driver() -> &'static Path {
     .as_path()
 }
 
-/// Emit one case's program as the default **binary container** (magic + relocs + svm-encode
-/// bytes) via the codegen. Decoded by `decode_emitted`.
+/// Emit one case's program as the default v9 svm-encode **object** via the codegen.
+/// Decoded by `decode_emitted` (`svm_encode::decode_unit`).
 fn emit(case: &str) -> Vec<u8> {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
     assert!(
@@ -80,7 +80,7 @@ fn i32_val(x: i32) -> i64 {
 /// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
 /// `[print …]` program's host I/O works the same way a pure-compute one returns a value.
 fn run_case_full(case: &str) -> (i64, Vec<u8>) {
-    let (program, relocs) =
+    let program =
         decode_emitted(&emit(case)).unwrap_or_else(|e| panic!("decode {case}: {e}"));
 
     let rt = translate_runtime();
@@ -93,7 +93,6 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
         LinkUnit {
             module: program,
             exports: vec![("__prog_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

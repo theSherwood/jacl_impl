@@ -49,7 +49,7 @@ fn link_program(prog: &PathBuf) -> Module {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
-    let (program, relocs) =
+    let program =
         jacl_runtime_harness::decode_emitted(&out.stdout).expect("decode emitted IR");
 
     let rt = jacl_runtime_harness::translate_runtime();
@@ -60,7 +60,6 @@ fn link_program(prog: &PathBuf) -> Module {
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

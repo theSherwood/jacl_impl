@@ -56,7 +56,6 @@ fn link_instantiate(
     rt: &svm_llvm::Translated,
     cat: &svm_llvm::Translated,
     program: Module,
-    relocs: Vec<svm_ir::DataReloc>,
 ) -> Result<svm_run::Instance, String> {
     let linked = link_with_manifest(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
@@ -64,7 +63,6 @@ fn link_instantiate(
         LinkUnit {
             module: program,
             exports: vec![(ENTRY_SYM.to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])
@@ -297,8 +295,8 @@ fn run_diff_exec(driver: &PathBuf, inst: &svm_run::Instance) -> Result<svm_run::
 /// latter is what a runtime `expect-error` case matches against. `fs_granted` picks the
 /// plain `run_diff` or the [`run_fs_granted`] two-leg.
 fn build_and_run(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, driver_stdout: &[u8], fs_granted: bool) -> Result<Vec<String>, String> {
-    let (program, relocs) = decode_emitted(driver_stdout)?;
-    let inst = link_instantiate(rt, cat, program, relocs)?;
+    let program = decode_emitted(driver_stdout)?;
+    let inst = link_instantiate(rt, cat, program)?;
     let run = if fs_granted {
         run_fs_granted(driver, &inst)?
     } else {
@@ -346,12 +344,12 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         return Stage::EmitFail(brief(&stderr));
     }
 
-    let (program, relocs) = match decode_emitted(&out.stdout) {
+    let program = match decode_emitted(&out.stdout) {
         Ok(pr) => pr,
         Err(e) => return Stage::TextParseFail(brief(&e)),
     };
 
-    let inst = match link_instantiate(rt, cat, program, relocs) {
+    let inst = match link_instantiate(rt, cat, program) {
         Ok(i) => i,
         Err(e) if e.starts_with("instantiate") || e.starts_with("powerbox") => {
             return Stage::RunFail(brief(&e))
