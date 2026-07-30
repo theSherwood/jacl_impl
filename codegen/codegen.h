@@ -26,13 +26,21 @@ struct AstNode;
  *
  * Returns the module (caller frees with irb_module_free), or NULL on an unsupported
  * construct — in which case a message is written to `err` (when `errcap > 0`). */
-/* `in_guest` selects the entry ABI. 0 (native / powerbox): func 0 = arity-1 `(sp)` entry that
- * inits the runtime and runs the program body (func 1) as the scheduler root fiber. 1 (guest-JIT
- * `[interpret …]`, docs/SVM_GUEST_JIT_STAGING.md §5): func 0 = arity-2 `(sp, _)` entry that inits
- * the runtime and runs the top-level forms **inline** (no fiber scheduler — the §22 `Jit` cap
- * forbids §12 concurrency), returning the program's last value as a live JaclVal. */
+/* `in_guest` selects the entry ABI (docs/SVM_GUEST_JIT_STAGING.md §5):
+ *   0 (native / powerbox): func 0 = arity-1 `(sp)` entry that inits the runtime and runs the program
+ *     body (func 1) as the scheduler root fiber.
+ *   1 (guest-JIT inline): func 0 = arity-2 `(sp, _)` entry that inits the runtime and runs the
+ *     top-level forms **inline** (no fiber scheduler), returning the last value as a live JaclVal —
+ *     for `[interpret …]` of **non-concurrent** source.
+ *   2 (guest-JIT scheduler): like 0 (func 1 run via `jacl_sched_run_main`) but an arity-2 `(sp, _)`
+ *     entry for `__vm_jit_invoke2` — for `[interpret …]` of **concurrent** source (spawn/await).
+ *     Needs a fiber-hosting `Jit` grant (the scheduler uses `cont.*`). */
 IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode, int in_guest,
                                char *err, size_t errcap);
+
+/* Does the program reach any concurrency/suspension op (spawn/await/parallel/race/yield/sleep)?
+ * The in-guest `interpret` bridge uses this to pick `in_guest` = 1 (inline) vs 2 (scheduler). */
+int svm_program_uses_concurrency(struct AstNode **nodes, uint32_t count);
 
 /* Compile one macro body to a module with a single `__jacl_macro(sp, args…) -> syntax-vec`
  * function — the codegen half of staged macro evaluation (docs/SVM_MACRO_STAGING_PLAN.md,

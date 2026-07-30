@@ -6,9 +6,10 @@
  * It is the macro-staging machinery generalized from a macro *body* to a whole *program*:
  *   1. lex + parse + type the source                   (the frontend, linked into this .svmb;
  *                                                        macro expansion is a follow-up — see below)
- *   2. codegen a runnable in-guest module               (svm_codegen_program, in_guest=1 — an arity-2
- *                                                         entry that runs the program inline, no
- *                                                         scheduler, since the §22 Jit cap forbids §12)
+ *   2. codegen a runnable in-guest module               (svm_codegen_program — an arity-2 entry;
+ *                                                         in_guest=1 runs straight-line source inline,
+ *                                                         in_guest=2 runs concurrent source on the
+ *                                                         scheduler root fiber over the Jit grant)
  *   3. serialize to a v9 svm-encode object              (irb_to_encoded, data-segment-free via §3b)
  *   4. compile+link against the runtime symbol table    (synrt_build_symtab, __vm_jit_compile_linked)
  *   5. run it on the Jit cap, over the staging stack     (__vm_jit_invoke2)
@@ -16,8 +17,8 @@
  * The result needs **no marshalling**: the unit runs in *this* domain (same window, same heap — the
  * symtab binds its `jacl_*` imports to the compiler's own runtime), so the entry's return value IS a
  * live `JaclVal` in this window — a rich value (int / vec / map / string / closure), not just the
- * scalar the host wire could carry. Non-concurrent source only for now (the inline entry has no
- * scheduler); concurrent `interpret` (spawn/await) is a later slice on the fiber-hosting Jit grant.
+ * scalar the host wire could carry. Concurrent source (spawn/await/parallel/race/yield/sleep) runs
+ * its body on the scheduler root fiber (in_guest=2), which the fiber-hosting Jit grant admits.
  *
  * NB: value predicates/constructors come from the **frontend** (`src/jacl.h`: `jacl_is_string`,
  * `JACL_NIL`/`JACL_FLAG_ERROR`) — the runtime's `jaclrt_*` equivalents are `static inline` in
@@ -75,10 +76,14 @@ static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
   if (expand_macros_inplace(parse.nodes, parse.count, &arena)) { arena_destroy(&arena); return INTERP_ERR; }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
 
-  /* 2-3. codegen a runnable in-guest module and serialize it. */
+  /* 2-3. codegen a runnable in-guest module and serialize it. Non-concurrent source runs inline
+   * in the arity-2 entry (in_guest=1, no fiber authority); source that reaches a suspension point
+   * (spawn/await/parallel/race/yield/sleep) runs its body on the scheduler root fiber (in_guest=2,
+   * needs the fiber-hosting Jit grant). Both entries are arity-2, so __vm_jit_invoke2 is unchanged. */
+  int concurrent = svm_program_uses_concurrency(parse.nodes, parse.count);
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, /*module_mode=*/0, /*in_guest=*/1,
-                                    err, sizeof err);
+  IrModule *m = svm_codegen_program(parse.nodes, parse.count, /*module_mode=*/0,
+                                    /*in_guest=*/concurrent ? 2 : 1, err, sizeof err);
   arena_destroy(&arena);
   if (!m) return INTERP_ERR;
   irb_set_memory(m, synrt_window_log2());   /* satisfy the Jit memory-match precondition (§3d) */
