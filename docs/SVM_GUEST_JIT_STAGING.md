@@ -145,13 +145,33 @@ symbol's slot directly as `(unsigned long)(void *)&jacl_vec_push`. (`install` is
 units JIT-compiled at *runtime*, as in `demos/jit/jit_link.c`.) So the symtab is just
 `{name → Slot((unsigned long)&fn)}`; no install/uninstall bookkeeping.
 
-**The real remaining work** is therefore (a) linking jaclrt (+ `syn_rt` + `stage_glue`) into
-the `.svmb` without a `malloc`/`read` symbol collision — `stage_glue.c` currently redefines
-`malloc`/`free`/`realloc` (a 256 KiB bump arena) and `read`, which must not clobber the
-compiler's own allocator/stdin; and (b) arg/result marshaling — `__vm_jit_invoke2` uses the
-`(i64,i64)` ABI, so `synrt_read_arg`/`synrt_write_result` must read/write a guest **buffer**,
-not stdin/stdout. Its heap (`jacl_heap_init`) coexists with the compiler's memory in one
-window — needs a memory-layout decision (see §4b).
+**Progress + the real remaining work:**
+
+- ✅ *Symbol separation* (was the hard blocker). The compiler `.svmb` already embeds the
+  reference VM's runtime (`src/collections.c` etc., live on the emit path), whose value ops
+  share **10** names with jaclrt (`jacl_arr_new`, `jacl_eq`, the `jacl_map_`/`jacl_vec_` ops).
+  Both are live and use different heaps, so jaclrt's copies are `jrtg_`-renamed in
+  `macro_staging/jaclrt_staging_guest.c`; the `compile_linked` symtab rebinds the import name
+  to the renamed slot. `jaclrt_staging_guest.c` + the frontend + codegen + shim **llvm-link
+  with zero multiply-defined symbols** (IR-verified with clang-18/llvm-link-18).
+- ✅ *Buffer marshaling.* `stage_glue_guest.c` drops the `malloc`/`read`/`write` overrides and
+  marshals the arg/result wire through in-window buffers (`synrt_set_arg_wire` /
+  `synrt_take_result`), since a `__vm_jit_invoke2`-called unit has no stdin/stdout.
+- ✅ *Symtab.* `synrt_build_symtab` emits the `{name → Slot(&fn)}` table.
+- ✅ *Memory layout (was flagged as an owner decision).* Dissolves: jaclrt's heap is a **static
+  16 MiB array** (`jacl_heap_mem`; `jacl_heap_init(void)` takes no base), so linking it into the
+  compiler just places that array in the window at a distinct linker-assigned address — the
+  compiler's allocator and the macro's heap coexist with no manual carving.
+- ⏳ *Entry ABI (the current edge).* `__vm_jit_invoke2(code, a, b)` passes **exactly 2** entry
+  params (`svm-run::jit_invoke_locked` rejects any other arity), but `svm_codegen_staged_macro`'s
+  func 0 is arity-1 `(sp) -> i64`. So the in-guest path needs an arity-2 entry (a thin `(sp, _)`
+  wrapper, or a staged-macro entry variant). The `sp` value is threaded through the runtime ABI
+  but the runtime allocates from its static heap, so a valid window offset with data-stack
+  headroom suffices (mirror `powerbox_entry_sp`, or reserve a fixed staging data-stack).
+- ⏳ *The hook + wiring.* A `jacl_macro_stage_hook` variant that does `svm_codegen_staged_macro`
+  → `irb_to_encoded` → `synrt_build_symtab` → `__vm_jit_compile_linked` → `synrt_set_arg_wire`
+  → `__vm_jit_invoke2` → `synrt_take_result` → `synw_decode`, then wire jaclrt_staging_guest.c +
+  the hook into `build_compiler_svmb.sh` and differential-test against the golden corpus.
 
 ### 3d. Memory-match + ABI plumbing (plumbing)
 
