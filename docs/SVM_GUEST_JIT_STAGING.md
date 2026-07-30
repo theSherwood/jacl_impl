@@ -274,11 +274,22 @@ structure; pick it unless a concrete need forces in-program linking.
    its own output), `splice`/`pack` (`[vec 10 20 30 40]` via variadic `~@rest`), and `gensym`
    (the `[gensym]` → `synrt_gensym` mint runs in-guest) — each expansion matching its native
    golden (`build_compiler_svmb.sh --selftest` STAGETEST, one translate+run over all five).
-5. **`interpret` via guest-JIT (model B)** — reuses 1–4: compile the source in-guest
-   (`codegen` reached through the `interp` compiler-as-a-cap, §4a) → `irb_to_encoded` →
-   `__vm_jit_compile_linked` → `invoke` → marshal the scalar/error result back through the
-   `interp` wire (`interpcap.c`). Deletes the cap's `jacl_eval` backend. Shares the encode +
-   link + invoke path with staging, so it lands after 1–4 (not independent).
+5. **`interpret` via guest-JIT (model B)** — reuses 1–4, generalized from a macro *body* to a
+   whole *program*. **Slice 1 DONE** (non-concurrent source): `[interpret SRC]` lowers to
+   `jacl_interpret1` (`interpcap.c`), which — when a codegen-linked program installs the
+   **in-guest interpret hook** (`jacl_install_svm_interpret_hook`, `interpret_bridge_guest.c`) —
+   parses SRC, codegens a runnable module (`svm_codegen_program`, new `in_guest=1` inline entry:
+   arity-2, runs the top-level forms directly with no scheduler, since the `Jit` cap forbids §12),
+   `irb_to_encoded` → `__vm_jit_compile_linked` → `__vm_jit_invoke2`, and returns the result. The
+   unit runs in *this* domain (same window/heap), so the entry's return value **is** a live
+   `JaclVal` — **no marshalling**, and a rich value (int/vec/map/string), not the host wire's
+   scalar. `jacl_interpret1` **falls back** to the host `interp` cap when no hook is installed, so
+   ordinary AOT programs are unchanged. Proven: `[interpret "[+ 1 [* 2 3]]"]` → live int `7`
+   in-guest (`build_compiler_svmb.sh --selftest` INTERPTEST). **Remaining:** macro expansion inside
+   `interpret` (the frontend's `expand_macros_inplace` is `static` + reference-VM-backed — expose a
+   linkable/in-guest path); the sandbox form (`jacl_interpret2`, still host-cap); and concurrent
+   source (spawn/await), which needs the embedder to grant the fiber-hosting `Jit` cap
+   (`grant_jit_fibers`, now supported by the engine — svm §22).
 6. **Drop `vm.c`** — once 4 (staging) and 5 (interpret) land, `src/jacl.c` stops needing
    `vm.c` / `bytecode.c` / the bytecode half of `compiler.c` on the emit path; remove them
    (behind the emit-only build), remove the now-orphaned `expand__compile_staged_body` /

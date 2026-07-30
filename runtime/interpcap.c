@@ -101,8 +101,17 @@ static JaclVal jacl_interp_run(int op, JaclVal src, const char *names, uint32_t 
   return jaclrt_error();
 }
 
-/* `[interpret SRC]` — run SRC with the default prelude. */
+/* In-guest `interpret` hook (docs/SVM_GUEST_JIT_STAGING.md §5, model B). When a codegen-linked
+ * program installs one (`jacl_install_svm_interpret_hook`, interpret_bridge_guest.c), `[interpret SRC]`
+ * compiles + runs SRC on the §22 Jit capability in this same window and returns a live JaclVal —
+ * no host round-trip, no reference VM. NULL (the default) keeps the host `interp` cap path below, so
+ * an ordinary AOT program is unchanged. */
+JaclVal (*jacl_interpret_hook)(JaclVal src);
+
+/* `[interpret SRC]` — run SRC with the default prelude: in-guest via the Jit cap when a hook is
+ * installed, else the host `interp` capability. */
 JaclVal jacl_interpret1(JaclVal src) {
+  if (jacl_interpret_hook) return jacl_interpret_hook(src);
   return jacl_interp_run(JINTERP_DEFAULT, src, 0, 0);
 }
 

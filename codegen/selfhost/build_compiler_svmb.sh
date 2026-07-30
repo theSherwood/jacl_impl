@@ -54,13 +54,17 @@ echo "=== compiling frontend + driver + shim to LLVM IR ==="
 # glue (jaclrt_staging_guest.c) and the Jit-capability hook (stage_bridge_guest.c), linked in so
 # macros expand on the SVM engine in this same domain instead of the reference VM. Needs `-I runtime`.
 MS="$DIR/macro_staging"
-"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c" -o "$OUT/jaclrt_staging_guest.ll"
-"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"   -o "$OUT/stage_bridge_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c"    -o "$OUT/jaclrt_staging_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"      -o "$OUT/stage_bridge_guest.ll"
+# In-guest `[interpret …]` (docs/SVM_GUEST_JIT_STAGING.md §5, model B): compile+run the source on the
+# Jit cap in this same window (jacl_interpret_hook), retiring vm.c from the interpret path.
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/interpret_bridge_guest.c" -o "$OUT/interpret_bridge_guest.ll"
 
 echo "=== linking whole program ==="
 "$LLVM_LINK" -S "$OUT/emit_driver.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
              "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
-             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
+             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+             "$OUT/interpret_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
 
 echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,
@@ -140,6 +144,41 @@ EOF
     echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym) expanded in-guest via the Jit capability."
   else
     echo "STAGETEST FAIL — a corpus case did not expand as expected in-guest." >&2
+    exit 1
+  fi
+
+  echo "=== interptest: run [interpret SRC] IN-GUEST via the Jit capability (model B, §5) ==="
+  # `[interpret "[+ 1 [* 2 3]]"]` with the in-guest interpret hook installed: the source is compiled
+  # (svm_codegen_program in_guest=1) and run on the Jit cap in this same window (interpret_bridge_guest.c),
+  # returning the result as a live JaclVal — no host round-trip, no reference VM. 1 + 2*3 = 7 (a tagged
+  # int: high byte 0x02, low bits the value), so the driver prints INTERP_TAG=2 / INTERP_RESULT=7.
+  cat > "$OUT/interptest_main.c" <<'EOF'
+#include <stdio.h>
+extern void jacl_install_svm_interpret_hook(void);
+extern long jacl_interpret1(long src);                 /* JaclVal jacl_interpret1(JaclVal) */
+extern long jacl_str_new(const char *s, unsigned len); /* JaclVal jacl_str_new(const char*, uint32) */
+extern void jacl_heap_init(void);
+extern void jacl_intern_init(void);
+extern void jacl_map_init(void);
+int main(void) {
+  jacl_heap_init(); jacl_intern_init(); jacl_map_init();
+  jacl_install_svm_interpret_hook();
+  const char *prog = "[+ 1 [* 2 3]]";
+  long r = jacl_interpret1(jacl_str_new(prog, 13));
+  printf("INTERP_TAG=%d\n", (int)((unsigned long)r >> 56));  /* 0x02 = int */
+  printf("INTERP_RESULT=%d\n", (int)(r & 0xffffffff));       /* 7 */
+  return 0;
+}
+EOF
+  "$CLANG" "${CF[@]}" "$OUT/interptest_main.c" -o "$OUT/interptest_main.ll"
+  "$LLVM_LINK" -S "$OUT/interptest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
+               "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+               "$OUT/interpret_bridge_guest.ll" -o "$OUT/interptest.ll"
+  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
+  if grep -q 'INTERP_TAG=2' "$OUT/interptest.out" && grep -q 'INTERP_RESULT=7' "$OUT/interptest.out"; then
+    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability, returning a live JaclVal (7)."
+  else
+    echo "INTERPTEST FAIL — expected [interpret '[+ 1 [* 2 3]]'] -> live int 7 in-guest." >&2
     exit 1
   fi
 fi

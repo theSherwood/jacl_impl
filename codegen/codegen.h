@@ -26,7 +26,12 @@ struct AstNode;
  *
  * Returns the module (caller frees with irb_module_free), or NULL on an unsupported
  * construct — in which case a message is written to `err` (when `errcap > 0`). */
-IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode,
+/* `in_guest` selects the entry ABI. 0 (native / powerbox): func 0 = arity-1 `(sp)` entry that
+ * inits the runtime and runs the program body (func 1) as the scheduler root fiber. 1 (guest-JIT
+ * `[interpret …]`, docs/SVM_GUEST_JIT_STAGING.md §5): func 0 = arity-2 `(sp, _)` entry that inits
+ * the runtime and runs the top-level forms **inline** (no fiber scheduler — the §22 `Jit` cap
+ * forbids §12 concurrency), returning the program's last value as a live JaclVal. */
+IrModule *svm_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode, int in_guest,
                                char *err, size_t errcap);
 
 /* Compile one macro body to a module with a single `__jacl_macro(sp, args…) -> syntax-vec`

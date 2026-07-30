@@ -413,7 +413,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   expand_macros_inplace(parse.nodes, parse.count, &arena);
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, err, sizeof err);
+  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, /*in_guest=*/0, err, sizeof err);
   if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
   /* Own-data addresses are now inline `data.self` instructions (v9), so the text is
    * self-contained — no separate `%%RELOCS%%` section. (The JS link path decodes/links
@@ -549,7 +549,7 @@ int main(int argc, char **argv) {
   typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, err, sizeof err);
+  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, /*in_guest=*/0, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   if (text_mode) {
