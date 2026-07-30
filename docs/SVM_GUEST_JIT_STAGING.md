@@ -269,9 +269,11 @@ structure; pick it unless a concrete need forces in-program linking.
    (`in_guest`: arity-2 entry, body run inline — no fiber/`suspend`, which the `Jit` cap
    forbids) → `irb_to_encoded` (runnable when data-free) → `synrt_build_symtab` →
    `__vm_jit_compile_linked` → set arg wire → `__vm_jit_invoke2` → `synrt_take_result` →
-   `synw_decode`. Proven on the SVM engine: `id 21` → `21`, and with item 2 landed
-   `twice 21` → `[+ 21 21]` (`build_compiler_svmb.sh --selftest` STAGETEST). The
-   frozen-golden differential for the whole corpus can now run in-guest.
+   `synw_decode`. Proven on the SVM engine for the **whole macro corpus** — `twice` (`[+ 21
+   21]`), `unless` (an `if`-lowering), `nested`/`quad` (`(5+5)+(5+5)`, i.e. a macro re-expanding
+   its own output), `splice`/`pack` (`[vec 10 20 30 40]` via variadic `~@rest`), and `gensym`
+   (the `[gensym]` → `synrt_gensym` mint runs in-guest) — each expansion matching its native
+   golden (`build_compiler_svmb.sh --selftest` STAGETEST, one translate+run over all five).
 5. **`interpret` via guest-JIT (model B)** — reuses 1–4: compile the source in-guest
    (`codegen` reached through the `interp` compiler-as-a-cap, §4a) → `irb_to_encoded` →
    `__vm_jit_compile_linked` → `invoke` → marshal the scalar/error result back through the
