@@ -115,18 +115,33 @@ vendor change.
 
 ### 3c. The staging runtime must live in the guest's domain (blocker for macros)
 
-The macro module calls `jacl_vec_*` / `synrt_*` / `jacl_*`. Under `compile_linked` those
-imports resolve **by name against a guest symbol table** — so the functions must already
-exist as code+data in the *same window*. Today the native bridge translates the staging
-runtime (`translate_runtime_staging`) as a separate Rust-linked module. The `.svmb` does
-**not** currently link jaclrt at all (it's the *compiler*, not a runtime).
+The macro module calls `jacl_vec_*` / `synrt_*` / `jacl_*`. Today the native bridge
+translates the staging runtime (`translate_runtime_staging`) as a separate Rust-linked
+module. The `.svmb` does **not** currently link jaclrt at all (it's the *compiler*, not a
+runtime).
 
-**Work item:** make the staging runtime (jaclrt + `syn_rt` + `stage_glue`) part of the
-compiler guest's image (a companion translated blob mapped into the window, or linked
-into the `.svmb`), and build the symtab `{name → guest address}` that `compile_linked`
-consumes. This is the in-guest analogue of `link_with_manifest`, and the biggest single
-chunk. Its heap (`jacl_heap_init`) coexists with the compiler's memory in one window —
-tractable, but needs a memory-layout decision.
+**Confirmed symtab wire (was §6 open question).** `compile_linked`'s symbol table is
+**not** `{name → address}`. It is (`svm-run::decode_symbol_table`, LEB128 mirroring
+`svm-encode`): `count`, then per entry `name` (uleb len + UTF-8), a `kind` byte, and a
+payload — `0` = **`Slot(uleb)`**, `1` = **`Cap(uleb type_id, uleb op)`**. Trailing bytes ⇒
+fail-closed. `Func` (static same-module index) is **not** deliverable this way. Each
+imported name (`call.sym "jacl_vec_push"`) resolves via `resolve_imports_with` to a
+`Resolved::Slot(N)` → the call is rewritten to **`call_indirect <N>`** through the domain's
+shared function table (the import's `ConstI32` handle placeholder is patched to `N`); a
+`Cap` binding rewrites to `cap.call`. So the staging runtime is reached **through the
+shared call_indirect table**, not by address.
+
+**Work item (revised):** make the staging runtime (jaclrt + `syn_rt` + `stage_glue`) part
+of the compiler guest's image — linked into the `.svmb` so `jacl_vec_push`/`synrt_*`/… are
+real functions in the guest module — then populate the shared function table with those
+functions (each a table slot) and build the `{name → Slot(N)}` symtab `compile_linked`
+consumes. This is the in-guest analogue of `link_with_manifest` (dynamic-link form), and
+the biggest single chunk. **Open sub-question:** the exact guest-side mechanism to place a
+guest function into the shared table and learn its slot index (ref.func + a table
+install, vs. the module's own function-table indices) — confirm against a real
+`compile_linked`+`invoke` integration before building. Its heap (`jacl_heap_init`)
+coexists with the compiler's memory in one window — tractable, but needs a memory-layout
+decision (see §4b).
 
 ### 3d. Memory-match + ABI plumbing (plumbing)
 
@@ -260,5 +275,9 @@ the payoff is that staging and `interpret` share one mechanism end to end.
   installed unit per macro *definition* rather than per *call*.
 - **`interpret` isolation (§4b).** The owner decision: is memory isolation from the
   calling program required (→ model A or C), or is escape-freedom enough (→ model B)?
-- **`compile_linked` symtab format.** Confirm the exact symtab wire the op expects
-  (name-length-prefixed? address width?) against `jit_native_op` op 5 before building §3c.
+- **`compile_linked` symtab format.** ✅ **Confirmed** (see §3c): LEB128 `count` + per-entry
+  `name` + kind byte + payload (`0`=`Slot(uleb)`, `1`=`Cap(type_id, op)`), fail-closed on
+  trailing bytes (`svm-run::decode_symbol_table`/`encode_symbol_table`). Names resolve to
+  **table slots** (`call_indirect`), not addresses — so §3c links jaclrt into the guest and
+  installs its functions as slots. The remaining open piece is the guest-side table-install
+  mechanism (how a guest function gets a stable slot index).
