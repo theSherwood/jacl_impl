@@ -34,7 +34,7 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
   /* 1. codegen the staged-macro module for this body. */
   IrModule *m = svm_codegen_staged_macro((const char **)entry->param_names,
                                          entry->param_name_lens, entry->param_count,
-                                         entry->variadic, entry->body, errbuf, sizeof errbuf);
+                                         entry->variadic, entry->body, /*in_guest=*/0, errbuf, sizeof errbuf);
   if (!m) return errbuf[0] ? errbuf : "staged codegen failed";
   size_t mlen = 0;
   uint8_t *mbytes = irb_to_encoded(m, &mlen);

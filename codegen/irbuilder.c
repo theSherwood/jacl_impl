@@ -711,6 +711,7 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   /* Pre-pass: build the import/type tables (first-encounter order) before writing the
    * sections, since they precede the funcs on the wire but are discovered from call sites. */
   ImportTable tab; memset(&tab, 0, sizeof tab);
+  int has_data_self = 0;
   for (int fi = 0; fi < m->nfuncs; fi++) {
     IrFunc *f = m->funcs[fi];
     for (int bi = 0; bi < f->nblocks; bi++) {
@@ -720,6 +721,8 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
         if (in->kind == K_CALL_IMPORT) {
           uint32_t ti = intern_type(&tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
           intern_import(&tab, in->name, ti);
+        } else if (in->kind == K_DATA_SELF) {
+          has_data_self = 1;
         }
       }
     }
@@ -729,10 +732,13 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   static const uint8_t magic[4] = {'S', 'V', 'M', 0};
   out_raw(&o, magic, 4);
   out_u8(&o, 9);                                   /* VERSION (v9) */
-  /* v9 flags byte: bit 0 marks the **object dialect**. irb always emits a pre-link unit (it
-   * carries `data.self` and unresolved `call.sym`s, resolved by `link`), and `data.self` is
-   * object-only, so this is always set. The harness decodes it with `decode_unit`. */
-  out_u8(&o, 0x01);
+  /* v9 flags byte: bit 0 marks the **object dialect** (a pre-link unit carrying `data.self`
+   * link-form addresses, decoded by `decode_unit`). Emit it only when the module actually has a
+   * `data.self` — otherwise the module is a plain runnable unit (unresolved `call.sym` imports
+   * are legal in the runnable dialect), which `decode_module` also accepts. This lets the §22
+   * `Jit` capability (`compile_linked` -> `decode_module`) consume a data-free guest module; a
+   * module with own-data addresses still needs the object dialect (and `link` to resolve them). */
+  out_u8(&o, has_data_self ? 0x01 : 0x00);
   /* Memory descriptor: presence flag, then size_log2. */
   if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); }
   else out_u8(&o, 0);
@@ -745,9 +751,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
     out_uleb(&o, m->data[i].len);
     out_raw(&o, m->data[i].bytes, m->data[i].len);
   }
-  /* Object-only `data.ptr` relocation section (v9): none — irb never embeds a raw pointer
-   * inside the data image (own-data addresses are `data.self` instructions in code). */
-  out_uleb(&o, 0);
+  /* Object-only `data.ptr` relocation section (v9), written only in the object dialect: none —
+   * irb never embeds a raw pointer inside the data image (own-data addresses are `data.self`
+   * instructions in code). Omitted for a runnable module, which has no such section. */
+  if (has_data_self) out_uleb(&o, 0);
   /* Import section: name, shape tag (0=func) + type index, mode byte (0=required). */
   out_uleb(&o, (uint64_t)tab.nimports);
   for (int i = 0; i < tab.nimports; i++) {
@@ -758,8 +765,8 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   }
   /* Export section: none (irb emits no named entry points). */
   out_uleb(&o, 0);
-  /* Object-only data-export section (v9): none — irb exports no named data symbols. */
-  out_uleb(&o, 0);
+  /* Object-only data-export section (v9), written only in the object dialect: none. */
+  if (has_data_self) out_uleb(&o, 0);
   /* Type section: each entry tagged (0=func), then param + result type lists. */
   out_uleb(&o, (uint64_t)tab.ntypes);
   for (int i = 0; i < tab.ntypes; i++) {

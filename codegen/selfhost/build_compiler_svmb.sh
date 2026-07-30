@@ -50,9 +50,17 @@ echo "=== compiling frontend + driver + shim to LLVM IR ==="
 "$CLANG" "${CF[@]}" "$DIR/emit_driver.c"    -o "$OUT/emit_driver.ll"
 "$CLANG" "${CF[@]}" "$DIR/emit_shim.c"      -o "$OUT/emit_shim.ll"
 
+# In-guest macro staging (docs/SVM_GUEST_JIT_STAGING.md §3/§4): the jaclrt runtime + staged-macro
+# glue (jaclrt_staging_guest.c) and the Jit-capability hook (stage_bridge_guest.c), linked in so
+# macros expand on the SVM engine in this same domain instead of the reference VM. Needs `-I runtime`.
+MS="$DIR/macro_staging"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c" -o "$OUT/jaclrt_staging_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"   -o "$OUT/stage_bridge_guest.ll"
+
 echo "=== linking whole program ==="
 "$LLVM_LINK" -S "$OUT/emit_driver.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
-             "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" -o "$OUT/jacl_compiler.ll"
+             "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
+             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
 
 echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,

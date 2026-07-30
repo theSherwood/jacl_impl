@@ -21,6 +21,22 @@
 
 JaclVal synrt_gensym(JaclVal prefix);   /* defined below; referenced by the symtab helper */
 
+/* The staged macro's data stack (the `sp` invoke2 passes to the entry). svm-llvm gives every
+ * translated runtime function an implicit `sp` first param and grows the data stack **up** from it
+ * (frame N+1 = sp + frame_size), so `sp` is the low end and this static region is its headroom. A
+ * static array coexists with the compiler's window like jaclrt's heap — the linker places it. */
+static __attribute__((aligned(16))) unsigned char g_macro_dstack[1u << 20];   /* 1 MiB */
+unsigned long synrt_macro_dstack_base(void) { return (unsigned long)(void *)g_macro_dstack; }
+
+/* The compiler guest's window size_log2, which the staged-macro object must declare to satisfy the
+ * `Jit` memory-match precondition (svm-run: object.memory.size_log2 must equal the parent window).
+ * The on-ramp bakes it into this .svmb at translate time; the default matches this build (32 MiB),
+ * and a host that knows the instantiated size can override it via `synrt_set_window_log2` (e.g. the
+ * emit driver from argv, mirroring peval_jit). See docs/SVM_GUEST_JIT_STAGING.md §3d. */
+static unsigned char g_window_log2 = 25;
+void synrt_set_window_log2(unsigned char n) { if (n) g_window_log2 = n; }
+unsigned char synrt_window_log2(void) { return g_window_log2; }
+
 /* ---- argument wire (hook -> macro), read by synrt_read_arg/read_rest ---- */
 
 static const unsigned char *g_arg_buf;
@@ -117,6 +133,8 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     else symtab_entry(out, cap, &pos, #f, (unsigned long)(void *)&f); \
   } while (0)
 #define SYMLIST \
+    /* the entry's runtime bring-up + scheduler root (svm_codegen_staged_macro func 0) */ \
+    SYM(jacl_heap_init); SYM(jacl_intern_init); SYM(jacl_map_init); SYM(jacl_sched_run_main); \
     /* the staged-macro I/O glue */ \
     SYM(synrt_read_arg); SYM(synrt_read_rest); SYM(synrt_write_result); SYM(synrt_gensym); \
     /* vectors / arrays (the plain-data syntax representation) */ \

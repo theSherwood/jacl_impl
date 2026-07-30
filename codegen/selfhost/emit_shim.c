@@ -86,6 +86,10 @@ static void emit_ch(char *buf, size_t cap, size_t *pos, char c) {
 static void emit_str(char *buf, size_t cap, size_t *pos, const char *s) {
   while (*s) emit_ch(buf, cap, pos, *s++);
 }
+/* Print up to `prec` chars of `s` (a precision-bounded string, may be non-NUL-terminated). */
+static void emit_str_n(char *buf, size_t cap, size_t *pos, const char *s, int prec) {
+  for (int i = 0; i < prec && s[i]; i++) emit_ch(buf, cap, pos, s[i]);
+}
 static void emit_uint(char *buf, size_t cap, size_t *pos, unsigned long long v,
                       int base, int upper, int width, char pad) {
   char t[24]; int n = 0;
@@ -102,9 +106,20 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
     char pad = ' '; int width = 0;
     if (*p == '0') { pad = '0'; p++; }
     while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+    /* Precision: `.` then `*` (from an int arg) or digits. Only `%.*s`/`%.Ns` (bounded
+     * string) is used by the frontend's `macro '%.*s'` diagnostics. */
+    int prec = -1;
+    if (*p == '.') {
+      p++;
+      if (*p == '*') { prec = va_arg(ap, int); p++; }
+      else { prec = 0; while (*p >= '0' && *p <= '9') { prec = prec * 10 + (*p - '0'); p++; } }
+    }
     int lng = 0; while (*p == 'l') { lng++; p++; }
     switch (*p) {
-      case 's': emit_str(buf, cap, &pos, va_arg(ap, const char *)); break;
+      case 's':
+        if (prec >= 0) emit_str_n(buf, cap, &pos, va_arg(ap, const char *), prec);
+        else emit_str(buf, cap, &pos, va_arg(ap, const char *));
+        break;
       case 'c': emit_ch(buf, cap, &pos, (char)va_arg(ap, int)); break;
       case '%': emit_ch(buf, cap, &pos, '%'); break;
       case 'd': case 'i': {

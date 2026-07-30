@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
                                  dm->data.defmacro.param_name_lens,
                                  dm->data.defmacro.param_count,
                                  dm->data.defmacro.variadic,
-                                 dm->data.defmacro.body, err, sizeof err);
+                                 dm->data.defmacro.body, /*in_guest=*/0, err, sizeof err);
   } else {
     uint32_t idx = 0;
     m = svm_codegen_macro_body((const char **)dm->data.defmacro.param_names,

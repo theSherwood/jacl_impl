@@ -39,12 +39,17 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
                                  char *err, size_t errcap);
 
 /* Compile a macro into a complete, runnable staged-macro program (entry reads the argument
- * syntax values on stdin, runs the body, writes the result on stdout). Links against the
- * staging-extended runtime like any JACL program. Any arity; when `variadic` is set the last
- * of the `nparams` parameters is the rest parameter (bound to a vec of the trailing syntax
- * values). NULL on an unsupported construct (message in `err`). See
- * docs/SVM_MACRO_STAGING_PLAN.md "final link". */
+ * syntax values, runs the body, writes the result). Links against the staging-extended runtime
+ * like any JACL program. Any arity; when `variadic` is set the last of the `nparams` parameters
+ * is the rest parameter (bound to a vec of the trailing syntax values). NULL on an unsupported
+ * construct (message in `err`). See docs/SVM_MACRO_STAGING_PLAN.md "final link".
+ *
+ * `in_guest` selects the entry (func 0) ABI. 0 (native / powerbox): arity-1 `(sp) -> i64`, which
+ * `synth_manifest_start` wraps in `_start`. 1 (guest-JIT, docs/SVM_GUEST_JIT_STAGING.md §3d):
+ * arity-2 `(sp, _) -> i64`, called directly by `__vm_jit_invoke2(code, sp, 0)` (which passes
+ * exactly two params); the extra param is ignored. Otherwise identical. */
 IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
-                                   int variadic, struct AstNode *body, char *err, size_t errcap);
+                                   int variadic, struct AstNode *body, int in_guest,
+                                   char *err, size_t errcap);
 
 #endif /* JACL_CODEGEN_H */
