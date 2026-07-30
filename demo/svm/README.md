@@ -43,13 +43,14 @@ so the guest traps (`STATUS_TRAP`).
 
 1. **Precompiled example (unedited):** fetch its `.svmb` from `manifest.json` and run it
    through `SvmJaclRunner.runSvmb` — fast, no compile.
-2. **Edited source (live):** `JaclFrontend.emitIr(source)` compiles it to SVM IR text in
-   the browser (`jacl_emit.wasm`); a compile error is shown as-is; otherwise
+2. **Edited source (live):** `JaclFrontend.emitIr(source)` compiles it to self-contained SVM
+   IR text in the browser (`jacl_emit.wasm`); a compile error is shown as-is; otherwise
    `SvmJaclRunner.linkRun(ir, jaclrt.svm)` links it against the runtime and runs it. `linkRun`
-   splits the frontend's `%%RELOCS%%` wire format and passes the module text, the `jaclrt.svm`
-   library, the `__jacl_entry` entry name, and the relocs to the cdylib's **generic**
-   `svm_link_run` (nothing JACL-specific lives in the cdylib). Both return the existing
-   `RunResult`, so `displayResult` is unchanged.
+   passes the program IR, the `jaclrt.svm` library, and the `__jacl_entry` entry name to the
+   cdylib's **generic** `svm_link_run` (nothing JACL-specific lives in the cdylib). Own-data
+   addresses are inline `data.self` instructions the linker resolves (wire v9), so there is no
+   relocation buffer to pass. Both return the existing `RunResult`, so `displayResult` is
+   unchanged.
 
 The whole live pipeline (source → IR → link → run → stdout) is verified headless — see the
 Node checks: `jacl_emit_ir("print \"hi\"")` → IR, then `svm_link_run` → `"hi\n"`; a

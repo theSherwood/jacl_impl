@@ -17,7 +17,14 @@
 extern long read(int fd, void *buf, long n);       /* on-ramp Stream.read */
 extern char *jacl_emit_ir(const char *source);     /* the browser frontend entry (emit_jacl.c) */
 
+/* Install the in-guest macro-staging hook (stage_bridge_guest.c) when this build links it. Macros
+ * then expand on the SVM engine in this same domain via the Jit capability — no reference VM. The
+ * expander still gates activation on JACL_STAGE_ON_SVM (default on in the guest), so installing is
+ * always safe. Weak so a build without the staging TU (or its dependencies) still links. */
+extern void jacl_install_svm_stage_hook(void) __attribute__((weak));
+
 int main(void) {
+  if (jacl_install_svm_stage_hook) jacl_install_svm_stage_hook();
   size_t cap = 1u << 20, len = 0;                  /* grows as needed */
   char *src = (char *)malloc(cap);
   if (!src) return 1;

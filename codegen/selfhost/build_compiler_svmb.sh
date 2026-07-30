@@ -50,9 +50,17 @@ echo "=== compiling frontend + driver + shim to LLVM IR ==="
 "$CLANG" "${CF[@]}" "$DIR/emit_driver.c"    -o "$OUT/emit_driver.ll"
 "$CLANG" "${CF[@]}" "$DIR/emit_shim.c"      -o "$OUT/emit_shim.ll"
 
+# In-guest macro staging (docs/SVM_GUEST_JIT_STAGING.md §3/§4): the jaclrt runtime + staged-macro
+# glue (jaclrt_staging_guest.c) and the Jit-capability hook (stage_bridge_guest.c), linked in so
+# macros expand on the SVM engine in this same domain instead of the reference VM. Needs `-I runtime`.
+MS="$DIR/macro_staging"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/jaclrt_staging_guest.c" -o "$OUT/jaclrt_staging_guest.ll"
+"$CLANG" "${CF[@]}" -I "$ROOT/runtime" "$MS/stage_bridge_guest.c"   -o "$OUT/stage_bridge_guest.ll"
+
 echo "=== linking whole program ==="
 "$LLVM_LINK" -S "$OUT/emit_driver.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
-             "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" -o "$OUT/jacl_compiler.ll"
+             "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
+             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
 
 echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,
@@ -78,6 +86,35 @@ EOF
     echo "SELFTEST PASS — JACL source compiled to SVM IR on the SVM engine."
   else
     echo "SELFTEST FAIL — expected mul/add in emitted IR." >&2
+    exit 1
+  fi
+
+  echo "=== stagetest: expand a macro IN-GUEST via the Jit capability ==="
+  # `id 21` runs the whole compile — including the macro expansion — on the SVM engine, with the
+  # in-guest staging hook (stage_bridge_guest.c) doing the expansion via __vm_jit_compile_linked +
+  # invoke2. A data-free macro (no string/symbol literals -> no data segments the Jit cap forbids,
+  # §3b) so it round-trips today; string-bearing macros await item 2 (data-free lowering).
+  # 0x0200000000000015 = 144115188075855893 is the JaclVal for i32 21 — the expansion of `id 21`.
+  cat > "$OUT/stagetest_main.c" <<'EOF'
+#include <stdio.h>
+extern char *jacl_emit_ir(const char *source);
+extern void jacl_install_svm_stage_hook(void);
+int main(void) {
+  jacl_install_svm_stage_hook();
+  char *ir = jacl_emit_ir("defmacro id {x} {\n  syntax-quote ~x\n}\nid 21\n");
+  fputs(ir ? ir : "NULL", stdout);
+  return 0;
+}
+EOF
+  "$CLANG" "${CF[@]}" "$OUT/stagetest_main.c" -o "$OUT/stagetest_main.ll"
+  "$LLVM_LINK" -S "$OUT/stagetest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
+               "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+               -o "$OUT/stagetest.ll"
+  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
+  if grep -q '144115188075855893' "$OUT/stagetest.out" && ! grep -q '%%ERROR%%' "$OUT/stagetest.out"; then
+    echo "STAGETEST PASS — macro expanded in-guest via the Jit capability."
+  else
+    echo "STAGETEST FAIL — expected the expansion of 'id 21' (21) with no error." >&2
     exit 1
   fi
 fi

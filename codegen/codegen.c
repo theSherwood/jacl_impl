@@ -4582,7 +4582,8 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
  * and the entry reads them in order (stateful `synrt_read_arg`). NULL on an unsupported
  * construct (message in `err`). */
 IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
-                                   int variadic, AstNode *body, char *err, size_t errcap) {
+                                   int variadic, AstNode *body, int in_guest,
+                                   char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
@@ -4594,18 +4595,33 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   IrType i64_1[] = {IRB_I64};
   IrType i64_2[] = {IRB_I64, IRB_I64};
   IrType r1[] = {IRB_I64};
-  IrFunc *entry = irb_func_new(m, i64_1, 1, r1, 1);
-  IrBlock entry_block = irb_block(entry, i64_1, 1);
-  IrFunc *mainf = irb_func_new(m, i64_2, 2, r1, 1);   /* (sp, resume-arg) */
-  IrBlock main_block = irb_block(mainf, i64_2, 2);
+  /* func 0 = entry. Native/powerbox: arity-1 `(sp)` (synth_manifest_start wraps it). Guest-JIT:
+   * arity-2 `(sp, _)` so `__vm_jit_invoke2`'s two-param call matches (the 2nd param is unused).
+   * Either way cx.sp is param 0 (v0). */
+  int entry_nparams = in_guest ? 2 : 1;
+  IrType *entry_params = in_guest ? i64_2 : i64_1;
+  IrFunc *entry = irb_func_new(m, entry_params, entry_nparams, r1, 1);
+  IrBlock entry_block = irb_block(entry, entry_params, entry_nparams);
+  /* The macro body runs on the scheduler root fiber (native) or directly in the entry (guest-JIT).
+   * The §22 `Jit` capability forbids §12 concurrency ops (single-threaded MVP), so the guest path
+   * must NOT use the fiber scheduler (`suspend` / `jacl_sched_run_main`) — it inits the runtime and
+   * runs the body inline in func 0. The native path keeps the fiber root for GC-as-usual. */
+  IrFunc *mainf = in_guest ? entry : irb_func_new(m, i64_2, 2, r1, 1);
+  IrBlock main_block = in_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
-  /* func 1 = the scheduler root: read the argument syntax values (one per fixed macro param,
-   * in order; the trailing rest param, if variadic, is a vec of the remaining values), bind
-   * them, run the macro body, write the result syntax value. Runs on a fiber like a normal
-   * program body, so allocation / GC behave as usual. `synrt_read_arg` / `synrt_read_rest`
-   * are stateful — successive calls consume the one argument wire in order. */
   cx.f = mainf; cx.cur = main_block; cx.sp = 0;
-  (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
+  if (in_guest) {
+    /* Bring up the runtime here (no scheduler): heap, interns, map registry. */
+    emit_void_call(&cx, "jacl_heap_init");
+    emit_void_call(&cx, "jacl_intern_init");
+    emit_void_call(&cx, "jacl_map_init");
+  } else {
+    (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
+  }
+  /* Read the argument syntax values (one per fixed macro param, in order; the trailing rest param,
+   * if variadic, is a vec of the remaining values), bind them, run the macro body, write the
+   * result. `synrt_read_arg` / `synrt_read_rest` are stateful — successive calls consume the one
+   * argument wire in order. */
   env_reset(&cx);
   capset_reset(&cx); capset_scan(&cx, body);
   scope_enter(&cx);
@@ -4628,8 +4644,9 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   scope_exit(&cx);
   if (!cx.failed) { IrVal ret[] = {res}; irb_return(cx.f, cx.cur, ret, 1); }
 
-  /* func 0 = entry: init the runtime, run func 1 as the scheduler root, return its result. */
-  if (!cx.failed) {
+  /* Native func 0 = entry: init the runtime, run func 1 as the scheduler root, return its result.
+   * (Guest-JIT already did all of this inline in the entry above.) */
+  if (!in_guest && !cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
     emit_void_call(&cx, "jacl_heap_init");
     emit_void_call(&cx, "jacl_intern_init");

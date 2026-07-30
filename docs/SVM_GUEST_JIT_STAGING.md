@@ -115,18 +115,63 @@ vendor change.
 
 ### 3c. The staging runtime must live in the guest's domain (blocker for macros)
 
-The macro module calls `jacl_vec_*` / `synrt_*` / `jacl_*`. Under `compile_linked` those
-imports resolve **by name against a guest symbol table** — so the functions must already
-exist as code+data in the *same window*. Today the native bridge translates the staging
-runtime (`translate_runtime_staging`) as a separate Rust-linked module. The `.svmb` does
-**not** currently link jaclrt at all (it's the *compiler*, not a runtime).
+The macro module calls `jacl_vec_*` / `synrt_*` / `jacl_*`. Today the native bridge
+translates the staging runtime (`translate_runtime_staging`) as a separate Rust-linked
+module. The `.svmb` does **not** currently link jaclrt at all (it's the *compiler*, not a
+runtime).
 
-**Work item:** make the staging runtime (jaclrt + `syn_rt` + `stage_glue`) part of the
-compiler guest's image (a companion translated blob mapped into the window, or linked
-into the `.svmb`), and build the symtab `{name → guest address}` that `compile_linked`
-consumes. This is the in-guest analogue of `link_with_manifest`, and the biggest single
-chunk. Its heap (`jacl_heap_init`) coexists with the compiler's memory in one window —
-tractable, but needs a memory-layout decision.
+**Confirmed symtab wire (was §6 open question).** `compile_linked`'s symbol table is
+**not** `{name → address}`. It is (`svm-run::decode_symbol_table`, LEB128 mirroring
+`svm-encode`): `count`, then per entry `name` (uleb len + UTF-8), a `kind` byte, and a
+payload — `0` = **`Slot(uleb)`**, `1` = **`Cap(uleb type_id, uleb op)`**. Trailing bytes ⇒
+fail-closed. `Func` (static same-module index) is **not** deliverable this way. Each
+imported name (`call.sym "jacl_vec_push"`) resolves via `resolve_imports_with` to a
+`Resolved::Slot(N)` → the call is rewritten to **`call_indirect <N>`** through the domain's
+shared function table (the import's `ConstI32` handle placeholder is patched to `N`); a
+`Cap` binding rewrites to `cap.call`. So the staging runtime is reached **through the
+shared call_indirect table**, not by address.
+
+**Work item (revised):** make the staging runtime (jaclrt + `syn_rt` + `stage_glue`) part
+of the compiler guest's image — linked into the `.svmb` so `jacl_vec_push`/`synrt_*`/… are
+real functions in the guest module — then build the `{name → Slot(N)}` symtab `compile_linked`
+consumes. This is the in-guest analogue of `link_with_manifest` (dynamic-link form).
+
+**Table-slot mechanism (confirmed).** No `__vm_jit_install` is needed for the compiler's
+*own* linked functions: the domain's `call_indirect` table is `[real module functions
+(0..n_real_funcs) | padding slots]` (`svm-jit::CompiledModule::fn_table`), so a module
+function's funcref index **is** its slot. svm-llvm lowers a taken function address to its
+funcref index (widened to i64; lib.rs §G/§K), so in the compiler C we get each runtime
+symbol's slot directly as `(unsigned long)(void *)&jacl_vec_push`. (`install` is only for
+units JIT-compiled at *runtime*, as in `demos/jit/jit_link.c`.) So the symtab is just
+`{name → Slot((unsigned long)&fn)}`; no install/uninstall bookkeeping.
+
+**Progress + the real remaining work:**
+
+- ✅ *Symbol separation* (was the hard blocker). The compiler `.svmb` already embeds the
+  reference VM's runtime (`src/collections.c` etc., live on the emit path), whose value ops
+  share **10** names with jaclrt (`jacl_arr_new`, `jacl_eq`, the `jacl_map_`/`jacl_vec_` ops).
+  Both are live and use different heaps, so jaclrt's copies are `jrtg_`-renamed in
+  `macro_staging/jaclrt_staging_guest.c`; the `compile_linked` symtab rebinds the import name
+  to the renamed slot. `jaclrt_staging_guest.c` + the frontend + codegen + shim **llvm-link
+  with zero multiply-defined symbols** (IR-verified with clang-18/llvm-link-18).
+- ✅ *Buffer marshaling.* `stage_glue_guest.c` drops the `malloc`/`read`/`write` overrides and
+  marshals the arg/result wire through in-window buffers (`synrt_set_arg_wire` /
+  `synrt_take_result`), since a `__vm_jit_invoke2`-called unit has no stdin/stdout.
+- ✅ *Symtab.* `synrt_build_symtab` emits the `{name → Slot(&fn)}` table.
+- ✅ *Memory layout (was flagged as an owner decision).* Dissolves: jaclrt's heap is a **static
+  16 MiB array** (`jacl_heap_mem`; `jacl_heap_init(void)` takes no base), so linking it into the
+  compiler just places that array in the window at a distinct linker-assigned address — the
+  compiler's allocator and the macro's heap coexist with no manual carving.
+- ⏳ *Entry ABI (the current edge).* `__vm_jit_invoke2(code, a, b)` passes **exactly 2** entry
+  params (`svm-run::jit_invoke_locked` rejects any other arity), but `svm_codegen_staged_macro`'s
+  func 0 is arity-1 `(sp) -> i64`. So the in-guest path needs an arity-2 entry (a thin `(sp, _)`
+  wrapper, or a staged-macro entry variant). The `sp` value is threaded through the runtime ABI
+  but the runtime allocates from its static heap, so a valid window offset with data-stack
+  headroom suffices (mirror `powerbox_entry_sp`, or reserve a fixed staging data-stack).
+- ⏳ *The hook + wiring.* A `jacl_macro_stage_hook` variant that does `svm_codegen_staged_macro`
+  → `irb_to_encoded` → `synrt_build_symtab` → `__vm_jit_compile_linked` → `synrt_set_arg_wire`
+  → `__vm_jit_invoke2` → `synrt_take_result` → `synw_decode`, then wire jaclrt_staging_guest.c +
+  the hook into `build_compiler_svmb.sh` and differential-test against the golden corpus.
 
 ### 3d. Memory-match + ABI plumbing (plumbing)
 
@@ -204,14 +249,23 @@ structure; pick it unless a concrete need forces in-program linking.
 1. **`irb_to_encoded` (svm-encode binary serializer in C)** — §3a. Standalone, testable
    by round-trip against `svm_encode::decode_module`. Unblocks everything and helps the
    native path too. *Prereq for all guest-JIT work.*
-2. **Data-segment-free literal lowering** under a `staged_macro` codegen flag — §3b.
-3. **Staging runtime in the guest image + symtab for `compile_linked`** — §3c. The big
-   one; the in-guest `link_with_manifest`.
-4. **Guest-JIT staging hook** — a `jacl_macro_stage_hook` variant that, instead of the
-   native FFI, does: `irb_to_encoded(body module)` → `__vm_jit_compile_linked(blob,
-   symtab)` → feed the arg wire / `__vm_jit_invoke2` → read the result wire → `release`.
-   Compiled into the `.svmb`. Verify: `run_diff` against the frozen golden with the
-   `.svmb` doing the expansion, no `vm.c`.
+2. **Data-segment-free literal lowering** under a `staged_macro` codegen flag — §3b. **Now
+   the gating item.** With 3+4 landed, a data-*free* macro (e.g. `id`) expands in-guest end
+   to end; a macro with string/symbol literals still emits a `data` segment the `Jit` cap
+   rejects (`jit_resolve_and_validate`: `!m.data.is_empty()`), so the operator/symbol name
+   lowering must build those `JaclVal`s without a `data.self`/data segment (e.g. from
+   immediate bytes) before the corpus stages in-guest.
+3. **Staging runtime in the guest image + symtab for `compile_linked`** — §3c. **DONE.**
+   jaclrt (+`syn_rt`+`stage_glue_guest`) is linked into the `.svmb` (`jrtg_`-renamed to
+   dodge the reference VM's 10 value-op collisions), and `synrt_build_symtab` emits the
+   `{name → Slot((unsigned long)&fn)}` table — the in-guest `link_with_manifest`.
+4. **Guest-JIT staging hook** — **DONE** (`stage_bridge_guest.c`): `svm_codegen_staged_macro`
+   (`in_guest`: arity-2 entry, body run inline — no fiber/`suspend`, which the `Jit` cap
+   forbids) → `irb_to_encoded` (runnable when data-free) → `synrt_build_symtab` →
+   `__vm_jit_compile_linked` → set arg wire → `__vm_jit_invoke2` → `synrt_take_result` →
+   `synw_decode`. Proven on the SVM engine: `id 21` → `21` (`build_compiler_svmb.sh
+   --selftest` STAGETEST). The frozen-golden differential for the whole corpus follows once
+   item 2 makes the string-bearing macros data-free.
 5. **`interpret` via guest-JIT (model B)** — reuses 1–4: compile the source in-guest
    (`codegen` reached through the `interp` compiler-as-a-cap, §4a) → `irb_to_encoded` →
    `__vm_jit_compile_linked` → `invoke` → marshal the scalar/error result back through the
@@ -260,5 +314,9 @@ the payoff is that staging and `interpret` share one mechanism end to end.
   installed unit per macro *definition* rather than per *call*.
 - **`interpret` isolation (§4b).** The owner decision: is memory isolation from the
   calling program required (→ model A or C), or is escape-freedom enough (→ model B)?
-- **`compile_linked` symtab format.** Confirm the exact symtab wire the op expects
-  (name-length-prefixed? address width?) against `jit_native_op` op 5 before building §3c.
+- **`compile_linked` symtab format.** ✅ **Confirmed** (see §3c): LEB128 `count` + per-entry
+  `name` + kind byte + payload (`0`=`Slot(uleb)`, `1`=`Cap(type_id, op)`), fail-closed on
+  trailing bytes (`svm-run::decode_symbol_table`/`encode_symbol_table`). Names resolve to
+  **table slots** (`call_indirect`), not addresses — so §3c links jaclrt into the guest and
+  installs its functions as slots. The remaining open piece is the guest-side table-install
+  mechanism (how a guest function gets a stable slot index).
