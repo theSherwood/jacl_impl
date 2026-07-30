@@ -19,6 +19,8 @@
 
 #include "syn_rt.c"
 
+JaclVal synrt_gensym(JaclVal prefix);   /* defined below; referenced by the symtab helper */
+
 /* ---- argument wire (hook -> macro), read by synrt_read_arg/read_rest ---- */
 
 static const unsigned char *g_arg_buf;
@@ -68,6 +70,74 @@ unsigned char *synrt_take_result(size_t *len) {
   g_res_buf = NULL;
   g_res_len = 0;
   return out;
+}
+
+/* ---- compile_linked symbol table (name -> table slot) ---- */
+
+/* The staging hook hands this to `__vm_jit_compile_linked`: it binds each runtime symbol a staged
+ * macro body may import (`call.sym "jacl_vec_push"`, …) to that function's **call_indirect slot**.
+ * A module function's funcref index *is* its slot, and svm-llvm lowers `&fn` to that index, so a
+ * slot is just `(unsigned long)(void *)&fn`. Wire form (svm-run::decode_symbol_table): uleb count,
+ * then per entry uleb namelen + name bytes + kind byte 0 (Slot) + uleb slot. The compile_linked
+ * resolver uses only the names the unit actually imports, so a superset is fine; a *missing* name
+ * fails closed. The `#define` renames in jaclrt_staging_guest.c are transparent here — `SYM(name)`
+ * stringizes the canonical import name but takes `&name`, which expands to the (possibly `jrtg_`-
+ * renamed) definition. Extend the list as macros reach further into the runtime. */
+
+static void symtab_uleb(unsigned char *out, size_t cap, size_t *pos, unsigned long v) {
+  for (;;) {
+    unsigned char b = (unsigned char)(v & 0x7f);
+    v >>= 7;
+    if (*pos < cap) out[*pos] = v ? (b | 0x80) : b;
+    (*pos)++;
+    if (!v) break;
+  }
+}
+static void symtab_entry(unsigned char *out, size_t cap, size_t *pos, const char *name,
+                         unsigned long slot) {
+  size_t nl = 0;
+  while (name[nl]) nl++;
+  symtab_uleb(out, cap, pos, (unsigned long)nl);
+  for (size_t i = 0; i < nl; i++) { if (*pos < cap) out[*pos] = (unsigned char)name[i]; (*pos)++; }
+  if (*pos < cap) out[*pos] = 0; /* kind 0 = Slot */
+  (*pos)++;
+  symtab_uleb(out, cap, pos, slot);
+}
+
+/* Emit the symtab into `out` (up to `cap` bytes) and return its true length; if the return value
+ * exceeds `cap`, `out` was too small (call again with a bigger buffer). `#SYM(f)` = one entry
+ * binding the import name "f" to `Slot(&f)`. */
+size_t synrt_build_symtab(unsigned char *out, size_t cap) {
+  static const unsigned long COUNT_PLACEHOLDER = 0;
+  (void)COUNT_PLACEHOLDER;
+  /* Count entries first (so the leading uleb count is exact) by running the body twice. */
+  size_t n = 0, pos = 0;
+#define SYM(f) do { \
+    if (counting) n++; \
+    else symtab_entry(out, cap, &pos, #f, (unsigned long)(void *)&f); \
+  } while (0)
+#define SYMLIST \
+    /* the staged-macro I/O glue */ \
+    SYM(synrt_read_arg); SYM(synrt_read_rest); SYM(synrt_write_result); SYM(synrt_gensym); \
+    /* vectors / arrays (the plain-data syntax representation) */ \
+    SYM(jacl_vec_empty); SYM(jacl_vec_push); SYM(jacl_vec_push_v); SYM(jacl_vec_get); \
+    SYM(jacl_vec_get_at); SYM(jacl_vec_set_at); SYM(jacl_vec_concat); SYM(jacl_vec_slice); \
+    SYM(jacl_arr_new); SYM(jacl_arr_push); SYM(jacl_arr_get_at); \
+    /* strings */ \
+    SYM(jacl_str_new); SYM(jacl_str_concat); SYM(jacl_to_string); \
+    /* scalars / misc used when a macro body computes */ \
+    SYM(jacl_len); SYM(jacl_eq); SYM(jacl_add); SYM(jacl_sub); SYM(jacl_mul); \
+    SYM(jacl_first); SYM(jacl_index_get)
+  int counting = 1;
+  SYMLIST;
+  /* Rewind and emit for real, prefixed by the count. */
+  counting = 0;
+  pos = 0;
+  symtab_uleb(out, cap, &pos, (unsigned long)n);
+  SYMLIST;
+#undef SYM
+#undef SYMLIST
+  return pos;
 }
 
 /* `[gensym]` / `[gensym "prefix"]`: mint a fresh hygienic name `prefix__N` as a plain-data
