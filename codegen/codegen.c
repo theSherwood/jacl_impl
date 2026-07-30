@@ -138,6 +138,9 @@ typedef struct {
   int staged_macro;  /* compiling a staged-macro body (svm_codegen_staged_macro): a `[gensym]`
                       * inside syntax-quote lowers to a runtime name-mint (synrt_gensym). In the
                       * normal path macros are pre-expanded, so compile_synquote never sees it. */
+  int data_free;     /* in-guest staging (svm_codegen_staged_macro in_guest): string literals must
+                      * NOT emit a `data` segment (the §22 `Jit` cap rejects them), so they build
+                      * incrementally from immediate bytes via synrt_str_* — see compile_string_literal. */
 } Cx;
 typedef struct SDef SDef;
 
@@ -580,8 +583,30 @@ static IrVal compile_i32(Cx *cx, AstNode *node) {
 /* ---- strings & collections (P2.8) ---- */
 
 /* Build a heap string from a literal: its bytes go in a data segment, and
- * jacl_str_new(ptr, len) copies them. `ptr` is a relocated data address; `len` is i32. */
+ * jacl_str_new(ptr, len) copies them. `ptr` is a relocated data address; `len` is i32.
+ *
+ * In-guest staging (`cx->data_free`, §3b): a `data` segment is forbidden — the §22 `Jit`
+ * capability rejects any submitted blob that carries one. So build the string incrementally
+ * from **immediate byte constants**: `synrt_str_empty()` then one `synrt_str_push_byte(s, b)`
+ * per byte (the glue helpers do the pointer-based construction internally, in the compiler, so
+ * the macro object itself has no data). Macro symbol/keyword literals are short, so the O(n)
+ * appends are cheap. */
 static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len) {
+  if (cx->data_free) {
+    IrType i64_1[] = {IRB_I64};
+    IrType i64_3[] = {IRB_I64, IRB_I64, IRB_I64};
+    IrType r1[] = {IRB_I64};
+    IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+    IrVal e[] = {cx->sp};
+    IrVal str = irb_call_import(cx->f, cx->cur, "synrt_str_empty", i64_1, 1, r1, 1, h, e, 1);
+    for (uint32_t i = 0; i < len; i++) {
+      IrVal b = irb_const_i64(cx->f, cx->cur, (int64_t)(unsigned char)s[i]);
+      IrVal a[] = {cx->sp, str, b};
+      IrVal h2 = irb_const_i32(cx->f, cx->cur, 0);
+      str = irb_call_import(cx->f, cx->cur, "synrt_str_push_byte", i64_3, 3, r1, 1, h2, a, 3);
+    }
+    return str;
+  }
   uint64_t off = irb_add_data(cx->m, s, len);
   IrVal addr = irb_data_addr(cx->f, cx->cur, off);
   IrVal lv = irb_const_i32(cx->f, cx->cur, (int32_t)len);
@@ -4588,6 +4613,7 @@ IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uin
   memset(&cx, 0, sizeof cx);
   cx.err = err; cx.errcap = errcap;
   cx.staged_macro = 1;   /* enables the `[gensym]` -> synrt_gensym lowering in compile_synquote */
+  cx.data_free = in_guest;   /* in-guest: string literals build data-segment-free (Jit §3b) */
 
   IrModule *m = irb_module_new();
   cx.m = m;

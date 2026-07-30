@@ -19,7 +19,9 @@
 
 #include "syn_rt.c"
 
-JaclVal synrt_gensym(JaclVal prefix);   /* defined below; referenced by the symtab helper */
+JaclVal synrt_gensym(JaclVal prefix);          /* defined below; referenced by the symtab helper */
+JaclVal synrt_str_empty(void);                 /* data-free string literal build (see below) */
+JaclVal synrt_str_push_byte(JaclVal s, long b);   /* b is i64 to match the codegen's call sig */
 
 /* The staged macro's data stack (the `sp` invoke2 passes to the entry). svm-llvm gives every
  * translated runtime function an implicit `sp` first param and grows the data stack **up** from it
@@ -137,6 +139,8 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_heap_init); SYM(jacl_intern_init); SYM(jacl_map_init); SYM(jacl_sched_run_main); \
     /* the staged-macro I/O glue */ \
     SYM(synrt_read_arg); SYM(synrt_read_rest); SYM(synrt_write_result); SYM(synrt_gensym); \
+    /* data-free string-literal construction (in-guest §3b) */ \
+    SYM(synrt_str_empty); SYM(synrt_str_push_byte); \
     /* vectors / arrays (the plain-data syntax representation) */ \
     SYM(jacl_vec_empty); SYM(jacl_vec_push); SYM(jacl_vec_push_v); SYM(jacl_vec_get); \
     SYM(jacl_vec_get_at); SYM(jacl_vec_set_at); SYM(jacl_vec_concat); SYM(jacl_vec_slice); \
@@ -185,4 +189,14 @@ JaclVal synrt_gensym(JaclVal prefix) {
   v = jacl_vec_push(v, jaclrt_i32(2));   /* flags: is_gensym */
   v = jacl_vec_push(v, namev);
   return v;
+}
+
+/* Data-free string-literal construction for in-guest staged macros (§3b). The macro object emits
+ * `synrt_str_empty()` then one `synrt_str_push_byte(s, b)` per literal byte, so it carries no `data`
+ * segment (the §22 `Jit` cap forbids them). The pointer-based `jacl_str_new` runs HERE, in the
+ * compiler, over a C local — not in the macro object — so no data segment appears on the wire. */
+JaclVal synrt_str_empty(void) { return jacl_str_new("", 0); }
+JaclVal synrt_str_push_byte(JaclVal s, long b) {
+  char c = (char)b;
+  return jacl_str_concat(s, jacl_str_new(&c, 1));
 }
