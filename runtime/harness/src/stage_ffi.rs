@@ -1,12 +1,11 @@
 //! C-ABI bridge that runs a codegen'd staged-macro module on the SVM engine, in-process,
 //! for the native JACL frontend (Phase 5 of `docs/SVM_MACRO_STAGING_PLAN.md`). This is the
 //! embedding half of "run on an SVM runtime instance": `expand__node`, behind
-//! `JACL_STAGE_ON_SVM`, codegens a macro body into a staged-macro module (svm-text + its
-//! SelfData relocations), encodes the argument syntax values to a `syn_wire` buffer, calls
-//! `jacl_svm_stage`, and decodes the returned result wire — replacing the legacy VM's
-//! `jacl_ctx_run_closure`.
+//! `JACL_STAGE_ON_SVM`, codegens a macro body into a staged-macro module (a v9 svm-encode
+//! object), encodes the argument syntax values to a `syn_wire` buffer, calls `jacl_svm_stage`,
+//! and decodes the returned result wire — replacing the legacy VM's `jacl_ctx_run_closure`.
 //!
-//! The path mirrors `bin/stage_macro.rs` exactly (parse → link vs the staging runtime →
+//! The path mirrors `bin/stage_macro.rs` exactly (decode_unit → link vs the staging runtime →
 //! `synth_manifest_start` → run with the arg wire on stdin), except the staging runtime is
 //! translated **once** and cached: translation dominates the cost, and it is identical for
 //! every macro.

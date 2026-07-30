@@ -40,8 +40,6 @@ interface SvmBrowserExports {
     libLen: number | bigint,
     entryPtr: number | bigint,
     entryLen: number | bigint,
-    relocPtr: number | bigint,
-    relocLen: number | bigint,
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
@@ -90,29 +88,6 @@ function statusMessage(status: number): string {
  * so nothing about this name lives in the language-agnostic cdylib.
  */
 const JACL_ENTRY = "__jacl_entry";
-
-/**
- * Decompose the JACL frontend's raw output into the two generic inputs `svm_link_run` wants: the SVM
- * IR **module text**, and the program's own-data **relocations** as a flat little-endian `u32` triple
- * buffer `(func, block, inst)`. The frontend appends `\n%%RELOCS%%\n` followed by whitespace-separated
- * triples (the same wire format the native `--file` path reads); no sentinel ⇒ no relocs. This split
- * is the JACL-frontend contract and deliberately lives here, not in the cdylib.
- */
-function splitJaclEmit(programIr: string): { moduleText: string; relocs: Uint8Array } {
-  const i = programIr.indexOf("%%RELOCS%%");
-  if (i < 0) return { moduleText: programIr, relocs: new Uint8Array(0) };
-  const moduleText = programIr.slice(0, i);
-  const triples: number[] = [];
-  for (const line of programIr.slice(i).split("\n").slice(1)) {
-    const n = line.trim().split(/\s+/).filter((t) => t.length > 0).map(Number);
-    if (n.length === 3 && n.every((x) => Number.isInteger(x) && x >= 0)) triples.push(...n);
-  }
-  const relocs = new Uint8Array(triples.length * 4);
-  const dv = new DataView(relocs.buffer);
-  triples.forEach((v, k) => dv.setUint32(k * 4, v >>> 0, true)); // little-endian
-
-  return { moduleText, relocs };
-}
 
 export class SvmJaclRunner {
   private readonly ex: SvmBrowserExports;
@@ -186,28 +161,23 @@ export class SvmJaclRunner {
   }
 
   /**
-   * The **live-editing** path: link the SVM IR text the JACL frontend emitted (`jacl_emit_ir`; see
+   * The **live-editing** path: link the SVM IR the JACL frontend emitted (`jacl_emit_ir`; see
    * {@link JaclFrontend}) against the JACL runtime (`jaclrt.svm` bytes) and run it — no precompiled
-   * `.svmb` needed. `programIr` is the raw frontend output (IR text + optional `%%RELOCS%%`).
+   * `.svmb` needed. `programIr` is the frontend's raw output: self-contained svm-text (wire v9 —
+   * own-data addresses are inline `data.self` instructions the linker resolves, so there is no
+   * separate relocation buffer).
    *
-   * The generic cdylib entry (`svm_link_run`) is language-agnostic — it takes a program module, a
-   * library module, an entry-export name, and a flat reloc buffer. The JACL-frontend specifics live
-   * here: the {@link splitJaclEmit} wire format and the `__jacl_entry` entry name.
+   * The generic cdylib entry (`svm_link_run`) is language-agnostic — it takes a program unit, a
+   * library unit (each text or a `.svmo` binary object, sniffed by magic), and an entry-export name.
+   * The only JACL-frontend specific here is the `__jacl_entry` entry name.
    */
   linkRun(programIr: string, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
     const ex = this.ex;
-    const { moduleText, relocs } = splitJaclEmit(programIr);
-    const prog = new TextEncoder().encode(moduleText);
+    const prog = new TextEncoder().encode(programIr);
     const entry = new TextEncoder().encode(JACL_ENTRY);
     const progPtr = this.load(prog);
     const rtPtr = this.load(runtime);
     const entryPtr = this.load(entry);
-    let relPtr: number | bigint = this.usize(0);
-    let relLen: number | bigint = this.usize(0);
-    if (relocs.length > 0) {
-      relPtr = this.load(relocs);
-      relLen = this.usize(relocs.length);
-    }
     let inPtr: number | bigint = this.usize(0);
     let inLen: number | bigint = this.usize(0);
     if (stdin && stdin.length > 0) {
@@ -221,8 +191,6 @@ export class SvmJaclRunner {
       this.usize(runtime.length),
       entryPtr,
       this.usize(entry.length),
-      relPtr,
-      relLen,
       inPtr,
       inLen,
     );
