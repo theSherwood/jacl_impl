@@ -69,7 +69,7 @@ fn build_instance(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let (program, relocs) = jacl_runtime_harness::decode_emitted(&out.stdout)?;
+    let program = jacl_runtime_harness::decode_emitted(&out.stdout)?;
 
     let linked = svm_ir::link_with_manifest(&[
         LinkUnit {
@@ -85,7 +85,6 @@ fn build_instance(
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

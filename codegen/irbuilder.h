@@ -71,7 +71,7 @@ void      irb_set_memory(IrModule *m, uint8_t size_log2);
 
 /* Append a read-only data segment (e.g. a string literal's bytes) to the window and
  * return its unit-local byte offset. After linking, the segment is relocated by the
- * unit's data base; reference it with irb_data_addr so the address const is patched. */
+ * unit's data base; reference it with irb_data_addr, which emits a link-form address. */
 uint64_t  irb_add_data(IrModule *m, const char *bytes, uint32_t len);
 
 /* Append a function with the given signature; returns its handle. Functions are
@@ -104,9 +104,9 @@ IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, in
  * suitable as the index operand of irb_call_indirect. */
 IrVal irb_ref_func(IrFunc *f, IrBlock b, const IrFunc *callee);
 
-/* An i64 constant holding the unit-local offset `local_off` of a data segment, plus a
- * recorded relocation so the linker patches it to the segment's final window address.
- * Pass the result where the runtime expects a data pointer (e.g. jacl_str_new). */
+/* Link-form own-data address (v9 `data.self <local_off>`): an i64 that the linker rewrites
+ * to the data segment's final window address (`i64.const dbase + local_off`). Pass the
+ * result where the runtime expects a data pointer (e.g. jacl_str_new). */
 IrVal irb_data_addr(IrFunc *f, IrBlock b, uint64_t local_off);
 
 /* Width conversion (i64.extend_i32_s/u, i32.wrap_i64). */
@@ -148,24 +148,16 @@ void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *ar
 /* ---- serialization ---- */
 
 /* Serialize the whole module to svm-text. Returns a malloc'd NUL-terminated string;
- * the caller frees it. */
+ * the caller frees it. Own-data addresses print as `data.self <offset>` (v9). */
 char *irb_to_text(const IrModule *m);
 
-/* Serialize the data relocations (one `<func> <block> <inst>` line each) — the linker
- * applies these as SelfData relocs on this unit. malloc'd; "" if none; caller frees. */
-char *irb_relocs_text(const IrModule *m);
-
-/* Serialize the whole module to the svm-encode **binary** format (VERSION 8) — the bytes
- * the §22 `Jit` capability consumes directly (no text round-trip). Returns a malloc'd
- * buffer of `*out_len` bytes; the caller frees it. Round-trip-equal to the text path:
- * `svm_encode::decode_module(irb_to_encoded(m))` equals `svm_text::parse_module(irb_to_text(m))`.
- * The import/type sections are interned exactly as parse_module interns name-inline
- * `call.sym`, so both paths reference the same indices. */
+/* Serialize the whole module to the svm-encode **binary object** (v9 object dialect, the
+ * default `emit_jacl` output and the bytes the §22 `Jit` capability consumes). irb output
+ * is always a pre-link unit — it carries `data.self` own-data addresses and unresolved
+ * `call.sym`s that `link` resolves — so the object flag is always set. Returns a malloc'd
+ * buffer of `*out_len` bytes; the caller frees it. The harness decodes it with
+ * `svm_encode::decode_unit` (`decode_module` rejects objects); round-trip-equal to the text
+ * path: `decode_unit(irb_to_encoded(m))` equals `svm_text::parse_unit(irb_to_text(m))`. */
 uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len);
-
-/* Binary form of the data relocations: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
- * u32 inst)]`, little-endian. Rides ahead of the module bytes in the emit driver's binary
- * container (the default `emit_jacl` output). malloc'd; caller frees. */
-uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len);
 
 #endif /* JACL_IRBUILDER_H */

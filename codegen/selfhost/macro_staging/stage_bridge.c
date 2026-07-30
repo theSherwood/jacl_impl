@@ -11,32 +11,18 @@
  * the frontend's serializers; it pulls in the frontend header for the shared types. */
 #include "../../../src/jacl.h" /* AstNode, MacroEntry, arena_t, ast_alloc, arena_alloc */
 #include "../../codegen.h"     /* svm_codegen_staged_macro */
-#include "../../irbuilder.h"   /* irb_to_text, irb_relocs_text */
+#include "../../irbuilder.h"   /* irb_to_encoded */
 #include "syn_wire.c"          /* synw_encode / synw_decode (unity; needs the frontend above) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The in-process SVM staging bridge (runtime/harness staticlib). */
-extern int jacl_svm_stage(const char *module_text, const unsigned *relocs, size_t relocs_len,
+/* The in-process SVM staging bridge (runtime/harness staticlib): takes the svm-encode object
+ * bytes (v9; own-data addresses are inline `data.self`, resolved by link — no reloc table). */
+extern int jacl_svm_stage(const unsigned char *module_bytes, size_t module_len,
                           const unsigned char *arg_wire, size_t arg_len,
                           unsigned char **out_ptr, size_t *out_len);
 extern void jacl_svm_stage_free(unsigned char *ptr, size_t len);
-
-/* Parse "<func> <block> <inst>\n…" into a flat u32-triple array; *n gets the triple count. */
-static unsigned *stage__parse_relocs(const char *text, size_t *n) {
-  size_t cap = 8, cnt = 0; unsigned *v = (unsigned *)malloc(cap * 3 * sizeof(unsigned));
-  const char *p = text;
-  while (p && *p) {
-    unsigned f, b, i;
-    if (sscanf(p, "%u %u %u", &f, &b, &i) == 3) {
-      if (cnt == cap) { cap *= 2; v = (unsigned *)realloc(v, cap * 3 * sizeof(unsigned)); }
-      v[cnt*3] = f; v[cnt*3+1] = b; v[cnt*3+2] = i; cnt++;
-    }
-    const char *nl = strchr(p, '\n'); p = nl ? nl + 1 : NULL;
-  }
-  *n = cnt; return v;
-}
 
 /* Matches jacl_macro_stage_hook: expand `entry(args…)` on SVM, returning the AST in *out
  * (arena-allocated). NULL on success, else an error string. */
@@ -50,9 +36,8 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
                                          entry->param_name_lens, entry->param_count,
                                          entry->variadic, entry->body, errbuf, sizeof errbuf);
   if (!m) return errbuf[0] ? errbuf : "staged codegen failed";
-  char *text  = irb_to_text(m);
-  char *rtext = irb_relocs_text(m);
-  size_t nrelocs = 0; unsigned *relocs = (rtext && rtext[0]) ? stage__parse_relocs(rtext, &nrelocs) : NULL;
+  size_t mlen = 0;
+  uint8_t *mbytes = irb_to_encoded(m, &mlen);
 
   /* 2. encode the argument ASTs to the wire the staged entry reads: one shared version byte,
    * then a syntax node per fixed parameter, then (variadic only) a u32 count and that many
@@ -69,7 +54,7 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
       STAGE_APPEND(&rest_count, sizeof rest_count);
     }
     size_t bn; unsigned char *b = synw_encode(args[i], &bn);
-    if (!b) { free(wire); free(relocs); return "staged arg encode failed"; }
+    if (!b) { free(wire); free(mbytes); return "staged arg encode failed"; }
     STAGE_APPEND(b + 1, bn - 1);   /* drop synw_encode's per-node version byte */
     free(b);
   }
@@ -82,8 +67,8 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
 
   /* 3. run on SVM. */
   unsigned char *res = NULL; size_t reslen = 0;
-  int rc = jacl_svm_stage(text, relocs, nrelocs, wire, wlen, &res, &reslen);
-  free(wire); free(relocs);
+  int rc = jacl_svm_stage(mbytes, mlen, wire, wlen, &res, &reslen);
+  free(wire); free(mbytes);
   if (rc != 0) {
     snprintf(errbuf, sizeof errbuf, "SVM staging failed (rc=%d)", rc);
     return errbuf;

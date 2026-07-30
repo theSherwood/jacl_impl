@@ -11,7 +11,7 @@
 //! *canonical* svm-text (`text == print_module(parse_module(text))`).
 //!
 //! It also gates the **binary** serializer (`irb_to_encoded`) against the text one:
-//! `decode_module(irb_to_encoded(m))` must equal `parse_module(irb_to_text(m))` across the
+//! `decode_unit(irb_to_encoded(m))` must equal `parse_module(irb_to_text(m))` across the
 //! whole corpus (`encoded_binary_matches_text_module`) — item 1 of the guest-JIT staging
 //! plan, since the §22 `Jit` capability consumes the binary form directly.
 
@@ -278,8 +278,11 @@ fn encoded_binary_matches_text_module() {
     ] {
         let from_text = svm_text::parse_module(&emit(module))
             .unwrap_or_else(|e| panic!("parse text {module}: {e:?}"));
-        let from_binary = svm_encode::decode_module(&emit_encoded(module))
-            .unwrap_or_else(|e| panic!("decode binary {module}: {e:?}"));
+        // irb emits a v9 **object** (pre-link unit) — decode it with `decode_unit`
+        // (`decode_module` rejects objects). The demo corpus uses no `data.self`, so the
+        // decoded Module equals the text one.
+        let from_binary = svm_encode::decode_unit(&emit_encoded(module))
+            .unwrap_or_else(|e| panic!("decode object {module}: {e:?}"));
         assert_eq!(
             from_binary, from_text,
             "irb_to_encoded({module}) decodes to a different Module than parse_module(irb_to_text)"

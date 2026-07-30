@@ -11,7 +11,7 @@
 //! translated **once** and cached: translation dominates the cost, and it is identical for
 //! every macro.
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::c_int;
 use std::sync::OnceLock;
 
 use svm_ir::{LinkUnit, Module};
@@ -33,10 +33,9 @@ fn staging_runtime() -> &'static Option<(Module, Vec<(String, u32)>)> {
 
 /// Run a staged-macro module on SVM and return the result `syn_wire` bytes.
 ///
-/// * `module_text` — NUL-terminated svm-text of the module from `svm_codegen_staged_macro`
-///   (`irb_to_text`).
-/// * `relocs` — `relocs_len` flat `[func, block, inst]` triples (i.e. `3 * relocs_len` u32s),
-///   the SelfData relocations from `irb_relocs_text`; may be null when `relocs_len == 0`.
+/// * `module_bytes` / `module_len` — the svm-encode **object** (v9) from
+///   `svm_codegen_staged_macro` + `irb_to_encoded`. Own-data addresses are inline `data.self`
+///   instructions that `link` resolves — no separate relocation table.
 /// * `arg_wire` / `arg_len` — the argument wire (one version byte, then the N parameter
 ///   syntax values back-to-back), fed to the module on stdin.
 /// * `out_ptr` / `out_len` — on success, receive a heap buffer of result-wire bytes; free it
@@ -45,45 +44,27 @@ fn staging_runtime() -> &'static Option<(Module, Vec<(String, u32)>)> {
 /// Returns 0 on success, non-zero on error (nothing is written to the out-params on error).
 ///
 /// # Safety
-/// All pointers must be valid for their stated lengths; `module_text` must be a valid
-/// NUL-terminated C string.
+/// All pointers must be valid for their stated lengths.
 #[no_mangle]
 pub unsafe extern "C" fn jacl_svm_stage(
-    module_text: *const c_char,
-    relocs: *const u32,
-    relocs_len: usize,
+    module_bytes: *const u8,
+    module_len: usize,
     arg_wire: *const u8,
     arg_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> c_int {
-    if module_text.is_null() || out_ptr.is_null() || out_len.is_null() {
+    if module_bytes.is_null() || module_len == 0 || out_ptr.is_null() || out_len.is_null() {
         return 1;
     }
-    let text = match std::ffi::CStr::from_ptr(module_text).to_str() {
-        Ok(s) => s,
-        Err(_) => return 2,
-    };
-    let reloc_vec: Vec<svm_ir::DataReloc> = if relocs_len == 0 || relocs.is_null() {
-        Vec::new()
-    } else {
-        let flat = std::slice::from_raw_parts(relocs, relocs_len * 3);
-        (0..relocs_len)
-            .map(|i| svm_ir::DataReloc {
-                func: flat[i * 3],
-                block: flat[i * 3 + 1],
-                inst: flat[i * 3 + 2],
-                kind: svm_ir::RelocKind::SelfData,
-            })
-            .collect()
-    };
+    let module_bytes = std::slice::from_raw_parts(module_bytes, module_len);
     let stdin_bytes: &[u8] = if arg_len == 0 || arg_wire.is_null() {
         &[]
     } else {
         std::slice::from_raw_parts(arg_wire, arg_len)
     };
 
-    match stage_run(text, reloc_vec, stdin_bytes) {
+    match stage_run(module_bytes, stdin_bytes) {
         Ok(bytes) => {
             let mut boxed = bytes.into_boxed_slice();
             *out_len = boxed.len();
@@ -106,8 +87,8 @@ pub unsafe extern "C" fn jacl_svm_stage_free(ptr: *mut u8, len: usize) {
     }
 }
 
-fn stage_run(text: &str, relocs: Vec<svm_ir::DataReloc>, stdin_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let program = svm_text::parse_module(text).map_err(|e| format!("parse: {e:?}"))?;
+fn stage_run(module_bytes: &[u8], stdin_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let program = svm_encode::decode_unit(module_bytes).map_err(|e| format!("decode: {e:?}"))?;
     let (rt_module, rt_exports) = staging_runtime()
         .as_ref()
         .ok_or_else(|| "staging runtime translation unavailable".to_string())?;
@@ -117,7 +98,6 @@ fn stage_run(text: &str, relocs: Vec<svm_ir::DataReloc>, stdin_bytes: &[u8]) -> 
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])

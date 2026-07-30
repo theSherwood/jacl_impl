@@ -9,10 +9,10 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
 - `irbuilder.h` / `irbuilder.c` — **P2.1: the IR builder.** An in-memory SVM-IR
   module/func/block/inst representation mirroring `svm-ir`'s shape, with two serializers
   behind one API: `irb_to_text` (the svm-text form `svm_text::parse_module` accepts, for
-  goldens/human diffs) and `irb_to_encoded` (the `svm-encode` **binary** form
-  `svm_encode::decode_module` accepts — the default interchange since guest-JIT staging
-  item 7). `irb_relocs_text` / `irb_relocs_encoded` are the matching reloc serializers.
-  The two are round-trip-gated against each other (`runtime/harness/tests/irbuilder.rs`).
+  goldens/human diffs) and `irb_to_encoded` (the `svm-encode` **binary object** — v9 object
+  dialect — that `svm_encode::decode_unit` accepts, the default interchange). Own-data
+  addresses are inline `data.self` instructions the linker resolves, so there is no separate
+  relocation serializer. The two are round-trip-gated (`runtime/harness/tests/irbuilder.rs`).
 
   Instruction surface: `i32/i64.const`, integer binops + comparisons, `load`/`store`
   (with a `memory` declaration), direct `call`, name-inline `call.import`, and the
@@ -61,14 +61,13 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     dynamic `jacl_*` call; `dyn` falls back to the dynamic path. Unboxing is confined
     to typed arithmetic trees — locals/frame stay all-i64 boxed JaclVals.
 
-  - **P2.8 (strings + vectors):** string literals build a `data` segment + a relocated
-    address const and call `jacl_str_new`; interpolation / `[concat …]` fold
-    `jacl_str_concat` (with `jacl_to_string` of expression segments). `[vec …]` →
-    `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`. The IR builder gained
-    data segments + `SelfData` relocations (`irb_add_data`/`irb_data_addr`/
-    `irb_relocs_text`/`irb_relocs_encoded`); the driver rides the relocs ahead of the
-    module bytes in its binary container (`--text` mode uses a `%%RELOCS%%` sentinel), and
-    the harness (`decode_emitted`) passes them to `svm_ir::link`.
+  - **P2.8 (strings + vectors):** string literals build a `data` segment + a link-form
+    own-data address (`data.self`, v9) and call `jacl_str_new`; interpolation / `[concat …]`
+    fold `jacl_str_concat` (with `jacl_to_string` of expression segments). `[vec …]` →
+    `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`. The IR builder emits data
+    segments + `data.self` addresses (`irb_add_data` / `irb_data_addr`); `svm_ir::link`
+    rewrites each `data.self` to the segment's final window address, so there is no separate
+    relocation table on the wire (the object carries everything).
 
   - **P2.9 (GC):** the codegen entry initializes the runtime (`jacl_heap_init` /
     `jacl_intern_init` / `jacl_map_init`) before the program runs. GC is stop-the-world,
@@ -89,7 +88,7 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
 
 - `tests/emit_jacl.c` — parses a JACL source snippet through the real frontend
   (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`, writing
-  the program module as the default **binary container** (`--text` for svm-text). Built
+  the program as the default v9 svm-encode **object** (`--text` for svm-text). Built
   with **gcc** (the frontend's toolchain).
 
 ## Phase 4 — corpus bring-up (parity scoreboard)
@@ -216,7 +215,7 @@ the call work for a real closure: the callee reads its captured upvalues back ou
 module, then parses → verifies → runs it on interp + JIT (and checks import-free output
 is canonical svm-text, plus that `irb_to_encoded` decodes to the same `Module` as the text
 path). `runtime/harness/tests/codegen.rs` does the same from real JACL source through
-`svm_codegen_program`, decoding the binary emit container (`decode_emitted`) and linking
+`svm_codegen_program`, decoding the binary emit object (`decode_emitted`) and linking
 each program against the runtime artifact. Run from `runtime/harness/`:
 
 ```sh

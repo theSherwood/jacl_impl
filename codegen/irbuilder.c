@@ -10,7 +10,7 @@
 
 typedef enum {
   K_CONST_I32, K_CONST_I64, K_INTBIN, K_INTCMP, K_LOAD, K_STORE, K_CALL, K_CALL_IMPORT,
-  K_REF_FUNC, K_CONVERT, K_CALL_INDIRECT, K_SUSPEND
+  K_REF_FUNC, K_CONVERT, K_CALL_INDIRECT, K_SUSPEND, K_DATA_SELF
 } InstKind;
 
 typedef struct {
@@ -60,13 +60,11 @@ struct IrFunc {
 };
 
 typedef struct { uint64_t off; char *bytes; uint32_t len; } DataSeg;
-typedef struct { uint32_t func, block, inst; } Reloc;
 
 struct IrModule {
   IrFunc **funcs; int nfuncs, cap_funcs;
   int      has_memory; uint8_t mem_log2;
   DataSeg *data; int ndata, cap_data; uint64_t data_top;
-  Reloc   *relocs; int nrelocs, cap_relocs;
 };
 
 /* ---- small helpers ---- */
@@ -113,10 +111,8 @@ static IrVal take_val(Block *blk) { return blk->next_val++; }
 IrModule *irb_module_new(void) {
   IrModule *m = xmalloc(sizeof(*m));
   /* Zero the WHOLE struct: irb_module_free / irb_add_data also touch data/ndata/
-   * cap_data/relocs/nrelocs/cap_relocs, which the field-by-field init here used to
-   * miss — leaving heap garbage that free()/realloc() blew up on whenever the
-   * allocator handed back a dirty chunk (latent until the embedder did any malloc
-   * before irb_module_new; the parity runner's file read exposed it). */
+   * cap_data, which a field-by-field init could miss — leaving heap garbage that
+   * free()/realloc() blew up on whenever the allocator handed back a dirty chunk. */
   memset(m, 0, sizeof(*m));
   return m;
 }
@@ -139,23 +135,13 @@ uint64_t irb_add_data(IrModule *m, const char *bytes, uint32_t len) {
   return off;
 }
 
-/* Record a SelfData relocation on the most recently emitted instruction of `b`. */
-static void record_reloc(IrFunc *f, IrBlock b) {
-  IrModule *m = f->module;
-  if (m->nrelocs == m->cap_relocs) {
-    m->cap_relocs = m->cap_relocs ? m->cap_relocs * 2 : 8;
-    m->relocs = realloc(m->relocs, (size_t)m->cap_relocs * sizeof(Reloc));
-    if (!m->relocs) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
-  }
-  Block *blk = block_at(f, b);
-  m->relocs[m->nrelocs++] = (Reloc){(uint32_t)irb_func_index(m, f), (uint32_t)b, (uint32_t)(blk->ninsts - 1)};
-}
-
 IrVal irb_data_addr(IrFunc *f, IrBlock b, uint64_t local_off) {
+  /* Link-form own-data address (v9 `data.self`): the object dialect carries the offset in
+   * the instruction itself; `link` rewrites it to `i64.const (dbase + local_off)`. Replaces
+   * the v8 `i64.const` + out-of-band SelfData relocation. */
   Block *blk = block_at(f, b);
   Inst *in = push_inst(blk);
-  in->kind = K_CONST_I64; in->nresults = 1; in->c64 = (int64_t)local_off;
-  record_reloc(f, b); /* patched to dbase + local_off at link time */
+  in->kind = K_DATA_SELF; in->nresults = 1; in->offset = local_off;
   return take_val(blk);
 }
 
@@ -437,6 +423,8 @@ static void out_inst(Out *o, const Inst *in) {
       break;
     case K_REF_FUNC:
       out_fmt(o, "ref.func %u", in->callee); break;
+    case K_DATA_SELF:
+      out_fmt(o, "data.self %llu", (unsigned long long)in->offset); break;
     case K_SUSPEND:
       out_fmt(o, "suspend v%u", in->a); break;
     case K_CONVERT: {
@@ -546,14 +534,6 @@ char *irb_to_text(const IrModule *m) {
   return o.buf;
 }
 
-char *irb_relocs_text(const IrModule *m) {
-  Out o = {0};
-  for (int i = 0; i < m->nrelocs; i++)
-    out_fmt(&o, "%u %u %u\n", m->relocs[i].func, m->relocs[i].block, m->relocs[i].inst);
-  if (!o.buf) { o.buf = xmalloc(1); o.buf[0] = '\0'; }
-  return o.buf;
-}
-
 /* ---- binary (svm-encode) serialization ---- */
 
 /* Byte-oriented writers over the same growable buffer as the text path. Unlike
@@ -570,13 +550,6 @@ static void out_raw(Out *o, const void *p, size_t n) {
   memcpy(o->buf + o->len, p, n);
   o->len += n;
   o->buf[o->len] = '\0';
-}
-/* Fixed 32-bit little-endian (the reloc-triple wire, shared with the JS host). */
-static void out_u32le(Out *o, uint32_t v) {
-  out_u8(o, (uint8_t)(v & 0xff));
-  out_u8(o, (uint8_t)((v >> 8) & 0xff));
-  out_u8(o, (uint8_t)((v >> 16) & 0xff));
-  out_u8(o, (uint8_t)((v >> 24) & 0xff));
 }
 /* Unsigned LEB128 (svm-encode `write_uleb`). */
 static void out_uleb(Out *o, uint64_t v) {
@@ -689,6 +662,7 @@ static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
       break;
     }
     case K_REF_FUNC: out_u8(o, 0x75); out_uleb(o, in->callee); break;
+    case K_DATA_SELF: out_u8(o, 0x07); out_uleb(o, in->offset); break; /* object-dialect own-data addr */
     case K_CONVERT:
       out_u8(o, in->op == IRB_EXTEND_I32S ? 0x60 : in->op == IRB_EXTEND_I32U ? 0x61 : 0x62);
       out_uleb(o, in->a); break;
@@ -754,7 +728,11 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   Out o = {0};
   static const uint8_t magic[4] = {'S', 'V', 'M', 0};
   out_raw(&o, magic, 4);
-  out_u8(&o, 8);                                   /* VERSION */
+  out_u8(&o, 9);                                   /* VERSION (v9) */
+  /* v9 flags byte: bit 0 marks the **object dialect**. irb always emits a pre-link unit (it
+   * carries `data.self` and unresolved `call.sym`s, resolved by `link`), and `data.self` is
+   * object-only, so this is always set. The harness decodes it with `decode_unit`. */
+  out_u8(&o, 0x01);
   /* Memory descriptor: presence flag, then size_log2. */
   if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); }
   else out_u8(&o, 0);
@@ -767,6 +745,9 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
     out_uleb(&o, m->data[i].len);
     out_raw(&o, m->data[i].bytes, m->data[i].len);
   }
+  /* Object-only `data.ptr` relocation section (v9): none — irb never embeds a raw pointer
+   * inside the data image (own-data addresses are `data.self` instructions in code). */
+  out_uleb(&o, 0);
   /* Import section: name, shape tag (0=func) + type index, mode byte (0=required). */
   out_uleb(&o, (uint64_t)tab.nimports);
   for (int i = 0; i < tab.nimports; i++) {
@@ -776,6 +757,8 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
     out_u8(&o, 0);
   }
   /* Export section: none (irb emits no named entry points). */
+  out_uleb(&o, 0);
+  /* Object-only data-export section (v9): none — irb exports no named data symbols. */
   out_uleb(&o, 0);
   /* Type section: each entry tagged (0=func), then param + result type lists. */
   out_uleb(&o, (uint64_t)tab.ntypes);
@@ -795,22 +778,6 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   free(tab.types);
   free(tab.imports);
 
-  if (!o.buf) { o.buf = xmalloc(1); }
-  *out_len = o.len;
-  return (uint8_t *)o.buf;
-}
-
-/* The binary form of irb_relocs_text: `[u32 nrelocs][nrelocs × (u32 func, u32 block,
- * u32 inst)]`, all little-endian — the count-prefixed SelfData relocs that ride ahead of
- * the module bytes in the emit driver's binary container. Malloc'd; caller frees. */
-uint8_t *irb_relocs_encoded(const IrModule *m, size_t *out_len) {
-  Out o = {0};
-  out_u32le(&o, (uint32_t)m->nrelocs);
-  for (int i = 0; i < m->nrelocs; i++) {
-    out_u32le(&o, m->relocs[i].func);
-    out_u32le(&o, m->relocs[i].block);
-    out_u32le(&o, m->relocs[i].inst);
-  }
   if (!o.buf) { o.buf = xmalloc(1); }
   *out_len = o.len;
   return (uint8_t *)o.buf;
@@ -845,7 +812,6 @@ void irb_module_free(IrModule *m) {
   }
   for (int i = 0; i < m->ndata; i++) free(m->data[i].bytes);
   free(m->data);
-  free(m->relocs);
   free(m->funcs);
   free(m);
 }

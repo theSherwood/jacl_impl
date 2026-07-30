@@ -348,12 +348,12 @@ static int run_interp(int argc, char **argv) {
 #include <emscripten.h>
 /* Browser frontend entry (docs/SVM_BROWSER_PLAN.md, option b): compile a single JACL source
  * string to SVM IR text, entirely client-side. Returns a malloc'd C string the JS host reads via
- * UTF8ToString and frees via `_free`. On success the string is the IR text, optionally followed by
- * a `%%RELOCS%%\n` sentinel + SelfData relocs (same wire format the native `--file` path prints, so
- * the JS linker splits it identically). On failure it begins with `%%ERROR%%\n` then the diagnostic
- * — the same messages the native path prints to stderr, so `# expect-error` semantics are preserved.
- * Module programs (top-level `use`) need filesystem import resolution and are rejected here for now
- * (single-file live editing). Never returns NULL (OOM aside). */
+ * UTF8ToString and frees via `_free`. On success the string is the self-contained IR text —
+ * own-data addresses are inline `data.self` instructions (v9) the JS link path resolves, so
+ * there is no separate `%%RELOCS%%` section. On failure it begins with `%%ERROR%%\n` then the
+ * diagnostic — the same messages the native path prints to stderr, so `# expect-error` semantics
+ * are preserved. Module programs (top-level `use`) need filesystem import resolution and are
+ * rejected here for now (single-file live editing). Never returns NULL (OOM aside). */
 static char *emit_dup(const char *s) {
   char *p = (char *)malloc(strlen(s) + 1);
   if (p) strcpy(p, s);
@@ -415,18 +415,12 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   char err[256] = {0};
   IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, err, sizeof err);
   if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
+  /* Own-data addresses are now inline `data.self` instructions (v9), so the text is
+   * self-contained — no separate `%%RELOCS%%` section. (The JS link path decodes/links
+   * `data.self` itself; a scoped follow-up alongside the object-dialect browser work.) */
   char *text = irb_to_text(m);
-  char *relocs = irb_relocs_text(m);
-  char *out;
-  if (relocs[0]) {
-    size_t n = strlen(text) + strlen("%%RELOCS%%\n") + strlen(relocs) + 1;
-    out = (char *)malloc(n);
-    if (out) snprintf(out, n, "%s%%%%RELOCS%%%%\n%s", text, relocs);
-  } else {
-    out = emit_dup(text);
-  }
+  char *out = emit_dup(text);
   free(text);
-  free(relocs);
   irb_module_free(m);
   arena_destroy(&arena);
   return out;
@@ -559,30 +553,23 @@ int main(int argc, char **argv) {
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   if (text_mode) {
-    /* svm-text form (goldens / human diffs). Data relocations follow the module after a
-     * sentinel; the harness splits on it and feeds them to svm_ir::link as SelfData relocs. */
+    /* svm-text form (goldens / human diffs). Self-contained: own-data addresses are inline
+     * `data.self` instructions (v9), so there is no separate relocation section. */
     char *text = irb_to_text(m);
     fputs(text, stdout);
     free(text);
-    char *relocs = irb_relocs_text(m);
-    if (relocs[0]) { fputs("%%RELOCS%%\n", stdout); fputs(relocs, stdout); }
-    free(relocs);
   } else {
-    /* Binary container (default): a 4-byte magic, the count-prefixed SelfData relocs, then
-     * the svm-encode module bytes to EOF. Length-framed (relocs carry their own count), so
-     * it needs no text sentinel — safe over arbitrary module bytes. Decoded by the harness's
-     * `decode_emitted` (runtime/harness/src/lib.rs). */
-    size_t mlen = 0, rlen = 0;
+    /* Binary form (default): the svm-encode **object** (v9 object dialect). It carries its
+     * own `data.self` addresses and unresolved `call.sym`s — `link` resolves both — so there
+     * is no separate relocation frame. Decoded by the harness's `decode_emitted`
+     * (`svm_encode::decode_unit`, runtime/harness/src/lib.rs). */
+    size_t mlen = 0;
     uint8_t *mod = irb_to_encoded(m, &mlen);
-    uint8_t *rel = irb_relocs_encoded(m, &rlen);
-    if (fwrite("JSB1", 1, 4, stdout) != 4 ||
-        (rlen && fwrite(rel, 1, rlen, stdout) != rlen) ||
-        (mlen && fwrite(mod, 1, mlen, stdout) != mlen)) {
+    if (mlen && fwrite(mod, 1, mlen, stdout) != mlen) {
       perror("emit_jacl: write");
-      free(mod); free(rel); irb_module_free(m); arena_destroy(&arena); return 1;
+      free(mod); irb_module_free(m); arena_destroy(&arena); return 1;
     }
     free(mod);
-    free(rel);
   }
   irb_module_free(m);
   arena_destroy(&arena);

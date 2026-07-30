@@ -55,27 +55,10 @@ fn main() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         die("emit_macro_body failed");
     }
-    let raw = String::from_utf8(out.stdout).unwrap_or_else(|_| die("emitted IR not UTF-8"));
-    // Split the module text from its SelfData relocations (%%RELOCS%% wire format) — string/data
-    // literals need these applied at link, else they resolve to empty. (Same as jacl_svm.)
-    let (text, relocs) = match raw.find("%%RELOCS%%") {
-        None => (raw.as_str(), Vec::new()),
-        Some(i) => {
-            let r = raw[i..]
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| {
-                    let n: Vec<u32> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-                    (n.len() == 3).then(|| svm_ir::DataReloc {
-                        func: n[0], block: n[1], inst: n[2], kind: svm_ir::RelocKind::SelfData,
-                    })
-                })
-                .collect::<Vec<_>>();
-            (&raw[..i], r)
-        }
-    };
-    let program = svm_text::parse_module(text).unwrap_or_else(|e| die(&format!("parse: {e:?}")));
+    // Decode the emitted svm-encode object. Own-data addresses are inline `data.self`
+    // instructions that `link` resolves — no separate relocation table.
+    let program = jacl_runtime_harness::decode_emitted(&out.stdout)
+        .unwrap_or_else(|e| die(&format!("decode emitted IR: {e}")));
 
     // 2. translate the staging-extended runtime, link, wrap the entry in the powerbox _start.
     eprintln!("stage_macro: translating staging runtime…");
@@ -85,7 +68,6 @@ fn main() {
         LinkUnit {
             module: program,
             exports: vec![("__jacl_entry".to_string(), 0)],
-            relocations: relocs,
             ..Default::default()
         },
     ])
