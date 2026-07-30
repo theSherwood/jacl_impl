@@ -149,7 +149,16 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_str_new); SYM(jacl_str_concat); SYM(jacl_to_string); \
     /* scalars / misc used when a macro body computes */ \
     SYM(jacl_len); SYM(jacl_eq); SYM(jacl_add); SYM(jacl_sub); SYM(jacl_mul); \
-    SYM(jacl_first); SYM(jacl_index_get)
+    SYM(jacl_first); SYM(jacl_index_get); \
+    /* closures (spawn/parallel/race compile each { block } to a 0-param closure) */ \
+    SYM(jacl_closure_new); SYM(jacl_closure_set); SYM(jacl_closure_fn); SYM(jacl_is_closure_v); \
+    SYM(jacl_proc_sig_register); \
+    /* top-level `def` bindings become runtime globals (jacl_global_get/set) */ \
+    SYM(jacl_global_get); SYM(jacl_global_set); \
+    /* concurrency runtime for in-guest interpret of concurrent source (in_guest=2 scheduler entry): \
+     * the program body runs on the scheduler root fiber (jacl_sched_run_main, above); spawn/await/… \
+     * reach these. `await`/`yield` lower to an inline `cont.suspend` (no import). */ \
+    SYM(jacl_spawn); SYM(jacl_parallel); SYM(jacl_race); SYM(jacl_sleep)
   int counting = 1;
   SYMLIST;
   /* Rewind and emit for real, prefixed by the count. */

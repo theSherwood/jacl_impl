@@ -175,6 +175,12 @@ int main(void) {
   run("PLAIN", "[+ 1 [* 2 3]]", 13);
   const char *mac = "defmacro dbl {x} { syntax-quote [+ ~x ~x] }\ndbl 5\n";
   run("MACRO", mac, (unsigned)__builtin_strlen(mac));
+  /* CONCUR: concurrent source (spawn/await) — the bridge detects concurrency and codegens the
+   * scheduler entry (in_guest=2), so the program body runs on the scheduler root fiber over the
+   * fiber-hosting Jit grant; the spawned { block } runs as a job (its funcref installed unit-own,
+   * vm #546) and await suspends/resumes the root fiber for the result. Returns 7. */
+  const char *con = "def f [spawn { [+ 1 [* 2 3]] }]\nawait $f\n";
+  run("CONCUR", con, (unsigned)__builtin_strlen(con));
   return 0;
 }
 EOF
@@ -182,11 +188,14 @@ EOF
   "$LLVM_LINK" -S "$OUT/interptest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
                "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
                "$OUT/interpret_bridge_guest.ll" -o "$OUT/interptest.ll"
-  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
-  if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out"; then
-    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10), returning live JaclVals."
+  # JACL_POOL_WORKERS=1 keeps the scheduler cooperative single-thread (cont.* only, no thread.spawn) —
+  # the submitted-unit concurrency model (a spawned vCPU may not outlive the synchronous cap.call).
+  JACL_POOL_WORKERS=1 SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
+  if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out" \
+     && grep -q 'CONCUR TAG=2 RESULT=7' "$OUT/interptest.out"; then
+    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10, concurrent spawn/await -> 7), returning live JaclVals."
   else
-    echo "INTERPTEST FAIL — expected in-guest interpret: [+ 1 [* 2 3]] -> 7 and 'dbl 5' -> 10." >&2
+    echo "INTERPTEST FAIL — expected in-guest interpret: [+ 1 [* 2 3]] -> 7, 'dbl 5' -> 10, and concurrent spawn/await -> 7." >&2
     exit 1
   fi
 fi

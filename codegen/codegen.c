@@ -4261,6 +4261,41 @@ static int is_proc_def(AstNode *n) {
   return n->type == AST_COMMAND && n->data.command.head_id == HEAD_PROC;
 }
 
+/* Does `node` reach an op that requires the fiber scheduler — the enum's "Concurrency /
+ * suspension" group (spawn/await/parallel/race/yield/sleep)? Unlike contains_yield this
+ * descends into everything, including nested procs: a proc that awaits still needs the
+ * enclosing execution to run on a scheduler fiber, so the whole program does. Used only to
+ * pick the in-guest `interpret` entry ABI (inline vs scheduler); see svm_program_uses_concurrency. */
+static int node_uses_concurrency(AstNode *node) {
+  if (!node) return 0;
+  if (node->type == AST_COMMAND) {
+    uint8_t hid = node->data.command.head_id;
+    if (hid == HEAD_SPAWN || hid == HEAD_AWAIT || hid == HEAD_PARALLEL ||
+        hid == HEAD_RACE || hid == HEAD_YIELD || hid == HEAD_SLEEP)
+      return 1;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++)
+      if (node_uses_concurrency(node->data.command.args[i])) return 1;
+    return 0;
+  }
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++)
+      if (node_uses_concurrency(node->data.block.commands[i])) return 1;
+    return 0;
+  }
+  if (node->type == AST_RETURN)
+    return node->data.return_stmt.value ? node_uses_concurrency(node->data.return_stmt.value) : 0;
+  return 0;
+}
+
+/* Whole-program predicate: does any top-level form reach a concurrency/suspension op? The
+ * in-guest `interpret` bridge uses this to choose svm_codegen_program's `in_guest` mode — 1
+ * (inline, no fiber authority) for straight-line source, 2 (scheduler root fiber) otherwise. */
+int svm_program_uses_concurrency(AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++)
+    if (node_uses_concurrency(nodes[i])) return 1;
+  return 0;
+}
+
 /* A `[Stream T]` type annotation: a bracket command whose head word is "Stream". */
 static int node_is_stream_type(AstNode *n) {
   if (!n || n->type != AST_COMMAND) return 0;
@@ -4470,7 +4505,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   Cx cx;
   memset(&cx, 0, sizeof cx);
   cx.module_mode = module_mode;
-  cx.data_free = in_guest;   /* in-guest (interpret via Jit cap): string literals data-segment-free (§3b) */
+  cx.data_free = (in_guest != 0);   /* any in-guest mode (Jit cap): string literals data-segment-free (§3b) */
   cx.err = err; cx.errcap = errcap;
 
   IrModule *m = irb_module_new();
@@ -4479,10 +4514,14 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   /* Native: func 0 = entry `(sp)` inits the runtime and runs func 1 = __jacl_main(sp, arg) as the
    * ROOT TASK on a scheduler fiber (program-as-a-job; roots live on a scannable fiber stack, GC-safe).
    *
-   * in_guest (`[interpret …]` run on the Jit cap, docs/SVM_GUEST_JIT_STAGING.md §5): the §22 `Jit`
-   * capability forbids §12 concurrency ops, so the program runs **inline** in the arity-2 entry
-   * `(sp, _)` — init the runtime, run the top-level forms, return the last value (a live JaclVal in
-   * the shared window). No scheduler/`suspend`; concurrent source (spawn/await) is a later slice. */
+   * in_guest (`[interpret …]` run on the Jit cap, docs/SVM_GUEST_JIT_STAGING.md §5):
+   *   1 = guest-**inline**: the program runs inline in the arity-2 entry `(sp, _)` — init the
+   *       runtime, run the top-level forms, return the last value. No scheduler/`suspend`; for
+   *       **non-concurrent** source (the §22 `Jit` cap hosts fibers only when the grant opts in).
+   *   2 = guest-**scheduler**: like native (func 1 = __jacl_main run as the scheduler root fiber via
+   *       `jacl_sched_run_main`), but the arity-2 entry `(sp, _)` matches `__vm_jit_invoke2` — for
+   *       **concurrent** source (spawn/await), which needs the fiber scheduler. Requires a
+   *       fiber-hosting `Jit` grant (`cont.*` in the scheduler); else `compile_linked` fails closed. */
   IrType i64_1[] = {IRB_I64};
   IrType i64_2[] = {IRB_I64, IRB_I64};
   IrType r1[] = {IRB_I64};
@@ -4490,8 +4529,11 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   IrType *entry_params = in_guest ? i64_2 : i64_1;
   IrFunc *entry = irb_func_new(m, entry_params, entry_nparams, r1, 1);
   IrBlock entry_block = irb_block(entry, entry_params, entry_nparams);
-  IrFunc *mainf = in_guest ? entry : irb_func_new(m, i64_2, 2, r1, 1);
-  IrBlock main_block = in_guest ? entry_block : irb_block(mainf, i64_2, 2);
+  /* Inline (in_guest==1) runs the body directly in the entry; native (0) and guest-scheduler (2)
+   * run it in a separate __jacl_main as the scheduler root fiber. */
+  int inline_guest = (in_guest == 1);
+  IrFunc *mainf = inline_guest ? entry : irb_func_new(m, i64_2, 2, r1, 1);
+  IrBlock main_block = inline_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
@@ -4506,7 +4548,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
    * root fiber (native, in __jacl_main) or directly in the entry (in_guest). */
   if (!cx.failed) {
     cx.f = mainf; cx.cur = main_block; cx.sp = 0;
-    if (in_guest) {
+    if (inline_guest) {
       /* Bring up the runtime here (no scheduler): heap, interns, map registry. */
       emit_void_call(&cx, "jacl_heap_init");
       emit_void_call(&cx, "jacl_intern_init");
@@ -4537,9 +4579,11 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
 
-  /* Native func 0 = entry: init the runtime (before anything allocates), then run __jacl_main as the
-   * root task on a fiber and return its result. (in_guest ran it all inline in the entry above.) */
-  if (!in_guest && !cx.failed) {
+  /* Scheduler entry (native func 0, or guest-scheduler in_guest==2): init the runtime, then run
+   * __jacl_main as the root task on a fiber and return its result. (Guest-inline ran it all inline in
+   * the entry above.) Native uses an arity-1 `(sp)` entry; guest-scheduler an arity-2 `(sp, _)` for
+   * `__vm_jit_invoke2` — the entry body is otherwise identical (cx.sp is param 0 either way). */
+  if (!inline_guest && !cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
     emit_void_call(&cx, "jacl_heap_init");
     emit_void_call(&cx, "jacl_intern_init");
