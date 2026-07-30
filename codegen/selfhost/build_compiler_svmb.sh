@@ -181,6 +181,14 @@ int main(void) {
    * vm #546) and await suspends/resumes the root fiber for the result. Returns 7. */
   const char *con = "def f [spawn { [+ 1 [* 2 3]] }]\nawait $f\n";
   run("CONCUR", con, (unsigned)__builtin_strlen(con));
+  /* MAP: a collection program — build a map literal and read it back. Exercises the broadened
+   * runtime symtab (jacl_map_empty/set/get) beyond the arithmetic/macro subset. Returns 42. */
+  const char *mp = "def m [map \"k\" 42]\nmap-get $m \"k\"\n";
+  run("MAP", mp, (unsigned)__builtin_strlen(mp));
+  /* NESTED: `[interpret …]` *inside* interpreted source — the inner program imports jacl_interpret1,
+   * which (the hook still installed) compiles+runs it on the Jit cap in this same window too. Returns 7. */
+  const char *nst = "[interpret \"[+ 4 3]\"]";
+  run("NESTED", nst, (unsigned)__builtin_strlen(nst));
   return 0;
 }
 EOF
@@ -192,10 +200,12 @@ EOF
   # the submitted-unit concurrency model (a spawned vCPU may not outlive the synchronous cap.call).
   JACL_POOL_WORKERS=1 SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
   if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out" \
-     && grep -q 'CONCUR TAG=2 RESULT=7' "$OUT/interptest.out"; then
-    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10, concurrent spawn/await -> 7), returning live JaclVals."
+     && grep -q 'CONCUR TAG=2 RESULT=7' "$OUT/interptest.out" \
+     && grep -q 'MAP TAG=2 RESULT=42' "$OUT/interptest.out" \
+     && grep -q 'NESTED TAG=2 RESULT=7' "$OUT/interptest.out"; then
+    echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10, concurrent spawn/await -> 7, map -> 42, nested interpret -> 7), returning live JaclVals."
   else
-    echo "INTERPTEST FAIL — expected in-guest interpret: [+ 1 [* 2 3]] -> 7, 'dbl 5' -> 10, and concurrent spawn/await -> 7." >&2
+    echo "INTERPTEST FAIL — expected in-guest interpret: plain 7, macro 10, concurrent 7, map 42, nested 7." >&2
     exit 1
   fi
 fi

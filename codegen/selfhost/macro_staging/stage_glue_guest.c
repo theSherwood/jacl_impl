@@ -100,7 +100,9 @@ unsigned char *synrt_take_result(size_t *len) {
  * resolver uses only the names the unit actually imports, so a superset is fine; a *missing* name
  * fails closed. The `#define` renames in jaclrt_staging_guest.c are transparent here — `SYM(name)`
  * stringizes the canonical import name but takes `&name`, which expands to the (possibly `jrtg_`-
- * renamed) definition. Extend the list as macros reach further into the runtime. */
+ * renamed) definition. The list now spans the whole codegen-emitted runtime surface (so in-guest
+ * `[interpret …]` covers the full language, not just the macro subset); keep it in sync with
+ * codegen.c's emit_rt_call/emit_void_call targets as the runtime grows. */
 
 static void symtab_uleb(unsigned char *out, size_t cap, size_t *pos, unsigned long v) {
   for (;;) {
@@ -158,7 +160,58 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     /* concurrency runtime for in-guest interpret of concurrent source (in_guest=2 scheduler entry): \
      * the program body runs on the scheduler root fiber (jacl_sched_run_main, above); spawn/await/… \
      * reach these. `await`/`yield` lower to an inline `cont.suspend` (no import). */ \
-    SYM(jacl_spawn); SYM(jacl_parallel); SYM(jacl_race); SYM(jacl_sleep)
+    SYM(jacl_spawn); SYM(jacl_parallel); SYM(jacl_race); SYM(jacl_sleep); \
+    /* --- the remaining codegen-emitted runtime surface, so in-guest `[interpret …]` covers the \
+     * whole language, not just the macro/arithmetic subset (each name is inert unless the unit \
+     * actually imports it). Kept in sync with codegen.c's emit_rt_call/emit_void_call targets. --- */ \
+    /* maps + type predicates */ \
+    SYM(jacl_map_empty); SYM(jacl_map_set); SYM(jacl_map_get); SYM(jacl_map_has_v); \
+    SYM(jacl_map_remove); SYM(jacl_map_keys_v); SYM(jacl_map_vals_v); \
+    SYM(jacl_is_map_v); SYM(jacl_is_error_v); SYM(jacl_not); \
+    /* boxes / cells / atoms */ \
+    SYM(jacl_box_new); SYM(jacl_box_get); SYM(jacl_box_set); \
+    SYM(jacl_cell_new); SYM(jacl_cell_get); SYM(jacl_cell_set); SYM(jacl_atom_watchers); \
+    SYM(jacl_closure_upval); \
+    /* structs + field/dot access */ \
+    SYM(jacl_struct_new); SYM(jacl_struct_put); SYM(jacl_struct_init_field); \
+    SYM(jacl_field_get); SYM(jacl_field_or_index); SYM(jacl_dot_dyn); SYM(jacl_dot_dyn_set); SYM(jacl_qdot); \
+    /* mutable arrays + buffers (Arr / Buf / flatbuf) */ \
+    SYM(jacl_arr_copy); SYM(jacl_arr_set_at); SYM(jacl_arr_set_at_zero); \
+    SYM(jacl_buf_get_checked); SYM(jacl_buf_offset_checked); \
+    SYM(jacl_fbuf_new); SYM(jacl_fbuf_new_nd); SYM(jacl_fbuf_get); SYM(jacl_fbuf_set); SYM(jacl_tvec_mark); \
+    /* typed pointers */ \
+    SYM(jacl_ptr_cast); SYM(jacl_ptr_addr); SYM(jacl_addr_of); SYM(jacl_raw_ptr); \
+    /* coercions */ \
+    SYM(jacl_to_cast); SYM(jacl_widen_to); \
+    /* generators + iteration (yield-based procs) */ \
+    SYM(jacl_gen_new); SYM(jacl_gen_next); SYM(jacl_gen_done); \
+    SYM(jacl_iter_key_at); SYM(jacl_iter_val_at); SYM(jacl_vec_reduce); \
+    /* with-ctx dynamic scope */ \
+    SYM(jacl_ctx_get); SYM(jacl_ctx_set_field); SYM(jacl_ctx_swap); \
+    /* timeout (cooperative deadline over sleeping) */ \
+    SYM(jacl_timeout_begin); SYM(jacl_timeout_end); \
+    /* diagnostics / errors / traces */ \
+    SYM(jacl_panic); SYM(jacl_assert); SYM(jacl_cannot_call); \
+    SYM(jacl_stack_trace); SYM(jacl_trace_push); SYM(jacl_trace_line); SYM(jacl_trace_snapshot); \
+    /* comparisons + remaining arithmetic (the operator lowering table) */ \
+    SYM(jacl_div); SYM(jacl_mod); SYM(jacl_lt); SYM(jacl_gt); SYM(jacl_le); SYM(jacl_ge); SYM(jacl_ne); \
+    /* errors */ \
+    SYM(jacl_error_new); SYM(jacl_error_val); \
+    /* more predicates + atoms + watchers */ \
+    SYM(jacl_is_atom_v); SYM(jacl_is_box_v); SYM(jacl_is_future_v); \
+    SYM(jacl_atom_new); SYM(jacl_watch); SYM(jacl_unwatch); \
+    /* ranges, indexing, slicing, arr push/pop */ \
+    SYM(jacl_range_vec); SYM(jacl_range_inclusive); SYM(jacl_index_op); SYM(jacl_slice_op); \
+    SYM(jacl_arr_pop); SYM(jacl_arr_push_v); SYM(jacl_assert_type); \
+    /* typed-pointer deref/offset */ \
+    SYM(jacl_ptr_deref); SYM(jacl_ptr_offset); \
+    /* streams + the interpret-prelude materializer */ \
+    SYM(jacl_lines); SYM(jacl_interpret_prelude); \
+    /* file-system capability surface */ \
+    SYM(jacl_read_file); SYM(jacl_write_file); SYM(jacl_append_file); \
+    SYM(jacl_delete_file); SYM(jacl_file_exists); SYM(jacl_list_dir); \
+    /* builtins reaching capabilities / nested interpret */ \
+    SYM(jacl_print); SYM(jacl_exec_capture); SYM(jacl_interpret1); SYM(jacl_interpret2)
   int counting = 1;
   SYMLIST;
   /* Rewind and emit for real, prefixed by the count. */
