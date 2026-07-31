@@ -700,3 +700,25 @@ fn string_less_than() {
 fn string_greater_than() {
     run_case("string_gt", i32_val(1)); // [> "xyz" "abc"] -> true
 }
+
+// --- index / slice builtins on SVM (item 6 slice 3a): retires test_index_builtin/test_slice_builtin.
+#[test]
+fn string_index() {
+    run_case("string_index", i32_val(1)); // [index "hello" 1] == "e"
+}
+
+#[test]
+fn vec_index() {
+    run_case("vec_index", i32_val(20)); // [index [vec 10 20 30] 1]
+}
+
+#[test]
+fn string_slice_range() {
+    run_case("string_slice", i32_val(1)); // [slice "hello" 1 3] == "el"
+}
+
+#[test]
+#[ignore = "codegen gap: one-arg [slice s N] form not lowered (two-arg [slice s a b] works)"]
+fn string_slice_from() {
+    run_case("string_slice_from", i32_val(1)); // [slice "hello" 2] == "llo"
+}

@@ -165,6 +165,15 @@ static const char *source_for(const char *name) {
     return "[if [< \"abc\" \"abd\"] { 1 } { 0 }]";      /* -> 1 */
   if (!strcmp(name, "string_gt"))
     return "[if [> \"xyz\" \"abc\"] { 1 } { 0 }]";      /* -> 1 */
+  /* index / slice builtins (item 6 slice 3a: test_index_builtin / test_slice_builtin) */
+  if (!strcmp(name, "string_index"))
+    return "[if [== [index \"hello\" 1] \"e\"] { 1 } { 0 }]"; /* -> 1 */
+  if (!strcmp(name, "vec_index"))
+    return "[+ [index [vec 10 20 30] 1] 0]";           /* -> 20 */
+  if (!strcmp(name, "string_slice"))
+    return "[if [== [slice \"hello\" 1 3] \"el\"] { 1 } { 0 }]"; /* chars [1,3) -> "el" -> 1 */
+  if (!strcmp(name, "string_slice_from"))
+    return "[if [== [slice \"hello\" 2] \"llo\"] { 1 } { 0 }]";  /* from 2 to end -> "llo" -> 1 */
   /* destructuring bind — vec positional, wildcard, rest, named-from-map (item 6 slice 3a:
    * SVM coverage for the native test_destructure_* exec tests, rephrased to return an i32). */
   if (!strcmp(name, "destr_vec"))
