@@ -652,3 +652,51 @@ fn stream_collect_len() {
 fn stream_count() {
     run_case("stream_count", i32_val(7)); // [count [upto 7]]
 }
+
+// --- More stream operators on SVM (item 6 slice 3a): retires test_stream_transform/filter,
+// the take/lines parts of test_stream_seq_ops/test_lines. Each runs on interp AND JIT.
+#[test]
+fn stream_transform_map() {
+    run_case("stream_transform", i32_val(100)); // transform [upto 5] (*10), summed
+}
+
+#[test]
+fn stream_filter_pred() {
+    run_case("stream_filter", i32_val(30)); // filter [upto 10] (>5), summed: 6+7+8+9
+}
+
+#[test]
+fn stream_take_n() {
+    run_case("stream_take", i32_val(3)); // take 3 of [upto 100], summed: 0+1+2
+}
+
+#[test]
+fn stream_lines_count() {
+    run_case("stream_lines", i32_val(3)); // [count [lines "a\nb\nc"]]
+}
+
+#[test]
+fn stream_first_elem() {
+    run_case("stream_first", i32_val(6)); // first of filter([upto 10], >5) -> 6
+}
+
+// --- String equality + ordering on SVM (item 6 slice 3a): retires test_string_eq_cmp.c.
+#[test]
+fn string_equal() {
+    run_case("string_eq", i32_val(1)); // [== "hello" "hello"] -> true
+}
+
+#[test]
+fn string_not_equal() {
+    run_case("string_neq", i32_val(0)); // [== "abc" "abd"] -> false
+}
+
+#[test]
+fn string_less_than() {
+    run_case("string_lt", i32_val(1)); // [< "abc" "abd"] -> true
+}
+
+#[test]
+fn string_greater_than() {
+    run_case("string_gt", i32_val(1)); // [> "xyz" "abc"] -> true
+}
