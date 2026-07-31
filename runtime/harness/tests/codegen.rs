@@ -147,7 +147,10 @@ fn arithmetic_sub_of_mul() {
 }
 
 #[test]
-#[ignore = "pre-existing codegen gap: `+` is binary-only, no variadic fold (see ISSUES.md)"]
+#[ignore = "blocked by the legacy compiler_compile oracle in the native emit_jacl driver (old \
+            compiler is binary-only for `+`), NOT an SVM codegen gap — SVM codegen folds `+` \
+            variadically (codegen.c, the compile_i32 / dynamic fold loops). Un-ignores once the \
+            harness driver drops the oracle (emit-only) or the compiler goes SVM-only (item 6)."]
 fn arithmetic_variadic_fold() {
     run_case("variadic", i32_val(10)); // [+ 1 2 3 4]
 }
@@ -718,7 +721,6 @@ fn string_slice_range() {
 }
 
 #[test]
-#[ignore = "codegen gap: one-arg [slice s N] form not lowered (two-arg [slice s a b] works)"]
 fn string_slice_from() {
     run_case("string_slice_from", i32_val(1)); // [slice "hello" 2] == "llo"
 }
