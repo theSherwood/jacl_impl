@@ -89,6 +89,15 @@ printf '%s\n' "${names[@]}" | node -e '
 ' "$OUT/manifest.json"
 echo "  -> demo/svm/svmb/manifest.json ($(wc -c < "$OUT/manifest.json") bytes)"
 
+# Regression gate: a `# mode: concurrent` program that `sleep`s must RUN on the browser bytecode
+# engine, not trap. Guards the wasm timed-wait path — a wall-clock `Instant::now()` there used to
+# panic ("SVM run failed: unreachable" from bytecode::drive). Runs only when the compiler-guest was
+# built (needs clang-18); `set -e` fails the build if the concurrent run regresses.
+if [ -f "$OUT/jacl_compiler.svmb" ]; then
+  echo "Gate: concurrent run path (concurrent_run.mjs)…"
+  node "$DIR/concurrent_run.mjs" "$DEMO/wasm/svm_browser.wasm" "$OUT/jacl_compiler.svmb" "$DEMO/svm/jaclrt.svm"
+fi
+
 echo ""
 echo "Smoke-test the run path headless:"
 echo "  node demo/svm/run_svmb.mjs demo/wasm/svm_browser.wasm demo/svm/svmb/hi.svmb \$'hi\\n'"
