@@ -348,7 +348,6 @@ body {
     <div id="example-dropdown" class="dropdown hidden"></div>
   </div>
   <div class="toolbar-spacer"></div>
-  <button id="engine-toggle" class="btn" title="Classic = the Emscripten JACL VM (runs any edited source). SVM = the new wasm-safe bytecode engine via the svm-browser cdylib (runs precompiled example .svmb).">Engine: Classic</button>
   <button id="vim-toggle" class="btn" title="Toggle vim keybindings (persisted in localStorage)">Vim: off</button>
   <button id="run-btn" class="btn btn-primary" disabled>Run</button>
   <span class="shortcut-hint">Ctrl+Enter</span>
@@ -372,9 +371,8 @@ body {
   <span id="status-right"></span>
 </div>
 
-<script src="wasm/jacl.js"></script>
 <!-- SVM in-browser frontend (defines createJaclEmit); harmless 404 if the SVM assets aren't built.
-     The heavy wasm only instantiates on demand when the SVM engine's live path first runs. -->
+     The heavy wasm only instantiates on demand when the live-edit path first runs. -->
 <script src="wasm/jacl_emit.js"></script>
 <script type="module" src="dist/playground.js"></script>
 </body>

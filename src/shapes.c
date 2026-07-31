@@ -412,4 +412,68 @@ static uint32_t type_shape_intern_proc(StructTypeRegistry* reg,
   return idx;
 }
 
+/* C-ABI size for a JaclType. Pure struct-layout logic; lives here with
+ * StructTypeRegistry/StructDef so the emit-only build (which excludes
+ * compiler.c) can still resolve it for GC tracing. */
+uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
+  switch (t) {
+    case TYPE_BOOL:    return 1;
+    case TYPE_NIL:     return 0;
+    case TYPE_I8:
+    case TYPE_U8:      return 1;
+    case TYPE_I16:
+    case TYPE_U16:     return 2;
+    case TYPE_I32:
+    case TYPE_U32:
+    case TYPE_F32:     return 4;
+    case TYPE_I64:
+    case TYPE_U64:
+    case TYPE_F64:     return 8;
+    case TYPE_STR:
+    case TYPE_VEC:
+    case TYPE_MAP:
+    case TYPE_CLOSURE:
+    case TYPE_DYN:
+    case TYPE_STREAM:  return 8; /* JaclVal / pointer */
+    case TYPE_STRUCT:
+      if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
+        return reg->defs[struct_idx]->total_size;
+      }
+      return 8; /* fallback */
+    default:           return 8;
+  }
+}
+
+/* Byte size of a type encoding that may be a scalar sentinel, a
+ * struct registry idx, or a chained TYPE_SHAPE_BUF shape (Phase 5b).
+ * Other shape kinds (typed-vec/map/ptr/future/box) are 8 bytes each
+ * (tagged JaclVal slots), same as struct__type_size for those
+ * JaclTypes. Lives here (not compiler.c) so the emit-only build can
+ * resolve it from gc_collect.c. */
+uint64_t compiler__encoding_byte_size(StructTypeRegistry* reg,
+                                      uint32_t encoded) {
+  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
+    return struct__type_size(JACL_TYPE_IDX_TO_SCALAR(encoded), NULL, 0);
+  }
+  if (!reg || encoded >= reg->count) return 0;
+  TypeShape* shape = &reg->shapes[encoded];
+  switch (shape->kind) {
+    case TYPE_SHAPE_STRUCT:
+    case TYPE_SHAPE_CTX:
+      return shape->u.struct_def ? shape->u.struct_def->total_size : 0;
+    case TYPE_SHAPE_BUF:
+      return (uint64_t)shape->u.buf.len *
+             compiler__encoding_byte_size(reg, shape->u.buf.elem_idx);
+    case TYPE_SHAPE_TYPED_VEC:
+    case TYPE_SHAPE_TYPED_MAP:
+    case TYPE_SHAPE_PTR:
+    case TYPE_SHAPE_FUTURE:
+    case TYPE_SHAPE_BOX:
+    case TYPE_SHAPE_PROC:
+      return 8; /* tagged JaclVal slot (closure is a heap pointer) */
+    default:
+      return 0;
+  }
+}
+
 #endif /* SHAPES_C */

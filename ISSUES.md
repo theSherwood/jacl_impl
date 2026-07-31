@@ -5,7 +5,8 @@ Track flaky and broken test gates here (per AGENTS.md) so they stay visible.
 ## `runtime/harness/tests/codegen.rs` — restored, with 6 pre-existing failures `#[ignore]`d
 
 **Status:** the suite builds and runs again (was completely dark — it didn't compile against
-the current `svm` API). **55 pass, 6 `#[ignore]`d.**
+the current `svm` API). As of the item-6 migration it runs on the emit-only driver:
+**96 pass, 2 `#[ignore]`d** (see the driver note below).
 
 **What was fixed.** The harness used the pre-`IMPORTS.md`-phase-4 link/run model
 (`svm_ir::link` + `synth_powerbox_start(linked, entry, 3, false)` + `instantiate`), which no
@@ -18,17 +19,24 @@ longer exists / no longer works: the translated runtime now keeps its `write` ca
 the `else` keyword (`[if C {t} else {e}]` → `[if C {t} {e}]`, and `elif` → nested `if`) and a
 proc named `count` that now collides with a builtin (renamed to `cnt`).
 
-**3 remain `#[ignore]`d** — pre-existing gaps (they fail identically on `main`; the dark suite
-just never surfaced them), not regressions from the macro-staging work:
+**Driver is now emit-only (item 6, slice 3a).** `codegen.rs`'s `driver()` builds
+`emit_jacl.c` with `-DJACL_EMIT_ONLY` — the LLVM-free frontend the product ships
+(`jacl_emit.wasm`), with **no** legacy `compiler_compile` static-error oracle. Accept/reject is
+now exactly the SVM backend's own behavior (typer + codegen). This is a prerequisite for
+deleting `compiler.c`/`vm.c` (slice 3c): the oracle path links against them. Effect on the
+previously-ignored cases: `arithmetic_variadic_fold` is **un-ignored** (SVM codegen folds `+`
+variadically; only the old binary-`+` oracle rejected it).
+
+**2 remain `#[ignore]`d** — deliberate current-semantics gaps, not regressions:
 
 - `for_over_dotdot_range` — the `A..B` dotdot form is not a valid **for-collection** in the
   current syntax: `[for 0..5 i { … }]` parses `0`, `..`, `5` as separate args and fails. Use
   `[for [range A B] binding { … }]` (as the other `for` tests now do). Reconcile if the
   dotdot-as-collection sugar is meant to return.
-- `arithmetic_variadic_fold` — `[+ 1 2 3 4]`; `+` is binary-only in this codegen (no variadic
-  fold).
-- `binding_same_scope_shadow_is_an_error` — top-level `def x 1; def x 2` no longer errors
-  ("already defined in this scope") in this codegen.
+- `binding_same_scope_shadow_is_an_error` — SVM codegen deliberately permits top-level
+  `def x 1; def x 2` as reassignment (`env_define`'s `module_scope` carve-out in `codegen.c`),
+  matching the old VM's top-level semantics. With no oracle in the emit-only driver, this stays
+  ignored unless top-level redef detection is added as a deliberate semantic change.
 
 The `for`-iteration cases were reconciled: the loop syntax changed from `for NAME in COLLECTION`
 to **`for COLLECTION binding { body }`** (collection first, no `in`), and `[range A B]` yields
