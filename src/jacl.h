@@ -821,331 +821,9 @@ typedef struct {
   uint32_t error_count;
 } Parser;
 
-/* ========================================================================
- * Types — bytecode.c
- * ======================================================================== */
-
-#define BYTECODE_INIT_CODE_CAP  256
-#define BYTECODE_INIT_CONST_CAP 64
-
-/* OP_EXEC flags byte — combine with | for mixed modes */
-#define EXEC_FLAG_FULL   0x01  /* Return map {stdout, stderr, exit} instead of stream */
-#define EXEC_FLAG_STDIN  0x02  /* Pop stdin value from stack before args */
-#define EXEC_FLAG_BG     0x04  /* Background: fork and return Job map immediately */
-#define EXEC_FLAG_PIPE   0x08  /* Pipe mode: next byte is command count (2+) */
-
-typedef enum {
-  OP_CONST,
-  OP_NIL,
-  OP_TRUE,
-  OP_FALSE,
-  OP_POP,
-  OP_ADD,
-  OP_SUB,
-  OP_MUL,
-  OP_DIV,
-  OP_MOD,
-  OP_NEG,
-  OP_EQ,
-  OP_LT,
-  OP_GT,
-  OP_LE,
-  OP_GE,
-  OP_PRINT,
-  OP_DEF_GLOBAL,
-  OP_GET_GLOBAL,
-  OP_GET_LOCAL,
-  OP_SET_LOCAL,
-  OP_GET_UPVALUE,
-  OP_JUMP,
-  OP_JUMP_IF_FALSE,
-  OP_LOOP,
-  OP_CALL,
-  OP_TAIL_CALL,
-  OP_RETURN,
-  OP_RETURN_WIDE,    /* return N inline struct slots: uint8_t width */
-  OP_CLOSURE,
-  OP_POP_N,
-  OP_CONCAT,
-  OP_STR_LEN,
-  OP_STR_BYTE_LEN,
-  OP_STR_INDEX,
-  OP_STR_SLICE,
-  OP_TO_STRING,
-  OP_VEC,
-  OP_VEC_GET,
-  OP_VEC_LEN,
-  OP_VEC_PUSH,
-  OP_VEC_SET,
-  OP_VEC_CONCAT,
-  OP_VEC_SLICE,
-  OP_VEC_SPREAD,
-  OP_MAP,
-  OP_MAP_GET,
-  OP_MAP_HAS,
-  OP_MAP_LEN,
-  OP_MAP_SET,
-  OP_MAP_REMOVE,
-  OP_MAP_KEYS,
-  OP_MAP_VALS,
-  OP_EACH,
-  OP_TRANSFORM,
-  OP_FILTER,
-  OP_ERROR,
-  OP_IS_ERROR,
-  OP_ERROR_VAL,
-  OP_CHECK_ERROR,
-  OP_JUMP_IF_ERROR,
-  OP_STACK_TRACE,
-  OP_MAKE_CELL,
-  OP_GET_CELL_LOCAL,
-  OP_SET_CELL_LOCAL,
-  OP_GET_CELL_UPVALUE,
-  OP_SET_CELL_UPVALUE,
-  OP_SET_GLOBAL,
-  OP_BOX,
-  OP_BOX_STRUCT,     /* uint16_t type_idx; pop struct, wrap in typed box, push box */
-  OP_ATOM,
-  OP_DEREF,
-  OP_RESET,
-  OP_SWAP,
-  OP_IS_BOX,
-  OP_IS_BOX_TYPED,   /* uint16_t type_idx; pop value, push true if box with matching type_idx */
-  OP_IS_ATOM,
-  OP_IS_FUTURE,
-  OP_AWAIT,
-  OP_SPAWN,
-  OP_RESOLVE_FUTURE,
-  OP_PARALLEL,
-  OP_RACE,
-  OP_COMPLETE_PARALLEL,
-  OP_COMPLETE_RACE,
-  OP_ADD_I64,
-  OP_SUB_I64,
-  OP_MUL_I64,
-  OP_DIV_I64,
-  OP_MOD_I64,
-  OP_NEG_I64,
-  OP_LT_I64,
-  OP_GT_I64,
-  OP_LE_I64,
-  OP_GE_I64,
-  OP_EQ_I64,
-  OP_DIV_U64,
-  OP_MOD_U64,
-  OP_LT_U64,
-  OP_GT_U64,
-  OP_LE_U64,
-  OP_GE_U64,
-  OP_ADD_F64,
-  OP_SUB_F64,
-  OP_MUL_F64,
-  OP_DIV_F64,
-  OP_MOD_F64,
-  OP_NEG_F64,
-  OP_LT_F64,
-  OP_GT_F64,
-  OP_LE_F64,
-  OP_GE_F64,
-  OP_EQ_F64,
-  OP_TO_I32,
-  OP_TO_I64,
-  OP_TO_U32,
-  OP_TO_U64,
-  OP_TO_F32,
-  OP_TO_F64,
-  OP_TO_DYN,
-  OP_CONST_I64,
-  OP_CONST_U64,
-  OP_CONST_F64,
-  OP_HEAP_RECORD_NEW,
-  OP_HEAP_RECORD_GET,
-  OP_HEAP_RECORD_SET,
-  OP_HEAP_RECORD_GET_DYN,
-  OP_HEAP_RECORD_SET_DYN,
-  OP_HEAP_RECORD_GET_INLINE,  /* u16 byte_offset, u16 sub_type_idx; pop heap record, push N inline slots from data+offset */
-  OP_HEAP_RECORD_SET_INLINE,  /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop heap record, copy to data+offset, push record back */
-  OP_RESET_INLINE,            /* u16 type_idx; reset struct-box: copy N inline slots into box->data, shuffle box out, leave new bytes on TOS */
-  OP_STRUCT_NEW_INLINE,
-  OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
-  OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
-  OP_STRUCT_STORE_INLINE, /* uint8_t base_slot, uint16_t type_idx; de-materialize heap struct to inline stack slots */
-  OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
-  OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
-  OP_LOAD_INLINE_LOCAL,    /* uint8_t base_slot, uint16_t type_idx; copy N inline slots from local to TOS */
-  OP_LOAD_INLINE_UPVALUE,  /* uint8_t base_uv_slot, uint16_t type_idx; copy N inline slots from closure upvalue to TOS */
-  OP_PRINT_STRUCT,         /* uint16_t type_idx; pop N inline slots and print Name{...} */
-  OP_STRUCT_EQ_TOS,        /* uint16_t type_idx; pop two structs (inline or heap), memcmp, push bool */
-  OP_STRUCT_GET_INLINE_TOS,/* uint16_t type_idx, u16 byte_offset, u8 field_type [+ u16 type_idx if STRUCT]; pop inline struct from TOS, push field */
-  OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap HeapRecord, push as N inline stack slots */
-  OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size; memcmp two inline structs, push bool */
-  OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx; hash inline struct bytes, push i32 */
-  OP_HASH,               /* pop value, push i32 hash via jacl_val_hash */
-  OP_CLOSE_LOOP,
-  OP_DESTRUCTURE_VEC,
-  OP_DESTRUCTURE_NAMED,
-  OP_DESTRUCTURE_VEC_REST,
-  OP_DESTRUCTURE_NAMED_REST,
-  OP_SPREAD,
-  OP_CALL_SPREAD,
-  OP_FOLD_SPREAD,
-  OP_COLLECT_VARIADIC,
-  OP_YIELD,
-  OP_STREAM_NEXT,
-  OP_COLLECT,
-  OP_IS_STREAM_EXHAUSTED,
-  OP_COUNT,
-  OP_TAKE,
-  OP_FIRST,
-  OP_LINES,
-  OP_GET_STATE_FIELD,
-  OP_SET_STATE_FIELD,
-  OP_GET_RESUME_POINT,
-  OP_SET_RESUME_POINT,
-  OP_YIELD_SM,
-  OP_AWAIT_SM,
-  OP_SLEEP_SM,    /* pop seconds (number); register timer with runtime, suspend SM */
-  OP_SLEEP_BLOCK, /* pop seconds (number); nanosleep blocking, push nil — non-SM path */
-  OP_CALL_SUSPEND,
-  OP_GET_STATE_FIELD_CELL,
-  OP_SET_STATE_FIELD_CELL,
-  OP_GET_STATE_FIELD_WIDE,  /* uint8_t base_idx, uint8_t width; copy N slots from SM to stack */
-  OP_SET_STATE_FIELD_WIDE,  /* uint8_t base_idx, uint8_t width; copy N slots from stack to SM */
-  OP_SYNTAX_SPLICE,
-  OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
-  OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
-  OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
-  OP_EXEC,         /* uint8_t flags; unified exec opcode — see EXEC_FLAG_* constants */
-  OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
-  OP_SIGNAL,       /* pop signal_name + job; send signal to pid, push $true/$false */
-  OP_HALT,
-  OP_GET_CTX,      /* push vm->ctx (implicit context struct) onto stack */
-  OP_CTX_FORK,     /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
-  OP_CTX_RESTORE,  /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
-  OP_SET_CTX,      /* pop value from stack and store in vm->ctx */
-  OP_RANGE,        /* uint8_t inclusive; pop end, pop start, push range stream */
-  OP_OPTIONAL_GET, /* uint16_t const_idx (field name); pop struct, push field or nil if struct is nil */
-
-  /* --- Typed vector operations --- */
-  OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
-  OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
-  OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
-  OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
-
-  OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count; create typed map */
-  OP_TYPED_MAP_SET,      /* uint16_t type_idx; pop struct, pop key, pop tmap; push new tmap */
-  OP_TYPED_MAP_HAS,      /* pop key, pop tmap; push bool */
-  OP_TYPED_MAP_REMOVE,   /* pop key, pop tmap; push new tmap */
-  OP_TYPED_MAP_LEN,      /* pop tmap; push i32 count */
-  OP_TYPED_MAP_KEYS,     /* pop tmap; push dyn vec of keys */
-  OP_TYPED_MAP_VALS,     /* uint16_t type_idx; pop tmap; push typed vec of values */
-
-  OP_TYPED_VEC_PRINT,    /* uint16_t type_idx; pop tvec; print elements with struct formatting */
-  OP_TYPED_MAP_PRINT,    /* uint16_t type_idx; pop tmap; print entries with struct formatting */
-  OP_TYPED_VEC_EQ,       /* uint16_t type_idx; pop tvec_b, pop tvec_a; push bool */
-  OP_TYPED_MAP_EQ,       /* uint16_t type_idx; pop tmap_b, pop tmap_a; push bool */
-
-  OP_IS_BOX_TYPED_VEC,   /* no operand; pop val; push bool (is box containing typed vec?) */
-  OP_IS_BOX_TYPED_MAP,   /* no operand; pop val; push bool (is box containing typed map?) */
-
-  OP_TYPED_VEC_CONCAT,   /* uint16_t type_idx; pop tvec_b, pop tvec_a; push concatenated tvec */
-  OP_TYPED_VEC_SLICE,    /* uint16_t type_idx; pop end, pop start, pop tvec; push sliced tvec */
-  OP_TYPED_EACH,         /* uint16_t type_idx; pop closure, pop typed coll; iterate with materialized elements */
-  OP_TYPED_TRANSFORM,    /* uint16_t type_idx; pop closure, pop typed coll; transform → dyn vec */
-  OP_TYPED_FILTER,       /* uint16_t type_idx; pop closure, pop typed coll; filter → typed vec */
-
-  OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
-  OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
-  OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
-  OP_DEREF_INLINE,         /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
-
-  /* Stage 5b — typed pointer load/store (appended to keep prior
-   * opcode positions stable). */
-  OP_PTR_LOAD,             /* u16 byte_offset, u8 field_type; pop u64 ptr, push value at *ptr+offset */
-  OP_PTR_STORE,            /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
-
-  /* Stage 5c — typed pointer arithmetic */
-  OP_PTR_OFFSET,           /* u16 elem_size; pop i32/i64 n, pop u64 p, push p + n*elem_size */
-  OP_PTR_DIFF,             /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
-
-  /* Nested struct fields through pointers — load/store whole inline structs at *ptr+offset */
-  OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
-  OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
-  OP_PTR_STORE_INLINE,     /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
-
-  /* --- File I/O builtins (read-file / write-file / append-file) --- */
-  OP_READ_FILE,            /* pop path (string); push file contents (string) or error */
-  OP_WRITE_FILE,           /* pop path (string), pop content (string or stream); write file, push nil or error */
-  OP_APPEND_FILE,          /* pop path (string), pop content (string or stream); append to file, push nil or error */
-
-  /* --- Atom watchers (watch / unwatch) --- */
-  OP_WATCH,                /* pop fn, pop key, pop atom; register fn under key; push nil */
-  OP_UNWATCH,              /* pop key, pop atom; remove watcher under key; push nil */
-
-  /* --- Assertion --- */
-  OP_PANIC,                 /* pop string message, halt unconditionally with that message */
-
-  /* --- Late additions (kept at the end so test_bytecode's
-   *     numeric-stability asserts stay valid) --- */
-  OP_BOX_UNCHECKED,         /* same as OP_BOX, skipping the jacl_is_error
-                               propagation check; emitted by the compiler
-                               when the operand provably cannot carry the
-                               error flag (see compiler__expr_is_error_free) */
-
-  /* Mutable [Arr T] ops (see ARR_DESIGN.md), at the end for numeric
-   * stability. Mirror of the same tail in bytecode.c. */
-  OP_ARR,
-  OP_ARR_GET,
-  OP_ARR_SET,
-  OP_ARR_PUSH,
-  OP_ARR_POP,
-  OP_ARR_LEN,
-  OP_TYPED_ARR,
-  OP_TYPED_ARR_PUSH,
-  OP_TYPED_ARR_SET
-} OpCode;
-
-typedef struct {
-  uint8_t*  code;
-  uint32_t  code_count;
-  uint32_t  code_cap;
-  JaclVal*  constants;
-  uint32_t  const_count;
-  uint32_t  const_cap;
-  uint32_t* lines;
-  uint32_t  lines_cap;
-  arena_t*  arena;
-} BytecodeChunk;
-
-typedef struct {
-  BytecodeChunk chunk;
-  uint8_t       param_count;
-  uint8_t       param_total_slots;   /* total JaclVal slots for all params (sum of widths; >= param_count) */
-  bool          has_inline_params;   /* true if any param is an inline struct (width > 1 or value-type struct) */
-  JaclVal*      param_names;
-  JaclVal*      upvalues;
-  uint8_t       upvalue_count;
-  uint16_t      upvalue_total_slots; /* total JaclVal slots in upvalues array (sum of widths) */
-  const char*   name;
-  uint8_t       min_args;
-  bool          variadic;
-  bool          pinned;
-  int8_t        pin_worker_id;
-  bool          is_generator;
-  bool          is_sm_compiled;
-  uint8_t       sm_field_count;
-  uint8_t       upvalue_inline_bitmap[32]; /* US-014: marks which upvalue slots hold raw struct bytes */
-  /* For generators: the declared [Stream T] element type, encoded like
-   * JaclStream.elem_idx (scalar sentinel / struct idx / dyn sentinel).
-   * Copied to the stream at creation so typed streams know their element
-   * type at runtime. JACL_SCALAR_TYPE_IDX(TYPE_DYN) for [Stream dyn] /
-   * non-generators. */
-  uint32_t      gen_elem_idx;
-  /* TYPE_SHAPE_PROC idx (runtime struct_registry) for the proc's signature,
-   * used for introspection when printing a closure; UINT32_MAX if the proc has
-   * no typed signature. Keep in sync with struct JaclClosure in src/bytecode.c. */
-  uint32_t      proc_shape_idx;
-} JaclClosure;
+/* JaclClosure — legacy bytecode-VM closure; only a forward decl survives
+ * (item 6): the sole remaining user is MacroEntry.closure (a pointer). */
+typedef struct JaclClosure JaclClosure;
 
 /* ========================================================================
  * Collection templates — collections.c
@@ -1179,7 +857,7 @@ typedef struct {
 
 
 /* ========================================================================
- * Types — compiler.c
+ * Types — type-shape registry (shapes.c) + macro table (syntax.c)
  * ======================================================================== */
 
 #define STRUCT_REGISTRY_INIT_CAP 32
@@ -1224,16 +902,9 @@ struct MacroTable {
   uint32_t   count;
 };
 
-typedef struct {
-  BytecodeChunk chunk;
-  uint32_t      error_count;
-  const char*   error_message;
-  bool          suspending;
-  StructTypeRegistry* struct_registry;
-  MacroTable*   macro_table;
-} CompileResult;
-
-/* Forward declaration (full definition below) */
+/* Forward declaration — the full jacl_context_s definition (which embedded the
+ * bytecode VM) was removed with the VM in item 6. The surviving emit-side stubs
+ * (jacl_emit_support.c) and macro-staging consumers use it only by pointer. */
 typedef struct jacl_context_s jacl_context_t;
 
 /* --- ExpandFrame: tracks nested macro expansion for error reporting --- */
@@ -1260,7 +931,7 @@ typedef struct {
     jacl_context_t *ctx;              /* context for macro eval (NULL if N/A) */
 } ExpandState;
 
-/* --- jacl_context_t: reentrant execution context --- */
+/* --- The JaclType enum + type-shape registry types (shapes.c / typer.c) --- */
 
 typedef enum {
   TYPE_DYN = 0,
@@ -1378,440 +1049,43 @@ struct StructTypeRegistry {
   uint32_t  proc_param_cap;
 };
 
-typedef struct {
-  const char* name;
-  uint32_t    name_len;
-  int16_t     arity;
-  bool        is_mutable;
-  bool        suspends;
-  JaclType    type;
-  JaclType    return_type;
-  JaclType    param_types[COMPILER_MAX_PROC_PARAMS];
-  uint32_t    param_count;
-} ExportEntry;
 
-typedef struct {
-  BytecodeChunk* chunk;
-  const char*    path;
-  const char*    source;
-  ExportEntry*   exports;
-  uint32_t       export_count;
-  uint32_t       topo_order;
-  bool           compiled;
-} Module;
 
-typedef struct {
-  Module**    modules;
-  uint32_t    module_count;
-  uint32_t    error_count;
-  const char* error_message;
-  bool        suspending;
-  StructTypeRegistry* struct_registry;
-} ProgramResult;
 
-typedef struct {
-  Module*  modules[MODULE_CACHE_MAX];
-  char*    paths[MODULE_CACHE_MAX];
-  uint32_t count;
-  uint32_t topo_counter;
-  arena_t* arena;
-} ModuleCache;
 
-typedef struct {
-  const char* paths[MODULE_IMPORT_STACK_MAX];
-  uint32_t    count;
-} ImportStack;
 
-typedef struct {
-  JaclVal   name;
-  int       depth;
-  int16_t   known_arity;
-  bool      is_mutable;
-  bool      is_param;
-  bool      suspends;
-  bool      captures_mutable;
-  JaclType  type;
-  uint32_t  struct_type_idx;
-  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
-  JaclType  return_type;
-  uint32_t  return_struct_idx;
-  JaclType* param_types;
-  uint32_t* param_struct_idxs; /* keep in sync with struct Local in src/compiler.c */
-  uint32_t  scope_mark;
-  uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
-  bool      is_inline;        /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
-  uint32_t  buf_len;          /* N for TYPE_BUF (in elements, not slots); 0 otherwise */
-  uint32_t  buf_inner_len;    /* M for TYPE_BUF nested [Buf N [Buf M T]]; 0 for scalar/struct element. M4.2 */
-} Local;
 
-typedef struct {
-  JaclVal   name;
-  int16_t   known_arity;
-  bool      is_mutable;
-  bool      suspends;
-  bool      captures_mutable;
-  bool      prelude_is_native_fn;
-  JaclType  type;
-  uint32_t  struct_type_idx;
-  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
-  JaclType  return_type;
-  uint32_t  return_struct_idx;
-  JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
-  uint32_t  param_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* see compiler.c (B3a) */
-} GlobalArity;
 
 /* Arena-backed growable table of GlobalArity entries. Embedders that
  * call jacl_eval more than once stash one of these on their JaclVM so
  * proc declarations accumulate across calls; grown lazily by
  * compiler_compile when the per-compile table outpaces capacity. */
-typedef struct {
-  GlobalArity *entries;
-  uint32_t     count;
-  uint32_t     capacity;
-} GlobalArityTable;
 
-typedef struct {
-  uint8_t   index;
-  uint8_t   is_local;
-  JaclVal   name;
-  bool      is_mutable;
-  bool      suspends;
-  bool      captures_mutable;
-  JaclType  type;
-  uint32_t  struct_type_idx;
-  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
-  uint32_t  scope_mark;
-  uint16_t  width;      /* JaclVal slot count: 1 for scalars, N for inline structs */
-  bool      is_inline;  /* true if capturing an inline struct (raw bytes, not heap) */
-  uint16_t  base_slot;  /* position in this closure's upvalue array */
-} Upvalue;
 
-typedef struct {
-  JaclVal name;
-  bool    suspends;
-  bool    is_generator;
-} SuspensionEntry;
 
-typedef struct {
-  SuspensionEntry entries[SUSPENSION_MAP_MAX];
-  uint32_t count;
-} SuspensionMap;
 
-typedef struct {
-  JaclVal  name;
-  bool     direct_suspends;
-  bool     has_yield;
-  bool     has_indirect_call;
-  JaclVal  callees[SUSPENSION_CALLEES_MAX];
-  uint32_t callee_count;
-} ProcSuspendInfo;
 
-typedef struct {
-  ProcSuspendInfo procs[MAX_PROC_INFOS];
-  uint32_t count;
-} ProcSuspendInfoList;
 
-typedef enum {
-  SUSPEND_YIELD,
-  SUSPEND_AWAIT,
-  SUSPEND_PARALLEL,
-  SUSPEND_RACE,
-  SUSPEND_CALL
-} SuspensionPointType;
 
-typedef struct {
-  uint32_t            id;
-  SuspensionPointType type;
-  AstNode*            node;
-  uint32_t            line;
-  uint32_t            column;
-  uint16_t            pre_stack_depth;
-} SuspensionPoint;
 
-typedef struct {
-  JaclVal  name;
-  uint32_t field_index;  /* base slot index in state machine fields[] */
-  bool     is_mutable;
-  bool     is_param;
-  uint16_t width;        /* number of JaclVal slots occupied (default 1, N for inline structs) */
-  uint32_t struct_type_idx; /* struct registry index when width > 1, else 0 */
-} StateField;
 
-typedef struct {
-  uint32_t         field_count;
-  uint32_t         total_slots;  /* sum of all field widths — actual fields[] size needed */
-  StateField       fields[SM_MAX_STATE_FIELDS];
-  ThreadHeap*      heap;          /* for interning names > 7 bytes */
-  JaclInternTable* intern_table;  /* for interning names > 7 bytes */
-  /* §8c shape-collision sink. Set by sm__add_state_field when the same
-     name is re-added with a different storage shape (is_mutable / width
-     / struct_type_idx / is_param). Surfaced as a compile error by
-     compiler__analyze_suspensions. Only the first collision is recorded. */
-  bool             has_collision;
-  JaclVal          collision_name;
-  uint32_t         collision_line;
-  uint32_t         collision_col;
-} StateLayout;
 
-typedef struct {
-  uint32_t        suspension_count;
-  SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
-  StateLayout     state_layout;
-  uint32_t        ctx_field_idx;  /* state field index for __ctx (UINT32_MAX if absent) */
-  uint16_t        max_pre_stack_depth;
-  uint16_t        spill_base_slot;
-  uint16_t        scratch_slot;
-} SuspensionAnalysis;
 
-typedef struct {
-  int32_t first_write;
-  int32_t last_read;
-} FieldLiveness;
 
-typedef struct {
-  uint32_t loop_start;
-  uint32_t break_patches[COMPILER_BREAK_PATCHES_MAX];
-  uint32_t break_patch_count;
-  uint32_t continue_patches[COMPILER_CONTINUE_PATCHES_MAX];
-  uint32_t continue_patch_count;
-  uint32_t local_count_at_loop;
-  uint32_t body_local_count;
-  bool     is_for_loop;
-} LoopContext;
 
-typedef struct {
-  uint32_t label_patches[SM_MAX_SUSPENSION_POINTS];
-  uint32_t label_count;
-} SMDispatchContext;
 
 #define COMPILER_MODULE_BINDINGS_MAX 64
 
-typedef struct {
-  JaclVal name;       /* local variable name (interned) */
-  int     local_slot; /* slot in the locals array */
-  Module* module;     /* the module it binds to */
-} ModuleBinding;
 
-typedef struct Compiler Compiler;
-struct Compiler {
-  BytecodeChunk*   chunk;
-  arena_t*         arena;
-  ThreadHeap*      heap;
-  JaclInternTable* intern_table;
-  uint32_t         error_count;
-  const char*      first_error;
-  Local            locals[COMPILER_LOCALS_MAX];
-  uint32_t         local_count;
-  int              scope_depth;
-  Upvalue          upvalues[COMPILER_UPVALUES_MAX];
-  uint32_t         upvalue_count;
-  Compiler*        enclosing;
-  /* Arena-backed growable; see comment in compiler.c definition. */
-  GlobalArity*     global_arities;
-  uint32_t         global_arity_count;
-  uint32_t         global_arity_capacity;
-  uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
-  uint32_t         try_patch_count;
-  bool             in_try_body;
-  bool             in_non_suspending_callback;
-  SuspensionMap*   suspension_map;
-  bool             in_concurrent_body;
-  bool             pin_all_closures;
-  bool             force_global_procs;
-  bool             ctx_pre_registered;
-  JaclType         last_expr_type; /* see compiler.c for documentation */
-  JaclType         return_type;
-  uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
-  uint32_t         hof_mapper_ret_enc; /* see compiler.c for documentation */
-  uint32_t         gen_stream_elem_idx; /* see compiler.c for documentation */
-  uint32_t         hof_param_enc;       /* see compiler.c for documentation */
-  /* Phase B typed-closure monomorphization context — see compiler.c. Must
-   * stay byte-for-byte in sync with the compiler.c definition (struct_sizes). */
-  bool             annot_proc_active;
-  uint8_t          annot_proc_param_count;
-  JaclType         annot_proc_param_types[COMPILER_MAX_PROC_PARAMS];
-  uint32_t         annot_proc_param_struct_idxs[COMPILER_MAX_PROC_PARAMS];
-  JaclType         annot_proc_return_type;
-  uint32_t         annot_proc_return_struct_idx;
-  uint32_t         pending_return_proc_shape; /* B3b — see compiler.c */
-  ModuleCache*     module_cache;
-  Module*          current_module;
-  ImportStack*     import_stack;
-  const char*      module_prefix;
-  uint32_t         module_prefix_len;
-  StructTypeRegistry* struct_registry;
-  /* Keep in sync with struct Compiler in src/compiler.c (step 2a). */
-  bool structs_preregistered;
-  LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
-  uint32_t             loop_depth;
-  bool                 has_yield;
-  uint32_t             sm_suspension_idx;
-  SMDispatchContext     sm_dispatch;
-  SuspensionAnalysis*  sm_analysis;
-  MacroTable*          macro_table;
-  uint32_t             current_scope_mark;
-  bool                 has_prelude;
-  uint8_t              inline_repr;   /* INLINE_NONE / INLINE_STACK / INLINE_REF */
-  uint8_t              inline_ref_base;
-  uint16_t             inline_ref_offset;
-  bool                 shell_fallback;
-  ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
-  uint32_t             module_binding_count;
-  /* Flow typing: type narrowings from box? guards in if-branches */
-  struct {
-    uint16_t local_slot;     /* which local variable is narrowed */
-    uint32_t box_type_idx;   /* struct element type_idx (0=dyn, >0=struct/collection element) */
-    uint32_t box_key_type_idx; /* key struct idx for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
-    JaclType box_type;       /* TYPE_STRUCT, TYPE_TYPED_VEC, TYPE_TYPED_MAP, or TYPE_DYN */
-  } narrowings[8];
-  uint32_t             narrowing_count;
-  void*                ctx_fields;       /* CtxFieldList* (opaque in header) */
-  bool                 lower_top_level;  /* true when a closure-free chunk
-                                            allows top-level mut/def to be
-                                            stored as depth-0 locals; see
-                                            compiler.c for full rationale */
-};
-
-/* ========================================================================
- * Types — vm.c (ctx pool)
- * ======================================================================== */
-
-#define CTX_POOL_INIT_SIZE 8
-
-typedef struct {
-    uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
-    uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
-    uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
-    StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
-} JaclCtxPool;
-
-/* ========================================================================
- * Types — vm.c
- * ======================================================================== */
-
-/* VM resource caps. These are hard limits — overflow surfaces as a
- * runtime error from the VM (operand-stack-overflow / call-depth-exceeded)
- * with a message naming the limit. See AUDIT.md §16.
- *   - VM_STACK_MAX  : operand-stack slot count. Hit by deep expression
- *                     nesting, wide inline structs, large spreads.
- *   - VM_FRAMES_MAX : call-frame depth. Hit by deep recursion. Convert
- *                     to a tail call, state machine, or trampoline. */
-#define VM_STACK_MAX        1024
-#define VM_FRAMES_MAX       256
-#define VM_ENV_INIT_CAP     16
-#define VM_STACK_TRACE_MAX  32
 
 /* Bitmap helpers for inline struct slot tracking */
 #define BITMAP_SET(bm, idx) ((bm)[(idx) / 8] |=  (uint8_t)(1u << ((idx) % 8)))
 #define BITMAP_CLR(bm, idx) ((bm)[(idx) / 8] &= (uint8_t)~(1u << ((idx) % 8)))
 #define BITMAP_GET(bm, idx) (((bm)[(idx) / 8] >> ((idx) % 8)) & 1u)
 
-typedef enum {
-  VM_OK,
-  VM_RUNTIME_ERROR,
-  VM_STACK_OVERFLOW,
-  VM_YIELD
-} VMResult;
 
-typedef void (*VMPrintFn)(const char* text, uint32_t len, void* ctx);
 
-typedef struct {
-  JaclVal*  names;
-  JaclVal*  values;
-  uint32_t  count;
-  uint32_t  cap;
-} Environment;
 
-typedef struct {
-  JaclClosure*   closure;
-  uint8_t*       return_ip;
-  uint32_t       stack_base;
-  BytecodeChunk* chunk;
-} CallFrame;
-
-typedef struct {
-  const char* function_name;
-  uint32_t    line_number;
-} StackTraceEntry;
-
-typedef struct {
-  StackTraceEntry entries[VM_STACK_TRACE_MAX];
-  uint32_t        count;
-} StackTrace;
-
-typedef struct {
-  JaclVal        stack[VM_STACK_MAX];
-  uint32_t       stack_top;
-  CallFrame      frames[VM_FRAMES_MAX];
-  uint32_t       frame_count;
-  uint8_t*       ip;
-  BytecodeChunk* chunk;
-  VMPrintFn      print_fn;
-  void*          print_ctx;
-  Environment    env;
-  arena_t*       arena;
-  BlockPool      block_pool;
-  ThreadHeap     heap;
-  JaclInternTable* intern_table;
-  BytecodeChunk* top_chunk;
-  GreyBuffer*    grey_buf;
-  RememberedSet* remembered_set;
-  uint32_t  *gc_active_ptr;
-  void*          runtime;
-  int            worker_id;
-  const char*    error_message;
-  uint32_t       error_line;
-  StackTrace     stack_trace;
-  StructTypeRegistry* struct_registry;
-  JaclCtxPool *ctx_pool;
-  JaclVal    ctx;              /* current implicit context struct */
-  JaclVal    saved_ctx[8];     /* with-ctx save stack for nested forks */
-  uint8_t    saved_ctx_count;  /* number of entries in saved_ctx */
-  JaclVal*   gc_handle_slots;
-  uint32_t   gc_handle_count;
-  JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);
-  void*      native_fn_ctx;
-  int8_t*    native_fn_arities;
-  uint32_t   native_fn_count;
-  uint32_t   spread_counts[32];
-  uint32_t   spread_count_top;
-  JaclVal    yield_value;
-  JaclVal    yield_wide[16];     /* multi-slot struct yield channel; see vm.c */
-  uint32_t   yield_wide_width;
-  uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
-  /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
-  uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */
-  /* US-014: bitmap marking stack slots that hold raw inline struct bytes (not GC-traceable JaclVals) */
-  uint8_t    inline_slot_bitmap[VM_STACK_MAX / 8];
-} VM;
-
-/* --- jacl_context_t: reentrant execution context (full definition) ---
- *
- * Owns arena, VM (which contains ThreadHeap), intern table, macro table.
- * Child contexts share parent's intern table but have their own arena/heap.
- * Macro expansion state (error, frames, scope counter, gensym counter) is
- * per-context, eliminating the file-static reentrancy hazards.
- */
-struct jacl_context_s {
-    arena_t          arena;
-    VM               vm;
-    JaclInternTable  intern_table;
-    MacroTable       macro_table;
-    uint64_t         restriction_set;     /* all-permissive = UINT64_MAX */
-    ExpandState      expand;
-
-    /* Parent context (NULL for root) */
-    jacl_context_t  *parent;
-    bool             owns_intern_table;   /* false when sharing parent's */
-};
-
-typedef struct {
-  char*     data;
-  uint32_t  len;
-  uint32_t  cap;
-  arena_t*  arena;
-  StructTypeRegistry* registry;
-} VMFormatBuf;
 
 typedef enum {
     STREAM_PULL_VALUE,
@@ -1841,211 +1115,18 @@ typedef struct {
 #define CHASE_LEV_NAME rt_deque
 #include "../lib/chase_lev/chase_lev.h"
 
-/* ========================================================================
- * Types — runtime.c
- * ======================================================================== */
 
-#define WORKER_IDLE ((uintptr_t)0)
-#define WORKER_BUSY ((uintptr_t)1)
-
-typedef struct {
-    void (*fn)(void *data);
-    void *data;
-    JaclVal gc_root;
-    JaclVal gc_root2;
-    JaclVal gc_root3;
-} RuntimeTask;
-
-/* Per-worker counters (writer is the worker thread itself; readers are the
- * perf-snapshot API which reads after all workers are quiesced). All updates
- * are relaxed atomics for cross-thread visibility under TSAN. */
-typedef struct {
-    uint64_t tasks_executed;
-    uint64_t steal_attempts;     /* one increment per pass through the steal loop */
-    uint64_t steal_successes;
-    uint64_t idle_sleep_ns;      /* cumulative time spent in backoff sleep */
-    uint64_t inbox_pops;         /* tasks pulled from the global inbox */
-    uint64_t pinned_inbox_pops;  /* tasks pulled from own pinned inbox */
-} WorkerStats;
-
-/* Runtime-wide GC cycle counters (writer is gc_concurrent_collect, called
- * serially via gc_running CAS; readers are the perf-snapshot API). */
-typedef struct {
-    uint64_t total_cycles;        /* concurrent_collect invocations */
-    uint64_t total_cycle_ns;      /* sum of wall-clock cycle durations */
-    uint64_t max_cycle_ns;        /* worst observed cycle duration */
-    uint64_t total_mark_rounds;   /* sum of convergence-loop rounds */
-} GCStats;
-
-typedef struct Runtime Runtime;
 
 /* DUAL DEFINITION: this struct is also defined in src/runtime.c for the
  * unity build. Any field change MUST be applied to both — and listed in
  * src/struct_drift_fields.h. See runtime.c for the rationale and
  * NOT_IMPLEMENTED.md §11 for the consolidation refactor that would
  * eliminate this duplication. */
-typedef struct WorkerThread {
-    rt_deque_deque    *public_deque;
-    rt_deque_deque    *private_deque;
-    GreyBuffer         grey_buf;
-    RememberedSet      remembered_set;
-    uintptr_t          currently_executing; /* atomic — see runtime.c */
-    uint64_t           thread_epoch;         /* atomic */
-    VM                 vm;
-    Runtime           *runtime;
-    int                id;
-    thread_t           thread;
-    arena_t            arena;
-    int               *steal_ids;
-    /* Pinned inbox: other workers route tasks here when escape analysis pins
-     * a closure to this worker. The owner drains this into private_deque at
-     * the top of each loop iteration, preserving private_deque's SPSC
-     * contract. Mutex-protected MPSC. MUST stay in sync with runtime.c. */
-    uintptr_t         *pinned_inbox;
-    intptr_t           pinned_inbox_count;  /* atomic — MPSC counter */
-    intptr_t           pinned_inbox_cap;
-    platform_mutex_t   pinned_inbox_mutex;
-    /* Retired tasks: epoch-deferred free list. See runtime.c for invariant. */
-    RuntimeTask      **retired_tasks;
-    uint64_t          *retired_epochs;
-    uint32_t           retired_count;
-    uint32_t           retired_cap;
-    /* Perf counters — see WorkerStats. */
-    WorkerStats        stats;
-} WorkerThread;
 
-struct Runtime {
-    WorkerThread       *workers;
-    int                 num_workers;
-    uint64_t            global_epoch;   /* atomic — incremented at each GC start */
-    uint32_t            gc_running;     /* atomic — CAS for GC entry */
-    uint32_t            gc_active;      /* atomic — set during mark phase */
-    BlockPool           block_pool;
-    int                 shutdown;       /* atomic — shutdown signal */
-    uintptr_t          *inbox;
-    intptr_t            inbox_count;    /* atomic — MPSC counter */
-    intptr_t            inbox_cap;
-    platform_mutex_t    inbox_mutex;
-    /* Wakeup CV — see runtime.c. MUST stay in sync. */
-    platform_cond_t     work_cv;
-    /* GC scanner thief slots — see runtime.c. MUST stay in sync. */
-    int                *gc_thief_public_ids;
-    int                *gc_thief_private_ids;
-    /* External GC roots — JaclVals pinned by C embedders (e.g. completion
-     * futures held by polling threads). Scanned by gc_enumerate_roots so
-     * concurrent GC doesn't sweep values held only by raw C pointers. */
-    JaclVal            *external_roots;
-    uint32_t            external_root_count;
-    uint32_t            external_root_cap;
-    platform_mutex_t    external_roots_mutex;
-    /* Sleep-timer state — deadline-sorted list polled by idle workers.
-     * No dedicated thread; runtime__poll_timers runs on the worker loop.
-     * See runtime.c. */
-    platform_mutex_t    timer_mutex;
-    struct TimerEntry  *timer_head;
-    /* Perf counters — see GCStats. */
-    GCStats             gc_stats;
-};
 
-extern JACL_THREAD_LOCAL int rt__worker_id;
-extern JACL_THREAD_LOCAL WorkerThread *rt__current_worker;
 
-/* ========================================================================
- * Types — embed.c
- * ======================================================================== */
 
-typedef struct JaclVM_s JaclVM;
-typedef struct JaclTrampoline_s JaclTrampoline;
 
-typedef struct {
-  size_t   initial_heap_size;
-  size_t   max_heap_size;
-  uint32_t max_handles;
-} JaclConfig;
-
-#define TRAMP_TYPE_VOID    0
-#define TRAMP_TYPE_I32     1
-#define TRAMP_TYPE_I64     2
-#define TRAMP_TYPE_U32     3
-#define TRAMP_TYPE_U64     4
-#define TRAMP_TYPE_F32     5
-#define TRAMP_TYPE_F64     6
-#define TRAMP_TYPE_PTR     7
-#define TRAMP_TYPE_UNKNOWN 255
-
-#ifdef JACL_HAS_LIBFFI
-#include <ffi.h>
-struct JaclTrampoline_s {
-  JaclVM*         jvm;
-  JaclVal         closure;
-  uint32_t        handle_idx;
-  void*           ffi_closure;
-  void*           code_ptr;
-  ffi_cif         cif;
-  ffi_type**      ffi_arg_types;
-  int             arg_types_id[16];
-  int             arg_count;
-  int             ret_type_id;
-  JaclTrampoline* vm_next;
-};
-#else
-struct JaclTrampoline_s { int _unused; };
-#endif
-
-typedef JaclVal (*EmbedNativeFn)(JaclVM* vm, JaclVal* args, int argc);
-
-typedef struct {
-  EmbedNativeFn fn;
-  JaclVal       name;
-  int8_t        arity;
-} NativeFnEntry;
-
-#define NATIVE_FN_INIT_CAP 32
-
-struct JaclVM_s {
-  VM              vm;
-  arena_t         arena;
-  JaclInternTable intern_table;
-  uint32_t        max_handles;
-  const char*     last_error;
-  JaclVal*        handle_slots;
-  uint32_t*       handle_free_list;
-  uint32_t        handle_count;
-  uint32_t        handle_free_top;
-  NativeFnEntry*  native_fns;
-  int8_t*         native_fn_arities;
-  uint32_t        native_fn_count;
-  uint32_t        native_fn_cap;
-  StructTypeRegistry* persistent_struct_registry;
-  /* ctx pool — initialized lazily on first jacl_eval that compiles a
-     `ctx <type> <name>` declaration. Must live for the VM's lifetime.
-     NOTE: keep in sync with struct JaclVM_s in src/embed.c. */
-  JaclCtxPool     ctx_pool;
-  uint8_t         ctx_initialized;
-  /* Persistent GlobalArity table — accumulates typed proc signatures
-     declared across all jacl_eval calls. Grown lazily by
-     compiler_compile. Keep in sync with src/embed.c. */
-  GlobalArityTable persistent_arities;
-  JaclTrampoline* trampoline_list;
-};
-
-typedef enum {
-  EMBED_TYPE_DYN = 0,
-  EMBED_TYPE_BOOL,
-  EMBED_TYPE_NIL,
-  EMBED_TYPE_I32,
-  EMBED_TYPE_I64,
-  EMBED_TYPE_U32,
-  EMBED_TYPE_U64,
-  EMBED_TYPE_F32,
-  EMBED_TYPE_F64,
-  EMBED_TYPE_STR,
-  EMBED_TYPE_VEC,
-  EMBED_TYPE_MAP,
-  EMBED_TYPE_CLOSURE,
-  EMBED_TYPE_STRUCT,
-  EMBED_TYPE_NATIVE_FN
-} EmbedJaclType;
 
 typedef struct { uint32_t index; } EmbedJaclHandle;
 
@@ -2357,11 +1438,8 @@ extern void parser__skip_newlines (Parser *p);
 extern void parser__sync_bracket (Parser *p);
 extern AstNode *parser__parse_atom (Parser *p);
 extern AstNode *parser__parse_command (Parser *p);
-extern void parser__sync_paren (Parser *p);
 extern int parser__is_operator (Token *tok);
 extern AstNode *parser__maybe_arrow_access (Parser *p, AstNode *expr);
-extern AstNode *parser__parse_infix_operand (Parser *p);
-extern AstNode *parser__parse_infix (Parser *p);
 extern AstNode *parser__parse_expr (Parser *p);
 extern int parser__is_command_end (Parser *p);
 extern int parser__is_operand_end (Parser *p);
@@ -2377,17 +1455,6 @@ extern AstNode *parser__parse_cmd_expr (Parser *p);
 extern AstNode *parser__parse_block (Parser *p);
 extern AstNode *parser__parse_interp_string (Parser *p);
 extern ParseResult parser_parse (LexResult tokens, arena_t *arena);
-
-/* --- bytecode.c --- */
-extern void chunk_init (BytecodeChunk *chunk, arena_t *arena);
-extern void bytecode__grow_code (BytecodeChunk *chunk);
-extern void bytecode__grow_constants (BytecodeChunk *chunk);
-extern void chunk_write (BytecodeChunk *chunk, uint8_t byte, uint32_t line);
-extern void chunk_write_u16 (BytecodeChunk *chunk, uint16_t value, uint32_t line);
-extern uint16_t chunk_add_constant (BytecodeChunk *chunk, JaclVal value);
-extern JaclVal jacl_closure (JaclClosure *cl);
-extern JaclClosure *jacl_as_closure (JaclVal v);
-extern const char *bytecode__opcode_name (uint8_t op);
 
 /* --- collections.c --- */
 extern uint32_t jacl_val_hash (JaclVal v);
@@ -2465,100 +1532,13 @@ extern int jacl_format_ptr_diff_pointee_mismatch (char *buf, size_t bufsz);
 extern int jacl_format_ptr_deref_struct (char *buf, size_t bufsz);
 extern int jacl_format_ptr_null_bad_arg (char *buf, size_t bufsz);
 
-/* --- compiler.c --- */
+/* --- type keyword / struct-layout helpers (ast.c, shapes.c) --- */
 extern bool is_type_keyword (const char *word, size_t len);
 extern JaclType type_from_keyword (const char *word, size_t len);
 extern const char *type_name (JaclType t);
 extern bool is_numeric_type (JaclType t);
 extern bool is_unboxed_type (JaclType t);
 extern uint32_t struct__type_size (JaclType t, StructTypeRegistry *reg, uint32_t struct_idx);
-extern uint32_t struct__type_align (JaclType t, StructTypeRegistry *reg, uint32_t struct_idx);
-extern uint32_t struct__align_up (uint32_t offset, uint32_t align);
-extern uint32_t struct_registry__find (StructTypeRegistry *reg, const char *name, uint32_t name_len);
-extern uint32_t compiler__register_inline_struct (StructTypeRegistry *reg, const char *spec, uint32_t spec_len);
-extern void module_cache__init (ModuleCache *cache, arena_t *arena);
-extern Module *module_cache__find (ModuleCache *cache, const char *canonical_path);
-extern Module *module_cache__add (ModuleCache *cache, const char *canonical_path);
-extern void import_stack__init (ImportStack *stack);
-extern bool import_stack__contains (ImportStack *stack, const char *canonical_path);
-extern bool import_stack__push (ImportStack *stack, const char *canonical_path);
-extern void import_stack__pop (ImportStack *stack);
-extern const char *import_stack__chain_str (ImportStack *stack, const char *cycle_path, arena_t *arena);
-extern const char *module__resolve_path (const char *importer_path, const char *use_path, arena_t *arena);
-extern bool module__is_private (const char *name, uint32_t name_len);
-extern char *module__read_file (const char *path, arena_t *arena);
-extern bool suspension_map_lookup (SuspensionMap *map, JaclVal name);
-extern bool suspension_map_is_generator (SuspensionMap *map, JaclVal name);
-extern void suspension_map_set (SuspensionMap *map, JaclVal name, bool suspends, bool is_generator);
-extern void analyze__walk_body (AstNode *node, ProcSuspendInfo *info, ThreadHeap *heap, JaclInternTable *intern_table);
-extern void analyze__collect_procs (AstNode *node, ProcSuspendInfoList *list, ThreadHeap *heap, JaclInternTable *intern_table);
-extern SuspensionMap compiler__analyze_suspension (AstNode **nodes, uint32_t count, ThreadHeap *heap, JaclInternTable *intern_table);
-extern void sm__walk_suspensions (AstNode *node, SuspensionAnalysis *analysis, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table);
-extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param, uint16_t width, uint32_t struct_type_idx, uint32_t line, uint32_t col);
-extern const StateField* sm__get_field (const StateLayout *layout, JaclVal name);
-extern int sm__find_field (const StateLayout *layout, JaclVal name);
-extern bool sm__is_field_mutable (const StateLayout *layout, JaclVal name);
-extern void sm__collect_destructure_vec_names (AstNode *dv, StateLayout *layout, bool is_mutable);
-extern void sm__collect_destructure_named_names (AstNode *dn, StateLayout *layout, bool is_mutable);
-extern void sm__collect_command_destructure_names (AstNode *pat, StateLayout *layout, bool is_mutable);
-extern void sm__collect_block_destructure_names (AstNode *blk, StateLayout *layout, bool is_mutable);
-extern void sm__walk_locals (AstNode *node, StateLayout *layout, SuspensionMap *susp_map, StructTypeRegistry *reg);
-extern void sm__liveness_mark_write (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
-extern void sm__liveness_mark_read (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
-extern JaclVal sm__lit_string_name (AstNode *node);
-extern void sm__liveness_mark_binding_names (AstNode *pattern, const StateLayout *layout, FieldLiveness *liveness, int32_t segment);
-extern bool sm__loop_body_suspends (AstNode *body);
-extern void sm__liveness_walk (AstNode *node, const StateLayout *layout, FieldLiveness *liveness, int32_t *segment);
-extern void sm__optimize_state_layout (SuspensionAnalysis *analysis, AstNode *body);
-extern SuspensionAnalysis compiler__analyze_suspensions (Compiler *c, AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table, StructTypeRegistry *struct_reg);
-extern bool ast__contains_suspension (AstNode *node, SuspensionMap *map);
-extern void ast__collect_local_muts (AstNode *node, JaclVal *names, uint32_t *count);
-extern bool ast__contains_nonlocal_set_impl (AstNode *node, JaclVal *local_muts, uint32_t local_mut_count);
-extern bool ast__contains_nonlocal_set (AstNode *block);
-extern void compiler__init (Compiler *c, BytecodeChunk *chunk, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap);
-extern const char *module__build_prefix (const char *canonical_path, arena_t *arena, uint32_t *out_len);
-extern JaclVal compiler__global_name_val (Compiler *c, const char *name, uint32_t name_len);
-extern void compiler__emit_byte (Compiler *c, uint8_t byte, uint32_t line);
-extern void compiler__emit_u16 (Compiler *c, uint16_t value, uint32_t line);
-extern void compiler__emit_constant (Compiler *c, JaclVal value, uint32_t line);
-extern void compiler__error (Compiler *c, uint32_t line, uint32_t col, const char *message);
-extern void compiler__begin_scope (Compiler *c);
-extern void compiler__end_scope (Compiler *c, uint32_t line);
-extern void compiler__add_local (Compiler *c, JaclVal name, uint32_t line, uint32_t col);
-extern int compiler__resolve_local (Compiler *c, JaclVal name);
-extern GlobalArity *compiler__find_global (Compiler *c, JaclVal name);
-extern void compiler__set_global_arity (Compiler *c, JaclVal name, int16_t arity);
-extern StructTypeRegistry *compiler__get_struct_registry (Compiler *c);
-extern bool compiler__resolve_type (Compiler *c, const char *word, uint32_t len, JaclType *out_type);
-extern bool compiler__is_type_annotation (Compiler *c, const char *word, uint32_t len);
-extern int compiler__add_upvalue (Compiler *c, uint8_t index, uint8_t is_local, JaclVal name);
-extern int compiler__resolve_upvalue (Compiler *c, JaclVal name);
-extern void ast__collect_local_names (AstNode *node, JaclVal *names, uint32_t *count);
-extern bool compiler__name_touches_mutable (Compiler *enclosing, JaclVal name);
-extern bool ast__refs_nonlocal_mutable_impl (AstNode *node, JaclVal *local_names, uint32_t local_name_count, Compiler *enclosing);
-extern bool compiler__body_captures_mutable (Compiler *enclosing, AstNode *body_block);
-extern uint32_t compiler__emit_jump (Compiler *c, uint8_t instruction, uint32_t line);
-extern void compiler__patch_jump (Compiler *c, uint32_t offset);
-extern void compiler__emit_check_error (Compiler *c, uint32_t line);
-extern void compiler__emit_sm_dispatch_table (Compiler *c, uint32_t suspension_count, uint32_t line);
-extern void compiler__compile_sm_stmts (Compiler *c, AstNode **stmts, uint32_t count, uint32_t line, bool return_last_value);
-extern void compiler__compile_sm_body (Compiler *c, AstNode *body_block, uint32_t line);
-extern void compiler__compile_parallel_body (Compiler *c, AstNode *body_block, uint32_t line, uint32_t col);
-extern void compiler__compile_block_expr (Compiler *c, AstNode *block_node);
-extern int compiler__head_matches (AstNode *head, const char *name, uint32_t len);
-extern int16_t compiler__node_known_arity (Compiler *c, AstNode *node);
-extern void compiler__builtin_arity_error (Compiler *c, uint32_t line, uint32_t col, const char *name, const char *expected_desc, uint32_t got);
-extern void compiler__ensure_boxed (Compiler *c, uint32_t line);
-extern uint8_t compiler__typed_op (uint8_t dyn_op, JaclType type);
-extern void compiler__compile_binary (Compiler *c, AstNode **args, uint8_t op, const char *op_verb, uint32_t line, uint32_t col);
-extern void compiler__compile_hof_builtin (Compiler *c, const char *name, AstNode **args, uint32_t argc, uint8_t opcode, uint32_t out_elem_enc, uint32_t line, uint32_t col);
-extern void compiler__compile_destructure_vec (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
-extern void compiler__compile_destructure_named (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, int spread_all, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
-extern void compiler__compile_pipe_op (Compiler *c, AstNode *node);
-extern void compiler__compile_command (Compiler *c, AstNode *node);
-extern void compiler__compile_node (Compiler *c, AstNode *node);
-extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
-extern bool compiler__is_core_builtin (const char *name, uint32_t len);
 extern const char *jacl_non_core_builtins[];  /* NULL-terminated list */
 /* persistent_arities is NULL when there is no persistent embedder
  * context. When non-NULL, compiler_compile reads its (entries, count)
@@ -2567,46 +1547,9 @@ extern const char *jacl_non_core_builtins[];  /* NULL-terminated list */
  * the compiler accumulated more entries than the persistent capacity
  * holds. Typed proc signatures declared in earlier jacl_eval calls
  * stay visible to later compiles via this mechanism. */
-extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map, GlobalArityTable *persistent_arities, arena_t *persistent_arena);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
 extern bool macro__is_special_form (const char *name, uint32_t len);
-extern void module__populate_exports (Module *mod, Compiler *c);
-extern bool compiler__compile_module (const char *canonical_path, Compiler *importer, uint32_t line, uint32_t col);
-extern ProgramResult jacl_compile_program (const char *root_path, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap);
-
-/* --- vm.c --- */
-extern void vm__emergency_gc_single (void *ctx);
-extern const char *vm__type_name (JaclVal v);
-extern void vm__set_error (VM *vm, const char *fmt, ...);
-extern void vm__default_print (const char *text, uint32_t len, void *ctx);
-extern bool vm__is_falsy (JaclVal v);
-extern void vm__capture_trace (VM *vm);
-extern void ctx_pool_init (JaclCtxPool *pool, ThreadHeap *heap, StructTypeRegistry *reg);
-extern HeapRecord *ctx_pool_alloc (JaclCtxPool *pool, ThreadHeap *heap);
-extern void ctx_pool_free (JaclCtxPool *pool, HeapRecord *s);
-extern void ctx__init_vm (VM *vm, JaclCtxPool *pool_storage);
-extern void vm_init (VM *vm, arena_t *arena);
-extern void vm_destroy (VM *vm);
-extern VMResult vm__push (VM *vm, JaclVal value);
-extern VMResult vm__pop (VM *vm, JaclVal *out);
-extern uint8_t vm__read_byte (VM *vm);
-extern uint16_t vm__read_u16 (VM *vm);
-extern void vm__env_grow (VM *vm);
-extern void vm__env_set (VM *vm, JaclVal name, JaclVal value);
-extern JaclVal vm__env_get (VM *vm, JaclVal name, bool *found);
-extern void vm__fmt_init (VMFormatBuf *buf, arena_t *arena, StructTypeRegistry *registry);
-extern void vm__fmt_ensure (VMFormatBuf *buf, uint32_t extra);
-extern void vm__fmt_append (VMFormatBuf *buf, const char *str, uint32_t len);
-extern void vm__fmt_value (VMFormatBuf *buf, JaclVal val);
-extern bool vm__deep_eq (JaclVal a, JaclVal b);
-extern JaclVal vm__heap_record_read_field (ThreadHeap *heap, HeapRecord *s, uint32_t offset, int field_type);
-extern void vm__heap_record_write_field (HeapRecord *s, uint32_t offset, int field_type, JaclVal val);
-extern VMResult vm_exec (VM *vm, BytecodeChunk *chunk);
-extern StreamPullResult vm__pull_stream_one (VM *vm, JaclVal stream_val, JaclVal *out_value);
-extern VMResult vm__run (VM *vm, uint32_t min_frame);
-extern VMResult jacl_exec_program (ProgramResult *program, VM *vm);
-extern VMResult jacl_run (const char *source, VM *vm, arena_t *arena);
 
 /* --- context lifecycle and internal run API --- */
 
@@ -2625,18 +1568,7 @@ typedef struct {
 
 extern jacl_context_t *jacl_ctx_new (jacl_context_t *parent);
 extern void            jacl_ctx_destroy (jacl_context_t *ctx);
-extern JaclVal         jacl_ctx_run_source (jacl_context_t *ctx, const char *src, size_t len, uint64_t restriction_set, JaclError *err_out);
-extern JaclVal         jacl_ctx_run_closure (jacl_context_t *ctx, JaclClosure *closure, JaclVal *args, uint32_t arg_count, JaclError *err_out);
 
-/* Compile source into a closure on the caller's heap without creating a
- * jacl_context_t.  Returns a closure JaclVal on success, or JACL_NIL with
- * err_out populated on lex/parse/compile error. */
-extern JaclVal source_to_closure_in_place(const char *src, size_t len,
-                                          arena_t *arena, ThreadHeap *heap,
-                                          JaclInternTable *intern_table,
-                                          ExpandState *expand,
-                                          JaclError *err_out,
-                                          JaclVal prelude_map);
 
 /* Scoped context switching: saves/restores gc__current_heap and the emergency
  * GC callback so that nested context operations are reentrant.
@@ -2651,7 +1583,6 @@ typedef struct {
 } jacl_ctx_saved_t;
 
 extern void jacl_ctx_save    (jacl_ctx_saved_t *saved);
-extern void jacl_ctx_enter   (jacl_context_t *ctx, jacl_ctx_saved_t *saved);
 extern void jacl_ctx_restore (jacl_ctx_saved_t saved);
 
 /* --- gc_collect.c --- */
@@ -2667,8 +1598,6 @@ extern void gc__trace_object (void *payload, GCMarkStack *ms);
  * provider (the VM*). Lets the collector stay decoupled from the bytecode VM type; the VM's
  * enumerators are vm__gc_roots_major / vm__gc_roots_minor below. */
 typedef void (*GcRootEnumerator)(ThreadHeap *heap, GCMarkStack *ms, void *ctx);
-extern void vm__gc_roots_major (ThreadHeap *heap, GCMarkStack *ms, void *ctx);
-extern void vm__gc_roots_minor (ThreadHeap *heap, GCMarkStack *ms, void *ctx);
 
 extern void gc_mark (ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx);
 extern size_t gc_sweep (ThreadHeap *heap);
@@ -2686,130 +1615,6 @@ extern void gc_collect_minor (ThreadHeap *heap, GcRootEnumerator enum_roots, voi
                               StructTypeRegistry *struct_registry, RememberedSet *remembered_set);
 extern bool gc_should_major (ThreadHeap *heap);
 extern size_t gc_sweep_concurrent (ThreadHeap *heap, GCBlock *skip_block, uint32_t watermark, uint8_t current_mark, BlockPool *pool);
-
-/* --- runtime.c --- */
-extern void runtime__init_worker_vm (WorkerThread *w);
-extern void runtime__emergency_gc (void *ctx);
-extern void *runtime__worker_loop (void *arg);
-extern void runtime_init (Runtime *rt, int num_workers);
-extern void runtime_destroy (Runtime *rt);
-/* Lower-level init: set up Runtime state WITHOUT spawning worker threads.
- * Tests that drive the state machine deterministically use these. Production
- * code should use runtime_init / runtime_destroy. */
-extern void runtime__init_state (Runtime *rt, int num_workers);
-extern void runtime__start_threads (Runtime *rt);
-extern void runtime__stop_threads (Runtime *rt);
-extern void runtime__teardown_state (Runtime *rt);
-extern void runtime__push_inbox (Runtime *rt, RuntimeTask *task);
-extern void runtime__push_pinned (Runtime *rt, RuntimeTask *task, int worker_id);
-extern void runtime_submit (Runtime *rt, void (*fn)(void *), void *data);
-/* Pin a JaclVal as a GC root from outside any GC-scanned structure. Required
- * for completion futures held only by raw C pointers across GC cycles. */
-extern uint32_t runtime_pin_value (Runtime *rt, JaclVal val);
-extern void     runtime_unpin_value (Runtime *rt, uint32_t handle);
-extern void runtime__setup_call (VM *vm, JaclClosure *cl, int argc, JaclVal *argv);
-extern void runtime__exec_closure (void *data);
-extern void runtime_submit_task (Runtime *rt, JaclClosure *closure, bool thread_local);
-extern void gc__scan_deque (rt_deque_deque *dq, GCMarkStack *ms, int thief_id);
-extern void gc_enumerate_roots (Runtime *rt, GCMarkStack *ms);
-extern bool gc__drain_grey_bufs (Runtime *rt, GCMarkStack *ms, uint32_t *drained);
-extern void gc_concurrent_collect (Runtime *rt);
-
-/* --- Perf snapshot (runtime.c) ---
- * One struct, summed across workers. Reads after THREAD_JOIN / quiesce. */
-typedef struct {
-    int      num_workers;
-    /* GC cycle stats */
-    GCStats  gc;
-    /* Allocation stats summed across worker heaps */
-    uint64_t total_bytes_allocated;
-    uint64_t total_allocs;
-    uint64_t slow_path_allocs;
-    /* §14 instrumentation: per-call work done in gc_alloc's slow path.
-     * blocks_scanned counts blocks that passed the max_free_run_lines
-     * reject and entered the in-block line scan. blocks_rejected_fast
-     * counts cheap O(1) rejects. lines_scanned tallies line_map bytes
-     * inspected inside the inner scan. blocks_scanned +
-     * blocks_rejected_fast = total outer-loop iterations. */
-    uint64_t blocks_scanned;
-    uint64_t lines_scanned;
-    uint64_t blocks_rejected_fast;
-    /* Worker stats summed across workers */
-    WorkerStats workers_total;
-    /* Instantaneous state */
-    uint32_t current_heap_blocks;
-    intptr_t current_inbox_depth;
-} JaclPerfSnapshot;
-
-extern JaclPerfSnapshot jacl_perf_snapshot (Runtime *rt);
-extern void jacl_perf_snapshot_print_json (FILE *out, const JaclPerfSnapshot *snap);
-extern void gc_concurrent_trigger (void *runtime_ptr);
-extern JaclVal runtime__create_resolve_closure (ThreadHeap *heap, arena_t *arena, JaclVal future_val);
-extern JaclVal runtime__create_parallel_k (ThreadHeap *heap, arena_t *arena, JaclVal agg_val, uint32_t index);
-extern void runtime__complete_parallel_slot (void *runtime_ptr, VM *vm, JaclVal agg_val, uint32_t index, JaclVal task_result);
-extern JaclVal runtime__create_race_k (ThreadHeap *heap, arena_t *arena, JaclVal agg_val);
-extern void runtime__complete_race_slot (void *runtime_ptr, VM *vm, JaclVal agg_val, JaclVal task_result);
-extern void runtime__continuation_task_exec (void *data);
-extern void runtime__schedule_continuation (void *runtime_ptr, JaclClosure *continuation, JaclVal result);
-extern void runtime__state_machine_task_exec (void *data);
-extern void runtime__schedule_sm_resumption (void *runtime_ptr, JaclVal state_machine, JaclVal result);
-extern void runtime__schedule_waiters (void *runtime_ptr, FutureWaiter *waiters, JaclVal result);
-extern void runtime__spawn_task_exec (void *data);
-extern void runtime__submit_spawn_task (void *runtime_ptr, JaclClosure *closure, JaclVal future_val, JaclVal parent_ctx);
-extern void runtime__parallel_task_exec (void *data);
-extern void runtime__submit_parallel_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, uint32_t index, JaclVal parent_ctx);
-extern void runtime__race_task_exec (void *data);
-extern void runtime__submit_race_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, JaclVal parent_ctx);
-extern VMResult rt_run_to_completion (Runtime *rt, JaclClosure *closure, arena_t *arena);
-
-/* --- embed.c --- */
-extern JaclVal embed__call_native (void *ctx, uint32_t fn_index, JaclVal *args, int argc);
-extern JaclVM *jacl_vm_new (void);
-extern JaclVM *jacl_vm_new_ex (const JaclConfig *config);
-extern void jacl_vm_free (JaclVM *vm);
-extern JaclVal embed__make_error (JaclVM *jvm, const char *msg);
-extern JaclVal jacl_eval (JaclVM *jvm, const char *source);
-extern JaclVal jacl_eval_file (JaclVM *jvm, const char *path);
-extern bool jacl_is_error_val (JaclVal v);
-extern const char *jacl_error_message_str (JaclVM *jvm, JaclVal err);
-extern JaclVal jacl_nil_val (void);
-extern JaclVal jacl_bool_val (bool b);
-extern JaclVal jacl_i32_val (int32_t n);
-extern JaclVal jacl_i64_val (JaclVM *jvm, int64_t n);
-extern JaclVal jacl_u32_val (uint32_t n);
-extern JaclVal jacl_u64_val (JaclVM *jvm, uint64_t n);
-extern JaclVal jacl_f32_val (float f);
-extern JaclVal jacl_f64_val (JaclVM *jvm, double d);
-extern JaclVal jacl_string_val (JaclVM *jvm, const char *s, size_t len);
-extern JaclVal jacl_string_cstr_val (JaclVM *jvm, const char *s);
-extern int32_t jacl_as_i32_val (JaclVal val);
-extern int64_t jacl_as_i64_val (JaclVal val);
-extern uint32_t jacl_as_u32_val (JaclVal val);
-extern uint64_t jacl_as_u64_val (JaclVal val);
-extern float jacl_as_f32_val (JaclVal val);
-extern double jacl_as_f64_val (JaclVal val);
-extern bool jacl_as_bool_val (JaclVal val);
-extern const char *jacl_as_cstr_val (JaclVM *jvm, JaclVal val, size_t *len_out);
-extern int jacl_typeof_val (JaclVal val);
-extern uint32_t embed__register_native (JaclVM *jvm, const char *name, EmbedNativeFn fn, int8_t arity);
-extern bool jacl_register_fn_val (JaclVM *jvm, const char *name, EmbedNativeFn fn, int arity);
-extern EmbedJaclHandle jacl_handle_new_val (JaclVM *jvm, JaclVal val);
-extern JaclVal jacl_handle_get_val (JaclVM *jvm, EmbedJaclHandle h);
-extern void jacl_handle_free_val (JaclVM *jvm, EmbedJaclHandle h);
-extern JaclVal jacl_call_val (JaclVM *jvm, JaclVal fn, JaclVal *args, int argc);
-extern JaclVal jacl_call_named_val (JaclVM *jvm, const char *name, JaclVal *args, int argc);
-extern bool embed__val_matches_field_type (JaclVal val, int field_type);
-extern JaclVal embed__heap_record_read_field (JaclVM *jvm, HeapRecord *s, uint32_t offset, int field_type);
-extern void embed__heap_record_write_field (HeapRecord *s, uint32_t offset, int field_type, JaclVal val);
-extern JaclVal jacl_struct_new_val (JaclVM *jvm, const char *type_name, JaclVal *fields, int count);
-extern JaclVal jacl_struct_get_val (JaclVM *jvm, JaclVal s_val, const char *field_name);
-extern bool jacl_struct_set_val (JaclVM *jvm, JaclVal s_val, const char *field_name, JaclVal value);
-extern bool jacl_has_trampolines (void);
-extern JaclTrampoline *jacl_trampoline_new_val (JaclVM *jvm, JaclVal closure, const char *sig);
-extern void *jacl_trampoline_ptr_val (JaclTrampoline *t);
-extern void jacl_trampoline_free_val (JaclVM *jvm, JaclTrampoline *t);
-extern void embed__free_all_trampolines (JaclVM *jvm);
-extern const char *jacl_struct_type_name_val (JaclVM *jvm, JaclVal s_val);
 
 /* ========================================================================
  * Auto-initialization constructor
@@ -2837,43 +1642,5 @@ static void jacl__init_template_handlers(void) {
     });
 }
 
-/* --- Struct size consistency checks (embed.c) ---
- * Returns sizeof(Type) from the unity build's .c definitions.
- * Tests compiled against this header compare these against their own sizeof()
- * to detect struct definition drift between .c files and jacl.h. */
-extern size_t jacl__sizeof_vm (void);
-extern size_t jacl__sizeof_compiler (void);
-extern size_t jacl__sizeof_compile_result (void);
-extern size_t jacl__sizeof_struct_type_field (void);
-extern size_t jacl__sizeof_struct_type_def (void);
-extern size_t jacl__sizeof_struct_type_registry (void);
-extern size_t jacl__sizeof_state_layout (void);
-extern size_t jacl__sizeof_suspension_analysis (void);
-extern size_t jacl__sizeof_call_frame (void);
-extern size_t jacl__sizeof_ctx_pool (void);
-extern size_t jacl__sizeof_environment (void);
-extern size_t jacl__sizeof_stack_trace (void);
-extern size_t jacl__sizeof_stack_trace_entry (void);
-
-/* Runtime / GC structs added after the AUDIT.md fixes — see embed.c. */
-extern size_t jacl__sizeof_worker_thread (void);
-extern size_t jacl__sizeof_runtime (void);
-extern size_t jacl__sizeof_runtime_task (void);
-extern size_t jacl__sizeof_thread_heap (void);
-extern size_t jacl__sizeof_grey_buffer (void);
-extern size_t jacl__sizeof_remembered_set (void);
-
-/* Per-field offset getters for Runtime + WorkerThread, generated from
- * src/struct_drift_fields.h. test_struct_sizes.c compares these (returning
- * the unity-build view) against offsetof from the jacl.h view (same struct
- * names, used here). Any drift between the two definitions fails the test. */
-#include "struct_drift_fields.h"
-#define JACL_DRIFT_DECLARE_OFFSETOF(STRUCT, FIELD) \
-    extern size_t jacl__offsetof_##STRUCT##_##FIELD (void);
-RUNTIME_FIELDS(JACL_DRIFT_DECLARE_OFFSETOF)
-WORKER_FIELDS(JACL_DRIFT_DECLARE_OFFSETOF)
-#undef JACL_DRIFT_DECLARE_OFFSETOF
-
-extern size_t jacl__offsetof_runtime_task_gc_root3 (void);
 
 #endif /* JACL_H */

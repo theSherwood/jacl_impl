@@ -62,19 +62,19 @@
   serves directly.
 - Source layout: `src/playground.ts` (entry — editor wiring, run
   pipeline, example picker, splitter, vim toggle), `src/jacl-mode.ts`
-  (StreamLanguage tokenizer), `src/jacl-wasm.ts` (typed wrapper over
-  `jacl_eval`), `src/splitter.ts` (drag-to-resize divider, persisted
-  to localStorage). The bundle (`dist/playground.js`, ~425 KB
-  minified) is committed so the playground works from a clone
+  (StreamLanguage tokenizer), `src/svm-jacl-wasm.ts` (`SvmJaclRunner`
+  over the svm-browser cdylib + `JaclFrontend` over `jacl_emit.wasm` —
+  the SVM backend is the sole engine), `src/splitter.ts` (drag-to-resize
+  divider, persisted to localStorage). The bundle (`dist/playground.js`,
+  ~425 KB minified) is committed so the playground works from a clone
   without a Node toolchain.
 - `./node_modules/.bin/tsc --noEmit` typechecks; `npm run build` only
   runs esbuild and ignores types, so always typecheck separately when
   changing TS surfaces.
-- Each Run click discards the previous JaclVM and spins up a fresh
-  one. The cross-eval persistence work in `embed.c` (struct registry,
-  ctx pool, GlobalArity table) is for embedders sharing one VM
-  across calls — the playground intentionally doesn't want that, so
-  Run is hermetic.
+- Each Run compiles the current source to SVM IR in the browser
+  (`jacl_emit.wasm`) and runs it fresh on the svm-browser cdylib —
+  hermetic by construction; unedited examples run their precompiled
+  `.svmb` directly.
 - Highlighting in `jacl-mode.ts` is position-driven, not just
   keyword-based:
     - first identifier after `[` → call head
@@ -100,20 +100,11 @@
   - This means that implementations either need to use the Allocator from `platform/platform.h` or they need to use macro-based polymorphism to allow the allocator to be set statically.
 - Use helpers from `platform/platform.h` where appropriate.
 
-### Dual-definition drift (gotchas)
+### The jacl.h mirror header
 
-Some definitions are **duplicated across files and can silently drift** — the
-unity build (`src/jacl.c` `#include`s the `.c` files) means only one copy is
-canonical per build:
-
-- **`OpCode` enum.** Canonical copy is in `src/bytecode.c` (the VM dispatch
-  table and the compiler's `OP_*` emits resolve against it via the unity build).
-  `src/jacl.h` has a **second, drifted** `OpCode` enum that is *not* what the VM
-  uses — adding an opcode there alone fails to link. **Add a new opcode to
-  `src/bytecode.c`** (the enum + the `opcode_name` switch); the VM handler goes
-  in `src/vm.c` (`CASE(OP_X)` label + the `dispatch_table[OP_X]` designated
-  initializer — add at the enum's end so existing values don't renumber).
-- **`Compiler` / `Runtime` / `WorkerThread` structs** are mirrored in `jacl.h`
-  vs `compiler.c`/`runtime.c`. Offsets are offset-checked via
-  `src/struct_drift_fields.h` (the `struct_sizes` test fails on drift); a new
-  field must be added to *both* copies.
+`src/jacl.h` is a hand-maintained mirror of the types/prototypes the unity
+build (`src/jacl.c`) defines — used only by separately-compiled consumers
+(the C tests, `codegen/codegen.c`, the macro-staging bridges). The unity itself
+does **not** include it. Keep a type/prototype in sync here when a
+separately-compiled consumer needs it; the interned frontend/GC/typer/shapes
+types are the ones that matter now that the bytecode VM is gone.

@@ -24,12 +24,15 @@ as you like; the language supports both.
 ## Status
 
 The core language is implemented and exercised by a large test corpus
-(74 C test modules plus 496 `*.jacl` programs under `test/jacl/`). All
-17 milestones in `DESIGN.md` are marked complete — value
-representation, lexer/parser, bytecode compiler + VM, procs and control
-flow, strings, persistent collections, error handling, mutable state,
-the static type system, the tracing GC, the NxM concurrency runtime,
-modules, macros, the three-mode syntax, and the FFI/embedding API.
+(the `*.jacl` programs under `test/jacl/`, the SVM runtime/codegen
+suites under `runtime/`, and the frontend C units under `test/`). The
+sole backend is the **SVM** (`codegen/*.c` → SVM IR, run on the
+`runtime/` engine); the legacy in-tree bytecode compiler + VM was
+removed in the SVM-backend migration (item 6). Implemented: value
+representation, lexer/parser, procs and control flow, strings,
+persistent collections, error handling, mutable state, the static type
+system, the tracing GC, the NxM concurrency runtime, modules, macros,
+and the three-mode syntax.
 
 The GC and concurrency paths were hardened by a multi-session audit
 campaign (see `DESIGN.md` "M12/M13 hardening note", `AUDIT.md`, and
