@@ -755,6 +755,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
    * irb never embeds a raw pointer inside the data image (own-data addresses are `data.self`
    * instructions in code). Omitted for a runnable module, which has no such section. */
   if (has_data_self) out_uleb(&o, 0);
+  /* Object-only `data.funcref` relocation section (v9), written next to `data.ptr` in the object
+   * dialect: none — irb never embeds a data->code reference in the data image (funcrefs live in
+   * code as `ref.func`, not as data-image relocations). Omitted for a runnable module. */
+  if (has_data_self) out_uleb(&o, 0);
   /* Import section: name, shape tag (0=func) + type index, mode byte (0=required). */
   out_uleb(&o, (uint64_t)tab.nimports);
   for (int i = 0; i < tab.nimports; i++) {
