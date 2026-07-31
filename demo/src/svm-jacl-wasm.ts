@@ -7,12 +7,11 @@
  * The cdylib decodes the module and runs function 0 on the fail-closed **bytecode
  * interpreter** — the browser's only wasm-safe engine — capturing stdout/stderr.
  *
- * This is the run half of the SVM-in-browser migration (docs/SVM_BROWSER_PLAN.md). It
- * exposes the same {@link RunResult} shape as the old Emscripten backend
- * (`jacl-wasm.ts`), so `playground.ts` consumes it unchanged. The compile half — turning
- * *edited* source into a `.svmb` in the browser — still needs an Emscripten build of the
- * LLVM-free frontend+codegen (`jacl_emit.wasm`); until then this runs **precompiled**
- * example `.svmb` blobs (MVP option (a) in the plan).
+ * This is the run half of the SVM-in-browser migration (docs/SVM_BROWSER_PLAN.md), and the
+ * playground's sole backend. It exposes a {@link RunResult} shape `playground.ts` consumes
+ * directly. The compile half — turning *edited* source into IR in the browser — uses an
+ * Emscripten build of the LLVM-free frontend+codegen (`jacl_emit.wasm`, {@link JaclFrontend});
+ * unedited examples run **precompiled** `.svmb` blobs.
  *
  * The cdylib entry is `svm_run_onramp`, which binds the module's manifest imports **by
  * name** (`write` → the stdout stream, `read`/`exit`/… likewise) — the ABI a
@@ -51,7 +50,7 @@ interface SvmBrowserExports {
   svm_stderr_len(): number | bigint;
 }
 
-/** Kept identical to `jacl-wasm.ts`'s `RunResult` so the playground is backend-agnostic. */
+/** The run-result shape the playground renders (stdout, optional error, error flag). */
 export interface RunResult {
   output: string;
   error: string | null;
@@ -207,10 +206,10 @@ export class SvmJaclRunner {
 }
 
 /**
- * The in-browser JACL **frontend**: the LLVM-free lexer+parser+codegen (`src/jacl.c` +
+ * The in-browser JACL **frontend**: the LLVM-free lexer+parser+codegen (`src/jacl_emit.c` +
  * `codegen/*.c`) compiled to wasm by Emscripten (`demo/svm/build_emit_wasm.sh`), exposing
  * `jacl_emit_ir(source) -> SVM IR text`. Loaded via a `<script src="wasm/jacl_emit.js">` tag, which
- * puts `createJaclEmit` on the global (like the old backend's `createJACL`).
+ * puts `createJaclEmit` on the global.
  */
 declare global {
   function createJaclEmit(init?: {

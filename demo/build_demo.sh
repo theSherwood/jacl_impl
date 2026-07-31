@@ -1,13 +1,16 @@
 #!/bin/bash
 #
 # Build the JACL playground demo assets:
-#   1. Symlinks the WASM artifacts produced by build_wasm.sh.
-#   2. Generates examples.json from test/jacl/*.jacl + the demo tours.
-#   3. Bundles the TypeScript editor (src/playground.ts) into
+#   1. Generates examples.json from test/jacl/*.jacl + the demo tours.
+#   2. Bundles the TypeScript editor (src/playground.ts) into
 #      dist/playground.js via esbuild, pulling CodeMirror 6 + the vim
 #      plugin in from node_modules. Runs `npm ci` first if
 #      node_modules is missing, so a fresh clone can build with
 #      `bash build_demo.sh` alone.
+#
+# The runtime WASM assets (svm_browser.wasm, jacl_emit.{js,wasm}, jaclrt.svm,
+# and the precompiled example .svmb blobs) are built by demo/svm/build_assets.sh
+# — the SVM backend is the playground's sole engine.
 #
 # Usage: cd demo && bash build_demo.sh
 #
@@ -16,12 +19,6 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-
-# --- Symlink WASM artifacts ---
-mkdir -p "$DIR/wasm"
-ln -sfn "../../build_wasm/jacl.js"   "$DIR/wasm/jacl.js"
-ln -sfn "../../build_wasm/jacl.wasm" "$DIR/wasm/jacl.wasm"
-echo "Linked wasm/ -> build_wasm/"
 
 # --- Editor bundle (CodeMirror 6 + vim + JACL mode) ---
 cd "$DIR"

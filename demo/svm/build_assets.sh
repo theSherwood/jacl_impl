@@ -40,7 +40,7 @@ echo "  -> demo/svm/jaclrt.svm ($(wc -c < "$DEMO/svm/jaclrt.svm") bytes; the liv
 
 # --- 1c. frontend (jacl_emit.wasm): the LLVM-free lexer+parser+codegen, for live editing ----------
 # Requires the Emscripten SDK on PATH. Skipped (fail-soft) if emcc is absent — the playground then
-# runs precompiled examples only, and the SVM live path falls back to the Classic VM.
+# runs precompiled examples only (editing a source shows an "assets missing" note until it's built).
 if command -v emcc >/dev/null 2>&1; then
   bash "$DIR/build_emit_wasm.sh"
 else

@@ -300,14 +300,13 @@ other compilers. See `AUDIT.md` for the per-baseline rationale and
 
 A browser playground for JACL lives in `demo/` — a CodeMirror 6 editor
 with a position-aware JACL syntax mode, optional vim keybindings, a
-draggable panel divider, and the WASM build of the VM. To run it
-locally:
+draggable panel divider, and the SVM backend (the wasm-safe bytecode
+engine + the in-browser LLVM-free frontend). To run it locally:
 
 ```
-bash build_wasm.sh           # produces build_wasm/jacl.{js,wasm}
-cd demo && bash build_demo.sh   # symlinks wasm/, regenerates examples.json,
-                                # bundles src/ → dist/playground.js
-python3 -m http.server 8080  # or any static server
+cd demo && bash svm/build_assets.sh   # svm_browser.wasm + jacl_emit.wasm + jaclrt.svm + example .svmb
+bash build_demo.sh                    # regenerates examples.json, bundles src/ → dist/playground.js
+python3 -m http.server 8080           # or any static server
 # open http://localhost:8080
 ```
 

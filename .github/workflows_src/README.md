@@ -62,18 +62,16 @@ goes red, re-run the copy above and commit.
 ### `pages.yml` — deploy the playground
 
 - Triggers on pushes to `main` and manually (`workflow_dispatch`).
-- Builds **both** backends and ships them side by side:
-  1. **Classic:** `build_wasm.sh` compiles `src/jacl.c` to
-     `build_wasm/jacl.{js,wasm}` via Emscripten (the in-tree compiler + VM).
-  2. **SVM** (the migration target): `demo/svm/build_assets.sh` builds the
-     wasm-safe bytecode engine cdylib (`svm_browser.wasm`), the in-browser
-     frontend (`jacl_emit.wasm`, `src/jacl.c` + `codegen/*` → SVM IR), and
-     the runtime blob (`jaclrt.svm`). Needs submodule checkout (`vendor/svm`),
-     Rust + `wasm32-unknown-unknown`, and clang/LLVM-18 (svm-llvm bakes the
-     runtime). The playground's "Engine: SVM" toggle then runs edited source
-     entirely client-side: `jacl_emit.wasm` → `svm_link_run` (generic link vs
-     `jaclrt.svm` + run). See `demo/svm/README.md`.
-  3. `demo/build_demo.sh` bundles the CodeMirror 6 editor with esbuild
+- Builds the **SVM backend** — the playground's sole engine (the old Emscripten
+  compiler + VM is no longer shipped to the playground):
+  1. `demo/svm/build_assets.sh` builds the wasm-safe bytecode engine cdylib
+     (`svm_browser.wasm`), the in-browser frontend (`jacl_emit.wasm`,
+     `src/jacl_emit.c` + `codegen/*` → SVM IR), and the runtime blob
+     (`jaclrt.svm`). Needs submodule checkout (`vendor/svm`), Rust +
+     `wasm32-unknown-unknown`, and clang/LLVM-18 (svm-llvm bakes the runtime).
+     The playground runs edited source entirely client-side: `jacl_emit.wasm` →
+     `svm_link_run` (generic link vs `jaclrt.svm` + run), and runs unedited
+     examples from precompiled `.svmb` blobs. See `demo/svm/README.md`.
+  2. `demo/build_demo.sh` bundles the CodeMirror 6 editor with esbuild
      and regenerates `examples.json` from `test/jacl/*.jacl`.
-  4. The real files (both backends) are assembled into `_site/` and
-     deployed to GitHub Pages.
+  3. The real files are assembled into `_site/` and deployed to GitHub Pages.

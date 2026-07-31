@@ -1,11 +1,11 @@
 # SVM-backend playground path
 
 Wires the JACL playground's **run** step onto the SVM backend's browser-viable
-**bytecode interpreter** (via the `svm-browser` cdylib on `wasm32`), instead of the old
-Emscripten bytecode VM (`demo/wasm/jacl.{js,wasm}`). This is the run half of
-`docs/SVM_BROWSER_PLAN.md`; the engine blockers it depended on are closed (see
-`docs/SVM_BROWSER_SPIKE_FINDINGS.md` — `vcpu.tls` lowered, the `gc.roots + thread` veto
-dropped in the vendored svm).
+**bytecode interpreter** (via the `svm-browser` cdylib on `wasm32`). This is now the
+playground's **sole** engine — the old Emscripten bytecode VM (`jacl.{js,wasm}`) has been
+removed. This is the run half of `docs/SVM_BROWSER_PLAN.md`; the engine blockers it depended
+on are closed (see `docs/SVM_BROWSER_SPIKE_FINDINGS.md` — `vcpu.tls` lowered, the
+`gc.roots + thread` veto dropped in the vendored svm).
 
 ## Pieces
 
@@ -14,7 +14,7 @@ dropped in the vendored svm).
 | `build_assets.sh` | Build `svm_browser.wasm` (cdylib → wasm32) + `jacl_emit.wasm` (frontend) into `demo/wasm/`, ship `jaclrt.svm`, and link+encode example programs to `svm/svmb/*.svmb` (+ `manifest.json`). |
 | `build_emit_wasm.sh` | Build just `jacl_emit.wasm` — the LLVM-free frontend+codegen (Emscripten), exposing `jacl_emit_ir(source) → SVM IR text`. Needs emsdk on PATH. |
 | `run_svmb.mjs` | Headless Node driver — runs a `.svmb` through `svm_run_onramp` and prints captured stdout. CI gate for the precompiled run path. |
-| `../src/svm-jacl-wasm.ts` | Browser modules: `SvmJaclRunner` (`runSvmb` precompiled / `linkRun` live) and `JaclFrontend` (`emitIr`) — the same `RunResult` shape as `jacl-wasm.ts`, so `playground.ts` stays backend-agnostic. |
+| `../src/svm-jacl-wasm.ts` | Browser modules: `SvmJaclRunner` (`runSvmb` precompiled / `linkRun` live), `JaclFrontend` (`emitIr`), and the `RunResult` shape `playground.ts` renders. |
 
 Generated assets (`wasm/svm_browser.wasm`, `svm/svmb/`) are git-ignored and rebuilt by CI.
 
@@ -39,7 +39,7 @@ so the guest traps (`STATUS_TRAP`).
 
 ## In the editor
 
-`playground.ts` has an **Engine: Classic ⇄ SVM** toggle. In SVM mode `runOnSvm` does:
+`playground.ts` runs every program through the SVM backend (`runOnSvm`):
 
 1. **Precompiled example (unedited):** fetch its `.svmb` from `manifest.json` and run it
    through `SvmJaclRunner.runSvmb` — fast, no compile.
@@ -58,13 +58,13 @@ generator → `"1\n2\n"`; malformed input is rejected with the frontend's own di
 
 **Limitations.** Single-file only — a module program (top-level `use`) needs filesystem
 import resolution and is rejected by the browser frontend for now. If the SVM assets aren't
-built/shipped, SVM mode falls back to the Classic VM with a note.
+built/shipped, the editor shows an "assets missing" note instead of running.
 
 ## Pages CI
 
-The Pages workflow change is in `.github/workflows_src/pages.yml` (the repo's unprivileged
-source of truth for workflows — see that dir's `README.md`). It adds submodule checkout,
+The Pages workflow is in `.github/workflows_src/pages.yml` (the repo's unprivileged
+source of truth for workflows — see that dir's `README.md`). It does submodule checkout,
 Rust + `wasm32-unknown-unknown`, clang/LLVM-18, a `Build SVM assets` step
 (`demo/svm/build_assets.sh`), and copies `svm_browser.wasm` / `jacl_emit.{js,wasm}` /
-`jaclrt.svm` into `_site` alongside the Classic `jacl.{js,wasm}`. Promote it into
+`jaclrt.svm` (+ the precompiled `.svmb`) into `_site`. Promote edits into
 `.github/workflows/` with the copy step documented in `.github/workflows_src/README.md`.
