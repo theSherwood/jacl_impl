@@ -522,3 +522,95 @@ fn nested_await() {
     let (iv, _) = run_case_full("nested_await");
     assert_eq!(iv, i32_val(42), "nested await result");
 }
+
+// --- P2.10 bring-up: combined programs across the supported subset, each returning an i32.
+// These mirror the native bytecode test/*.c exec cases on the SVM backend (item 6, slice 3a):
+// they run through the same emit -> link -> run_diff path (interp == JIT), so the SVM engine is
+// the oracle the C exec tests are being retired in favor of.
+
+#[test]
+fn bring_bindings() {
+    run_case("bring_bindings", i32_val(42)); // def x 5; def y 37; [+ $x $y]
+}
+
+#[test]
+fn bring_nested_arith() {
+    run_case("bring_nested_arith", i32_val(11)); // [+ 1 [* 2 [- 10 5]]]
+}
+
+#[test]
+fn bring_factorial() {
+    run_case("bring_factorial", i32_val(720)); // fac 6
+}
+
+#[test]
+fn bring_while_sum() {
+    run_case("bring_while_sum", i32_val(55)); // sum 1..10
+}
+
+#[test]
+fn bring_if() {
+    run_case("bring_if", i32_val(100)); // n=7 > 5 -> 100
+}
+
+#[test]
+fn bring_closure() {
+    run_case("bring_closure", i32_val(42)); // anon proc capturing $y=10, [$f 32]
+}
+
+#[test]
+fn bring_counter() {
+    run_case("bring_counter", i32_val(3)); // mutable-capturing proc invoked 3x
+}
+
+#[test]
+fn bring_str() {
+    run_case("bring_str", i32_val(9)); // [length [concat "foo" "barbaz"]]
+}
+
+#[test]
+fn bring_hof() {
+    run_case("bring_hof", i32_val(42)); // apply $dbl 21
+}
+
+#[test]
+fn bring_proc_chain() {
+    run_case("bring_proc_chain", i32_val(42)); // dbl(add 19 2)
+}
+
+#[test]
+fn bring_recur_sum() {
+    run_case("bring_recur_sum", i32_val(55)); // sumto 10, recursive
+}
+
+// --- Concurrency (spawn/await/parallel) on the SVM fiber scheduler. `race` is intentionally
+// omitted: its result is the first block to finish, non-deterministic for pure-compute blocks.
+#[test]
+fn spawn_await() {
+    run_case("spawn_await", i32_val(42)); // def f [spawn { [+ 40 2] }]; [await $f]
+}
+
+#[test]
+fn spawn_two() {
+    run_case("spawn_two", i32_val(45)); // [+ [await $a] [await $b]] -> 42 + 3
+}
+
+#[test]
+fn spawn_capture() {
+    run_case("spawn_capture", i32_val(42)); // spawn block captures $y=30; +12
+}
+
+#[test]
+fn spawn_await_twice() {
+    run_case("spawn_await_twice", i32_val(42)); // future resolves once, cached; 21+21
+}
+
+#[test]
+fn parallel_two() {
+    run_case("parallel", i32_val(45)); // def [a b] [parallel {…} {…}]; [+ $a $b]
+}
+
+#[test]
+fn parallel_three() {
+    run_case("parallel3", i32_val(42)); // 10 + 20 + 12
+}
