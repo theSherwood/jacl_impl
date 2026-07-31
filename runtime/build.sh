@@ -4,9 +4,10 @@
 #   1. jaclrt.bc   — the clang stage (runtime C -> clang -O2 -emit-llvm).
 #   2. jaclrt.svm  — the SVM-IR module (svm-llvm-translate of the bitcode), the
 #                    reusable, separately-compiled runtime that programs link against.
-#   3. jaclrt.syms — the export sidecar (`name idx` per line): each jacl_* function's
-#                    index in the module, so a program module resolves its
-#                    `call.import "jacl_*"` through svm_ir::link (LinkUnit.exports).
+#                    Exports ride in-band in the module now — svm-llvm retired the
+#                    `.syms` export sidecar — so a program module resolves its
+#                    `call.import "jacl_*"` through svm_ir::link over the module's own
+#                    export table (svm_link_run reads `module.exports` directly).
 #
 # This is the separate-artifact path (SVM_BACKEND_PHASE2.md P2.0): compile the
 # runtime once here, link many JACL-emitted program modules against it. Requires
@@ -23,8 +24,7 @@ clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
   -I "$DIR" "$DIR/jaclrt.c" -o "$OUT/jaclrt.bc"
 echo "runtime bitcode:  $OUT/jaclrt.bc"
 
-# 2 + 3. bitcode -> SVM-IR module + export sidecar, via the standalone CLI.
+# 2. bitcode -> SVM-IR module (exports in-band), via the standalone CLI.
 cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin svm-llvm-translate -- \
-  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.svm" --emit-syms "$OUT/jaclrt.syms"
+  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.svm"
 echo "runtime module:   $OUT/jaclrt.svm"
-echo "runtime exports:  $OUT/jaclrt.syms"
