@@ -142,6 +142,10 @@ static const char *source_for(const char *name) {
     return "proc sq {n} { mut i 1\n[while [<= $i $n] { yield [* $i $i]\nset i [+ $i 1] }] }\nmut s 0\n[for [sq 4] x { set s [+ $s $x] }]\n[+ $s 0]";
   if (!strcmp(name, "gen_sequential"))   /* explicit sequential yields (test_yield.c pattern) */
     return "proc gen {} { yield 1\nyield 2\nyield 3 }\nmut s 0\n[for [gen] x { set s [+ $s $x] }]\n[+ $s 0]"; /* -> 6 */
+  if (!strcmp(name, "stream_collect"))   /* stream operator: collect a generator into a vec */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[length [collect [upto 5]]]"; /* -> 5 */
+  if (!strcmp(name, "stream_count"))     /* stream operator: count elements */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[count [upto 7]]"; /* -> 7 */
   /* destructuring bind — vec positional, wildcard, rest, named-from-map (item 6 slice 3a:
    * SVM coverage for the native test_destructure_* exec tests, rephrased to return an i32). */
   if (!strcmp(name, "destr_vec"))

@@ -200,7 +200,6 @@ TESTS=(
     "test/test_splat.c|splat|"
     "test/test_variadic.c|variadic|"
     "test/test_stream_type.c|stream_type|"
-    "test/test_collect.c|collect|"
     "test/test_stream_for.c|stream_for|"
     "test/test_stream_filter.c|stream_filter|"
     "test/test_stream_transform.c|stream_transform|"

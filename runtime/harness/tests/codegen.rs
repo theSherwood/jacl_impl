@@ -641,3 +641,14 @@ fn destructure_named_from_map() {
 fn gen_sequential_yields() {
     run_case("gen_sequential", i32_val(6)); // proc with yield 1/2/3, summed over for -> 6
 }
+
+// --- Stream operators on SVM generators (probe for the test_stream_*/test_collect family).
+#[test]
+fn stream_collect_len() {
+    run_case("stream_collect", i32_val(5)); // [length [collect [upto 5]]]
+}
+
+#[test]
+fn stream_count() {
+    run_case("stream_count", i32_val(7)); // [count [upto 7]]
+}
