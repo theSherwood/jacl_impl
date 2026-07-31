@@ -146,6 +146,25 @@ static const char *source_for(const char *name) {
     return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[length [collect [upto 5]]]"; /* -> 5 */
   if (!strcmp(name, "stream_count"))     /* stream operator: count elements */
     return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[count [upto 7]]"; /* -> 7 */
+  if (!strcmp(name, "stream_transform")) /* transform (map) over a generator via a \\-lambda */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [transform [upto 5] [\\ * $it 10]] x { set s [+ $s $x] }]\n[+ $s 0]"; /* 0+10+20+30+40 -> 100 */
+  if (!strcmp(name, "stream_filter"))    /* filter a generator via a \\-lambda predicate */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [filter [upto 10] [\\ > $it 5]] x { set s [+ $s $x] }]\n[+ $s 0]"; /* 6+7+8+9 -> 30 */
+  if (!strcmp(name, "stream_take"))      /* take N from a stream */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\nmut s 0\n[for [take [upto 100] 3] x { set s [+ $s $x] }]\n[+ $s 0]"; /* 0+1+2 -> 3 */
+  if (!strcmp(name, "stream_lines"))     /* split a string into a line stream */
+    return "[count [lines \"a\\nb\\nc\"]]"; /* -> 3 */
+  if (!strcmp(name, "stream_first"))     /* first element of a stream */
+    return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[+ [first [filter [upto 10] [\\ > $it 5]]] 0]"; /* first of (6,7,8,9) -> 6 */
+  /* string equality + ordering (item 6 slice 3a: SVM coverage for test_string_eq_cmp.c) */
+  if (!strcmp(name, "string_eq"))
+    return "[if [== \"hello\" \"hello\"] { 1 } { 0 }]"; /* -> 1 */
+  if (!strcmp(name, "string_neq"))
+    return "[if [== \"abc\" \"abd\"] { 1 } { 0 }]";     /* -> 0 */
+  if (!strcmp(name, "string_lt"))
+    return "[if [< \"abc\" \"abd\"] { 1 } { 0 }]";      /* -> 1 */
+  if (!strcmp(name, "string_gt"))
+    return "[if [> \"xyz\" \"abc\"] { 1 } { 0 }]";      /* -> 1 */
   /* destructuring bind — vec positional, wildcard, rest, named-from-map (item 6 slice 3a:
    * SVM coverage for the native test_destructure_* exec tests, rephrased to return an i32). */
   if (!strcmp(name, "destr_vec"))
