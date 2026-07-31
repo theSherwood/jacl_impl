@@ -5,7 +5,7 @@
 # editing half of the SVM playground). The JS host feeds edited source in, gets IR text back, then
 # links it vs jaclrt.svm + encodes it in the browser and runs it through the svm-browser cdylib.
 #
-# Mirrors build_wasm.sh (the old backend's Emscripten build) but compiles the **frontend only**:
+# Compiles the JACL **frontend only** to wasm via Emscripten:
 # the emit TU (codegen/tests/emit_jacl.c, a unity include of src/jacl.c) + codegen.c + irbuilder.c,
 # exporting `_jacl_emit_ir` instead of the whole VM. Output → demo/wasm/jacl_emit.{js,wasm}.
 #
