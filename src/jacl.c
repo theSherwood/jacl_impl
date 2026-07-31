@@ -1,6 +1,23 @@
-/* JACL — Unity build. Include this single file to get the full pipeline. */
+/* JACL — Unity build. Include this single file to get the full pipeline.
+ *
+ * The sole backend is the SVM (codegen/*.c + the runtime/ Rust engine); the
+ * legacy bytecode backend (bytecode.c / compiler.c / vm.c) and its scheduler +
+ * embedding API (runtime.c / embed.c) were removed in item 6. This unity is the
+ * frontend (lexer → parser → typer → shapes) plus the front-end GC (gc.c /
+ * gc_collect.c) that backs the transient values macro expansion produces.
+ *
+ * The small surface the macro expander + GC tracer still need from the old
+ * files (macro table + expand-state types, three helpers, the context-lifecycle
+ * no-ops, and the JaclClosure/BytecodeChunk layouts the GC traces) is provided
+ * by jacl_emit_support.c, a parallel mirror. The JACL_EMIT_ONLY guards
+ * throughout the tree (a historical name from the emit-only split) now gate the
+ * one and only build. */
 #ifndef JACL_C
 #define JACL_C
+
+#ifndef JACL_EMIT_ONLY
+#define JACL_EMIT_ONLY 1
+#endif
 
 /* --- System headers --- */
 #include <assert.h>
@@ -46,13 +63,13 @@
 #include "parser.c"
 #include "shapes.c"
 #include "typer.c"
-#include "bytecode.c"
 #include "collections.c"
-#include "compiler.c"
-#include "vm.c"
+
+/* Legacy-backend surface the macro expander + GC tracer need, mirrored
+ * (no bytecode.c/compiler.c/vm.c). */
+#include "jacl_emit_support.c"
+
 #include "syntax.c"
 #include "gc_collect.c"
-#include "runtime.c"
-#include "embed.c"
 
 #endif /* JACL_C */

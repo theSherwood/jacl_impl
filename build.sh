@@ -35,7 +35,6 @@ FILTER=""
 CLEAN=0
 PARALLEL=0
 TSAN=0
-WASM=0
 RELEASE=0
 for arg in "$@"; do
   case "$arg" in
@@ -45,47 +44,9 @@ for arg in "$@"; do
     --parallel|-j) PARALLEL=$(nproc) ;;
     --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
     --tsan) TSAN=1 ;;
-    --wasm) WASM=1 ;;
     --release) RELEASE=1 ;;
   esac
 done
-
-# --wasm mode: build the unity tree via emscripten and exercise the
-# resulting .wasm/.js pair through test/test_wasm.mjs (which now also
-# runs test/jacl/tour.jacl end-to-end — the same script the playground
-# serves by default). Skips with a clear notice when emcc or node is
-# missing instead of silently passing. Exclusive with --tsan.
-if [ "$WASM" -eq 1 ]; then
-  if [ "$TSAN" -eq 1 ]; then
-    echo "error: --wasm and --tsan are mutually exclusive."
-    exit 2
-  fi
-  if ! command -v emcc >/dev/null 2>&1; then
-    echo "WASM check: SKIPPED (emcc not on PATH)."
-    echo "  Install Emscripten SDK to enable: https://emscripten.org"
-    exit 0
-  fi
-  DIR="$(cd "$(dirname "$0")" && pwd)"
-  echo "=== WASM build check (emcc) ==="
-  if ! bash "$DIR/build_wasm.sh"; then
-    echo "WASM build: FAIL"
-    exit 1
-  fi
-  echo "WASM build: PASS"
-
-  if ! command -v node >/dev/null 2>&1; then
-    echo "WASM run: SKIPPED (node not on PATH; build-only check)."
-    exit 0
-  fi
-  echo "=== WASM run check (node test/test_wasm.mjs) ==="
-  if node "$DIR/test/test_wasm.mjs"; then
-    echo "WASM run: PASS"
-    exit 0
-  else
-    echo "WASM run: FAIL"
-    exit 1
-  fi
-fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
@@ -146,69 +107,19 @@ TESTS=(
     "lib/bignum/test_bigfloat_pbt.c|bigfloat_pbt|"
     "lib/segment_array/test_segment_array.c|segment_array|"
     "lib/segment_array/test_segment_array_var.c|segment_array_var|"
+    # C-internal unit tests that link against the VM-free libjacl.a. The VM-only
+    # tests (bytecode/compiler/vm/embed/e2e, milestones, and the run_ok-driven
+    # feature tests that executed on the legacy VM) were removed with the bytecode
+    # backend in item 6; SVM feature coverage lives in runtime/harness/tests/*.rs
+    # and the SVM GC's concurrent/MT coverage in runtime/tests/*_mt.c.
     "test/test_value.c|value|"
     "test/test_lexer.c|lexer|"
     "test/test_parser.c|parser|"
     "test/test_head_id_stamp.c|head_id_stamp|"
     "test/test_typer.c|typer|"
-    "test/test_type_errors.c|type_errors|"
-    "test/test_bytecode.c|bytecode|"
-    "test/test_vm.c|vm|"
-    "test/test_compiler.c|compiler|"
-    "test/test_integration.c|integration|"
-    "test/test_m4.c|m4|"
-    "test/test_string.c|string|"
-    "test/test_m5.c|m5|"
-    "test/test_m6.c|m6|"
-    "test/test_collections.c|collections|"
-    "test/test_m9.c|m9|"
-    "test/test_m10.c|m10|"
-    "test/test_m11.c|m11|"
-    "test/test_gc.c|gc|"
-    "test/test_runtime.c|runtime|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_pinned_deque.c|chaos_pinned_deque|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_gc_deque_scan.c|chaos_gc_deque_scan|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_grey_buf.c|chaos_grey_buf|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_gc_alloc_sweep.c|chaos_gc_alloc_sweep|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_soak.c|chaos_soak|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_concurrent_intern.c|chaos_concurrent_intern|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_chaos_satb_deref.c|chaos_satb_deref|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_embed.c|embed|${LIBFFI_FLAGS}"
-    "test/test_e2e_embed_basics.c|e2e_embed_basics|${LIBFFI_FLAGS}"
-    "test/test_e2e_native_fns.c|e2e_native_fns|${LIBFFI_FLAGS}"
-    "test/test_e2e_gc_handles.c|e2e_gc_handles|${LIBFFI_FLAGS}"
-    "test/test_e2e_struct_tramp.c|e2e_struct_tramp|${LIBFFI_FLAGS}"
     "test/test_rope_string.c|rope_string|"
     "test/test_utf8_nfd.c|utf8_nfd|"
     "test/test_string_new.c|string_new|"
-    "test/test_length_builtin.c|length_builtin|"
-    "test/test_index_builtin.c|index_builtin|"
-    "test/test_slice_builtin.c|slice_builtin|"
-    "test/test_concat_tiers.c|concat_tiers|"
-    "test/test_compiler_vm_integration.c|compiler_vm_integration|"
-    "test/test_heap_strings.c|heap_strings|"
-    "test/test_gc_rope_tracing.c|gc_rope_tracing|"
-    "test/test_intern_eviction.c|intern_eviction|"
-    "test/test_concurrent_intern.c|concurrent_intern|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_rope_slice_grapheme.c|rope_slice_grapheme|"
-    "test/test_cross_thread_string.c|cross_thread_string|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
-    "test/test_destructure_spread_all.c|destructure_spread_all|"
-    "test/test_splat.c|splat|"
-    "test/test_variadic.c|variadic|"
-    "test/test_stream_type.c|stream_type|"
-    "test/test_stream_for.c|stream_for|"
-    "test/test_stream_type_enforce.c|stream_type_enforce|"
-    "test/test_interpret_sandbox.c|interpret_sandbox|"
-    "test/test_syntax.c|syntax|"
-    "test/test_long_names.c|long_names|"
-    "test/test_typed_vec.c|typed_vec|"
-    "test/test_typed_map.c|typed_map|"
-    "test/test_struct_sizes.c|struct_sizes|"
-    "test/test_bench.c|bench|"
-    "test/test_perf.c|perf|"
 )
 
 # Filter tests if --lib flag is set

@@ -269,11 +269,11 @@ Three pre-merge baselines:
                             #   failures: TSAN blindness on barrier/fence/
                             #   epoch-mediated synchronization, not missed
                             #   barriers — see DESIGN.md)
-./build.sh --wasm           # builds via Emscripten and runs the WASM
-                            #   suite (test/test_wasm.mjs, including
-                            #   tour.jacl end-to-end). Skips with a clear
-                            #   notice when emcc or node isn't on PATH.
 ```
+
+The SVM backend's own tests live under `runtime/` (`runtime/harness` — the
+`cargo test` suites — and the `runtime/tests/*.c` GC/scheduler tests). The
+browser playground is built by `demo/svm/build_assets.sh`.
 
 Each run prints `=== Results: N passed, M failed ===`. Filter to one
 test:

@@ -7,11 +7,7 @@
  *
  * Cases map to small arithmetic programs (see source_for). Built with gcc (the
  * frontend's toolchain); the unity src/jacl.c provides lexer_lex / parser_parse. */
-#ifdef JACL_EMIT_ONLY
-#include "../../src/jacl_emit.c"   /* emit-only unity: frontend + codegen, no bytecode VM (item 6) */
-#else
-#include "../../src/jacl.c"   /* full JACL frontend (defines the parse pipeline) */
-#endif
+#include "../../src/jacl.c"   /* the JACL frontend unity (VM-free; self-defines JACL_EMIT_ONLY) */
 
 /* Bridge: codegen synthesizes sugar AST nodes (implicit-`it` lambda bodies) and
  * needs head-id interning, which is static inside the frontend unity. */
