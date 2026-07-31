@@ -7,7 +7,11 @@
  *
  * Cases map to small arithmetic programs (see source_for). Built with gcc (the
  * frontend's toolchain); the unity src/jacl.c provides lexer_lex / parser_parse. */
+#ifdef JACL_EMIT_ONLY
+#include "../../src/jacl_emit.c"   /* emit-only unity: frontend + codegen, no bytecode VM (item 6) */
+#else
 #include "../../src/jacl.c"   /* full JACL frontend (defines the parse pipeline) */
+#endif
 
 /* Bridge: codegen synthesizes sugar AST nodes (implicit-`it` lambda bodies) and
  * needs head-id interning, which is static inside the frontend unity. */
@@ -203,6 +207,7 @@ static const char *find_ast_error(AstNode *n) {
   return NULL;
 }
 
+#ifndef JACL_EMIT_ONLY
 /* Concatenate a compiled program's modules into one flat top-level form list for SVM codegen.
  * The reference module model is a single flat global namespace: every module's procs, globals,
  * and structs share it, disambiguated only by name, and modules execute deps-first (topo order,
@@ -258,6 +263,7 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
   *out_count = k;
   return out;
 }
+#endif /* JACL_EMIT_ONLY */
 
 /* Expand compile-time macros in place, matching the reference pipeline (which runs
  * `ast_expand_macros` after parsing, before codegen). This registers the prelude macros
@@ -271,6 +277,40 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
  * expansion error message (arena/heap-backed). Non-static + error-returning so the in-guest
  * `[interpret …]` bridge (interpret_bridge_guest.c) can reuse the exact expansion the compiler runs
  * — with the macro-staging hook it expands macro bodies on the SVM engine, no reference VM. */
+#ifdef JACL_EMIT_ONLY
+/* Emit-only build: no legacy VM is linked, so set up a bare frontend heap + intern table for the
+ * expansion pass directly (mirrors the prelude bring-up in syntax.c) instead of via jacl_vm_new.
+ * Macro bodies expand on the SVM engine through the staging hook, so `es.ctx` stays NULL and the
+ * heap is only touched by the frontend's transient allocations. A process-lifetime static heap is
+ * fine for a compiler front-end (short-lived, grows monotonically). */
+const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+  static arena_t         em_arena  = {0};
+  static BlockPool       em_pool;
+  static ThreadHeap      em_heap;
+  static JaclInternTable em_intern;
+  static int             em_ready  = 0;
+  if (!em_ready) {
+    gc_block_pool_init(&em_pool);
+    gc_heap_init(&em_heap, &em_pool);
+    intern_table_init(&em_intern, &em_arena);
+    em_ready = 1;
+  }
+  ThreadHeap *prev_heap = gc__current_heap;
+  gc__current_heap = &em_heap;
+  MacroTable mt;
+  macro_table_init(&mt);
+  ExpandState es;
+  memset(&es, 0, sizeof(es));
+  es.ctx = NULL;   /* no legacy context in an emit-only build */
+  uint32_t err_line = 0, err_col = 0;
+  jacl_expand_skip_prelude = 1;   /* only user defmacros; prelude macros stay name-handled */
+  const char *err = ast_expand_macros(nodes, count, &mt, &em_heap,
+                                      &em_intern, arena, &es, &err_line, &err_col);
+  jacl_expand_skip_prelude = 0;
+  gc__current_heap = prev_heap;
+  return err;
+}
+#else
 const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
   JaclVM *evm = jacl_vm_new();
   MacroTable mt;
@@ -291,6 +331,7 @@ const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *aren
   jacl_ctx_restore(saved);
   return err;
 }
+#endif /* JACL_EMIT_ONLY */
 
 /* Host side of the `interp` powerbox capability (runtime/interpcap.c). Reads JACL source on
  * stdin, runs it on a reference VM, and prints the scalar/error result as one line:
@@ -303,6 +344,7 @@ const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *aren
  * it evaluates a wrapper that takes `[interpret-prelude]`, drops every non-core name NOT in the
  * allow-list, and calls `[interpret $p "<src>"]`. (v1 marshals integer + error results — all the
  * corpus's interpret sites return; a non-scalar result reports ERR.) */
+#ifndef JACL_EMIT_ONLY
 static void interp_emit_result(JaclVal v) {
   if (jacl_is_error(v)) { puts("ERR"); return; }
   if (jacl_is_i32(v))   { printf("INT %d\n", jacl_as_i32(v)); return; }
@@ -347,6 +389,7 @@ static int run_interp(int argc, char **argv) {
   interp_emit_result(jacl_eval(jvm, wrap));
   return 0;
 }
+#endif /* JACL_EMIT_ONLY */
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -389,7 +432,10 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
       return emit_err("module `use` is not supported in the browser frontend yet", "");
     }
   }
-  /* Static-error oracle: the reference compiler's diagnostics (own re-parse, as in `main`). */
+#ifndef JACL_EMIT_ONLY
+  /* Static-error oracle: the reference compiler's diagnostics (own re-parse, as in `main`).
+   * Emit-only builds drop this legacy-compiler diagnostic pass — the SVM codegen path performs
+   * its own checks and this is what pins compiler.c/vm.c into the build (item 6). */
   {
     JaclVM *chk = jacl_vm_new();
     LexResult ctoks = lexer_lex(source, &chk->arena);
@@ -414,6 +460,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
       }
     }
   }
+#endif /* JACL_EMIT_ONLY */
   { const char *me = expand_macros_inplace(parse.nodes, parse.count, &arena);
     if (me) { char *o = emit_err("macro error: ", me); arena_destroy(&arena); return o; } }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
@@ -445,7 +492,9 @@ int main(int argc, char **argv) {
   jacl_install_svm_stage_hook();
 #endif
   /* `--interp <mode> [names…]`: the host backend of the interp capability (reads stdin). */
+#ifndef JACL_EMIT_ONLY
   if (argc >= 2 && !strcmp(argv[1], "--interp")) return run_interp(argc, argv);
+#endif
   /* Output format. The default is the **binary** svm-encode container (guest-JIT staging
    * item 7 — the interchange format the harness decodes with `svm_encode::decode_module`,
    * no parse round-trip). `--text` restores the human/golden svm-text form. */
@@ -492,6 +541,7 @@ int main(int argc, char **argv) {
   for (uint32_t i = 0; i < parse.count; i++)
     if (parse.nodes[i]->type == AST_USE) { is_module_program = 1; break; }
 
+#ifndef JACL_EMIT_ONLY
   if (is_module_program && file_path) {
     char abs_path[4096];
     if (!realpath(file_path, abs_path)) {
@@ -543,6 +593,7 @@ int main(int argc, char **argv) {
       }
     }
   }
+#endif /* JACL_EMIT_ONLY */
 
   /* Macro expansion: rewrite compile-time macro call sites (prelude + user `defmacro`s)
    * into their expansions, exactly as the reference compiler does before codegen. Runs on
