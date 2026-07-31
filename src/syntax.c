@@ -1020,6 +1020,19 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     return false;
                 }
 
+#ifdef JACL_EMIT_ONLY
+                /* Emit-only build: macros expand exclusively through the SVM staging hook (handled
+                 * above); the legacy bytecode-VM evaluator (jacl_ctx_run_closure) is not linked. If
+                 * the hook is unset we cannot expand — a configuration error, reported as such. */
+                {
+                    char err[256];
+                    snprintf(err, sizeof(err),
+                             "macro '%.*s': SVM staging hook not installed (emit-only build has no legacy VM)",
+                             (int)name_len, name);
+                    expand__set_error(es, err, node->start.line, node->start.column, arena);
+                    return false;
+                }
+#else
                 /* Convert args to syntax objects.
                  * For variadic macros, collect extra args into a vec. */
                 JaclVal arg_vals[64];
@@ -1106,6 +1119,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                                        es, depth + 1);
                 expand__pop_frame(es);
                 return ok;
+#endif /* JACL_EMIT_ONLY */
             }
         }
 
@@ -1140,6 +1154,16 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
 /* Compile a macro body into a closure.
  * Called during expansion (before the main compilation pass) so the closure
  * is available for jacl_ctx_run_closure when a staged macro is invoked. */
+#ifdef JACL_EMIT_ONLY
+/* Emit-only build: no legacy bytecode compiler is linked. Macro bodies are compiled per call
+ * onto the SVM engine via the staging hook, so no legacy closure is ever built — this is a
+ * never-called stub (its two call sites are runtime-skipped under staging + skip-prelude). */
+static const char *expand__compile_staged_body(MacroEntry *entry, ThreadHeap *heap,
+                                               JaclInternTable *intern, arena_t *arena) {
+    (void)entry; (void)heap; (void)intern; (void)arena;
+    return "expand__compile_staged_body called in an emit-only build";
+}
+#else
 static const char *expand__compile_staged_body(MacroEntry *entry,
                                                ThreadHeap *heap,
                                                JaclInternTable *intern,
@@ -1199,6 +1223,7 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     entry->closure = closure;
     return NULL;
 }
+#endif /* JACL_EMIT_ONLY */
 
 /* Opt-in: when set, ast_expand_macros skips registering the built-in prelude macros
  * (assert / timeout / not / and / or / incr / \), so only user `defmacro`s are expanded.

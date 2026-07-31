@@ -37,7 +37,11 @@ if [ ! -x "$TRANSLATE" ]; then
   ( cd "$SVM/crates/svm-llvm" && cargo build --release --bin svm-llvm-translate --example try_translate )
 fi
 
-CF=(-std=c99 -O2 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D__EMSCRIPTEN__
+# -DJACL_EMIT_ONLY selects the emit-only frontend unity (src/jacl_emit.c) inside emit_jacl.c:
+# the compiler-as-guest only compiles JACL -> SVM IR, so the legacy bytecode backend
+# (bytecode.c/compiler.c/vm.c) + its scheduler/embedding (runtime.c/embed.c) are dropped —
+# a smaller .svmb, no stubbed vm.c externals (docs/SVM_SELFHOST_FEASIBILITY.md §2, item 6).
+CF=(-std=c99 -O2 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D__EMSCRIPTEN__ -DJACL_EMIT_ONLY
     -Wno-implicit-function-declaration -fno-vectorize -fno-slp-vectorize
     -emit-llvm -S -I "$CODEGEN" -I "$DIR/inc")
 

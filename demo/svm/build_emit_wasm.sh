@@ -27,6 +27,7 @@ $EMCC \
   -O2 \
   -D_DEFAULT_SOURCE \
   -D_POSIX_C_SOURCE=200809L \
+  -DJACL_EMIT_ONLY \
   -Wno-implicit-function-declaration \
   -I "$ROOT/codegen" \
   "$ROOT/codegen/tests/emit_jacl.c" \
