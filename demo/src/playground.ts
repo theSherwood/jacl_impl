@@ -151,7 +151,8 @@ function setSource(view: EditorView, text: string) {
 // LLVM-free frontend (jacl_emit.wasm) and linked against the runtime (jaclrt.svm) per run.
 let svmRunner: SvmJaclRunner | null = null;
 let svmManifest: { name: string; svmb: string }[] | null = null;
-let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
+let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm) — fallback
+let svmCompiler: Uint8Array | null = null;      // jacl_compiler.svmb — the self-hosted frontend (stages macros)
 let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
 let currentExample: Example | null = null;
@@ -170,16 +171,30 @@ async function ensureSvm(): Promise<SvmJaclRunner | null> {
   }
 }
 
-/** Load the live-editing pieces (frontend wasm + runtime blob) on demand; null if not shipped. */
-async function ensureLive(): Promise<{ frontend: JaclFrontend; runtime: Uint8Array } | null> {
+/**
+ * Load the live-editing pieces on demand; null if the runtime isn't shipped. The **frontend** is
+ * either the self-hosted JACL compiler run as an SVM guest (`jacl_compiler.svmb`, which expands
+ * `defmacro`s in-guest via the §22 Jit cap — the macro-capable path) or, if that asset isn't shipped,
+ * the Emscripten `jacl_emit.wasm` ({@link JaclFrontend}, no in-browser macro expansion).
+ */
+async function ensureLive(): Promise<{
+  compiler: Uint8Array | null;
+  frontend: JaclFrontend | null;
+  runtime: Uint8Array;
+} | null> {
   try {
-    if (!svmFrontend) svmFrontend = await JaclFrontend.create();
+    if (!svmCompiler) {
+      const resp = await fetch("svm/svmb/jacl_compiler.svmb");
+      if (resp.ok) svmCompiler = new Uint8Array(await resp.arrayBuffer());
+    }
+    // Fall back to the Emscripten frontend only when the self-hosted compiler-guest isn't shipped.
+    if (!svmCompiler && !svmFrontend) svmFrontend = await JaclFrontend.create();
     if (!svmRuntime) {
       const resp = await fetch("svm/jaclrt.svm");
       if (!resp.ok) return null;
       svmRuntime = new Uint8Array(await resp.arrayBuffer());
     }
-    return { frontend: svmFrontend, runtime: svmRuntime };
+    return { compiler: svmCompiler, frontend: svmFrontend, runtime: svmRuntime };
   } catch {
     return null;
   }
@@ -257,12 +272,15 @@ async function runOnSvm(source: string) {
     }
     // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
     const live = await ensureLive();
-    if (!live) {
-      svmError("Live compile needs jacl_emit.wasm + jaclrt.svm (run demo/svm/build_emit_wasm.sh + build_assets.sh).");
+    if (!live || (!live.compiler && !live.frontend)) {
+      svmError("Live compile needs jacl_compiler.svmb (or jacl_emit.wasm) + jaclrt.svm (run demo/svm/build_assets.sh).");
       return;
     }
     const t0 = performance.now();
-    const emitted = live.frontend.emitIr(source);
+    // Prefer the self-hosted compiler-guest (expands macros in-guest); else the Emscripten frontend.
+    const emitted = live.compiler
+      ? runner.emitIrViaCompiler(live.compiler, source)
+      : live.frontend!.emitIr(source);
     if ("error" in emitted) {
       displayResult({ output: "", error: emitted.error, isError: true }, performance.now() - t0);
       return;
