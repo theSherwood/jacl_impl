@@ -303,36 +303,10 @@ static JaclType compiler__buf_elem_decode(StructTypeRegistry* reg,
 uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
 uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len);
 
-/* Byte size of a type encoding that may be a scalar sentinel, a
- * struct registry idx, or a chained TYPE_SHAPE_BUF shape (Phase 5b).
- * Other shape kinds (typed-vec/map/ptr/future/box) are 8 bytes each
- * (tagged JaclVal slots), same as struct__type_size for those
- * JaclTypes. */
-static uint64_t compiler__encoding_byte_size(StructTypeRegistry* reg,
-                                              uint32_t encoded) {
-  if (JACL_IS_SCALAR_TYPE_IDX(encoded)) {
-    return struct__type_size(JACL_TYPE_IDX_TO_SCALAR(encoded), NULL, 0);
-  }
-  if (!reg || encoded >= reg->count) return 0;
-  TypeShape* shape = &reg->shapes[encoded];
-  switch (shape->kind) {
-    case TYPE_SHAPE_STRUCT:
-    case TYPE_SHAPE_CTX:
-      return shape->u.struct_def ? shape->u.struct_def->total_size : 0;
-    case TYPE_SHAPE_BUF:
-      return (uint64_t)shape->u.buf.len *
-             compiler__encoding_byte_size(reg, shape->u.buf.elem_idx);
-    case TYPE_SHAPE_TYPED_VEC:
-    case TYPE_SHAPE_TYPED_MAP:
-    case TYPE_SHAPE_PTR:
-    case TYPE_SHAPE_FUTURE:
-    case TYPE_SHAPE_BOX:
-    case TYPE_SHAPE_PROC:
-      return 8; /* tagged JaclVal slot (closure is a heap pointer) */
-    default:
-      return 0;
-  }
-}
+/* struct__type_size + compiler__encoding_byte_size are pure struct-layout
+ * logic and live in src/shapes.c (with StructTypeRegistry/TypeShape) so the
+ * emit-only build can resolve them from gc_collect.c. Forward-declared above. */
+uint64_t compiler__encoding_byte_size(StructTypeRegistry* reg, uint32_t encoded);
 
 /* Recursively intern a [Buf N T] AST as a chain of TYPE_SHAPE_BUF
  * entries on the given registry. Inner T may be a scalar keyword, a
@@ -567,35 +541,7 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   return type_idx;
 }
 
-/* C-ABI size and alignment for a JaclType */
-uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
-  switch (t) {
-    case TYPE_BOOL:    return 1;
-    case TYPE_NIL:     return 0;
-    case TYPE_I8:
-    case TYPE_U8:      return 1;
-    case TYPE_I16:
-    case TYPE_U16:     return 2;
-    case TYPE_I32:
-    case TYPE_U32:
-    case TYPE_F32:     return 4;
-    case TYPE_I64:
-    case TYPE_U64:
-    case TYPE_F64:     return 8;
-    case TYPE_STR:
-    case TYPE_VEC:
-    case TYPE_MAP:
-    case TYPE_CLOSURE:
-    case TYPE_DYN:
-    case TYPE_STREAM:  return 8; /* JaclVal / pointer */
-    case TYPE_STRUCT:
-      if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
-        return reg->defs[struct_idx]->total_size;
-      }
-      return 8; /* fallback */
-    default:           return 8;
-  }
-}
+/* struct__type_size lives in src/shapes.c (forward-declared above). */
 
 uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
   switch (t) {
@@ -642,7 +588,7 @@ uint32_t struct__slot_width(StructTypeRegistry* reg, uint32_t struct_idx) {
  *
  * The descriptor for any type encoding (scalar sentinel or registry idx)
  * is { size, align, ref_map } computed bottom-up. `compiler__encoding_byte_size`
- * (above) is the size half. These two add align and the GC reference map.
+ * (in shapes.c) is the size half. These two add align and the GC reference map.
  *
  * The ref map is the load-bearing piece: it is the set of 8-byte JaclVal
  * slots, relative to a byte base, that hold a GC-traced tagged value. It is
