@@ -1,9 +1,8 @@
 name: Deploy Playground to Pages
 
-# Builds the SVM backend — the playground's sole engine. The old Emscripten
-# compiler+VM is no longer shipped to the playground (build_wasm.sh remains only
-# for the `build.sh --wasm` compile-check). The playground runs edited source
-# entirely client-side: jacl_emit.wasm (the LLVM-free frontend → SVM IR) →
+# Builds the SVM backend — the playground's sole engine. The legacy bytecode VM
+# was removed in item 6 (SVM is the only backend). The playground runs edited
+# source entirely client-side: jacl_emit.wasm (the LLVM-free frontend → SVM IR) →
 # svm_link_run in svm_browser.wasm (generic link vs jaclrt.svm + run), and runs
 # unedited examples from precompiled .svmb blobs. See demo/svm/README.md.
 
