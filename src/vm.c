@@ -332,10 +332,92 @@ VMResult jacl_exec_program(ProgramResult* program, VM* vm);
 
 /* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
 
-void gc_collect(ThreadHeap *heap, VM *vm);
-void gc_collect_minor(ThreadHeap *heap, VM *vm,
-                              RememberedSet *remembered_set);
+/* Mark stack + the root-enumeration callback contract. Included here (before gc_collect.c)
+ * so the VM's root enumerators below can push onto the mark stack. The collector takes an
+ * enumerator rather than a `VM*`, so gc_collect.c is decoupled from the bytecode VM type. */
+#include "gc_roots.h"
+
+void gc_collect(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                StructTypeRegistry *struct_registry, JaclInternTable *intern_table);
+void gc_collect_minor(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                      StructTypeRegistry *struct_registry, RememberedSet *remembered_set);
 bool gc_should_major(ThreadHeap *heap);
+
+/* Root enumerators — the bytecode VM's answer to "what are my live roots?". The collector
+ * (gc_collect.c) calls these through the GcRootEnumerator seam; the root-set knowledge that
+ * used to live inside gc_mark/gc_mark_minor now lives here, with the VM. Behavior is verbatim
+ * the two former markers, including their one deliberate difference (below). */
+
+/* Major cycle: intern table is a WEAK root (evicted after mark); the ctx register + with-ctx
+ * save stack ARE roots. */
+void vm__gc_roots_major(ThreadHeap *heap, GCMarkStack *ms, void *ctx) {
+    VM *vm = (VM *)ctx;
+    /* 1. VM stack values — skip slots containing raw inline struct bytes */
+    for (uint32_t i = 0; i < vm->stack_top; i++)
+        if (!BITMAP_GET(vm->inline_slot_bitmap, i))
+            gc__ms_push_val(ms, vm->stack[i]);
+    /* 2. Call frame closures — skip stack-allocated synthesized closures (no GCHeader; their
+     * chunk constants are pushed in step 5 and they carry no upvalues). */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        JaclClosure *cl = vm->frames[i].closure;
+        if (cl && gc__ptr_in_heap(heap, cl)) gc__ms_push(ms, cl);
+    }
+    /* 3. Global environment values */
+    for (uint32_t i = 0; i < vm->env.count; i++)
+        gc__ms_push_val(ms, vm->env.values[i]);
+    /* 4. Intern table entries — weak roots (not scanned); evicted by gc_sweep_intern_table. */
+    /* 5. Call frame chunk constants (heap i64/u64/f64 literals) */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        BytecodeChunk *ch = vm->frames[i].chunk;
+        if (ch)
+            for (uint32_t j = 0; j < ch->const_count; j++)
+                gc__ms_push_const(ms, ch->constants[j]);
+    }
+    /* 6. External GC handle slots (embedding API) */
+    if (vm->gc_handle_slots)
+        for (uint32_t i = 0; i < vm->gc_handle_count; i++)
+            gc__ms_push_val(ms, vm->gc_handle_slots[i]);
+    /* 8. Current ctx register (implicit context struct) */
+    gc__ms_push_val(ms, vm->ctx);
+    /* 9. Saved ctx stack (with-ctx nesting) */
+    for (uint8_t sci = 0; sci < vm->saved_ctx_count; sci++)
+        gc__ms_push_val(ms, vm->saved_ctx[sci]);
+}
+
+/* Minor cycle: intern table is scanned as a STRONG root (young interned strings kept alive);
+ * the ctx register + save stack are NOT re-scanned (a minor cycle only chases young objects, and
+ * live ctxs are reached through the remembered set / env). Matches the former gc_mark_minor. */
+void vm__gc_roots_minor(ThreadHeap *heap, GCMarkStack *ms, void *ctx) {
+    VM *vm = (VM *)ctx;
+    /* 1. VM stack values */
+    for (uint32_t i = 0; i < vm->stack_top; i++)
+        if (!BITMAP_GET(vm->inline_slot_bitmap, i))
+            gc__ms_push_val(ms, vm->stack[i]);
+    /* 2. Call frame closures */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        JaclClosure *cl = vm->frames[i].closure;
+        if (cl && gc__ptr_in_heap(heap, cl)) gc__ms_push(ms, cl);
+    }
+    /* 3. Global environment values */
+    for (uint32_t i = 0; i < vm->env.count; i++)
+        gc__ms_push_val(ms, vm->env.values[i]);
+    /* 4. Intern table entries — STRONG roots in a minor cycle */
+    if (vm->intern_table)
+        for (uint32_t i = 0; i < vm->intern_table->cap; i++)
+            if (vm->intern_table->entries[i])
+                gc__ms_push(ms, vm->intern_table->entries[i]);
+    /* 5. Call frame chunk constants */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        BytecodeChunk *ch = vm->frames[i].chunk;
+        if (ch)
+            for (uint32_t j = 0; j < ch->const_count; j++)
+                gc__ms_push_const(ms, ch->constants[j]);
+    }
+    /* 6. External GC handle slots (embedding API) */
+    if (vm->gc_handle_slots)
+        for (uint32_t i = 0; i < vm->gc_handle_count; i++)
+            gc__ms_push_val(ms, vm->gc_handle_slots[i]);
+}
 
 /* US-015: introspection kind-name helper (defined in syntax.c) */
 const char *syntax_kind_name(uint8_t kind);
@@ -344,7 +426,7 @@ const char *syntax_kind_name(uint8_t kind);
 
 void vm__emergency_gc_single(void *ctx) {
     VM *vm = (VM *)ctx;
-    gc_collect(&vm->heap, vm);
+    gc_collect(&vm->heap, vm__gc_roots_major, vm, vm->struct_registry, vm->intern_table);
 }
 
 /* --- Concurrent GC trigger (defined in runtime.c, after gc_collect.c) --- */
@@ -2739,8 +2821,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
   #define VM_PRELUDE() do {                                                    \
       if (ATOMIC_LOAD_EXPLICIT(&vm->heap.needs_gc, MEM_RELAXED)) {              \
         if (!vm->runtime) {                                                    \
-          if (gc_should_major(&vm->heap)) gc_collect(&vm->heap, vm);           \
-          else gc_collect_minor(&vm->heap, vm, vm->remembered_set);            \
+          if (gc_should_major(&vm->heap))                                      \
+            gc_collect(&vm->heap, vm__gc_roots_major, vm,                      \
+                       vm->struct_registry, vm->intern_table);                 \
+          else                                                                 \
+            gc_collect_minor(&vm->heap, vm__gc_roots_minor, vm,                \
+                             vm->struct_registry, vm->remembered_set);         \
         } else {                                                               \
           ATOMIC_STORE_EXPLICIT(&vm->heap.needs_gc, false, MEM_RELAXED);       \
           ATOMIC_STORE_EXPLICIT(&vm->heap.bytes_since_gc, 0, MEM_RELAXED);     \

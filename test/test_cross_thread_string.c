@@ -131,7 +131,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE interned_receiver_fn(void *arg) {
     JaclVal v = ta->slot->value;
 
     /* Trigger GC on receiving thread to test epoch watermarking */
-    gc_collect(&heap, ta->vm);
+    gc_collect(&heap, vm__gc_roots_major, ta->vm, ta->vm->struct_registry, ta->vm->intern_table);
 
     /* Verify content (the handle pin should keep it alive through GC) */
     char buf[32];
@@ -201,7 +201,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE rope_receiver_fn(void *arg) {
     JaclVal v = ta->slot->value;
 
     /* Trigger GC */
-    gc_collect(&heap, ta->vm);
+    gc_collect(&heap, vm__gc_roots_major, ta->vm, ta->vm->struct_registry, ta->vm->intern_table);
 
     /* Verify rope content via cursor */
     JaclRopeString *rs = jacl_as_rope_string(v);
@@ -359,7 +359,7 @@ static int test_rope_concat_cross_thread(void) {
     ASSERT(h_b != UINT32_MAX);
 
     /* Trigger GC between receive and concat */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Thread C (main): concatenate the two ropes */
     JaclRopeString *rs_a = jacl_as_rope_string(val_a);

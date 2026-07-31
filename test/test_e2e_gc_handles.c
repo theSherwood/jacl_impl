@@ -11,7 +11,7 @@
  * pinned by handles survive.
  */
 static void force_gc_now(JaclVM* jvm) {
-  gc_collect(&jvm->vm.heap, &jvm->vm);
+  gc_collect(&jvm->vm.heap, vm__gc_roots_major, &jvm->vm, jvm->vm.struct_registry, jvm->vm.intern_table);
 }
 
 /* Test 1: create handle, force GC, verify value survives */

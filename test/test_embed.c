@@ -552,7 +552,7 @@ static int test_handle_survives_gc(void) {
   ASSERT(h.index != UINT32_MAX);
 
   /* Force GC */
-  gc_collect_minor(&vm->vm.heap, &vm->vm, NULL);
+  gc_collect_minor(&vm->vm.heap, vm__gc_roots_minor, &vm->vm, vm->vm.struct_registry, NULL);
 
   /* Value should still be alive */
   JaclVal got = jacl_handle_get_val(vm, h);

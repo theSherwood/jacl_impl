@@ -2663,7 +2663,14 @@ extern void gc__ms_push_val (GCMarkStack *ms, JaclVal v);
 extern void gc__ms_push_const (GCMarkStack *ms, JaclVal v);
 extern void gc__finalize_dead (GCHeader *hdr);
 extern void gc__trace_object (void *payload, GCMarkStack *ms);
-extern void gc_mark (ThreadHeap *heap, VM *vm);
+/* Root-enumeration callback: a provider pushes its live roots onto `ms`. `ctx` is the
+ * provider (the VM*). Lets the collector stay decoupled from the bytecode VM type; the VM's
+ * enumerators are vm__gc_roots_major / vm__gc_roots_minor below. */
+typedef void (*GcRootEnumerator)(ThreadHeap *heap, GCMarkStack *ms, void *ctx);
+extern void vm__gc_roots_major (ThreadHeap *heap, GCMarkStack *ms, void *ctx);
+extern void vm__gc_roots_minor (ThreadHeap *heap, GCMarkStack *ms, void *ctx);
+
+extern void gc_mark (ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx);
 extern size_t gc_sweep (ThreadHeap *heap);
 extern bool gc__ptr_in_heap (ThreadHeap *heap, void *ptr);
 /* watermark != 0 enables concurrent-GC epoch protection: entries with
@@ -2671,10 +2678,12 @@ extern bool gc__ptr_in_heap (ThreadHeap *heap, void *ptr);
  * observe them). Pass 0 from single-threaded callers. */
 extern void gc_sweep_intern_table (JaclInternTable *table, ThreadHeap *heap, uint32_t watermark);
 extern void gc__adjust_threshold (ThreadHeap *heap, size_t bytes_survived);
-extern void gc_collect (ThreadHeap *heap, VM *vm);
-extern void gc_mark_minor (ThreadHeap *heap, VM *vm, RememberedSet *remembered_set);
+extern void gc_collect (ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                        StructTypeRegistry *struct_registry, JaclInternTable *intern_table);
+extern void gc_mark_minor (ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx, RememberedSet *remembered_set);
 extern size_t gc_sweep_minor (ThreadHeap *heap);
-extern void gc_collect_minor (ThreadHeap *heap, VM *vm, RememberedSet *remembered_set);
+extern void gc_collect_minor (ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                              StructTypeRegistry *struct_registry, RememberedSet *remembered_set);
 extern bool gc_should_major (ThreadHeap *heap);
 extern size_t gc_sweep_concurrent (ThreadHeap *heap, GCBlock *skip_block, uint32_t watermark, uint8_t current_mark, BlockPool *pool);
 

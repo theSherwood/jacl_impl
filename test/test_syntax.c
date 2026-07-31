@@ -588,7 +588,7 @@ static int test_syntax_gc_survives(void) {
     vm.stack[vm.stack_top++] = s2;
 
     /* Force a GC cycle */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Objects should survive (they're on the stack) */
     ASSERT(jacl_is_syntax(s1));
@@ -640,7 +640,7 @@ static int test_syntax_command_gc_survives(void) {
     /* Root only the command — inner syntax should survive via tracing */
     vm.stack[vm.stack_top++] = cmd;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Verify the entire tree survived */
     JaclSyntax *c = jacl_as_syntax(cmd);
@@ -1141,7 +1141,7 @@ static int test_from_ast_gc_survives(void) {
     JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
     vm.stack[vm.stack_top++] = syn;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Verify the tree survived */
     JaclSyntax *s = jacl_as_syntax(syn);
