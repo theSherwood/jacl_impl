@@ -147,7 +147,10 @@ fn arithmetic_sub_of_mul() {
 }
 
 #[test]
-#[ignore = "pre-existing codegen gap: `+` is binary-only, no variadic fold (see ISSUES.md)"]
+#[ignore = "blocked by the legacy compiler_compile oracle in the native emit_jacl driver (old \
+            compiler is binary-only for `+`), NOT an SVM codegen gap — SVM codegen folds `+` \
+            variadically (codegen.c, the compile_i32 / dynamic fold loops). Un-ignores once the \
+            harness driver drops the oracle (emit-only) or the compiler goes SVM-only (item 6)."]
 fn arithmetic_variadic_fold() {
     run_case("variadic", i32_val(10)); // [+ 1 2 3 4]
 }
@@ -699,4 +702,25 @@ fn string_less_than() {
 #[test]
 fn string_greater_than() {
     run_case("string_gt", i32_val(1)); // [> "xyz" "abc"] -> true
+}
+
+// --- index / slice builtins on SVM (item 6 slice 3a): retires test_index_builtin/test_slice_builtin.
+#[test]
+fn string_index() {
+    run_case("string_index", i32_val(1)); // [index "hello" 1] == "e"
+}
+
+#[test]
+fn vec_index() {
+    run_case("vec_index", i32_val(20)); // [index [vec 10 20 30] 1]
+}
+
+#[test]
+fn string_slice_range() {
+    run_case("string_slice", i32_val(1)); // [slice "hello" 1 3] == "el"
+}
+
+#[test]
+fn string_slice_from() {
+    run_case("string_slice_from", i32_val(1)); // [slice "hello" 2] == "llo"
 }

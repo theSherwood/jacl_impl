@@ -3990,6 +3990,20 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
           IrVal a[] = {cx->sp, bv, iv, dv};
           return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
         }
+        /* One-arg `[slice s N]` — slice from N to the end. The BI table only carries the
+         * fixed-arity 3-arg `[slice s a b]` form; here the end index is synthesized as the
+         * source's own length ([length s]), then the same jacl_slice_op is emitted. */
+        if ((HeadId)hid == HEAD_SLICE && node->data.command.arg_count == 2) {
+          IrVal s = compile_expr(cx, node->data.command.args[0]);
+          if (cx->failed) return 0;
+          IrVal start = compile_expr(cx, node->data.command.args[1]);
+          if (cx->failed) return 0;
+          IrVal la[] = {cx->sp, s};
+          IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
+          if (cx->failed) return 0;
+          IrVal a[] = {cx->sp, s, start, len};
+          return emit_rt_call(cx, "jacl_slice_op", a, 4);
+        }
         /* `error V` while tracing: stamp the error line on the top frame and snapshot the
          * call stack, so a later `[stack-trace]` in the handler shows where it was raised.
          * Falls through to the BI table, which emits the actual jacl_error_new. */
