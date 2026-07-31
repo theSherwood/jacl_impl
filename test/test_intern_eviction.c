@@ -82,7 +82,7 @@ static int test_intern_eviction_after_gc(void) {
   /* Full GC: mark phase won't trace intern table (removed from roots),
    * gc_sweep_intern_table evicts dead entries as tombstones,
    * gc_sweep zeroes dead objects. */
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   /* All 13 entries evicted */
   ASSERT_U32_EQ(table.count, 0);
@@ -124,7 +124,7 @@ static int test_reintern_after_eviction(void) {
   vm.stack_top = 0;
 
   /* Full GC → evicts all 13 entries */
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
   ASSERT_U32_EQ(table.count, 0);
 
   /* Advance allocator past potential same-address reuse */
@@ -184,7 +184,7 @@ static int test_tombstone_compaction(void) {
   vm.stack_top = 3;
 
   /* Full GC: evicts 10 dead entries, keeps 3 alive (marked via stack roots) */
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   ASSERT_U32_EQ(table.count, 3);
   ASSERT_U32_EQ(table.tombstone_count, 10);

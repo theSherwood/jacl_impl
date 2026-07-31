@@ -9,19 +9,10 @@
 #ifndef GC_COLLECT_C
 #define GC_COLLECT_C
 
-/* ======================================================================
- * Mark stack: fixed-size array with dynamic overflow for pathological cases
- * ====================================================================== */
-
-#define GC_MARK_STACK_SIZE 4096
-
-typedef struct {
-    void  *fixed[GC_MARK_STACK_SIZE];
-    int    top;          /* next free slot in fixed array */
-    void **overflow;     /* dynamically growing overflow buffer */
-    int    ov_count;
-    int    ov_cap;
-} GCMarkStack;
+/* Mark stack + the root-enumeration callback contract (GCMarkStack, GcRootEnumerator) live in
+ * gc_roots.h — hoisted so a root provider (vm.c) can push roots even though it is compiled
+ * before this file. gc_collect no longer names the `VM` type: callers pass an enumerator. */
+#include "gc_roots.h"
 
 void gc__ms_init(GCMarkStack *ms) {
     ms->top      = 0;
@@ -567,69 +558,15 @@ bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr);
  * gc_mark: trace from GC roots through the object graph, marking live objects
  * ====================================================================== */
 
-void gc_mark(ThreadHeap *heap, VM *vm) {
+void gc_mark(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx) {
     GCMarkStack ms;
     gc__ms_init(&ms);
 
     uint8_t mark = heap->current_mark;
 
-    /* --- Root enumeration --- */
-
-    /* 1. VM stack values — skip slots containing raw inline struct bytes */
-    for (uint32_t i = 0; i < vm->stack_top; i++) {
-        if (!BITMAP_GET(vm->inline_slot_bitmap, i)) {
-            gc__ms_push_val(&ms, vm->stack[i]);
-        }
-    }
-
-    /* 2. Call frame closures. Skip stack-allocated synthesized closures
-     * (vm_exec's top_closure, embed.c's top_closure_wrapper) — they
-     * have no GCHeader, so gc_header_of(cl) would read 4 bytes before
-     * a stack variable. Their chunk constants are pushed below (step 5)
-     * and they carry no upvalues, so skipping the closure itself is
-     * safe — nothing reachable only through them is lost. */
-    for (uint32_t i = 0; i < vm->frame_count; i++) {
-        JaclClosure *cl = vm->frames[i].closure;
-        if (cl && gc__ptr_in_heap(heap, cl)) {
-            gc__ms_push(&ms, cl);
-        }
-    }
-
-    /* 3. Global environment values */
-    for (uint32_t i = 0; i < vm->env.count; i++) {
-        gc__ms_push_val(&ms, vm->env.values[i]);
-    }
-
-    /* 4. Intern table entries — treated as weak roots (not scanned).
-     * Dead entries are evicted by gc_sweep_intern_table after mark phase. */
-
-    /* 5. Call frame chunk constants (heap i64/u64/f64 literals) */
-    for (uint32_t i = 0; i < vm->frame_count; i++) {
-        BytecodeChunk *ch = vm->frames[i].chunk;
-        if (ch) {
-            for (uint32_t j = 0; j < ch->const_count; j++) {
-                gc__ms_push_const(&ms, ch->constants[j]);
-            }
-        }
-    }
-
-    /* 6. External GC handle slots (embedding API) */
-    if (vm->gc_handle_slots) {
-        for (uint32_t i = 0; i < vm->gc_handle_count; i++) {
-            gc__ms_push_val(&ms, vm->gc_handle_slots[i]);
-        }
-    }
-
-    /* 7. (formerly: walked ctx_pool->free_list_head). Pool removed
-     * in AUDIT.md §18 — see runtime.c gc_enumerate_roots comment. */
-
-    /* 8. Current ctx register (implicit context struct) */
-    gc__ms_push_val(&ms, vm->ctx);
-
-    /* 9. Saved ctx stack (with-ctx nesting) */
-    for (uint8_t sci = 0; sci < vm->saved_ctx_count; sci++) {
-        gc__ms_push_val(&ms, vm->saved_ctx[sci]);
-    }
+    /* --- Root enumeration --- provided by the caller (vm.c's vm__gc_roots_major for the
+     * bytecode VM). The collector is agnostic to what the roots are; it just marks from them. */
+    enum_roots(heap, &ms, ctx);
 
     /* --- Mark loop --- */
     void *ptr;
@@ -863,15 +800,16 @@ void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
     ATOMIC_STORE_EXPLICIT(&heap->gc_threshold, th, MEM_RELAXED);
 }
 
-void gc_collect(ThreadHeap *heap, VM *vm) {
-    gc__struct_registry = vm ? vm->struct_registry : NULL;
-    gc_mark(heap, vm);
+void gc_collect(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                StructTypeRegistry *struct_registry, JaclInternTable *intern_table) {
+    gc__struct_registry = struct_registry;
+    gc_mark(heap, enum_roots, ctx);
 
     /* Evict dead intern table entries before sweep zeroes their memory.
      * watermark=0: single-threaded path, no concurrent allocations to
      * protect — mark bit alone determines liveness. */
-    if (vm && vm->intern_table) {
-        gc_sweep_intern_table(vm->intern_table, heap, 0);
+    if (intern_table) {
+        gc_sweep_intern_table(intern_table, heap, 0);
     }
 
     size_t bytes_survived = gc_sweep(heap);
@@ -894,60 +832,17 @@ void gc_collect(ThreadHeap *heap, VM *vm) {
  * reachable only through old-gen containers.
  * ====================================================================== */
 
-void gc_mark_minor(ThreadHeap *heap, VM *vm,
+void gc_mark_minor(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
                            RememberedSet *remembered_set) {
     GCMarkStack ms;
     gc__ms_init(&ms);
 
     uint8_t mark = heap->current_mark;
 
-    /* --- Root enumeration (same as full GC) --- */
-
-    /* 1. VM stack values — skip slots containing raw inline struct bytes */
-    for (uint32_t i = 0; i < vm->stack_top; i++) {
-        if (!BITMAP_GET(vm->inline_slot_bitmap, i)) {
-            gc__ms_push_val(&ms, vm->stack[i]);
-        }
-    }
-
-    /* 2. Call frame closures. See gc_mark for the stack-closure skip rationale. */
-    for (uint32_t i = 0; i < vm->frame_count; i++) {
-        JaclClosure *cl = vm->frames[i].closure;
-        if (cl && gc__ptr_in_heap(heap, cl)) {
-            gc__ms_push(&ms, cl);
-        }
-    }
-
-    /* 3. Global environment values */
-    for (uint32_t i = 0; i < vm->env.count; i++) {
-        gc__ms_push_val(&ms, vm->env.values[i]);
-    }
-
-    /* 4. Intern table entries */
-    if (vm->intern_table) {
-        for (uint32_t i = 0; i < vm->intern_table->cap; i++) {
-            if (vm->intern_table->entries[i]) {
-                gc__ms_push(&ms, vm->intern_table->entries[i]);
-            }
-        }
-    }
-
-    /* 5. Call frame chunk constants */
-    for (uint32_t i = 0; i < vm->frame_count; i++) {
-        BytecodeChunk *ch = vm->frames[i].chunk;
-        if (ch) {
-            for (uint32_t j = 0; j < ch->const_count; j++) {
-                gc__ms_push_const(&ms, ch->constants[j]);
-            }
-        }
-    }
-
-    /* 6. External GC handle slots (embedding API) */
-    if (vm->gc_handle_slots) {
-        for (uint32_t i = 0; i < vm->gc_handle_count; i++) {
-            gc__ms_push_val(&ms, vm->gc_handle_slots[i]);
-        }
-    }
+    /* --- Root enumeration --- the caller's minor enumerator (vm.c's vm__gc_roots_minor)
+     * pushes the same object roots as the major one, but scans the intern table as *strong*
+     * roots (young interned strings kept alive) — see that function for the major/minor split. */
+    enum_roots(heap, &ms, ctx);
 
     /* 7. Remembered set: trace old-gen containers' children.
      * These are old-gen mutable refs that point to young-gen values.
@@ -1128,10 +1023,11 @@ size_t gc_sweep_minor(ThreadHeap *heap) {
  * Clears the remembered set after collection.
  * ====================================================================== */
 
-void gc_collect_minor(ThreadHeap *heap, VM *vm,
+void gc_collect_minor(ThreadHeap *heap, GcRootEnumerator enum_roots, void *ctx,
+                              StructTypeRegistry *struct_registry,
                               RememberedSet *remembered_set) {
-    gc__struct_registry = vm ? vm->struct_registry : NULL;
-    gc_mark_minor(heap, vm, remembered_set);
+    gc__struct_registry = struct_registry;
+    gc_mark_minor(heap, enum_roots, ctx, remembered_set);
     size_t bytes_survived = gc_sweep_minor(heap);
     gc__adjust_threshold(heap, bytes_survived);
     heap->current_mark  = 1 - heap->current_mark;

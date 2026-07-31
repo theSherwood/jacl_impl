@@ -144,7 +144,7 @@ static int test_e2e_struct_type_mismatch(void) {
  * is compiled from a single .c file, there is no conflict.
  */
 static void tramp_force_gc(JaclVM* jvm) {
-  gc_collect(&jvm->vm.heap, &jvm->vm);
+  gc_collect(&jvm->vm.heap, vm__gc_roots_major, &jvm->vm, jvm->vm.struct_registry, jvm->vm.intern_table);
 }
 
 /* Test 4: create trampoline from JACL closure, call C function pointer */

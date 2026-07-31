@@ -266,7 +266,7 @@ static int test_concurrent_gc_eviction(void) {
      * which serializes with jacl_intern's read/write lock. */
     for (int cycle = 0; cycle < 10; cycle++) {
         vm.stack_top = 0;  /* No roots → entries appear unreachable */
-        gc_collect(&vm.heap, &vm);
+        gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
         SLEEP_MILLISECONDS(1);
     }
 

@@ -104,7 +104,7 @@ static int test_rope_survives_gc(void) {
   ASSERT(rope_count >= 1);
   ASSERT(leaf_count >= 1);
 
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   /* Rope string and all nodes survive */
   ASSERT(count_objects_of_type(&vm.heap, OBJ_ROPE_STRING) == rope_count);
@@ -144,7 +144,7 @@ static int test_rope_collected_when_unrooted(void) {
   /* Nothing rooted */
   vm.stack_top = 0;
 
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   /* All rope objects should be collected */
   ASSERT_SIZE_EQ(count_objects_of_type(&vm.heap, OBJ_ROPE_STRING), 0);
@@ -195,7 +195,7 @@ static int test_rope_structural_sharing_gc(void) {
   vm.stack[0] = valB;
   vm.stack_top = 1;
 
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   /* B's JaclRopeString survived — verify via GC header */
   ASSERT(gc_header_of(rsB)->alloc_total > 0);
@@ -213,7 +213,7 @@ static int test_rope_structural_sharing_gc(void) {
   ASSERT(gc_header_of(rsA)->alloc_total == 0);
 
   /* Run a second GC cycle to verify tracing works across cycles */
-  gc_collect(&vm.heap, &vm);
+  gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
   /* B still survives second cycle */
   char buf2[600];
@@ -254,8 +254,8 @@ static int test_rope_minor_gc_promotion(void) {
   remembered_set_init(&rset);
 
   /* Run 2 minor GC cycles — objects should be promoted after surviving both */
-  gc_collect_minor(&vm.heap, &vm, &rset);
-  gc_collect_minor(&vm.heap, &vm, &rset);
+  gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, &rset);
+  gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, &rset);
 
   /* After 2 cycles, rope nodes should be promoted to old gen */
   ASSERT(gc_header_of(rs)->gen == 1);

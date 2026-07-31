@@ -103,7 +103,7 @@ static int test_gc_multi_type_survive(void) {
         gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     }
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* All live values intact */
     ASSERT(jacl_as_i64(vi) == 42);
@@ -132,7 +132,7 @@ static int test_gc_dead_collected(void) {
     vm.stack[0] = live;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Dead objects zeroed */
     ASSERT(gc_header_of(dead1)->alloc_total == 0);
@@ -178,7 +178,7 @@ static int test_trace_closure_upvalue_map(void) {
     vm.stack_top = 1;
 
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Closure marked */
     ASSERT(gc__is_marked(cl, mark));
@@ -218,7 +218,7 @@ static int test_trace_hamt_nested(void) {
     vm.stack[0] = map_val;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* All values survive GC */
     for (int i = 0; i < 5; i++) {
@@ -258,7 +258,7 @@ static int test_trace_rrb_closure_elements(void) {
     vm.stack_top = 1;
 
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     ASSERT(gc__is_marked(vec, mark));
     for (int i = 0; i < 3; i++) {
@@ -292,7 +292,7 @@ static int test_wb_satb_old_survives(void) {
 
     /* Simulate active GC: mark first */
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     /* old_val is marked since it's reachable through atom */
     ASSERT(gc__is_marked(jacl_as_ptr(old_val), mark));
 
@@ -336,7 +336,7 @@ static int test_wb_insertion_new_survives(void) {
 
     /* Mark phase — GC scans atom, finds 'initial' */
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Now store a NEW value after GC scanned the atom.
      * In a real concurrent scenario, the insertion barrier would push
@@ -408,7 +408,7 @@ static int test_line_granularity_reclamation(void) {
         gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     }
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Live value survives */
     ASSERT(jacl_as_i64(live) == 42);
@@ -467,7 +467,7 @@ static int test_block_recycling(void) {
     for (GCBlock *b = vm.heap.blocks; b; b = b->next) block_count_before++;
     ASSERT(block_count_before >= 2);
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* After GC, dead block(s) should be recycled — fewer blocks */
     int block_count_after = 0;
@@ -806,14 +806,14 @@ static int test_gc_gen_survives_gc(void) {
     hdr->gen = 1;
 
     /* Run a GC cycle */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Object survived, gen still 1 */
     ASSERT(jacl_as_i64(live) == 42);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(live))->gen, 1);
 
     /* Run another GC cycle */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Still gen 1 */
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(live))->gen, 1);
@@ -866,13 +866,13 @@ static int test_gc_promote_after_2_cycles(void) {
     ASSERT_INT_EQ(hdr->survive_count, 0);
 
     /* After 1 GC cycle: still young, survive_count=1 */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 0);
     ASSERT_INT_EQ(hdr->survive_count, 1);
 
     /* After 2 GC cycles: promoted to old (gen=1) */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 1);
 
@@ -894,7 +894,7 @@ static int test_gc_no_promote_after_1_cycle(void) {
     vm.stack[0] = live;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 0);
@@ -922,7 +922,7 @@ static int test_gc_dead_not_promoted(void) {
     vm.stack[0] = live;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Dead object should be zeroed */
     ASSERT(gc_header_of(dead)->alloc_total == 0);
@@ -943,16 +943,16 @@ static int test_gc_old_stays_old(void) {
     vm.stack_top = 1;
 
     /* Promote after 2 cycles */
-    gc_collect(&vm.heap, &vm);
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 1);
 
     /* Run 3 more cycles — should stay old */
-    gc_collect(&vm.heap, &vm);
-    gc_collect(&vm.heap, &vm);
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 1);
@@ -976,7 +976,7 @@ static int test_gc_promote_multiple_objects(void) {
     vm.stack_top = 2;
 
     /* 1 cycle: both young */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v1))->gen, 0);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v2))->gen, 0);
 
@@ -986,13 +986,13 @@ static int test_gc_promote_multiple_objects(void) {
     vm.stack_top = 3;
 
     /* 2nd cycle: v1,v2 promoted; v3 still young (only 1 survival) */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v1))->gen, 1);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v2))->gen, 1);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v3))->gen, 0);
 
     /* 3rd cycle: v3 now promoted too */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v3))->gen, 1);
 
     /* Values all correct */
@@ -1195,7 +1195,7 @@ static int test_minor_gc_reclaims_dead_young(void) {
     void *dead1 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     void *dead2 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
 
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
 
     /* Dead young objects zeroed */
     ASSERT(gc_header_of(dead1)->alloc_total == 0);
@@ -1241,7 +1241,7 @@ static int test_minor_gc_remembered_set_saves_young(void) {
     w->vm.stack_top = 1;
 
     /* Run minor GC with remembered set */
-    gc_collect_minor(&w->vm.heap, &w->vm, &w->remembered_set);
+    gc_collect_minor(&w->vm.heap, vm__gc_roots_minor, &w->vm, w->vm.struct_registry, &w->remembered_set);
 
     /* Young value should survive (reachable via remembered set) */
     ASSERT(gc_header_of(jacl_as_ptr(young_val))->alloc_total > 0);
@@ -1270,7 +1270,7 @@ static int test_minor_gc_old_objects_untouched(void) {
     vm.stack[0] = live;
     vm.stack_top = 1;
 
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
 
     /* Old unreachable object NOT collected by minor GC */
     ASSERT(gc_header_of(old_unreachable)->alloc_total > 0);
@@ -1295,13 +1295,13 @@ static int test_minor_gc_promotes_survivors(void) {
     ASSERT_INT_EQ(hdr->gen, 0);
 
     /* 1st minor cycle: survive_count -> 1, still young */
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
     hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 0);
     ASSERT_INT_EQ(hdr->survive_count, 1);
 
     /* 2nd minor cycle: promoted to old */
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
     hdr = gc_header_of(jacl_as_ptr(live));
     ASSERT_INT_EQ(hdr->gen, 1);
 
@@ -1323,15 +1323,15 @@ static int test_minor_gc_major_gc_still_works(void) {
     vm.stack_top = 1;
 
     /* Run a minor GC first */
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
 
     /* Allocate dead objects */
     void *dead = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
 
     /* Run two major GC cycles — first cycle immunizes recently allocated
      * objects (mark bit aliasing), second cycle collects them */
-    gc_collect(&vm.heap, &vm);
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Dead object collected */
     ASSERT(gc_header_of(dead)->alloc_total == 0);
@@ -1361,7 +1361,7 @@ static int test_gc_schedule_first_cycle_major(void) {
     JaclVal live = jacl_i64(&vm.heap, 1);
     vm.stack[0] = live;
     vm.stack_top = 1;
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* After first major, gc_cycle_count == 1, should NOT be major (no old growth) */
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
@@ -1382,7 +1382,7 @@ static int test_gc_schedule_minor_after_threshold(void) {
     JaclVal live = jacl_i64(&vm.heap, 1);
     vm.stack[0] = live;
     vm.stack_top = 1;
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Simulate allocation exceeding threshold */
     vm.heap.bytes_since_gc = GC_THRESHOLD + 1;
@@ -1392,7 +1392,7 @@ static int test_gc_schedule_minor_after_threshold(void) {
     ASSERT(!gc_should_major(&vm.heap));
 
     /* Run minor GC — should succeed */
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
     ASSERT_INT_EQ(vm.heap.bytes_since_gc, 0);
     ASSERT(!vm.heap.needs_gc);
@@ -1417,11 +1417,11 @@ static int test_gc_schedule_major_on_old_gen_growth(void) {
     vm.stack_top = 10;
 
     /* First major GC */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
 
     /* Second major GC (promotes objects after 2 cycles survived) */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
 
     /* Now we have some old gen bytes from promotions */
@@ -1456,11 +1456,11 @@ static int test_gc_schedule_old_gen_bytes_tracked(void) {
     vm.stack_top = 1;
 
     /* After first major GC: survive_count = 1, still young → no old bytes */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(vm.heap.old_gen_bytes, 0);
 
     /* After second major GC: promoted → old_gen_bytes > 0 */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT(vm.heap.old_gen_bytes > 0);
     size_t old_after = vm.heap.old_gen_bytes;
 
@@ -1468,7 +1468,7 @@ static int test_gc_schedule_old_gen_bytes_tracked(void) {
     JaclVal young = jacl_i64(&vm.heap, 99);
     vm.stack[1] = young;
     vm.stack_top = 2;
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
 
     /* old_gen_bytes >= old_after (didn't shrink — minor doesn't collect old) */
     ASSERT(vm.heap.old_gen_bytes >= old_after);
@@ -1490,13 +1490,13 @@ static int test_gc_schedule_cycle_count_increments(void) {
 
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 0);
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
 
-    gc_collect_minor(&vm.heap, &vm, NULL);
+    gc_collect_minor(&vm.heap, vm__gc_roots_minor, &vm, vm.struct_registry, NULL);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT_INT_EQ(vm.heap.gc_cycle_count, 3);
 
     vm_destroy(&vm);

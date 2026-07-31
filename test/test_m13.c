@@ -214,7 +214,7 @@ static int test_gc_trace_future_resolved(void) {
     vm.stack_top = 1;
 
     /* Run GC */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Future and its result should survive */
     ASSERT(gc_header_of(jacl_as_ptr(f))->mark == (1 - vm.heap.current_mark));
@@ -243,7 +243,7 @@ static int test_gc_trace_future_waiters(void) {
     vm.stack_top = 1;
 
     /* Run GC */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Future, waiter node, and continuation should all survive.
      * Mark was toggled by gc_collect, so current_mark is now the OPPOSITE
@@ -2167,7 +2167,7 @@ static int test_adaptive_threshold_increase(void) {
         vm.stack[vm.stack_top++] = v;
     }
     /* All objects survive → survival rate ~100% → threshold should increase */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     ASSERT(vm.heap.gc_threshold > initial);
 
@@ -2189,7 +2189,7 @@ static int test_adaptive_threshold_decrease(void) {
         (void)jacl_i64(&vm.heap, (int64_t)i);
     }
     /* No roots on stack → survival rate ~0% → threshold should decrease */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     ASSERT(vm.heap.gc_threshold < initial);
 
@@ -2211,7 +2211,7 @@ static int test_adaptive_threshold_min_bound(void) {
     for (int i = 0; i < 50; i++) {
         (void)jacl_i64(&vm.heap, (int64_t)i);
     }
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Should not go below minimum */
     ASSERT(vm.heap.gc_threshold >= GC_THRESHOLD_MIN);
@@ -2235,7 +2235,7 @@ static int test_adaptive_threshold_max_bound(void) {
         JaclVal v = jacl_i64(&vm.heap, (int64_t)i);
         vm.stack[vm.stack_top++] = v;
     }
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Should not exceed maximum */
     ASSERT(vm.heap.gc_threshold <= GC_THRESHOLD_MAX);

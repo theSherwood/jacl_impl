@@ -367,7 +367,7 @@ static int test_gc_mark_leaf_objects(void) {
     /* Allocate unreachable object (not on stack, not in env) */
     void *dead = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Reachable objects marked */
     ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
@@ -406,7 +406,7 @@ static int test_gc_mark_closure_upvalues(void) {
     vm.stack[0] = jacl_closure(cl);
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Closure is marked */
     ASSERT(gc__is_marked(cl, mark));
@@ -436,7 +436,7 @@ static int test_gc_mark_mutable_ref(void) {
     vm.stack[0] = jacl_box_ptr(ref);
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     ASSERT(gc__is_marked(ref, mark));
     ASSERT(gc__is_marked(jacl_as_ptr(inner), mark));
@@ -470,7 +470,7 @@ static int test_gc_mark_hamt(void) {
     vm.stack[0] = map_val;
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Map root node is marked */
     ASSERT(gc__is_marked(map, mark));
@@ -505,7 +505,7 @@ static int test_gc_mark_rrb_vec(void) {
     vm.stack[0] = vec_val;
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Root struct is marked */
     ASSERT(gc__is_marked(vec, mark));
@@ -535,7 +535,7 @@ static int test_gc_mark_global_env(void) {
     /* Nothing on the stack */
     vm.stack_top = 0;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     ASSERT(gc__is_marked(jacl_as_ptr(gval), mark));
 
@@ -561,7 +561,7 @@ static int test_gc_mark_unreachable_not_marked(void) {
 
     vm.stack_top = 0;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     ASSERT(!gc__is_marked(dead1, mark));
     ASSERT(!gc__is_marked(dead2, mark));
@@ -585,7 +585,7 @@ static int test_gc_mark_alternation(void) {
     vm.stack[0] = vi;
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(vi))->mark, 1);
 
     /* Toggle mark for next cycle */
@@ -593,7 +593,7 @@ static int test_gc_mark_alternation(void) {
     ASSERT_INT_EQ(vm.heap.current_mark, 0);
 
     /* Second mark cycle: should overwrite with 0 */
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(vi))->mark, 0);
 
     vm_destroy(&vm);
@@ -634,7 +634,7 @@ static int test_gc_mark_deep_closure_chain(void) {
     vm.stack[0] = jacl_closure(cl1);
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     ASSERT(gc__is_marked(cl1, mark));
     ASSERT(gc__is_marked(cl2, mark));
@@ -679,7 +679,7 @@ static int test_gc_mark_mixed_graph(void) {
     vm.stack[0] = jacl_closure(cl);
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* The entire chain is reachable */
     ASSERT(gc__is_marked(cl, mark));
@@ -707,7 +707,7 @@ static int test_gc_sweep_dead_objects_freed(void) {
     vm.stack_top = 0;
 
     /* Mark (nothing reachable) then sweep */
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     gc_sweep(&vm.heap);
 
     /* All lines should be free (all objects were dead) */
@@ -734,7 +734,7 @@ static int test_gc_sweep_live_objects_survive(void) {
     /* Also allocate a dead object */
     gc_alloc(&vm.heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     gc_sweep(&vm.heap);
 
     /* Block still exists (has live objects) */
@@ -768,7 +768,7 @@ static int test_gc_sweep_line_granularity(void) {
     vm.stack[0] = live_val;
     vm.stack_top = 1;
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     gc_sweep(&vm.heap);
 
     GCBlock *block = vm.heap.blocks;
@@ -808,7 +808,7 @@ static int test_gc_sweep_block_recycling(void) {
     ASSERT(vm.heap.blocks != NULL);
     ASSERT(vm.heap.blocks->next != NULL);
 
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
     gc_sweep(&vm.heap);
 
     /* Only one block should remain (the one with the live object) */
@@ -842,7 +842,7 @@ static int test_gc_collect_full_cycle(void) {
     size_t before_bytes = vm.heap.bytes_since_gc;
     ASSERT(before_bytes > 0);
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Mark toggled */
     ASSERT_INT_EQ(vm.heap.current_mark, 0);
@@ -868,7 +868,7 @@ static int test_gc_collect_multiple_cycles(void) {
     JaclVal v1 = jacl_i64(&vm.heap, 100);
     vm.stack[0] = v1;
     vm.stack_top = 1;
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT(jacl_as_i64(v1) == 100);
 
     /* Cycle 2: allocate more, root some */
@@ -876,14 +876,14 @@ static int test_gc_collect_multiple_cycles(void) {
     gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64)); /* dead */
     vm.stack[1] = v2;
     vm.stack_top = 2;
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT(jacl_as_i64(v1) == 100);
     ASSERT(jacl_as_i64(v2) == 200);
 
     /* Cycle 3: drop v1 from roots */
     vm.stack[0] = v2;
     vm.stack_top = 1;
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     ASSERT(jacl_as_i64(v2) == 200);
 
     vm_destroy(&vm);
@@ -914,7 +914,7 @@ static int test_gc_collect_closure_with_upvalues(void) {
 
     /* Run 3 GC cycles */
     for (int i = 0; i < 3; i++) {
-        gc_collect(&vm.heap, &vm);
+        gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
     }
 
     /* Both closure and captured value survive */
@@ -944,7 +944,7 @@ static int test_gc_collect_map_survives(void) {
     vm.stack[0] = map_val;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Map survived — can still look up the value */
     jacl_map_node *map2 = (jacl_map_node *)(uintptr_t)(vm.stack[0] & JACL_PAYLOAD_MASK);
@@ -973,7 +973,7 @@ static int test_gc_collect_vec_survives(void) {
     vm.stack[0] = vec_val;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Vector survived — elements accessible */
     jacl_vec_root *vec2 = (jacl_vec_root *)(uintptr_t)(vm.stack[0] & JACL_PAYLOAD_MASK);
@@ -1019,7 +1019,7 @@ static int test_gc_alloc_after_sweep(void) {
     vm.stack[0] = live;
     vm.stack_top = 1;
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* Now allocate again — should use freed lines */
     JaclVal v2 = jacl_i64(&vm.heap, 2);
@@ -1057,7 +1057,7 @@ static int test_gc_fragmentation_reuse(void) {
     ASSERT(vm.heap.blocks != NULL);
     ASSERT(vm.heap.blocks->next == NULL); /* single block */
 
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* After GC: only the live i64's line is OCCUPIED, rest free */
     ASSERT(vm.heap.blocks != NULL);
@@ -1108,7 +1108,7 @@ static int test_gc_multi_cycle_mixed_lifetimes(void) {
         vm.stack[2] = s3;
         vm.stack_top = 3;
 
-        gc_collect(&vm.heap, &vm);
+        gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
         /* Verify mark bit alternation (initial mark=1, toggles each cycle) */
         ASSERT_INT_EQ(vm.heap.current_mark, cycle % 2);
@@ -1205,7 +1205,7 @@ static int test_gc_deferred_block_recycling(void) {
     /* Mark with only 'live' rooted — blocks 1 and 2 are fully dead */
     vm.stack[0] = live;
     vm.stack_top = 1;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Run concurrent sweep — empty blocks are unlinked and returned to
      * the pool inline (no deferred phase needed). */
@@ -1546,7 +1546,7 @@ static int test_gc_inline_struct_bitmap_skip(void) {
     uint8_t mark = vm.heap.current_mark;
 
     /* GC should skip slots 1 and 2 — must not crash following garbage pointers */
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* The real heap object should be marked */
     ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
@@ -1579,7 +1579,7 @@ static int test_gc_inline_struct_non_struct_survives(void) {
     vm.stack_top = 3;
 
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Both real heap objects survive */
     ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
@@ -1621,7 +1621,7 @@ static int test_gc_sm_field_bitmap_skip(void) {
     vm.stack_top = 1;
 
     uint8_t mark = vm.heap.current_mark;
-    gc_mark(&vm.heap, &vm);
+    gc_mark(&vm.heap, vm__gc_roots_major, &vm);
 
     /* Real heap objects in SM fields survive */
     ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
@@ -1678,7 +1678,7 @@ static int test_gc_value_type_struct_no_trace(void) {
     vm.stack_top = 1;
 
     /* gc_collect sets gc__struct_registry from vm.struct_registry internally */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* After gc_collect, mark is toggled. Live objects have previous mark. */
     uint8_t mark = 1 - vm.heap.current_mark;
@@ -1715,7 +1715,7 @@ static int test_gc_stress_inline_struct_gc_cycles(void) {
         vm.stack_top = 4;
 
         /* Run a full GC cycle */
-        gc_collect(&vm.heap, &vm);
+        gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
         /* Verify heap objects survived */
         uint8_t mark = vm.heap.current_mark;
@@ -1910,7 +1910,7 @@ static int test_vm_ctx_gc_survives(void) {
     vm.ctx = jacl_heap_record_val(ctx_struct);
 
     /* Run GC — ctx struct and its pwd string should survive */
-    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
     /* After GC, verify ctx struct is still marked alive */
     uint8_t mark = 1 - vm.heap.current_mark;
@@ -1964,7 +1964,7 @@ static int test_vm_ctx_multiple_gc_cycles(void) {
                 (const uint8_t *)"garbage string data!", 20);
         }
 
-        gc_collect(&vm.heap, &vm);
+        gc_collect(&vm.heap, vm__gc_roots_major, &vm, vm.struct_registry, vm.intern_table);
 
         /* After each cycle, ctx struct should survive */
         uint8_t mark = 1 - vm.heap.current_mark;
