@@ -19,12 +19,18 @@ const CODEGEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codegen");
 
 /// Build the codegen driver once per test process (gcc: the unity frontend uses
 /// pre-declaration ordering clang rejects under -std=c99).
+///
+/// `-DJACL_EMIT_ONLY` selects the LLVM-free emit-only frontend (`src/jacl_emit.c`) —
+/// the same TU the product ships (jacl_emit.wasm). It drops the legacy `compiler_compile`
+/// static-error oracle, so accept/reject here is exactly the SVM backend's own behavior
+/// (typer + codegen), not the old bytecode compiler's. This is a prerequisite for deleting
+/// `compiler.c`/`vm.c` (item 6, slice 3c): the oracle path links against them.
 fn driver() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let out = std::env::temp_dir().join(format!("jacl_emit_jacl_{}", std::process::id()));
         let status = Command::new("gcc")
-            .args(["-O0", "-w", "-D_DEFAULT_SOURCE"])
+            .args(["-O0", "-w", "-D_DEFAULT_SOURCE", "-DJACL_EMIT_ONLY"])
             .arg(format!("{CODEGEN_DIR}/tests/emit_jacl.c"))
             .arg(format!("{CODEGEN_DIR}/codegen.c"))
             .arg(format!("{CODEGEN_DIR}/irbuilder.c"))
@@ -147,11 +153,9 @@ fn arithmetic_sub_of_mul() {
 }
 
 #[test]
-#[ignore = "blocked by the legacy compiler_compile oracle in the native emit_jacl driver (old \
-            compiler is binary-only for `+`), NOT an SVM codegen gap — SVM codegen folds `+` \
-            variadically (codegen.c, the compile_i32 / dynamic fold loops). Un-ignores once the \
-            harness driver drops the oracle (emit-only) or the compiler goes SVM-only (item 6)."]
 fn arithmetic_variadic_fold() {
+    // SVM codegen folds `+` variadically (codegen.c, the compile_i32 / dynamic fold loops).
+    // Now exercised: the driver is emit-only, so there is no legacy binary-`+` oracle to reject it.
     run_case("variadic", i32_val(10)); // [+ 1 2 3 4]
 }
 
@@ -181,7 +185,10 @@ fn binding_block_scope() {
 }
 
 #[test]
-#[ignore = "pre-existing: top-level `def x; def x` no longer errors in this codegen (see ISSUES.md)"]
+#[ignore = "SVM codegen deliberately permits top-level `def x; def x` as reassignment \
+            (env_define's module_scope carve-out in codegen.c), matching the old VM's top-level \
+            semantics. The emit-only driver has no oracle to reject it, so this stays ignored \
+            unless top-level redef detection is added as a deliberate semantic change (ISSUES.md)."]
 fn binding_same_scope_shadow_is_an_error() {
     let err = emit_expecting_error("shadow_err"); // def x 1; def x 2
     assert!(err.contains("already defined in this scope"), "unexpected error: {err}");
