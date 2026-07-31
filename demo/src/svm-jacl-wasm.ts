@@ -203,6 +203,25 @@ export class SvmJaclRunner {
     }
     return { output: stdout + stderr, error: null, isError: false };
   }
+
+  /**
+   * The **self-hosted frontend** path: compile JACL `source` to SVM IR by running the JACL compiler
+   * *as an SVM guest* (`jacl_compiler.svmb` — the LLVM-free frontend+codegen translated to SVM). The
+   * compiler reads the source on stdin and writes the IR on stdout; its `_start` is the emit driver.
+   *
+   * Unlike the Emscripten {@link JaclFrontend} (`jacl_emit.wasm`), this expands `defmacro`s **in-guest**
+   * via the §22 `Jit` capability the on-ramp grants a `vm_jit_*`-importing guest (`onramp_exec` runs it
+   * on the tree-walker so its import-bound `invoke`/`install` reach the driver) — so macro-bearing tour
+   * programs compile instead of trapping. The emitted IR is the same wire form {@link JaclFrontend}
+   * produces (it is the same `jacl_emit_ir` codegen), so {@link linkRun} consumes it unchanged.
+   */
+  emitIrViaCompiler(compilerSvmb: Uint8Array, source: string): EmitResult {
+    const out = this.runSvmb(compilerSvmb, new TextEncoder().encode(source));
+    if (out.isError) return { error: out.error ?? "compiler-guest run failed" };
+    const MARK = "%%ERROR%%\n";
+    if (out.output.startsWith(MARK)) return { error: out.output.slice(MARK.length) };
+    return { ir: out.output };
+  }
 }
 
 /**

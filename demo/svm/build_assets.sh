@@ -50,6 +50,20 @@ fi
 OUT="$DIR/svmb"
 mkdir -p "$OUT"
 
+# --- 1d. self-hosted frontend (jacl_compiler.svmb): the JACL compiler translated to SVM, run as a
+# guest to compile edited source *and expand its macros in-guest* via the §22 Jit cap (the macro-capable
+# live path the playground prefers over jacl_emit.wasm). Shipped under svm/svmb/ so the Pages assemble
+# step's `cp -r demo/svm/svmb/.` picks it up with no workflow change. Needs clang-18 + llvm-link-18;
+# fail-soft (the build script exits 0 when the toolchain is absent — live editing then uses jacl_emit.wasm).
+echo "Building self-hosted compiler-guest (codegen/selfhost/build_compiler_svmb.sh)…"
+bash "$ROOT/codegen/selfhost/build_compiler_svmb.sh"
+if [ -f "$ROOT/codegen/selfhost/build/jacl_compiler.svmb" ]; then
+  cp "$ROOT/codegen/selfhost/build/jacl_compiler.svmb" "$OUT/jacl_compiler.svmb"
+  echo "  -> demo/svm/svmb/jacl_compiler.svmb ($(wc -c < "$OUT/jacl_compiler.svmb") bytes; the macro-capable live frontend)"
+else
+  echo "  (clang-18/llvm-link-18 absent — skipping jacl_compiler.svmb; live editing falls back to jacl_emit.wasm.)"
+fi
+
 # Default smoke set if none given: write two tiny programs.
 if [ "$#" -eq 0 ]; then
   printf 'print "hi"\n' > "$OUT/hi.jacl"
