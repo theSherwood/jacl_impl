@@ -614,3 +614,30 @@ fn parallel_two() {
 fn parallel_three() {
     run_case("parallel3", i32_val(42)); // 10 + 20 + 12
 }
+
+// --- Destructuring bind on SVM (item 6 slice 3a): retires test_destructure_*.c. Each is the
+// native exec test's scenario rephrased to return an i32 so run_diff (interp == JIT) checks it.
+#[test]
+fn destructure_vec_positional() {
+    run_case("destr_vec", i32_val(6)); // def [a b c] [vec 1 2 3]; a+b+c
+}
+
+#[test]
+fn destructure_wildcard() {
+    run_case("destr_wildcard", i32_val(20)); // def [_ b _] [vec 10 20 30]; b
+}
+
+#[test]
+fn destructure_rest() {
+    run_case("destr_rest", i32_val(4)); // def [head ..rest] [vec 1 2 3 4]; head + len(rest)
+}
+
+#[test]
+fn destructure_named_from_map() {
+    run_case("destr_named", i32_val(12)); // def m {x:5,y:7}; def {x,y} $m; x+y
+}
+
+#[test]
+fn gen_sequential_yields() {
+    run_case("gen_sequential", i32_val(6)); // proc with yield 1/2/3, summed over for -> 6
+}
