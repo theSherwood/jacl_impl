@@ -1,11 +1,11 @@
 name: Deploy Playground to Pages
 
-# Builds BOTH backends and ships them side by side:
-#   - Classic: build_wasm.sh → src/jacl.c (jacl_eval), the in-tree compiler+VM.
-#   - SVM (the migration target): the wasm-safe bytecode engine. The playground's
-#     "Engine: SVM" toggle runs edited source client-side — jacl_emit.wasm (the
-#     LLVM-free frontend → SVM IR) → svm_link_run in svm_browser.wasm (generic link vs
-#     jaclrt.svm + run). See demo/svm/README.md.
+# Builds the SVM backend — the playground's sole engine. The old Emscripten
+# compiler+VM is no longer shipped to the playground (build_wasm.sh remains only
+# for the `build.sh --wasm` compile-check). The playground runs edited source
+# entirely client-side: jacl_emit.wasm (the LLVM-free frontend → SVM IR) →
+# svm_link_run in svm_browser.wasm (generic link vs jaclrt.svm + run), and runs
+# unedited examples from precompiled .svmb blobs. See demo/svm/README.md.
 
 on:
   push:
@@ -55,25 +55,19 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
-      # Produces build_wasm/jacl.js + build_wasm/jacl.wasm (the Classic backend).
-      - name: Build WASM module
-        run: bash build_wasm.sh
-
       # Produces the SVM backend assets: svm_browser.wasm + jacl_emit.{js,wasm} + jaclrt.svm
       # (+ a couple precompiled example .svmb). Reuses the same script the docs describe.
       - name: Build SVM assets
         run: bash demo/svm/build_assets.sh
 
-      # Symlinks wasm/, bundles the CodeMirror editor via esbuild
-      # (npm ci on first run), and regenerates examples.json from
-      # test/jacl/*.jacl. Produces demo/dist/playground.js.
+      # Bundles the CodeMirror editor via esbuild (npm ci on first run) and
+      # regenerates examples.json from test/jacl/*.jacl. Produces
+      # demo/dist/playground.js. (WASM assets come from build_assets.sh above.)
       - name: Build demo assets
         run: bash build_demo.sh
         working-directory: demo
 
-      # Assemble a self-contained site directory with real files (the
-      # demo/wasm/* entries are symlinks into build_wasm/, which don't
-      # survive artifact upload — copy the real files into place).
+      # Assemble a self-contained site directory with real files.
       - name: Assemble site
         run: |
           rm -rf _site
@@ -81,9 +75,6 @@ jobs:
           cp demo/index.html      _site/index.html
           cp demo/examples.json   _site/examples.json
           cp demo/dist/playground.js _site/dist/playground.js
-          # Classic backend
-          cp build_wasm/jacl.js   _site/wasm/jacl.js
-          cp build_wasm/jacl.wasm _site/wasm/jacl.wasm
           # SVM backend: cdylib + in-browser frontend + runtime blob + precompiled examples
           cp demo/wasm/svm_browser.wasm _site/wasm/svm_browser.wasm
           cp demo/wasm/jacl_emit.js     _site/wasm/jacl_emit.js
