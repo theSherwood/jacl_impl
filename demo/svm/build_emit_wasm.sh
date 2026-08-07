@@ -30,13 +30,17 @@ $EMCC \
   -DJACL_EMIT_ONLY \
   -Wno-implicit-function-declaration \
   -I "$ROOT/codegen" \
+  -I "$ROOT/runtime" \
+  -I "$ROOT/codegen/selfhost/macro_staging" \
   "$ROOT/codegen/tests/emit_jacl.c" \
   "$ROOT/codegen/codegen.c" \
   "$ROOT/codegen/irbuilder.c" \
+  "$ROOT/codegen/selfhost/macro_staging/stage_bridge.c" \
+  --js-library "$DIR/stage_lib.js" \
   -o "$OUT/jacl_emit.js" \
   -s MODULARIZE=1 \
   -s EXPORT_NAME="createJaclEmit" \
-  -s EXPORTED_FUNCTIONS="['_jacl_emit_ir','_malloc','_free']" \
+  -s EXPORTED_FUNCTIONS="['_jacl_emit_ir','_jacl_install_svm_stage_hook','_malloc','_free']" \
   -s EXPORTED_RUNTIME_METHODS="['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']" \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s INITIAL_MEMORY=16777216 \

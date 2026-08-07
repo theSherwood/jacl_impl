@@ -37,6 +37,12 @@ if [ ! -f "$ROOT/runtime/build/jaclrt.svm" ]; then
 fi
 cp "$ROOT/runtime/build/jaclrt.svm" "$DEMO/svm/jaclrt.svm"
 echo "  -> demo/svm/jaclrt.svm ($(wc -c < "$DEMO/svm/jaclrt.svm") bytes; the live-editing link target)"
+# The staging runtime (jaclrt + syn_rt glue) — jacl_emit.wasm links each macro body against it to stage
+# macros on the cdylib, so the fast AOT frontend is macro-capable.
+if [ -f "$ROOT/runtime/build/jaclrt_staging.svm" ]; then
+  cp "$ROOT/runtime/build/jaclrt_staging.svm" "$DEMO/svm/jaclrt_staging.svm"
+  echo "  -> demo/svm/jaclrt_staging.svm ($(wc -c < "$DEMO/svm/jaclrt_staging.svm") bytes; jacl_emit macro staging)"
+fi
 
 # --- 1c. frontend (jacl_emit.wasm): the LLVM-free lexer+parser+codegen, for live editing ----------
 # Requires the Emscripten SDK on PATH. Skipped (fail-soft) if emcc is absent — the playground then

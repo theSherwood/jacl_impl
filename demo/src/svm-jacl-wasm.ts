@@ -205,6 +205,40 @@ export class SvmJaclRunner {
   }
 
   /**
+   * Run a **binary program object** against `runtime` with raw byte I/O and return raw stdout — the
+   * macro-body staging primitive. The AOT frontend codegens each macro body to an svm-encode object
+   * and hands it here (linked at `__jacl_entry` against jaclrt_staging.svm, arg wire on stdin); the
+   * returned bytes are the result wire it decodes back to an AST. `null` on a non-OK run.
+   */
+  linkRunRaw(programBytes: Uint8Array, runtime: Uint8Array, stdin: Uint8Array): Uint8Array | null {
+    const ex = this.ex;
+    const progPtr = this.load(programBytes);
+    const rtPtr = this.load(runtime);
+    const entry = new TextEncoder().encode(JACL_ENTRY);
+    const entryPtr = this.load(entry);
+    let inPtr: number | bigint = this.usize(0);
+    let inLen: number | bigint = this.usize(0);
+    if (stdin.length > 0) {
+      inPtr = this.load(stdin);
+      inLen = this.usize(stdin.length);
+    }
+    ex.svm_link_run(
+      progPtr,
+      this.usize(programBytes.length),
+      rtPtr,
+      this.usize(runtime.length),
+      entryPtr,
+      this.usize(entry.length),
+      inPtr,
+      inLen,
+    );
+    if (ex.svm_status() !== STATUS.OK) return null;
+    const n = Number(ex.svm_stdout_len());
+    if (n === 0) return new Uint8Array(0);
+    return new Uint8Array(this.ex.memory.buffer, Number(ex.svm_stdout_ptr()), n).slice();
+  }
+
+  /**
    * The **self-hosted frontend** path: compile JACL `source` to SVM IR by running the JACL compiler
    * *as an SVM guest* (`jacl_compiler.svmb` — the LLVM-free frontend+codegen translated to SVM). The
    * compiler reads the source on stdin and writes the IR on stdout; its `_start` is the emit driver.
@@ -237,9 +271,15 @@ declare global {
 }
 interface JaclEmitModule {
   cwrap(name: string, ret: string, args: string[]): (...a: unknown[]) => number;
+  ccall(name: string, ret: string | null, argTypes: string[], args: unknown[]): unknown;
   UTF8ToString(ptr: number): string;
   _free(ptr: number): void;
+  /** Set by us: the macro-body staging callback the `jacl_svm_stage` JS-library import calls. */
+  svmStageRun?: (moduleBytes: Uint8Array, argWire: Uint8Array) => Uint8Array | null;
 }
+
+/** Runs a codegen'd macro-body module on SVM and returns the result wire — bytes in, bytes out. */
+export type MacroStageRun = (moduleBytes: Uint8Array, argWire: Uint8Array) => Uint8Array | null;
 
 /** Frontend output: either the SVM IR text, or a compile diagnostic (syntax/type/codegen error). */
 export type EmitResult = { ir: string } | { error: string };
@@ -253,8 +293,18 @@ export class JaclFrontend {
     this.emit = (src: string) => mod.cwrap("jacl_emit_ir", "number", ["string"])(src);
   }
 
-  static async create(): Promise<JaclFrontend> {
+  /**
+   * Load the AOT-compiled JACL frontend. Pass `stageRun` to make it **macro-capable**: the frontend
+   * codegens each macro body to an SVM object and hands it to `stageRun` (which runs it on the
+   * cdylib against jaclrt_staging.svm) via the `jacl_svm_stage` bridge — so 99% of compilation runs
+   * at native wasm speed and only tiny macro bodies touch SVM. Without it, macros error (emit-only).
+   */
+  static async create(stageRun?: MacroStageRun): Promise<JaclFrontend> {
     const mod = await createJaclEmit();
+    if (stageRun) {
+      mod.svmStageRun = stageRun;
+      mod.ccall("jacl_install_svm_stage_hook", null, [], []); // arm the staging hook
+    }
     return new JaclFrontend(mod);
   }
 

@@ -166,9 +166,10 @@ function setSource(view: EditorView, text: string) {
 // LLVM-free frontend (jacl_emit.wasm) and linked against the runtime (jaclrt.svm) per run.
 let svmRunner: SvmJaclRunner | null = null;
 let svmManifest: { name: string; svmb: string }[] | null = null;
-let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm) — fallback
+let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
 let svmCompiler: Uint8Array | null = null;      // jacl_compiler.svmb — the self-hosted frontend (stages macros)
 let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
+let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.svm — links macro-body modules (jacl_emit staging)
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
 let currentExample: Example | null = null;
 
@@ -205,8 +206,22 @@ async function ensureLive(): Promise<{
       const resp = await fetch("svm/svmb/jacl_compiler.svmb");
       if (resp.ok) svmCompiler = new Uint8Array(await resp.arrayBuffer());
     }
+    // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
+    // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
+    if (!svmStagingRt) {
+      const resp = await fetch("svm/jaclrt_staging.svm");
+      if (resp.ok) svmStagingRt = new Uint8Array(await resp.arrayBuffer());
+    }
     if (!svmFrontend && typeof createJaclEmit === "function") {
-      try { svmFrontend = await JaclFrontend.create(); } catch { /* jacl_emit.wasm not shipped */ }
+      // Macro-body staging callback: run the codegen'd body on the cdylib, return the result wire.
+      const stageRt = svmStagingRt;
+      const stageRun =
+        svmRunner && stageRt
+          ? (mod: Uint8Array, arg: Uint8Array) => svmRunner!.linkRunRaw(mod, stageRt, arg)
+          : undefined;
+      try {
+        svmFrontend = await JaclFrontend.create(stageRun);
+      } catch { /* jacl_emit.wasm not shipped */ }
     }
     if (!svmRuntime) {
       const resp = await fetch("svm/jaclrt.svm");
