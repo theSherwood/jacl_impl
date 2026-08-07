@@ -563,6 +563,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "svm-durable"
+version = "0.0.0"
+dependencies = [
+ "svm-ir",
+]
+
+[[package]]
 name = "svm-encode"
 version = "0.0.0"
 dependencies = [
@@ -675,6 +682,7 @@ name = "svm-run"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "svm-durable",
  "svm-encode",
  "svm-exec",
  "svm-fs",
