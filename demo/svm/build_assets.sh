@@ -80,6 +80,19 @@ for prog in "$@"; do
   names+=("$name")
 done
 
+# Pre-bake the macro-bearing tour so the *unedited* tour example loads instantly (runs its shipped
+# .svmb, no ~1.4s live compile). emit_svmb's C driver is emit-only and can't stage `defmacro`s, so the
+# self-hosted guest compiles the tour to IR first; emit_svmb --ir then links + encodes it. Needs the
+# compiler-guest (clang-18) + the cdylib; skipped otherwise (the tour then falls back to live compile).
+if [ -f "$OUT/jacl_compiler.svmb" ] && [ -f "$DEMO/wasm/svm_browser.wasm" ] && [ -f "$ROOT/test/jacl/tour.jacl" ]; then
+  echo "Pre-baking tour.svmb via the self-hosted guest…"
+  node "$DIR/guest_compile.mjs" "$DEMO/wasm/svm_browser.wasm" "$OUT/jacl_compiler.svmb" "$ROOT/test/jacl/tour.jacl" > "$OUT/tour.ir"
+  ( cd "$ROOT/runtime/harness" && cargo run --quiet --bin emit_svmb -- --ir "$OUT/tour.ir" "$OUT/tour.svmb" )
+  rm -f "$OUT/tour.ir"
+  echo "  -> demo/svm/svmb/tour.svmb ($(wc -c < "$OUT/tour.svmb") bytes; the unedited-tour fast path)"
+  names+=("tour")
+fi
+
 # Manifest: example name → .svmb file, so the playground can list + fetch precompiled programs.
 printf '%s\n' "${names[@]}" | node -e '
   const fs = require("fs");

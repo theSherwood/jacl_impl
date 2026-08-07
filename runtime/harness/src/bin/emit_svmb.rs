@@ -34,20 +34,42 @@ fn build_driver() -> PathBuf {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 2 {
-        eprintln!("usage: emit_svmb <prog.jacl> <out.svmb>");
-        std::process::exit(2);
-    }
-    let (prog, out_path) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
-
-    let driver = build_driver();
-    let out = Command::new(&driver).arg("--file").arg(&prog).output().expect("run emit driver");
-    if !out.status.success() {
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-        std::process::exit(1);
-    }
-    let program =
-        jacl_runtime_harness::decode_emitted(&out.stdout).expect("decode emitted IR");
+    // Two input shapes:
+    //   emit_svmb <prog.jacl> <out.svmb>   — compile via the emit-only C driver (no macros), or
+    //   emit_svmb --ir <prog.ir> <out.svmb> — link + encode SVM-IR produced elsewhere. The `--ir`
+    // form is how the macro-bearing tour is baked: the self-hosted guest (which CAN stage macros)
+    // emits the IR, and this path links it against the runtime + powerbox exactly like the C path.
+    let (program, out_path) = match args.as_slice() {
+        // `--ir` takes SVM-IR **text** (what the self-hosted guest emits on stdout — the macro-capable
+        // path), parsed the same way `svm_link_run` parses the playground's live compile.
+        [flag, ir_path, out] if flag == "--ir" => {
+            let text = std::fs::read_to_string(ir_path).expect("read --ir file");
+            let m = svm_text::parse_module(&text)
+                .unwrap_or_else(|e| panic!("parse --ir text: {e:?}"));
+            (m, PathBuf::from(out))
+        }
+        // The default path runs the emit-only C driver (binary object → `decode_emitted`); no macros.
+        [prog, out] => {
+            let driver = build_driver();
+            let res = Command::new(&driver)
+                .arg("--file")
+                .arg(PathBuf::from(prog))
+                .output()
+                .expect("run emit driver");
+            if !res.status.success() {
+                eprint!("{}", String::from_utf8_lossy(&res.stderr));
+                std::process::exit(1);
+            }
+            (
+                jacl_runtime_harness::decode_emitted(&res.stdout).expect("decode emitted IR"),
+                PathBuf::from(out),
+            )
+        }
+        _ => {
+            eprintln!("usage: emit_svmb <prog.jacl> <out.svmb>  |  emit_svmb --ir <prog.ir> <out.svmb>");
+            std::process::exit(2);
+        }
+    };
 
     eprintln!("emit_svmb: translating runtime + catalog…");
     let rt = jacl_runtime_harness::translate_runtime();
