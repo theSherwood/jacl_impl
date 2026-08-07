@@ -263,6 +263,7 @@ interface RunTiming {
   runMs?: number;
   mode?: CompileMode;
   cached?: boolean;
+  precompiled?: boolean; // ran a shipped .svmb (unedited example) — no live compile at all
 }
 
 function displayResult(result: RunResult, timing: RunTiming) {
@@ -287,7 +288,7 @@ function displayResult(result: RunResult, timing: RunTiming) {
   }
   if (timing.runMs !== undefined) parts.push(`run ${timing.runMs.toFixed(0)}ms`);
   const total = (timing.compileMs ?? 0) + (timing.runMs ?? 0);
-  const modeTag = timing.mode ? ` [${MODE_LABEL[timing.mode]}]` : "";
+  const modeTag = timing.precompiled ? " [precompiled]" : timing.mode ? ` [${MODE_LABEL[timing.mode]}]` : "";
   const breakdown =
     parts.join(" · ") + (parts.length > 1 ? ` · total ${total.toFixed(0)}ms` : "") + modeTag;
 
@@ -359,7 +360,7 @@ async function runOnSvm(source: string) {
     if (entry) {
       const tRun = performance.now();
       const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
-      displayResult(runner.runSvmb(bytes), { runMs: performance.now() - tRun });
+      displayResult(runner.runSvmb(bytes), { runMs: performance.now() - tRun, precompiled: true });
       return;
     }
     // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
