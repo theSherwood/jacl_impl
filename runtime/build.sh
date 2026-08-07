@@ -28,3 +28,13 @@ echo "runtime bitcode:  $OUT/jaclrt.bc"
 cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin svm-llvm-translate -- \
   "$OUT/jaclrt.bc" -o "$OUT/jaclrt.svm"
 echo "runtime module:   $OUT/jaclrt.svm"
+
+# 3. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's
+#    macro staging links each codegen'd macro body against, so `synrt_read_arg`/`synrt_write_result`
+#    (and the jacl_* runtime) resolve by name. Same scalar subset as jaclrt.svm.
+STAGING="${DIR}/../codegen/selfhost/macro_staging"
+clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
+  -I "$DIR" -I "$STAGING" "$STAGING/jaclrt_staging.c" -o "$OUT/jaclrt_staging.bc"
+cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin svm-llvm-translate -- \
+  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.svm"
+echo "staging runtime:  $OUT/jaclrt_staging.svm"
