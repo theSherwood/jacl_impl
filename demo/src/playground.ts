@@ -236,7 +236,15 @@ function handleRun() {
   void runOnSvm(source);
 }
 
-function displayResult(result: RunResult, elapsedMs: number) {
+/** Timing breakdown for a run: `compileMs` (source → SVM IR) is absent for a precompiled example
+ *  that runs its shipped `.svmb` verbatim; `runMs` (link + execute) is absent if a compile error
+ *  stopped us before running. */
+interface RunTiming {
+  compileMs?: number;
+  runMs?: number;
+}
+
+function displayResult(result: RunResult, timing: RunTiming) {
   output.textContent = "";
   if (result.output) {
     output.appendChild(document.createTextNode(result.output));
@@ -250,8 +258,26 @@ function displayResult(result: RunResult, elapsedMs: number) {
   if (!result.output && !result.isError) {
     output.innerHTML = '<span class="placeholder">(no output)</span>';
   }
-  const ms = elapsedMs.toFixed(1);
-  setStatus(result.isError ? `Error (${ms}ms)` : `Done (${ms}ms)`, result.isError ? "error" : "ok");
+
+  // Build a compile/run breakdown for the status line and the console.
+  const parts: string[] = [];
+  if (timing.compileMs !== undefined) parts.push(`compile ${timing.compileMs.toFixed(0)}ms`);
+  if (timing.runMs !== undefined) parts.push(`run ${timing.runMs.toFixed(0)}ms`);
+  const total = (timing.compileMs ?? 0) + (timing.runMs ?? 0);
+  const breakdown = parts.join(" · ") + (parts.length > 1 ? ` · total ${total.toFixed(0)}ms` : "");
+
+  // Console log: a single grouped line so it's easy to watch across runs.
+  console.log(
+    `[svm] ${result.isError ? "error" : "ok"} — ` +
+      (timing.compileMs !== undefined ? `compile=${timing.compileMs.toFixed(1)}ms ` : "") +
+      (timing.runMs !== undefined ? `run=${timing.runMs.toFixed(1)}ms ` : "") +
+      `total=${total.toFixed(1)}ms`,
+  );
+
+  setStatus(
+    result.isError ? `Error — ${breakdown}` : `Done — ${breakdown}`,
+    result.isError ? "error" : "ok",
+  );
 }
 
 /** Run the current source on the SVM backend: a precompiled example verbatim, else compile+link live. */
@@ -265,9 +291,9 @@ async function runOnSvm(source: string) {
     // Fast path: an *unedited* precompiled example runs its shipped .svmb directly.
     const entry = svmEntryForCurrentSource(source);
     if (entry) {
-      const t0 = performance.now();
+      const tRun = performance.now();
       const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
-      displayResult(runner.runSvmb(bytes), performance.now() - t0);
+      displayResult(runner.runSvmb(bytes), { runMs: performance.now() - tRun });
       return;
     }
     // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
@@ -276,16 +302,21 @@ async function runOnSvm(source: string) {
       svmError("Live compile needs jacl_compiler.svmb (or jacl_emit.wasm) + jaclrt.svm (run demo/svm/build_assets.sh).");
       return;
     }
-    const t0 = performance.now();
+    // Time the two halves separately: compiling the source to SVM IR (via the self-hosted
+    // compiler-guest, or the Emscripten frontend) vs linking + running the program.
+    const tCompile = performance.now();
     // Prefer the self-hosted compiler-guest (expands macros in-guest); else the Emscripten frontend.
     const emitted = live.compiler
       ? runner.emitIrViaCompiler(live.compiler, source)
       : live.frontend!.emitIr(source);
+    const compileMs = performance.now() - tCompile;
     if ("error" in emitted) {
-      displayResult({ output: "", error: emitted.error, isError: true }, performance.now() - t0);
+      displayResult({ output: "", error: emitted.error, isError: true }, { compileMs });
       return;
     }
-    displayResult(runner.linkRun(emitted.ir, live.runtime), performance.now() - t0);
+    const tRun = performance.now();
+    const result = runner.linkRun(emitted.ir, live.runtime);
+    displayResult(result, { compileMs, runMs: performance.now() - tRun });
   } catch (e) {
     output.textContent = "";
     const span = document.createElement("span");
