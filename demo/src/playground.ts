@@ -39,7 +39,7 @@ const jaclHighlight = HighlightStyle.define([
   { tag: t.variableName,             color: "#178" },
   { tag: t.operator,                 color: "#905" },
 ]);
-import { SvmJaclRunner, JaclFrontend, RunResult } from "./svm-jacl-wasm";
+import { SvmJaclRunner, JaclFrontend, RunResult, EmitResult } from "./svm-jacl-wasm";
 import { initSplitter } from "./splitter";
 
 // --- DOM refs ---
@@ -49,6 +49,7 @@ const output       = document.getElementById("output")       as HTMLPreElement;
 const runBtn       = document.getElementById("run-btn")      as HTMLButtonElement;
 const clearBtn     = document.getElementById("clear-btn")    as HTMLButtonElement;
 const vimToggleBtn = document.getElementById("vim-toggle")   as HTMLButtonElement;
+const compileModeEl = document.getElementById("compile-mode") as HTMLSelectElement;
 const statusEl     = document.getElementById("status")       as HTMLSpanElement;
 const searchInput  = document.getElementById("example-search") as HTMLInputElement;
 const dropdown     = document.getElementById("example-dropdown") as HTMLDivElement;
@@ -73,6 +74,20 @@ print [fact 10]
 const vimCompartment = new Compartment();
 const VIM_KEY = "jacl-playground:vim";
 let vimEnabled = localStorage.getItem(VIM_KEY) === "1";
+
+// Which frontend compiles edited source to SVM IR. `emit` = jacl_emit.wasm (the Emscripten-built
+// native-speed frontend — expands macros, ~70x faster); `guest` = the self-hosted compiler run as an
+// SVM guest on the bytecode interpreter (slow, kept for comparison); `tierup` = the same guest with a
+// pre-baked wasm tier-up (falls back to `guest` until that asset ships). Persisted in localStorage.
+type CompileMode = "emit" | "guest" | "tierup";
+const MODE_KEY = "jacl-playground:compile-mode";
+function loadCompileMode(): CompileMode {
+  const v = localStorage.getItem(MODE_KEY);
+  return v === "guest" || v === "tierup" ? v : "emit";
+}
+let compileMode: CompileMode = loadCompileMode();
+// Memoize compiled IR by (mode, source) so re-running unchanged source skips the compile entirely.
+const irCache = new Map<string, { ir: string; ran: CompileMode }>();
 
 // --- Editor construction ---
 function buildEditor(initial: string): EditorView {
@@ -183,12 +198,16 @@ async function ensureLive(): Promise<{
   runtime: Uint8Array;
 } | null> {
   try {
+    // Load BOTH frontends so the compiler dropdown can switch without a reload: the self-hosted
+    // compiler-guest (`guest`/`tierup` modes) and the Emscripten `jacl_emit.wasm` (`emit` mode).
+    // Each is best-effort — a missing asset just disables the modes that need it.
     if (!svmCompiler) {
       const resp = await fetch("svm/svmb/jacl_compiler.svmb");
       if (resp.ok) svmCompiler = new Uint8Array(await resp.arrayBuffer());
     }
-    // Fall back to the Emscripten frontend only when the self-hosted compiler-guest isn't shipped.
-    if (!svmCompiler && !svmFrontend) svmFrontend = await JaclFrontend.create();
+    if (!svmFrontend && typeof createJaclEmit === "function") {
+      try { svmFrontend = await JaclFrontend.create(); } catch { /* jacl_emit.wasm not shipped */ }
+    }
     if (!svmRuntime) {
       const resp = await fetch("svm/jaclrt.svm");
       if (!resp.ok) return null;
@@ -242,6 +261,8 @@ function handleRun() {
 interface RunTiming {
   compileMs?: number;
   runMs?: number;
+  mode?: CompileMode;
+  cached?: boolean;
 }
 
 function displayResult(result: RunResult, timing: RunTiming) {
@@ -261,15 +282,21 @@ function displayResult(result: RunResult, timing: RunTiming) {
 
   // Build a compile/run breakdown for the status line and the console.
   const parts: string[] = [];
-  if (timing.compileMs !== undefined) parts.push(`compile ${timing.compileMs.toFixed(0)}ms`);
+  if (timing.compileMs !== undefined) {
+    parts.push(timing.cached ? "compile 0ms (cached)" : `compile ${timing.compileMs.toFixed(0)}ms`);
+  }
   if (timing.runMs !== undefined) parts.push(`run ${timing.runMs.toFixed(0)}ms`);
   const total = (timing.compileMs ?? 0) + (timing.runMs ?? 0);
-  const breakdown = parts.join(" · ") + (parts.length > 1 ? ` · total ${total.toFixed(0)}ms` : "");
+  const modeTag = timing.mode ? ` [${MODE_LABEL[timing.mode]}]` : "";
+  const breakdown =
+    parts.join(" · ") + (parts.length > 1 ? ` · total ${total.toFixed(0)}ms` : "") + modeTag;
 
   // Console log: a single grouped line so it's easy to watch across runs.
   console.log(
-    `[svm] ${result.isError ? "error" : "ok"} — ` +
-      (timing.compileMs !== undefined ? `compile=${timing.compileMs.toFixed(1)}ms ` : "") +
+    `[svm] ${result.isError ? "error" : "ok"}${timing.mode ? " " + timing.mode : ""} — ` +
+      (timing.compileMs !== undefined
+        ? `compile=${timing.cached ? "0ms(cached)" : timing.compileMs.toFixed(1) + "ms"} `
+        : "") +
       (timing.runMs !== undefined ? `run=${timing.runMs.toFixed(1)}ms ` : "") +
       `total=${total.toFixed(1)}ms`,
   );
@@ -278,6 +305,45 @@ function displayResult(result: RunResult, timing: RunTiming) {
     result.isError ? `Error — ${breakdown}` : `Done — ${breakdown}`,
     result.isError ? "error" : "ok",
   );
+}
+
+type Live = { compiler: Uint8Array | null; frontend: JaclFrontend | null; runtime: Uint8Array };
+
+/** Human labels for the status line / console (kept in sync with the `<select>` options). */
+const MODE_LABEL: Record<CompileMode, string> = {
+  emit: "jacl_emit.wasm",
+  guest: "self-hosted guest (interp)",
+  tierup: "self-hosted guest (tier-up)",
+};
+
+/** The effective compile mode given which assets actually loaded — falls back so Run never dead-ends. */
+function resolveCompileMode(live: Live): CompileMode {
+  if (compileMode === "emit") return live.frontend ? "emit" : live.compiler ? "guest" : "emit";
+  // guest / tierup both need the compiler-guest; without it, fall back to the Emscripten frontend.
+  if (!live.compiler) return "emit";
+  // tier-up's pre-baked wasm isn't wired yet — run the guest on the interpreter for now.
+  return compileMode === "tierup" ? "tierup" : "guest";
+}
+
+/** jacl_emit.wasm is an **emit-only** build with no SVM runtime, so it can't stage `defmacro`s — it
+ *  returns an "emit-only build" / "staging hook not installed" error. Detect that so `emit` mode can
+ *  fall back to the macro-capable self-hosted guest instead of dead-ending. */
+function isMacroStagingError(e: string): boolean {
+  return /macro|staging|emit-only/i.test(e);
+}
+
+/** Compile `source` to SVM IR with the chosen frontend, returning which engine actually ran (an
+ *  `emit` that hits a macro falls back to the guest, so the reported mode reflects reality). */
+function compileWith(mode: CompileMode, live: Live, source: string): { emitted: EmitResult; ran: CompileMode } {
+  if (mode === "emit") {
+    const r = live.frontend!.emitIr(source);
+    // Fast path succeeded, or failed for a non-macro reason (real syntax/type error) → report as-is.
+    if (!("error" in r) || !isMacroStagingError(r.error) || !live.compiler) return { emitted: r, ran: "emit" };
+    // Macro program → jacl_emit can't stage it; fall back to the self-hosted guest.
+    return { emitted: svmRunner!.emitIrViaCompiler(live.compiler, source), ran: "guest" };
+  }
+  // guest / tierup both run the self-hosted guest today (the pre-baked tier-up runner is phase 2).
+  return { emitted: svmRunner!.emitIrViaCompiler(live.compiler!, source), ran: mode };
 }
 
 /** Run the current source on the SVM backend: a precompiled example verbatim, else compile+link live. */
@@ -302,21 +368,32 @@ async function runOnSvm(source: string) {
       svmError("Live compile needs jacl_compiler.svmb (or jacl_emit.wasm) + jaclrt.svm (run demo/svm/build_assets.sh).");
       return;
     }
-    // Time the two halves separately: compiling the source to SVM IR (via the self-hosted
-    // compiler-guest, or the Emscripten frontend) vs linking + running the program.
+    // Resolve the requested compiler, falling back if its asset isn't shipped.
+    const mode = resolveCompileMode(live);
+    // Time the two halves separately: compiling the source to SVM IR vs linking + running.
+    // A cache hit (same mode + source) reports compile time 0 — the compile was skipped.
+    const cacheKey = mode + "\0" + source;
     const tCompile = performance.now();
-    // Prefer the self-hosted compiler-guest (expands macros in-guest); else the Emscripten frontend.
-    const emitted = live.compiler
-      ? runner.emitIrViaCompiler(live.compiler, source)
-      : live.frontend!.emitIr(source);
-    const compileMs = performance.now() - tCompile;
-    if ("error" in emitted) {
-      displayResult({ output: "", error: emitted.error, isError: true }, { compileMs });
-      return;
+    const cachedEntry = irCache.get(cacheKey);
+    const cached = cachedEntry !== undefined;
+    let ir: string;
+    let ran: CompileMode = mode;
+    if (cachedEntry !== undefined) {
+      ({ ir, ran } = cachedEntry);
+    } else {
+      const out = compileWith(mode, live, source);
+      ran = out.ran;
+      if ("error" in out.emitted) {
+        displayResult({ output: "", error: out.emitted.error, isError: true }, { compileMs: performance.now() - tCompile, mode: ran });
+        return;
+      }
+      ir = out.emitted.ir;
+      irCache.set(cacheKey, { ir, ran });
     }
+    const compileMs = cached ? 0 : performance.now() - tCompile;
     const tRun = performance.now();
-    const result = runner.linkRun(emitted.ir, live.runtime);
-    displayResult(result, { compileMs, runMs: performance.now() - tRun });
+    const result = runner.linkRun(ir, live.runtime);
+    displayResult(result, { compileMs, runMs: performance.now() - tRun, mode: ran, cached });
   } catch (e) {
     output.textContent = "";
     const span = document.createElement("span");
@@ -458,6 +535,15 @@ clearBtn.addEventListener("click", () => {
   setStatus("Ready", "ok");
 });
 vimToggleBtn.addEventListener("click", () => setVim(!vimEnabled, view));
+
+// Compile-mode dropdown: reflect the persisted choice, and persist + re-run on change.
+compileModeEl.value = compileMode;
+compileModeEl.addEventListener("change", () => {
+  compileMode = (compileModeEl.value as CompileMode) ?? "emit";
+  localStorage.setItem(MODE_KEY, compileMode);
+  // Re-run the current source through the newly selected compiler so the timing updates immediately.
+  if (!runBtn.disabled) void runOnSvm(getSource(view));
+});
 
 searchInput.addEventListener("focus", openDropdown);
 searchInput.addEventListener("input", () => {

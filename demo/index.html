@@ -348,6 +348,12 @@ body {
     <div id="example-dropdown" class="dropdown hidden"></div>
   </div>
   <div class="toolbar-spacer"></div>
+  <label class="compile-mode-label" for="compile-mode" title="Which frontend compiles edited source to SVM IR">Compiler:</label>
+  <select id="compile-mode" class="btn" title="Which frontend compiles edited source to SVM IR (persisted in localStorage)">
+    <option value="emit">jacl_emit.wasm (fast)</option>
+    <option value="guest">self-hosted guest (interp)</option>
+    <option value="tierup">self-hosted guest (tier-up)</option>
+  </select>
   <button id="vim-toggle" class="btn" title="Toggle vim keybindings (persisted in localStorage)">Vim: off</button>
   <button id="run-btn" class="btn btn-primary" disabled>Run</button>
   <span class="shortcut-hint">Ctrl+Enter</span>
