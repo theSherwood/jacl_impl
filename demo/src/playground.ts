@@ -76,9 +76,10 @@ const VIM_KEY = "jacl-playground:vim";
 let vimEnabled = localStorage.getItem(VIM_KEY) === "1";
 
 // Which frontend compiles edited source to SVM IR. `emit` = jacl_emit.wasm (the Emscripten-built
-// native-speed frontend — expands macros, ~70x faster); `guest` = the self-hosted compiler run as an
-// SVM guest on the bytecode interpreter (slow, kept for comparison); `tierup` = the same guest with a
-// pre-baked wasm tier-up (falls back to `guest` until that asset ships). Persisted in localStorage.
+// native-speed frontend, now macro-capable — it stages each macro body on the cdylib, ~30x faster
+// than the guest on the tour); `guest` = the self-hosted compiler run as an SVM guest on the bytecode
+// interpreter (slow, kept for comparison); `tierup` = the guest today (a pre-baked wasm tier-up is not
+// wired). Persisted in localStorage.
 type CompileMode = "emit" | "guest" | "tierup";
 const MODE_KEY = "jacl-playground:compile-mode";
 function loadCompileMode(): CompileMode {
@@ -169,7 +170,7 @@ let svmManifest: { name: string; svmb: string }[] | null = null;
 let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
 let svmCompiler: Uint8Array | null = null;      // jacl_compiler.svmb — the self-hosted frontend (stages macros)
 let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
-let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.svm — links macro-body modules (jacl_emit staging)
+let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.svmo — links macro-body modules (jacl_emit staging)
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
 let currentExample: Example | null = null;
 
@@ -209,7 +210,7 @@ async function ensureLive(): Promise<{
     // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
     // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
     if (!svmStagingRt) {
-      const resp = await fetch("svm/jaclrt_staging.svm");
+      const resp = await fetch("svm/jaclrt_staging.svmo");
       if (resp.ok) svmStagingRt = new Uint8Array(await resp.arrayBuffer());
     }
     if (!svmFrontend && typeof createJaclEmit === "function") {

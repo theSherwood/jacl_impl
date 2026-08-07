@@ -35,6 +35,9 @@ echo "runtime module:   $OUT/jaclrt.svm"
 STAGING="${DIR}/../codegen/selfhost/macro_staging"
 clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
   -I "$DIR" -I "$STAGING" "$STAGING/jaclrt_staging.c" -o "$OUT/jaclrt_staging.bc"
+# Emit the **binary** object (.svmo, ~200 KB) rather than text (~1.3 MB): the browser re-decodes this
+# runtime on every macro body, and decoding the binary is ~4x faster than parsing the text — the
+# dominant per-macro cost (tour macro staging ~90ms→~20ms per body).
 cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin svm-llvm-translate -- \
-  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.svm"
-echo "staging runtime:  $OUT/jaclrt_staging.svm"
+  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.svmo"
+echo "staging runtime:  $OUT/jaclrt_staging.svmo"
