@@ -6,4 +6,3 @@ wasm/jacl_emit.js
 wasm/jacl_emit.wasm
 svm/svmb/
 svm/jaclrt.svm
-svm/jaclrt_staging.svmo
