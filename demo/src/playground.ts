@@ -210,7 +210,7 @@ async function ensureLive(): Promise<{
     // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
     // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
     if (!svmStagingRt) {
-      const resp = await fetch("svm/jaclrt_staging.svmo");
+      const resp = await fetch("svm/svmb/jaclrt_staging.svmo");
       if (resp.ok) svmStagingRt = new Uint8Array(await resp.arrayBuffer());
     }
     if (!svmFrontend && typeof createJaclEmit === "function") {
