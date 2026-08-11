@@ -1,10 +1,47 @@
 # Browser per-function JIT tier-up — spike findings
 
-**Status: abandoned spike, written up for an svm-side follow-up.** This records an attempt to
-speed up the in-browser JACL compiler-guest by routing its hot functions through svm's
-per-function wasm-JIT tier, the failure it hit, and where an svm engineer should look. It is a
-**postmortem + lead**, not a design: treat the *symptom* as ground truth and the *root-cause*
-section as ranked hypotheses.
+**Status: RESOLVED on the svm side (defect diagnosed + fixed); adopted as svm's WASM_AOT.md
+"slice 0".** The confirmed defect is fixed in svm `main` and is present as of our submodule pin
+`bf75dd72` (svm PR: "slice 0: gate page ops in compile_module_tierup", commit `17e06a4e`). The
+sections below are the original postmortem, preserved for context; the resolution is summarized
+next.
+
+## 0. Resolution (svm side)
+
+svm reproduced the defect natively and fixed it. Which of this doc's ranked hypotheses held:
+
+- **Hypothesis 1 (data/window materialization) — ruled out** for the native path. A new harness
+  (`svm-wasm-jit/tests/tierup_live_window.rs`) drives the real loop — a `bytecode::VcpuReactor`
+  over a caller-owned window, `_start` materializing `m.data`, then a mainline `Call` tiered onto
+  emitted wasm mirrored over that live window — and it matches the interpreter oracle exactly
+  (data-segment read + write-then-read round-trip) **when the window size matches**. The
+  shared-`win` contract is sound.
+- **Hypothesis 2/3 (baked `size_log2` vs a page-managed window) — confirmed as the real defect.**
+  `compile_module_tierup` (a *public* entry) did **not** apply the `module_uses_page_ops` gate that
+  `compile_jit`/`compile_nested` apply. A guest that maps/unmaps/protects its own window — exactly
+  the JACL compiler's growing heap — got hot leaves emitted with `mapped = 1 << size_log2` **baked
+  at emit time**; an emitted mask-only access then ignores the live (grown/remapped) page state and
+  diverges from the interpreter → the `MemoryFault → unreachable` mid-body, before any
+  `env.call_interp`, that this spike saw. The spike called `compile_module_tierup` directly,
+  bypassing `compile_jit`'s gate.
+
+**Fix (landed):** `compile_module_tierup_caps` now self-applies the page-op gate — a page-managing
+module emits nothing (all-`false` bitmap, valid imports-only wasm), identical to `compile_jit`.
+The gate holds regardless of which public entry a host calls.
+
+**What this means for JACL.** The trap/divergence is gone: driving a page-managing guest through
+tier-up is now *safe* (it silently routes those functions to the interpreter). But a page-managing
+guest — our compiler — is therefore **not accelerated** by this path; it runs on the interpreter as
+before. Actually *speeding up* a page-managing guest needs the follow-on bounds-proof elision work
+svm has started (`svm_ir::bounds` + "wasm-JIT elides the bounds-trap on a provable in-window
+proof", commits `6c492579` / `4d5f811d`). So: **fixed = no longer a bug; still not a speedup for the
+compiler-guest.** The shipped AOT-frontend + macro-body-staging fast path remains the playground's
+real performance story, and this stays a latent option, not a live need. One residue svm flags as
+unverifiable without a node+cdylib browser harness: whether the `svm_par_run`/`PAR_TIERUP` lane's
+`win`/`size_log2` provenance matches `svm_run_onramp` for a guest that *grows* its window mid-run —
+moot in practice now that the gate routes such guests to the interpreter.
+
+---
 
 References below are to the `vendor/svm` engine (`crates/svm-wasm-jit`, `browser/src`). Line
 numbers are approximate — read against current svm `main`; the symbol names and module-doc
