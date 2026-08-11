@@ -14,7 +14,9 @@ on are closed (see `docs/SVM_BROWSER_SPIKE_FINDINGS.md` — `vcpu.tls` lowered, 
 | `build_assets.sh` | Build `svm_browser.wasm` (cdylib → wasm32) + `jacl_emit.wasm` (frontend) into `demo/wasm/`, ship `jaclrt.svm`, and link+encode example programs to `svm/svmb/*.svmb` (+ `manifest.json`). |
 | `build_emit_wasm.sh` | Build just `jacl_emit.wasm` — the LLVM-free frontend+codegen (Emscripten), exposing `jacl_emit_ir(source) → SVM IR text`. Needs emsdk on PATH. |
 | `run_svmb.mjs` | Headless Node driver — runs a `.svmb` through `svm_run_onramp` and prints captured stdout. CI gate for the precompiled run path. |
-| `../src/svm-jacl-wasm.ts` | Browser modules: `SvmJaclRunner` (`runSvmb` precompiled / `linkRun` live), `JaclFrontend` (`emitIr`), and the `RunResult` shape `playground.ts` renders. |
+| `concurrent_run.mjs` | CI gate for the browser **run** path on a `# mode: concurrent` `sleep` program — guards the wasm timed-wait against a wall-clock `Instant::now()` trap. |
+| `stage_gate.mjs` | CI gate for the **macro-staging** path — asserts `jacl_emit.wasm` expands a user `defmacro` by staging its body on SVM, instead of silently falling back to the slow compiler-guest. |
+| `../src/svm-jacl-wasm.ts` | Browser modules: `SvmJaclRunner` (`runSvmb` precompiled / `linkRun` live / `linkRunRaw` macro-body), `JaclFrontend` (`emitIr`, staging hook), and the `RunResult` shape `playground.ts` renders. |
 
 Generated assets (`wasm/svm_browser.wasm`, `svm/svmb/`) are git-ignored and rebuilt by CI.
 
