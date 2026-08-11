@@ -120,6 +120,14 @@ if [ -f "$OUT/jacl_compiler.svmb" ]; then
   node "$DIR/concurrent_run.mjs" "$DEMO/wasm/svm_browser.wasm" "$OUT/jacl_compiler.svmb" "$DEMO/svm/jaclrt.svm"
 fi
 
+# Regression gate: jacl_emit.wasm must stage a user `defmacro` on SVM (not silently fall back to the
+# slow compiler-guest). Needs the emit frontend + the staging runtime object; runs only when both were
+# built (emcc + clang-18). `set -e` fails the build if the staging seam regresses. See stage_gate.mjs.
+if [ -f "$DEMO/wasm/jacl_emit.js" ] && [ -f "$DIR/svmb/jaclrt_staging.svmo" ]; then
+  echo "Gate: macro-staging path (stage_gate.mjs)…"
+  node "$DIR/stage_gate.mjs" "$DEMO/wasm/jacl_emit.js" "$DEMO/wasm/svm_browser.wasm" "$DIR/svmb/jaclrt_staging.svmo" "$DEMO/svm/jaclrt.svm"
+fi
+
 echo ""
 echo "Smoke-test the run path headless:"
 echo "  node demo/svm/run_svmb.mjs demo/wasm/svm_browser.wasm demo/svm/svmb/hi.svmb \$'hi\\n'"
