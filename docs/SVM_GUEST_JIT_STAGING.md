@@ -9,6 +9,10 @@ This is a **scoping doc**, not an implementation. It records the target SVM API,
 concrete gaps on the JACL side, the design forks (especially for `interpret`), and a
 work breakdown with the open decisions called out.
 
+> Not to be confused with the **wasm-JIT tier-up** spike (accelerating the compiler-guest by
+> emitting its hot functions to wasm) — that is a separate mechanism and is written up, with its
+> failure mode, in `docs/SVM_BROWSER_TIERUP_FINDINGS.md`.
+
 ## 1. Why
 
 Two things still pin `vm.c` into the toolchain (Phase 6.1–6.3 removed the rest):
