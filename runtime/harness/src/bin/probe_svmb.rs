@@ -76,9 +76,6 @@ fn declined_shape(type_id: u32, op: u32, nargs: usize, nresults: usize) -> Optio
             let ok = matches!(op, 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 14);
             if ok { None } else { Some(format!("INSTANTIATOR op {op} (unsupported variant)")) }
         }
-        cap_id::YIELDER => {
-            if op == 0 && nargs >= 1 { None } else { Some(format!("YIELDER op {op}")) }
-        }
         cap_id::SHARED_REGION if op == 4 => Some("SHARED_REGION op 4 (grant into child)".into()),
         CAP_SELF if op == 9 || op == 10 => {
             if nresults == 1 && nargs == 0 {
@@ -114,7 +111,7 @@ fn scan_module(m: &Module, reachable: &[bool]) -> (Seams, Seams, Vec<(usize, Str
                     Inst::CapCall { type_id, op, sig, args, .. } => {
                         match (*type_id, *op) {
                             (cap_id::INSTANTIATOR, 0 | 1 | 5) => set!(instantiate),
-                            (cap_id::INSTANTIATOR, _) | (cap_id::YIELDER, _) => set!(coro),
+                            (cap_id::INSTANTIATOR, _) => set!(coro),
                             (CAP_SELF, 9 | 10) => set!(svc),
                             _ => {}
                         }
@@ -213,9 +210,9 @@ fn report(tag: &str, m: &Module) {
         for ((t, o), c) in &cap {
             let name = match *t {
                 cap_id::STREAM => "STREAM", cap_id::EXIT => "EXIT", cap_id::CLOCK => "CLOCK",
-                cap_id::MEMORY => "MEMORY", cap_id::SHARED_REGION => "SHARED_REGION",
+                cap_id::SHARED_REGION => "SHARED_REGION",
                 cap_id::ADDRESS_SPACE => "ADDRSPACE", cap_id::INSTANTIATOR => "INSTANTIATOR",
-                cap_id::YIELDER => "YIELDER", cap_id::MODULE => "MODULE", cap_id::JIT => "JIT",
+                cap_id::MODULE => "MODULE", cap_id::JIT => "JIT",
                 CAP_SELF => "cap.self", _ => "other",
             };
             print!("  {name}#{o}×{c}");
@@ -312,7 +309,6 @@ fn run_compare(m: &Module) {
                                 Inst::Suspend { .. } => "suspend",
                                 Inst::CapCall { type_id, .. } => {
                                     if *type_id == cap_id::INSTANTIATOR { "cap.instantiator" }
-                                    else if *type_id == cap_id::YIELDER { "cap.yielder" }
                                     else if *type_id == CAP_SELF { "cap.self" }
                                     else { "cap.call" }
                                 }

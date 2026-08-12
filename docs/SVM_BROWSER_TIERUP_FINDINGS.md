@@ -6,6 +6,19 @@
 sections below are the original postmortem, preserved for context; the resolution is summarized
 next.
 
+**Update (svm pin `63a70532`, latest).** The *entire* WASM_AOT slice plan has since landed — slice 1
+(compiled-module cache, native + browser), slice 2 (default JIT-on where eligible; the browser
+mainline-tier-up-over-live-window path this doc flagged is now validated in real Chromium,
+`browser-tierup-mainline-test.mjs`), slice 3 (bounds-proof elision), **plus** a warm-runtime-snapshot
+reactor (`svm_warm_open`/`_eval`/`_close`). For a *page-managing* guest like the JACL compiler, the
+sanctioned route is the warm-snapshot's own trick: map a large-enough window (svm uses
+`WARM_MAPPED_LOG2` = 2²⁶) so the heap never `vm_map`-grows — no page ops → simultaneously JIT-eligible
+**and** snapshot-restorable. That is the large/fixed-window lever noted elsewhere, now proven by svm
+(QuickJS, an on-ramp of the same shape as our compiler-guest, went from a >1 s do-nothing floor to
+~2 ms warm). Nothing further is blocked on svm; the remaining work to close the guest-JIT↔AOT gap is
+JACL-side wiring (a two-phase `warmup`/`eval_run` driver over a pre-sized window). See
+`vendor/svm/WASM_AOT.md`.
+
 ## 0. Resolution (svm side)
 
 svm reproduced the defect natively and fixed it. Which of this doc's ranked hypotheses held:
