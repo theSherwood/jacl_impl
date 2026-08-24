@@ -30,11 +30,11 @@ if ! command -v "$CLANG" >/dev/null || ! command -v "$LLVM_LINK" >/dev/null; the
 fi
 
 # On-ramp binaries: use prebuilt if given, else build from the vendored svm submodule.
-TRANSLATE="${SVM_LLVM_TRANSLATE:-$SVM/crates/svm-llvm/target/release/svm-llvm-translate}"
-TRY="${TRY_TRANSLATE:-$SVM/crates/svm-llvm/target/release/examples/try_translate}"
+TRANSLATE="${SVM_LLVM_TRANSLATE:-$SVM/crates/temen-llvm/target/release/temen-llvm-translate}"
+TRY="${TRY_TRANSLATE:-$SVM/crates/temen-llvm/target/release/examples/try_translate}"
 if [ ! -x "$TRANSLATE" ]; then
-  echo "=== building svm-llvm-translate from vendor/svm ==="
-  ( cd "$SVM/crates/svm-llvm" && cargo build --release --bin svm-llvm-translate --example try_translate )
+  echo "=== building temen-llvm-translate from vendor/svm ==="
+  ( cd "$SVM/crates/temen-llvm" && cargo build --release --bin temen-llvm-translate --example try_translate )
 fi
 
 # -DJACL_EMIT_ONLY selects the emit-only frontend unity (src/jacl_emit.c) inside emit_jacl.c:
@@ -73,7 +73,7 @@ echo "=== linking whole program ==="
 echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,
 # never reached on the emit path). See the feasibility doc's symbol footprint.
-SVM_STUB_EXTERNS=1 "$TRANSLATE" "$OUT/jacl_compiler.ll" -o "$OUT/jacl_compiler.svmb" --binary --stub-externs
+"$TRANSLATE" "$OUT/jacl_compiler.ll" -o "$OUT/jacl_compiler.svmb" --binary --stub-externs
 echo "  -> $OUT/jacl_compiler.svmb ($(wc -c < "$OUT/jacl_compiler.svmb") bytes)"
 
 if [ "${1:-}" = "--selftest" ]; then
