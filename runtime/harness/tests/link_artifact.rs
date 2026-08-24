@@ -8,8 +8,8 @@
 //! Phase-2 codegen builds on (compile the runtime once, link many programs).
 
 use jacl_runtime_harness::translate_runtime;
-use svm_interp::Value;
-use svm_ir::{link, LinkUnit};
+use temen_interp::Value;
+use temen_ir::{link, LinkUnit};
 
 /// JaclVal encoding of an i32 (tag `0x02` in the high byte, value in the low 32),
 /// matching `jaclrt_i32` in `runtime/jaclrt.h`.
@@ -49,7 +49,7 @@ fn program_links_against_runtime_artifact_and_calls_jacl_add() {
 
     // 2. Link a JACL-shaped program unit against the runtime unit (runtime first, so
     //    its indices are unchanged and the program function lands at rt_func_count).
-    let program = svm_text::parse_module(PROGRAM_IR).expect("parse program module");
+    let program = temen_text::parse_module(PROGRAM_IR).expect("parse program module");
     let linked = link(&[
         LinkUnit {
             module: rt.module,
@@ -69,7 +69,7 @@ fn program_links_against_runtime_artifact_and_calls_jacl_add() {
     );
 
     // 3. The linked module re-verifies.
-    svm_verify::verify_module(&linked).expect("verify linked module");
+    temen_verify::verify_module(&linked).expect("verify linked module");
 
     // 4. Run the program entry on interp + JIT: jacl_add(40, 2) == 42 (as i32 JaclVals).
     let entry = rt_func_count;
@@ -77,7 +77,7 @@ fn program_links_against_runtime_artifact_and_calls_jacl_add() {
     let want = i32_val(42);
 
     let mut fuel = 100_000_000u64;
-    let interp = svm_interp::run(
+    let interp = temen_interp::run(
         &linked,
         entry,
         &[Value::I64(entry_sp as i64), Value::I64(a), Value::I64(b)],
@@ -90,10 +90,10 @@ fn program_links_against_runtime_artifact_and_calls_jacl_add() {
     };
     assert_eq!(iv, want, "interp jacl_add(40,2)");
 
-    let jv = match svm_jit::compile_and_run(&linked, entry, &[entry_sp as i64, a, b])
+    let jv = match temen_jit::compile_and_run(&linked, entry, &[entry_sp as i64, a, b])
         .expect("jit compile_and_run")
     {
-        svm_jit::JitOutcome::Returned(s) => s[0],
+        temen_jit::JitOutcome::Returned(s) => s[0],
         other => panic!("jit did not return: {other:?}"),
     };
     assert_eq!(jv, want, "jit jacl_add(40,2)");

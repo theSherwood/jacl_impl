@@ -1,6 +1,6 @@
 // ROI probe for the warm-snapshot / JIT compiler-guest plan (docs/SVM_WARM_COMPILER.md, Slice 0).
 // Times the self-hosted compiler-guest (jacl_compiler.svmb) compiling several programs through the
-// svm-browser cdylib's svm_run_onramp — the exact playground live-compile path, on the bytecode
+// svm-browser cdylib's temen_run_onramp — the exact playground live-compile path, on the bytecode
 // interpreter. Reports, per program, the wall time to compile.
 //
 // Decomposition: time(trivial) ≈ the fixed FLOOR (module decode + instantiate + _start + jaclrt
@@ -8,20 +8,20 @@
 // ≈ the MARGINAL per-source compile work — roughly what the JIT tier speeds up. The split sizes the
 // ROI of warm-snapshot vs JIT-tier.
 //
-//   node bench_guest.mjs <svm_browser.wasm> <jacl_compiler.svmb> <prog1.jacl> [prog2.jacl ...]
+//   node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog1.jacl> [prog2.jacl ...]
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, compPath, ...progs] = process.argv.slice(2);
 if (!wasmPath || !compPath || progs.length === 0) {
-  process.stderr.write('usage: node bench_guest.mjs <svm_browser.wasm> <jacl_compiler.svmb> <prog.jacl>...\n');
+  process.stderr.write('usage: node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>...\n');
   process.exit(2);
 }
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), { svm_host: { webgpu_op: () => -1n } });
+const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), { temen_host: { webgpu_op: () => -1n } });
 const ex = instance.exports;
-const is64 = ex.svm_abi_is64() === 1;
+const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
-const load = (b) => { const p = ex.svm_alloc(U(b.length)); new Uint8Array(ex.memory.buffer).set(b, Number(p)); return Number(p); };
+const load = (b) => { const p = ex.temen_alloc(U(b.length)); new Uint8Array(ex.memory.buffer).set(b, Number(p)); return Number(p); };
 const capStr = (pf, lf) => { const n = Number(lf()); return n === 0 ? '' : new TextDecoder().decode(new Uint8Array(ex.memory.buffer, Number(pf()), n).slice()); };
 
 const svmb = readFileSync(compPath);
@@ -31,9 +31,9 @@ const svmbLen = U(svmb.length);
 
 function compileOnce(srcBytes) {
   const sp = load(srcBytes);
-  ex.svm_run_onramp(svmbPtr, svmbLen, sp, U(srcBytes.length));
-  const status = ex.svm_status();
-  const ir = capStr(ex.svm_stdout_ptr, ex.svm_stdout_len);
+  ex.temen_run_onramp(svmbPtr, svmbLen, sp, U(srcBytes.length));
+  const status = ex.temen_status();
+  const ir = capStr(ex.temen_stdout_ptr, ex.temen_stdout_len);
   return { status, irLen: ir.length, isErr: (status !== 0 && status !== 5) || ir.startsWith('%%ERROR%%'), ir };
 }
 

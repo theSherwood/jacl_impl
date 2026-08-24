@@ -1,5 +1,5 @@
 # Phase 1 runtime test harness. Compiles a C driver (which includes the JACL
-# runtime) via svm-llvm and runs it on interp + JIT. `cargo test` here is the
+# runtime) via temen-llvm and runs it on interp + JIT. `cargo test` here is the
 # Phase 1 test runner. Own cargo root; path-deps into the svm submodule (links
 # libLLVM — needs llvm-18-dev).
 [workspace]
@@ -17,13 +17,13 @@ publish = false
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-svm-ir     = { path = "../../vendor/svm/crates/svm-ir" }
-svm-llvm   = { path = "../../vendor/svm/crates/svm-llvm" }
-svm-text   = { path = "../../vendor/svm/crates/svm-text" }
-svm-verify = { path = "../../vendor/svm/crates/svm-verify" }
-svm-interp = { path = "../../vendor/svm/crates/svm-interp" }
-svm-jit    = { path = "../../vendor/svm/crates/svm-jit" }
-svm-run    = { path = "../../vendor/svm/crates/svm-run" }
-svm-encode = { path = "../../vendor/svm/crates/svm-encode" }
-svm-opt      = { path = "../../vendor/svm/crates/svm-opt" }
-svm-wasm-jit = { path = "../../vendor/svm/crates/svm-wasm-jit" }
+temen-ir     = { path = "../../vendor/svm/crates/temen-ir" }
+temen-llvm   = { path = "../../vendor/svm/crates/temen-llvm" }
+temen-text   = { path = "../../vendor/svm/crates/temen-text" }
+temen-verify = { path = "../../vendor/svm/crates/temen-verify" }
+temen-interp = { path = "../../vendor/svm/crates/temen-interp" }
+temen-jit    = { path = "../../vendor/svm/crates/temen-jit" }
+temen-run    = { path = "../../vendor/svm/crates/temen-run" }
+temen-encode = { path = "../../vendor/svm/crates/temen-encode" }
+temen-opt      = { path = "../../vendor/svm/crates/temen-opt" }
+temen-wasm-jit = { path = "../../vendor/svm/crates/temen-wasm-jit" }

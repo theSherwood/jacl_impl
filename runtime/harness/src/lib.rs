@@ -14,9 +14,9 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use svm_interp::Value;
-use svm_ir::ValType;
-use svm_jit::JitOutcome;
+use temen_interp::Value;
+use temen_ir::ValType;
+use temen_jit::JitOutcome;
 
 /// C-ABI bridge (`jacl_svm_stage`) that runs a codegen'd staged-macro module on SVM
 /// in-process, for the native frontend's `JACL_STAGE_ON_SVM` path.
@@ -30,8 +30,8 @@ const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 /// pre-link unit, fed to `link`/`link_with_manifest` as a `LinkUnit`. Objects decode via
 /// `decode_unit` (`decode_module` rejects them). (`emit_jacl --text` still emits svm-text for
 /// goldens; that path is consumed by shell diffs, not this decoder.)
-pub fn decode_emitted(bytes: &[u8]) -> Result<svm_ir::Module, String> {
-    svm_encode::decode_unit(bytes).map_err(|e| format!("decode object: {e:?}"))
+pub fn decode_emitted(bytes: &[u8]) -> Result<temen_ir::Module, String> {
+    temen_encode::decode_unit(bytes).map_err(|e| format!("decode object: {e:?}"))
 }
 
 fn compile_driver(driver_abs: &str) -> PathBuf {
@@ -63,14 +63,14 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
 /// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
 /// own — the separately-compiled runtime artifact. The returned `exports` name each
 /// `jacl_*` function with its module index, so a program module can resolve a
-/// `call.import "jacl_*"` against it through `svm_ir::link` (the separate-artifact
+/// `call.import "jacl_*"` against it through `temen_ir::link` (the separate-artifact
 /// path: compile the runtime once, link many programs against it). This is the
 /// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
-pub fn translate_runtime() -> svm_llvm::Translated {
+pub fn translate_runtime() -> temen_llvm::Translated {
     let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
     // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
-    // through `svm_ir::link_with_manifest` (which retains an import no unit exports), and the host
+    // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
     // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call
     // via the now-deleted `resolve_capability_imports`; the manifest path is the phase-4 model.)
 }
@@ -80,29 +80,29 @@ pub fn translate_runtime() -> svm_llvm::Translated {
 /// (and `jacl_*`) by name at link. The glue's `jacl_vec_*` calls are in-unit; only
 /// `read`/`write` cross the boundary (the recognized Stream caps). See
 /// `docs/SVM_MACRO_STAGING_PLAN.md` "final link".
-pub fn translate_runtime_staging() -> svm_llvm::Translated {
+pub fn translate_runtime_staging() -> temen_llvm::Translated {
     let unity = format!("{RUNTIME_DIR}/../codegen/selfhost/macro_staging/jaclrt_staging.c");
     let bc = compile_driver(&unity);
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate staging runtime")
+    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate staging runtime")
 }
 
 /// Translate the test-only native `extern` catalog (`extern_catalog.c`) as its own
 /// module. Its exports name `t_sumi` / `t_fill` / `t_xor` so a program module's
 /// `call.import "t_*"` (emitted for an `extern` call) resolves against it through
-/// `svm_ir::link`. The catalog is pure (no capability imports); it takes raw
+/// `temen_ir::link`. The catalog is pure (no capability imports); it takes raw
 /// linear-memory addresses and dereferences them with C semantics — the fidelity
 /// point of the flat-buffer decay path (see docs/SVM_BUFFERS.md).
-pub fn translate_catalog() -> svm_llvm::Translated {
+pub fn translate_catalog() -> temen_llvm::Translated {
     let bc = compile_driver(&format!("{}/extern_catalog.c", env!("CARGO_MANIFEST_DIR")));
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate extern catalog")
+    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate extern catalog")
 }
 
 /// Translate the runtime with a custom `JACL_HEAP_BYTES` (a small heap makes the
 /// collect-on-pressure path fire after a modest number of allocations).
-pub fn translate_runtime_heap(heap_bytes: u32) -> svm_llvm::Translated {
+pub fn translate_runtime_heap(heap_bytes: u32) -> temen_llvm::Translated {
     let def = format!("JACL_HEAP_BYTES={heap_bytes}u");
     let bc = compile_driver_defs(&format!("{RUNTIME_DIR}/jaclrt.c"), &[&def]);
-    svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
+    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
 }
 
 /// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run
@@ -112,18 +112,18 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
 
-    let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
     // A non-printing runtime test carries the `write` capability import but never calls it, so the
     // module runs func 0 directly with the import declared-but-unbound (dead). Programs that DO
     // print are powerbox programs — run them via `run_powerbox`.
     let module = t.module;
-    svm_verify::verify_module(&module).expect("verify translated IR");
+    temen_verify::verify_module(&module).expect("verify translated IR");
 
     let results = module.funcs[0].results.clone();
     let full = vec![Value::I64(t.entry_sp as i64), Value::I32(n)];
 
     let mut fuel = 2_000_000_000u64;
-    let interp = svm_interp::run(&module, 0, &full, &mut fuel).expect("interp run");
+    let interp = temen_interp::run(&module, 0, &full, &mut fuel).expect("interp run");
     let iv = match interp[0] {
         Value::I32(x) => x,
         other => panic!("unexpected interp value {other:?}"),
@@ -134,7 +134,7 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
         Value::I32(x) => *x as i64,
         other => panic!("unsupported arg {other:?}"),
     }).collect();
-    let jv = match svm_jit::compile_and_run(&module, 0, &slots).expect("jit run") {
+    let jv = match temen_jit::compile_and_run(&module, 0, &slots).expect("jit run") {
         JitOutcome::Returned(s) => match results[0] {
             ValType::I32 => s[0] as i32,
             other => panic!("unexpected result type {other:?}"),
@@ -154,12 +154,12 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
 pub fn run_test_jit(driver: &str, n: i32) -> i32 {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
-    let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
     let module = t.module;
-    svm_verify::verify_module(&module).expect("verify translated IR");
+    temen_verify::verify_module(&module).expect("verify translated IR");
     let results = module.funcs[0].results.clone();
     let slots = vec![t.entry_sp as i64, n as i64];
-    match svm_jit::compile_and_run(&module, 0, &slots).expect("jit run") {
+    match temen_jit::compile_and_run(&module, 0, &slots).expect("jit run") {
         JitOutcome::Returned(s) => match results[0] {
             ValType::I32 => s[0] as i32,
             other => panic!("unexpected result type {other:?}"),
@@ -176,11 +176,11 @@ pub fn run_test_jit(driver: &str, n: i32) -> i32 {
 pub fn run_powerbox(driver: &str) -> Vec<u8> {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
-    let t = svm_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
-    let inst = svm_run::instantiate(t.module).expect("instantiate powerbox module");
+    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let inst = temen_run::instantiate(t.module).expect("instantiate powerbox module");
     // run_diff runs the powerbox entry (func 0) on interp AND jit, enforcing they agree, and
     // grants the fixed §3e powerbox. (call("_start") would need the entry exported by name;
     // svm-llvm's C output reaches it as the implicit func-0 entry instead.)
-    let run = inst.run_diff(&svm_run::RunConfig::default()).expect("run powerbox entry (interp==jit)");
+    let run = inst.run_diff(&temen_run::RunConfig::default()).expect("run powerbox entry (interp==jit)");
     run.stdout
 }

@@ -181,7 +181,7 @@ async function ensureSvm(): Promise<SvmJaclRunner | null> {
       const resp = await fetch("svm/svmb/manifest.json");
       svmManifest = resp.ok ? await resp.json() : [];
     }
-    if (!svmRunner) svmRunner = await SvmJaclRunner.create("wasm/svm_browser.wasm");
+    if (!svmRunner) svmRunner = await SvmJaclRunner.create("wasm/temen_browser.wasm");
     return svmRunner;
   } catch {
     return null; // assets not built / not shipped → caller shows an "assets missing" note
@@ -252,7 +252,7 @@ async function initSvm(): Promise<void> {
   } else {
     setStatus("WASM load failed", "error");
     output.innerHTML =
-      '<span class="error-line">Failed to load the SVM engine (wasm/svm_browser.wasm).\n\n' +
+      '<span class="error-line">Failed to load the SVM engine (wasm/temen_browser.wasm).\n\n' +
       "Make sure you ran: bash build_demo.sh (and demo/svm/build_assets.sh)\n" +
       'And are serving via HTTP (not file://)</span>';
   }

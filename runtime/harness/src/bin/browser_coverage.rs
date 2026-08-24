@@ -18,8 +18,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::Command;
 
-use svm_interp::{bytecode, cap_id, BoundImport, Host, StreamRole};
-use svm_ir::{link_with_manifest, LinkUnit, Module};
+use temen_interp::{bytecode, cap_id, BoundImport, Host, StreamRole};
+use temen_ir::{link_with_manifest, LinkUnit, Module};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -116,7 +116,7 @@ struct Case {
     expect_error: Option<String>,
 }
 
-fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Translated, case: &Case, fuel_cap: u64) -> Stage {
+fn run_case(driver: &PathBuf, rt: &temen_llvm::Translated, cat: &temen_llvm::Translated, case: &Case, fuel_cap: u64) -> Stage {
     // 1. frontend + codegen
     let out = Command::new(driver).arg("--file").arg(&case.path).output().expect("run driver");
     if !out.status.success() {
@@ -143,7 +143,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
         Some(e) => e,
         None => return Stage::LinkFail,
     };
-    let module = match svm_ir::synth_manifest_start(linked, entry, false) {
+    let module = match temen_ir::synth_manifest_start(linked, entry, false) {
         Ok(m) => m,
         Err(_) => return Stage::LinkFail,
     };
@@ -156,7 +156,7 @@ fn run_case(driver: &PathBuf, rt: &svm_llvm::Translated, cat: &svm_llvm::Transla
     let mut fuel = fuel_cap;
     match bytecode::compile_and_run_with_host(&module, 0, &[], &mut fuel, &mut host) {
         None => Stage::Unsupported, // shouldn't happen (compile_module accepted), but classify safely
-        Some(Err(svm_interp::Trap::Exit(_))) | Some(Ok(_)) => {
+        Some(Err(temen_interp::Trap::Exit(_))) | Some(Ok(_)) => {
             if fuel == 0 {
                 return Stage::Hang;
             }

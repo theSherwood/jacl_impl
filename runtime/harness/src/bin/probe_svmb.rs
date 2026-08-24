@@ -3,7 +3,7 @@
 //! Mirrors `emit_svmb` up to `synth_manifest_start`, then instead of encoding it
 //! *measures* the linked module:
 //!   1. Does the bytecode engine accept the linked module as-is? (`compile_module`)
-//!   2. Does `svm_opt::optimize_module` (devirt + inter-fn DCE) prune it, and does
+//!   2. Does `temen_opt::optimize_module` (devirt + inter-fn DCE) prune it, and does
 //!      the pruned module then fit the bytecode subset?
 //!   3. Which *specific* declined ops/shapes remain, and are they reachable from _start?
 //!   4. Does the wasm-JIT mixed tier accept it (`analyze` / after `outline_cap_calls`)?
@@ -20,8 +20,8 @@ use std::process::Command;
 
 use std::sync::Arc;
 
-use svm_ir::{Inst, LinkUnit, Module};
-use svm_interp::{bytecode, cap_id, Region, Value};
+use temen_ir::{Inst, LinkUnit, Module};
+use temen_interp::{bytecode, cap_id, Region, Value};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const CAP_SELF: u32 = u32::MAX;
@@ -54,7 +54,7 @@ fn link_program(prog: &PathBuf) -> Module {
 
     let rt = jacl_runtime_harness::translate_runtime();
     let cat = jacl_runtime_harness::translate_catalog();
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {
@@ -65,7 +65,7 @@ fn link_program(prog: &PathBuf) -> Module {
     ])
     .expect("link");
     let entry = linked.resolve_export("__jacl_entry").expect("entry export missing after link");
-    svm_ir::synth_manifest_start(linked, entry, false).expect("powerbox")
+    temen_ir::synth_manifest_start(linked, entry, false).expect("powerbox")
 }
 
 /// Is this CapCall a shape the *bytecode* engine declines? (Mirrors
@@ -104,7 +104,7 @@ fn scan_module(m: &Module, reachable: &[bool]) -> (Seams, Seams, Vec<(usize, Str
         macro_rules! set { ($field:ident) => {{ s.$field = true; if r { sr.$field = true; } }} }
         for b in &f.blocks {
             if r {
-                if matches!(b.term, svm_ir::Terminator::ReturnCallIndirect { .. }) { indirect[0] += 1; }
+                if matches!(b.term, temen_ir::Terminator::ReturnCallIndirect { .. }) { indirect[0] += 1; }
             }
             for inst in &b.insts {
                 match inst {
@@ -148,7 +148,7 @@ fn report(tag: &str, m: &Module) {
     println!("\n===== {tag} =====");
     println!("functions: {}", m.funcs.len());
 
-    let a = svm_wasm_jit::analyze(m);
+    let a = temen_wasm_jit::analyze(m);
     let reach: Vec<bool> = a.reachable.clone();
     let nreach = reach.iter().filter(|&&r| r).count();
 
@@ -222,10 +222,10 @@ fn report(tag: &str, m: &Module) {
 }
 
 /// Build a powerbox `Host` with the module's manifest imports bound by name (`write`→stdout,
-/// `stdin`→stdin, `exit`→exit), mirroring `svm_run`'s manifest binding — so `print` actually routes
+/// `stdin`→stdin, `exit`→exit), mirroring `temen_run`'s manifest binding — so `print` actually routes
 /// to a captured stdout buffer instead of faulting.
-fn powerbox_host(m: &Module) -> svm_interp::Host {
-    use svm_interp::{Host, StreamRole};
+fn powerbox_host(m: &Module) -> temen_interp::Host {
+    use temen_interp::{Host, StreamRole};
     let mut host = Host::new();
     let mut bindings = Vec::with_capacity(m.imports.len());
     for imp in &m.imports {
@@ -235,13 +235,13 @@ fn powerbox_host(m: &Module) -> svm_interp::Host {
             "exit" => (cap_id::EXIT, 0u32, host.grant_exit()),
             other => {
                 eprintln!("probe: unbound import '{other}' — leaving CapFault");
-                bindings.push(svm_interp::BoundImport {
+                bindings.push(temen_interp::BoundImport {
                     type_id: 0, op: 0, handle: -1, bound: false, rebindable: false,
                 });
                 continue;
             }
         };
-        bindings.push(svm_interp::BoundImport {
+        bindings.push(temen_interp::BoundImport {
             type_id: b.0, op: b.1, handle: b.2, bound: true, rebindable: false,
         });
     }
@@ -341,7 +341,7 @@ fn run_compare(m: &Module) {
     }
 }
 
-fn describe(r: &Option<Result<Vec<Value>, svm_interp::Trap>>) -> String {
+fn describe(r: &Option<Result<Vec<Value>, temen_interp::Trap>>) -> String {
     match r {
         None => "None (compile declined — a remaining seam veto fired)".into(),
         Some(Ok(v)) => format!("Ok({v:?})"),
@@ -356,11 +356,11 @@ fn main() {
 
     report("LINKED (as the spike measured it — no optimizer)", &module);
 
-    let opt = svm_opt::optimize_module(&module);
-    report("AFTER svm_opt::optimize_module (devirt + inter-fn DCE)", &opt);
+    let opt = temen_opt::optimize_module(&module);
+    report("AFTER temen_opt::optimize_module (devirt + inter-fn DCE)", &opt);
 
     let mut outlined = opt.clone();
-    svm_wasm_jit::outline_cap_calls(&mut outlined);
+    temen_wasm_jit::outline_cap_calls(&mut outlined);
     report("AFTER optimize_module + outline_cap_calls (mixed-tier prep)", &outlined);
 
     run_compare(&module);
