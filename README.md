@@ -6,6 +6,16 @@ unboxed typed values, an NxM work-stealing runtime, a non-moving
 tracing GC, and top-tier C FFI for embedding. Be as safe or as unsafe
 as you like; the language supports both.
 
+> **⚠️ Status: very early, very WIP.** Both the language and its tooling
+> are under active development and change often — expect rough edges,
+> missing features, and churn (see [Status](#status) and
+> `NOT_IMPLEMENTED.md`).
+
+**Try it in your browser →
+[thesherwood.github.io/jacl_impl](https://thesherwood.github.io/jacl_impl/)**
+— a live playground that compiles and runs JACL entirely client-side on
+the SVM backend. Nothing to install (see [Playground](#playground)).
+
 ## Goals
 
 - **Safety by default**, with absolute freedom to be unsafe (poke at
@@ -23,12 +33,16 @@ as you like; the language supports both.
 
 ## Status
 
+**This is an experimental, work-in-progress language.** Syntax, APIs, and
+internals move frequently and there is no stability guarantee yet.
+
 The core language is implemented and exercised by a large test corpus
 (the `*.jacl` programs under `test/jacl/`, the SVM runtime/codegen
 suites under `runtime/`, and the frontend C units under `test/`). The
-sole backend is the **SVM** (`codegen/*.c` → SVM IR, run on the
-`runtime/` engine); the legacy in-tree bytecode compiler + VM was
-removed in the SVM-backend migration (item 6). Implemented: value
+sole backend is the **SVM** (`codegen/*.c` → SVM IR, linked against the
+`runtime/` library and run on the SVM engine); the legacy in-tree
+bytecode compiler + VM was removed in the SVM-backend migration
+(item 6). Implemented: value
 representation, lexer/parser, procs and control flow, strings,
 persistent collections, error handling, mutable state, the static type
 system, the tracing GC, the NxM concurrency runtime, modules, macros,
@@ -287,24 +301,49 @@ test:
 ./build.sh --release              # -O2 build in .build-release/ (for benchmarks)
 ```
 
-Run a single `.jacl` source through the harness:
+Run a single `.jacl` source through the SVM CLI (`jacl_svm`, built from
+the runtime harness crate):
 
 ```
-.build/jacl_harness test/jacl/<name>.jacl
-.build/jacl_harness test/jacl/tour.jacl     # the syntax tour
+cd runtime/harness
+cargo run --bin jacl_svm -- run ../../test/jacl/<name>.jacl
 ```
 
-The dispatch loop in `src/vm.c` is direct-threaded (computed-goto) on
-GCC/Clang non-WASM targets and falls back to a switch on Emscripten and
-other compilers. See `AUDIT.md` for the per-baseline rationale and
-`AUDIT_HISTORY.md` for the audit campaign.
+The canonical syntax tour (`test/jacl/tour.jacl`) is self-checking — every
+section ends in `assert`, and a tripped assert propagates out as an error —
+so the harness runs it end-to-end on the SVM backend to hold it in sync with
+the implementation (it defines a macro, so it needs the SVM-staged frontend
+the harness test builds, not the plain `jacl_svm` driver):
+
+```
+cd runtime/harness && cargo test --test codegen syntax_tour_runs_clean_on_svm
+```
+
+The execution engine is the SVM, vendored at `vendor/svm` (from
+[`theSherwood/vm`](https://github.com/theSherwood/vm)): the C runtime
+under `runtime/` is compiled to SVM IR via `svm-llvm` and executed on
+the SVM's tree-walking interpreter and Cranelift JIT (the runtime
+harness runs both and asserts they agree). See `AUDIT.md` for the
+per-baseline rationale and `AUDIT_HISTORY.md` for the audit campaign.
 
 ## Playground
 
-A browser playground for JACL lives in `demo/` — a CodeMirror 6 editor
-with a position-aware JACL syntax mode, optional vim keybindings, a
-draggable panel divider, and the SVM backend (the wasm-safe bytecode
-engine + the in-browser LLVM-free frontend). To run it locally:
+A live, hosted playground runs in the browser at
+**<https://thesherwood.github.io/jacl_impl/>** (deployed from `main` by
+`.github/workflows/pages.yml`). Edit JACL and run it with no install — the
+whole pipeline (source → SVM IR → link → run) executes client-side.
+
+It runs on the **SVM backend** — the same `vm` engine the rest of the
+project uses, vendored at `vendor/svm` from
+[`theSherwood/vm`](https://github.com/theSherwood/vm) and compiled to
+WebAssembly. Editing recompiles the source to SVM IR in the browser
+(`jacl_emit.wasm`, the LLVM-free frontend), then links and runs it against
+the runtime blob (`jaclrt.svm`) on the `svm-browser` cdylib; unedited
+examples run from precompiled `.svmb` blobs.
+
+The source lives in `demo/` — a CodeMirror 6 editor with a position-aware
+JACL syntax mode, optional vim keybindings, and a draggable panel divider.
+To build and serve it locally:
 
 ```
 cd demo && bash svm/build_assets.sh   # svm_browser.wasm + jacl_emit.wasm + jaclrt.svm + example .svmb
@@ -313,7 +352,7 @@ python3 -m http.server 8080           # or any static server
 # open http://localhost:8080
 ```
 
-The bundle (`demo/dist/playground.js`, ~425 KB minified) is committed
+The bundle (`demo/dist/playground.js`, ~430 KB minified) is committed
 so the playground works from a clone without a Node toolchain;
 `build_demo.sh` only re-bundles when you edit `demo/src/`.
 

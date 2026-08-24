@@ -27,8 +27,10 @@
   `test/jacl/tour.jacl` — values, bindings, the three modes,
   interpolation, procs, lambdas, if/while/for, streams,
   destructuring, structs, maps, mutable state, errors, and
-  spawn/await/parallel/race. The test harness runs it, so it stays in
-  sync with the implementation. `SYNTAX.md` is the full reference.
+  spawn/await/parallel/race. It is self-checking (every section ends in
+  `assert`) and the harness runs it end-to-end on the SVM backend
+  (`codegen.rs::syntax_tour_runs_clean_on_svm`), so it stays in sync
+  with the implementation. `SYNTAX.md` is the full reference.
 
 ## When benchmarking
 
