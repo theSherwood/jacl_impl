@@ -307,7 +307,16 @@ the runtime harness crate):
 ```
 cd runtime/harness
 cargo run --bin jacl_svm -- run ../../test/jacl/<name>.jacl
-cargo run --bin jacl_svm -- run ../../test/jacl/tour.jacl   # the syntax tour
+```
+
+The canonical syntax tour (`test/jacl/tour.jacl`) is self-checking — every
+section ends in `assert`, and a tripped assert propagates out as an error —
+so the harness runs it end-to-end on the SVM backend to hold it in sync with
+the implementation (it defines a macro, so it needs the SVM-staged frontend
+the harness test builds, not the plain `jacl_svm` driver):
+
+```
+cd runtime/harness && cargo test --test codegen syntax_tour_runs_clean_on_svm
 ```
 
 The execution engine is the SVM, vendored at `vendor/svm` (from

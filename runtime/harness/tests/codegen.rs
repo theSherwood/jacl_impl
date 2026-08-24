@@ -731,3 +731,160 @@ fn string_slice_range() {
 fn string_slice_from() {
     run_case("string_slice_from", i32_val(1)); // [slice "hello" 2] == "llo"
 }
+
+// ---- Syntax tour: the full single-file survey the README and AGENTS.md cite as the
+// canonical, harness-verified picture of working syntax. Running it here makes that promise
+// ("the harness runs it, so it cannot drift from the implementation") a real CI gate. ----
+
+/// Absolute path to the canonical syntax tour.
+const TOUR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/tour.jacl");
+
+/// Repo root (for the codegen sources + macro-staging bridge the staged driver links).
+const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+/// JACL error flag — bit 61 of a `JaclVal` (mirrors `JACL_FLAG_ERROR` in `runtime/jaclrt.h`).
+/// A failed `assert` expands to `panic`, which the SVM backend surfaces as an error *value*
+/// that auto-returns out of the job (builtins.c `jacl_panic`) — so a tripped assert shows up
+/// as an error-tagged return value, not a trap or a nonzero exit.
+fn is_jacl_error(v: i64) -> bool {
+    (v as u64) & (1u64 << 61) != 0
+}
+
+/// This crate's `target/<profile>` dir, deduced from the running test binary
+/// (`target/<profile>/deps/<test>-<hash>`). Holds `libjacl_runtime_harness.a`.
+fn target_profile_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    exe.ancestors()
+        .nth(2)
+        .expect("target/<profile> above deps/")
+        .to_path_buf()
+}
+
+/// Build the **SVM-staged** frontend driver: `emit_jacl` + codegen + the macro-staging bridge
+/// (`stage_bridge.c`), linked against this crate's `libjacl_runtime_harness.a` (which exports
+/// `jacl_svm_stage`). This is the `codegen/selfhost/macro_staging/run_diff.sh --svm` recipe. It
+/// is required for tour.jacl specifically: the tour defines and invokes a `defmacro`, and macro
+/// bodies now expand by staging on the SVM engine (there is no legacy bytecode compiler to fall
+/// back to), so the plain emit-only `driver()` rejects it with "emit-only build". Cached per
+/// test process.
+fn staged_driver() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let profile_dir = target_profile_dir();
+        let staticlib = profile_dir.join("libjacl_runtime_harness.a");
+        if !staticlib.exists() {
+            // `cargo test` builds only the test binary + rlib, not the `[staticlib]` artifact the
+            // C driver links against — materialize it (a no-op when already built).
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+            if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
+                cmd.arg("--release");
+            }
+            let st = cmd.status().expect("spawn cargo build --lib");
+            assert!(
+                st.success() && staticlib.exists(),
+                "could not build {} for the staged driver",
+                staticlib.display()
+            );
+        }
+        let out = std::env::temp_dir().join(format!("jacl_emit_staged_{}", std::process::id()));
+        let status = Command::new("gcc")
+            .args(["-DJACL_STAGE_ON_SVM_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
+            .arg("-I")
+            .arg(format!("{REPO_ROOT}/codegen"))
+            .arg(format!("{REPO_ROOT}/codegen/tests/emit_jacl.c"))
+            .arg(format!("{REPO_ROOT}/codegen/codegen.c"))
+            .arg(format!("{REPO_ROOT}/codegen/irbuilder.c"))
+            .arg(format!("{REPO_ROOT}/codegen/selfhost/macro_staging/stage_bridge.c"))
+            .arg("-L")
+            .arg(&profile_dir)
+            // The Rust staticlib pulls in libstd's system deps — the same link line run_diff.sh uses.
+            .args([
+                "-ljacl_runtime_harness", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl",
+                "-lc",
+            ])
+            .arg("-o")
+            .arg(&out)
+            .status()
+            .expect("spawn gcc (staged driver)");
+        assert!(status.success(), "gcc failed to build the SVM-staged codegen driver");
+        out
+    })
+    .as_path()
+}
+
+/// Emit an arbitrary `.jacl` *file* through the staged driver's `--file` mode (`JACL_STAGE_ON_SVM=1`
+/// so macros expand on the SVM engine), then run it through the same link → powerbox → interp==jit
+/// path as `run_case_full`. Returns the program's returned `JaclVal` and captured stdout.
+fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
+    let out = Command::new(staged_driver())
+        .env("JACL_STAGE_ON_SVM", "1")
+        .arg("--file")
+        .arg(path)
+        .output()
+        .expect("run staged emit_jacl --file");
+    assert!(
+        out.status.success(),
+        "staged emit_jacl --file {path} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let program =
+        decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"));
+
+    let rt = translate_runtime();
+    let linked = link_with_manifest(&[
+        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
+        LinkUnit {
+            module: program,
+            exports: vec![("__prog_entry".to_string(), 0)],
+            ..Default::default()
+        },
+    ])
+    .unwrap_or_else(|e| panic!("link {path}: {e:?}"));
+    let entry = linked
+        .resolve_export("__prog_entry")
+        .unwrap_or_else(|| panic!("{path}: entry export missing after link"));
+
+    let pb = svm_ir::synth_manifest_start(linked, entry, false)
+        .unwrap_or_else(|e| panic!("synth_manifest_start {path}: {e}"));
+    let imports = svm_run::Imports::new()
+        .provide("write", svm_run::HostCap::stdout())
+        .provide("exit", svm_run::HostCap::exit())
+        .provide("stdin", svm_run::HostCap::stdin());
+    let inst = svm_run::instantiate_with_imports(pb, imports)
+        .unwrap_or_else(|e| panic!("instantiate {path}: {e}"));
+    let run = inst
+        .run_diff(&svm_run::RunConfig::default())
+        .unwrap_or_else(|e| panic!("run {path}: {e}"));
+    let ret = match run.outcome {
+        svm_run::Outcome::Returned(ref v) => match v.first() {
+            Some(Value::I64(x)) => *x,
+            other => panic!("{path}: unexpected returned value {other:?}"),
+        },
+        svm_run::Outcome::Exited(c) => panic!("{path}: exited({c}) instead of returning"),
+    };
+    (ret, run.stdout)
+}
+
+#[test]
+fn syntax_tour_runs_clean_on_svm() {
+    // tour.jacl exercises one feature area per section — values, bindings, the three modes,
+    // interpolation, procs, lambdas, if/while/for, streams, destructuring, structs, maps,
+    // mutable state, errors, macros, `ctx`, and spawn/await/parallel/race — each ending in
+    // `assert`. A failed assert expands to `panic`, which the SVM backend returns as an error
+    // *value* that propagates out as the job's result (no subsequent statement runs). So the
+    // drift guard is twofold: the tour must run to completion on interp AND jit (`run_diff`
+    // enforces they agree), and its returned value must not be an error. It prints nothing.
+    let (ret, stdout) = run_jacl_file(TOUR_JACL);
+    assert!(
+        !is_jacl_error(ret),
+        "tour.jacl returned a JACL error (0x{:016x}) — a syntax/feature regression tripped an \
+         `assert` in the tour; bisect it against test/jacl/tour.jacl",
+        ret as u64
+    );
+    assert!(
+        stdout.is_empty(),
+        "tour.jacl is assertion-only and must not print; got: {:?}",
+        String::from_utf8_lossy(&stdout)
+    );
+}
