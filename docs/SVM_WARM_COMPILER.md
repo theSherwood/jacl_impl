@@ -156,6 +156,38 @@ way, so this hits the *guest*-compiler path.)
 useful events on real guests anyway) — plus, on our side, the `-22` macro-staging regression. The
 consumer window-pre-sizing (old Slice 1) is **not** the lever.
 
+#### Update — re-measured with a freshly-built cdylib (engine still @ `85d8cf5d`, post-migration)
+
+After the `svm→temen` migration merged (jacl_impl PR #73), the shipped `temen_browser.wasm` was found
+**stale** — built mid-migration when the submodule pointer had flickered to an older commit, so its
+compiled-in `temen_encode` rejected the current v10 card (`temen_run_onramp` → `STATUS_DECODE_ERR`,
+status 1) even though `decode_module`/`decode_unit` accept the card natively. Rebuilt the **threads**
+cdylib from the pinned checkout (the `pages.yml` `browser-real` recipe: `+atomics,+bulk-memory` +
+`--shared-memory --import-memory`, `-Z build-std`) and re-ran `demo/svm/bench_tierup.mjs`. Three
+refinements to the above:
+
+- **The `-22` macro-staging regression is RESOLVED** — the v10 encoder fix (`irb_to_encoded`, PR #73:
+  version `9→10`, `CALL_SYM` `0x0E→0x7B`) closes it. `tour.jacl` now compiles clean to 191 828 B of
+  IR on the plain path, no `-22`.
+- **The trap is input-independent** — `tour.jacl` (13 969 B src) and `try_basic.jacl` (93 B src) both
+  produce the *identical* event profile: `temen_coop_open` 0/0 (admitted ✓), then `tierups=2,
+  jit_invokes=0, bounces=1`, then a clean decline (`temen_coop_run` → 2, `temen_status()==3
+  STATUS_TRAP`, **empty** `temen_par_last_panic` — a decline, not a wasm crash). Same 2-tierups /
+  1-bounce for a 93 B and a 14 KB compile ⇒ the decline is **structural to the compiler-guest itself**
+  (its linked jaclrt), hit early in startup, *not* in the input-dependent compile work.
+- **#926 is now fully closed** (slice 2 landed via PR #974 — fiber-scheduler + live-futex tier-up
+  servicing — and is in this pin), and the multi-vCPU coop driver *does* service `Spawn`/`Join`/
+  `Wait`/`Notify`. Yet JACL still cleanly declines. So the live blocker is **less likely an
+  unserviced concurrency event and more likely the page-op / scalar-extent representability family
+  (#1009 / #750 / #816)** — the guest's `vm_map`-grown window + Ro-rodata prots making the emitted
+  tier's single mapped bound unrepresentable, surfacing here as a clean coop decline. Naming the exact
+  declining op needs engine-side tracing (a temen task); the cdylib reports only the clean trap.
+
+Net for the playground today: **unchanged** — the JACL compile still runs wholly on the (correct,
+fast-enough) bytecode interpreter; the coop tier-up attempt declines and falls back. No regression in
+the shipped path (the playground catches the decline), no win yet. `decode_check` (harness bin) guards
+against shipping a cdylib/card version-skew again.
+
 ### Slice 1 — pre-sized, non-growing window (the shared prerequisite)
 
 Make the compiler-guest never call `vm_map`: give the guest libc `malloc` heap a fixed pre-sized
