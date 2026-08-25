@@ -52,6 +52,7 @@ echo "=== compiling frontend + driver + shim to LLVM IR ==="
 "$CLANG" "${CF[@]}" "$CODEGEN/codegen.c"    -o "$OUT/codegen.ll"
 "$CLANG" "${CF[@]}" "$CODEGEN/irbuilder.c"  -o "$OUT/irbuilder.ll"
 "$CLANG" "${CF[@]}" "$DIR/emit_driver.c"    -o "$OUT/emit_driver.ll"
+"$CLANG" "${CF[@]}" "$DIR/emit_driver_snapshot.c" -o "$OUT/emit_driver_snapshot.ll"
 "$CLANG" "${CF[@]}" "$DIR/emit_shim.c"      -o "$OUT/emit_shim.ll"
 
 # In-guest macro staging (docs/SVM_GUEST_JIT_STAGING.md §3/§4): the jaclrt runtime + staged-macro
@@ -76,6 +77,18 @@ echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
 "$TRANSLATE" "$OUT/jacl_compiler.ll" -o "$OUT/jacl_compiler.svmb" --binary --stub-externs
 echo "  -> $OUT/jacl_compiler.svmb ($(wc -c < "$OUT/jacl_compiler.svmb") bytes)"
 
+# Warm-snapshot two-phase card (docs/SVM_WARM_COMPILER.md Slice 2/3): the same program, but driven
+# by emit_driver_snapshot.c (main/warmup/eval_run exports) so the browser reactor can warm the
+# prelude once (temen_warm_open) and restore-per-Run. Identical frontend/codegen; only the driver TU
+# differs.
+echo "=== translating warm-snapshot card (jacl_compiler_snapshot.svmb) ==="
+"$LLVM_LINK" -S "$OUT/emit_driver_snapshot.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
+             "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
+             "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+             "$OUT/interpret_bridge_guest.ll" -o "$OUT/jacl_compiler_snapshot.ll"
+"$TRANSLATE" "$OUT/jacl_compiler_snapshot.ll" -o "$OUT/jacl_compiler_snapshot.svmb" --binary --stub-externs
+echo "  -> $OUT/jacl_compiler_snapshot.svmb ($(wc -c < "$OUT/jacl_compiler_snapshot.svmb") bytes)"
+
 if [ "${1:-}" = "--selftest" ]; then
   echo "=== selftest: compile a fixed JACL program on the SVM engine ==="
   # A driver with a hardcoded source (no stdin), so try_translate — which runs the
@@ -88,7 +101,7 @@ EOF
   "$CLANG" "${CF[@]}" "$OUT/selftest_main.c" -o "$OUT/selftest_main.ll"
   "$LLVM_LINK" -S "$OUT/selftest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
                "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" -o "$OUT/selftest.ll"
-  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/selftest.ll" 2>&1 | tee "$OUT/selftest.out"
+  TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/selftest.ll" 2>&1 | tee "$OUT/selftest.out"
   # 1 + 2*3 = 7 must appear as an i32.mul + i32.add in the emitted IR.
   if grep -q 'i32.mul' "$OUT/selftest.out" && grep -q 'i32.add' "$OUT/selftest.out"; then
     echo "SELFTEST PASS — JACL source compiled to SVM IR on the SVM engine."
@@ -134,7 +147,7 @@ EOF
   "$LLVM_LINK" -S "$OUT/stagetest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
                "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
                -o "$OUT/stagetest.ll"
-  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
+  TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
   # Slice per-case output with awk so the greps below can't cross a case boundary.
   case_out() { awk "/CASE $1 BEGIN/,/CASE $1 END/" "$OUT/stagetest.out"; }
   sf=0
@@ -202,7 +215,7 @@ EOF
                "$OUT/interpret_bridge_guest.ll" -o "$OUT/interptest.ll"
   # JACL_POOL_WORKERS=1 keeps the scheduler cooperative single-thread (cont.* only, no thread.spawn) —
   # the submitted-unit concurrency model (a spawned vCPU may not outlive the synchronous cap.call).
-  JACL_POOL_WORKERS=1 SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
+  JACL_POOL_WORKERS=1 TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
   if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out" \
      && grep -q 'CONCUR TAG=2 RESULT=7' "$OUT/interptest.out" \
      && grep -q 'MAP TAG=2 RESULT=42' "$OUT/interptest.out" \
@@ -210,6 +223,51 @@ EOF
     echo "INTERPTEST PASS — [interpret …] ran in-guest via the Jit capability (plain -> 7, macro-bearing -> 10, concurrent spawn/await -> 7, map -> 42, nested interpret -> 7), returning live JaclVals."
   else
     echo "INTERPTEST FAIL — expected in-guest interpret: plain 7, macro 10, concurrent 7, map 42, nested 7." >&2
+    exit 1
+  fi
+
+  echo "=== snaptest: warm-snapshot two-phase API (warmup + compile, isolation) ==="
+  # jacl_emit_warmup() once, then jacl_emit_compile several sources over the warm prelude statics.
+  # Asserts the warm compile is correct (arithmetic + a macro that expands post-warmup) and that
+  # compiles are isolated: source A compiled identically before and after an unrelated source B
+  # (a var/macro from B must not leak into A's re-compile). This pins the Slice 2 decomposition
+  # (docs/SVM_WARM_COMPILER.md) before the browser reactor wiring (Slice 3).
+  cat > "$OUT/snaptest_main.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+extern void jacl_emit_warmup(void);
+extern char *jacl_emit_compile(const char *source);
+extern void jacl_install_svm_stage_hook(void);
+int main(void) {
+  jacl_install_svm_stage_hook();
+  jacl_emit_warmup();                              /* pay the prelude init once */
+  const char *A = "[+ 1 [* 2 3]]\n";               /* 1 + 2*3 -> i32.mul + i32.add */
+  const char *B = "defmacro dbl {x} { syntax-quote [+ ~x ~x] }\ndbl 5\n"; /* macro after warmup */
+  char *a1 = jacl_emit_compile(A);
+  char *bb = jacl_emit_compile(B);
+  char *a2 = jacl_emit_compile(A);                 /* A again, after B */
+  printf("===A1 BEGIN===\n%s\n===A1 END===\n", a1 ? a1 : "NULL");
+  printf("===B BEGIN===\n%s\n===B END===\n", bb ? bb : "NULL");
+  printf("ISOLATION %s\n", (a1 && a2 && strcmp(a1, a2) == 0) ? "OK" : "FAIL");
+  return 0;
+}
+EOF
+  "$CLANG" "${CF[@]}" "$OUT/snaptest_main.c" -o "$OUT/snaptest_main.ll"
+  "$LLVM_LINK" -S "$OUT/snaptest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
+               "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
+               -o "$OUT/snaptest.ll"
+  TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/snaptest.ll" 2>&1 | tee "$OUT/snaptest.out"
+  a1_out() { awk '/A1 BEGIN/,/A1 END/' "$OUT/snaptest.out"; }
+  b_out()  { awk '/B BEGIN/,/B END/'   "$OUT/snaptest.out"; }
+  sf=0
+  a1_out | grep -q 'i32.mul' && a1_out | grep -q 'i32.add' || { echo "SNAPTEST FAIL: warm arithmetic compile" >&2; sf=1; }
+  [ "$(b_out | grep -c 'i32.const 5')" -ge 2 ] && b_out | grep -q 'i32.add' || { echo "SNAPTEST FAIL: macro-after-warmup" >&2; sf=1; }
+  grep -q 'ISOLATION OK' "$OUT/snaptest.out" || { echo "SNAPTEST FAIL: compiles not isolated" >&2; sf=1; }
+  grep -q '%%ERROR%%\|NULL' "$OUT/snaptest.out" && { echo "SNAPTEST FAIL: error/NULL in warm compile" >&2; sf=1; }
+  if [ "$sf" = 0 ]; then
+    echo "SNAPTEST PASS — warmup + compile: correct output, macro expands post-warmup, compiles isolated."
+  else
+    echo "SNAPTEST FAIL — the warm-snapshot two-phase API did not compile correctly/isolated." >&2
     exit 1
   fi
 fi

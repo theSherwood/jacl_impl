@@ -42,6 +42,13 @@ interface SvmBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
+  // Warm-runtime snapshot (SVM_WARM_COMPILER.md Slice 3): open a two-phase (`warmup`/`eval_run`)
+  // guest once — the host runs `warmup` and snapshots the post-init window — then `eval_run` each
+  // input over the restored warm image (skipping the guest init floor). `open` returns `-1` on
+  // failure; `eval` reports via `temen_status`/`temen_stdout_*` like `temen_run_onramp`.
+  temen_warm_open(modPtr: number | bigint, modLen: number | bigint): bigint;
+  temen_warm_eval(stdinPtr: number | bigint, stdinLen: number | bigint): bigint;
+  temen_warm_close(): void;
   temen_status(): number;
   temen_exit_code(): number;
   temen_stdout_ptr(): number | bigint;
@@ -255,6 +262,48 @@ export class SvmJaclRunner {
     const MARK = "%%ERROR%%\n";
     if (out.output.startsWith(MARK)) return { error: out.output.slice(MARK.length) };
     return { ir: out.output };
+  }
+
+  private warmOpened = false;
+
+  /**
+   * Open a **warm-runtime snapshot** session over the two-phase compiler card
+   * (`jacl_compiler_snapshot.svmb`): the host runs its `warmup` (the prelude init) once and snapshots
+   * the window. Call once, then {@link warmEval} per compile — each restores the warm image and JITs
+   * `eval_run`, skipping the ~450 ms/compile init+prelude floor (SVM_WARM_COMPILER.md Slice 3; ~2×
+   * over `emitIrViaCompiler`). Returns `false` if the engine refuses the card (then fall back).
+   */
+  warmOpen(snapshotSvmb: Uint8Array): boolean {
+    const modPtr = this.load(snapshotSvmb);
+    const opened = this.ex.temen_warm_open(modPtr, this.usize(snapshotSvmb.length));
+    this.warmOpened = opened !== -1n && this.ex.temen_status() === STATUS.OK;
+    return this.warmOpened;
+  }
+
+  /** Whether a warm session is currently open (via {@link warmOpen}). */
+  get isWarmOpen(): boolean {
+    return this.warmOpened;
+  }
+
+  /** Compile `source` over the open warm session — the fast path (see {@link warmOpen}). */
+  warmEval(source: string): EmitResult {
+    if (!this.warmOpened) return { error: "warm session not open" };
+    const inBytes = new TextEncoder().encode(source);
+    const inPtr = this.load(inBytes);
+    this.ex.temen_warm_eval(inPtr, this.usize(inBytes.length));
+    const status = this.ex.temen_status();
+    const stdout = this.readCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
+    const stderr = this.readCapture(this.ex.temen_stderr_ptr(), this.ex.temen_stderr_len());
+    if (status !== STATUS.OK) return { error: stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status) };
+    const MARK = "%%ERROR%%\n";
+    if (stdout.startsWith(MARK)) return { error: stdout.slice(MARK.length) };
+    return { ir: stdout };
+  }
+
+  /** Tear down the warm session and free its owned window. */
+  warmClose(): void {
+    this.ex.temen_warm_close();
+    this.warmOpened = false;
   }
 }
 

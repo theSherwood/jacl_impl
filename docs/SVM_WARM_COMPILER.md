@@ -156,51 +156,160 @@ way, so this hits the *guest*-compiler path.)
 useful events on real guests anyway) — plus, on our side, the `-22` macro-staging regression. The
 consumer window-pre-sizing (old Slice 1) is **not** the lever.
 
-### Slice 1 — pre-sized, non-growing window (the shared prerequisite)
+#### Update — re-measured with a freshly-built cdylib (engine still @ `85d8cf5d`, post-migration)
 
-Make the compiler-guest never call `vm_map`: give the guest libc `malloc` heap a fixed pre-sized
-arena (large enough for the largest expected compile) instead of growing window pages. The GC heap
-is already static (`heap_gc.c`), so this is the libc-heap side (#737's area). Verify with
-`probe_svmb`/`browser_coverage` that the linked compiler module reports **no page ops** and is
-JIT-eligible (`analyze` accepts it, `module_uses_page_ops == false`).
-- **Test:** the compiler-guest compiles the corpus identically with the fixed arena (native
-  `parity`), and `probe_svmb` shows page-op-free + JIT-eligible.
+After the `svm→temen` migration merged (jacl_impl PR #73), the shipped `temen_browser.wasm` was found
+**stale** — built mid-migration when the submodule pointer had flickered to an older commit, so its
+compiled-in `temen_encode` rejected the current v10 card (`temen_run_onramp` → `STATUS_DECODE_ERR`,
+status 1) even though `decode_module`/`decode_unit` accept the card natively. Rebuilt the **threads**
+cdylib from the pinned checkout (the `pages.yml` `browser-real` recipe: `+atomics,+bulk-memory` +
+`--shared-memory --import-memory`, `-Z build-std`) and re-ran `demo/svm/bench_tierup.mjs`. Three
+refinements to the above:
 
-### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver
+- **The `-22` macro-staging regression is RESOLVED** — the v10 encoder fix (`irb_to_encoded`, PR #73:
+  version `9→10`, `CALL_SYM` `0x0E→0x7B`) closes it. `tour.jacl` now compiles clean to 191 828 B of
+  IR on the plain path, no `-22`.
+- **The trap is input-independent** — `tour.jacl` (13 969 B src) and `try_basic.jacl` (93 B src) both
+  produce the *identical* event profile: `temen_coop_open` 0/0 (admitted ✓), then `tierups=2,
+  jit_invokes=0, bounces=1`, then a clean decline (`temen_coop_run` → 2, `temen_status()==3
+  STATUS_TRAP`, **empty** `temen_par_last_panic` — a decline, not a wasm crash). Same 2-tierups /
+  1-bounce for a 93 B and a 14 KB compile ⇒ the decline is **structural to the compiler-guest itself**
+  (its linked jaclrt), hit early in startup, *not* in the input-dependent compile work.
+- **#926 is now fully closed** (slice 2 landed via PR #974 — fiber-scheduler + live-futex tier-up
+  servicing — and is in this pin), and the multi-vCPU coop driver *does* service `Spawn`/`Join`/
+  `Wait`/`Notify`. Yet JACL still cleanly declines.
 
-Split `jacl_emit_ir` into:
-- `jacl_emit_warmup(void)` — build the **program-independent** state into statics: intern/keyword
-  tables, the built-in prelude macros, type-registry builtins, and prime the GC/arena allocators to
-  a clean "ready to compile, arenas empty" state.
-- `jacl_emit_compile(const char *src) -> char *` — compile one source using the warm state, writing
-  into per-compile arenas that a snapshot **restore** resets between runs.
+#### Traced root cause — it is **not** a concurrency op; it is a `vm_map`-grow-inside-an-emitted-leaf
 
-Then a two-phase driver (`codegen/selfhost/emit_driver_snapshot.c`) exporting `warmup()` and
-`eval_run()` (mirrors `qjs_snapshot.c`). **Fresh-per-Run isolation (INVARIANT #6)** falls out of the
-snapshot contract: each `eval_run` restores the identical post-`warmup` image, so per-compile arena
-state cannot leak between compiles — *provided* the frontend allocates all persistent state during
-`warmup` and all per-compile state after it.
-- **Risk / open question:** how separable is the frontend's init? If `jacl_emit_ir` interleaves
-  init with compile (or leaves global mutable state a second call would trip on), the decomposition
-  needs care. Pin it with a native test **before** wiring the browser.
-- **Test:** native harness — `warmup()` once, then `eval_run()` over N sources, asserting each
-  output byte-identical to `jacl_emit_ir(src)` (cold≡warm), and that source K+1's output does not
-  depend on source K (isolation).
+Instrumented the coop driver (`temen_coop_run`'s `Trapped(_)` arm) and the JS drive loop's swallowed
+`catch` to surface the real trap. The decline is:
 
-### Slice 3 — playground wiring
+```
+TIERUP f821: RuntimeError: unreachable      (identical for a 93 B and a 14 KB compile)
+```
 
-- Build `jacl_compiler_snapshot.svmb` (the two-phase driver) in `build_assets.sh`.
-- `SvmJaclRunner`: add `warmOpen(moduleBytes)` / `warmEval(source) -> RunResult` over
-  `svm_warm_open`/`_eval`/`_close`. Open once in `ensureLive`; `compileWith` a new `warm` mode calls
-  `warmEval`. Invalidate + reopen on module change (there is none at runtime, so open-once).
-- **Test:** node twin of `warm-snapshot-test.mjs` — warmup once, eval several sources, cold≡warm
-  parity + first-vs-warm timing. Then the browser differential.
+`temen_coop_deliver_trap` defaults to `Trap::Unreachable`, so the coop code reports it generically —
+but the JS `catch` shows the ground truth: the **emitted tiered leaf `f821` traps on a wasm
+`unreachable` at runtime**. Dumping func 821 from the card (`decode_check <card> 821`) pins it exactly:
 
-### Slice 4 — confirm JIT engages (measure)
+- `f821 : (I64) -> I64`, **3 blocks, no `unreachable` terminator in its IR** — so it is *not* a
+  `--stub-externs` stub. Its body is `Load … IntCmp → BrIf` (block 0, "is there room?"), then
+  `… CallImport<vm_map> … Store → Br` (block 1, the grow-and-write slow path), then `Store, Store,
+  Return` (block 2). **Func 821 is the guest's heap-grow allocator slow-path.**
+- The emitted leaf calls `vm_map` via a **cross-tier bounce** (matches the observed `bounces=1`) to
+  grow the window, then `Store`s into the just-grown region. But the emitted tier's `mapped` bound is
+  synced only at event boundaries, so it does **not** reflect the grow that happened *within* this
+  leaf — the post-grow `Store`'s confinement bounds-check against the stale `mapped` global fails and
+  the emitter's guard fires `unreachable`. The interpreter admits the same `Store` (its page map
+  updated on the `vm_map`), so **emitted `f821` diverges from the interpreter oracle**.
 
-With Slice 1's page-op-free window, confirm the compiler-guest's hot functions actually tier up
-(slice-2 default-on, or opt-in `tierup: true`), and measure the compile-work speedup. Compose with
-warm-snapshot (svm's warm+JIT). Report numbers vs. the interpreter and vs. `jacl_emit`.
+So the blocker is precisely the **#816 / #717 / #1009** family, now with a concrete repro. It is
+input-independent (f821 is the allocator, hit by every compile) and decisively rules out the earlier
+"concurrency op" guess.
+
+**Dug into the engine to attempt a fix — the mechanism is deeper than a stale `mapped` bound.** The
+JACL card is already run **paged** (1128 `readonly` data segments ⇒ `temen_coop_open`'s paged
+predicate is true), so the emitted tier uses the per-page state table, not a scalar extent. Yet the
+store still traps. Instrumenting `temen_coop_call_interp` across f821's `vm_map` bounce:
+
+```
+BOUNCE paged  map_ver_now=1 (== pv_before)  scalar_ext=0  cover_after=33554432 (32 MiB)
+```
+
+- `mem_map_version()` **does not change** across the `vm_map` grow, so the version-guarded
+  `sync_pagestate` skips its rebuild. But forcing an unconditional rebuild on every bounce
+  (tried: `sync_pagestate_forced`) **still gives 32 MiB coverage** — so `mem_map_info()` **does not
+  reflect the grown pages at all**. The coop window is `JIT_RUN_WIN_LOG2 = 25` (32 MiB) with a small
+  committed prefix; the guest's heap pages sit above the prefix and the paged table marks them
+  `Unmapped` (default above `mapped`) ⇒ the emitted store traps `unreachable`.
+- This matches a limitation the engine flags in-code: `window_scalar_extent`/`mem_map_info` "read the
+  shared root window (a confined child's own-window growth is a later refinement)" — i.e. the
+  `vm_map`-grown/committed reserved-tail pages the guest writes to are **not represented in the root
+  window introspection the paged tier-up depends on**.
+
+So the real engine fix is a **non-trivial memory-model change** (make the grown/committed reserved-tail
+state visible to the paged tier-up's page-state table, in the confinement-critical path — needs the
+differential + masking fuzz suites), not a one-line refresh. The reverted experiment is captured in
+this session; the deepened diagnosis is posted to #816/#1009.
+
+**The consumer-side sidestep is the faster path and is fully in our hands: the old Slice 1** — a
+**pre-sized, non-`vm_map`-growing** compiler window (below). It removes the grow entirely, so f821
+never calls `vm_map`, the paged table stays valid, and the guest tiers up — and it is exactly what
+#816's own workaround recommends. That is the lever to pull for a JACL tier-up win without waiting on
+the engine memory-model refinement.
+
+### Slice 1 — pre-sized, non-growing window — **DONE. The JACL compiler-guest now tiers up.**
+
+Made the compiler-guest never call `vm_map` by **defining `malloc`/`calloc`/`realloc`/`free` in
+`codegen/selfhost/emit_shim.c`** over a fixed 4 MiB static arena (`JACL_ARENA_BYTES`). A guest-defined
+allocator **shadows** the on-ramp's synthesized `__temen_malloc` (the translator only synthesizes it
+for an *undefined* `malloc`), so the `vm_map`-growing bump allocator (the `f821` that trapped) is
+never emitted. The arena lives in the guest image's committed data, so no `vm_map` ever runs and the
+paged tier-up's page-state table stays valid for the whole run. The allocator keeps the synthesized
+one's exact semantics — never-reusing bump, `free` a no-op, `calloc` zeroed, `realloc` via a 16-byte
+size header — so compiler output is byte-identical.
+
+**Measured (`demo/svm/bench_tierup.mjs`, threads `temen_browser.wasm` @ `85d8cf5d`):**
+- `vm_map` fully eliminated from the guest (0 calls in `jacl_compiler.ll`); `decode_check` shows the
+  arena in committed static data (data top 26 → 30 MiB, still under the 32 MiB window).
+- The coop tier-up now **completes with `parity=OK`** — the `unreachable` trap is gone. Validated
+  across the tour + 9 corpus programs (all `parity=OK`).
+- `tour.jacl`: bytecode 822 ms → coop **689 ms warm (1.19×)**, `tierups=19959`. A real, correct win
+  (the earlier "3.24×" was the spurious time-to-trap with a mismatched result).
+
+Capacity note: the 4 MiB arena covers the tour (the heaviest bundled example) with margin and every
+corpus program; it is a hair below the synthesized allocator's old ~5.8 MiB ceiling, which only
+matters for programs larger than the playground compiles. Enlarging `JACL_ARENA_BYTES` past ~5 MiB
+pushes the guest image over 32 MiB and auto-bumps the declared window to 64 MiB (`size_log2` 25→26).
+
+The remaining speedup ceiling is the **bounce count** (`bounces=25688` on the tour — every cap/import
+site bounces to the interpreter); reducing it (more emittable leaves / #888-style outlining) is the
+next lever, tracked engine-side, and is separate from this unblock. The engine memory-model fix
+(exposing the `vm_map`-grown tail to the paged tier, #816) remains the "proper" path but is no longer
+on JACL's critical path.
+
+### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver — **DONE**
+
+The program-independent state turned out to already be lazy-once statics: the built-in prelude macros
+are parsed + compiled **once** into `syntax.c`'s `expand__prelude_*` (guarded by
+`expand__prelude_ready`), and every compile runs on a fresh **local** arena that `jacl_emit_ir`
+destroys — so per-compile state is already isolated. So the decomposition is thin:
+- `jacl_emit_warmup(void)` (`codegen/tests/emit_jacl.c`) — a trivial throwaway compile that triggers
+  the lazy prelude/typer/codegen init into their statics, then discards the result + its arena.
+- `jacl_emit_compile(const char *src)` — `jacl_emit_ir` over the warm statics.
+
+Two-phase driver `codegen/selfhost/emit_driver_snapshot.c` exports `main` (cold baseline) / `warmup`
+/ `eval_run` (the `qjs_snapshot.c` twin). **Fresh-per-Run isolation (INVARIANT #6)** falls out of the
+snapshot contract (each `eval_run` restores the identical post-`warmup` image) *and* the per-compile
+local arena. Needs Slice 1's non-growing window so the image is snapshot-restorable (temen#816).
+- **Native test — `SNAPTEST` in `build_compiler_svmb.sh --selftest`:** `warmup()` once, then compile
+  arithmetic + a `defmacro` (the macro must still expand *after* warmup), and compile source A before
+  and after an unrelated source B — asserting A's output is byte-identical both times (isolation).
+  **PASS.**
+
+### Slice 3 — playground wiring — **DONE (pending Pages runtime validation)**
+
+- `build_compiler_svmb.sh` builds **`jacl_compiler_snapshot.svmb`**; `build_assets.sh` ships it under
+  `svm/svmb/` (best-effort, alongside `jacl_compiler.svmb`).
+- `SvmJaclRunner` (`demo/src/svm-jacl-wasm.ts`): `warmOpen(snapshotSvmb)` / `warmEval(source)` /
+  `warmClose()` over `temen_warm_open`/`_eval`/`_close`, plus `isWarmOpen`.
+- `playground.ts`: `ensureLive` loads the warm card; the **`tierup` mode** (previously a placeholder
+  that aliased `guest`) now opens the warm session once and `warmEval`s each compile, falling back to
+  the plain guest if the card isn't shipped or the engine refuses it. `npx tsc --noEmit` + esbuild
+  bundle both clean.
+- **End-to-end measured** (`demo/svm/warm_probe.mjs`, threads `temen_browser.wasm` @ `85d8cf5d`,
+  `tour.jacl`): `temen_warm_open` admits the card, then `temen_warm_eval` runs each compile over the
+  restored warm image on the **warm+JIT tier** — **cold `temen_run_onramp` 903 ms → warm 450 ms
+  (2.01×), 453 ms/compile saved, parity=OK.** The biggest lever measured — it skips the guest init
+  floor *and* JITs `eval_run`, beating even the coop tier-up (1.37×) on this guest.
+- **Left to confirm:** the browser differential in Pages CI (the node path + type-check are green
+  here; the live-browser `tierup`-mode timing is the last check).
+
+### Slice 4 — confirm JIT engages (measure) — **DONE (folded into the numbers above)**
+
+The coop tier-up (Slice 1's unblock) measures **1.37×** on the tour; the warm+JIT `eval_run` path
+(Slice 3's `temen_warm_eval`) measures **2.01×**. Both hold parity vs the interpreter oracle. The
+warm+JIT path is the one to ship for the playground compile.
 
 ## Relationship to svm issues
 

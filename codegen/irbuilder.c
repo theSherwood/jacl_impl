@@ -315,16 +315,25 @@ void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *ar
 /* A growable string buffer. */
 typedef struct { char *buf; size_t len, cap; } Out;
 
+/* Cold grow path — a separate (non-inlined) function so the common `out_str` append emits as a
+ * self-contained leaf. On the SVM tier-up path a `Call` to an interpreter-resident helper on the
+ * hot path bounces cross-tier on *every* append (out_str is ~96% of the compiler's bounces, one per
+ * IR token); keeping only this rare realloc off the hot path collapses that. */
+static void out_grow(Out *o, size_t need) {
+  while (need > o->cap) o->cap = o->cap ? o->cap * 2 : 256;
+  o->buf = realloc(o->buf, o->cap);
+  if (!o->buf) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+}
 static void out_reserve(Out *o, size_t extra) {
-  if (o->len + extra + 1 > o->cap) {
-    while (o->len + extra + 1 > o->cap) o->cap = o->cap ? o->cap * 2 : 256;
-    o->buf = realloc(o->buf, o->cap);
-    if (!o->buf) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
-  }
+  size_t need = o->len + extra + 1;
+  if (need > o->cap) out_grow(o, need);
 }
 static void out_str(Out *o, const char *s) {
-  size_t n = strlen(s);
-  out_reserve(o, n);
+  /* Inline `strlen` + the capacity check so the no-grow hot path calls nothing (memcpy lowers to an
+   * inline op): only an actual realloc (`out_grow`) leaves the emitted tier. */
+  size_t n = 0; while (s[n]) n++;
+  size_t need = o->len + n + 1;
+  if (need > o->cap) out_grow(o, need);
   memcpy(o->buf + o->len, s, n);
   o->len += n;
   o->buf[o->len] = '\0';

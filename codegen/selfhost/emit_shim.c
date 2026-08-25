@@ -18,6 +18,46 @@ typedef __builtin_va_list va_list;
 #define va_arg   __builtin_va_arg
 #define va_end   __builtin_va_end
 
+/* --- fixed pre-sized heap arena (SVM_WARM_COMPILER.md Slice 1) ---------------------------------
+ * Defining malloc/calloc/realloc/free here *shadows* the on-ramp's synthesized `__temen_malloc`,
+ * a bump allocator that grows the window via `vm_map` on demand. That mid-run `vm_map` grow is
+ * invisible to the paged tier-up's page-state table (temen #816), so the emitted heap-store traps
+ * and the JACL compiler-guest can't tier up. A fixed static arena lives in the guest image's
+ * committed data, so no `vm_map` ever runs and the paged table stays valid. The allocator keeps the
+ * synthesized one's semantics exactly — a never-reusing bump allocator, `free` a no-op, `calloc`
+ * zeroed — so compiler output is byte-identical (differential parity vs the interpreter holds).
+ * ARENA_BYTES must fit under the window with the guest's static data (~26 MiB) + stack. */
+#ifndef JACL_ARENA_BYTES
+#define JACL_ARENA_BYTES (4u * 1024u * 1024u)
+#endif
+static unsigned char g_arena[JACL_ARENA_BYTES] __attribute__((aligned(16)));
+static size_t g_brk;
+static size_t g_arena_hi; /* high-water, for the OOM report */
+
+void *malloc(size_t n) {
+  size_t payload = (n + 15u) & ~(size_t)15u; /* 16-align the payload */
+  if (g_brk + 16u + payload > JACL_ARENA_BYTES) return 0; /* arena exhausted */
+  unsigned char *p = g_arena + g_brk + 16u;
+  *(size_t *)(p - 16u) = n; /* size header (for realloc), matching the synthesized layout */
+  g_brk += 16u + payload;
+  if (g_brk > g_arena_hi) g_arena_hi = g_brk;
+  return p;
+}
+void *calloc(size_t nmemb, size_t sz) {
+  size_t n = nmemb * sz;
+  unsigned char *p = malloc(n);
+  if (p) for (size_t i = 0; i < n; i++) p[i] = 0;
+  return p;
+}
+void free(void *p) { (void)p; } /* never reuse — matches the synthesized allocator */
+void *realloc(void *p, size_t n) {
+  if (!p) return malloc(n);
+  size_t old = *(size_t *)((unsigned char *)p - 16u);
+  unsigned char *q = malloc(n);
+  if (q) { size_t m = old < n ? old : n; unsigned char *s = p; for (size_t i = 0; i < m; i++) q[i] = s[i]; }
+  return q;
+}
+
 int memcmp(const void *a, const void *b, size_t n) {
   const unsigned char *p = a, *q = b;
   for (size_t i = 0; i < n; i++)
