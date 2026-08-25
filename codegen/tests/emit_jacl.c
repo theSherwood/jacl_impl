@@ -517,6 +517,25 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   arena_destroy(&arena);
   return out;
 }
+
+/* --- Warm-snapshot two-phase API (docs/SVM_WARM_COMPILER.md Slice 2) ---------------------------
+ * The compiler's program-independent state — the built-in prelude macros — is parsed + compiled
+ * ONCE into static storage (syntax.c `expand__prelude_*`, guarded by `expand__prelude_ready`); it
+ * dominates the fixed per-compile floor. `jacl_emit_warmup` triggers that init so the host can
+ * snapshot the post-warmup window (temen_warm_open) and restore it before each `jacl_emit_compile`,
+ * paying the prelude init once instead of on every Run. Each compile runs on a fresh local arena
+ * (jacl_emit_ir), so compiles are isolated; the snapshot restore keeps the warm prelude statics and
+ * discards per-compile state. Requires the guest to be non-`vm_map`-growing (Slice 1) so the window
+ * is snapshot-restorable (temen#816). */
+EMSCRIPTEN_KEEPALIVE void jacl_emit_warmup(void) {
+  /* A trivial compile exercises the lazy prelude/typer/codegen init paths into their statics; the
+   * result (and its local arena) are discarded, leaving only the program-independent warm state. */
+  char *w = jacl_emit_ir("0\n");
+  free(w);
+}
+EMSCRIPTEN_KEEPALIVE char *jacl_emit_compile(const char *source) {
+  return jacl_emit_ir(source);
+}
 #endif /* __EMSCRIPTEN__ */
 
 #ifdef JACL_STAGE_ON_SVM_BUILD

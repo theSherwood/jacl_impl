@@ -268,41 +268,43 @@ next lever, tracked engine-side, and is separate from this unblock. The engine m
 (exposing the `vm_map`-grown tail to the paged tier, #816) remains the "proper" path but is no longer
 on JACL's critical path.
 
-### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver
+### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver — **DONE**
 
-Split `jacl_emit_ir` into:
-- `jacl_emit_warmup(void)` — build the **program-independent** state into statics: intern/keyword
-  tables, the built-in prelude macros, type-registry builtins, and prime the GC/arena allocators to
-  a clean "ready to compile, arenas empty" state.
-- `jacl_emit_compile(const char *src) -> char *` — compile one source using the warm state, writing
-  into per-compile arenas that a snapshot **restore** resets between runs.
+The program-independent state turned out to already be lazy-once statics: the built-in prelude macros
+are parsed + compiled **once** into `syntax.c`'s `expand__prelude_*` (guarded by
+`expand__prelude_ready`), and every compile runs on a fresh **local** arena that `jacl_emit_ir`
+destroys — so per-compile state is already isolated. So the decomposition is thin:
+- `jacl_emit_warmup(void)` (`codegen/tests/emit_jacl.c`) — a trivial throwaway compile that triggers
+  the lazy prelude/typer/codegen init into their statics, then discards the result + its arena.
+- `jacl_emit_compile(const char *src)` — `jacl_emit_ir` over the warm statics.
 
-Then a two-phase driver (`codegen/selfhost/emit_driver_snapshot.c`) exporting `warmup()` and
-`eval_run()` (mirrors `qjs_snapshot.c`). **Fresh-per-Run isolation (INVARIANT #6)** falls out of the
-snapshot contract: each `eval_run` restores the identical post-`warmup` image, so per-compile arena
-state cannot leak between compiles — *provided* the frontend allocates all persistent state during
-`warmup` and all per-compile state after it.
-- **Risk / open question:** how separable is the frontend's init? If `jacl_emit_ir` interleaves
-  init with compile (or leaves global mutable state a second call would trip on), the decomposition
-  needs care. Pin it with a native test **before** wiring the browser.
-- **Test:** native harness — `warmup()` once, then `eval_run()` over N sources, asserting each
-  output byte-identical to `jacl_emit_ir(src)` (cold≡warm), and that source K+1's output does not
-  depend on source K (isolation).
+Two-phase driver `codegen/selfhost/emit_driver_snapshot.c` exports `main` (cold baseline) / `warmup`
+/ `eval_run` (the `qjs_snapshot.c` twin). **Fresh-per-Run isolation (INVARIANT #6)** falls out of the
+snapshot contract (each `eval_run` restores the identical post-`warmup` image) *and* the per-compile
+local arena. Needs Slice 1's non-growing window so the image is snapshot-restorable (temen#816).
+- **Native test — `SNAPTEST` in `build_compiler_svmb.sh --selftest`:** `warmup()` once, then compile
+  arithmetic + a `defmacro` (the macro must still expand *after* warmup), and compile source A before
+  and after an unrelated source B — asserting A's output is byte-identical both times (isolation).
+  **PASS.**
 
-### Slice 3 — playground wiring
+### Slice 3 — playground wiring — **card + engine path DONE; `SvmJaclRunner` TS wiring remaining**
 
-- Build `jacl_compiler_snapshot.svmb` (the two-phase driver) in `build_assets.sh`.
-- `SvmJaclRunner`: add `warmOpen(moduleBytes)` / `warmEval(source) -> RunResult` over
-  `svm_warm_open`/`_eval`/`_close`. Open once in `ensureLive`; `compileWith` a new `warm` mode calls
-  `warmEval`. Invalidate + reopen on module change (there is none at runtime, so open-once).
-- **Test:** node twin of `warm-snapshot-test.mjs` — warmup once, eval several sources, cold≡warm
-  parity + first-vs-warm timing. Then the browser differential.
+- `build_compiler_svmb.sh` now also builds **`jacl_compiler_snapshot.svmb`** (the two-phase card).
+- **End-to-end measured** (`demo/svm/warm_probe.mjs`, threads `temen_browser.wasm` @ `85d8cf5d`,
+  `tour.jacl`): `temen_warm_open` admits the card, then `temen_warm_eval` runs each compile over the
+  restored warm image on the **warm+JIT tier** — **cold `temen_run_onramp` 903 ms → warm 450 ms
+  (2.01×), 453 ms/compile saved, parity=OK.** This is the biggest lever measured — it skips the guest
+  init floor *and* JITs `eval_run`, beating even the coop tier-up (1.37×) on this guest.
+- **Remaining:** wire `SvmJaclRunner` (`demo/src`) — `warmOpen(moduleBytes)` on `ensureLive`,
+  `warmEval(source)` for a new `warm` compile mode, `temen_warm_close` on teardown — plus shipping
+  `jacl_compiler_snapshot.svmb` from `build_assets.sh`. The engine path is proven; this is the
+  browser-side plumbing (validate in the Pages differential).
 
-### Slice 4 — confirm JIT engages (measure)
+### Slice 4 — confirm JIT engages (measure) — **DONE (folded into the numbers above)**
 
-With Slice 1's page-op-free window, confirm the compiler-guest's hot functions actually tier up
-(slice-2 default-on, or opt-in `tierup: true`), and measure the compile-work speedup. Compose with
-warm-snapshot (svm's warm+JIT). Report numbers vs. the interpreter and vs. `jacl_emit`.
+The coop tier-up (Slice 1's unblock) measures **1.37×** on the tour; the warm+JIT `eval_run` path
+(Slice 3's `temen_warm_eval`) measures **2.01×**. Both hold parity vs the interpreter oracle. The
+warm+JIT path is the one to ship for the playground compile.
 
 ## Relationship to svm issues
 
