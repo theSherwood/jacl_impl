@@ -177,11 +177,39 @@ refinements to the above:
   (its linked jaclrt), hit early in startup, *not* in the input-dependent compile work.
 - **#926 is now fully closed** (slice 2 landed via PR #974 — fiber-scheduler + live-futex tier-up
   servicing — and is in this pin), and the multi-vCPU coop driver *does* service `Spawn`/`Join`/
-  `Wait`/`Notify`. Yet JACL still cleanly declines. So the live blocker is **less likely an
-  unserviced concurrency event and more likely the page-op / scalar-extent representability family
-  (#1009 / #750 / #816)** — the guest's `vm_map`-grown window + Ro-rodata prots making the emitted
-  tier's single mapped bound unrepresentable, surfacing here as a clean coop decline. Naming the exact
-  declining op needs engine-side tracing (a temen task); the cdylib reports only the clean trap.
+  `Wait`/`Notify`. Yet JACL still cleanly declines.
+
+#### Traced root cause — it is **not** a concurrency op; it is a `vm_map`-grow-inside-an-emitted-leaf
+
+Instrumented the coop driver (`temen_coop_run`'s `Trapped(_)` arm) and the JS drive loop's swallowed
+`catch` to surface the real trap. The decline is:
+
+```
+TIERUP f821: RuntimeError: unreachable      (identical for a 93 B and a 14 KB compile)
+```
+
+`temen_coop_deliver_trap` defaults to `Trap::Unreachable`, so the coop code reports it generically —
+but the JS `catch` shows the ground truth: the **emitted tiered leaf `f821` traps on a wasm
+`unreachable` at runtime**. Dumping func 821 from the card (`decode_check <card> 821`) pins it exactly:
+
+- `f821 : (I64) -> I64`, **3 blocks, no `unreachable` terminator in its IR** — so it is *not* a
+  `--stub-externs` stub. Its body is `Load … IntCmp → BrIf` (block 0, "is there room?"), then
+  `… CallImport<vm_map> … Store → Br` (block 1, the grow-and-write slow path), then `Store, Store,
+  Return` (block 2). **Func 821 is the guest's heap-grow allocator slow-path.**
+- The emitted leaf calls `vm_map` via a **cross-tier bounce** (matches the observed `bounces=1`) to
+  grow the window, then `Store`s into the just-grown region. But the emitted tier's `mapped` bound is
+  synced only at event boundaries, so it does **not** reflect the grow that happened *within* this
+  leaf — the post-grow `Store`'s confinement bounds-check against the stale `mapped` global fails and
+  the emitter's guard fires `unreachable`. The interpreter admits the same `Store` (its page map
+  updated on the `vm_map`), so **emitted `f821` diverges from the interpreter oracle**.
+
+So the blocker is precisely the **#816 / #717 / #1009** family, now with a concrete repro: a
+`vm_map` grow *inside* an emitted leaf isn't propagated to that leaf's live `mapped` bound before the
+subsequent write. It is input-independent (f821 is the allocator, hit by every compile), and it
+decisively rules out the earlier "concurrency op" guess. The engine fix is to re-sync the emitted
+tier's `mapped` extent across an in-leaf `vm_map` (or run the compiler-guest paged, #750/#1009); the
+consumer alternative is the old Slice 1 after all — a **pre-sized, non-`vm_map`-growing** compiler
+window, which removes the grow the emitted tier can't currently track.
 
 Net for the playground today: **unchanged** — the JACL compile still runs wholly on the (correct,
 fast-enough) bytecode interpreter; the coop tier-up attempt declines and falls back. No regression in
