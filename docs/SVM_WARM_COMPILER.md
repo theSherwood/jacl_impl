@@ -203,13 +203,40 @@ but the JS `catch` shows the ground truth: the **emitted tiered leaf `f821` trap
   the emitter's guard fires `unreachable`. The interpreter admits the same `Store` (its page map
   updated on the `vm_map`), so **emitted `f821` diverges from the interpreter oracle**.
 
-So the blocker is precisely the **#816 / #717 / #1009** family, now with a concrete repro: a
-`vm_map` grow *inside* an emitted leaf isn't propagated to that leaf's live `mapped` bound before the
-subsequent write. It is input-independent (f821 is the allocator, hit by every compile), and it
-decisively rules out the earlier "concurrency op" guess. The engine fix is to re-sync the emitted
-tier's `mapped` extent across an in-leaf `vm_map` (or run the compiler-guest paged, #750/#1009); the
-consumer alternative is the old Slice 1 after all — a **pre-sized, non-`vm_map`-growing** compiler
-window, which removes the grow the emitted tier can't currently track.
+So the blocker is precisely the **#816 / #717 / #1009** family, now with a concrete repro. It is
+input-independent (f821 is the allocator, hit by every compile) and decisively rules out the earlier
+"concurrency op" guess.
+
+**Dug into the engine to attempt a fix — the mechanism is deeper than a stale `mapped` bound.** The
+JACL card is already run **paged** (1128 `readonly` data segments ⇒ `temen_coop_open`'s paged
+predicate is true), so the emitted tier uses the per-page state table, not a scalar extent. Yet the
+store still traps. Instrumenting `temen_coop_call_interp` across f821's `vm_map` bounce:
+
+```
+BOUNCE paged  map_ver_now=1 (== pv_before)  scalar_ext=0  cover_after=33554432 (32 MiB)
+```
+
+- `mem_map_version()` **does not change** across the `vm_map` grow, so the version-guarded
+  `sync_pagestate` skips its rebuild. But forcing an unconditional rebuild on every bounce
+  (tried: `sync_pagestate_forced`) **still gives 32 MiB coverage** — so `mem_map_info()` **does not
+  reflect the grown pages at all**. The coop window is `JIT_RUN_WIN_LOG2 = 25` (32 MiB) with a small
+  committed prefix; the guest's heap pages sit above the prefix and the paged table marks them
+  `Unmapped` (default above `mapped`) ⇒ the emitted store traps `unreachable`.
+- This matches a limitation the engine flags in-code: `window_scalar_extent`/`mem_map_info` "read the
+  shared root window (a confined child's own-window growth is a later refinement)" — i.e. the
+  `vm_map`-grown/committed reserved-tail pages the guest writes to are **not represented in the root
+  window introspection the paged tier-up depends on**.
+
+So the real engine fix is a **non-trivial memory-model change** (make the grown/committed reserved-tail
+state visible to the paged tier-up's page-state table, in the confinement-critical path — needs the
+differential + masking fuzz suites), not a one-line refresh. The reverted experiment is captured in
+this session; the deepened diagnosis is posted to #816/#1009.
+
+**The consumer-side sidestep is the faster path and is fully in our hands: the old Slice 1** — a
+**pre-sized, non-`vm_map`-growing** compiler window (below). It removes the grow entirely, so f821
+never calls `vm_map`, the paged table stays valid, and the guest tiers up — and it is exactly what
+#816's own workaround recommends. That is the lever to pull for a JACL tier-up win without waiting on
+the engine memory-model refinement.
 
 Net for the playground today: **unchanged** — the JACL compile still runs wholly on the (correct,
 fast-enough) bytecode interpreter; the coop tier-up attempt declines and falls back. No regression in

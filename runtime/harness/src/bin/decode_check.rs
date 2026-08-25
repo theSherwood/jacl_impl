@@ -26,6 +26,31 @@ fn main() {
             return;
         }
     };
+    // #1009 paged predicate: does the coop tier-up run this guest PAGED (page-checked, honors Ro +
+    // grow) or non-paged (scalar `mapped` extent)? Mirrors temen_coop_open's decision.
+    {
+        let scalar = |t: &temen_ir::ValType| {
+            matches!(
+                t,
+                temen_ir::ValType::I32
+                    | temen_ir::ValType::I64
+                    | temen_ir::ValType::F32
+                    | temen_ir::ValType::F64
+            )
+        };
+        let max_slots = (temen_wasm_jit::ENV_CELL_BYTES - 16) / 8;
+        let all_shimmable = m.funcs.iter().all(|f| {
+            f.params.iter().all(&scalar)
+                && f.results.iter().all(&scalar)
+                && f.params.len().max(f.results.len()) <= max_slots
+        });
+        let ro_data = m.data.iter().filter(|d| d.readonly).count();
+        let uses_unmap_protect = temen_wasm_jit::module_uses_unmap_protect(&m);
+        let paged = all_shimmable && (ro_data > 0 || uses_unmap_protect);
+        println!(
+            "paged predicate: all_shimmable={all_shimmable} readonly_data_segs={ro_data} uses_unmap_protect={uses_unmap_protect} => PAGED={paged}"
+        );
+    }
     if let Some(i) = func_idx {
         let Some(f) = m.funcs.get(i) else {
             println!("func {i}: OUT OF RANGE ({} funcs)", m.funcs.len());
