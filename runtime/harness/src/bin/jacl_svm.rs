@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use svm_ir::LinkUnit;
+use temen_ir::LinkUnit;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -65,10 +65,10 @@ fn cmd_bundle(args: &[String]) {
     }
     let dir = dir.unwrap_or_else(|| die("bundle: missing <assets-dir>"));
     let out = out.unwrap_or_else(|| die("bundle: missing -o <out.fsimg>"));
-    let (files, dirs) = svm_run::fs::read_host_dir(&dir)
+    let (files, dirs) = temen_run::fs::read_host_dir(&dir)
         .unwrap_or_else(|e| die(&format!("bundle: read {}: {e}", dir.display())));
     let bytes: usize = files.iter().map(|(_, b)| b.len()).sum();
-    let img = svm_run::fs::encode_image(&files, &dirs);
+    let img = temen_run::fs::encode_image(&files, &dirs);
     std::fs::write(&out, &img)
         .unwrap_or_else(|e| die(&format!("bundle: write {}: {e}", out.display())));
     eprintln!(
@@ -128,7 +128,7 @@ fn cmd_run(args: &[String]) -> ! {
     // Retain the runtime's manifest capability imports through link (post-IMPORTS.md-phase-4;
     // docs/SVM_IMPORT_MIGRATION_ASK.md), wrap the program entry (its func 0) in the paramless
     // powerbox `_start`, and bind the powerbox names.
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {
@@ -141,29 +141,29 @@ fn cmd_run(args: &[String]) -> ! {
     let entry = linked
         .resolve_export("__jacl_entry")
         .unwrap_or_else(|| die("entry export missing after link"));
-    let module = svm_ir::synth_manifest_start(linked, entry, false)
+    let module = temen_ir::synth_manifest_start(linked, entry, false)
         .unwrap_or_else(|e| die(&format!("powerbox: {e}")));
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("stdin", svm_run::HostCap::stdin());
-    let inst = svm_run::instantiate_with_imports(module, imports)
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("stdin", temen_run::HostCap::stdin());
+    let inst = temen_run::instantiate_with_imports(module, imports)
         .unwrap_or_else(|e| die(&format!("instantiate: {e}")));
 
     // The grant (SVM_FS_DESIGN.md host-policy ladder). Explicit, default-deny.
-    let caps: Vec<(&str, svm_run::HostCap)> = match &grant {
+    let caps: Vec<(&str, temen_run::HostCap)> = match &grant {
         FsGrant::None => Vec::new(),
         FsGrant::Root(dir) => {
             // The program's `/` is DIR; create it (and DIR/tmp, the language's baseline
             // directory model — the guest VFS models `/` and `/tmp` as existing).
             std::fs::create_dir_all(dir.join("tmp"))
                 .unwrap_or_else(|e| die(&format!("--fs-root {}: {e}", dir.display())));
-            vec![("fs", svm_run::fs::host_fs(dir.clone()))]
+            vec![("fs", temen_run::fs::host_fs(dir.clone()))]
         }
         FsGrant::Image(file) => {
             let bytes = std::fs::read(file)
                 .unwrap_or_else(|e| die(&format!("--fs-image {}: {e}", file.display())));
-            let cap = svm_run::fs::mem_fs_from_archive(&bytes)
+            let cap = temen_run::fs::mem_fs_from_archive(&bytes)
                 .unwrap_or_else(|e| die(&format!("--fs-image {}: {e}", file.display())));
             vec![("fs", cap)]
         }
@@ -174,19 +174,19 @@ fn cmd_run(args: &[String]) -> ! {
     // (docs/SVM_BROWSER_SPIKE_FINDINGS.md) declines the linked runtime — so output matches
     // `--interp`; the flag exists to exercise that path directly as the browser migration proceeds.
     let backend = match (bytecode, interp) {
-        (true, _) => svm_run::Backend::Bytecode,
-        (false, true) => svm_run::Backend::TreeWalk,
-        (false, false) => svm_run::Backend::Jit,
+        (true, _) => temen_run::Backend::Bytecode,
+        (false, true) => temen_run::Backend::TreeWalk,
+        (false, false) => temen_run::Backend::Jit,
     };
     let run = inst
-        .run_with_caps(backend, &svm_run::RunConfig::default(), &caps)
+        .run_with_caps(backend, &temen_run::RunConfig::default(), &caps)
         .unwrap_or_else(|e| die(&format!("run: {e}")));
     use std::io::Write;
     std::io::stdout().write_all(&run.stdout).ok();
     std::io::stderr().write_all(&run.stderr).ok();
     match run.outcome {
-        svm_run::Outcome::Exited(c) => std::process::exit(c),
-        svm_run::Outcome::Returned(_) => std::process::exit(0),
+        temen_run::Outcome::Exited(c) => std::process::exit(c),
+        temen_run::Outcome::Returned(_) => std::process::exit(0),
     }
 }
 

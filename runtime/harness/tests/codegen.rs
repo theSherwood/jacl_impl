@@ -12,8 +12,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use jacl_runtime_harness::{decode_emitted, translate_runtime};
-use svm_interp::Value;
-use svm_ir::{link_with_manifest, LinkUnit};
+use temen_interp::Value;
+use temen_ir::{link_with_manifest, LinkUnit};
 
 const CODEGEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codegen");
 
@@ -46,7 +46,7 @@ fn driver() -> &'static Path {
 }
 
 /// Emit one case's program as the default v9 svm-encode **object** via the codegen.
-/// Decoded by `decode_emitted` (`svm_encode::decode_unit`).
+/// Decoded by `decode_emitted` (`temen_encode::decode_unit`).
 fn emit(case: &str) -> Vec<u8> {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
     assert!(
@@ -110,23 +110,23 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
     // Wrap the program entry in the paramless powerbox `_start` (svm lays out the writable
     // stash + memory), then bind the powerbox capability names. `run_diff` grants them to both
     // backends identically and enforces interp == jit.
-    let pb = svm_ir::synth_manifest_start(linked, entry, false)
+    let pb = temen_ir::synth_manifest_start(linked, entry, false)
         .unwrap_or_else(|e| panic!("synth_manifest_start {case}: {e}"));
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("stdin", svm_run::HostCap::stdin());
-    let inst = svm_run::instantiate_with_imports(pb, imports)
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("stdin", temen_run::HostCap::stdin());
+    let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {case}: {e}"));
     let run = inst
-        .run_diff(&svm_run::RunConfig::default())
+        .run_diff(&temen_run::RunConfig::default())
         .unwrap_or_else(|e| panic!("run {case}: {e}"));
     let result = match run.outcome {
-        svm_run::Outcome::Returned(ref v) => match v.first() {
+        temen_run::Outcome::Returned(ref v) => match v.first() {
             Some(Value::I64(x)) => *x,
             other => panic!("{case}: unexpected returned value {other:?}"),
         },
-        svm_run::Outcome::Exited(c) => panic!("{case}: program exited({c})"),
+        temen_run::Outcome::Exited(c) => panic!("{case}: program exited({c})"),
     };
     (result, run.stdout)
 }
@@ -845,23 +845,23 @@ fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
         .resolve_export("__prog_entry")
         .unwrap_or_else(|| panic!("{path}: entry export missing after link"));
 
-    let pb = svm_ir::synth_manifest_start(linked, entry, false)
+    let pb = temen_ir::synth_manifest_start(linked, entry, false)
         .unwrap_or_else(|e| panic!("synth_manifest_start {path}: {e}"));
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("stdin", svm_run::HostCap::stdin());
-    let inst = svm_run::instantiate_with_imports(pb, imports)
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("stdin", temen_run::HostCap::stdin());
+    let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {path}: {e}"));
     let run = inst
-        .run_diff(&svm_run::RunConfig::default())
+        .run_diff(&temen_run::RunConfig::default())
         .unwrap_or_else(|e| panic!("run {path}: {e}"));
     let ret = match run.outcome {
-        svm_run::Outcome::Returned(ref v) => match v.first() {
+        temen_run::Outcome::Returned(ref v) => match v.first() {
             Some(Value::I64(x)) => *x,
             other => panic!("{path}: unexpected returned value {other:?}"),
         },
-        svm_run::Outcome::Exited(c) => panic!("{path}: exited({c}) instead of returning"),
+        temen_run::Outcome::Exited(c) => panic!("{path}: exited({c}) instead of returning"),
     };
     (ret, run.stdout)
 }

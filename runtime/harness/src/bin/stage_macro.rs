@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-use svm_ir::LinkUnit;
+use temen_ir::LinkUnit;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -63,7 +63,7 @@ fn main() {
     // 2. translate the staging-extended runtime, link, wrap the entry in the powerbox _start.
     eprintln!("stage_macro: translating staging runtime…");
     let rt = jacl_runtime_harness::translate_runtime_staging();
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
             module: program,
@@ -75,14 +75,14 @@ fn main() {
     let entry = linked
         .resolve_export("__jacl_entry")
         .unwrap_or_else(|| die("entry export missing after link"));
-    let module = svm_ir::synth_manifest_start(linked, entry, false)
+    let module = temen_ir::synth_manifest_start(linked, entry, false)
         .unwrap_or_else(|e| die(&format!("powerbox: {e}")));
 
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("read", svm_run::HostCap::stdin());   // synrt_read_arg's read(0) -> seeded stdin
-    let inst = svm_run::instantiate_with_imports(module, imports)
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("read", temen_run::HostCap::stdin());   // synrt_read_arg's read(0) -> seeded stdin
+    let inst = temen_run::instantiate_with_imports(module, imports)
         .unwrap_or_else(|e| die(&format!("instantiate: {e}")));
 
     // 3. feed the argument wire on stdin, run, emit the result wire on stdout.

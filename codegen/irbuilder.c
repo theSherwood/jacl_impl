@@ -650,10 +650,11 @@ static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
     case K_CALL:
       out_u8(o, 0x73); out_uleb(o, in->callee); out_idxs(o, in->args, in->nargs); break;
     case K_CALL_IMPORT: {
-      /* Name-inline `call.sym` -> CALL_SYM (0x0E) by interned import index. */
+      /* Name-inline `call.sym` -> CALL_SYM (0x7B in the #900 consolidated call band) by
+       * interned import index. */
       uint32_t ti = intern_type(tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
       uint32_t idx = intern_import(tab, in->name, ti);
-      out_u8(o, 0x0E);
+      out_u8(o, 0x7B);
       out_uleb(o, idx);
       out_types_bin(o, in->sig_params, in->sig_np);
       out_types_bin(o, in->sig_results, in->sig_nr);
@@ -731,7 +732,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   Out o = {0};
   static const uint8_t magic[4] = {'S', 'V', 'M', 0};
   out_raw(&o, magic, 4);
-  out_u8(&o, 9);                                   /* VERSION (v9) */
+  out_u8(&o, 10);                                  /* VERSION (v10) — v10 adds a per-offer
+                                                    * impl-export policy byte, but we emit zero
+                                                    * impl-exports, so the image is otherwise
+                                                    * byte-identical to v9. */
   /* v9 flags byte: bit 0 marks the **object dialect** (a pre-link unit carrying `data.self`
    * link-form addresses, decoded by `decode_unit`). Emit it only when the module actually has a
    * `data.self` — otherwise the module is a plain runnable unit (unresolved `call.sym` imports

@@ -2,9 +2,9 @@
 #
 # Build the SVM-backend playground assets (docs/SVM_BROWSER_PLAN.md, MVP option (a)):
 #
-#   1. svm_browser.wasm  — the svm-browser cdylib compiled to wasm32 (the run engine:
+#   1. temen_browser.wasm  — the temen-browser cdylib compiled to wasm32 (the run engine:
 #                          decode a .svmb + run function 0 on the bytecode interpreter,
-#                          capture stdout). Copied to demo/wasm/svm_browser.wasm.
+#                          capture stdout). Copied to demo/wasm/temen_browser.wasm.
 #   2. <example>.svmb    — each example program linked against the translated JACL runtime
 #                          and encoded at build time (the "link natively for fixed examples"
 #                          MVP; the in-browser frontend for live editing is a later slice).
@@ -24,11 +24,11 @@ ROOT="$(cd "$DEMO/.." && pwd)"                # repo root
 SVM="$ROOT/vendor/svm"
 
 # --- 1. cdylib -> wasm32 --------------------------------------------------------------------------
-echo "Building svm-browser cdylib for wasm32…"
+echo "Building temen-browser cdylib for wasm32…"
 ( cd "$SVM/browser" && cargo build --release --lib --target wasm32-unknown-unknown )
 mkdir -p "$DEMO/wasm"
-cp "$SVM/browser/target/wasm32-unknown-unknown/release/svm_browser.wasm" "$DEMO/wasm/svm_browser.wasm"
-echo "  -> demo/wasm/svm_browser.wasm ($(wc -c < "$DEMO/wasm/svm_browser.wasm") bytes)"
+cp "$SVM/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm" "$DEMO/wasm/temen_browser.wasm"
+echo "  -> demo/wasm/temen_browser.wasm ($(wc -c < "$DEMO/wasm/temen_browser.wasm") bytes)"
 
 # --- 1b. runtime IR (jaclrt.svm): baked once, shipped for in-browser live linking -----------------
 if [ ! -f "$ROOT/runtime/build/jaclrt.svm" ]; then
@@ -93,9 +93,9 @@ done
 # .svmb, no ~1.4s live compile). emit_svmb's C driver is emit-only and can't stage `defmacro`s, so the
 # self-hosted guest compiles the tour to IR first; emit_svmb --ir then links + encodes it. Needs the
 # compiler-guest (clang-18) + the cdylib; skipped otherwise (the tour then falls back to live compile).
-if [ -f "$OUT/jacl_compiler.svmb" ] && [ -f "$DEMO/wasm/svm_browser.wasm" ] && [ -f "$ROOT/test/jacl/tour.jacl" ]; then
+if [ -f "$OUT/jacl_compiler.svmb" ] && [ -f "$DEMO/wasm/temen_browser.wasm" ] && [ -f "$ROOT/test/jacl/tour.jacl" ]; then
   echo "Pre-baking tour.svmb via the self-hosted guest…"
-  node "$DIR/guest_compile.mjs" "$DEMO/wasm/svm_browser.wasm" "$OUT/jacl_compiler.svmb" "$ROOT/test/jacl/tour.jacl" > "$OUT/tour.ir"
+  node "$DIR/guest_compile.mjs" "$DEMO/wasm/temen_browser.wasm" "$OUT/jacl_compiler.svmb" "$ROOT/test/jacl/tour.jacl" > "$OUT/tour.ir"
   ( cd "$ROOT/runtime/harness" && cargo run --quiet --bin emit_svmb -- --ir "$OUT/tour.ir" "$OUT/tour.svmb" )
   rm -f "$OUT/tour.ir"
   echo "  -> demo/svm/svmb/tour.svmb ($(wc -c < "$OUT/tour.svmb") bytes; the unedited-tour fast path)"
@@ -117,7 +117,7 @@ echo "  -> demo/svm/svmb/manifest.json ($(wc -c < "$OUT/manifest.json") bytes)"
 # built (needs clang-18); `set -e` fails the build if the concurrent run regresses.
 if [ -f "$OUT/jacl_compiler.svmb" ]; then
   echo "Gate: concurrent run path (concurrent_run.mjs)…"
-  node "$DIR/concurrent_run.mjs" "$DEMO/wasm/svm_browser.wasm" "$OUT/jacl_compiler.svmb" "$DEMO/svm/jaclrt.svm"
+  node "$DIR/concurrent_run.mjs" "$DEMO/wasm/temen_browser.wasm" "$OUT/jacl_compiler.svmb" "$DEMO/svm/jaclrt.svm"
 fi
 
 # Regression gate: jacl_emit.wasm must stage a user `defmacro` on SVM (not silently fall back to the
@@ -125,9 +125,9 @@ fi
 # built (emcc + clang-18). `set -e` fails the build if the staging seam regresses. See stage_gate.mjs.
 if [ -f "$DEMO/wasm/jacl_emit.js" ] && [ -f "$DIR/svmb/jaclrt_staging.svmo" ]; then
   echo "Gate: macro-staging path (stage_gate.mjs)…"
-  node "$DIR/stage_gate.mjs" "$DEMO/wasm/jacl_emit.js" "$DEMO/wasm/svm_browser.wasm" "$DIR/svmb/jaclrt_staging.svmo" "$DEMO/svm/jaclrt.svm"
+  node "$DIR/stage_gate.mjs" "$DEMO/wasm/jacl_emit.js" "$DEMO/wasm/temen_browser.wasm" "$DIR/svmb/jaclrt_staging.svmo" "$DEMO/svm/jaclrt.svm"
 fi
 
 echo ""
 echo "Smoke-test the run path headless:"
-echo "  node demo/svm/run_svmb.mjs demo/wasm/svm_browser.wasm demo/svm/svmb/hi.svmb \$'hi\\n'"
+echo "  node demo/svm/run_svmb.mjs demo/wasm/temen_browser.wasm demo/svm/svmb/hi.svmb \$'hi\\n'"

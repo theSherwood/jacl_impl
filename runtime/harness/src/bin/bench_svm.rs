@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use svm_ir::LinkUnit;
-use svm_run::{Backend, Instance, RunConfig};
+use temen_ir::LinkUnit;
+use temen_run::{Backend, Instance, RunConfig};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -54,8 +54,8 @@ fn build_driver() -> PathBuf {
 /// Compile a scenario `.jacl` all the way to an instantiated `Instance` (untimed).
 fn build_instance(
     driver: &Path,
-    rt: &svm_llvm::Translated,
-    cat: &svm_llvm::Translated,
+    rt: &temen_llvm::Translated,
+    cat: &temen_llvm::Translated,
     scenario: &Path,
 ) -> Result<Instance, String> {
     let out = Command::new(driver)
@@ -71,7 +71,7 @@ fn build_instance(
     }
     let program = jacl_runtime_harness::decode_emitted(&out.stdout)?;
 
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit {
             module: rt.module.clone(),
             exports: rt.exports.clone(),
@@ -92,13 +92,13 @@ fn build_instance(
     let entry = linked
         .resolve_export("__jacl_entry")
         .ok_or_else(|| "entry export missing after link".to_string())?;
-    let module = svm_ir::synth_manifest_start(linked, entry, false)
+    let module = temen_ir::synth_manifest_start(linked, entry, false)
         .map_err(|e| format!("powerbox: {e}"))?;
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("stdin", svm_run::HostCap::stdin());
-    svm_run::instantiate_with_imports(module, imports).map_err(|e| format!("instantiate: {e}"))
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("stdin", temen_run::HostCap::stdin());
+    temen_run::instantiate_with_imports(module, imports).map_err(|e| format!("instantiate: {e}"))
 }
 
 fn run_once(inst: &Instance, backend: Backend, cfg: &RunConfig) -> Result<Vec<u8>, String> {

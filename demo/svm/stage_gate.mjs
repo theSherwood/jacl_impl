@@ -6,7 +6,7 @@
 // "emit-only"/staging error, and playground.ts then silently falls back to the ~20x-slower
 // compiler-guest (compileWith, demo/src/playground.ts). The staging hook is what avoids that: the
 // frontend codegens each macro body to an SVM object and bounces it to the cdylib
-// (jacl_svm_stage → Module.svmStageRun → svm_link_run vs jaclrt_staging.svmo), so only tiny macro
+// (jacl_svm_stage → Module.svmStageRun → temen_link_run vs jaclrt_staging.svmo), so only tiny macro
 // bodies touch SVM and the tour compiles in ~80ms instead of ~1.8s.
 //
 // This gate wires that exact pipeline headlessly and asserts a user `defmacro` compiles **through
@@ -15,7 +15,7 @@
 // cdylib entry rename), emitIr errors here and the gate fails — instead of the browser quietly
 // degrading to the slow guest with output still correct (invisible to correctness tests).
 //
-//   node stage_gate.mjs <jacl_emit.js> <svm_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>
+//   node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -23,7 +23,7 @@ import path from 'node:path';
 
 const [emitJsPath, wasmPath, stagingRtPath, jaclrtPath] = process.argv.slice(2);
 if (!emitJsPath || !wasmPath || !stagingRtPath || !jaclrtPath) {
-  console.error('usage: node stage_gate.mjs <jacl_emit.js> <svm_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>');
+  console.error('usage: node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>');
   process.exit(2);
 }
 
@@ -41,13 +41,13 @@ const SRC =
   'main\n';
 
 // --- svm-browser cdylib: runs the staged macro-body module, and the final linked program. ---------
-const imports = { svm_host: { webgpu_op: () => -1n } };
+const imports = { temen_host: { webgpu_op: () => -1n } };
 const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), imports);
 const ex = instance.exports;
-const is64 = ex.svm_abi_is64() === 1;
+const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
 const load = (bytes) => {
-  const ptr = ex.svm_alloc(U(bytes.length));
+  const ptr = ex.temen_alloc(U(bytes.length));
   new Uint8Array(ex.memory.buffer).set(bytes, Number(ptr)); // re-fetch (alloc may grow memory)
   return Number(ptr);
 };
@@ -68,9 +68,9 @@ function linkRunRaw(moduleBytes, runtime, stdin) {
   const entryPtr = load(ENTRY);
   let inPtr = U(0), inLen = U(0);
   if (stdin.length) { inPtr = load(stdin); inLen = U(stdin.length); }
-  ex.svm_link_run(progPtr, U(moduleBytes.length), rtPtr, U(runtime.length), entryPtr, U(ENTRY.length), inPtr, inLen);
-  if (ex.svm_status() !== 0) return null;
-  return cap(ex.svm_stdout_ptr, ex.svm_stdout_len);
+  ex.temen_link_run(progPtr, U(moduleBytes.length), rtPtr, U(runtime.length), entryPtr, U(ENTRY.length), inPtr, inLen);
+  if (ex.temen_status() !== 0) return null;
+  return cap(ex.temen_stdout_ptr, ex.temen_stdout_len);
 }
 
 // --- jacl_emit.wasm frontend, wired with the staging hook (mirrors JaclFrontend.create). ----------
@@ -109,9 +109,9 @@ if (stageCalls === 0) {
 
 // --- Run the emitted IR to confirm the staged expansion is correct end-to-end. --------------------
 const run = linkRunRaw(new TextEncoder().encode(emitted), jaclrt, new Uint8Array(0));
-// linkRunRaw here reuses the same helper; the emitted IR is text, which svm_link_run sniffs by magic.
+// linkRunRaw here reuses the same helper; the emitted IR is text, which temen_link_run sniffs by magic.
 const out = run ? new TextDecoder().decode(run) : null;
-const stderr = new TextDecoder().decode(cap(ex.svm_stderr_ptr, ex.svm_stderr_len));
+const stderr = new TextDecoder().decode(cap(ex.temen_stderr_ptr, ex.temen_stderr_len));
 
 console.log(`stage_gate: stageCalls=${stageCalls} ir=${emitted.length}B stdout=${JSON.stringify(out)}${stderr ? ` stderr=${JSON.stringify(stderr.slice(0, 200))}` : ''}`);
 

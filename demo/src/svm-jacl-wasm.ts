@@ -13,26 +13,26 @@
  * Emscripten build of the LLVM-free frontend+codegen (`jacl_emit.wasm`, {@link JaclFrontend});
  * unedited examples run **precompiled** `.svmb` blobs.
  *
- * The cdylib entry is `svm_run_onramp`, which binds the module's manifest imports **by
+ * The cdylib entry is `temen_run_onramp`, which binds the module's manifest imports **by
  * name** (`write` → the stdout stream, `read`/`exit`/… likewise) — the ABI a
  * `synth_manifest_start` `_start` expects, where `print` reaches the host through
- * `call.import "write"`. (`svm_run_pb`'s arity-slot powerbox leaves that import unbound
+ * `call.import "write"`. (`temen_run_pb`'s arity-slot powerbox leaves that import unbound
  * and the module traps.)
  */
 
 /** The subset of the svm-browser cdylib exports this runner touches. */
 interface SvmBrowserExports {
   memory: WebAssembly.Memory;
-  svm_abi_is64(): number;
-  svm_alloc(len: number | bigint): number | bigint;
-  svm_dealloc(ptr: number | bigint, len: number | bigint): void;
-  svm_run_onramp(
+  temen_abi_is64(): number;
+  temen_alloc(len: number | bigint): number | bigint;
+  temen_dealloc(ptr: number | bigint, len: number | bigint): void;
+  temen_run_onramp(
     modPtr: number | bigint,
     modLen: number | bigint,
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
-  svm_link_run(
+  temen_link_run(
     progPtr: number | bigint,
     progLen: number | bigint,
     libPtr: number | bigint,
@@ -42,12 +42,12 @@ interface SvmBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
-  svm_status(): number;
-  svm_exit_code(): number;
-  svm_stdout_ptr(): number | bigint;
-  svm_stdout_len(): number | bigint;
-  svm_stderr_ptr(): number | bigint;
-  svm_stderr_len(): number | bigint;
+  temen_status(): number;
+  temen_exit_code(): number;
+  temen_stdout_ptr(): number | bigint;
+  temen_stdout_len(): number | bigint;
+  temen_stderr_ptr(): number | bigint;
+  temen_stderr_len(): number | bigint;
 }
 
 /** The run-result shape the playground renders (stdout, optional error, error flag). */
@@ -57,7 +57,7 @@ export interface RunResult {
   isError: boolean;
 }
 
-/** `svm_status` codes (mirror `svm-browser`'s `STATUS_*`). */
+/** `temen_status` codes (mirror `svm-browser`'s `STATUS_*`). */
 const STATUS = {
   OK: 0,
   DECODE_ERR: 1,
@@ -77,13 +77,13 @@ function statusMessage(status: number): string {
     case STATUS.BAD_RESULT:
       return "the entry returned an unexpected result shape";
     default:
-      return `svm_status ${status}`;
+      return `temen_status ${status}`;
   }
 }
 
 /**
  * The export the JACL frontend names its program entry (`jacl_emit_ir` emits the program body as
- * func 0; the native link path resolves it under this symbol). Passed to the generic `svm_link_run`
+ * func 0; the native link path resolves it under this symbol). Passed to the generic `temen_link_run`
  * so nothing about this name lives in the language-agnostic cdylib.
  */
 const JACL_ENTRY = "__jacl_entry";
@@ -94,17 +94,17 @@ export class SvmJaclRunner {
 
   private constructor(ex: SvmBrowserExports) {
     this.ex = ex;
-    this.is64 = ex.svm_abi_is64() === 1;
+    this.is64 = ex.temen_abi_is64() === 1;
   }
 
   /**
-   * Instantiate the svm-browser cdylib. `wasmUrl` points at `svm_browser.wasm`
+   * Instantiate the svm-browser cdylib. `wasmUrl` points at `temen_browser.wasm`
    * (built by `demo/svm/build_assets.sh`). The plain (non-threads) build needs only the
-   * `svm_host.webgpu_op` import stub — no clock/console host functions.
+   * `temen_host.webgpu_op` import stub — no clock/console host functions.
    */
   static async create(wasmUrl: string): Promise<SvmJaclRunner> {
     const source = await fetch(wasmUrl);
-    const imports = { svm_host: { webgpu_op: () => -1n } };
+    const imports = { temen_host: { webgpu_op: () => -1n } };
     const { instance } = await WebAssembly.instantiateStreaming(source, imports);
     return new SvmJaclRunner(instance.exports as unknown as SvmBrowserExports);
   }
@@ -114,10 +114,10 @@ export class SvmJaclRunner {
     return this.is64 ? BigInt(x) : x;
   }
 
-  /** Copy `bytes` into guest linear memory via `svm_alloc`; returns the pointer as a Number. */
+  /** Copy `bytes` into guest linear memory via `temen_alloc`; returns the pointer as a Number. */
   private load(bytes: Uint8Array): number {
-    const ptr = this.ex.svm_alloc(this.usize(bytes.length));
-    // Re-fetch the view: svm_alloc may have grown (and thus detached) the memory buffer.
+    const ptr = this.ex.temen_alloc(this.usize(bytes.length));
+    // Re-fetch the view: temen_alloc may have grown (and thus detached) the memory buffer.
     new Uint8Array(this.ex.memory.buffer).set(bytes, Number(ptr));
     return Number(ptr);
   }
@@ -146,11 +146,11 @@ export class SvmJaclRunner {
       inLen = this.usize(stdin.length);
     }
 
-    ex.svm_run_onramp(modPtr, modLen, inPtr, inLen);
+    ex.temen_run_onramp(modPtr, modLen, inPtr, inLen);
 
-    const status = ex.svm_status();
-    const stdout = this.readCapture(ex.svm_stdout_ptr(), ex.svm_stdout_len());
-    const stderr = this.readCapture(ex.svm_stderr_ptr(), ex.svm_stderr_len());
+    const status = ex.temen_status();
+    const stdout = this.readCapture(ex.temen_stdout_ptr(), ex.temen_stdout_len());
+    const stderr = this.readCapture(ex.temen_stderr_ptr(), ex.temen_stderr_len());
 
     if (status !== STATUS.OK) {
       const detail = stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status);
@@ -166,7 +166,7 @@ export class SvmJaclRunner {
    * own-data addresses are inline `data.self` instructions the linker resolves, so there is no
    * separate relocation buffer).
    *
-   * The generic cdylib entry (`svm_link_run`) is language-agnostic — it takes a program unit, a
+   * The generic cdylib entry (`temen_link_run`) is language-agnostic — it takes a program unit, a
    * library unit (each text or a `.svmo` binary object, sniffed by magic), and an entry-export name.
    * The only JACL-frontend specific here is the `__jacl_entry` entry name.
    */
@@ -183,7 +183,7 @@ export class SvmJaclRunner {
       inPtr = this.load(stdin);
       inLen = this.usize(stdin.length);
     }
-    ex.svm_link_run(
+    ex.temen_link_run(
       progPtr,
       this.usize(prog.length),
       rtPtr,
@@ -194,9 +194,9 @@ export class SvmJaclRunner {
       inLen,
     );
 
-    const status = ex.svm_status();
-    const stdout = this.readCapture(ex.svm_stdout_ptr(), ex.svm_stdout_len());
-    const stderr = this.readCapture(ex.svm_stderr_ptr(), ex.svm_stderr_len());
+    const status = ex.temen_status();
+    const stdout = this.readCapture(ex.temen_stdout_ptr(), ex.temen_stdout_len());
+    const stderr = this.readCapture(ex.temen_stderr_ptr(), ex.temen_stderr_len());
     if (status !== STATUS.OK) {
       const detail = stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status);
       return { output: stdout, error: detail, isError: true };
@@ -222,7 +222,7 @@ export class SvmJaclRunner {
       inPtr = this.load(stdin);
       inLen = this.usize(stdin.length);
     }
-    ex.svm_link_run(
+    ex.temen_link_run(
       progPtr,
       this.usize(programBytes.length),
       rtPtr,
@@ -232,10 +232,10 @@ export class SvmJaclRunner {
       inPtr,
       inLen,
     );
-    if (ex.svm_status() !== STATUS.OK) return null;
-    const n = Number(ex.svm_stdout_len());
+    if (ex.temen_status() !== STATUS.OK) return null;
+    const n = Number(ex.temen_stdout_len());
     if (n === 0) return new Uint8Array(0);
-    return new Uint8Array(this.ex.memory.buffer, Number(ex.svm_stdout_ptr()), n).slice();
+    return new Uint8Array(this.ex.memory.buffer, Number(ex.temen_stdout_ptr()), n).slice();
   }
 
   /**

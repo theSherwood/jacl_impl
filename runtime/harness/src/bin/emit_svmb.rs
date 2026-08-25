@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use svm_ir::LinkUnit;
+use temen_ir::LinkUnit;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -44,7 +44,7 @@ fn main() {
         // path), parsed the same way `svm_link_run` parses the playground's live compile.
         [flag, ir_path, out] if flag == "--ir" => {
             let text = std::fs::read_to_string(ir_path).expect("read --ir file");
-            let m = svm_text::parse_module(&text)
+            let m = temen_text::parse_module(&text)
                 .unwrap_or_else(|e| panic!("parse --ir text: {e:?}"));
             (m, PathBuf::from(out))
         }
@@ -75,7 +75,7 @@ fn main() {
     let rt = jacl_runtime_harness::translate_runtime();
     let cat = jacl_runtime_harness::translate_catalog();
 
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {
@@ -86,9 +86,9 @@ fn main() {
     ])
     .expect("link");
     let entry = linked.resolve_export("__jacl_entry").expect("entry export missing after link");
-    let module = svm_ir::synth_manifest_start(linked, entry, false).expect("powerbox");
+    let module = temen_ir::synth_manifest_start(linked, entry, false).expect("powerbox");
 
-    let bytes = svm_encode::encode_module(&module);
+    let bytes = temen_encode::encode_module(&module);
     std::fs::write(&out_path, &bytes).expect("write .svmb");
     eprintln!("emit_svmb: wrote {} ({} bytes)", out_path.display(), bytes.len());
 }

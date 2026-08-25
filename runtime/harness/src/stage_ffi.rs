@@ -13,7 +13,7 @@
 use std::os::raw::c_int;
 use std::sync::OnceLock;
 
-use svm_ir::{LinkUnit, Module};
+use temen_ir::{LinkUnit, Module};
 
 /// The staging-extended runtime, translated once (translation is the expensive step and is
 /// the same for every macro). `link_with_manifest` consumes the module, so each call links a
@@ -87,12 +87,12 @@ pub unsafe extern "C" fn jacl_svm_stage_free(ptr: *mut u8, len: usize) {
 }
 
 fn stage_run(module_bytes: &[u8], stdin_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let program = svm_encode::decode_unit(module_bytes).map_err(|e| format!("decode: {e:?}"))?;
+    let program = temen_encode::decode_unit(module_bytes).map_err(|e| format!("decode: {e:?}"))?;
     let (rt_module, rt_exports) = staging_runtime()
         .as_ref()
         .ok_or_else(|| "staging runtime translation unavailable".to_string())?;
 
-    let linked = svm_ir::link_with_manifest(&[
+    let linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt_module.clone(), exports: rt_exports.clone(), ..Default::default() },
         LinkUnit {
             module: program,
@@ -104,14 +104,14 @@ fn stage_run(module_bytes: &[u8], stdin_bytes: &[u8]) -> Result<Vec<u8>, String>
     let entry = linked
         .resolve_export("__jacl_entry")
         .ok_or_else(|| "entry export missing after link".to_string())?;
-    let module = svm_ir::synth_manifest_start(linked, entry, false)
+    let module = temen_ir::synth_manifest_start(linked, entry, false)
         .map_err(|e| format!("powerbox: {e}"))?;
 
-    let imports = svm_run::Imports::new()
-        .provide("write", svm_run::HostCap::stdout())
-        .provide("exit", svm_run::HostCap::exit())
-        .provide("read", svm_run::HostCap::stdin());
-    let inst = svm_run::instantiate_with_imports(module, imports)
+    let imports = temen_run::Imports::new()
+        .provide("write", temen_run::HostCap::stdout())
+        .provide("exit", temen_run::HostCap::exit())
+        .provide("read", temen_run::HostCap::stdin());
+    let inst = temen_run::instantiate_with_imports(module, imports)
         .map_err(|e| format!("instantiate: {e}"))?;
     let run = inst.call_with_stdin(stdin_bytes).map_err(|e| format!("run: {e}"))?;
     Ok(run.stdout)
