@@ -287,18 +287,23 @@ local arena. Needs Slice 1's non-growing window so the image is snapshot-restora
   and after an unrelated source B — asserting A's output is byte-identical both times (isolation).
   **PASS.**
 
-### Slice 3 — playground wiring — **card + engine path DONE; `SvmJaclRunner` TS wiring remaining**
+### Slice 3 — playground wiring — **DONE (pending Pages runtime validation)**
 
-- `build_compiler_svmb.sh` now also builds **`jacl_compiler_snapshot.svmb`** (the two-phase card).
+- `build_compiler_svmb.sh` builds **`jacl_compiler_snapshot.svmb`**; `build_assets.sh` ships it under
+  `svm/svmb/` (best-effort, alongside `jacl_compiler.svmb`).
+- `SvmJaclRunner` (`demo/src/svm-jacl-wasm.ts`): `warmOpen(snapshotSvmb)` / `warmEval(source)` /
+  `warmClose()` over `temen_warm_open`/`_eval`/`_close`, plus `isWarmOpen`.
+- `playground.ts`: `ensureLive` loads the warm card; the **`tierup` mode** (previously a placeholder
+  that aliased `guest`) now opens the warm session once and `warmEval`s each compile, falling back to
+  the plain guest if the card isn't shipped or the engine refuses it. `npx tsc --noEmit` + esbuild
+  bundle both clean.
 - **End-to-end measured** (`demo/svm/warm_probe.mjs`, threads `temen_browser.wasm` @ `85d8cf5d`,
   `tour.jacl`): `temen_warm_open` admits the card, then `temen_warm_eval` runs each compile over the
   restored warm image on the **warm+JIT tier** — **cold `temen_run_onramp` 903 ms → warm 450 ms
-  (2.01×), 453 ms/compile saved, parity=OK.** This is the biggest lever measured — it skips the guest
-  init floor *and* JITs `eval_run`, beating even the coop tier-up (1.37×) on this guest.
-- **Remaining:** wire `SvmJaclRunner` (`demo/src`) — `warmOpen(moduleBytes)` on `ensureLive`,
-  `warmEval(source)` for a new `warm` compile mode, `temen_warm_close` on teardown — plus shipping
-  `jacl_compiler_snapshot.svmb` from `build_assets.sh`. The engine path is proven; this is the
-  browser-side plumbing (validate in the Pages differential).
+  (2.01×), 453 ms/compile saved, parity=OK.** The biggest lever measured — it skips the guest init
+  floor *and* JITs `eval_run`, beating even the coop tier-up (1.37×) on this guest.
+- **Left to confirm:** the browser differential in Pages CI (the node path + type-check are green
+  here; the live-browser `tierup`-mode timing is the last check).
 
 ### Slice 4 — confirm JIT engages (measure) — **DONE (folded into the numbers above)**
 

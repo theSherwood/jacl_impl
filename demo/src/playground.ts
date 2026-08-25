@@ -169,6 +169,7 @@ let svmRunner: SvmJaclRunner | null = null;
 let svmManifest: { name: string; svmb: string }[] | null = null;
 let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
 let svmCompiler: Uint8Array | null = null;      // jacl_compiler.svmb — the self-hosted frontend (stages macros)
+let svmWarmCompiler: Uint8Array | null = null;  // jacl_compiler_snapshot.svmb — two-phase warm card (tierup mode)
 let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
 let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.svmo — links macro-body modules (jacl_emit staging)
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
@@ -196,6 +197,7 @@ async function ensureSvm(): Promise<SvmJaclRunner | null> {
  */
 async function ensureLive(): Promise<{
   compiler: Uint8Array | null;
+  warmCompiler: Uint8Array | null;
   frontend: JaclFrontend | null;
   runtime: Uint8Array;
 } | null> {
@@ -206,6 +208,13 @@ async function ensureLive(): Promise<{
     if (!svmCompiler) {
       const resp = await fetch("svm/svmb/jacl_compiler.svmb");
       if (resp.ok) svmCompiler = new Uint8Array(await resp.arrayBuffer());
+    }
+    // The warm-snapshot two-phase card (SVM_WARM_COMPILER.md Slice 3): the `tierup` mode opens it
+    // once and evals each compile over the restored warm image (~2× the plain guest). Best-effort —
+    // a missing asset just leaves `tierup` falling back to the plain guest compile.
+    if (!svmWarmCompiler) {
+      const resp = await fetch("svm/svmb/jacl_compiler_snapshot.svmb");
+      if (resp.ok) svmWarmCompiler = new Uint8Array(await resp.arrayBuffer());
     }
     // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
     // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
@@ -229,7 +238,7 @@ async function ensureLive(): Promise<{
       if (!resp.ok) return null;
       svmRuntime = new Uint8Array(await resp.arrayBuffer());
     }
-    return { compiler: svmCompiler, frontend: svmFrontend, runtime: svmRuntime };
+    return { compiler: svmCompiler, warmCompiler: svmWarmCompiler, frontend: svmFrontend, runtime: svmRuntime };
   } catch {
     return null;
   }
@@ -324,7 +333,7 @@ function displayResult(result: RunResult, timing: RunTiming) {
   );
 }
 
-type Live = { compiler: Uint8Array | null; frontend: JaclFrontend | null; runtime: Uint8Array };
+type Live = { compiler: Uint8Array | null; warmCompiler: Uint8Array | null; frontend: JaclFrontend | null; runtime: Uint8Array };
 
 /** Human labels for the status line / console (kept in sync with the `<select>` options). */
 const MODE_LABEL: Record<CompileMode, string> = {
@@ -338,7 +347,8 @@ function resolveCompileMode(live: Live): CompileMode {
   if (compileMode === "emit") return live.frontend ? "emit" : live.compiler ? "guest" : "emit";
   // guest / tierup both need the compiler-guest; without it, fall back to the Emscripten frontend.
   if (!live.compiler) return "emit";
-  // tier-up's pre-baked wasm isn't wired yet — run the guest on the interpreter for now.
+  // `tierup` runs the warm-snapshot fast path when its two-phase card is shipped (compileWith falls
+  // back to the plain guest otherwise); `guest` always runs the self-hosted guest on the interpreter.
   return compileMode === "tierup" ? "tierup" : "guest";
 }
 
@@ -359,8 +369,17 @@ function compileWith(mode: CompileMode, live: Live, source: string): { emitted: 
     // Macro program → jacl_emit can't stage it; fall back to the self-hosted guest.
     return { emitted: svmRunner!.emitIrViaCompiler(live.compiler, source), ran: "guest" };
   }
-  // guest / tierup both run the self-hosted guest today (the pre-baked tier-up runner is phase 2).
-  return { emitted: svmRunner!.emitIrViaCompiler(live.compiler!, source), ran: mode };
+  // `tierup`: the warm-snapshot fast path (SVM_WARM_COMPILER.md Slice 3) — open the two-phase card
+  // once, then eval each compile over the restored warm image (~2× the plain guest). Falls back to
+  // the plain self-hosted guest if the warm card isn't shipped or the engine refuses it.
+  if (mode === "tierup" && live.warmCompiler) {
+    const r = svmRunner!;
+    if (r.isWarmOpen || r.warmOpen(live.warmCompiler)) {
+      return { emitted: r.warmEval(source), ran: "tierup" };
+    }
+  }
+  // `guest` (and the tierup fallback): run the self-hosted compiler-guest verbatim.
+  return { emitted: svmRunner!.emitIrViaCompiler(live.compiler!, source), ran: mode === "tierup" ? "guest" : mode };
 }
 
 /** Run the current source on the SVM backend: a precompiled example verbatim, else compile+link live. */

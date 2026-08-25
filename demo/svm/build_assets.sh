@@ -69,6 +69,12 @@ bash "$ROOT/codegen/selfhost/build_compiler_svmb.sh"
 if [ -f "$ROOT/codegen/selfhost/build/jacl_compiler.svmb" ]; then
   cp "$ROOT/codegen/selfhost/build/jacl_compiler.svmb" "$OUT/jacl_compiler.svmb"
   echo "  -> demo/svm/svmb/jacl_compiler.svmb ($(wc -c < "$OUT/jacl_compiler.svmb") bytes; the macro-capable live frontend)"
+  # The warm-snapshot two-phase card (SVM_WARM_COMPILER.md Slice 3): the playground's `tierup` mode
+  # opens it once (temen_warm_open) and evals each compile over the restored warm image (~2x).
+  if [ -f "$ROOT/codegen/selfhost/build/jacl_compiler_snapshot.svmb" ]; then
+    cp "$ROOT/codegen/selfhost/build/jacl_compiler_snapshot.svmb" "$OUT/jacl_compiler_snapshot.svmb"
+    echo "  -> demo/svm/svmb/jacl_compiler_snapshot.svmb ($(wc -c < "$OUT/jacl_compiler_snapshot.svmb") bytes; warm-snapshot fast compile)"
+  fi
 else
   echo "  (clang-18/llvm-link-18 absent — skipping jacl_compiler.svmb; live editing falls back to jacl_emit.wasm.)"
 fi
