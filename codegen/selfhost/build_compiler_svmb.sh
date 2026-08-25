@@ -88,7 +88,7 @@ EOF
   "$CLANG" "${CF[@]}" "$OUT/selftest_main.c" -o "$OUT/selftest_main.ll"
   "$LLVM_LINK" -S "$OUT/selftest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
                "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" -o "$OUT/selftest.ll"
-  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/selftest.ll" 2>&1 | tee "$OUT/selftest.out"
+  TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/selftest.ll" 2>&1 | tee "$OUT/selftest.out"
   # 1 + 2*3 = 7 must appear as an i32.mul + i32.add in the emitted IR.
   if grep -q 'i32.mul' "$OUT/selftest.out" && grep -q 'i32.add' "$OUT/selftest.out"; then
     echo "SELFTEST PASS — JACL source compiled to SVM IR on the SVM engine."
@@ -134,7 +134,7 @@ EOF
   "$LLVM_LINK" -S "$OUT/stagetest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" "$OUT/irbuilder.ll" \
                "$OUT/emit_shim.ll" "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
                -o "$OUT/stagetest.ll"
-  SVM_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
+  TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/stagetest.ll" 2>&1 | tee "$OUT/stagetest.out"
   # Slice per-case output with awk so the greps below can't cross a case boundary.
   case_out() { awk "/CASE $1 BEGIN/,/CASE $1 END/" "$OUT/stagetest.out"; }
   sf=0
@@ -202,7 +202,7 @@ EOF
                "$OUT/interpret_bridge_guest.ll" -o "$OUT/interptest.ll"
   # JACL_POOL_WORKERS=1 keeps the scheduler cooperative single-thread (cont.* only, no thread.spawn) —
   # the submitted-unit concurrency model (a spawned vCPU may not outlive the synchronous cap.call).
-  JACL_POOL_WORKERS=1 SVM_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
+  JACL_POOL_WORKERS=1 TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/interptest.ll" 2>&1 | tee "$OUT/interptest.out"
   if grep -q 'PLAIN TAG=2 RESULT=7' "$OUT/interptest.out" && grep -q 'MACRO TAG=2 RESULT=10' "$OUT/interptest.out" \
      && grep -q 'CONCUR TAG=2 RESULT=7' "$OUT/interptest.out" \
      && grep -q 'MAP TAG=2 RESULT=42' "$OUT/interptest.out" \
