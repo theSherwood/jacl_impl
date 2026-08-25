@@ -50,6 +50,22 @@ fn main() {
         println!(
             "paged predicate: all_shimmable={all_shimmable} readonly_data_segs={ro_data} uses_unmap_protect={uses_unmap_protect} => PAGED={paged}"
         );
+        if let Some(mem) = m.memory.as_ref() {
+            let win = 1u64 << mem.size_log2;
+            let data_hi = m
+                .data
+                .iter()
+                .map(|d| d.offset + d.bytes.len() as u64)
+                .max()
+                .unwrap_or(0);
+            let data_lo = m.data.iter().map(|d| d.offset).min().unwrap_or(0);
+            println!(
+                "memory: size_log2={} window={win} ({} MiB); data range [{data_lo}, {data_hi}) top={} MiB",
+                mem.size_log2,
+                win / (1 << 20),
+                data_hi / (1 << 20)
+            );
+        }
     }
     if let Some(i) = func_idx {
         let Some(f) = m.funcs.get(i) else {

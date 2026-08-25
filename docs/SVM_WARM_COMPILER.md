@@ -238,20 +238,35 @@ never calls `vm_map`, the paged table stays valid, and the guest tiers up — an
 #816's own workaround recommends. That is the lever to pull for a JACL tier-up win without waiting on
 the engine memory-model refinement.
 
-Net for the playground today: **unchanged** — the JACL compile still runs wholly on the (correct,
-fast-enough) bytecode interpreter; the coop tier-up attempt declines and falls back. No regression in
-the shipped path (the playground catches the decline), no win yet. `decode_check` (harness bin) guards
-against shipping a cdylib/card version-skew again.
+### Slice 1 — pre-sized, non-growing window — **DONE. The JACL compiler-guest now tiers up.**
 
-### Slice 1 — pre-sized, non-growing window (the shared prerequisite)
+Made the compiler-guest never call `vm_map` by **defining `malloc`/`calloc`/`realloc`/`free` in
+`codegen/selfhost/emit_shim.c`** over a fixed 4 MiB static arena (`JACL_ARENA_BYTES`). A guest-defined
+allocator **shadows** the on-ramp's synthesized `__temen_malloc` (the translator only synthesizes it
+for an *undefined* `malloc`), so the `vm_map`-growing bump allocator (the `f821` that trapped) is
+never emitted. The arena lives in the guest image's committed data, so no `vm_map` ever runs and the
+paged tier-up's page-state table stays valid for the whole run. The allocator keeps the synthesized
+one's exact semantics — never-reusing bump, `free` a no-op, `calloc` zeroed, `realloc` via a 16-byte
+size header — so compiler output is byte-identical.
 
-Make the compiler-guest never call `vm_map`: give the guest libc `malloc` heap a fixed pre-sized
-arena (large enough for the largest expected compile) instead of growing window pages. The GC heap
-is already static (`heap_gc.c`), so this is the libc-heap side (#737's area). Verify with
-`probe_svmb`/`browser_coverage` that the linked compiler module reports **no page ops** and is
-JIT-eligible (`analyze` accepts it, `module_uses_page_ops == false`).
-- **Test:** the compiler-guest compiles the corpus identically with the fixed arena (native
-  `parity`), and `probe_svmb` shows page-op-free + JIT-eligible.
+**Measured (`demo/svm/bench_tierup.mjs`, threads `temen_browser.wasm` @ `85d8cf5d`):**
+- `vm_map` fully eliminated from the guest (0 calls in `jacl_compiler.ll`); `decode_check` shows the
+  arena in committed static data (data top 26 → 30 MiB, still under the 32 MiB window).
+- The coop tier-up now **completes with `parity=OK`** — the `unreachable` trap is gone. Validated
+  across the tour + 9 corpus programs (all `parity=OK`).
+- `tour.jacl`: bytecode 822 ms → coop **689 ms warm (1.19×)**, `tierups=19959`. A real, correct win
+  (the earlier "3.24×" was the spurious time-to-trap with a mismatched result).
+
+Capacity note: the 4 MiB arena covers the tour (the heaviest bundled example) with margin and every
+corpus program; it is a hair below the synthesized allocator's old ~5.8 MiB ceiling, which only
+matters for programs larger than the playground compiles. Enlarging `JACL_ARENA_BYTES` past ~5 MiB
+pushes the guest image over 32 MiB and auto-bumps the declared window to 64 MiB (`size_log2` 25→26).
+
+The remaining speedup ceiling is the **bounce count** (`bounces=25688` on the tour — every cap/import
+site bounces to the interpreter); reducing it (more emittable leaves / #888-style outlining) is the
+next lever, tracked engine-side, and is separate from this unblock. The engine memory-model fix
+(exposing the `vm_map`-grown tail to the paged tier, #816) remains the "proper" path but is no longer
+on JACL's critical path.
 
 ### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver
 
