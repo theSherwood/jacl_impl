@@ -90,6 +90,7 @@ fn main() {
                         "CallImport<{}>",
                         m.imports.get(*import as usize).map(|im| im.name.as_str()).unwrap_or("?")
                     ),
+                    temen_ir::Inst::Call { func, .. } => format!("Call(f{func})"),
                     other => format!("{other:?}").split(['(', ' ', '{']).next().unwrap_or("?").to_string(),
                 })
                 .collect();
