@@ -20,13 +20,17 @@ typedef __builtin_va_list va_list;
 
 /* --- fixed pre-sized heap arena (SVM_WARM_COMPILER.md Slice 1) ---------------------------------
  * Defining malloc/calloc/realloc/free here *shadows* the on-ramp's synthesized `__temen_malloc`,
- * a bump allocator that grows the window via `vm_map` on demand. That mid-run `vm_map` grow is
- * invisible to the paged tier-up's page-state table (temen #816), so the emitted heap-store traps
- * and the JACL compiler-guest can't tier up. A fixed static arena lives in the guest image's
- * committed data, so no `vm_map` ever runs and the paged table stays valid. The allocator keeps the
- * synthesized one's semantics exactly — a never-reusing bump allocator, `free` a no-op, `calloc`
- * zeroed — so compiler output is byte-identical (differential parity vs the interpreter holds).
- * ARENA_BYTES must fit under the window with the guest's static data (~26 MiB) + stack. */
+ * a bump allocator that grows the window via `vm_map` on demand. That mid-run `vm_map` grow traps
+ * the coop tier-up on the emitted tier (temen #1151, still open — re-measured against temen main
+ * @ 90a1604c on 2026-09-02: a growing card still traps, tierups=0, while this arena card tiers up).
+ * A fixed static arena lives in the guest image's committed data, so no `vm_map` runs and the paged
+ * table stays valid. Build with `-DJACL_GROW_HEAP` to omit this shim and use the engine's growing
+ * allocator — the one-flag re-check for when #1151 lands. The arena stays the default: it also
+ * serves the warm-snapshot path, which needs a non-growing window to be memcpy-restorable (#816).
+ * The allocator keeps the synthesized one's semantics exactly — never-reusing bump, `free` a no-op,
+ * `calloc` zeroed — so compiler output is byte-identical. ARENA_BYTES must fit under the window with
+ * the guest's static data (~26 MiB) + stack. */
+#ifndef JACL_GROW_HEAP
 #ifndef JACL_ARENA_BYTES
 #define JACL_ARENA_BYTES (4u * 1024u * 1024u)
 #endif
@@ -57,6 +61,7 @@ void *realloc(void *p, size_t n) {
   if (q) { size_t m = old < n ? old : n; unsigned char *s = p; for (size_t i = 0; i < m; i++) q[i] = s[i]; }
   return q;
 }
+#endif /* !JACL_GROW_HEAP */
 
 int memcmp(const void *a, const void *b, size_t n) {
   const unsigned char *p = a, *q = b;
