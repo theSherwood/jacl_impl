@@ -41,9 +41,12 @@ fi
 # the compiler-as-guest only compiles JACL -> SVM IR, so the legacy bytecode backend
 # (bytecode.c/compiler.c/vm.c) + its scheduler/embedding (runtime.c/embed.c) are dropped —
 # a smaller .svmb, no stubbed vm.c externals (docs/SVM_SELFHOST_FEASIBILITY.md §2, item 6).
+# EXTRA_CFLAGS lets a re-measure build a variant card — e.g. `EXTRA_CFLAGS=-DJACL_GROW_HEAP` omits
+# emit_shim.c's fixed-arena malloc so the guest uses the engine's `vm_map`-growing allocator (the
+# SVM_WARM_COMPILER.md "requirement re-check" against a newer temen; see Slice 1).
 CF=(-std=c99 -O2 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D__EMSCRIPTEN__ -DJACL_EMIT_ONLY
     -Wno-implicit-function-declaration -fno-vectorize -fno-slp-vectorize
-    -emit-llvm -S -I "$CODEGEN" -I "$DIR/inc")
+    -emit-llvm -S -I "$CODEGEN" -I "$DIR/inc" ${EXTRA_CFLAGS:-})
 
 echo "=== compiling frontend + driver + shim to LLVM IR ==="
 # emit_jacl.c is the unity frontend (defines jacl_emit_ir); demote its CLI main so

@@ -268,6 +268,29 @@ next lever, tracked engine-side, and is separate from this unblock. The engine m
 (exposing the `vm_map`-grown tail to the paged tier, #816) remains the "proper" path but is no longer
 on JACL's critical path.
 
+#### Re-measure against temen latest (`90a1604c`, 2026-09-02) — the arena is still required
+
+Bumped the submodule to temen main to check whether the engine now handles the growing allocator so
+the arena workaround could be dropped, and built a **growing** card (`EXTRA_CFLAGS=-DJACL_GROW_HEAP`,
+which omits the fixed-arena `malloc` so the guest uses the engine's `vm_map`-growing one). Result on
+a fresh threads `temen_browser.wasm` @ `90a1604c` (`demo/svm/bench_tierup.mjs`):
+
+- **Growing card still traps on the coop tier** — `try_basic` (macro-free): bytecode oracle produces
+  correct IR (1553 B, status 0), but the coop tier-up throws `cooperative tier-up run trapped`,
+  `tierups=0`, `parity=MISMATCH`. The **arena** card at the same pin tiers up with `parity=OK`. So the
+  in-leaf `vm_map`-grow trap is **not** fixed for this guest yet.
+- This maps to **#1151** (*"the JACL/compiler-guest allocator traps today on an in-leaf grow on the
+  emitted tier"*), which is **still open**. #1153 (closed) fixed the *single-shot on-ramp* tier's
+  grow, not the cooperative tier the playground uses; the landed #1151 slices (1/2a/2b) cover nested
+  §14 children's unmap/protect, not this top-level allocator grow.
+- The bump also **regresses macro compiles**: in-guest macro staging fails `-22` (`macro 'unless':
+  jit compile_linked failed`) — temen's Jit `compile_linked` wire changed again since `85d8cf5d`, so
+  `irb_to_encoded` would need another version/opcode migration (the v9→v10 class of fix).
+
+**Conclusion:** do **not** bump the pin yet — it gives no tier-up benefit (growing still traps) and
+would regress macro compiles. The arena workaround stays; revisit when **#1151** closes. The
+`-DJACL_GROW_HEAP` build flag + `EXTRA_CFLAGS` hook make the re-check a one-flag rebuild next time.
+
 ### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver — **DONE**
 
 The program-independent state turned out to already be lazy-once statics: the built-in prelude macros
