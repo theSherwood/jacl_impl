@@ -20,13 +20,16 @@ typedef __builtin_va_list va_list;
 
 /* --- fixed pre-sized heap arena (SVM_WARM_COMPILER.md Slice 1) ---------------------------------
  * Defining malloc/calloc/realloc/free here *shadows* the on-ramp's synthesized `__temen_malloc`,
- * a bump allocator that grows the window via `vm_map` on demand. That mid-run `vm_map` grow traps
- * the coop tier-up on the emitted tier (temen #1151, still open — re-measured against temen main
- * @ 90a1604c on 2026-09-02: a growing card still traps, tierups=0, while this arena card tiers up).
+ * a bump allocator that grows the window via `vm_map` (op 0) on demand. That in-leaf `vm_map` grow
+ * traps the coop tier-up on the emitted tier — re-measured against temen main @ 90a1604c (2026-09-02)
+ * and again @ 2fbb3163 (2026-09-07): a growing card still traps, tierups=0, while this arena card
+ * tiers up. This is *not* the #1151/#1201 gap (those are `unmap`/`protect` per-page-state, and
+ * `decode_check` reports this guest `uses_unmap_protect=false`); it's the coop-tier in-leaf `map`/grow
+ * case #1153 left — the coop pump only re-syncs the live `"mapped"` bound between events, not mid-run.
  * A fixed static arena lives in the guest image's committed data, so no `vm_map` runs and the paged
  * table stays valid. Build with `-DJACL_GROW_HEAP` to omit this shim and use the engine's growing
- * allocator — the one-flag re-check for when #1151 lands. The arena stays the default: it also
- * serves the warm-snapshot path, which needs a non-growing window to be memcpy-restorable (#816).
+ * allocator — the one-flag re-check for when the coop in-leaf grow lands. The arena stays the default:
+ * it also serves the warm-snapshot path, which needs a non-growing window to be memcpy-restorable (#816).
  * The allocator keeps the synthesized one's semantics exactly — never-reusing bump, `free` a no-op,
  * `calloc` zeroed — so compiler output is byte-identical. ARENA_BYTES must fit under the window with
  * the guest's static data (~26 MiB) + stack. */
