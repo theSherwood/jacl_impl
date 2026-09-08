@@ -115,7 +115,12 @@ fn scan_module(m: &Module, reachable: &[bool]) -> (Seams, Seams, Vec<(usize, Str
                             (CAP_SELF, 9 | 10) => set!(svc),
                             _ => {}
                         }
-                        if let Some(why) = declined_shape(*type_id, *op, args.len(), sig.results.len()) {
+                        // #922: CapCall.sig is a Module::types index, resolve it to the func type.
+                        let nres = match m.types.get(*sig as usize) {
+                            Some(temen_ir::TypeEntry::Func(ft)) => ft.results.len(),
+                            _ => 0,
+                        };
+                        if let Some(why) = declined_shape(*type_id, *op, args.len(), nres) {
                             declined.push((fi, why, r));
                         }
                     }
@@ -153,7 +158,7 @@ fn report(tag: &str, m: &Module) {
     let nreach = reach.iter().filter(|&&r| r).count();
 
     // bytecode engine verdict
-    let bc = bytecode::compile_module(&m.funcs);
+    let bc = bytecode::compile_module(&m.funcs, &m.types);
     println!("bytecode::compile_module (all-or-nothing): {}",
         if bc.is_some() { "ACCEPTED ✓" } else { "None ✗ (STATUS_UNSUPPORTED)" });
 

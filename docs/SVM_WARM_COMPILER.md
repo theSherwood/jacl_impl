@@ -238,7 +238,13 @@ never calls `vm_map`, the paged table stays valid, and the guest tiers up — an
 #816's own workaround recommends. That is the lever to pull for a JACL tier-up win without waiting on
 the engine memory-model refinement.
 
-### Slice 1 — pre-sized, non-growing window — **DONE. The JACL compiler-guest now tiers up.**
+### Slice 1 — pre-sized, non-growing window — **DONE, then RETIRED (see "Arena retired" below).**
+
+> **Superseded 2026-09-08:** the fixed arena was a workaround for a coop-tier in-leaf `vm_map`-grow
+> trap. That engine gap is now fixed (temen **#1312** / PR #1319 — a growable, relocatable coop
+> window), the pin is bumped, and the arena is **removed** — the guest uses the engine's growing
+> allocator again, with no heap cap. The historical arena rationale is kept below for context; the
+> current state is in **"Arena retired"**.
 
 Made the compiler-guest never call `vm_map` by **defining `malloc`/`calloc`/`realloc`/`free` in
 `codegen/selfhost/emit_shim.c`** over a fixed 4 MiB static arena (`JACL_ARENA_BYTES`). A guest-defined
@@ -268,46 +274,44 @@ next lever, tracked engine-side, and is separate from this unblock. The engine m
 (exposing the `vm_map`-grown tail to the paged tier, #816) remains the "proper" path but is no longer
 on JACL's critical path.
 
-#### Re-measure against temen latest — the arena is still required (two data points)
+#### Arena retired — the coop in-leaf `vm_map`-grow is fixed (temen #1312), pin bumped
 
-Bumped the submodule to temen main to check whether the engine now handles the growing allocator so
-the arena workaround could be dropped, and built a **growing** card (`EXTRA_CFLAGS=-DJACL_GROW_HEAP`,
-which omits the fixed-arena `malloc` so the guest uses the engine's `vm_map`-growing one). Measured
-twice against a fresh threads `temen_browser.wasm` (`demo/svm/bench_tierup.mjs`):
+The arena was a workaround for a coop-tier in-leaf `vm_map`-grow trap. Two earlier re-measures (temen
+`90a1604c`, `2fbb3163`) confirmed a **growing** card still trapped on the coop tier (`tierups=0`,
+`parity=MISMATCH`) while the arena card tiered up — the in-leaf `map`/grow (op 0) case #1153 left open
+on the coop tier, filed as **temen #1312**. (It is *not* #1151/#1201, which are `unmap`/`protect`
+per-page-state; `decode_check` reports the growing card `uses_unmap_protect=false`.)
 
-- **`90a1604c` (2026-09-02)** and again **`2fbb3163` (2026-09-07, = origin/main minus 3 unrelated
-  commits — a bash guest + rustfmt)**: identical result both pins. `try_basic` (macro-free): the
-  bytecode oracle produces correct IR (1553 B, status 0), but the coop tier-up throws `cooperative
-  tier-up run trapped`, `tierups=0`, `parity=MISMATCH`. The **arena** card at the same pin tiers up
-  with `tierups=1`, `parity=OK`. Since the only difference between the two cards is the allocator, the
-  in-leaf `vm_map`-grow is what traps — **not fixed for this guest yet**.
+**#1312 is now fixed** — **PR #1319** made the cooperative run window a **growable, relocatable
+backing** (raising the reservation to the oracle's `DEFAULT_RESERVED_LOG2` and adding a `"win"` global
+the emitted tier reloads after calls, since the backing may move on grow). So:
 
-**Root cause is `map`/grow (op 0) on the coop tier, and it is *not* what #1151/#1201 addressed.**
-`decode_check` reports the growing card `uses_unmap_protect=false` — its only page-op is `map`/grow.
-The two closed page-op issues cover the *other* ops:
+- **Pin bumped** to temen `fdeb72a9` (main, post-#1319). The migration this required on the JACL side:
+  - `irb_to_encoded` (`codegen/irbuilder.c`) → the unified 16-byte **TEMEN** container header
+    (`MAGIC "TEMEN\0\0\0"` + `kind:u16` + `version:u16` + `flags:u32`; the object dialect is the
+    header `kind`, not a payload flag byte), plus the #922 body changes — `call.sym`/`call.dyn` carry
+    an **interned type-section index** instead of an inline sig, and load/store dropped the `align`
+    byte. This fixes the `-22` in-guest macro-staging (`__vm_jit_compile_linked` now decodes the
+    staged IR). Gated by the `encoded_binary_matches_text_module` round-trip test.
+  - `irb_to_text` mnemonic `call_indirect` → `call.dyn`.
+  - harness `probe_svmb`/`browser_coverage` for `CapCall.sig` (#922 type index) + `compile_module`'s
+    2-arg `(&funcs, &types)` signature; `memory_load_store_round_trip` stores above the now
+    **unconditional 16 KiB NULL guard** (#1094).
+- **Arena removed** (`emit_shim.c` no longer defines `malloc`/…): the guest uses the engine's
+  synthesized `vm_map`-growing allocator again — no pre-sizing, no ~5.8 MiB heap cap.
+- **Re-measured (`demo/svm/bench_tierup.mjs`, threads `temen_browser.wasm` @ `fdeb72a9`):** the
+  growing (no-arena) card **tiers up with `parity=OK`** on macro-free programs — `try_basic`
+  `tierups=1 bounces=1`, `arithmetic` `tierups=1 bounces=2` — where before the fix it trapped
+  `tierups=0`. In-guest macro staging is green end-to-end (`build_compiler_svmb.sh --selftest`:
+  SELFTEST/STAGETEST/INTERPTEST/SNAPTEST all pass).
 
-- **#1151** (closed completed 2026-09-03) and its single-shot follow-up **#1201** (closed, PR #1205)
-  address **`unmap`/`protect` (ops 1/2) per-page-state** enforcement — root guests, §14 nested
-  children, and the single-shot tier. #1201 §1 is explicit: *"`map`-only guests keep the mask-only
-  emit + live `\"mapped\"` (#1153)."* So neither issue touches the JACL allocator's grow.
-- The JACL case is **#1153's** domain (mask-only emit + a live `\"mapped\"` global). #1153 (closed)
-  fixed the **single-shot on-ramp** tier's grow and *claimed* the cooperative/warm-coop tiers also
-  carry in-eval `vm_map` growth — but this measurement contradicts that for an **in-leaf** grow: the
-  coop pump (`wasmjit-module.js`) only re-syncs `\"mapped\"` *between* events, before invoking the
-  emitted function; a grow inside a leaf mid-run, followed by an access in the same emitted run,
-  checks the stale bound and traps. The playground uses this coop path (`runJitModule` →
-  `temen_coop_open`), so the arena stays required.
-- The bump also **regresses macro compiles**: in-guest macro staging fails `-22` (`macro 'unless':
-  jit compile_linked failed`) — temen's Jit `compile_linked` wire changed again since `85d8cf5d`, so
-  `irb_to_encoded` would need another migration. The wire magic also changed `SVM\0` (4 B) →
-  `TEMEN\0\0\0` (8 B), so a full bump additionally invalidates every wire-coupled asset.
-
-**Conclusion:** do **not** bump the pin — it gives no tier-up benefit (the in-leaf grow still traps on
-the coop tier) and would regress macro compiles + require a wire-magic migration. The arena workaround
-stays; the re-check to run when the coop in-leaf `map`/grow lands is `EXTRA_CFLAGS=-DJACL_GROW_HEAP
-bash codegen/selfhost/build_compiler_svmb.sh` then the bench — a one-flag rebuild. The right issue to
-watch is a coop-tier in-leaf `map`/grow follow-up (the gap against #1153's coop claim), **not**
-#1151/#1201, which are `unmap`/`protect`.
+**Known separate limitation (not a regression):** a **macro** program (`tour.jacl`) still declines the
+coop tier-up to the interpreter (`parity=MISMATCH` in the bench harness; correct output via the
+interpreter fallback in the real browser). This is **not** the allocator — an **arena** card built at
+the same pin traps on `tour` identically. The cause is the in-guest Jit-capability macro staging
+(`__vm_jit_compile_linked` mid-run) during a coop tier-up run, orthogonal to the heap. Macro-free
+programs get the tier-up; macro programs run correctly on the interpreter as before. Tracking that
+in-guest-JIT-during-coop case is a separate engine follow-up.
 
 ### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver — **DONE**
 

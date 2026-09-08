@@ -441,7 +441,7 @@ static void out_inst(Out *o, const Inst *in) {
       out_fmt(o, "%s v%u", cn[in->op], in->a); break;
     }
     case K_CALL_INDIRECT:
-      out_str(o, "call_indirect (");
+      out_str(o, "call.dyn (");  /* #900: the indirect-call mnemonic is `call.dyn` */
       out_typelist(o, in->sig_params, in->sig_np);
       out_str(o, ") -> (");
       out_typelist(o, in->sig_results, in->sig_nr);
@@ -651,11 +651,13 @@ static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
       out_u8(o, (uint8_t)((in->ty == IRB_I32 ? 0x31 : 0x51) + in->op));
       out_uleb(o, in->a); out_uleb(o, in->x); break;
     case K_LOAD:
+      /* LOAD = opcode, addr, offset (no align byte — the align field was removed from the wire). */
       out_u8(o, (uint8_t)(0xF0 + in->op));
-      out_uleb(o, in->addr); out_uleb(o, in->offset); out_u8(o, in->align); break;
+      out_uleb(o, in->addr); out_uleb(o, in->offset); break;
     case K_STORE:
+      /* STORE = opcode, addr, value, offset (no align byte). */
       out_u8(o, (uint8_t)(0x84 + in->op));
-      out_uleb(o, in->addr); out_uleb(o, in->value); out_uleb(o, in->offset); out_u8(o, in->align); break;
+      out_uleb(o, in->addr); out_uleb(o, in->value); out_uleb(o, in->offset); break;
     case K_CALL:
       out_u8(o, 0x73); out_uleb(o, in->callee); out_idxs(o, in->args, in->nargs); break;
     case K_CALL_IMPORT: {
@@ -663,10 +665,10 @@ static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
        * interned import index. */
       uint32_t ti = intern_type(tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
       uint32_t idx = intern_import(tab, in->name, ti);
+      /* #922: CALL_SYM = import idx, sig type-idx (interned), handle, arg idx-list. */
       out_u8(o, 0x7B);
       out_uleb(o, idx);
-      out_types_bin(o, in->sig_params, in->sig_np);
-      out_types_bin(o, in->sig_results, in->sig_nr);
+      out_uleb(o, ti);
       out_uleb(o, in->handle);
       out_idxs(o, in->args, in->nargs);
       break;
@@ -676,12 +678,14 @@ static void enc_inst(Out *o, const Inst *in, ImportTable *tab) {
     case K_CONVERT:
       out_u8(o, in->op == IRB_EXTEND_I32S ? 0x60 : in->op == IRB_EXTEND_I32U ? 0x61 : 0x62);
       out_uleb(o, in->a); break;
-    case K_CALL_INDIRECT:
+    case K_CALL_INDIRECT: {
+      /* #922: CALL_INDIRECT = sig type-idx (interned), idx, arg idx-list. */
+      uint32_t ti = intern_type(tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
       out_u8(o, 0x74);
-      out_types_bin(o, in->sig_params, in->sig_np);
-      out_types_bin(o, in->sig_results, in->sig_nr);
+      out_uleb(o, ti);
       out_uleb(o, in->addr); /* the index operand reuses the `addr` slot */
       out_idxs(o, in->args, in->nargs); break;
+    }
     case K_SUSPEND: out_u8(o, 0xCC); out_uleb(o, in->a); break;
   }
 }
@@ -731,6 +735,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
         if (in->kind == K_CALL_IMPORT) {
           uint32_t ti = intern_type(&tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
           intern_import(&tab, in->name, ti);
+        } else if (in->kind == K_CALL_INDIRECT) {
+          /* #922: call.indirect now references an interned type-section index, not an inline sig —
+           * intern it here (source order) so the type section matches what parse_module builds. */
+          intern_type(&tab, in->sig_params, in->sig_np, in->sig_results, in->sig_nr);
         } else if (in->kind == K_DATA_SELF) {
           has_data_self = 1;
         }
@@ -739,19 +747,23 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   }
 
   Out o = {0};
-  static const uint8_t magic[4] = {'S', 'V', 'M', 0};
-  out_raw(&o, magic, 4);
-  out_u8(&o, 10);                                  /* VERSION (v10) — v10 adds a per-offer
-                                                    * impl-export policy byte, but we emit zero
-                                                    * impl-exports, so the image is otherwise
-                                                    * byte-identical to v9. */
-  /* v9 flags byte: bit 0 marks the **object dialect** (a pre-link unit carrying `data.self`
-   * link-form addresses, decoded by `decode_unit`). Emit it only when the module actually has a
-   * `data.self` — otherwise the module is a plain runnable unit (unresolved `call.sym` imports
-   * are legal in the runnable dialect), which `decode_module` also accepts. This lets the §22
-   * `Jit` capability (`compile_linked` -> `decode_module`) consume a data-free guest module; a
-   * module with own-data addresses still needs the object dialect (and `link` to resolve them). */
-  out_u8(&o, has_data_self ? 0x01 : 0x00);
+  /* Unified TEMEN container header (WIRE.md), 16 bytes little-endian:
+   *   [0..8)  MAGIC   = "TEMEN\0\0\0"
+   *   [8..10) kind    : u16   — 0 = KIND_MODULE (runnable), 1 = KIND_OBJECT (pre-link unit)
+   *   [10..12) version: u16   = 10 (v10; v10 adds a per-offer impl-export policy byte, but we emit
+   *                              zero impl-exports, so the payload is otherwise byte-identical to v9)
+   *   [12..16) flags  : u32   = 0 (reserved; a set bit fails closed on decode)
+   * The object dialect (a pre-link unit carrying `data.self` link-form addresses, decoded by
+   * `decode_unit`) is now the header `kind`, not a payload flag byte. Emit KIND_OBJECT only when the
+   * module actually has a `data.self`; otherwise it is a plain runnable unit (unresolved `call.sym`
+   * imports are legal there), which `decode_module` accepts — this lets the §22 `Jit` capability
+   * (`compile_linked` -> `decode_module`) consume a data-free guest module. A module with own-data
+   * addresses still needs the object dialect (and `link` to resolve them). */
+  static const uint8_t magic[8] = {'T', 'E', 'M', 'E', 'N', 0, 0, 0};
+  out_raw(&o, magic, 8);
+  out_u8(&o, has_data_self ? 0x01 : 0x00); out_u8(&o, 0x00); /* kind:u16 LE (0=module, 1=object) */
+  out_u8(&o, 10); out_u8(&o, 0x00);                          /* version:u16 LE = 10 */
+  out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); /* flags:u32 LE = 0 */
   /* Memory descriptor: presence flag, then size_log2. */
   if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); }
   else out_u8(&o, 0);
