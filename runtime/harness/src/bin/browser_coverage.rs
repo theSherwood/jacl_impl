@@ -149,7 +149,7 @@ fn run_case(driver: &PathBuf, rt: &temen_llvm::Translated, cat: &temen_llvm::Tra
     };
 
     // 3. the browser's engine: pure bytecode, no tree-walker fallback.
-    if bytecode::compile_module(&module.funcs).is_none() {
+    if bytecode::compile_module(&module.funcs, &module.types).is_none() {
         return Stage::Unsupported;
     }
     let mut host = onramp_host(&module);

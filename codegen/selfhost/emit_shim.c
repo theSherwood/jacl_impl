@@ -18,53 +18,16 @@ typedef __builtin_va_list va_list;
 #define va_arg   __builtin_va_arg
 #define va_end   __builtin_va_end
 
-/* --- fixed pre-sized heap arena (SVM_WARM_COMPILER.md Slice 1) ---------------------------------
- * Defining malloc/calloc/realloc/free here *shadows* the on-ramp's synthesized `__temen_malloc`,
- * a bump allocator that grows the window via `vm_map` (op 0) on demand. That in-leaf `vm_map` grow
- * traps the coop tier-up on the emitted tier — re-measured against temen main @ 90a1604c (2026-09-02)
- * and again @ 2fbb3163 (2026-09-07): a growing card still traps, tierups=0, while this arena card
- * tiers up. This is *not* the #1151/#1201 gap (those are `unmap`/`protect` per-page-state, and
- * `decode_check` reports this guest `uses_unmap_protect=false`); it's the coop-tier in-leaf `map`/grow
- * case #1153 left — the coop pump only re-syncs the live `"mapped"` bound between events, not mid-run.
- * A fixed static arena lives in the guest image's committed data, so no `vm_map` runs and the paged
- * table stays valid. Build with `-DJACL_GROW_HEAP` to omit this shim and use the engine's growing
- * allocator — the one-flag re-check for when the coop in-leaf grow lands. The arena stays the default:
- * it also serves the warm-snapshot path, which needs a non-growing window to be memcpy-restorable (#816).
- * The allocator keeps the synthesized one's semantics exactly — never-reusing bump, `free` a no-op,
- * `calloc` zeroed — so compiler output is byte-identical. ARENA_BYTES must fit under the window with
- * the guest's static data (~26 MiB) + stack. */
-#ifndef JACL_GROW_HEAP
-#ifndef JACL_ARENA_BYTES
-#define JACL_ARENA_BYTES (4u * 1024u * 1024u)
-#endif
-static unsigned char g_arena[JACL_ARENA_BYTES] __attribute__((aligned(16)));
-static size_t g_brk;
-static size_t g_arena_hi; /* high-water, for the OOM report */
-
-void *malloc(size_t n) {
-  size_t payload = (n + 15u) & ~(size_t)15u; /* 16-align the payload */
-  if (g_brk + 16u + payload > JACL_ARENA_BYTES) return 0; /* arena exhausted */
-  unsigned char *p = g_arena + g_brk + 16u;
-  *(size_t *)(p - 16u) = n; /* size header (for realloc), matching the synthesized layout */
-  g_brk += 16u + payload;
-  if (g_brk > g_arena_hi) g_arena_hi = g_brk;
-  return p;
-}
-void *calloc(size_t nmemb, size_t sz) {
-  size_t n = nmemb * sz;
-  unsigned char *p = malloc(n);
-  if (p) for (size_t i = 0; i < n; i++) p[i] = 0;
-  return p;
-}
-void free(void *p) { (void)p; } /* never reuse — matches the synthesized allocator */
-void *realloc(void *p, size_t n) {
-  if (!p) return malloc(n);
-  size_t old = *(size_t *)((unsigned char *)p - 16u);
-  unsigned char *q = malloc(n);
-  if (q) { size_t m = old < n ? old : n; unsigned char *s = p; for (size_t i = 0; i < m; i++) q[i] = s[i]; }
-  return q;
-}
-#endif /* !JACL_GROW_HEAP */
+/* --- heap allocation: the engine's growing allocator ------------------------------------------
+ * We do NOT define malloc/calloc/realloc/free here: the SVM LLVM on-ramp synthesizes them over its
+ * `__temen_malloc`, a bump allocator that grows the window via `vm_map` (op 0) on demand. Earlier
+ * this file shadowed them with a fixed static arena (SVM_WARM_COMPILER.md Slice 1) because an
+ * in-leaf `vm_map` grow trapped the cooperative tier-up on the emitted tier — the coop pump only
+ * re-synced the live `"mapped"` bound between events, not mid-run. That gap is closed: temen #1312
+ * (PR #1319) made the coop run window a growable, relocatable backing, so an in-leaf grow tiers up
+ * confined and byte-identical to the interpreter. Re-measured on the growing card after the bump:
+ * tierups=1, parity=OK. The arena is retired — no pre-sizing / heap cap, and the warm-coop window
+ * grows and snapshots too (#1312 Slice 3). */
 
 int memcmp(const void *a, const void *b, size_t n) {
   const unsigned char *p = a, *q = b;

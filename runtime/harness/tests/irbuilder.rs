@@ -150,7 +150,11 @@ fn direct_intra_module_call() {
 #[test]
 fn memory_load_store_round_trip() {
     let m = parse_self_contained("mem_roundtrip");
-    check(&m, 0, &[Value::I64(64), Value::I64(0x1234_5678)], 0x1234_5678);
+    // Store above the unconditional 16 KiB NULL guard (#1094: `[0, module_null_guard())` is
+    // Unmapped on every module, so a low address like 64 now faults by design). The guest's real
+    // scratch/heap already lives above the guard; this just picks a valid in-window address.
+    let addr = temen_ir::module_null_guard() as i64 + 64;
+    check(&m, 0, &[Value::I64(addr), Value::I64(0x1234_5678)], 0x1234_5678);
 }
 
 #[test]
