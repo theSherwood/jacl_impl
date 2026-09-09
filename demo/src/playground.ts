@@ -162,16 +162,16 @@ function setSource(view: EditorView, text: string) {
 }
 
 // --- SVM backend (the wasm-safe bytecode engine via the svm-browser cdylib) ---
-// The sole run path. Unedited example programs run their **precompiled** `.svmb` blobs (built by
+// The sole run path. Unedited example programs run their **precompiled** `.temen` blobs (built by
 // demo/svm/build_assets.sh) directly; edited source is compiled to SVM IR in the browser by the
-// LLVM-free frontend (jacl_emit.wasm) and linked against the runtime (jaclrt.svm) per run.
+// LLVM-free frontend (jacl_emit.wasm) and linked against the runtime (jaclrt.temen) per run.
 let svmRunner: SvmJaclRunner | null = null;
-let svmManifest: { name: string; svmb: string }[] | null = null;
+let svmManifest: { name: string; temen: string }[] | null = null;
 let svmFrontend: JaclFrontend | null = null;   // in-browser lexer+parser+codegen (jacl_emit.wasm)
-let svmCompiler: Uint8Array | null = null;      // jacl_compiler.svmb — the self-hosted frontend (stages macros)
-let svmWarmCompiler: Uint8Array | null = null;  // jacl_compiler_snapshot.svmb — two-phase warm card (tierup mode)
-let svmRuntime: Uint8Array | null = null;       // jaclrt.svm — linked against per live run
-let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.svmo — links macro-body modules (jacl_emit staging)
+let svmCompiler: Uint8Array | null = null;      // jacl_compiler.temen — the self-hosted frontend (stages macros)
+let svmWarmCompiler: Uint8Array | null = null;  // jacl_compiler_snapshot.temen — two-phase warm card (tierup mode)
+let svmRuntime: Uint8Array | null = null;       // jaclrt.temen — linked against per live run
+let svmStagingRt: Uint8Array | null = null;     // jaclrt_staging.temeno — links macro-body modules (jacl_emit staging)
 /** The example currently loaded verbatim in the editor (cleared once the user edits it). */
 let currentExample: Example | null = null;
 
@@ -191,7 +191,7 @@ async function ensureSvm(): Promise<SvmJaclRunner | null> {
 
 /**
  * Load the live-editing pieces on demand; null if the runtime isn't shipped. The **frontend** is
- * either the self-hosted JACL compiler run as an SVM guest (`jacl_compiler.svmb`, which expands
+ * either the self-hosted JACL compiler run as an SVM guest (`jacl_compiler.temen`, which expands
  * `defmacro`s in-guest via the §22 Jit cap — the macro-capable path) or, if that asset isn't shipped,
  * the Emscripten `jacl_emit.wasm` ({@link JaclFrontend}, no in-browser macro expansion).
  */
@@ -206,20 +206,20 @@ async function ensureLive(): Promise<{
     // compiler-guest (`guest`/`tierup` modes) and the Emscripten `jacl_emit.wasm` (`emit` mode).
     // Each is best-effort — a missing asset just disables the modes that need it.
     if (!svmCompiler) {
-      const resp = await fetch("svm/svmb/jacl_compiler.svmb");
+      const resp = await fetch("svm/svmb/jacl_compiler.temen");
       if (resp.ok) svmCompiler = new Uint8Array(await resp.arrayBuffer());
     }
     // The warm-snapshot two-phase card (SVM_WARM_COMPILER.md Slice 3): the `tierup` mode opens it
     // once and evals each compile over the restored warm image (~2× the plain guest). Best-effort —
     // a missing asset just leaves `tierup` falling back to the plain guest compile.
     if (!svmWarmCompiler) {
-      const resp = await fetch("svm/svmb/jacl_compiler_snapshot.svmb");
+      const resp = await fetch("svm/svmb/jacl_compiler_snapshot.temen");
       if (resp.ok) svmWarmCompiler = new Uint8Array(await resp.arrayBuffer());
     }
     // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
     // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
     if (!svmStagingRt) {
-      const resp = await fetch("svm/svmb/jaclrt_staging.svmo");
+      const resp = await fetch("svm/svmb/jaclrt_staging.temeno");
       if (resp.ok) svmStagingRt = new Uint8Array(await resp.arrayBuffer());
     }
     if (!svmFrontend && typeof createJaclEmit === "function") {
@@ -234,7 +234,7 @@ async function ensureLive(): Promise<{
       } catch { /* jacl_emit.wasm not shipped */ }
     }
     if (!svmRuntime) {
-      const resp = await fetch("svm/jaclrt.svm");
+      const resp = await fetch("svm/jaclrt.temen");
       if (!resp.ok) return null;
       svmRuntime = new Uint8Array(await resp.arrayBuffer());
     }
@@ -245,7 +245,7 @@ async function ensureLive(): Promise<{
 }
 
 /** The manifest entry for the current source iff it is an *unedited* precompiled example. */
-function svmEntryForCurrentSource(source: string): { name: string; svmb: string } | null {
+function svmEntryForCurrentSource(source: string): { name: string; temen: string } | null {
   if (!currentExample || !svmManifest) return null;
   if (source !== currentExample.code) return null; // edited → not precompiled
   return svmManifest.find((e) => e.name === currentExample!.name) ?? null;
@@ -281,14 +281,14 @@ function handleRun() {
 }
 
 /** Timing breakdown for a run: `compileMs` (source → SVM IR) is absent for a precompiled example
- *  that runs its shipped `.svmb` verbatim; `runMs` (link + execute) is absent if a compile error
+ *  that runs its shipped `.temen` verbatim; `runMs` (link + execute) is absent if a compile error
  *  stopped us before running. */
 interface RunTiming {
   compileMs?: number;
   runMs?: number;
   mode?: CompileMode;
   cached?: boolean;
-  precompiled?: boolean; // ran a shipped .svmb (unedited example) — no live compile at all
+  precompiled?: boolean; // ran a shipped .temen (unedited example) — no live compile at all
 }
 
 function displayResult(result: RunResult, timing: RunTiming) {
@@ -396,18 +396,18 @@ async function runOnSvm(source: string) {
     return;
   }
   try {
-    // Fast path: an *unedited* precompiled example runs its shipped .svmb directly.
+    // Fast path: an *unedited* precompiled example runs its shipped .temen directly.
     const entry = svmEntryForCurrentSource(source);
     if (entry) {
       const tRun = performance.now();
-      const bytes = new Uint8Array(await (await fetch(`svm/${entry.svmb}`)).arrayBuffer());
+      const bytes = new Uint8Array(await (await fetch(`svm/${entry.temen}`)).arrayBuffer());
       displayResult(runner.runSvmb(bytes), { runMs: performance.now() - tRun, precompiled: true });
       return;
     }
     // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
     const live = await ensureLive();
     if (!live || (!live.compiler && !live.frontend)) {
-      svmError("Live compile needs jacl_compiler.svmb (or jacl_emit.wasm) + jaclrt.svm (run demo/svm/build_assets.sh).");
+      svmError("Live compile needs jacl_compiler.temen (or jacl_emit.wasm) + jaclrt.temen (run demo/svm/build_assets.sh).");
       return;
     }
     // Resolve the requested compiler, falling back if its asset isn't shipped.
@@ -537,7 +537,7 @@ function renderDropdown(filter: string) {
 
 function selectExample(ex: Example) {
   setSource(view, ex.code);
-  currentExample = ex; // remember it so the SVM backend can run its precompiled .svmb
+  currentExample = ex; // remember it so the SVM backend can run its precompiled .temen
   searchInput.value = "";
   closeDropdown();
   view.focus();

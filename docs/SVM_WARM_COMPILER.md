@@ -1,7 +1,7 @@
 # Warm-snapshot + JIT compiler-guest — plan
 
 Closing the **guest-JIT ↔ AOT gap**: make the self-hosted JACL compiler-guest
-(`jacl_compiler.svmb`) fast enough in the browser that it approaches the AOT `jacl_emit.wasm`
+(`jacl_compiler.temen`) fast enough in the browser that it approaches the AOT `jacl_emit.wasm`
 frontend, by running it over a **pre-sized, non-growing window**. That single property unlocks two
 independent wins svm now supports:
 
@@ -65,7 +65,7 @@ do-nothing floor to ~2 ms warm.
 
 ### Slice 0 — measure the floor — DONE. Verdict: **JIT-tier first, warm-snapshot deferred.**
 
-Measured `jacl_compiler.svmb` compiling several programs through `svm_run_onramp` (bytecode
+Measured `jacl_compiler.temen` compiling several programs through `svm_run_onramp` (bytecode
 interpreter, the live playground path), median of 25 runs, via `demo/svm/bench_guest.mjs`:
 
 | program | src | median | fixed floor | per-source work |
@@ -334,8 +334,8 @@ local arena. Needs Slice 1's non-growing window so the image is snapshot-restora
 
 ### Slice 3 — playground wiring — **DONE (pending Pages runtime validation)**
 
-- `build_compiler_svmb.sh` builds **`jacl_compiler_snapshot.svmb`**; `build_assets.sh` ships it under
-  `svm/svmb/` (best-effort, alongside `jacl_compiler.svmb`).
+- `build_compiler_svmb.sh` builds **`jacl_compiler_snapshot.temen`**; `build_assets.sh` ships it under
+  `svm/svmb/` (best-effort, alongside `jacl_compiler.temen`).
 - `SvmJaclRunner` (`demo/src/svm-jacl-wasm.ts`): `warmOpen(snapshotSvmb)` / `warmEval(source)` /
   `warmClose()` over `temen_warm_open`/`_eval`/`_close`, plus `isWarmOpen`.
 - `playground.ts`: `ensureLive` loads the warm card; the **`tierup` mode** (previously a placeholder

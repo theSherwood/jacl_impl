@@ -338,15 +338,15 @@ project uses, vendored at `vendor/svm` from
 [`theSherwood/vm`](https://github.com/theSherwood/vm) and compiled to
 WebAssembly. Editing recompiles the source to SVM IR in the browser
 (`jacl_emit.wasm`, the LLVM-free frontend), then links and runs it against
-the runtime blob (`jaclrt.svm`) on the `svm-browser` cdylib; unedited
-examples run from precompiled `.svmb` blobs.
+the runtime blob (`jaclrt.temen`) on the `svm-browser` cdylib; unedited
+examples run from precompiled `.temen` blobs.
 
 The source lives in `demo/` — a CodeMirror 6 editor with a position-aware
 JACL syntax mode, optional vim keybindings, and a draggable panel divider.
 To build and serve it locally:
 
 ```
-cd demo && bash svm/build_assets.sh   # svm_browser.wasm + jacl_emit.wasm + jaclrt.svm + example .svmb
+cd demo && bash svm/build_assets.sh   # svm_browser.wasm + jacl_emit.wasm + jaclrt.temen + example .temen
 bash build_demo.sh                    # regenerates examples.json, bundles src/ → dist/playground.js
 python3 -m http.server 8080           # or any static server
 # open http://localhost:8080

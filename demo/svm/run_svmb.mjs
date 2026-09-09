@@ -1,15 +1,15 @@
-// Node twin of demo/src/svm-jacl-wasm.ts: run a precompiled JACL `.svmb` through the
+// Node twin of demo/src/svm-jacl-wasm.ts: run a precompiled JACL `.temen` through the
 // svm-browser cdylib's `temen_run_onramp` entry (bytecode engine, wasm32) and print the
 // captured stdout. Proves the playground's SVM run path headless, so CI can gate it.
 //
-//   node run_svmb.mjs <temen_browser.wasm> <prog.svmb> [expected-stdout]
+//   node run_svmb.mjs <temen_browser.wasm> <prog.temen> [expected-stdout]
 //
 // Exit 0 iff temen_status == 0 and (no expected given, or stdout matches).
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, svmbPath, expected] = process.argv.slice(2);
 if (!wasmPath || !svmbPath) {
-  console.error('usage: node run_svmb.mjs <temen_browser.wasm> <prog.svmb> [expected-stdout]');
+  console.error('usage: node run_svmb.mjs <temen_browser.wasm> <prog.temen> [expected-stdout]');
   process.exit(2);
 }
 

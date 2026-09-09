@@ -2,7 +2,7 @@
 # Produce the JACL runtime artifacts for the SVM backend:
 #
 #   1. jaclrt.bc   — the clang stage (runtime C -> clang -O2 -emit-llvm).
-#   2. jaclrt.svm  — the SVM-IR module (temen-llvm-translate of the bitcode), the
+#   2. jaclrt.temen  — the SVM-IR module (temen-llvm-translate of the bitcode), the
 #                    reusable, separately-compiled runtime that programs link against.
 #                    Exports ride in-band in the module now — temen-llvm retired the
 #                    `.syms` export sidecar — so a program module resolves its
@@ -26,18 +26,18 @@ echo "runtime bitcode:  $OUT/jaclrt.bc"
 
 # 2. bitcode -> SVM-IR module (exports in-band), via the standalone CLI.
 cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin temen-llvm-translate -- \
-  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.svm"
-echo "runtime module:   $OUT/jaclrt.svm"
+  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.temen"
+echo "runtime module:   $OUT/jaclrt.temen"
 
 # 3. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's
 #    macro staging links each codegen'd macro body against, so `synrt_read_arg`/`synrt_write_result`
-#    (and the jacl_* runtime) resolve by name. Same scalar subset as jaclrt.svm.
+#    (and the jacl_* runtime) resolve by name. Same scalar subset as jaclrt.temen.
 STAGING="${DIR}/../codegen/selfhost/macro_staging"
 clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
   -I "$DIR" -I "$STAGING" "$STAGING/jaclrt_staging.c" -o "$OUT/jaclrt_staging.bc"
-# Emit the **binary** object (.svmo, ~200 KB) rather than text (~1.3 MB): the browser re-decodes this
+# Emit the **binary** object (.temeno, ~200 KB) rather than text (~1.3 MB): the browser re-decodes this
 # runtime on every macro body, and decoding the binary is ~4x faster than parsing the text — the
 # dominant per-macro cost (tour macro staging ~90ms→~20ms per body).
 cargo run --quiet --manifest-path "$SVM_LLVM/Cargo.toml" --bin temen-llvm-translate -- \
-  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.svmo"
-echo "staging runtime:  $OUT/jaclrt_staging.svmo"
+  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.temeno"
+echo "staging runtime:  $OUT/jaclrt_staging.temeno"

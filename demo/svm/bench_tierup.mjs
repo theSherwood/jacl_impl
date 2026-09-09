@@ -6,14 +6,14 @@
 // which path was taken, tier-up/JIT_INVOKE/bounce event counts, stdout parity, and — the #926 question —
 // whether temen_coop_open now ADMITS the compiler-guest (returns 0, was -2).
 //
-//   node demo/svm/bench_tierup.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>...
+//   node demo/svm/bench_tierup.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>...
 import { readFileSync } from 'node:fs';
 import { runJitModule } from '../../vendor/svm/browser/web/wasmjit-module.js';
 import { engineImports } from '../../vendor/svm/browser/engine-imports.mjs';
 
 const [wasmPath, compPath, ...progs] = process.argv.slice(2);
 if (!wasmPath || !compPath || progs.length === 0) {
-  process.stderr.write('usage: node bench_tierup.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>...\n');
+  process.stderr.write('usage: node bench_tierup.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>...\n');
   process.exit(2);
 }
 

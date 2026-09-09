@@ -6,16 +6,16 @@
 // "emit-only"/staging error, and playground.ts then silently falls back to the ~20x-slower
 // compiler-guest (compileWith, demo/src/playground.ts). The staging hook is what avoids that: the
 // frontend codegens each macro body to an SVM object and bounces it to the cdylib
-// (jacl_svm_stage → Module.svmStageRun → temen_link_run vs jaclrt_staging.svmo), so only tiny macro
+// (jacl_svm_stage → Module.svmStageRun → temen_link_run vs jaclrt_staging.temeno), so only tiny macro
 // bodies touch SVM and the tour compiles in ~80ms instead of ~1.8s.
 //
 // This gate wires that exact pipeline headlessly and asserts a user `defmacro` compiles **through
 // staging** — i.e. jacl_emit.wasm produces IR (no staging error) AND the stage hook actually ran.
-// If the seam regresses (hook not installed, jaclrt_staging.svmo missing/stale, wire format drift,
+// If the seam regresses (hook not installed, jaclrt_staging.temeno missing/stale, wire format drift,
 // cdylib entry rename), emitIr errors here and the gate fails — instead of the browser quietly
 // degrading to the slow guest with output still correct (invisible to correctness tests).
 //
-//   node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>
+//   node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.temeno> <jaclrt.temen>
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -23,7 +23,7 @@ import path from 'node:path';
 
 const [emitJsPath, wasmPath, stagingRtPath, jaclrtPath] = process.argv.slice(2);
 if (!emitJsPath || !wasmPath || !stagingRtPath || !jaclrtPath) {
-  console.error('usage: node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.svmo> <jaclrt.svm>');
+  console.error('usage: node stage_gate.mjs <jacl_emit.js> <temen_browser.wasm> <jaclrt_staging.temeno> <jaclrt.temen>');
   process.exit(2);
 }
 
