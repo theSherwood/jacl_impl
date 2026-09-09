@@ -270,26 +270,57 @@ async function loadLive(): Promise<Live | null> {
 }
 
 /**
- * Pre-warm the live path in the background so the FIRST edited-source Run is as fast as every later
- * one: the first compile + link paid ~300 ms of V8 lazily compiling the frontend's and the cdylib's
- * link-path functions (247 ms compile + 52 ms run vs 1 + 9 ms warm). Compiles and links a trivial
- * program through the currently selected frontend — `emit` / `guest` only: both are synchronous
- * cdylib calls, so this can never interleave with a Run the user starts meanwhile (JS is
- * single-threaded and nothing here awaits). `tierup` is left alone: its warm-coop pump is async and
- * the warm session is single-occupancy. Results are discarded; nothing touches the UI or `irCache`.
+ * Pre-warm the live path in the background — before any Run is requested — so the FIRST edited-source
+ * Run is as fast as every later one. The first compile + link used to pay V8 lazily compiling the
+ * frontend's and the cdylib's link-path functions (247 ms compile + 52 ms run vs 1 + 9 ms warm), and
+ * a single trivial pass isn't enough: wasm functions compile lazily PER FUNCTION (a `print 1` never
+ * touches what a real program uses) and the first call only gets baseline code. So this compiles +
+ * links a small feature-covering program several times, one pass per idle slot so the page stays
+ * responsive, through the selected `emit`/`guest` frontend — and the guest once regardless, since
+ * `emit` falls back to it on any macro program. Both are synchronous cdylib calls, so a pass can never
+ * interleave with a Run the user starts meanwhile (JS is single-threaded; nothing here awaits).
+ * `tierup` is left alone: its warm-coop pump is async over a single-occupancy warm session. Results
+ * are discarded; nothing touches the UI or `irCache`.
  */
+const PREWARM_PASSES = 3;
+const PREWARM_SRC = `# pre-warm: exercise what a typical program uses
+struct Pt {i32 x, i32 y}
+proc add {i64 a, i64 b} i64 { + $a $b }
+proc greet {str s} str { concat "hi " $s }
+proc sum-all {..nums} { mut t 0; for $nums n { set t [+ $t $n] }; $t }
+proc main {} {
+  def p [Pt x 3 y 4]
+  def m [map a 1 b 2]
+  def xs [collect [transform [vec 1 2 3] [\\ * $it 2]]]
+  mut i 0
+  while [< $i 3] { set i [+ $i 1] }
+  if [> [add 20 22] 41] { print [greet "there"] } { print "no" }
+  print [sum-all ..$xs]
+  print [+ 1.5 [* 2.0 $p->x]]
+  print [map-get $m a]
+  print "done $i"
+}
+main
+`;
 function prewarmLive(runner: TemenJaclRunner, live: Live): void {
-  try {
-    const src = "proc main {} { print 1 }\nmain\n";
-    const mode = resolveCompileMode(live);
-    const emitted =
-      mode === "emit" && live.frontend ? live.frontend.emitIr(src)
-      : live.compiler ? runner.emitIrViaCompiler(live.compiler, src)
-      : null;
-    if (emitted && !("error" in emitted)) runner.linkRun(emitted.ir, live.runtime);
-  } catch {
-    /* best-effort */
-  }
+  const idle = (f: () => void) =>
+    typeof requestIdleCallback === "function" ? requestIdleCallback(() => f(), { timeout: 500 }) : setTimeout(f, 0);
+  const passes: (() => void)[] = [];
+  const mode = resolveCompileMode(live);
+  const viaEmit = () => live.frontend && live.frontend.emitIr(PREWARM_SRC);
+  const viaGuest = () => live.compiler && runner.emitIrViaCompiler(live.compiler, PREWARM_SRC);
+  const pass = (compile: () => EmitResult | null | false) => () => {
+    try {
+      const emitted = compile();
+      if (emitted && !("error" in emitted)) runner.linkRun(emitted.ir, live.runtime);
+    } catch {
+      /* best-effort */
+    }
+  };
+  for (let i = 0; i < PREWARM_PASSES; i++) passes.push(pass(mode === "guest" ? viaGuest : viaEmit));
+  if (mode !== "guest") passes.push(pass(viaGuest)); // the macro fallback path, once
+  const next = () => { const f = passes.shift(); if (f) { f(); idle(next); } };
+  idle(next);
 }
 
 /** The manifest entry for the current source iff it is an *unedited* precompiled example. */
