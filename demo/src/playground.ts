@@ -361,7 +361,7 @@ function isMacroStagingError(e: string): boolean {
 
 /** Compile `source` to SVM IR with the chosen frontend, returning which engine actually ran (an
  *  `emit` that hits a macro falls back to the guest, so the reported mode reflects reality). */
-function compileWith(mode: CompileMode, live: Live, source: string): { emitted: EmitResult; ran: CompileMode } {
+async function compileWith(mode: CompileMode, live: Live, source: string): Promise<{ emitted: EmitResult; ran: CompileMode }> {
   if (mode === "emit") {
     const r = live.frontend!.emitIr(source);
     // Fast path succeeded, or failed for a non-macro reason (real syntax/type error) → report as-is.
@@ -369,16 +369,22 @@ function compileWith(mode: CompileMode, live: Live, source: string): { emitted: 
     // Macro program → jacl_emit can't stage it; fall back to the self-hosted guest.
     return { emitted: svmRunner!.emitIrViaCompiler(live.compiler, source), ran: "guest" };
   }
-  // `tierup`: the warm-snapshot fast path (SVM_WARM_COMPILER.md Slice 3) — open the two-phase card
-  // once, then eval each compile over the restored warm image (~2× the plain guest). Falls back to
-  // the plain self-hosted guest if the warm card isn't shipped or the engine refuses it.
+  // `tierup`: open the two-phase warm-snapshot card once (init/prelude paid once, then restored per
+  // compile), and run each compile on the **warm-coop** tier — cooperative tier-up over the warm image,
+  // the fastest self-hosted path (SVM_WARM_COMPILER.md; ~3× warm-interp on the tour). The stable
+  // cacheKey inside warmCoopEval compiles the emitted compiler module once per session. If the coop tier
+  // declines/traps we fall back to warm-interp (temen_warm_eval); if the warm card isn't shipped at all,
+  // to the plain self-hosted guest.
   if (mode === "tierup" && live.warmCompiler) {
     const r = svmRunner!;
     if (r.isWarmOpen || r.warmOpen(live.warmCompiler)) {
+      const coop = await r.warmCoopEval(source);
+      // Success, or a real compile error (not a tier decline) → report as-is; only a decline falls back.
+      if (!("error" in coop) || !coop.error.startsWith("warm-coop declined:")) return { emitted: coop, ran: "tierup" };
       return { emitted: r.warmEval(source), ran: "tierup" };
     }
   }
-  // `guest` (and the tierup fallback): run the self-hosted compiler-guest verbatim.
+  // `guest` (and the tierup fallback when no warm card): run the self-hosted compiler-guest verbatim.
   return { emitted: svmRunner!.emitIrViaCompiler(live.compiler!, source), ran: mode === "tierup" ? "guest" : mode };
 }
 
@@ -417,7 +423,7 @@ async function runOnSvm(source: string) {
     if (cachedEntry !== undefined) {
       ({ ir, ran } = cachedEntry);
     } else {
-      const out = compileWith(mode, live, source);
+      const out = await compileWith(mode, live, source);
       ran = out.ran;
       if ("error" in out.emitted) {
         displayResult({ output: "", error: out.emitted.error, isError: true }, { compileMs: performance.now() - tCompile, mode: ran });
