@@ -1,10 +1,10 @@
 name: Deploy Playground to Pages
 
-# Builds the SVM backend — the playground's sole engine. The legacy bytecode VM
-# was removed in item 6 (SVM is the only backend). The playground runs edited
-# source entirely client-side: jacl_emit.wasm (the LLVM-free frontend → SVM IR) →
-# svm_link_run in svm_browser.wasm (generic link vs jaclrt.temen + run), and runs
-# unedited examples from precompiled .temen blobs. See demo/svm/README.md.
+# Builds the TEMEN backend — the playground's sole engine. The legacy bytecode VM
+# was removed in item 6 (TEMEN is the only backend). The playground runs edited
+# source entirely client-side: jacl_emit.wasm (the LLVM-free frontend → TEMEN IR) →
+# temen_link_run in temen_browser.wasm (generic link vs jaclrt.temen + run), and runs
+# unedited examples from precompiled .temen blobs. See demo/temen/README.md.
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive   # vendor/svm — the cdylib + svm-llvm for the SVM backend
+          submodules: recursive   # vendor/temen — the cdylib + temen-llvm for the TEMEN backend
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -43,21 +43,21 @@ jobs:
           version: latest
           actions-cache-folder: emsdk-cache
 
-      - name: Setup Rust (wasm32 for the svm-browser cdylib)
+      - name: Setup Rust (wasm32 for the temen-browser cdylib)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install clang/LLVM 18 (svm-llvm bakes jaclrt.temen)
+      - name: Install clang/LLVM 18 (temen-llvm bakes jaclrt.temen)
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
-      # Produces the SVM backend assets: svm_browser.wasm + jacl_emit.{js,wasm} + jaclrt.temen
+      # Produces the TEMEN backend assets: temen_browser.wasm + jacl_emit.{js,wasm} + jaclrt.temen
       # (+ a couple precompiled example .temen). Reuses the same script the docs describe.
-      - name: Build SVM assets
-        run: bash demo/svm/build_assets.sh
+      - name: Build TEMEN assets
+        run: bash demo/temen/build_assets.sh
 
       # Bundles the CodeMirror editor via esbuild (npm ci on first run) and
       # regenerates examples.json from test/jacl/*.jacl. Produces
@@ -70,16 +70,16 @@ jobs:
       - name: Assemble site
         run: |
           rm -rf _site
-          mkdir -p _site/wasm _site/dist _site/svm/svmb
+          mkdir -p _site/wasm _site/dist _site/temen/cards
           cp demo/index.html      _site/index.html
           cp demo/examples.json   _site/examples.json
           cp demo/dist/playground.js _site/dist/playground.js
-          # SVM backend: cdylib + in-browser frontend + runtime blob + precompiled examples
-          cp demo/wasm/svm_browser.wasm _site/wasm/svm_browser.wasm
+          # TEMEN backend: cdylib + in-browser frontend + runtime blob + precompiled examples
+          cp demo/wasm/temen_browser.wasm _site/wasm/temen_browser.wasm
           cp demo/wasm/jacl_emit.js     _site/wasm/jacl_emit.js
           cp demo/wasm/jacl_emit.wasm   _site/wasm/jacl_emit.wasm
-          cp demo/svm/jaclrt.temen        _site/svm/jaclrt.temen
-          cp -r demo/svm/svmb/.         _site/svm/svmb/ 2>/dev/null || true
+          cp demo/temen/jaclrt.temen        _site/temen/jaclrt.temen
+          cp -r demo/temen/cards/.         _site/temen/cards/ 2>/dev/null || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
