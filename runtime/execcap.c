@@ -1,20 +1,20 @@
-/* execcap.c — the "exec" named-capability adapter (docs/SVM_EXEC_ASK.md).
+/* execcap.c — the "exec" named-capability adapter (docs/TEMEN_EXEC_ASK.md).
  *
  * Shell-out (`!cmd args`) resolves the "exec" capability by name and runs the command to
  * completion, returning its stdout as a string. Ungranted, it is a *catchable error*: a
  * subprocess is pure host authority, so — unlike the filesystem's guest VFS — there is no
  * in-guest fallback to emulate it. The embedder grants either the real `host_exec(allowlist)`
- * backend or a deterministic `scripted_exec` table (svm-run's `exec` cap; wire protocol in
- * crates/svm-exec). Structurally a mirror of fscap.c.
+ * backend or a deterministic `scripted_exec` table (temen-run's `exec` cap; wire protocol in
+ * crates/temen-exec). Structurally a mirror of fscap.c.
  *
- * `__vm_cap_resolve` / `__vm_host_call` are svm-llvm intrinsics lowered at translate time. */
+ * `__vm_cap_resolve` / `__vm_host_call` are temen-llvm intrinsics lowered at translate time. */
 #include <stdint.h>
 #include <string.h>
 
 extern int  __vm_cap_resolve(const char *name, long len);
 extern long __vm_host_call(int h, int op, long a, long b, long c, long d);
 
-/* exec wire ops (crates/svm-exec/src/lib.rs). */
+/* exec wire ops (crates/temen-exec/src/lib.rs). */
 #define JEXEC_RUN       0   /* run(argv_ptr, argv_len, stdin_ptr, stdin_len) -> job | -errno */
 #define JEXEC_READ_OUT  1   /* read_out(job, buf, cap) -> n | 0 = EOF | -errno */
 #define JEXEC_STATUS    3   /* status(job) -> exit code | -errno */

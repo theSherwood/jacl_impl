@@ -1,7 +1,7 @@
 /* Test-only stand-in for a codegen'd macro body: twice {x} = syntax-quote [+ ~x ~x].
- * Builds the plain-data syntax vec for [+ x x] by hand (mirrors what svm_codegen_macro_body
+ * Builds the plain-data syntax vec for [+ x x] by hand (mirrors what temen_codegen_macro_body
  * emits), so the wrapper's decode->call->encode data flow can be tested natively with the
- * real syn_rt codec. head_id 1 = "+" (matches the parser / the SVM e2e output). */
+ * real syn_rt codec. head_id 1 = "+" (matches the parser / the TEMEN e2e output). */
 #include "jaclrt.h"
 JaclVal __jacl_macro(JaclVal x) {
   JaclVal head = jacl_vec_empty();

@@ -1,9 +1,9 @@
-//! P2.2 — codegen scaffold proof (real JACL source → SVM-IR → run).
+//! P2.2 — codegen scaffold proof (real JACL source → TEMEN-IR → run).
 //!
 //! Builds the JACL frontend + the P2.2 codegen (`codegen/codegen.c`) into a driver
 //! (`codegen/tests/emit_jacl.c`, compiled with gcc — the frontend's toolchain), which
-//! parses a JACL snippet and emits the program as a v9 svm-encode **object** (decoded by
-//! `decode_emitted`; `--text` still gives svm-text for the IR-inspection tests). Each
+//! parses a JACL snippet and emits the program as a v9 temen-encode **object** (decoded by
+//! `decode_emitted`; `--text` still gives temen-text for the IR-inspection tests). Each
 //! program is linked against the separately-translated runtime (the P2.0 path) and run on
 //! interp + JIT; the result (an i32 JaclVal) is checked against the expected value.
 
@@ -22,7 +22,7 @@ const CODEGEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codegen");
 ///
 /// `-DJACL_EMIT_ONLY` selects the LLVM-free emit-only frontend (`src/jacl_emit.c`) —
 /// the same TU the product ships (jacl_emit.wasm). It drops the legacy `compiler_compile`
-/// static-error oracle, so accept/reject here is exactly the SVM backend's own behavior
+/// static-error oracle, so accept/reject here is exactly the TEMEN backend's own behavior
 /// (typer + codegen), not the old bytecode compiler's. This is a prerequisite for deleting
 /// `compiler.c`/`vm.c` (item 6, slice 3c): the oracle path links against them.
 fn driver() -> &'static Path {
@@ -45,7 +45,7 @@ fn driver() -> &'static Path {
     .as_path()
 }
 
-/// Emit one case's program as the default v9 svm-encode **object** via the codegen.
+/// Emit one case's program as the default v9 temen-encode **object** via the codegen.
 /// Decoded by `decode_emitted` (`temen_encode::decode_unit`).
 fn emit(case: &str) -> Vec<u8> {
     let out = Command::new(driver()).arg(case).output().expect("run emit_jacl");
@@ -57,7 +57,7 @@ fn emit(case: &str) -> Vec<u8> {
     out.stdout
 }
 
-/// Emit one case's program as **svm-text** (`--text`), for tests that inspect the emitted IR.
+/// Emit one case's program as **temen-text** (`--text`), for tests that inspect the emitted IR.
 fn emit_text(case: &str) -> String {
     let out = Command::new(driver()).arg("--text").arg(case).output().expect("run emit_jacl");
     assert!(
@@ -80,7 +80,7 @@ fn i32_val(x: i32) -> i64 {
     ((0x02u64 << 56) | (x as u32 as u64)) as i64
 }
 
-/// Compile `case`, link it against the runtime, wrap it with svm's powerbox entry
+/// Compile `case`, link it against the runtime, wrap it with temen's powerbox entry
 /// (`synth_manifest_start`), instantiate, and run the powerbox entry on interp + JIT
 /// (`run_diff` enforces they agree). Returns the program's returned JaclVal and captured
 /// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
@@ -93,7 +93,7 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
     // Retain the runtime's manifest capability imports (`write`, …) through the link
     // (post-IMPORTS.md-phase-4): `link_with_manifest` keeps an import no unit exports, and the
     // host binds it at instantiate. The program's entry is its func 0 — export it so we can
-    // resolve its final index after linking (mirrors bin/jacl_svm.rs).
+    // resolve its final index after linking (mirrors bin/jacl_temen.rs).
     let linked = link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
@@ -107,7 +107,7 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
         .resolve_export("__prog_entry")
         .unwrap_or_else(|| panic!("{case}: entry export missing after link"));
 
-    // Wrap the program entry in the paramless powerbox `_start` (svm lays out the writable
+    // Wrap the program entry in the paramless powerbox `_start` (temen lays out the writable
     // stash + memory), then bind the powerbox capability names. `run_diff` grants them to both
     // backends identically and enforces interp == jit.
     let pb = temen_ir::synth_manifest_start(linked, entry, false)
@@ -154,7 +154,7 @@ fn arithmetic_sub_of_mul() {
 
 #[test]
 fn arithmetic_variadic_fold() {
-    // SVM codegen folds `+` variadically (codegen.c, the compile_i32 / dynamic fold loops).
+    // TEMEN codegen folds `+` variadically (codegen.c, the compile_i32 / dynamic fold loops).
     // Now exercised: the driver is emit-only, so there is no legacy binary-`+` oracle to reject it.
     run_case("variadic", i32_val(10)); // [+ 1 2 3 4]
 }
@@ -185,7 +185,7 @@ fn binding_block_scope() {
 }
 
 #[test]
-#[ignore = "SVM codegen deliberately permits top-level `def x; def x` as reassignment \
+#[ignore = "TEMEN codegen deliberately permits top-level `def x; def x` as reassignment \
             (env_define's module_scope carve-out in codegen.c), matching the old VM's top-level \
             semantics. The emit-only driver has no oracle to reject it, so this stays ignored \
             unless top-level redef detection is added as a deliberate semantic change (ISSUES.md)."]
@@ -534,8 +534,8 @@ fn nested_await() {
 }
 
 // --- P2.10 bring-up: combined programs across the supported subset, each returning an i32.
-// These mirror the native bytecode test/*.c exec cases on the SVM backend (item 6, slice 3a):
-// they run through the same emit -> link -> run_diff path (interp == JIT), so the SVM engine is
+// These mirror the native bytecode test/*.c exec cases on the TEMEN backend (item 6, slice 3a):
+// they run through the same emit -> link -> run_diff path (interp == JIT), so the TEMEN engine is
 // the oracle the C exec tests are being retired in favor of.
 
 #[test]
@@ -593,7 +593,7 @@ fn bring_recur_sum() {
     run_case("bring_recur_sum", i32_val(55)); // sumto 10, recursive
 }
 
-// --- Concurrency (spawn/await/parallel) on the SVM fiber scheduler. `race` is intentionally
+// --- Concurrency (spawn/await/parallel) on the TEMEN fiber scheduler. `race` is intentionally
 // omitted: its result is the first block to finish, non-deterministic for pure-compute blocks.
 #[test]
 fn spawn_await() {
@@ -625,7 +625,7 @@ fn parallel_three() {
     run_case("parallel3", i32_val(42)); // 10 + 20 + 12
 }
 
-// --- Destructuring bind on SVM (item 6 slice 3a): retires test_destructure_*.c. Each is the
+// --- Destructuring bind on TEMEN (item 6 slice 3a): retires test_destructure_*.c. Each is the
 // native exec test's scenario rephrased to return an i32 so run_diff (interp == JIT) checks it.
 #[test]
 fn destructure_vec_positional() {
@@ -652,7 +652,7 @@ fn gen_sequential_yields() {
     run_case("gen_sequential", i32_val(6)); // proc with yield 1/2/3, summed over for -> 6
 }
 
-// --- Stream operators on SVM generators (probe for the test_stream_*/test_collect family).
+// --- Stream operators on TEMEN generators (probe for the test_stream_*/test_collect family).
 #[test]
 fn stream_collect_len() {
     run_case("stream_collect", i32_val(5)); // [length [collect [upto 5]]]
@@ -663,7 +663,7 @@ fn stream_count() {
     run_case("stream_count", i32_val(7)); // [count [upto 7]]
 }
 
-// --- More stream operators on SVM (item 6 slice 3a): retires test_stream_transform/filter,
+// --- More stream operators on TEMEN (item 6 slice 3a): retires test_stream_transform/filter,
 // the take/lines parts of test_stream_seq_ops/test_lines. Each runs on interp AND JIT.
 #[test]
 fn stream_transform_map() {
@@ -690,7 +690,7 @@ fn stream_first_elem() {
     run_case("stream_first", i32_val(6)); // first of filter([upto 10], >5) -> 6
 }
 
-// --- String equality + ordering on SVM (item 6 slice 3a): retires test_string_eq_cmp.c.
+// --- String equality + ordering on TEMEN (item 6 slice 3a): retires test_string_eq_cmp.c.
 #[test]
 fn string_equal() {
     run_case("string_eq", i32_val(1)); // [== "hello" "hello"] -> true
@@ -711,7 +711,7 @@ fn string_greater_than() {
     run_case("string_gt", i32_val(1)); // [> "xyz" "abc"] -> true
 }
 
-// --- index / slice builtins on SVM (item 6 slice 3a): retires test_index_builtin/test_slice_builtin.
+// --- index / slice builtins on TEMEN (item 6 slice 3a): retires test_index_builtin/test_slice_builtin.
 #[test]
 fn string_index() {
     run_case("string_index", i32_val(1)); // [index "hello" 1] == "e"
@@ -743,7 +743,7 @@ const TOUR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/to
 const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 /// JACL error flag — bit 61 of a `JaclVal` (mirrors `JACL_FLAG_ERROR` in `runtime/jaclrt.h`).
-/// A failed `assert` expands to `panic`, which the SVM backend surfaces as an error *value*
+/// A failed `assert` expands to `panic`, which the TEMEN backend surfaces as an error *value*
 /// that auto-returns out of the job (builtins.c `jacl_panic`) — so a tripped assert shows up
 /// as an error-tagged return value, not a trap or a nonzero exit.
 fn is_jacl_error(v: i64) -> bool {
@@ -760,11 +760,11 @@ fn target_profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Build the **SVM-staged** frontend driver: `emit_jacl` + codegen + the macro-staging bridge
+/// Build the **TEMEN-staged** frontend driver: `emit_jacl` + codegen + the macro-staging bridge
 /// (`stage_bridge.c`), linked against this crate's `libjacl_runtime_harness.a` (which exports
-/// `jacl_svm_stage`). This is the `codegen/selfhost/macro_staging/run_diff.sh --svm` recipe. It
+/// `jacl_temen_stage`). This is the `codegen/selfhost/macro_staging/run_diff.sh --temen` recipe. It
 /// is required for tour.jacl specifically: the tour defines and invokes a `defmacro`, and macro
-/// bodies now expand by staging on the SVM engine (there is no legacy bytecode compiler to fall
+/// bodies now expand by staging on the TEMEN engine (there is no legacy bytecode compiler to fall
 /// back to), so the plain emit-only `driver()` rejects it with "emit-only build". Cached per
 /// test process.
 fn staged_driver() -> &'static Path {
@@ -789,7 +789,7 @@ fn staged_driver() -> &'static Path {
         }
         let out = std::env::temp_dir().join(format!("jacl_emit_staged_{}", std::process::id()));
         let status = Command::new("gcc")
-            .args(["-DJACL_STAGE_ON_SVM_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
+            .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
             .arg("-I")
             .arg(format!("{REPO_ROOT}/codegen"))
             .arg(format!("{REPO_ROOT}/codegen/tests/emit_jacl.c"))
@@ -807,18 +807,18 @@ fn staged_driver() -> &'static Path {
             .arg(&out)
             .status()
             .expect("spawn gcc (staged driver)");
-        assert!(status.success(), "gcc failed to build the SVM-staged codegen driver");
+        assert!(status.success(), "gcc failed to build the TEMEN-staged codegen driver");
         out
     })
     .as_path()
 }
 
-/// Emit an arbitrary `.jacl` *file* through the staged driver's `--file` mode (`JACL_STAGE_ON_SVM=1`
-/// so macros expand on the SVM engine), then run it through the same link → powerbox → interp==jit
+/// Emit an arbitrary `.jacl` *file* through the staged driver's `--file` mode (`JACL_STAGE_ON_TEMEN=1`
+/// so macros expand on the TEMEN engine), then run it through the same link → powerbox → interp==jit
 /// path as `run_case_full`. Returns the program's returned `JaclVal` and captured stdout.
 fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
     let out = Command::new(staged_driver())
-        .env("JACL_STAGE_ON_SVM", "1")
+        .env("JACL_STAGE_ON_TEMEN", "1")
         .arg("--file")
         .arg(path)
         .output()
@@ -867,11 +867,11 @@ fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
 }
 
 #[test]
-fn syntax_tour_runs_clean_on_svm() {
+fn syntax_tour_runs_clean_on_temen() {
     // tour.jacl exercises one feature area per section — values, bindings, the three modes,
     // interpolation, procs, lambdas, if/while/for, streams, destructuring, structs, maps,
     // mutable state, errors, macros, `ctx`, and spawn/await/parallel/race — each ending in
-    // `assert`. A failed assert expands to `panic`, which the SVM backend returns as an error
+    // `assert`. A failed assert expands to `panic`, which the TEMEN backend returns as an error
     // *value* that propagates out as the job's result (no subsequent statement runs). So the
     // drift guard is twofold: the tour must run to completion on interp AND jit (`run_diff`
     // enforces they agree), and its returned value must not be an error. It prints nothing.

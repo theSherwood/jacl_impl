@@ -8,9 +8,9 @@
 #      node_modules is missing, so a fresh clone can build with
 #      `bash build_demo.sh` alone.
 #
-# The runtime WASM assets (svm_browser.wasm, jacl_emit.{js,wasm}, jaclrt.temen,
-# and the precompiled example .temen blobs) are built by demo/svm/build_assets.sh
-# — the SVM backend is the playground's sole engine.
+# The runtime WASM assets (temen_browser.wasm, jacl_emit.{js,wasm}, jaclrt.temen,
+# and the precompiled example .temen blobs) are built by demo/temen/build_assets.sh
+# — the TEMEN backend is the playground's sole engine.
 #
 # Usage: cd demo && bash build_demo.sh
 #

@@ -1,6 +1,6 @@
 /* JACL — Unity build. Include this single file to get the full pipeline.
  *
- * The sole backend is the SVM (codegen/*.c + the runtime/ Rust engine); the
+ * The sole backend is the TEMEN (codegen/*.c + the runtime/ Rust engine); the
  * legacy bytecode backend (bytecode.c / compiler.c / vm.c) and its scheduler +
  * embedding API (runtime.c / embed.c) were removed in item 6. This unity is the
  * frontend (lexer → parser → typer → shapes) plus the front-end GC (gc.c /

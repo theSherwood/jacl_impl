@@ -1,4 +1,4 @@
-/* IR-level test for svm_codegen_macro_body: a macro body compiles to a single
+/* IR-level test for temen_codegen_macro_body: a macro body compiles to a single
  * __jacl_macro(sp, params…) whose syntax-quote lowers to vec construction, and whose
  * ~unquote holes read the params (not constant vecs). For `twice {x} = [+ ~x ~x]` the
  * template has two non-hole nodes (command, "+") -> exactly 2 jacl_vec_empty; the two
@@ -19,7 +19,7 @@ int main(void) {
   for (uint32_t i = 0; i < pr.count; i++) if (pr.nodes[i]->type == AST_DEFMACRO) { dm = pr.nodes[i]; break; }
   if (!dm) { printf("FAIL: no defmacro parsed\n"); return 1; }
   char err[256] = {0}; uint32_t idx = 999;
-  IrModule *m = svm_codegen_macro_body((const char **)dm->data.defmacro.param_names,
+  IrModule *m = temen_codegen_macro_body((const char **)dm->data.defmacro.param_names,
                                        dm->data.defmacro.param_name_lens,
                                        dm->data.defmacro.param_count,
                                        dm->data.defmacro.body, &idx, err, sizeof err);

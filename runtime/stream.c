@@ -42,7 +42,7 @@ __attribute__((noinline)) JaclVal jacl_stream_take(JaclVal src, int64_t k) { ret
 
 int jacl_stream_next(JaclVal sv, JaclVal *out) {
   Stream *s = str_of(sv);
-  switch (s->kind) {                       /* switch on u32 kind -> i32 (svm-llvm OK) */
+  switch (s->kind) {                       /* switch on u32 kind -> i32 (temen-llvm OK) */
     case STK_RANGE:
       if (s->i < s->n) { *out = jaclrt_i32((int32_t)s->i); s->i++; return 1; }
       return 0;

@@ -1,8 +1,8 @@
 /* syn_wire — the staged-macro syntax-value ABI (compiler side).
  *
- * A macro re-hosted on SVM (docs/SVM_MACRO_STAGING_PLAN.md, option B) receives its
+ * A macro re-hosted on TEMEN (docs/TEMEN_MACRO_STAGING_PLAN.md, option B) receives its
  * argument ASTs and returns its result AST across a host↔guest boundary. Rather than
- * share heap objects across two incompatible heaps (native pointers vs SVM window
+ * share heap objects across two incompatible heaps (native pointers vs TEMEN window
  * offsets), we serialize an AST subtree to a flat, self-describing byte buffer and
  * reconstruct it on the other side. This is the compiler side: `AstNode ↔ bytes`.
  * (The macro side — jaclrt plain-data ↔ the same bytes — is a later brick.)

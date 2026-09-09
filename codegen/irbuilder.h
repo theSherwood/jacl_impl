@@ -1,14 +1,14 @@
-/* irbuilder.h — JACL-owned SVM-IR builder (P2.1).
+/* irbuilder.h — JACL-owned TEMEN-IR builder (P2.1).
  *
- * An in-memory SVM-IR module/func/block/inst representation mirroring svm-ir's
- * shape, with a text serializer (`irb_to_text`) emitting the svm-text format that
- * `svm_text::parse_module` accepts. This is the target of JACL's Phase-2 codegen:
+ * An in-memory TEMEN-IR module/func/block/inst representation mirroring temen-ir's
+ * shape, with a text serializer (`irb_to_text`) emitting the temen-text format that
+ * `temen_text::parse_module` accepts. This is the target of JACL's Phase-2 codegen:
  * the AST walk emits into a builder, which serializes to text, which links against
  * the runtime artifact (see runtime/harness/tests/link_artifact.rs) and runs on
- * interp + JIT. A binary (svm-encode) serializer (`irb_to_encoded`) sits behind the same
+ * interp + JIT. A binary (temen-encode) serializer (`irb_to_encoded`) sits behind the same
  * API, round-trip-gated against the text path — the bytes the §22 `Jit` capability consumes.
  *
- * Discipline (carried from Spike-1): SVM is **block-local SSA** — an instruction may
+ * Discipline (carried from Spike-1): TEMEN is **block-local SSA** — an instruction may
  * reference only its own block's params and earlier results; a value needed in
  * another block is threaded as a branch argument and received as a block param. The
  * builder enforces value *numbering* (params are v0..v{k-1}, then each result-
@@ -22,10 +22,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* svm-ir value types (ValType). */
+/* temen-ir value types (ValType). */
 typedef enum { IRB_I32, IRB_I64, IRB_F32, IRB_F64, IRB_V128, IRB_REF } IrType;
 
-/* Integer binary ops (BinOp), in svm-ir order. */
+/* Integer binary ops (BinOp), in temen-ir order. */
 typedef enum {
   IRB_ADD, IRB_SUB, IRB_MUL, IRB_DIV_S, IRB_DIV_U, IRB_REM_S, IRB_REM_U,
   IRB_AND, IRB_OR, IRB_XOR, IRB_SHL, IRB_SHR_S, IRB_SHR_U, IRB_ROTL, IRB_ROTR
@@ -37,7 +37,7 @@ typedef enum {
   IRB_GT_S, IRB_GT_U, IRB_GE_S, IRB_GE_U
 } IrCmpOp;
 
-/* Memory loads (LoadOp), in svm-ir order. */
+/* Memory loads (LoadOp), in temen-ir order. */
 typedef enum {
   IRB_LOAD_I32, IRB_LOAD_I64, IRB_LOAD_F32, IRB_LOAD_F64,
   IRB_LOAD_I32_8S, IRB_LOAD_I32_8U, IRB_LOAD_I32_16S, IRB_LOAD_I32_16U,
@@ -45,13 +45,13 @@ typedef enum {
   IRB_LOAD_I64_32S, IRB_LOAD_I64_32U
 } IrLoadOp;
 
-/* Memory stores (StoreOp), in svm-ir order. */
+/* Memory stores (StoreOp), in temen-ir order. */
 typedef enum {
   IRB_STORE_I32, IRB_STORE_I64, IRB_STORE_F32, IRB_STORE_F64,
   IRB_STORE_I32_8, IRB_STORE_I32_16, IRB_STORE_I64_8, IRB_STORE_I64_16, IRB_STORE_I64_32
 } IrStoreOp;
 
-/* Width conversions (ConvOp), in svm-ir order. */
+/* Width conversions (ConvOp), in temen-ir order. */
 typedef enum { IRB_EXTEND_I32S, IRB_EXTEND_I32U, IRB_WRAP_I64 } IrConvOp;
 
 typedef struct IrModule IrModule;
@@ -65,7 +65,7 @@ typedef int      IrBlock;  /* block index within a func */
 IrModule *irb_module_new(void);
 void      irb_module_free(IrModule *m);
 
-/* Declare a linear memory of 2^size_log2 bytes (svm-text `memory <size_log2>`).
+/* Declare a linear memory of 2^size_log2 bytes (temen-text `memory <size_log2>`).
  * Required for load/store to have backing storage. Without it no memory is emitted. */
 void      irb_set_memory(IrModule *m, uint8_t size_log2);
 
@@ -147,17 +147,17 @@ void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *ar
 
 /* ---- serialization ---- */
 
-/* Serialize the whole module to svm-text. Returns a malloc'd NUL-terminated string;
+/* Serialize the whole module to temen-text. Returns a malloc'd NUL-terminated string;
  * the caller frees it. Own-data addresses print as `data.self <offset>` (v9). */
 char *irb_to_text(const IrModule *m);
 
-/* Serialize the whole module to the svm-encode **binary object** (v9 object dialect, the
+/* Serialize the whole module to the temen-encode **binary object** (v9 object dialect, the
  * default `emit_jacl` output and the bytes the §22 `Jit` capability consumes). irb output
  * is always a pre-link unit — it carries `data.self` own-data addresses and unresolved
  * `call.sym`s that `link` resolves — so the object flag is always set. Returns a malloc'd
  * buffer of `*out_len` bytes; the caller frees it. The harness decodes it with
- * `svm_encode::decode_unit` (`decode_module` rejects objects); round-trip-equal to the text
- * path: `decode_unit(irb_to_encoded(m))` equals `svm_text::parse_unit(irb_to_text(m))`. */
+ * `temen_encode::decode_unit` (`decode_module` rejects objects); round-trip-equal to the text
+ * path: `decode_unit(irb_to_encoded(m))` equals `temen_text::parse_unit(irb_to_text(m))`. */
 uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len);
 
 #endif /* JACL_IRBUILDER_H */

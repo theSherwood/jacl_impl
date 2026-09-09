@@ -4,7 +4,7 @@
  * garbage and forces collections, then returns arg*arg. A collection run by any worker must
  * keep every block's keeper live (its roots are on a suspended job fiber) and let no mutator
  * run during the stop (violation count stays 0); results are checked against arg*arg.
- * Returns 555. Run under --release (svm-jit gc.roots trips a debug-only UB check, benign here). */
+ * Returns 555. Run under --release (temen-jit gc.roots trips a debug-only UB check, benign here). */
 #include "jaclrt.h"
 
 #define NT       8

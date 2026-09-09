@@ -1,31 +1,31 @@
-/* stage_bridge_guest — the **in-guest** macro-staging hook (docs/SVM_GUEST_JIT_STAGING.md §3/§4).
- * Installed into the frontend's `jacl_macro_stage_hook`; when the compiler runs as an SVM guest
- * (`jacl_compiler.svmb`) it expands a macro call by running the macro body on the SAME domain via
+/* stage_bridge_guest — the **in-guest** macro-staging hook (docs/TEMEN_GUEST_JIT_STAGING.md §3/§4).
+ * Installed into the frontend's `jacl_macro_stage_hook`; when the compiler runs as an TEMEN guest
+ * (`jacl_compiler.temen`) it expands a macro call by running the macro body on the SAME domain via
  * the §22 `Jit` capability — no host round-trip, no reference VM:
- *   1. codegen the body into a staged-macro module (svm_codegen_staged_macro, in_guest=1)
- *   2. serialize it to a v9 svm-encode object                (irb_to_encoded)
+ *   1. codegen the body into a staged-macro module (temen_codegen_staged_macro, in_guest=1)
+ *   2. serialize it to a v9 temen-encode object                (irb_to_encoded)
  *   3. build the {name -> Slot(&fn)} symbol table            (synrt_build_symtab, guest glue)
  *   4. compile+link the object against the table             (__vm_jit_compile_linked)
  *   5. hand it the argument wire, run its entry              (synrt_set_arg_wire, __vm_jit_invoke2)
  *   6. drain + decode the result wire                        (synrt_take_result, synw_decode)
  *
- * The staged runtime (jacl_* / synrt_*) is linked into this same `.svmb` (jaclrt_staging_guest.c);
+ * The staged runtime (jacl_* / synrt_*) is linked into this same `.temen` (jaclrt_staging_guest.c);
  * the symtab binds the macro object's `call.sym` imports to those functions' call_indirect slots.
  * Compiled as its own TU (not unity with the driver), like stage_bridge.c. */
 #include "../../../src/jacl.h" /* AstNode, MacroEntry, arena_t */
-#include "../../codegen.h"     /* svm_codegen_staged_macro */
+#include "../../codegen.h"     /* temen_codegen_staged_macro */
 #include "../../irbuilder.h"   /* irb_to_encoded */
 #include "syn_wire.c"          /* synw_encode / synw_decode (unity; needs the frontend above) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* §22 Jit capability (svm-llvm binds these __vm_jit_* names to iface 11 ops). */
+/* §22 Jit capability (temen-llvm binds these __vm_jit_* names to iface 11 ops). */
 extern long __vm_jit_compile_linked(void *ir, long ir_len, void *symtab, long symtab_len);
 extern long __vm_jit_invoke2(long code, long a, long b);
 extern long __vm_jit_release(long code);
 
-/* The in-guest staging glue (jaclrt_staging_guest.c, linked into this .svmb). */
+/* The in-guest staging glue (jaclrt_staging_guest.c, linked into this .temen). */
 extern void synrt_set_arg_wire(const unsigned char *buf, size_t len);
 extern unsigned char *synrt_take_result(size_t *len);
 extern size_t synrt_build_symtab(unsigned char *out, size_t cap);
@@ -34,13 +34,13 @@ extern unsigned char synrt_window_log2(void);
 
 /* Matches jacl_macro_stage_hook: expand `entry(args…)` in-guest, returning the AST in *out
  * (arena-allocated). NULL on success, else an error string. */
-static const char *jacl_stage_macro_on_svm_guest(MacroEntry *entry, AstNode **args, uint32_t argc,
+static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **args, uint32_t argc,
                                                  arena_t *arena, AstNode **out) {
   static char errbuf[256];
   *out = NULL;
 
   /* 1-2. codegen the staged-macro module (guest ABI: arity-2 entry) and serialize it. */
-  IrModule *m = svm_codegen_staged_macro((const char **)entry->param_names,
+  IrModule *m = temen_codegen_staged_macro((const char **)entry->param_names,
                                          entry->param_name_lens, entry->param_count,
                                          entry->variadic, entry->body, /*in_guest=*/1,
                                          errbuf, sizeof errbuf);
@@ -93,7 +93,7 @@ static const char *jacl_stage_macro_on_svm_guest(MacroEntry *entry, AstNode **ar
 }
 
 /* Install the hook. The driver calls this once at startup; activation is still gated by the
- * `JACL_STAGE_ON_SVM` env var inside the expander, so installing it is always safe. */
-void jacl_install_svm_stage_hook(void) {
-  jacl_macro_stage_hook = jacl_stage_macro_on_svm_guest;
+ * `JACL_STAGE_ON_TEMEN` env var inside the expander, so installing it is always safe. */
+void jacl_install_temen_stage_hook(void) {
+  jacl_macro_stage_hook = jacl_stage_macro_on_temen_guest;
 }

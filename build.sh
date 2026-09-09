@@ -110,8 +110,8 @@ TESTS=(
     # C-internal unit tests that link against the VM-free libjacl.a. The VM-only
     # tests (bytecode/compiler/vm/embed/e2e, milestones, and the run_ok-driven
     # feature tests that executed on the legacy VM) were removed with the bytecode
-    # backend in item 6; SVM feature coverage lives in runtime/harness/tests/*.rs
-    # and the SVM GC's concurrent/MT coverage in runtime/tests/*_mt.c.
+    # backend in item 6; TEMEN feature coverage lives in runtime/harness/tests/*.rs
+    # and the TEMEN GC's concurrent/MT coverage in runtime/tests/*_mt.c.
     "test/test_value.c|value|"
     "test/test_lexer.c|lexer|"
     "test/test_parser.c|parser|"

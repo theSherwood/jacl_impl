@@ -41,7 +41,7 @@ fn par_min() {
 fn par_gc() {
     // JIT-only: the continuation pool is now GC-sound under heavy concurrent collection on the
     // real backend (real OS-thread vCPUs) — the job registry roots every live job so a job (incl.
-    // the program root) is never swept mid-collection. The svm *interpreter*'s cooperative
+    // the program root) is never swept mid-collection. The temen *interpreter*'s cooperative
     // single-thread scheduler livelocks on the pool's futex traffic under this load (a simulation
     // artifact — see run_test_jit), so the differential oracle can't drive this case.
     let r = jacl_runtime_harness::run_test_jit("test_par_gc.c", 0);

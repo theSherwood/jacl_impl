@@ -14,7 +14,7 @@ JACL original** — that equality is the correctness gate for the comparison.
 | `box_churn` | short-lived single-slot allocations (3M) | `21000000` |
 | `string_concat` | O(N²) immutable string building (400 rounds) | `160400` |
 
-`_baseline.jacl` (`print 0`) exists only to measure the SVM JIT's per-run compile
+`_baseline.jacl` (`print 0`) exists only to measure the TEMEN JIT's per-run compile
 tax; it is not a workload.
 
 ## What is measured
@@ -28,7 +28,7 @@ the numbers are comparable.
 | Runtime | Harness | One-time cost excluded |
 |---|---|---|
 | Old bytecode VM | `test/test_perf.c` (`.build/perf`) | compile to bytecode |
-| **SVM JIT** (new) | `runtime/harness` → `bench_svm` | runtime translation + Cranelift compile |
+| **TEMEN JIT** (new) | `runtime/harness` → `bench_temen` | runtime translation + Cranelift compile |
 | CPython 3.11 | `pytimer` (below) | interpreter startup, import |
 | Node 22 (V8) | `nodetimer` (below) | process startup, TurboFan warm-up |
 | Clojure 1.12 (JVM) | `_bench_runner.clj` (this suite) | JVM startup, HotSpot C2 warm-up |
@@ -38,7 +38,7 @@ the numbers are comparable.
 Times in **milliseconds, minimum of timed runs, execution-only**. Single machine,
 best-of-N; treat as order-of-magnitude with ±10–15% run-to-run noise.
 
-| Scenario | Old VM | **SVM JIT** | Python 3.11 | Node 22 | Clojure/JVM |
+| Scenario | Old VM | **TEMEN JIT** | Python 3.11 | Node 22 | Clojure/JVM |
 |---|--:|--:|--:|--:|--:|
 | `fib` | 3384 | **258** | 613 | 60 | 54 |
 | `sieve` | 2954 | **255** | 342 | 21 | 5.0 |
@@ -49,13 +49,13 @@ best-of-N; treat as order-of-magnitude with ±10–15% run-to-run noise.
 ¹ The old VM exhausts its GC (1.5 MB threshold) on the scaled `string_concat` and
 aborts. It completes at the unscaled size.
 
-**SVM JIT** figures are execution-only with the harness's ~198 ms/run Cranelift
+**TEMEN JIT** figures are execution-only with the harness's ~198 ms/run Cranelift
 recompile subtracted (a one-time cost under real AOT use). Even *without*
 subtracting — counting a full recompile on every run — the JIT still beats the old
 VM ~7× on `fib`. The raw per-run JIT figures (incl. compile) are `fib` 455,
 `sieve` 452, `map_lookup` 402, `box_churn` 331, `string_concat` 250 ms.
 
-**Headline:** the migration from the bytecode VM to SVM made JACL **8–25× faster**
+**Headline:** the migration from the bytecode VM to TEMEN made JACL **8–25× faster**
 (13× on `fib`) with identical results, landing it around CPython. The two mature
 JITs — V8 and the JVM's HotSpot — are still ahead.
 
@@ -71,9 +71,9 @@ BENCH_SCENARIOS="fib_recursive,sieve_primes,map_lookup_hot" ./.build/perf
 #   the scaled workloads, temporarily copy bench_scaled/<x>.jacl over the matching
 #   bench/<name>.jacl the table expects, run, then restore.
 
-# SVM JIT + interp (execution-only; interp is the slow correctness oracle)
+# TEMEN JIT + interp (execution-only; interp is the slow correctness oracle)
 cd runtime/harness
-BENCH_NO_INTERP=1 cargo run --release --bin bench_svm -- \
+BENCH_NO_INTERP=1 cargo run --release --bin bench_temen -- \
   ../../test/jacl/bench_scaled/_baseline.jacl \
   ../../test/jacl/bench_scaled/fib.jacl  # … etc
 
@@ -86,7 +86,7 @@ clojure -M test/clojure/bench_scaled/_bench_runner.clj
 #   dynamic import, warm 3×, time run() 10×, report min/median (performance.now)
 ```
 
-The `bench_svm` and `test_perf` harnesses are part of the SVM migration work; a
+The `bench_temen` and `test_perf` harnesses are part of the TEMEN migration work; a
 full run of all five columns requires that code to be present.
 
 ---
@@ -96,7 +96,7 @@ full run of all five columns requires that code to be present.
 Clojure runs on the JVM — one of the most heavily optimized runtimes ever built —
 so being 3–5× behind it (and ~50× on `sieve`) is not surprising in absolute
 terms. But the *shape* of the gap points at specific, fixable things in the JACL →
-SVM lowering, not at a fundamental ceiling. Concretely:
+TEMEN lowering, not at a fundamental ceiling. Concretely:
 
 ### 1. Comparisons, `%`, and `/` are out-of-line runtime calls — the biggest gap
 
@@ -110,7 +110,7 @@ a boxed result.
 This is why `sieve` is the worst case: its inner loop is
 `while (i*i <= k) { if (k % i == 0) … }`. The `<=`, `%`, and `==` are **three
 function calls per inner iteration**, while HotSpot compiles them to three machine
-instructions (`cmp`, `idiv`/`irem`). Clojure finishes `sieve` in 5 ms; the SVM JIT
+instructions (`cmp`, `idiv`/`irem`). Clojure finishes `sieve` in 5 ms; the TEMEN JIT
 takes 255 ms — a 51× gap that is almost entirely call overhead on the hottest ops.
 
 > **Highest-leverage fix:** lower typed comparisons, `%`, and `/` to native `IRB_*`
@@ -129,7 +129,7 @@ feedback routinely unbox across exactly those boundaries. `fib` — which is not
 but "pass a number to a call, get a number back" — pays this on every one of its
 ~11.4M calls.
 
-### 3. No cross-function inlining, and calls are the SVM calling convention
+### 3. No cross-function inlining, and calls are the TEMEN calling convention
 
 `fib` calls `fib`. In this pipeline nothing inlines across function boundaries, so
 each call is a full frame setup passing/returning boxed values, plus a `jacl_lt`
@@ -166,7 +166,7 @@ less and the field levels out.
 
 **Bottom line:** the ranking is dominated by items 1–2 — dynamic dispatch on hot
 scalar ops and pervasive boxing — both of which are lowering choices with clear
-paths forward, not inherent limits of the SVM backend. The migration already
+paths forward, not inherent limits of the TEMEN backend. The migration already
 bought an 8–25× win over the old VM; closing more of the distance to the mature
 JITs is mostly a matter of extending the typed-native lowering that `+ − *`
 already demonstrates.

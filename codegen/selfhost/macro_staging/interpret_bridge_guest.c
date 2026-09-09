@@ -1,16 +1,16 @@
-/* interpret_bridge_guest — the **in-guest** `[interpret SRC]` hook (docs/SVM_GUEST_JIT_STAGING.md §5,
- * model B). Installed into `jacl_interpret_hook`; when a codegen-linked program (the compiler `.svmb`,
+/* interpret_bridge_guest — the **in-guest** `[interpret SRC]` hook (docs/TEMEN_GUEST_JIT_STAGING.md §5,
+ * model B). Installed into `jacl_interpret_hook`; when a codegen-linked program (the compiler `.temen`,
  * or a test harness) evaluates `[interpret SRC]`, `jacl_interpret1` calls this instead of the host
  * `interp` capability round-trip (interpcap.c) — retiring `vm.c` from the interpret path.
  *
  * It is the macro-staging machinery generalized from a macro *body* to a whole *program*:
- *   1. lex + parse + type the source                   (the frontend, linked into this .svmb;
+ *   1. lex + parse + type the source                   (the frontend, linked into this .temen;
  *                                                        macro expansion is a follow-up — see below)
- *   2. codegen a runnable in-guest module               (svm_codegen_program — an arity-2 entry;
+ *   2. codegen a runnable in-guest module               (temen_codegen_program — an arity-2 entry;
  *                                                         in_guest=1 runs straight-line source inline,
  *                                                         in_guest=2 runs concurrent source on the
  *                                                         scheduler root fiber over the Jit grant)
- *   3. serialize to a v9 svm-encode object              (irb_to_encoded, data-segment-free via §3b)
+ *   3. serialize to a v9 temen-encode object              (irb_to_encoded, data-segment-free via §3b)
  *   4. compile+link against the runtime symbol table    (synrt_build_symtab, __vm_jit_compile_linked)
  *   5. run it on the Jit cap, over the staging stack     (__vm_jit_invoke2)
  *
@@ -25,18 +25,18 @@
  * `jaclrt.h` (no external symbol), so declaring them `extern` here would trap under `--stub-externs`.
  * The two worlds share the JaclVal encoding (a heap string is tag 5 in both). */
 #include "../../../src/jacl.h" /* JaclVal, JACL_NIL/JACL_FLAG_ERROR, jacl_is_string, lexer/parser/… */
-#include "../../codegen.h"     /* svm_codegen_program */
+#include "../../codegen.h"     /* temen_codegen_program */
 #include "../../irbuilder.h"   /* irb_to_encoded, irb_set_memory, irb_module_free */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* §22 Jit capability (svm-llvm binds these to iface 11 ops). */
+/* §22 Jit capability (temen-llvm binds these to iface 11 ops). */
 extern long __vm_jit_compile_linked(void *ir, long ir_len, void *symtab, long symtab_len);
 extern long __vm_jit_invoke2(long code, long a, long b);
 extern long __vm_jit_release(long code);
 
-/* The in-guest staging glue (jaclrt_staging_guest.c, linked into this .svmb) — shared with macros. */
+/* The in-guest staging glue (jaclrt_staging_guest.c, linked into this .temen) — shared with macros. */
 extern size_t synrt_build_symtab(unsigned char *out, size_t cap);
 extern unsigned long synrt_macro_dstack_base(void);
 extern unsigned char synrt_window_log2(void);
@@ -54,7 +54,7 @@ extern const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_
 /* `jacl_interpret_hook`-shaped: compile SRC and run it on the Jit cap, returning its value (a live
  * JaclVal in this window). An error value on any failure — a bad source is a catchable interpret
  * error, exactly like the ungranted-cap path (interpcap.c). */
-static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
+static JaclVal jacl_interpret_on_temen_guest(JaclVal src) {
   if (!jacl_is_string(src)) return INTERP_ERR;
   uint32_t slen = jacl_str_len(src);
   char *buf = (char *)malloc((size_t)slen + 1);
@@ -71,8 +71,8 @@ static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) { arena_destroy(&arena); return INTERP_ERR; }
   /* Expand user `defmacro`s exactly as the compiler does before codegen (expand_macros_inplace,
-   * emit_jacl.c). With the macro-staging hook installed (jacl_install_svm_stage_hook), macro bodies
-   * expand on the SVM engine in this same domain — no reference VM. NULL == success. */
+   * emit_jacl.c). With the macro-staging hook installed (jacl_install_temen_stage_hook), macro bodies
+   * expand on the TEMEN engine in this same domain — no reference VM. NULL == success. */
   if (expand_macros_inplace(parse.nodes, parse.count, &arena)) { arena_destroy(&arena); return INTERP_ERR; }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
 
@@ -80,9 +80,9 @@ static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
    * in the arity-2 entry (in_guest=1, no fiber authority); source that reaches a suspension point
    * (spawn/await/parallel/race/yield/sleep) runs its body on the scheduler root fiber (in_guest=2,
    * needs the fiber-hosting Jit grant). Both entries are arity-2, so __vm_jit_invoke2 is unchanged. */
-  int concurrent = svm_program_uses_concurrency(parse.nodes, parse.count);
+  int concurrent = temen_program_uses_concurrency(parse.nodes, parse.count);
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, /*module_mode=*/0,
+  IrModule *m = temen_codegen_program(parse.nodes, parse.count, /*module_mode=*/0,
                                     /*in_guest=*/concurrent ? 2 : 1, err, sizeof err);
   arena_destroy(&arena);
   if (!m) return INTERP_ERR;
@@ -109,6 +109,6 @@ static JaclVal jacl_interpret_on_svm_guest(JaclVal src) {
 
 /* Install the hook. The driver calls this once at startup; `jacl_interpret1` (interpcap.c) uses it
  * when set and otherwise falls back to the host `interp` capability, so installing it is always safe. */
-void jacl_install_svm_interpret_hook(void) {
-  jacl_interpret_hook = jacl_interpret_on_svm_guest;
+void jacl_install_temen_interpret_hook(void) {
+  jacl_interpret_hook = jacl_interpret_on_temen_guest;
 }

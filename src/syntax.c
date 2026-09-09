@@ -900,25 +900,25 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 
 
 
-/* Optional staging hook (Phase 5 of docs/SVM_MACRO_STAGING_PLAN.md). When installed by the
- * codegen driver, a macro call is expanded by running the macro body on the **SVM engine**
- * (codegen the body → run in-process via the `jacl_svm_stage` bridge → decode the result)
+/* Optional staging hook (Phase 5 of docs/TEMEN_MACRO_STAGING_PLAN.md). When installed by the
+ * codegen driver, a macro call is expanded by running the macro body on the **TEMEN engine**
+ * (codegen the body → run in-process via the `jacl_temen_stage` bridge → decode the result)
  * instead of the legacy bytecode VM. The hook takes the macro entry and the call's argument
  * ASTs and returns the expanded AST in `*out` (allocated in `arena`); it returns NULL on
- * success or an error string. Left NULL (a build that does not link the SVM stage bridge) the
+ * success or an error string. Left NULL (a build that does not link the TEMEN stage bridge) the
  * behaviour is exactly the legacy path. This is the seam that keeps `src/` free of any
- * codegen/SVM dependency: the driver installs it. */
+ * codegen/TEMEN dependency: the driver installs it. */
 const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
                                      arena_t *arena, AstNode **out) = NULL;
 
-/* Whether to stage macros on SVM (Phase 6.2: staging is the **default** once the bridge is
+/* Whether to stage macros on TEMEN (Phase 6.2: staging is the **default** once the bridge is
  * linked). It applies only where `jacl_macro_stage_hook` is installed — a build without the
  * bridge leaves the hook NULL and always takes the legacy path regardless. Set
- * `JACL_STAGE_ON_SVM=0` to force the legacy path even in a bridged build (e.g. to regenerate
+ * `JACL_STAGE_ON_TEMEN=0` to force the legacy path even in a bridged build (e.g. to regenerate
  * the legacy oracle). Any other value — or unset — means staging. */
-static int jacl_stage_on_svm_enabled(void) {
+static int jacl_stage_on_temen_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *v = getenv("JACL_STAGE_ON_SVM"); cached = !(v && v[0] == '0'); }
+    if (cached < 0) { const char *v = getenv("JACL_STAGE_ON_TEMEN"); cached = !(v && v[0] == '0'); }
     return cached;
 }
 
@@ -980,10 +980,10 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     return false;
                 }
 
-                /* Phase 5: stage the macro body on the SVM engine instead of the legacy VM.
+                /* Phase 5: stage the macro body on the TEMEN engine instead of the legacy VM.
                  * Produces the expanded AST directly (no jaclrt syntax value / syntax_to_ast),
                  * then splices + re-expands exactly like the legacy tail below. */
-                if (jacl_macro_stage_hook && jacl_stage_on_svm_enabled()) {
+                if (jacl_macro_stage_hook && jacl_stage_on_temen_enabled()) {
                     AstNode *expanded = NULL;
                     const char *serr = jacl_macro_stage_hook(
                         entry, node->data.command.args, argc, arena, &expanded);
@@ -1021,13 +1021,13 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 }
 
 #ifdef JACL_EMIT_ONLY
-                /* Emit-only build: macros expand exclusively through the SVM staging hook (handled
+                /* Emit-only build: macros expand exclusively through the TEMEN staging hook (handled
                  * above); the legacy bytecode-VM evaluator (jacl_ctx_run_closure) is not linked. If
                  * the hook is unset we cannot expand — a configuration error, reported as such. */
                 {
                     char err[256];
                     snprintf(err, sizeof(err),
-                             "macro '%.*s': SVM staging hook not installed (emit-only build has no legacy VM)",
+                             "macro '%.*s': TEMEN staging hook not installed (emit-only build has no legacy VM)",
                              (int)name_len, name);
                     expand__set_error(es, err, node->start.line, node->start.column, arena);
                     return false;
@@ -1156,7 +1156,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
  * is available for jacl_ctx_run_closure when a staged macro is invoked. */
 #ifdef JACL_EMIT_ONLY
 /* Emit-only build: no legacy bytecode compiler is linked. Macro bodies are compiled per call
- * onto the SVM engine via the staging hook, so no legacy closure is ever built — this is a
+ * onto the TEMEN engine via the staging hook, so no legacy closure is ever built — this is a
  * never-called stub (its two call sites are runtime-skipped under staging + skip-prelude). */
 static const char *expand__compile_staged_body(MacroEntry *entry, ThreadHeap *heap,
                                                JaclInternTable *intern, arena_t *arena) {
@@ -1227,7 +1227,7 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
 
 /* Opt-in: when set, ast_expand_macros skips registering the built-in prelude macros
  * (assert / timeout / not / and / or / incr / \), so only user `defmacro`s are expanded.
- * The reference VM leaves this 0 (prelude always registered — unchanged behavior); the SVM
+ * The reference VM leaves this 0 (prelude always registered — unchanged behavior); the TEMEN
  * codegen driver sets it, because it lowers the prelude macros by name at codegen time (e.g.
  * `timeout` → jacl_timeout_begin/end, which the race/sleep/error expansion can't match) and
  * only needs macro expansion for user-defined macros the name handlers can't know about. */
@@ -1418,11 +1418,11 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     }
 
     /* Phase 2: Compile macro bodies into legacy bytecode closures — for the legacy VM's
-     * `jacl_ctx_run_closure` (Phase 3). Skipped entirely when the SVM staging hook is active
-     * (JACL_STAGE_ON_SVM): staging codegens each body onto the SVM engine per call, so no
+     * `jacl_ctx_run_closure` (Phase 3). Skipped entirely when the TEMEN staging hook is active
+     * (JACL_STAGE_ON_TEMEN): staging codegens each body onto the TEMEN engine per call, so no
      * legacy closure is needed. This is the first Phase-6 cut of the macro path's dependence
-     * on `compiler.c` / `bytecode.c` / `vm.c` (docs/SVM_MACRO_STAGING_PLAN.md, Phase 6). */
-    int staging_active = jacl_macro_stage_hook && jacl_stage_on_svm_enabled();
+     * on `compiler.c` / `bytecode.c` / `vm.c` (docs/TEMEN_MACRO_STAGING_PLAN.md, Phase 6). */
+    int staging_active = jacl_macro_stage_hook && jacl_stage_on_temen_enabled();
     if (!staging_active) {
         for (uint32_t i = 0; i < macros->count; i++) {
             MacroEntry *entry = &macros->entries[i];

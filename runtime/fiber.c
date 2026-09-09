@@ -1,4 +1,4 @@
-/* fiber.c — P3.1 generators on svm stackful fibers (cont.*).
+/* fiber.c — P3.1 generators on temen stackful fibers (cont.*).
  *
  * A JACL generator (a proc whose body contains `yield`) lowers to a codegen function
  * `(i64 sp, i64 arg) -> i64`; `yield V` is the `suspend` op. This runtime side wraps
@@ -12,7 +12,7 @@
  */
 #include "jaclrt.h"
 
-/* svm fiber intrinsics (svm-llvm lowers these to cont.new / cont.resume). The guest
+/* temen fiber intrinsics (temen-llvm lowers these to cont.new / cont.resume). The guest
  * fiber handle is an i64 (16-bit slot + 48-bit generation); the resume status stays i32. */
 long __vm_fiber_new(long (*f)(long), void *stack);
 long __vm_fiber_resume(long k, long arg, int *done);

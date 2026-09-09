@@ -1,4 +1,4 @@
-/* codegen.c — JACL AST → SVM-IR (P2.2–P2.4 scaffold). See codegen.h. */
+/* codegen.c — JACL AST → TEMEN-IR (P2.2–P2.4 scaffold). See codegen.h. */
 #include "codegen.h"
 
 #include "../src/jacl.h"   /* AstNode, AstNodeType, HeadId, JaclType */
@@ -37,7 +37,7 @@ static const char *binary_runtime_fn(uint8_t head_id) {
 
 /* ---- compile context: current block + lexical environment ----
  *
- * SVM is block-local SSA, so any value used in a block must be one of its params or
+ * TEMEN is block-local SSA, so any value used in a block must be one of its params or
  * defined in it. Across control-flow edges we therefore thread a *frame* — the data-
  * stack pointer `sp` plus every live local — as block params: a branch passes the
  * current frame, and the target block rebinds `sp`/locals to its params. A `set`
@@ -57,7 +57,7 @@ typedef struct {
   int32_t     buf_size;                            /* fixed Buf length, or -1 */
 } Binding;
 
-/* A top-level proc: name -> its SVM function + arity. Registered before any body is
+/* A top-level proc: name -> its TEMEN function + arity. Registered before any body is
  * compiled, so (mutual) recursion resolves. */
 typedef struct {
   const char *name;
@@ -119,7 +119,7 @@ typedef struct {
   int nsdefs;
 
   /* extern (FFI) declarations: name -> C-ABI signature. A pointer param ([Ptr T]/[Buf N T])
-   * decays to a raw i64 address; a scalar param passes as a native i32. See docs/SVM_BUFFERS.md. */
+   * decays to a raw i64 address; a scalar param passes as a native i32. See docs/TEMEN_BUFFERS.md. */
   struct EDef {
     char name[64]; uint32_t len;   /* NUL-terminated (the import symbol passed to the linker) */
     int arity;
@@ -135,10 +135,10 @@ typedef struct {
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
   int module_mode;   /* compiling a multi-module program: top-level `mut` globals are boxed so a
                       * cross-module import shares one cell (deref/reset), matching the reference. */
-  int staged_macro;  /* compiling a staged-macro body (svm_codegen_staged_macro): a `[gensym]`
+  int staged_macro;  /* compiling a staged-macro body (temen_codegen_staged_macro): a `[gensym]`
                       * inside syntax-quote lowers to a runtime name-mint (synrt_gensym). In the
                       * normal path macros are pre-expanded, so compile_synquote never sees it. */
-  int data_free;     /* in-guest staging (svm_codegen_staged_macro in_guest): string literals must
+  int data_free;     /* in-guest staging (temen_codegen_staged_macro in_guest): string literals must
                       * NOT emit a `data` segment (the §22 `Jit` cap rejects them), so they build
                       * incrementally from immediate bytes via synrt_str_* — see compile_string_literal. */
 } Cx;
@@ -2287,7 +2287,7 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
 /* Lower one expression to an i64 SSA value (a JaclVal) in the current block. */
 /* Lower a `syntax-quote` template into runtime construction of a plain-data syntax
  * value — a jaclrt vector [kind, scope_mark, flags, ...payload], the representation
- * codegen/selfhost/macro_staging/syn_rt.c decodes/encodes (docs/SVM_MACRO_STAGING_PLAN.md,
+ * codegen/selfhost/macro_staging/syn_rt.c decodes/encodes (docs/TEMEN_MACRO_STAGING_PLAN.md,
  * option B). An `~unquote` hole evaluates its child (already a syntax value) and splices
  * it in. Node kinds are corpus-scoped (command/block/literal/var-ref); others fail.
  *
@@ -2656,7 +2656,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       }
 
       /* `print V` — write V's text + newline to stdout via the powerbox Stream capability
-       * (jacl_print → libc write → Stream.write). The harness wraps the program with svm's
+       * (jacl_print → libc write → Stream.write). The harness wraps the program with temen's
        * synth_powerbox_start, so the stdout handle is stashed before the program runs. */
       if (hid == HEAD_PRINT) {
         IrVal v = (node->data.command.arg_count >= 1)
@@ -4279,7 +4279,7 @@ static int is_proc_def(AstNode *n) {
  * suspension" group (spawn/await/parallel/race/yield/sleep)? Unlike contains_yield this
  * descends into everything, including nested procs: a proc that awaits still needs the
  * enclosing execution to run on a scheduler fiber, so the whole program does. Used only to
- * pick the in-guest `interpret` entry ABI (inline vs scheduler); see svm_program_uses_concurrency. */
+ * pick the in-guest `interpret` entry ABI (inline vs scheduler); see temen_program_uses_concurrency. */
 static int node_uses_concurrency(AstNode *node) {
   if (!node) return 0;
   if (node->type == AST_COMMAND) {
@@ -4302,9 +4302,9 @@ static int node_uses_concurrency(AstNode *node) {
 }
 
 /* Whole-program predicate: does any top-level form reach a concurrency/suspension op? The
- * in-guest `interpret` bridge uses this to choose svm_codegen_program's `in_guest` mode — 1
+ * in-guest `interpret` bridge uses this to choose temen_codegen_program's `in_guest` mode — 1
  * (inline, no fiber authority) for straight-line source, 2 (scheduler root fiber) otherwise. */
-int svm_program_uses_concurrency(AstNode **nodes, uint32_t count) {
+int temen_program_uses_concurrency(AstNode **nodes, uint32_t count) {
   for (uint32_t i = 0; i < count; i++)
     if (node_uses_concurrency(nodes[i])) return 1;
   return 0;
@@ -4351,7 +4351,7 @@ static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
     cx_fail(cx, msg);
     return 0;
   }
-  /* svm-llvm gives every translated C function an implicit leading data-SP param, so the
+  /* temen-llvm gives every translated C function an implicit leading data-SP param, so the
    * catalog's `t_*` are `(i64 sp, args…)` at the IR level — thread sp as arg 0. */
   IrType sig[1 + CG_MAX_PARAMS];
   IrVal cargs[1 + CG_MAX_PARAMS];
@@ -4376,7 +4376,7 @@ static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
   return box_i32(cx, ret);
 }
 
-/* Pass 1: create an SVM function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
+/* Pass 1: create an TEMEN function (data-SP ABI: `func (i64 sp, i64 a0…) -> i64`) for
  * each top-level proc and register name -> {func, arity}, so calls (incl. recursion)
  * resolve before any body is compiled. */
 static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count) {
@@ -4402,7 +4402,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     /* A generator (body has `yield`) is a fiber function `(i64 sp, i64 arg) -> i64`:
      * the single declared param binds to the resume arg. Otherwise a plain proc
      * `(i64 sp, i64 a0…)`. A variadic proc's declared params already count the rest
-     * slot (its last name), which the SVM function receives as the packed vector. */
+     * slot (its last name), which the TEMEN function receives as the packed vector. */
     int gen = contains_yield(def->data.command.args[argc - 1]);
     /* Return annotation (between params and body) of the form `[Stream T]` marks a typed
      * stream: its collected/transformed/filtered results are typed vectors (comma print). */
@@ -4514,7 +4514,7 @@ static void compile_pending_closures(Cx *cx) {
   }
 }
 
-IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, int in_guest,
+IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode, int in_guest,
                               char *err, size_t errcap) {
   Cx cx;
   memset(&cx, 0, sizeof cx);
@@ -4528,7 +4528,7 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
   /* Native: func 0 = entry `(sp)` inits the runtime and runs func 1 = __jacl_main(sp, arg) as the
    * ROOT TASK on a scheduler fiber (program-as-a-job; roots live on a scannable fiber stack, GC-safe).
    *
-   * in_guest (`[interpret …]` run on the Jit cap, docs/SVM_GUEST_JIT_STAGING.md §5):
+   * in_guest (`[interpret …]` run on the Jit cap, docs/TEMEN_GUEST_JIT_STAGING.md §5):
    *   1 = guest-**inline**: the program runs inline in the arity-2 entry `(sp, _)` — init the
    *       runtime, run the top-level forms, return the last value. No scheduler/`suspend`; for
    *       **non-concurrent** source (the §22 `Jit` cap hosts fibers only when the grant opts in).
@@ -4625,12 +4625,12 @@ IrModule *svm_codegen_program(AstNode **nodes, uint32_t count, int module_mode, 
  * whose params bind the macro's parameters and whose body is lowered normally — a
  * `syntax-quote` template becomes plain-data vec construction (compile_synquote), with
  * `~unquote` holes reading the corresponding param (an incoming syntax value). This is
- * the codegen half of staged macro evaluation (docs/SVM_MACRO_STAGING_PLAN.md, Phase 3):
+ * the codegen half of staged macro evaluation (docs/TEMEN_MACRO_STAGING_PLAN.md, Phase 3):
  * a host wrapper decodes the argument syntax values, calls this function, and encodes the
  * returned syntax value. No entry/scheduler here — the wrapper module provides `_start`;
  * `__jacl_macro` is resolved by name at link time (like the runtime's exports). Returns
  * the func's index via `*out_func_idx` for the link step. */
-IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint32_t nparams,
+IrModule *temen_codegen_macro_body(const char **names, const uint32_t *lens, uint32_t nparams,
                                  AstNode *body, uint32_t *out_func_idx,
                                  char *err, size_t errcap) {
   Cx cx;
@@ -4672,14 +4672,14 @@ IrModule *svm_codegen_macro_body(const char **names, const uint32_t *lens, uint3
 /* Compile a macro into a complete, runnable **staged-macro program**: a module whose
  * scheduler-root body reads the argument syntax value from stdin, runs the macro body with
  * the parameter bound to it, and writes the result syntax value to stdout — evaluating the
- * macro on the SVM engine (docs/SVM_MACRO_STAGING_PLAN.md, "final link", corrected design).
- * Unlike `svm_codegen_macro_body`, the entry is codegen'd (so `synrt_read_arg` /
+ * macro on the TEMEN engine (docs/TEMEN_MACRO_STAGING_PLAN.md, "final link", corrected design).
+ * Unlike `temen_codegen_macro_body`, the entry is codegen'd (so `synrt_read_arg` /
  * `synrt_write_result` / `jacl_*` are `call.sym` imports, resolved against the staging-
- * extended runtime) — svm-llvm C cannot emit those cross-unit imports. Links like any JACL
+ * extended runtime) — temen-llvm C cannot emit those cross-unit imports. Links like any JACL
  * program. Any arity: the argument wire carries the N parameter syntax values back-to-back,
  * and the entry reads them in order (stateful `synrt_read_arg`). NULL on an unsupported
  * construct (message in `err`). */
-IrModule *svm_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
+IrModule *temen_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
                                    int variadic, AstNode *body, int in_guest,
                                    char *err, size_t errcap) {
   Cx cx;

@@ -62,18 +62,19 @@ goes red, re-run the copy above and commit.
 ### `pages.yml` — deploy the playground
 
 - Triggers on pushes to `main` and manually (`workflow_dispatch`).
-- Builds the **SVM backend** — the playground's sole engine (the old Emscripten
+- Builds the **TEMEN backend** — the playground's sole engine (the old Emscripten
   compiler + VM is no longer shipped to the playground):
-  1. `demo/svm/build_assets.sh` builds the wasm-safe bytecode engine cdylib
-     (`svm_browser.wasm`), the in-browser frontend (`jacl_emit.wasm`,
-     `src/jacl_emit.c` + `codegen/*` → SVM IR), and the runtime blob
-     (`jaclrt.svm`). Needs submodule checkout (`vendor/svm`), Rust +
-     `wasm32-unknown-unknown`, and clang/LLVM-18 (svm-llvm bakes the runtime).
+  1. `demo/temen/build_assets.sh` builds the wasm-safe bytecode engine cdylib
+     (`temen_browser.wasm`), the in-browser frontend (`jacl_emit.wasm`,
+     `src/jacl_emit.c` + `codegen/*` → TEMEN IR), and the runtime blob
+     (`jaclrt.temen`). Needs submodule checkout (`vendor/temen`), Rust +
+     `wasm32-unknown-unknown`, and clang/LLVM-18 (temen-llvm bakes the runtime).
      The playground runs edited source entirely client-side: `jacl_emit.wasm` →
-     `svm_link_run` (generic link vs `jaclrt.svm` + run), and runs unedited
-     examples from precompiled `.svmb` blobs. See `demo/svm/README.md`.
+     `temen_link_run` (generic link vs `jaclrt.temen` + run), and runs unedited
+     examples from precompiled `.temen` blobs. See `demo/temen/README.md`.
   2. `demo/build_demo.sh` bundles the CodeMirror 6 editor with esbuild
      and regenerates `examples.json` from `test/jacl/*.jacl`.
   3. The real files are assembled into `_site/` and deployed to GitHub Pages.
 
-- **pages.yml** (2026-09-09): the runtime + cards moved from the svm-era extensions to temen's (`jaclrt.svm`→`jaclrt.temen` (now binary, ~6.5× smaller), `.svmb`→`.temen`, `.svmo`→`.temeno`). Line 81's hardcoded `cp demo/svm/jaclrt.svm …` becomes `jaclrt.temen`. Until copied over, `build_assets.sh` also emits a `jaclrt.svm` alias so the live deploy keeps working; delete that alias line after syncing.
+- **pages.yml** (2026-09-09): the runtime + cards moved from the svm-era extensions to temen's (`jaclrt.svm`→`jaclrt.temen` (now binary, ~6.5× smaller), `.svmb`→`.temen`, `.svmo`→`.temeno`). Line 81's hardcoded `cp demo/svm/jaclrt.svm …` becomes `jaclrt.temen`. Until copied over, `build_assets.sh` also emits a `jaclrt.svm` alias so the live deploy keeps working; delete that alias line after syncing. **Synced.**
+- **pages.yml** (2026-09-09, svm→temen rename): every `svm` path/name became `temen` — `demo/svm/`→`demo/temen/`, the precompiled-card dir `svmb/`→`cards/` (`_site/svm/svmb`→`_site/temen/cards`), `svm_browser.wasm`→`temen_browser.wasm` (the name `build_assets.sh` actually emits), `vendor/svm`→`vendor/temen`, and the comments. Until copied over, the deploy fails at `Build SVM assets` (`demo/svm/build_assets.sh` no longer exists).

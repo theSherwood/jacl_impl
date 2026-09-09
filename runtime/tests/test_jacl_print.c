@@ -1,5 +1,5 @@
 /* P3.5 — the JACL runtime `print` builtin through the powerbox. A `main(void)` program
- * (so svm-llvm synthesizes the `_start` powerbox entry) prints a string and an int via
+ * (so temen-llvm synthesizes the `_start` powerbox entry) prints a string and an int via
  * jacl_print, which writes to stdout through the granted Stream capability. The harness
  * (run_powerbox) grants the powerbox and captures stdout on interp + jit. Expected:
  * "hello\n42\n". */

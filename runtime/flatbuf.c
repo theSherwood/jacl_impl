@@ -1,5 +1,5 @@
 /* flatbuf.c — flat, C-ABI buffers ([Buf N T] with a scalar leaf T, any nesting depth).
- * See docs/SVM_BUFFERS.md.
+ * See docs/TEMEN_BUFFERS.md.
  *
  * A buffer is backed by REAL contiguous memory: one JOBJ_BLOB of total*sizeof(T) raw bytes
  * (all the leaf scalars, row-major) plus a traced header (JACL_TAG_FBUF over a JOBJ_NODE)
@@ -14,7 +14,7 @@
  * of the inner dims) with one fewer dimension. Sub-views therefore ALIAS: a write through one
  * is visible through every view of the same blob (mark-sweep is non-moving, so the blob's
  * address is stable). At ndims==1 an index yields the leaf scalar. `[addr …]` yields the
- * blob's genuine linear-memory address so a compiled-to-svm extern dereferences it with C
+ * blob's genuine linear-memory address so a compiled-to-temen extern dereferences it with C
  * semantics.
  *
  * Element codes (size, load tag): 0 i8, 1 u8 (1B, i32) · 2 i16, 3 u16 (2B, i32) ·
@@ -24,7 +24,7 @@
 
 #define FB_MAX_DIMS 6   /* the fixed-arity constructor / view headers support up to 6 dims */
 
-/* svm-llvm rejects a *constant* ptrtoint of an address; route through a noinline call so it
+/* temen-llvm rejects a *constant* ptrtoint of an address; route through a noinline call so it
  * lowers to a runtime instruction (mirrors heap_gc.c's jacl_pti). */
 __attribute__((noinline)) static long jacl_fb_pti(void *p) { return (long)(uintptr_t)p; }
 

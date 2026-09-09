@@ -14,7 +14,7 @@ as you like; the language supports both.
 **Try it in your browser →
 [thesherwood.github.io/jacl_impl](https://thesherwood.github.io/jacl_impl/)**
 — a live playground that compiles and runs JACL entirely client-side on
-the SVM backend. Nothing to install (see [Playground](#playground)).
+the TEMEN backend. Nothing to install (see [Playground](#playground)).
 
 ## Goals
 
@@ -37,11 +37,11 @@ the SVM backend. Nothing to install (see [Playground](#playground)).
 internals move frequently and there is no stability guarantee yet.
 
 The core language is implemented and exercised by a large test corpus
-(the `*.jacl` programs under `test/jacl/`, the SVM runtime/codegen
+(the `*.jacl` programs under `test/jacl/`, the TEMEN runtime/codegen
 suites under `runtime/`, and the frontend C units under `test/`). The
-sole backend is the **SVM** (`codegen/*.c` → SVM IR, linked against the
-`runtime/` library and run on the SVM engine); the legacy in-tree
-bytecode compiler + VM was removed in the SVM-backend migration
+sole backend is the **TEMEN** (`codegen/*.c` → TEMEN IR, linked against the
+`runtime/` library and run on the TEMEN engine); the legacy in-tree
+bytecode compiler + VM was removed in the TEMEN-backend migration
 (item 6). Implemented: value
 representation, lexer/parser, procs and control flow, strings,
 persistent collections, error handling, mutable state, the static type
@@ -288,9 +288,9 @@ Three pre-merge baselines:
                             #   barriers — see DESIGN.md)
 ```
 
-The SVM backend's own tests live under `runtime/` (`runtime/harness` — the
+The TEMEN backend's own tests live under `runtime/` (`runtime/harness` — the
 `cargo test` suites — and the `runtime/tests/*.c` GC/scheduler tests). The
-browser playground is built by `demo/svm/build_assets.sh`.
+browser playground is built by `demo/temen/build_assets.sh`.
 
 Each run prints `=== Results: N passed, M failed ===`. Filter to one
 test:
@@ -301,28 +301,28 @@ test:
 ./build.sh --release              # -O2 build in .build-release/ (for benchmarks)
 ```
 
-Run a single `.jacl` source through the SVM CLI (`jacl_svm`, built from
+Run a single `.jacl` source through the TEMEN CLI (`jacl_temen`, built from
 the runtime harness crate):
 
 ```
 cd runtime/harness
-cargo run --bin jacl_svm -- run ../../test/jacl/<name>.jacl
+cargo run --bin jacl_temen -- run ../../test/jacl/<name>.jacl
 ```
 
 The canonical syntax tour (`test/jacl/tour.jacl`) is self-checking — every
 section ends in `assert`, and a tripped assert propagates out as an error —
-so the harness runs it end-to-end on the SVM backend to hold it in sync with
-the implementation (it defines a macro, so it needs the SVM-staged frontend
-the harness test builds, not the plain `jacl_svm` driver):
+so the harness runs it end-to-end on the TEMEN backend to hold it in sync with
+the implementation (it defines a macro, so it needs the TEMEN-staged frontend
+the harness test builds, not the plain `jacl_temen` driver):
 
 ```
-cd runtime/harness && cargo test --test codegen syntax_tour_runs_clean_on_svm
+cd runtime/harness && cargo test --test codegen syntax_tour_runs_clean_on_temen
 ```
 
-The execution engine is the SVM, vendored at `vendor/svm` (from
+The execution engine is the TEMEN, vendored at `vendor/temen` (from
 [`theSherwood/vm`](https://github.com/theSherwood/vm)): the C runtime
-under `runtime/` is compiled to SVM IR via `svm-llvm` and executed on
-the SVM's tree-walking interpreter and Cranelift JIT (the runtime
+under `runtime/` is compiled to TEMEN IR via `temen-llvm` and executed on
+the TEMEN's tree-walking interpreter and Cranelift JIT (the runtime
 harness runs both and asserts they agree). See `AUDIT.md` for the
 per-baseline rationale and `AUDIT_HISTORY.md` for the audit campaign.
 
@@ -331,14 +331,14 @@ per-baseline rationale and `AUDIT_HISTORY.md` for the audit campaign.
 A live, hosted playground runs in the browser at
 **<https://thesherwood.github.io/jacl_impl/>** (deployed from `main` by
 `.github/workflows/pages.yml`). Edit JACL and run it with no install — the
-whole pipeline (source → SVM IR → link → run) executes client-side.
+whole pipeline (source → TEMEN IR → link → run) executes client-side.
 
-It runs on the **SVM backend** — the same `vm` engine the rest of the
-project uses, vendored at `vendor/svm` from
+It runs on the **TEMEN backend** — the same `vm` engine the rest of the
+project uses, vendored at `vendor/temen` from
 [`theSherwood/vm`](https://github.com/theSherwood/vm) and compiled to
-WebAssembly. Editing recompiles the source to SVM IR in the browser
+WebAssembly. Editing recompiles the source to TEMEN IR in the browser
 (`jacl_emit.wasm`, the LLVM-free frontend), then links and runs it against
-the runtime blob (`jaclrt.temen`) on the `svm-browser` cdylib; unedited
+the runtime blob (`jaclrt.temen`) on the `temen-browser` cdylib; unedited
 examples run from precompiled `.temen` blobs.
 
 The source lives in `demo/` — a CodeMirror 6 editor with a position-aware
@@ -346,7 +346,7 @@ JACL syntax mode, optional vim keybindings, and a draggable panel divider.
 To build and serve it locally:
 
 ```
-cd demo && bash svm/build_assets.sh   # svm_browser.wasm + jacl_emit.wasm + jaclrt.temen + example .temen
+cd demo && bash temen/build_assets.sh   # temen_browser.wasm + jacl_emit.wasm + jaclrt.temen + example .temen
 bash build_demo.sh                    # regenerates examples.json, bundles src/ → dist/playground.js
 python3 -m http.server 8080           # or any static server
 # open http://localhost:8080

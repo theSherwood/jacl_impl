@@ -1,7 +1,7 @@
 /* closure.c — P2.6 closure + cell objects (the runtime side of codegen closures).
  *
  * A closure is a JOBJ_NODE whose payload is `[ i64 fnref ][ JaclVal upval0 ] …`:
- * `fnref` is the (link-relocated) SVM function index obtained from `ref.func`, and
+ * `fnref` is the (link-relocated) TEMEN function index obtained from `ref.func`, and
  * the upvals are the captured environment. The closure function has signature
  * `(i64 sp, i64 self, args…) -> i64` and reads its upvals back via jacl_closure_upval.
  *

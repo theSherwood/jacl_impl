@@ -5,7 +5,7 @@
  * cells stay live; with jobs as plain GC objects the dead rounds are swept, so the final live
  * count stays far below R*M. Meanwhile a future `held` from round 0 is kept across every
  * collection and re-awaited at the end — its cached result must survive (a held future is
- * rooted via this fiber's scanned stack, svm >= #217).
+ * rooted via this fiber's scanned stack, temen >= #217).
  *
  * run() returns 555 on success; 900000+live if too many cells survive (leak / no reclamation);
  * 800000+got if the held future's re-await went wrong; 700000+round*100+i on a bad sum. */

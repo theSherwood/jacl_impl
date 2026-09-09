@@ -1,38 +1,38 @@
 /* stage_bridge — the Phase 5 macro-staging hook implementation (installed into the frontend's
- * `jacl_macro_stage_hook`). It expands a macro call by running the macro body on the SVM engine:
- *   1. codegen the body into a staged-macro module   (svm_codegen_staged_macro)
+ * `jacl_macro_stage_hook`). It expands a macro call by running the macro body on the TEMEN engine:
+ *   1. codegen the body into a staged-macro module   (temen_codegen_staged_macro)
  *   2. encode the call's argument ASTs to a syn_wire  (synw_encode; version byte, then N nodes)
- *   3. run the module on SVM in-process               (jacl_svm_stage, runtime/harness staticlib)
+ *   3. run the module on TEMEN in-process               (jacl_temen_stage, runtime/harness staticlib)
  *   4. decode the result wire back to an AstNode       (synw_decode)
  * This lives in the codegen/driver layer (not src/) so the frontend stays free of any codegen
- * or SVM dependency — the driver installs the hook. See docs/SVM_MACRO_STAGING_PLAN.md (Phase 5).
+ * or TEMEN dependency — the driver installs the hook. See docs/TEMEN_MACRO_STAGING_PLAN.md (Phase 5).
  *
  * Compiled as its own TU (not unity with the driver) to avoid static-symbol collisions with
  * the frontend's serializers; it pulls in the frontend header for the shared types. */
 #include "../../../src/jacl.h" /* AstNode, MacroEntry, arena_t, ast_alloc, arena_alloc */
-#include "../../codegen.h"     /* svm_codegen_staged_macro */
+#include "../../codegen.h"     /* temen_codegen_staged_macro */
 #include "../../irbuilder.h"   /* irb_to_encoded */
 #include "syn_wire.c"          /* synw_encode / synw_decode (unity; needs the frontend above) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The in-process SVM staging bridge (runtime/harness staticlib): takes the svm-encode object
+/* The in-process TEMEN staging bridge (runtime/harness staticlib): takes the temen-encode object
  * bytes (v9; own-data addresses are inline `data.self`, resolved by link — no reloc table). */
-extern int jacl_svm_stage(const unsigned char *module_bytes, size_t module_len,
+extern int jacl_temen_stage(const unsigned char *module_bytes, size_t module_len,
                           const unsigned char *arg_wire, size_t arg_len,
                           unsigned char **out_ptr, size_t *out_len);
-extern void jacl_svm_stage_free(unsigned char *ptr, size_t len);
+extern void jacl_temen_stage_free(unsigned char *ptr, size_t len);
 
-/* Matches jacl_macro_stage_hook: expand `entry(args…)` on SVM, returning the AST in *out
+/* Matches jacl_macro_stage_hook: expand `entry(args…)` on TEMEN, returning the AST in *out
  * (arena-allocated). NULL on success, else an error string. */
-static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, uint32_t argc,
+static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode **args, uint32_t argc,
                                            arena_t *arena, AstNode **out) {
   static char errbuf[256];
   *out = NULL;
 
   /* 1. codegen the staged-macro module for this body. */
-  IrModule *m = svm_codegen_staged_macro((const char **)entry->param_names,
+  IrModule *m = temen_codegen_staged_macro((const char **)entry->param_names,
                                          entry->param_name_lens, entry->param_count,
                                          entry->variadic, entry->body, /*in_guest=*/0, errbuf, sizeof errbuf);
   if (!m) return errbuf[0] ? errbuf : "staged codegen failed";
@@ -65,23 +65,23 @@ static const char *jacl_stage_macro_on_svm(MacroEntry *entry, AstNode **args, ui
   }
   #undef STAGE_APPEND
 
-  /* 3. run on SVM. */
+  /* 3. run on TEMEN. */
   unsigned char *res = NULL; size_t reslen = 0;
-  int rc = jacl_svm_stage(mbytes, mlen, wire, wlen, &res, &reslen);
+  int rc = jacl_temen_stage(mbytes, mlen, wire, wlen, &res, &reslen);
   free(wire); free(mbytes);
   if (rc != 0) {
-    snprintf(errbuf, sizeof errbuf, "SVM staging failed (rc=%d)", rc);
+    snprintf(errbuf, sizeof errbuf, "TEMEN staging failed (rc=%d)", rc);
     return errbuf;
   }
 
   /* 4. decode the result wire back to an AST (strings are copied into `arena`). */
   *out = synw_decode(res, reslen, arena);
-  jacl_svm_stage_free(res, reslen);
+  jacl_temen_stage_free(res, reslen);
   return *out ? NULL : "staged expansion produced invalid syntax";
 }
 
 /* Install the hook. The driver calls this once at startup; activation is still gated by the
- * `JACL_STAGE_ON_SVM` env var inside the expander, so installing it is always safe. */
-void jacl_install_svm_stage_hook(void) {
-  jacl_macro_stage_hook = jacl_stage_macro_on_svm;
+ * `JACL_STAGE_ON_TEMEN` env var inside the expander, so installing it is always safe. */
+void jacl_install_temen_stage_hook(void) {
+  jacl_macro_stage_hook = jacl_stage_macro_on_temen;
 }

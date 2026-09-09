@@ -1,4 +1,4 @@
-/* JACL compiler-guest — warm-snapshot two-phase driver (docs/SVM_WARM_COMPILER.md Slice 2/3).
+/* JACL compiler-guest — warm-snapshot two-phase driver (docs/TEMEN_WARM_COMPILER.md Slice 2/3).
  *
  * The single-shot `emit_driver.c` rebuilds the compiler's program-independent state (the prelude
  * macros, parsed+compiled once into statics) on every fresh guest Run — a fixed floor that dominates
@@ -25,7 +25,7 @@ extern void jacl_emit_warmup(void);                     /* trigger the prelude/s
 extern char *jacl_emit_compile(const char *source);     /* compile over the warm statics */
 
 /* Install the in-guest macro-staging hook when this build links it (weak; safe if absent). */
-extern void jacl_install_svm_stage_hook(void) __attribute__((weak));
+extern void jacl_install_temen_stage_hook(void) __attribute__((weak));
 
 /* Read all of stdin into a growable buffer (NUL-terminated); returns the buffer (caller frees). */
 static char *read_stdin(void) {
@@ -55,7 +55,7 @@ static void emit_and_print(char *(*compile)(const char *), const char *src) {
 
 /* BASELINE (cold): the original one-shot flow — the emit_driver.c path. */
 int main(void) {
-  if (jacl_install_svm_stage_hook) jacl_install_svm_stage_hook();
+  if (jacl_install_temen_stage_hook) jacl_install_temen_stage_hook();
   char *src = read_stdin();
   if (!src) return 1;
   emit_and_print(jacl_emit_ir, src);
@@ -66,7 +66,7 @@ int main(void) {
 /* WARM PHASE 1: init the program-independent state (prelude macros) into statics, then return. No
  * stdin, no user compile — the produced window is program-independent. The host snapshots here. */
 int warmup(void) {
-  if (jacl_install_svm_stage_hook) jacl_install_svm_stage_hook();
+  if (jacl_install_temen_stage_hook) jacl_install_temen_stage_hook();
   jacl_emit_warmup();
   return 0;
 }

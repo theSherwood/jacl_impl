@@ -1,7 +1,7 @@
-/* Staged-macro I/O glue for the **in-guest** staging path (guest-JIT, docs/SVM_GUEST_JIT_STAGING.md
+/* Staged-macro I/O glue for the **in-guest** staging path (guest-JIT, docs/TEMEN_GUEST_JIT_STAGING.md
  * item 3/4). The difference from stage_glue.c (the native/separate-module path):
  *
- *   - No malloc/free/realloc override. This TU is linked INTO the compiler `.svmb`, which already
+ *   - No malloc/free/realloc override. This TU is linked INTO the compiler `.temen`, which already
  *     has an allocator (the on-ramp's + emit_shim.c); redefining malloc here would clobber it.
  *   - synrt_read_arg / synrt_read_rest read the argument wire from an in-window **buffer** the
  *     staging hook sets (`synrt_set_arg_wire`), not from stdin — a JITed unit invoked via
@@ -23,7 +23,7 @@ JaclVal synrt_gensym(JaclVal prefix);          /* defined below; referenced by t
 JaclVal synrt_str_empty(void);                 /* data-free string literal build (see below) */
 JaclVal synrt_str_push_byte(JaclVal s, long b);   /* b is i64 to match the codegen's call sig */
 
-/* The staged macro's data stack (the `sp` invoke2 passes to the entry). svm-llvm gives every
+/* The staged macro's data stack (the `sp` invoke2 passes to the entry). temen-llvm gives every
  * translated runtime function an implicit `sp` first param and grows the data stack **up** from it
  * (frame N+1 = sp + frame_size), so `sp` is the low end and this static region is its headroom. A
  * static array coexists with the compiler's window like jaclrt's heap — the linker places it. */
@@ -31,10 +31,10 @@ static __attribute__((aligned(16))) unsigned char g_macro_dstack[1u << 20];   /*
 unsigned long synrt_macro_dstack_base(void) { return (unsigned long)(void *)g_macro_dstack; }
 
 /* The compiler guest's window size_log2, which the staged-macro object must declare to satisfy the
- * `Jit` memory-match precondition (svm-run: object.memory.size_log2 must equal the parent window).
- * The on-ramp bakes it into this .svmb at translate time; the default matches this build (32 MiB),
+ * `Jit` memory-match precondition (temen-run: object.memory.size_log2 must equal the parent window).
+ * The on-ramp bakes it into this .temen at translate time; the default matches this build (32 MiB),
  * and a host that knows the instantiated size can override it via `synrt_set_window_log2` (e.g. the
- * emit driver from argv, mirroring peval_jit). See docs/SVM_GUEST_JIT_STAGING.md §3d. */
+ * emit driver from argv, mirroring peval_jit). See docs/TEMEN_GUEST_JIT_STAGING.md §3d. */
 static unsigned char g_window_log2 = 25;
 void synrt_set_window_log2(unsigned char n) { if (n) g_window_log2 = n; }
 unsigned char synrt_window_log2(void) { return g_window_log2; }
@@ -94,8 +94,8 @@ unsigned char *synrt_take_result(size_t *len) {
 
 /* The staging hook hands this to `__vm_jit_compile_linked`: it binds each runtime symbol a staged
  * macro body may import (`call.sym "jacl_vec_push"`, …) to that function's **call_indirect slot**.
- * A module function's funcref index *is* its slot, and svm-llvm lowers `&fn` to that index, so a
- * slot is just `(unsigned long)(void *)&fn`. Wire form (svm-run::decode_symbol_table): uleb count,
+ * A module function's funcref index *is* its slot, and temen-llvm lowers `&fn` to that index, so a
+ * slot is just `(unsigned long)(void *)&fn`. Wire form (temen-run::decode_symbol_table): uleb count,
  * then per entry uleb namelen + name bytes + kind byte 0 (Slot) + uleb slot. The compile_linked
  * resolver uses only the names the unit actually imports, so a superset is fine; a *missing* name
  * fails closed. The `#define` renames in jaclrt_staging_guest.c are transparent here — `SYM(name)`
@@ -137,7 +137,7 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     else symtab_entry(out, cap, &pos, #f, (unsigned long)(void *)&f); \
   } while (0)
 #define SYMLIST \
-    /* the entry's runtime bring-up + scheduler root (svm_codegen_staged_macro func 0) */ \
+    /* the entry's runtime bring-up + scheduler root (temen_codegen_staged_macro func 0) */ \
     SYM(jacl_heap_init); SYM(jacl_intern_init); SYM(jacl_map_init); SYM(jacl_sched_run_main); \
     /* the staged-macro I/O glue */ \
     SYM(synrt_read_arg); SYM(synrt_read_rest); SYM(synrt_write_result); SYM(synrt_gensym); \

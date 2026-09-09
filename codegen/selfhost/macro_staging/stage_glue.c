@@ -3,17 +3,17 @@
  * Stream caps). The codegen'd staged-macro entry calls these by name (call.sym).
  *   synrt_read_arg()          read the argument syntax value (wire) from stdin -> plain-data vec
  *   synrt_write_result(vec)   encode the result syntax value -> wire -> stdout
- * See docs/SVM_MACRO_STAGING_PLAN.md ("final link"). Included after jaclrt.c, so the
+ * See docs/TEMEN_MACRO_STAGING_PLAN.md ("final link"). Included after jaclrt.c, so the
  * runtime's `write` (io.c) is in scope; `read` isn't declared there, so declare it (the
  * on-ramp Stream.read prototype, as tcl_repl.c uses). */
 #include <stddef.h>
 #include <string.h>
 
-/* The SVM build has no libc malloc here (jaclrt uses its own GC allocator, so the runtime
- * never references malloc; svm-llvm doesn't synthesize it in this translate). syn_rt's small,
+/* The TEMEN build has no libc malloc here (jaclrt uses its own GC allocator, so the runtime
+ * never references malloc; temen-llvm doesn't synthesize it in this translate). syn_rt's small,
  * short-lived wire buffers back onto a static bump arena instead. A 16-byte header records
  * each block's size so realloc copies correctly; free is a no-op (one-shot run). Native
- * builds of syn_rt.c use the real libc malloc — this file is only in the SVM staging unity. */
+ * builds of syn_rt.c use the real libc malloc — this file is only in the TEMEN staging unity. */
 static __attribute__((aligned(16))) char g_arena[1u << 18];
 static size_t g_off;
 void *malloc(size_t n) {

@@ -1,7 +1,7 @@
 /* P1.4 — strings (non-GC): inline / heap / interning / equality. Returns 1414. */
 #include "jaclrt.h"
 
-/* svm-llvm has no strcmp; hand-roll (static inline so run() stays func 0). */
+/* temen-llvm has no strcmp; hand-roll (static inline so run() stays func 0). */
 static inline int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 
 int run(int n) {

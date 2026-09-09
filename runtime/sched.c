@@ -5,19 +5,19 @@
  * jobs; `parallel`/`race` create a batch of jobs. Every job is a stackful fiber that runs to
  * completion across the workers. When a job must wait (`await` an unresolved job), it
  * **suspends back to the bare worker loop** — it does not busy-cycle and it is not nested on
- * another fiber — and is re-enqueued (and resumed by whatever worker grabs it — svm fiber
+ * another fiber — and is re-enqueued (and resumed by whatever worker grabs it — temen fiber
  * migration) once its target completes. So at any instant a job is either RUNNING on exactly
  * one worker or RUNNABLE-suspended (parked on a target / waiting in the ready queue); it is
  * **never a RUNNING fiber while it is logically blocked**.
  *
  * This is the keystone the earlier transient pool couldn't reach. Root-causing the transient
- * attempt (`spikes/svm_pool_gc/`) showed its corruption came from keeping the program on the
+ * attempt (`spikes/temen_pool_gc/`) showed its corruption came from keeping the program on the
  * main thread as a *busy-cycling* fiber in the multi-worker quiesce set, with its roots on
  * main's bare stack. The continuation model dissolves all of that:
  *  - GC roots: all scheduler state lives in globals scanned by `jacl_sched_mark_roots` (the
  *    ready queue + each worker's current job); every program/task local lives on a job fiber
  *    that is always either RUNNING-and-will-suspend-at-its-next-safepoint or RUNNABLE-suspended
- *    (and svm `gc.roots` scans suspended fibers). No root ever lives only on a bare OS stack.
+ *    (and temen `gc.roots` scans suspended fibers). No root ever lives only on a bare OS stack.
  *  - GC quiesce (P3.4c): a worker resuming a job brackets it with task_begin/end; a GC
  *    safepoint suspends the running fiber (value 0) and the worker re-resumes it after the
  *    collection. An `await` suspends with the target job pointer (non-zero), which the worker
@@ -25,8 +25,8 @@
  *  - Result handoff: a job's completion (store result, mark DONE, wake waiters) runs under the
  *    one scheduler lock, so a waiter that observes DONE also observes the result.
  *
- * Relies only on svm primitives that already exist and are tested, including cross-vCPU fiber
- * migration (`svm/tests/fiber_migrate.rs`, `gc_roots.rs`).
+ * Relies only on temen primitives that already exist and are tested, including cross-vCPU fiber
+ * migration (`temen/tests/fiber_migrate.rs`, `gc_roots.rs`).
  */
 #include "jaclrt.h"
 #include <string.h>
@@ -37,10 +37,10 @@ long __vm_fiber_new(long (*f)(long), void *stack);
 long __vm_fiber_resume(long k, long arg, int *done);   /* *done = cont.resume status (see JACL_FIBER_*) */
 long __vm_fiber_suspend(long value);
 
-/* svm `cont.resume` status delivered through `__vm_fiber_resume`'s `*done` (svm-interp FIBER_*).
+/* temen `cont.resume` status delivered through `__vm_fiber_resume`'s `*done` (temen-interp FIBER_*).
  * A fiber that blocks on a `memory.wait` (jacl's `sleep`) parks the FIBER, not the vCPU: the
- * resume reports JACL_FIBER_PARKED and the resumer must re-poll (svm >= vm#442, §3.6 5a). Older
- * svm only ever wrote 0/1, so the historical `if (done)` test conflated a park with a return. */
+ * resume reports JACL_FIBER_PARKED and the resumer must re-poll (temen >= vm#442, §3.6 5a). Older
+ * temen only ever wrote 0/1, so the historical `if (done)` test conflated a park with a return. */
 #define JACL_FIBER_SUSPENDED 0   /* voluntary suspend (GC safepoint = value 0, await = target ptr) */
 #define JACL_FIBER_RETURNED  1   /* the fiber ran to completion; the value is its result */
 #define JACL_FIBER_PARKED    3   /* blocked on a VM wait (timeout/notify) — re-poll to make progress */
@@ -61,10 +61,10 @@ extern JaclVal jacl_ctx_cur;
 #define JACL_SCHED_MAX_WORKERS 16
 #define JACL_SCHED_STACK       (1u << 16)
 /* Pool size. The DEFAULT is 1 — a single cooperative worker (main) — because that is the
- * only configuration correct on BOTH svm backends, and the reference interpreter (the
+ * only configuration correct on BOTH temen backends, and the reference interpreter (the
  * parity oracle) is one of them:
  *
- *   - The svm interpreter multiplexes every `thread.spawn`ed vCPU cooperatively onto one
+ *   - The temen interpreter multiplexes every `thread.spawn`ed vCPU cooperatively onto one
  *     OS thread (it is `#![forbid(unsafe_code)]`, no native stack switching). With >1
  *     worker, jobs are pinned round-robin to per-worker queues that only their owner drains
  *     (next_owner / rq_pop), and the cross-vCPU park/wake handshake livelocks under that
@@ -144,7 +144,7 @@ static void release_task_stack(void *stk) {
 
 /* Conservatively scan every IN-USE fiber data stack for heap roots. Address-taken locals
  * (parallel's futs[], any array/struct local of a job) live on these guest-memory data
- * stacks — svm's gc.roots covers the NATIVE side (control stacks; registers via the #217
+ * stacks — temen's gc.roots covers the NATIVE side (control stacks; registers via the #217
  * flush trampoline), and the vCPU-top contract makes guest-memory roots the guest's own
  * to report. This is that report: without it, a job referenced only by a parked fiber's
  * futs[] is swept mid-collection. Runs under STW (free list stable). */
@@ -190,7 +190,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
 
 /* ---- per-worker ready queues + pool state (all under slock unless noted) ----
  * Each job is PINNED to an owner worker (round-robin at creation) and runs only on that worker
- * — no fiber ever migrates between vCPUs, so svm's cross-vCPU claim is never contended. */
+ * — no fiber ever migrates between vCPUs, so temen's cross-vCPU claim is never contended. */
 #define JACL_RQ_CAP 1024
 static JaclObj *jacl_rq[JACL_SCHED_MAX_WORKERS][JACL_RQ_CAP];
 static int32_t  jacl_rq_head[JACL_SCHED_MAX_WORKERS], jacl_rq_count[JACL_SCHED_MAX_WORKERS];
@@ -209,10 +209,10 @@ static JaclObj *jacl_root_job;
 static JaclObj *jacl_blocked_head[JACL_SCHED_MAX_WORKERS];
 
 /* Jobs are ordinary GC objects — no global registry, no cap, no leak. Root coverage, per the
- * Ask 3 contract (docs/SVM_PHASE3_ASKS.md; svm >= vm#217):
+ * Ask 3 contract (docs/TEMEN_PHASE3_ASKS.md; temen >= vm#217):
  *   - WINDOW (jacl_sched_mark_roots): ready queues + jacl_running_job + the root job. A job
  *     parked on a target is reachable from the target's traced waiter chain.
- *   - NATIVE side (svm gc.roots): parked fibers' control stacks (the fiber switch spills all
+ *   - NATIVE side (temen gc.roots): parked fibers' control stacks (the fiber switch spills all
  *     callee-saved registers) and, via #217's flush trampoline, the collector's own
  *     call-surviving register roots — so scalar locals (a `def`d future handle) are covered.
  *   - GUEST-MEMORY side (ours to report): address-taken locals (parallel's futs[]) live on the
@@ -261,7 +261,7 @@ static void complete_job(JaclObj *j, long v) {
 /* ---- the GC-cooperative resume ----
  * Resume job `j` once (continuing past GC safepoints). Returns 0 (RETURNED; *out=result),
  * 1 (AWAIT; *out=target-job-ptr), or 2 (SKIP — a concurrent claim is already running this
- * job's fiber; svm would FiberFault a second claimant, so we bail and let the owner finish).
+ * job's fiber; temen would FiberFault a second claimant, so we bail and let the owner finish).
  * p[19] is the single-claim guard: exactly one worker may resume a given job at a time. */
 static int resume_job(JaclObj *j, long *out) {
   int self = jacl_sched_self();
@@ -491,7 +491,7 @@ JaclVal jacl_await(JaclVal future) {
    * `j` under the scheduler lock and either parks us (re-resumed with j's result when it
    * completes) or, if `j` is already done, re-runs us immediately with the result. Routing the
    * result through the lock-ordered resume_arg keeps every result read synchronized — no
-   * lockless DONE/result fast path (that pairing reorders under svm-llvm + the JIT). */
+   * lockless DONE/result fast path (that pairing reorders under temen-llvm + the JIT). */
   return (JaclVal)__vm_fiber_suspend((long)j);
 }
 

@@ -1,6 +1,6 @@
 # Phase 1 runtime test harness. Compiles a C driver (which includes the JACL
 # runtime) via temen-llvm and runs it on interp + JIT. `cargo test` here is the
-# Phase 1 test runner. Own cargo root; path-deps into the svm submodule (links
+# Phase 1 test runner. Own cargo root; path-deps into the temen submodule (links
 # libLLVM — needs llvm-18-dev).
 [workspace]
 
@@ -10,20 +10,20 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# `rlib` for the bins (jacl_svm, stage_macro, …); `staticlib` for `libjacl_runtime_harness.a`,
-# which the native JACL frontend links to stage macros on SVM in-process (`jacl_svm_stage`,
-# behind JACL_STAGE_ON_SVM — the Phase 5 embedding). See src/stage_ffi.rs.
+# `rlib` for the bins (jacl_temen, stage_macro, …); `staticlib` for `libjacl_runtime_harness.a`,
+# which the native JACL frontend links to stage macros on TEMEN in-process (`jacl_temen_stage`,
+# behind JACL_STAGE_ON_TEMEN — the Phase 5 embedding). See src/stage_ffi.rs.
 [lib]
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-temen-ir     = { path = "../../vendor/svm/crates/temen-ir" }
-temen-llvm   = { path = "../../vendor/svm/crates/temen-llvm" }
-temen-text   = { path = "../../vendor/svm/crates/temen-text" }
-temen-verify = { path = "../../vendor/svm/crates/temen-verify" }
-temen-interp = { path = "../../vendor/svm/crates/temen-interp" }
-temen-jit    = { path = "../../vendor/svm/crates/temen-jit" }
-temen-run    = { path = "../../vendor/svm/crates/temen-run" }
-temen-encode = { path = "../../vendor/svm/crates/temen-encode" }
-temen-opt      = { path = "../../vendor/svm/crates/temen-opt" }
-temen-wasm-jit = { path = "../../vendor/svm/crates/temen-wasm-jit" }
+temen-ir     = { path = "../../vendor/temen/crates/temen-ir" }
+temen-llvm   = { path = "../../vendor/temen/crates/temen-llvm" }
+temen-text   = { path = "../../vendor/temen/crates/temen-text" }
+temen-verify = { path = "../../vendor/temen/crates/temen-verify" }
+temen-interp = { path = "../../vendor/temen/crates/temen-interp" }
+temen-jit    = { path = "../../vendor/temen/crates/temen-jit" }
+temen-run    = { path = "../../vendor/temen/crates/temen-run" }
+temen-encode = { path = "../../vendor/temen/crates/temen-encode" }
+temen-opt      = { path = "../../vendor/temen/crates/temen-opt" }
+temen-wasm-jit = { path = "../../vendor/temen/crates/temen-wasm-jit" }

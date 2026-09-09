@@ -5,7 +5,7 @@
  * and periodically triggers a collection. A collection driven by one worker quiesces the
  * others: each other worker's task hits a safepoint (in jacl_alloc) and SUSPENDS back to
  * its scheduler, which parks the (root-free) vCPU. The collector's gc.roots then scans
- * every suspended task fiber + its own (caller) frames (svm GC.md §3.1), so each worker's
+ * every suspended task fiber + its own (caller) frames (temen GC.md §3.1), so each worker's
  * keeper survives a collection run by a DIFFERENT worker — the property that bare-vCPU
  * futex-parking could not give. After joining, every keeper is intact and the STW
  * mutual-exclusion violation count is 0. Returns 999.

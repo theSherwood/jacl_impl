@@ -1,8 +1,8 @@
-//! decode_check — decode a `.svmb` with the exact `temen_encode` the cdylib uses and print the
+//! decode_check — decode a `.temen` with the exact `temen_encode` the cdylib uses and print the
 //! real error. The cdylib's `temen_run_onramp` maps any decode failure to `STATUS_DECODE_ERR`
 //! (status=1); this surfaces the underlying reason (BadVersion / BadOpcode / section mismatch / …).
 //!
-//!   decode_check <image.svmb> [func_index]
+//!   decode_check <image.temen> [func_index]
 //!
 //! With a `func_index`, also dumps that function's shape (signature, block/terminator kinds, and
 //! whether it contains an `unreachable` terminator) — used to characterize a tier-up decline
@@ -12,7 +12,7 @@ use temen_ir::Terminator;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: decode_check <image.svmb> [func_index]");
+    let path = args.next().expect("usage: decode_check <image.temen> [func_index]");
     let func_idx: Option<usize> = args.next().and_then(|s| s.parse().ok());
     let bytes = std::fs::read(&path).expect("read image");
     println!("{}: {} bytes; magic+ver {:02x?}", path, bytes.len(), &bytes[..bytes.len().min(6)]);

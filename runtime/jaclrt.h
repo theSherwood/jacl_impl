@@ -1,7 +1,7 @@
 /* jaclrt.h — JACL runtime, value representation (Phase 1, P1.1)
  *
  * JaclVal is a 64-bit tagged value: an 8-bit tag byte (top) over a 56-bit
- * payload. Heap pointers are window offsets, which fit in 56 bits (the SVM window
+ * payload. Heap pointers are window offsets, which fit in 56 bits (the TEMEN window
  * is ~2^40). The tag/type layout mirrors the existing bytecode VM (src/jacl.h) so
  * ported builtins/collections stay compatible.
  *
@@ -45,7 +45,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_ARR           ((uint64_t)0x1A << JACL_TAG_SHIFT)   /* mutable array (mirrors src/jacl.h) */
 /* Typed vector `[Vec T]` — SAME representation as a plain vector (RRB root cell), a distinct
- * tag only so print renders it comma-style (`[1, 2, 3]`) vs a dynamic `[vec 1 2 3]`. svm's
+ * tag only so print renders it comma-style (`[1, 2, 3]`) vs a dynamic `[vec 1 2 3]`. temen's
  * conservative root scan is tag-agnostic (masks the top byte), so a fresh tag is GC-safe. */
 #define JACL_TAG_TVEC          ((uint64_t)0x1B << JACL_TAG_SHIFT)
 /* Typed pointer `[Ptr T]` produced by ptr-cast / ptr-null — a 2-slot object
@@ -60,7 +60,7 @@ typedef uint64_t JaclVal;
 /* Flat scalar buffer — a `[Buf N T]` with a scalar element type, backed by REAL contiguous
  * memory: a traced 3-slot header { count, elem-code, data-blob } over a JOBJ_BLOB of
  * N*sizeof(T) raw bytes. `[addr $b]` yields the blob's genuine linear-memory address, so a
- * compiled-to-SVM extern can dereference it with C semantics. Heap-element buffers keep the
+ * compiled-to-TEMEN extern can dereference it with C semantics. Heap-element buffers keep the
  * JaclVal-array model (their slots are real references the GC must follow). */
 #define JACL_TAG_FBUF          ((uint64_t)0x1E << JACL_TAG_SHIFT)
 /* Flat pointer into a scalar buffer — a 2-slot { address, elem-code } produced by `[addr]`;
@@ -147,7 +147,7 @@ static inline bool jaclrt_is_string(JaclVal v) {
 /* ===================================================================
  * Heap + GC (P1.2 / P1.3) — non-inline; defined in heap_gc.c.
  * Conservative, non-moving mark-sweep over a heap region; roots via the
- * svm `gc.roots` op (__vm_gc_roots). Object pointers are the cell address
+ * temen `gc.roots` op (__vm_gc_roots). Object pointers are the cell address
  * (header included). See heap_gc.c.
  * =================================================================== */
 
@@ -210,7 +210,7 @@ void   jacl_mark_runtime_roots(void);
 /* ===================================================================
  * Strings (P1.4) — inline / heap / interned. Defined in string.c.
  * =================================================================== */
-/* Host I/O (P3.5, io.c) — through the svm powerbox Stream capability. */
+/* Host I/O (P3.5, io.c) — through the temen powerbox Stream capability. */
 JaclVal  jacl_print(JaclVal v);                           /* write V's text + newline to stdout; -> nil */
 
 void     jacl_intern_init(void);                          /* reset the intern table */
@@ -319,7 +319,7 @@ JaclVal jacl_append_file(JaclVal content, JaclVal path);  /* append-file */
 JaclVal jacl_delete_file(JaclVal path);                   /* delete-file: nil, or error on missing */
 JaclVal jacl_file_exists(JaclVal path);                   /* file-exists?: bool */
 JaclVal jacl_list_dir(JaclVal path);                      /* list-dir: sorted vec of names, or error */
-/* "fs" named-capability adapter (fscap.c; docs/SVM_FS_DESIGN.md). Granted -> the file
+/* "fs" named-capability adapter (fscap.c; docs/TEMEN_FS_DESIGN.md). Granted -> the file
  * builtins route through real cap ops; absent -> the pure-guest VFS above serves. */
 int     jacl_fs_granted(void);
 JaclVal jacl_fscap_read_file(JaclVal path);

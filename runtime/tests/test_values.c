@@ -1,5 +1,5 @@
 /* P1.1 — value representation test. `run` returns 4242 iff every check passes.
- * Compiled with the runtime via svm-llvm; run on interp + JIT by the harness. */
+ * Compiled with the runtime via temen-llvm; run on interp + JIT by the harness. */
 #include "jaclrt.h"
 
 int run(int n) {

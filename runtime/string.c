@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* svm-llvm provides memcpy/memset but not bcmp/memcmp; hand-roll the compare. */
+/* temen-llvm provides memcpy/memset but not bcmp/memcmp; hand-roll the compare. */
 static int rt_bytes_eq(const char *a, const char *b, uint32_t n) {
   for (uint32_t i = 0; i < n; i++) if (a[i] != b[i]) return 0;
   return 1;
@@ -94,7 +94,7 @@ JaclVal jacl_str_intern(const char *s, uint32_t len) {
       return v;
     }
     /* entries are always heap strings (len>7) — compare directly, avoiding a
-       second tag check (which lets clang merge into an i64 switch svm-llvm
+       second tag check (which lets clang merge into an i64 switch temen-llvm
        can't lower; runtime tag dispatch should switch on the i32 type index). */
     JaclStr *es = str_obj(e);
     if (es->len == len && rt_bytes_eq((const char*)(es + 1), s, len)) return e;

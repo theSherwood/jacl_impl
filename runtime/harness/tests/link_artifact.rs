@@ -1,9 +1,9 @@
 //! P2.0 separate-artifact link proof.
 //!
-//! Spike-1 (`spikes/svm_emit_link`) proved emit → verify → link → run with a
+//! Spike-1 (`spikes/temen_emit_link`) proved emit → verify → link → run with a
 //! *hand-authored* runtime unit. This proves the same path against the **real,
 //! separately-compiled runtime**: translate `jaclrt.c` on its own, take its
-//! `exports` (the svm-llvm name→index map, Phase-2 Ask 1), and link a JACL-shaped
+//! `exports` (the temen-llvm name→index map, Phase-2 Ask 1), and link a JACL-shaped
 //! program module that calls a `jacl_*` function via `call.import` — the foundation
 //! Phase-2 codegen builds on (compile the runtime once, link many programs).
 
@@ -17,7 +17,7 @@ fn i32_val(x: i32) -> i64 {
     ((0x02u64 << 56) | (x as u32 as u64)) as i64
 }
 
-/// A program function that forwards `(sp, a, b)` to the runtime's `jacl_add`. svm-llvm
+/// A program function that forwards `(sp, a, b)` to the runtime's `jacl_add`. temen-llvm
 /// threads the data-stack pointer as every function's leading parameter (the §3d ABI),
 /// so the runtime `jacl_add(JaclVal,JaclVal)` is `(i64 sp, i64 a, i64 b) -> i64`; the
 /// program passes its own `sp` straight through. The `call.import` handle (`i32.const 0`)
