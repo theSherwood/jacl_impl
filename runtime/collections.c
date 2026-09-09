@@ -1,7 +1,7 @@
 /* collections.c — JACL runtime collections (P1.5): persistent vector.
  *
  * Instantiates the real `lib/rrb_vec` (an include-as-template, proven to compile
- * through svm-llvm in Spike-1b) for `JaclVal` elements, with its allocation hooks
+ * through temen-llvm in Spike-1b) for `JaclVal` elements, with its allocation hooks
  * wired to the GC heap:
  *   - nodes (leaf/internal/root) -> jacl_alloc(JOBJ_NODE) so the GC traces them
  *     (conservative payload scan + interior-pointer resolution finds child node

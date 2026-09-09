@@ -348,8 +348,8 @@ body {
     <div id="example-dropdown" class="dropdown hidden"></div>
   </div>
   <div class="toolbar-spacer"></div>
-  <label class="compile-mode-label" for="compile-mode" title="Which frontend compiles edited source to SVM IR">Compiler:</label>
-  <select id="compile-mode" class="btn" title="Which frontend compiles edited source to SVM IR (persisted in localStorage)">
+  <label class="compile-mode-label" for="compile-mode" title="Which frontend compiles edited source to TEMEN IR">Compiler:</label>
+  <select id="compile-mode" class="btn" title="Which frontend compiles edited source to TEMEN IR (persisted in localStorage)">
     <option value="emit">jacl_emit.wasm (fast)</option>
     <option value="guest">self-hosted guest (interp)</option>
     <option value="tierup">self-hosted guest (tier-up)</option>
@@ -377,7 +377,7 @@ body {
   <span id="status-right"></span>
 </div>
 
-<!-- SVM in-browser frontend (defines createJaclEmit); harmless 404 if the SVM assets aren't built.
+<!-- TEMEN in-browser frontend (defines createJaclEmit); harmless 404 if the TEMEN assets aren't built.
      The heavy wasm only instantiates on demand when the live-edit path first runs. -->
 <script src="wasm/jacl_emit.js"></script>
 <script type="module" src="dist/playground.js"></script>

@@ -1,16 +1,16 @@
-/* Emit-path libc shim for the JACL-compiler-on-SVM build.
+/* Emit-path libc shim for the JACL-compiler-on-TEMEN build.
  *
- * The SVM LLVM on-ramp synthesizes malloc/calloc/realloc/free and memcpy/memset,
+ * The TEMEN LLVM on-ramp synthesizes malloc/calloc/realloc/free and memcpy/memset,
  * and binds read/write/exit to host caps by name. Everything else the JACL frontend
  * calls on the codegen path is supplied here. Measured surface (call counts) from
- * `docs/SVM_SELFHOST_FEASIBILITY.md`: memcmp, strlen/strcmp/strcpy/strrchr,
+ * `docs/TEMEN_SELFHOST_FEASIBILITY.md`: memcmp, strlen/strcmp/strcpy/strrchr,
  * snprintf/vsnprintf (integer/string specifiers only — the IR-text builder uses
  * %u %s %d %llu %lld %02x, no floats), strtol, strerror, qsort, fmod,
  * __errno_location.
  *
  * This is intentionally small and self-contained (no libc headers) so the whole
  * program is one clean LLVM module. A production build may instead link the reused
- * shims under vendor/svm/crates/svm-run/demos/{postgres,strtod}. */
+ * shims under vendor/temen/crates/temen-run/demos/{postgres,strtod}. */
 
 typedef unsigned long size_t;
 typedef __builtin_va_list va_list;
@@ -19,9 +19,9 @@ typedef __builtin_va_list va_list;
 #define va_end   __builtin_va_end
 
 /* --- heap allocation: the engine's growing allocator ------------------------------------------
- * We do NOT define malloc/calloc/realloc/free here: the SVM LLVM on-ramp synthesizes them over its
+ * We do NOT define malloc/calloc/realloc/free here: the TEMEN LLVM on-ramp synthesizes them over its
  * `__temen_malloc`, a bump allocator that grows the window via `vm_map` (op 0) on demand. Earlier
- * this file shadowed them with a fixed static arena (SVM_WARM_COMPILER.md Slice 1) because an
+ * this file shadowed them with a fixed static arena (TEMEN_WARM_COMPILER.md Slice 1) because an
  * in-leaf `vm_map` grow trapped the cooperative tier-up on the emitted tier — the coop pump only
  * re-synced the live `"mapped"` bound between events, not mid-run. That gap is closed: temen #1312
  * (PR #1319) made the coop run window a growable, relocatable backing, so an in-leaf grow tiers up

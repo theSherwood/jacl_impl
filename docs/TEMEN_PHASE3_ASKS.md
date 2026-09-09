@@ -1,0 +1,250 @@
+# Asks for temen — Phase 3 prerequisite (per-vCPU heap identity)
+
+> **STATUS: RESOLVED** (temen `main` ≥ `7a82f64`, PR #79 "per-vCPU TLS register").
+> temen shipped exactly Ask 1 — and a touch better than option 1. See the
+> "Resolution" note at the bottom; the rest of this doc is kept as the original
+> ask for the record.
+
+> For the temen side. **One** change unblocks JACL's Phase 3 P3.4 (the M:N
+> work-stealing scheduler with real OS-thread workers): a way for guest code to
+> learn **which worker/vCPU it is running on**. The runtime and codegen are
+> otherwise ready; this is the single missing primitive for a high-performance,
+> per-worker allocator.
+>
+> Context: P3.1–P3.3 (generators, `spawn`/`await`, `parallel`/`race`) and the
+> single-thread GC quiesce (P3.6) are done cooperatively on one OS thread. P3.4
+> turns the workers into real `__vm_thread_spawn` OS threads, which needs a
+> **thread-safe allocator**. We agreed on JACL's existing design — **per-worker
+> (per-vCPU) heaps with a lock-free bump fast path** — not a per-allocation lock.
+> (See `TEMEN_BACKEND_PHASE3.md` §P3.4.)
+
+## Ask 1 — a guest-visible thread/vCPU self-id (the blocker)
+
+**Problem.** The per-vCPU allocator needs each worker to index its own heap:
+`per_worker[id].bump`. That requires the running code to know its own `id`
+**cheaply, anywhere** (the allocator fast path runs on every `jacl_alloc`). temen
+today exposes **no** way to get that:
+
+- **No C thread-locals.** temen-llvm does not lower TLS (`__thread` /
+  `thread_local`), so the classic `__thread ThreadHeap *current_heap` the old VM
+  uses (`src/gc.c`) cannot be expressed.
+- **No self-id intrinsic.** The `__vm_*` surface has atomics
+  (`__vm_atomic_add`, `__vm_atomic_cas32`), a futex (`__vm_wait32` /
+  `__vm_notify`), and `__vm_thread_spawn` / `__vm_thread_join`, but nothing that
+  returns "which vCPU/OS-thread am I." `__vm_thread_spawn(funcidx, sp, arg)`
+  returns the handle **to the spawner**, not an identity to the spawnee.
+- **No frame-address / stack-base intrinsic** either, so a worker can't even
+  derive an identity from its own stack region.
+
+We can thread a **worker id as the spawn `arg`** and pass it explicitly down the
+data-SP ABI — and the current P3.4 design does exactly that as the fallback — but
+it means **every** function on a worker carries an extra `id` parameter purely to
+reach the allocator, which is invasive and easy to get wrong across fiber
+resume/suspend boundaries (a fiber may migrate workers under work-stealing, so a
+captured-at-spawn id is *stale* after a steal). A cheap "ask the VM where I am
+**now**" removes both problems.
+
+**The change.** Add one of (in preference order):
+
+1. **A self-id intrinsic** — `long __vm_thread_self_id(void)` (or
+   `__vm_vcpu_id`), returning a small dense index `0..N` for the current OS
+   worker/vCPU, stable for the duration of a `thread.spawn` body and **re-read
+   after any fiber resume** (so a stolen fiber sees its new home). This is the
+   minimal, fastest, migration-correct option.
+
+   ```c
+   long __vm_thread_self_id(void);  // 0..num_workers-1 for the running vCPU
+   ```
+
+2. **TLS lowering** — make temen-llvm lower `__thread` / `thread_local` to a
+   per-OS-thread slot. More general (lets the allocator stash a whole
+   `ThreadHeap*`, matching the old VM verbatim), but a larger change and still
+   needs care so a migrated fiber re-reads the slot on its new thread.
+
+Option 1 is sufficient and is what we'd build on: index `per_worker[id]` and
+re-read `id` at each allocation safe point.
+
+**Acceptance.** A guest spawns `N` workers via `__vm_thread_spawn`; inside each,
+`__vm_thread_self_id()` returns a distinct value in `0..N-1`; the value is stable
+across calls within a worker and, for a fiber resumed on a different worker after
+a steal, reflects the **current** worker. A small test: N workers each bump-
+allocate into `per_worker[self_id()]` concurrently with no atomics on the fast
+path and no cross-worker corruption (the per-vCPU allocator's core invariant).
+
+## What JACL builds on top (no further temen asks)
+
+Everything else P3.4 needs already exists in temen and is referenced in
+`TEMEN_BACKEND_PHASE3.md`:
+
+- **Real OS-thread workers:** `__vm_thread_spawn` / `__vm_thread_join`
+  (`Inst::ThreadSpawn`, supported on interp + JIT).
+- **Shared region-pool refill + free-lists:** `__vm_atomic_cas32` /
+  `__vm_atomic_add` (coarse mutex now, lock-free Treiber list later).
+- **Multi-vCPU STW quiesce:** the guest futex barrier pattern from temen's
+  `crates/temen/tests/gc_quiesce.rs` ("quiescing the N threads quiesces the M
+  fibers") — no new temen primitive.
+- **Conservative roots over every parked fiber:** `gc.roots` already scans all
+  suspended fibers' control + data stacks (temen's
+  `gc_roots_scans_suspended_fiber_stack` / `gc_roots_enumerates_every_parked_fiber`).
+
+## Summary
+
+| # | Ask | Size | Gates |
+|---|---|---|---|
+| 1 | `__vm_thread_self_id()` (or TLS lowering) | small–med | per-vCPU lock-free allocator (P3.4) |
+
+With Ask 1, JACL implements per-vCPU TLAB allocation (lock-free bump, shared
+region pool, cooperative STW quiesce) directly — the agreed best-perf design —
+with no throwaway global-allocator step. Until it lands, P3.4 implementation is
+paused; P3.1–P3.3 + P3.6 (cooperative concurrency) are done and unaffected.
+
+## Resolution (temen `7a82f64`, PR #79)
+
+temen added an **ambient per-vCPU TLS register**, exposed to C exactly as the ask's
+preferred option (and slightly stronger):
+
+```c
+long __vm_vcpu_tls_get(void);   // current vCPU's i64 TLS word
+void __vm_vcpu_tls_set(long x); // overwrite it
+```
+
+- **Read at the execution point**, so a fiber that migrated to another vCPU reads
+  the *current* vCPU's word — the migration-correctness property we specifically
+  called out for work-stealing (temen's `vcpu_tls_tracks_current_vcpu_across_migration`
+  test covers exactly this).
+- **Seeded to a dense id** at vCPU creation (root 0, children sequential), so a
+  bare `get` before any `set` doubles as a `vcpu.id` — what we'd index
+  `per_worker[id]` with.
+- **Or a full per-CPU pointer:** the guest may `set` it to a pointer to its own
+  per-CPU block, giving `__thread`-style TLS (lets us stash a whole `ThreadHeap*`
+  the way the old VM does, without C TLS).
+
+Wired through ir / encode (`0xEB`/`0xEC`) / text (`vcpu.tls.get|set`) / verify /
+interp / jit / temen-llvm (`__vm_vcpu_tls_get` / `__vm_vcpu_tls_set`) / peval.
+Verified on the JACL side: the C intrinsics translate (temen-llvm
+`vm_vcpu_tls_round_trip`) and the temen migration/seed tests pass at the pinned
+commit. **P3.4 is unblocked.**
+
+> Note: the same bump (temen `9b0d163`) also **widened fiber handles i32 → i64**
+> (`cont.new` yields i64, `cont.resume` takes an i64 handle, status stays i32; the
+> C on-ramp is now `long __vm_fiber_new` / `long __vm_fiber_resume(long, …)`).
+> `runtime/fiber.c` was updated to store i64 handles accordingly — required for the
+> module to verify against the new pin.
+
+---
+
+## Ask 2 — persistent M:N pool — **WITHDRAWN: no temen change needed**
+
+> **STATUS: WITHDRAWN.** Two earlier drafts of this ask were both wrong. (a) "`gc.roots`
+> coverage bug" — wrong: `gc.roots` is sound (the transient `jacl_sched_run_batch` uses it and
+> is rock-solid, `mt.rs::gc_sched`). (b) "need fiber migration" — wrong: **temen already provides
+> cross-vCPU fiber migration, and it is tested *with* GC.** So the persistent M:N pool (the
+> P3.4d keystone) is **not blocked on temen at all** — the remaining work is entirely JACL-side.
+> Kept here, withdrawn, for the record. Full root-cause + reproducer: `spikes/temen_pool_gc/`.
+
+**Why the persistent pool corrupted (root cause — all JACL-side).** Three causes, found by
+isolation in `spikes/temen_pool_gc/`:
+1. *main-side roots* — `jacl_parallel` held in-flight roots (the closures vector, freshly
+   allocated futures, the result vector, register transients) on **main's** fiber stack while
+   pool workers collected; `gc.roots` doesn't cover the main thread's stack for a collection
+   elected on another vCPU. **Fixed** by global root buffers + main-allocates-only-when-sole-mutator.
+2. *result-handoff ordering* — a plain i64 result store wasn't ordered before the atomic DONE
+   flag under temen-llvm + real JIT threads. **Fixed** by atomic-halves publish/read.
+3. *main's program-fiber in the multi-worker quiesce set* — unlike the transient pool (main
+   unregisters and parks on its bare thread, never a running fiber during a collection), the
+   persistent pool runs main as a program fiber that **cycles suspend/resume** while awaiting,
+   leaving rare windows the strict `gc.roots` trips (`FiberFault`, ~1/40 on real-thread JIT).
+
+**Why #3 needs no temen change.** The clean fix for #3 is a **continuation scheduler**: a wait
+suspends the program/task fiber back to a bare scheduler loop (so it is `RUNNABLE`, *off* the
+workers — never `RUNNING` while a worker collects), and a ready fiber is resumed by whatever
+worker grabs it. That needs cross-vCPU fiber **migration** (resume a fiber on a different vCPU
+than suspended it), which **temen already implements and tests on both backends**:
+
+- `cont.resume` claims a fiber from a run-shared registry, "**possibly one suspended on another
+  vCPU (D57 migration)**" — interp `temen-interp/src/bytecode.rs`; JIT `fiber_rt::fiber_resume`:
+  "**any vCPU may resume** a fresh (`OWNED`) or suspended (`RUNNABLE`) fiber … even when another
+  OS thread suspended it (the migration edge)."
+- Tests: `temen/tests/fiber_migrate.rs::fiber_suspended_on_root_resumes_on_spawned_vcpu`,
+  `foreign_vcpu_claim_succeeds_without_a_race`, `racing_resumes_have_exactly_one_winner`;
+  `fiber_fuzz.rs::generated_migration_schedules_agree_on_interp_and_jit`; and `gc_roots.rs` /
+  `gc_quiesce.rs` exercise a stop-the-world `gc.roots` scan **across spawned vCPUs** (with the
+  §3.3 "refuse if another vCPU holds a *running* fiber" check verified *not* to fire when fibers
+  are properly suspended — exactly the continuation scheduler's invariant).
+
+**Remaining work (JACL-side, no ask):** build the continuation scheduler on temen's existing
+migration — `await`/wait suspends the awaiting fiber to a bare per-worker loop instead of
+busy-cycling; workers resume ready fibers (migrating them); keep #1's global-buffer rooting and
+#2's atomic handoff. Then `parallel`/`race`/`spawn`/`await` move onto the persistent pool and
+the async/parking builtins (`sleep`/channels) follow. Tracked in `TEMEN_BACKEND_PHASE3.md` P3.4d.
+
+---
+
+## Ask 3 — `gc.roots` coverage contract for guest values on stacks/registers
+
+> **STATUS: RESOLVED — contract + temen #217.** The final division of labor, verified at temen
+> `57e20b1`:
+>
+> - **temen scans the native side.** Parked fibers' control stacks `[ctx, top)` (the fiber switch
+>   spills all callee-saved registers — a suspending fiber gets its "register flush" for free);
+>   running resume-chain ancestors; the collector's root frames. And **#217 shipped the
+>   register-flush shim** this ask requested (`temen_gc_roots_flush`, one naked trampoline per
+>   target): the collector's own call-surviving roots in callee-saved registers — the confirmed
+>   gap (A/B: 13 of 17 roots found without it) — now land in the scanned region by construction.
+> - **The guest reports the guest-memory side.** The contract: **a vCPU top (bare
+>   `thread.spawn`-entry native stack, e.g. our worker loop) holds no heap roots at a safepoint —
+>   push them into a fiber or the window before parking.** And guest-memory locations are the
+>   guest's own to mark: scheduler globals **and the fiber DATA stacks** (`jacl_task_stack`),
+>   where temen-llvm places address-taken locals like `parallel`'s `futs[]`. `gc.roots` never sees
+>   those — they're ordinary guest memory.
+>
+> **Outcome in JACL (`runtime/sched.c`):** the `jacl_all_jobs` force-root registry (cap 8192 +
+> leak) is **deleted** — jobs are ordinary GC objects. `jacl_sched_mark_roots` marks the window
+> (ready queues, `running_job`, root job) and conservatively scans the in-use fiber data stacks
+> (`mark_task_stacks`; released stacks are zeroed against stale retention). Isolation that pinned
+> the final gap: without the registry, `par_gc` hung even single-worker until the data-stack scan
+> landed — the swept jobs were exactly the ones referenced only by `futs[]`. Verified at
+> `57e20b1`: `mt::par_gc` + `mt::job_gc` (reclamation bound + a future held/re-awaited across ~34
+> collections) 12/12 under stress, and the old `mt::sched_batch` baseline flake (a keeper in a
+> callee-saved register, missed pre-#217) is gone (8/8). Original ask kept below for the record.
+
+---
+
+### Original ask (answered above by the vCPU-top contract)
+
+**Context.** JACL runs an M:N scheduler on `cont.*`: a persistent pool of `thread.spawn` vCPU
+workers, each running a bare worker loop that resumes job fibers. The guest GC finds heap roots
+via `gc.roots` at a stop-the-world safepoint.
+
+**Problem.** We cannot rely on `gc.roots` to find guest heap pointers that live on stacks — they
+get swept mid-collection. Confirmed with a reproducer: when scheduler "job" objects are rooted
+only via their natural references (a worker-loop local, a `parallel` block's `futs[]` array on
+the awaiting fiber, the program root reachable through a waiter chain), live jobs — including the
+program root — get collected, hanging/corrupting the run. Marking the obvious guest globals
+(ready queues, per-worker current-job, root-job pointer) is **not** enough; only copying *every*
+job pointer into a guest-global array and marking it by hand works. That array can't be safely
+reclaimed (a DONE job may be a held, re-awaitable future whose only reference is a stack slot we
+can't prove dead), so it leaks / is capped.
+
+`gc.roots`' own doc already flags one gap: *"live roots a caller holds only in unspilled
+callee-saved registers … are out of scope (a register-flush shim is a future follow-up)."*
+
+**Please confirm coverage at a STW `gc.roots` (driven by one vCPU) for each:**
+1. Values live only in **unspilled callee-saved registers** — of the calling frame, of suspended
+   fibers, and of resume-chain ancestors.
+2. A **non-collector spawned vCPU's bare native-thread (root-computation) stack** — i.e. its
+   `thread.spawn` entry frames (our worker loop), where a job pointer sits between dequeuing it
+   and resuming its fiber. Is `root_entry_sp` recorded and that region scanned for spawned vCPUs,
+   not just the main one?
+3. A **suspended fiber's full saved C-frame chain** (e.g. a `parallel` local array on a fiber
+   parked in `await`).
+
+**Ask.** Document the exact `gc.roots` coverage contract (which locations × which vCPUs/fibers are
+guaranteed scanned at STW), and close the gaps — in particular the already-flagged register-flush
+shim, and (2) if spawned-worker native stacks are not covered. Then a guest scheduler can keep
+roots in normal locals instead of a hand-marked, un-reclaimable global table.
+
+**Repro (JACL, this repo).** `spikes/temen_pool_gc/` (analysis) + `runtime/tests/test_par_gc.c` via
+`cargo test --release --test mt par_gc` (JIT). With the explicit job registry it passes 10/10;
+relying on the stack scan (registry removed, queues+running+root marked) it hangs 0/8 —
+`runtime/sched.c` `jacl_sched_mark_roots` / `jacl_all_jobs`.

@@ -1,13 +1,13 @@
-/* extern_catalog.c — the test-only native `extern` catalog for the SVM parity harness.
+/* extern_catalog.c — the test-only native `extern` catalog for the TEMEN parity harness.
  *
  * These are the C functions that `test/jacl/buf_extern_c.jacl` calls through `extern`
- * declarations. They are compiled to SVM IR on their own and linked as a third module
+ * declarations. They are compiled to TEMEN IR on their own and linked as a third module
  * (after the runtime, before the program), so a JACL program's `call.import "t_sumi"`
  * resolves against them. The point is fidelity: each takes a *raw linear-memory address*
  * (the value a `[Buf N T]` / `[Ptr T]` decays to at a C-ABI boundary) and dereferences it
  * with genuine C pointer semantics — proving `[addr $buf]` is a real, stable pointer the
- * C side can read and write. The JACL heap *is* SVM linear memory and the collector is
- * non-moving, so the address stays valid across the call. See docs/SVM_BUFFERS.md.
+ * C side can read and write. The JACL heap *is* TEMEN linear memory and the collector is
+ * non-moving, so the address stays valid across the call. See docs/TEMEN_BUFFERS.md.
  *
  * Names are <=7 bytes so they encode as inline strings (matches the old-VM harness). */
 #include <stdint.h>
@@ -24,7 +24,7 @@ int32_t t_sumi(int64_t addr, int32_t len) {
 /* Fill `len` bytes at `addr` with `byte`. Writes through the decayed pointer; the caller
  * observes the mutation by reading the buffer back. Returns `len`. The `volatile` keeps
  * clang's loop-idiom pass from coalescing this into a variable-length `llvm.memset` (which
- * svm-llvm lowers to a synthesized `__svm_memset` helper that doesn't survive cross-module
+ * temen-llvm lowers to a synthesized `__temen_memset` helper that doesn't survive cross-module
  * linking) — a plain per-byte store loop is what we want here. */
 int32_t t_fill(int64_t addr, int32_t len, int32_t byte) {
   volatile uint8_t *p = (volatile uint8_t *)(uintptr_t)addr;

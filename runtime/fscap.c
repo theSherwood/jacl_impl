@@ -1,7 +1,7 @@
-/* fscap.c — the "fs" named-capability adapter (docs/SVM_FS_DESIGN.md, layer 2).
+/* fscap.c — the "fs" named-capability adapter (docs/TEMEN_FS_DESIGN.md, layer 2).
  *
  * At the first file builtin, probe the §7 capability-name directory for an embedder-granted
- * "fs" capability (svm-fs wire protocol: crates/svm-fs). Granted, `read-file` /
+ * "fs" capability (temen-fs wire protocol: crates/temen-fs). Granted, `read-file` /
  * `write-file` / `append-file` route through real cap ops — against whatever backend the
  * host chose (in-memory mem_fs, a seeded data image, or host_fs rooted at a directory).
  * Not granted, the callers in io.c fall back to the pure-guest VFS map, so a program runs
@@ -10,11 +10,11 @@
  *
  * Path model: JACL's absolute namespace is rooted at the grant — the adapter strips the
  * leading '/'s, so JACL's "/tmp/x.txt" names "tmp/x.txt" inside the granted root. Both
- * svm-fs backends refuse absolute / ".." / empty paths host-side (-EACCES), so vetting is
+ * temen-fs backends refuse absolute / ".." / empty paths host-side (-EACCES), so vetting is
  * not duplicated here. Errors (negative errnos) surface as JACL error values — the same
  * try/catch-able failures the guest VFS produces, so `# expect-error` oracles keep matching.
  *
- * `__vm_cap_resolve` / `__vm_host_call` are svm-llvm intrinsics lowered at translate time
+ * `__vm_cap_resolve` / `__vm_host_call` are temen-llvm intrinsics lowered at translate time
  * to `cap.self.resolve` / `cap.call` (each call site passes its op as a literal — the
  * lowering requires a constant op). */
 #include <string.h>
@@ -22,7 +22,7 @@
 extern int  __vm_cap_resolve(const char *name, long len);
 extern long __vm_host_call(int h, int op, long a, long b, long c, long d);
 
-/* svm-fs protocol constants (crates/svm-fs/src/lib.rs). Ops are passed as literals at each
+/* temen-fs protocol constants (crates/temen-fs/src/lib.rs). Ops are passed as literals at each
  * call site (constant-op requirement); these name the flag/whence values only. */
 #define JFS_O_READ    1
 #define JFS_O_WRITE   2
@@ -35,7 +35,7 @@ extern long __vm_host_call(int h, int op, long a, long b, long c, long d);
 #define JFS_S_IFMT  0170000u
 #define JFS_S_IFDIR 0040000u
 
-/* svm-llvm rejects a *constant* ptrtoint; route addresses through a noinline call so they
+/* temen-llvm rejects a *constant* ptrtoint; route addresses through a noinline call so they
  * lower to runtime instructions (mirrors flatbuf.c's jacl_fb_pti). */
 __attribute__((noinline)) static long jacl_fs_pti(const void *p) { return (long)(uintptr_t)p; }
 
@@ -187,7 +187,7 @@ JaclVal jacl_fscap_file_exists(JaclVal path) {
   return jaclrt_bool(r == 0);
 }
 /* `[list-dir PATH]` through the cap: opendir/readdir/closedir (ops 17/18/19), sorted.
- * "/" maps to "." (svm-fs's read_path admits CurDir; norm() folds it to the root). */
+ * "/" maps to "." (temen-fs's read_path admits CurDir; norm() folds it to the root). */
 JaclVal jacl_fscap_list_dir(JaclVal path) {
   int h = jacl_fs();
   char p[1024];

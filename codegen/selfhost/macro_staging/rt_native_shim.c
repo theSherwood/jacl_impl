@@ -1,5 +1,5 @@
-/* Native single-threaded stubs for the SVM __vm_* intrinsics, so the runtime's
- * value/string/collection subset (and the syn_rt codec) can be unit-tested off-SVM.
+/* Native single-threaded stubs for the TEMEN __vm_* intrinsics, so the runtime's
+ * value/string/collection subset (and the syn_rt codec) can be unit-tested off-TEMEN.
  * Atomics become plain ops (single-threaded); wait/notify/suspend/gc_roots are inert. */
 #include <stdint.h>
 long __vm_vcpu_tls_get(void) { return 0; }

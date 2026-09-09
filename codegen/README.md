@@ -1,16 +1,16 @@
-# codegen — JACL → SVM-IR (Phase 2)
+# codegen — JACL → TEMEN-IR (Phase 2)
 
-JACL-owned code generation for the SVM backend. Phase 2 retargets JACL's codegen to
-**AST → SVM IR**, emitting calls into the Phase-1 runtime, linked into one module and
-run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
+JACL-owned code generation for the TEMEN backend. Phase 2 retargets JACL's codegen to
+**AST → TEMEN IR**, emitting calls into the Phase-1 runtime, linked into one module and
+run on interp + JIT (see `docs/TEMEN_BACKEND_PHASE2.md`).
 
 ## Contents
 
-- `irbuilder.h` / `irbuilder.c` — **P2.1: the IR builder.** An in-memory SVM-IR
-  module/func/block/inst representation mirroring `svm-ir`'s shape, with two serializers
-  behind one API: `irb_to_text` (the svm-text form `svm_text::parse_module` accepts, for
-  goldens/human diffs) and `irb_to_encoded` (the `svm-encode` **binary object** — v9 object
-  dialect — that `svm_encode::decode_unit` accepts, the default interchange). Own-data
+- `irbuilder.h` / `irbuilder.c` — **P2.1: the IR builder.** An in-memory TEMEN-IR
+  module/func/block/inst representation mirroring `temen-ir`'s shape, with two serializers
+  behind one API: `irb_to_text` (the temen-text form `temen_text::parse_module` accepts, for
+  goldens/human diffs) and `irb_to_encoded` (the `temen-encode` **binary object** — v9 object
+  dialect — that `temen_encode::decode_unit` accepts, the default interchange). Own-data
   addresses are inline `data.self` instructions the linker resolves, so there is no separate
   relocation serializer. The two are round-trip-gated (`runtime/harness/tests/irbuilder.rs`).
 
@@ -18,13 +18,13 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   (with a `memory` declaration), direct `call`, name-inline `call.import`, and the
   `br` / `br_if` / `return` terminators.
 
-  **Discipline:** SVM is *block-local SSA* — an instruction references only its own
+  **Discipline:** TEMEN is *block-local SSA* — an instruction references only its own
   block's params (`v0..v{k-1}`) and earlier results; values needed elsewhere cross as
   branch arguments and are received as block params. The builder numbers values per
   block and returns each new id; the caller threads cross-block values explicitly.
 
-- `codegen.h` / `codegen.c` — **the codegen walk.** `svm_codegen_program` walks the
-  JACL AST (from `src/jacl.h`) and emits an SVM-IR module via the builder, with a
+- `codegen.h` / `codegen.c` — **the codegen walk.** `temen_codegen_program` walks the
+  JACL AST (from `src/jacl.h`) and emits an TEMEN-IR module via the builder, with a
   single entry `func (i64 sp) -> (i64)` returning the last top-level form's JaclVal.
   - **P2.2 (literals + arithmetic):** integer literals (→ i32 JaclVal constants) and
     `+ - * / %` (→ runtime `jacl_add`/`sub`/`mul`/`div`/`mod` via `call.import`,
@@ -40,7 +40,7 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     (integer ranges) desugars onto the loop machinery. Conditions reduce to an i32
     truth (`(c != false) & (c != nil)`); comparisons lower to `jacl_lt/le/gt/ge/eq/ne`.
 
-  - **P2.5 (procs & calls):** top-level `proc`s become SVM functions
+  - **P2.5 (procs & calls):** top-level `proc`s become TEMEN functions
     (`func (i64 sp, i64 a0…) -> i64`); codegen is two-pass (register all procs, then
     compile bodies) so recursion resolves. Calls resolve by name against the proc
     table (with an arity check) and thread `sp` unchanged. Proc bodies compile in
@@ -65,7 +65,7 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
     own-data address (`data.self`, v9) and call `jacl_str_new`; interpolation / `[concat …]`
     fold `jacl_str_concat` (with `jacl_to_string` of expression segments). `[vec …]` →
     `jacl_vec_empty` + `jacl_vec_push`; `[length X]` → `jacl_len`. The IR builder emits data
-    segments + `data.self` addresses (`irb_add_data` / `irb_data_addr`); `svm_ir::link`
+    segments + `data.self` addresses (`irb_add_data` / `irb_data_addr`); `temen_ir::link`
     rewrites each `data.self` to the segment's final window address, so there is no separate
     relocation table on the wire (the object carries everything).
 
@@ -84,26 +84,26 @@ run on interp + JIT (see `docs/SVM_BACKEND_PHASE2.md`).
   add maps + element access and structs, and drive the full corpus.
 
 - `tests/emit_demo.c` — builds sample modules through the builder and prints their
-  svm-text (selected by argv), the C side of the IR-builder round-trip test.
+  temen-text (selected by argv), the C side of the IR-builder round-trip test.
 
 - `tests/emit_jacl.c` — parses a JACL source snippet through the real frontend
-  (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `svm_codegen_program`, writing
-  the program as the default v9 svm-encode **object** (`--text` for svm-text). Built
+  (`src/jacl.c`: lexer + parser + `typer_infer`) and runs `temen_codegen_program`, writing
+  the program as the default v9 temen-encode **object** (`--text` for temen-text). Built
   with **gcc** (the frontend's toolchain).
 
 ## Phase 4 — corpus bring-up (parity scoreboard)
 
 `runtime/harness/src/bin/parity.rs` drives the whole `test/jacl/*.jacl` corpus through
-the real pipeline (frontend → svm codegen → link → interp==jit) and scores each case
-against its inline `# expect:` / `# expect-error:` oracle, writing `docs/SVM_PARITY.md`.
+the real pipeline (frontend → temen codegen → link → interp==jit) and scores each case
+against its inline `# expect:` / `# expect-error:` oracle, writing `docs/TEMEN_PARITY.md`.
 Phase 4 works that scoreboard cluster by cluster. Slices landed so far:
 
 - **Static-error oracle (the driver).** `tests/emit_jacl.c` runs the old VM's full
   `compiler_compile` purely for its compile-time diagnostics, on its OWN re-lexed/
-  re-parsed AST (so the compiler's conformance pass and the SVM codegen never mutate a
+  re-parsed AST (so the compiler's conformance pass and the TEMEN codegen never mutate a
   shared tree). Every corpus program is written for the old VM, so the compiler accepts
   each passing case and rejects each `# expect-error` case with its canonical message —
-  exactly the accept/reject the SVM backend must mirror. This resolves the bulk of the
+  exactly the accept/reject the TEMEN backend must mirror. This resolves the bulk of the
   typed/struct/ctx/buf/generator/typed-closure `expect-error` corpus without duplicating
   those checks in the codegen. On rejection the emitted module is discarded.
 
@@ -213,9 +213,9 @@ the call work for a real closure: the callee reads its captured upvalues back ou
 
 `runtime/harness/tests/irbuilder.rs` compiles the builder + demo natively, emits each
 module, then parses → verifies → runs it on interp + JIT (and checks import-free output
-is canonical svm-text, plus that `irb_to_encoded` decodes to the same `Module` as the text
+is canonical temen-text, plus that `irb_to_encoded` decodes to the same `Module` as the text
 path). `runtime/harness/tests/codegen.rs` does the same from real JACL source through
-`svm_codegen_program`, decoding the binary emit object (`decode_emitted`) and linking
+`temen_codegen_program`, decoding the binary emit object (`decode_emitted`) and linking
 each program against the runtime artifact. Run from `runtime/harness/`:
 
 ```sh
@@ -226,5 +226,5 @@ cargo test --test codegen
 The full corpus scoreboard is regenerated with:
 
 ```sh
-cargo run --release --bin parity      # writes docs/SVM_PARITY.md
+cargo run --release --bin parity      # writes docs/TEMEN_PARITY.md
 ```

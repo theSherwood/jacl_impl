@@ -2,15 +2,15 @@
 //!
 //! Compiles a C driver from `runtime/tests/` — which `#include`s the JACL runtime
 //! (`runtime/jaclrt.h` and, once it exists, the unity `jaclrt.c`) — with
-//! `clang -O2 -emit-llvm`, translates the bitcode via `svm-llvm`, verifies, and runs
+//! `clang -O2 -emit-llvm`, translates the bitcode via `temen-llvm`, verifies, and runs
 //! the driver's `run(int)` (module function 0) on **both** the interpreter and the
 //! Cranelift JIT, asserting they agree. Returns the i32 result.
 //!
 //! Whole-program compilation (driver + runtime in one TU) is used deliberately for
-//! Phase 1: it sidesteps the separate-artifact symbol-linking question (svm-llvm
+//! Phase 1: it sidesteps the separate-artifact symbol-linking question (temen-llvm
 //! does not yet expose a name→index export map — a Phase-2 prerequisite) while
 //! still building and testing the real runtime code. Separate-artifact linking is
-//! proven independently by Spike-1 (`spikes/svm_emit_link`).
+//! proven independently by Spike-1 (`spikes/temen_emit_link`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,17 +18,17 @@ use temen_interp::Value;
 use temen_ir::ValType;
 use temen_jit::JitOutcome;
 
-/// C-ABI bridge (`jacl_svm_stage`) that runs a codegen'd staged-macro module on SVM
-/// in-process, for the native frontend's `JACL_STAGE_ON_SVM` path.
+/// C-ABI bridge (`jacl_temen_stage`) that runs a codegen'd staged-macro module on TEMEN
+/// in-process, for the native frontend's `JACL_STAGE_ON_TEMEN` path.
 pub mod stage_ffi;
 
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
-/// Decode the emit driver's default output — a v9 svm-encode **object** (`irb_to_encoded`).
+/// Decode the emit driver's default output — a v9 temen-encode **object** (`irb_to_encoded`).
 /// The object carries its own `data.self` link-form data addresses and unresolved `call.sym`s,
 /// which `link` resolves, so there is no separate relocation table: the returned `Module` is a
 /// pre-link unit, fed to `link`/`link_with_manifest` as a `LinkUnit`. Objects decode via
-/// `decode_unit` (`decode_module` rejects them). (`emit_jacl --text` still emits svm-text for
+/// `decode_unit` (`decode_module` rejects them). (`emit_jacl --text` still emits temen-text for
 /// goldens; that path is consumed by shell diffs, not this decoder.)
 pub fn decode_emitted(bytes: &[u8]) -> Result<temen_ir::Module, String> {
     temen_encode::decode_unit(bytes).map_err(|e| format!("decode object: {e:?}"))
@@ -65,10 +65,10 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
 /// `jacl_*` function with its module index, so a program module can resolve a
 /// `call.import "jacl_*"` against it through `temen_ir::link` (the separate-artifact
 /// path: compile the runtime once, link many programs against it). This is the
-/// in-process analogue of `runtime/build.sh`'s `clang … | svm-llvm-translate`.
+/// in-process analogue of `runtime/build.sh`'s `clang … | temen-llvm-translate`.
 pub fn translate_runtime() -> temen_llvm::Translated {
     let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
-    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime")
+    temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate runtime")
     // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
     // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
     // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call
@@ -79,11 +79,11 @@ pub fn translate_runtime() -> temen_llvm::Translated {
 /// `synrt_write_result`) as one module, so a codegen'd staged-macro program resolves those
 /// (and `jacl_*`) by name at link. The glue's `jacl_vec_*` calls are in-unit; only
 /// `read`/`write` cross the boundary (the recognized Stream caps). See
-/// `docs/SVM_MACRO_STAGING_PLAN.md` "final link".
+/// `docs/TEMEN_MACRO_STAGING_PLAN.md` "final link".
 pub fn translate_runtime_staging() -> temen_llvm::Translated {
     let unity = format!("{RUNTIME_DIR}/../codegen/selfhost/macro_staging/jaclrt_staging.c");
     let bc = compile_driver(&unity);
-    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate staging runtime")
+    temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate staging runtime")
 }
 
 /// Translate the test-only native `extern` catalog (`extern_catalog.c`) as its own
@@ -91,10 +91,10 @@ pub fn translate_runtime_staging() -> temen_llvm::Translated {
 /// `call.import "t_*"` (emitted for an `extern` call) resolves against it through
 /// `temen_ir::link`. The catalog is pure (no capability imports); it takes raw
 /// linear-memory addresses and dereferences them with C semantics — the fidelity
-/// point of the flat-buffer decay path (see docs/SVM_BUFFERS.md).
+/// point of the flat-buffer decay path (see docs/TEMEN_BUFFERS.md).
 pub fn translate_catalog() -> temen_llvm::Translated {
     let bc = compile_driver(&format!("{}/extern_catalog.c", env!("CARGO_MANIFEST_DIR")));
-    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate extern catalog")
+    temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate extern catalog")
 }
 
 /// Translate the runtime with a custom `JACL_HEAP_BYTES` (a small heap makes the
@@ -102,17 +102,17 @@ pub fn translate_catalog() -> temen_llvm::Translated {
 pub fn translate_runtime_heap(heap_bytes: u32) -> temen_llvm::Translated {
     let def = format!("JACL_HEAP_BYTES={heap_bytes}u");
     let bc = compile_driver_defs(&format!("{RUNTIME_DIR}/jaclrt.c"), &[&def]);
-    temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate runtime (small heap)")
+    temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate runtime (small heap)")
 }
 
-/// Compile `runtime/tests/<driver>`, translate via svm-llvm, verify, and run
+/// Compile `runtime/tests/<driver>`, translate via temen-llvm, verify, and run
 /// `run(n)` (func 0) on interp + JIT. Asserts the two backends agree; returns the
 /// i32 result.
 pub fn run_test(driver: &str, n: i32) -> i32 {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
 
-    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let t = temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate bitcode");
     // A non-printing runtime test carries the `write` capability import but never calls it, so the
     // module runs func 0 directly with the import declared-but-unbound (dead). Programs that DO
     // print are powerbox programs — run them via `run_powerbox`.
@@ -147,14 +147,14 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
 }
 
 /// Like `run_test`, but runs **only the Cranelift JIT** (the real backend, real OS-thread
-/// vCPUs). Used for the concurrent-GC stress test: under heavy concurrent collection the svm
+/// vCPUs). Used for the concurrent-GC stress test: under heavy concurrent collection the temen
 /// *interpreter*'s cooperative single-thread scheduler flakily livelocks on the runtime's
 /// futex-based GC barrier (a simulation artifact — the JIT, with real threads, is unaffected),
 /// so the differential oracle can't drive that case; this verifies the JIT path directly.
 pub fn run_test_jit(driver: &str, n: i32) -> i32 {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
-    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let t = temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate bitcode");
     let module = t.module;
     temen_verify::verify_module(&module).expect("verify translated IR");
     let results = module.funcs[0].results.clone();
@@ -169,18 +169,18 @@ pub fn run_test_jit(driver: &str, n: i32) -> i32 {
 }
 
 /// Run a **powerbox** program (a host-I/O program whose entry is the synthesized `_start`)
-/// through svm's frontend-independent embedding API (`instantiate` + `Instance::call`),
+/// through temen's frontend-independent embedding API (`instantiate` + `Instance::call`),
 /// which resolves the §7 capability imports, grants the fixed powerbox, runs the `_start`
 /// entry on interp **and** JIT (enforcing they agree), and captures stdout. Returns the
 /// captured stdout bytes.
 pub fn run_powerbox(driver: &str) -> Vec<u8> {
     let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
     let bc = compile_driver(&driver_abs);
-    let t = temen_llvm::translate_bc_path(&bc).expect("svm-llvm: translate bitcode");
+    let t = temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate bitcode");
     let inst = temen_run::instantiate(t.module).expect("instantiate powerbox module");
     // run_diff runs the powerbox entry (func 0) on interp AND jit, enforcing they agree, and
     // grants the fixed §3e powerbox. (call("_start") would need the entry exported by name;
-    // svm-llvm's C output reaches it as the implicit func-0 entry instead.)
+    // temen-llvm's C output reaches it as the implicit func-0 entry instead.)
     let run = inst.run_diff(&temen_run::RunConfig::default()).expect("run powerbox entry (interp==jit)");
     run.stdout
 }

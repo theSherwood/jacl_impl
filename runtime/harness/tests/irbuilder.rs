@@ -1,14 +1,14 @@
 //! P2.1 — IR builder round-trip proof.
 //!
 //! Compiles the JACL-owned IR builder (`codegen/irbuilder.c`) plus a demo emitter
-//! (`codegen/tests/emit_demo.c`) natively, runs it to get the svm-text for each
+//! (`codegen/tests/emit_demo.c`) natively, runs it to get the temen-text for each
 //! module, then parses → verifies → runs on interp + JIT — "Spike-1, but via the
 //! builder." Covers literals/arithmetic, an SSA loop with block args (block-local
 //! SSA), an intra-module direct call, a load/store memory round-trip, and a
 //! `call.import` linked against the real runtime artifact (reusing the P2.0 path).
 //!
 //! For import-free modules it also asserts the builder's output is already the
-//! *canonical* svm-text (`text == print_module(parse_module(text))`).
+//! *canonical* temen-text (`text == print_module(parse_module(text))`).
 //!
 //! It also gates the **binary** serializer (`irb_to_encoded`) against the text one:
 //! `decode_unit(irb_to_encoded(m))` must equal `parse_module(irb_to_text(m))` across the
@@ -43,7 +43,7 @@ fn emitter() -> &'static Path {
     .as_path()
 }
 
-/// Emit one module's svm-text via the builder.
+/// Emit one module's temen-text via the builder.
 fn emit(module: &str) -> String {
     let out = Command::new(emitter())
         .arg(module)
@@ -57,7 +57,7 @@ fn emit(module: &str) -> String {
     String::from_utf8(out.stdout).expect("emit_demo output is UTF-8")
 }
 
-/// Emit one module's svm-encode **binary** via the builder (`irb_to_encoded`).
+/// Emit one module's temen-encode **binary** via the builder (`irb_to_encoded`).
 fn emit_encoded(module: &str) -> Vec<u8> {
     let out = Command::new(emitter())
         .arg(module)
@@ -112,14 +112,14 @@ fn check(module: &Module, entry: u32, args: &[Value], want: i64) {
 }
 
 /// Parse + verify a self-contained (import-free) module, asserting the builder
-/// emitted canonical svm-text.
+/// emitted canonical temen-text.
 fn parse_self_contained(module: &str) -> Module {
     let text = emit(module);
     let m = temen_text::parse_module(&text).unwrap_or_else(|e| panic!("parse {module}: {e:?}"));
     assert_eq!(
         text,
         temen_text::print_module(&m),
-        "builder output for {module} is not canonical svm-text"
+        "builder output for {module} is not canonical temen-text"
     );
     temen_verify::verify_module(&m).unwrap_or_else(|e| panic!("verify {module}: {e:?}"));
     m
@@ -264,7 +264,7 @@ fn call_import_linked_against_runtime() {
 }
 
 /// The binary serializer (`irb_to_encoded`) is gated against the text one: for every
-/// demo module, decoding the emitted svm-encode bytes must yield the *same* `Module` the
+/// demo module, decoding the emitted temen-encode bytes must yield the *same* `Module` the
 /// text path produces via `parse_module`. This is item 1 of the guest-JIT staging plan —
 /// the §22 `Jit` capability consumes these bytes directly, so binary and text must agree
 /// bit-for-bit at the `Module` level (import/type interning, opcode bytes, LEB128, section

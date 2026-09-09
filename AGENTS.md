@@ -7,8 +7,8 @@
 - Avoid altering tests unless you know the test is testing the wrong thing.
 - Pre-merge baselines for any change to `src/`: `./build.sh` and
   `./build.sh --tsan`. See `AUDIT.md` for rationale. (The legacy bytecode
-  VM and its Emscripten `--wasm` check were removed in item 6 — SVM is the
-  sole backend; the browser build now lives in `demo/svm/build_assets.sh`.)
+  VM and its Emscripten `--wasm` check were removed in item 6 — TEMEN is the
+  sole backend; the browser build now lives in `demo/temen/build_assets.sh`.)
 - Prefer snake_case for values and functions. Prefer PascalCase for types.
 - If there is a DESIGN.md, upon completion of an entire prd.json, update DESIGN.md to show what was completed. Be very concise about things already implemented.
 
@@ -28,8 +28,8 @@
   interpolation, procs, lambdas, if/while/for, streams,
   destructuring, structs, maps, mutable state, errors, and
   spawn/await/parallel/race. It is self-checking (every section ends in
-  `assert`) and the harness runs it end-to-end on the SVM backend
-  (`codegen.rs::syntax_tour_runs_clean_on_svm`), so it stays in sync
+  `assert`) and the harness runs it end-to-end on the TEMEN backend
+  (`codegen.rs::syntax_tour_runs_clean_on_temen`), so it stays in sync
   with the implementation. `SYNTAX.md` is the full reference.
 
 ## When benchmarking
@@ -64,17 +64,17 @@
   serves directly.
 - Source layout: `src/playground.ts` (entry — editor wiring, run
   pipeline, example picker, splitter, vim toggle), `src/jacl-mode.ts`
-  (StreamLanguage tokenizer), `src/svm-jacl-wasm.ts` (`SvmJaclRunner`
-  over the svm-browser cdylib + `JaclFrontend` over `jacl_emit.wasm` —
-  the SVM backend is the sole engine), `src/splitter.ts` (drag-to-resize
+  (StreamLanguage tokenizer), `src/temen-jacl-wasm.ts` (`TemenJaclRunner`
+  over the temen-browser cdylib + `JaclFrontend` over `jacl_emit.wasm` —
+  the TEMEN backend is the sole engine), `src/splitter.ts` (drag-to-resize
   divider, persisted to localStorage). The bundle (`dist/playground.js`,
   ~425 KB minified) is committed so the playground works from a clone
   without a Node toolchain.
 - `./node_modules/.bin/tsc --noEmit` typechecks; `npm run build` only
   runs esbuild and ignores types, so always typecheck separately when
   changing TS surfaces.
-- Each Run compiles the current source to SVM IR in the browser
-  (`jacl_emit.wasm`) and runs it fresh on the svm-browser cdylib —
+- Each Run compiles the current source to TEMEN IR in the browser
+  (`jacl_emit.wasm`) and runs it fresh on the temen-browser cdylib —
   hermetic by construction; unedited examples run their precompiled
   `.temen` directly.
 - Highlighting in `jacl-mode.ts` is position-driven, not just

@@ -1,7 +1,7 @@
 /* syn_rt — the staged-macro syntax-value ABI (macro/runtime side).
  *
  * The mirror of `syn_wire` (the compiler side) for code running *inside* a staged
- * macro on the SVM runtime. It converts between the `syn_wire` byte format and the
+ * macro on the TEMEN runtime. It converts between the `syn_wire` byte format and the
  * **plain-data** representation of a syntax value (option B): a jaclrt **vector**
  *
  *     [ kind:i32, scope_mark:i32, flags:i32, ...payload ]
@@ -16,7 +16,7 @@
  * u32 len + bytes, command head = presence u8 + node). Keep the two in sync; the
  * cross-codec round-trip test (run_rt_codec_test.sh) enforces it byte-for-byte.
  *
- * Compiled to SVM as runtime code (via svm-llvm) for real staged macros, and built
+ * Compiled to TEMEN as runtime code (via temen-llvm) for real staged macros, and built
  * natively (with an __vm_* shim) for the unit test.
  */
 #ifndef SYN_RT_H

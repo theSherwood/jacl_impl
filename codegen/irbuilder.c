@@ -1,4 +1,4 @@
-/* irbuilder.c — implementation of the JACL-owned SVM-IR builder (P2.1). See irbuilder.h. */
+/* irbuilder.c — implementation of the JACL-owned TEMEN-IR builder (P2.1). See irbuilder.h. */
 #include "irbuilder.h"
 
 #include <stdio.h>
@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* ---- internal representation (mirrors svm-ir's Inst / Terminator shape) ---- */
+/* ---- internal representation (mirrors temen-ir's Inst / Terminator shape) ---- */
 
 typedef enum {
   K_CONST_I32, K_CONST_I64, K_INTBIN, K_INTCMP, K_LOAD, K_STORE, K_CALL, K_CALL_IMPORT,
@@ -316,7 +316,7 @@ void irb_return_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *ar
 typedef struct { char *buf; size_t len, cap; } Out;
 
 /* Cold grow path — a separate (non-inlined) function so the common `out_str` append emits as a
- * self-contained leaf. On the SVM tier-up path a `Call` to an interpreter-resident helper on the
+ * self-contained leaf. On the TEMEN tier-up path a `Call` to an interpreter-resident helper on the
  * hot path bounces cross-tier on *every* append (out_str is ~96% of the compiler's bounces, one per
  * IR token); keeping only this rare realloc off the hot path collapses that. */
 static void out_grow(Out *o, size_t need) {
@@ -388,7 +388,7 @@ static const char *storeop_name(int op) {
   return n[op];
 }
 
-/* `(v0, v1, ...)` — matches svm-text's arglist. */
+/* `(v0, v1, ...)` — matches temen-text's arglist. */
 static void out_arglist(Out *o, const IrVal *args, int n) {
   out_str(o, "(");
   for (int i = 0; i < n; i++) out_fmt(o, "%sv%u", i ? ", " : "", args[i]);
@@ -397,7 +397,7 @@ static void out_arglist(Out *o, const IrVal *args, int n) {
 static void out_typelist(Out *o, const IrType *ts, int n) {
   for (int i = 0; i < n; i++) out_fmt(o, "%s%s", i ? ", " : "", type_name(ts[i]));
 }
-/* ` offset=N align=N` (each omitted when zero) — matches svm-text's memarg. */
+/* ` offset=N align=N` (each omitted when zero) — matches temen-text's memarg. */
 static void out_memarg(Out *o, uint64_t offset, uint8_t align) {
   if (offset != 0) out_fmt(o, " offset=%llu", (unsigned long long)offset);
   if (align != 0) out_fmt(o, " align=%u", (unsigned)align);
@@ -421,7 +421,7 @@ static void out_inst(Out *o, const Inst *in) {
     case K_CALL_IMPORT:
       /* Name-inline link-form symbolic call: `call.sym "name" (sig) v<h> (args)` — the
        * linker (`link_with_manifest`) resolves the name against the runtime's exports.
-       * (`call.import <idx>` is now the manifest capability form, emitted by svm-llvm for
+       * (`call.import <idx>` is now the manifest capability form, emitted by temen-llvm for
        * the runtime's own `write`/`exit`; the program only makes symbolic runtime calls.) */
       out_fmt(o, "call.sym \"%s\" (", in->name);
       out_typelist(o, in->sig_params, in->sig_np);
@@ -482,7 +482,7 @@ static void out_term(Out *o, const Term *t) {
 }
 
 static void out_func(Out *o, const IrFunc *f, int idx) {
-  /* §3.5 settled surface (matches svm-text's canonical printer): every definition carries
+  /* §3.5 settled surface (matches temen-text's canonical printer): every definition carries
    * its positional label and one brace construct nests everything —
    * `func N (…) -> (…) { block N (…) { … } }`. Blocks indent 2 spaces, their bodies 4; a
    * branch names its target block by bare index (`br <n>(args)` / `br_if v<c> <then>(args)
@@ -498,7 +498,7 @@ static void out_func(Out *o, const IrFunc *f, int idx) {
     for (int i = 0; i < blk->nparams; i++)
       out_fmt(o, "%sv%d: %s", i ? ", " : "", i, type_name(blk->params[i]));
     out_str(o, ") {\n");
-    uint32_t next = (uint32_t)blk->nparams;   /* recompute numbering, as svm-text does */
+    uint32_t next = (uint32_t)blk->nparams;   /* recompute numbering, as temen-text does */
     for (int ii = 0; ii < blk->ninsts; ii++) {
       const Inst *in = &blk->insts[ii];
       if (in->nresults == 0) { out_str(o, "    "); out_inst(o, in); out_str(o, "\n"); }
@@ -516,7 +516,7 @@ static void out_func(Out *o, const IrFunc *f, int idx) {
   out_str(o, "}\n");
 }
 
-/* Escape data bytes for svm-text: printable ASCII verbatim (except \ and "), else \xHH. */
+/* Escape data bytes for temen-text: printable ASCII verbatim (except \ and "), else \xHH. */
 static void out_data_bytes(Out *o, const char *b, uint32_t n) {
   for (uint32_t i = 0; i < n; i++) {
     unsigned char c = (unsigned char)b[i];
@@ -543,11 +543,11 @@ char *irb_to_text(const IrModule *m) {
   return o.buf;
 }
 
-/* ---- binary (svm-encode) serialization ---- */
+/* ---- binary (temen-encode) serialization ---- */
 
 /* Byte-oriented writers over the same growable buffer as the text path. Unlike
- * out_str these are NUL-safe (length-tracked), mirroring svm-encode's write_* helpers
- * (crates/svm-encode/src/lib.rs). The `\0` sentinel out_reserve keeps past `len` is
+ * out_str these are NUL-safe (length-tracked), mirroring temen-encode's write_* helpers
+ * (crates/temen-encode/src/lib.rs). The `\0` sentinel out_reserve keeps past `len` is
  * inert here — binary content is delimited by `len`, never by a terminator. */
 static void out_u8(Out *o, uint8_t b) {
   out_reserve(o, 1);
@@ -560,7 +560,7 @@ static void out_raw(Out *o, const void *p, size_t n) {
   o->len += n;
   o->buf[o->len] = '\0';
 }
-/* Unsigned LEB128 (svm-encode `write_uleb`). */
+/* Unsigned LEB128 (temen-encode `write_uleb`). */
 static void out_uleb(Out *o, uint64_t v) {
   for (;;) {
     uint8_t byte = (uint8_t)(v & 0x7f);
@@ -569,7 +569,7 @@ static void out_uleb(Out *o, uint64_t v) {
     else { out_u8(o, byte); break; }
   }
 }
-/* Signed LEB128 (svm-encode `write_sleb`): arithmetic shift, sign-terminated. */
+/* Signed LEB128 (temen-encode `write_sleb`): arithmetic shift, sign-terminated. */
 static void out_sleb(Out *o, int64_t v) {
   for (;;) {
     uint8_t byte = (uint8_t)(v & 0x7f);
@@ -579,25 +579,25 @@ static void out_sleb(Out *o, int64_t v) {
     out_u8(o, byte | 0x80);
   }
 }
-/* Type list: count, then one tag per type. IrType's ordinal is the svm ValType tag
- * (I32=0,I64=1,F32=2,F64=3,V128=4,REF=5 — verified against svm-ir::ValType). */
+/* Type list: count, then one tag per type. IrType's ordinal is the temen ValType tag
+ * (I32=0,I64=1,F32=2,F64=3,V128=4,REF=5 — verified against temen-ir::ValType). */
 static void out_types_bin(Out *o, const IrType *ts, int n) {
   out_uleb(o, (uint64_t)n);
   for (int i = 0; i < n; i++) out_u8(o, (uint8_t)ts[i]);
 }
-/* Value-index list: count, then one uleb per index (svm-encode `write_idxs`). */
+/* Value-index list: count, then one uleb per index (temen-encode `write_idxs`). */
 static void out_idxs(Out *o, const IrVal *idxs, int n) {
   out_uleb(o, (uint64_t)n);
   for (int i = 0; i < n; i++) out_uleb(o, idxs[i]);
 }
-/* Length-prefixed string (svm-encode `write_str`). */
+/* Length-prefixed string (temen-encode `write_str`). */
 static void out_str_bin(Out *o, const char *s) {
   size_t n = strlen(s);
   out_uleb(o, n);
   out_raw(o, s, n);
 }
 
-/* The import + type sections `svm_text::parse_module` interns from name-inline
+/* The import + type sections `temen_text::parse_module` interns from name-inline
  * `call.sym "name" (sig) v<h> (args)` — reconstructed here so the binary references the
  * same indices the text path would (round-trip equality). A `call.sym` first interns its
  * signature as a `TypeEntry::Func` (dedup by structural equality), then an import keyed by

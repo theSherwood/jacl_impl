@@ -132,7 +132,7 @@ bool macro__is_special_form(const char* name, uint32_t len) {
 }
 
 /* --- Emit-only stubs for the legacy context lifecycle (vm.c). The emit path never runs the
- * bytecode macro evaluator (the SVM staging hook does all expansion), so a NULL context with
+ * bytecode macro evaluator (the TEMEN staging hook does all expansion), so a NULL context with
  * no-op save/restore is correct: `es->ctx`/`tmp_ctx` stay NULL and every `if (tmp_ctx)` cleanup
  * in ast_expand_macros is skipped. --- */
 void jacl_ctx_save(jacl_ctx_saved_t *saved) { (void)saved; }

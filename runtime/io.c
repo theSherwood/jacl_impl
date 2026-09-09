@@ -1,6 +1,6 @@
-/* io.c — host I/O builtins via the svm powerbox (P3.5).
+/* io.c — host I/O builtins via the temen powerbox (P3.5).
  *
- * `print` writes a value's text representation + a newline to stdout. svm-llvm lowers the
+ * `print` writes a value's text representation + a newline to stdout. temen-llvm lowers the
  * libc `write` to a `Stream.write` cap.call on the stashed stdout handle, and (because the
  * program uses a powerbox import + defines `main`) synthesizes the `_start` powerbox entry
  * that stashes the granted handles. So a JACL program that prints is a powerbox program:
@@ -10,12 +10,12 @@
 #include "jaclrt.h"
 #include <stdint.h>
 
-/* svm-llvm libc shim: lowers to Stream.write on the stashed stdout handle. */
+/* temen-llvm libc shim: lowers to Stream.write on the stashed stdout handle. */
 int write(int fd, const char *buf, long n);
 
 /* The value's 5-bit type index behind an OPAQUE boundary. Without this, clang reassociates
  * a cascade of `jaclrt_type_index(v) == K` tests into a single `switch (v & TYPE_MASK)`
- * whose cases are `K << 56` — a *sparse* switch (span ~2^57) svm-llvm rejects. Taking the
+ * whose cases are `K << 56` — a *sparse* switch (span ~2^57) temen-llvm rejects. Taking the
  * tag through a noinline call forces the dispatch onto the small index (0..31). */
 __attribute__((noinline)) static uint32_t jacl_tag_of(JaclVal v) { return jaclrt_type_index(v); }
 
@@ -31,7 +31,7 @@ static int jacl_itoa(long v, char *buf) {
 }
 
 /* ---- in-memory virtual filesystem ----
- * The svm powerbox exposes only stdout/stdin/exit — there is no host filesystem capability
+ * The temen powerbox exposes only stdout/stdin/exit — there is no host filesystem capability
  * (its sandbox deliberately excludes arbitrary FS). So file I/O is modelled guest-side: a
  * runtime map keyed by absolute path holds each file's contents. This reproduces the corpus's
  * observable behaviour (write→read round-trips, a missing read → error, a write into a

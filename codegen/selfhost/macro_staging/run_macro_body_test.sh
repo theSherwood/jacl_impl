@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test svm_codegen_macro_body: a macro body compiles to a single __jacl_macro(sp,params)
+# Test temen_codegen_macro_body: a macro body compiles to a single __jacl_macro(sp,params)
 # whose syntax-quote lowers to vec construction and whose ~unquote holes splice the
 # params. (Codegen half of Phase 3; the runtime wrapper + link + onramp run is the next
 # slice.) Needs gcc; skips cleanly if absent.

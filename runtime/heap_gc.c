@@ -5,12 +5,12 @@
  * with **no lock** (only the owner touches its bump pointer and its size-class free
  * lists). The sole cross-worker synchronization on the allocation path is claiming a
  * fresh region from a shared pool — one `__vm_atomic_add`, amortized once per region.
- * The current worker is the per-vCPU TLS word (`__vm_vcpu_tls_get`, seeded by svm to
+ * The current worker is the per-vCPU TLS word (`__vm_vcpu_tls_get`, seeded by temen to
  * a dense vCPU id), so a fiber that migrated under work-stealing allocates into the
  * vCPU it is *currently* on. The main thread is vCPU 0, so the single-thread path is
  * unchanged. (This replaces P1's single global bump + free lists.)
  *
- * GC: conservative, non-moving mark-sweep. Roots come from the svm `gc.roots` op
+ * GC: conservative, non-moving mark-sweep. Roots come from the temen `gc.roots` op
  * (__vm_gc_roots) — the words on the control stack/registers that point into the
  * heap. Heap edges are traced conservatively (each live cell's payload words are
  * scanned for candidate object-starts). Non-moving ⇒ found pointers stay valid; the
@@ -32,14 +32,14 @@
 #include <stdint.h>
 #include <string.h>
 
-/* svm op: scan the calling fiber's roots into buf, return total candidate count.
+/* temen op: scan the calling fiber's roots into buf, return total candidate count.
  * `mask` is AND-ed with each scanned word before the range test (and the masked
  * value is what is returned), so a tagged JaclVal (tag in the high byte) resolves
- * to its bare heap offset. svm constrains the mask to top-byte-strip only, so no
+ * to its bare heap offset. temen constrains the mask to top-byte-strip only, so no
  * host address can be folded into the heap window. */
 long __vm_gc_roots(long heap_lo, long heap_hi, long mask, void *buf, long cap);
 
-/* svm §12 atomics + futex, the per-vCPU TLS register, and fiber suspend (svm-llvm
+/* temen §12 atomics + futex, the per-vCPU TLS register, and fiber suspend (temen-llvm
  * lowers these). The TLS word is seeded to a dense vCPU id (root 0, children
  * sequential) and read at the execution point, so it is the current worker's index
  * even across fiber migration. */
@@ -86,10 +86,10 @@ typedef struct {
 static JaclWorker jacl_worker[JACL_MAX_WORKERS];
 
 /* ---- multi-vCPU stop-the-world quiesce (P3.4c) ----
- * A pure-guest futex barrier (svm GC.md §2.1) over the fiber scheduler. Roots live on
+ * A pure-guest futex barrier (temen GC.md §2.1) over the fiber scheduler. Roots live on
  * task **fibers**, and the GC safepoint **suspends** the running task back to its worker's
  * scheduler loop (suspend flushes live roots onto the fiber's control stack, so gc.roots
- * scans them — svm scans every *suspended* fiber + the collector, GC.md §3.1; a worker
+ * scans them — temen scans every *suspended* fiber + the collector, GC.md §3.1; a worker
  * merely blocked in a futex on its bare stack is NOT scanned, which is why the safepoint
  * must suspend, not just park). The scheduler loop then parks the (root-free) vCPU.
  *
@@ -107,7 +107,7 @@ static int32_t jacl_gc_stopped;
 static int32_t jacl_gc_violations;
 #define JACL_GC_WAIT_NS 1000000L   /* 1 ms futex timeout: every wait re-checks (hang-proof) */
 
-/* The current worker (vCPU) index: the per-vCPU TLS word svm seeds to a dense id. */
+/* The current worker (vCPU) index: the per-vCPU TLS word temen seeds to a dense id. */
 static int jacl_gc_self(void) {
   int w = (int)__vm_vcpu_tls_get();
   return (w < 0 || w >= JACL_MAX_WORKERS) ? 0 : w;
@@ -138,7 +138,7 @@ void jacl_heap_init(void) {
   jacl_gc_active[jacl_gc_self()] = 1;
 }
 
-/* svm-llvm rejects a *constant* ptrtoint of a global address; route the cast
+/* temen-llvm rejects a *constant* ptrtoint of a global address; route the cast
    through a noinline helper so it is a runtime instruction (Phase-0 finding). */
 __attribute__((noinline)) static long jacl_pti(void *p) { return (long)p; }
 long jacl_heap_lo(void) { return jacl_pti(&jacl_heap_mem[0]); }
@@ -404,10 +404,10 @@ static long jacl_gc_collect_stw(void) {
       ((JaclObj*)&jacl_heap_mem[off])->mark = 0;
     }
   }
-  /* 2. roots from the svm gc.roots op.
+  /* 2. roots from the temen gc.roots op.
    * Stack roots are tagged JaclVals (tag in the high byte: STRING<<56, VECTOR<<56,
    * …) whose full word sits far above the heap range, plus raw heap pointers
-   * (tag byte 0) on C frames. We pass JACL_PAYLOAD_MASK so svm strips the tag byte
+   * (tag byte 0) on C frames. We pass JACL_PAYLOAD_MASK so temen strips the tag byte
    * before the range test and returns the bare offset: a tagged JaclVal masks to
    * its heap offset (in range → kept), a raw heap pointer is unchanged (kept), and
    * a host address never folds into the heap window (the mask only clears the top

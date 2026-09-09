@@ -1,5 +1,5 @@
-//! stage_macro — run a JACL macro's body **on SVM** with a real argument (the Phase 3
-//! final link of `docs/SVM_MACRO_STAGING_PLAN.md`, corrected design). Given a `.jacl` file
+//! stage_macro — run a JACL macro's body **on TEMEN** with a real argument (the Phase 3
+//! final link of `docs/TEMEN_MACRO_STAGING_PLAN.md`, corrected design). Given a `.jacl` file
 //! with a `defmacro`, this codegens a complete staged-macro program (entry reads the
 //! argument syntax value on stdin, runs the body, writes the result on stdout), links it
 //! against the staging-extended runtime, and runs it. The argument/result use the
@@ -20,7 +20,7 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-/// Build the `emit_macro_body` tool (frontend + codegen, gcc — same recipe as jacl_svm).
+/// Build the `emit_macro_body` tool (frontend + codegen, gcc — same recipe as jacl_temen).
 fn build_emit_macro_body() -> PathBuf {
     let out = std::env::temp_dir().join(format!("emit_macro_body_{}", std::process::id()));
     let ms = format!("{ROOT}/codegen/selfhost/macro_staging");
@@ -55,7 +55,7 @@ fn main() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         die("emit_macro_body failed");
     }
-    // Decode the emitted svm-encode object. Own-data addresses are inline `data.self`
+    // Decode the emitted temen-encode object. Own-data addresses are inline `data.self`
     // instructions that `link` resolves — no separate relocation table.
     let program = jacl_runtime_harness::decode_emitted(&out.stdout)
         .unwrap_or_else(|e| die(&format!("decode emitted IR: {e}")));

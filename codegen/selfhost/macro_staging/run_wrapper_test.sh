@@ -5,7 +5,7 @@
 #   wire_to_ast   (wire -> AST pretty-print)
 # and asserts the expansion. Only __jacl_macro is a hand-written stand-in (fake_twice.c)
 # for the codegen'd body — the codegen'd version is proven by run_macro_body_test.sh and
-# run_svm_e2e.sh; here we prove the marshalling that carries args in and the result out.
+# run_temen_e2e.sh; here we prove the marshalling that carries args in and the result out.
 # Needs gcc; skips cleanly if absent.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"

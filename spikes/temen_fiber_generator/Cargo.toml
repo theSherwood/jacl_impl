@@ -1,0 +1,19 @@
+# Spike-3: fibers replace the state-machine transform. A real generator written in
+# C on temen's __vm_fiber_* (cont.*) primitives, compiled via temen-llvm, run on
+# interp + JIT. Own cargo root; path-deps into the temen submodule (links libLLVM —
+# needs llvm-18-dev).
+[workspace]
+
+[package]
+name = "jacl-temen-fiber-generator-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+temen-ir     = { path = "../../vendor/temen/crates/temen-ir" }
+temen-llvm   = { path = "../../vendor/temen/crates/temen-llvm" }
+temen-text   = { path = "../../vendor/temen/crates/temen-text" }
+temen-verify = { path = "../../vendor/temen/crates/temen-verify" }
+temen-interp = { path = "../../vendor/temen/crates/temen-interp" }
+temen-jit    = { path = "../../vendor/temen/crates/temen-jit" }

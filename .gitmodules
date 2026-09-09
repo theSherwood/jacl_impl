@@ -1,3 +1,3 @@
-[submodule "vendor/svm"]
-	path = vendor/svm
+[submodule "vendor/temen"]
+	path = vendor/temen
 	url = https://github.com/theSherwood/vm

@@ -705,7 +705,7 @@ typedef enum {
   HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
   HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
 
-  /* File-system surface growth (docs/SVM_FS_DESIGN.md phase 4) */
+  /* File-system surface growth (docs/TEMEN_FS_DESIGN.md phase 4) */
   HEAD_DELETE_FILE, HEAD_FILE_EXISTS, HEAD_LIST_DIR,
 
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
@@ -1331,18 +1331,18 @@ extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 extern JaclVal syntax_from_ast (AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
 extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
 /* Phase 5 staging hook: install a function that expands a macro call by running its body on
- * the SVM engine (see syntax.c). When installed and `JACL_STAGE_ON_SVM` is set, the expander
+ * the TEMEN engine (see syntax.c). When installed and `JACL_STAGE_ON_TEMEN` is set, the expander
  * uses it in place of the legacy VM. NULL by default — the driver (which owns codegen + the
- * SVM bridge) installs it, keeping src/ free of any codegen/SVM dependency. */
+ * TEMEN bridge) installs it, keeping src/ free of any codegen/TEMEN dependency. */
 extern const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
                                             arena_t *arena, AstNode **out);
-/* In-guest `[interpret SRC]` hook (docs/SVM_GUEST_JIT_STAGING.md §5, model B). When installed
- * (`jacl_install_svm_interpret_hook`, the driver that owns codegen + the SVM bridge),
+/* In-guest `[interpret SRC]` hook (docs/TEMEN_GUEST_JIT_STAGING.md §5, model B). When installed
+ * (`jacl_install_temen_interpret_hook`, the driver that owns codegen + the TEMEN bridge),
  * `jacl_interpret1` compiles + runs SRC on the §22 Jit capability in this window instead of the host
  * `interp` capability, returning a live JaclVal. NULL by default (host-cap path), keeping src/ and
- * ordinary AOT programs free of any codegen/SVM dependency. */
+ * ordinary AOT programs free of any codegen/TEMEN dependency. */
 extern JaclVal (*jacl_interpret_hook)(JaclVal src);
-extern void jacl_install_svm_interpret_hook(void);
+extern void jacl_install_temen_interpret_hook(void);
 extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      MacroTable *macros, ThreadHeap *heap,
                                      JaclInternTable *intern, arena_t *arena,

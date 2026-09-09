@@ -1,7 +1,7 @@
 /* interpcap.c — the "interp" named-capability adapter for `[interpret …]` / `[interpret-prelude]`.
  *
  * `interpret` is metacircular eval: it compiles and runs JACL source in a sandboxed child VM at
- * runtime. The SVM backend is ahead-of-time — the guest is svm bytecode with no JACL compiler or
+ * runtime. The TEMEN backend is ahead-of-time — the guest is temen bytecode with no JACL compiler or
  * VM inside it — so unlike a pure-runtime builtin this resolves a host capability by name ("interp")
  * and ships the source (plus, for the 2-arg sandbox form, the set of allowed prelude names) to the
  * embedder, which runs a JACL evaluator on the host and marshals a scalar/error result back.
@@ -13,7 +13,7 @@
  * so a program can derive a restricted subset with map-remove / map-set and hand it back to
  * `interpret`. The name list MUST stay in sync with src/compiler.c's jacl_non_core_builtins.
  *
- * `__vm_cap_resolve` / `__vm_host_call` are svm-llvm intrinsics lowered at translate time. */
+ * `__vm_cap_resolve` / `__vm_host_call` are temen-llvm intrinsics lowered at translate time. */
 #include <stdint.h>
 #include <string.h>
 
@@ -47,7 +47,7 @@ static const char *const jacl_interp_prelude_names[] = {
 
 __attribute__((noinline)) static long jacl_interp_pti(const void *p) { return (long)(uintptr_t)p; }
 
-/* svm-llvm requires a *constant* `op` on __vm_host_call. A single call site branching on a
+/* temen-llvm requires a *constant* `op` on __vm_host_call. A single call site branching on a
  * variable op gets tail-merged back into one variable-op call, so each form gets its own noinline
  * wrapper — two distinct bodies clang cannot merge, each carrying a literal op. */
 __attribute__((noinline)) static long jacl_interp_call_default(int h, long req, long sl, long nl, long out) {
@@ -101,8 +101,8 @@ static JaclVal jacl_interp_run(int op, JaclVal src, const char *names, uint32_t 
   return jaclrt_error();
 }
 
-/* In-guest `interpret` hook (docs/SVM_GUEST_JIT_STAGING.md §5, model B). When a codegen-linked
- * program installs one (`jacl_install_svm_interpret_hook`, interpret_bridge_guest.c), `[interpret SRC]`
+/* In-guest `interpret` hook (docs/TEMEN_GUEST_JIT_STAGING.md §5, model B). When a codegen-linked
+ * program installs one (`jacl_install_temen_interpret_hook`, interpret_bridge_guest.c), `[interpret SRC]`
  * compiles + runs SRC on the §22 Jit capability in this same window and returns a live JaclVal —
  * no host round-trip, no reference VM. NULL (the default) keeps the host `interp` cap path below, so
  * an ordinary AOT program is unchanged. */

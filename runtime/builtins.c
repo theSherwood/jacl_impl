@@ -259,7 +259,7 @@ JaclVal jacl_not(JaclVal a) {
 
 /* ---- type ops ---- */
 JaclVal jacl_typeof(JaclVal v) {
-  switch (jaclrt_type_index(v)) {        /* switch on the i32 type index (svm-llvm OK) */
+  switch (jaclrt_type_index(v)) {        /* switch on the i32 type index (temen-llvm OK) */
     case 0x00: return jacl_str_new("nil", 3);
     case 0x01: return jacl_str_new("bool", 4);
     case 0x02: return jacl_str_new("i32", 3);
@@ -657,7 +657,7 @@ JaclVal jacl_assert(JaclVal v) {
   return truthy ? JACL_NIL : jaclrt_error();
 }
 /* [panic MSG] — halt with a message. The reference emits OP_PANIC (unconditional halt);
- * the SVM backend surfaces it as an error value carrying the message, which the
+ * the TEMEN backend surfaces it as an error value carrying the message, which the
  * statement-position auto-return then propagates out of the job. `assert` (a prelude
  * macro) expands to `[if PRED {} { panic "assertion failed: …" }]`, so panic is only
  * reached on a failed predicate — the passing corpus never exercises it. */
@@ -816,7 +816,7 @@ JaclVal jacl_arr_push_v(JaclVal a, JaclVal e) {
 }
 /* ---- buffer pointers (fat pointer over an array-backed buffer) ----
  * `addr $buf->i` yields a pointer = a small 2-slot object { base, offset }; ptr-deref
- * reads base[offset]; ptr-offset advances the offset. On the SVM backend buffers are
+ * reads base[offset]; ptr-offset advances the offset. On the TEMEN backend buffers are
  * JaclVal arrays (not raw memory), so a pointer carries (array, index) rather than a
  * machine address — enough to walk a buffer's elements the way a C extern would. The
  * object is a 2-element vector internally (traced, so the base survives GC). */
@@ -888,7 +888,7 @@ JaclVal jacl_ptr_addr(JaclVal p) {
 /* ---- proc-signature registry (runtime introspection) ----
  * Printing a proc value / closure shows its signature (`<proc add(i64, i64) -> i64>`).
  * The signature is fully known at compile time, so the codegen registers a formatted
- * string keyed by the closure's SVM function index (fnref) at each creation site; print
+ * string keyed by the closure's TEMEN function index (fnref) at each creation site; print
  * looks it up by the fnref stashed in the closure. A map keyed by i32(fnref); the global
  * is a GC root (jacl_sched_mark_roots). */
 JaclVal jacl_proc_sigs;

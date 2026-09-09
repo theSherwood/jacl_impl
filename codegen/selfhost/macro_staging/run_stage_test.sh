@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# On-SVM staged-macro final-link e2e (Phase 3+, docs/SVM_MACRO_STAGING_PLAN.md).
+# On-TEMEN staged-macro final-link e2e (Phase 3+, docs/TEMEN_MACRO_STAGING_PLAN.md).
 # For each `defmacro` case, codegen a complete staged-macro program (entry reads the N
-# argument syntax values on stdin, runs the body on SVM, writes the result), link it
+# argument syntax values on stdin, runs the body on TEMEN, writes the result), link it
 # against the staging-extended runtime, and RUN it on the real engine via `stage_macro`:
-#   gen_wire ARGS…  (ASTs -> wire) | stage_macro MACRO.jacl (on SVM) | wire_to_ast (-> AST)
+#   gen_wire ARGS…  (ASTs -> wire) | stage_macro MACRO.jacl (on TEMEN) | wire_to_ast (-> AST)
 # and assert the expansion. Unlike run_wrapper_test.sh (a hand-written __jacl_macro run
-# natively), this exercises the *codegen'd* body executing on SVM plus the real
+# natively), this exercises the *codegen'd* body executing on TEMEN plus the real
 # read/encode/write glue — the full final link, including multi-arity macros. Heavy:
 # builds the Rust harness + translates the runtime. Needs cargo+gcc+clang; skips cleanly
 # if any is absent.
@@ -24,7 +24,7 @@ SM="$ROOT/runtime/harness/target/release/stage_macro"
 
 fail=0
 # check SRC WANT ARG…  — write the defmacro SRC, feed each ARG (a JACL snippet) as a
-# syntax value on the wire, run on SVM, assert the pretty-printed expansion equals WANT.
+# syntax value on the wire, run on TEMEN, assert the pretty-printed expansion equals WANT.
 check() {
   local src="$1" want="$2"; shift 2
   printf '%s\n' "$src" > "$B/_stage_case.jacl"
@@ -46,4 +46,4 @@ check 'defmacro twice {x} { syntax-quote [+ ~x ~x] }'   '[+ [* 3 4] [* 3 4]]'  '
 check 'defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }' \
       '[if [== 1 2] {} { [set hit 5] }]'  '[== 1 2]'  '{ set hit 5 }'
 
-[ $fail = 0 ] && echo "staged macro on SVM: codegen'd body + glue evaluate the expansion on the real engine." || exit 1
+[ $fail = 0 ] && echo "staged macro on TEMEN: codegen'd body + glue evaluate the expansion on the real engine." || exit 1

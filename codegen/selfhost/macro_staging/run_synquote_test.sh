@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Structural test for the codegen `syntax-quote` lowering (docs/SVM_MACRO_STAGING_PLAN.md).
+# Structural test for the codegen `syntax-quote` lowering (docs/TEMEN_MACRO_STAGING_PLAN.md).
 # A `syntax-quote <template>` must lower to construction of a plain-data syntax vec
 # (jacl_vec_empty/push, the syn_rt schema). We assert the emit succeeds and that the
 # number of `jacl_vec_empty` calls equals the number of syntax nodes in the template

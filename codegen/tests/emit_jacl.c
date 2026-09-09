@@ -1,6 +1,6 @@
 /* emit_jacl.c — drives the P2.2 codegen from real JACL source. Parses a named
- * source snippet through the JACL frontend (lexer + parser), runs svm_codegen_program,
- * and prints the resulting svm-text to stdout so a Rust harness test can link it
+ * source snippet through the JACL frontend (lexer + parser), runs temen_codegen_program,
+ * and prints the resulting temen-text to stdout so a Rust harness test can link it
  * against the runtime and run it on interp + JIT.
  *
  *   emit_jacl <case>
@@ -152,7 +152,7 @@ static const char *source_for(const char *name) {
     return "[count [lines \"a\\nb\\nc\"]]"; /* -> 3 */
   if (!strcmp(name, "stream_first"))     /* first element of a stream */
     return "proc upto {n} { mut i 0\n[while [< $i $n] { yield $i\nset i [+ $i 1] }] }\n[+ [first [filter [upto 10] [\\ > $it 5]]] 0]"; /* first of (6,7,8,9) -> 6 */
-  /* string equality + ordering (item 6 slice 3a: SVM coverage for test_string_eq_cmp.c) */
+  /* string equality + ordering (item 6 slice 3a: TEMEN coverage for test_string_eq_cmp.c) */
   if (!strcmp(name, "string_eq"))
     return "[if [== \"hello\" \"hello\"] { 1 } { 0 }]"; /* -> 1 */
   if (!strcmp(name, "string_neq"))
@@ -171,7 +171,7 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "string_slice_from"))
     return "[if [== [slice \"hello\" 2] \"llo\"] { 1 } { 0 }]";  /* from 2 to end -> "llo" -> 1 */
   /* destructuring bind — vec positional, wildcard, rest, named-from-map (item 6 slice 3a:
-   * SVM coverage for the native test_destructure_* exec tests, rephrased to return an i32). */
+   * TEMEN coverage for the native test_destructure_* exec tests, rephrased to return an i32). */
   if (!strcmp(name, "destr_vec"))
     return "def [a b c] [vec 1 2 3]\n[+ $a [+ $b $c]]";      /* -> 6 */
   if (!strcmp(name, "destr_wildcard"))
@@ -248,7 +248,7 @@ static const char *find_ast_error(AstNode *n) {
 }
 
 #ifndef JACL_EMIT_ONLY
-/* Concatenate a compiled program's modules into one flat top-level form list for SVM codegen.
+/* Concatenate a compiled program's modules into one flat top-level form list for TEMEN codegen.
  * The reference module model is a single flat global namespace: every module's procs, globals,
  * and structs share it, disambiguated only by name, and modules execute deps-first (topo order,
  * root last) into that one env. So a destructuring `use "path" {names}` is a no-op for codegen —
@@ -308,7 +308,7 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
 /* Expand compile-time macros in place, matching the reference pipeline (which runs
  * `ast_expand_macros` after parsing, before codegen). This registers the prelude macros
  * (assert / timeout / not / and / or / incr / \) AND any user `defmacro`s from the source,
- * then rewrites every macro call site into its expansion — so the SVM codegen sees the same
+ * then rewrites every macro call site into its expansion — so the TEMEN codegen sees the same
  * post-expansion AST the reference compiler does. User macros (e.g. tour's `unless`) that the
  * name-based head handlers can't know about are handled here for free. Fatal on a macro error.
  * A fresh VM supplies the GC heap / intern table the staged macro evaluator needs; the new
@@ -316,11 +316,11 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
 /* Expand user `defmacro`s into their expansions (in place). Returns NULL on success, else the
  * expansion error message (arena/heap-backed). Non-static + error-returning so the in-guest
  * `[interpret …]` bridge (interpret_bridge_guest.c) can reuse the exact expansion the compiler runs
- * — with the macro-staging hook it expands macro bodies on the SVM engine, no reference VM. */
+ * — with the macro-staging hook it expands macro bodies on the TEMEN engine, no reference VM. */
 #ifdef JACL_EMIT_ONLY
 /* Emit-only build: no legacy VM is linked, so set up a bare frontend heap + intern table for the
  * expansion pass directly (mirrors the prelude bring-up in syntax.c) instead of via jacl_vm_new.
- * Macro bodies expand on the SVM engine through the staging hook, so `es.ctx` stays NULL and the
+ * Macro bodies expand on the TEMEN engine through the staging hook, so `es.ctx` stays NULL and the
  * heap is only touched by the frontend's transient allocations. A process-lifetime static heap is
  * fine for a compiler front-end (short-lived, grows monotonically). */
 const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
@@ -433,8 +433,8 @@ static int run_interp(int argc, char **argv) {
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-/* Browser frontend entry (docs/SVM_BROWSER_PLAN.md, option b): compile a single JACL source
- * string to SVM IR text, entirely client-side. Returns a malloc'd C string the JS host reads via
+/* Browser frontend entry (docs/TEMEN_BROWSER_PLAN.md, option b): compile a single JACL source
+ * string to TEMEN IR text, entirely client-side. Returns a malloc'd C string the JS host reads via
  * UTF8ToString and frees via `_free`. On success the string is the self-contained IR text —
  * own-data addresses are inline `data.self` instructions (v9) the JS link path resolves, so
  * there is no separate `%%RELOCS%%` section. On failure it begins with `%%ERROR%%\n` then the
@@ -474,7 +474,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   }
 #ifndef JACL_EMIT_ONLY
   /* Static-error oracle: the reference compiler's diagnostics (own re-parse, as in `main`).
-   * Emit-only builds drop this legacy-compiler diagnostic pass — the SVM codegen path performs
+   * Emit-only builds drop this legacy-compiler diagnostic pass — the TEMEN codegen path performs
    * its own checks and this is what pins compiler.c/vm.c into the build (item 6). */
   {
     JaclVM *chk = jacl_vm_new();
@@ -505,7 +505,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
     if (me) { char *o = emit_err("macro error: ", me); arena_destroy(&arena); return o; } }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(parse.nodes, parse.count, 0, /*in_guest=*/0, err, sizeof err);
+  IrModule *m = temen_codegen_program(parse.nodes, parse.count, 0, /*in_guest=*/0, err, sizeof err);
   if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
   /* Own-data addresses are now inline `data.self` instructions (v9), so the text is
    * self-contained — no separate `%%RELOCS%%` section. (The JS link path decodes/links
@@ -518,7 +518,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   return out;
 }
 
-/* --- Warm-snapshot two-phase API (docs/SVM_WARM_COMPILER.md Slice 2) ---------------------------
+/* --- Warm-snapshot two-phase API (docs/TEMEN_WARM_COMPILER.md Slice 2) ---------------------------
  * The compiler's program-independent state — the built-in prelude macros — is parsed + compiled
  * ONCE into static storage (syntax.c `expand__prelude_*`, guarded by `expand__prelude_ready`); it
  * dominates the fixed per-compile floor. `jacl_emit_warmup` triggers that init so the host can
@@ -538,25 +538,25 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_compile(const char *source) {
 }
 #endif /* __EMSCRIPTEN__ */
 
-#ifdef JACL_STAGE_ON_SVM_BUILD
-/* Staged build: link the SVM staging bridge (stage_bridge.c + the runtime/harness staticlib)
- * and install the macro-staging hook. Activation is still gated by the JACL_STAGE_ON_SVM env
+#ifdef JACL_STAGE_ON_TEMEN_BUILD
+/* Staged build: link the TEMEN staging bridge (stage_bridge.c + the runtime/harness staticlib)
+ * and install the macro-staging hook. Activation is still gated by the JACL_STAGE_ON_TEMEN env
  * var inside the expander, so this build behaves identically to the normal one unless the env
- * var is set. Built by run_diff.sh's --svm mode. */
-extern void jacl_install_svm_stage_hook(void);
+ * var is set. Built by run_diff.sh's --temen mode. */
+extern void jacl_install_temen_stage_hook(void);
 #endif
 
 int main(int argc, char **argv) {
-#ifdef JACL_STAGE_ON_SVM_BUILD
-  jacl_install_svm_stage_hook();
+#ifdef JACL_STAGE_ON_TEMEN_BUILD
+  jacl_install_temen_stage_hook();
 #endif
   /* `--interp <mode> [names…]`: the host backend of the interp capability (reads stdin). */
 #ifndef JACL_EMIT_ONLY
   if (argc >= 2 && !strcmp(argv[1], "--interp")) return run_interp(argc, argv);
 #endif
-  /* Output format. The default is the **binary** svm-encode container (guest-JIT staging
-   * item 7 — the interchange format the harness decodes with `svm_encode::decode_module`,
-   * no parse round-trip). `--text` restores the human/golden svm-text form. */
+  /* Output format. The default is the **binary** temen-encode container (guest-JIT staging
+   * item 7 — the interchange format the harness decodes with `temen_encode::decode_module`,
+   * no parse round-trip). `--text` restores the human/golden temen-text form. */
   int text_mode = 0;
   if (argc >= 2 && !strcmp(argv[1], "--text")) { text_mode = 1; argv++; argc--; }
   const char *src = NULL;
@@ -621,11 +621,11 @@ int main(int argc, char **argv) {
    * diagnostics (typed def/set/arith/proc-arg/convert mismatches, struct/ctx/buf/
    * generator/typed-closure conformance, …). Every corpus program is written for the
    * old VM, so the compiler accepts each passing case and rejects each `# expect-error`
-   * case with its canonical message — exactly the accept/reject the SVM backend should
+   * case with its canonical message — exactly the accept/reject the TEMEN backend should
    * mirror. On rejection we surface the message and stop before codegen.
    *
    * The compiler runs on its OWN re-lexed/re-parsed AST (a second parse into chk's
-   * arena): both the compiler's conformance pass and the SVM codegen mutate their AST
+   * arena): both the compiler's conformance pass and the TEMEN codegen mutate their AST
    * in place, so sharing one tree cross-contaminates them. Isolating the two parses
    * lets the compiler give its canonical message while codegen still sees pristine
    * nodes. */
@@ -665,20 +665,20 @@ int main(int argc, char **argv) {
   typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
 
   char err[256] = {0};
-  IrModule *m = svm_codegen_program(cg_nodes, cg_count, is_module_program, /*in_guest=*/0, err, sizeof err);
+  IrModule *m = temen_codegen_program(cg_nodes, cg_count, is_module_program, /*in_guest=*/0, err, sizeof err);
   if (!m) { fprintf(stderr, "%s\n", err); arena_destroy(&arena); return 1; }
 
   if (text_mode) {
-    /* svm-text form (goldens / human diffs). Self-contained: own-data addresses are inline
+    /* temen-text form (goldens / human diffs). Self-contained: own-data addresses are inline
      * `data.self` instructions (v9), so there is no separate relocation section. */
     char *text = irb_to_text(m);
     fputs(text, stdout);
     free(text);
   } else {
-    /* Binary form (default): the svm-encode **object** (v9 object dialect). It carries its
+    /* Binary form (default): the temen-encode **object** (v9 object dialect). It carries its
      * own `data.self` addresses and unresolved `call.sym`s — `link` resolves both — so there
      * is no separate relocation frame. Decoded by the harness's `decode_emitted`
-     * (`svm_encode::decode_unit`, runtime/harness/src/lib.rs). */
+     * (`temen_encode::decode_unit`, runtime/harness/src/lib.rs). */
     size_t mlen = 0;
     uint8_t *mod = irb_to_encoded(m, &mlen);
     if (mlen && fwrite(mod, 1, mlen, stdout) != mlen) {

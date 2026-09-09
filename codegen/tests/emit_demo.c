@@ -1,5 +1,5 @@
 /* emit_demo.c — exercises the IR builder (P2.1). Builds a named module via the
- * irbuilder API and prints its svm-text to stdout, so a Rust harness test can
+ * irbuilder API and prints its temen-text to stdout, so a Rust harness test can
  * parse → verify → run it on interp + JIT ("Spike-1, but via the builder").
  *
  *   emit_demo <module>
@@ -24,7 +24,7 @@ static IrModule *build_add2(void) {
 }
 
 /* sum_to(n) = 1 + 2 + ... + n  — an SSA loop with block args (block-local SSA).
- * svm value numbering is per block: a block's params are v0..v{k-1}, then each
+ * temen value numbering is per block: a block's params are v0..v{k-1}, then each
  * result-producing instruction takes the next local id. Operands reference only
  * this block's params + earlier results; loop-carried state crosses via block args. */
 static IrModule *build_sum_to(void) {
@@ -227,8 +227,8 @@ static IrModule *build_gc(void) {
 }
 
 int main(int argc, char **argv) {
-  /* `emit_demo <module>` prints svm-text; `emit_demo <module> --encoded` writes the raw
-   * svm-encode binary to stdout (for the cross-language round-trip test). */
+  /* `emit_demo <module>` prints temen-text; `emit_demo <module> --encoded` writes the raw
+   * temen-encode binary to stdout (for the cross-language round-trip test). */
   if (argc != 2 && argc != 3) { fprintf(stderr, "usage: emit_demo <module> [--encoded]\n"); return 2; }
   const char *name = argv[1];
   int encoded = (argc == 3 && !strcmp(argv[2], "--encoded"));

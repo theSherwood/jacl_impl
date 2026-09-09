@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Build the TEMEN-backend playground assets (docs/TEMEN_BROWSER_PLAN.md, MVP option (a)):
+#
+#   1. temen_browser.wasm  — the temen-browser cdylib compiled to wasm32 (the run engine:
+#                          decode a .temen + run function 0 on the bytecode interpreter,
+#                          capture stdout). Copied to demo/wasm/temen_browser.wasm.
+#   2. <example>.temen    — each example program linked against the translated JACL runtime
+#                          and encoded at build time (the "link natively for fixed examples"
+#                          MVP; the in-browser frontend for live editing is a later slice).
+#                          Written to demo/temen/cards/.
+#
+# The runtime IR (jaclrt.temen) is baked by runtime/build.sh (clang-18 + temen-llvm) — libLLVM
+# stays out of the browser; only its .temen output ships. Requires the wasm32 target
+# (`rustup target add wasm32-unknown-unknown`) and clang-18.
+#
+# Usage: cd demo && bash temen/build_assets.sh [prog1.jacl prog2.jacl ...]
+#        (default set: a couple of smoke programs)
+set -e
+
+DIR="$(cd "$(dirname "$0")" && pwd)"          # demo/temen
+DEMO="$(cd "$DIR/.." && pwd)"                 # demo
+ROOT="$(cd "$DEMO/.." && pwd)"                # repo root
+TEMEN="$ROOT/vendor/temen"
+
+# --- 1. cdylib -> wasm32 --------------------------------------------------------------------------
+echo "Building temen-browser cdylib for wasm32…"
+( cd "$TEMEN/browser" && cargo build --release --lib --target wasm32-unknown-unknown )
+mkdir -p "$DEMO/wasm"
+cp "$TEMEN/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm" "$DEMO/wasm/temen_browser.wasm"
+echo "  -> demo/wasm/temen_browser.wasm ($(wc -c < "$DEMO/wasm/temen_browser.wasm") bytes)"
+
+# --- 1b. runtime IR (jaclrt.temen): baked once, shipped for in-browser live linking -----------------
+if [ ! -f "$ROOT/runtime/build/jaclrt.temen" ]; then
+  echo "Baking runtime IR (runtime/build.sh)…"
+  bash "$ROOT/runtime/build.sh"
+fi
+cp "$ROOT/runtime/build/jaclrt.temen" "$DEMO/temen/jaclrt.temen"
+echo "  -> demo/temen/jaclrt.temen ($(wc -c < "$DEMO/temen/jaclrt.temen") bytes; the live-editing link target)"
+# The staging runtime (jaclrt + syn_rt glue) — jacl_emit.wasm links each macro body against it to stage
+# macros on the cdylib, so the fast AOT frontend is macro-capable. Shipped under temen/cards/ so the Pages
+# assemble step's `cp -r demo/temen/cards/.` picks it up (the individually-copied temen/ assets are hardcoded
+# in the workflow, which the CI token can't edit).
+if [ -f "$ROOT/runtime/build/jaclrt_staging.temeno" ]; then
+  mkdir -p "$DIR/cards"
+  cp "$ROOT/runtime/build/jaclrt_staging.temeno" "$DIR/cards/jaclrt_staging.temeno"
+  echo "  -> demo/temen/cards/jaclrt_staging.temeno ($(wc -c < "$DIR/cards/jaclrt_staging.temeno") bytes; jacl_emit macro staging)"
+fi
+
+# --- 1c. frontend (jacl_emit.wasm): the LLVM-free lexer+parser+codegen, for live editing ----------
+# Requires the Emscripten SDK on PATH. Skipped (fail-soft) if emcc is absent — the playground then
+# runs precompiled examples only (editing a source shows an "assets missing" note until it's built).
+if command -v emcc >/dev/null 2>&1; then
+  bash "$DIR/build_emit_wasm.sh"
+else
+  echo "  (emcc not found — skipping jacl_emit.wasm; live editing on TEMEN needs it. Precompiled examples still run.)"
+fi
+
+OUT="$DIR/cards"
+mkdir -p "$OUT"
+
+# --- 1d. self-hosted frontend (jacl_compiler.temen): the JACL compiler translated to TEMEN, run as a
+# guest to compile edited source *and expand its macros in-guest* via the §22 Jit cap (the macro-capable
+# live path the playground prefers over jacl_emit.wasm). Shipped under temen/cards/ so the Pages assemble
+# step's `cp -r demo/temen/cards/.` picks it up with no workflow change. Needs clang-18 + llvm-link-18;
+# fail-soft (the build script exits 0 when the toolchain is absent — live editing then uses jacl_emit.wasm).
+echo "Building self-hosted compiler-guest (codegen/selfhost/build_compiler_temen.sh)…"
+bash "$ROOT/codegen/selfhost/build_compiler_temen.sh"
+if [ -f "$ROOT/codegen/selfhost/build/jacl_compiler.temen" ]; then
+  cp "$ROOT/codegen/selfhost/build/jacl_compiler.temen" "$OUT/jacl_compiler.temen"
+  echo "  -> demo/temen/cards/jacl_compiler.temen ($(wc -c < "$OUT/jacl_compiler.temen") bytes; the macro-capable live frontend)"
+  # The warm-snapshot two-phase card (TEMEN_WARM_COMPILER.md Slice 3): the playground's `tierup` mode
+  # opens it once (temen_warm_open) and evals each compile over the restored warm image (~2x).
+  if [ -f "$ROOT/codegen/selfhost/build/jacl_compiler_snapshot.temen" ]; then
+    cp "$ROOT/codegen/selfhost/build/jacl_compiler_snapshot.temen" "$OUT/jacl_compiler_snapshot.temen"
+    echo "  -> demo/temen/cards/jacl_compiler_snapshot.temen ($(wc -c < "$OUT/jacl_compiler_snapshot.temen") bytes; warm-snapshot fast compile)"
+  fi
+else
+  echo "  (clang-18/llvm-link-18 absent — skipping jacl_compiler.temen; live editing falls back to jacl_emit.wasm.)"
+fi
+
+# Default smoke set if none given: write two tiny programs.
+if [ "$#" -eq 0 ]; then
+  printf 'print "hi"\n' > "$OUT/hi.jacl"
+  printf 'proc g {} [Stream i64] {\n  yield 1\n  yield 2\n}\nproc main {} {\n  for [g] n { print $n }\n}\nmain\n' > "$OUT/gen.jacl"
+  set -- "$OUT/hi.jacl" "$OUT/gen.jacl"
+fi
+
+names=()
+for prog in "$@"; do
+  name="$(basename "$prog" .jacl)"
+  echo "Linking + encoding $name → $name.temen…"
+  ( cd "$ROOT/runtime/harness" && cargo run --quiet --bin emit_temen -- "$prog" "$OUT/$name.temen" )
+  echo "  -> demo/temen/cards/$name.temen ($(wc -c < "$OUT/$name.temen") bytes)"
+  names+=("$name")
+done
+
+# Pre-bake the macro-bearing tour so the *unedited* tour example loads instantly (runs its shipped
+# .temen, no ~1.4s live compile). emit_temen's C driver is emit-only and can't stage `defmacro`s, so the
+# self-hosted guest compiles the tour to IR first; emit_temen --ir then links + encodes it. Needs the
+# compiler-guest (clang-18) + the cdylib; skipped otherwise (the tour then falls back to live compile).
+if [ -f "$OUT/jacl_compiler.temen" ] && [ -f "$DEMO/wasm/temen_browser.wasm" ] && [ -f "$ROOT/test/jacl/tour.jacl" ]; then
+  echo "Pre-baking tour.temen via the self-hosted guest…"
+  node "$DIR/guest_compile.mjs" "$DEMO/wasm/temen_browser.wasm" "$OUT/jacl_compiler.temen" "$ROOT/test/jacl/tour.jacl" > "$OUT/tour.ir"
+  ( cd "$ROOT/runtime/harness" && cargo run --quiet --bin emit_temen -- --ir "$OUT/tour.ir" "$OUT/tour.temen" )
+  rm -f "$OUT/tour.ir"
+  echo "  -> demo/temen/cards/tour.temen ($(wc -c < "$OUT/tour.temen") bytes; the unedited-tour fast path)"
+  names+=("tour")
+fi
+
+# Manifest: example name → .temen file, so the playground can list + fetch precompiled programs.
+printf '%s\n' "${names[@]}" | node -e '
+  const fs = require("fs");
+  const names = require("fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
+  const manifest = names.map((n) => ({ name: n, temen: `cards/${n}.temen` }));
+  fs.writeFileSync(process.argv[1], JSON.stringify(manifest, null, 2) + "\n");
+' "$OUT/manifest.json"
+echo "  -> demo/temen/cards/manifest.json ($(wc -c < "$OUT/manifest.json") bytes)"
+
+# Regression gate: a `# mode: concurrent` program that `sleep`s must RUN on the browser bytecode
+# engine, not trap. Guards the wasm timed-wait path — a wall-clock `Instant::now()` there used to
+# panic ("TEMEN run failed: unreachable" from bytecode::drive). Runs only when the compiler-guest was
+# built (needs clang-18); `set -e` fails the build if the concurrent run regresses.
+if [ -f "$OUT/jacl_compiler.temen" ]; then
+  echo "Gate: concurrent run path (concurrent_run.mjs)…"
+  node "$DIR/concurrent_run.mjs" "$DEMO/wasm/temen_browser.wasm" "$OUT/jacl_compiler.temen" "$DEMO/temen/jaclrt.temen"
+fi
+
+# Regression gate: jacl_emit.wasm must stage a user `defmacro` on TEMEN (not silently fall back to the
+# slow compiler-guest). Needs the emit frontend + the staging runtime object; runs only when both were
+# built (emcc + clang-18). `set -e` fails the build if the staging seam regresses. See stage_gate.mjs.
+if [ -f "$DEMO/wasm/jacl_emit.js" ] && [ -f "$DIR/cards/jaclrt_staging.temeno" ]; then
+  echo "Gate: macro-staging path (stage_gate.mjs)…"
+  node "$DIR/stage_gate.mjs" "$DEMO/wasm/jacl_emit.js" "$DEMO/wasm/temen_browser.wasm" "$DIR/cards/jaclrt_staging.temeno" "$DEMO/temen/jaclrt.temen"
+fi
+
+echo ""
+echo "Smoke-test the run path headless:"
+echo "  node demo/temen/run_temen.mjs demo/wasm/temen_browser.wasm demo/temen/cards/hi.temen \$'hi\\n'"

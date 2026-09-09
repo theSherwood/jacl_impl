@@ -1,8 +1,8 @@
 /* Staged-macro wrapper (arity-1). The entry of a staged macro module: read the argument
  * syntax value from stdin (syn_rt wire), decode it, call the codegen'd __jacl_macro, and
  * write the encoded result syntax value to stdout. read(0)/write(1) are POSIX natively
- * and the on-ramp Stream caps on SVM, so the same source serves both. __jacl_macro is
- * resolved by name at link time (svm_codegen_macro_body's export). */
+ * and the on-ramp Stream caps on TEMEN, so the same source serves both. __jacl_macro is
+ * resolved by name at link time (temen_codegen_macro_body's export). */
 #include "jaclrt.h"
 #include "syn_rt.h"
 #include <unistd.h>

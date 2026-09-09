@@ -1,8 +1,8 @@
-//! C-ABI bridge that runs a codegen'd staged-macro module on the SVM engine, in-process,
-//! for the native JACL frontend (Phase 5 of `docs/SVM_MACRO_STAGING_PLAN.md`). This is the
-//! embedding half of "run on an SVM runtime instance": `expand__node`, behind
-//! `JACL_STAGE_ON_SVM`, codegens a macro body into a staged-macro module (a v9 svm-encode
-//! object), encodes the argument syntax values to a `syn_wire` buffer, calls `jacl_svm_stage`,
+//! C-ABI bridge that runs a codegen'd staged-macro module on the TEMEN engine, in-process,
+//! for the native JACL frontend (Phase 5 of `docs/TEMEN_MACRO_STAGING_PLAN.md`). This is the
+//! embedding half of "run on an TEMEN runtime instance": `expand__node`, behind
+//! `JACL_STAGE_ON_TEMEN`, codegens a macro body into a staged-macro module (a v9 temen-encode
+//! object), encodes the argument syntax values to a `syn_wire` buffer, calls `jacl_temen_stage`,
 //! and decodes the returned result wire — replacing the legacy VM's `jacl_ctx_run_closure`.
 //!
 //! The path mirrors `bin/stage_macro.rs` exactly (decode_unit → link vs the staging runtime →
@@ -30,22 +30,22 @@ fn staging_runtime() -> &'static Option<(Module, Vec<(String, u32)>)> {
     })
 }
 
-/// Run a staged-macro module on SVM and return the result `syn_wire` bytes.
+/// Run a staged-macro module on TEMEN and return the result `syn_wire` bytes.
 ///
-/// * `module_bytes` / `module_len` — the svm-encode **object** (v9) from
-///   `svm_codegen_staged_macro` + `irb_to_encoded`. Own-data addresses are inline `data.self`
+/// * `module_bytes` / `module_len` — the temen-encode **object** (v9) from
+///   `temen_codegen_staged_macro` + `irb_to_encoded`. Own-data addresses are inline `data.self`
 ///   instructions that `link` resolves — no separate relocation table.
 /// * `arg_wire` / `arg_len` — the argument wire (one version byte, then the N parameter
 ///   syntax values back-to-back), fed to the module on stdin.
 /// * `out_ptr` / `out_len` — on success, receive a heap buffer of result-wire bytes; free it
-///   with `jacl_svm_stage_free`.
+///   with `jacl_temen_stage_free`.
 ///
 /// Returns 0 on success, non-zero on error (nothing is written to the out-params on error).
 ///
 /// # Safety
 /// All pointers must be valid for their stated lengths.
 #[no_mangle]
-pub unsafe extern "C" fn jacl_svm_stage(
+pub unsafe extern "C" fn jacl_temen_stage(
     module_bytes: *const u8,
     module_len: usize,
     arg_wire: *const u8,
@@ -68,19 +68,19 @@ pub unsafe extern "C" fn jacl_svm_stage(
             let mut boxed = bytes.into_boxed_slice();
             *out_len = boxed.len();
             *out_ptr = boxed.as_mut_ptr();
-            std::mem::forget(boxed); // ownership transfers to C; reclaimed via jacl_svm_stage_free
+            std::mem::forget(boxed); // ownership transfers to C; reclaimed via jacl_temen_stage_free
             0
         }
         Err(_) => 3,
     }
 }
 
-/// Free a buffer returned by `jacl_svm_stage`.
+/// Free a buffer returned by `jacl_temen_stage`.
 ///
 /// # Safety
-/// `ptr`/`len` must be exactly what a prior `jacl_svm_stage` success wrote, or null/0.
+/// `ptr`/`len` must be exactly what a prior `jacl_temen_stage` success wrote, or null/0.
 #[no_mangle]
-pub unsafe extern "C" fn jacl_svm_stage_free(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn jacl_temen_stage_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len != 0 {
         drop(Box::from_raw(std::slice::from_raw_parts_mut(ptr, len)));
     }

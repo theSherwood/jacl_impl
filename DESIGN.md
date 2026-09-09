@@ -136,11 +136,11 @@ demo/          WASM playground (CodeMirror 6 + vim + JACL syntax mode)
   src/             TypeScript sources (esbuild-bundled into dist/)
     playground.ts  entry: editor wiring, run pipeline, example picker, splitter
     jacl-mode.ts   StreamLanguage tokenizer with position-aware call highlighting
-    svm-jacl-wasm.ts  SvmJaclRunner (svm-browser cdylib) + JaclFrontend (jacl_emit.wasm)
+    temen-jacl-wasm.ts  TemenJaclRunner (temen-browser cdylib) + JaclFrontend (jacl_emit.wasm)
     splitter.ts    draggable panel splitter, persisted to localStorage
   build_demo.sh    regenerates examples.json, bundles src/ → dist/
-  svm/build_assets.sh  builds the SVM assets (svm_browser.wasm, jacl_emit.wasm, jaclrt.svm, .svmb)
-  wasm/            SVM engine + frontend wasm (built by svm/build_assets.sh; git-ignored)
+  temen/build_assets.sh  builds the TEMEN assets (temen_browser.wasm, jacl_emit.wasm, jaclrt.temen, .temen)
+  wasm/            TEMEN engine + frontend wasm (built by temen/build_assets.sh; git-ignored)
 ```
 
 Tests link against `libjacl.a` (built once from `jacl.c`) and include `../src/jacl.h` — historically tests `#include`d `jacl.c` directly, but the unity-include path survives only in two legacy tests.
