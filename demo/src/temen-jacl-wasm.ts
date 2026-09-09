@@ -51,6 +51,7 @@ interface TemenBrowserExports {
     stdinLen: number | bigint,
   ): bigint;
   // #1373 (temen): resident link libraries — decode a runtime once, link programs against it by handle.
+  temen_coop_set_emit_cap(bytes: number | bigint): void;
   temen_link_lib_open(libPtr: number | bigint, libLen: number | bigint): number;
   temen_link_lib_close(handle: number): void;
   temen_link_run_lib(
@@ -114,6 +115,9 @@ function statusMessage(status: number): string {
  * so nothing about this name lives in the language-agnostic cdylib.
  */
 const JACL_ENTRY = "__jacl_entry";
+
+/** temen #1384: estimated-emitted-bytes cap above which a compiler function stays interpreted. */
+const JACL_EMIT_CAP_BYTES = 512_000;
 
 export class TemenJaclRunner {
   private readonly ex: TemenBrowserExports;
@@ -323,11 +327,23 @@ export class TemenJaclRunner {
    * over `emitIrViaCompiler`). Returns `false` if the engine refuses the card (then fall back).
    */
   warmOpen(snapshotTemen: Uint8Array): boolean {
+    // temen #1384: cap the emitted-function size for this session's tier-up emit. Chromium's TurboFan
+    // crashes the renderer (`V8 process OOM (Zone)`) optimizing the compiler's three 0.5–0.8 MB
+    // `br_table`-dispatch functions once a macro program (the tour) makes them hot; at this cap they
+    // stay on the interpreter and the crash is gone (swept: 1 MB crashes, 500 KB and below never;
+    // cost ~100 ms on the tour's warm compile, still 3× the plain guest).
+    this.ex.temen_coop_set_emit_cap(this.usize(JACL_EMIT_CAP_BYTES));
     const modPtr = this.load(snapshotTemen);
     const opened = this.ex.temen_warm_open(modPtr, this.usize(snapshotTemen.length));
     this.warmOpened = opened !== -1n && this.ex.temen_status() === STATUS.OK;
     return this.warmOpened;
   }
+
+  /**
+   * Warm-coop calls are serialized: the driver's pump is async over a SINGLE warm session, so two
+   * in-flight evals (a background pre-warm and a Run) would interleave on the same engine state.
+   */
+  private coopQueue: Promise<unknown> = Promise.resolve();
 
   /** Whether a warm session is currently open (via {@link warmOpen}). */
   get isWarmOpen(): boolean {
@@ -358,7 +374,13 @@ export class TemenJaclRunner {
    * compiler module **once per session** (its ~one-time cold cost); every later compile reuses it. The
    * caller falls back to {@link warmEval} if this declines/traps. Async (the coop pump is).
    */
-  async warmCoopEval(source: string): Promise<EmitResult> {
+  warmCoopEval(source: string): Promise<EmitResult> {
+    const run = this.coopQueue.then(() => this.warmCoopEvalNow(source));
+    this.coopQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async warmCoopEvalNow(source: string): Promise<EmitResult> {
     if (!this.warmOpened) return { error: "warm session not open" };
     const inBytes = new TextEncoder().encode(source);
     try {
