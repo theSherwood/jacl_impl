@@ -50,6 +50,18 @@ interface TemenBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
+  // #1373 (temen): resident link libraries — decode a runtime once, link programs against it by handle.
+  temen_link_lib_open(libPtr: number | bigint, libLen: number | bigint): number;
+  temen_link_lib_close(handle: number): void;
+  temen_link_run_lib(
+    handle: number,
+    progPtr: number | bigint,
+    progLen: number | bigint,
+    entryPtr: number | bigint,
+    entryLen: number | bigint,
+    stdinPtr: number | bigint,
+    stdinLen: number | bigint,
+  ): bigint;
   // Warm-runtime snapshot (TEMEN_WARM_COMPILER.md Slice 3): open a two-phase (`warmup`/`eval_run`)
   // guest once — the host runs `warmup` and snapshots the post-init window — then `eval_run` each
   // input over the restored warm image (skipping the guest init floor). `open` returns `-1` on
@@ -176,6 +188,26 @@ export class TemenJaclRunner {
   }
 
   /**
+   * Resident link libraries (temen #1373): each runtime `Uint8Array` the page links against is decoded
+   * into the cdylib **once** (`temen_link_lib_open`) and every later link goes through its handle
+   * (`temen_link_run_lib`), skipping the per-run runtime decode (~35% of the run floor). Keyed by the
+   * byte array's identity — the page holds one array per runtime (jaclrt.temen for programs,
+   * jaclrt_staging.temeno for macro bodies) for its lifetime, so both stay resident.
+   */
+  private readonly libHandles = new Map<Uint8Array, number>();
+
+  private libHandle(runtime: Uint8Array): number {
+    const cached = this.libHandles.get(runtime);
+    if (cached !== undefined) return cached;
+    const ptr = this.load(runtime);
+    const h = this.ex.temen_link_lib_open(ptr, this.usize(runtime.length));
+    this.ex.temen_dealloc(ptr, this.usize(runtime.length));
+    if (h < 0) throw new Error(`temen_link_lib_open: ${statusMessage(this.ex.temen_status())}`);
+    this.libHandles.set(runtime, h);
+    return h;
+  }
+
+  /**
    * The **live-editing** path: link the TEMEN IR the JACL frontend emitted (`jacl_emit_ir`; see
    * {@link JaclFrontend}) against the JACL runtime (`jaclrt.temen` bytes) and run it — no precompiled
    * `.temen` needed. `programIr` is the frontend's raw output: self-contained temen-text (wire v9 —
@@ -190,8 +222,13 @@ export class TemenJaclRunner {
     const ex = this.ex;
     const prog = new TextEncoder().encode(programIr);
     const entry = new TextEncoder().encode(JACL_ENTRY);
+    let lib: number;
+    try {
+      lib = this.libHandle(runtime);
+    } catch (e) {
+      return { output: "", error: String(e instanceof Error ? e.message : e), isError: true };
+    }
     const progPtr = this.load(prog);
-    const rtPtr = this.load(runtime);
     const entryPtr = this.load(entry);
     let inPtr: number | bigint = this.usize(0);
     let inLen: number | bigint = this.usize(0);
@@ -199,11 +236,10 @@ export class TemenJaclRunner {
       inPtr = this.load(stdin);
       inLen = this.usize(stdin.length);
     }
-    ex.temen_link_run(
+    ex.temen_link_run_lib(
+      lib,
       progPtr,
       this.usize(prog.length),
-      rtPtr,
-      this.usize(runtime.length),
       entryPtr,
       this.usize(entry.length),
       inPtr,
@@ -228,8 +264,13 @@ export class TemenJaclRunner {
    */
   linkRunRaw(programBytes: Uint8Array, runtime: Uint8Array, stdin: Uint8Array): Uint8Array | null {
     const ex = this.ex;
+    let lib: number;
+    try {
+      lib = this.libHandle(runtime);
+    } catch {
+      return null;
+    }
     const progPtr = this.load(programBytes);
-    const rtPtr = this.load(runtime);
     const entry = new TextEncoder().encode(JACL_ENTRY);
     const entryPtr = this.load(entry);
     let inPtr: number | bigint = this.usize(0);
@@ -238,11 +279,10 @@ export class TemenJaclRunner {
       inPtr = this.load(stdin);
       inLen = this.usize(stdin.length);
     }
-    ex.temen_link_run(
+    ex.temen_link_run_lib(
+      lib,
       progPtr,
       this.usize(programBytes.length),
-      rtPtr,
-      this.usize(runtime.length),
       entryPtr,
       this.usize(entry.length),
       inPtr,
