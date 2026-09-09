@@ -20,6 +20,14 @@
  * and the module traps.)
  */
 
+// The vendored engine glue: `engineImports()` supplies the current `temen_host.*` host seam the plain
+// cdylib imports (webgpu_op + stdout_chunk + foreign_* stubs; no memory — the plain build owns its own),
+// and `runWarmCoop` drives the cooperative tier-up over an open warm session (the fast `tierup` path).
+// @ts-ignore — vendored JS engine glue, no bundled type declarations.
+import { engineImports } from "../../vendor/svm/browser/engine-imports.mjs";
+// @ts-ignore — vendored JS engine glue, no bundled type declarations.
+import { runWarmCoop } from "../../vendor/svm/browser/web/wasmjit-module.js";
+
 /** The subset of the svm-browser cdylib exports this runner touches. */
 interface SvmBrowserExports {
   memory: WebAssembly.Memory;
@@ -111,8 +119,9 @@ export class SvmJaclRunner {
    */
   static async create(wasmUrl: string): Promise<SvmJaclRunner> {
     const source = await fetch(wasmUrl);
-    const imports = { temen_host: { webgpu_op: () => -1n } };
-    const { instance } = await WebAssembly.instantiateStreaming(source, imports);
+    // `engineImports()` (no memory arg) is the plain build's import set — the plain cdylib exports its
+    // own memory and imports only the `temen_host.*` host seam (webgpu_op + stdout_chunk + foreign_*).
+    const { instance } = await WebAssembly.instantiateStreaming(source, engineImports());
     return new SvmJaclRunner(instance.exports as unknown as SvmBrowserExports);
   }
 
@@ -291,6 +300,33 @@ export class SvmJaclRunner {
     const inBytes = new TextEncoder().encode(source);
     const inPtr = this.load(inBytes);
     this.ex.temen_warm_eval(inPtr, this.usize(inBytes.length));
+    const status = this.ex.temen_status();
+    const stdout = this.readCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
+    const stderr = this.readCapture(this.ex.temen_stderr_ptr(), this.ex.temen_stderr_len());
+    if (status !== STATUS.OK) return { error: stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status) };
+    const MARK = "%%ERROR%%\n";
+    if (stdout.startsWith(MARK)) return { error: stdout.slice(MARK.length) };
+    return { ir: stdout };
+  }
+
+  /**
+   * Compile `source` over the open warm session on the **cooperative tier-up** tier — restore the warm
+   * image and drive `eval_run` with its eligible leaves on emitted wasm ({@link runWarmCoop}). This
+   * composes the two levers: warm-snapshot removes the init floor and tier-up accelerates the per-source
+   * compile, so it is the fastest self-hosted path on non-trivial programs (measured ~3× warm-interp on
+   * the tour; below ~2 KB warm-interp still edges it). The stable `cacheKey` compiles the emitted
+   * compiler module **once per session** (its ~one-time cold cost); every later compile reuses it. The
+   * caller falls back to {@link warmEval} if this declines/traps. Async (the coop pump is).
+   */
+  async warmCoopEval(source: string): Promise<EmitResult> {
+    if (!this.warmOpened) return { error: "warm session not open" };
+    const inBytes = new TextEncoder().encode(source);
+    try {
+      // shared=0: the plain browser cdylib owns a non-shared memory (the threads build passes 1).
+      await runWarmCoop(this.ex, this.ex.memory, inBytes, "jacl-compiler-warmcoop", 0);
+    } catch (e) {
+      return { error: `warm-coop declined: ${e instanceof Error ? e.message : String(e)}` };
+    }
     const status = this.ex.temen_status();
     const stdout = this.readCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
     const stderr = this.readCapture(this.ex.temen_stderr_ptr(), this.ex.temen_stderr_len());
