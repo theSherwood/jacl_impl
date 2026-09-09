@@ -4,6 +4,7 @@
 // tour into a runnable .temen (via `emit_svmb --ir`) so the unedited tour loads instantly.
 //
 //   node guest_compile.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>  > out.ir
+import { engineImports } from '../../vendor/svm/browser/engine-imports.mjs';
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, compPath, progPath] = process.argv.slice(2);
@@ -12,7 +13,7 @@ if (!wasmPath || !compPath || !progPath) {
   process.exit(2);
 }
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), { temen_host: { webgpu_op: () => -1n } });
+const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
 const ex = instance.exports;
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
