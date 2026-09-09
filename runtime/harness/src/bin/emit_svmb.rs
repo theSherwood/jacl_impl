@@ -1,11 +1,11 @@
 //! emit_svmb — spike tool (docs/SVM_BROWSER_PLAN.md).
 //!
 //! Runs the JACL frontend+codegen → links against the translated runtime + extern
-//! catalog → powerbox `_start` → **encodes** the module to a `.svmb` byte image
+//! catalog → powerbox `_start` → **encodes** the module to a `.temen` byte image
 //! (instead of running it, as `jacl_svm run` does). The image is what the browser
 //! `svm-browser` cdylib's `svm_run_pb` decodes and runs.
 //!
-//!   emit_svmb <prog.jacl> <out.svmb>
+//!   emit_svmb <prog.jacl> <out.temen>
 //!
 //! The pipeline mirrors `jacl_svm.rs` exactly up to `synth_manifest_start`.
 
@@ -35,8 +35,8 @@ fn build_driver() -> PathBuf {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Two input shapes:
-    //   emit_svmb <prog.jacl> <out.svmb>   — compile via the emit-only C driver (no macros), or
-    //   emit_svmb --ir <prog.ir> <out.svmb> — link + encode SVM-IR produced elsewhere. The `--ir`
+    //   emit_svmb <prog.jacl> <out.temen>   — compile via the emit-only C driver (no macros), or
+    //   emit_svmb --ir <prog.ir> <out.temen> — link + encode SVM-IR produced elsewhere. The `--ir`
     // form is how the macro-bearing tour is baked: the self-hosted guest (which CAN stage macros)
     // emits the IR, and this path links it against the runtime + powerbox exactly like the C path.
     let (program, out_path) = match args.as_slice() {
@@ -66,7 +66,7 @@ fn main() {
             )
         }
         _ => {
-            eprintln!("usage: emit_svmb <prog.jacl> <out.svmb>  |  emit_svmb --ir <prog.ir> <out.svmb>");
+            eprintln!("usage: emit_svmb <prog.jacl> <out.temen>  |  emit_svmb --ir <prog.ir> <out.temen>");
             std::process::exit(2);
         }
     };
@@ -89,6 +89,6 @@ fn main() {
     let module = temen_ir::synth_manifest_start(linked, entry, false).expect("powerbox");
 
     let bytes = temen_encode::encode_module(&module);
-    std::fs::write(&out_path, &bytes).expect("write .svmb");
+    std::fs::write(&out_path, &bytes).expect("write .temen");
     eprintln!("emit_svmb: wrote {} ({} bytes)", out_path.display(), bytes.len());
 }

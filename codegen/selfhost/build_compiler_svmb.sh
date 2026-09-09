@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build the JACL compiler as an SVM guest: compile the C frontend to LLVM IR, run it
-# through the vendor/svm LLVM on-ramp, and emit `jacl_compiler.svmb` — a module that
+# through the vendor/svm LLVM on-ramp, and emit `jacl_compiler.temen` — a module that
 # reads JACL source on stdin and writes SVM-IR text on stdout.
 #
 #   codegen/selfhost/build_compiler_svmb.sh [--selftest]
@@ -40,7 +40,7 @@ fi
 # -DJACL_EMIT_ONLY selects the emit-only frontend unity (src/jacl_emit.c) inside emit_jacl.c:
 # the compiler-as-guest only compiles JACL -> SVM IR, so the legacy bytecode backend
 # (bytecode.c/compiler.c/vm.c) + its scheduler/embedding (runtime.c/embed.c) are dropped —
-# a smaller .svmb, no stubbed vm.c externals (docs/SVM_SELFHOST_FEASIBILITY.md §2, item 6).
+# a smaller .temen, no stubbed vm.c externals (docs/SVM_SELFHOST_FEASIBILITY.md §2, item 6).
 # The guest uses the engine's synthesized `vm_map`-growing allocator (emit_shim.c no longer defines a
 # fixed arena — retired once temen #1312/#1319 made the coop window growable; see SVM_WARM_COMPILER.md).
 # EXTRA_CFLAGS remains a general escape hatch for building a variant card.
@@ -74,23 +74,23 @@ echo "=== linking whole program ==="
              "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
              "$OUT/interpret_bridge_guest.ll" -o "$OUT/jacl_compiler.ll"
 
-echo "=== translating to SVM IR (jacl_compiler.svmb) ==="
+echo "=== translating to SVM IR (jacl_compiler.temen) ==="
 # --stub-externs traps-if-called the dead runtime surface (fork/exec/... from vm.c,
 # never reached on the emit path). See the feasibility doc's symbol footprint.
-"$TRANSLATE" "$OUT/jacl_compiler.ll" -o "$OUT/jacl_compiler.svmb" --binary --stub-externs
-echo "  -> $OUT/jacl_compiler.svmb ($(wc -c < "$OUT/jacl_compiler.svmb") bytes)"
+"$TRANSLATE" "$OUT/jacl_compiler.ll" -o "$OUT/jacl_compiler.temen" --binary --stub-externs
+echo "  -> $OUT/jacl_compiler.temen ($(wc -c < "$OUT/jacl_compiler.temen") bytes)"
 
 # Warm-snapshot two-phase card (docs/SVM_WARM_COMPILER.md Slice 2/3): the same program, but driven
 # by emit_driver_snapshot.c (main/warmup/eval_run exports) so the browser reactor can warm the
 # prelude once (temen_warm_open) and restore-per-Run. Identical frontend/codegen; only the driver TU
 # differs.
-echo "=== translating warm-snapshot card (jacl_compiler_snapshot.svmb) ==="
+echo "=== translating warm-snapshot card (jacl_compiler_snapshot.temen) ==="
 "$LLVM_LINK" -S "$OUT/emit_driver_snapshot.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
              "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" \
              "$OUT/jaclrt_staging_guest.ll" "$OUT/stage_bridge_guest.ll" \
              "$OUT/interpret_bridge_guest.ll" -o "$OUT/jacl_compiler_snapshot.ll"
-"$TRANSLATE" "$OUT/jacl_compiler_snapshot.ll" -o "$OUT/jacl_compiler_snapshot.svmb" --binary --stub-externs
-echo "  -> $OUT/jacl_compiler_snapshot.svmb ($(wc -c < "$OUT/jacl_compiler_snapshot.svmb") bytes)"
+"$TRANSLATE" "$OUT/jacl_compiler_snapshot.ll" -o "$OUT/jacl_compiler_snapshot.temen" --binary --stub-externs
+echo "  -> $OUT/jacl_compiler_snapshot.temen ($(wc -c < "$OUT/jacl_compiler_snapshot.temen") bytes)"
 
 if [ "${1:-}" = "--selftest" ]; then
   echo "=== selftest: compile a fixed JACL program on the SVM engine ==="

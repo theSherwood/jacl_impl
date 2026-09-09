@@ -1,5 +1,5 @@
 // ROI probe for the warm-snapshot / JIT compiler-guest plan (docs/SVM_WARM_COMPILER.md, Slice 0).
-// Times the self-hosted compiler-guest (jacl_compiler.svmb) compiling several programs through the
+// Times the self-hosted compiler-guest (jacl_compiler.temen) compiling several programs through the
 // svm-browser cdylib's temen_run_onramp — the exact playground live-compile path, on the bytecode
 // interpreter. Reports, per program, the wall time to compile.
 //
@@ -8,12 +8,12 @@
 // ≈ the MARGINAL per-source compile work — roughly what the JIT tier speeds up. The split sizes the
 // ROI of warm-snapshot vs JIT-tier.
 //
-//   node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog1.jacl> [prog2.jacl ...]
+//   node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog1.jacl> [prog2.jacl ...]
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, compPath, ...progs] = process.argv.slice(2);
 if (!wasmPath || !compPath || progs.length === 0) {
-  process.stderr.write('usage: node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>...\n');
+  process.stderr.write('usage: node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>...\n');
   process.exit(2);
 }
 

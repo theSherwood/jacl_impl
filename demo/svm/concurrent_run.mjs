@@ -1,8 +1,8 @@
 // Regression gate for the browser **run** path on a concurrent program (not just compile).
 //
 // Exercises the exact playground live-edit pipeline on the wasm32 cdylib:
-//   1. runSvmb(jacl_compiler.svmb, source) -> IR text   (temen_run_onramp; macro-capable frontend)
-//   2. temen_link_run(IR, jaclrt.svm, "__jacl_entry")      -> run the linked program
+//   1. runSvmb(jacl_compiler.temen, source) -> IR text   (temen_run_onramp; macro-capable frontend)
+//   2. temen_link_run(IR, jaclrt.temen, "__jacl_entry")      -> run the linked program
 //
 // The program is `# mode: concurrent` and contains `sleep`, which lowers to a timed `memory.wait`
 // on the bytecode scheduler. That timed wait used to record a wall-clock deadline via
@@ -10,12 +10,12 @@
 // unreachable" from `bytecode::drive`). This gate fails if that regression returns — a concurrent
 // guest must run to completion on the browser engine, not trap.
 //
-//   node concurrent_run.mjs <temen_browser.wasm> <jacl_compiler.svmb> <jaclrt.svm>
+//   node concurrent_run.mjs <temen_browser.wasm> <jacl_compiler.temen> <jaclrt.temen>
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, compPath, rtPath] = process.argv.slice(2);
 if (!wasmPath || !compPath || !rtPath) {
-  console.error('usage: node concurrent_run.mjs <temen_browser.wasm> <jacl_compiler.svmb> <jaclrt.svm>');
+  console.error('usage: node concurrent_run.mjs <temen_browser.wasm> <jacl_compiler.temen> <jaclrt.temen>');
   process.exit(2);
 }
 

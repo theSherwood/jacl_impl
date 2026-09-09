@@ -76,7 +76,7 @@
 - Each Run compiles the current source to SVM IR in the browser
   (`jacl_emit.wasm`) and runs it fresh on the svm-browser cdylib —
   hermetic by construction; unedited examples run their precompiled
-  `.svmb` directly.
+  `.temen` directly.
 - Highlighting in `jacl-mode.ts` is position-driven, not just
   keyword-based:
     - first identifier after `[` → call head

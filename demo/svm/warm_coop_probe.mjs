@@ -5,7 +5,7 @@
 // Reports best-of-N warm times, tier-up/bounce counts, stdout parity, and interp/coop speedup —
 // so we can see whether warm-snapshot (no startup floor) COMPOSES with tier-up (fast compile).
 //
-//   node demo/svm/warm_coop_probe.mjs <cdylib.wasm> <snapshot.svmb> <prog.jacl>...
+//   node demo/svm/warm_coop_probe.mjs <cdylib.wasm> <snapshot.temen> <prog.jacl>...
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { runWarmCoop } from '../../vendor/svm/browser/web/wasmjit-module.js';

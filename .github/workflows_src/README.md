@@ -75,3 +75,5 @@ goes red, re-run the copy above and commit.
   2. `demo/build_demo.sh` bundles the CodeMirror 6 editor with esbuild
      and regenerates `examples.json` from `test/jacl/*.jacl`.
   3. The real files are assembled into `_site/` and deployed to GitHub Pages.
+
+- **pages.yml** (2026-09-09): the runtime + cards moved from the svm-era extensions to temen's (`jaclrt.svm`→`jaclrt.temen` (now binary, ~6.5× smaller), `.svmb`→`.temen`, `.svmo`→`.temeno`). Line 81's hardcoded `cp demo/svm/jaclrt.svm …` becomes `jaclrt.temen`. Until copied over, `build_assets.sh` also emits a `jaclrt.svm` alias so the live deploy keeps working; delete that alias line after syncing.

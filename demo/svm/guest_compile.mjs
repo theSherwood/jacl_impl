@@ -1,14 +1,14 @@
-// Compile a JACL source file to SVM IR by running the self-hosted compiler-guest (jacl_compiler.svmb)
+// Compile a JACL source file to SVM IR by running the self-hosted compiler-guest (jacl_compiler.temen)
 // through the svm-browser cdylib's `temen_run_onramp` — the macro-capable path (the emit-only C driver
 // can't stage `defmacro`s). Writes the emitted IR to stdout; used by build_assets.sh to pre-bake the
-// tour into a runnable .svmb (via `emit_svmb --ir`) so the unedited tour loads instantly.
+// tour into a runnable .temen (via `emit_svmb --ir`) so the unedited tour loads instantly.
 //
-//   node guest_compile.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>  > out.ir
+//   node guest_compile.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>  > out.ir
 import { readFileSync } from 'node:fs';
 
 const [wasmPath, compPath, progPath] = process.argv.slice(2);
 if (!wasmPath || !compPath || !progPath) {
-  process.stderr.write('usage: node guest_compile.mjs <temen_browser.wasm> <jacl_compiler.svmb> <prog.jacl>\n');
+  process.stderr.write('usage: node guest_compile.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>\n');
   process.exit(2);
 }
 

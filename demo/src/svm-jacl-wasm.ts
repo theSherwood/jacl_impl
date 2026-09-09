@@ -1,7 +1,7 @@
 /**
  * SVM-backend run path for the playground.
  *
- * Runs a JACL program that has been compiled to an encoded SVM-IR module (`.svmb`:
+ * Runs a JACL program that has been compiled to an encoded SVM-IR module (`.temen`:
  * frontend → codegen → link vs the translated runtime → powerbox `_start` → encode; see
  * `runtime/harness/src/bin/emit_svmb.rs`) through the **svm-browser cdylib** on `wasm32`.
  * The cdylib decodes the module and runs function 0 on the fail-closed **bytecode
@@ -11,7 +11,7 @@
  * playground's sole backend. It exposes a {@link RunResult} shape `playground.ts` consumes
  * directly. The compile half — turning *edited* source into IR in the browser — uses an
  * Emscripten build of the LLVM-free frontend+codegen (`jacl_emit.wasm`, {@link JaclFrontend});
- * unedited examples run **precompiled** `.svmb` blobs.
+ * unedited examples run **precompiled** `.temen` blobs.
  *
  * The cdylib entry is `temen_run_onramp`, which binds the module's manifest imports **by
  * name** (`write` → the stdout stream, `read`/`exit`/… likewise) — the ABI a
@@ -84,7 +84,7 @@ const STATUS = {
 function statusMessage(status: number): string {
   switch (status) {
     case STATUS.DECODE_ERR:
-      return "could not decode the encoded module (.svmb)";
+      return "could not decode the encoded module (.temen)";
     case STATUS.UNSUPPORTED:
       return "a function is outside the bytecode engine's subset (STATUS_UNSUPPORTED)";
     case STATUS.TRAP:
@@ -147,7 +147,7 @@ export class SvmJaclRunner {
   }
 
   /**
-   * Run a precompiled `.svmb` module. `stdin` is optional. Returns the captured stdout, and
+   * Run a precompiled `.temen` module. `stdin` is optional. Returns the captured stdout, and
    * on a non-OK status an error string — the same {@link RunResult} the old backend produced.
    */
   runSvmb(svmb: Uint8Array, stdin?: Uint8Array): RunResult {
@@ -177,13 +177,13 @@ export class SvmJaclRunner {
 
   /**
    * The **live-editing** path: link the SVM IR the JACL frontend emitted (`jacl_emit_ir`; see
-   * {@link JaclFrontend}) against the JACL runtime (`jaclrt.svm` bytes) and run it — no precompiled
-   * `.svmb` needed. `programIr` is the frontend's raw output: self-contained svm-text (wire v9 —
+   * {@link JaclFrontend}) against the JACL runtime (`jaclrt.temen` bytes) and run it — no precompiled
+   * `.temen` needed. `programIr` is the frontend's raw output: self-contained svm-text (wire v9 —
    * own-data addresses are inline `data.self` instructions the linker resolves, so there is no
    * separate relocation buffer).
    *
    * The generic cdylib entry (`temen_link_run`) is language-agnostic — it takes a program unit, a
-   * library unit (each text or a `.svmo` binary object, sniffed by magic), and an entry-export name.
+   * library unit (each text or a `.temeno` binary object, sniffed by magic), and an entry-export name.
    * The only JACL-frontend specific here is the `__jacl_entry` entry name.
    */
   linkRun(programIr: string, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
@@ -223,7 +223,7 @@ export class SvmJaclRunner {
   /**
    * Run a **binary program object** against `runtime` with raw byte I/O and return raw stdout — the
    * macro-body staging primitive. The AOT frontend codegens each macro body to an svm-encode object
-   * and hands it here (linked at `__jacl_entry` against jaclrt_staging.svm, arg wire on stdin); the
+   * and hands it here (linked at `__jacl_entry` against jaclrt_staging.temeno, arg wire on stdin); the
    * returned bytes are the result wire it decodes back to an AST. `null` on a non-OK run.
    */
   linkRunRaw(programBytes: Uint8Array, runtime: Uint8Array, stdin: Uint8Array): Uint8Array | null {
@@ -256,7 +256,7 @@ export class SvmJaclRunner {
 
   /**
    * The **self-hosted frontend** path: compile JACL `source` to SVM IR by running the JACL compiler
-   * *as an SVM guest* (`jacl_compiler.svmb` — the LLVM-free frontend+codegen translated to SVM). The
+   * *as an SVM guest* (`jacl_compiler.temen` — the LLVM-free frontend+codegen translated to SVM). The
    * compiler reads the source on stdin and writes the IR on stdout; its `_start` is the emit driver.
    *
    * Unlike the Emscripten {@link JaclFrontend} (`jacl_emit.wasm`), this expands `defmacro`s **in-guest**
@@ -277,7 +277,7 @@ export class SvmJaclRunner {
 
   /**
    * Open a **warm-runtime snapshot** session over the two-phase compiler card
-   * (`jacl_compiler_snapshot.svmb`): the host runs its `warmup` (the prelude init) once and snapshots
+   * (`jacl_compiler_snapshot.temen`): the host runs its `warmup` (the prelude init) once and snapshots
    * the window. Call once, then {@link warmEval} per compile — each restores the warm image and JITs
    * `eval_run`, skipping the ~450 ms/compile init+prelude floor (SVM_WARM_COMPILER.md Slice 3; ~2×
    * over `emitIrViaCompiler`). Returns `false` if the engine refuses the card (then fall back).
@@ -381,7 +381,7 @@ export class JaclFrontend {
   /**
    * Load the AOT-compiled JACL frontend. Pass `stageRun` to make it **macro-capable**: the frontend
    * codegens each macro body to an SVM object and hands it to `stageRun` (which runs it on the
-   * cdylib against jaclrt_staging.svm) via the `jacl_svm_stage` bridge — so 99% of compilation runs
+   * cdylib against jaclrt_staging.temeno) via the `jacl_svm_stage` bridge — so 99% of compilation runs
    * at native wasm speed and only tiny macro bodies touch SVM. Without it, macros error (emit-only).
    */
   static async create(stageRun?: MacroStageRun): Promise<JaclFrontend> {
