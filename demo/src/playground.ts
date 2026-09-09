@@ -40,6 +40,15 @@ const jaclHighlight = HighlightStyle.define([
   { tag: t.operator,                 color: "#905" },
 ]);
 import { TemenJaclRunner, JaclFrontend, RunResult, EmitResult } from "./temen-jacl-wasm";
+
+// Kick the engine off at module load — before the editor is built, before examples.json — so the
+// cdylib streams + compiles in parallel with everything else the page does at startup (it needs no
+// DOM). `ensureTemen` awaits this; a failure is reported there, so the bare rejection is swallowed.
+const engineBoot: Promise<TemenJaclRunner> = TemenJaclRunner.create("wasm/temen_browser.wasm");
+engineBoot.catch(() => {});
+const manifestBoot: Promise<{ name: string; temen: string }[]> = fetch("temen/cards/manifest.json")
+  .then((resp) => (resp.ok ? resp.json() : []))
+  .catch(() => []);
 import { initSplitter } from "./splitter";
 
 // --- DOM refs ---
@@ -178,11 +187,8 @@ let currentExample: Example | null = null;
 async function ensureTemen(): Promise<TemenJaclRunner | null> {
   if (temenRunner && temenManifest) return temenRunner;
   try {
-    if (!temenManifest) {
-      const resp = await fetch("temen/cards/manifest.json");
-      temenManifest = resp.ok ? await resp.json() : [];
-    }
-    if (!temenRunner) temenRunner = await TemenJaclRunner.create("wasm/temen_browser.wasm");
+    // Both were started at module load (`engineBoot` / `manifestBoot`) and resolve in parallel.
+    [temenRunner, temenManifest] = await Promise.all([engineBoot, manifestBoot]);
     return temenRunner;
   } catch {
     return null; // assets not built / not shipped → caller shows an "assets missing" note
@@ -195,52 +201,94 @@ async function ensureTemen(): Promise<TemenJaclRunner | null> {
  * `defmacro`s in-guest via the §22 Jit cap — the macro-capable path) or, if that asset isn't shipped,
  * the Emscripten `jacl_emit.wasm` ({@link JaclFrontend}, no in-browser macro expansion).
  */
-async function ensureLive(): Promise<{
-  compiler: Uint8Array | null;
-  warmCompiler: Uint8Array | null;
-  frontend: JaclFrontend | null;
-  runtime: Uint8Array;
-} | null> {
+type Live = { compiler: Uint8Array | null; warmCompiler: Uint8Array | null; frontend: JaclFrontend | null; runtime: Uint8Array };
+
+/** One in-flight `ensureLive` — the startup pre-load and a Run clicked before it lands share it
+ *  instead of each fetching every asset again (they used to: `jaclrt.temen` and `jacl_emit.wasm`
+ *  showed up twice in the network timeline). */
+let livePromise: Promise<Live | null> | null = null;
+
+async function ensureLive(): Promise<Live | null> {
+  if (temenRuntime && temenCompiler && temenWarmCompiler && temenStagingRt && temenFrontend) {
+    return { compiler: temenCompiler, warmCompiler: temenWarmCompiler, frontend: temenFrontend, runtime: temenRuntime };
+  }
+  if (!livePromise) livePromise = loadLive().finally(() => { livePromise = null; });
+  return livePromise;
+}
+
+/** Best-effort fetch of one asset's bytes: `null` if it isn't shipped (404) or the fetch fails. */
+async function fetchBytes(url: string): Promise<Uint8Array | null> {
+  try {
+    const resp = await fetch(url);
+    return resp.ok ? new Uint8Array(await resp.arrayBuffer()) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadLive(): Promise<Live | null> {
   try {
     // Load BOTH frontends so the compiler dropdown can switch without a reload: the self-hosted
     // compiler-guest (`guest`/`tierup` modes) and the Emscripten `jacl_emit.wasm` (`emit` mode).
-    // Each is best-effort — a missing asset just disables the modes that need it.
-    if (!temenCompiler) {
-      const resp = await fetch("temen/cards/jacl_compiler.temen");
-      if (resp.ok) temenCompiler = new Uint8Array(await resp.arrayBuffer());
-    }
-    // The warm-snapshot two-phase card (TEMEN_WARM_COMPILER.md Slice 3): the `tierup` mode opens it
-    // once and evals each compile over the restored warm image (~2× the plain guest). Best-effort —
-    // a missing asset just leaves `tierup` falling back to the plain guest compile.
-    if (!temenWarmCompiler) {
-      const resp = await fetch("temen/cards/jacl_compiler_snapshot.temen");
-      if (resp.ok) temenWarmCompiler = new Uint8Array(await resp.arrayBuffer());
-    }
-    // The staging runtime (jaclrt + syn_rt glue) lets jacl_emit.wasm stage macros: it codegens each
-    // macro body and runs it on the cdylib against this module — so the fast AOT frontend is macro-capable.
-    if (!temenStagingRt) {
-      const resp = await fetch("temen/cards/jaclrt_staging.temeno");
-      if (resp.ok) temenStagingRt = new Uint8Array(await resp.arrayBuffer());
-    }
-    if (!temenFrontend && typeof createJaclEmit === "function") {
-      // Macro-body staging callback: run the codegen'd body on the cdylib, return the result wire.
-      const stageRt = temenStagingRt;
-      const stageRun =
-        temenRunner && stageRt
-          ? (mod: Uint8Array, arg: Uint8Array) => temenRunner!.linkRunRaw(mod, stageRt, arg)
-          : undefined;
-      try {
-        temenFrontend = await JaclFrontend.create(stageRun);
-      } catch { /* jacl_emit.wasm not shipped */ }
-    }
-    if (!temenRuntime) {
-      const resp = await fetch("temen/jaclrt.temen");
-      if (!resp.ok) return null;
-      temenRuntime = new Uint8Array(await resp.arrayBuffer());
-    }
+    // Each is best-effort — a missing asset just disables the modes that need it. Everything is
+    // fetched IN PARALLEL (five assets were awaited one after another before — five round trips in
+    // a row on a real connection); only the macro-staging callback below reads its runtime lazily.
+    //
+    // - jacl_compiler.temen: the self-hosted frontend (expands `defmacro`s in-guest via the §22 Jit cap).
+    // - jacl_compiler_snapshot.temen: the warm-snapshot two-phase card (TEMEN_WARM_COMPILER.md Slice 3)
+    //   the `tierup` mode opens once and evals each compile over (~2× the plain guest).
+    // - jaclrt_staging.temeno: the staging runtime (jaclrt + syn_rt glue) that lets jacl_emit.wasm stage
+    //   macros — it codegens each macro body and runs it on the cdylib against this module.
+    // - jaclrt.temen: the runtime every live program links against (required).
+    // - jacl_emit.wasm (`JaclFrontend.create`): the Emscripten frontend; its staging callback reads
+    //   `temenStagingRt` at CALL time, so instantiating it needn't wait for that fetch.
+    const stageRun = (mod: Uint8Array, arg: Uint8Array) =>
+      temenRunner && temenStagingRt ? temenRunner.linkRunRaw(mod, temenStagingRt, arg) : null;
+    const frontendP: Promise<JaclFrontend | null> =
+      temenFrontend
+        ? Promise.resolve(temenFrontend)
+        : typeof createJaclEmit === "function"
+          ? JaclFrontend.create(stageRun).catch(() => null) // jacl_emit.wasm not shipped
+          : Promise.resolve(null);
+    const [compiler, warmCompiler, stagingRt, runtime, frontend] = await Promise.all([
+      temenCompiler ? Promise.resolve(temenCompiler) : fetchBytes("temen/cards/jacl_compiler.temen"),
+      temenWarmCompiler ? Promise.resolve(temenWarmCompiler) : fetchBytes("temen/cards/jacl_compiler_snapshot.temen"),
+      temenStagingRt ? Promise.resolve(temenStagingRt) : fetchBytes("temen/cards/jaclrt_staging.temeno"),
+      temenRuntime ? Promise.resolve(temenRuntime) : fetchBytes("temen/jaclrt.temen"),
+      frontendP,
+    ]);
+    temenCompiler = compiler;
+    temenWarmCompiler = warmCompiler;
+    temenStagingRt = stagingRt;
+    temenFrontend = frontend;
+    if (!runtime) return null;
+    temenRuntime = runtime;
     return { compiler: temenCompiler, warmCompiler: temenWarmCompiler, frontend: temenFrontend, runtime: temenRuntime };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Pre-warm the live path in the background so the FIRST edited-source Run is as fast as every later
+ * one: the first compile + link paid ~300 ms of V8 lazily compiling the frontend's and the cdylib's
+ * link-path functions (247 ms compile + 52 ms run vs 1 + 9 ms warm). Compiles and links a trivial
+ * program through the currently selected frontend — `emit` / `guest` only: both are synchronous
+ * cdylib calls, so this can never interleave with a Run the user starts meanwhile (JS is
+ * single-threaded and nothing here awaits). `tierup` is left alone: its warm-coop pump is async and
+ * the warm session is single-occupancy. Results are discarded; nothing touches the UI or `irCache`.
+ */
+function prewarmLive(runner: TemenJaclRunner, live: Live): void {
+  try {
+    const src = "proc main {} { print 1 }\nmain\n";
+    const mode = resolveCompileMode(live);
+    const emitted =
+      mode === "emit" && live.frontend ? live.frontend.emitIr(src)
+      : live.compiler ? runner.emitIrViaCompiler(live.compiler, src)
+      : null;
+    if (emitted && !("error" in emitted)) runner.linkRun(emitted.ir, live.runtime);
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -257,7 +305,7 @@ async function initTemen(): Promise<void> {
     setStatus("Ready", "ok");
     runBtn.disabled = false;
     output.innerHTML = '<span class="placeholder">Press Run or Ctrl+Enter to execute</span>';
-    void ensureLive(); // warm the frontend + runtime so the first edited-source Run is instant
+    void ensureLive().then((live) => live && prewarmLive(runner, live));
   } else {
     setStatus("WASM load failed", "error");
     output.innerHTML =
@@ -332,8 +380,6 @@ function displayResult(result: RunResult, timing: RunTiming) {
     result.isError ? "error" : "ok",
   );
 }
-
-type Live = { compiler: Uint8Array | null; warmCompiler: Uint8Array | null; frontend: JaclFrontend | null; runtime: Uint8Array };
 
 /** Human labels for the status line / console (kept in sync with the `<select>` options). */
 const MODE_LABEL: Record<CompileMode, string> = {
