@@ -87,13 +87,14 @@ let vimEnabled = localStorage.getItem(VIM_KEY) === "1";
 // Which frontend compiles edited source to TEMEN IR. `emit` = jacl_emit.wasm (the Emscripten-built
 // native-speed frontend, now macro-capable — it stages each macro body on the cdylib, ~30x faster
 // than the guest on the tour); `guest` = the self-hosted compiler run as an TEMEN guest on the bytecode
-// interpreter (slow, kept for comparison); `tierup` = the guest today (a pre-baked wasm tier-up is not
-// wired). Persisted in localStorage.
+// interpreter (slow, kept for comparison); `tierup` = the guest on the cooperative tier-up tier over
+// the warm-snapshot card (the default). Persisted in localStorage.
 type CompileMode = "emit" | "guest" | "tierup";
 const MODE_KEY = "jacl-playground:compile-mode";
 function loadCompileMode(): CompileMode {
   const v = localStorage.getItem(MODE_KEY);
-  return v === "guest" || v === "tierup" ? v : "emit";
+  // Default: the self-hosted compiler on the tier-up tier (its first use is pre-warmed in the background).
+  return v === "guest" || v === "emit" ? v : "tierup";
 }
 let compileMode: CompileMode = loadCompileMode();
 // Memoize compiled IR by (mode, source) so re-running unchanged source skips the compile entirely.
@@ -276,11 +277,13 @@ async function loadLive(): Promise<Live | null> {
  * a single trivial pass isn't enough: wasm functions compile lazily PER FUNCTION (a `print 1` never
  * touches what a real program uses) and the first call only gets baseline code. So this compiles +
  * links a small feature-covering program several times, one pass per idle slot so the page stays
- * responsive, through the selected `emit`/`guest` frontend — and the guest once regardless, since
- * `emit` falls back to it on any macro program. Both are synchronous cdylib calls, so a pass can never
- * interleave with a Run the user starts meanwhile (JS is single-threaded; nothing here awaits).
- * `tierup` is left alone: its warm-coop pump is async over a single-occupancy warm session. Results
- * are discarded; nothing touches the UI or `irCache`.
+ * responsive, through the selected frontend — and the guest once regardless, since `emit` falls back
+ * to it on any macro program. `emit`/`guest` are synchronous cdylib calls, so a pass can never
+ * interleave with a Run the user starts meanwhile. `tierup` goes through `compileWith` like a Run: it
+ * opens the warm session and drives the coop pump (the one-time emit + the pre-compiled module's
+ * first instantiate happen HERE, before any click); the runner serializes warm-coop evals, so a Run
+ * that arrives mid-pass simply queues behind it. Results are discarded; nothing touches the UI or
+ * `irCache`.
  */
 const PREWARM_PASSES = 3;
 const PREWARM_SRC = `# pre-warm: exercise what a typical program uses
@@ -305,21 +308,23 @@ main
 function prewarmLive(runner: TemenJaclRunner, live: Live): void {
   const idle = (f: () => void) =>
     typeof requestIdleCallback === "function" ? requestIdleCallback(() => f(), { timeout: 500 }) : setTimeout(f, 0);
-  const passes: (() => void)[] = [];
+  const passes: (() => Promise<void>)[] = [];
   const mode = resolveCompileMode(live);
   const viaEmit = () => live.frontend && live.frontend.emitIr(PREWARM_SRC);
   const viaGuest = () => live.compiler && runner.emitIrViaCompiler(live.compiler, PREWARM_SRC);
-  const pass = (compile: () => EmitResult | null | false) => () => {
+  const viaTierup = () => compileWith("tierup", live, PREWARM_SRC).then((o) => o.emitted);
+  const pass = (compile: () => EmitResult | null | false | Promise<EmitResult>) => async () => {
     try {
-      const emitted = compile();
+      const emitted = await compile();
       if (emitted && !("error" in emitted)) runner.linkRun(emitted.ir, live.runtime);
     } catch {
       /* best-effort */
     }
   };
-  for (let i = 0; i < PREWARM_PASSES; i++) passes.push(pass(mode === "guest" ? viaGuest : viaEmit));
+  const via = mode === "tierup" && live.warmCompiler ? viaTierup : mode === "guest" ? viaGuest : viaEmit;
+  for (let i = 0; i < PREWARM_PASSES; i++) passes.push(pass(via));
   if (mode !== "guest") passes.push(pass(viaGuest)); // the macro fallback path, once
-  const next = () => { const f = passes.shift(); if (f) { f(); idle(next); } };
+  const next = () => { const f = passes.shift(); if (f) void f().then(() => idle(next)); };
   idle(next);
 }
 
