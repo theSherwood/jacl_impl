@@ -59,6 +59,62 @@ VM ~7× on `fib`. The raw per-run JIT figures (incl. compile) are `fib` 455,
 (13× on `fib`) with identical results, landing it around CPython. The two mature
 JITs — V8 and the JVM's HotSpot — are still ahead.
 
+## Results — 2026-09-11 re-run, all seven columns on one machine
+
+The table above was measured on an earlier machine and lacks the wasm tiers and Lua. This run has
+every column from a single container (4-core Xeon @ 2.80GHz), same protocol: load/compile once, warm,
+time the hot path N times, report the **minimum**. Treat cross-machine comparisons with the table
+above as invalid — this box is ~1.5× slower than that one (CPython `fib` 918 ms here vs 613 ms there).
+
+Times in **milliseconds, execution-only** (per-run compile/decode tax subtracted via `_baseline`,
+which is `print 0`; the raw figures and the tax are below).
+
+| Scenario | JACL cranelift | JACL wasm coop | JACL wasm bytecode | Python 3.11 | Node 22 | Lua 5.4 | Clojure 1.12/JVM |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `fib` | **427** | 28676 | 28429 | 918 | 98 | 433 | 72 |
+| `sieve` | **436** | 35429 | 36023 | 566 | 52 | 269 | 14 |
+| `map_lookup` | **389** | 28360 | 50551 | 367 | 32 | 120 | 101 |
+| `box_churn` | **225** | 19631 | 34606 | 210 | 2.7 | 285 | 12 |
+| `string_concat` | **107** | 8793 | 16151 | 9.0 | 1.4 | 17 | 13 |
+
+Per-run tax excluded from each JACL column (`_baseline` minimum): cranelift **271 ms** (Cranelift
+recompiles the module every run in this harness), wasm coop **50 ms**, wasm bytecode **10.5 ms**.
+Every column's output was checked against the documented result (`5702887` / `6057` / `493733` /
+`21000000` / `160400`).
+
+### Reading it
+
+- **Native JACL (cranelift) lands around CPython.** Faster on the call- and loop-heavy scenarios
+  (`fib` 427 vs 918, `sieve` 436 vs 566), level on `map_lookup` and `box_churn`, and ~12× behind on
+  `string_concat` (CPython's `str` append hits a realloc-in-place fast path JACL's rope concat does
+  not). Against Lua 5.4 it is a wash: level on `fib`, ahead on `box_churn`, behind on `sieve` and
+  `map_lookup`.
+- **The two mature JITs are still well ahead**: V8 4–10× faster than cranelift JACL, HotSpot 4–31×.
+  The "why" analysis below (boxed values, out-of-line comparisons/`%`/`/`) is unchanged and is where
+  the gap lives.
+- **In the browser, JACL runs at interpreter speed — 65–130× off its own native tier.** That is the
+  number to quote for the playground, not the cranelift column.
+- **The wasm-JIT tier does not accelerate JACL user code.** `runJitModule` on a linked JACL program
+  declines whole-program emit (its `_start` reaches caps/GC) and falls back to the cooperative
+  tier-up driver, which is no better than the plain bytecode interpreter on `fib`/`sieve` and only
+  ~1.8× better on the allocation/lookup scenarios. Consistent with jacl#83 lever 4a, closed as
+  measured-not-worth-it. The playground's own latency (compile ~85 ms, run ~12 ms for the tour) comes
+  from the compiler-guest tiering up, which is a different mechanism from running user code emitted.
+
+### Harnesses used
+
+| Column | Command |
+|---|---|
+| JACL cranelift | `cd runtime/harness && BENCH_NO_INTERP=1 BENCH_ITERS=15 cargo run --release --bin bench_temen -- ../../test/jacl/bench_scaled/{_baseline,fib,…}.jacl` |
+| JACL wasm coop / bytecode | `emit_temen <x>.jacl <x>.temen` per scenario, then `runJitModule` / `temen_run_onramp` in Node against the shipped browser cdylib, best-of-N with a stable cacheKey |
+| Python 3.11 | `pytimer.py` (import once, warm 3×, time `run()` 10×) |
+| Node 22 | `nodetimer.mjs` (dynamic import, warm 3×, time `run()` 10×) |
+| Lua 5.4 | `luatimer.lua` (`dofile` once, warm 3×, time `run()` 10×, `os.clock`) |
+| Clojure 1.12 | `clojure test/clojure/bench_scaled/_bench_runner.clj` (Debian's `clojure` takes no `-M`) |
+
+The Lua mirrors live in `test/lua/bench_scaled/` and, like the other mirrors, produce byte-identical
+output to the JACL originals.
+
 ## Reproducing
 
 From the repo root:
