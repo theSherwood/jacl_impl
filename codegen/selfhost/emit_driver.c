@@ -1,6 +1,6 @@
 /* JACL compiler-guest entry point.
  *
- * Reads a JACL program from **stdin** and writes the emitted TEMEN-IR text to
+ * Reads a JACL program from **stdin** and writes the emitted TEMEN-IR **binary object** to
  * **stdout** — the shape the TEMEN on-ramp powerbox expects (stdin/stdout bound by
  * name). Compiled to TEMEN IR (via the vendor/temen LLVM on-ramp) it becomes
  * `jacl_compiler.temen`: the JACL compiler running as an TEMEN guest, so the browser
@@ -12,10 +12,11 @@
  * compile error) is handed back verbatim; the host then links it against
  * `jaclrt.temen` and runs it via `temen_link_run`. */
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 extern long read(int fd, void *buf, long n);       /* on-ramp Stream.read */
-extern char *jacl_emit_ir(const char *source);     /* the browser frontend entry (emit_jacl.c) */
+extern char *jacl_emit_obj(const char *source, size_t *out_len); /* the browser frontend entry (emit_jacl.c) */
 
 /* Install the in-guest macro-staging hook (stage_bridge_guest.c) when this build links it. Macros
  * then expand on the TEMEN engine in this same domain via the Jit capability — no reference VM. The
@@ -41,8 +42,13 @@ int main(void) {
   }
   src[len] = 0;
 
-  char *ir = jacl_emit_ir(src);
-  fputs(ir ? ir : "%%ERROR%%\n(codegen returned null)\n", stdout);
+  /* Binary TEMEN object, not temen-text: the host hands these bytes straight to the engine's link
+   * path (it sniffs binary vs text by magic), skipping both the text formatting here and the parse
+   * there. An error still comes back as the `%%ERROR%%…` text the host tests for. */
+  size_t n = 0;
+  char *obj = jacl_emit_obj(src, &n);
+  if (!obj) fputs("%%ERROR%%\n(codegen returned null)\n", stdout);
+  else fwrite(obj, 1, n, stdout);
   fflush(stdout);
   return 0;
 }

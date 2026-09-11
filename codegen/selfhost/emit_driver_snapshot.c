@@ -17,12 +17,13 @@
  * snapshot-restorable (temen#816). Built like emit_driver.c; the three exports are ordinary
  * `(i64 sp)` on-ramp entries the reactor drives. */
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 extern long read(int fd, void *buf, long n);            /* on-ramp Stream.read */
-extern char *jacl_emit_ir(const char *source);          /* cold compile (emit_jacl.c) */
+extern char *jacl_emit_obj(const char *source, size_t *out_len);         /* cold compile (emit_jacl.c) */
 extern void jacl_emit_warmup(void);                     /* trigger the prelude/statics init */
-extern char *jacl_emit_compile(const char *source);     /* compile over the warm statics */
+extern char *jacl_emit_compile_obj(const char *source, size_t *out_len); /* over the warm statics */
 
 /* Install the in-guest macro-staging hook when this build links it (weak; safe if absent). */
 extern void jacl_install_temen_stage_hook(void) __attribute__((weak));
@@ -47,9 +48,14 @@ static char *read_stdin(void) {
   return src;
 }
 
-static void emit_and_print(char *(*compile)(const char *), const char *src) {
-  char *ir = compile(src);
-  fputs(ir ? ir : "%%ERROR%%\n(codegen returned null)\n", stdout);
+/* Write the compiled **binary** TEMEN object (or the `%%ERROR%%…` text a failed compile returns —
+ * the host sniffs the two apart by the marker / the container magic). Binary because formatting the
+ * IR as text costs ~47% of a bytecode-interp compile and the host would only parse it back. */
+static void emit_and_print(char *(*compile)(const char *, size_t *), const char *src) {
+  size_t n = 0;
+  char *obj = compile(src, &n);
+  if (!obj) fputs("%%ERROR%%\n(codegen returned null)\n", stdout);
+  else fwrite(obj, 1, n, stdout);
   fflush(stdout);
 }
 
@@ -58,7 +64,7 @@ int main(void) {
   if (jacl_install_temen_stage_hook) jacl_install_temen_stage_hook();
   char *src = read_stdin();
   if (!src) return 1;
-  emit_and_print(jacl_emit_ir, src);
+  emit_and_print(jacl_emit_obj, src);
   free(src);
   return 0;
 }
@@ -76,7 +82,7 @@ int warmup(void) {
 int eval_run(void) {
   char *src = read_stdin();
   if (!src) return 1;
-  emit_and_print(jacl_emit_compile, src);
+  emit_and_print(jacl_emit_compile_obj, src);
   free(src);
   return 0;
 }

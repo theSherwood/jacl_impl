@@ -98,7 +98,7 @@ function loadCompileMode(): CompileMode {
 }
 let compileMode: CompileMode = loadCompileMode();
 // Memoize compiled IR by (mode, source) so re-running unchanged source skips the compile entirely.
-const irCache = new Map<string, { ir: string; ran: CompileMode }>();
+const irCache = new Map<string, { ir: string | Uint8Array; ran: CompileMode }>();
 
 // --- Editor construction ---
 function buildEditor(initial: string): EditorView {
@@ -500,7 +500,7 @@ async function runOnTemen(source: string) {
     const tCompile = performance.now();
     const cachedEntry = irCache.get(cacheKey);
     const cached = cachedEntry !== undefined;
-    let ir: string;
+    let ir: string | Uint8Array;
     let ran: CompileMode = mode;
     if (cachedEntry !== undefined) {
       ({ ir, ran } = cachedEntry);
