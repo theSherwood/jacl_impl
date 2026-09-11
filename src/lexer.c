@@ -486,14 +486,19 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
                    lex->source[lex->pos + 1] == 'X')) {
     lexer__advance(lex); /* '0' */
     lexer__advance(lex); /* 'x' */
-    int64_t val = 0;
-    int has_digits = 0;
+    /* Unsigned accumulation with an explicit overflow flag: a signed accumulator wraps
+     * (UB) past 2^63, and the wrapped value then slips through the range check below and
+     * is truncated into the token — a literal silently becoming a different number. */
+    uint64_t val = 0;
+    int ovf = 0, has_digits = 0;
     for (;;) {
       char h = lexer__peek(lex);
-      if (h >= '0' && h <= '9')      { val = val * 16 + (h - '0'); }
-      else if (h >= 'a' && h <= 'f') { val = val * 16 + (h - 'a' + 10); }
-      else if (h >= 'A' && h <= 'F') { val = val * 16 + (h - 'A' + 10); }
+      uint32_t d;
+      if (h >= '0' && h <= '9')      { d = (uint32_t)(h - '0'); }
+      else if (h >= 'a' && h <= 'f') { d = (uint32_t)(h - 'a' + 10); }
+      else if (h >= 'A' && h <= 'F') { d = (uint32_t)(h - 'A' + 10); }
       else break;
+      if (val > (UINT64_MAX - d) / 16) ovf = 1; else val = val * 16 + d;
       has_digits = 1;
       lexer__advance(lex);
     }
@@ -508,7 +513,7 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (val > INT32_MAX) {
+    if (ovf || val > (uint64_t)INT32_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
       tok.payload.error_msg =
         "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
@@ -529,10 +534,11 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
                    lex->source[lex->pos + 1] == 'B')) {
     lexer__advance(lex); /* '0' */
     lexer__advance(lex); /* 'b' */
-    int64_t val = 0;
-    int has_digits = 0;
+    uint64_t val = 0;                      /* see the hex path: unsigned + overflow flag */
+    int ovf = 0, has_digits = 0;
     while (lexer__peek(lex) == '0' || lexer__peek(lex) == '1') {
-      val = val * 2 + (lexer__peek(lex) - '0');
+      uint32_t d = (uint32_t)(lexer__peek(lex) - '0');
+      if (val > (UINT64_MAX - d) / 2) ovf = 1; else val = val * 2 + d;
       has_digits = 1;
       lexer__advance(lex);
     }
@@ -548,7 +554,7 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (val > INT32_MAX) {
+    if (ovf || val > (uint64_t)INT32_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
       tok.payload.error_msg =
         "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
@@ -566,9 +572,15 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
 
   /* Decimal integer or float */
   {
-    int64_t int_val = 0;
+    /* See the hex path. The integral part is also accumulated as a double, so a float
+     * literal with a huge integral part still lexes — only the *integer* form is bounded. */
+    uint64_t int_val = 0;
+    double   dval = 0.0;
+    int      ovf = 0;
     while (lexer__peek(lex) >= '0' && lexer__peek(lex) <= '9') {
-      int_val = int_val * 10 + (lexer__peek(lex) - '0');
+      uint32_t d = (uint32_t)(lexer__peek(lex) - '0');
+      if (int_val > (UINT64_MAX - d) / 10) ovf = 1; else int_val = int_val * 10 + d;
+      dval = dval * 10.0 + (double)d;
       lexer__advance(lex);
     }
 
@@ -594,7 +606,7 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       }
       {
         Token tok = lexer__make_token(lex, TOKEN_FLOAT, start, sline, scol);
-        tok.payload.float_val = (float)int_val + (float)frac / (float)frac_div;
+        tok.payload.float_val = (float)(dval + (double)frac / (double)frac_div);
         lexer__arr_push(arr, tok);
       }
       return;
@@ -610,7 +622,7 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (int_val > INT32_MAX) {
+    if (ovf || int_val > (uint64_t)INT32_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
       tok.payload.error_msg =
         "integer literal out of i32 range (use [i64 ...] or [u64 ...])";

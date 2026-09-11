@@ -1,0 +1,41 @@
+# expect: 100000000
+# expect: 10000000000
+# expect: 2208999936
+# expect: 1.5
+# expect: -2.25
+# expect: 0.000001
+# expect: inf
+# expect: 1e+20
+# expect: inf
+# expect: 4000000000
+# expect: true
+# expect: 8000000000
+# expect: -2446744073709551616
+#
+# Two fixes, both of which used to be silently wrong.
+#
+# jacl #108 — a float above INT32_MAX rendered as `inf`, though the value was correct. The
+# formatter now has three magnitude bands and reserves `inf` for an actual infinity.
+#
+# jacl #104 — the wide branches of `jacl_add`/`sub`/`mul` did unguarded signed 64-bit
+# arithmetic: UB in C, a silent wrap in practice. Overflow is now detected and returns an
+# error, since there is nothing wider to promote into yet (jacl #106 makes it a bigint).
+# `+% -% *%` are unaffected — they are defined to wrap.
+
+print [* 10000.0 10000.0]       # 1e8  — inside the fixed-point band
+print [* 100000.0 100000.0]     # 1e10 — used to print `inf`
+print [* 47000.0 47000.0]       # 2.209e9 at f32 precision, also used to print `inf`
+print 1.5
+print [- 0.0 2.25]
+print 0.000001                  # the smallest value the 6-digit format keeps
+print [/ 1.0 0.0]               # a real infinity still prints `inf`
+def big [* 100000.0 100000.0]
+print [* $big $big]             # 1e20: past both fixed-point bands, so exponent form
+print [* [* $big $big] [* $big $big]]   # 1e40 really is infinity for an f32
+
+def s 2000000000
+def a [+ $s $s]                 # 4000000000, promoted to a wide int
+print $a
+print [error? [* $a $a]]        # 1.6e19 does not fit in i64 -> error, not a wrap
+print [+% $a $a]                # in range, so wrapping has nothing to do
+print [*% $a $a]                # asked for a wrap, got the wrap
