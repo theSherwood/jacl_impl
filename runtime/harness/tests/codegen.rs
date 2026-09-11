@@ -430,6 +430,19 @@ fn dynamic_arithmetic_guards_two_i32s_inline() {
 }
 
 #[test]
+fn guard_tests_the_flag_bits_too() {
+    // The guard's mask is the whole top byte (0xFF << 56) — the 5 type-index bits AND the
+    // tainted/secret/error flags — so a flagged operand fails it and the runtime keeps owning
+    // flag propagation. Narrowing this to the type bits (0x1F << 56) would silently drop
+    // taint/secret on the fast path, so pin the constant.
+    let ir = emit_text("guard_dyn");
+    assert!(
+        ir.contains("i64.const -72057594037927936"),
+        "the guard must mask the full tag byte (0xFF << 56), flag bits included:\n{ir}"
+    );
+}
+
+#[test]
 fn guard_falls_through_to_the_runtime() {
     // Every case the guard does not prove must still get the runtime's answer: an i32 add that
     // overflows promotes to a wide int, a zero divisor is a domain error, a float operand
