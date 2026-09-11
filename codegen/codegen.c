@@ -263,7 +263,51 @@ static int pin_push(Cx *cx, IrVal v) {
   return slot;
 }
 static IrVal pin_get(Cx *cx, int slot) { return cx->locals[slot].value; }
-static void  pin_drop(Cx *cx, int slot) { cx->nlocals = slot; }
+static int  pin_mark(Cx *cx) { return cx->nlocals; }
+/* Release the `n` pins sitting above `mark` — but only when nothing else was appended on
+ * top of them. An operand expression can bind a real local (`def a [+ 1 [def x 2]]`), and
+ * truncating past it would unbind the name; in that case the pins simply ride along until
+ * the enclosing scope exits. */
+static void pin_release(Cx *cx, int mark, int n) {
+  if (cx->nlocals == mark + n) cx->nlocals = mark;
+}
+static void pin_drop(Cx *cx, int slot) { pin_release(cx, slot, 1); }
+
+/* Compile one element of an accumulator fold — `[vec …]`, `[map …]`, a rest vector, the
+ * shell argv — pinning the accumulator across the element's compilation and writing it back
+ * at its new SSA id. Same reason as `compile_operands`: the element may move blocks. */
+static IrVal compile_elem_pinned(Cx *cx, AstNode *elem, IrVal *acc);
+
+/* Compile `n` sibling operands into `out[0..n)`, pinning each across the next one's
+ * compilation. Any operand may move the emission point to a new block (an `[if …]`, a
+ * guarded binop), which would otherwise strand every value computed before it — block-local
+ * SSA cannot name it there. The values written to `out` are valid in the block that is
+ * current on return. 0 on failure.
+ *
+ * Every site that computes two or more values before using them needs this discipline, and
+ * that includes values that did not come from `compile_expr`: a literal's `i64.const`, or a
+ * string literal's `jacl_str_new`, is just as block-local. Pin those with `pin_push`. */
+static IrVal compile_expr(Cx *cx, AstNode *node);   /* fwd */
+static int compile_operands(Cx *cx, AstNode **args, uint32_t n, IrVal *out) {
+  int mark = pin_mark(cx);
+  int mv = cx->move_ok_here;   /* pinned siblings ⇒ the operands may move blocks too */
+  for (uint32_t i = 0; i < n; i++) {
+    cx->move_ok = mv;
+    (void)pin_push(cx, compile_expr(cx, args[i]));
+    if (cx->failed) { pin_release(cx, mark, (int)i + 1); return 0; }
+  }
+  for (uint32_t i = 0; i < n; i++) out[i] = pin_get(cx, mark + (int)i);
+  pin_release(cx, mark, (int)n);
+  return 1;
+}
+static IrVal compile_elem_pinned(Cx *cx, AstNode *elem, IrVal *acc) {
+  int pin = pin_push(cx, *acc);
+  cx->move_ok = cx->move_ok_here;   /* the accumulator is pinned: the element may move */
+  IrVal e = compile_expr(cx, elem);
+  *acc = pin_get(cx, pin);
+  pin_drop(cx, pin);
+  return e;
+}
 
 /* ---- top-level procs ---- */
 
@@ -878,12 +922,18 @@ static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint3
     IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
     IrVal cargs[2 + CG_MAX_PARAMS];
     IrType sig[2 + CG_MAX_PARAMS];
-    cargs[0] = cx->sp; cargs[1] = cv; sig[0] = sig[1] = IRB_I64;
-    for (uint32_t i = 0; i < argc && i < CG_MAX_PARAMS; i++) {
-      cargs[2 + i] = compile_expr(cx, args[i]);
-      sig[2 + i] = IRB_I64;
-      if (cx->failed) return 0;
-    }
+    sig[0] = sig[1] = IRB_I64;
+    /* `cv` (a param of this block) and `fnw` have to survive the arguments' compilation:
+     * an argument may move the emission point, and neither rides the frame on its own. */
+    int pm = pin_mark(cx);
+    int p_cv = pin_push(cx, cv), p_fn = pin_push(cx, fnw);
+    uint32_t nca = argc < CG_MAX_PARAMS ? argc : CG_MAX_PARAMS;
+    IrVal av[CG_MAX_PARAMS];
+    if (nca && !compile_operands(cx, args, nca, av)) return 0;
+    for (uint32_t i = 0; i < nca; i++) { cargs[2 + i] = av[i]; sig[2 + i] = IRB_I64; }
+    cargs[0] = cx->sp; cargs[1] = pin_get(cx, p_cv);
+    fnw = pin_get(cx, p_fn);
+    pin_release(cx, pm, 2);
     IrType r1[] = {IRB_I64};
     IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
     fill_frame(cx, frame);
@@ -1349,9 +1399,11 @@ static IrVal compile_for_generator(Cx *cx, AstNode *gen_call, const char *name, 
 static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
                                AstNode *start_node, AstNode *end_node, AstNode *body) {
   scope_enter(cx); /* loop scope: holds the induction var + end bound */
-  IrVal startv = compile_expr(cx, start_node);
-  IrVal endv = compile_expr(cx, end_node);
-  if (cx->failed) { scope_exit(cx); return 0; }
+  AstNode *bounds[2] = {start_node, end_node};
+  cx->move_ok_here = 1;   /* both bounds go straight into the loop's env */
+  IrVal bv2[2];
+  if (!compile_operands(cx, bounds, 2, bv2)) { scope_exit(cx); return 0; }
+  IrVal startv = bv2[0], endv = bv2[1];
   env_define(cx, name, nlen, startv, /*is_mut=*/1, /*is_cell=*/0);
   env_define(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN, endv, /*is_mut=*/0, /*is_cell=*/0);
   if (cx->failed) { scope_exit(cx); return 0; }
@@ -1984,7 +2036,10 @@ static int emit_nd_literal_fill(Cx *cx, IrVal buf_view, AstNode *lit, int ndims_
     if (ndims_remaining <= 1) {               /* scalar leaf: write the element in place */
       if (btt && !check_elem_literal(cx, a, btt->data.lit_string.value, btt->data.lit_string.length))
         return 0;
+      int pin = pin_push(cx, buf_view);
       IrVal e = compile_expr(cx, a);
+      buf_view = pin_get(cx, pin);
+      pin_drop(cx, pin);
       if (cx->failed) return 0;
       IrVal sa[] = {cx->sp, buf_view, idx, e};
       (void)emit_rt_call(cx, "jacl_fbuf_set", sa, 4);
@@ -2176,7 +2231,10 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   if (cx->failed) { scope_exit(cx); return 0; }
   IrVal cb = 0;
   if (cb_node) {
+    int pin = pin_push(cx, coll);
     cb = compile_expr(cx, cb_node);
+    coll = pin_get(cx, pin);
+    pin_drop(cx, pin);
     if (cx->failed) { scope_exit(cx); return 0; }
   }
   IrVal la[] = {cx->sp, coll};
@@ -2637,10 +2695,12 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         cx_fail(cx, "with-ctx overrides must be `field VALUE` pairs");
         scope_exit(cx); return 0;
       }
-      IrVal fname = compile_string_literal(cx, cmd->data.command.head->data.lit_string.value,
-                                           cmd->data.command.head->data.lit_string.length);
+      int wpm = pin_push(cx, compile_string_literal(cx, cmd->data.command.head->data.lit_string.value,
+                                                    cmd->data.command.head->data.lit_string.length));
       IrVal v = compile_expr(cx, cmd->data.command.args[0]);
       if (cx->failed) { scope_exit(cx); return 0; }
+      IrVal fname = pin_get(cx, wpm);
+      pin_drop(cx, wpm);
       IrVal sa[] = {cx->sp, fname, v};
       (void)emit_rt_call(cx, "jacl_ctx_set_field", sa, 3);
     }
@@ -2820,10 +2880,9 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
   if (hid == HEAD_DOT && node->data.command.arg_count == 2 &&
       node->data.command.args[1]->type != AST_LIT_STRING &&
       node->data.command.args[1]->type != AST_LIT_INT) {
-    IrVal sv = compile_expr(cx, node->data.command.args[0]);
-    if (cx->failed) return 0;
-    IrVal kv = compile_expr(cx, node->data.command.args[1]);
-    if (cx->failed) return 0;
+    IrVal sk[2];
+    if (!compile_operands(cx, node->data.command.args, 2, sk)) return 0;
+    IrVal sv = sk[0], kv = sk[1];
     /* A dynamic index into a nested-buffer dimension (the typer stamped the dimension's
      * static size on this arrow node) is bounds-checked at runtime. */
     if (node->inferred_buf_len > 0) {
@@ -2849,35 +2908,40 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
    * key routes through the runtime dispatch. */
   if (hid == HEAD_DOT && node->data.command.arg_count == 3) {
     AstNode *keyn = node->data.command.args[1];
-    IrVal sv = compile_expr(cx, node->data.command.args[0]);
+    int dpm = pin_mark(cx);
+    (void)pin_push(cx, compile_expr(cx, node->data.command.args[0]));
     if (cx->failed) return 0;
     if (keyn->type == AST_LIT_INT) {
-      IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)keyn->data.lit_int.value));
+      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)keyn->data.lit_int.value)));
       IrVal val = compile_expr(cx, node->data.command.args[2]);
       if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, sv, idx, val};
+      IrVal a[] = {cx->sp, pin_get(cx, dpm), pin_get(cx, dpm + 1), val};
+      pin_release(cx, dpm, 2);
       return emit_rt_call(cx, "jacl_arr_set_at", a, 4);
     }
     if (keyn->type == AST_LIT_STRING) {
-      IrVal fname = compile_string_literal(cx, keyn->data.lit_string.value,
-                                           keyn->data.lit_string.length);
+      (void)pin_push(cx, compile_string_literal(cx, keyn->data.lit_string.value,
+                                                keyn->data.lit_string.length));
       IrVal val = compile_expr(cx, node->data.command.args[2]);
       if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, sv, fname, val};
+      IrVal a[] = {cx->sp, pin_get(cx, dpm), pin_get(cx, dpm + 1), val};
+      pin_release(cx, dpm, 2);
       return emit_rt_call(cx, "jacl_struct_put", a, 4);
     }
-    IrVal kv = compile_expr(cx, keyn);
+    (void)pin_push(cx, compile_expr(cx, keyn));
     if (cx->failed) return 0;
     IrVal val = compile_expr(cx, node->data.command.args[2]);
     if (cx->failed) return 0;
-    IrVal a[] = {cx->sp, sv, kv, val};
+    IrVal a[] = {cx->sp, pin_get(cx, dpm), pin_get(cx, dpm + 1), val};
+    pin_release(cx, dpm, 2);
     return emit_rt_call(cx, "jacl_dot_dyn_set", a, 4);
   }
 
   /* Optional chaining `[?. EXPR key]` — nil short-circuits to nil, a map reads the
    * entry (missing -> nil). A bareword key compiles as a string (like `->`). */
   if (hid == HEAD_QDOT && node->data.command.arg_count == 2) {
-    IrVal sv = compile_expr(cx, node->data.command.args[0]);
+    int qpm = pin_mark(cx);
+    (void)pin_push(cx, compile_expr(cx, node->data.command.args[0]));
     if (cx->failed) return 0;
     AstNode *keyn = node->data.command.args[1];
     IrVal kv = (keyn->type == AST_LIT_STRING)
@@ -2885,6 +2949,8 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
                                             keyn->data.lit_string.length)
                    : compile_expr(cx, keyn);
     if (cx->failed) return 0;
+    IrVal sv = pin_get(cx, qpm);
+    pin_release(cx, qpm, 1);
     IrVal a[] = {cx->sp, sv, kv};
     return emit_rt_call(cx, "jacl_qdot", a, 3);
   }
@@ -3156,12 +3222,15 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         node->data.command.args[0]->data.command.arg_count == 2 &&
         node->data.command.args[0]->data.command.args[1]->type == AST_LIT_INT) {
       AstNode *dot = node->data.command.args[0];
-      IrVal bv = compile_expr(cx, dot->data.command.args[0]);
+      int spm = pin_mark(cx);
+      (void)pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
       if (cx->failed) return 0;
-      IrVal idx = irb_const_i64(cx->f, cx->cur,
-                                jaclval_i32((int32_t)dot->data.command.args[1]->data.lit_int.value));
+      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur,
+                                jaclval_i32((int32_t)dot->data.command.args[1]->data.lit_int.value)));
       IrVal val = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
+      IrVal bv = pin_get(cx, spm), idx = pin_get(cx, spm + 1);
+      pin_release(cx, spm, 2);
       IrVal a[] = {cx->sp, bv, idx, val};
       return emit_rt_call(cx, "jacl_arr_set_at", a, 4);
     }
@@ -3172,13 +3241,11 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         node->data.command.args[0]->data.command.args[1]->type != AST_LIT_STRING &&
         node->data.command.args[0]->data.command.args[1]->type != AST_LIT_INT) {
       AstNode *dot = node->data.command.args[0];
-      IrVal sv = compile_expr(cx, dot->data.command.args[0]);
-      if (cx->failed) return 0;
-      IrVal kv = compile_expr(cx, dot->data.command.args[1]);
-      if (cx->failed) return 0;
-      IrVal val = compile_expr(cx, node->data.command.args[1]);
-      if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, sv, kv, val};
+      AstNode *ops[3] = {dot->data.command.args[0], dot->data.command.args[1],
+                         node->data.command.args[1]};
+      IrVal ov[3];
+      if (!compile_operands(cx, ops, 3, ov)) return 0;
+      IrVal a[] = {cx->sp, ov[0], ov[1], ov[2]};
       return emit_rt_call(cx, "jacl_dot_dyn_set", a, 4);
     }
     /* `set $ctx->field V` — the ambient context is a map (not a struct), so route
@@ -3194,10 +3261,12 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         memcmp(node->data.command.args[0]->data.command.args[0]->data.var_ref.name, "ctx", 3) == 0 &&
         !env_lookup(cx, "ctx", 3)) {
       AstNode *dot = node->data.command.args[0];
-      IrVal fname = compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
-                                           dot->data.command.args[1]->data.lit_string.length);
+      int cpm = pin_push(cx, compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
+                                                    dot->data.command.args[1]->data.lit_string.length));
       IrVal val = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
+      IrVal fname = pin_get(cx, cpm);
+      pin_drop(cx, cpm);
       IrVal a[] = {cx->sp, fname, val};
       return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
     }
@@ -3207,12 +3276,15 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         node->data.command.args[0]->data.command.arg_count == 2 &&
         node->data.command.args[0]->data.command.args[1]->type == AST_LIT_STRING) {
       AstNode *dot = node->data.command.args[0];
-      IrVal sv = compile_expr(cx, dot->data.command.args[0]);
+      int fpm = pin_mark(cx);
+      (void)pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
       if (cx->failed) return 0;
-      IrVal fname = compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
-                                           dot->data.command.args[1]->data.lit_string.length);
+      (void)pin_push(cx, compile_string_literal(cx, dot->data.command.args[1]->data.lit_string.value,
+                                                dot->data.command.args[1]->data.lit_string.length));
       IrVal val = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
+      IrVal sv = pin_get(cx, fpm), fname = pin_get(cx, fpm + 1);
+      pin_release(cx, fpm, 2);
       IrVal a[] = {cx->sp, sv, fname, val};
       return emit_rt_call(cx, "jacl_struct_put", a, 4);
     }
@@ -3242,7 +3314,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     IrVal empty[] = {cx->sp};
     IrVal acc = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-      IrVal e = compile_expr(cx, node->data.command.args[i]);
+      IrVal e = compile_elem_pinned(cx, node->data.command.args[i], &acc);
       if (cx->failed) return 0;
       IrVal a[] = {cx->sp, acc, e};
       acc = emit_rt_call(cx, "jacl_vec_push", a, 3);
@@ -3262,11 +3334,12 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     IrVal empty[] = {cx->sp};
     IrVal acc = emit_rt_call(cx, "jacl_map_empty", empty, 1);
     for (uint32_t i = 0; i + 1 < node->data.command.arg_count; i += 2) {
-      IrVal k = compile_expr(cx, node->data.command.args[i]);
-      if (cx->failed) return 0;
-      IrVal v = compile_expr(cx, node->data.command.args[i + 1]);
-      if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, acc, k, v};
+      int pin = pin_push(cx, acc);
+      IrVal kv[2];
+      if (!compile_operands(cx, node->data.command.args + i, 2, kv)) return 0;
+      acc = pin_get(cx, pin);
+      pin_drop(cx, pin);
+      IrVal a[] = {cx->sp, acc, kv[0], kv[1]};
       acc = emit_rt_call(cx, "jacl_map_set", a, 4);
     }
     return acc;
@@ -3282,7 +3355,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
   if (hid == HEAD_CONCAT && node->data.command.arg_count >= 2) {
     IrVal acc = compile_expr(cx, node->data.command.args[0]);
     for (uint32_t i = 1; i < node->data.command.arg_count; i++) {
-      IrVal s = compile_expr(cx, node->data.command.args[i]);
+      IrVal s = compile_elem_pinned(cx, node->data.command.args[i], &acc);
       if (cx->failed) return 0;
       acc = emit_binop_call(cx, "jacl_str_concat", acc, s);
     }
@@ -3392,11 +3465,13 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
           return 0;
         }
         IrVal cargs[1 + CG_MAX_PARAMS];
-        cargs[0] = cx->sp;
-        for (int i = 0; i < p->fixed_arity; i++) {
-          cargs[1 + i] = compile_expr(cx, node->data.command.args[i]);
-          if (cx->failed) return 0;
-        }
+        if (p->fixed_arity &&
+            !compile_operands(cx, node->data.command.args, (uint32_t)p->fixed_arity, cargs + 1))
+          return 0;
+        /* The fixed arguments must survive the rest vector's construction, which compiles
+         * more operands. */
+        int pmv = pin_mark(cx);
+        for (int i = 0; i < p->fixed_arity; i++) (void)pin_push(cx, cargs[1 + i]);
         IrVal ve[] = {cx->sp};
         IrVal rest = emit_rt_call(cx, "jacl_vec_empty", ve, 1);
         for (uint32_t i = (uint32_t)p->fixed_arity; i < argc; i++) {
@@ -3404,17 +3479,20 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
           if (an->type == AST_SPREAD) {
             /* `..$xs` at the call site — splice the collection's elements into the rest
              * vector rather than pushing the collection itself. */
-            IrVal sv = compile_expr(cx, an->data.spread.expr);
+            IrVal sv = compile_elem_pinned(cx, an->data.spread.expr, &rest);
             if (cx->failed) return 0;
             IrVal ca[] = {cx->sp, rest, sv};
             rest = emit_rt_call(cx, "jacl_vec_concat", ca, 3);
           } else {
-            IrVal e = compile_expr(cx, an);
+            IrVal e = compile_elem_pinned(cx, an, &rest);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, rest, e};
             rest = emit_rt_call(cx, "jacl_vec_push", pa, 3);
           }
         }
+        for (int i = 0; i < p->fixed_arity; i++) cargs[1 + i] = pin_get(cx, pmv + i);
+        pin_release(cx, pmv, p->fixed_arity);
+        cargs[0] = cx->sp;
         cargs[1 + p->fixed_arity] = rest;
         emit_trace_line(cx, node->start.line);
         return irb_call(cx->f, cx->cur, p->func, cargs, p->fixed_arity + 2);
@@ -3463,7 +3541,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
           IrVal empty[] = {cx->sp};
           IrVal vec = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
           for (uint32_t gi = 0; gi < argc; gi++) {
-            IrVal e = compile_expr(cx, node->data.command.args[gi]);
+            IrVal e = compile_elem_pinned(cx, node->data.command.args[gi], &vec);
             if (cx->failed) return 0;
             IrVal pa[] = {cx->sp, vec, e};
             vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -3474,11 +3552,8 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
         return emit_rt_call(cx, "jacl_gen_new", a, 3);
       }
       IrVal args[1 + CG_MAX_PARAMS];
+      if (argc && !compile_operands(cx, node->data.command.args, argc, args + 1)) return 0;
       args[0] = cx->sp; /* data-SP ABI: thread sp as the leading argument */
-      for (uint32_t i = 0; i < argc; i++) {
-        args[i + 1] = compile_expr(cx, node->data.command.args[i]);
-        if (cx->failed) return 0;
-      }
       emit_trace_line(cx, node->start.line);  /* record the call site on the caller frame */
       return irb_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
     }
@@ -3530,7 +3605,10 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     if (cx->failed) return 0;
     IrVal clo = 0;
     if (hid != HEAD_COLLECT) {
+      int pin = pin_push(cx, src);
       clo = compile_expr(cx, node->data.command.args[1]);
+      src = pin_get(cx, pin);
+      pin_drop(cx, pin);
       if (cx->failed) return 0;
     }
     IrVal result;
@@ -3567,7 +3645,10 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       src = compile_expr(cx, node->data.command.args[0]);
     }
     if (cx->failed) return 0;
+    int tkpm = pin_push(cx, src);
     IrVal n = compile_expr(cx, node->data.command.args[1]);
+    src = pin_get(cx, tkpm);
+    pin_drop(cx, tkpm);
     if (cx->failed) return 0;
     IrVal zero = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
     IrVal a[] = {cx->sp, src, zero, n};
@@ -3607,13 +3688,15 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       node->data.command.args[0]->data.command.head_id == HEAD_DOT &&
       node->data.command.args[0]->data.command.arg_count == 2) {
     AstNode *dot = node->data.command.args[0];
-    IrVal base = compile_expr(cx, dot->data.command.args[0]);
+    int apm = pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
     if (cx->failed) return 0;
     AstNode *ixn = dot->data.command.args[1];
     IrVal idx = (ixn->type == AST_LIT_INT)
                     ? irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)ixn->data.lit_int.value))
                     : compile_expr(cx, ixn);
     if (cx->failed) return 0;
+    IrVal base = pin_get(cx, apm);
+    pin_drop(cx, apm);
     IrVal a[] = {cx->sp, base, idx};
     return emit_rt_call(cx, "jacl_addr_of", a, 3);
   }
@@ -3659,11 +3742,12 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       IrVal ea[] = {cx->sp};
       IrVal acc = emit_rt_call(cx, "jacl_map_empty", ea, 1);
       for (uint32_t i = 0; i + 1 < node->data.command.arg_count; i += 2) {
-        IrVal k = compile_expr(cx, node->data.command.args[i]);
-        if (cx->failed) return 0;
-        IrVal v = compile_expr(cx, node->data.command.args[i + 1]);
-        if (cx->failed) return 0;
-        IrVal pa[] = {cx->sp, acc, k, v};
+        int pin = pin_push(cx, acc);
+        IrVal kv[2];
+        if (!compile_operands(cx, node->data.command.args + i, 2, kv)) return 0;
+        acc = pin_get(cx, pin);
+        pin_drop(cx, pin);
+        IrVal pa[] = {cx->sp, acc, kv[0], kv[1]};
         acc = emit_rt_call(cx, "jacl_map_set", pa, 4);
       }
       return acc;
@@ -3677,7 +3761,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
         if (vtt && !check_elem_literal(cx, node->data.command.args[i],
                                        vtt->data.lit_string.value, vtt->data.lit_string.length))
           return 0;
-        IrVal e = compile_expr(cx, node->data.command.args[i]);
+        IrVal e = compile_elem_pinned(cx, node->data.command.args[i], &acc);
         if (cx->failed) return 0;
         IrVal pa[] = {cx->sp, acc, e};
         acc = emit_rt_call(cx, "jacl_vec_push", pa, 3);
@@ -3707,7 +3791,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
           if (btt && !check_elem_literal(cx, node->data.command.args[k],
                                          btt->data.lit_string.value, btt->data.lit_string.length))
             return 0;
-          IrVal e = compile_expr(cx, node->data.command.args[k]);
+          IrVal e = compile_elem_pinned(cx, node->data.command.args[k], &av);
           if (cx->failed) return 0;
           IrVal idx = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)k));
           IrVal sa[] = {cx->sp, av, idx, e};
@@ -3723,7 +3807,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
                                 btt->data.lit_string.value, btt->data.lit_string.length))
           return 0;
         IrVal e = ((uint32_t)k < given)
-                      ? compile_expr(cx, node->data.command.args[k])
+                      ? compile_elem_pinned(cx, node->data.command.args[k], &av)
                       : emit_type_default(cx, bnode, 0);
         if (cx->failed) return 0;
         IrVal pa[] = {cx->sp, av, e};
@@ -3739,7 +3823,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
         if (att && !check_elem_literal(cx, node->data.command.args[i],
                                        att->data.lit_string.value, att->data.lit_string.length))
           return 0;
-        IrVal e = compile_expr(cx, node->data.command.args[i]);
+        IrVal e = compile_elem_pinned(cx, node->data.command.args[i], &av);
         if (cx->failed) return 0;
         IrVal pa[] = {cx->sp, av, e};
         (void)emit_rt_call(cx, "jacl_arr_push", pa, 3);
@@ -3781,10 +3865,15 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
         if (node->data.command.args[i]->type != AST_LIT_STRING) {
           cx_fail(cx, "struct constructor expects `field value` pairs"); return 0;
         }
-        IrVal fname = compile_string_literal(cx, node->data.command.args[i]->data.lit_string.value,
-                                             node->data.command.args[i]->data.lit_string.length);
+        int spm = pin_mark(cx);
+        (void)pin_push(cx, sv);
+        (void)pin_push(cx, compile_string_literal(cx, node->data.command.args[i]->data.lit_string.value,
+                                                  node->data.command.args[i]->data.lit_string.length));
         IrVal val = compile_expr(cx, node->data.command.args[i + 1]);
         if (cx->failed) return 0;
+        sv = pin_get(cx, spm);
+        IrVal fname = pin_get(cx, spm + 1);
+        pin_release(cx, spm, 2);
         IrVal pa[] = {cx->sp, sv, fname, val};
         (void)emit_rt_call(cx, "jacl_struct_put", pa, 4);
       }
@@ -3795,20 +3884,21 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
   /* `[to TYPE V]` — cast (the TYPE word compiles as a string). */
   if (hid == HEAD_TO && node->data.command.arg_count == 2 &&
       node->data.command.args[0]->type == AST_LIT_STRING) {
-    IrVal tn = compile_string_literal(cx, node->data.command.args[0]->data.lit_string.value,
-                                      node->data.command.args[0]->data.lit_string.length);
+    int tpm = pin_push(cx, compile_string_literal(cx, node->data.command.args[0]->data.lit_string.value,
+                                                  node->data.command.args[0]->data.lit_string.length));
     IrVal v = compile_expr(cx, node->data.command.args[1]);
     if (cx->failed) return 0;
+    IrVal tn = pin_get(cx, tpm);
+    pin_drop(cx, tpm);
     IrVal a[] = {cx->sp, v, tn};
     return emit_rt_call(cx, "jacl_to_cast", a, 3);
   }
   /* `[swap $ref $f]` — apply the closure to the deref'd value, store it back,
    * and yield the new value (box or atom). */
   if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
-    IrVal ref = compile_expr(cx, node->data.command.args[0]);
-    if (cx->failed) return 0;
-    IrVal clo = compile_expr(cx, node->data.command.args[1]);
-    if (cx->failed) return 0;
+    IrVal rc[2];
+    if (!compile_operands(cx, node->data.command.args, 2, rc)) return 0;
+    IrVal ref = rc[0], clo = rc[1];
     IrVal da[] = {cx->sp, ref};
     IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
     IrVal fa[] = {cx->sp, clo};
@@ -3827,10 +3917,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
 
   /* `[reset $ref V]` — set the value and, for an atom, notify watchers (old, new). */
   if (hid == HEAD_RESET && node->data.command.arg_count == 2) {
-    IrVal ref = compile_expr(cx, node->data.command.args[0]);
-    if (cx->failed) return 0;
-    IrVal v = compile_expr(cx, node->data.command.args[1]);
-    if (cx->failed) return 0;
+    IrVal rv2[2];
+    if (!compile_operands(cx, node->data.command.args, 2, rv2)) return 0;
+    IrVal ref = rv2[0], v = rv2[1];
     IrVal da[] = {cx->sp, ref};
     IrVal old = emit_rt_call(cx, "jacl_box_get", da, 2);
     IrVal sa[] = {cx->sp, ref, v};
@@ -3858,6 +3947,8 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
     if (cx->failed) return 0;
     IrVal ba[] = {cx->sp, d};
     (void)emit_rt_call(cx, "jacl_timeout_begin", ba, 2);
+    /* the body is a block: it can move the emission point, but nothing from before it is
+     * used afterwards (the timeout handle lives in the runtime), so no pin is needed */
     IrVal bv = compile_expr(cx, node->data.command.args[1]);
     if (cx->failed) return 0;
     IrVal ea[] = {cx->sp, bv};
@@ -3938,11 +4029,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       return emit_rt_call(cx, "jacl_interpret1", a, 2);
     }
     if (node->data.command.arg_count == 2) {
-      IrVal prelude = compile_expr(cx, node->data.command.args[0]);
-      if (cx->failed) return 0;
-      IrVal src = compile_expr(cx, node->data.command.args[1]);
-      if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, prelude, src};
+      IrVal ps[2];
+      if (!compile_operands(cx, node->data.command.args, 2, ps)) return 0;
+      IrVal a[] = {cx->sp, ps[0], ps[1]};
       return emit_rt_call(cx, "jacl_interpret2", a, 3);
     }
     cx_fail(cx, "interpret expects 1 or 2 arguments");
@@ -4043,13 +4132,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       Binding *ab = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
                                node->data.command.args[0]->data.var_ref.length);
       if (ab && ab->elem_type && cg_is_int_scalar(ab->elem_type, ab->elem_type_len)) {
-        IrVal av = compile_expr(cx, node->data.command.args[0]);
-        if (cx->failed) return 0;
-        IrVal iv = compile_expr(cx, node->data.command.args[1]);
-        if (cx->failed) return 0;
-        IrVal vv = compile_expr(cx, node->data.command.args[2]);
-        if (cx->failed) return 0;
-        IrVal a[] = {cx->sp, av, iv, vv};
+        IrVal aiv[3];
+        if (!compile_operands(cx, node->data.command.args, 3, aiv)) return 0;
+        IrVal a[] = {cx->sp, aiv[0], aiv[1], aiv[2]};
         return emit_rt_call(cx, "jacl_arr_set_at_zero", a, 4);
       }
     }
@@ -4064,10 +4149,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
         char ts[96];
         int tn = snprintf(ts, sizeof ts, " out of bounds for [Buf %d %.*s]",
                           bb->buf_size, (int)bb->elem_type_len, bb->elem_type);
-        IrVal bv = compile_expr(cx, node->data.command.args[0]);
-        if (cx->failed) return 0;
-        IrVal iv = compile_expr(cx, node->data.command.args[1]);
-        if (cx->failed) return 0;
+        IrVal bi2[2];
+        if (!compile_operands(cx, node->data.command.args, 2, bi2)) return 0;
+        IrVal bv = bi2[0], iv = bi2[1];
         IrVal sz = irb_const_i64(cx->f, cx->cur, jaclval_i32(bb->buf_size));
         IrVal tsv = compile_string_literal(cx, ts, (uint32_t)tn);
         IrVal a[] = {cx->sp, bv, iv, sz, tsv};
@@ -4080,10 +4164,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
         node->data.command.args[0]->type != AST_VAR_REF &&
         node->data.command.args[0]->inferred_buf_len > 0) {
       uint32_t dim = node->data.command.args[0]->inferred_buf_len;
-      IrVal bv = compile_expr(cx, node->data.command.args[0]);
-      if (cx->failed) return 0;
-      IrVal iv = compile_expr(cx, node->data.command.args[1]);
-      if (cx->failed) return 0;
+      IrVal bi3[2];
+      if (!compile_operands(cx, node->data.command.args, 2, bi3)) return 0;
+      IrVal bv = bi3[0], iv = bi3[1];
       IrVal dv = irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)dim));
       IrVal a[] = {cx->sp, bv, iv, dv};
       return emit_rt_call(cx, "jacl_buf_offset_checked", a, 4);
@@ -4092,10 +4175,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
      * fixed-arity 3-arg `[slice s a b]` form; here the end index is synthesized as the
      * source's own length ([length s]), then the same jacl_slice_op is emitted. */
     if ((HeadId)hid == HEAD_SLICE && node->data.command.arg_count == 2) {
-      IrVal s = compile_expr(cx, node->data.command.args[0]);
-      if (cx->failed) return 0;
-      IrVal start = compile_expr(cx, node->data.command.args[1]);
-      if (cx->failed) return 0;
+      IrVal ss[2];
+      if (!compile_operands(cx, node->data.command.args, 2, ss)) return 0;
+      IrVal s = ss[0], start = ss[1];
       IrVal la[] = {cx->sp, s};
       IrVal len = emit_rt_call(cx, "jacl_len", la, 2);
       if (cx->failed) return 0;
@@ -4122,17 +4204,20 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
         return 0;
       }
       IrVal a[1 + 4];
-      a[0] = cx->sp;
+      int bpm = pin_mark(cx);
       for (uint32_t i = 0; i < BI[bi].arity; i++) {
         AstNode *an = node->data.command.args[i];
         /* assert-type's TYPE argument is a bare word: pass it as a string. */
-        if ((HeadId)hid == HEAD_ASSERT_TYPE && i == 1 && an->type == AST_LIT_STRING)
-          a[1 + i] = compile_string_literal(cx, an->data.lit_string.value,
-                                            an->data.lit_string.length);
-        else
-          a[1 + i] = compile_expr(cx, an);
-        if (cx->failed) return 0;
+        IrVal v = ((HeadId)hid == HEAD_ASSERT_TYPE && i == 1 && an->type == AST_LIT_STRING)
+                      ? compile_string_literal(cx, an->data.lit_string.value,
+                                               an->data.lit_string.length)
+                      : compile_expr(cx, an);
+        (void)pin_push(cx, v);
+        if (cx->failed) { pin_release(cx, bpm, (int)i + 1); return 0; }
       }
+      for (uint32_t i = 0; i < BI[bi].arity; i++) a[1 + i] = pin_get(cx, bpm + (int)i);
+      pin_release(cx, bpm, (int)BI[bi].arity);
+      a[0] = cx->sp;
       return emit_rt_call(cx, BI[bi].fn, a, (int)BI[bi].arity + 1);
     }
   }
@@ -4140,12 +4225,22 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
   return 0;
 }
 
+/* `move_ok` is granted to one node at a time: `compile_expr` snapshots it into
+ * `move_ok_here` for the duration of that node and clears it, so an unaudited parent never
+ * leaks the permission down to its children. The snapshot is saved and restored around the
+ * node, so it still reads as *this* node's permission after a nested compile — which is what
+ * `compile_operands` consults to decide whether its operands may move blocks too. */
+static IrVal compile_expr_node(Cx *cx, AstNode *node);
 static IrVal compile_expr(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
-  /* `move_ok` is granted to one node at a time: snapshot it for this node and clear it, so
-   * an unaudited parent never leaks the permission down to its children. */
+  int saved = cx->move_ok_here;
   cx->move_ok_here = cx->move_ok;
   cx->move_ok = 0;
+  IrVal v = compile_expr_node(cx, node);
+  cx->move_ok_here = saved;
+  return v;
+}
+static IrVal compile_expr_node(Cx *cx, AstNode *node) {
   switch (node->type) {
     case AST_SYNTAX_QUOTE:
       return compile_synquote(cx, node->data.syntax_quote.child);
@@ -4267,7 +4362,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (n == 0) return compile_string_literal(cx, "", 0);
       IrVal acc = compile_str_segment(cx, node->data.interp_string.segments[0]);
       for (uint32_t i = 1; i < n; i++) {
+        int pin = pin_push(cx, acc);
         IrVal s = compile_str_segment(cx, node->data.interp_string.segments[i]);
+        acc = pin_get(cx, pin);
+        pin_drop(cx, pin);
         if (cx->failed) return 0;
         acc = emit_binop_call(cx, "jacl_str_concat", acc, s);
       }
@@ -4354,7 +4452,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       if (cx->failed) return 0;
       { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        IrVal e = compile_expr(cx, node->data.shell_cmd.args[i]);
+        IrVal e = compile_elem_pinned(cx, node->data.shell_cmd.args[i], &argv);
         if (cx->failed) return 0;
         IrVal a[] = {cx->sp, argv, e};
         argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
@@ -4493,11 +4591,9 @@ static void compile_tail(Cx *cx, AstNode *node) {
         }
         if (!check_buf_arg_sizes(cx, p, node)) return;   /* by-value buffer size mismatch */
         IrVal args[1 + CG_MAX_PARAMS];
+        cx->move_ok_here = 1;   /* tail position: nothing outlives the call */
+        if (argc && !compile_operands(cx, node->data.command.args, argc, args + 1)) return;
         args[0] = cx->sp;
-        for (uint32_t i = 0; i < argc; i++) {
-          args[i + 1] = compile_expr(cx, node->data.command.args[i]);
-          if (cx->failed) return;
-        }
         emit_trace_line(cx, node->start.line);  /* tail call: record site on caller frame */
         irb_return_call(cx->f, cx->cur, p->func, args, (int)argc + 1);
         return;

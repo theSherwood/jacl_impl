@@ -279,3 +279,54 @@ The guard is a three-block diamond, so the emitted IR grows: `sieve_10k`'s progr
 went 3,404 → 9,248 estimated emitted bytes. That is well inside the browser host's
 proven-safe band (≤ 263,614 B per emitted function) and, incidentally, now above the
 4,096 B coop tier-up floor that had kept it interpreted.
+
+## Results — after #100 (sibling operands pinned; the guard reaches argument position)
+
+#98's guard only fired where the consumer already tolerated a block move — statement
+position, conditions, binding initializers, tail/return values — because an operand that
+moves the emission point strands its siblings (jacl #100, a bug that predated the guard).
+#100 pins sibling operands at every multi-operand site, which both fixes that and lets the
+guard reach nested operand positions: `[fib [- $n 1]]`'s subtraction, a `[vec [+ $a $b] …]`
+element, a proc-call argument.
+
+Same protocol, both columns measured back to back on one container.
+
+| Scenario | before #100 | after #100 | |
+|---|--:|--:|--:|
+| `fib` | 225 | **123** | 1.84× |
+| `sieve` | 97.0 | 96.9 | — (already at zero calls after #98) |
+| `map_lookup` | 223 | **208** | 1.07× |
+| `box_churn` | 132 | **125** | 1.06× |
+| `string_concat` | 77 | **73** | 1.06× |
+
+ms, execution-only, minimum of 15 runs, `_baseline` compile tax subtracted.
+
+`fib` is where argument-position arithmetic lives, and it nearly halves. Cumulatively
+across #98 + #100 it is **412 → 123 ms, 3.35×** — past Lua 5.4 (433) and CPython (918),
+within 1.25× of Node 22 (98), and 1.7× off Clojure/HotSpot (72).
+
+### Calls per operation
+
+`fib 20` on the browser bytecode engine, by helper:
+
+| | before #100 | after #100 |
+|---|--:|--:|
+| `jacl_sub` (the two `[- $n …]` arguments) | 21,890 | **0** |
+| recursive `fib` calls | 21,891 | 21,891 |
+| total | 43,803 | **21,913** |
+
+Every runtime-helper call is gone from `fib`; what remains is the recursion itself, which
+is the function-call-dispatch item, not arithmetic. `sieve_10k` (59) and `box_100k`
+(500,046) are unchanged — #98 had already taken their arithmetic inline.
+
+### Emitted size
+
+| program | before #100 | after #100 |
+|---|--:|--:|
+| `fib 20` | 2,268 | 3,522 |
+| `sieve_10k` | 9,248 | 9,248 |
+| `box_100k` | 3,176 | 3,176 |
+
+Estimated emitted bytes for the program's own function. Only `fib` grows (it is the one
+that gained guards), and every figure stays far inside the browser host's proven-safe band
+(≤ 263,614 B per emitted function).

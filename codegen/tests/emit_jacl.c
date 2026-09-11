@@ -43,6 +43,15 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "guard_float_mix")) return "def a 1.5\ndef b 2\ndef s [+ $a $b]\n[print $s]";
   if (!strcmp(name, "guard_mod_neg"))   return "def a -7\ndef b 3\n[% $a $b]";
   if (!strcmp(name, "guard_if_operand"))return "def x 1\n[+ $x [if [> 1 0] { 2 } { 3 }]]";
+  /* #100 — sibling operands are pinned across an operand that moves the emission point.
+   * `pin_call_arg` is the issue's repro (a proc call's second argument), `pin_def_in_operand`
+   * covers a binding made inside an operand surviving the pin release, and `arg_arith` is the
+   * payoff: argument-position arithmetic now reaches the monomorphic guard. */
+  if (!strcmp(name, "pin_call_arg"))
+    return "proc f {a, b} {+ $a $b}\ndef r [f 1 [if [> 1 0] { 2 } { 3 }]]\n[+ $r 0]";
+  if (!strcmp(name, "pin_def_in_operand")) return "def a [+ 1 [def x 2]]\n[+ $a $x]";
+  if (!strcmp(name, "arg_arith"))
+    return "proc f {n} { $n }\ndef x 5\ndef r [f [- $x 1]]\n[+ $r 0]";
   /* error cases (driver exits nonzero) */
   if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
   if (!strcmp(name, "set_undef_err"))return "set nope 1";

@@ -454,6 +454,33 @@ fn guard_falls_through_to_the_runtime() {
 }
 
 #[test]
+fn call_argument_survives_a_block_move() {
+    // `[f 1 [if …]]` — the second argument's lowering leaves the block the first was
+    // computed in. Every multi-operand site pins its siblings across that (#100); before
+    // it, this emitted an operand reference into a block that does not define it.
+    run_case("pin_call_arg", i32_val(3));
+}
+
+#[test]
+fn a_binding_made_inside_an_operand_survives() {
+    // A pin is released by truncating the env, so an operand that binds a real name must not
+    // be truncated away with it (#100).
+    run_case("pin_def_in_operand", i32_val(5));
+}
+
+#[test]
+fn argument_position_arithmetic_reaches_the_guard() {
+    // With siblings pinned, the monomorphic guard is allowed in operand position too, so a
+    // proc-call argument's arithmetic lowers natively instead of calling the runtime (#100).
+    // The guard's arithmetic fast path subtracts in i64 on the sign-extended operands (so it
+    // can range-check the result), and `[- $x 1]` in argument position is the only subtraction
+    // in this program — so an `i64.sub` here means the guard reached it.
+    let ir = emit_text("arg_arith");
+    assert!(ir.contains("i64.sub"), "argument-position [- $x 1] should lower natively:\n{ir}");
+    run_case("arg_arith", i32_val(4));
+}
+
+#[test]
 fn binop_operand_survives_a_block_move() {
     // `[+ $x [if … ]]`: the second operand's lowering leaves the block the first was computed
     // in, so the accumulator is pinned into the frame across it. Before that it was emitted as
