@@ -23,6 +23,9 @@ static int64_t jaclval_i32(int32_t x) {
 static const char *binary_runtime_fn(uint8_t head_id) {
   switch (head_id) {
     case HEAD_PLUS:    return "jacl_add";
+    case HEAD_PLUS_PCT:  return "jacl_wrap_add";
+    case HEAD_MINUS_PCT: return "jacl_wrap_sub";
+    case HEAD_STAR_PCT:  return "jacl_wrap_mul";
     case HEAD_MINUS:   return "jacl_sub";
     case HEAD_STAR:    return "jacl_mul";
     case HEAD_SLASH:   return "jacl_div";
@@ -617,7 +620,20 @@ static void emit_trace_line(Cx *cx, uint32_t line) {
  * locals/calls/blocks; unboxing happens only *within* a typed arithmetic tree, with a
  * single box at the root — so the env/frame stay all-i64 and no rep tracking leaks out.
  * (Taint/secret flag propagation is dropped on the unboxed path; statically-typed pure
- * arithmetic is the intended trade.) */
+ * arithmetic is the intended trade.)
+ *
+ * Overflow (#102): the dynamic rules cannot apply here. Promotion is out — a declared i32
+ * that overflowed into an i64 is no longer an i32, so an `i32`-annotated proc would return
+ * something its own signature forbids — and silently wrapping would mean adding an
+ * annotation changes a program's answers, which also makes widening the typer's reach
+ * (#94 item 3) a semantic change rather than a speed one. So each op carries a sticky
+ * "left i32 range" bit, and the tree's root turns it into the error flag: an overflowing
+ * typed computation yields a catchable error, exactly like division by zero. `+% -% *%`
+ * opt out — they are *defined* to wrap, so they skip the check entirely.
+ *
+ * The bit rides the frame in a pin, not a native value, so it survives an operand that
+ * moves the emission point; the accumulator is pinned the same way (widened to i64 and
+ * narrowed back), since the frame is all-i64 and a native i32 cannot ride it directly. */
 static IrVal box_i32(Cx *cx, IrVal v) {
   IrVal ext = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v);
   IrVal tag = irb_const_i64(cx->f, cx->cur, (int64_t)JACL_TAG_I32_SHIFTED);
@@ -626,32 +642,102 @@ static IrVal box_i32(Cx *cx, IrVal v) {
 static IrVal unbox_i32(Cx *cx, IrVal boxed) {
   return irb_convert(cx->f, cx->cur, IRB_WRAP_I64, boxed);
 }
+/* Box a typed i32 result, folding the sticky overflow bit into the error flag. Branchless:
+ * an error-flagged i32 is a perfectly good JaclVal (it is what `jacl_div` returns for a zero
+ * divisor), so the flag is just another OR. */
+static IrVal box_i32_checked(Cx *cx, IrVal v, int ovf_slot) {
+  IrVal boxed = box_i32(cx, v);
+  IrVal sh = irb_const_i64(cx->f, cx->cur, 61);   /* JACL_FLAG_ERROR */
+  IrVal bit = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SHL, pin_get(cx, ovf_slot), sh);
+  return irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, boxed, bit);
+}
+/* Pin a native i32 across something that may move the emission point. */
+static int pin_i32_push(Cx *cx, IrVal v) {
+  return pin_push(cx, irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v));
+}
+static IrVal pin_i32_get(Cx *cx, int slot) {
+  return irb_convert(cx->f, cx->cur, IRB_WRAP_I64, pin_get(cx, slot));
+}
+/* OR a fresh "this op overflowed" bit (i32 0/1) into the sticky pin. */
+static void ovf_mark(Cx *cx, int ovf_slot, IrVal bad) {
+  IrVal wide = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, bad);
+  cx->locals[ovf_slot].value =
+      irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, pin_get(cx, ovf_slot), wide);
+}
 
 /* True when `[op …]` can be lowered to native i32 arithmetic (typer proved i32). */
 static int i32_arith(AstNode *node) {
   if (node->type != AST_COMMAND || node->inferred_type != TYPE_I32) return 0;
   uint8_t hid = node->data.command.head_id;
-  return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR;
+  return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR ||
+         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
+}
+/* Does this typed head wrap by definition (`+% -% *%`)? Then no overflow check. */
+static int i32_arith_wraps(uint8_t hid) {
+  return hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
+}
+/* Can lowering `node` leave the current block? Literals and variable reads cannot (a read is
+ * a frame value, a global get, or a cell load — no block ever ends), and a typed arithmetic
+ * node can only move if one of its operands does. Everything else is assumed to move, so the
+ * accumulator gets pinned across it. Keeping the common `[+ $n 1]` shape pin-free is worth
+ * the check: a pin costs a widen and a narrow around every operand. */
+static int i32_operand_stays_put(AstNode *n) {
+  switch (n->type) {
+    case AST_LIT_INT: case AST_LIT_FLOAT: case AST_VAR_REF: return 1;
+    case AST_COMMAND:
+      if (!i32_arith(n)) return 0;
+      for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+        if (!i32_operand_stays_put(n->data.command.args[i])) return 0;
+      return 1;
+    default: return 0;
+  }
 }
 
-/* Lower `node` to a native i32 value. Typed `+ - *` stay unboxed (recursively);
- * literals are i32 constants; anything else is computed boxed then unboxed. */
-static IrVal compile_i32(Cx *cx, AstNode *node) {
+/* Lower `node` to a native i32 value, ORing each op's overflow into `ovf_slot`. Typed
+ * `+ - *` (and `+% -% *%`) stay unboxed recursively; literals are i32 constants; anything
+ * else is computed boxed then unboxed. */
+static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (cx->failed) return 0;
   if (node->type == AST_LIT_INT) return irb_const_i32(cx->f, cx->cur, node->data.lit_int.value);
   if (i32_arith(node)) {
     uint8_t hid = node->data.command.head_id;
-    IrBinOp op = hid == HEAD_PLUS ? IRB_ADD : hid == HEAD_MINUS ? IRB_SUB : IRB_MUL;
+    int wraps = i32_arith_wraps(hid);
+    IrBinOp op = (hid == HEAD_PLUS || hid == HEAD_PLUS_PCT) ? IRB_ADD
+               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB : IRB_MUL;
     uint32_t argc = node->data.command.arg_count;
-    IrVal acc = compile_i32(cx, node->data.command.args[0]);
+    IrVal acc = compile_i32(cx, node->data.command.args[0], ovf_slot);
     for (uint32_t i = 1; i < argc; i++) {
-      IrVal r = compile_i32(cx, node->data.command.args[i]);
+      AstNode *arg = node->data.command.args[i];
+      int pa = i32_operand_stays_put(arg) ? -1 : pin_i32_push(cx, acc);
+      IrVal r = compile_i32(cx, arg, ovf_slot);
+      if (pa >= 0) { acc = pin_i32_get(cx, pa); pin_drop(cx, pa); }
       if (cx->failed) return 0;
-      acc = irb_intbin(cx->f, cx->cur, IRB_I32, op, acc, r);
+      if (wraps) {                       /* defined to wrap: the bare i32 op is the answer */
+        acc = irb_intbin(cx->f, cx->cur, IRB_I32, op, acc, r);
+        continue;
+      }
+      /* Compute in 64 bits on the sign-extended operands so the i32 overflow is
+       * observable, then narrow. Both operands are i32-ranged, so the i64 op cannot
+       * itself overflow (|a*b| < 2^62). */
+      IrVal ea = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, acc);
+      IrVal eb = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, r);
+      IrVal r64 = irb_intbin(cx->f, cx->cur, IRB_I64, op, ea, eb);
+      IrVal narrow = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, r64);
+      IrVal back = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, narrow);
+      ovf_mark(cx, ovf_slot, irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, back, r64));
+      acc = narrow;
     }
     return acc;
   }
   return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
+}
+/* Compile a whole typed i32 tree to a boxed JaclVal, error-flagged if any op overflowed. */
+static IrVal compile_i32_tree(Cx *cx, AstNode *node) {
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrVal v = compile_i32(cx, node, ovf);
+  IrVal res = cx->failed ? 0 : box_i32_checked(cx, v, ovf);
+  pin_release(cx, ovf, 1);
+  return res;
 }
 
 /* ---- strings & collections (P2.8) ---- */
@@ -795,7 +881,7 @@ static int frame_guard(Cx *cx) {
  *
  * Emitting it moves the emission point (a diamond joining on the frame + the result), so it is
  * only reached where the caller allowed that: `cx->move_ok_here`. */
-typedef enum { GOP_NONE, GOP_ARITH, GOP_DIVREM, GOP_CMP } GuardKind;
+typedef enum { GOP_NONE, GOP_ARITH, GOP_DIVREM, GOP_CMP, GOP_WRAP } GuardKind;
 
 static GuardKind guard_kind_for(const char *fn, IrBinOp *bop, IrCmpOp *cop) {
   if (!strcmp(fn, "jacl_add")) { *bop = IRB_ADD;   return GOP_ARITH;  }
@@ -803,6 +889,10 @@ static GuardKind guard_kind_for(const char *fn, IrBinOp *bop, IrCmpOp *cop) {
   if (!strcmp(fn, "jacl_mul")) { *bop = IRB_MUL;   return GOP_ARITH;  }
   if (!strcmp(fn, "jacl_div")) { *bop = IRB_DIV_S; return GOP_DIVREM; }
   if (!strcmp(fn, "jacl_mod")) { *bop = IRB_REM_S; return GOP_DIVREM; }
+  /* `+% -% *%` are defined to wrap, so the fast path is the bare i32 op — no range check. */
+  if (!strcmp(fn, "jacl_wrap_add")) { *bop = IRB_ADD; return GOP_WRAP; }
+  if (!strcmp(fn, "jacl_wrap_sub")) { *bop = IRB_SUB; return GOP_WRAP; }
+  if (!strcmp(fn, "jacl_wrap_mul")) { *bop = IRB_MUL; return GOP_WRAP; }
   if (!strcmp(fn, "jacl_lt"))  { *cop = IRB_LT_S;  return GOP_CMP;    }
   if (!strcmp(fn, "jacl_le"))  { *cop = IRB_LE_S;  return GOP_CMP;    }
   if (!strcmp(fn, "jacl_gt"))  { *cop = IRB_GT_S;  return GOP_CMP;    }
@@ -865,7 +955,9 @@ static IrVal emit_binop_guarded(Cx *cx, int move_ok, const char *fn, IrVal lhs, 
     IrVal res = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, cz, bt);
     fill_frame(cx, fedge); fedge[w] = res;
     irb_br(cx->f, cx->cur, join, fedge, w + 1);
-  } else if (k == GOP_DIVREM) {
+  } else if (k == GOP_DIVREM || k == GOP_WRAP) {
+    /* The whole answer is the bare i32 op: a divisor of 0 or -1 was excluded by the guard
+     * above, and a wrapping op has nothing to exclude. */
     IrVal q = irb_intbin(cx->f, cx->cur, IRB_I32, bop, ia, ib);
     IrVal res = box_i32(cx, q);
     fill_frame(cx, fedge); fedge[w] = res;
@@ -3419,7 +3511,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       return 0;
     }
     /* Type-driven: native i32 arithmetic when the typer proved i32 (boxed once). */
-    if (i32_arith(node)) return box_i32(cx, compile_i32(cx, node));
+    if (i32_arith(node)) return compile_i32_tree(cx, node);
     /* Dynamic fold. The accumulator is pinned across each operand's compilation: an operand
      * (an `[if …]`, or a nested guarded binop) may leave the current block, which would
      * strand a value computed before it. With that in hand the operands inherit this node's
@@ -4715,20 +4807,33 @@ static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
    * catalog's `t_*` are `(i64 sp, args…)` at the IR level — thread sp as arg 0. */
   IrType sig[1 + CG_MAX_PARAMS];
   IrVal cargs[1 + CG_MAX_PARAMS];
-  sig[0] = IRB_I64; cargs[0] = cx->sp;
+  sig[0] = IRB_I64;
+  /* Pin each argument across the next one's compilation (#100): an argument may move the
+   * emission point, which would strand the ones already computed. A scalar argument is a
+   * native i32, so it is widened into the pin and narrowed back out.
+   *
+   * Overflow in a typed scalar argument is *not* flagged: the value is being handed to C as
+   * a machine i32, so C's wrapping is the contract at this boundary — the same reason a
+   * pointer argument decays to a raw address here. */
+  int epm = pin_mark(cx);
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
   for (int i = 0; i < e->arity; i++) {
     if (e->pkind[i]) {                                   /* pointer: decay to a raw address */
       IrVal v = compile_expr(cx, node->data.command.args[i]);
       if (cx->failed) return 0;
       IrVal ra[] = {cx->sp, v};
-      cargs[1 + i] = emit_rt_call(cx, "jacl_raw_ptr", ra, 2);  /* i64 machine address */
+      (void)pin_push(cx, emit_rt_call(cx, "jacl_raw_ptr", ra, 2));  /* i64 machine address */
       sig[1 + i] = IRB_I64;
     } else {                                             /* scalar: native i32 */
-      cargs[1 + i] = compile_i32(cx, node->data.command.args[i]);
+      (void)pin_i32_push(cx, compile_i32(cx, node->data.command.args[i], ovf));
       if (cx->failed) return 0;
       sig[1 + i] = IRB_I32;
     }
   }
+  for (int i = 0; i < e->arity; i++)
+    cargs[1 + i] = e->pkind[i] ? pin_get(cx, epm + 1 + i) : pin_i32_get(cx, epm + 1 + i);
+  cargs[0] = cx->sp;
+  pin_release(cx, epm, e->arity + 1);
   emit_trace_line(cx, node->start.line);
   IrType r1[] = {IRB_I32};
   IrVal handle = irb_const_i32(cx->f, cx->cur, 0);

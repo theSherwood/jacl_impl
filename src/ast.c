@@ -60,6 +60,9 @@ typedef enum {
 
   /* Operators */
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
+  /* Wrapping arithmetic: `+%` `-%` `*%` wrap modulo the operand width instead of
+   * promoting (dynamic) or erroring (typed) on overflow. See docs/TEMEN_NUMERICS.md. */
+  HEAD_PLUS_PCT, HEAD_MINUS_PCT, HEAD_STAR_PCT,
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_RANGE, HEAD_RANGE_INCLUSIVE,
@@ -165,6 +168,11 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (s[0] == '|' && s[1] == '|') return HEAD_PIPE_PIPE;
       if (s[0] == '&' && s[1] == '&') return HEAD_AMP_AMP;
       if (s[0] == '?' && s[1] == '.') return HEAD_QDOT;
+      if (s[1] == '%') {                      /* wrapping arithmetic */
+        if (s[0] == '+') return HEAD_PLUS_PCT;
+        if (s[0] == '-') return HEAD_MINUS_PCT;
+        if (s[0] == '*') return HEAD_STAR_PCT;
+      }
       if (s[0] == 'i' && s[1] == 'f') return HEAD_IF;
       if (s[0] == 't' && s[1] == 'o') return HEAD_TO;
       return HEAD_NONE;

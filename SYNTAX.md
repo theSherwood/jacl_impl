@@ -48,6 +48,22 @@ Interpolation inside `"…"` strings uses one non-trivial form for embedded expr
 - `\$` — escaped literal `$`
 - Forms nest: `"value: $[+ $x [vec-len $v]]"`
 
+## Wrapping arithmetic: `+%` `-%` `*%`
+
+`+ - *` never wrap: on a dynamic value they promote to a wide int, and on a value the typer
+proved is `i32` they produce a catchable error (a declared `i32` cannot hold the promoted
+result). When wrapping is what you want, ask for it:
+
+```jacl
+def a 2000000000
+print [+  $a $a]      # 4000000000   — promoted
+print [+% $a $a]      # -294967296   — wrapped, modulo 2^32
+```
+
+`+% -% *%` wrap modulo the operand width (2^32 for `i32`, 2^64 for `i64`/`u64`) and are a
+type error on anything that is not an integer. There is no `/%` — division does not wrap;
+it has domain errors instead. Full rules: `docs/TEMEN_NUMERICS.md`.
+
 ## Pipes
 
 - `|` is intrinsic to command mode (not bolted on)

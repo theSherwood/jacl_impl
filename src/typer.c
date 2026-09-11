@@ -3933,7 +3933,9 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
       uint32_t    hl2 = rhs->data.command.head->data.lit_string.length;
       bool is_arith2 = (hl2 == 1 && (hn2[0] == '+' || hn2[0] == '-' ||
                                      hn2[0] == '*' || hn2[0] == '/' ||
-                                     hn2[0] == '%'));
+                                     hn2[0] == '%')) ||
+                       (hl2 == 2 && hn2[1] == '%' &&
+                        (hn2[0] == '+' || hn2[0] == '-' || hn2[0] == '*'));
       bool is_cmp2 = (hl2 == 1 && (hn2[0] == '<' || hn2[0] == '>')) ||
                      (hl2 == 2 && (memcmp(hn2, "<=", 2) == 0 ||
                                    memcmp(hn2, ">=", 2) == 0 ||
@@ -6159,9 +6161,13 @@ __attribute__((noinline))
 static int typer__infer_cmd_binop(TyperCtx* tc, AstNode* node, AstNode* head) {
   const char* hname = head->data.lit_string.value;
   uint32_t    hlen  = head->data.lit_string.length;
+  /* `+% -% *%` infer exactly like `+ - *` — same operand rules, same result type; only
+   * the overflow behavior differs, which is a codegen/runtime matter (docs/TEMEN_NUMERICS.md). */
   bool is_arith = (hlen == 1 && (hname[0] == '+' || hname[0] == '-' ||
                                   hname[0] == '*' || hname[0] == '/' ||
-                                  hname[0] == '%'));
+                                  hname[0] == '%')) ||
+                  (hlen == 2 && hname[1] == '%' &&
+                   (hname[0] == '+' || hname[0] == '-' || hname[0] == '*'));
   bool is_cmp = false;
   if (!is_arith) {
     if ((hlen == 1 && (hname[0] == '<' || hname[0] == '>')) ||

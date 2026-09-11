@@ -633,6 +633,9 @@ typedef enum {
 
   /* Operators */
   HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
+  /* Wrapping arithmetic: `+%` `-%` `*%` wrap modulo the operand width instead of
+   * promoting (dynamic) or erroring (typed) on overflow. See docs/TEMEN_NUMERICS.md. */
+  HEAD_PLUS_PCT, HEAD_MINUS_PCT, HEAD_STAR_PCT,
   HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ, HEAD_BANG_EQ,
   HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
   HEAD_RANGE, HEAD_RANGE_INCLUSIVE,

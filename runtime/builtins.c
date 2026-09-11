@@ -141,6 +141,45 @@ JaclVal jacl_mod(JaclVal a, JaclVal b) {
   int32_t r = (x == INT32_MIN && y == -1) ? 0 : x % y;
   return jaclrt_i32(r) | prop_flags(a, b);
 }
+/* ---- wrapping arithmetic (`+%` `-%` `*%`) ----
+ *
+ * The explicit opt-out from the overflow rules above: two i32s wrap modulo 2^32 and two wide
+ * ints modulo 2^64, with no promotion and no error. Anything else is a type error — wrapping
+ * a float (or a string) has no meaning, and silently coercing would defeat the point of
+ * asking for wrapping. Computed through unsigned types so the wrap is defined, not UB. */
+JaclVal jacl_wrap_add(JaclVal a, JaclVal b) {
+  ERR_IF_ERR(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) + (uint32_t)jaclrt_as_i32(b))) |
+           prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b))
+    return jacl_wide_new(jacl_iwide_tag(a, b),
+                         (int64_t)((uint64_t)jacl_int_val(a) + (uint64_t)jacl_int_val(b))) |
+           prop_flags(a, b);
+  return jaclrt_error();
+}
+JaclVal jacl_wrap_sub(JaclVal a, JaclVal b) {
+  ERR_IF_ERR(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) - (uint32_t)jaclrt_as_i32(b))) |
+           prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b))
+    return jacl_wide_new(jacl_iwide_tag(a, b),
+                         (int64_t)((uint64_t)jacl_int_val(a) - (uint64_t)jacl_int_val(b))) |
+           prop_flags(a, b);
+  return jaclrt_error();
+}
+JaclVal jacl_wrap_mul(JaclVal a, JaclVal b) {
+  ERR_IF_ERR(a, b);
+  if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
+    return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) * (uint32_t)jaclrt_as_i32(b))) |
+           prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b))
+    return jacl_wide_new(jacl_iwide_tag(a, b),
+                         (int64_t)((uint64_t)jacl_int_val(a) * (uint64_t)jacl_int_val(b))) |
+           prop_flags(a, b);
+  return jaclrt_error();
+}
 JaclVal jacl_neg(JaclVal a) {
   if (jaclrt_is_error(a)) return a;
   if (!jaclrt_is_i32(a)) return jaclrt_error();
