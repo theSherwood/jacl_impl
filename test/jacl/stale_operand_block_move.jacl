@@ -1,0 +1,69 @@
+# expect: 3
+# expect: 30
+# expect: [vec 1 2]
+# expect: 7
+# expect: [Point x 1 y 9]
+# expect: 5
+# expect: 4
+# expect: ab
+# expect: 6
+# expect: 11
+# expect: 2
+#
+# Regression: an operand that lowers to a block diamond (an `[if …]`, or a guarded
+# dynamic binop) leaves the emission point in a new block. TEMEN is block-local SSA,
+# so every sibling value computed BEFORE it has to ride the frame — codegen pins them.
+# Without that, each shape below either fails verification or names the wrong value
+# (jacl #100). Only a non-FIRST operand position is affected, since operands are
+# compiled left to right.
+
+struct Point {i32 x, i32 y}
+
+proc add2 {a, b} {+ $a $b}
+proc addv {a, ..rest} {+ $a [first $rest]}
+
+proc main {} {
+  def one 1
+
+  # user proc call: second argument moves blocks
+  print [add2 $one [if [> 1 0] { 2 } { 3 }]]
+
+  # variadic proc: the fixed argument must survive the rest vector
+  print [addv 10 [if [> 1 0] { 20 } { 30 }]]
+
+  # vector literal: the accumulator must survive each element
+  print [vec $one [if [> 1 0] { 2 } { 3 }]]
+
+  # map literal: the accumulator and the key must survive the value
+  def m [map "a" $one "b" [if [> 1 0] { 7 } { 8 }]]
+  print [map-get $m "b"]
+
+  # struct constructor: the instance and the field name must survive the value
+  print [Point x $one y [if [> 1 0] { 9 } { 8 }]]
+
+  # builtin from the arity table: [arr-get ARR IDX]
+  def a [arr 4 5 6]
+  print [arr-get $a [if [> 1 0] { 1 } { 2 }]]
+
+  # dotted set: the target must survive the value
+  def p [Point x 1 y 2]
+  set $p->x [if [> 1 0] { 4 } { 5 }]
+  print $p->x
+
+  # concat fold
+  print [concat "a" [if [> 1 0] { "b" } { "c" }]]
+
+  # box reset: the ref must survive the new value
+  def b [box 0]
+  reset $b [if [> 1 0] { 6 } { 5 }]
+  print [deref $b]
+
+  # closure call through a binding: the callee and its first argument must survive
+  def f [\ + $it 1]
+  print [f [if [> 1 0] { 10 } { 20 }]]
+
+  # nested: a guarded dynamic binop in a non-first operand position
+  def two 2
+  print [add2 [- $two 2] [+ $one $one]]
+}
+main

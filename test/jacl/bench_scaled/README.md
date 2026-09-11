@@ -279,3 +279,4 @@ The guard is a three-block diamond, so the emitted IR grows: `sieve_10k`'s progr
 went 3,404 → 9,248 estimated emitted bytes. That is well inside the browser host's
 proven-safe band (≤ 263,614 B per emitted function) and, incidentally, now above the
 4,096 B coop tier-up floor that had kept it interpreted.
+
