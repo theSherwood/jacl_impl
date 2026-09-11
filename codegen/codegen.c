@@ -12,6 +12,7 @@
 #define JACLVAL_FALSE        ((int64_t)((uint64_t)0x01 << 56))   /* JACL_FALSE */
 #define JACLVAL_TRUE         ((int64_t)(((uint64_t)0x01 << 56) | 1)) /* JACL_TRUE */
 #define JACLVAL_NIL          ((int64_t)0)                        /* JACL_NIL   */
+#define JACLVAL_FLAG_ERROR   ((int64_t)((uint64_t)1 << 61))       /* JACL_FLAG_ERROR */
 static int64_t jaclval_i32(int32_t x) {
   return (int64_t)(JACL_TAG_I32_SHIFTED | (uint64_t)(uint32_t)x);
 }
@@ -686,6 +687,16 @@ static IrVal emit_truthy(Cx *cx, IrVal cond) {
   IrVal ne_false = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, cond, cfalse);
   IrVal ne_nil = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, cond, cnil);
   return irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, ne_false, ne_nil);
+}
+
+/* The error flag as an i32 0/1: `(v & JACL_FLAG_ERROR) != 0`, emitted inline. The runtime's
+ * `jacl_is_error_v` is exactly this one test, so calling it — once per statement, on the
+ * hottest path there is — cost a call for two instructions (#98). */
+static IrVal emit_is_error_bit(Cx *cx, IrVal v) {
+  IrVal bit = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR);
+  IrVal masked = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, v, bit);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  return irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, masked, zero);
 }
 
 static int frame_guard(Cx *cx) {
@@ -1645,9 +1656,7 @@ static IrVal compile_filter_transform(Cx *cx, IrVal src, IrVal clo, int is_filte
  * Splits the current block: err path returns, cont path carries the frame on. */
 static void emit_stmt_error_check(Cx *cx, IrVal v) {
   if (cx->failed || !frame_guard(cx)) return;
-  IrVal ea[] = {cx->sp, v};
-  IrVal e = emit_rt_call(cx, "jacl_is_error_v", ea, 2);
-  IrVal truth = emit_truthy(cx, e);
+  IrVal truth = emit_is_error_bit(cx, v);
   int w = frame_width(cx);
   IrBlock cont = new_i64_block(cx, w);
   IrVal frame[IRB_MAX_FRAME + 2];
@@ -2160,9 +2169,7 @@ static IrVal compile_try(Cx *cx, AstNode *node) {
   cx->in_try = st; cx->try_target = stt; cx->try_width = stw;
   if (cx->failed) return 0;
   /* the body VALUE may itself be an error: route it too */
-  IrVal ea[] = {cx->sp, bv};
-  IrVal e = emit_rt_call(cx, "jacl_is_error_v", ea, 2);
-  IrVal truth = emit_truthy(cx, e);
+  IrVal truth = emit_is_error_bit(cx, bv);
   fill_frame(cx, frame);
   frame[w] = bv;
   irb_br_if(cx->f, cx->cur, truth, err_h, frame, w + 1, join, frame, w + 1);

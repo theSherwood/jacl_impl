@@ -37,6 +37,37 @@ int run(int n) {
   ok &= jaclrt_as_bool(jacl_ne(jaclrt_i32(7), jaclrt_i32(8)));
   ok &= jaclrt_as_bool(jacl_eq(jacl_str_new("hi", 2), jacl_str_new("hi", 2)));  /* inline -> same bits */
 
+  /* #98: `==`/`!=` settle nil/bool/i32 pairs inline — same answers as the generic walk,
+   * including across numeric representations (i32 vs heap i64/f64) and with flags set. */
+  ok &= jaclrt_as_bool(jacl_eq(jaclrt_nil(), jaclrt_nil()));
+  ok &= !jaclrt_as_bool(jacl_ne(jaclrt_nil(), jaclrt_nil()));
+  ok &= jaclrt_as_bool(jacl_eq(jaclrt_bool(true), jaclrt_bool(true)));
+  ok &= !jaclrt_as_bool(jacl_eq(jaclrt_bool(true), jaclrt_bool(false)));
+  ok &= jaclrt_as_bool(jacl_ne(jaclrt_bool(true), jaclrt_bool(false)));
+  ok &= !jaclrt_as_bool(jacl_eq(jaclrt_nil(), jaclrt_bool(false)));   /* different tags */
+  ok &= !jaclrt_as_bool(jacl_eq(jaclrt_nil(), jaclrt_i32(0)));
+  ok &= jaclrt_as_bool(jacl_eq(jaclrt_i32(-7), jacl_wide_new(0x0E, -7)));  /* i32 == heap i64 */
+  ok &= jaclrt_as_bool(jacl_ne(jaclrt_i32(-7), jacl_wide_new(0x0E, -8)));
+  {
+    JaclVal ti = jaclrt_i32(7) | JACL_FLAG_TAINTED;
+    ok &= jaclrt_as_bool(jacl_eq(ti, jaclrt_i32(7)));
+    ok &= ((jacl_eq(ti, jaclrt_i32(7)) & JACL_FLAG_TAINTED) != 0);   /* flags still propagate */
+    ok &= ((jacl_ne(ti, jaclrt_i32(8)) & JACL_FLAG_TAINTED) != 0);
+  }
+
+  /* #98: `box` snapshots without a deep copy for immediates, and still copies the two
+   * mutable aggregates — a boxed arr does not observe later mutation of the source. */
+  ok &= (jaclrt_as_i32(jacl_box_get(jacl_box_new(jaclrt_i32(5)))) == 5);
+  ok &= jaclrt_is_nil(jacl_box_get(jacl_box_new(jaclrt_nil())));
+  {
+    JaclVal src = jacl_arr_new();
+    src = jacl_arr_push(src, jaclrt_i32(1));
+    JaclVal bx = jacl_box_new(src);
+    src = jacl_arr_push(src, jaclrt_i32(2));
+    ok &= (jaclrt_as_i32(jacl_len(jacl_box_get(bx))) == 1);   /* snapshot, not the live arr */
+    ok &= (jaclrt_as_i32(jacl_len(src)) == 2);
+  }
+
   /* logic */
   ok &= jaclrt_as_bool(jacl_not(jaclrt_bool(false)));
   ok &= !jaclrt_as_bool(jacl_not(jaclrt_bool(true)));

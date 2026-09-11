@@ -31,6 +31,9 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "mutate"))       return "mut c 1\nset c 42\n[+ $c 0]";
   if (!strcmp(name, "reassign_expr"))return "mut c 1\nset c [+ $c 41]\n[+ $c 0]";
   if (!strcmp(name, "scoped_block")) return "def x 1\n{ def y 10\n[+ $x $y] }";
+  /* A proc body with a non-tail, non-binding statement: the one shape that emits the
+   * statement-position error auto-return (#98 — an inline flag test, not a call). */
+  if (!strcmp(name, "stmt_seq"))     return "proc f {} {\n[+ 1 1]\n[+ 20 22] }\n[f]";
   /* error cases (driver exits nonzero) */
   if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
   if (!strcmp(name, "set_undef_err"))return "set nope 1";

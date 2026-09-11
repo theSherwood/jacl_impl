@@ -397,6 +397,18 @@ fn typed_arithmetic_lowers_to_native_i32() {
 }
 
 #[test]
+fn statement_error_check_is_inline() {
+    // A non-tail statement's error auto-return is an inline error-flag test in the emitted
+    // IR, not a call into jacl_is_error_v (whose whole body is that one test) — #98.
+    let ir = emit_text("stmt_seq");
+    assert!(
+        !ir.contains("jacl_is_error_v"),
+        "the statement-position error check should be inline:\n{ir}"
+    );
+    run_case("stmt_seq", i32_val(42));
+}
+
+#[test]
 fn dynamic_arithmetic_keeps_runtime_calls() {
     // def x 5; [+ $x 10] — x is dyn, so the dynamic jacl_add path is used.
     let ir = emit_text("bind_read");
