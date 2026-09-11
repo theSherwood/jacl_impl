@@ -203,12 +203,31 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
   }
   return 0;
 }
+/* Immediate-scalar `==`: 1/0 for a pair the tag alone settles, -1 when the generic
+ * structural walk is needed. Two same-typed nil/bool/i32 values are the overwhelmingly
+ * common comparison, and answering them here keeps `jacl_eq` from making a second
+ * out-of-line call into `jacl_val_equal` for what is one payload compare (#98).
+ * Equivalent to `jacl_val_equal` by construction: for i32 that function settles on
+ * `jacl_int_val` (the sign-extended low 32 bits), for nil/bool on the type+payload
+ * compare reproduced here. */
+static inline int jacl_scalar_equal(JaclVal a, JaclVal b) {
+  uint32_t t = jaclrt_type_index(a);
+  if (t != jaclrt_type_index(b)) return -1;
+  if (t == 0x02) return jaclrt_as_i32(a) == jaclrt_as_i32(b);                  /* i32 */
+  if (t == 0x00 || t == 0x01)                                                  /* nil / bool */
+    return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
+  return -1;
+}
 JaclVal jacl_eq(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
+  int s = jacl_scalar_equal(a, b);
+  if (s >= 0) return jaclrt_bool(s != 0) | prop_flags(a, b);
   return jaclrt_bool(jacl_val_equal(a, b) != 0) | prop_flags(a, b);
 }
 JaclVal jacl_ne(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
+  int s = jacl_scalar_equal(a, b);
+  if (s >= 0) return jaclrt_bool(s == 0) | prop_flags(a, b);
   return jaclrt_bool(jacl_val_equal(a, b) == 0) | prop_flags(a, b);
 }
 JaclVal jacl_lt(JaclVal a, JaclVal b) {
@@ -409,6 +428,11 @@ JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v) {   /* in-place fiel
  * way; everything else (scalars, strings, vectors, maps — immutable JaclVals) is shared.
  * The non-moving mark-sweep heap keeps raw payload pointers valid across the nested allocs,
  * and every in-flight JaclVal lives in a scanned stack slot, so a mid-copy GC is safe. */
+/* The only two tags `jacl_deep_copy` does work for: everything else it returns as is. */
+static inline int jacl_needs_deep_copy(JaclVal v) {
+  uint32_t t = jaclrt_type_index(v);
+  return t == 0x1A || t == 0x12;      /* ARR / STRUCT */
+}
 JaclVal jacl_deep_copy(JaclVal v) {
   uint32_t t = jaclrt_type_index(v);
   if (t == 0x1A) return jacl_arr_copy(v);
@@ -429,8 +453,10 @@ JaclVal jacl_deep_copy(JaclVal v) {
 /* ---- box / deref / reset — a mutable single-slot ref (over the cell object) ---- */
 JaclVal jacl_box_new(JaclVal v) {
   /* `box` snapshots its argument by value: a boxed struct/buffer is independent of the
-   * original, so later mutation of the source does not leak into the box. */
-  JaclVal c = jacl_cell_new(jacl_deep_copy(v));
+   * original, so later mutation of the source does not leak into the box. Only the two
+   * mutable aggregates have anything to copy — for every other value `jacl_deep_copy`
+   * is the identity, so skip the call rather than pay it per `box` (#98). */
+  JaclVal c = jacl_cell_new(jacl_needs_deep_copy(v) ? jacl_deep_copy(v) : v);
   return jaclrt_from_ptr(JACL_TAG_BOX, jaclrt_as_ptr(c));
 }
 JaclVal jacl_box_get(JaclVal b) {
