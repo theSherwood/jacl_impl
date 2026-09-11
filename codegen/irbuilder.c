@@ -549,6 +549,10 @@ char *irb_to_text(const IrModule *m) {
  * out_str these are NUL-safe (length-tracked), mirroring temen-encode's write_* helpers
  * (crates/temen-encode/src/lib.rs). The `\0` sentinel out_reserve keeps past `len` is
  * inert here — binary content is delimited by `len`, never by a terminator. */
+/* The byte and varint writers are the encoder's innermost operations — `out_uleb` alone was
+ * 14,055 calls (20.7% of all calls) in a tour compile, one per integer field written, and clang
+ * would not inline them on its own. Forced inline: ~15,550 calls per compile removed, which matters
+ * in the guest where a call is an interpreter dispatch rather than a few cycles (#97). */
 static void out_u8(Out *o, uint8_t b) {
   out_reserve(o, 1);
   o->buf[o->len++] = (char)b;
@@ -605,10 +609,44 @@ static void out_str_bin(Out *o, const char *s) {
  * the source order irb_to_text emits and parse_module walks. */
 typedef struct { IrType *params; int np; IrType *results; int nr; } SigEntry;
 typedef struct { const char *name; uint32_t type_idx; } ImpEntry;
+/* Both tables are interned **per call-site instruction** over the whole module, so their linear
+ * scans dominated a compile: 1,640 `intern_type` calls produced 6,562 `bcmp` (sig_eq's elementwise
+ * compares, which clang lowers to bcmp) and 1,608 `intern_import` calls produced 10,339 `strcmp` —
+ * together ~30% of every call the compiler made (#97). Each table now carries an open-addressed
+ * index keyed by a hash of its entry, holding `slot = index + 1` (0 = empty).
+ *
+ * Index assignment is unchanged: a hit returns the existing index, a miss appends at the end, so
+ * entries still land in first-encounter order — which the wire format REQUIRES, because these
+ * indices must match the ones `temen_text::parse_module` derives from the text form (the round-trip
+ * equality this encoder is gated on). */
+#define IRB_INTERN_CAP 1024u /* power of two; tables hold a handful of entries in practice */
 typedef struct {
   SigEntry *types; int ntypes, cap_types;
   ImpEntry *imports; int nimports, cap_imports;
+  uint32_t type_ix[IRB_INTERN_CAP];   /* hash -> type index + 1 */
+  uint32_t imp_ix[IRB_INTERN_CAP];    /* hash -> import index + 1 */
 } ImportTable;
+
+/* FNV-1a over the bytes of a signature / a name; any stable hash works, collisions just fall
+ * through to the next slot and are resolved by the exact comparison the scan used before. */
+static uint32_t irb_hash_bytes(uint32_t h, const void *p, size_t n) {
+  const unsigned char *b = (const unsigned char *)p;
+  for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
+  return h;
+}
+static uint32_t sig_hash(const IrType *p, int np, const IrType *r, int nr) {
+  uint32_t h = 2166136261u;
+  h = irb_hash_bytes(h, &np, sizeof np);
+  h = irb_hash_bytes(h, &nr, sizeof nr);
+  h = irb_hash_bytes(h, p, (size_t)np * sizeof *p);
+  h = irb_hash_bytes(h, r, (size_t)nr * sizeof *r);
+  return h;
+}
+static uint32_t imp_hash(const char *name, uint32_t type_idx) {
+  uint32_t h = 2166136261u;
+  h = irb_hash_bytes(h, &type_idx, sizeof type_idx);
+  return irb_hash_bytes(h, name, strlen(name));
+}
 
 static int sig_eq(const SigEntry *e, const IrType *p, int np, const IrType *r, int nr) {
   if (e->np != np || e->nr != nr) return 0;
@@ -617,7 +655,20 @@ static int sig_eq(const SigEntry *e, const IrType *p, int np, const IrType *r, i
   return 1;
 }
 static uint32_t intern_type(ImportTable *t, const IrType *p, int np, const IrType *r, int nr) {
-  for (int i = 0; i < t->ntypes; i++) if (sig_eq(&t->types[i], p, np, r, nr)) return (uint32_t)i;
+  /* Use the hash index while the table has slack; past 3/4 full fall back to the original linear
+   * scan so probing can never run out of free slots (and so an unbounded entry count stays
+   * correct, just slower). `ntypes` only grows, so this switch is one-way. */
+  uint32_t mask = IRB_INTERN_CAP - 1, h = 0;
+  int hashed = (uint32_t)t->ntypes * 4u < IRB_INTERN_CAP * 3u;
+  if (hashed) {
+    for (h = sig_hash(p, np, r, nr) & mask;; h = (h + 1) & mask) {
+      uint32_t slot = t->type_ix[h];
+      if (!slot) break; /* free slot: absent — `h` is where the new index gets recorded below */
+      if (sig_eq(&t->types[slot - 1], p, np, r, nr)) return slot - 1;
+    }
+  } else {
+    for (int i = 0; i < t->ntypes; i++) if (sig_eq(&t->types[i], p, np, r, nr)) return (uint32_t)i;
+  }
   if (t->ntypes == t->cap_types) {
     t->cap_types = t->cap_types ? t->cap_types * 2 : 4;
     t->types = realloc(t->types, (size_t)t->cap_types * sizeof(SigEntry));
@@ -626,17 +677,31 @@ static uint32_t intern_type(ImportTable *t, const IrType *p, int np, const IrTyp
   SigEntry *e = &t->types[t->ntypes];
   e->params = dup_types(p, np); e->np = np;
   e->results = dup_types(r, nr); e->nr = nr;
+  if (hashed) t->type_ix[h] = (uint32_t)t->ntypes + 1;
   return (uint32_t)t->ntypes++;
 }
 static uint32_t intern_import(ImportTable *t, const char *name, uint32_t type_idx) {
-  for (int i = 0; i < t->nimports; i++)
-    if (t->imports[i].type_idx == type_idx && !strcmp(t->imports[i].name, name)) return (uint32_t)i;
+  /* Same shape as `intern_type`: hashed while there is slack, linear past 3/4 full. */
+  uint32_t mask = IRB_INTERN_CAP - 1, h = 0;
+  int hashed = (uint32_t)t->nimports * 4u < IRB_INTERN_CAP * 3u;
+  if (hashed) {
+    for (h = imp_hash(name, type_idx) & mask;; h = (h + 1) & mask) {
+      uint32_t slot = t->imp_ix[h];
+      if (!slot) break;
+      const ImpEntry *e = &t->imports[slot - 1];
+      if (e->type_idx == type_idx && !strcmp(e->name, name)) return slot - 1;
+    }
+  } else {
+    for (int i = 0; i < t->nimports; i++)
+      if (t->imports[i].type_idx == type_idx && !strcmp(t->imports[i].name, name)) return (uint32_t)i;
+  }
   if (t->nimports == t->cap_imports) {
     t->cap_imports = t->cap_imports ? t->cap_imports * 2 : 4;
     t->imports = realloc(t->imports, (size_t)t->cap_imports * sizeof(ImpEntry));
     if (!t->imports) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
   }
   t->imports[t->nimports] = (ImpEntry){name, type_idx};
+  if (hashed) t->imp_ix[h] = (uint32_t)t->nimports + 1;
   return (uint32_t)t->nimports++;
 }
 
