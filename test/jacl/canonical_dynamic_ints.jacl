@@ -1,0 +1,44 @@
+# expect: 37
+# expect: true
+# expect: v37
+# expect: v37
+# expect: v37
+# expect: v37
+# expect: vk
+# expect: 4000000000
+# expect: -4000000000
+#
+# A dynamic integer takes the narrowest representation that holds it, so its representation
+# is a function of the magnitude and never of the path that computed it (jacl #107).
+#
+# Before this, the wide branches returned a heap i64 even for a result that fits in i32.
+# `jacl_val_equal` settles integers by value but `jmap_key_hash` mixes the raw bits — a
+# pointer, for a heap wide int — so a wide-computed 37 hashed to a different bucket than the
+# inline 37 it compares equal to, and the lookup silently missed. It only showed up once a
+# map was big enough to leave the small-map linear scan, which is what made it quiet.
+#
+# The map below has 64 keys to force the hashed path.
+
+def m [map 0 "v0" 1 "v1" 2 "v2" 3 "v3" 4 "v4" 5 "v5" 6 "v6" 7 "v7" 8 "v8" 9 "v9" 10 "v10" 11 "v11" 12 "v12" 13 "v13" 14 "v14" 15 "v15" 16 "v16" 17 "v17" 18 "v18" 19 "v19" 20 "v20" 21 "v21" 22 "v22" 23 "v23" 24 "v24" 25 "v25" 26 "v26" 27 "v27" 28 "v28" 29 "v29" 30 "v30" 31 "v31" 32 "v32" 33 "v33" 34 "v34" 35 "v35" 36 "v36" 37 "v37" 38 "v38" 39 "v39" 40 "v40" 41 "v41" 42 "v42" 43 "v43" 44 "v44" 45 "v45" 46 "v46" 47 "v47" 48 "v48" 49 "v49" 50 "v50" 51 "v51" 52 "v52" 53 "v53" 54 "v54" 55 "v55" 56 "v56" 57 "v57" 58 "v58" 59 "v59" 60 "v60" 61 "v61" 62 "v62" 63 "v63"]
+
+def s 2000000000
+def a [+ $s $s]                     # 4000000000 — promoted, genuinely wide
+
+# a 37 computed through the wide path is the same value, and the same key
+def w [- $a [- $a 37]]
+print $w
+print [== $w 37]
+print [map-get $m $w]
+
+# every dynamic wide operation canonicalizes, not just subtraction
+print [map-get $m [/ $a [/ $a 37]]]
+print [map-get $m [+% $a [- 37 $a]]]
+print [map-get $m [*% [- $a [- $a 37]] 1]]
+
+# the key hash recurses into vectors, so an element has to be canonical too
+def vm [map [vec 1 37] "vk"]
+print [map-get $vm [vec 1 [- $a [- $a 37]]]]
+
+# a value that does NOT fit stays wide, and keeps its value
+print $a
+print [- 0 $a]
