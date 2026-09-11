@@ -40,12 +40,19 @@ fn main() {
     // form is how the macro-bearing tour is baked: the self-hosted guest (which CAN stage macros)
     // emits the IR, and this path links it against the runtime + powerbox exactly like the C path.
     let (program, out_path) = match args.as_slice() {
-        // `--ir` takes TEMEN-IR **text** (what the self-hosted guest emits on stdout — the macro-capable
-        // path), parsed the same way `temen_link_run` parses the playground's live compile.
+        // `--ir` takes what the self-hosted guest emits on stdout (the macro-capable path): a **binary**
+        // TEMEN object, or TEMEN-IR **text**. Sniffed by the container magic exactly as `temen_link_run`
+        // sniffs the playground's live compile, so either form bakes.
         [flag, ir_path, out] if flag == "--ir" => {
-            let text = std::fs::read_to_string(ir_path).expect("read --ir file");
-            let m = temen_text::parse_module(&text)
-                .unwrap_or_else(|e| panic!("parse --ir text: {e:?}"));
+            let bytes = std::fs::read(ir_path).expect("read --ir file");
+            let m = if temen_encode::wire::is_module_blob(&bytes) {
+                temen_encode::decode_unit(&bytes)
+                    .unwrap_or_else(|e| panic!("decode --ir object: {e:?}"))
+            } else {
+                let text = String::from_utf8(bytes).expect("--ir file is neither an object nor UTF-8 text");
+                temen_text::parse_module(&text)
+                    .unwrap_or_else(|e| panic!("parse --ir text: {e:?}"))
+            };
             (m, PathBuf::from(out))
         }
         // The default path runs the emit-only C driver (binary object → `decode_emitted`); no macros.

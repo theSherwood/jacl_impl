@@ -3898,6 +3898,2831 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   tc->expected_type = outer_et;
 }
 
+/* The named-command arm of `typer__infer_command_inner`, split out of it so each emitted function
+ * stays under the browser host's per-function optimizer limit (temen#1384: TurboFan zone-OOMs the
+ * renderer on the ~1 MB inline body, and the playground's 512 KB cap otherwise keeps the whole
+ * dispatch interpreted — the typer's hot path). Pure extraction: the body is byte-for-byte what it
+ * was inline, `return`s included (both functions are void). Reached when the command's head is a
+ * string literal and no proc / struct / closure-call shape matched earlier. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
+  HeadId hid = (HeadId)node->data.command.head_id;
+  const char* hn = head->data.lit_string.value;
+  uint32_t    hl = head->data.lit_string.length;
+
+  /* Pipe operator: the compiler's compile_pipe_op rewrites
+   * `[| lhs rhs]` into a synthetic command that prepends lhs as
+   * the first arg of rhs (or wraps rhs as head with lhs as the
+   * arg). The result type matches that synthetic call.
+   *
+   * Special case: rhs is a 1-arg binary-op call like `[* 3]` —
+   * after pipe rewrite this becomes `[* lhs 3]` (a binary op).
+   * The typer's binary-op rule only fires for arg_count==2, so
+   * we replay it here using lhs and rhs's single arg. */
+  if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
+    AstNode* lhs = node->data.command.args[0];
+    AstNode* rhs = node->data.command.args[1];
+    JaclType lhs_t = (JaclType)lhs->inferred_type;
+    if (rhs->type == AST_COMMAND && rhs->data.command.arg_count == 1 &&
+        rhs->data.command.head &&
+        rhs->data.command.head->type == AST_LIT_STRING) {
+      const char* hn2 = rhs->data.command.head->data.lit_string.value;
+      uint32_t    hl2 = rhs->data.command.head->data.lit_string.length;
+      bool is_arith2 = (hl2 == 1 && (hn2[0] == '+' || hn2[0] == '-' ||
+                                     hn2[0] == '*' || hn2[0] == '/' ||
+                                     hn2[0] == '%'));
+      bool is_cmp2 = (hl2 == 1 && (hn2[0] == '<' || hn2[0] == '>')) ||
+                     (hl2 == 2 && (memcmp(hn2, "<=", 2) == 0 ||
+                                   memcmp(hn2, ">=", 2) == 0 ||
+                                   memcmp(hn2, "==", 2) == 0));
+      if (is_arith2 || is_cmp2) {
+        AstNode* arg = rhs->data.command.args[0];
+        JaclType arg_t = (JaclType)arg->inferred_type;
+        if (is_cmp2) {
+          node->inferred_type = TYPE_BOOL;
+        } else if (lhs_t == arg_t && lhs_t != TYPE_DYN) {
+          node->inferred_type = lhs_t;
+        } else {
+          node->inferred_type = TYPE_DYN;
+        }
+        return;
+      }
+    }
+    node->inferred_type = rhs->inferred_type;
+    node->inferred_struct_idx = rhs->inferred_struct_idx;
+    return;
+  }
+
+  /* Receiver-preserving vec/map builtins. Result depends on whether
+   * the typer knows the receiver type:
+   *   typed vec/map → typed result (with elem-type idx propagated)
+   *   plain vec/map → plain result
+   *   DYN          → DYN (compiler's c->last_expr_type fallback wins)
+   * Annotating DYN as VEC/MAP would mask a typed receiver that the
+   * compiler tracks but the typer does not, leading to silent miscompile. */
+  if (node->data.command.arg_count >= 1) {
+    AstNode*  recv = node->data.command.args[0];
+    JaclType  recv_t = (JaclType)recv->inferred_type;
+    switch (hid) {
+      case HEAD_VEC_PUSH:   case HEAD_VEC_SET:
+      case HEAD_VEC_CONCAT: case HEAD_VEC_SLICE:
+        if (recv_t == TYPE_TYPED_VEC) {
+          node->inferred_type = TYPE_TYPED_VEC;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+        } else if (recv_t == TYPE_VEC) {
+          node->inferred_type = TYPE_VEC;
+        }
+        return;
+      case HEAD_MAP_SET: case HEAD_MAP_REMOVE:
+        if (recv_t == TYPE_TYPED_MAP) {
+          node->inferred_type = TYPE_TYPED_MAP;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+          node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
+        } else if (recv_t == TYPE_MAP) {
+          /* Stamped ref-kind maps keep their static key/value types
+           * through set/remove (the result is the same plain map rep). */
+          node->inferred_type = TYPE_MAP;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+          node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
+        }
+        return;
+      case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
+        if (recv_t == TYPE_TYPED_MAP) {
+          /* keys: dyn-keyed maps return a plain vec (matches the
+           * runtime path in OP_TYPED_MAP_KEYS keyed on
+           * key_type_idx == 0xFFFF); str keys return a PLAIN vec too
+           * (str can't live in GC-opaque typed-vec storage) but carry
+           * the [Vec str] stamp. Struct/numeric keys yield a typed
+           * vec. vals on a TYPE_TYPED_MAP always have a declared
+           * value type, so they're always typed-vec. */
+          if (hid == HEAD_MAP_KEYS &&
+              recv->inferred_key_struct_idx == UINT32_MAX) {
+            node->inferred_type = TYPE_VEC;
+          } else if (hid == HEAD_MAP_KEYS &&
+                     recv->inferred_key_struct_idx ==
+                         JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+            node->inferred_type = TYPE_VEC;
+            node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+          } else {
+            node->inferred_type = TYPE_TYPED_VEC;
+            node->inferred_struct_idx =
+                (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
+                                       : recv->inferred_struct_idx;
+          }
+        } else if (recv_t == TYPE_MAP) {
+          /* Plain rep: result is a plain vec; a str stamp on the
+           * relevant side ([Map str V] keys / [Map K str] vals)
+           * propagates as [Vec str]. Other stamps (numeric plain-rep
+           * keys) stay unstamped — the vec holds tagged values. */
+          node->inferred_type = TYPE_VEC;
+          uint32_t side_idx =
+              (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
+                                     : recv->inferred_struct_idx;
+          if (side_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR))
+            node->inferred_struct_idx = side_idx;
+        }
+        return;
+      case HEAD_VEC_GET:
+        /* Element narrowing: typed-vec elem_idx is either a real struct
+         * registry index (→ TYPE_STRUCT) or a JACL_SCALAR_TYPE_IDX
+         * sentinel (→ that scalar JaclType). */
+        if (recv_t == TYPE_TYPED_VEC &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t eidx = recv->inferred_struct_idx;
+          if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+            node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+          } else if (eidx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = eidx;
+          }
+        } else if (recv_t == TYPE_VEC &&
+                   recv->inferred_struct_idx != UINT32_MAX &&
+                   JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+          /* Stamped ref-element vec ([Vec str]): element narrows. */
+          node->inferred_type =
+              JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+        } else if (recv_t == TYPE_VEC) {
+          /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
+           * suppressed by the cross-registry rule, so the element SHAPE comes
+           * from the receiver via the consolidated helper (binding for a
+           * var-ref today; the stamp directly once 2c un-suppresses). Decode
+           * it to a PORTABLE result encoding, mirroring HEAD_FOR. A depth-3+
+           * inner shape stays suppressed on the AST (the def handler
+           * re-derives it into the new binding). */
+          uint32_t vsh = typer__receiver_coll_shape(tc, recv);
+          if (vsh != UINT32_MAX) {
+            uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+            JaclType ek = typer__buf_elem_decode(tc, vsh, &iv, &ik);
+            if (ek == TYPE_TYPED_VEC) {
+              bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                               (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                                JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+              bool inner_shape = typer__is_shape_idx(tc, iv);
+              if (inner_ref) {
+                node->inferred_type = TYPE_VEC;
+                if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
+                  node->inferred_struct_idx = iv;
+              } else if (inner_shape) {
+                node->inferred_type = TYPE_VEC;  /* stamp stays suppressed */
+              } else {
+                node->inferred_type = TYPE_TYPED_VEC;
+                node->inferred_struct_idx = iv;
+              }
+            } else if (ek == TYPE_TYPED_MAP) {
+              JaclType mt; uint32_t msi, mki;
+              typer__decode_map_shape(iv, ik, &mt, &msi, &mki);
+              node->inferred_type = mt;
+              node->inferred_struct_idx = msi;
+              node->inferred_key_struct_idx = mki;
+            } else if (ek == TYPE_CLOSURE) {
+              /* B3c follow-up: [Vec [Proc …]] element — vec-get narrows to a
+               * typed closure carrying the element signature (typer-side
+               * shape), so a `def g [vec-get $fns 0]` binding stamps as a
+               * typed closure and `[g …]` is a typed call. Mirrors HEAD_FOR. */
+              node->inferred_type = TYPE_CLOSURE;
+              node->inferred_struct_idx = vsh;
+              /* Step 2b: portable stamp so the compiler can type a DIRECT call
+               * of the get result — `[[vec-get $fns 0] 5]` — where there's no
+               * binding to re-derive from. */
+              node->inferred_proc_shape_idx =
+                  typer__portable_proc_shape(tc, vsh);
+            }
+          }
+        }
+        return;
+      /* arr ops mirror vec: get narrows to the element type for a typed
+       * receiver; set returns the (reference) arr. See ARR_DESIGN.md M4c. */
+      case HEAD_ARR_GET:
+      case HEAD_ARR_POP:
+        /* Both narrow to the element type for a typed receiver. arr-pop on a
+         * struct array pushes inline struct slots, so the result type MUST
+         * be TYPE_STRUCT or the compiler under-counts the stack. */
+        if (recv_t == TYPE_TYPED_ARR &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t eidx = recv->inferred_struct_idx;
+          if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+            /* Narrow to the element scalar for ALL scalars. i64/u64/f64 come
+             * back as unboxed wide bits (vm__arr_scalar_load), matching
+             * typed-vec; OP_TO_DYN bridges them at dyn sinks. */
+            node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+          } else if (eidx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = eidx;
+          }
+        } else if (recv_t == TYPE_ARR &&
+                   recv->inferred_struct_idx != UINT32_MAX &&
+                   JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
+          /* Stamped ref-element arr ([Arr str]): element narrows. */
+          node->inferred_type =
+              JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
+        } else if (recv_t == TYPE_ARR) {
+          /* B3c follow-up: [Arr [Proc …]] element — the proc-shape elem rides
+           * the receiver (AST stamp suppressed by the cross-registry rule), so
+           * recover it via the consolidated helper and narrow arr-get/arr-pop
+           * to a typed closure. Mirrors the vec-get arm and HEAD_FOR. */
+          uint32_t ash = typer__receiver_coll_shape(tc, recv);
+          if (ash != UINT32_MAX) {
+            uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+            if (typer__decode_proc_shape(tc, ash, &pc2, pts2, &rt2)) {
+              node->inferred_type = TYPE_CLOSURE;
+              node->inferred_struct_idx = ash;
+              /* Step 2b: portable stamp for a DIRECT call of the get result. */
+              node->inferred_proc_shape_idx =
+                  typer__portable_proc_shape(tc, ash);
+            }
+          }
+        }
+        return;
+      case HEAD_ARR_SET:
+        if (recv_t == TYPE_TYPED_ARR) {
+          node->inferred_type = TYPE_TYPED_ARR;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+        } else if (recv_t == TYPE_ARR) {
+          /* Stamped ref-element arrs keep their element type. */
+          node->inferred_type = TYPE_ARR;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+        }
+        return;
+      case HEAD_BUF_SET:
+      case HEAD_BUF_USET:
+        /* [buf-set $b $i $v] / [buf-unchecked-set $b $i $v]:
+         * compile-time type check on $v against the buf's element
+         * type. Result type (TYPE_NIL) comes from fixed_returns
+         * below; we just emit any mismatch error here. */
+        if (recv_t == TYPE_BUF &&
+            recv->inferred_struct_idx != UINT32_MAX &&
+            node->data.command.arg_count == 3) {
+          typer__check_buf_set_value(tc, recv->inferred_struct_idx,
+                                      node->data.command.args[2]);
+        }
+        break;  /* fall through to fixed_returns for TYPE_NIL */
+      case HEAD_BUF_GET:
+      case HEAD_BUF_UGET:
+        /* Result type of [buf-get $b $i] / [buf-unchecked-get $b $i].
+         * Decode via the typer's shape registry: scalar elements
+         * surface as their JaclType (small ints widen to i32 at the
+         * dyn boundary); typed-vec / typed-map elements propagate
+         * V (and K for maps) to the result AST so chained map-get /
+         * vec-get / arrow chains narrow correctly. */
+        if (recv_t == TYPE_BUF && recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
+          JaclType elem = typer__buf_elem_decode(tc,
+              recv->inferred_struct_idx, &inner_v, &inner_k);
+          switch (elem) {
+            case TYPE_I8: case TYPE_U8:
+            case TYPE_I16: case TYPE_U16:
+              node->inferred_type = TYPE_I32; break;
+            case TYPE_TYPED_VEC:
+              node->inferred_type = TYPE_TYPED_VEC;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_TYPED_MAP:
+              node->inferred_type = TYPE_TYPED_MAP;
+              node->inferred_struct_idx = inner_v;
+              node->inferred_key_struct_idx = inner_k;
+              break;
+            case TYPE_PTR:
+              node->inferred_type = TYPE_PTR;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_FUTURE:
+              node->inferred_type = TYPE_FUTURE;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_STRUCT:
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = recv->inferred_struct_idx;
+              break;
+            default:
+              node->inferred_type = elem; break;
+          }
+        }
+        return;
+      case HEAD_MAP_GET:
+        if (recv_t == TYPE_TYPED_MAP &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t eidx = recv->inferred_struct_idx;
+          if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+            node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+          } else if (eidx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = eidx;
+          }
+        } else if (recv_t == TYPE_MAP &&
+                   recv->inferred_struct_idx ==
+                       JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
+          /* Stamped ref-value map ([Map K str]): the value narrows. */
+          node->inferred_type = TYPE_STR;
+        } else if (recv_t == TYPE_MAP) {
+          /* Nested compound VALUE map ([Map str [Vec i64]]): recover the
+           * typer-side value shape from the receiver via the consolidated
+           * helper and decode to a PORTABLE result encoding (mirrors vec-get
+           * on shape-carried vec bindings). */
+          uint32_t msh = typer__receiver_coll_shape(tc, recv);
+          if (msh != UINT32_MAX) {
+            uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+            JaclType ek = typer__buf_elem_decode(tc, msh, &iv, &ik);
+            if (ek == TYPE_TYPED_VEC) {
+              bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                               (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                                JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+              bool inner_shape = typer__is_shape_idx(tc, iv);
+              if (inner_ref) {
+                node->inferred_type = TYPE_VEC;
+                if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
+                  node->inferred_struct_idx = iv;
+              } else if (inner_shape) {
+                node->inferred_type = TYPE_VEC;  /* stamp suppressed */
+              } else {
+                node->inferred_type = TYPE_TYPED_VEC;
+                node->inferred_struct_idx = iv;
+              }
+            } else if (ek == TYPE_TYPED_MAP) {
+              JaclType mt; uint32_t msi, mki;
+              typer__decode_map_shape(iv, ik, &mt, &msi, &mki);
+              node->inferred_type = mt;
+              node->inferred_struct_idx = msi;
+              node->inferred_key_struct_idx = mki;
+            }
+          }
+        }
+        return;
+      case HEAD_RESET:
+        /* reset on struct-box → returns the new struct bytes (TOS).
+         * reset on plain box → returns NIL. */
+        if (node->data.command.arg_count == 2) {
+          AstNode* val = node->data.command.args[1];
+          if ((JaclType)val->inferred_type == TYPE_STRUCT &&
+              val->inferred_struct_idx != UINT32_MAX) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = val->inferred_struct_idx;
+          } else {
+            node->inferred_type = TYPE_NIL;
+          }
+        } else {
+          node->inferred_type = TYPE_NIL;
+        }
+        return;
+      case HEAD_FILTER:
+        /* filter preserves the receiver's collection type, including
+         * elem (and key) struct_idx. Mirrors compiler__compile_hof_builtin:
+         * typed receiver → typed result; plain → plain; stream → stream. */
+        if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP ||
+            recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
+            recv_t == TYPE_STREAM) {
+          node->inferred_type = recv_t;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+          node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
+          /* Typed-closure predicate (TYPED_CLOSURES_DESIGN.md Phase A): over a
+           * typed stream, type the predicate body with its param bound to the
+           * source element type (the truthiness return is discarded, so we
+           * ignore the result enc — we just want the body typed). For a wide
+           * element this leaves the body compiled to read the param wide, so
+           * the filter pull can skip the box-for-call. Only inline procs are
+           * affected; typer__proc_result_enc no-ops on a var-ref predicate. */
+          if (recv_t == TYPE_STREAM &&
+              node->data.command.arg_count == 2 &&
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t arg_enc = recv->inferred_struct_idx;
+            bool pred_typed = false;
+            (void)typer__proc_result_enc(
+                tc, node->data.command.args[1], &arg_enc, 1, &pred_typed);
+            /* Stamp the predicate proc node so the compiler bakes the
+             * param rep onto OP_FILTER iff the body was actually typed
+             * against the element (a clean probe). On fallback/non-proc it
+             * stays dyn → the pull boxes a wide element for the call.
+             * An inline proc skipped the generic pre-walk (type-once), so
+             * also give it the TYPE_CLOSURE stamp handle_proc would have. */
+            node->data.command.args[1]->inferred_struct_idx =
+                pred_typed ? arg_enc : UINT32_MAX;
+            if (node->data.command.args[1]->type == AST_COMMAND &&
+                node->data.command.args[1]->data.command.head_id == HEAD_PROC)
+              node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
+          }
+        }
+        return;
+      case HEAD_TRANSFORM:
+        /* transform on typed_vec → plain TYPE_VEC (loses elem typing).
+         * On plain receivers preserves the receiver type (vec/stream).
+         * Mirrors compiler__compile_hof_builtin. */
+        if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP) {
+          node->inferred_type = TYPE_VEC;
+        } else if (recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
+                   recv_t == TYPE_STREAM) {
+          node->inferred_type = recv_t;
+          /* transform over a typed stream → a stream of the mapper's return
+           * type: bind the mapper proc's param to the source element type
+           * and infer its body. Works for any inline proc, not just `\`
+           * lambdas. (Output element falls back to dyn when the return type
+           * can't be inferred.) */
+          if (recv_t == TYPE_STREAM &&
+              node->data.command.arg_count == 2 &&
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t arg_enc = recv->inferred_struct_idx;
+            bool mapper_typed = false;
+            node->inferred_struct_idx = typer__proc_result_enc(
+                tc, node->data.command.args[1], &arg_enc, 1, &mapper_typed);
+            /* Stamp the mapper node with the element enc iff its body was
+             * monomorphized (typed against the element). The compiler
+             * requires this for struct-element streams: only a
+             * monomorphized inline mapper can take the N-slot element.
+             * An inline proc skipped the generic pre-walk (type-once), so
+             * also give it the TYPE_CLOSURE stamp handle_proc would have. */
+            node->data.command.args[1]->inferred_struct_idx =
+                mapper_typed ? arg_enc : UINT32_MAX;
+            if (node->data.command.args[1]->type == AST_COMMAND &&
+                node->data.command.args[1]->data.command.head_id == HEAD_PROC)
+              node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
+          }
+        }
+        return;
+      case HEAD_TAKE:
+        /* take preserves the receiver's collection kind:
+         * vec → vec, typed_vec → typed_vec (slice keeps element types),
+         * stream → stream. Mirrors vm.c:OP_TAKE branches. */
+        if (recv_t == TYPE_TYPED_VEC) {
+          node->inferred_type = TYPE_TYPED_VEC;
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+        } else if (recv_t == TYPE_VEC || recv_t == TYPE_STREAM) {
+          node->inferred_type = recv_t;
+          /* Preserve the element type for typed streams/vecs so a for-loop
+           * over `take N <typed stream>` still narrows. Mirrors filter. */
+          node->inferred_struct_idx = recv->inferred_struct_idx;
+        }
+        return;
+      case HEAD_FIRST:
+        /* first returns the receiver's first element. Narrow when
+         * the receiver is a typed-vec with a knowable element type
+         * (same encoding as vec-get / map-get). Plain vec / map /
+         * stream → DYN since elements are heterogeneously typed. */
+        if (recv_t == TYPE_TYPED_VEC &&
+            recv->inferred_struct_idx != UINT32_MAX) {
+          uint32_t eidx = recv->inferred_struct_idx;
+          if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+            node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+          } else if (eidx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = eidx;
+          }
+        }
+        return;
+      default: break;
+    }
+  }
+
+  /* Fixed-return table: builtins where the compiler's typed and untyped
+   * paths agree on the result. Vec/map mutations on typed receivers are
+   * handled above; the entries below cover the dyn-receiver path. */
+  static const struct { HeadId hid; uint8_t ret; } fixed_returns[] = {
+    /* Predicates and short-circuit logicals — always bool. */
+    { HEAD_ATOM_Q,      TYPE_BOOL   },
+    { HEAD_FUTURE_Q,    TYPE_BOOL   },
+    { HEAD_ERROR_Q,     TYPE_BOOL   },
+    { HEAD_BOX_Q,       TYPE_BOOL   },
+    { HEAD_MAP_HAS,     TYPE_BOOL   },
+    { HEAD_AMP_AMP,     TYPE_BOOL   },
+    { HEAD_PIPE_PIPE,   TYPE_BOOL   },
+    { HEAD_TILDE,       TYPE_BOOL   },
+    /* Length-style builtins — always i32 (typed and untyped). */
+    { HEAD_LENGTH,      TYPE_I32    },
+    { HEAD_BYTE_LENGTH, TYPE_I32    },
+    { HEAD_COUNT,       TYPE_I32    },
+    { HEAD_VEC_LEN,     TYPE_I32    },
+    { HEAD_MAP_LEN,     TYPE_I32    },
+    { HEAD_BUF_LEN,     TYPE_I32    },
+    { HEAD_ARR_LEN,     TYPE_I32    },
+    /* arr-push mutates in place and returns the new length (i32). */
+    { HEAD_ARR_PUSH,    TYPE_I32    },
+    /* Hash — OP_HASH always pushes an i32 (vm.c:6859). */
+    { HEAD_HASH,        TYPE_I32    },
+    /* String results. */
+    { HEAD_TO_STRING,   TYPE_STR    },
+    { HEAD_SLICE,       TYPE_STR    },
+    { HEAD_CONCAT,      TYPE_STR    },
+    /* Stream constructors. */
+    { HEAD_RANGE,            TYPE_STREAM },
+    { HEAD_RANGE_INCLUSIVE,  TYPE_STREAM },
+    { HEAD_LINES,       TYPE_STREAM },
+    /* Constructors that always produce dyn collections. */
+    { HEAD_VEC,         TYPE_VEC    },
+    { HEAD_MAP,         TYPE_MAP    },
+    { HEAD_COLLECT,     TYPE_VEC    },
+    /* Mutable arr: constructor + in-place set (returns the arr). arr-get
+     * and arr-pop stay dyn (fall through to the default). See ARR_DESIGN.md. */
+    { HEAD_ARR,         TYPE_ARR    },
+    { HEAD_ARR_SET,     TYPE_ARR    },
+    /* Side-effecting — always nil. */
+    { HEAD_PRINT,       TYPE_NIL    },
+    { HEAD_BUF_SET,     TYPE_NIL    },
+    { HEAD_BUF_USET,    TYPE_NIL    },
+    /* File I/O — write/append produce nil on success, error value on
+     * failure (catchable via try/catch).  read-file produces a string. */
+    { HEAD_READ_FILE,   TYPE_STR    },
+    { HEAD_WRITE_FILE,  TYPE_NIL    },
+    { HEAD_APPEND_FILE, TYPE_NIL    },
+    { HEAD_DELETE_FILE, TYPE_NIL    },
+    { HEAD_FILE_EXISTS, TYPE_BOOL   },
+    { HEAD_LIST_DIR,    TYPE_VEC    },
+    /* Atom watchers — both side-effecting, return nil. */
+    { HEAD_WATCH,       TYPE_NIL    },
+    { HEAD_UNWATCH,     TYPE_NIL    },
+    /* Loop forms — emit OP_NIL at normal exit. break-with-value
+     * paths could carry a different type but are conservatively
+     * unified to nil here; refine in a later commit if needed. */
+    { HEAD_WHILE,       TYPE_NIL    },
+    { HEAD_FOR,         TYPE_NIL    },
+    /* Yield — pushes nil after resume in current SM compilation. */
+    { HEAD_YIELD,       TYPE_NIL    },
+    /* Sleep — always evaluates to nil (after wake or after nanosleep). */
+    { HEAD_SLEEP,       TYPE_NIL    },
+    /* Job control — bool indicates delivered/cancelled. */
+    { HEAD_SIGNAL,      TYPE_BOOL   },
+    { HEAD_CANCEL,      TYPE_BOOL   },
+    /* Concurrency: parallel resolves N futures and pushes a vec of
+     * results in input order (vm.c:5066 — `cont_arg = jacl_vector_ptr(vec)`).
+     * spawn/await/race stay DYN: spawn returns a future (no
+     * TYPE_FUTURE in the type system today), await unwraps the
+     * future to whatever type the body produced, race returns the
+     * winner's value — all dynamically determined. */
+    { HEAD_PARALLEL,    TYPE_VEC    },
+    /* Syntax-object introspection (US-015) — fixed result types. */
+    { HEAD_SYNTAX_KIND,     TYPE_STR },
+    { HEAD_SYNTAX_ARGS,     TYPE_VEC },
+    { HEAD_SYNTAX_COMMANDS, TYPE_VEC },
+    { HEAD_SYNTAX_POS,      TYPE_MAP },
+    { HEAD_SYNTAX_STR,      TYPE_STR },
+  };
+  bool matched = false;
+  for (size_t fi = 0; fi < sizeof(fixed_returns)/sizeof(fixed_returns[0]); fi++) {
+    if (hid == fixed_returns[fi].hid) {
+      node->inferred_type = fixed_returns[fi].ret;
+      matched = true;
+      break;
+    }
+  }
+  if (matched) {
+    /* Stream constructors: stamp the element-type idx so `for x in s`
+     * narrows the loop binding (parallel to TYPE_TYPED_VEC's idx).
+     * `range` / `range-inclusive` yield i64 (vm.c OP_RANGE produces
+     * i64 via jacl_i64), `lines` yields str. */
+    if (hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
+      node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_I64);
+    } else if (hid == HEAD_LINES) {
+      node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+    } else if (hid == HEAD_COLLECT && node->data.command.arg_count == 1) {
+      /* Typed collect: collecting a TYPED
+       * stream materializes a typed vec [Vec T] — wide elements stored
+       * flat (no i32-for-small box-back), struct elements stored as
+       * inline bytes. Dyn streams (and vec identity) keep TYPE_VEC.
+       * The VM keys the same decision off the stream's runtime elem_idx,
+       * so dyn-flow and typed-flow agree. */
+      AstNode* recv = node->data.command.args[0];
+      if ((JaclType)recv->inferred_type == TYPE_STREAM &&
+          recv->inferred_struct_idx != UINT32_MAX) {
+        uint32_t ce = recv->inferred_struct_idx;
+        /* Value-type elements only — same rule as the [Vec T] constructor:
+         * typed-vec storage is GC-OPAQUE raw bytes, so str (a heap
+         * pointer) must stay in a plain (traced) vec. dyn streams keep
+         * the plain vec too. */
+        bool ce_ok = !JACL_IS_SCALAR_TYPE_IDX(ce) /* struct */ ||
+                     (JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_DYN &&
+                      JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_STR);
+        if (ce_ok) {
+          node->inferred_type = TYPE_TYPED_VEC;
+          node->inferred_struct_idx = ce;
+          node->inferred_key_struct_idx = UINT32_MAX;
+        } else if (JACL_IS_SCALAR_TYPE_IDX(ce) &&
+                   JACL_TYPE_IDX_TO_SCALAR(ce) == TYPE_STR) {
+          /* str elements: ref-element [Vec str] — plain traced vec REP
+           * (the VM keeps the plain-vec collect path), element type
+           * carried statically so for-loops over the result narrow. */
+          node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
+          node->inferred_key_struct_idx = UINT32_MAX;
+        }
+      }
+    }
+  } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
+    /* [box $val]: runtime returns a box wrapping the value. The
+     * box's element type is the value's static type, encoded the
+     * same way as TYPE_FUTURE / TYPE_TYPED_VEC — scalar sentinel
+     * for scalar elements, real struct idx for struct elements. */
+    AstNode* val = node->data.command.args[0];
+    JaclType vt = (JaclType)val->inferred_type;
+    node->inferred_type = TYPE_BOX;
+    if (vt == TYPE_STRUCT) {
+      node->inferred_struct_idx = val->inferred_struct_idx;
+    } else if (vt != TYPE_DYN) {
+      node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(vt);
+    }
+  } else if (hid == HEAD_DEREF && node->data.command.arg_count == 1) {
+    /* [deref $box]: narrow to the box's element type. Scalar
+     * elements use the JACL_SCALAR_TYPE_IDX sentinel encoding;
+     * struct elements use the registry idx and the compiler
+     * emits OP_DEREF_INLINE to materialize inline struct bytes
+     * (parallel to the unbox path's struct-box handling). */
+    AstNode* recv = node->data.command.args[0];
+    JaclType rt = (JaclType)recv->inferred_type;
+    uint32_t e_idx = recv->inferred_struct_idx;
+    if (rt == TYPE_BOX && e_idx != UINT32_MAX) {
+      if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      } else {
+        node->inferred_type = TYPE_STRUCT;
+        node->inferred_struct_idx = e_idx;
+      }
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+  } else if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
+    /* [swap $box $fn]: scalar-element narrowing only. Struct
+     * elements stay dyn — swap's fn-return path doesn't have an
+     * inline-struct opcode yet (would need OP_SWAP_INLINE). */
+    AstNode* recv = node->data.command.args[0];
+    JaclType rt = (JaclType)recv->inferred_type;
+    uint32_t e_idx = recv->inferred_struct_idx;
+    if (rt == TYPE_BOX && e_idx != UINT32_MAX &&
+        JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+      node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+  } else if (hid == HEAD_SPAWN && node->data.command.arg_count == 1 &&
+             node->data.command.args[0]->type == AST_BLOCK) {
+    /* spawn: runtime returns a future (vm.c:4763). Element type is
+     * the body's tail type when concrete, dyn otherwise. The body
+     * was already typed by the args walk; its inferred_type is the
+     * type of the last expression (or NIL if trailing semi). */
+    AstNode* body = node->data.command.args[0];
+    node->inferred_type = TYPE_FUTURE;
+    JaclType body_t = (JaclType)body->inferred_type;
+    if (body_t == TYPE_STRUCT) {
+      node->inferred_struct_idx = body->inferred_struct_idx;
+    } else if (body_t != TYPE_DYN) {
+      node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(body_t);
+    }
+  } else if (hid == HEAD_RACE && node->data.command.arg_count >= 2) {
+    /* race: returns the first body's result to complete. If every
+     * body has the same concrete tail type, narrow the result to
+     * that type; otherwise dyn. Mirrors parallel's body-walk shape
+     * but returns a single value (the winner) instead of a vec. */
+    AstNode** as = node->data.command.args;
+    uint32_t n = node->data.command.arg_count;
+    JaclType  unified_t    = TYPE_DYN;
+    uint32_t  unified_sidx = UINT32_MAX;
+    bool      all_same     = true;
+    for (uint32_t i = 0; i < n; i++) {
+      AstNode* body = as[i];
+      if (body->type != AST_BLOCK) { all_same = false; break; }
+      JaclType bt = (JaclType)body->inferred_type;
+      if (bt == TYPE_DYN) { all_same = false; break; }
+      if (i == 0) {
+        unified_t = bt;
+        unified_sidx = body->inferred_struct_idx;
+      } else if (bt != unified_t ||
+                 (bt == TYPE_STRUCT &&
+                  body->inferred_struct_idx != unified_sidx)) {
+        all_same = false;
+        break;
+      }
+    }
+    if (all_same) {
+      node->inferred_type = unified_t;
+      if (unified_t == TYPE_STRUCT) {
+        node->inferred_struct_idx = unified_sidx;
+      }
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+  } else if (hid == HEAD_AWAIT && node->data.command.arg_count == 1) {
+    /* await: unwraps a future. If the operand is a TYPE_FUTURE with
+     * a known element type, narrow the result to that element type.
+     * If the operand has a known concrete non-future type, that's a
+     * compile-time type error (await is only meaningful on futures).
+     * Dyn operands are permitted; the runtime tag check catches
+     * non-future values at await time. */
+    AstNode* arg = node->data.command.args[0];
+    JaclType arg_t = (JaclType)arg->inferred_type;
+    if (arg_t == TYPE_FUTURE) {
+      uint32_t e_idx = arg->inferred_struct_idx;
+      if (e_idx == UINT32_MAX) {
+        node->inferred_type = TYPE_DYN;
+      } else if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      } else {
+        node->inferred_type = TYPE_STRUCT;
+        node->inferred_struct_idx = e_idx;
+      }
+    } else if (arg_t == TYPE_DYN) {
+      node->inferred_type = TYPE_DYN;
+    } else {
+      char err[256];
+      jacl_format_await_non_future(err, sizeof(err), arg_t);
+      typer__error(tc, arg->start.line, arg->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    }
+  } else if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
+    /* [ptr-null [Ptr T]]: typed null pointer literal. Pure
+     * compile-time op — at runtime a null pointer is u64(0).
+     * The annotation supplies pointee identity. */
+    AstNode* type_node = node->data.command.args[0];
+    uint32_t pointee_sidx = UINT32_MAX;
+    if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
+      char err[128];
+      jacl_format_ptr_null_bad_arg(err, sizeof(err));
+      typer__error(tc, type_node->start.line, type_node->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    } else {
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = pointee_sidx;
+    }
+  } else if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
+    /* [ptr-cast [Ptr T] $u64_value]: re-tag a u64 address as a typed
+     * pointer. The annotation supplies pointee identity; the value
+     * must be u64 (or dyn — the cast is the explicit boundary). */
+    AstNode* type_node = node->data.command.args[0];
+    AstNode* val_node  = node->data.command.args[1];
+    uint32_t pointee_sidx = UINT32_MAX;
+    if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
+      char err[128];
+      jacl_format_ptr_cast_bad_first_arg(err, sizeof(err));
+      typer__error(tc, type_node->start.line, type_node->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    } else {
+      JaclType val_t = (JaclType)val_node->inferred_type;
+      if (val_t != TYPE_U64 && val_t != TYPE_DYN) {
+        char err[128];
+        jacl_format_ptr_cast_value_not_u64(err, sizeof(err), val_t);
+        typer__error(tc, val_node->start.line, val_node->start.column, err);
+      }
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = pointee_sidx;
+    }
+  } else if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
+    /* [ptr-addr $p]: typed pointer → raw u64. Dyn is permitted; any
+     * other concrete type is a compile-time error. */
+    AstNode* arg = node->data.command.args[0];
+    JaclType arg_t = (JaclType)arg->inferred_type;
+    if (arg_t != TYPE_PTR && arg_t != TYPE_DYN) {
+      char err[128];
+      jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-addr", arg_t);
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    }
+    node->inferred_type = TYPE_U64;
+  } else if (hid == HEAD_ADDR && node->data.command.arg_count == 1) {
+    /* [addr $p->field->...]: result is [Ptr T] where T is the
+     * accessed field's type. The typer trusts the typer-set
+     * inferred_type/struct_idx on the inner chain expression. */
+    AstNode* inner = node->data.command.args[0];
+
+    /* [addr $buf->N] / [addr $p->N]: result is [Ptr ElemType] using
+     * the buf or pointer's *declared* element/pointee type (not the
+     * widened i32 surfaced by the arrow-read). Detect
+     * `[. $varref $intlit]` whose receiver is a TYPE_BUF or TYPE_PTR
+     * binding. See BUFFER_DESIGN.md M3 / M3.7. */
+    if (inner->type == AST_COMMAND &&
+        inner->data.command.head_id == HEAD_DOT &&
+        inner->data.command.arg_count == 2 &&
+        inner->data.command.args[0]->type == AST_VAR_REF &&
+        inner->data.command.args[1]->type == AST_LIT_INT) {
+      AstNode* recv = inner->data.command.args[0];
+      const TyperBinding* b = typer__scope_resolve(tc,
+          recv->data.var_ref.name, recv->data.var_ref.length,
+          recv->scope_mark);
+      if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
+          b->struct_idx != UINT32_MAX) {
+        /* For nested bufs (Phase 5b: struct_idx is a TYPE_SHAPE_BUF
+         * idx), walk the shape chain to the leaf element so the
+         * resulting [Ptr T_leaf] points at scalar / struct bytes the
+         * compiler can interpret. Without this peel, [addr $cube->0]
+         * propagates a typer-side shape idx as the pointee, which the
+         * compiler reads as a struct idx and either segfaults or
+         * mis-typed-errors. */
+        uint32_t pointee = b->struct_idx;
+        if (b->type == TYPE_BUF) {
+          uint32_t walk = pointee;
+          while (typer__is_shape_idx(tc, walk) &&
+                 tc->shared_reg->shapes[walk].kind == TYPE_SHAPE_BUF) {
+            walk = tc->shared_reg->shapes[walk].u.buf.elem_idx;
+          }
+          pointee = walk;
+        }
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = pointee;
+        return;
+      }
+    }
+
+    /* [addr EXPR->N] where EXPR has inferred_type TYPE_PTR (covers
+     * chained field access like `[addr $h->magic->0]`). The receiver
+     * isn't a bare var-ref here; the pointee idx must come from
+     * EXPR.inferred_struct_idx (the *un-widened* pointee), since
+     * inner->inferred_type is the widened scalar (i32 for u8/i16/etc.).
+     * See BUFFER_DESIGN.md "Receiver-shape generalization". */
+    if (inner->type == AST_COMMAND &&
+        inner->data.command.head_id == HEAD_DOT &&
+        inner->data.command.arg_count == 2 &&
+        inner->data.command.args[0]->type != AST_VAR_REF &&
+        inner->data.command.args[1]->type == AST_LIT_INT) {
+      AstNode* recv = inner->data.command.args[0];
+      if ((JaclType)recv->inferred_type == TYPE_PTR &&
+          recv->inferred_struct_idx != UINT32_MAX) {
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = recv->inferred_struct_idx;
+        return;
+      }
+    }
+
+    JaclType inner_t = (JaclType)inner->inferred_type;
+    uint32_t inner_sidx = inner->inferred_struct_idx;
+    if (inner_t == TYPE_STRUCT && inner_sidx != UINT32_MAX) {
+      /* addr of an embedded struct field → [Ptr InnerStruct] */
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = inner_sidx;
+    } else if (inner_t != TYPE_DYN && inner_t != TYPE_STRUCT) {
+      /* Scalar leaf → [Ptr <scalar>] */
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(inner_t);
+    } else {
+      /* Unknown / dyn — fall back to dyn-pointer (caller-checked
+       * at runtime via the chain walker's compile-time error if
+       * the chain doesn't resolve). */
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = UINT32_MAX;
+    }
+  } else if (hid == HEAD_PTR_OFFSET && node->data.command.arg_count == 2) {
+    /* [ptr-offset $p $n]: typed pointer arithmetic. Result preserves
+     * the operand's pointee type. The integer offset must be a
+     * concrete numeric (or dyn). */
+    AstNode* p   = node->data.command.args[0];
+    AstNode* n   = node->data.command.args[1];
+    JaclType p_t = (JaclType)p->inferred_type;
+    JaclType n_t = (JaclType)n->inferred_type;
+    if (p_t != TYPE_PTR && p_t != TYPE_DYN) {
+      char err[160];
+      jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-offset", p_t);
+      typer__error(tc, p->start.line, p->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    } else if (n_t != TYPE_DYN && !is_numeric_type(n_t)) {
+      char err[160];
+      jacl_format_ptr_offset_non_numeric(err, sizeof(err), n_t);
+      typer__error(tc, n->start.line, n->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    } else {
+      node->inferred_type       = TYPE_PTR;
+      node->inferred_struct_idx = p->inferred_struct_idx;
+    }
+  } else if (hid == HEAD_PTR_DIFF && node->data.command.arg_count == 2) {
+    /* [ptr-diff $a $b]: subtract two pointers of the same pointee.
+     * Result is i64 (signed element count). */
+    AstNode* a = node->data.command.args[0];
+    AstNode* b = node->data.command.args[1];
+    JaclType a_t = (JaclType)a->inferred_type;
+    JaclType b_t = (JaclType)b->inferred_type;
+    if (a_t != TYPE_PTR || b_t != TYPE_PTR) {
+      if (a_t != TYPE_DYN && b_t != TYPE_DYN) {
+        char err[160];
+        jacl_format_ptr_diff_expects_two(err, sizeof(err), a_t, b_t);
+        typer__error(tc, a->start.line, a->start.column, err);
+      }
+    } else if (a->inferred_struct_idx != b->inferred_struct_idx &&
+               a->inferred_struct_idx != UINT32_MAX &&
+               b->inferred_struct_idx != UINT32_MAX) {
+      char err[160];
+      jacl_format_ptr_diff_pointee_mismatch(err, sizeof(err));
+      typer__error(tc, a->start.line, a->start.column, err);
+    }
+    node->inferred_type = TYPE_I64;
+  } else if (hid == HEAD_PTR_DEREF && node->data.command.arg_count == 1) {
+    /* [ptr-deref $p]: load the value at *p. For [Ptr T] with a
+     * scalar pointee, the result narrows to T. Struct pointees
+     * route through $p->field; this builtin errors on them. */
+    AstNode* arg = node->data.command.args[0];
+    JaclType arg_t = (JaclType)arg->inferred_type;
+    uint32_t arg_sidx = arg->inferred_struct_idx;
+    if (arg_t == TYPE_PTR) {
+      if (JACL_IS_SCALAR_TYPE_IDX(arg_sidx)) {
+        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(arg_sidx);
+      } else if (arg_sidx != UINT32_MAX) {
+        char err[160];
+        jacl_format_ptr_deref_struct(err, sizeof(err));
+        typer__error(tc, arg->start.line, arg->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      } else {
+        /* Pointee unknown — fall through to dyn. */
+        node->inferred_type = TYPE_DYN;
+      }
+    } else if (arg_t == TYPE_DYN) {
+      node->inferred_type = TYPE_DYN;
+    } else {
+      char err[128];
+      jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-deref", arg_t);
+      typer__error(tc, arg->start.line, arg->start.column, err);
+      node->inferred_type = TYPE_DYN;
+    }
+  } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
+    /* "puts" is not in the HeadId table — keep the memcmp here. */
+    node->inferred_type = TYPE_NIL;
+  } else if (hid == HEAD_TO &&
+             node->data.command.arg_count >= 1 &&
+             node->data.command.args[0]->type == AST_LIT_STRING &&
+             is_type_keyword(node->data.command.args[0]->data.lit_string.value,
+                             node->data.command.args[0]->data.lit_string.length)) {
+    /* [to TYPE expr] — the result type is the keyword. */
+    node->inferred_type =
+        type_from_keyword(node->data.command.args[0]->data.lit_string.value,
+                          node->data.command.args[0]->data.lit_string.length);
+  } else if (hid == HEAD_DOT &&
+             node->data.command.arg_count == 3) {
+    /* [. struct field new_value] field-set — emits OP_HEAP_RECORD_SET,
+     * leaves nil. Mirrors compiler.c's set path. Also enforces the
+     * field-type / value-type rule via the shared formatters
+     * (compiler.c:9722-9738). */
+    AstNode* tgt = node->data.command.args[0];
+    AstNode* fld = node->data.command.args[1];
+    AstNode* val = node->data.command.args[2];
+    JaclType tgt_t    = (JaclType)tgt->inferred_type;
+    uint32_t tgt_sidx = tgt->inferred_struct_idx;
+    if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
+        tgt->data.lit_string.length > 0) {
+      const TyperBinding* b = typer__scope_resolve(tc,
+          tgt->data.lit_string.value,
+          tgt->data.lit_string.length,
+          tgt->scope_mark);
+      if (b && b->type == TYPE_STRUCT) {
+        tgt_t = TYPE_STRUCT;
+        tgt_sidx = b->struct_idx;
+      }
+    }
+    /* Stage 5b: auto-deref a [Ptr Struct] receiver. The field-set
+     * then resolves against the pointee struct identically to a
+     * direct struct receiver — the compiler emits OP_PTR_STORE
+     * instead of OP_HEAP_RECORD_SET. Scalar pointees ([Ptr i32])
+     * have no field surface and fall through to TYPE_DYN. */
+    if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
+      tgt_t = TYPE_STRUCT;
+    }
+    if (tgt_t == TYPE_STRUCT && tgt_sidx < tc->struct_count &&
+        fld->type == AST_LIT_STRING) {
+      const TyperStruct* sd = &tc->structs[tgt_sidx];
+      const char* fn  = fld->data.lit_string.value;
+      uint32_t    fnl = fld->data.lit_string.length;
+      for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+        if (sd->field_name_lens[fi] != fnl ||
+            memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
+        JaclType field_t = (JaclType)sd->field_types[fi];
+        JaclType val_t   = (JaclType)val->inferred_type;
+        if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
+            val_t != field_t &&
+            !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
+          char err[224];
+          jacl_format_field_mismatch(err, sizeof(err),
+              sd->name, sd->name_len, fn, fnl, field_t, val_t);
+          typer__error(tc, val->start.line, val->start.column, err);
+        } else if (field_t != TYPE_DYN && val_t == TYPE_DYN) {
+          char err[256];
+          jacl_format_field_dyn_assign(err, sizeof(err),
+              sd->name, sd->name_len, fn, fnl, field_t);
+          typer__error(tc, val->start.line, val->start.column, err);
+        }
+        break;
+      }
+    }
+    node->inferred_type = TYPE_NIL;
+  } else if (hid == HEAD_DOT &&
+             node->data.command.arg_count == 2) {
+    /* [. struct field] arrow access — result type is the accessed
+     * field's declared type. For struct-typed fields, propagate
+     * inferred_struct_idx so chained access (`$x.field.subfield`)
+     * resolves the subfield's type. */
+    AstNode* tgt = node->data.command.args[0];
+    AstNode* fld = node->data.command.args[1];
+
+    /* Module-binding value access: `$mod->field` where mod is a
+     * `use "path" mod` binding. Narrow to the export's declared
+     * type. Procs reached this way (not as a call head) are
+     * closure values — narrow to TYPE_CLOSURE. Resolution falls
+     * through if a local binding shadows the module name. */
+    if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_STRING) {
+      const TyperBinding* shadow = typer__scope_resolve(tc,
+          tgt->data.var_ref.name, tgt->data.var_ref.length,
+          tgt->scope_mark);
+      if (!shadow) {
+        const TyperImportProc* bound = typer__find_bound_export(tc,
+            tgt->data.var_ref.name, tgt->data.var_ref.length,
+            fld->data.lit_string.value, fld->data.lit_string.length);
+        if (bound) {
+          node->inferred_type = (bound->arity >= 0)
+                                ? (uint8_t)TYPE_CLOSURE
+                                : bound->return_type;
+          return;
+        }
+      }
+    }
+
+    /* Nested-buf chain at depth >= 3, or any depth-N chain rooted at
+     * a TYPE_PTR-with-buf-shape binding (decomposed chains). Walks
+     * the arrow chain inside-out and yields the chain's result type;
+     * bails on depth <= 2 TYPE_BUF receivers so the existing
+     * per-arrow handlers continue to drive those. */
+    if (fld->type == AST_LIT_INT) {
+      JaclType chain_t = TYPE_DYN;
+      uint32_t chain_sidx = UINT32_MAX;
+      if (typer__nested_buf_chain_result(tc, tgt, fld,
+                                         &chain_t, &chain_sidx, NULL, NULL)) {
+        node->inferred_type       = chain_t;
+        node->inferred_struct_idx = chain_sidx;
+        return;
+      }
+    }
+    /* A dynamic index into a nested-buf dimension (`$cube->$j`): stamp the dimension's
+     * static size on the node (as inferred_buf_len — a plain length, not a shape idx, so
+     * it may cross to the compiler) so the codegen can emit a runtime bounds check. The
+     * node's inferred type is left to the existing dynamic-dot handling below. */
+    if (fld->type != AST_LIT_INT && fld->type != AST_LIT_STRING) {
+      JaclType chain_t = TYPE_DYN;
+      uint32_t chain_sidx = UINT32_MAX, index_dim = 0;
+      if (typer__nested_buf_chain_result(tc, tgt, fld,
+                                         &chain_t, &chain_sidx, NULL, &index_dim) &&
+          index_dim > 0) {
+        node->inferred_buf_len = index_dim;
+      }
+    }
+
+    /* Buf or Ptr element access: `$x->N` parses as `[. $x N]` where
+     * the field is an AST_LIT_INT.
+     *   TYPE_BUF: bounds-checked at typer (N must be < buf_len).
+     *   TYPE_PTR: no bounds check (pointer can target anything);
+     *             pointee must be scalar.
+     * Result narrows to the element scalar, widening small ints to
+     * i32 (mirrors HEAD_BUF_GET / OP_PTR_LOAD widening). See
+     * BUFFER_DESIGN.md M3. */
+    if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_INT) {
+      const TyperBinding* b = typer__scope_resolve(tc,
+          tgt->data.var_ref.name, tgt->data.var_ref.length,
+          tgt->scope_mark);
+      if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
+          b->struct_idx != UINT32_MAX) {
+        int32_t idx_lit = fld->data.lit_int.value;
+        if (b->type == TYPE_BUF &&
+            (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
+          char buf_ty[96];
+          /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
+           * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
+           * and T from the shape. */
+          if (typer__is_shape_idx(tc, b->struct_idx) &&
+              tc->shared_reg->shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
+            TypeShape* inner = &tc->shared_reg->shapes[b->struct_idx];
+            uint32_t inner_M = inner->u.buf.len;
+            uint32_t inner_t_enc = inner->u.buf.elem_idx;
+            if (JACL_IS_SCALAR_TYPE_IDX(inner_t_enc)) {
+              const char* en = type_name(JACL_TYPE_IDX_TO_SCALAR(inner_t_enc));
+              snprintf(buf_ty, sizeof(buf_ty),
+                       "[Buf %u [Buf %u %s]]",
+                       (unsigned)b->buf_len, (unsigned)inner_M, en);
+            } else if (inner_t_enc < tc->struct_count) {
+              const TyperStruct* sd = &tc->structs[inner_t_enc];
+              snprintf(buf_ty, sizeof(buf_ty),
+                       "[Buf %u [Buf %u %.*s]]",
+                       (unsigned)b->buf_len, (unsigned)inner_M,
+                       (int)sd->name_len, sd->name);
+            } else {
+              snprintf(buf_ty, sizeof(buf_ty),
+                       "[Buf %u [Buf %u ...]]",
+                       (unsigned)b->buf_len, (unsigned)inner_M);
+            }
+          } else if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+            const char* en = type_name(
+                JACL_TYPE_IDX_TO_SCALAR(b->struct_idx));
+            jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                 b->buf_len, en, (uint32_t)strlen(en));
+          } else if (b->struct_idx < tc->struct_count) {
+            const TyperStruct* sd = &tc->structs[b->struct_idx];
+            jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                 b->buf_len, sd->name, sd->name_len);
+          } else {
+            jacl_format_buf_type(buf_ty, sizeof(buf_ty),
+                                 b->buf_len, "T", 1);
+          }
+          char err[192];
+          snprintf(err, sizeof(err),
+              "type error: buf index %d out of bounds for %s",
+              (int)idx_lit, buf_ty);
+          typer__error(tc, fld->start.line, fld->start.column, err);
+          node->inferred_type = TYPE_DYN;
+          return;
+        }
+        if (b->type == TYPE_BUF) {
+          uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
+          JaclType elem = typer__buf_elem_decode(tc, b->struct_idx,
+                                                 &inner_v, &inner_k);
+          /* Nested buf [Buf N [Buf M T]]: $matrix->i yields [Ptr T]
+           * (decay-style). Phase 5b moved the inner-M / T encoding
+           * into a TYPE_SHAPE_BUF registry entry; decode to spot
+           * the nested case via TYPE_BUF kind. For depth-3+, the
+           * leaf T isn't directly addressable through a single
+           * [Ptr T] decay -- error and point at the workaround. */
+          if (elem == TYPE_BUF) {
+            uint32_t leaf_inner_v = UINT32_MAX;
+            JaclType leaf_kind = typer__buf_elem_decode(tc, inner_v,
+                                                        &leaf_inner_v, NULL);
+            if (leaf_kind == TYPE_BUF) {
+              /* depth-3+ arrow chain: codegen isn't ready, but [addr]
+               * intercepts before this path (see HEAD_ADDR handler).
+               * Stay quiet here -- the compiler will catch any real
+               * misuse (e.g. `$cube->i->j->k`) with a clearer error
+               * at codegen time. Leaving as TYPE_DYN propagates to a
+               * compile-time error rather than a typer error. */
+              node->inferred_type = TYPE_DYN;
+              return;
+            }
+            /* depth-2: yield [Ptr T_leaf] (existing semantic). */
+            node->inferred_type       = TYPE_PTR;
+            node->inferred_struct_idx = inner_v;
+            return;
+          }
+          switch (elem) {
+            case TYPE_I8: case TYPE_U8:
+            case TYPE_I16: case TYPE_U16:
+              node->inferred_type = TYPE_I32; break;
+            case TYPE_TYPED_VEC:
+              node->inferred_type = TYPE_TYPED_VEC;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_TYPED_MAP:
+              node->inferred_type = TYPE_TYPED_MAP;
+              node->inferred_struct_idx = inner_v;
+              node->inferred_key_struct_idx = inner_k;
+              break;
+            case TYPE_PTR:
+              node->inferred_type = TYPE_PTR;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_FUTURE:
+              node->inferred_type = TYPE_FUTURE;
+              node->inferred_struct_idx = inner_v;
+              break;
+            case TYPE_STRUCT:
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = b->struct_idx;
+              break;
+            default:
+              node->inferred_type = elem;
+              break;
+          }
+        } else if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
+          /* TYPE_PTR branch: scalar pointee. */
+          JaclType elem = JACL_TYPE_IDX_TO_SCALAR(b->struct_idx);
+          switch (elem) {
+            case TYPE_I8: case TYPE_U8:
+            case TYPE_I16: case TYPE_U16:
+              node->inferred_type = TYPE_I32; break;
+            default:
+              node->inferred_type = elem; break;
+          }
+        } else {
+          /* TYPE_PTR struct pointee: result is the inline struct value. */
+          node->inferred_type       = TYPE_STRUCT;
+          node->inferred_struct_idx = b->struct_idx;
+        }
+        return;
+      }
+    }
+
+    /* Same shape but receiver is an arbitrary expression with
+     * inferred_type TYPE_PTR — covers field-access chains like
+     * `$h->magic->0` where `$h->magic` returns [Ptr u8]. Bufs
+     * aren't expression-result types in JACL, so only TYPE_PTR
+     * needs the generalization. No bounds check (TYPE_PTR
+     * branch above is also bounds-check-free). For struct pointee
+     * (`$grid->i->j` against `[Buf N [Buf M Point]]`), the result
+     * is the inline struct value -- M4.2.2. See
+     * BUFFER_DESIGN.md "Receiver-shape generalization". */
+    if (fld->type == AST_LIT_INT &&
+        (JaclType)tgt->inferred_type == TYPE_PTR &&
+        tgt->inferred_struct_idx != UINT32_MAX) {
+      if (JACL_IS_SCALAR_TYPE_IDX(tgt->inferred_struct_idx)) {
+        JaclType elem = JACL_TYPE_IDX_TO_SCALAR(tgt->inferred_struct_idx);
+        switch (elem) {
+          case TYPE_I8: case TYPE_U8:
+          case TYPE_I16: case TYPE_U16:
+            node->inferred_type = TYPE_I32; break;
+          default:
+            node->inferred_type = elem; break;
+        }
+        return;
+      }
+      if (tgt->inferred_struct_idx < tc->struct_count) {
+        node->inferred_type       = TYPE_STRUCT;
+        node->inferred_struct_idx = tgt->inferred_struct_idx;
+        return;
+      }
+    }
+
+    /* Resolve target struct type. Two shapes:
+     *   - tgt was already typed as STRUCT (e.g. $ln var-ref or a
+     *     nested dot expression).
+     *   - tgt is a bare LIT_STRING name on the LHS of a `set` chain
+     *     (e.g. `set ln->start->x 77` parses with bare `ln`). The
+     *     compiler's HEAD_SET rewrite later converts it to a
+     *     VAR_REF; we look up the binding here so the typer's
+     *     annotation matches what the rewrite produces. */
+    JaclType    tgt_t = (JaclType)tgt->inferred_type;
+    uint32_t    tgt_sidx = tgt->inferred_struct_idx;
+    if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
+        tgt->data.lit_string.length > 0) {
+      const TyperBinding* b = typer__scope_resolve(tc,
+          tgt->data.lit_string.value,
+          tgt->data.lit_string.length,
+          tgt->scope_mark);
+      if (b && b->type == TYPE_STRUCT) {
+        tgt_t = TYPE_STRUCT;
+        tgt_sidx = b->struct_idx;
+      }
+    }
+    /* Stage 5b: auto-deref [Ptr Struct] receiver to its pointee for
+     * field resolution. The compiler emits OP_PTR_LOAD with the
+     * field's offset and type. Scalar pointees fall through. */
+    if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
+      tgt_t = TYPE_STRUCT;
+    }
+    if (tgt_t == TYPE_STRUCT &&
+        tgt_sidx < tc->struct_count &&
+        fld->type == AST_LIT_STRING) {
+      const TyperStruct* sd = &tc->structs[tgt_sidx];
+      const char* fn = fld->data.lit_string.value;
+      uint32_t    fnl = fld->data.lit_string.length;
+      node->inferred_type = TYPE_DYN;
+      for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+        if (sd->field_name_lens[fi] == fnl &&
+            memcmp(sd->field_names[fi], fn, fnl) == 0) {
+          JaclType ft = (JaclType)sd->field_types[fi];
+          if (ft == TYPE_BUF) {
+            /* Buf field access: $h->field returns [Ptr ElemType]
+             * pointing at the field's first byte. See
+             * BUFFER_DESIGN.md M4.3. The field's fixed length rides
+             * along as inferred_buf_len so `[buf-get $h->field $i]`
+             * can bounds-check the index at runtime. */
+            node->inferred_type       = TYPE_PTR;
+            node->inferred_struct_idx = sd->field_struct_idxs[fi];
+            node->inferred_buf_len    = sd->field_buf_lens[fi];
+          } else {
+            node->inferred_type = (uint8_t)ft;
+            if (ft == TYPE_STRUCT) {
+              node->inferred_struct_idx = sd->field_struct_idxs[fi];
+            }
+          }
+          break;
+        }
+      }
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+  } else {
+    node->inferred_type = TYPE_DYN;
+  }
+}
+
+/* The prefix/binding forms of `typer__infer_command_inner` — def/mut, set, proc, and the
+ * `if`-with-`box?` flow-typing narrowing — split out of it so each emitted function stays under the
+ * browser host's per-function optimizer limit (temen#1384). Pure extraction apart from the return
+ * convention: 1 = this group typed the node (it would have `return`ed inline), 0 = fall through to
+ * the generic dispatch. */
+/* The `for` arm of `typer__infer_cmd_prefix`, split off for the same reason the prefix group
+ * itself was (temen#1384) — it alone pushed that function over the size band the shipped card
+ * proves safe. Byte-for-byte the inline body; 1 = typed the node, 0 = fall through. */
+__attribute__((noinline))
+static int typer__infer_cmd_for(TyperCtx* tc, AstNode* node, AstNode* head) {
+  /* for [coll] { body }  /  for [coll] name { body } — narrow the loop
+   * binding to the collection's element type so typed body operations
+   * (typed arithmetic, assigning to a typed local, assert-type) see the
+   * right type. Currently only typed arr narrows; dyn arr / vec / stream
+   * keep a dyn binding (stream/vec for-binding narrowing is deferred —
+   * NOT_IMPLEMENTED §4 wide-cell note), preserving existing behavior.
+   * The callback/each form (args[1] is a var-ref or command) and any
+   * malformed shape fall through to the generic walker. */
+  AstNode** as = node->data.command.args;
+  uint32_t  ac = node->data.command.arg_count;
+  /* `bn` is the VALUE binding (the LAST name); `en` (NULL = none) is the
+   * ENUMERATOR binding (the optional FIRST name — the index for vec/arr, the
+   * key for maps). See SYNTAX.md §"`for` — unified iteration". */
+  const char* bn = "it"; uint32_t bnl = 2;
+  const char* en = NULL; uint32_t enl = 0; uint32_t emark = 0;
+  AstNode* body = NULL; uint32_t bmark = 0;
+  if (ac == 2 && as[1]->type == AST_BLOCK) {
+    body = as[1]; bmark = as[1]->scope_mark;
+  } else if (ac == 3 && as[1]->type == AST_LIT_STRING &&
+             as[2]->type == AST_BLOCK) {
+    bn = as[1]->data.lit_string.value;
+    bnl = as[1]->data.lit_string.length;
+    body = as[2]; bmark = as[1]->scope_mark;
+  } else if (ac == 4 && as[1]->type == AST_LIT_STRING &&
+             as[2]->type == AST_LIT_STRING && as[3]->type == AST_BLOCK) {
+    en = as[1]->data.lit_string.value;
+    enl = as[1]->data.lit_string.length; emark = as[1]->scope_mark;
+    bn = as[2]->data.lit_string.value;
+    bnl = as[2]->data.lit_string.length; bmark = as[2]->scope_mark;
+    body = as[3];
+  }
+  if (body) {
+    typer__infer_node(tc, as[0]);
+    JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
+    uint32_t for_bind_key_idx = UINT32_MAX;
+    JaclType coll_t = (JaclType)as[0]->inferred_type;
+    if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
+         coll_t == TYPE_STREAM ||
+         /* Ref-element [Vec T] / [Arr T] (e.g. [Vec str], [Arr str]):
+          * plain (dyn) rep with a static element stamp — narrow the
+          * binding like any typed collection. Only tagged-fit ref
+          * elements can be stamped on TYPE_VEC/TYPE_ARR, so the tagged
+          * binding rep is always correct. */
+         coll_t == TYPE_VEC || coll_t == TYPE_ARR)) {
+      uint32_t eidx = as[0]->inferred_struct_idx;
+      /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
+       * suppressed by the cross-registry rule, so resolve the TYPER-SIDE
+       * shape idx directly — from the binding for a var-ref receiver, or
+       * re-derived from the ctor head for a literal receiver. */
+      if ((coll_t == TYPE_VEC || coll_t == TYPE_ARR) &&
+          eidx == UINT32_MAX) {
+        /* var-ref receiver → the consolidated helper (binding shape today,
+         * the stamp once 2c un-suppresses). */
+        eidx = typer__receiver_coll_shape(tc, as[0]);
+        if (eidx == UINT32_MAX && as[0]->type == AST_COMMAND &&
+                   as[0]->data.command.head &&
+                   as[0]->data.command.head->type == AST_COMMAND &&
+                   as[0]->data.command.head->data.command.head &&
+                   as[0]->data.command.head->data.command.head->type ==
+                       AST_LIT_STRING &&
+                   as[0]->data.command.head->data.command.head
+                       ->data.lit_string.length == 3 &&
+                   (memcmp(as[0]->data.command.head->data.command.head
+                              ->data.lit_string.value, "Vec", 3) == 0 ||
+                    memcmp(as[0]->data.command.head->data.command.head
+                              ->data.lit_string.value, "Arr", 3) == 0) &&
+                   as[0]->data.command.head->data.command.arg_count == 1 &&
+                   as[0]->data.command.head->data.command.args[0]->type ==
+                       AST_COMMAND) {
+          eidx = typer__nested_elem_shape(
+              tc, as[0]->data.command.head->data.command.args[0]);
+        }
+      }
+      if (eidx == UINT32_MAX) {
+        /* untyped element — binding stays dyn */
+      } else if (typer__is_shape_idx(tc, eidx)) {
+        /* Typer-side shape: decode to PORTABLE inner encodings for the
+         * loop binding (scalar sentinel / aligned struct idx). Inner
+         * ref-kinds ([Vec str]/[Vec dyn] elements) are plain-rep'd. */
+        uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+        JaclType ek = typer__buf_elem_decode(tc, eidx, &iv, &ik);
+        (void)ik;
+        if (ek == TYPE_TYPED_VEC) {
+          bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                           (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                            JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+          bool inner_shape = typer__is_shape_idx(tc, iv);
+          if (inner_ref) {
+            bt = TYPE_VEC;
+            bsi = (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
+                      ? iv : UINT32_MAX;
+          } else if (inner_shape) {
+            /* Element is itself a nested-element vec: bind as a
+             * ref-element TYPE_VEC carrying the inner shape idx — the
+             * next loop level resolves it from this binding (the
+             * recursion point for depth-N narrowing). */
+            bt = TYPE_VEC; bsi = iv;
+          } else {
+            bt = TYPE_TYPED_VEC; bsi = iv;
+          }
+        } else if (ek == TYPE_TYPED_MAP) {
+          uint32_t bki;
+          typer__decode_map_shape(iv, ik, &bt, &bsi, &bki);
+          /* scope_add below has no key slot — patch it in after. */
+          for_bind_key_idx = bki;
+        } else if (ek == TYPE_CLOSURE) {
+          /* B3c: [Vec [Proc …]] element — bind the loop var as a typed
+           * closure carrying the element signature (stamped after
+           * scope_add) so `[f …]` in the body is a typed call. */
+          bt = TYPE_CLOSURE; bsi = eidx;
+        }
+      } else if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+        /* Narrow to the element scalar — all scalars, including wide
+         * i64/u64/f64. Non-SM loops store the wide binding in a typed
+         * local; SM loops store it boxed in a state field and the
+         * var-ref read unboxes via the node's inferred_type. Applies to
+         * [Arr T], [Vec T], and [Stream T] element bindings. */
+        bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
+      } else if (eidx < tc->struct_count) {
+        /* Struct-element narrowing: arr/vec, and now streams too — the
+         * multi-slot stream channel (OP_STREAM_NEXT_INLINE) delivers the
+         * element as inline value bytes and the for-loop binds it in an
+         * N-slot inline local (NOT_IMPLEMENTED.md §4.1b). */
+        bt = TYPE_STRUCT; bsi = eidx;
+      }
+    }
+    /* The ENUMERATOR (first name of the two-name form) defaults to the i32
+     * index for sequences. For a MAP the VALUE binding is V and the
+     * enumerator is the KEY K — narrow both from the map's value/key idxs.
+     * (Single-name over a map binds the value; see SYNTAX.md.) */
+    JaclType et = TYPE_I32; uint32_t esi = UINT32_MAX;
+    if (coll_t == TYPE_MAP || coll_t == TYPE_TYPED_MAP) {
+      typer__idx_to_for_binding(tc, as[0]->inferred_struct_idx, &bt, &bsi);
+      typer__idx_to_for_binding(tc, as[0]->inferred_key_struct_idx, &et, &esi);
+    }
+    typer__scope_push(tc);
+    /* Two-name form: add the enumerator binding first (index/key). */
+    if (en) typer__scope_add(tc, en, enl, emark, (uint8_t)et, esi);
+    typer__scope_add(tc, bn, bnl, bmark, (uint8_t)bt, bsi);
+    /* Map-element bindings carry the key idx too (scope_add has no
+     * key slot — patch in place, like the def handler). */
+    if (for_bind_key_idx != UINT32_MAX && tc->binding_count > 0) {
+      tc->bindings[tc->binding_count - 1].key_struct_idx =
+          for_bind_key_idx;
+    }
+    /* B3c: a closure-element loop binding decodes its proc shape onto the
+     * binding so a body call `[f …]` narrows (via the bound_proxy). */
+    if (bt == TYPE_CLOSURE && bsi != UINT32_MAX && tc->binding_count > 0) {
+      uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+      if (typer__decode_proc_shape(tc, bsi, &pc2, pts2, &rt2)) {
+        TyperBinding* b = &tc->bindings[tc->binding_count - 1];
+        b->is_typed_closure = true;
+        b->proc_param_count = pc2;
+        for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
+          b->proc_param_types[k] = pts2[k];
+        b->proc_return_type = rt2;
+        b->proc_return_struct_idx = UINT32_MAX;
+      }
+    }
+    typer__infer_node(tc, body);
+    typer__scope_pop(tc);
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  }
+  /* Callback/each form: [for $coll [\ body]] / [for $coll $cb]. Type the
+   * collection and the callback; for an inline lambda over a typed wide
+   * stream, monomorphize the callback body (type its param wide) and stamp
+   * it so the compiler bakes the wide param rep onto OP_EACH (the pull then
+   * hands the element over wide, no box). Mirrors HEAD_FILTER. A var-ref
+   * callback or a fallback (mixed-type) body stays dyn → boxed. */
+  if (ac == 2 && (as[1]->type == AST_COMMAND ||
+                  as[1]->type == AST_VAR_REF)) {
+    typer__infer_node(tc, as[0]);
+    /* Type-once: an inline callback over a typed stream is typed ONLY
+     * via proc_result_enc below (param bound to the element type) —
+     * a generic walk first would type the body with the param unbound
+     * and record spurious sticky errors. Mirrors the transform/filter
+     * pre-walk skip. */
+    bool cb_inline_typed_stream =
+        (as[1]->type == AST_COMMAND &&
+         as[1]->data.command.head_id == HEAD_PROC &&
+         (JaclType)as[0]->inferred_type == TYPE_STREAM &&
+         as[0]->inferred_struct_idx != UINT32_MAX);
+    if (!cb_inline_typed_stream) typer__infer_node(tc, as[1]);
+    if (as[1]->type == AST_COMMAND) {
+      uint32_t cb_enc = UINT32_MAX;
+      if (cb_inline_typed_stream) {
+        uint32_t arg_enc = as[0]->inferred_struct_idx;
+        bool cb_typed = false;
+        (void)typer__proc_result_enc(tc, as[1], &arg_enc, 1, &cb_typed);
+        if (cb_typed) cb_enc = arg_enc;
+        /* The skipped pre-walk would have stamped this (handle_proc). */
+        as[1]->inferred_type = TYPE_CLOSURE;
+      }
+      as[1]->inferred_struct_idx = cb_enc;
+    }
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  }
+  /* else: malformed — fall through to generic. */
+  return 0;
+}
+
+/* `noinline`: see above. */
+__attribute__((noinline))
+/* Split out of `typer__infer_cmd_prefix` so every emitted function stays inside the size band
+ * the shipped card already proves safe under the browser host's optimizer (temen#1384).
+ * Byte-for-byte the inline body; 1 = typed the node, 0 = fall through. */
+__attribute__((noinline))
+static int typer__infer_cmd_if_narrow(TyperCtx* tc, AstNode* node) {
+  /* if [cond] {then} {else?} — detect [box? Type $var] for flow
+   * typing. Mirrors compiler.c:7651-7708. */
+  AstNode** as = node->data.command.args;
+  AstNode* cond = as[0];
+  bool pushed = false;
+  if (cond->type == AST_COMMAND &&
+      cond->data.command.head_id == HEAD_BOX_Q &&
+      cond->data.command.arg_count == 2 &&
+      cond->data.command.args[1]->type == AST_VAR_REF &&
+      tc->narrowing_count < TYPER_MAX_NARROWINGS) {
+    AstNode* type_arg = cond->data.command.args[0];
+    AstNode* var_node = cond->data.command.args[1];
+    JaclType bt = TYPE_DYN;
+    uint32_t bsidx = UINT32_MAX;
+    if (type_arg->type == AST_LIT_STRING) {
+      if (is_type_keyword(type_arg->data.lit_string.value,
+                          type_arg->data.lit_string.length)) {
+        bt = type_from_keyword(type_arg->data.lit_string.value,
+                               type_arg->data.lit_string.length);
+      } else {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
+              memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
+                     type_arg->data.lit_string.length) == 0) {
+            bt = TYPE_STRUCT;
+            bsidx = si;
+            break;
+          }
+        }
+      }
+    } else if (type_arg->type == AST_COMMAND) {
+      /* [box? [Vec T] $x] / [box? [Map K V] $x] — narrow to typed
+       * collection. Look up element struct_idx so post-narrow
+       * vec-get/map-get can narrow further to the elem type. */
+      int tcoll = typer__typed_collection_kind(type_arg);
+      if (tcoll == 1) bt = TYPE_TYPED_VEC;
+      else if (tcoll == 2 || tcoll == 3) bt = TYPE_TYPED_MAP;
+      if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
+        AstNode* elem_node = (tcoll == 3)
+            ? type_arg->data.command.args[1]
+            : type_arg->data.command.args[0];
+        if (elem_node && elem_node->type == AST_LIT_STRING &&
+            !is_type_keyword(elem_node->data.lit_string.value,
+                             elem_node->data.lit_string.length)) {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
+                memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
+                       elem_node->data.lit_string.length) == 0) {
+              bsidx = si;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (bt != TYPE_DYN) {
+      tc->narrowings[tc->narrowing_count].name       = var_node->data.var_ref.name;
+      tc->narrowings[tc->narrowing_count].name_len   = var_node->data.var_ref.length;
+      tc->narrowings[tc->narrowing_count].scope_mark = var_node->scope_mark;
+      tc->narrowings[tc->narrowing_count].box_type   = (uint8_t)bt;
+      tc->narrowings[tc->narrowing_count].box_struct_idx = bsidx;
+      tc->narrowing_count++;
+      pushed = true;
+    }
+  }
+  typer__infer_node(tc, cond);
+  typer__infer_node(tc, as[1]);
+  if (pushed) tc->narrowing_count--;
+  if (node->data.command.arg_count == 3) {
+    typer__infer_node(tc, as[2]);
+  }
+  /* Block-result unification: if both branches agree, propagate. */
+  JaclType then_t = (JaclType)as[1]->inferred_type;
+  JaclType else_t = (node->data.command.arg_count == 3)
+                      ? (JaclType)as[2]->inferred_type : TYPE_NIL;
+  if (then_t == else_t) {
+    node->inferred_type = then_t;
+    node->inferred_struct_idx = as[1]->inferred_struct_idx;
+  } else {
+    node->inferred_type = TYPE_DYN;
+  }
+  return 1;
+  return 0;
+}
+
+/* Split out of `typer__infer_cmd_prefix` so every emitted function stays inside the size band
+ * the shipped card already proves safe under the browser host's optimizer (temen#1384).
+ * Byte-for-byte the inline body; 1 = typed the node, 0 = fall through. */
+__attribute__((noinline))
+static int typer__infer_cmd_assert_type(TyperCtx* tc, AstNode* node) {
+  /* [assert-type EXPR TYPE] — compile-time static type assertion.
+   * EXPR is typer-walked so its inferred_type lands on the node;
+   * the result is compared to TYPE (a bare type-keyword or a
+   * registered struct name). No runtime evaluation: the compiler
+   * emits a single OP_NIL and discards EXPR. Whole form has
+   * static type nil. */
+  AstNode** as = node->data.command.args;
+  uint32_t  ac = node->data.command.arg_count;
+  if (ac != 2) {
+    typer__error(tc, node->start.line, node->start.column,
+                 "assert-type expects 2 arguments");
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  }
+  AstNode* expr_node = as[0];
+  AstNode* type_node = as[1];
+  JaclType saved_et = tc->expected_type;
+  tc->expected_type = TYPE_DYN;
+  typer__infer_node(tc, expr_node);
+  tc->expected_type = saved_et;
+  if (type_node->type != AST_LIT_STRING) {
+    typer__error(tc, type_node->start.line, type_node->start.column,
+                 "assert-type: second argument must be a type name");
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  }
+  const char* tname = type_node->data.lit_string.value;
+  uint32_t    tlen  = type_node->data.lit_string.length;
+  JaclType actual_t = (JaclType)expr_node->inferred_type;
+  JaclType expected_t = TYPE_DYN;
+  bool expected_known = false;
+  uint32_t expected_struct_idx = UINT32_MAX;
+  if (is_type_keyword(tname, tlen)) {
+    expected_t = type_from_keyword(tname, tlen);
+    expected_known = true;
+  } else {
+    for (uint32_t si = 0; si < tc->struct_count; si++) {
+      if (tc->structs[si].name_len == tlen &&
+          memcmp(tc->structs[si].name, tname, tlen) == 0) {
+        expected_t = TYPE_STRUCT;
+        expected_struct_idx = si;
+        expected_known = true;
+        break;
+      }
+    }
+  }
+  if (!expected_known) {
+    char err[160];
+    snprintf(err, sizeof(err),
+             "assert-type: unknown type '%.*s'", (int)tlen, tname);
+    typer__error(tc, type_node->start.line, type_node->start.column, err);
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  }
+  bool match = (actual_t == expected_t);
+  if (match && expected_t == TYPE_STRUCT &&
+      expected_struct_idx != UINT32_MAX) {
+    match = (expr_node->inferred_struct_idx == expected_struct_idx);
+  }
+  if (!match) {
+    char err[224];
+    const char* actual_name =
+        (actual_t == TYPE_STRUCT &&
+         expr_node->inferred_struct_idx < tc->struct_count)
+        ? tc->structs[expr_node->inferred_struct_idx].name
+        : type_name(actual_t);
+    snprintf(err, sizeof(err),
+             "assert-type failed: expected %.*s, got %s",
+             (int)tlen, tname, actual_name);
+    typer__error(tc, node->start.line, node->start.column, err);
+  }
+  node->inferred_type = TYPE_NIL;
+  return 1;
+  return 0;
+}
+
+static int typer__infer_cmd_prefix(TyperCtx* tc, AstNode* node, AstNode* head) {
+  HeadId hid = (HeadId)node->data.command.head_id;
+  if (hid == HEAD_DEF || hid == HEAD_MUT) {
+    if (typer__handle_def_or_mut(tc, node)) return 1;
+    /* Even if the def/mut shape didn't match a typed handler (e.g.,
+     * destructure with non-LIT_STRING name), all def/mut commands
+     * return NIL at runtime. Type as NIL here so the typer agrees
+     * with the compiler's HEAD_DEF/HEAD_MUT pin. */
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  } else if (hid == HEAD_SET) {
+    if (typer__handle_set(tc, node)) return 1;
+    node->inferred_type = TYPE_NIL;
+    return 1;
+  } else if (hid == HEAD_PROC) {
+    if (typer__handle_proc(tc, node)) return 1;
+    /* proc def emits a closure value regardless of which shape was
+     * recognized. Pin closure for shapes handle_proc bailed on. */
+    node->inferred_type = TYPE_CLOSURE;
+    return 1;
+  } else if (hid == HEAD_IF &&
+             (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
+    if (typer__infer_cmd_if_narrow(tc, node)) return 1;
+  } else if (hid == HEAD_TRY &&
+             node->data.command.arg_count == 3 &&
+             node->data.command.args[0]->type == AST_BLOCK &&
+             node->data.command.args[1]->type == AST_LIT_STRING &&
+             node->data.command.args[2]->type == AST_BLOCK) {
+    /* try body err handler — result is body's tail value (no error)
+     * or handler's tail value (error). Unify the two; if they agree,
+     * propagate the type. The error binding (args[1]) is the local
+     * the handler scope binds the trapped error to — typed as DYN
+     * since we don't track error tag types. Push a scope with the
+     * binding before walking the handler so var-refs to the err
+     * name resolve correctly. */
+    AstNode** as = node->data.command.args;
+    typer__infer_node(tc, as[0]);
+    typer__scope_push(tc);
+    typer__scope_add(tc, as[1]->data.lit_string.value,
+                     as[1]->data.lit_string.length,
+                     as[1]->scope_mark,
+                     (uint8_t)TYPE_DYN, UINT32_MAX);
+    typer__infer_node(tc, as[2]);
+    typer__scope_pop(tc);
+    JaclType body_t    = (JaclType)as[0]->inferred_type;
+    JaclType handler_t = (JaclType)as[2]->inferred_type;
+    if (body_t == handler_t) {
+      node->inferred_type = body_t;
+      node->inferred_struct_idx = as[0]->inferred_struct_idx;
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+    return 1;
+  } else if (hid == HEAD_WITH_CTX &&
+             node->data.command.arg_count == 2 &&
+             node->data.command.args[0]->type == AST_BLOCK &&
+             node->data.command.args[1]->type == AST_BLOCK) {
+    /* with-ctx overrides body — result is the body's tail value
+     * (overrides block produces nil). Mirrors compiler.c:8214. */
+    AstNode** as = node->data.command.args;
+    typer__infer_node(tc, as[0]);
+    typer__infer_node(tc, as[1]);
+    node->inferred_type = as[1]->inferred_type;
+    node->inferred_struct_idx = as[1]->inferred_struct_idx;
+    return 1;
+  } else if (hid == HEAD_UNBOX &&
+             node->data.command.arg_count == 1 &&
+             node->data.command.args[0]->type == AST_VAR_REF) {
+    /* [unbox $var] inside a box?-guarded branch — look up the
+     * narrowing and adopt its type. */
+    AstNode* var_node = node->data.command.args[0];
+    typer__infer_node(tc, var_node);
+    for (uint32_t ni = 0; ni < tc->narrowing_count; ni++) {
+      if (tc->narrowings[ni].name_len == var_node->data.var_ref.length &&
+          memcmp(tc->narrowings[ni].name, var_node->data.var_ref.name,
+                 var_node->data.var_ref.length) == 0) {
+        node->inferred_type = tc->narrowings[ni].box_type;
+        node->inferred_struct_idx = tc->narrowings[ni].box_struct_idx;
+        return 1;
+      }
+    }
+    node->inferred_type = TYPE_DYN;
+    return 1;
+  } else if (hid == HEAD_ASSERT_TYPE) {
+    if (typer__infer_cmd_assert_type(tc, node)) return 1;
+  } else if (hid == HEAD_FOR &&
+             (node->data.command.arg_count == 2 ||
+              node->data.command.arg_count == 3 ||
+              node->data.command.arg_count == 4)) {
+    if (typer__infer_cmd_for(tc, node, head)) return 1;
+  }
+  return 0;
+}
+
+/* The command-headed arm of `typer__infer_command_inner` (typed-collection constructors
+ * `[[Vec T] …]` / `[[Map K V] …]` and the command-as-head call shapes), split out for the same
+ * reason as `typer__infer_cmd_prefix`. Pure extraction — byte-for-byte the inline body. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_cmdhead(TyperCtx* tc, AstNode* node, AstNode* head) {
+  /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
+   * Mirrors compiler__compile_command's typed-vec/typed-map branch.
+   * Element struct_idx is propagated via inferred_struct_idx so
+   * vec-get/map-get can narrow the result type. Scalar element types
+   * (i32/i64/etc.) use the shared JACL_SCALAR_TYPE_IDX sentinel
+   * encoding so the compiler can read the same idx. */
+  if (typer__map_v_form(head)) {
+    typer__error(tc, node->start.line, node->start.column,
+                 TYPER_MAP_V_REMOVED_MSG);
+    node->inferred_type = TYPE_MAP;
+    return;
+  }
+  /* Nested compound VALUE map ctor ([[Map str [Vec i64]] ...]): the
+   * value is a collection — a tagged heap value, i.e. a REF kind — so
+   * the map uses the PLAIN traced rep. The key type stamps as usual;
+   * the value SHAPE is interned TYPER-SIDE and lives in bindings only
+   * (def re-derives it; the AST value stamp stays UINT32_MAX per the
+   * cross-registry rule). Mirrors the [Vec [Vec T]] ctor. */
+  if (head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Map", 3)
+          == 0 &&
+      head->data.command.arg_count == 2 &&
+      head->data.command.args[0]->type == AST_LIT_STRING &&
+      head->data.command.args[1]->type == AST_COMMAND) {
+    uint32_t vsh = typer__nested_elem_shape(tc, head->data.command.args[1]);
+    if (vsh != UINT32_MAX) {
+      node->inferred_type = TYPE_MAP;
+      node->inferred_struct_idx = UINT32_MAX;  /* shape: binding-only */
+      AstNode* kn = head->data.command.args[0];
+      JaclType ref_kt = TYPE_DYN;
+      if (is_type_keyword(kn->data.lit_string.value,
+                          kn->data.lit_string.length)) {
+        ref_kt = type_from_keyword(kn->data.lit_string.value,
+                                   kn->data.lit_string.length);
+        if (ref_kt != TYPE_DYN)
+          node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(ref_kt);
+      }
+      /* Decode the value shape to the PORTABLE expected kind. */
+      uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+      JaclType ekind = typer__buf_elem_decode(tc, vsh, &iv, &ik);
+      JaclType want = TYPE_DYN;
+      uint32_t want_idx = UINT32_MAX;
+      if (ekind == TYPE_TYPED_VEC) {
+        bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                         (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                          JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
+        bool inner_shape = typer__is_shape_idx(tc, iv);
+        if (inner_ref) {
+          want = TYPE_VEC;
+          if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR) want_idx = iv;
+        } else if (inner_shape) {
+          want = TYPE_VEC;  /* inner shape: no idx compare */
+        } else {
+          want = TYPE_TYPED_VEC;
+          want_idx = iv;
+        }
+      } else if (ekind == TYPE_TYPED_MAP) {
+        uint32_t mki;
+        typer__decode_map_shape(iv, ik, &want, &want_idx, &mki);
+        (void)mki;
+      }
+      for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+        bool is_key = (ei % 2 == 0);
+        AstNode* av = node->data.command.args[ei];
+        JaclType at = (JaclType)av->inferred_type;
+        if (at == TYPE_DYN) continue;
+        bool ok = true;
+        if (is_key) {
+          if (ref_kt != TYPE_DYN) ok = (at == ref_kt);
+        } else {
+          ok = (at == want);
+          if (ok && want_idx != UINT32_MAX &&
+              av->inferred_struct_idx != UINT32_MAX &&
+              av->inferred_struct_idx != want_idx)
+            ok = false;
+        }
+        if (!ok) {
+          char err[192];
+          snprintf(err, sizeof(err),
+                   "type error: [Map ...] %s %u does not match the "
+                   "declared nested %s type",
+                   is_key ? "key" : "value", ei / 2,
+                   is_key ? "key" : "value");
+          typer__error(tc, av->start.line, av->start.column, err);
+          break;
+        }
+      }
+      return;
+    }
+  }
+  int tc_kind = typer__typed_collection_kind(head);
+  /* [[Arr T] ...] constructor: element semantics are identical to vec
+   * (single element type, one element per arg), so reuse the kind==1
+   * machinery below but stamp TYPE_TYPED_ARR. See ARR_DESIGN.md M4c. */
+  uint32_t arr_ctor_ei;
+  bool is_arr_ctor = (tc_kind == 0) && typer__arr_type(tc, head, &arr_ctor_ei);
+  if (is_arr_ctor) tc_kind = 1;
+  /* Nested compound element ctor ([[Vec [Vec i64]] ...], [[Arr [Proc …]] …]):
+   * typer__typed_collection_kind / typer__arr_type require a LIT_STRING
+   * element and return 0/false — recognize the compound-element form
+   * directly so the ref-element branch below handles it. An Arr compound
+   * element also flips is_arr_ctor so the branch stamps TYPE_ARR. */
+  if (tc_kind == 0 && !is_arr_ctor && head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3)
+          == 0 ||
+       memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
+          == 0) &&
+      head->data.command.arg_count == 1 &&
+      head->data.command.args[0]->type == AST_COMMAND) {
+    tc_kind = 1;
+    if (memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
+            == 0)
+      is_arr_ctor = true;
+  }
+  if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
+    /* Ref-element [Vec T] (T = str or dyn): `vec` is shorthand for
+     * [Vec dyn] — the whole family is legal. Ref elements share the
+     * plain traced vec REP (no strided rep win exists for tagged heap
+     * values); the element type lives statically as TYPE_VEC + elem
+     * stamp, exactly the scheme typed streams use. [Vec dyn] IS the
+     * plain vec (no stamp). Through a dyn slot the element type widens
+     * to dyn — same as scalars. */
+    if (tc_kind == 1) {
+      AstNode* en = head->data.command.args[0];
+      /* Nested compound element ([Vec [Vec i64]], [Vec [Map K V]],
+       * [Vec [Proc …]] — and the [Arr …] variants): also a REF element
+       * (collections / closures are tagged heap values) → plain traced
+       * vec/arr rep. The element shape is interned TYPER-SIDE for
+       * binding-level narrowing (def re-derives it; see the def handler);
+       * the AST stamp stays UINT32_MAX per the cross-registry rule. */
+      if (en && en->type == AST_COMMAND) {
+        uint32_t esh = typer__nested_elem_shape(tc, en);
+        if (esh != UINT32_MAX) {
+          node->inferred_type = is_arr_ctor ? TYPE_ARR : TYPE_VEC;
+          node->inferred_struct_idx = UINT32_MAX;
+          uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+          JaclType ekind = typer__buf_elem_decode(tc, esh, &iv, &ik);
+          /* Inner ref-kinds ([Vec str]/[Vec dyn] elements) are themselves
+           * plain-rep'd vecs. */
+          bool inner_ref = (ekind == TYPE_TYPED_VEC &&
+                            JACL_IS_SCALAR_TYPE_IDX(iv) &&
+                            (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
+                             JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN));
+          /* A nested element whose OWN element is a shape ([Vec [Vec T]]
+           * elements of a depth-3 ctor) is itself plain-rep'd, and its AST
+           * stamp is suppressed — expect TYPE_VEC with no idx compare. */
+          bool inner_shape = (ekind == TYPE_TYPED_VEC &&
+                              typer__is_shape_idx(tc, iv));
+          if (inner_shape) { inner_ref = true; iv = UINT32_MAX; }
+          JaclType want;
+          if (inner_ref) {
+            want = TYPE_VEC;
+          } else if (ekind == TYPE_TYPED_MAP) {
+            /* Rep rule for inner maps: ref-kind VALUES → plain TYPE_MAP
+             * (compare against the decoded value stamp); value kinds →
+             * typed rep. */
+            uint32_t mki;
+            typer__decode_map_shape(iv, ik, &want, &iv, &mki);
+            (void)mki;
+          } else if (ekind == TYPE_CLOSURE) {
+            /* B3c: [Vec/Arr [Proc …]] — closure element (ref-kind, plain rep).
+             * An inline closure-literal element is monomorphized to the
+             * element signature here (mirrors the def/arg/return walk); a
+             * named closure stays TYPE_CLOSURE (compiler enforces conformance).
+             * No idx compare — proc shapes are typer-side only. */
+            want = TYPE_CLOSURE;
+            inner_ref = true;  /* suppress the idx compare below */
+            uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+            uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+            bool dec = typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2,
+                                                   psi2, &rsi2);
+            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+              AstNode* av = node->data.command.args[ei];
+              if (dec && av->type == AST_COMMAND &&
+                  av->data.command.head_id == HEAD_PROC)
+                typer__monomorphize_proc_literal(tc, av, pts2, psi2, pc2, rt2);
+            }
+          } else {
+            want = TYPE_TYPED_VEC;
+          }
+          for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+            AstNode* av = node->data.command.args[ei];
+            JaclType at = (JaclType)av->inferred_type;
+            bool ok = (at == TYPE_DYN) || (at == want);
+            if (ok && !inner_ref && at == want &&
+                av->inferred_struct_idx != UINT32_MAX && iv != UINT32_MAX &&
+                av->inferred_struct_idx != iv)
+              ok = false;
+            if (!ok) {
+              char err[192];
+              snprintf(err, sizeof(err),
+                       "type error: %s element %u does not match "
+                       "the declared nested element type",
+                       is_arr_ctor ? "[Arr ...]" : "[Vec ...]", ei);
+              typer__error(tc, node->start.line, node->start.column, err);
+            }
+          }
+          return;
+        }
+      }
+      if (!is_arr_ctor && en && en->type == AST_LIT_STRING &&
+          is_type_keyword(en->data.lit_string.value,
+                          en->data.lit_string.length)) {
+        JaclType ref_et = type_from_keyword(en->data.lit_string.value,
+                                            en->data.lit_string.length);
+        if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
+          node->inferred_type = TYPE_VEC;
+          node->inferred_struct_idx = (ref_et == TYPE_STR)
+              ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+          if (ref_et == TYPE_STR) {
+            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+              JaclType at =
+                  (JaclType)node->data.command.args[ei]->inferred_type;
+              if (at != TYPE_STR && at != TYPE_DYN) {
+                char err[160];
+                jacl_format_typed_vec_elem(err, sizeof(err),
+                    en->data.lit_string.value, en->data.lit_string.length,
+                    ei, true, at);
+                typer__error(tc, node->start.line, node->start.column, err);
+              }
+            }
+          }
+          return;
+        }
+      }
+    }
+    /* Ref-element [Arr T] (T = str or dyn): `arr` is shorthand for
+     * [Arr dyn]. Ref elements use the DYN arr rep (tagged traced slots,
+     * elem_size 8) — no flat-bytes rep win exists for tagged heap
+     * values; the element type lives statically as TYPE_ARR + stamp.
+     * [Arr dyn] IS the plain arr (no stamp). Mirrors [Vec str]. */
+    if (tc_kind == 1 && is_arr_ctor) {
+      AstNode* en = head->data.command.args[0];
+      if (en && en->type == AST_LIT_STRING &&
+          is_type_keyword(en->data.lit_string.value,
+                          en->data.lit_string.length)) {
+        JaclType ref_et = type_from_keyword(en->data.lit_string.value,
+                                            en->data.lit_string.length);
+        if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
+          node->inferred_type = TYPE_ARR;
+          node->inferred_struct_idx = (ref_et == TYPE_STR)
+              ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+          if (ref_et == TYPE_STR) {
+            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+              JaclType at =
+                  (JaclType)node->data.command.args[ei]->inferred_type;
+              if (at != TYPE_STR && at != TYPE_DYN) {
+                char err[160];
+                jacl_format_typed_arr_elem(err, sizeof(err),
+                    en->data.lit_string.value, en->data.lit_string.length,
+                    ei, true, at);
+                typer__error(tc, node->start.line, node->start.column, err);
+              }
+            }
+          }
+          return;
+        }
+      }
+    }
+    /* Ref-kind VALUE [Map K V] forms ([Map K str] / [Map K dyn]):
+     * plain traced map rep; the key/value types live statically as
+     * TYPE_MAP + stamps (value on inferred_struct_idx, key on
+     * inferred_key_struct_idx) — the [Vec str] scheme. [Map dyn dyn] IS
+     * the plain map (no stamps). Mirrors the compiler's plain-rep route. */
+    if (tc_kind == 3) {
+      AstNode* vn = head->data.command.args[1];
+      AstNode* kn = head->data.command.args[0];
+      if (vn && vn->type == AST_LIT_STRING &&
+          is_type_keyword(vn->data.lit_string.value,
+                          vn->data.lit_string.length)) {
+        JaclType ref_vt = type_from_keyword(vn->data.lit_string.value,
+                                            vn->data.lit_string.length);
+        if (ref_vt == TYPE_STR || ref_vt == TYPE_DYN) {
+          node->inferred_type = TYPE_MAP;
+          node->inferred_struct_idx = (ref_vt == TYPE_STR)
+              ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
+          JaclType ref_kt = TYPE_DYN;
+          if (kn && kn->type == AST_LIT_STRING &&
+              is_type_keyword(kn->data.lit_string.value,
+                              kn->data.lit_string.length)) {
+            ref_kt = type_from_keyword(kn->data.lit_string.value,
+                                       kn->data.lit_string.length);
+            if (ref_kt != TYPE_DYN)
+              node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(ref_kt);
+          }
+          /* Per-pair checks (dyn flow-in left to the compiler's mirror). */
+          for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
+            bool is_key = (ei % 2 == 0);
+            JaclType at = (JaclType)node->data.command.args[ei]->inferred_type;
+            if (at == TYPE_DYN) continue;
+            bool ok = true;
+            if (is_key) {
+              if (ref_kt != TYPE_DYN) ok = (at == ref_kt);
+            } else {
+              if (ref_vt == TYPE_STR) ok = (at == TYPE_STR);
+            }
+            if (!ok) {
+              char err[224];
+              jacl_format_typed_map_kv(err, sizeof(err),
+                  kn->data.lit_string.value, kn->data.lit_string.length,
+                  vn->data.lit_string.value, vn->data.lit_string.length,
+                  ei / 2, !is_key);
+              typer__error(tc, node->data.command.args[ei]->start.line,
+                           node->data.command.args[ei]->start.column, err);
+              break;
+            }
+          }
+          return;
+        }
+      }
+    }
+    node->inferred_type = is_arr_ctor ? TYPE_TYPED_ARR
+                        : (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+    AstNode* elem_node = (tc_kind == 3)
+        ? head->data.command.args[1]
+        : head->data.command.args[0];
+    if (elem_node && elem_node->type == AST_LIT_STRING) {
+      const char* nm = elem_node->data.lit_string.value;
+      uint32_t    nl = elem_node->data.lit_string.length;
+      if (is_type_keyword(nm, nl)) {
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+      } else {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == nl &&
+              memcmp(tc->structs[si].name, nm, nl) == 0) {
+            node->inferred_struct_idx = si;
+            break;
+          }
+        }
+      }
+    }
+    /* For [Map K V] (kind=3), also propagate the key type idx. */
+    AstNode* key_node = NULL;
+    if (tc_kind == 3) {
+      key_node = head->data.command.args[0];
+      if (key_node && key_node->type == AST_LIT_STRING) {
+        const char* nm = key_node->data.lit_string.value;
+        uint32_t    nl = key_node->data.lit_string.length;
+        if (is_type_keyword(nm, nl)) {
+          /* Explicit dyn keys ([Map dyn V]) are the [Map V] dyn-key form:
+           * no key stamp (UINT32_MAX ≡ the VM's 0xFFFF convention). */
+          JaclType kkw = type_from_keyword(nm, nl);
+          if (kkw != TYPE_DYN)
+            node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(kkw);
+        } else {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == nl &&
+                memcmp(tc->structs[si].name, nm, nl) == 0) {
+              node->inferred_key_struct_idx = si;
+              break;
+            }
+          }
+        }
+      }
+    }
+    /* Element-type checks: each arg's typer-inferred type must match
+     * the declared element (and key, for kind=3) type. Mirrors the
+     * compiler's per-element check in compiler__compile_command's
+     * typed-vec/typed-map branches; uses the same shared formatters
+     * so wording stays in sync. We skip when the declared scalar is
+     * not a supported typed-collection scalar (compiler reports the
+     * "only value-type scalars supported" error first), and skip
+     * struct checks for unknown struct names (compiler backstops
+     * unknown-type errors). */
+    if (elem_node && elem_node->type == AST_LIT_STRING) {
+      const char* elem_nm = elem_node->data.lit_string.value;
+      uint32_t    elem_nl = elem_node->data.lit_string.length;
+      bool elem_is_scalar = is_type_keyword(elem_nm, elem_nl);
+      JaclType elem_t = elem_is_scalar
+                        ? type_from_keyword(elem_nm, elem_nl) : TYPE_DYN;
+      uint32_t elem_sidx = node->inferred_struct_idx;
+      bool elem_known = elem_is_scalar
+          ? typer__is_typed_collection_scalar(elem_t)
+          : (elem_sidx != UINT32_MAX &&
+             !JACL_IS_SCALAR_TYPE_IDX(elem_sidx));
+
+      const char* key_nm = NULL;
+      uint32_t    key_nl = 0;
+      bool key_is_scalar = false;
+      JaclType key_t = TYPE_DYN;
+      uint32_t key_sidx = UINT32_MAX;
+      bool key_known = false;
+      if (tc_kind == 3 && key_node && key_node->type == AST_LIT_STRING) {
+        key_nm = key_node->data.lit_string.value;
+        key_nl = key_node->data.lit_string.length;
+        key_is_scalar = is_type_keyword(key_nm, key_nl);
+        key_t = key_is_scalar
+                ? type_from_keyword(key_nm, key_nl) : TYPE_DYN;
+        key_sidx = node->inferred_key_struct_idx;
+        /* str keys are first-class on the typed rep (1 tagged traced
+         * slot) — include them in the static key checks. Explicit dyn
+         * keys have no stamp and skip checks. */
+        key_known = key_is_scalar
+            ? (typer__is_typed_collection_scalar(key_t) ||
+               key_t == TYPE_STR)
+            : (key_sidx != UINT32_MAX &&
+               !JACL_IS_SCALAR_TYPE_IDX(key_sidx));
+      }
+
+      uint32_t argc = node->data.command.arg_count;
+      AstNode** as = node->data.command.args;
+      for (uint32_t i = 0; i < argc; i++) {
+        /* For Map kinds, even idx → key, odd idx → value.
+         * For Vec, every idx → element. */
+        bool is_map = (tc_kind == 2 || tc_kind == 3);
+        bool is_value_slot = !is_map || (i % 2 == 1);
+        /* kind=2 keys are dyn — skip key slots. */
+        if (tc_kind == 2 && !is_value_slot) continue;
+        /* kind=3 key slot uses key_t/key_sidx; otherwise elem. */
+        bool slot_is_key = (tc_kind == 3 && !is_value_slot);
+        bool       slot_known      = slot_is_key ? key_known      : elem_known;
+        bool       slot_is_scalar  = slot_is_key ? key_is_scalar  : elem_is_scalar;
+        JaclType   slot_t          = slot_is_key ? key_t          : elem_t;
+        uint32_t   slot_sidx       = slot_is_key ? key_sidx       : elem_sidx;
+        if (!slot_known) continue;
+        AstNode* arg = as[i];
+        JaclType arg_t = (JaclType)arg->inferred_type;
+        if (arg_t == TYPE_DYN) continue;  /* dyn flow-in: compiler handles */
+        bool ok;
+        if (slot_is_scalar) {
+          ok = (arg_t == slot_t);
+        } else {
+          ok = (arg_t == TYPE_STRUCT && arg->inferred_struct_idx == slot_sidx);
+        }
+        if (ok) continue;
+        char err[224];
+        uint32_t pair_or_elem_idx = is_map ? (i / 2) : i;
+        if (tc_kind == 1) {
+          if (is_arr_ctor)
+            jacl_format_typed_arr_elem(err, sizeof(err),
+                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+          else
+            jacl_format_typed_vec_elem(err, sizeof(err),
+                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+        } else if (tc_kind == 2) {
+          jacl_format_typed_map_value(err, sizeof(err),
+              elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+        } else {
+          jacl_format_typed_map_kv(err, sizeof(err),
+              key_nm, key_nl, elem_nm, elem_nl,
+              pair_or_elem_idx, is_value_slot);
+        }
+        typer__error(tc, arg->start.line, arg->start.column, err);
+        break;
+      }
+    }
+  } else {
+    /* [[Buf N T] v0 v1 ...] constructor — same shape as the typed-
+     * vec/map constructors above but with a value (N) in the head's
+     * second slot. The compiler integrates with the def site for
+     * codegen; the typer just stamps TYPE_BUF + element/len so the
+     * def-site type check sees a matching RHS. Nested form
+     * `[[Buf N [Buf M T]] ...]` also tracked via inner_len (M4.2). */
+    uint32_t buf_sidx_ctor;
+    uint32_t buf_len_ctor;
+    uint32_t buf_inner_len_ctor = 0;
+    if (typer__buf_type_full(tc, head, &buf_sidx_ctor, &buf_len_ctor,
+                             &buf_inner_len_ctor, NULL) &&
+        buf_len_ctor > 0 && buf_sidx_ctor != UINT32_MAX) {
+      node->inferred_type           = TYPE_BUF;
+      node->inferred_struct_idx     = buf_sidx_ctor;
+      node->inferred_buf_len        = buf_len_ctor;
+      node->inferred_buf_inner_len  = buf_inner_len_ctor;
+      return;
+    }
+    node->inferred_type = TYPE_DYN;
+  }
+}
+
+/* Split out of `typer__infer_command_inner` so each emitted function stays under the browser
+ * host's per-function optimizer limit (temen#1384). Pure extraction: the body is byte-for-byte
+ * what it was inline, and every outer local it needs is passed by value under its own name
+ * (all read-only inline, so nothing is passed back). Built-in binary ops whose LHS type propagates to the RHS; 1 = typed, 0 = fall through. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static int typer__infer_cmd_binop(TyperCtx* tc, AstNode* node, AstNode* head) {
+  const char* hname = head->data.lit_string.value;
+  uint32_t    hlen  = head->data.lit_string.length;
+  bool is_arith = (hlen == 1 && (hname[0] == '+' || hname[0] == '-' ||
+                                  hname[0] == '*' || hname[0] == '/' ||
+                                  hname[0] == '%'));
+  bool is_cmp = false;
+  if (!is_arith) {
+    if ((hlen == 1 && (hname[0] == '<' || hname[0] == '>')) ||
+        (hlen == 2 && (memcmp(hname, "<=", 2) == 0 ||
+                       memcmp(hname, ">=", 2) == 0 ||
+                       memcmp(hname, "==", 2) == 0))) {
+      is_cmp = true;
+    }
+  }
+  if ((is_arith || is_cmp) && node->data.command.arg_count == 2) {
+    AstNode* lhs = node->data.command.args[0];
+    AstNode* rhs = node->data.command.args[1];
+    typer__infer_node(tc, lhs);
+    JaclType lhs_t = (JaclType)lhs->inferred_type;
+    JaclType saved_et = tc->expected_type;
+    if (lhs_t != TYPE_DYN) tc->expected_type = lhs_t;
+    typer__infer_node(tc, rhs);
+    tc->expected_type = saved_et;
+    JaclType rhs_t = (JaclType)rhs->inferred_type;
+    /* Concrete-mismatch (both sides non-DYN, different types):
+     *  - Arithmetic (+ - * / %): always error per decision 1
+     *    (no implicit widening; explicit cast required).
+     *  - Comparison (== < > etc.) of unboxed scalars (i64/u64/f64):
+     *    error to mirror the compiler at compiler.c:3859-3868
+     *    (unboxed values can't go through dynamic dispatch).
+     *  - Comparison of tagged scalars: still allowed; cross-type
+     *    equality is meaningful (always false) and tests rely on it.
+     *  - Mixed dyn/typed: stays permissive (decision 2 deferred). */
+    /* TYPE_PTR-specific rules (Stage 5a):
+     *  - Arithmetic with any pointer operand → error (use [ptr-offset]).
+     *  - Comparison of two TYPE_PTR values → require matching pointee
+     *    idx; otherwise it's a type error.
+     *  - Comparison of TYPE_PTR with a non-pointer concrete type
+     *    falls through to the generic concrete-mismatch check below. */
+    if ((lhs_t == TYPE_PTR || rhs_t == TYPE_PTR) && is_arith) {
+      char err[160];
+      jacl_format_ptr_arithmetic(err, sizeof(err));
+      typer__error(tc, lhs->start.line, lhs->start.column, err);
+    } else if (lhs_t == TYPE_PTR && rhs_t == TYPE_PTR && is_cmp &&
+               lhs->inferred_struct_idx != rhs->inferred_struct_idx &&
+               lhs->inferred_struct_idx != UINT32_MAX &&
+               rhs->inferred_struct_idx != UINT32_MAX) {
+      char err[160];
+      jacl_format_ptr_compare_pointee_mismatch(err, sizeof(err));
+      typer__error(tc, lhs->start.line, lhs->start.column, err);
+    }
+    bool concrete_mismatch = (lhs_t != rhs_t &&
+                              lhs_t != TYPE_DYN && rhs_t != TYPE_DYN);
+    bool unboxed_either = is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t);
+    if (concrete_mismatch && (is_arith || unboxed_either)) {
+      const char* verb = is_cmp ? "compare" :
+                         (hname[0] == '+' ? "add" :
+                          hname[0] == '-' ? "subtract" :
+                          hname[0] == '*' ? "multiply" :
+                          hname[0] == '/' ? "divide" : "compute");
+      char err[160];
+      snprintf(err, sizeof(err),
+               "type error: cannot %s %s and %s",
+               verb, type_name(lhs_t), type_name(rhs_t));
+      typer__error(tc, lhs->start.line, lhs->start.column, err);
+    }
+    if (is_cmp) {
+      node->inferred_type = TYPE_BOOL;
+    } else if (lhs_t == rhs_t && lhs_t != TYPE_DYN) {
+      /* Tagged or unboxed arithmetic, both sides same type — preserve. */
+      node->inferred_type = lhs_t;
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+    return 1;
+  }
+  /* Unary minus: `[- $x]` — result preserves operand's numeric type. */
+  if (is_arith && hlen == 1 && hname[0] == '-' &&
+      node->data.command.arg_count == 1) {
+    AstNode* arg = node->data.command.args[0];
+    typer__infer_node(tc, arg);
+    JaclType t = (JaclType)arg->inferred_type;
+    if (t == TYPE_I32 || t == TYPE_I64 ||
+        t == TYPE_F32 || t == TYPE_F64 ||
+        t == TYPE_U32 || t == TYPE_U64) {
+      node->inferred_type = t;
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+/* Split out of `typer__infer_command_inner` so each emitted function stays under the browser
+ * host's per-function optimizer limit (temen#1384). Pure extraction: the body is byte-for-byte
+ * what it was inline, and every outer local it needs is passed by value under its own name
+ * (all read-only inline, so nothing is passed back). The per-argument walk: types each arg and narrows it against the callee's signature. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_arg_walk(TyperCtx* tc, AstNode* node, AstNode* head,
+                                      const TyperProc* proc, const TyperStruct* sdef,
+                                      int ctor_kind, JaclType ctor_elem_t, JaclType ctor_key_t,
+                                      bool ctor_is_arr, HeadId mutator_hid, uint8_t head_clos_pc,
+                                      const uint8_t* head_clos_pts, bool head_is_closure_call) {
+for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+  AstNode* arg = node->data.command.args[i];
+  /* Type-once for monomorphized HOF callbacks: an inline proc passed to
+   * transform/filter over a typed stream is typed by the HOF case below
+   * (typer__proc_result_enc, with its param bound to the element type).
+   * Skip it here — this generic walk would type the body with the param
+   * UNBOUND (dyn), recording spurious sticky errors (e.g. an in-body
+   * assert-type) and paying an extra body walk. The skip condition
+   * mirrors the HOF case's exactly (args[0] is typed before i==1, so its
+   * stream/elem verdict is available). */
+  if (i == 1 && node->data.command.arg_count == 2 &&
+      (mutator_hid == HEAD_TRANSFORM || mutator_hid == HEAD_FILTER) &&
+      (JaclType)node->data.command.args[0]->inferred_type == TYPE_STREAM &&
+      node->data.command.args[0]->inferred_struct_idx != UINT32_MAX &&
+      arg->type == AST_COMMAND &&
+      arg->data.command.head_id == HEAD_PROC) {
+    continue;
+  }
+  JaclType saved_et = tc->expected_type;
+  if (proc && i < proc->param_count) {
+    tc->expected_type = (JaclType)proc->param_types[i];
+  } else if (head_is_closure_call && i < head_clos_pc) {
+    tc->expected_type = (JaclType)head_clos_pts[i];  /* step 2b */
+  } else if (sdef) {
+    /* Named struct constructor: args are field/value pairs. The
+     * value position is at odd `i`; the preceding even-position arg
+     * carries the field name. Look up the field and push its type
+     * so literal narrowing fires. Positional struct constructors
+     * are no longer accepted — only the named form. */
+    if ((i & 1u) == 1) {
+      AstNode* fname_node = node->data.command.args[i - 1];
+      if (fname_node->type == AST_LIT_STRING) {
+        for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->field_name_lens[fi] == fname_node->data.lit_string.length &&
+              memcmp(sdef->field_names[fi], fname_node->data.lit_string.value,
+                     fname_node->data.lit_string.length) == 0) {
+            tc->expected_type = (JaclType)sdef->field_types[fi];
+            break;
+          }
+        }
+      }
+    }
+  } else if ((ctor_kind == 1 || ctor_is_arr) && ctor_elem_t != TYPE_DYN) {
+    tc->expected_type = ctor_elem_t;
+  } else if ((ctor_kind == 2 || ctor_kind == 3) &&
+             (ctor_elem_t != TYPE_DYN || ctor_key_t != TYPE_DYN)) {
+    /* Map ctor: alternating key/value pairs. Even idx → key, odd → val. */
+    tc->expected_type = (i % 2 == 0) ? ctor_key_t : ctor_elem_t;
+  } else if (i > 0 && (mutator_hid == HEAD_VEC_PUSH ||
+                       mutator_hid == HEAD_VEC_SET ||
+                       mutator_hid == HEAD_ARR_PUSH ||
+                       mutator_hid == HEAD_ARR_SET ||
+                       mutator_hid == HEAD_MAP_SET ||
+                       mutator_hid == HEAD_MAP_REMOVE ||
+                       mutator_hid == HEAD_MAP_GET ||
+                       mutator_hid == HEAD_MAP_HAS)) {
+    AstNode* recv = node->data.command.args[0];
+    JaclType recv_t = (JaclType)recv->inferred_type;
+    uint32_t e_idx = recv->inferred_struct_idx;
+    uint32_t k_idx = recv->inferred_key_struct_idx;
+    JaclType target = TYPE_DYN;
+    /* arr-push i=1 → elem; arr-set i=1 → idx (dyn), i=2 → elem.
+     * TYPE_ARR with a stamp = ref-element [Arr str]: same narrowing. */
+    if (recv_t == TYPE_TYPED_ARR || recv_t == TYPE_ARR) {
+      if (mutator_hid == HEAD_ARR_PUSH ||
+          (mutator_hid == HEAD_ARR_SET && i == 2)) {
+        if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+          target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+        }
+      }
+    }
+    /* Pick the right slot:
+     *   vec-push i=1 → elem
+     *   vec-set  i=1 → idx (DYN), i=2 → elem
+     *   map-set  i=1 → key, i=2 → val
+     *   map-remove/get/has i=1 → key
+     */
+    if (recv_t == TYPE_VEC && e_idx != UINT32_MAX &&
+        JACL_IS_SCALAR_TYPE_IDX(e_idx) &&
+        (mutator_hid == HEAD_VEC_PUSH ||
+         (mutator_hid == HEAD_VEC_SET && i == 2))) {
+      /* Stamped ref-element vec ([Vec str]): pushed/assigned values take
+       * the element type as expected_type (literals narrow; mismatched
+       * concrete values surface through the generic checks). */
+      target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+    }
+    if (recv_t == TYPE_TYPED_VEC) {
+      if (mutator_hid == HEAD_VEC_PUSH ||
+          (mutator_hid == HEAD_VEC_SET && i == 2)) {
+        if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+          target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+        }
+      }
+    } else if (recv_t == TYPE_TYPED_MAP || recv_t == TYPE_MAP) {
+      /* TYPE_MAP with stamps = ref-kind [Map ...] form on the plain rep
+       * ([Map str], [Map i64 str]): same static key/value narrowing as
+       * the typed rep. Unstamped plain maps have UINT32_MAX idxs and
+       * fall through to dyn. */
+      bool is_key_slot =
+          (mutator_hid == HEAD_MAP_REMOVE ||
+           mutator_hid == HEAD_MAP_GET ||
+           mutator_hid == HEAD_MAP_HAS ||
+           (mutator_hid == HEAD_MAP_SET && i == 1));
+      bool is_val_slot = (mutator_hid == HEAD_MAP_SET && i == 2);
+      if (is_key_slot && k_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(k_idx)) {
+        target = JACL_TYPE_IDX_TO_SCALAR(k_idx);
+      } else if (is_val_slot && e_idx != UINT32_MAX &&
+                 JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+        target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      }
+    }
+    tc->expected_type = target;
+  } else if (mutator_hid == HEAD_YIELD && i == 0 &&
+             tc->yield_elem_struct_idx != UINT32_MAX &&
+             JACL_IS_SCALAR_TYPE_IDX(tc->yield_elem_struct_idx)) {
+    /* yield X in a [Stream T] generator: narrow a numeric literal X to the
+     * element type T (yield 1.5 in [Stream f64] -> f64; yield 100 in
+     * [Stream i64] -> i64). Mirrors typed def/mut/push expected_type
+     * propagation. The yield codegen boxes a wide tail before OP_YIELD_SM. */
+    tc->expected_type = JACL_TYPE_IDX_TO_SCALAR(tc->yield_elem_struct_idx);
+  } else {
+    tc->expected_type = TYPE_DYN;
+  }
+  /* Phase B3a: an inline closure literal passed to a [Proc …] closure param
+   * is monomorphized against the param's signature, so its body types with
+   * the declared param/return (mirrors the def-site walk). Otherwise the body
+   * stays dyn and the typed call at the callee reads a tagged param. */
+  if (proc && i < proc->param_count &&
+      (JaclType)proc->param_types[i] == TYPE_CLOSURE &&
+      proc->param_struct_idxs[i] != UINT32_MAX &&
+      arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+    uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+    uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+    if (typer__decode_proc_shape_ex(tc, proc->param_struct_idxs[i],
+                                    &pc2, pts2, &rt2, psi2, &rsi2)) {
+      typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
+      tc->expected_type = saved_et;
+      continue;
+    }
+  }
+  /* B3c follow-up: an inline closure literal pushed to a [Vec/Arr [Proc …]]
+   * is monomorphized against the element signature (mirrors the ctor walk),
+   * so its body types with the declared param/return instead of staying dyn.
+   * The element proc shape rides the receiver BINDING (AST stamp suppressed
+   * by the cross-registry rule), so resolve it from the var-ref. */
+  if (i == 1 &&
+      (mutator_hid == HEAD_VEC_PUSH || mutator_hid == HEAD_ARR_PUSH) &&
+      arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+    uint32_t esh =
+        typer__coll_receiver_proc_shape(tc, node->data.command.args[0]);
+    if (esh != UINT32_MAX) {
+      uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
+      uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
+      if (typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2, psi2, &rsi2)) {
+        typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
+        tc->expected_type = saved_et;
+        continue;
+      }
+    }
+  }
+  /* An inline closure literal ELEMENT of a typed [[Vec/Arr [Proc …]] …]
+   * constructor: skip the generic walk — the ctor branch below monomorphizes
+   * it to the element signature (binding an untyped `{q}` param to the
+   * declared struct). The generic walk would type the body with the literal's
+   * own (dyn) params and raise a premature "body returns dyn" when the literal
+   * declares a return but a param needs the annotation's struct type. */
+  if (head && head->type == AST_COMMAND && head->data.command.head &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0 ||
+       memcmp(head->data.command.head->data.lit_string.value, "Arr", 3) == 0) &&
+      head->data.command.arg_count == 1 &&
+      head->data.command.args[0]->type == AST_COMMAND &&
+      arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
+    uint32_t esh = typer__nested_elem_shape(tc, head->data.command.args[0]);
+    uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
+    if (esh != UINT32_MAX &&
+        typer__buf_elem_decode(tc, esh, &iv, &ik) == TYPE_CLOSURE) {
+      tc->expected_type = saved_et;
+      continue;  /* ctor branch monomorphizes this element */
+    }
+  }
+  typer__infer_node(tc, arg);
+  tc->expected_type = saved_et;
+}
+}
+
+/* Split out of `typer__infer_command_inner` so each emitted function stays under the browser
+ * host's per-function optimizer limit (temen#1384). Pure extraction: the body is byte-for-byte
+ * what it was inline, and every outer local it needs is passed by value under its own name
+ * (all read-only inline, so nothing is passed back). The `[yield V]` forms. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_yield(TyperCtx* tc, AstNode* node, const TyperProc* proc,
+                                   HeadId mutator_hid) {
+if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
+    tc->yield_elem_struct_idx == UINT32_MAX) {
+  AstNode* arg = node->data.command.args[0];
+  bool is_literal = (arg->type == AST_LIT_INT ||
+                     arg->type == AST_LIT_FLOAT ||
+                     arg->type == AST_LIT_STRING);
+  JaclType arg_t = (JaclType)arg->inferred_type;
+  if (!is_literal && arg_t != TYPE_DYN && arg_t != TYPE_NIL) {
+    char err[224];
+    snprintf(err, sizeof(err),
+             "type error: yield of typed value (%s) in an unannotated "
+             "generator; annotate the proc with `[Stream %s]` or "
+             "convert the value to dyn",
+             type_name(arg_t), type_name(arg_t));
+    typer__error(tc, arg->start.line, arg->start.column, err);
+  }
+}
+/* [yield X] inside `[Stream T]` (T != dyn): verify the yielded
+ * expression's type matches T. Yield-into-[Stream dyn] stays lenient
+ * (typed→dyn widens implicitly, parallel to proc returns/dyn args).
+ * Only the first arg matters — yield has arity 1. */
+if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
+    tc->yield_elem_struct_idx != UINT32_MAX) {
+  AstNode* arg = node->data.command.args[0];
+  JaclType arg_t = (JaclType)arg->inferred_type;
+  uint32_t elem_idx = tc->yield_elem_struct_idx;
+  /* Integer / float literals have flex type — accepted into any
+   * numeric stream element. Note: literal stays at its default
+   * (i32 / f32) at codegen time. The wide-typed-i64 unboxed yield
+   * path has an unrelated bug (see NOT_IMPLEMENTED.md), so we
+   * deliberately don't push expected_type onto the arg upstream. */
+  bool literal_flex = false;
+  if (JACL_IS_SCALAR_TYPE_IDX(elem_idx)) {
+    JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
+    if (arg->type == AST_LIT_INT && is_numeric_type(elem_t)) literal_flex = true;
+    if (arg->type == AST_LIT_FLOAT && (elem_t == TYPE_F32 || elem_t == TYPE_F64))
+      literal_flex = true;
+    if (literal_flex) {
+      /* No-op: literal is accepted. */
+    } else if (arg_t != elem_t && arg_t != TYPE_DYN) {
+      char err[224];
+      snprintf(err, sizeof(err),
+               "type error: yield expected %s, got %s",
+               type_name(elem_t), type_name(arg_t));
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    } else if (arg_t == TYPE_DYN) {
+      char err[224];
+      snprintf(err, sizeof(err),
+               "type error: yield expected %s, got dyn (use [to %s $val])",
+               type_name(elem_t), type_name(elem_t));
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    }
+  } else {
+    /* Struct element type: compare via struct registry idx. The
+     * typer's struct-idx alignment with the compiler holds for
+     * locally-defined structs (pre-pass sets indices); imported
+     * structs are still placeholder entries, in which case the
+     * arg's struct_idx may be UINT32_MAX even on a real Struct
+     * value. Skip the check in that case rather than false-positive. */
+    if (arg_t == TYPE_DYN) {
+      char err[224];
+      const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+      if (s) {
+        snprintf(err, sizeof(err),
+                 "type error: yield expected %.*s, got dyn (use [to %.*s $val])",
+                 (int)s->name_len, s->name, (int)s->name_len, s->name);
+      } else {
+        snprintf(err, sizeof(err),
+                 "type error: yield expected struct, got dyn");
+      }
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    } else if (arg_t != TYPE_STRUCT) {
+      char err[224];
+      const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+      if (s) {
+        snprintf(err, sizeof(err),
+                 "type error: yield expected %.*s, got %s",
+                 (int)s->name_len, s->name, type_name(arg_t));
+      } else {
+        snprintf(err, sizeof(err),
+                 "type error: yield expected struct, got %s", type_name(arg_t));
+      }
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    } else if (arg->inferred_struct_idx != UINT32_MAX &&
+               arg->inferred_struct_idx != elem_idx) {
+      const TyperStruct* expected = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
+      const TyperStruct* got = (arg->inferred_struct_idx < tc->struct_count) ? &tc->structs[arg->inferred_struct_idx] : NULL;
+      char err[224];
+      snprintf(err, sizeof(err),
+               "type error: yield expected %.*s, got %.*s",
+               expected ? (int)expected->name_len : 6,
+               expected ? expected->name : "struct",
+               got ? (int)got->name_len : 6,
+               got ? got->name : "struct");
+      typer__error(tc, arg->start.line, arg->start.column, err);
+    }
+  }
+}
+}
+
+/* Split out of `typer__infer_command_inner` so each emitted function stays under the browser
+ * host's per-function optimizer limit (temen#1384). Pure extraction: the body is byte-for-byte
+ * what it was inline, and every outer local it needs is passed by value under its own name
+ * (all read-only inline, so nothing is passed back). Types a call to a user-declared proc. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_proc_call(TyperCtx* tc, AstNode* node, AstNode* head,
+                                       const TyperProc* proc) {
+  node->inferred_type = proc->return_type;
+  node->inferred_struct_idx = proc->return_struct_idx;
+  /* [Map K V] return: carry the KEY so a binding `def [Map K V] m [f …]` and
+   * map-get on the call result type the key (not just the value). */
+  node->inferred_key_struct_idx = proc->return_key_struct_idx;
+  /* Step 2b (proc-first): a call returning a closure with a known signature
+   * gets a portable proc-shape stamp so the compiler reads it directly from
+   * the AST instead of re-deriving via GlobalArity. Lazy intern at the stamp;
+   * dedup makes this the same idx the compiler would produce. */
+  if ((JaclType)proc->return_type == TYPE_CLOSURE &&
+      proc->return_struct_idx != UINT32_MAX)
+    node->inferred_proc_shape_idx =
+        typer__portable_proc_shape(tc, proc->return_struct_idx);
+  /* Check positional arg types against declared param types. Mirrors
+   * the compiler's typed-call check (compiler.c:10359-10378). Both
+   * concrete-mismatch and dyn-into-typed (decision 2: no implicit
+   * coercion) fire; struct-to-struct stays compiler-owned (typer's
+   * struct-idx tracking is not fully aligned across modules). */
+  uint32_t argc = node->data.command.arg_count;
+  AstNode** as = node->data.command.args;
+  uint32_t check_n = argc < proc->param_count ? argc : proc->param_count;
+  for (uint32_t i = 0; i < check_n; i++) {
+    JaclType param_t = (JaclType)proc->param_types[i];
+    if (param_t == TYPE_DYN) continue;
+    JaclType arg_t = (JaclType)as[i]->inferred_type;
+    if (arg_t == param_t) continue;
+    if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+    /* Plain-rep collection params accept their typed siblings (a typed
+     * vec/map/arr IS a vec/map/arr value through dyn; mirrors the
+     * def-annotation acceptance). */
+    if ((param_t == TYPE_VEC && arg_t == TYPE_TYPED_VEC) ||
+        (param_t == TYPE_MAP && arg_t == TYPE_TYPED_MAP) ||
+        (param_t == TYPE_ARR && arg_t == TYPE_TYPED_ARR)) continue;
+    /* [Buf N T] → [Ptr T] implicit decay at call sites. The buf's
+     * element type must match the param's pointee type exactly, and
+     * the element must be C-ABI compatible: scalars, value-structs,
+     * [Ptr U]. Ref-element bufs (M4.4: dyn/str/vec/map/closure/stream)
+     * hold tagged JaclVals and are rejected -- nothing C-side
+     * understands the encoding. Use [addr $b->0] explicitly if you
+     * need a raw pointer into a tagged-slot buf. See BUFFER_DESIGN.md
+     * M3 / M4.4. */
+    if (param_t == TYPE_PTR && arg_t == TYPE_BUF) {
+      uint32_t arg_elem = as[i]->inferred_struct_idx;
+      if (JACL_IS_SCALAR_TYPE_IDX(arg_elem)) {
+        JaclType et = JACL_TYPE_IDX_TO_SCALAR(arg_elem);
+        if (et == TYPE_DYN || et == TYPE_STR || et == TYPE_VEC ||
+            et == TYPE_MAP || et == TYPE_CLOSURE || et == TYPE_STREAM) {
+          char err[224];
+          snprintf(err, sizeof(err),
+              "type error: argument %u of %.*s: [Buf N %s] cannot decay "
+              "to [Ptr %s] -- reference-element bufs are not C-ABI "
+              "compatible; use [addr $b->0] for an explicit raw pointer",
+              i + 1, (int)proc->name_len, proc->name,
+              type_name(et), type_name(et));
+          typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+          break;
+        }
+      }
+      uint32_t param_pointee = proc->param_struct_idxs[i];
+      if (param_pointee == arg_elem ||
+          param_pointee == UINT32_MAX) {
+        /* Either the param doesn't constrain pointee (rare) or the
+         * encoded element matches. Accept the decay; the compiler
+         * emits address-of at the call site. */
+        continue;
+      }
+    }
+    char err[224];
+    /* Read name from `proc` rather than `head`: for module-binding
+     * calls (`[$mod->fn args]`) the head is an AST_COMMAND, not the
+     * literal proc name. The name was stamped on the proxy. */
+    if (arg_t == TYPE_DYN) {
+      snprintf(err, sizeof(err),
+               "type error: argument %u of %.*s expected %s, got dyn (use [to %s $val])",
+               i + 1,
+               (int)proc->name_len, proc->name,
+               type_name(param_t), type_name(param_t));
+    } else {
+      snprintf(err, sizeof(err),
+               "type error: argument %u of %.*s expected %s, got %s",
+               i + 1,
+               (int)proc->name_len, proc->name,
+               type_name(param_t), type_name(arg_t));
+    }
+    typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+    break;
+  }
+}
+
+/* Split out of `typer__infer_command_inner` so each emitted function stays under the browser
+ * host's per-function optimizer limit (temen#1384). Pure extraction: the body is byte-for-byte
+ * what it was inline, and every outer local it needs is passed by value under its own name
+ * (all read-only inline, so nothing is passed back). Types a struct-constructor call. */
+/* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
+ * and each is called exactly once — at -O2 clang would inline it straight back and undo the
+ * split (measured: without this the caller's estimated emitted size barely moves). */
+__attribute__((noinline))
+static void typer__infer_cmd_struct_ctor(TyperCtx* tc, AstNode* node,
+                                         const TyperStruct* sdef, uint32_t sdef_idx) {
+  node->inferred_type = TYPE_STRUCT;
+  node->inferred_struct_idx = sdef_idx;
+  /* Named struct constructor: args are field/value pairs. The
+   * compiler enforces uniqueness, unknown-name, and buf-vs-value
+   * arity errors; the typer's job here is to type-check each
+   * provided value against the declared field type so call-site
+   * narrowing produces the right diagnostics. */
+  uint32_t argc = node->data.command.arg_count;
+  AstNode** as = node->data.command.args;
+  if ((argc & 1u) == 0) {
+    uint32_t pair_count = argc / 2;
+    for (uint32_t p = 0; p < pair_count; p++) {
+      AstNode* name_node = as[p * 2];
+      AstNode* val_node  = as[p * 2 + 1];
+      if (name_node->type != AST_LIT_STRING) continue;
+      const char* fname = name_node->data.lit_string.value;
+      uint32_t    fname_len = name_node->data.lit_string.length;
+      uint32_t found = UINT32_MAX;
+      for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+        if (sdef->field_name_lens[fi] == fname_len &&
+            memcmp(sdef->field_names[fi], fname, fname_len) == 0) {
+          found = fi;
+          break;
+        }
+      }
+      if (found == UINT32_MAX) continue;  /* compiler reports */
+      JaclType field_t = (JaclType)sdef->field_types[found];
+      if (field_t == TYPE_DYN) continue;
+      JaclType arg_t = (JaclType)val_node->inferred_type;
+      if (arg_t == field_t) continue;
+      if (field_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+      if (arg_t == TYPE_DYN) {
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
+                 (int)sdef->field_name_lens[found], sdef->field_names[found],
+                 (int)sdef->name_len, sdef->name,
+                 type_name(field_t));
+        typer__error(tc, val_node->start.line, val_node->start.column, err);
+      } else {
+        char err[224];
+        jacl_format_field_mismatch(err, sizeof(err),
+            sdef->name, sdef->name_len,
+            sdef->field_names[found], sdef->field_name_lens[found],
+            field_t, arg_t);
+        typer__error(tc, val_node->start.line, val_node->start.column, err);
+      }
+      break;
+    }
+  }
+}
+
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   AstNode* head = node->data.command.head;
 
@@ -3905,448 +6730,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
    * commands def/mut/set; anything not handled falls through to generic
    * call dispatch. */
   if (head && head->type == AST_LIT_STRING) {
-    HeadId hid = (HeadId)node->data.command.head_id;
-    if (hid == HEAD_DEF || hid == HEAD_MUT) {
-      if (typer__handle_def_or_mut(tc, node)) return;
-      /* Even if the def/mut shape didn't match a typed handler (e.g.,
-       * destructure with non-LIT_STRING name), all def/mut commands
-       * return NIL at runtime. Type as NIL here so the typer agrees
-       * with the compiler's HEAD_DEF/HEAD_MUT pin. */
-      node->inferred_type = TYPE_NIL;
-      return;
-    } else if (hid == HEAD_SET) {
-      if (typer__handle_set(tc, node)) return;
-      node->inferred_type = TYPE_NIL;
-      return;
-    } else if (hid == HEAD_PROC) {
-      if (typer__handle_proc(tc, node)) return;
-      /* proc def emits a closure value regardless of which shape was
-       * recognized. Pin closure for shapes handle_proc bailed on. */
-      node->inferred_type = TYPE_CLOSURE;
-      return;
-    } else if (hid == HEAD_IF &&
-               (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
-      /* if [cond] {then} {else?} — detect [box? Type $var] for flow
-       * typing. Mirrors compiler.c:7651-7708. */
-      AstNode** as = node->data.command.args;
-      AstNode* cond = as[0];
-      bool pushed = false;
-      if (cond->type == AST_COMMAND &&
-          cond->data.command.head_id == HEAD_BOX_Q &&
-          cond->data.command.arg_count == 2 &&
-          cond->data.command.args[1]->type == AST_VAR_REF &&
-          tc->narrowing_count < TYPER_MAX_NARROWINGS) {
-        AstNode* type_arg = cond->data.command.args[0];
-        AstNode* var_node = cond->data.command.args[1];
-        JaclType bt = TYPE_DYN;
-        uint32_t bsidx = UINT32_MAX;
-        if (type_arg->type == AST_LIT_STRING) {
-          if (is_type_keyword(type_arg->data.lit_string.value,
-                              type_arg->data.lit_string.length)) {
-            bt = type_from_keyword(type_arg->data.lit_string.value,
-                                   type_arg->data.lit_string.length);
-          } else {
-            for (uint32_t si = 0; si < tc->struct_count; si++) {
-              if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
-                  memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
-                         type_arg->data.lit_string.length) == 0) {
-                bt = TYPE_STRUCT;
-                bsidx = si;
-                break;
-              }
-            }
-          }
-        } else if (type_arg->type == AST_COMMAND) {
-          /* [box? [Vec T] $x] / [box? [Map K V] $x] — narrow to typed
-           * collection. Look up element struct_idx so post-narrow
-           * vec-get/map-get can narrow further to the elem type. */
-          int tcoll = typer__typed_collection_kind(type_arg);
-          if (tcoll == 1) bt = TYPE_TYPED_VEC;
-          else if (tcoll == 2 || tcoll == 3) bt = TYPE_TYPED_MAP;
-          if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
-            AstNode* elem_node = (tcoll == 3)
-                ? type_arg->data.command.args[1]
-                : type_arg->data.command.args[0];
-            if (elem_node && elem_node->type == AST_LIT_STRING &&
-                !is_type_keyword(elem_node->data.lit_string.value,
-                                 elem_node->data.lit_string.length)) {
-              for (uint32_t si = 0; si < tc->struct_count; si++) {
-                if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
-                    memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
-                           elem_node->data.lit_string.length) == 0) {
-                  bsidx = si;
-                  break;
-                }
-              }
-            }
-          }
-        }
-        if (bt != TYPE_DYN) {
-          tc->narrowings[tc->narrowing_count].name       = var_node->data.var_ref.name;
-          tc->narrowings[tc->narrowing_count].name_len   = var_node->data.var_ref.length;
-          tc->narrowings[tc->narrowing_count].scope_mark = var_node->scope_mark;
-          tc->narrowings[tc->narrowing_count].box_type   = (uint8_t)bt;
-          tc->narrowings[tc->narrowing_count].box_struct_idx = bsidx;
-          tc->narrowing_count++;
-          pushed = true;
-        }
-      }
-      typer__infer_node(tc, cond);
-      typer__infer_node(tc, as[1]);
-      if (pushed) tc->narrowing_count--;
-      if (node->data.command.arg_count == 3) {
-        typer__infer_node(tc, as[2]);
-      }
-      /* Block-result unification: if both branches agree, propagate. */
-      JaclType then_t = (JaclType)as[1]->inferred_type;
-      JaclType else_t = (node->data.command.arg_count == 3)
-                          ? (JaclType)as[2]->inferred_type : TYPE_NIL;
-      if (then_t == else_t) {
-        node->inferred_type = then_t;
-        node->inferred_struct_idx = as[1]->inferred_struct_idx;
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-      return;
-    } else if (hid == HEAD_TRY &&
-               node->data.command.arg_count == 3 &&
-               node->data.command.args[0]->type == AST_BLOCK &&
-               node->data.command.args[1]->type == AST_LIT_STRING &&
-               node->data.command.args[2]->type == AST_BLOCK) {
-      /* try body err handler — result is body's tail value (no error)
-       * or handler's tail value (error). Unify the two; if they agree,
-       * propagate the type. The error binding (args[1]) is the local
-       * the handler scope binds the trapped error to — typed as DYN
-       * since we don't track error tag types. Push a scope with the
-       * binding before walking the handler so var-refs to the err
-       * name resolve correctly. */
-      AstNode** as = node->data.command.args;
-      typer__infer_node(tc, as[0]);
-      typer__scope_push(tc);
-      typer__scope_add(tc, as[1]->data.lit_string.value,
-                       as[1]->data.lit_string.length,
-                       as[1]->scope_mark,
-                       (uint8_t)TYPE_DYN, UINT32_MAX);
-      typer__infer_node(tc, as[2]);
-      typer__scope_pop(tc);
-      JaclType body_t    = (JaclType)as[0]->inferred_type;
-      JaclType handler_t = (JaclType)as[2]->inferred_type;
-      if (body_t == handler_t) {
-        node->inferred_type = body_t;
-        node->inferred_struct_idx = as[0]->inferred_struct_idx;
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-      return;
-    } else if (hid == HEAD_WITH_CTX &&
-               node->data.command.arg_count == 2 &&
-               node->data.command.args[0]->type == AST_BLOCK &&
-               node->data.command.args[1]->type == AST_BLOCK) {
-      /* with-ctx overrides body — result is the body's tail value
-       * (overrides block produces nil). Mirrors compiler.c:8214. */
-      AstNode** as = node->data.command.args;
-      typer__infer_node(tc, as[0]);
-      typer__infer_node(tc, as[1]);
-      node->inferred_type = as[1]->inferred_type;
-      node->inferred_struct_idx = as[1]->inferred_struct_idx;
-      return;
-    } else if (hid == HEAD_UNBOX &&
-               node->data.command.arg_count == 1 &&
-               node->data.command.args[0]->type == AST_VAR_REF) {
-      /* [unbox $var] inside a box?-guarded branch — look up the
-       * narrowing and adopt its type. */
-      AstNode* var_node = node->data.command.args[0];
-      typer__infer_node(tc, var_node);
-      for (uint32_t ni = 0; ni < tc->narrowing_count; ni++) {
-        if (tc->narrowings[ni].name_len == var_node->data.var_ref.length &&
-            memcmp(tc->narrowings[ni].name, var_node->data.var_ref.name,
-                   var_node->data.var_ref.length) == 0) {
-          node->inferred_type = tc->narrowings[ni].box_type;
-          node->inferred_struct_idx = tc->narrowings[ni].box_struct_idx;
-          return;
-        }
-      }
-      node->inferred_type = TYPE_DYN;
-      return;
-    } else if (hid == HEAD_ASSERT_TYPE) {
-      /* [assert-type EXPR TYPE] — compile-time static type assertion.
-       * EXPR is typer-walked so its inferred_type lands on the node;
-       * the result is compared to TYPE (a bare type-keyword or a
-       * registered struct name). No runtime evaluation: the compiler
-       * emits a single OP_NIL and discards EXPR. Whole form has
-       * static type nil. */
-      AstNode** as = node->data.command.args;
-      uint32_t  ac = node->data.command.arg_count;
-      if (ac != 2) {
-        typer__error(tc, node->start.line, node->start.column,
-                     "assert-type expects 2 arguments");
-        node->inferred_type = TYPE_NIL;
-        return;
-      }
-      AstNode* expr_node = as[0];
-      AstNode* type_node = as[1];
-      JaclType saved_et = tc->expected_type;
-      tc->expected_type = TYPE_DYN;
-      typer__infer_node(tc, expr_node);
-      tc->expected_type = saved_et;
-      if (type_node->type != AST_LIT_STRING) {
-        typer__error(tc, type_node->start.line, type_node->start.column,
-                     "assert-type: second argument must be a type name");
-        node->inferred_type = TYPE_NIL;
-        return;
-      }
-      const char* tname = type_node->data.lit_string.value;
-      uint32_t    tlen  = type_node->data.lit_string.length;
-      JaclType actual_t = (JaclType)expr_node->inferred_type;
-      JaclType expected_t = TYPE_DYN;
-      bool expected_known = false;
-      uint32_t expected_struct_idx = UINT32_MAX;
-      if (is_type_keyword(tname, tlen)) {
-        expected_t = type_from_keyword(tname, tlen);
-        expected_known = true;
-      } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == tlen &&
-              memcmp(tc->structs[si].name, tname, tlen) == 0) {
-            expected_t = TYPE_STRUCT;
-            expected_struct_idx = si;
-            expected_known = true;
-            break;
-          }
-        }
-      }
-      if (!expected_known) {
-        char err[160];
-        snprintf(err, sizeof(err),
-                 "assert-type: unknown type '%.*s'", (int)tlen, tname);
-        typer__error(tc, type_node->start.line, type_node->start.column, err);
-        node->inferred_type = TYPE_NIL;
-        return;
-      }
-      bool match = (actual_t == expected_t);
-      if (match && expected_t == TYPE_STRUCT &&
-          expected_struct_idx != UINT32_MAX) {
-        match = (expr_node->inferred_struct_idx == expected_struct_idx);
-      }
-      if (!match) {
-        char err[224];
-        const char* actual_name =
-            (actual_t == TYPE_STRUCT &&
-             expr_node->inferred_struct_idx < tc->struct_count)
-            ? tc->structs[expr_node->inferred_struct_idx].name
-            : type_name(actual_t);
-        snprintf(err, sizeof(err),
-                 "assert-type failed: expected %.*s, got %s",
-                 (int)tlen, tname, actual_name);
-        typer__error(tc, node->start.line, node->start.column, err);
-      }
-      node->inferred_type = TYPE_NIL;
-      return;
-    } else if (hid == HEAD_FOR &&
-               (node->data.command.arg_count == 2 ||
-                node->data.command.arg_count == 3 ||
-                node->data.command.arg_count == 4)) {
-      /* for [coll] { body }  /  for [coll] name { body } — narrow the loop
-       * binding to the collection's element type so typed body operations
-       * (typed arithmetic, assigning to a typed local, assert-type) see the
-       * right type. Currently only typed arr narrows; dyn arr / vec / stream
-       * keep a dyn binding (stream/vec for-binding narrowing is deferred —
-       * NOT_IMPLEMENTED §4 wide-cell note), preserving existing behavior.
-       * The callback/each form (args[1] is a var-ref or command) and any
-       * malformed shape fall through to the generic walker. */
-      AstNode** as = node->data.command.args;
-      uint32_t  ac = node->data.command.arg_count;
-      /* `bn` is the VALUE binding (the LAST name); `en` (NULL = none) is the
-       * ENUMERATOR binding (the optional FIRST name — the index for vec/arr, the
-       * key for maps). See SYNTAX.md §"`for` — unified iteration". */
-      const char* bn = "it"; uint32_t bnl = 2;
-      const char* en = NULL; uint32_t enl = 0; uint32_t emark = 0;
-      AstNode* body = NULL; uint32_t bmark = 0;
-      if (ac == 2 && as[1]->type == AST_BLOCK) {
-        body = as[1]; bmark = as[1]->scope_mark;
-      } else if (ac == 3 && as[1]->type == AST_LIT_STRING &&
-                 as[2]->type == AST_BLOCK) {
-        bn = as[1]->data.lit_string.value;
-        bnl = as[1]->data.lit_string.length;
-        body = as[2]; bmark = as[1]->scope_mark;
-      } else if (ac == 4 && as[1]->type == AST_LIT_STRING &&
-                 as[2]->type == AST_LIT_STRING && as[3]->type == AST_BLOCK) {
-        en = as[1]->data.lit_string.value;
-        enl = as[1]->data.lit_string.length; emark = as[1]->scope_mark;
-        bn = as[2]->data.lit_string.value;
-        bnl = as[2]->data.lit_string.length; bmark = as[2]->scope_mark;
-        body = as[3];
-      }
-      if (body) {
-        typer__infer_node(tc, as[0]);
-        JaclType bt = TYPE_DYN; uint32_t bsi = UINT32_MAX;
-        uint32_t for_bind_key_idx = UINT32_MAX;
-        JaclType coll_t = (JaclType)as[0]->inferred_type;
-        if ((coll_t == TYPE_TYPED_ARR || coll_t == TYPE_TYPED_VEC ||
-             coll_t == TYPE_STREAM ||
-             /* Ref-element [Vec T] / [Arr T] (e.g. [Vec str], [Arr str]):
-              * plain (dyn) rep with a static element stamp — narrow the
-              * binding like any typed collection. Only tagged-fit ref
-              * elements can be stamped on TYPE_VEC/TYPE_ARR, so the tagged
-              * binding rep is always correct. */
-             coll_t == TYPE_VEC || coll_t == TYPE_ARR)) {
-          uint32_t eidx = as[0]->inferred_struct_idx;
-          /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
-           * suppressed by the cross-registry rule, so resolve the TYPER-SIDE
-           * shape idx directly — from the binding for a var-ref receiver, or
-           * re-derived from the ctor head for a literal receiver. */
-          if ((coll_t == TYPE_VEC || coll_t == TYPE_ARR) &&
-              eidx == UINT32_MAX) {
-            /* var-ref receiver → the consolidated helper (binding shape today,
-             * the stamp once 2c un-suppresses). */
-            eidx = typer__receiver_coll_shape(tc, as[0]);
-            if (eidx == UINT32_MAX && as[0]->type == AST_COMMAND &&
-                       as[0]->data.command.head &&
-                       as[0]->data.command.head->type == AST_COMMAND &&
-                       as[0]->data.command.head->data.command.head &&
-                       as[0]->data.command.head->data.command.head->type ==
-                           AST_LIT_STRING &&
-                       as[0]->data.command.head->data.command.head
-                           ->data.lit_string.length == 3 &&
-                       (memcmp(as[0]->data.command.head->data.command.head
-                                  ->data.lit_string.value, "Vec", 3) == 0 ||
-                        memcmp(as[0]->data.command.head->data.command.head
-                                  ->data.lit_string.value, "Arr", 3) == 0) &&
-                       as[0]->data.command.head->data.command.arg_count == 1 &&
-                       as[0]->data.command.head->data.command.args[0]->type ==
-                           AST_COMMAND) {
-              eidx = typer__nested_elem_shape(
-                  tc, as[0]->data.command.head->data.command.args[0]);
-            }
-          }
-          if (eidx == UINT32_MAX) {
-            /* untyped element — binding stays dyn */
-          } else if (typer__is_shape_idx(tc, eidx)) {
-            /* Typer-side shape: decode to PORTABLE inner encodings for the
-             * loop binding (scalar sentinel / aligned struct idx). Inner
-             * ref-kinds ([Vec str]/[Vec dyn] elements) are plain-rep'd. */
-            uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-            JaclType ek = typer__buf_elem_decode(tc, eidx, &iv, &ik);
-            (void)ik;
-            if (ek == TYPE_TYPED_VEC) {
-              bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                               (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
-                                JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-              bool inner_shape = typer__is_shape_idx(tc, iv);
-              if (inner_ref) {
-                bt = TYPE_VEC;
-                bsi = (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
-                          ? iv : UINT32_MAX;
-              } else if (inner_shape) {
-                /* Element is itself a nested-element vec: bind as a
-                 * ref-element TYPE_VEC carrying the inner shape idx — the
-                 * next loop level resolves it from this binding (the
-                 * recursion point for depth-N narrowing). */
-                bt = TYPE_VEC; bsi = iv;
-              } else {
-                bt = TYPE_TYPED_VEC; bsi = iv;
-              }
-            } else if (ek == TYPE_TYPED_MAP) {
-              uint32_t bki;
-              typer__decode_map_shape(iv, ik, &bt, &bsi, &bki);
-              /* scope_add below has no key slot — patch it in after. */
-              for_bind_key_idx = bki;
-            } else if (ek == TYPE_CLOSURE) {
-              /* B3c: [Vec [Proc …]] element — bind the loop var as a typed
-               * closure carrying the element signature (stamped after
-               * scope_add) so `[f …]` in the body is a typed call. */
-              bt = TYPE_CLOSURE; bsi = eidx;
-            }
-          } else if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-            /* Narrow to the element scalar — all scalars, including wide
-             * i64/u64/f64. Non-SM loops store the wide binding in a typed
-             * local; SM loops store it boxed in a state field and the
-             * var-ref read unboxes via the node's inferred_type. Applies to
-             * [Arr T], [Vec T], and [Stream T] element bindings. */
-            bt = JACL_TYPE_IDX_TO_SCALAR(eidx);
-          } else if (eidx < tc->struct_count) {
-            /* Struct-element narrowing: arr/vec, and now streams too — the
-             * multi-slot stream channel (OP_STREAM_NEXT_INLINE) delivers the
-             * element as inline value bytes and the for-loop binds it in an
-             * N-slot inline local (NOT_IMPLEMENTED.md §4.1b). */
-            bt = TYPE_STRUCT; bsi = eidx;
-          }
-        }
-        /* The ENUMERATOR (first name of the two-name form) defaults to the i32
-         * index for sequences. For a MAP the VALUE binding is V and the
-         * enumerator is the KEY K — narrow both from the map's value/key idxs.
-         * (Single-name over a map binds the value; see SYNTAX.md.) */
-        JaclType et = TYPE_I32; uint32_t esi = UINT32_MAX;
-        if (coll_t == TYPE_MAP || coll_t == TYPE_TYPED_MAP) {
-          typer__idx_to_for_binding(tc, as[0]->inferred_struct_idx, &bt, &bsi);
-          typer__idx_to_for_binding(tc, as[0]->inferred_key_struct_idx, &et, &esi);
-        }
-        typer__scope_push(tc);
-        /* Two-name form: add the enumerator binding first (index/key). */
-        if (en) typer__scope_add(tc, en, enl, emark, (uint8_t)et, esi);
-        typer__scope_add(tc, bn, bnl, bmark, (uint8_t)bt, bsi);
-        /* Map-element bindings carry the key idx too (scope_add has no
-         * key slot — patch in place, like the def handler). */
-        if (for_bind_key_idx != UINT32_MAX && tc->binding_count > 0) {
-          tc->bindings[tc->binding_count - 1].key_struct_idx =
-              for_bind_key_idx;
-        }
-        /* B3c: a closure-element loop binding decodes its proc shape onto the
-         * binding so a body call `[f …]` narrows (via the bound_proxy). */
-        if (bt == TYPE_CLOSURE && bsi != UINT32_MAX && tc->binding_count > 0) {
-          uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-          if (typer__decode_proc_shape(tc, bsi, &pc2, pts2, &rt2)) {
-            TyperBinding* b = &tc->bindings[tc->binding_count - 1];
-            b->is_typed_closure = true;
-            b->proc_param_count = pc2;
-            for (uint8_t k = 0; k < pc2 && k < TYPER_MAX_PROC_PARAMS; k++)
-              b->proc_param_types[k] = pts2[k];
-            b->proc_return_type = rt2;
-            b->proc_return_struct_idx = UINT32_MAX;
-          }
-        }
-        typer__infer_node(tc, body);
-        typer__scope_pop(tc);
-        node->inferred_type = TYPE_NIL;
-        return;
-      }
-      /* Callback/each form: [for $coll [\ body]] / [for $coll $cb]. Type the
-       * collection and the callback; for an inline lambda over a typed wide
-       * stream, monomorphize the callback body (type its param wide) and stamp
-       * it so the compiler bakes the wide param rep onto OP_EACH (the pull then
-       * hands the element over wide, no box). Mirrors HEAD_FILTER. A var-ref
-       * callback or a fallback (mixed-type) body stays dyn → boxed. */
-      if (ac == 2 && (as[1]->type == AST_COMMAND ||
-                      as[1]->type == AST_VAR_REF)) {
-        typer__infer_node(tc, as[0]);
-        /* Type-once: an inline callback over a typed stream is typed ONLY
-         * via proc_result_enc below (param bound to the element type) —
-         * a generic walk first would type the body with the param unbound
-         * and record spurious sticky errors. Mirrors the transform/filter
-         * pre-walk skip. */
-        bool cb_inline_typed_stream =
-            (as[1]->type == AST_COMMAND &&
-             as[1]->data.command.head_id == HEAD_PROC &&
-             (JaclType)as[0]->inferred_type == TYPE_STREAM &&
-             as[0]->inferred_struct_idx != UINT32_MAX);
-        if (!cb_inline_typed_stream) typer__infer_node(tc, as[1]);
-        if (as[1]->type == AST_COMMAND) {
-          uint32_t cb_enc = UINT32_MAX;
-          if (cb_inline_typed_stream) {
-            uint32_t arg_enc = as[0]->inferred_struct_idx;
-            bool cb_typed = false;
-            (void)typer__proc_result_enc(tc, as[1], &arg_enc, 1, &cb_typed);
-            if (cb_typed) cb_enc = arg_enc;
-            /* The skipped pre-walk would have stamped this (handle_proc). */
-            as[1]->inferred_type = TYPE_CLOSURE;
-          }
-          as[1]->inferred_struct_idx = cb_enc;
-        }
-        node->inferred_type = TYPE_NIL;
-        return;
-      }
-      /* else: malformed — fall through to generic. */
-    }
+    if (typer__infer_cmd_prefix(tc, node, head)) return;
   }
 
   /* Recognize built-in binary ops where LHS type propagates to RHS
@@ -4355,97 +6739,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
    * Result type follows compile_binary: same as operand for arithmetic,
    * BOOL for comparisons. */
   if (head && head->type == AST_LIT_STRING) {
-    const char* hname = head->data.lit_string.value;
-    uint32_t    hlen  = head->data.lit_string.length;
-    bool is_arith = (hlen == 1 && (hname[0] == '+' || hname[0] == '-' ||
-                                    hname[0] == '*' || hname[0] == '/' ||
-                                    hname[0] == '%'));
-    bool is_cmp = false;
-    if (!is_arith) {
-      if ((hlen == 1 && (hname[0] == '<' || hname[0] == '>')) ||
-          (hlen == 2 && (memcmp(hname, "<=", 2) == 0 ||
-                         memcmp(hname, ">=", 2) == 0 ||
-                         memcmp(hname, "==", 2) == 0))) {
-        is_cmp = true;
-      }
-    }
-    if ((is_arith || is_cmp) && node->data.command.arg_count == 2) {
-      AstNode* lhs = node->data.command.args[0];
-      AstNode* rhs = node->data.command.args[1];
-      typer__infer_node(tc, lhs);
-      JaclType lhs_t = (JaclType)lhs->inferred_type;
-      JaclType saved_et = tc->expected_type;
-      if (lhs_t != TYPE_DYN) tc->expected_type = lhs_t;
-      typer__infer_node(tc, rhs);
-      tc->expected_type = saved_et;
-      JaclType rhs_t = (JaclType)rhs->inferred_type;
-      /* Concrete-mismatch (both sides non-DYN, different types):
-       *  - Arithmetic (+ - * / %): always error per decision 1
-       *    (no implicit widening; explicit cast required).
-       *  - Comparison (== < > etc.) of unboxed scalars (i64/u64/f64):
-       *    error to mirror the compiler at compiler.c:3859-3868
-       *    (unboxed values can't go through dynamic dispatch).
-       *  - Comparison of tagged scalars: still allowed; cross-type
-       *    equality is meaningful (always false) and tests rely on it.
-       *  - Mixed dyn/typed: stays permissive (decision 2 deferred). */
-      /* TYPE_PTR-specific rules (Stage 5a):
-       *  - Arithmetic with any pointer operand → error (use [ptr-offset]).
-       *  - Comparison of two TYPE_PTR values → require matching pointee
-       *    idx; otherwise it's a type error.
-       *  - Comparison of TYPE_PTR with a non-pointer concrete type
-       *    falls through to the generic concrete-mismatch check below. */
-      if ((lhs_t == TYPE_PTR || rhs_t == TYPE_PTR) && is_arith) {
-        char err[160];
-        jacl_format_ptr_arithmetic(err, sizeof(err));
-        typer__error(tc, lhs->start.line, lhs->start.column, err);
-      } else if (lhs_t == TYPE_PTR && rhs_t == TYPE_PTR && is_cmp &&
-                 lhs->inferred_struct_idx != rhs->inferred_struct_idx &&
-                 lhs->inferred_struct_idx != UINT32_MAX &&
-                 rhs->inferred_struct_idx != UINT32_MAX) {
-        char err[160];
-        jacl_format_ptr_compare_pointee_mismatch(err, sizeof(err));
-        typer__error(tc, lhs->start.line, lhs->start.column, err);
-      }
-      bool concrete_mismatch = (lhs_t != rhs_t &&
-                                lhs_t != TYPE_DYN && rhs_t != TYPE_DYN);
-      bool unboxed_either = is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t);
-      if (concrete_mismatch && (is_arith || unboxed_either)) {
-        const char* verb = is_cmp ? "compare" :
-                           (hname[0] == '+' ? "add" :
-                            hname[0] == '-' ? "subtract" :
-                            hname[0] == '*' ? "multiply" :
-                            hname[0] == '/' ? "divide" : "compute");
-        char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: cannot %s %s and %s",
-                 verb, type_name(lhs_t), type_name(rhs_t));
-        typer__error(tc, lhs->start.line, lhs->start.column, err);
-      }
-      if (is_cmp) {
-        node->inferred_type = TYPE_BOOL;
-      } else if (lhs_t == rhs_t && lhs_t != TYPE_DYN) {
-        /* Tagged or unboxed arithmetic, both sides same type — preserve. */
-        node->inferred_type = lhs_t;
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-      return;
-    }
-    /* Unary minus: `[- $x]` — result preserves operand's numeric type. */
-    if (is_arith && hlen == 1 && hname[0] == '-' &&
-        node->data.command.arg_count == 1) {
-      AstNode* arg = node->data.command.args[0];
-      typer__infer_node(tc, arg);
-      JaclType t = (JaclType)arg->inferred_type;
-      if (t == TYPE_I32 || t == TYPE_I64 ||
-          t == TYPE_F32 || t == TYPE_F64 ||
-          t == TYPE_U32 || t == TYPE_U64) {
-        node->inferred_type = t;
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-      return;
-    }
+    if (typer__infer_cmd_binop(tc, node, head)) return;
   }
 
   /* Generic call/constructor dispatch: head may be a known proc name
@@ -4640,435 +6934,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                                   &head_clos_pc, head_clos_pts, &head_clos_rt,
                                   head_clos_psi, &head_clos_rsi);
 
-  for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-    AstNode* arg = node->data.command.args[i];
-    /* Type-once for monomorphized HOF callbacks: an inline proc passed to
-     * transform/filter over a typed stream is typed by the HOF case below
-     * (typer__proc_result_enc, with its param bound to the element type).
-     * Skip it here — this generic walk would type the body with the param
-     * UNBOUND (dyn), recording spurious sticky errors (e.g. an in-body
-     * assert-type) and paying an extra body walk. The skip condition
-     * mirrors the HOF case's exactly (args[0] is typed before i==1, so its
-     * stream/elem verdict is available). */
-    if (i == 1 && node->data.command.arg_count == 2 &&
-        (mutator_hid == HEAD_TRANSFORM || mutator_hid == HEAD_FILTER) &&
-        (JaclType)node->data.command.args[0]->inferred_type == TYPE_STREAM &&
-        node->data.command.args[0]->inferred_struct_idx != UINT32_MAX &&
-        arg->type == AST_COMMAND &&
-        arg->data.command.head_id == HEAD_PROC) {
-      continue;
-    }
-    JaclType saved_et = tc->expected_type;
-    if (proc && i < proc->param_count) {
-      tc->expected_type = (JaclType)proc->param_types[i];
-    } else if (head_is_closure_call && i < head_clos_pc) {
-      tc->expected_type = (JaclType)head_clos_pts[i];  /* step 2b */
-    } else if (sdef) {
-      /* Named struct constructor: args are field/value pairs. The
-       * value position is at odd `i`; the preceding even-position arg
-       * carries the field name. Look up the field and push its type
-       * so literal narrowing fires. Positional struct constructors
-       * are no longer accepted — only the named form. */
-      if ((i & 1u) == 1) {
-        AstNode* fname_node = node->data.command.args[i - 1];
-        if (fname_node->type == AST_LIT_STRING) {
-          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-            if (sdef->field_name_lens[fi] == fname_node->data.lit_string.length &&
-                memcmp(sdef->field_names[fi], fname_node->data.lit_string.value,
-                       fname_node->data.lit_string.length) == 0) {
-              tc->expected_type = (JaclType)sdef->field_types[fi];
-              break;
-            }
-          }
-        }
-      }
-    } else if ((ctor_kind == 1 || ctor_is_arr) && ctor_elem_t != TYPE_DYN) {
-      tc->expected_type = ctor_elem_t;
-    } else if ((ctor_kind == 2 || ctor_kind == 3) &&
-               (ctor_elem_t != TYPE_DYN || ctor_key_t != TYPE_DYN)) {
-      /* Map ctor: alternating key/value pairs. Even idx → key, odd → val. */
-      tc->expected_type = (i % 2 == 0) ? ctor_key_t : ctor_elem_t;
-    } else if (i > 0 && (mutator_hid == HEAD_VEC_PUSH ||
-                         mutator_hid == HEAD_VEC_SET ||
-                         mutator_hid == HEAD_ARR_PUSH ||
-                         mutator_hid == HEAD_ARR_SET ||
-                         mutator_hid == HEAD_MAP_SET ||
-                         mutator_hid == HEAD_MAP_REMOVE ||
-                         mutator_hid == HEAD_MAP_GET ||
-                         mutator_hid == HEAD_MAP_HAS)) {
-      AstNode* recv = node->data.command.args[0];
-      JaclType recv_t = (JaclType)recv->inferred_type;
-      uint32_t e_idx = recv->inferred_struct_idx;
-      uint32_t k_idx = recv->inferred_key_struct_idx;
-      JaclType target = TYPE_DYN;
-      /* arr-push i=1 → elem; arr-set i=1 → idx (dyn), i=2 → elem.
-       * TYPE_ARR with a stamp = ref-element [Arr str]: same narrowing. */
-      if (recv_t == TYPE_TYPED_ARR || recv_t == TYPE_ARR) {
-        if (mutator_hid == HEAD_ARR_PUSH ||
-            (mutator_hid == HEAD_ARR_SET && i == 2)) {
-          if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-            target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-          }
-        }
-      }
-      /* Pick the right slot:
-       *   vec-push i=1 → elem
-       *   vec-set  i=1 → idx (DYN), i=2 → elem
-       *   map-set  i=1 → key, i=2 → val
-       *   map-remove/get/has i=1 → key
-       */
-      if (recv_t == TYPE_VEC && e_idx != UINT32_MAX &&
-          JACL_IS_SCALAR_TYPE_IDX(e_idx) &&
-          (mutator_hid == HEAD_VEC_PUSH ||
-           (mutator_hid == HEAD_VEC_SET && i == 2))) {
-        /* Stamped ref-element vec ([Vec str]): pushed/assigned values take
-         * the element type as expected_type (literals narrow; mismatched
-         * concrete values surface through the generic checks). */
-        target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-      }
-      if (recv_t == TYPE_TYPED_VEC) {
-        if (mutator_hid == HEAD_VEC_PUSH ||
-            (mutator_hid == HEAD_VEC_SET && i == 2)) {
-          if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-            target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-          }
-        }
-      } else if (recv_t == TYPE_TYPED_MAP || recv_t == TYPE_MAP) {
-        /* TYPE_MAP with stamps = ref-kind [Map ...] form on the plain rep
-         * ([Map str], [Map i64 str]): same static key/value narrowing as
-         * the typed rep. Unstamped plain maps have UINT32_MAX idxs and
-         * fall through to dyn. */
-        bool is_key_slot =
-            (mutator_hid == HEAD_MAP_REMOVE ||
-             mutator_hid == HEAD_MAP_GET ||
-             mutator_hid == HEAD_MAP_HAS ||
-             (mutator_hid == HEAD_MAP_SET && i == 1));
-        bool is_val_slot = (mutator_hid == HEAD_MAP_SET && i == 2);
-        if (is_key_slot && k_idx != UINT32_MAX &&
-            JACL_IS_SCALAR_TYPE_IDX(k_idx)) {
-          target = JACL_TYPE_IDX_TO_SCALAR(k_idx);
-        } else if (is_val_slot && e_idx != UINT32_MAX &&
-                   JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-          target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-        }
-      }
-      tc->expected_type = target;
-    } else if (mutator_hid == HEAD_YIELD && i == 0 &&
-               tc->yield_elem_struct_idx != UINT32_MAX &&
-               JACL_IS_SCALAR_TYPE_IDX(tc->yield_elem_struct_idx)) {
-      /* yield X in a [Stream T] generator: narrow a numeric literal X to the
-       * element type T (yield 1.5 in [Stream f64] -> f64; yield 100 in
-       * [Stream i64] -> i64). Mirrors typed def/mut/push expected_type
-       * propagation. The yield codegen boxes a wide tail before OP_YIELD_SM. */
-      tc->expected_type = JACL_TYPE_IDX_TO_SCALAR(tc->yield_elem_struct_idx);
-    } else {
-      tc->expected_type = TYPE_DYN;
-    }
-    /* Phase B3a: an inline closure literal passed to a [Proc …] closure param
-     * is monomorphized against the param's signature, so its body types with
-     * the declared param/return (mirrors the def-site walk). Otherwise the body
-     * stays dyn and the typed call at the callee reads a tagged param. */
-    if (proc && i < proc->param_count &&
-        (JaclType)proc->param_types[i] == TYPE_CLOSURE &&
-        proc->param_struct_idxs[i] != UINT32_MAX &&
-        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
-      uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-      uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
-      if (typer__decode_proc_shape_ex(tc, proc->param_struct_idxs[i],
-                                      &pc2, pts2, &rt2, psi2, &rsi2)) {
-        typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
-        tc->expected_type = saved_et;
-        continue;
-      }
-    }
-    /* B3c follow-up: an inline closure literal pushed to a [Vec/Arr [Proc …]]
-     * is monomorphized against the element signature (mirrors the ctor walk),
-     * so its body types with the declared param/return instead of staying dyn.
-     * The element proc shape rides the receiver BINDING (AST stamp suppressed
-     * by the cross-registry rule), so resolve it from the var-ref. */
-    if (i == 1 &&
-        (mutator_hid == HEAD_VEC_PUSH || mutator_hid == HEAD_ARR_PUSH) &&
-        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
-      uint32_t esh =
-          typer__coll_receiver_proc_shape(tc, node->data.command.args[0]);
-      if (esh != UINT32_MAX) {
-        uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-        uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
-        if (typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2, psi2, &rsi2)) {
-          typer__monomorphize_proc_literal(tc, arg, pts2, psi2, pc2, rt2);
-          tc->expected_type = saved_et;
-          continue;
-        }
-      }
-    }
-    /* An inline closure literal ELEMENT of a typed [[Vec/Arr [Proc …]] …]
-     * constructor: skip the generic walk — the ctor branch below monomorphizes
-     * it to the element signature (binding an untyped `{q}` param to the
-     * declared struct). The generic walk would type the body with the literal's
-     * own (dyn) params and raise a premature "body returns dyn" when the literal
-     * declares a return but a param needs the annotation's struct type. */
-    if (head && head->type == AST_COMMAND && head->data.command.head &&
-        head->data.command.head->type == AST_LIT_STRING &&
-        head->data.command.head->data.lit_string.length == 3 &&
-        (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0 ||
-         memcmp(head->data.command.head->data.lit_string.value, "Arr", 3) == 0) &&
-        head->data.command.arg_count == 1 &&
-        head->data.command.args[0]->type == AST_COMMAND &&
-        arg->type == AST_COMMAND && arg->data.command.head_id == HEAD_PROC) {
-      uint32_t esh = typer__nested_elem_shape(tc, head->data.command.args[0]);
-      uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-      if (esh != UINT32_MAX &&
-          typer__buf_elem_decode(tc, esh, &iv, &ik) == TYPE_CLOSURE) {
-        tc->expected_type = saved_et;
-        continue;  /* ctor branch monomorphizes this element */
-      }
-    }
-    typer__infer_node(tc, arg);
-    tc->expected_type = saved_et;
-  }
+  typer__infer_cmd_arg_walk(tc, node, head, proc, sdef, ctor_kind, ctor_elem_t, ctor_key_t,
+                            ctor_is_arr, mutator_hid, head_clos_pc, head_clos_pts,
+                            head_is_closure_call);
   /* §4 Phase 2: `yield $typed` in an unannotated generator (proc
    * has no `[Stream T]` return type, so the stream is implicitly
    * `[Stream dyn]`) is a compile error. Literals stay flex/dyn and
    * are allowed. The user must annotate the proc with `[Stream T]`
    * to yield typed values — no inference, mirroring proc return
    * types. */
-  if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
-      tc->yield_elem_struct_idx == UINT32_MAX) {
-    AstNode* arg = node->data.command.args[0];
-    bool is_literal = (arg->type == AST_LIT_INT ||
-                       arg->type == AST_LIT_FLOAT ||
-                       arg->type == AST_LIT_STRING);
-    JaclType arg_t = (JaclType)arg->inferred_type;
-    if (!is_literal && arg_t != TYPE_DYN && arg_t != TYPE_NIL) {
-      char err[224];
-      snprintf(err, sizeof(err),
-               "type error: yield of typed value (%s) in an unannotated "
-               "generator; annotate the proc with `[Stream %s]` or "
-               "convert the value to dyn",
-               type_name(arg_t), type_name(arg_t));
-      typer__error(tc, arg->start.line, arg->start.column, err);
-    }
-  }
-  /* [yield X] inside `[Stream T]` (T != dyn): verify the yielded
-   * expression's type matches T. Yield-into-[Stream dyn] stays lenient
-   * (typed→dyn widens implicitly, parallel to proc returns/dyn args).
-   * Only the first arg matters — yield has arity 1. */
-  if (mutator_hid == HEAD_YIELD && node->data.command.arg_count == 1 &&
-      tc->yield_elem_struct_idx != UINT32_MAX) {
-    AstNode* arg = node->data.command.args[0];
-    JaclType arg_t = (JaclType)arg->inferred_type;
-    uint32_t elem_idx = tc->yield_elem_struct_idx;
-    /* Integer / float literals have flex type — accepted into any
-     * numeric stream element. Note: literal stays at its default
-     * (i32 / f32) at codegen time. The wide-typed-i64 unboxed yield
-     * path has an unrelated bug (see NOT_IMPLEMENTED.md), so we
-     * deliberately don't push expected_type onto the arg upstream. */
-    bool literal_flex = false;
-    if (JACL_IS_SCALAR_TYPE_IDX(elem_idx)) {
-      JaclType elem_t = JACL_TYPE_IDX_TO_SCALAR(elem_idx);
-      if (arg->type == AST_LIT_INT && is_numeric_type(elem_t)) literal_flex = true;
-      if (arg->type == AST_LIT_FLOAT && (elem_t == TYPE_F32 || elem_t == TYPE_F64))
-        literal_flex = true;
-      if (literal_flex) {
-        /* No-op: literal is accepted. */
-      } else if (arg_t != elem_t && arg_t != TYPE_DYN) {
-        char err[224];
-        snprintf(err, sizeof(err),
-                 "type error: yield expected %s, got %s",
-                 type_name(elem_t), type_name(arg_t));
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      } else if (arg_t == TYPE_DYN) {
-        char err[224];
-        snprintf(err, sizeof(err),
-                 "type error: yield expected %s, got dyn (use [to %s $val])",
-                 type_name(elem_t), type_name(elem_t));
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      }
-    } else {
-      /* Struct element type: compare via struct registry idx. The
-       * typer's struct-idx alignment with the compiler holds for
-       * locally-defined structs (pre-pass sets indices); imported
-       * structs are still placeholder entries, in which case the
-       * arg's struct_idx may be UINT32_MAX even on a real Struct
-       * value. Skip the check in that case rather than false-positive. */
-      if (arg_t == TYPE_DYN) {
-        char err[224];
-        const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
-        if (s) {
-          snprintf(err, sizeof(err),
-                   "type error: yield expected %.*s, got dyn (use [to %.*s $val])",
-                   (int)s->name_len, s->name, (int)s->name_len, s->name);
-        } else {
-          snprintf(err, sizeof(err),
-                   "type error: yield expected struct, got dyn");
-        }
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      } else if (arg_t != TYPE_STRUCT) {
-        char err[224];
-        const TyperStruct* s = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
-        if (s) {
-          snprintf(err, sizeof(err),
-                   "type error: yield expected %.*s, got %s",
-                   (int)s->name_len, s->name, type_name(arg_t));
-        } else {
-          snprintf(err, sizeof(err),
-                   "type error: yield expected struct, got %s", type_name(arg_t));
-        }
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      } else if (arg->inferred_struct_idx != UINT32_MAX &&
-                 arg->inferred_struct_idx != elem_idx) {
-        const TyperStruct* expected = (elem_idx < tc->struct_count) ? &tc->structs[elem_idx] : NULL;
-        const TyperStruct* got = (arg->inferred_struct_idx < tc->struct_count) ? &tc->structs[arg->inferred_struct_idx] : NULL;
-        char err[224];
-        snprintf(err, sizeof(err),
-                 "type error: yield expected %.*s, got %.*s",
-                 expected ? (int)expected->name_len : 6,
-                 expected ? expected->name : "struct",
-                 got ? (int)got->name_len : 6,
-                 got ? got->name : "struct");
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      }
-    }
-  }
+  typer__infer_cmd_yield(tc, node, proc, mutator_hid);
   if (proc) {
-    node->inferred_type = proc->return_type;
-    node->inferred_struct_idx = proc->return_struct_idx;
-    /* [Map K V] return: carry the KEY so a binding `def [Map K V] m [f …]` and
-     * map-get on the call result type the key (not just the value). */
-    node->inferred_key_struct_idx = proc->return_key_struct_idx;
-    /* Step 2b (proc-first): a call returning a closure with a known signature
-     * gets a portable proc-shape stamp so the compiler reads it directly from
-     * the AST instead of re-deriving via GlobalArity. Lazy intern at the stamp;
-     * dedup makes this the same idx the compiler would produce. */
-    if ((JaclType)proc->return_type == TYPE_CLOSURE &&
-        proc->return_struct_idx != UINT32_MAX)
-      node->inferred_proc_shape_idx =
-          typer__portable_proc_shape(tc, proc->return_struct_idx);
-    /* Check positional arg types against declared param types. Mirrors
-     * the compiler's typed-call check (compiler.c:10359-10378). Both
-     * concrete-mismatch and dyn-into-typed (decision 2: no implicit
-     * coercion) fire; struct-to-struct stays compiler-owned (typer's
-     * struct-idx tracking is not fully aligned across modules). */
-    uint32_t argc = node->data.command.arg_count;
-    AstNode** as = node->data.command.args;
-    uint32_t check_n = argc < proc->param_count ? argc : proc->param_count;
-    for (uint32_t i = 0; i < check_n; i++) {
-      JaclType param_t = (JaclType)proc->param_types[i];
-      if (param_t == TYPE_DYN) continue;
-      JaclType arg_t = (JaclType)as[i]->inferred_type;
-      if (arg_t == param_t) continue;
-      if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
-      /* Plain-rep collection params accept their typed siblings (a typed
-       * vec/map/arr IS a vec/map/arr value through dyn; mirrors the
-       * def-annotation acceptance). */
-      if ((param_t == TYPE_VEC && arg_t == TYPE_TYPED_VEC) ||
-          (param_t == TYPE_MAP && arg_t == TYPE_TYPED_MAP) ||
-          (param_t == TYPE_ARR && arg_t == TYPE_TYPED_ARR)) continue;
-      /* [Buf N T] → [Ptr T] implicit decay at call sites. The buf's
-       * element type must match the param's pointee type exactly, and
-       * the element must be C-ABI compatible: scalars, value-structs,
-       * [Ptr U]. Ref-element bufs (M4.4: dyn/str/vec/map/closure/stream)
-       * hold tagged JaclVals and are rejected -- nothing C-side
-       * understands the encoding. Use [addr $b->0] explicitly if you
-       * need a raw pointer into a tagged-slot buf. See BUFFER_DESIGN.md
-       * M3 / M4.4. */
-      if (param_t == TYPE_PTR && arg_t == TYPE_BUF) {
-        uint32_t arg_elem = as[i]->inferred_struct_idx;
-        if (JACL_IS_SCALAR_TYPE_IDX(arg_elem)) {
-          JaclType et = JACL_TYPE_IDX_TO_SCALAR(arg_elem);
-          if (et == TYPE_DYN || et == TYPE_STR || et == TYPE_VEC ||
-              et == TYPE_MAP || et == TYPE_CLOSURE || et == TYPE_STREAM) {
-            char err[224];
-            snprintf(err, sizeof(err),
-                "type error: argument %u of %.*s: [Buf N %s] cannot decay "
-                "to [Ptr %s] -- reference-element bufs are not C-ABI "
-                "compatible; use [addr $b->0] for an explicit raw pointer",
-                i + 1, (int)proc->name_len, proc->name,
-                type_name(et), type_name(et));
-            typer__error(tc, as[i]->start.line, as[i]->start.column, err);
-            break;
-          }
-        }
-        uint32_t param_pointee = proc->param_struct_idxs[i];
-        if (param_pointee == arg_elem ||
-            param_pointee == UINT32_MAX) {
-          /* Either the param doesn't constrain pointee (rare) or the
-           * encoded element matches. Accept the decay; the compiler
-           * emits address-of at the call site. */
-          continue;
-        }
-      }
-      char err[224];
-      /* Read name from `proc` rather than `head`: for module-binding
-       * calls (`[$mod->fn args]`) the head is an AST_COMMAND, not the
-       * literal proc name. The name was stamped on the proxy. */
-      if (arg_t == TYPE_DYN) {
-        snprintf(err, sizeof(err),
-                 "type error: argument %u of %.*s expected %s, got dyn (use [to %s $val])",
-                 i + 1,
-                 (int)proc->name_len, proc->name,
-                 type_name(param_t), type_name(param_t));
-      } else {
-        snprintf(err, sizeof(err),
-                 "type error: argument %u of %.*s expected %s, got %s",
-                 i + 1,
-                 (int)proc->name_len, proc->name,
-                 type_name(param_t), type_name(arg_t));
-      }
-      typer__error(tc, as[i]->start.line, as[i]->start.column, err);
-      break;
-    }
+    typer__infer_cmd_proc_call(tc, node, head, proc);
   } else if (sdef) {
-    node->inferred_type = TYPE_STRUCT;
-    node->inferred_struct_idx = sdef_idx;
-    /* Named struct constructor: args are field/value pairs. The
-     * compiler enforces uniqueness, unknown-name, and buf-vs-value
-     * arity errors; the typer's job here is to type-check each
-     * provided value against the declared field type so call-site
-     * narrowing produces the right diagnostics. */
-    uint32_t argc = node->data.command.arg_count;
-    AstNode** as = node->data.command.args;
-    if ((argc & 1u) == 0) {
-      uint32_t pair_count = argc / 2;
-      for (uint32_t p = 0; p < pair_count; p++) {
-        AstNode* name_node = as[p * 2];
-        AstNode* val_node  = as[p * 2 + 1];
-        if (name_node->type != AST_LIT_STRING) continue;
-        const char* fname = name_node->data.lit_string.value;
-        uint32_t    fname_len = name_node->data.lit_string.length;
-        uint32_t found = UINT32_MAX;
-        for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-          if (sdef->field_name_lens[fi] == fname_len &&
-              memcmp(sdef->field_names[fi], fname, fname_len) == 0) {
-            found = fi;
-            break;
-          }
-        }
-        if (found == UINT32_MAX) continue;  /* compiler reports */
-        JaclType field_t = (JaclType)sdef->field_types[found];
-        if (field_t == TYPE_DYN) continue;
-        JaclType arg_t = (JaclType)val_node->inferred_type;
-        if (arg_t == field_t) continue;
-        if (field_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
-        if (arg_t == TYPE_DYN) {
-          char err[224];
-          snprintf(err, sizeof(err),
-                   "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
-                   (int)sdef->field_name_lens[found], sdef->field_names[found],
-                   (int)sdef->name_len, sdef->name,
-                   type_name(field_t));
-          typer__error(tc, val_node->start.line, val_node->start.column, err);
-        } else {
-          char err[224];
-          jacl_format_field_mismatch(err, sizeof(err),
-              sdef->name, sdef->name_len,
-              sdef->field_names[found], sdef->field_name_lens[found],
-              field_t, arg_t);
-          typer__error(tc, val_node->start.line, val_node->start.column, err);
-        }
-        break;
-      }
-    }
+    typer__infer_cmd_struct_ctor(tc, node, sdef, sdef_idx);
   } else if (head_is_closure_call) {
     /* Step 2b: a DIRECT call of a closure-valued command head — the result is
      * the closure's return type (mirrors the named-proc `if (proc)` arm).
@@ -5078,1754 +6957,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     if ((JaclType)head_clos_rt == TYPE_STRUCT)
       node->inferred_struct_idx = head_clos_rsi;
   } else if (head && head->type == AST_COMMAND) {
-    /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
-     * Mirrors compiler__compile_command's typed-vec/typed-map branch.
-     * Element struct_idx is propagated via inferred_struct_idx so
-     * vec-get/map-get can narrow the result type. Scalar element types
-     * (i32/i64/etc.) use the shared JACL_SCALAR_TYPE_IDX sentinel
-     * encoding so the compiler can read the same idx. */
-    if (typer__map_v_form(head)) {
-      typer__error(tc, node->start.line, node->start.column,
-                   TYPER_MAP_V_REMOVED_MSG);
-      node->inferred_type = TYPE_MAP;
-      return;
-    }
-    /* Nested compound VALUE map ctor ([[Map str [Vec i64]] ...]): the
-     * value is a collection — a tagged heap value, i.e. a REF kind — so
-     * the map uses the PLAIN traced rep. The key type stamps as usual;
-     * the value SHAPE is interned TYPER-SIDE and lives in bindings only
-     * (def re-derives it; the AST value stamp stays UINT32_MAX per the
-     * cross-registry rule). Mirrors the [Vec [Vec T]] ctor. */
-    if (head->data.command.head &&
-        head->data.command.head->type == AST_LIT_STRING &&
-        head->data.command.head->data.lit_string.length == 3 &&
-        memcmp(head->data.command.head->data.lit_string.value, "Map", 3)
-            == 0 &&
-        head->data.command.arg_count == 2 &&
-        head->data.command.args[0]->type == AST_LIT_STRING &&
-        head->data.command.args[1]->type == AST_COMMAND) {
-      uint32_t vsh = typer__nested_elem_shape(tc, head->data.command.args[1]);
-      if (vsh != UINT32_MAX) {
-        node->inferred_type = TYPE_MAP;
-        node->inferred_struct_idx = UINT32_MAX;  /* shape: binding-only */
-        AstNode* kn = head->data.command.args[0];
-        JaclType ref_kt = TYPE_DYN;
-        if (is_type_keyword(kn->data.lit_string.value,
-                            kn->data.lit_string.length)) {
-          ref_kt = type_from_keyword(kn->data.lit_string.value,
-                                     kn->data.lit_string.length);
-          if (ref_kt != TYPE_DYN)
-            node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(ref_kt);
-        }
-        /* Decode the value shape to the PORTABLE expected kind. */
-        uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-        JaclType ekind = typer__buf_elem_decode(tc, vsh, &iv, &ik);
-        JaclType want = TYPE_DYN;
-        uint32_t want_idx = UINT32_MAX;
-        if (ekind == TYPE_TYPED_VEC) {
-          bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                           (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
-                            JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-          bool inner_shape = typer__is_shape_idx(tc, iv);
-          if (inner_ref) {
-            want = TYPE_VEC;
-            if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR) want_idx = iv;
-          } else if (inner_shape) {
-            want = TYPE_VEC;  /* inner shape: no idx compare */
-          } else {
-            want = TYPE_TYPED_VEC;
-            want_idx = iv;
-          }
-        } else if (ekind == TYPE_TYPED_MAP) {
-          uint32_t mki;
-          typer__decode_map_shape(iv, ik, &want, &want_idx, &mki);
-          (void)mki;
-        }
-        for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-          bool is_key = (ei % 2 == 0);
-          AstNode* av = node->data.command.args[ei];
-          JaclType at = (JaclType)av->inferred_type;
-          if (at == TYPE_DYN) continue;
-          bool ok = true;
-          if (is_key) {
-            if (ref_kt != TYPE_DYN) ok = (at == ref_kt);
-          } else {
-            ok = (at == want);
-            if (ok && want_idx != UINT32_MAX &&
-                av->inferred_struct_idx != UINT32_MAX &&
-                av->inferred_struct_idx != want_idx)
-              ok = false;
-          }
-          if (!ok) {
-            char err[192];
-            snprintf(err, sizeof(err),
-                     "type error: [Map ...] %s %u does not match the "
-                     "declared nested %s type",
-                     is_key ? "key" : "value", ei / 2,
-                     is_key ? "key" : "value");
-            typer__error(tc, av->start.line, av->start.column, err);
-            break;
-          }
-        }
-        return;
-      }
-    }
-    int tc_kind = typer__typed_collection_kind(head);
-    /* [[Arr T] ...] constructor: element semantics are identical to vec
-     * (single element type, one element per arg), so reuse the kind==1
-     * machinery below but stamp TYPE_TYPED_ARR. See ARR_DESIGN.md M4c. */
-    uint32_t arr_ctor_ei;
-    bool is_arr_ctor = (tc_kind == 0) && typer__arr_type(tc, head, &arr_ctor_ei);
-    if (is_arr_ctor) tc_kind = 1;
-    /* Nested compound element ctor ([[Vec [Vec i64]] ...], [[Arr [Proc …]] …]):
-     * typer__typed_collection_kind / typer__arr_type require a LIT_STRING
-     * element and return 0/false — recognize the compound-element form
-     * directly so the ref-element branch below handles it. An Arr compound
-     * element also flips is_arr_ctor so the branch stamps TYPE_ARR. */
-    if (tc_kind == 0 && !is_arr_ctor && head->data.command.head &&
-        head->data.command.head->type == AST_LIT_STRING &&
-        head->data.command.head->data.lit_string.length == 3 &&
-        (memcmp(head->data.command.head->data.lit_string.value, "Vec", 3)
-            == 0 ||
-         memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
-            == 0) &&
-        head->data.command.arg_count == 1 &&
-        head->data.command.args[0]->type == AST_COMMAND) {
-      tc_kind = 1;
-      if (memcmp(head->data.command.head->data.lit_string.value, "Arr", 3)
-              == 0)
-        is_arr_ctor = true;
-    }
-    if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
-      /* Ref-element [Vec T] (T = str or dyn): `vec` is shorthand for
-       * [Vec dyn] — the whole family is legal. Ref elements share the
-       * plain traced vec REP (no strided rep win exists for tagged heap
-       * values); the element type lives statically as TYPE_VEC + elem
-       * stamp, exactly the scheme typed streams use. [Vec dyn] IS the
-       * plain vec (no stamp). Through a dyn slot the element type widens
-       * to dyn — same as scalars. */
-      if (tc_kind == 1) {
-        AstNode* en = head->data.command.args[0];
-        /* Nested compound element ([Vec [Vec i64]], [Vec [Map K V]],
-         * [Vec [Proc …]] — and the [Arr …] variants): also a REF element
-         * (collections / closures are tagged heap values) → plain traced
-         * vec/arr rep. The element shape is interned TYPER-SIDE for
-         * binding-level narrowing (def re-derives it; see the def handler);
-         * the AST stamp stays UINT32_MAX per the cross-registry rule. */
-        if (en && en->type == AST_COMMAND) {
-          uint32_t esh = typer__nested_elem_shape(tc, en);
-          if (esh != UINT32_MAX) {
-            node->inferred_type = is_arr_ctor ? TYPE_ARR : TYPE_VEC;
-            node->inferred_struct_idx = UINT32_MAX;
-            uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-            JaclType ekind = typer__buf_elem_decode(tc, esh, &iv, &ik);
-            /* Inner ref-kinds ([Vec str]/[Vec dyn] elements) are themselves
-             * plain-rep'd vecs. */
-            bool inner_ref = (ekind == TYPE_TYPED_VEC &&
-                              JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                              (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
-                               JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN));
-            /* A nested element whose OWN element is a shape ([Vec [Vec T]]
-             * elements of a depth-3 ctor) is itself plain-rep'd, and its AST
-             * stamp is suppressed — expect TYPE_VEC with no idx compare. */
-            bool inner_shape = (ekind == TYPE_TYPED_VEC &&
-                                typer__is_shape_idx(tc, iv));
-            if (inner_shape) { inner_ref = true; iv = UINT32_MAX; }
-            JaclType want;
-            if (inner_ref) {
-              want = TYPE_VEC;
-            } else if (ekind == TYPE_TYPED_MAP) {
-              /* Rep rule for inner maps: ref-kind VALUES → plain TYPE_MAP
-               * (compare against the decoded value stamp); value kinds →
-               * typed rep. */
-              uint32_t mki;
-              typer__decode_map_shape(iv, ik, &want, &iv, &mki);
-              (void)mki;
-            } else if (ekind == TYPE_CLOSURE) {
-              /* B3c: [Vec/Arr [Proc …]] — closure element (ref-kind, plain rep).
-               * An inline closure-literal element is monomorphized to the
-               * element signature here (mirrors the def/arg/return walk); a
-               * named closure stays TYPE_CLOSURE (compiler enforces conformance).
-               * No idx compare — proc shapes are typer-side only. */
-              want = TYPE_CLOSURE;
-              inner_ref = true;  /* suppress the idx compare below */
-              uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-              uint32_t psi2[TYPER_MAX_PROC_PARAMS], rsi2;
-              bool dec = typer__decode_proc_shape_ex(tc, esh, &pc2, pts2, &rt2,
-                                                     psi2, &rsi2);
-              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-                AstNode* av = node->data.command.args[ei];
-                if (dec && av->type == AST_COMMAND &&
-                    av->data.command.head_id == HEAD_PROC)
-                  typer__monomorphize_proc_literal(tc, av, pts2, psi2, pc2, rt2);
-              }
-            } else {
-              want = TYPE_TYPED_VEC;
-            }
-            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-              AstNode* av = node->data.command.args[ei];
-              JaclType at = (JaclType)av->inferred_type;
-              bool ok = (at == TYPE_DYN) || (at == want);
-              if (ok && !inner_ref && at == want &&
-                  av->inferred_struct_idx != UINT32_MAX && iv != UINT32_MAX &&
-                  av->inferred_struct_idx != iv)
-                ok = false;
-              if (!ok) {
-                char err[192];
-                snprintf(err, sizeof(err),
-                         "type error: %s element %u does not match "
-                         "the declared nested element type",
-                         is_arr_ctor ? "[Arr ...]" : "[Vec ...]", ei);
-                typer__error(tc, node->start.line, node->start.column, err);
-              }
-            }
-            return;
-          }
-        }
-        if (!is_arr_ctor && en && en->type == AST_LIT_STRING &&
-            is_type_keyword(en->data.lit_string.value,
-                            en->data.lit_string.length)) {
-          JaclType ref_et = type_from_keyword(en->data.lit_string.value,
-                                              en->data.lit_string.length);
-          if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
-            node->inferred_type = TYPE_VEC;
-            node->inferred_struct_idx = (ref_et == TYPE_STR)
-                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
-            if (ref_et == TYPE_STR) {
-              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-                JaclType at =
-                    (JaclType)node->data.command.args[ei]->inferred_type;
-                if (at != TYPE_STR && at != TYPE_DYN) {
-                  char err[160];
-                  jacl_format_typed_vec_elem(err, sizeof(err),
-                      en->data.lit_string.value, en->data.lit_string.length,
-                      ei, true, at);
-                  typer__error(tc, node->start.line, node->start.column, err);
-                }
-              }
-            }
-            return;
-          }
-        }
-      }
-      /* Ref-element [Arr T] (T = str or dyn): `arr` is shorthand for
-       * [Arr dyn]. Ref elements use the DYN arr rep (tagged traced slots,
-       * elem_size 8) — no flat-bytes rep win exists for tagged heap
-       * values; the element type lives statically as TYPE_ARR + stamp.
-       * [Arr dyn] IS the plain arr (no stamp). Mirrors [Vec str]. */
-      if (tc_kind == 1 && is_arr_ctor) {
-        AstNode* en = head->data.command.args[0];
-        if (en && en->type == AST_LIT_STRING &&
-            is_type_keyword(en->data.lit_string.value,
-                            en->data.lit_string.length)) {
-          JaclType ref_et = type_from_keyword(en->data.lit_string.value,
-                                              en->data.lit_string.length);
-          if (ref_et == TYPE_DYN || ref_et == TYPE_STR) {
-            node->inferred_type = TYPE_ARR;
-            node->inferred_struct_idx = (ref_et == TYPE_STR)
-                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
-            if (ref_et == TYPE_STR) {
-              for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-                JaclType at =
-                    (JaclType)node->data.command.args[ei]->inferred_type;
-                if (at != TYPE_STR && at != TYPE_DYN) {
-                  char err[160];
-                  jacl_format_typed_arr_elem(err, sizeof(err),
-                      en->data.lit_string.value, en->data.lit_string.length,
-                      ei, true, at);
-                  typer__error(tc, node->start.line, node->start.column, err);
-                }
-              }
-            }
-            return;
-          }
-        }
-      }
-      /* Ref-kind VALUE [Map K V] forms ([Map K str] / [Map K dyn]):
-       * plain traced map rep; the key/value types live statically as
-       * TYPE_MAP + stamps (value on inferred_struct_idx, key on
-       * inferred_key_struct_idx) — the [Vec str] scheme. [Map dyn dyn] IS
-       * the plain map (no stamps). Mirrors the compiler's plain-rep route. */
-      if (tc_kind == 3) {
-        AstNode* vn = head->data.command.args[1];
-        AstNode* kn = head->data.command.args[0];
-        if (vn && vn->type == AST_LIT_STRING &&
-            is_type_keyword(vn->data.lit_string.value,
-                            vn->data.lit_string.length)) {
-          JaclType ref_vt = type_from_keyword(vn->data.lit_string.value,
-                                              vn->data.lit_string.length);
-          if (ref_vt == TYPE_STR || ref_vt == TYPE_DYN) {
-            node->inferred_type = TYPE_MAP;
-            node->inferred_struct_idx = (ref_vt == TYPE_STR)
-                ? JACL_SCALAR_TYPE_IDX(TYPE_STR) : UINT32_MAX;
-            JaclType ref_kt = TYPE_DYN;
-            if (kn && kn->type == AST_LIT_STRING &&
-                is_type_keyword(kn->data.lit_string.value,
-                                kn->data.lit_string.length)) {
-              ref_kt = type_from_keyword(kn->data.lit_string.value,
-                                         kn->data.lit_string.length);
-              if (ref_kt != TYPE_DYN)
-                node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(ref_kt);
-            }
-            /* Per-pair checks (dyn flow-in left to the compiler's mirror). */
-            for (uint32_t ei = 0; ei < node->data.command.arg_count; ei++) {
-              bool is_key = (ei % 2 == 0);
-              JaclType at = (JaclType)node->data.command.args[ei]->inferred_type;
-              if (at == TYPE_DYN) continue;
-              bool ok = true;
-              if (is_key) {
-                if (ref_kt != TYPE_DYN) ok = (at == ref_kt);
-              } else {
-                if (ref_vt == TYPE_STR) ok = (at == TYPE_STR);
-              }
-              if (!ok) {
-                char err[224];
-                jacl_format_typed_map_kv(err, sizeof(err),
-                    kn->data.lit_string.value, kn->data.lit_string.length,
-                    vn->data.lit_string.value, vn->data.lit_string.length,
-                    ei / 2, !is_key);
-                typer__error(tc, node->data.command.args[ei]->start.line,
-                             node->data.command.args[ei]->start.column, err);
-                break;
-              }
-            }
-            return;
-          }
-        }
-      }
-      node->inferred_type = is_arr_ctor ? TYPE_TYPED_ARR
-                          : (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
-      AstNode* elem_node = (tc_kind == 3)
-          ? head->data.command.args[1]
-          : head->data.command.args[0];
-      if (elem_node && elem_node->type == AST_LIT_STRING) {
-        const char* nm = elem_node->data.lit_string.value;
-        uint32_t    nl = elem_node->data.lit_string.length;
-        if (is_type_keyword(nm, nl)) {
-          node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
-        } else {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == nl &&
-                memcmp(tc->structs[si].name, nm, nl) == 0) {
-              node->inferred_struct_idx = si;
-              break;
-            }
-          }
-        }
-      }
-      /* For [Map K V] (kind=3), also propagate the key type idx. */
-      AstNode* key_node = NULL;
-      if (tc_kind == 3) {
-        key_node = head->data.command.args[0];
-        if (key_node && key_node->type == AST_LIT_STRING) {
-          const char* nm = key_node->data.lit_string.value;
-          uint32_t    nl = key_node->data.lit_string.length;
-          if (is_type_keyword(nm, nl)) {
-            /* Explicit dyn keys ([Map dyn V]) are the [Map V] dyn-key form:
-             * no key stamp (UINT32_MAX ≡ the VM's 0xFFFF convention). */
-            JaclType kkw = type_from_keyword(nm, nl);
-            if (kkw != TYPE_DYN)
-              node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(kkw);
-          } else {
-            for (uint32_t si = 0; si < tc->struct_count; si++) {
-              if (tc->structs[si].name_len == nl &&
-                  memcmp(tc->structs[si].name, nm, nl) == 0) {
-                node->inferred_key_struct_idx = si;
-                break;
-              }
-            }
-          }
-        }
-      }
-      /* Element-type checks: each arg's typer-inferred type must match
-       * the declared element (and key, for kind=3) type. Mirrors the
-       * compiler's per-element check in compiler__compile_command's
-       * typed-vec/typed-map branches; uses the same shared formatters
-       * so wording stays in sync. We skip when the declared scalar is
-       * not a supported typed-collection scalar (compiler reports the
-       * "only value-type scalars supported" error first), and skip
-       * struct checks for unknown struct names (compiler backstops
-       * unknown-type errors). */
-      if (elem_node && elem_node->type == AST_LIT_STRING) {
-        const char* elem_nm = elem_node->data.lit_string.value;
-        uint32_t    elem_nl = elem_node->data.lit_string.length;
-        bool elem_is_scalar = is_type_keyword(elem_nm, elem_nl);
-        JaclType elem_t = elem_is_scalar
-                          ? type_from_keyword(elem_nm, elem_nl) : TYPE_DYN;
-        uint32_t elem_sidx = node->inferred_struct_idx;
-        bool elem_known = elem_is_scalar
-            ? typer__is_typed_collection_scalar(elem_t)
-            : (elem_sidx != UINT32_MAX &&
-               !JACL_IS_SCALAR_TYPE_IDX(elem_sidx));
-
-        const char* key_nm = NULL;
-        uint32_t    key_nl = 0;
-        bool key_is_scalar = false;
-        JaclType key_t = TYPE_DYN;
-        uint32_t key_sidx = UINT32_MAX;
-        bool key_known = false;
-        if (tc_kind == 3 && key_node && key_node->type == AST_LIT_STRING) {
-          key_nm = key_node->data.lit_string.value;
-          key_nl = key_node->data.lit_string.length;
-          key_is_scalar = is_type_keyword(key_nm, key_nl);
-          key_t = key_is_scalar
-                  ? type_from_keyword(key_nm, key_nl) : TYPE_DYN;
-          key_sidx = node->inferred_key_struct_idx;
-          /* str keys are first-class on the typed rep (1 tagged traced
-           * slot) — include them in the static key checks. Explicit dyn
-           * keys have no stamp and skip checks. */
-          key_known = key_is_scalar
-              ? (typer__is_typed_collection_scalar(key_t) ||
-                 key_t == TYPE_STR)
-              : (key_sidx != UINT32_MAX &&
-                 !JACL_IS_SCALAR_TYPE_IDX(key_sidx));
-        }
-
-        uint32_t argc = node->data.command.arg_count;
-        AstNode** as = node->data.command.args;
-        for (uint32_t i = 0; i < argc; i++) {
-          /* For Map kinds, even idx → key, odd idx → value.
-           * For Vec, every idx → element. */
-          bool is_map = (tc_kind == 2 || tc_kind == 3);
-          bool is_value_slot = !is_map || (i % 2 == 1);
-          /* kind=2 keys are dyn — skip key slots. */
-          if (tc_kind == 2 && !is_value_slot) continue;
-          /* kind=3 key slot uses key_t/key_sidx; otherwise elem. */
-          bool slot_is_key = (tc_kind == 3 && !is_value_slot);
-          bool       slot_known      = slot_is_key ? key_known      : elem_known;
-          bool       slot_is_scalar  = slot_is_key ? key_is_scalar  : elem_is_scalar;
-          JaclType   slot_t          = slot_is_key ? key_t          : elem_t;
-          uint32_t   slot_sidx       = slot_is_key ? key_sidx       : elem_sidx;
-          if (!slot_known) continue;
-          AstNode* arg = as[i];
-          JaclType arg_t = (JaclType)arg->inferred_type;
-          if (arg_t == TYPE_DYN) continue;  /* dyn flow-in: compiler handles */
-          bool ok;
-          if (slot_is_scalar) {
-            ok = (arg_t == slot_t);
-          } else {
-            ok = (arg_t == TYPE_STRUCT && arg->inferred_struct_idx == slot_sidx);
-          }
-          if (ok) continue;
-          char err[224];
-          uint32_t pair_or_elem_idx = is_map ? (i / 2) : i;
-          if (tc_kind == 1) {
-            if (is_arr_ctor)
-              jacl_format_typed_arr_elem(err, sizeof(err),
-                  elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
-            else
-              jacl_format_typed_vec_elem(err, sizeof(err),
-                  elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
-          } else if (tc_kind == 2) {
-            jacl_format_typed_map_value(err, sizeof(err),
-                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
-          } else {
-            jacl_format_typed_map_kv(err, sizeof(err),
-                key_nm, key_nl, elem_nm, elem_nl,
-                pair_or_elem_idx, is_value_slot);
-          }
-          typer__error(tc, arg->start.line, arg->start.column, err);
-          break;
-        }
-      }
-    } else {
-      /* [[Buf N T] v0 v1 ...] constructor — same shape as the typed-
-       * vec/map constructors above but with a value (N) in the head's
-       * second slot. The compiler integrates with the def site for
-       * codegen; the typer just stamps TYPE_BUF + element/len so the
-       * def-site type check sees a matching RHS. Nested form
-       * `[[Buf N [Buf M T]] ...]` also tracked via inner_len (M4.2). */
-      uint32_t buf_sidx_ctor;
-      uint32_t buf_len_ctor;
-      uint32_t buf_inner_len_ctor = 0;
-      if (typer__buf_type_full(tc, head, &buf_sidx_ctor, &buf_len_ctor,
-                               &buf_inner_len_ctor, NULL) &&
-          buf_len_ctor > 0 && buf_sidx_ctor != UINT32_MAX) {
-        node->inferred_type           = TYPE_BUF;
-        node->inferred_struct_idx     = buf_sidx_ctor;
-        node->inferred_buf_len        = buf_len_ctor;
-        node->inferred_buf_inner_len  = buf_inner_len_ctor;
-        return;
-      }
-      node->inferred_type = TYPE_DYN;
-    }
+    typer__infer_cmd_cmdhead(tc, node, head);
   } else if (head && head->type == AST_LIT_STRING) {
-    HeadId hid = (HeadId)node->data.command.head_id;
-    const char* hn = head->data.lit_string.value;
-    uint32_t    hl = head->data.lit_string.length;
-
-    /* Pipe operator: the compiler's compile_pipe_op rewrites
-     * `[| lhs rhs]` into a synthetic command that prepends lhs as
-     * the first arg of rhs (or wraps rhs as head with lhs as the
-     * arg). The result type matches that synthetic call.
-     *
-     * Special case: rhs is a 1-arg binary-op call like `[* 3]` —
-     * after pipe rewrite this becomes `[* lhs 3]` (a binary op).
-     * The typer's binary-op rule only fires for arg_count==2, so
-     * we replay it here using lhs and rhs's single arg. */
-    if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
-      AstNode* lhs = node->data.command.args[0];
-      AstNode* rhs = node->data.command.args[1];
-      JaclType lhs_t = (JaclType)lhs->inferred_type;
-      if (rhs->type == AST_COMMAND && rhs->data.command.arg_count == 1 &&
-          rhs->data.command.head &&
-          rhs->data.command.head->type == AST_LIT_STRING) {
-        const char* hn2 = rhs->data.command.head->data.lit_string.value;
-        uint32_t    hl2 = rhs->data.command.head->data.lit_string.length;
-        bool is_arith2 = (hl2 == 1 && (hn2[0] == '+' || hn2[0] == '-' ||
-                                       hn2[0] == '*' || hn2[0] == '/' ||
-                                       hn2[0] == '%'));
-        bool is_cmp2 = (hl2 == 1 && (hn2[0] == '<' || hn2[0] == '>')) ||
-                       (hl2 == 2 && (memcmp(hn2, "<=", 2) == 0 ||
-                                     memcmp(hn2, ">=", 2) == 0 ||
-                                     memcmp(hn2, "==", 2) == 0));
-        if (is_arith2 || is_cmp2) {
-          AstNode* arg = rhs->data.command.args[0];
-          JaclType arg_t = (JaclType)arg->inferred_type;
-          if (is_cmp2) {
-            node->inferred_type = TYPE_BOOL;
-          } else if (lhs_t == arg_t && lhs_t != TYPE_DYN) {
-            node->inferred_type = lhs_t;
-          } else {
-            node->inferred_type = TYPE_DYN;
-          }
-          return;
-        }
-      }
-      node->inferred_type = rhs->inferred_type;
-      node->inferred_struct_idx = rhs->inferred_struct_idx;
-      return;
-    }
-
-    /* Receiver-preserving vec/map builtins. Result depends on whether
-     * the typer knows the receiver type:
-     *   typed vec/map → typed result (with elem-type idx propagated)
-     *   plain vec/map → plain result
-     *   DYN          → DYN (compiler's c->last_expr_type fallback wins)
-     * Annotating DYN as VEC/MAP would mask a typed receiver that the
-     * compiler tracks but the typer does not, leading to silent miscompile. */
-    if (node->data.command.arg_count >= 1) {
-      AstNode*  recv = node->data.command.args[0];
-      JaclType  recv_t = (JaclType)recv->inferred_type;
-      switch (hid) {
-        case HEAD_VEC_PUSH:   case HEAD_VEC_SET:
-        case HEAD_VEC_CONCAT: case HEAD_VEC_SLICE:
-          if (recv_t == TYPE_TYPED_VEC) {
-            node->inferred_type = TYPE_TYPED_VEC;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-          } else if (recv_t == TYPE_VEC) {
-            node->inferred_type = TYPE_VEC;
-          }
-          return;
-        case HEAD_MAP_SET: case HEAD_MAP_REMOVE:
-          if (recv_t == TYPE_TYPED_MAP) {
-            node->inferred_type = TYPE_TYPED_MAP;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
-          } else if (recv_t == TYPE_MAP) {
-            /* Stamped ref-kind maps keep their static key/value types
-             * through set/remove (the result is the same plain map rep). */
-            node->inferred_type = TYPE_MAP;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
-          }
-          return;
-        case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
-          if (recv_t == TYPE_TYPED_MAP) {
-            /* keys: dyn-keyed maps return a plain vec (matches the
-             * runtime path in OP_TYPED_MAP_KEYS keyed on
-             * key_type_idx == 0xFFFF); str keys return a PLAIN vec too
-             * (str can't live in GC-opaque typed-vec storage) but carry
-             * the [Vec str] stamp. Struct/numeric keys yield a typed
-             * vec. vals on a TYPE_TYPED_MAP always have a declared
-             * value type, so they're always typed-vec. */
-            if (hid == HEAD_MAP_KEYS &&
-                recv->inferred_key_struct_idx == UINT32_MAX) {
-              node->inferred_type = TYPE_VEC;
-            } else if (hid == HEAD_MAP_KEYS &&
-                       recv->inferred_key_struct_idx ==
-                           JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
-              node->inferred_type = TYPE_VEC;
-              node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
-            } else {
-              node->inferred_type = TYPE_TYPED_VEC;
-              node->inferred_struct_idx =
-                  (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
-                                         : recv->inferred_struct_idx;
-            }
-          } else if (recv_t == TYPE_MAP) {
-            /* Plain rep: result is a plain vec; a str stamp on the
-             * relevant side ([Map str V] keys / [Map K str] vals)
-             * propagates as [Vec str]. Other stamps (numeric plain-rep
-             * keys) stay unstamped — the vec holds tagged values. */
-            node->inferred_type = TYPE_VEC;
-            uint32_t side_idx =
-                (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
-                                       : recv->inferred_struct_idx;
-            if (side_idx == JACL_SCALAR_TYPE_IDX(TYPE_STR))
-              node->inferred_struct_idx = side_idx;
-          }
-          return;
-        case HEAD_VEC_GET:
-          /* Element narrowing: typed-vec elem_idx is either a real struct
-           * registry index (→ TYPE_STRUCT) or a JACL_SCALAR_TYPE_IDX
-           * sentinel (→ that scalar JaclType). */
-          if (recv_t == TYPE_TYPED_VEC &&
-              recv->inferred_struct_idx != UINT32_MAX) {
-            uint32_t eidx = recv->inferred_struct_idx;
-            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
-            } else if (eidx < tc->struct_count) {
-              node->inferred_type = TYPE_STRUCT;
-              node->inferred_struct_idx = eidx;
-            }
-          } else if (recv_t == TYPE_VEC &&
-                     recv->inferred_struct_idx != UINT32_MAX &&
-                     JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
-            /* Stamped ref-element vec ([Vec str]): element narrows. */
-            node->inferred_type =
-                JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
-          } else if (recv_t == TYPE_VEC) {
-            /* Nested-element vec ([Vec [Vec i64]] …): the AST stamp is
-             * suppressed by the cross-registry rule, so the element SHAPE comes
-             * from the receiver via the consolidated helper (binding for a
-             * var-ref today; the stamp directly once 2c un-suppresses). Decode
-             * it to a PORTABLE result encoding, mirroring HEAD_FOR. A depth-3+
-             * inner shape stays suppressed on the AST (the def handler
-             * re-derives it into the new binding). */
-            uint32_t vsh = typer__receiver_coll_shape(tc, recv);
-            if (vsh != UINT32_MAX) {
-              uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-              JaclType ek = typer__buf_elem_decode(tc, vsh, &iv, &ik);
-              if (ek == TYPE_TYPED_VEC) {
-                bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                 (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
-                                  JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-                bool inner_shape = typer__is_shape_idx(tc, iv);
-                if (inner_ref) {
-                  node->inferred_type = TYPE_VEC;
-                  if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
-                    node->inferred_struct_idx = iv;
-                } else if (inner_shape) {
-                  node->inferred_type = TYPE_VEC;  /* stamp stays suppressed */
-                } else {
-                  node->inferred_type = TYPE_TYPED_VEC;
-                  node->inferred_struct_idx = iv;
-                }
-              } else if (ek == TYPE_TYPED_MAP) {
-                JaclType mt; uint32_t msi, mki;
-                typer__decode_map_shape(iv, ik, &mt, &msi, &mki);
-                node->inferred_type = mt;
-                node->inferred_struct_idx = msi;
-                node->inferred_key_struct_idx = mki;
-              } else if (ek == TYPE_CLOSURE) {
-                /* B3c follow-up: [Vec [Proc …]] element — vec-get narrows to a
-                 * typed closure carrying the element signature (typer-side
-                 * shape), so a `def g [vec-get $fns 0]` binding stamps as a
-                 * typed closure and `[g …]` is a typed call. Mirrors HEAD_FOR. */
-                node->inferred_type = TYPE_CLOSURE;
-                node->inferred_struct_idx = vsh;
-                /* Step 2b: portable stamp so the compiler can type a DIRECT call
-                 * of the get result — `[[vec-get $fns 0] 5]` — where there's no
-                 * binding to re-derive from. */
-                node->inferred_proc_shape_idx =
-                    typer__portable_proc_shape(tc, vsh);
-              }
-            }
-          }
-          return;
-        /* arr ops mirror vec: get narrows to the element type for a typed
-         * receiver; set returns the (reference) arr. See ARR_DESIGN.md M4c. */
-        case HEAD_ARR_GET:
-        case HEAD_ARR_POP:
-          /* Both narrow to the element type for a typed receiver. arr-pop on a
-           * struct array pushes inline struct slots, so the result type MUST
-           * be TYPE_STRUCT or the compiler under-counts the stack. */
-          if (recv_t == TYPE_TYPED_ARR &&
-              recv->inferred_struct_idx != UINT32_MAX) {
-            uint32_t eidx = recv->inferred_struct_idx;
-            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              /* Narrow to the element scalar for ALL scalars. i64/u64/f64 come
-               * back as unboxed wide bits (vm__arr_scalar_load), matching
-               * typed-vec; OP_TO_DYN bridges them at dyn sinks. */
-              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
-            } else if (eidx < tc->struct_count) {
-              node->inferred_type = TYPE_STRUCT;
-              node->inferred_struct_idx = eidx;
-            }
-          } else if (recv_t == TYPE_ARR &&
-                     recv->inferred_struct_idx != UINT32_MAX &&
-                     JACL_IS_SCALAR_TYPE_IDX(recv->inferred_struct_idx)) {
-            /* Stamped ref-element arr ([Arr str]): element narrows. */
-            node->inferred_type =
-                JACL_TYPE_IDX_TO_SCALAR(recv->inferred_struct_idx);
-          } else if (recv_t == TYPE_ARR) {
-            /* B3c follow-up: [Arr [Proc …]] element — the proc-shape elem rides
-             * the receiver (AST stamp suppressed by the cross-registry rule), so
-             * recover it via the consolidated helper and narrow arr-get/arr-pop
-             * to a typed closure. Mirrors the vec-get arm and HEAD_FOR. */
-            uint32_t ash = typer__receiver_coll_shape(tc, recv);
-            if (ash != UINT32_MAX) {
-              uint8_t pc2 = 0, rt2 = (uint8_t)TYPE_DYN, pts2[TYPER_MAX_PROC_PARAMS];
-              if (typer__decode_proc_shape(tc, ash, &pc2, pts2, &rt2)) {
-                node->inferred_type = TYPE_CLOSURE;
-                node->inferred_struct_idx = ash;
-                /* Step 2b: portable stamp for a DIRECT call of the get result. */
-                node->inferred_proc_shape_idx =
-                    typer__portable_proc_shape(tc, ash);
-              }
-            }
-          }
-          return;
-        case HEAD_ARR_SET:
-          if (recv_t == TYPE_TYPED_ARR) {
-            node->inferred_type = TYPE_TYPED_ARR;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-          } else if (recv_t == TYPE_ARR) {
-            /* Stamped ref-element arrs keep their element type. */
-            node->inferred_type = TYPE_ARR;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-          }
-          return;
-        case HEAD_BUF_SET:
-        case HEAD_BUF_USET:
-          /* [buf-set $b $i $v] / [buf-unchecked-set $b $i $v]:
-           * compile-time type check on $v against the buf's element
-           * type. Result type (TYPE_NIL) comes from fixed_returns
-           * below; we just emit any mismatch error here. */
-          if (recv_t == TYPE_BUF &&
-              recv->inferred_struct_idx != UINT32_MAX &&
-              node->data.command.arg_count == 3) {
-            typer__check_buf_set_value(tc, recv->inferred_struct_idx,
-                                        node->data.command.args[2]);
-          }
-          break;  /* fall through to fixed_returns for TYPE_NIL */
-        case HEAD_BUF_GET:
-        case HEAD_BUF_UGET:
-          /* Result type of [buf-get $b $i] / [buf-unchecked-get $b $i].
-           * Decode via the typer's shape registry: scalar elements
-           * surface as their JaclType (small ints widen to i32 at the
-           * dyn boundary); typed-vec / typed-map elements propagate
-           * V (and K for maps) to the result AST so chained map-get /
-           * vec-get / arrow chains narrow correctly. */
-          if (recv_t == TYPE_BUF && recv->inferred_struct_idx != UINT32_MAX) {
-            uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
-            JaclType elem = typer__buf_elem_decode(tc,
-                recv->inferred_struct_idx, &inner_v, &inner_k);
-            switch (elem) {
-              case TYPE_I8: case TYPE_U8:
-              case TYPE_I16: case TYPE_U16:
-                node->inferred_type = TYPE_I32; break;
-              case TYPE_TYPED_VEC:
-                node->inferred_type = TYPE_TYPED_VEC;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_TYPED_MAP:
-                node->inferred_type = TYPE_TYPED_MAP;
-                node->inferred_struct_idx = inner_v;
-                node->inferred_key_struct_idx = inner_k;
-                break;
-              case TYPE_PTR:
-                node->inferred_type = TYPE_PTR;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_FUTURE:
-                node->inferred_type = TYPE_FUTURE;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_STRUCT:
-                node->inferred_type = TYPE_STRUCT;
-                node->inferred_struct_idx = recv->inferred_struct_idx;
-                break;
-              default:
-                node->inferred_type = elem; break;
-            }
-          }
-          return;
-        case HEAD_MAP_GET:
-          if (recv_t == TYPE_TYPED_MAP &&
-              recv->inferred_struct_idx != UINT32_MAX) {
-            uint32_t eidx = recv->inferred_struct_idx;
-            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
-            } else if (eidx < tc->struct_count) {
-              node->inferred_type = TYPE_STRUCT;
-              node->inferred_struct_idx = eidx;
-            }
-          } else if (recv_t == TYPE_MAP &&
-                     recv->inferred_struct_idx ==
-                         JACL_SCALAR_TYPE_IDX(TYPE_STR)) {
-            /* Stamped ref-value map ([Map K str]): the value narrows. */
-            node->inferred_type = TYPE_STR;
-          } else if (recv_t == TYPE_MAP) {
-            /* Nested compound VALUE map ([Map str [Vec i64]]): recover the
-             * typer-side value shape from the receiver via the consolidated
-             * helper and decode to a PORTABLE result encoding (mirrors vec-get
-             * on shape-carried vec bindings). */
-            uint32_t msh = typer__receiver_coll_shape(tc, recv);
-            if (msh != UINT32_MAX) {
-              uint32_t iv = UINT32_MAX, ik = UINT32_MAX;
-              JaclType ek = typer__buf_elem_decode(tc, msh, &iv, &ik);
-              if (ek == TYPE_TYPED_VEC) {
-                bool inner_ref = JACL_IS_SCALAR_TYPE_IDX(iv) &&
-                                 (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR ||
-                                  JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_DYN);
-                bool inner_shape = typer__is_shape_idx(tc, iv);
-                if (inner_ref) {
-                  node->inferred_type = TYPE_VEC;
-                  if (JACL_TYPE_IDX_TO_SCALAR(iv) == TYPE_STR)
-                    node->inferred_struct_idx = iv;
-                } else if (inner_shape) {
-                  node->inferred_type = TYPE_VEC;  /* stamp suppressed */
-                } else {
-                  node->inferred_type = TYPE_TYPED_VEC;
-                  node->inferred_struct_idx = iv;
-                }
-              } else if (ek == TYPE_TYPED_MAP) {
-                JaclType mt; uint32_t msi, mki;
-                typer__decode_map_shape(iv, ik, &mt, &msi, &mki);
-                node->inferred_type = mt;
-                node->inferred_struct_idx = msi;
-                node->inferred_key_struct_idx = mki;
-              }
-            }
-          }
-          return;
-        case HEAD_RESET:
-          /* reset on struct-box → returns the new struct bytes (TOS).
-           * reset on plain box → returns NIL. */
-          if (node->data.command.arg_count == 2) {
-            AstNode* val = node->data.command.args[1];
-            if ((JaclType)val->inferred_type == TYPE_STRUCT &&
-                val->inferred_struct_idx != UINT32_MAX) {
-              node->inferred_type = TYPE_STRUCT;
-              node->inferred_struct_idx = val->inferred_struct_idx;
-            } else {
-              node->inferred_type = TYPE_NIL;
-            }
-          } else {
-            node->inferred_type = TYPE_NIL;
-          }
-          return;
-        case HEAD_FILTER:
-          /* filter preserves the receiver's collection type, including
-           * elem (and key) struct_idx. Mirrors compiler__compile_hof_builtin:
-           * typed receiver → typed result; plain → plain; stream → stream. */
-          if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP ||
-              recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
-              recv_t == TYPE_STREAM) {
-            node->inferred_type = recv_t;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
-            /* Typed-closure predicate (TYPED_CLOSURES_DESIGN.md Phase A): over a
-             * typed stream, type the predicate body with its param bound to the
-             * source element type (the truthiness return is discarded, so we
-             * ignore the result enc — we just want the body typed). For a wide
-             * element this leaves the body compiled to read the param wide, so
-             * the filter pull can skip the box-for-call. Only inline procs are
-             * affected; typer__proc_result_enc no-ops on a var-ref predicate. */
-            if (recv_t == TYPE_STREAM &&
-                node->data.command.arg_count == 2 &&
-                recv->inferred_struct_idx != UINT32_MAX) {
-              uint32_t arg_enc = recv->inferred_struct_idx;
-              bool pred_typed = false;
-              (void)typer__proc_result_enc(
-                  tc, node->data.command.args[1], &arg_enc, 1, &pred_typed);
-              /* Stamp the predicate proc node so the compiler bakes the
-               * param rep onto OP_FILTER iff the body was actually typed
-               * against the element (a clean probe). On fallback/non-proc it
-               * stays dyn → the pull boxes a wide element for the call.
-               * An inline proc skipped the generic pre-walk (type-once), so
-               * also give it the TYPE_CLOSURE stamp handle_proc would have. */
-              node->data.command.args[1]->inferred_struct_idx =
-                  pred_typed ? arg_enc : UINT32_MAX;
-              if (node->data.command.args[1]->type == AST_COMMAND &&
-                  node->data.command.args[1]->data.command.head_id == HEAD_PROC)
-                node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
-            }
-          }
-          return;
-        case HEAD_TRANSFORM:
-          /* transform on typed_vec → plain TYPE_VEC (loses elem typing).
-           * On plain receivers preserves the receiver type (vec/stream).
-           * Mirrors compiler__compile_hof_builtin. */
-          if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP) {
-            node->inferred_type = TYPE_VEC;
-          } else if (recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
-                     recv_t == TYPE_STREAM) {
-            node->inferred_type = recv_t;
-            /* transform over a typed stream → a stream of the mapper's return
-             * type: bind the mapper proc's param to the source element type
-             * and infer its body. Works for any inline proc, not just `\`
-             * lambdas. (Output element falls back to dyn when the return type
-             * can't be inferred.) */
-            if (recv_t == TYPE_STREAM &&
-                node->data.command.arg_count == 2 &&
-                recv->inferred_struct_idx != UINT32_MAX) {
-              uint32_t arg_enc = recv->inferred_struct_idx;
-              bool mapper_typed = false;
-              node->inferred_struct_idx = typer__proc_result_enc(
-                  tc, node->data.command.args[1], &arg_enc, 1, &mapper_typed);
-              /* Stamp the mapper node with the element enc iff its body was
-               * monomorphized (typed against the element). The compiler
-               * requires this for struct-element streams: only a
-               * monomorphized inline mapper can take the N-slot element.
-               * An inline proc skipped the generic pre-walk (type-once), so
-               * also give it the TYPE_CLOSURE stamp handle_proc would have. */
-              node->data.command.args[1]->inferred_struct_idx =
-                  mapper_typed ? arg_enc : UINT32_MAX;
-              if (node->data.command.args[1]->type == AST_COMMAND &&
-                  node->data.command.args[1]->data.command.head_id == HEAD_PROC)
-                node->data.command.args[1]->inferred_type = TYPE_CLOSURE;
-            }
-          }
-          return;
-        case HEAD_TAKE:
-          /* take preserves the receiver's collection kind:
-           * vec → vec, typed_vec → typed_vec (slice keeps element types),
-           * stream → stream. Mirrors vm.c:OP_TAKE branches. */
-          if (recv_t == TYPE_TYPED_VEC) {
-            node->inferred_type = TYPE_TYPED_VEC;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-          } else if (recv_t == TYPE_VEC || recv_t == TYPE_STREAM) {
-            node->inferred_type = recv_t;
-            /* Preserve the element type for typed streams/vecs so a for-loop
-             * over `take N <typed stream>` still narrows. Mirrors filter. */
-            node->inferred_struct_idx = recv->inferred_struct_idx;
-          }
-          return;
-        case HEAD_FIRST:
-          /* first returns the receiver's first element. Narrow when
-           * the receiver is a typed-vec with a knowable element type
-           * (same encoding as vec-get / map-get). Plain vec / map /
-           * stream → DYN since elements are heterogeneously typed. */
-          if (recv_t == TYPE_TYPED_VEC &&
-              recv->inferred_struct_idx != UINT32_MAX) {
-            uint32_t eidx = recv->inferred_struct_idx;
-            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
-              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
-            } else if (eidx < tc->struct_count) {
-              node->inferred_type = TYPE_STRUCT;
-              node->inferred_struct_idx = eidx;
-            }
-          }
-          return;
-        default: break;
-      }
-    }
-
-    /* Fixed-return table: builtins where the compiler's typed and untyped
-     * paths agree on the result. Vec/map mutations on typed receivers are
-     * handled above; the entries below cover the dyn-receiver path. */
-    static const struct { HeadId hid; uint8_t ret; } fixed_returns[] = {
-      /* Predicates and short-circuit logicals — always bool. */
-      { HEAD_ATOM_Q,      TYPE_BOOL   },
-      { HEAD_FUTURE_Q,    TYPE_BOOL   },
-      { HEAD_ERROR_Q,     TYPE_BOOL   },
-      { HEAD_BOX_Q,       TYPE_BOOL   },
-      { HEAD_MAP_HAS,     TYPE_BOOL   },
-      { HEAD_AMP_AMP,     TYPE_BOOL   },
-      { HEAD_PIPE_PIPE,   TYPE_BOOL   },
-      { HEAD_TILDE,       TYPE_BOOL   },
-      /* Length-style builtins — always i32 (typed and untyped). */
-      { HEAD_LENGTH,      TYPE_I32    },
-      { HEAD_BYTE_LENGTH, TYPE_I32    },
-      { HEAD_COUNT,       TYPE_I32    },
-      { HEAD_VEC_LEN,     TYPE_I32    },
-      { HEAD_MAP_LEN,     TYPE_I32    },
-      { HEAD_BUF_LEN,     TYPE_I32    },
-      { HEAD_ARR_LEN,     TYPE_I32    },
-      /* arr-push mutates in place and returns the new length (i32). */
-      { HEAD_ARR_PUSH,    TYPE_I32    },
-      /* Hash — OP_HASH always pushes an i32 (vm.c:6859). */
-      { HEAD_HASH,        TYPE_I32    },
-      /* String results. */
-      { HEAD_TO_STRING,   TYPE_STR    },
-      { HEAD_SLICE,       TYPE_STR    },
-      { HEAD_CONCAT,      TYPE_STR    },
-      /* Stream constructors. */
-      { HEAD_RANGE,            TYPE_STREAM },
-      { HEAD_RANGE_INCLUSIVE,  TYPE_STREAM },
-      { HEAD_LINES,       TYPE_STREAM },
-      /* Constructors that always produce dyn collections. */
-      { HEAD_VEC,         TYPE_VEC    },
-      { HEAD_MAP,         TYPE_MAP    },
-      { HEAD_COLLECT,     TYPE_VEC    },
-      /* Mutable arr: constructor + in-place set (returns the arr). arr-get
-       * and arr-pop stay dyn (fall through to the default). See ARR_DESIGN.md. */
-      { HEAD_ARR,         TYPE_ARR    },
-      { HEAD_ARR_SET,     TYPE_ARR    },
-      /* Side-effecting — always nil. */
-      { HEAD_PRINT,       TYPE_NIL    },
-      { HEAD_BUF_SET,     TYPE_NIL    },
-      { HEAD_BUF_USET,    TYPE_NIL    },
-      /* File I/O — write/append produce nil on success, error value on
-       * failure (catchable via try/catch).  read-file produces a string. */
-      { HEAD_READ_FILE,   TYPE_STR    },
-      { HEAD_WRITE_FILE,  TYPE_NIL    },
-      { HEAD_APPEND_FILE, TYPE_NIL    },
-      { HEAD_DELETE_FILE, TYPE_NIL    },
-      { HEAD_FILE_EXISTS, TYPE_BOOL   },
-      { HEAD_LIST_DIR,    TYPE_VEC    },
-      /* Atom watchers — both side-effecting, return nil. */
-      { HEAD_WATCH,       TYPE_NIL    },
-      { HEAD_UNWATCH,     TYPE_NIL    },
-      /* Loop forms — emit OP_NIL at normal exit. break-with-value
-       * paths could carry a different type but are conservatively
-       * unified to nil here; refine in a later commit if needed. */
-      { HEAD_WHILE,       TYPE_NIL    },
-      { HEAD_FOR,         TYPE_NIL    },
-      /* Yield — pushes nil after resume in current SM compilation. */
-      { HEAD_YIELD,       TYPE_NIL    },
-      /* Sleep — always evaluates to nil (after wake or after nanosleep). */
-      { HEAD_SLEEP,       TYPE_NIL    },
-      /* Job control — bool indicates delivered/cancelled. */
-      { HEAD_SIGNAL,      TYPE_BOOL   },
-      { HEAD_CANCEL,      TYPE_BOOL   },
-      /* Concurrency: parallel resolves N futures and pushes a vec of
-       * results in input order (vm.c:5066 — `cont_arg = jacl_vector_ptr(vec)`).
-       * spawn/await/race stay DYN: spawn returns a future (no
-       * TYPE_FUTURE in the type system today), await unwraps the
-       * future to whatever type the body produced, race returns the
-       * winner's value — all dynamically determined. */
-      { HEAD_PARALLEL,    TYPE_VEC    },
-      /* Syntax-object introspection (US-015) — fixed result types. */
-      { HEAD_SYNTAX_KIND,     TYPE_STR },
-      { HEAD_SYNTAX_ARGS,     TYPE_VEC },
-      { HEAD_SYNTAX_COMMANDS, TYPE_VEC },
-      { HEAD_SYNTAX_POS,      TYPE_MAP },
-      { HEAD_SYNTAX_STR,      TYPE_STR },
-    };
-    bool matched = false;
-    for (size_t fi = 0; fi < sizeof(fixed_returns)/sizeof(fixed_returns[0]); fi++) {
-      if (hid == fixed_returns[fi].hid) {
-        node->inferred_type = fixed_returns[fi].ret;
-        matched = true;
-        break;
-      }
-    }
-    if (matched) {
-      /* Stream constructors: stamp the element-type idx so `for x in s`
-       * narrows the loop binding (parallel to TYPE_TYPED_VEC's idx).
-       * `range` / `range-inclusive` yield i64 (vm.c OP_RANGE produces
-       * i64 via jacl_i64), `lines` yields str. */
-      if (hid == HEAD_RANGE || hid == HEAD_RANGE_INCLUSIVE) {
-        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_I64);
-      } else if (hid == HEAD_LINES) {
-        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
-      } else if (hid == HEAD_COLLECT && node->data.command.arg_count == 1) {
-        /* Typed collect: collecting a TYPED
-         * stream materializes a typed vec [Vec T] — wide elements stored
-         * flat (no i32-for-small box-back), struct elements stored as
-         * inline bytes. Dyn streams (and vec identity) keep TYPE_VEC.
-         * The VM keys the same decision off the stream's runtime elem_idx,
-         * so dyn-flow and typed-flow agree. */
-        AstNode* recv = node->data.command.args[0];
-        if ((JaclType)recv->inferred_type == TYPE_STREAM &&
-            recv->inferred_struct_idx != UINT32_MAX) {
-          uint32_t ce = recv->inferred_struct_idx;
-          /* Value-type elements only — same rule as the [Vec T] constructor:
-           * typed-vec storage is GC-OPAQUE raw bytes, so str (a heap
-           * pointer) must stay in a plain (traced) vec. dyn streams keep
-           * the plain vec too. */
-          bool ce_ok = !JACL_IS_SCALAR_TYPE_IDX(ce) /* struct */ ||
-                       (JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_DYN &&
-                        JACL_TYPE_IDX_TO_SCALAR(ce) != TYPE_STR);
-          if (ce_ok) {
-            node->inferred_type = TYPE_TYPED_VEC;
-            node->inferred_struct_idx = ce;
-            node->inferred_key_struct_idx = UINT32_MAX;
-          } else if (JACL_IS_SCALAR_TYPE_IDX(ce) &&
-                     JACL_TYPE_IDX_TO_SCALAR(ce) == TYPE_STR) {
-            /* str elements: ref-element [Vec str] — plain traced vec REP
-             * (the VM keeps the plain-vec collect path), element type
-             * carried statically so for-loops over the result narrow. */
-            node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(TYPE_STR);
-            node->inferred_key_struct_idx = UINT32_MAX;
-          }
-        }
-      }
-    } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
-      /* [box $val]: runtime returns a box wrapping the value. The
-       * box's element type is the value's static type, encoded the
-       * same way as TYPE_FUTURE / TYPE_TYPED_VEC — scalar sentinel
-       * for scalar elements, real struct idx for struct elements. */
-      AstNode* val = node->data.command.args[0];
-      JaclType vt = (JaclType)val->inferred_type;
-      node->inferred_type = TYPE_BOX;
-      if (vt == TYPE_STRUCT) {
-        node->inferred_struct_idx = val->inferred_struct_idx;
-      } else if (vt != TYPE_DYN) {
-        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(vt);
-      }
-    } else if (hid == HEAD_DEREF && node->data.command.arg_count == 1) {
-      /* [deref $box]: narrow to the box's element type. Scalar
-       * elements use the JACL_SCALAR_TYPE_IDX sentinel encoding;
-       * struct elements use the registry idx and the compiler
-       * emits OP_DEREF_INLINE to materialize inline struct bytes
-       * (parallel to the unbox path's struct-box handling). */
-      AstNode* recv = node->data.command.args[0];
-      JaclType rt = (JaclType)recv->inferred_type;
-      uint32_t e_idx = recv->inferred_struct_idx;
-      if (rt == TYPE_BOX && e_idx != UINT32_MAX) {
-        if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-        } else {
-          node->inferred_type = TYPE_STRUCT;
-          node->inferred_struct_idx = e_idx;
-        }
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-    } else if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
-      /* [swap $box $fn]: scalar-element narrowing only. Struct
-       * elements stay dyn — swap's fn-return path doesn't have an
-       * inline-struct opcode yet (would need OP_SWAP_INLINE). */
-      AstNode* recv = node->data.command.args[0];
-      JaclType rt = (JaclType)recv->inferred_type;
-      uint32_t e_idx = recv->inferred_struct_idx;
-      if (rt == TYPE_BOX && e_idx != UINT32_MAX &&
-          JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-    } else if (hid == HEAD_SPAWN && node->data.command.arg_count == 1 &&
-               node->data.command.args[0]->type == AST_BLOCK) {
-      /* spawn: runtime returns a future (vm.c:4763). Element type is
-       * the body's tail type when concrete, dyn otherwise. The body
-       * was already typed by the args walk; its inferred_type is the
-       * type of the last expression (or NIL if trailing semi). */
-      AstNode* body = node->data.command.args[0];
-      node->inferred_type = TYPE_FUTURE;
-      JaclType body_t = (JaclType)body->inferred_type;
-      if (body_t == TYPE_STRUCT) {
-        node->inferred_struct_idx = body->inferred_struct_idx;
-      } else if (body_t != TYPE_DYN) {
-        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(body_t);
-      }
-    } else if (hid == HEAD_RACE && node->data.command.arg_count >= 2) {
-      /* race: returns the first body's result to complete. If every
-       * body has the same concrete tail type, narrow the result to
-       * that type; otherwise dyn. Mirrors parallel's body-walk shape
-       * but returns a single value (the winner) instead of a vec. */
-      AstNode** as = node->data.command.args;
-      uint32_t n = node->data.command.arg_count;
-      JaclType  unified_t    = TYPE_DYN;
-      uint32_t  unified_sidx = UINT32_MAX;
-      bool      all_same     = true;
-      for (uint32_t i = 0; i < n; i++) {
-        AstNode* body = as[i];
-        if (body->type != AST_BLOCK) { all_same = false; break; }
-        JaclType bt = (JaclType)body->inferred_type;
-        if (bt == TYPE_DYN) { all_same = false; break; }
-        if (i == 0) {
-          unified_t = bt;
-          unified_sidx = body->inferred_struct_idx;
-        } else if (bt != unified_t ||
-                   (bt == TYPE_STRUCT &&
-                    body->inferred_struct_idx != unified_sidx)) {
-          all_same = false;
-          break;
-        }
-      }
-      if (all_same) {
-        node->inferred_type = unified_t;
-        if (unified_t == TYPE_STRUCT) {
-          node->inferred_struct_idx = unified_sidx;
-        }
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-    } else if (hid == HEAD_AWAIT && node->data.command.arg_count == 1) {
-      /* await: unwraps a future. If the operand is a TYPE_FUTURE with
-       * a known element type, narrow the result to that element type.
-       * If the operand has a known concrete non-future type, that's a
-       * compile-time type error (await is only meaningful on futures).
-       * Dyn operands are permitted; the runtime tag check catches
-       * non-future values at await time. */
-      AstNode* arg = node->data.command.args[0];
-      JaclType arg_t = (JaclType)arg->inferred_type;
-      if (arg_t == TYPE_FUTURE) {
-        uint32_t e_idx = arg->inferred_struct_idx;
-        if (e_idx == UINT32_MAX) {
-          node->inferred_type = TYPE_DYN;
-        } else if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
-        } else {
-          node->inferred_type = TYPE_STRUCT;
-          node->inferred_struct_idx = e_idx;
-        }
-      } else if (arg_t == TYPE_DYN) {
-        node->inferred_type = TYPE_DYN;
-      } else {
-        char err[256];
-        jacl_format_await_non_future(err, sizeof(err), arg_t);
-        typer__error(tc, arg->start.line, arg->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      }
-    } else if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
-      /* [ptr-null [Ptr T]]: typed null pointer literal. Pure
-       * compile-time op — at runtime a null pointer is u64(0).
-       * The annotation supplies pointee identity. */
-      AstNode* type_node = node->data.command.args[0];
-      uint32_t pointee_sidx = UINT32_MAX;
-      if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
-        char err[128];
-        jacl_format_ptr_null_bad_arg(err, sizeof(err));
-        typer__error(tc, type_node->start.line, type_node->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      } else {
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = pointee_sidx;
-      }
-    } else if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
-      /* [ptr-cast [Ptr T] $u64_value]: re-tag a u64 address as a typed
-       * pointer. The annotation supplies pointee identity; the value
-       * must be u64 (or dyn — the cast is the explicit boundary). */
-      AstNode* type_node = node->data.command.args[0];
-      AstNode* val_node  = node->data.command.args[1];
-      uint32_t pointee_sidx = UINT32_MAX;
-      if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
-        char err[128];
-        jacl_format_ptr_cast_bad_first_arg(err, sizeof(err));
-        typer__error(tc, type_node->start.line, type_node->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      } else {
-        JaclType val_t = (JaclType)val_node->inferred_type;
-        if (val_t != TYPE_U64 && val_t != TYPE_DYN) {
-          char err[128];
-          jacl_format_ptr_cast_value_not_u64(err, sizeof(err), val_t);
-          typer__error(tc, val_node->start.line, val_node->start.column, err);
-        }
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = pointee_sidx;
-      }
-    } else if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
-      /* [ptr-addr $p]: typed pointer → raw u64. Dyn is permitted; any
-       * other concrete type is a compile-time error. */
-      AstNode* arg = node->data.command.args[0];
-      JaclType arg_t = (JaclType)arg->inferred_type;
-      if (arg_t != TYPE_PTR && arg_t != TYPE_DYN) {
-        char err[128];
-        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-addr", arg_t);
-        typer__error(tc, arg->start.line, arg->start.column, err);
-      }
-      node->inferred_type = TYPE_U64;
-    } else if (hid == HEAD_ADDR && node->data.command.arg_count == 1) {
-      /* [addr $p->field->...]: result is [Ptr T] where T is the
-       * accessed field's type. The typer trusts the typer-set
-       * inferred_type/struct_idx on the inner chain expression. */
-      AstNode* inner = node->data.command.args[0];
-
-      /* [addr $buf->N] / [addr $p->N]: result is [Ptr ElemType] using
-       * the buf or pointer's *declared* element/pointee type (not the
-       * widened i32 surfaced by the arrow-read). Detect
-       * `[. $varref $intlit]` whose receiver is a TYPE_BUF or TYPE_PTR
-       * binding. See BUFFER_DESIGN.md M3 / M3.7. */
-      if (inner->type == AST_COMMAND &&
-          inner->data.command.head_id == HEAD_DOT &&
-          inner->data.command.arg_count == 2 &&
-          inner->data.command.args[0]->type == AST_VAR_REF &&
-          inner->data.command.args[1]->type == AST_LIT_INT) {
-        AstNode* recv = inner->data.command.args[0];
-        const TyperBinding* b = typer__scope_resolve(tc,
-            recv->data.var_ref.name, recv->data.var_ref.length,
-            recv->scope_mark);
-        if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
-            b->struct_idx != UINT32_MAX) {
-          /* For nested bufs (Phase 5b: struct_idx is a TYPE_SHAPE_BUF
-           * idx), walk the shape chain to the leaf element so the
-           * resulting [Ptr T_leaf] points at scalar / struct bytes the
-           * compiler can interpret. Without this peel, [addr $cube->0]
-           * propagates a typer-side shape idx as the pointee, which the
-           * compiler reads as a struct idx and either segfaults or
-           * mis-typed-errors. */
-          uint32_t pointee = b->struct_idx;
-          if (b->type == TYPE_BUF) {
-            uint32_t walk = pointee;
-            while (typer__is_shape_idx(tc, walk) &&
-                   tc->shared_reg->shapes[walk].kind == TYPE_SHAPE_BUF) {
-              walk = tc->shared_reg->shapes[walk].u.buf.elem_idx;
-            }
-            pointee = walk;
-          }
-          node->inferred_type       = TYPE_PTR;
-          node->inferred_struct_idx = pointee;
-          return;
-        }
-      }
-
-      /* [addr EXPR->N] where EXPR has inferred_type TYPE_PTR (covers
-       * chained field access like `[addr $h->magic->0]`). The receiver
-       * isn't a bare var-ref here; the pointee idx must come from
-       * EXPR.inferred_struct_idx (the *un-widened* pointee), since
-       * inner->inferred_type is the widened scalar (i32 for u8/i16/etc.).
-       * See BUFFER_DESIGN.md "Receiver-shape generalization". */
-      if (inner->type == AST_COMMAND &&
-          inner->data.command.head_id == HEAD_DOT &&
-          inner->data.command.arg_count == 2 &&
-          inner->data.command.args[0]->type != AST_VAR_REF &&
-          inner->data.command.args[1]->type == AST_LIT_INT) {
-        AstNode* recv = inner->data.command.args[0];
-        if ((JaclType)recv->inferred_type == TYPE_PTR &&
-            recv->inferred_struct_idx != UINT32_MAX) {
-          node->inferred_type       = TYPE_PTR;
-          node->inferred_struct_idx = recv->inferred_struct_idx;
-          return;
-        }
-      }
-
-      JaclType inner_t = (JaclType)inner->inferred_type;
-      uint32_t inner_sidx = inner->inferred_struct_idx;
-      if (inner_t == TYPE_STRUCT && inner_sidx != UINT32_MAX) {
-        /* addr of an embedded struct field → [Ptr InnerStruct] */
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = inner_sidx;
-      } else if (inner_t != TYPE_DYN && inner_t != TYPE_STRUCT) {
-        /* Scalar leaf → [Ptr <scalar>] */
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(inner_t);
-      } else {
-        /* Unknown / dyn — fall back to dyn-pointer (caller-checked
-         * at runtime via the chain walker's compile-time error if
-         * the chain doesn't resolve). */
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = UINT32_MAX;
-      }
-    } else if (hid == HEAD_PTR_OFFSET && node->data.command.arg_count == 2) {
-      /* [ptr-offset $p $n]: typed pointer arithmetic. Result preserves
-       * the operand's pointee type. The integer offset must be a
-       * concrete numeric (or dyn). */
-      AstNode* p   = node->data.command.args[0];
-      AstNode* n   = node->data.command.args[1];
-      JaclType p_t = (JaclType)p->inferred_type;
-      JaclType n_t = (JaclType)n->inferred_type;
-      if (p_t != TYPE_PTR && p_t != TYPE_DYN) {
-        char err[160];
-        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-offset", p_t);
-        typer__error(tc, p->start.line, p->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      } else if (n_t != TYPE_DYN && !is_numeric_type(n_t)) {
-        char err[160];
-        jacl_format_ptr_offset_non_numeric(err, sizeof(err), n_t);
-        typer__error(tc, n->start.line, n->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      } else {
-        node->inferred_type       = TYPE_PTR;
-        node->inferred_struct_idx = p->inferred_struct_idx;
-      }
-    } else if (hid == HEAD_PTR_DIFF && node->data.command.arg_count == 2) {
-      /* [ptr-diff $a $b]: subtract two pointers of the same pointee.
-       * Result is i64 (signed element count). */
-      AstNode* a = node->data.command.args[0];
-      AstNode* b = node->data.command.args[1];
-      JaclType a_t = (JaclType)a->inferred_type;
-      JaclType b_t = (JaclType)b->inferred_type;
-      if (a_t != TYPE_PTR || b_t != TYPE_PTR) {
-        if (a_t != TYPE_DYN && b_t != TYPE_DYN) {
-          char err[160];
-          jacl_format_ptr_diff_expects_two(err, sizeof(err), a_t, b_t);
-          typer__error(tc, a->start.line, a->start.column, err);
-        }
-      } else if (a->inferred_struct_idx != b->inferred_struct_idx &&
-                 a->inferred_struct_idx != UINT32_MAX &&
-                 b->inferred_struct_idx != UINT32_MAX) {
-        char err[160];
-        jacl_format_ptr_diff_pointee_mismatch(err, sizeof(err));
-        typer__error(tc, a->start.line, a->start.column, err);
-      }
-      node->inferred_type = TYPE_I64;
-    } else if (hid == HEAD_PTR_DEREF && node->data.command.arg_count == 1) {
-      /* [ptr-deref $p]: load the value at *p. For [Ptr T] with a
-       * scalar pointee, the result narrows to T. Struct pointees
-       * route through $p->field; this builtin errors on them. */
-      AstNode* arg = node->data.command.args[0];
-      JaclType arg_t = (JaclType)arg->inferred_type;
-      uint32_t arg_sidx = arg->inferred_struct_idx;
-      if (arg_t == TYPE_PTR) {
-        if (JACL_IS_SCALAR_TYPE_IDX(arg_sidx)) {
-          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(arg_sidx);
-        } else if (arg_sidx != UINT32_MAX) {
-          char err[160];
-          jacl_format_ptr_deref_struct(err, sizeof(err));
-          typer__error(tc, arg->start.line, arg->start.column, err);
-          node->inferred_type = TYPE_DYN;
-        } else {
-          /* Pointee unknown — fall through to dyn. */
-          node->inferred_type = TYPE_DYN;
-        }
-      } else if (arg_t == TYPE_DYN) {
-        node->inferred_type = TYPE_DYN;
-      } else {
-        char err[128];
-        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-deref", arg_t);
-        typer__error(tc, arg->start.line, arg->start.column, err);
-        node->inferred_type = TYPE_DYN;
-      }
-    } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
-      /* "puts" is not in the HeadId table — keep the memcmp here. */
-      node->inferred_type = TYPE_NIL;
-    } else if (hid == HEAD_TO &&
-               node->data.command.arg_count >= 1 &&
-               node->data.command.args[0]->type == AST_LIT_STRING &&
-               is_type_keyword(node->data.command.args[0]->data.lit_string.value,
-                               node->data.command.args[0]->data.lit_string.length)) {
-      /* [to TYPE expr] — the result type is the keyword. */
-      node->inferred_type =
-          type_from_keyword(node->data.command.args[0]->data.lit_string.value,
-                            node->data.command.args[0]->data.lit_string.length);
-    } else if (hid == HEAD_DOT &&
-               node->data.command.arg_count == 3) {
-      /* [. struct field new_value] field-set — emits OP_HEAP_RECORD_SET,
-       * leaves nil. Mirrors compiler.c's set path. Also enforces the
-       * field-type / value-type rule via the shared formatters
-       * (compiler.c:9722-9738). */
-      AstNode* tgt = node->data.command.args[0];
-      AstNode* fld = node->data.command.args[1];
-      AstNode* val = node->data.command.args[2];
-      JaclType tgt_t    = (JaclType)tgt->inferred_type;
-      uint32_t tgt_sidx = tgt->inferred_struct_idx;
-      if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
-          tgt->data.lit_string.length > 0) {
-        const TyperBinding* b = typer__scope_resolve(tc,
-            tgt->data.lit_string.value,
-            tgt->data.lit_string.length,
-            tgt->scope_mark);
-        if (b && b->type == TYPE_STRUCT) {
-          tgt_t = TYPE_STRUCT;
-          tgt_sidx = b->struct_idx;
-        }
-      }
-      /* Stage 5b: auto-deref a [Ptr Struct] receiver. The field-set
-       * then resolves against the pointee struct identically to a
-       * direct struct receiver — the compiler emits OP_PTR_STORE
-       * instead of OP_HEAP_RECORD_SET. Scalar pointees ([Ptr i32])
-       * have no field surface and fall through to TYPE_DYN. */
-      if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
-          !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
-        tgt_t = TYPE_STRUCT;
-      }
-      if (tgt_t == TYPE_STRUCT && tgt_sidx < tc->struct_count &&
-          fld->type == AST_LIT_STRING) {
-        const TyperStruct* sd = &tc->structs[tgt_sidx];
-        const char* fn  = fld->data.lit_string.value;
-        uint32_t    fnl = fld->data.lit_string.length;
-        for (uint32_t fi = 0; fi < sd->field_count; fi++) {
-          if (sd->field_name_lens[fi] != fnl ||
-              memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
-          JaclType field_t = (JaclType)sd->field_types[fi];
-          JaclType val_t   = (JaclType)val->inferred_type;
-          if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
-              val_t != field_t &&
-              !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
-            char err[224];
-            jacl_format_field_mismatch(err, sizeof(err),
-                sd->name, sd->name_len, fn, fnl, field_t, val_t);
-            typer__error(tc, val->start.line, val->start.column, err);
-          } else if (field_t != TYPE_DYN && val_t == TYPE_DYN) {
-            char err[256];
-            jacl_format_field_dyn_assign(err, sizeof(err),
-                sd->name, sd->name_len, fn, fnl, field_t);
-            typer__error(tc, val->start.line, val->start.column, err);
-          }
-          break;
-        }
-      }
-      node->inferred_type = TYPE_NIL;
-    } else if (hid == HEAD_DOT &&
-               node->data.command.arg_count == 2) {
-      /* [. struct field] arrow access — result type is the accessed
-       * field's declared type. For struct-typed fields, propagate
-       * inferred_struct_idx so chained access (`$x.field.subfield`)
-       * resolves the subfield's type. */
-      AstNode* tgt = node->data.command.args[0];
-      AstNode* fld = node->data.command.args[1];
-
-      /* Module-binding value access: `$mod->field` where mod is a
-       * `use "path" mod` binding. Narrow to the export's declared
-       * type. Procs reached this way (not as a call head) are
-       * closure values — narrow to TYPE_CLOSURE. Resolution falls
-       * through if a local binding shadows the module name. */
-      if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_STRING) {
-        const TyperBinding* shadow = typer__scope_resolve(tc,
-            tgt->data.var_ref.name, tgt->data.var_ref.length,
-            tgt->scope_mark);
-        if (!shadow) {
-          const TyperImportProc* bound = typer__find_bound_export(tc,
-              tgt->data.var_ref.name, tgt->data.var_ref.length,
-              fld->data.lit_string.value, fld->data.lit_string.length);
-          if (bound) {
-            node->inferred_type = (bound->arity >= 0)
-                                  ? (uint8_t)TYPE_CLOSURE
-                                  : bound->return_type;
-            return;
-          }
-        }
-      }
-
-      /* Nested-buf chain at depth >= 3, or any depth-N chain rooted at
-       * a TYPE_PTR-with-buf-shape binding (decomposed chains). Walks
-       * the arrow chain inside-out and yields the chain's result type;
-       * bails on depth <= 2 TYPE_BUF receivers so the existing
-       * per-arrow handlers continue to drive those. */
-      if (fld->type == AST_LIT_INT) {
-        JaclType chain_t = TYPE_DYN;
-        uint32_t chain_sidx = UINT32_MAX;
-        if (typer__nested_buf_chain_result(tc, tgt, fld,
-                                           &chain_t, &chain_sidx, NULL, NULL)) {
-          node->inferred_type       = chain_t;
-          node->inferred_struct_idx = chain_sidx;
-          return;
-        }
-      }
-      /* A dynamic index into a nested-buf dimension (`$cube->$j`): stamp the dimension's
-       * static size on the node (as inferred_buf_len — a plain length, not a shape idx, so
-       * it may cross to the compiler) so the codegen can emit a runtime bounds check. The
-       * node's inferred type is left to the existing dynamic-dot handling below. */
-      if (fld->type != AST_LIT_INT && fld->type != AST_LIT_STRING) {
-        JaclType chain_t = TYPE_DYN;
-        uint32_t chain_sidx = UINT32_MAX, index_dim = 0;
-        if (typer__nested_buf_chain_result(tc, tgt, fld,
-                                           &chain_t, &chain_sidx, NULL, &index_dim) &&
-            index_dim > 0) {
-          node->inferred_buf_len = index_dim;
-        }
-      }
-
-      /* Buf or Ptr element access: `$x->N` parses as `[. $x N]` where
-       * the field is an AST_LIT_INT.
-       *   TYPE_BUF: bounds-checked at typer (N must be < buf_len).
-       *   TYPE_PTR: no bounds check (pointer can target anything);
-       *             pointee must be scalar.
-       * Result narrows to the element scalar, widening small ints to
-       * i32 (mirrors HEAD_BUF_GET / OP_PTR_LOAD widening). See
-       * BUFFER_DESIGN.md M3. */
-      if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_INT) {
-        const TyperBinding* b = typer__scope_resolve(tc,
-            tgt->data.var_ref.name, tgt->data.var_ref.length,
-            tgt->scope_mark);
-        if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
-            b->struct_idx != UINT32_MAX) {
-          int32_t idx_lit = fld->data.lit_int.value;
-          if (b->type == TYPE_BUF &&
-              (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
-            char buf_ty[96];
-            /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
-             * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
-             * and T from the shape. */
-            if (typer__is_shape_idx(tc, b->struct_idx) &&
-                tc->shared_reg->shapes[b->struct_idx].kind == TYPE_SHAPE_BUF) {
-              TypeShape* inner = &tc->shared_reg->shapes[b->struct_idx];
-              uint32_t inner_M = inner->u.buf.len;
-              uint32_t inner_t_enc = inner->u.buf.elem_idx;
-              if (JACL_IS_SCALAR_TYPE_IDX(inner_t_enc)) {
-                const char* en = type_name(JACL_TYPE_IDX_TO_SCALAR(inner_t_enc));
-                snprintf(buf_ty, sizeof(buf_ty),
-                         "[Buf %u [Buf %u %s]]",
-                         (unsigned)b->buf_len, (unsigned)inner_M, en);
-              } else if (inner_t_enc < tc->struct_count) {
-                const TyperStruct* sd = &tc->structs[inner_t_enc];
-                snprintf(buf_ty, sizeof(buf_ty),
-                         "[Buf %u [Buf %u %.*s]]",
-                         (unsigned)b->buf_len, (unsigned)inner_M,
-                         (int)sd->name_len, sd->name);
-              } else {
-                snprintf(buf_ty, sizeof(buf_ty),
-                         "[Buf %u [Buf %u ...]]",
-                         (unsigned)b->buf_len, (unsigned)inner_M);
-              }
-            } else if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
-              const char* en = type_name(
-                  JACL_TYPE_IDX_TO_SCALAR(b->struct_idx));
-              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
-                                   b->buf_len, en, (uint32_t)strlen(en));
-            } else if (b->struct_idx < tc->struct_count) {
-              const TyperStruct* sd = &tc->structs[b->struct_idx];
-              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
-                                   b->buf_len, sd->name, sd->name_len);
-            } else {
-              jacl_format_buf_type(buf_ty, sizeof(buf_ty),
-                                   b->buf_len, "T", 1);
-            }
-            char err[192];
-            snprintf(err, sizeof(err),
-                "type error: buf index %d out of bounds for %s",
-                (int)idx_lit, buf_ty);
-            typer__error(tc, fld->start.line, fld->start.column, err);
-            node->inferred_type = TYPE_DYN;
-            return;
-          }
-          if (b->type == TYPE_BUF) {
-            uint32_t inner_v = UINT32_MAX, inner_k = UINT32_MAX;
-            JaclType elem = typer__buf_elem_decode(tc, b->struct_idx,
-                                                   &inner_v, &inner_k);
-            /* Nested buf [Buf N [Buf M T]]: $matrix->i yields [Ptr T]
-             * (decay-style). Phase 5b moved the inner-M / T encoding
-             * into a TYPE_SHAPE_BUF registry entry; decode to spot
-             * the nested case via TYPE_BUF kind. For depth-3+, the
-             * leaf T isn't directly addressable through a single
-             * [Ptr T] decay -- error and point at the workaround. */
-            if (elem == TYPE_BUF) {
-              uint32_t leaf_inner_v = UINT32_MAX;
-              JaclType leaf_kind = typer__buf_elem_decode(tc, inner_v,
-                                                          &leaf_inner_v, NULL);
-              if (leaf_kind == TYPE_BUF) {
-                /* depth-3+ arrow chain: codegen isn't ready, but [addr]
-                 * intercepts before this path (see HEAD_ADDR handler).
-                 * Stay quiet here -- the compiler will catch any real
-                 * misuse (e.g. `$cube->i->j->k`) with a clearer error
-                 * at codegen time. Leaving as TYPE_DYN propagates to a
-                 * compile-time error rather than a typer error. */
-                node->inferred_type = TYPE_DYN;
-                return;
-              }
-              /* depth-2: yield [Ptr T_leaf] (existing semantic). */
-              node->inferred_type       = TYPE_PTR;
-              node->inferred_struct_idx = inner_v;
-              return;
-            }
-            switch (elem) {
-              case TYPE_I8: case TYPE_U8:
-              case TYPE_I16: case TYPE_U16:
-                node->inferred_type = TYPE_I32; break;
-              case TYPE_TYPED_VEC:
-                node->inferred_type = TYPE_TYPED_VEC;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_TYPED_MAP:
-                node->inferred_type = TYPE_TYPED_MAP;
-                node->inferred_struct_idx = inner_v;
-                node->inferred_key_struct_idx = inner_k;
-                break;
-              case TYPE_PTR:
-                node->inferred_type = TYPE_PTR;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_FUTURE:
-                node->inferred_type = TYPE_FUTURE;
-                node->inferred_struct_idx = inner_v;
-                break;
-              case TYPE_STRUCT:
-                node->inferred_type = TYPE_STRUCT;
-                node->inferred_struct_idx = b->struct_idx;
-                break;
-              default:
-                node->inferred_type = elem;
-                break;
-            }
-          } else if (JACL_IS_SCALAR_TYPE_IDX(b->struct_idx)) {
-            /* TYPE_PTR branch: scalar pointee. */
-            JaclType elem = JACL_TYPE_IDX_TO_SCALAR(b->struct_idx);
-            switch (elem) {
-              case TYPE_I8: case TYPE_U8:
-              case TYPE_I16: case TYPE_U16:
-                node->inferred_type = TYPE_I32; break;
-              default:
-                node->inferred_type = elem; break;
-            }
-          } else {
-            /* TYPE_PTR struct pointee: result is the inline struct value. */
-            node->inferred_type       = TYPE_STRUCT;
-            node->inferred_struct_idx = b->struct_idx;
-          }
-          return;
-        }
-      }
-
-      /* Same shape but receiver is an arbitrary expression with
-       * inferred_type TYPE_PTR — covers field-access chains like
-       * `$h->magic->0` where `$h->magic` returns [Ptr u8]. Bufs
-       * aren't expression-result types in JACL, so only TYPE_PTR
-       * needs the generalization. No bounds check (TYPE_PTR
-       * branch above is also bounds-check-free). For struct pointee
-       * (`$grid->i->j` against `[Buf N [Buf M Point]]`), the result
-       * is the inline struct value -- M4.2.2. See
-       * BUFFER_DESIGN.md "Receiver-shape generalization". */
-      if (fld->type == AST_LIT_INT &&
-          (JaclType)tgt->inferred_type == TYPE_PTR &&
-          tgt->inferred_struct_idx != UINT32_MAX) {
-        if (JACL_IS_SCALAR_TYPE_IDX(tgt->inferred_struct_idx)) {
-          JaclType elem = JACL_TYPE_IDX_TO_SCALAR(tgt->inferred_struct_idx);
-          switch (elem) {
-            case TYPE_I8: case TYPE_U8:
-            case TYPE_I16: case TYPE_U16:
-              node->inferred_type = TYPE_I32; break;
-            default:
-              node->inferred_type = elem; break;
-          }
-          return;
-        }
-        if (tgt->inferred_struct_idx < tc->struct_count) {
-          node->inferred_type       = TYPE_STRUCT;
-          node->inferred_struct_idx = tgt->inferred_struct_idx;
-          return;
-        }
-      }
-
-      /* Resolve target struct type. Two shapes:
-       *   - tgt was already typed as STRUCT (e.g. $ln var-ref or a
-       *     nested dot expression).
-       *   - tgt is a bare LIT_STRING name on the LHS of a `set` chain
-       *     (e.g. `set ln->start->x 77` parses with bare `ln`). The
-       *     compiler's HEAD_SET rewrite later converts it to a
-       *     VAR_REF; we look up the binding here so the typer's
-       *     annotation matches what the rewrite produces. */
-      JaclType    tgt_t = (JaclType)tgt->inferred_type;
-      uint32_t    tgt_sidx = tgt->inferred_struct_idx;
-      if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
-          tgt->data.lit_string.length > 0) {
-        const TyperBinding* b = typer__scope_resolve(tc,
-            tgt->data.lit_string.value,
-            tgt->data.lit_string.length,
-            tgt->scope_mark);
-        if (b && b->type == TYPE_STRUCT) {
-          tgt_t = TYPE_STRUCT;
-          tgt_sidx = b->struct_idx;
-        }
-      }
-      /* Stage 5b: auto-deref [Ptr Struct] receiver to its pointee for
-       * field resolution. The compiler emits OP_PTR_LOAD with the
-       * field's offset and type. Scalar pointees fall through. */
-      if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
-          !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
-        tgt_t = TYPE_STRUCT;
-      }
-      if (tgt_t == TYPE_STRUCT &&
-          tgt_sidx < tc->struct_count &&
-          fld->type == AST_LIT_STRING) {
-        const TyperStruct* sd = &tc->structs[tgt_sidx];
-        const char* fn = fld->data.lit_string.value;
-        uint32_t    fnl = fld->data.lit_string.length;
-        node->inferred_type = TYPE_DYN;
-        for (uint32_t fi = 0; fi < sd->field_count; fi++) {
-          if (sd->field_name_lens[fi] == fnl &&
-              memcmp(sd->field_names[fi], fn, fnl) == 0) {
-            JaclType ft = (JaclType)sd->field_types[fi];
-            if (ft == TYPE_BUF) {
-              /* Buf field access: $h->field returns [Ptr ElemType]
-               * pointing at the field's first byte. See
-               * BUFFER_DESIGN.md M4.3. The field's fixed length rides
-               * along as inferred_buf_len so `[buf-get $h->field $i]`
-               * can bounds-check the index at runtime. */
-              node->inferred_type       = TYPE_PTR;
-              node->inferred_struct_idx = sd->field_struct_idxs[fi];
-              node->inferred_buf_len    = sd->field_buf_lens[fi];
-            } else {
-              node->inferred_type = (uint8_t)ft;
-              if (ft == TYPE_STRUCT) {
-                node->inferred_struct_idx = sd->field_struct_idxs[fi];
-              }
-            }
-            break;
-          }
-        }
-      } else {
-        node->inferred_type = TYPE_DYN;
-      }
-    } else {
-      node->inferred_type = TYPE_DYN;
-    }
+    typer__infer_cmd_named(tc, node, head);
   } else {
     node->inferred_type = TYPE_DYN;
   }

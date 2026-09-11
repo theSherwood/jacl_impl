@@ -154,6 +154,30 @@ export class TemenJaclRunner {
     return Number(ptr);
   }
 
+  private rawCapture(ptr: number | bigint, len: number | bigint): Uint8Array {
+    const n = Number(len);
+    if (n === 0) return new Uint8Array(0);
+    return new Uint8Array(this.ex.memory.buffer, Number(ptr), n).slice();
+  }
+
+  /**
+   * Read the compiler-guest's stdout: a **binary** TEMEN object (what the emit driver writes now —
+   * formatting the IR as text cost ~47% of a compile and the engine only parsed it back), or the
+   * `%%ERROR%%…` text a failed compile writes instead. Told apart by the marker.
+   */
+  private compilerOutput(): EmitResult {
+    const bytes = this.rawCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
+    const MARK = "%%ERROR%%\n";
+    if (bytes.length >= MARK.length - 1) {
+      const head = new TextDecoder().decode(bytes.slice(0, MARK.length));
+      if (head.startsWith("%%ERROR%%")) {
+        return { error: new TextDecoder().decode(bytes).slice(MARK.length) };
+      }
+    }
+    if (bytes.length === 0) return { error: "compiler produced no output" };
+    return { ir: bytes };
+  }
+
   private readCapture(ptr: number | bigint, len: number | bigint): string {
     const p = Number(ptr);
     const n = Number(len);
@@ -222,9 +246,9 @@ export class TemenJaclRunner {
    * library unit (each text or a `.temeno` binary object, sniffed by magic), and an entry-export name.
    * The only JACL-frontend specific here is the `__jacl_entry` entry name.
    */
-  linkRun(programIr: string, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
+  linkRun(programIr: string | Uint8Array, runtime: Uint8Array, stdin?: Uint8Array): RunResult {
     const ex = this.ex;
-    const prog = new TextEncoder().encode(programIr);
+    const prog = typeof programIr === "string" ? new TextEncoder().encode(programIr) : programIr;
     const entry = new TextEncoder().encode(JACL_ENTRY);
     let lib: number;
     try {
@@ -306,15 +330,14 @@ export class TemenJaclRunner {
    * Unlike the Emscripten {@link JaclFrontend} (`jacl_emit.wasm`), this expands `defmacro`s **in-guest**
    * via the §22 `Jit` capability the on-ramp grants a `vm_jit_*`-importing guest (`onramp_exec` runs it
    * on the tree-walker so its import-bound `invoke`/`install` reach the driver) — so macro-bearing tour
-   * programs compile instead of trapping. The emitted IR is the same wire form {@link JaclFrontend}
-   * produces (it is the same `jacl_emit_ir` codegen), so {@link linkRun} consumes it unchanged.
+   * programs compile instead of trapping. The card emits a **binary** TEMEN object (the same module
+   * {@link JaclFrontend}'s text describes — `irb_to_encoded` vs `irb_to_text` over one IrModule), and
+   * {@link linkRun} takes either form.
    */
   emitIrViaCompiler(compilerTemen: Uint8Array, source: string): EmitResult {
     const out = this.runTemen(compilerTemen, new TextEncoder().encode(source));
     if (out.isError) return { error: out.error ?? "compiler-guest run failed" };
-    const MARK = "%%ERROR%%\n";
-    if (out.output.startsWith(MARK)) return { error: out.output.slice(MARK.length) };
-    return { ir: out.output };
+    return this.compilerOutput();
   }
 
   private warmOpened = false;
@@ -357,12 +380,9 @@ export class TemenJaclRunner {
     const inPtr = this.load(inBytes);
     this.ex.temen_warm_eval(inPtr, this.usize(inBytes.length));
     const status = this.ex.temen_status();
-    const stdout = this.readCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
     const stderr = this.readCapture(this.ex.temen_stderr_ptr(), this.ex.temen_stderr_len());
     if (status !== STATUS.OK) return { error: stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status) };
-    const MARK = "%%ERROR%%\n";
-    if (stdout.startsWith(MARK)) return { error: stdout.slice(MARK.length) };
-    return { ir: stdout };
+    return this.compilerOutput();
   }
 
   /**
@@ -390,12 +410,9 @@ export class TemenJaclRunner {
       return { error: `warm-coop declined: ${e instanceof Error ? e.message : String(e)}` };
     }
     const status = this.ex.temen_status();
-    const stdout = this.readCapture(this.ex.temen_stdout_ptr(), this.ex.temen_stdout_len());
     const stderr = this.readCapture(this.ex.temen_stderr_ptr(), this.ex.temen_stderr_len());
     if (status !== STATUS.OK) return { error: stderr ? `${statusMessage(status)}: ${stderr}` : statusMessage(status) };
-    const MARK = "%%ERROR%%\n";
-    if (stdout.startsWith(MARK)) return { error: stdout.slice(MARK.length) };
-    return { ir: stdout };
+    return this.compilerOutput();
   }
 
   /** Tear down the warm session and free its owned window. */
@@ -429,7 +446,9 @@ interface JaclEmitModule {
 export type MacroStageRun = (moduleBytes: Uint8Array, argWire: Uint8Array) => Uint8Array | null;
 
 /** Frontend output: either the TEMEN IR text, or a compile diagnostic (syntax/type/codegen error). */
-export type EmitResult = { ir: string } | { error: string };
+/** A successful compile is a binary TEMEN object from the self-hosted card, or temen-text from the
+ *  Emscripten frontend; {@link TemenJaclRunner.linkRun} takes either (the engine sniffs by magic). */
+export type EmitResult = { ir: string | Uint8Array } | { error: string };
 
 export class JaclFrontend {
   private readonly emit: (src: string) => number;

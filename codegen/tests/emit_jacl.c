@@ -446,6 +446,12 @@ static char *emit_dup(const char *s) {
   if (p) strcpy(p, s);
   return p;
 }
+/* `emit_dup` for a byte buffer (the binary object path — not NUL-terminated). */
+static char *emit_dupn(const void *src, size_t n) {
+  char *p = (char *)malloc(n ? n : 1);
+  if (p) memcpy(p, src, n);
+  return p;
+}
 static char *emit_err(const char *prefix, const char *msg) {
   size_t n = strlen("%%ERROR%%\n") + strlen(prefix) + strlen(msg) + 1;
   char *p = (char *)malloc(n);
@@ -454,7 +460,12 @@ static char *emit_err(const char *prefix, const char *msg) {
   if (p) snprintf(p, n, "%%%%ERROR%%%%\n%s%s", prefix, msg);
   return p;
 }
-EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
+/* The shared compile core behind {@link jacl_emit_ir} (temen-text) and {@link jacl_emit_obj}
+ * (the binary temen-encode container). Identical front half — lex, parse, macro-expand, type,
+ * codegen — differing only in how the IrModule is serialized. `*out_len` is set on the BINARY
+ * success path only; every error path returns a NUL-terminated `%%ERROR%%…` string and leaves it
+ * alone (the wrappers fall back to strlen), so both entries keep one error protocol. */
+static char *jacl_emit__serialize(const char *source, int binary, size_t *out_len) {
   arena_t arena = {0};
   LexResult toks = lexer_lex(source, &arena);
   if (toks.error_count) { arena_destroy(&arena); return emit_err("lex error", ""); }
@@ -510,12 +521,42 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
   /* Own-data addresses are now inline `data.self` instructions (v9), so the text is
    * self-contained — no separate `%%RELOCS%%` section. (The JS link path decodes/links
    * `data.self` itself; a scoped follow-up alongside the object-dialect browser work.) */
-  char *text = irb_to_text(m);
-  char *out = emit_dup(text);
-  free(text);
+  char *out;
+  if (binary) {
+    /* The binary container (`irb_to_encoded`) the host hands straight to the engine's link path,
+     * which sniffs binary vs text by magic. Skips formatting the IR as text — measured ~47% of a
+     * bytecode-interp compile and ~110 ms of a ~335 ms tier-up compile of the tour, since the text
+     * form runs the whole module through `vsnprintf` (half of all calls) and the engine then parses
+     * it back. `irbuilder.h` pins the two serializers equivalent:
+     * `decode_unit(irb_to_encoded(m))` == `parse_unit(irb_to_text(m))`. */
+    size_t blen = 0;
+    uint8_t *bin = irb_to_encoded(m, &blen);
+    out = bin ? emit_dupn(bin, blen) : NULL;
+    free(bin);
+    if (out && out_len) *out_len = blen;
+  } else {
+    char *text = irb_to_text(m);
+    out = text ? emit_dup(text) : NULL;
+    free(text);
+  }
   irb_module_free(m);
   arena_destroy(&arena);
   return out;
+}
+
+EMSCRIPTEN_KEEPALIVE char *jacl_emit_ir(const char *source) {
+  return jacl_emit__serialize(source, 0, NULL);
+}
+
+/* Compile `source` to a **binary** TEMEN object; `*out_len` gets its byte length. On a compile error
+ * the return is the same NUL-terminated `%%ERROR%%…` text `jacl_emit_ir` produces (with `*out_len`
+ * its strlen), so a host sniffs the two apart by the marker / the container magic. */
+EMSCRIPTEN_KEEPALIVE char *jacl_emit_obj(const char *source, size_t *out_len) {
+  size_t n = 0;
+  char *p = jacl_emit__serialize(source, 1, &n);
+  if (p && n == 0) n = strlen(p); /* an error string, not an object */
+  if (out_len) *out_len = n;
+  return p;
 }
 
 /* --- Warm-snapshot two-phase API (docs/TEMEN_WARM_COMPILER.md Slice 2) ---------------------------
@@ -535,6 +576,11 @@ EMSCRIPTEN_KEEPALIVE void jacl_emit_warmup(void) {
 }
 EMSCRIPTEN_KEEPALIVE char *jacl_emit_compile(const char *source) {
   return jacl_emit_ir(source);
+}
+
+/* {@link jacl_emit_compile}'s binary twin (the warm card's `eval_run` output). */
+EMSCRIPTEN_KEEPALIVE char *jacl_emit_compile_obj(const char *source, size_t *out_len) {
+  return jacl_emit_obj(source, out_len);
 }
 #endif /* __EMSCRIPTEN__ */
 
