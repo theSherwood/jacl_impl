@@ -272,6 +272,10 @@ JaclVal jacl_sub(JaclVal a, JaclVal b);
 JaclVal jacl_mul(JaclVal a, JaclVal b);
 JaclVal jacl_div(JaclVal a, JaclVal b);    /* div-by-zero -> error */
 JaclVal jacl_mod(JaclVal a, JaclVal b);    /* mod-by-zero -> error */
+/* `+% -% *%` — wrap modulo the operand width (i32 or wide); non-integers are a type error. */
+JaclVal jacl_wrap_add(JaclVal a, JaclVal b);
+JaclVal jacl_wrap_sub(JaclVal a, JaclVal b);
+JaclVal jacl_wrap_mul(JaclVal a, JaclVal b);
 JaclVal jacl_neg(JaclVal a);
 JaclVal jacl_eq(JaclVal a, JaclVal b);     /* bitwise type+payload equality -> bool */
 JaclVal jacl_ne(JaclVal a, JaclVal b);

@@ -389,10 +389,13 @@ fn closures_share_one_mutable_cell() {
 
 #[test]
 fn typed_arithmetic_lowers_to_native_i32() {
-    // [+ 1 [* 2 3]] — the typer proves i32, so native i32 ops with no runtime calls.
+    // [+ 1 [* 2 3]] — the typer proves i32, so native ops with no runtime calls. The ops are
+    // 64-bit on the sign-extended operands so that leaving i32 range is observable (#102):
+    // the result is narrowed back to i32, and the sticky overflow bit becomes the error flag.
     let ir = emit_text("nested");
-    assert!(ir.contains("i32.mul") && ir.contains("i32.add"), "expected native i32 ops:\n{ir}");
+    assert!(ir.contains("i64.mul") && ir.contains("i64.add"), "expected native ops:\n{ir}");
     assert!(!ir.contains("jacl_mul") && !ir.contains("jacl_add"), "should not call the runtime:\n{ir}");
+    assert!(ir.contains("i64.const 61"), "expected the overflow bit to reach the error flag:\n{ir}");
     run_case("nested", i32_val(7)); // and it's still correct
 }
 
@@ -488,6 +491,33 @@ fn binop_operand_survives_a_block_move() {
     run_case("guard_if_operand", i32_val(3));
 }
 
+// ---- #102: overflow in a typed i32 computation ----
+
+#[test]
+fn typed_i32_overflow_is_a_catchable_error() {
+    // A declared i32 cannot hold a promoted result, and silently wrapping would mean adding
+    // an annotation changes a program's answers — so the tree's sticky overflow bit becomes
+    // the error flag. `error?` sees it, and the arithmetic is otherwise untouched.
+    run_case("typed_ovf", i32_val(1));
+    run_case("typed_no_ovf", i32_val(42));
+}
+
+#[test]
+fn typed_wrapping_operator_opts_out_of_the_check() {
+    // `+%` is defined to wrap, so it emits the bare i32 op and no error.
+    let ir = emit_text("typed_wrap");
+    assert!(ir.contains("i32.add"), "+% should be a bare native add:\n{ir}");
+    run_case("typed_wrap", i32_val(0));
+}
+
+#[test]
+fn typed_tree_operand_can_move_blocks() {
+    // The native accumulator and the overflow bit ride the frame in pins, so an operand that
+    // leaves the block (an `[if …]`) no longer strands them — this used to fail verification
+    // with a TypeMismatch between the stale i32 and an i64 value id.
+    run_case("typed_ovf_if_operand", i32_val(3));
+}
+
 // ---- P2.8: strings + collections ----
 
 #[test]
@@ -581,9 +611,10 @@ fn parallel_race_matches_old_vm() {
 
 #[test]
 fn typed_proc_body_is_unboxed() {
-    // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body uses i32.add.
+    // proc add {i32 x, i32 y} i32 {+ $x $y} — typed params, so the body adds natively (in 64
+    // bits, to observe i32 overflow — see typed_arithmetic_lowers_to_native_i32).
     let ir = emit_text("proc_typed");
-    assert!(ir.contains("i32.add"), "typed proc body should use native i32.add:\n{ir}");
+    assert!(ir.contains("i64.add"), "typed proc body should add natively:\n{ir}");
     assert!(!ir.contains("jacl_add"), "typed proc body should not call jacl_add:\n{ir}");
     run_case("proc_typed", i32_val(42));
 }

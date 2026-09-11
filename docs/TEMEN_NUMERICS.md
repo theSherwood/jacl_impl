@@ -69,6 +69,44 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Overflow: three behaviors, one per spelling
+
+The promotion rule above applies to a **dynamic** value, whose width is not declared. A
+value the typer has *proved* is `i32` cannot use it: the promoted result would be an i64,
+which is not an i32, so an `i32`-annotated proc would return something its own signature
+forbids. Silently wrapping instead is worse — it would mean adding an annotation changes a
+program's answers, and it would make widening the typer's reach a *semantic* change rather
+than a speed one. So overflow in a typed i32 computation is an **error**:
+
+| spelling | on overflow |
+|---|---|
+| `+ - *` on dynamic values | promote to a wide int (`[* 100000 100000]` → `10_000_000_000`) |
+| `+ - *` on values proved `i32` | error-flagged result — catchable with `try` / `error?` |
+| `+% -% *%`, anywhere | wrap modulo the operand width |
+
+```jacl
+proc dbl {i32 n} i32 { + $n $n }
+print [error? [dbl 2000000000]]     # true  — declared i32, cannot promote
+def a 2000000000
+print [+ $a $a]                     # 4000000000 — dynamic, promotes
+print [+% $a $a]                    # -294967296 — asked for a wrap
+```
+
+The typed lowering computes each op in 64 bits on the sign-extended operands, narrows back
+to i32, and ORs "the result left i32 range" into a sticky bit that becomes the error flag
+when the tree re-boxes (branchless — an error-flagged i32 is an ordinary JaclVal, the same
+shape `jacl_div` returns for a zero divisor). `+% -% *%` skip the check and emit the bare
+`i32.add` / `i32.sub` / `i32.mul`; on dynamic operands they call `jacl_wrap_add` & co.,
+which wrap two i32s modulo 2^32, two wide ints modulo 2^64, and return a type error for
+anything else — coercing a float into a wrapping op would defeat the point of asking.
+
+At the `extern` (C ABI) boundary a typed scalar argument is *not* checked: it is handed to
+C as a machine i32, so C's wrapping is the contract there, the same reason a pointer
+argument decays to a raw address.
+
+History: the typed path wrapped silently until jacl #102 — see that issue for the
+alternatives considered (documenting the wrap, versus checking it).
+
 ## Comparison and equality
 
 `jacl_lt` / `le` / `gt` / `ge` compare numerically across widths: two ints compare as

@@ -1,0 +1,43 @@
+# expect: true
+# expect: 4000000000
+# expect: -294967296
+# expect: -294967296
+# expect: 42
+# expect: 294967296
+# expect: 1705032704
+# expect: 99
+# expect: true
+# expect: 3
+#
+# Overflow rules (docs/TEMEN_NUMERICS.md, jacl #102). Three behaviors, one per spelling:
+#   dynamic `+`  -> promotes to a wide int (the value's width is not declared)
+#   typed   `+`  -> a catchable error (a declared i32 cannot hold the promoted value, and
+#                   silently wrapping would make an annotation change a program's answers)
+#   `+% -% *%`   -> wrap modulo the operand width, always, typed or not
+
+proc dbl {i32 n} i32 { + $n $n }
+proc dblw {i32 n} i32 { +% $n $n }
+
+# typed overflow is an error, not a wrap
+print [error? [dbl 2000000000]]
+# the same arithmetic left dynamic still promotes
+def a 2000000000
+print [+ $a $a]
+# asking for a wrap gets a wrap, dynamic or typed
+print [+% $a $a]
+print [dblw 2000000000]
+# and nothing changes when the result fits
+print [dbl 21]
+
+# the other two wrapping operators
+print [-% [- 0 $a] $a]
+print [*% $a 3]
+
+# the error is an ordinary JACL error: catchable, and it propagates
+print [try { [dbl 2000000000] } e { 99 }]
+# wrapping only means something for integers
+print [error? [+% 1.5 2]]
+
+# a typed tree whose operand moves the emission point still lowers correctly
+proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }
+print [f 1]

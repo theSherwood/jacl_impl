@@ -161,6 +161,13 @@ flag, ctx as the lone HeapRecord) see `STRUCT_DESIGN.md`.
 | `def i32 r [+ $i32 $dyn]` | compile error at the `def` (dyn-result into typed slot) |
 | `[+ $i32 [to i32 $dyn]]` | compiles; result `i32` |
 
+An annotation changes *how fast* an operation runs, never *what it answers* — with one
+consequence worth stating: `i32` arithmetic that overflows cannot promote (the promoted
+value is not an `i32`), so it produces a catchable error instead, where the same expression
+on `dyn` operands would have widened. `+% -% *%` wrap instead, on typed and dynamic
+operands alike. See `docs/TEMEN_NUMERICS.md` § "Overflow: three behaviors, one per
+spelling".
+
 The quarantine model makes the typer's rules tractable: once a
 value is typed, every operation it touches has known typed semantics,
 without exception cases for "this typed value happens to be flowing

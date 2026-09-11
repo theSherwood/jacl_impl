@@ -52,6 +52,15 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "pin_def_in_operand")) return "def a [+ 1 [def x 2]]\n[+ $a $x]";
   if (!strcmp(name, "arg_arith"))
     return "proc f {n} { $n }\ndef x 5\ndef r [f [- $x 1]]\n[+ $r 0]";
+  /* #102 — overflow in a typed i32 computation is a catchable error, not a silent wrap;
+   * `+%` is the explicit opt-in to wrapping. */
+  if (!strcmp(name, "typed_ovf"))
+    return "proc dbl {i32 n} i32 { + $n $n }\ndef r [dbl 2000000000]\n[if [error? $r] { 1 } { 0 }]";
+  if (!strcmp(name, "typed_wrap"))
+    return "proc dbl {i32 n} i32 { +% $n $n }\ndef r [dbl 2000000000]\n[if [error? $r] { 1 } { 0 }]";
+  if (!strcmp(name, "typed_no_ovf")) return "proc dbl {i32 n} i32 { + $n $n }\n[dbl 21]";
+  if (!strcmp(name, "typed_ovf_if_operand"))
+    return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */
   if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
   if (!strcmp(name, "set_undef_err"))return "set nope 1";
