@@ -226,3 +226,56 @@ paths forward, not inherent limits of the TEMEN backend. The migration already
 bought an 8–25× win over the old VM; closing more of the distance to the mature
 JITs is mostly a matter of extending the typed-native lowering that `+ − *`
 already demonstrates.
+
+## Results — after #98 (inline monomorphic guard + the three call-shaped costs)
+
+#98 stopped codegen and the runtime from making an out-of-line call for work that is a few
+instructions: the statement-position error check, i32 equality, the `box` snapshot deep-copy,
+and — the big one — an inline tag guard so a dynamic binop on two plain i32s computes natively
+and only calls `jacl_add` & co. on the paths the guard does not prove.
+
+Same protocol as the section above (load/compile once, warm, minimum of 15 timed runs,
+`_baseline` compile tax subtracted), all three columns measured back to back on the same
+container. **Cross-machine comparison with the tables above is invalid** — this box measured
+`sieve` at 431 ms where the 2026-09-11 table recorded 436 ms, so it is close, but re-measure
+before comparing.
+
+Times in **milliseconds, execution-only**.
+
+| Scenario | before #98 | items 1–3 | items 1–4 | total |
+|---|--:|--:|--:|--:|
+| `fib` | 412 | 403 | **228** | 1.81× |
+| `sieve` | 431 | 354 | **103** | 4.18× |
+| `map_lookup` | 365 | 353 | **220** | 1.66× |
+| `box_churn` | 212 | 182 | **132** | 1.61× |
+| `string_concat` | 70 | 85 | **82** | ~1× (noise) |
+
+`string_concat` builds strings with `jacl_str_concat`, which has no native lowering; its raw
+per-run figures (364.3 / 366.4 / 368.9 ms including the ~285 ms compile tax) differ by 1.3%,
+so the apparent regression is the baseline subtraction amplifying noise, not a real cost.
+
+### Calls per operation
+
+Counted with the `callprof` cdylib feature (`temen_callprof_reset` / `_dump`), which tallies
+every runtime-helper call a guest makes, on the browser's bytecode engine:
+
+| program | before #98 | items 1–3 | items 1–4 |
+|---|--:|--:|--:|
+| `sieve_10k` (10k primes) | 4,662,826 | 3,309,534 | **59** |
+| `box_100k` (100k boxes) | 1,100,047 | 800,047 | **500,046** |
+
+`sieve_10k`'s inner loop went from **seven calls per iteration to none** — `jacl_add`,
+`jacl_mul`, `jacl_mod`, `jacl_le`, `jacl_eq`, `jacl_val_equal` and `jacl_is_error_v` all left
+the profile; the 59 that remain are program start-up. Its wall clock on that engine went
+3822 → 1694 ms.
+
+`box_100k`'s remaining 500k are the allocation itself, five per iteration: `jacl_alloc`,
+`jacl_alloc_off`, `jacl_gc_safepoint`, `jacl_box_new` and `jacl_box_get`. Nothing in #98
+addresses those — that is the escape-analysis item in §4 above.
+
+### Emitted size
+
+The guard is a three-block diamond, so the emitted IR grows: `sieve_10k`'s program function
+went 3,404 → 9,248 estimated emitted bytes. That is well inside the browser host's
+proven-safe band (≤ 263,614 B per emitted function) and, incidentally, now above the
+4,096 B coop tier-up floor that had kept it interpreted.

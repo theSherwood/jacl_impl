@@ -13,6 +13,7 @@
 #define JACLVAL_TRUE         ((int64_t)(((uint64_t)0x01 << 56) | 1)) /* JACL_TRUE */
 #define JACLVAL_NIL          ((int64_t)0)                        /* JACL_NIL   */
 #define JACLVAL_FLAG_ERROR   ((int64_t)((uint64_t)1 << 61))       /* JACL_FLAG_ERROR */
+#define JACL_TAG_MASK_SHIFTED ((int64_t)((uint64_t)0xFF << 56))   /* type index + flag bits */
 static int64_t jaclval_i32(int32_t x) {
   return (int64_t)(JACL_TAG_I32_SHIFTED | (uint64_t)(uint32_t)x);
 }
@@ -110,6 +111,13 @@ typedef struct {
   IrBlock try_target; int try_width; int in_try;
   int cur_is_generator; /* the proc currently being compiled contains `yield` */
 
+  /* May the expression being compiled move the emission point to a new block?
+   * `move_ok` is set by a parent immediately before compiling a child and applies to
+   * that child only (compile_expr snapshots it into `move_ok_here` and clears it), so
+   * a construct that emits a block diamond for an expression — the monomorphic binop
+   * guard — is only reached from a position whose consumer tolerates the move. */
+  int move_ok, move_ok_here;
+
   /* struct declarations (dynamic name-based records): name -> ordered field names + types */
   struct SDef {
     const char *name; uint32_t len;
@@ -195,6 +203,7 @@ static void cx_failf(Cx *cx, const char *fmt, const char *name, uint32_t len) {
 }
 
 static int name_eq(const Binding *bd, const char *name, uint32_t len) {
+  if (!len) return 0;   /* pins are unnamed frame slots; they never resolve by name */
   return bd->len == len && memcmp(bd->name, name, len) == 0;
 }
 
@@ -216,6 +225,15 @@ static Binding *env_lookup(Cx *cx, const char *name, uint32_t len) {
   return NULL;
 }
 
+static void locals_push(Cx *cx, Binding b) {
+  if (cx->nlocals == cx->cap_locals) {
+    cx->cap_locals = cx->cap_locals ? cx->cap_locals * 2 : 8;
+    cx->locals = realloc(cx->locals, (size_t)cx->cap_locals * sizeof(Binding));
+    if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
+  }
+  cx->locals[cx->nlocals++] = b;
+}
+
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
   /* Re-binding is allowed for the throwaway `_`, and at the outermost module scope where a
@@ -228,13 +246,24 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
       cx_failf(cx, "codegen: variable '%.*s' already defined in this scope", name, len);
       return;
     }
-  if (cx->nlocals == cx->cap_locals) {
-    cx->cap_locals = cx->cap_locals ? cx->cap_locals * 2 : 8;
-    cx->locals = realloc(cx->locals, (size_t)cx->cap_locals * sizeof(Binding));
-    if (!cx->locals) { fprintf(stderr, "codegen: oom\n"); abort(); }
-  }
-  cx->locals[cx->nlocals++] = (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1};
+  locals_push(cx, (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1});
 }
+
+/* ---- operand pins ----
+ *
+ * A subexpression may move the emission point to a new block (an `[if …]`, and — with the
+ * monomorphic guard below — a dynamic binop). Block-local SSA then makes any value computed
+ * *before* that move unnameable: it belongs to the old block. Such a value has to ride the
+ * frame like a local, so park it as an unnamed local — every frame edge already threads
+ * `sp` + locals and `enter_frame_block` rebinds them — and read it back afterwards at its
+ * current SSA id. Pins are LIFO and live only within one expression. */
+static int pin_push(Cx *cx, IrVal v) {
+  int slot = cx->nlocals;
+  locals_push(cx, (Binding){"", 0, v, /*is_mut=*/0, /*is_cell=*/0, NULL, 0, -1});
+  return slot;
+}
+static IrVal pin_get(Cx *cx, int slot) { return cx->locals[slot].value; }
+static void  pin_drop(Cx *cx, int slot) { cx->nlocals = slot; }
 
 /* ---- top-level procs ---- */
 
@@ -704,6 +733,126 @@ static int frame_guard(Cx *cx) {
   return 1;
 }
 
+/* ---- inline monomorphic i32 guard (#98) ----
+ *
+ * A dynamic binop on two plain i32s is a handful of machine instructions, but codegen would
+ * emit an unconditional call into the runtime's numeric tower for it. Emit the common case
+ * inline instead, with the call as the out-of-line slow path:
+ *
+ *     tag(a) == I32 && tag(b) == I32  ->  native i32 op, re-tagged
+ *     otherwise                       ->  call jacl_<op>
+ *
+ * The test is on the whole top byte, so a flagged operand (tainted / secret / error) takes the
+ * slow path and the runtime keeps owning flag propagation and the error short-circuit. An
+ * arithmetic result that left i32 range also falls through to the runtime, which is what
+ * promotes it to a heap wide-int; so does a zero or -1 divisor (the domain error and the
+ * INT32_MIN special case). This is a static test on the operands at the point of use — not
+ * speculation: no profiling, no deopt, no tier-up.
+ *
+ * Emitting it moves the emission point (a diamond joining on the frame + the result), so it is
+ * only reached where the caller allowed that: `cx->move_ok_here`. */
+typedef enum { GOP_NONE, GOP_ARITH, GOP_DIVREM, GOP_CMP } GuardKind;
+
+static GuardKind guard_kind_for(const char *fn, IrBinOp *bop, IrCmpOp *cop) {
+  if (!strcmp(fn, "jacl_add")) { *bop = IRB_ADD;   return GOP_ARITH;  }
+  if (!strcmp(fn, "jacl_sub")) { *bop = IRB_SUB;   return GOP_ARITH;  }
+  if (!strcmp(fn, "jacl_mul")) { *bop = IRB_MUL;   return GOP_ARITH;  }
+  if (!strcmp(fn, "jacl_div")) { *bop = IRB_DIV_S; return GOP_DIVREM; }
+  if (!strcmp(fn, "jacl_mod")) { *bop = IRB_REM_S; return GOP_DIVREM; }
+  if (!strcmp(fn, "jacl_lt"))  { *cop = IRB_LT_S;  return GOP_CMP;    }
+  if (!strcmp(fn, "jacl_le"))  { *cop = IRB_LE_S;  return GOP_CMP;    }
+  if (!strcmp(fn, "jacl_gt"))  { *cop = IRB_GT_S;  return GOP_CMP;    }
+  if (!strcmp(fn, "jacl_ge"))  { *cop = IRB_GE_S;  return GOP_CMP;    }
+  if (!strcmp(fn, "jacl_eq"))  { *cop = IRB_EQ;    return GOP_CMP;    }
+  if (!strcmp(fn, "jacl_ne"))  { *cop = IRB_NE;    return GOP_CMP;    }
+  return GOP_NONE;
+}
+
+/* `lhs`/`rhs` are boxed JaclVals live in the current block. Returns the result, live in the
+ * block that is current on return. Falls back to the plain call when the op has no native
+ * lowering, when the caller did not allow a block move, or when the frame is already at the
+ * width limit. */
+static IrVal emit_binop_guarded(Cx *cx, int move_ok, const char *fn, IrVal lhs, IrVal rhs) {
+  IrBinOp bop = IRB_ADD; IrCmpOp cop = IRB_EQ;
+  GuardKind k = guard_kind_for(fn, &bop, &cop);
+  if (cx->failed || !move_ok || k == GOP_NONE || frame_width(cx) > IRB_MAX_FRAME - 1)
+    return emit_binop_call(cx, fn, lhs, rhs);
+
+  int w = frame_width(cx);
+  IrBlock fast = new_i64_block(cx, w + 2);   /* frame + lhs + rhs */
+  IrBlock slow = new_i64_block(cx, w + 2);   /* frame + lhs + rhs */
+  IrBlock join = new_i64_block(cx, w + 1);   /* frame + the result */
+
+  /* both operands are exactly tag I32 with no flag bits set */
+  IrVal tag = irb_const_i64(cx->f, cx->cur, (int64_t)JACL_TAG_I32_SHIFTED);
+  IrVal xa = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, lhs, tag);
+  IrVal xb = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, rhs, tag);
+  IrVal both = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, xa, xb);
+  IrVal hi = irb_const_i64(cx->f, cx->cur, (int64_t)JACL_TAG_MASK_SHIFTED);
+  IrVal hib = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, both, hi);
+  IrVal zero64 = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal ok = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, hib, zero64);
+  if (k == GOP_DIVREM) {
+    /* a 0 or -1 divisor stays with the runtime (domain error / INT32_MIN overflow), and the
+     * native divide must not be reached for it — so fold the test in here, before the branch.
+     * With the tag pinned to plain I32 the divisor's whole word is the comparison. */
+    IrVal d0 = irb_const_i64(cx->f, cx->cur, jaclval_i32(0));
+    IrVal dm1 = irb_const_i64(cx->f, cx->cur, jaclval_i32(-1));
+    IrVal n0 = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, rhs, d0);
+    IrVal nm1 = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, rhs, dm1);
+    ok = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, ok, n0);
+    ok = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, ok, nm1);
+  }
+  IrVal edge[IRB_MAX_FRAME + 2];
+  fill_frame(cx, edge);
+  edge[w] = lhs; edge[w + 1] = rhs;
+  irb_br_if(cx->f, cx->cur, ok, fast, edge, w + 2, slow, edge, w + 2);
+
+  /* fast: both operands are plain i32 */
+  enter_frame_block(cx, fast);
+  IrVal fa = (IrVal)w, fb = (IrVal)(w + 1);
+  IrVal ia = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fa);
+  IrVal ib = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fb);
+  IrVal fedge[IRB_MAX_FRAME + 2];
+  if (k == GOP_CMP) {
+    IrVal c = irb_intcmp(cx->f, cx->cur, IRB_I32, cop, ia, ib);
+    IrVal cz = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, c);
+    IrVal bt = irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);   /* bool tag; payload 0/1 */
+    IrVal res = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, cz, bt);
+    fill_frame(cx, fedge); fedge[w] = res;
+    irb_br(cx->f, cx->cur, join, fedge, w + 1);
+  } else if (k == GOP_DIVREM) {
+    IrVal q = irb_intbin(cx->f, cx->cur, IRB_I32, bop, ia, ib);
+    IrVal res = box_i32(cx, q);
+    fill_frame(cx, fedge); fedge[w] = res;
+    irb_br(cx->f, cx->cur, join, fedge, w + 1);
+  } else {
+    /* 64-bit op on the sign-extended operands, then back to the runtime if the result left
+     * i32 range — `jacl_add` & co. promote an overflowing i32 op to a heap wide int. */
+    IrVal ea = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, ia);
+    IrVal eb = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, ib);
+    IrVal r = irb_intbin(cx->f, cx->cur, IRB_I64, bop, ea, eb);
+    IrVal narrow = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, r);
+    IrVal wide = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, narrow);
+    IrVal fits = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, wide, r);
+    IrVal res = box_i32(cx, narrow);
+    fill_frame(cx, fedge); fedge[w] = res;
+    IrVal sedge[IRB_MAX_FRAME + 2];
+    fill_frame(cx, sedge); sedge[w] = fa; sedge[w + 1] = fb;
+    irb_br_if(cx->f, cx->cur, fits, join, fedge, w + 1, slow, sedge, w + 2);
+  }
+
+  /* slow: the runtime call, on the operands threaded in */
+  enter_frame_block(cx, slow);
+  IrVal sv = emit_binop_call(cx, fn, (IrVal)w, (IrVal)(w + 1));
+  IrVal sedge2[IRB_MAX_FRAME + 2];
+  fill_frame(cx, sedge2); sedge2[w] = sv;
+  irb_br(cx->f, cx->cur, join, sedge2, w + 1);
+
+  enter_frame_block(cx, join);
+  return (IrVal)w;                            /* the join's result param */
+}
+
 /* Call `cval` as a closure with `argc` args (compiled inside the call arm), guarding against
  * a non-closure head: `[42 1]` would otherwise read a garbage function index and trap, so
  * branch on is-closure and yield a clean `cannot call` error. The result flows through a
@@ -1013,6 +1162,7 @@ static IrVal compile_if_chain(Cx *cx, AstNode **args, uint32_t argc, uint32_t st
   }
   if (!frame_guard(cx)) return 0;
 
+  cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal cond = compile_expr(cx, args[start]);
   if (cx->failed) return 0;
   IrVal truth = emit_truthy(cx, cond);
@@ -1068,6 +1218,7 @@ static IrVal compile_if(Cx *cx, AstNode *node) {
  * `a || b` → `if a { true } { b }` — b is compiled only on the branch that needs it. */
 static IrVal compile_short_circuit(Cx *cx, AstNode *a, AstNode *b, int is_and) {
   if (!frame_guard(cx)) return 0;
+  cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal cond = compile_expr(cx, a);
   if (cx->failed) return 0;
   IrVal truth = emit_truthy(cx, cond);
@@ -1116,6 +1267,7 @@ static IrVal compile_while(Cx *cx, AstNode *node) {
 
   /* header: test the condition */
   enter_frame_block(cx, header);
+  cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal cond = compile_expr(cx, args[0]);
   if (cx->failed) return 0;
   IrVal truth = emit_truthy(cx, cond);
@@ -2511,6 +2663,7 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       cx_fail(cx, "cannot return a value from a generator (proc contains `yield`)");
       return 0;
     }
+    cx->move_ok = cx->move_ok_here;      /* pass-through: inherit this node's permission */
     return rv ? compile_expr(cx, rv) : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
   }
 
@@ -2924,6 +3077,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       cx_fail(cx, "binding form needs a name and a value");
       return 0;
     }
+    cx->move_ok = 1;   /* the value goes straight into the binding */
     IrVal val = compile_expr(cx, bargs[tshift + 1]);
     if (cx->failed) return 0;
     /* `def i64/u64/f64 x V` — widen the value to the declared wide scalar so
@@ -3064,6 +3218,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     }
     const char *name; uint32_t len;
     if (!binding_name(cx, node, &name, &len)) return 0;
+    cx->move_ok = 1;   /* the value goes straight into the binding */
     IrVal val = compile_expr(cx, node->data.command.args[1]);
     if (cx->failed) return 0;
     Binding *bd = env_lookup(cx, name, len);
@@ -3192,11 +3347,22 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     }
     /* Type-driven: native i32 arithmetic when the typer proved i32 (boxed once). */
     if (i32_arith(node)) return box_i32(cx, compile_i32(cx, node));
+    /* Dynamic fold. The accumulator is pinned across each operand's compilation: an operand
+     * (an `[if …]`, or a nested guarded binop) may leave the current block, which would
+     * strand a value computed before it. With that in hand the operands inherit this node's
+     * move permission — the fold can absorb their block moves. */
+    int mv = cx->move_ok_here;
+    cx->move_ok = mv;
     IrVal acc = compile_expr(cx, args[0]);
+    if (cx->failed) return 0;
     for (uint32_t i = 1; i < argc; i++) {
+      int pin = pin_push(cx, acc);
+      cx->move_ok = mv;
       IrVal rhs = compile_expr(cx, args[i]);
       if (cx->failed) return 0;
-      acc = emit_binop_call(cx, fn, acc, rhs);
+      acc = pin_get(cx, pin);
+      pin_drop(cx, pin);
+      acc = emit_binop_guarded(cx, mv, fn, acc, rhs);
     }
     return acc;
   }
@@ -3976,6 +4142,10 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
 
 static IrVal compile_expr(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
+  /* `move_ok` is granted to one node at a time: snapshot it for this node and clear it, so
+   * an unaudited parent never leaks the permission down to its children. */
+  cx->move_ok_here = cx->move_ok;
+  cx->move_ok = 0;
   switch (node->type) {
     case AST_SYNTAX_QUOTE:
       return compile_synquote(cx, node->data.syntax_quote.child);
@@ -4083,7 +4253,10 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
     case AST_RETURN:
       /* Tail-position return: evaluate to the value; the proc wraps the body value in
        * a single `return`. Early/mid-block return (out of loops) is not yet supported. */
-      if (node->data.return_stmt.value) return compile_expr(cx, node->data.return_stmt.value);
+      if (node->data.return_stmt.value) {
+        cx->move_ok = cx->move_ok_here;   /* pass-through: inherit this node's permission */
+        return compile_expr(cx, node->data.return_stmt.value);
+      }
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
     case AST_LIT_STRING:
@@ -4106,6 +4279,7 @@ static IrVal compile_expr(Cx *cx, AstNode *node) {
       scope_enter(cx);
       IrVal last = (bn == 0) ? irb_const_i64(cx->f, cx->cur, jaclval_i32(0)) : 0;
       for (uint32_t i = 0; i < bn; i++) {
+        cx->move_ok = 1;   /* statement position: nothing outlives the statement */
         last = compile_expr(cx, node->data.block.commands[i]);
         if (cx->failed) break;
         if (i + 1 < bn) emit_stmt_error_check(cx, last);   /* error auto-return */
@@ -4215,6 +4389,7 @@ static void emit_return_value(Cx *cx, IrVal v) {
 static void compile_if_tail(Cx *cx, AstNode **args, uint32_t argc, uint32_t start) {
   if (start + 1 >= argc || args[start + 1]->type != AST_BLOCK) { cx_fail(cx, "if/elif needs a condition and a { then-block }"); return; }
   if (!frame_guard(cx)) return;
+  cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal cond = compile_expr(cx, args[start]);
   if (cx->failed) return;
   IrVal truth = emit_truthy(cx, cond);
@@ -4281,6 +4456,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
           (stmt->type == AST_COMMAND && stmt->data.command.head_id == HEAD_RETURN)) {
         compile_tail(cx, stmt); scope_exit(cx); return;
       }
+      cx->move_ok = 1;   /* statement position: nothing outlives the statement */
       IrVal sv = compile_expr(cx, stmt);
       /* A binding statement (def/mut/set) CAPTURES its value — an error bound to a name
        * does not auto-return; it propagates only when the name is later USED unhandled
@@ -4330,6 +4506,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
   }
 
   /* Fallback: compute the value normally and return it. */
+  cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal v = compile_expr(cx, node);
   if (!cx->failed) emit_return_value(cx, v);
 }
@@ -4670,6 +4847,7 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
     IrVal last = 0; int have = 0;
     for (uint32_t i = 0; i < count; i++) {
       if (is_proc_def(nodes[i])) continue;
+      cx.move_ok = 1;   /* statement position: nothing outlives the statement */
       last = compile_expr(&cx, nodes[i]);
       have = 1;
       if (cx.failed) break;

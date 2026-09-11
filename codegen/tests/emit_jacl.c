@@ -34,6 +34,15 @@ static const char *source_for(const char *name) {
   /* A proc body with a non-tail, non-binding statement: the one shape that emits the
    * statement-position error auto-return (#98 — an inline flag test, not a call). */
   if (!strcmp(name, "stmt_seq"))     return "proc f {} {\n[+ 1 1]\n[+ 20 22] }\n[f]";
+  /* #98 item 4 — the inline monomorphic i32 guard. `guard_dyn` is the shape that gets one
+   * (two dyn operands in statement position); the rest check that every case the guard does
+   * not prove still reaches the runtime, and that an operand survives a block move. */
+  if (!strcmp(name, "guard_dyn"))       return "def a 5\ndef b 10\n[+ $a $b]";
+  if (!strcmp(name, "guard_overflow"))  return "def a 2000000000\ndef s [+ $a $a]\n[print $s]";
+  if (!strcmp(name, "guard_div_zero"))  return "def a 1\ndef b 0\ndef q [/ $a $b]\n[print [error? $q]]";
+  if (!strcmp(name, "guard_float_mix")) return "def a 1.5\ndef b 2\ndef s [+ $a $b]\n[print $s]";
+  if (!strcmp(name, "guard_mod_neg"))   return "def a -7\ndef b 3\n[% $a $b]";
+  if (!strcmp(name, "guard_if_operand"))return "def x 1\n[+ $x [if [> 1 0] { 2 } { 3 }]]";
   /* error cases (driver exits nonzero) */
   if (!strcmp(name, "shadow_err"))   return "def x 1\ndef x 2";
   if (!strcmp(name, "set_undef_err"))return "set nope 1";

@@ -416,6 +416,38 @@ fn dynamic_arithmetic_keeps_runtime_calls() {
     run_case("bind_read", i32_val(15));
 }
 
+// ---- #98 item 4: the inline monomorphic i32 guard ----
+
+#[test]
+fn dynamic_arithmetic_guards_two_i32s_inline() {
+    // Two dyn operands: the emitted IR tests both tags inline and adds natively, keeping the
+    // jacl_add call only as the out-of-line slow path.
+    let ir = emit_text("guard_dyn");
+    assert!(ir.contains("i64.xor"), "expected the inline tag test:\n{ir}");
+    assert!(ir.contains("i64.add"), "expected the native add:\n{ir}");
+    assert!(ir.contains("jacl_add"), "the runtime call must remain as the slow path:\n{ir}");
+    run_case("guard_dyn", i32_val(15));
+}
+
+#[test]
+fn guard_falls_through_to_the_runtime() {
+    // Every case the guard does not prove must still get the runtime's answer: an i32 add that
+    // overflows promotes to a wide int, a zero divisor is a domain error, a float operand
+    // coerces, and `%` keeps C truncation semantics on a negative left operand.
+    assert_eq!(run_case_full("guard_overflow").1, b"4000000000\n");
+    assert_eq!(run_case_full("guard_div_zero").1, b"true\n");
+    assert_eq!(run_case_full("guard_float_mix").1, b"3.5\n");
+    run_case("guard_mod_neg", i32_val(-1));
+}
+
+#[test]
+fn binop_operand_survives_a_block_move() {
+    // `[+ $x [if … ]]`: the second operand's lowering leaves the block the first was computed
+    // in, so the accumulator is pinned into the frame across it. Before that it was emitted as
+    // a reference into a block that does not define it, and the verifier rejected the module.
+    run_case("guard_if_operand", i32_val(3));
+}
+
 // ---- P2.8: strings + collections ----
 
 #[test]
