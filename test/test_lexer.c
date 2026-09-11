@@ -687,6 +687,74 @@ static int test_hex_max_valid(void) {
   TEST_PASS();
 }
 
+/* jacl #105: the accumulator used to be a signed int64, so a literal at or past 2^63
+ * wrapped negative, slipped past the `> INT32_MAX` check, and was truncated into the token
+ * as a different number — `12345678901234567890` compiled as -350287150. Each base needs
+ * its own case: the range check is duplicated per base. */
+static int test_decimal_past_int64_rejected(void) {
+  setup();
+  LexResult r = lexer_lex("12345678901234567890", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_decimal_past_uint64_rejected(void) {
+  setup();
+  LexResult r = lexer_lex("18446744073709551616", &test_arena);  /* 2^64 */
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_past_int64_rejected(void) {
+  setup();
+  LexResult r = lexer_lex("0xFFFFFFFFFFFFFFFFF", &test_arena);   /* 68 bits */
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_binary_past_int64_rejected(void) {
+  setup();
+  LexResult r = lexer_lex("0b1" "0000000000000000000000000000000000000000000000000000000000000000",
+                          &test_arena);                          /* 2^64 */
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* A float literal is NOT bounded by the integer range: its integral part is accumulated as
+ * a double alongside, so a huge integral part still lexes. */
+static int test_float_with_huge_integral_part(void) {
+  setup();
+  LexResult r = lexer_lex("99999999999999999999.5", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_FLOAT);
+  ASSERT(r.tokens[0].payload.float_val > 9.0e19f);
+  ASSERT(r.tokens[0].payload.float_val < 1.1e20f);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_binary_overflow_33bits(void) {
   setup();
   /* 33 ones = exceeds i32 */
@@ -2914,6 +2982,11 @@ int main(void) {
     {"hex_overflow_80000000",    test_hex_overflow_0x80000000},
     {"hex_max_valid",            test_hex_max_valid},
     {"bin_overflow_33bits",      test_binary_overflow_33bits},
+    {"dec_past_int64_rejected",  test_decimal_past_int64_rejected},
+    {"dec_past_uint64_rejected", test_decimal_past_uint64_rejected},
+    {"hex_past_int64_rejected",  test_hex_past_int64_rejected},
+    {"bin_past_int64_rejected",  test_binary_past_int64_rejected},
+    {"float_huge_integral",      test_float_with_huge_integral_part},
     {"bin_max_valid",            test_binary_max_valid},
     {"overflow_error_span",      test_overflow_error_has_span},
     {"very_small_float",         test_very_small_float},

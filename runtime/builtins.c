@@ -57,10 +57,30 @@ static JaclVal jacl_f64_new(double d) {
   union { double d; int64_t b; } c; c.d = d;
   return jacl_wide_new(0x10, c.b);
 }
+/* Wide-int arithmetic with the overflow detected rather than left to wrap.
+ *
+ * Signed 64-bit overflow is UB in C, so the wide branches below cannot simply add and hope:
+ * they ask `__builtin_*_overflow` first. There is nothing wider to promote into yet, so an
+ * overflowing wide op is an **error** — the same answer a declared i32 gets (#102/#103), and
+ * loud rather than silently wrong. When the bigint tier lands (#106) this becomes a
+ * promotion instead, which turns a failing program into a working one. `+% -% *%` are
+ * unaffected: they are defined to wrap and compute through unsigned types. */
+#define JACL_WIDE_OP(fn, builtin)                                                    \
+  static inline JaclVal fn(JaclVal a, JaclVal b) {                                   \
+    int64_t r;                                                                       \
+    if (builtin(jacl_int_val(a), jacl_int_val(b), &r))                               \
+      return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);                      \
+    return jacl_wide_new(jacl_iwide_tag(a, b), r) | prop_flags(a, b);                 \
+  }
+
 /* result tag for a wide-int binop: u64 if either side is u64, else i64 */
 static inline uint32_t jacl_iwide_tag(JaclVal a, JaclVal b) {
   return (jaclrt_type_index(a) == 0x0F || jaclrt_type_index(b) == 0x0F) ? 0x0F : 0x0E;
 }
+JACL_WIDE_OP(jacl_wide_add, __builtin_add_overflow)
+JACL_WIDE_OP(jacl_wide_sub, __builtin_sub_overflow)
+JACL_WIDE_OP(jacl_wide_mul, __builtin_mul_overflow)
+
 #define ERR_IF_ERR(a, b) do { if (jaclrt_is_error(a)) return (a); if (jaclrt_is_error(b)) return (b); } while (0)
 
 /* ---- arithmetic (i32) ---- */
@@ -76,7 +96,7 @@ JaclVal jacl_add(JaclVal a, JaclVal b) {
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) + jacl_num_f64(b)) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
-    return jacl_wide_new(jacl_iwide_tag(a, b), jacl_int_val(a) + jacl_int_val(b)) | prop_flags(a, b);
+    return jacl_wide_add(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
     return jaclrt_f32v(jacl_num_f32(a) + jacl_num_f32(b)) | prop_flags(a, b);
   return jaclrt_error();
@@ -93,7 +113,7 @@ JaclVal jacl_sub(JaclVal a, JaclVal b) {
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) - jacl_num_f64(b)) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
-    return jacl_wide_new(jacl_iwide_tag(a, b), jacl_int_val(a) - jacl_int_val(b)) | prop_flags(a, b);
+    return jacl_wide_sub(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
     return jaclrt_f32v(jacl_num_f32(a) - jacl_num_f32(b)) | prop_flags(a, b);
   return jaclrt_error();
@@ -110,7 +130,7 @@ JaclVal jacl_mul(JaclVal a, JaclVal b) {
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) * jacl_num_f64(b)) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
-    return jacl_wide_new(jacl_iwide_tag(a, b), jacl_int_val(a) * jacl_int_val(b)) | prop_flags(a, b);
+    return jacl_wide_mul(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
     return jaclrt_f32v(jacl_num_f32(a) * jacl_num_f32(b)) | prop_flags(a, b);
   return jaclrt_error();
@@ -1140,28 +1160,68 @@ typedef struct { char *p; uint32_t n, cap; } JaclRepr;
 static void repr_put(JaclRepr *rb, const char *s, uint32_t n) {
   for (uint32_t i = 0; i < n && rb->n < rb->cap; i++) rb->p[rb->n++] = s[i];
 }
-/* Format an f32 like the old VM's display: up to 6 fractional digits, trailing
- * zeros stripped; integral values print without a decimal point. */
-static void repr_f32(JaclRepr *rb, float fv) {
-  double v = (double)fv;
+/* Six fractional digits, trailing zeros stripped; an integral value prints without a
+ * decimal point (the old VM's display). Takes a double so f32 and f64 share it without the
+ * f64 side being narrowed — it used to be f32-only, and an f64 was cast down to reach it.
+ *
+ * Three magnitude bands, because one fixed-point scale cannot span the range:
+ *   < 1e13   scale by 1e6 — integral and fractional digits, exact in a u64
+ *   < 1.8e19 integral digits only (the scaled form would overflow a u64, and a float this
+ *            large has no fractional precision left anyway)
+ *   above    exponent form — ~7 significant digits for an f32, so printing 39 of them
+ *            would be noise
+ * `inf` is now reserved for an actual infinity. It used to be printed for anything above
+ * INT32_MAX, so a correct 1e10 rendered as `inf` (#108). */
+static void repr_fmt_fp(JaclRepr *rb, double v) {
   if (v != v) { repr_put(rb, "nan", 3); return; }
   if (v < 0) { repr_put(rb, "-", 1); v = -v; }
-  if (v > 2147483000.0) { repr_put(rb, "inf", 3); return; }
-  uint64_t scaled = (uint64_t)(v * 1000000.0 + 0.5);
-  uint64_t ip = scaled / 1000000u, fp = scaled % 1000000u;
-  char tmp[24]; int j = 0;
-  if (ip == 0) tmp[j++] = '0';
-  while (ip) { tmp[j++] = (char)('0' + (ip % 10)); ip /= 10; }
-  while (j) { j--; repr_put(rb, &tmp[j], 1); }
-  if (fp) {
-    char fd[6];
-    for (int k = 5; k >= 0; k--) { fd[k] = (char)('0' + (fp % 10)); fp /= 10; }
-    int last = 5;
-    while (last >= 0 && fd[last] == '0') last--;
-    repr_put(rb, ".", 1);
-    for (int k = 0; k <= last; k++) repr_put(rb, &fd[k], 1);
+  if (v > 0.0 && v * 0.5 == v) { repr_put(rb, "inf", 3); return; }  /* only ±inf does this */
+  char tmp[32]; int j = 0;
+  if (v < 1.0e13) {
+    uint64_t scaled = (uint64_t)(v * 1000000.0 + 0.5);
+    uint64_t ip = scaled / 1000000u, fp = scaled % 1000000u;
+    if (ip == 0) tmp[j++] = '0';
+    while (ip) { tmp[j++] = (char)('0' + (ip % 10)); ip /= 10; }
+    while (j) { j--; repr_put(rb, &tmp[j], 1); }
+    if (fp) {
+      char fd[6];
+      for (int k = 5; k >= 0; k--) { fd[k] = (char)('0' + (fp % 10)); fp /= 10; }
+      int last = 5;
+      while (last >= 0 && fd[last] == '0') last--;
+      repr_put(rb, ".", 1);
+      for (int k = 0; k <= last; k++) repr_put(rb, &fd[k], 1);
+    }
+    return;
+  }
+  if (v < 1.8e19) {                                  /* integral digits, exact in a u64 */
+    uint64_t ip = (uint64_t)v;
+    while (ip) { tmp[j++] = (char)('0' + (ip % 10)); ip /= 10; }
+    while (j) { j--; repr_put(rb, &tmp[j], 1); }
+    return;
+  }
+  {                                                  /* m.mmmmmm e+XX */
+    int exp10 = 0;
+    while (v >= 10.0) { v /= 10.0; exp10++; }
+    uint64_t m = (uint64_t)(v * 1000000.0 + 0.5);
+    if (m >= 10000000u) { m /= 10; exp10++; }        /* rounding carried a decade */
+    uint64_t mi = m / 1000000u, mf = m % 1000000u;
+    char d = (char)('0' + (mi % 10));
+    repr_put(rb, &d, 1);
+    if (mf) {
+      char fd[6];
+      for (int k = 5; k >= 0; k--) { fd[k] = (char)('0' + (mf % 10)); mf /= 10; }
+      int last = 5;
+      while (last >= 0 && fd[last] == '0') last--;
+      repr_put(rb, ".", 1);
+      for (int k = 0; k <= last; k++) repr_put(rb, &fd[k], 1);
+    }
+    repr_put(rb, "e+", 2);
+    if (exp10 >= 100) { char h = (char)('0' + exp10 / 100); repr_put(rb, &h, 1); }
+    if (exp10 >= 10)  { char t = (char)('0' + (exp10 / 10) % 10); repr_put(rb, &t, 1); }
+    { char o = (char)('0' + exp10 % 10); repr_put(rb, &o, 1); }
   }
 }
+static void repr_f32(JaclRepr *rb, float fv) { repr_fmt_fp(rb, (double)fv); }
 static void repr_i32(JaclRepr *rb, int32_t x) {
   char tmp[16]; int j = 0;
   int neg = x < 0;
@@ -1198,7 +1258,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     while (j) { j--; repr_put(rb, &tmp[j], 1); }
     return;
   }
-  if (t == 0x10) { repr_f32(rb, (float)jacl_num_f64(v)); return; }   /* f64: shared formatter */
+  if (t == 0x10) { repr_fmt_fp(rb, jacl_num_f64(v)); return; }        /* f64: full precision */
   if (t == 0x06) {                                       /* VECTOR: [vec e0 e1 …] */
     repr_put(rb, "[vec", 4);
     uint32_t n = jacl_vec_count(v);

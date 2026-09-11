@@ -69,6 +69,15 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Wide (i64/u64) overflow
+
+There is nothing wider to promote into yet, so an overflowing wide op returns an
+**error-flagged value** rather than wrapping: `jacl_add`/`sub`/`mul` ask
+`__builtin_*_overflow` before building the result. Signed 64-bit overflow is also UB in C,
+so the previous unguarded `jacl_int_val(a) + jacl_int_val(b)` was not merely a silent wrap
+— it was undefined (jacl #104). When the bigint tier lands (jacl #106) this becomes a
+promotion, which turns a failing program into a working one.
+
 ### Overflow: three behaviors, one per spelling
 
 The promotion rule above applies to a **dynamic** value, whose width is not declared. A
@@ -106,6 +115,19 @@ argument decays to a raw address.
 
 History: the typed path wrapped silently until jacl #102 — see that issue for the
 alternatives considered (documenting the wrap, versus checking it).
+
+## Rendering
+
+`repr_fmt_fp` formats both f32 and f64: six fractional digits, trailing zeros stripped, an
+integral value printed without a decimal point. One fixed-point scale cannot span the range,
+so there are three magnitude bands — below 1e13 the value is scaled by 1e6 (integral and
+fractional digits, exact in a `u64`); below 1.8e19 the integral digits are printed alone (a
+float that large has no fractional precision left); above that, exponent form (`1e+20`),
+since an f32 carries only ~7 significant digits and printing 39 of them would be noise.
+
+`inf` means an actual infinity. It used to be printed for anything above `INT32_MAX`, so a
+correct `1e10` rendered as `inf` (jacl #108) — and an f64 was narrowed through f32 before
+formatting, losing both range and precision.
 
 ## Comparison and equality
 
