@@ -290,7 +290,9 @@ static IrVal compile_elem_pinned(Cx *cx, AstNode *elem, IrVal *acc);
 static IrVal compile_expr(Cx *cx, AstNode *node);   /* fwd */
 static int compile_operands(Cx *cx, AstNode **args, uint32_t n, IrVal *out) {
   int mark = pin_mark(cx);
+  int mv = cx->move_ok_here;   /* pinned siblings ⇒ the operands may move blocks too */
   for (uint32_t i = 0; i < n; i++) {
+    cx->move_ok = mv;
     (void)pin_push(cx, compile_expr(cx, args[i]));
     if (cx->failed) { pin_release(cx, mark, (int)i + 1); return 0; }
   }
@@ -300,6 +302,7 @@ static int compile_operands(Cx *cx, AstNode **args, uint32_t n, IrVal *out) {
 }
 static IrVal compile_elem_pinned(Cx *cx, AstNode *elem, IrVal *acc) {
   int pin = pin_push(cx, *acc);
+  cx->move_ok = cx->move_ok_here;   /* the accumulator is pinned: the element may move */
   IrVal e = compile_expr(cx, elem);
   *acc = pin_get(cx, pin);
   pin_drop(cx, pin);
@@ -1397,6 +1400,7 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
                                AstNode *start_node, AstNode *end_node, AstNode *body) {
   scope_enter(cx); /* loop scope: holds the induction var + end bound */
   AstNode *bounds[2] = {start_node, end_node};
+  cx->move_ok_here = 1;   /* both bounds go straight into the loop's env */
   IrVal bv2[2];
   if (!compile_operands(cx, bounds, 2, bv2)) { scope_exit(cx); return 0; }
   IrVal startv = bv2[0], endv = bv2[1];
@@ -4221,12 +4225,22 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
   return 0;
 }
 
+/* `move_ok` is granted to one node at a time: `compile_expr` snapshots it into
+ * `move_ok_here` for the duration of that node and clears it, so an unaudited parent never
+ * leaks the permission down to its children. The snapshot is saved and restored around the
+ * node, so it still reads as *this* node's permission after a nested compile — which is what
+ * `compile_operands` consults to decide whether its operands may move blocks too. */
+static IrVal compile_expr_node(Cx *cx, AstNode *node);
 static IrVal compile_expr(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
-  /* `move_ok` is granted to one node at a time: snapshot it for this node and clear it, so
-   * an unaudited parent never leaks the permission down to its children. */
+  int saved = cx->move_ok_here;
   cx->move_ok_here = cx->move_ok;
   cx->move_ok = 0;
+  IrVal v = compile_expr_node(cx, node);
+  cx->move_ok_here = saved;
+  return v;
+}
+static IrVal compile_expr_node(Cx *cx, AstNode *node) {
   switch (node->type) {
     case AST_SYNTAX_QUOTE:
       return compile_synquote(cx, node->data.syntax_quote.child);
@@ -4577,6 +4591,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
         }
         if (!check_buf_arg_sizes(cx, p, node)) return;   /* by-value buffer size mismatch */
         IrVal args[1 + CG_MAX_PARAMS];
+        cx->move_ok_here = 1;   /* tail position: nothing outlives the call */
         if (argc && !compile_operands(cx, node->data.command.args, argc, args + 1)) return;
         args[0] = cx->sp;
         emit_trace_line(cx, node->start.line);  /* tail call: record site on caller frame */

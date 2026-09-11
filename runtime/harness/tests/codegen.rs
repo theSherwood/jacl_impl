@@ -469,6 +469,18 @@ fn a_binding_made_inside_an_operand_survives() {
 }
 
 #[test]
+fn argument_position_arithmetic_reaches_the_guard() {
+    // With siblings pinned, the monomorphic guard is allowed in operand position too, so a
+    // proc-call argument's arithmetic lowers natively instead of calling the runtime (#100).
+    // The guard's arithmetic fast path subtracts in i64 on the sign-extended operands (so it
+    // can range-check the result), and `[- $x 1]` in argument position is the only subtraction
+    // in this program — so an `i64.sub` here means the guard reached it.
+    let ir = emit_text("arg_arith");
+    assert!(ir.contains("i64.sub"), "argument-position [- $x 1] should lower natively:\n{ir}");
+    run_case("arg_arith", i32_val(4));
+}
+
+#[test]
 fn binop_operand_survives_a_block_move() {
     // `[+ $x [if … ]]`: the second operand's lowering leaves the block the first was computed
     // in, so the accumulator is pinned into the frame across it. Before that it was emitted as
