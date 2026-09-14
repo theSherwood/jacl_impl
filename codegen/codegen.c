@@ -739,7 +739,8 @@ static int pin_i32_push(Cx *cx, IrVal v) {
 static IrVal pin_i32_get(Cx *cx, int slot) {
   return irb_convert(cx->f, cx->cur, IRB_WRAP_I64, pin_get(cx, slot));
 }
-/* OR a fresh "this op overflowed" bit (i32 0/1) into the sticky pin. */
+/* OR a fresh "this op failed" bit (i32 0/1) into the sticky pin. Overflow is the common
+ * source; a zero divisor uses the same bit, since both end as the tree's error flag. */
 static void ovf_mark(Cx *cx, int ovf_slot, IrVal bad) {
   IrVal wide = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, bad);
   cx->locals[ovf_slot].value =
@@ -751,8 +752,13 @@ static int i32_arith(AstNode *node) {
   if (node->type != AST_COMMAND || node->inferred_type != TYPE_I32) return 0;
   uint8_t hid = node->data.command.head_id;
   return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR ||
-         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
+         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT ||
+         hid == HEAD_SLASH || hid == HEAD_PERCENT;
 }
+/* Division and remainder need the domain cases handled *before* the native op runs: a zero
+ * divisor, and `INT32_MIN / -1` whose true quotient is not an i32. Both would trap the host,
+ * so neither can simply be computed and checked afterwards. */
+static int i32_divrem(uint8_t hid) { return hid == HEAD_SLASH || hid == HEAD_PERCENT; }
 /* Does this typed head wrap by definition (`+% -% *%`)? Then no overflow check. */
 static int i32_arith_wraps(uint8_t hid) {
   return hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
@@ -774,6 +780,45 @@ static int i32_operand_stays_put(AstNode *n) {
   }
 }
 
+/* `a / b` or `a % b` on native i32s, branchless, matching `jacl_div`/`jacl_mod` exactly.
+ *
+ * Two inputs must never reach the machine instruction: a zero divisor (a trap) and
+ * `INT32_MIN / -1`, whose true quotient is not an i32 (also a trap). Neither can be computed
+ * and checked afterwards, so both are steered around by substituting a divisor of 1 — which
+ * happens to give the right answer for the second case for free (`INT32_MIN / 1` is
+ * `INT32_MIN`, and `INT32_MIN % 1` is 0, which is what the runtime returns for each).
+ *
+ * The zero case then only needs its payload masked to 0 and the sticky error bit set, so a
+ * `[/ $a 0]` inside a typed tree produces the same error-flagged 0 the runtime does. No
+ * branch, so it composes with the rest of the tree rather than moving the emission point. */
+static IrVal emit_i32_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot) {
+  IrVal zero = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal one  = irb_const_i32(cx->f, cx->cur, 1);
+  IrVal mone = irb_const_i32(cx->f, cx->cur, -1);
+  IrVal imin = irb_const_i32(cx->f, cx->cur, INT32_MIN);
+
+  IrVal is_zero = irb_intcmp(cx->f, cx->cur, IRB_I32, IRB_EQ, b, zero);
+  IrVal a_min   = irb_intcmp(cx->f, cx->cur, IRB_I32, IRB_EQ, a, imin);
+  IrVal b_mone  = irb_intcmp(cx->f, cx->cur, IRB_I32, IRB_EQ, b, mone);
+  IrVal is_ovf  = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, a_min, b_mone);
+  IrVal bad     = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_OR, is_zero, is_ovf);
+
+  /* bsafe = bad ? 1 : b, as a mask so there is no branch */
+  IrVal bmask = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_SUB, zero, bad);   /* 0 or ~0 */
+  IrVal keepb = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_XOR, bmask, mone); /* ~bmask */
+  IrVal bsafe = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_OR,
+                           irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, b, keepb),
+                           irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, one, bmask));
+
+  IrVal r = irb_intbin(cx->f, cx->cur, IRB_I32, op, a, bsafe);
+  /* a zero divisor yields 0, whatever the substituted divide produced: mask by 0 - (b != 0) */
+  IrVal notzero = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_XOR, is_zero, one);
+  IrVal zmask   = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_SUB, zero, notzero);  /* 0 or ~0 */
+  r = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, r, zmask);
+  ovf_mark(cx, ovf_slot, is_zero);
+  return r;
+}
+
 /* Lower `node` to a native i32 value, ORing each op's overflow into `ovf_slot`. Typed
  * `+ - *` (and `+% -% *%`) stay unboxed recursively; literals are i32 constants; anything
  * else is computed boxed then unboxed. */
@@ -792,8 +837,11 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (i32_arith(node)) {
     uint8_t hid = node->data.command.head_id;
     int wraps = i32_arith_wraps(hid);
+    int divrem = i32_divrem(hid);
     IrBinOp op = (hid == HEAD_PLUS || hid == HEAD_PLUS_PCT) ? IRB_ADD
-               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB : IRB_MUL;
+               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB
+               : (hid == HEAD_SLASH) ? IRB_DIV_S
+               : (hid == HEAD_PERCENT) ? IRB_REM_S : IRB_MUL;
     uint32_t argc = node->data.command.arg_count;
     IrVal acc = compile_i32(cx, node->data.command.args[0], ovf_slot);
     for (uint32_t i = 1; i < argc; i++) {
@@ -802,6 +850,7 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
       IrVal r = compile_i32(cx, arg, ovf_slot);
       if (pa >= 0) { acc = pin_i32_get(cx, pa); pin_drop(cx, pa); }
       if (cx->failed) return 0;
+      if (divrem) { acc = emit_i32_divrem(cx, op, acc, r, ovf_slot); continue; }
       if (wraps) {                       /* defined to wrap: the bare i32 op is the answer */
         acc = irb_intbin(cx->f, cx->cur, IRB_I32, op, acc, r);
         continue;
@@ -948,6 +997,70 @@ static IrVal compile_i32_tree_raw(Cx *cx, AstNode *node) {
   IrVal out = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return out;
+}
+
+/* ---- typed comparisons (#94) ----
+ *
+ * The #98 monomorphic guard already lowers a comparison to a native op — but it pays a
+ * runtime tag test and a diamond (two blocks joining on the frame) to find out it may. Where
+ * the typer *proved* both operands, neither is needed: the comparison is straight-line code
+ * with no branch and no block move, which also means it composes inside another expression
+ * without the caller having to grant move permission.
+ *
+ * This is the sieve half of #94's measurement. `fib` gained 3.2x from typing because its hot
+ * ops are `+` and `-`; `sieve` gained only 1.6x because its inner loop is `<=`, `%` and `==`.
+ *
+ * Returns 0 (not a comparison to lower) or the operand width in bits. Mixed widths are a type
+ * error (#115), so an unequal pair is left to the dynamic path rather than silently widened. */
+static int typed_cmp_width(AstNode *node) {
+  if (node->type != AST_COMMAND || node->data.command.arg_count != 2) return 0;
+  uint8_t hid = node->data.command.head_id;
+  if (hid != HEAD_LT && hid != HEAD_LE && hid != HEAD_GT && hid != HEAD_GE &&
+      hid != HEAD_EQ_EQ && hid != HEAD_BANG_EQ) return 0;
+  uint8_t a = node->data.command.args[0]->inferred_type;
+  uint8_t b = node->data.command.args[1]->inferred_type;
+  if (a != b) return 0;
+  return a == TYPE_I32 ? 32 : a == TYPE_I64 ? 64 : 0;
+}
+
+static IrCmpOp typed_cmp_op(uint8_t hid) {
+  switch (hid) {
+    case HEAD_LT: return IRB_LT_S;
+    case HEAD_LE: return IRB_LE_S;
+    case HEAD_GT: return IRB_GT_S;
+    case HEAD_GE: return IRB_GE_S;
+    case HEAD_EQ_EQ: return IRB_EQ;
+    default: return IRB_NE;                      /* HEAD_BANG_EQ */
+  }
+}
+
+/* The operands may still fail — an overflowing `[< [* $a $b] $c]` must not compare a wrapped
+ * value — so the tree's sticky bit rides along and folds into the bool's error flag at the
+ * root, exactly as `box_i32_checked` does for an arithmetic tree. A bool has a spare bit for
+ * it; the flag is orthogonal to the tag. */
+static IrVal compile_typed_cmp(Cx *cx, AstNode *node, int bits) {
+  AstNode **args = node->data.command.args;
+  IrCmpOp cop = typed_cmp_op(node->data.command.head_id);
+  int wide = (bits == 64);
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+
+  IrVal a = wide ? compile_raw_i64(cx, args[0], ovf) : compile_i32(cx, args[0], ovf);
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+  int pa = i32_operand_stays_put(args[1]) ? -1
+         : (wide ? pin_push(cx, a) : pin_i32_push(cx, a));
+  IrVal b = wide ? compile_raw_i64(cx, args[1], ovf) : compile_i32(cx, args[1], ovf);
+  if (pa >= 0) { a = wide ? pin_get(cx, pa) : pin_i32_get(cx, pa); pin_drop(cx, pa); }
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+
+  IrVal c = irb_intcmp(cx->f, cx->cur, wide ? IRB_I64 : IRB_I32, cop, a, b);
+  IrVal cz = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, c);
+  IrVal bt = irb_const_i64(cx->f, cx->cur, JACLVAL_FALSE);   /* bool tag; payload 0/1 */
+  IrVal res = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, cz, bt);
+  IrVal sh = irb_const_i64(cx->f, cx->cur, 61);              /* JACL_FLAG_ERROR */
+  IrVal bit = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SHL, pin_get(cx, ovf), sh);
+  res = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, res, bit);
+  pin_release(cx, ovf, 1);
+  return res;
 }
 
 /* Compile a whole typed i32 tree to a boxed JaclVal, error-flagged if any op overflowed. */
@@ -3774,6 +3887,8 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     }
     /* Type-driven: native i32 arithmetic when the typer proved i32 (boxed once). */
     if (i32_arith(node)) return compile_i32_tree(cx, node);
+    /* ...and a native comparison when it proved both operands the same integer width (#94). */
+    { int cw = typed_cmp_width(node); if (cw) return compile_typed_cmp(cx, node, cw); }
     /* Dynamic fold. The accumulator is pinned across each operand's compilation: an operand
      * (an `[if …]`, or a nested guarded binop) may leave the current block, which would
      * strand a value computed before it. With that in hand the operands inherit this node's

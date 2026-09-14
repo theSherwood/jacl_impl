@@ -1,0 +1,22 @@
+# The annotated twin of sieve.jacl, measuring what the typed path is worth on a loop whose
+# hot ops are `<=`, `%` and `==` rather than `+`/`-`. That distinction is the whole of #94's
+# measurement: annotating fib bought 3.2x and annotating sieve only 1.6x, because sieve's
+# inner loop was still three out-of-line runtime calls per iteration.
+#
+# Kept identical to sieve.jacl apart from the annotations, so the two are directly comparable.
+proc run {i32 n} i32 {
+  mut i32 count 0
+  mut i32 k 2
+  while [< $k $n] {
+    mut i32 is_p 1
+    mut i32 i 2
+    while [<= [* $i $i] $k] {
+      if [== [% $k $i] 0] { set is_p 0 }
+      set i [+ $i 1]
+    }
+    if [== $is_p 1] { set count [+ $count 1] }
+    set k [+ $k 1]
+  }
+  $count
+}
+print [run 60000]

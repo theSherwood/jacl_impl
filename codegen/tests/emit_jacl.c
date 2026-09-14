@@ -70,6 +70,10 @@ static const char *source_for(const char *name) {
   /* #114 — a `def i32` local is a raw, untagged, sign-extended word. */
   if (!strcmp(name, "i32_raw"))
     return "proc f {} {\n def i32 a 100\n def i32 b [* $a $a]\n [+ $b 1] }\n[f]";
+  /* #94 slice 1 — proved-typed comparisons, `/` and `%` lower to native ops with no runtime
+   * call and no monomorphic-guard diamond. 20 % 6 == 2, so the taken branch is 20 / 6 = 3. */
+  if (!strcmp(name, "typed_cmp_divrem"))
+    return "proc f {i32 a i32 b} i32 { if [== [% $a $b] 2] { / $a $b } { 0 } }\n[f 20 6]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

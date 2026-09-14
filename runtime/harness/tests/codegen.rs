@@ -540,6 +540,23 @@ fn typed_i64_local_is_a_raw_word() {
     assert!(ir.contains("jacl_i64_box"), "expected the dyn crossing to canonicalize:\n{ir}");
 }
 
+// ---- #94 slice 1: typed comparisons, `/` and `%` are native ----
+
+#[test]
+fn typed_compare_and_divrem_are_native() {
+    // Where the typer proved both operands, a comparison and a `/` or `%` are straight-line
+    // native ops. The #98 monomorphic guard already reaches the same instructions, but pays a
+    // runtime tag test and a diamond to find out it may; a proved operand needs neither.
+    let ir = emit_text("typed_cmp_divrem");
+    assert!(ir.contains("i32.rem_s"), "expected a native remainder:\n{ir}");
+    assert!(ir.contains("i32.div_s"), "expected a native divide:\n{ir}");
+    assert!(ir.contains("i32.eq"), "expected a native comparison:\n{ir}");
+    for call in ["jacl_mod", "jacl_div", "jacl_eq", "jacl_val_equal"] {
+        assert!(!ir.contains(call), "should not call {call}:\n{ir}");
+    }
+    run_case("typed_cmp_divrem", i32_val(3)); // and it is still correct
+}
+
 // ---- #114: a typed i32 is a raw 32-bit word ----
 
 #[test]

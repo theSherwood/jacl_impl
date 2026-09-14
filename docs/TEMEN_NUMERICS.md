@@ -349,6 +349,20 @@ print [+ $a $a]                     # 4000000000 — dynamic, promotes
 print [+% $a $a]                    # -294967296 — asked for a wrap
 ```
 
+`/` and `%` join `+ - *` on the typed path (jacl #94), and comparisons get a native op of
+their own. Two inputs must never reach a machine divide, because both trap: a zero divisor,
+and `INT32_MIN / -1`, whose true quotient is not an i32. Neither can be computed and checked
+afterwards, so both are steered around by substituting a divisor of 1 — which gives the right
+answer for the second case for free (`INT32_MIN / 1` is `INT32_MIN`; `INT32_MIN % 1` is 0,
+which is what the runtime returns for each). The zero case then needs only its payload masked
+to 0 and the sticky failure bit set. No branch, so it composes inside a larger tree.
+
+A typed comparison folds that same sticky bit into the bool's error flag, so
+`[< [* $a $b] $c]` with an overflowing multiply is an error rather than a comparison against
+a wrapped value. The #98 monomorphic guard reaches the same instructions on the *dynamic*
+path, but pays a runtime tag test and a diamond to find out it may; a proved operand needs
+neither.
+
 The typed lowering computes each op in 64 bits on the sign-extended operands, narrows back
 to i32, and ORs "the result left i32 range" into a sticky bit that becomes the error flag
 when the tree re-boxes (branchless — an error-flagged i32 is an ordinary JaclVal, the same
