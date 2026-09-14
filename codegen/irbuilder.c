@@ -15,7 +15,7 @@ typedef enum {
 
 typedef struct {
   InstKind kind;
-  uint8_t  nresults;   /* 0 or 1: drives value numbering + the `vN =` binding */
+  uint8_t  nresults;   /* result count: drives value numbering + the `vN, … =` binding */
   IrType   ty;         /* operand type for intbin/intcmp */
   int      op;         /* IrBinOp / IrCmpOp / IrLoadOp / IrStoreOp */
   int32_t  c32;
@@ -105,6 +105,27 @@ static Inst *push_inst(Block *blk) {
 
 /* Reserve a result value id for a 1-result instruction. */
 static IrVal take_val(Block *blk) { return blk->next_val++; }
+
+/* Reserve `n` consecutive result value ids and return the first (0 when n == 0). A
+ * multi-result instruction binds `v{first} … v{first+n-1}` in one go, so the ids have to be
+ * taken together — this is the whole of "value numbering" for the multi-result case. */
+static IrVal take_vals(Block *blk, int n) {
+  if (n <= 0) return 0;
+  IrVal first = blk->next_val;
+  blk->next_val += (uint32_t)n;
+  return first;
+}
+
+/* A call site that produces more results than the caller asked for would silently drop them,
+ * which is exactly the failure mode that hid `irb_call`'s old `nresults == 1 ? 1 : 0` clamp.
+ * Refuse loudly instead. */
+static void require_single_result(const char *what, int nresults) {
+  if (nresults > 1) {
+    fprintf(stderr, "irbuilder: %s has %d results; use the multi-result entry point\n",
+            what, nresults);
+    abort();
+  }
+}
 
 /* ---- module / function / block ---- */
 
@@ -228,8 +249,25 @@ IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, in
   Inst *in = push_inst(blk);
   in->kind = K_CALL; in->callee = (uint32_t)idx;
   in->args = dup_vals(args, nargs); in->nargs = nargs;
-  in->nresults = (uint8_t)(callee->nresults == 1 ? 1 : 0);
+  require_single_result("irb_call callee", callee->nresults);
+  in->nresults = (uint8_t)callee->nresults;
   return in->nresults ? take_val(blk) : 0;
+}
+IrVal irb_call_multi(IrFunc *f, IrBlock b, const IrFunc *callee,
+                     const IrVal *args, int nargs, IrVal *results) {
+  Block *blk = block_at(f, b);
+  int idx = irb_func_index(f->module, callee);
+  if (idx < 0) { fprintf(stderr, "irbuilder: call to unknown function\n"); abort(); }
+  if (callee->nresults > 255) {
+    fprintf(stderr, "irbuilder: callee has %d results (max 255)\n", callee->nresults); abort();
+  }
+  Inst *in = push_inst(blk);
+  in->kind = K_CALL; in->callee = (uint32_t)idx;
+  in->args = dup_vals(args, nargs); in->nargs = nargs;
+  in->nresults = (uint8_t)callee->nresults;
+  IrVal first = take_vals(blk, callee->nresults);
+  for (int i = 0; i < callee->nresults; i++) results[i] = first + (IrVal)i;
+  return first;
 }
 IrVal irb_ref_func(IrFunc *f, IrBlock b, const IrFunc *callee) {
   Block *blk = block_at(f, b);
@@ -262,7 +300,8 @@ IrVal irb_call_indirect(IrFunc *f, IrBlock b,
   in->sig_results = dup_types(results, nresults); in->sig_nr = nresults;
   in->addr = idx; /* reuse `addr` slot for the index operand */
   in->args = dup_vals(args, nargs); in->nargs = nargs;
-  in->nresults = (uint8_t)(nresults == 1 ? 1 : 0);
+  require_single_result("irb_call_indirect signature", nresults);
+  in->nresults = (uint8_t)nresults;
   return in->nresults ? take_val(blk) : 0;
 }
 IrVal irb_call_import(IrFunc *f, IrBlock b, const char *name,
@@ -277,7 +316,8 @@ IrVal irb_call_import(IrFunc *f, IrBlock b, const char *name,
   in->sig_results = dup_types(results, nresults); in->sig_nr = nresults;
   in->handle = handle;
   in->args = dup_vals(args, nargs); in->nargs = nargs;
-  in->nresults = (uint8_t)(nresults == 1 ? 1 : 0);
+  require_single_result("irb_call_import signature", nresults);
+  in->nresults = (uint8_t)nresults;
   return in->nresults ? take_val(blk) : 0;
 }
 
@@ -503,7 +543,10 @@ static void out_func(Out *o, const IrFunc *f, int idx) {
       const Inst *in = &blk->insts[ii];
       if (in->nresults == 0) { out_str(o, "    "); out_inst(o, in); out_str(o, "\n"); }
       else {
-        out_fmt(o, "    v%u = ", next);
+        /* A multi-result instruction binds every id it took: `v2, v3 = call 0(v0, v1)`. */
+        out_str(o, "    ");
+        for (int k = 0; k < in->nresults; k++) out_fmt(o, "%sv%u", k ? ", " : "", next + (uint32_t)k);
+        out_str(o, " = ");
         out_inst(o, in);
         out_str(o, "\n");
         next += in->nresults;

@@ -86,6 +86,59 @@ static IrModule *build_call_addone(void) {
   return m;
 }
 
+/* multires(a, b) = { (s, e) = divmod(a, b); s * 10 + e } — a two-result callee.
+ *
+ * The shape #94 slice 2b needs: a raw value alongside a second word the raw one has no bits
+ * for. Here it is quotient + remainder, but the motivating pair is (value, error_flag) —
+ * INVARIANTS.md V6. Exercises take_vals (two consecutive ids from one instruction), the
+ * `v2, v3 = ` text binding, and the encoder deriving the count from the callee signature. */
+static IrModule *build_multires(void) {
+  IrModule *m = irb_module_new();
+  IrType i32_2[] = {IRB_I32, IRB_I32};
+  IrType r2[] = {IRB_I32, IRB_I32};
+  IrType r1[] = {IRB_I32};
+
+  IrFunc *divmod = irb_func_new(m, i32_2, 2, r2, 2);
+  IrBlock d0 = irb_block(divmod, i32_2, 2);
+  IrVal q = irb_intbin(divmod, d0, IRB_I32, IRB_DIV_S, 0, 1);
+  IrVal rem = irb_intbin(divmod, d0, IRB_I32, IRB_REM_S, 0, 1);
+  IrVal dr[] = {q, rem};
+  irb_return(divmod, d0, dr, 2);
+
+  IrFunc *caller = irb_func_new(m, i32_2, 2, r1, 1);
+  IrBlock c0 = irb_block(caller, i32_2, 2);
+  IrVal args[] = {0, 1};
+  IrVal got[2];
+  irb_call_multi(caller, c0, divmod, args, 2, got);
+  IrVal ten = irb_const_i32(caller, c0, 10);
+  IrVal scaled = irb_intbin(caller, c0, IRB_I32, IRB_MUL, got[0], ten);
+  IrVal sum = irb_intbin(caller, c0, IRB_I32, IRB_ADD, scaled, got[1]);
+  IrVal cr[] = {sum};
+  irb_return(caller, c0, cr, 1);
+  return m;
+}
+
+/* Not a module: calls the two-result callee through the SINGLE-result irb_call, which must
+ * abort rather than drop the second result. Exists only so a test can observe the refusal —
+ * the old clamp (`nresults == 1 ? 1 : 0`) dropped them silently, and that is the shape of bug
+ * this guard is here to make impossible. */
+static IrModule *build_multires_misuse(void) {
+  IrModule *m = irb_module_new();
+  IrType i32_2[] = {IRB_I32, IRB_I32};
+  IrType r2[] = {IRB_I32, IRB_I32};
+  IrFunc *divmod = irb_func_new(m, i32_2, 2, r2, 2);
+  IrBlock d0 = irb_block(divmod, i32_2, 2);
+  IrVal q = irb_intbin(divmod, d0, IRB_I32, IRB_DIV_S, 0, 1);
+  IrVal dr[] = {q, q};
+  irb_return(divmod, d0, dr, 2);
+
+  IrFunc *caller = irb_func_new(m, i32_2, 2, r2, 2);
+  IrBlock c0 = irb_block(caller, i32_2, 2);
+  IrVal args[] = {0, 1};
+  (void)irb_call(caller, c0, divmod, args, 2);   /* aborts */
+  return m;
+}
+
 /* mem_roundtrip(addr, val) = { store i64 val@addr; load i64 @addr } — load/store. */
 static IrModule *build_mem_roundtrip(void) {
   IrModule *m = irb_module_new();
@@ -237,6 +290,8 @@ int main(int argc, char **argv) {
   else if (!strcmp(name, "sum_to")) m = build_sum_to();
   else if (!strcmp(name, "call_addone")) m = build_call_addone();
   else if (!strcmp(name, "mem_roundtrip")) m = build_mem_roundtrip();
+  else if (!strcmp(name, "multires")) m = build_multires();
+  else if (!strcmp(name, "multires_misuse")) m = build_multires_misuse();
   else if (!strcmp(name, "call_jacl_add")) m = build_call_jacl_add();
   else if (!strcmp(name, "closure")) m = build_closure();
   else if (!strcmp(name, "gc")) m = build_gc();
