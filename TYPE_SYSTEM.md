@@ -228,6 +228,41 @@ literals → var-refs → blocks → commands → declarations, making
 each shape's typing total before moving to the next. Recorded for
 the same shape of work if a future change re-opens the migration.
 
+### 6. The integer model — C widths, or arbitrary precision
+
+`docs/TEMEN_NUMERICS.md` § "The integer model" is authoritative; this is the half the typer
+owns. The governing rule:
+
+> **A static type is a promise about representation. `dyn` is a promise about value.**
+
+`i32`, `u32`, `i64`, `u64` are C variables — untagged, exactly that width at runtime.
+`dyn` is an integer of conceptually arbitrary precision whose representation (inline i32,
+boxed i64, boxed bigint) is never observable. Four typer consequences:
+
+**An unannotated integer literal is `dyn`, not `i32`.** `[* 100000 100000]` promotes; it
+does not overflow. This is the rule that makes the model consistent, and it is why the
+inline i32 representation stops meaning "the static type i32" and starts meaning "`dyn`'s
+narrow form".
+
+**Declared and inferred expectations are different channels.** `tc->expected_type` used to
+do both jobs — "the user wrote `i32` here" and "this binop is unifying its operands to the
+first one's type" — and conflating them is wrong in both directions. Only a *declared*
+expectation may promote a literal to a width or reject one that does not fit; a unification
+expectation may not. `[- 0 9223372036854775807]` is exactly the shape that distinguishes
+them: the `0` makes the binop expect `i32`, and treating that as a declaration makes a
+legal expression fail to compile.
+
+**A declared width rejects a literal it cannot hold.** `def i32 x 5000000000` and
+`def i8 x 300` are type errors, at the `def`.
+
+**No implicit conversions between static types.** `[+ $u64 $i64]` is a type error; write
+the `to`. We take C's *widths*, not C's conversion ranking — under which the signed operand
+silently becomes unsigned and a negative number becomes enormous.
+
+Crossing the barrier keeps decision 2's shape, now with a range check: `dyn` → static is
+explicit (`[to "i32" $d]`) and a **domain error** when the value does not fit — narrowing
+never truncates. Static → `dyn` is implicit, cannot fail, and canonicalizes on the way out.
+
 ## Cross-module typing
 
 Pre-pass in `compiler__collect_typer_imports` triggers dependency

@@ -7,6 +7,83 @@ entry points. Everything here is about the *runtime* tower; the typer's static w
 (`i32`, `u64`, `f64`, …) drive which values flow in, but the runtime tower below is what
 actually executes.
 
+## The integer model
+
+One rule decides everything below it:
+
+> **A static type is a promise about representation. `dyn` is a promise about value.**
+
+There are five integer types. Four of them — `i32`, `u32`, `i64`, `u64` — are **C
+variables**: untagged, exactly the width the name says, no spare bits, no flags, no
+runtime type word. What a program declares is what the machine holds. The fifth, `dyn`, is
+**an integer**, conceptually of arbitrary precision; its width is a representation the
+compiler picks, re-picks, and never lets the program observe.
+
+### `dyn`: one word, three representations
+
+A `dyn` integer is always a tagged 64-bit word, in one of three forms:
+
+| form | when | tag |
+|---|---|---|
+| inline `i32` | the value fits `[INT32_MIN, INT32_MAX]` | `0x02` |
+| pointer to a boxed, untagged `i64` | it fits 64 bits signed | `0x0E` |
+| pointer to a boxed, untagged bigint | anything larger | `0x09` (reserved) |
+
+The form is chosen by **magnitude alone** — never by the path that computed the value.
+That is what `jacl_int_result` enforces, and it is not a nicety: `jacl_val_equal` settles
+integers by value while `jmap_key_hash` mixes the raw bits, so two representations of one
+number are *distinguishable* unless exactly one is canonical. A wide-computed `37` hashing
+to a different bucket than the inline `37` it compares equal to was a real, quiet map-lookup
+miss (jacl #107).
+
+Canonicalization is therefore the load-bearing part of "width is an implementation detail",
+and it runs in both directions: a value that grows past i32 boxes, and a value that shrinks
+back into i32 range un-boxes.
+
+### What follows from the rule
+
+**`dyn` arithmetic cannot fail on magnitude.** It promotes: inline i32 → boxed i64 →
+bigint. The only failures left are domain errors (division by zero, `%` by zero). This is
+the property that makes `dyn` worth having, and it is why the bigint tier is not optional
+garnish — see "Known gap" below.
+
+**A declared width errors on overflow.** The promoted value is not an `i32`, so an
+`i32`-annotated proc returning one would break its own signature. Wrapping silently is
+worse still: it would mean *adding an annotation changes a program's answers*, which would
+make widening the typer's reach a semantic change rather than a speed one. `+% -% *%` wrap,
+because there the program asked.
+
+**A declared width errors on a literal it cannot hold.** `def i32 x 5000000000` is a type
+error, for the same reason and at compile time.
+
+**No implicit conversions between static types — C widths, not C conversions.**
+`[+ $u64 $i64]` is a type error; write the `to` you mean. C's integer-promotion and
+usual-arithmetic-conversion ranking is a famous footgun (the signed operand converts to
+unsigned, and a negative number becomes enormous), and there is no reason to inherit it
+along with the widths.
+
+**`dyn` → static is explicit and checked; static → `dyn` is implicit and canonicalizes.**
+`[to "i32" $d]` is a **domain error** if `$d` does not fit — narrowing never truncates.
+The other direction needs no syntax and cannot fail: the value is re-canonicalized on the
+way out, which is what makes a typed `i64` holding `37` the same map key as the literal
+`37`.
+
+**Signedness is a static property only.** There is no such thing as a `dyn u64`: `dyn` is
+"integer", signed, unbounded. A static `u64` above `INT64_MAX` therefore needs the bigint
+tier to reach `dyn` at all — it cannot borrow a tag to remember it was unsigned, because
+under this model no tag carries that meaning.
+
+**A static value cannot carry the taint/secret flags** (jacl #95). An untagged word has
+nowhere to put them. That stops being a rule we enforce and becomes a fact of the
+representation.
+
+### Known gap
+
+`dyn` today errors past `INT64_MAX` instead of promoting to bigint, because the bigint tier
+does not exist yet (jacl #106 slice 2). That is a **violation of the model, not a rule of
+it** — the rule is that `dyn` never fails on magnitude. Read the "Wide (i64/u64) overflow"
+section below as a description of a temporary state.
+
 ## Values: inline scalars vs heap wides
 
 A `JaclVal` is a 64-bit tagged word — an 8-bit tag over a 56-bit payload (see
