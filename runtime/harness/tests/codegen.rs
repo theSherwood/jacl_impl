@@ -518,6 +518,22 @@ fn typed_tree_operand_can_move_blocks() {
     run_case("typed_ovf_if_operand", i32_val(3));
 }
 
+// ---- #106 slice 1a: a typed i64 is a raw 64-bit word ----
+
+#[test]
+fn typed_i64_local_is_a_raw_word() {
+    // `def i64` holds an untagged machine word, so the arithmetic is a native 64-bit op with
+    // no boxing in between — and the multiply's overflow check is the one thing it asks the
+    // runtime, because the inline sign trick does not exist for multiply and dividing back
+    // would trap on INT64_MIN / -1.
+    let ir = emit_text("i64_raw");
+    assert!(ir.contains("jacl_i64_mul_ovf"), "expected the raw i64 multiply:\n{ir}");
+    assert!(!ir.contains("jacl_mul"), "should not go through the dynamic tower:\n{ir}");
+    assert!(!ir.contains("jacl_widen_to"), "should not box into a heap i64:\n{ir}");
+    // Crossing back into a dyn position boxes — and that box canonicalizes (#107).
+    assert!(ir.contains("jacl_i64_box"), "expected the dyn crossing to canonicalize:\n{ir}");
+}
+
 // ---- P2.8: strings + collections ----
 
 #[test]

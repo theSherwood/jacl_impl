@@ -1,0 +1,56 @@
+# expect: 3000000000
+# expect: 6000000000
+# expect: 9000000000000000000
+# expect: v37
+# expect: true
+# expect: 99
+# expect: 42
+#
+# A binding the typer proved is `i64` holds an untagged 64-bit word — a C variable, no tag
+# (jacl #106 slice 1a). Three things follow, and this case pins all three.
+#
+# 1. The arithmetic happens at 64 bits, so values far past i32 are exact.
+# 2. Coercing to `dyn` canonicalizes, so a typed i64 holding 37 is the same map key as the
+#    literal 37 (the typed half of jacl #107, for locals).
+# 3. A raw word has no spare bits for an error flag, so an overflowing op branches out
+#    through the enclosing `[try …]` handler or the function's error return instead.
+
+def m [map 0 "v0" 1 "v1" 2 "v2" 3 "v3" 4 "v4" 5 "v5" 6 "v6" 7 "v7" 8 "v8" 9 "v9" 10 "v10" 11 "v11" 12 "v12" 13 "v13" 14 "v14" 15 "v15" 16 "v16" 17 "v17" 18 "v18" 19 "v19" 20 "v20" 21 "v21" 22 "v22" 23 "v23" 24 "v24" 25 "v25" 26 "v26" 27 "v27" 28 "v28" 29 "v29" 30 "v30" 31 "v31" 32 "v32" 33 "v33" 34 "v34" 35 "v35" 36 "v36" 37 "v37" 38 "v38" 39 "v39" 40 "v40" 41 "v41" 42 "v42" 43 "v43" 44 "v44" 45 "v45" 46 "v46" 47 "v47" 48 "v48" 49 "v49" 50 "v50" 51 "v51" 52 "v52" 53 "v53" 54 "v54" 55 "v55" 56 "v56" 57 "v57" 58 "v58" 59 "v59" 60 "v60" 61 "v61" 62 "v62" 63 "v63"]
+
+proc wide {} {
+  def i64 k 2000000
+  def i64 a [* $k 1500]          # 3e9 — past i32, exact in a 64-bit word
+  print $a
+  def i64 b [+ $a $a]
+  print $b
+  def i64 c [* $a $a]            # 9e18 — just inside i64
+  print $c
+  $c
+}
+[wide]
+
+# a typed i64 crossing into a dyn position canonicalizes, so it keys the map
+proc as_key {} {
+  def i64 small 37
+  [map-get $m $small]
+}
+print [as_key]
+
+# overflow leaves through the error path rather than wrapping
+proc ovf {} {
+  def i64 k 2000000
+  def i64 a [* $k 1500]
+  def i64 c [* $a $a]
+  def i64 boom [* $c $c]         # 8.1e37 — no 64-bit word holds it
+  print "unreachable"
+  $boom
+}
+print [error? [ovf]]
+print [try { [ovf] } e { 99 }]
+
+# and the ordinary case is untouched
+proc plain {} {
+  def i64 x 40
+  [+ $x 2]
+}
+print [plain]

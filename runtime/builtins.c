@@ -220,6 +220,27 @@ JaclVal jacl_wrap_mul(JaclVal a, JaclVal b) {
            prop_flags(a, b);
   return jaclrt_error();
 }
+/* ---- raw <-> tagged for typed i64 (#106) ----
+ *
+ * A binding the typer proved is `i64` holds an untagged 64-bit word — a C variable, with no
+ * tag and no spare bits. These two are the boundary between that world and the dynamic one.
+ * `jacl_i64_box` canonicalizes on the way out, which is what makes a typed i64 coerced to
+ * `dyn` interchangeable with any other spelling of the same number (#107). */
+int64_t jacl_i64_unbox(JaclVal v) {
+  if (jaclrt_is_i32(v)) return (int64_t)jaclrt_as_i32(v);
+  if (jacl_is_iwide(v)) return jacl_wide_bits(v);
+  if (jacl_is_anyfloat(v)) return (int64_t)jacl_num_f64(v);
+  return 0;                      /* not a number: the typer should have refused this */
+}
+JaclVal jacl_i64_box(int64_t x) { return jacl_int_result(0x0E, x); }
+/* Did `a * b` overflow 64 bits? Add and subtract are checked inline in the emitted code from
+ * the operand and result signs; multiply has no such trick, and the obvious "divide back and
+ * compare" traps the host on `INT64_MIN / -1`. So it asks the compiler here instead. */
+int64_t jacl_i64_mul_ovf(int64_t a, int64_t b) {
+  int64_t r;
+  return __builtin_mul_overflow(a, b, &r) ? 1 : 0;
+}
+
 JaclVal jacl_neg(JaclVal a) {
   if (jaclrt_is_error(a)) return a;
   if (!jaclrt_is_i32(a)) return jaclrt_error();

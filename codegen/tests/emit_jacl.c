@@ -59,6 +59,9 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "typed_wrap"))
     return "proc dbl {i32 n} i32 { +% $n $n }\ndef r [dbl 2000000000]\n[if [error? $r] { 1 } { 0 }]";
   if (!strcmp(name, "typed_no_ovf")) return "proc dbl {i32 n} i32 { + $n $n }\n[dbl 21]";
+  /* #106 slice 1a — a `def i64` local is a raw, untagged 64-bit word. */
+  if (!strcmp(name, "i64_raw"))
+    return "proc f {} {\n def i64 k 2000000\n def i64 d [* $k 1500]\n [+ $d 0] }\n[f]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

@@ -69,6 +69,37 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Typed i64: a raw, untagged word
+
+A binding the typer proved is `i64` holds an **untagged 64-bit word** — a C variable, no tag
+and no spare bits (jacl #106). `codegen.c` tracks that on the binding (`Binding.rep`), and
+reads go through `env_value`, which boxes a raw binding back into a tagged JaclVal. That
+default is deliberate: a site that has not been taught about raw words gets a correct (if
+slower) value rather than reading a raw word as a tag, and a missed coercion would be silent
+garbage. Only the typed-arithmetic path opts into reading raw.
+
+Boxing on the way out canonicalizes, so a typed i64 holding `37` reaches dynamic code as the
+inline `37` that every other spelling produces — the same map key, the same `==`.
+
+Because the word has no spare bits, an overflowing typed op cannot return an error *value*
+the way an i32 tree's root does. It branches instead, through the enclosing `[try …]`
+handler or the function's error return, so the observable rule is the same ("a declared width
+errors on overflow, catchably") by a different mechanism. Add and subtract detect it inline
+from the operand and result signs; multiply asks `jacl_i64_mul_ovf`, because there is no sign
+trick for it and the obvious "divide back and compare" traps the host on `INT64_MIN / -1`.
+
+Slice 1a covers an immutable local inside a proc. A top-level binding is mirrored into the
+global map and a captured `mut` lives in a heap cell — both store a JaclVal, so an i64 bound
+that way stays tagged until those paths learn about raw words, as do `i64` proc parameters
+and returns (slice 1b) and `u64` (slice 1c).
+
+One wart inherited from the type system: `typer__infer_command` clears the expected type at
+command boundaries, so a declared type does not reach a binop over *literals* —
+`def i64 d [* 2000000 1500]` multiplies at i32 and reports the overflow rather than
+multiplying at 64 bits. `def i64 d [* $k 1500]` (one typed operand) does use the declared
+width. That matches C, where the same initializer also computes in `int`, and it now fails
+loudly rather than silently; widening it is a typer change with its own blast radius.
+
 ### Canonical dynamic integers
 
 A **dynamic** integer takes the narrowest representation that holds it: its representation
