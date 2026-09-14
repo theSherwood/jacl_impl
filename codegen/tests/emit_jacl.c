@@ -78,13 +78,35 @@ static const char *source_for(const char *name) {
    * becomes a tail-calling adapter that every other caller keeps using. 3 + 4 = 7. */
   if (!strcmp(name, "typed_raw_params"))
     return "proc add {i32 a i32 b} i32 { + $a $b }\n[add 3 4]";
-  /* jacl #95 — a dyn value crossing into a raw word. Neither `[g 5]` nor `[inc $x]` is an
-   * arithmetic tree, so each takes the crossing fallback, where all three flags (error,
-   * taint, secret) have to be tested: the raw word has no bits to carry any of them. */
+  /* Raw params, boxed return (no return annotation): the adapter can still tail-call the raw
+   * entry, because both entries return one value. With a raw return it cannot (#94 2b). */
+  if (!strcmp(name, "typed_raw_params_dynret"))
+    return "proc add {i32 a i32 b} { + $a $b }\n[add 3 4]";
+  /* jacl #95 — a dyn value crossing into a raw word, where all three flags (error, taint,
+   * secret) have to be tested because the raw word has no bits to carry any of them.
+   *
+   * Each callee has a raw-able declared return but is called with a *dyn* argument, so the
+   * call site cannot take the raw entry (#94 slice 2b: one unproved argument sends the whole
+   * call to the boxed entry) — the result comes back tagged and has to cross. Calling them
+   * with proved arguments instead would take the raw pair and never reach the crossing at
+   * all, which is why these read the way they do. */
   if (!strcmp(name, "flag_cross_i64"))
-    return "proc g {i64 n} i64 { * $n 3 }\nproc f {} i64 {\n def i64 a [g 5]\n [+ $a 1] }\n[f]";
+    return "proc g {i64 n} i64 { * $n 3 }\nproc f {} i64 {\n def d 5\n def i64 a [g $d]\n [+ $a 1] }\n[f]";
   if (!strcmp(name, "flag_cross_i32"))
-    return "proc inc {i32 n} i32 { + $n 1 }\nproc f {i32 x} i32 { + [inc $x] 1 }\n[f 4]";
+    return "proc inc {i32 n} i32 { + $n 1 }\nproc f {} i32 {\n def d 4\n [+ [inc $d] 1] }\n[f]";
+  /* #94 slice 2b — a typed proc returns a raw word plus an error word. `add` is called from
+   * a typed tree (raw in, raw out, nothing boxed) and from dyn position (re-boxed). */
+  if (!strcmp(name, "typed_raw_ret"))
+    return "proc add {i32 a i32 b} i32 { + $a $b }\nproc f {i32 x} i32 { + [add $x 1] [add $x 2] }\n[f 10]";
+  if (!strcmp(name, "typed_raw_ret_i64"))
+    return "proc wide {i64 n} i64 { * $n 1000000 }\nproc g {i64 n} i64 { + [wide $n] 1 }\n[g 5]";
+  /* The error channel: a zero divisor inside the raw callee must arrive as an error at the
+   * caller, not as a plausible number. */
+  if (!strcmp(name, "typed_raw_ret_err"))
+    return "proc dv {i32 a i32 b} i32 { / $a $b }\ndef r [dv 7 0]\n[if [error? $r] { 1 } { 0 }]";
+  /* Overflow in the raw callee travels the same channel. */
+  if (!strcmp(name, "typed_raw_ret_ovf"))
+    return "proc dbl {i32 n} i32 { + $n $n }\ndef r [dbl 2000000000]\n[if [error? $r] { 1 } { 0 }]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

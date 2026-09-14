@@ -70,14 +70,24 @@ answers. `dyn` promotes through the whole tower and therefore **cannot fail on m
 only domain errors remain. Wrapping is available, but only when the program asks for it by
 name.
 
-## V6. A raw-word representation turns overflow into control flow
+## V6. A raw-word representation needs a separate channel for the error
 
-A tagged result can carry an error flag; a raw untagged word cannot. So where a binding holds a
-raw word, an overflowing operation *branches* — through the enclosing `[try …]` or the
-function's error return — rather than returning an error-flagged value.
+A tagged result can carry an error flag; a raw untagged word cannot. So where a value is a raw
+word, the error travels beside it rather than inside it. Two shapes, both in use:
+
+- **Control flow.** Inside a function body, an overflowing operation *branches* — through the
+  enclosing `[try …]` or the function's error return — rather than producing an
+  error-flagged value.
+- **A second result.** A proc whose declared return is a raw width returns
+  `(value, error)`: the raw entry is a two-result function, the error word is 0 on the normal
+  path, and the value word is 0 whenever the error word is not. The decision of what to do
+  with the error lands at the call site, which is the only place that knows whether the value
+  is wanted raw or boxed.
 
 The observable rule (V5) is unchanged; the mechanism is forced by the representation. Any new
-raw representation inherits this, and a new one that returns a sentinel instead is wrong.
+raw representation inherits this, and a new one that returns a **sentinel** — an in-band value
+that means "failed" — is wrong, because there is no raw bit pattern a caller can distinguish
+from a legitimate result.
 
 ## V7. Where the typer is unsure, the representation stays tagged
 
