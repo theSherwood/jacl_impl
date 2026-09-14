@@ -540,6 +540,24 @@ fn typed_i64_local_is_a_raw_word() {
     assert!(ir.contains("jacl_i64_box"), "expected the dyn crossing to canonicalize:\n{ir}");
 }
 
+// ---- #114: a typed i32 is a raw 32-bit word ----
+
+#[test]
+fn typed_i32_local_is_a_raw_word() {
+    // `def i32` holds an untagged, sign-extended word, so the arithmetic reads the slot and
+    // narrows rather than untagging a JaclVal — and nothing re-tags it in between.
+    let ir = emit_text("i32_raw");
+    assert!(!ir.contains("jacl_mul"), "should not go through the dynamic tower:\n{ir}");
+    assert!(!ir.contains("jacl_add"), "should not go through the dynamic tower:\n{ir}");
+    // The multiply is native, and the i32 overflow check computes it in 64 bits on the
+    // sign-extended operands (#102) rather than asking the runtime the way i64 must.
+    assert!(ir.contains("i64.mul"), "expected the widened native multiply:\n{ir}");
+    assert!(!ir.contains("jacl_i64_mul_ovf"), "i32 checks overflow inline, not via a call:\n{ir}");
+    // A raw word has no bit for the error flag, so the tree's sticky overflow bit has to
+    // become a branch — the same trade the i64 path makes.
+    assert!(ir.contains("br_if"), "expected overflow to become control flow:\n{ir}");
+}
+
 // ---- P2.8: strings + collections ----
 
 #[test]

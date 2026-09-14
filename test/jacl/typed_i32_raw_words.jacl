@@ -1,0 +1,61 @@
+# expect: 2000000001
+# expect: true
+# expect: 9999
+# expect: -4
+# expect: seven
+# expect: true
+# expect: 7
+# expect: -294967296
+#
+# A binding the typer proved is `i32` holds an untagged, sign-extended 32-bit word — a C
+# variable (jacl #114), the same change #106 slice 1a made for `i64`. Three things follow,
+# and this case pins all three.
+#
+# 1. The value in the slot is the number, not a tagged JaclVal: negatives round-trip, and
+#    reading it for arithmetic is a narrow rather than an untag.
+# 2. A raw word has no spare bit for the error flag, so an overflowing op branches out
+#    through the enclosing handler or the function's error return instead of returning an
+#    error-flagged value the way the boxed i32 tree does.
+# 3. Coercing to `dyn` re-tags, and an i32 is already the narrowest representation of its
+#    value, so it is the same map key and the same `==` as the literal.
+
+proc fits {} {
+  def i32 a 2000000000
+  def i32 b [+ $a 1]
+  print $b
+}
+[fits]
+
+proc overflows {} {
+  def i32 a 2000000000
+  def i32 c [* $a 2]      # leaves i32 range — branches out, so the print never runs
+  print $c
+  $c
+}
+print [error? [overflows]]
+
+proc negatives {} {
+  def i32 a 100
+  def i32 b [* $a $a]
+  print [- $b 1]
+  def i32 n [- 0 5]
+  print [+ $n 1]
+}
+[negatives]
+
+proc crosses {} {
+  def i32 k 7
+  def m [map-set {} $k "seven"]
+  print [map-get $m 7]     # same key as the literal 7
+  print [== $k 7]
+  $k
+}
+print [crosses]
+
+# `*%` is defined to wrap, so it stays in range by construction and never branches.
+proc wraps {} {
+  def i32 a 2000000000
+  def i32 w [+% $a $a]
+  $w
+}
+print [wraps]

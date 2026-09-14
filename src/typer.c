@@ -29,6 +29,8 @@
  * so no arena allocation is needed at the typer boundary; the caller
  * copies into its own arena-backed error storage if it needs the
  * message to outlive the typer pass. */
+/* Mirrors the definition in jacl.h — the unity build does not include that header, it
+ * parallels it (same arrangement as the Token struct). Keep the two in sync. */
 typedef struct TyperResult {
   uint32_t error_count;
   uint32_t first_error_line;
@@ -216,6 +218,7 @@ static void typer__error(TyperCtx* tc, uint32_t line, uint32_t col,
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
 static void typer__check_lit_range(TyperCtx* tc, AstNode* node, JaclType want);
+static bool typer__is_int_width(JaclType t);
 static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
 static bool typer__body_yields(AstNode* node);
@@ -6244,7 +6247,14 @@ static int typer__infer_cmd_binop(TyperCtx* tc, AstNode* node, AstNode* head) {
     bool concrete_mismatch = (lhs_t != rhs_t &&
                               lhs_t != TYPE_DYN && rhs_t != TYPE_DYN);
     bool unboxed_either = is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t);
-    if (concrete_mismatch && (is_arith || unboxed_either)) {
+    /* Two different static integer *widths* is a type error on comparison too, not just on
+     * arithmetic (jacl #115). We take C's widths and deliberately not C's conversion
+     * ranking, under which `-1 < 1u` is false because the signed operand converts to
+     * unsigned — the footgun bites hardest exactly here. Cross-*kind* comparison stays
+     * permissive: `[== $n "s"]` is meaningfully false and tests rely on it. */
+    bool int_width_mismatch = concrete_mismatch &&
+                              typer__is_int_width(lhs_t) && typer__is_int_width(rhs_t);
+    if (concrete_mismatch && (is_arith || unboxed_either || int_width_mismatch)) {
       const char* verb = is_cmp ? "compare" :
                          (hname[0] == '+' ? "add" :
                           hname[0] == '-' ? "subtract" :
@@ -7065,6 +7075,13 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
       node->inferred_type = TYPE_DYN;
     }
   }
+}
+
+/* Is `t` one of the static integer widths? (`dyn` is not — it is an integer of arbitrary
+ * precision, and mixing it with a width is decision 1's permissive case, not a mismatch.) */
+static bool typer__is_int_width(JaclType t) {
+  return t == TYPE_I8  || t == TYPE_U8  || t == TYPE_I16 || t == TYPE_U16 ||
+         t == TYPE_I32 || t == TYPE_U32 || t == TYPE_I64 || t == TYPE_U64;
 }
 
 /* The inclusive range of an integer type, or false if `t` is not an integer width.

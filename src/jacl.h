@@ -1466,10 +1466,16 @@ extern void collections__init (void);
 
 /* --- typer.c --- */
 
-/* TyperResult: captured first error from a typer pass. Defined in typer.c
- * because the unity build pulls typer.c in before compiler.c. */
-struct TyperResult;
-typedef struct TyperResult TyperResult;
+/* The typer's error channel — the captured first error from a pass, plus a count.
+ * No longer opaque: a caller has to be able to read it, and every `typer_infer` call site in
+ * the tree currently passes NULL (jacl #117). Mirrors the definition in typer.c; the unity
+ * build parallels this header rather than including it, so keep the two in sync. */
+typedef struct TyperResult {
+  uint32_t error_count;
+  uint32_t first_error_line;
+  uint32_t first_error_col;
+  char     first_error[256];   /* "" when error_count == 0 */
+} TyperResult;
 /* Imported proc signature passed to the typer so cross-module calls
  * narrow to the declared return type instead of dyn. The compiler
  * builds an array of these (one per imported proc name from a

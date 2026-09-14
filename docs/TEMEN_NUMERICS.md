@@ -66,7 +66,21 @@ unsigned, and a negative number becomes enormous), and there is no reason to inh
 along with the widths.
 
 **`dyn` → static is explicit and checked; static → `dyn` is implicit and canonicalizes.**
-`[to "i32" $d]` is a **domain error** if `$d` does not fit — narrowing never truncates.
+`[to "i32" $d]` is a **domain error** if `$d` does not fit — the class `[/ 1 0]` produces,
+never a truncation. This is the one place the model could leak: a `dyn`, whose whole
+contract is that its width is not observable, must not become a *different number* by being
+stored. (`[to "i32" 5000000000]` used to answer `705032704`.) The rule covers the declared
+widening too, where the only lossy case is sign: `def u64 x [- 0 5]` is an error rather than
+`18446744073709551611`.
+
+Dropping a float's **fractional** part is a different operation and stays — `[to "i32" 3.9]`
+is `3`, as a float-to-int conversion means everywhere. What is refused is a float whose
+*magnitude* the target cannot hold, and a non-finite one; both are undefined behaviour to
+convert in C rather than merely lossy, so the check runs in double arithmetic before the
+cast. It is written as `d >= (double)lo && d < (double)hi + 1.0` because `(double)INT64_MAX`
+rounds *up* to 2^63, so the inclusive form would admit a value one past the end — and
+because NaN has to fail, which a positively-phrased test gives for free.
+
 The other direction needs no syntax and cannot fail: the value is re-canonicalized on the
 way out, which is what makes a typed `i64` holding `37` the same map key as the literal
 `37`.
@@ -179,6 +193,43 @@ return one, propagating the error flag (see below). The dispatch, in order:
 guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as `0 - x`,
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
+
+### Typed i32: a raw, untagged word
+
+A binding the typer proved is `i32` holds an untagged, **sign-extended** 32-bit word in its
+frame slot (jacl #114) — the same change slice 1a made for `i64`. The frame is all-i64, so
+the invariant is worth stating once because every store depends on it:
+
+> A `REP_I32` slot holds the **sign-extended** value.
+
+Sign- rather than zero-extension so the slot reads as the same number at 64 bits, which is
+what makes a stray 64-bit compare on it right instead of subtly wrong. (Pins stay
+zero-extended; a pin round-trips bits, not a value.)
+
+This is a smaller change than it sounds, because typed i32 *arithmetic* was already raw:
+`compile_i32` returns native values and `box_i32_checked` boxed once at the root of the
+tree. It was the **binding** that carried a tag. What actually changes:
+
+- Reading an i32 binding for arithmetic is a narrow instead of an untag, and crossing back to
+  `dyn` is a narrow and an OR — no runtime call in either direction, unlike `i64`, whose
+  crossing may allocate. An i32 is already the narrowest representation of its value, so
+  there is nothing for the crossing to canonicalize.
+- **Overflow becomes control flow.** The boxed tree folds its sticky overflow bit into the
+  result's error flag, which works only because a tagged i32 has a spare bit to put it in. A
+  raw word does not, so the same bit becomes a branch through the enclosing `[try …]` or the
+  function's error return — identical trade to `i64`, forced by the same fact.
+
+One guard is load-bearing: the raw representation is taken **only where the typer proved the
+value is `i32`**. Unlike `i64`, whose fallback crossing goes through `jacl_i64_unbox` and
+type-checks, narrowing a tagged value to i32 is a bare truncation — on a string binding that
+is the low half of a pointer, re-tagged as a perfectly plausible integer. Where the typer is
+unsure, the binding stays tagged and correct-but-slower, the same safe default slice 1a set.
+
+`u32` and `u64` are **not** raw yet, and the reason is not effort. A static `u64` above
+`INT64_MAX` has no `dyn` representation to cross into until the bigint tier exists, and
+`u32`/`u64` have no native typed arithmetic (the IR has `div_u`/`rem_u`/`lt_u`, but nothing
+emits them), so giving them raw slots today would add a box on every operation and make them
+*slower*. Both wait on their own slice.
 
 ### Typed i64: a raw, untagged word
 
