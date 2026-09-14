@@ -140,7 +140,9 @@ static uint32_t jbig_mag_mul(const uint32_t *a, uint32_t na,
   return n;
 }
 
-/* a /= d in place, returning the remainder. Single-limb divisor only — see jacl_big_divmod. */
+/* a /= d in place, returning the remainder. Single-limb divisor; the general case is
+ * jbig_mag_divmod below, which this stays separate from because one limb needs none of the
+ * normalization and none of the correction. */
 static uint32_t jbig_divmod_small(uint32_t *a, uint32_t n, uint32_t d) {
   uint64_t rem = 0;
   for (uint32_t i = n; i--;) {
@@ -149,6 +151,108 @@ static uint32_t jbig_divmod_small(uint32_t *a, uint32_t n, uint32_t d) {
     rem = cur % d;
   }
   return (uint32_t)rem;
+}
+
+/* Count leading zeros of a non-zero limb. Written out rather than using __builtin_clz: this
+ * file is compiled for the guest too, and the builtin is not something to assume there. */
+static int jbig_clz32(uint32_t x) {
+  int n = 0;
+  if (!(x & 0xFFFF0000u)) { n += 16; x <<= 16; }
+  if (!(x & 0xFF000000u)) { n += 8;  x <<= 8;  }
+  if (!(x & 0xF0000000u)) { n += 4;  x <<= 4;  }
+  if (!(x & 0xC0000000u)) { n += 2;  x <<= 2;  }
+  if (!(x & 0x80000000u)) { n += 1; }
+  return n;
+}
+
+/* Limb `i` of `a << sh`, for 0 <= sh < 32 and i <= n. Written as one 64-bit window rather
+ * than the usual `(a[i] << sh) | (a[i-1] >> (32 - sh))` for two reasons: the shift by
+ * `32 - sh` is undefined when sh is 0, and clang recognizes that idiom as a funnel shift and
+ * emits `llvm.fshr.i32`, which temen-llvm does not translate with a non-constant amount. The
+ * window form needs no special case for sh == 0 and never shifts by a full width. */
+static uint32_t jbig_shl_limb(const uint32_t *a, uint32_t n, uint32_t i, int sh) {
+  uint64_t hi = i < n ? a[i] : 0u;
+  uint64_t lo = i > 0 ? a[i - 1] : 0u;
+  return (uint32_t)((((hi << 32) | lo) << sh) >> 32);
+}
+
+/* Knuth TAOCP 4.3.1 algorithm D — schoolbook long division, magnitudes only (jacl #121).
+ *
+ * Divides u (na limbs) by v (nb limbs, nb >= 2), writing na-nb+1 quotient limbs to q and nb
+ * remainder limbs to r. Requires na >= nb; the caller handles the smaller-dividend case,
+ * where the answer is q = 0, r = u and there is nothing to do.
+ *
+ * Three things make this more than the obvious loop, and each is a place it can be subtly
+ * wrong rather than loudly wrong:
+ *
+ *  - **Normalization.** Both operands are shifted left so the divisor's top limb has its
+ *    high bit set. That is what bounds the quotient-digit estimate's error to at most 2;
+ *    without it the estimate can be arbitrarily far off and the correction loop below is not
+ *    enough. The remainder is shifted back at the end.
+ *  - **The estimate.** qhat comes from the top *two* dividend limbs over the top divisor
+ *    limb, then is corrected down while the next limb says it is too big. After
+ *    normalization this loop runs at most twice.
+ *  - **Add-back.** Even a correct estimate can be one too large, which shows up as a borrow
+ *    out of the multiply-and-subtract. Then the divisor is added back and qhat decremented.
+ *    This happens for roughly 2 in 2^32 digit positions, so it is effectively never reached
+ *    by accident — it has to be tested deliberately, and test_bigint_runtime.c does.
+ *
+ * Base 2^32 keeps every intermediate inside a uint64_t, and every shift goes through
+ * jbig_shl_limb or a 64-bit window, so no shift by a full width is ever executed. */
+static void jbig_mag_divmod(const uint32_t *u, uint32_t na,
+                            const uint32_t *v, uint32_t nb,
+                            uint32_t *q, uint32_t *r) {
+  const uint64_t B = (uint64_t)1 << 32;
+  uint32_t vn[JBIG_MAX_LIMBS];
+  uint32_t un[JBIG_MAX_LIMBS + 1];
+  int sh = jbig_clz32(v[nb - 1]);
+
+  /* D1: normalize. */
+  for (uint32_t i = 0; i < nb; i++) vn[i] = jbig_shl_limb(v, nb, i, sh);
+  for (uint32_t i = 0; i <= na; i++) un[i] = jbig_shl_limb(u, na, i, sh);
+
+  for (int32_t j = (int32_t)(na - nb); j >= 0; j--) {
+    /* D3: estimate, then correct down. */
+    uint64_t num = (uint64_t)un[j + nb] * B + un[j + nb - 1];
+    uint64_t qhat = num / vn[nb - 1];
+    uint64_t rhat = num % vn[nb - 1];
+    for (;;) {
+      if (qhat >= B || qhat * vn[nb - 2] > rhat * B + un[j + nb - 2]) {
+        qhat--; rhat += vn[nb - 1];
+        if (rhat < B) continue;
+      }
+      break;
+    }
+    /* D4: multiply and subtract. */
+    int64_t borrow = 0;
+    uint64_t carry = 0;
+    for (uint32_t i = 0; i < nb; i++) {
+      uint64_t prod = qhat * vn[i] + carry;
+      carry = prod >> 32;
+      int64_t t = (int64_t)un[i + j] - (int64_t)(uint32_t)prod - borrow;
+      un[i + j] = (uint32_t)t;
+      borrow = t < 0;
+    }
+    int64_t top = (int64_t)un[j + nb] - (int64_t)carry - borrow;
+    un[j + nb] = (uint32_t)top;
+
+    /* D5/D6: the estimate was one too large — add the divisor back. */
+    if (top < 0) {
+      qhat--;
+      uint64_t c = 0;
+      for (uint32_t i = 0; i < nb; i++) {
+        uint64_t sum = (uint64_t)un[i + j] + vn[i] + c;
+        un[i + j] = (uint32_t)sum;
+        c = sum >> 32;
+      }
+      un[j + nb] = (uint32_t)((uint64_t)un[j + nb] + c);
+    }
+    q[j] = (uint32_t)qhat;
+  }
+
+  /* D8: denormalize the remainder by the same shift. */
+  for (uint32_t i = 0; i < nb; i++)
+    r[i] = (uint32_t)(((((uint64_t)un[i + 1]) << 32) | un[i]) >> sh);
 }
 
 /* ---- the operations builtins.c routes to ---- */
@@ -244,10 +348,12 @@ uint32_t jacl_big_to_decimal(JaclVal v, char *buf, uint32_t cap) {
   return o;
 }
 
-/* Division and remainder. A divisor that fits one limb is peeled off directly; big-by-big
- * needs Knuth algorithm D and is jacl #121 — it produces a domain error rather than a wrong
- * answer until then. Truncation toward zero, and the remainder takes the dividend's sign,
- * matching what the i32 and i64 tiers already do. */
+/* Division and remainder, across the whole tower (jacl #121). A divisor that fits one limb
+ * is peeled off directly; anything wider goes through algorithm D above.
+ *
+ * Truncation toward zero, and the remainder takes the **dividend's** sign, matching what the
+ * i32 and i64 tiers already do — sign is handled entirely here, because algorithm D works on
+ * magnitudes and truncating division makes |q| and |r| independent of both signs. */
 JaclVal jacl_big_divmod(JaclVal a, JaclVal b, int want_rem) {
   uint32_t sa[2], sb[2];
   const uint32_t *la, *lb;
@@ -255,12 +361,22 @@ JaclVal jacl_big_divmod(JaclVal a, JaclVal b, int want_rem) {
   uint32_t na = jbig_read(a, &siga, sa, &la);
   uint32_t nb = jbig_read(b, &sigb, sb, &lb);
   if (nb == 1 && lb[0] == 0) return jaclrt_set_error(jaclrt_i32(0));   /* divide by zero */
-  if (nb > 1 || na > JBIG_MAX_LIMBS) return jaclrt_set_error(jaclrt_i32(0));
-  uint32_t tmp[JBIG_MAX_LIMBS];
-  for (uint32_t i = 0; i < na; i++) tmp[i] = la[i];
-  uint32_t rem = jbig_divmod_small(tmp, na, lb[0]);
-  if (want_rem) return jbig_canon(siga, &rem, 1);
-  return jbig_canon(siga * sigb, tmp, na);
+  if (na > JBIG_MAX_LIMBS || nb > JBIG_MAX_LIMBS) return jaclrt_set_error(jaclrt_i32(0));
+  if (na < nb) {
+    /* |a| < |b|: q is 0 and r is a, which is also algorithm D's precondition failing. */
+    return want_rem ? jbig_canon(siga, la, na) : jaclrt_i32(0);
+  }
+  if (nb == 1) {
+    uint32_t tmp[JBIG_MAX_LIMBS];
+    for (uint32_t i = 0; i < na; i++) tmp[i] = la[i];
+    uint32_t rem = jbig_divmod_small(tmp, na, lb[0]);
+    if (want_rem) return jbig_canon(siga, &rem, 1);
+    return jbig_canon(siga * sigb, tmp, na);
+  }
+  uint32_t q[JBIG_MAX_LIMBS], r[JBIG_MAX_LIMBS];
+  jbig_mag_divmod(la, na, lb, nb, q, r);
+  if (want_rem) return jbig_canon(siga, r, nb);
+  return jbig_canon(siga * sigb, q, na - nb + 1);
 }
 
 /* Build from a decimal digit string — how a bigint *literal* reaches the runtime, since one

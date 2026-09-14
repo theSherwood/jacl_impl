@@ -199,9 +199,13 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
     return jacl_big_divmod(a, b, /*want_rem=*/0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b))) {
-    int64_t y = jacl_int_val(b);
+    int64_t x = jacl_int_val(a), y = jacl_int_val(b);
     if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
-    return jacl_int_result(jacl_iwide_tag(a, b), jacl_int_val(a) / y) | prop_flags(a, b);
+    /* INT64_MIN / -1 is C undefined behaviour, and its true value (2^63) does not fit an
+     * i64 at all. `dyn` promotes rather than failing on magnitude, so hand this one case to
+     * the bigint tier, which canonicalizes it back down if it ever fits again (#104, #121). */
+    if (x == INT64_MIN && y == -1) return jacl_big_divmod(a, b, /*want_rem=*/0) | prop_flags(a, b);
+    return jacl_int_result(jacl_iwide_tag(a, b), x / y) | prop_flags(a, b);
   }
   if (jacl_is_num(a) && jacl_is_num(b) && !(jaclrt_is_i32(a) && jaclrt_is_i32(b)))
     return jaclrt_f32v(jacl_num_f32(a) / jacl_num_f32(b)) | prop_flags(a, b);
@@ -215,6 +219,15 @@ JaclVal jacl_mod(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
     return jacl_big_divmod(a, b, /*want_rem=*/1) | prop_flags(a, b);
+  /* The boxed-i64 tier, which `jacl_div` has always had and this did not: without it every
+   * `%` on a wide int was a domain error, so `[% [* 3000000000 2] 7]` failed while the `/`
+   * beside it worked. Found by the jacl #121 division tests. */
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b))) {
+    int64_t x = jacl_int_val(a), y = jacl_int_val(b);
+    if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
+    if (x == INT64_MIN && y == -1) return jaclrt_i32(0) | prop_flags(a, b);   /* exact; no UB */
+    return jacl_int_result(jacl_iwide_tag(a, b), x % y) | prop_flags(a, b);
+  }
   if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
   int32_t x = jaclrt_as_i32(a), y = jaclrt_as_i32(b);
   if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);

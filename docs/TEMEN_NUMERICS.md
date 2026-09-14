@@ -111,14 +111,18 @@ bigint compared against an i32 or i64 can be settled by magnitude alone.
 Hashing is **by value**, over the limbs. A pointer hash would put two equal numbers in
 different buckets, which is precisely the bug #107 was.
 
-Two bounds worth knowing, both deliberate and both loud rather than silent:
+One bound worth knowing, deliberate and loud rather than silent: **~1233 decimal digits**
+(128 limbs). "Arbitrary precision" is the *model*; the implementation states a limit and
+exceeds it with a domain error rather than wrapping or smashing a stack buffer. Raising it
+is one constant plus moving the multiply scratch off the stack — the scratch is what the
+bound really protects.
 
-- **~1233 decimal digits** (128 limbs). "Arbitrary precision" is the *model*; the
-  implementation states a limit and exceeds it with a domain error rather than wrapping or
-  smashing a stack buffer. Raising it is one constant plus moving the multiply scratch off
-  the stack — the scratch is what the bound really protects.
-- **Division needs a single-limb divisor.** Big-by-big needs Knuth algorithm D (jacl #121);
-  until then it is a domain error, never a wrong answer.
+Division works at every width (jacl #121). A single-limb divisor is peeled off directly;
+anything wider goes through Knuth TAOCP 4.3.1 algorithm D — normalized schoolbook long
+division, with the two-limb quotient estimate and the add-back correction. Truncation is
+toward zero and the remainder takes the dividend's sign, matching the i32 and i64 tiers;
+algorithm D works on magnitudes, so every sign question is settled by the caller. There is
+now **no arithmetic that fails on magnitude alone** — only on a domain error.
 
 `u64` is the one type that still errors on overflow rather than promoting, and the tag is
 what forces it: promoting drops the record that the value was meant to be unsigned, and

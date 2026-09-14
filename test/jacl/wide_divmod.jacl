@@ -1,0 +1,27 @@
+# expect: 857142857
+# expect: 1
+# expect: -1
+# expect: 1
+# expect: true
+# expect: 9223372036854775808
+# expect: 0
+#
+# `%` on a boxed i64 (jacl #121). `jacl_div` has always had the wide tier and `jacl_mod` did
+# not, so every `%` on a value past INT32_MAX was a domain error while the `/` beside it
+# worked. Found by the algorithm-D division tests, fixed with them.
+#
+# Also the one case where truncating division has no i64 answer at all: INT64_MIN / -1 is
+# 2^63, which does not fit. `dyn` promotes rather than failing on magnitude, so it lands in
+# the bigint tier — and it is C undefined behaviour to compute, which is the other reason it
+# gets its own branch (#104).
+
+def n [* 3000000000 2]             # 6000000000, a boxed i64
+print [/ $n 7]
+print [% $n 7]
+print [% [- 0 $n] 7]               # the remainder takes the dividend's sign
+print [% $n [- 0 7]]
+print [== [+ [* [/ $n 7] 7] [% $n 7]] $n]
+
+def m [- 0 9223372036854775808]    # INT64_MIN
+print [/ $m [- 0 1]]
+print [% $m [- 0 1]]
