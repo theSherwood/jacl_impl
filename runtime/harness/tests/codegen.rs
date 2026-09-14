@@ -389,14 +389,20 @@ fn closures_share_one_mutable_cell() {
 
 #[test]
 fn typed_arithmetic_lowers_to_native_i32() {
-    // [+ 1 [* 2 3]] — the typer proves i32, so native ops with no runtime calls. The ops are
-    // 64-bit on the sign-extended operands so that leaving i32 range is observable (#102):
-    // the result is narrowed back to i32, and the sticky overflow bit becomes the error flag.
-    let ir = emit_text("nested");
+    // proc f {i32 n} i32 { + $n [* 2 3] } — the typer proves i32, so native ops with no
+    // runtime calls. The ops are 64-bit on the sign-extended operands so that leaving i32
+    // range is observable (#102): the result is narrowed back to i32, and the sticky overflow
+    // bit becomes the error flag.
+    //
+    // The annotation is load-bearing now. A bare `[+ 1 [* 2 3]]` is all literals, so it is
+    // `dyn` and promotes rather than erroring (#112) — it takes the guarded dynamic path, not
+    // this one. What keeps the body here unboxed is that `[* 2 3]` is a *constant subtree* and
+    // adopts the i32 its sibling parameter supplies.
+    let ir = emit_text("typed_nested");
     assert!(ir.contains("i64.mul") && ir.contains("i64.add"), "expected native ops:\n{ir}");
     assert!(!ir.contains("jacl_mul") && !ir.contains("jacl_add"), "should not call the runtime:\n{ir}");
     assert!(ir.contains("i64.const 61"), "expected the overflow bit to reach the error flag:\n{ir}");
-    run_case("nested", i32_val(7)); // and it's still correct
+    run_case("typed_nested", i32_val(7)); // and it's still correct
 }
 
 #[test]

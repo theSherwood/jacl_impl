@@ -244,13 +244,32 @@ does not overflow. This is the rule that makes the model consistent, and it is w
 inline i32 representation stops meaning "the static type i32" and starts meaning "`dyn`'s
 narrow form".
 
-**Declared and inferred expectations are different channels.** `tc->expected_type` used to
-do both jobs — "the user wrote `i32` here" and "this binop is unifying its operands to the
-first one's type" — and conflating them is wrong in both directions. Only a *declared*
-expectation may promote a literal to a width or reject one that does not fit; a unification
-expectation may not. `[- 0 9223372036854775807]` is exactly the shape that distinguishes
-them: the `0` makes the binop expect `i32`, and treating that as a declaration makes a
-legal expression fail to compile.
+**A constant takes its width from context; nothing else does.** A bare literal, and a
+`+ - *` tree whose leaves are all literals, has no width of its own — so it adopts the one
+its context supplies, and a context that cannot hold it is an error. This is what keeps
+`proc f {i32 n} i32 { + $n [* 2 3] }` on the typed path, and what makes
+`def i64 d [* 2000000 1500]` multiply at 64 bits instead of promoting and needing a cast
+back.
+
+Two limits on that, both deliberate. It applies to **integer** targets only: letting a
+constant subtree adopt a float width would make `def f64 x [/ 1 2]` evaluate as `0.5`,
+where C — and every language that types `1 / 2` by its operands — gives `0.0`. *The width a
+constant adopts may change the range it must fit; it must never change the operation
+performed.* And `/` and `%` are excluded from the constant shapes for the same reason.
+
+Context arrives after the fact in two cases, so the adoption is a **retype in place**
+(`typer__retype_literal`) rather than a second walk: a binop's unifying width is whatever
+the *other* operand turned out to be, and a struct field's declared type is found by name
+after the value was walked. Operands cannot simply be walked in a different order — one may
+contain a `def` another reads — but a constant subtree has no scope effects, so retyping it
+afterwards is safe.
+
+**A selecting form propagates the expectation; a computing form does not.** `if`, `try`,
+`race` and `with-ctx` produce one of their branch tails and compute nothing of their own, so
+an expectation on the form is an expectation on each branch:
+`proc f {} i32 { if $c { 2 } { 3 } }` returns `i32`. Every other command keeps the
+boundary reset — it evaluates at its own operand types. A block propagates to its tail
+statement only; the statements before it are evaluated for effect and inherit nothing.
 
 **A declared width rejects a literal it cannot hold.** `def i32 x 5000000000` and
 `def i8 x 300` are type errors, at the `def`.

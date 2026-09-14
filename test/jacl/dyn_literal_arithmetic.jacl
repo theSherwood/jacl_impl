@@ -1,0 +1,50 @@
+# expect: 10000000000
+# expect: 3000000000
+# expect: 2147483648
+# expect: 10000000000
+# expect: -294967296
+# expect: true
+# expect: true
+# expect: 2000000001
+# expect: 9
+# expect: 3000000000
+# expect: 0
+#
+# The integer model (docs/TEMEN_NUMERICS.md): an unannotated integer literal is `dyn` — an
+# integer, conceptually of arbitrary precision. So literal arithmetic **promotes**; it does
+# not overflow. Before jacl #112 a bare literal was `i32`, which put literal-only trees on
+# the declared-width path and made `[* 100000 100000]` an overflow error.
+
+print [* 100000 100000]
+print [* 2000000 1500]
+print [+ 2147483647 1]
+
+# A wide literal and a narrow one are the same kind of thing — both dyn.
+print [* 5000000000 2]
+
+# `+% -% *%` still wrap: there the program asked for a width.
+print [+% 2000000000 2000000000]
+
+# A *declared* width still errors on overflow, and does so whichever side the literal is on.
+# A literal is a leaf, so it takes the other operand's width after the fact — `[+ 1 $n]` and
+# `[+ $n 1]` agree rather than differing on whether overflow promotes.
+def i32 n 2000000000
+print [error? [+ $n $n]]
+print [error? [+ 2000000000 $n]]
+print [+ 1 $n]
+
+# A selecting form (`if`/`try`/`race`/`with-ctx`) computes nothing of its own, so an
+# expectation on it is an expectation on each branch tail: this `if` is an i32 position, and
+# the whole proc stays on the typed path instead of falling back to dyn.
+proc pick {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }
+print [pick 7]
+
+# A *constant subtree* takes its width from context, exactly like a bare literal: this
+# multiply happens at 64 bits rather than promoting to dyn and needing a cast back.
+def i64 wide [* 2000000 1500]
+print $wide
+
+# But adopting a width never changes the *operation*. `[/ 1 2]` is integer division whatever
+# it is assigned to — the same answer C gives for `double x = 1 / 2;`.
+def f64 half [/ 1 2]
+print $half

@@ -54,7 +54,10 @@ make widening the typer's reach a semantic change rather than a speed one. `+% -
 because there the program asked.
 
 **A declared width errors on a literal it cannot hold.** `def i32 x 5000000000` is a type
-error, for the same reason and at compile time.
+error, for the same reason and at compile time. A *constant expression* counts as a literal
+here — `[* 2000000 1500]` under a declared `i64` multiplies at 64 bits — but adopting a
+width never changes the operation: `def f64 x [/ 1 2]` is still integer division, giving
+`0.0` exactly as C does. See `TYPE_SYSTEM.md` § 6.
 
 **No implicit conversions between static types — C widths, not C conversions.**
 `[+ $u64 $i64]` is a type error; write the `to` you mean. C's integer-promotion and

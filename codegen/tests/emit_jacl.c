@@ -23,6 +23,11 @@ HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(
 static const char *source_for(const char *name) {
   if (!strcmp(name, "add"))      return "[+ 1 2]";
   if (!strcmp(name, "nested"))   return "[+ 1 [* 2 3]]";
+  /* Typed twin of `nested`: a bare literal tree is `dyn` (jacl #112), so the typed-lowering
+   * test needs an actual annotation. `[* 2 3]` is a constant subtree and adopts the i32 the
+   * parameter gives it, which is what keeps the whole body on the unboxed path. */
+  if (!strcmp(name, "typed_nested"))
+    return "proc f {i32 n} i32 { + $n [* 2 3] }\n[f 1]";
   if (!strcmp(name, "submul"))   return "[- [* 4 5] 3]";
   if (!strcmp(name, "variadic")) return "[+ 1 2 3 4]";
   if (!strcmp(name, "div_mod"))  return "[+ [/ 20 6] [% 20 6]]";
