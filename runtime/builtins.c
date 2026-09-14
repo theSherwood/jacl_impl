@@ -70,12 +70,32 @@ static JaclVal jacl_f64_new(double d) {
     int64_t r;                                                                       \
     if (builtin(jacl_int_val(a), jacl_int_val(b), &r))                               \
       return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);                      \
-    return jacl_wide_new(jacl_iwide_tag(a, b), r) | prop_flags(a, b);                 \
+    return jacl_int_result(jacl_iwide_tag(a, b), r) | prop_flags(a, b);               \
   }
 
 /* result tag for a wide-int binop: u64 if either side is u64, else i64 */
 static inline uint32_t jacl_iwide_tag(JaclVal a, JaclVal b) {
   return (jaclrt_type_index(a) == 0x0F || jaclrt_type_index(b) == 0x0F) ? 0x0F : 0x0E;
+}
+/* ---- canonical dynamic integers (#107) ----
+ *
+ * A dynamic integer takes the narrowest representation that holds it, so the representation
+ * is a function of the magnitude and never of the path that computed it. Without that, two
+ * spellings of the same number coexist — and they are distinguishable, because
+ * `jacl_val_equal` settles integers by value while `jmap_key_hash` mixes the raw bits (a
+ * pointer, for a heap wide int). A wide-computed `37` then hashes to a different bucket
+ * than the inline `37` it compares equal to, and a map lookup silently misses.
+ *
+ * Every *dynamic* wide result therefore returns through here. Two things deliberately do
+ * not: `u64` keeps its wide form, since the tag is the only record that the value is meant
+ * to be unsigned and dropping it would change which tag later arithmetic picks; and
+ * explicit widening (`def i64 x 37`, `[to "i64" 37]`) keeps what the program asked for —
+ * that is the typed side of the rule, and it needs the native i64 representation from
+ * jacl #106 slice 1 before it can be honored end to end. */
+static inline JaclVal jacl_int_result(uint32_t tidx, int64_t bits) {
+  if (tidx == 0x0E && bits >= INT32_MIN && bits <= INT32_MAX)
+    return jaclrt_i32((int32_t)bits);
+  return jacl_wide_new(tidx, bits);
 }
 JACL_WIDE_OP(jacl_wide_add, __builtin_add_overflow)
 JACL_WIDE_OP(jacl_wide_sub, __builtin_sub_overflow)
@@ -90,7 +110,7 @@ JaclVal jacl_add(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_add_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) + (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) + (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -107,7 +127,7 @@ JaclVal jacl_sub(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_sub_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) - (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) - (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -124,7 +144,7 @@ JaclVal jacl_mul(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_mul_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(a) * (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) * (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -143,7 +163,7 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b))) {
     int64_t y = jacl_int_val(b);
     if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
-    return jacl_wide_new(jacl_iwide_tag(a, b), jacl_int_val(a) / y) | prop_flags(a, b);
+    return jacl_int_result(jacl_iwide_tag(a, b), jacl_int_val(a) / y) | prop_flags(a, b);
   }
   if (jacl_is_num(a) && jacl_is_num(b) && !(jaclrt_is_i32(a) && jaclrt_is_i32(b)))
     return jaclrt_f32v(jacl_num_f32(a) / jacl_num_f32(b)) | prop_flags(a, b);
@@ -173,8 +193,8 @@ JaclVal jacl_wrap_add(JaclVal a, JaclVal b) {
     return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) + (uint32_t)jaclrt_as_i32(b))) |
            prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b))
-    return jacl_wide_new(jacl_iwide_tag(a, b),
-                         (int64_t)((uint64_t)jacl_int_val(a) + (uint64_t)jacl_int_val(b))) |
+    return jacl_int_result(jacl_iwide_tag(a, b),
+                           (int64_t)((uint64_t)jacl_int_val(a) + (uint64_t)jacl_int_val(b))) |
            prop_flags(a, b);
   return jaclrt_error();
 }
@@ -184,8 +204,8 @@ JaclVal jacl_wrap_sub(JaclVal a, JaclVal b) {
     return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) - (uint32_t)jaclrt_as_i32(b))) |
            prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b))
-    return jacl_wide_new(jacl_iwide_tag(a, b),
-                         (int64_t)((uint64_t)jacl_int_val(a) - (uint64_t)jacl_int_val(b))) |
+    return jacl_int_result(jacl_iwide_tag(a, b),
+                           (int64_t)((uint64_t)jacl_int_val(a) - (uint64_t)jacl_int_val(b))) |
            prop_flags(a, b);
   return jaclrt_error();
 }
@@ -195,8 +215,8 @@ JaclVal jacl_wrap_mul(JaclVal a, JaclVal b) {
     return jaclrt_i32((int32_t)((uint32_t)jaclrt_as_i32(a) * (uint32_t)jaclrt_as_i32(b))) |
            prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b))
-    return jacl_wide_new(jacl_iwide_tag(a, b),
-                         (int64_t)((uint64_t)jacl_int_val(a) * (uint64_t)jacl_int_val(b))) |
+    return jacl_int_result(jacl_iwide_tag(a, b),
+                           (int64_t)((uint64_t)jacl_int_val(a) * (uint64_t)jacl_int_val(b))) |
            prop_flags(a, b);
   return jaclrt_error();
 }

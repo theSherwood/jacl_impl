@@ -69,6 +69,30 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Canonical dynamic integers
+
+A **dynamic** integer takes the narrowest representation that holds it: its representation
+is a function of the magnitude, never of the path that computed it. Every dynamic wide
+result is built through `jacl_int_result`, which hands back an inline i32 when the value
+fits.
+
+This is what makes the representation unobservable, and it has to be, because two spellings
+of one number are otherwise distinguishable: `jacl_val_equal` settles integers by value
+while `jmap_key_hash` mixes the raw bits — a *pointer*, for a heap wide int. A wide-computed
+`37` therefore hashed to a different bucket than the inline `37` it compares equal to, and a
+map lookup silently missed (jacl #107). It only surfaced once a map outgrew the small-map
+linear scan, which is what kept it quiet.
+
+Two things deliberately keep their wide form:
+
+- **`u64`** — the tag is the only record that the value is meant to be unsigned, and
+  dropping it would change which tag later arithmetic picks.
+- **Explicit widening** (`def i64 x 37`, `[to "i64" 37]`) — that is the *typed* side of the
+  rule, where a declared type should mean exactly that representation at runtime. Honoring
+  it end to end needs the native i64 lowering (jacl #106 slice 1), which is also what gives
+  the typed → dyn crossing a place to canonicalize; until then such a value stays wide and
+  is not interchangeable with an inline i32 as a map key.
+
 ### Wide (i64/u64) overflow
 
 There is nothing wider to promote into yet, so an overflowing wide op returns an
