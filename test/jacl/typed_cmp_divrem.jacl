@@ -1,0 +1,67 @@
+# expect: 4
+# expect: 3
+# expect: -3
+# expect: -3
+# expect: 2
+# expect: -2
+# expect: 2
+# expect: true
+# expect: true
+# expect: -2147483648
+# expect: 0
+# expect: true
+# expect: false
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+#
+# Where the typer proved both operands, a comparison and a `/` or `%` lower to native ops
+# (jacl #94). The #98 monomorphic guard already reaches the same instructions on the dynamic
+# path, but pays a runtime tag test and a diamond to find out it may; a proved operand needs
+# neither, so the code is straight-line and composes inside a larger expression.
+#
+# Semantics are unchanged — this case exists to pin that. `/` and `%` have two inputs that
+# must never reach the machine instruction, because both trap: a zero divisor, and
+# `INT32_MIN / -1` whose true quotient is not an i32. They are steered around branchlessly,
+# and the answers still match the runtime exactly.
+
+proc dv {i32 a i32 b} i32 { / $a $b }
+proc md {i32 a i32 b} i32 { % $a $b }
+
+print [dv 20 5]
+print [dv 20 6]
+print [dv -20 6]      # truncation toward zero, not floor
+print [dv 20 -6]
+print [md 20 6]
+print [md -20 6]      # the remainder takes the dividend's sign
+print [md 20 -6]
+
+# A zero divisor is a catchable domain error, with the same payload the runtime produces.
+print [error? [dv 1 0]]
+print [error? [md 1 0]]
+
+# INT32_MIN / -1 would trap; the answer matches the runtime's rather than faulting.
+print [dv -2147483648 -1]
+print [md -2147483648 -1]
+
+proc lt {i32 a i32 b} { < $a $b }
+proc ge {i32 a i32 b} { >= $a $b }
+proc ne {i32 a i32 b} { != $a $b }
+print [lt -1 0]
+print [ge 2 3]
+print [ne 5 6]
+
+# i64 operands take the same path at 64 bits.
+proc wide {} {
+  def i64 a 5000000000
+  def i64 b 5000000001
+  print [< $a $b]
+  print [== $a $a]
+}
+[wide]
+
+# An operand that overflows must not be compared as a wrapped value: the tree's sticky
+# failure bit folds into the bool's error flag, because a bool has a spare bit for it.
+proc ovf {i32 n} { < [* $n $n] 0 }
+print [error? [ovf 100000]]

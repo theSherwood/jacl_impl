@@ -6,7 +6,7 @@
 > takes (no tree-walker fallback). `unsupported` = the engine declined the module
 > (`STATUS_UNSUPPORTED` in the browser); `trap` = it ran but faulted.
 
-**Browser-pass: 438/440 runnable programs** (568 corpus files).
+**Browser-pass: 439/441 runnable programs** (569 corpus files).
 
 > The powerbox grants only `stdout`/`stdin`/`exit` (a browser sandbox has no
 > shell or filesystem), so a program that shells out (`!cmd`) or reads/writes files
@@ -18,7 +18,7 @@
 | emit-fail | 1 |
 | err-no-fail | 89 |
 | err-pass | 39 |
-| pass | 438 |
+| pass | 439 |
 | wrong-output | 1 |
 
 ## wrong-output (1)
