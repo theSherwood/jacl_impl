@@ -172,6 +172,43 @@ static void test_int_literal_promoted_to_i64(void) {
   arena_destroy(&a);
 }
 
+/* jacl #115: C widths, not C conversions. Two different static integer widths need an
+ * explicit `to` — on comparison as much as on arithmetic, since that is where C's ranking
+ * bites hardest (`-1 < 1u` is false there, because the signed operand goes unsigned). */
+static void test_mixed_int_widths_reject(void) {
+  current_test = "mixed_int_widths_reject";
+  arena_t a = {0};
+  arena_t b = {0};
+  int bad = 0;
+  TyperResult tr = {0};
+  {
+    /* i32 vs u32 — neither is an "unboxed" type, so this pair is precisely what the older
+     * rule let through. (i32 vs i64 already errored, because i64 is unboxed.) */
+    LexResult lex = lexer_lex("def i32 x 1\ndef u32 y 2\ndef r [< $x $y]", &a);
+    ParseResult pr = parser_parse(lex, &a);
+    typer_infer(pr.nodes, pr.count, &tr, NULL, 0, NULL, 0);
+    if (tr.error_count == 0) {
+      fprintf(stderr, "  FAIL %s: expected a type error for [< $i32 $u32]\n", current_test);
+      failures++; bad = 1;
+    }
+  }
+  /* ...and the same widths on both sides is fine. */
+  {
+    TyperResult ok = {0};
+    LexResult lex = lexer_lex("def i32 x 1\ndef i32 y 2\ndef r [< $x $y]", &b);
+    ParseResult pr = parser_parse(lex, &b);
+    typer_infer(pr.nodes, pr.count, &ok, NULL, 0, NULL, 0);
+    if (ok.error_count != 0) {
+      fprintf(stderr, "  FAIL %s: same width should compare cleanly: %s\n",
+              current_test, ok.first_error);
+      failures++; bad = 1;
+    }
+  }
+  if (!bad) passes++;
+  arena_destroy(&a);
+  arena_destroy(&b);
+}
+
 static void test_float_literal_default(void) {
   current_test = "float_literal_default";
   arena_t a = {0};
@@ -1156,6 +1193,7 @@ int main(void) {
   test_int_literal_default_is_dyn();
   test_int_literal_past_i32_is_dyn();
   test_int_literal_declared_i32();
+  test_mixed_int_widths_reject();
   test_int_literal_promoted_to_i64();
   test_float_literal_default();
   test_float_literal_promoted_to_f64();

@@ -278,6 +278,16 @@ statement only; the statements before it are evaluated for effect and inherit no
 the `to`. We take C's *widths*, not C's conversion ranking — under which the signed operand
 silently becomes unsigned and a negative number becomes enormous.
 
+Arithmetic already errored on any concrete mismatch (decision 1). **Comparison** did not,
+unless one side was an "unboxed" type (`i64`/`u64`/`f64`) — so `[< $i32 $u32]` slipped
+through, which is exactly where C's ranking bites hardest. Two different static integer
+*widths* now error on comparison too. Cross-*kind* comparison stays permissive: `[== $n "s"]`
+is meaningfully false and tests rely on it.
+
+**This rule cannot currently fail a compile.** Every `typer_infer` call site in the tree
+passes `NULL` for the `TyperResult`, so no typer diagnostic reaches anyone (jacl #117). The
+rule is written and unit-tested; it starts biting when that channel is connected.
+
 Crossing the barrier keeps decision 2's shape, now with a range check: `dyn` → static is
 explicit (`[to "i32" $d]`) and a **domain error** when the value does not fit — narrowing
 never truncates. Static → `dyn` is implicit, cannot fail, and canonicalizes on the way out.
