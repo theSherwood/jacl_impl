@@ -292,6 +292,25 @@ Crossing the barrier keeps decision 2's shape, now with a range check: `dyn` →
 explicit (`[to "i32" $d]`) and a **domain error** when the value does not fit — narrowing
 never truncates. Static → `dyn` is implicit, cannot fail, and canonicalizes on the way out.
 
+### 7. Taint and secret are dynamic-value properties
+
+Coercing a flagged `dyn` (tainted or secret) to **any** static type is an **error**, not a
+flag drop — `INVARIANTS.md` V3, jacl #95.
+
+The two paths used to disagree without saying so: the boxed path propagates flags on every
+operation (`| prop_flags(a, b)`), while the unboxed typed path dropped them, with a code
+comment calling it "the intended trade". Under a raw, untagged representation there is no
+trade available — the word has no bits for a flag — so the only choices are refusing the
+crossing or laundering the value into a plain number. Refusing is the rule.
+
+The refusal keeps the flags on the resulting error, so the fact that a value was tainted is
+not lost along with the cast.
+
+Taint and secret currently have **no source-level producer** (`NOT_IMPLEMENTED.md`), so the
+rule is enforced ahead of the feature. The crossings are the only place it can be enforced,
+and doing it now means a producer lands into a system that already holds the line rather than
+one that needs every crossing audited afterwards.
+
 ## Cross-module typing
 
 Pre-pass in `compiler__collect_typer_imports` triggers dependency

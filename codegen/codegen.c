@@ -700,8 +700,8 @@ static void emit_trace_line(Cx *cx, uint32_t line) {
  * ops instead of dynamic `jacl_*` calls. Values still flow as boxed JaclVals across
  * locals/calls/blocks; unboxing happens only *within* a typed arithmetic tree, with a
  * single box at the root — so the env/frame stay all-i64 and no rep tracking leaks out.
- * (Taint/secret flag propagation is dropped on the unboxed path; statically-typed pure
- * arithmetic is the intended trade.)
+ * (Taint/secret never reach the unboxed path: a flagged value cannot become a statically
+ * typed one — jacl #95, INVARIANTS.md — so the crossings refuse it rather than dropping it.)
  *
  * Overflow (#102): the dynamic rules cannot apply here. Promotion is out — a declared i32
  * that overflowed into an i64 is no longer an i32, so an `i32`-annotated proc would return

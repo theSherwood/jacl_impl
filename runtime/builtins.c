@@ -12,6 +12,18 @@
 static inline uint64_t prop_flags(JaclVal a, JaclVal b) {
   return (a | b) & (JACL_FLAG_TAINTED | JACL_FLAG_SECRET);
 }
+/* Is this value carrying taint or secret? A statically typed value never does — the crossings
+ * refuse one rather than dropping its flags (jacl #95, INVARIANTS.md). An untagged word has
+ * nowhere to put them, so "refuse" is what keeps the unboxed fast path sound instead of a
+ * silent laundering of a flagged value into a plain number. */
+static inline int jacl_is_flagged(JaclVal v) {
+  return (v & (JACL_FLAG_TAINTED | JACL_FLAG_SECRET)) != 0;
+}
+/* The error a refused crossing produces. Keeps the flags, so the fact that the value was
+ * tainted or secret is not lost along with the cast. */
+static inline JaclVal jacl_flagged_refusal(JaclVal v) {
+  return jaclrt_set_error(jaclrt_i32(0)) | (v & (JACL_FLAG_TAINTED | JACL_FLAG_SECRET));
+}
 /* ---- inline f32 (tag 0x03, bits in the low payload word) ---- */
 static inline JaclVal jaclrt_f32v(float f) {
   union { float f; uint32_t u; } c; c.f = f;
@@ -255,6 +267,11 @@ JaclVal jacl_wrap_mul(JaclVal a, JaclVal b) {
  * `jacl_i64_box` canonicalizes on the way out, which is what makes a typed i64 coerced to
  * `dyn` interchangeable with any other spelling of the same number (#107). */
 int64_t jacl_i64_unbox(JaclVal v) {
+  /* Codegen branches on the flags before it ever calls this (`emit_has_any_flag`), so reaching
+   * here with one set means some other entry point. An int64 return has no way to signal, so
+   * the value it cannot represent becomes 0 — the same answer a non-number gets below, and
+   * never a laundered payload. */
+  if (jacl_is_flagged(v)) return 0;
   if (jaclrt_is_i32(v)) return (int64_t)jaclrt_as_i32(v);
   if (jacl_is_iwide(v)) return jacl_wide_bits(v);
   if (jacl_is_anyfloat(v)) return (int64_t)jacl_num_f64(v);
@@ -769,6 +786,7 @@ JaclVal jacl_global_set(JaclVal name, JaclVal v) {
 /* Widen a value to a declared wide scalar kind (typed defs): 14=i64, 15=u64, 16=f64. */
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
   if (jaclrt_is_error(v) || !jaclrt_is_i32(kind)) return v;
+  if (jacl_is_flagged(v)) return jacl_flagged_refusal(v);
   int32_t k = jaclrt_as_i32(kind);
   if (k == 0x10) return jacl_is_f64(v) ? v : jacl_f64_new(jacl_num_f64(v));
   if (k == 0x0E || k == 0x0F) {
@@ -801,6 +819,10 @@ JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
  * else: `dyn` is a signed integer tower, and its top half needs the bigint tier (#119). */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   if (jaclrt_is_error(v)) return v;
+  /* A tainted or secret value cannot become a statically typed one (jacl #95): the target
+   * representation has no bits for the flag, so allowing the cast would launder it into a
+   * plain number. */
+  if (jacl_is_flagged(v)) return jacl_flagged_refusal(v);
   char tn[16];
   uint32_t tl = jacl_str_len(tname);
   if (tl > sizeof tn - 1) tl = sizeof tn - 1;
