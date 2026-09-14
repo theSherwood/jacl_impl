@@ -267,6 +267,52 @@ else
 fi
 echo ""
 
+# Phase 0b: syntax-check the codegen sources.
+#
+# `src/jacl.c` above is a unity build of src/ only — it does NOT include
+# codegen/. Nothing else in build.sh compiles codegen.c, so before this check a
+# codegen.c that did not compile at all still reported a clean 25/25 (that is
+# how the codegen half of jacl #95 went missing through a green merge — see
+# jacl #128). The harness tests do compile it, but only via `cargo test`, which
+# is minutes away and not what anyone runs first.
+#
+# Syntax-only, so no objects and no link: ~1.3s for all three files in both
+# build configurations. It proves the file compiles, nothing more — behaviour
+# still belongs to runtime/harness/tests/codegen.rs.
+CODEGEN_SRCS="codegen/codegen.c codegen/irbuilder.c codegen/tests/emit_jacl.c"
+CODEGEN_STAMP="$BUILD_DIR/.codegen-syntax"
+NEWEST_CODEGEN=$(ls -t codegen/*.c codegen/*.h codegen/tests/*.c 2>/dev/null | head -1)
+if [ "$LIB_ONLY" -eq 1 ]; then
+    :   # --lib means lib/ only; codegen is not in scope
+elif [ -f "$CODEGEN_STAMP" ] && [ -n "$NEWEST_CODEGEN" ] \
+     && [ "$CODEGEN_STAMP" -nt "$NEWEST_CODEGEN" ]; then
+    echo "codegen sources are up-to-date"
+    echo ""
+else
+    echo -n "Syntax-checking codegen... "
+    CODEGEN_OK=1
+    # Both configurations: the staged driver defines JACL_STAGE_ON_TEMEN_BUILD,
+    # so a break under that define is just as invisible to the plain build.
+    for defs in "" "-DJACL_STAGE_ON_TEMEN_BUILD"; do
+        for f in $CODEGEN_SRCS; do
+            if ! $CC -fsyntax-only -std=gnu11 -D_GNU_SOURCE $defs -Icodegen "$f" \
+                 2>"$BUILD_DIR/codegen-syntax.err"; then
+                CODEGEN_OK=0
+                echo "FAIL ($f${defs:+ $defs})"
+                cat "$BUILD_DIR/codegen-syntax.err" >&2
+                break 2
+            fi
+        done
+    done
+    if [ "$CODEGEN_OK" -eq 1 ]; then
+        touch "$CODEGEN_STAMP"
+        echo "ok"
+        echo ""
+    else
+        exit 1
+    fi
+fi
+
 # Phase 1: compile all tests in parallel
 PIDS=()
 NEED_COMPILE=()

@@ -13,6 +13,11 @@
 #define JACLVAL_TRUE         ((int64_t)(((uint64_t)0x01 << 56) | 1)) /* JACL_TRUE */
 #define JACLVAL_NIL          ((int64_t)0)                        /* JACL_NIL   */
 #define JACLVAL_FLAG_ERROR   ((int64_t)((uint64_t)1 << 61))       /* JACL_FLAG_ERROR */
+#define JACLVAL_FLAG_SECRET  ((int64_t)((uint64_t)1 << 62))       /* JACL_FLAG_SECRET */
+#define JACLVAL_FLAG_TAINTED ((int64_t)((uint64_t)1 << 63))       /* JACL_FLAG_TAINTED */
+/* The three flags a raw, untagged word has nowhere to put. Tested as one mask at every
+ * dyn -> static crossing (jacl #95, INVARIANTS.md V3). */
+#define JACLVAL_FLAGS_ALL    (JACLVAL_FLAG_ERROR | JACLVAL_FLAG_SECRET | JACLVAL_FLAG_TAINTED)
 #define JACL_TAG_MASK_SHIFTED ((int64_t)((uint64_t)0xFF << 56))   /* type index + flag bits */
 static int64_t jaclval_i32(int32_t x) {
   return (int64_t)(JACL_TAG_I32_SHIFTED | (uint64_t)(uint32_t)x);
@@ -109,10 +114,20 @@ typedef struct {
    * site that already has the types in hand.
    *
    * The body is compiled into `rawfunc`; `func` becomes a thin adapter that unboxes and
-   * forwards. Returns stay boxed — a raw return has no bit for the error flag (V6), so
-   * giving it one is its own slice. */
-  IrFunc     *rawfunc;              /* NULL when no param is a raw-able width */
+   * forwards.
+   *
+   * ---- raw returns (#94 slice 2b) ----
+   *
+   * When the return annotation is a raw-able width, `rawfunc` returns **two** i64s:
+   * `(value, error)`. A raw word has no bit for the error flag (V6), so the flag becomes a
+   * second result rather than a branch out of the callee — the callee stays a leaf and the
+   * decision lands at the call site, which is the only place that knows whether the value
+   * is wanted raw or boxed. `error` is 0 on the normal path and a flagged JaclVal otherwise;
+   * when it is non-zero `value` is 0, so a caller that forgets to look cannot read a
+   * plausible number (V7). */
+  IrFunc     *rawfunc;              /* NULL when no param and no return is a raw-able width */
   uint8_t     prep[CG_MAX_PARAMS];  /* BindRep per param; REP_TAGGED where not proved */
+  uint8_t     rawret;               /* BindRep of the return; REP_TAGGED = boxed as before */
 } Proc;
 
 /* A closure literal whose body is compiled after its creation site (a worklist, so
@@ -151,6 +166,11 @@ typedef struct {
   /* innermost enclosing try (statement errors branch to the handler, not return) */
   IrBlock try_target; int try_width; int in_try;
   int cur_is_generator; /* the proc currently being compiled contains `yield` */
+  /* BindRep of the function currently being compiled INTO. REP_TAGGED for every boxed
+   * entry, closure and top-level; otherwise this is a raw entry whose every `return` — the
+   * tail value, the statement-error branch, an overflow branch — hands back the
+   * `(value, error)` pair. Set beside `cx->f`, never independently. */
+  uint8_t ret_raw;
 
   /* May the expression being compiled move the emission point to a new block?
    * `move_ok` is set by a parent immediately before compiling a child and applies to
@@ -842,6 +862,10 @@ static IrVal emit_i32_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot)
 /* Lower `node` to a native i32 value, ORing each op's overflow into `ovf_slot`. Typed
  * `+ - *` (and `+% -% *%`) stay unboxed recursively; literals are i32 constants; anything
  * else is computed boxed then unboxed. */
+static IrVal emit_has_any_flag(Cx *cx, IrVal v);                     /* fwd */
+static int emit_raw_call(Cx *cx, AstNode *node, Proc *p, IrVal out[2]);  /* fwd */
+static Proc *tail_call_proc(Cx *cx, AstNode *node);                      /* fwd */
+static int check_buf_arg_sizes(Cx *cx, Proc *p, AstNode *node);          /* fwd */
 static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (cx->failed) return 0;
   if (node->type == AST_LIT_INT) {
@@ -888,7 +912,32 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
     }
     return acc;
   }
-  return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
+  /* A call to a proc whose return is a raw i32 (#94 slice 2b): take the value word straight
+   * into this tree. The callee's error word folds into the sticky overflow bit — the same
+   * channel an overflow inside this tree uses — so no box, no unbox, and no new mechanism. */
+  {
+    Proc *rp = tail_call_proc(cx, node);
+    if (rp && rp->rawret == REP_I32) {
+      IrVal pr[2];
+      if (emit_raw_call(cx, node, rp, pr) == 2) {
+        if (cx->failed) return 0;
+        IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+        ovf_mark(cx, ovf_slot, irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, pr[1], zero));
+        return unbox_i32(cx, pr[0]);   /* the slot is sign-extended; wrap back to i32 */
+      }
+      if (cx->failed) return 0;
+    }
+  }
+  /* A dyn value crossing into a raw i32. `unbox_i32` is a truncation, so every one of the
+   * three flags is about to be thrown away; under jacl #95 a flagged value must not become a
+   * static one at all. The i32 tier already has a channel for exactly this — the sticky
+   * overflow bit — so the flag test just ORs into it, and the tree root turns it into an
+   * error flag (`box_i32_checked`) or a branch (`compile_i32_tree_raw`) like any overflow.
+   * Branchless, and no new mechanism. */
+  IrVal boxed = compile_expr(cx, node);            /* var-refs, calls, dyn ops, … */
+  if (cx->failed) return 0;
+  ovf_mark(cx, ovf_slot, emit_has_any_flag(cx, boxed));
+  return unbox_i32(cx, boxed);
 }
 /* ---- typed i64: a raw, untagged 64-bit word (#106) ----
  *
@@ -969,12 +1018,39 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
     }
     return acc;
   }
-  { /* A dyn value crossing into the raw world: the word cannot carry an error, so an error
-     * here has to leave by the same branch an overflow takes. */
+  /* A call to a proc whose return is a raw i64 (#94 slice 2b): the value word is already the
+   * word this tier wants, and the error word leaves by the branch an overflow takes. */
+  {
+    Proc *rp = tail_call_proc(cx, node);
+    if (rp && rp->rawret == REP_I64) {
+      IrVal pr[2];
+      if (emit_raw_call(cx, node, rp, pr) == 2) {
+        if (cx->failed) return 0;
+        int pv = pin_push(cx, pr[0]);
+        int pe = pin_push(cx, pr[1]);
+        IrVal e = pin_get(cx, pe);
+        IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+        IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, e, zero);
+        emit_error_branch_if(cx, truth, pin_get(cx, pe));
+        IrVal val = pin_get(cx, pv);
+        pin_release(cx, pv, 2);
+        return val;
+      }
+      if (cx->failed) return 0;
+    }
+  }
+  { /* A dyn value crossing into the raw world. The word has no spare bits, so *none* of the
+     * three flags can survive the crossing — and under jacl #95 a flagged value must not
+     * become a static one at all. All three leave by the branch an overflow takes, with the
+     * error bit forced on so a merely tainted value arrives as an error rather than as a
+     * plain number that quietly lost its flag. (An already-error value is unchanged by the
+     * OR, so error propagation keeps its old behaviour exactly.) */
     IrVal v = compile_expr(cx, node);
     if (cx->failed) return 0;
     int pv = pin_push(cx, v);
-    emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
+    IrVal flagged = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, v,
+                               irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR));
+    emit_error_branch_if(cx, emit_has_any_flag(cx, v), flagged);
     v = pin_get(cx, pv);
     pin_drop(cx, pv);
     IrVal a[] = {cx->sp, v};
@@ -1017,6 +1093,67 @@ static IrVal compile_i32_tree_raw(Cx *cx, AstNode *node) {
   IrVal out = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return out;
+}
+
+/* Emit a direct call through a proc's raw entry, when this call site can prove every raw
+ * param — "mostly proved" is not a thing a calling convention can be, so one unproved
+ * argument sends the whole call to the boxed entry.
+ *
+ * Returns 0 when the call is not eligible (the caller falls back to the boxed entry),
+ * 1 when it emitted a single *tagged* result into out[0] (raw params, boxed return), and
+ * 2 when it emitted the raw `(value, error)` pair into out[0]/out[1] (#94 slice 2b). Kind 2
+ * is what lets a typed consumer skip the box entirely: the value word goes straight into the
+ * arithmetic and the error word into whatever channel that consumer already has for an
+ * overflow. */
+static int emit_raw_call(Cx *cx, AstNode *node, Proc *p, IrVal out[2]) {
+  if (!p->rawfunc || p->is_generator || p->variadic) return 0;
+  uint32_t argc = node->data.command.arg_count;
+  if ((int)argc != p->arity) return 0;
+  /* compile_expr checks this before it gets here, but compile_i32 / compile_raw_i64 call in
+   * directly — and a proc can have a by-value `[Buf N T]` param (which stays tagged) beside a
+   * raw return, so the size check cannot be assumed to have run. */
+  if (!check_buf_arg_sizes(cx, p, node)) return 0;
+  for (int i = 0; i < (int)argc; i++) {
+    if (p->prep[i] == REP_TAGGED) continue;
+    uint8_t want = p->prep[i] == REP_I32 ? TYPE_I32 : TYPE_I64;
+    if (node->data.command.args[i]->inferred_type != want) return 0;
+  }
+  /* Each raw argument is compiled straight to a word, so nothing is boxed here and nothing
+   * is unboxed on the other side. The tagged ones go through the usual path. */
+  IrVal args[1 + CG_MAX_PARAMS];
+  for (int i = 0; i < (int)argc; i++) {
+    int pm = pin_mark(cx);
+    for (int j = 0; j < i; j++) (void)pin_push(cx, args[1 + j]);
+    IrVal v;
+    if (p->prep[i] == REP_I32) {
+      v = compile_i32_tree_raw(cx, node->data.command.args[i]);  /* sign-extended to 64 bits */
+    } else if (p->prep[i] == REP_I64) {
+      v = compile_i64_tree(cx, node->data.command.args[i]);
+    } else {
+      v = compile_expr(cx, node->data.command.args[i]);
+    }
+    if (cx->failed) return 0;
+    for (int j = 0; j < i; j++) args[1 + j] = pin_get(cx, pm + j);
+    pin_release(cx, pm, i);
+    args[1 + i] = v;
+  }
+  args[0] = cx->sp;
+  emit_trace_line(cx, node->start.line);
+  if (p->rawret == REP_TAGGED) {
+    out[0] = irb_call(cx->f, cx->cur, p->rawfunc, args, (int)argc + 1);
+    out[1] = 0;
+    return 1;
+  }
+  irb_call_multi(cx->f, cx->cur, p->rawfunc, args, (int)argc + 1, out);
+  return 2;
+}
+
+/* The proc a direct call names, or NULL. Mirrors compile_expr's head resolution. */
+static Proc *tail_call_proc(Cx *cx, AstNode *node) {
+  if (node->type != AST_COMMAND) return NULL;
+  AstNode *head = node->data.command.head;
+  if (!head || head->type != AST_LIT_STRING) return NULL;
+  return proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
 }
 
 /* ---- typed comparisons (#94) ----
@@ -1208,6 +1345,40 @@ static IrVal emit_is_error_bit(Cx *cx, IrVal v) {
   IrVal masked = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, v, bit);
   IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
   return irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, masked, zero);
+}
+/* Any of error / taint / secret. Used only where a dyn value crosses into a *static*
+ * representation: a raw word has no bits for any of the three, so all three have to leave by
+ * the same branch, and the rule that a flagged value cannot become a static one (jacl #95,
+ * INVARIANTS.md V3) is what makes dropping them sound rather than a silent hole. Costs
+ * exactly what the error-only test cost — a wider mask constant, the same two instructions. */
+static IrVal emit_has_any_flag(Cx *cx, IrVal v) {
+  IrVal bits = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAGS_ALL);
+  IrVal masked = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, v, bits);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  return irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, masked, zero);
+}
+
+/* `sel ? when_nz : when_z`, branchless, on i64s. Used to recombine a raw entry's
+ * `(value, error)` pair back into one tagged word (#94 slice 2b): the error case is rare, so
+ * a real branch would split the block on every call for nothing. Five instructions, no
+ * control flow, and both operands are already computed. */
+static IrVal emit_select_nonzero(Cx *cx, IrVal sel, IrVal when_nz, IrVal when_z) {
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal nz = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U,
+                         irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, sel, zero));
+  IrVal mask = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SUB, zero, nz);   /* 0 or ~0 */
+  IrVal keep = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, mask,
+                          irb_const_i64(cx->f, cx->cur, -1));            /* ~mask */
+  return irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR,
+                    irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, when_nz, mask),
+                    irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, when_z, keep));
+}
+
+/* Box a raw entry's value word back into a tagged JaclVal, per the return's BindRep. */
+static IrVal emit_box_raw(Cx *cx, uint8_t rep, IrVal raw) {
+  if (rep == REP_I32) return box_i32(cx, unbox_i32(cx, raw));
+  IrVal ba[] = {cx->sp, raw};
+  return emit_rt_call(cx, "jacl_i64_box", ba, 2);
 }
 
 static int frame_guard(Cx *cx) {
@@ -2322,8 +2493,15 @@ static void emit_error_branch_if(Cx *cx, IrVal truth, IrVal errv) {
     IrVal ef[1] = {errv};
     irb_br_if(cx->f, cx->cur, truth, err_blk, ef, 1, cont, frame, w);
     cx->cur = err_blk;
-    IrVal rv[1] = {(IrVal)0};      /* err_blk's single param: the error value */
-    irb_return(cx->f, err_blk, rv, 1);
+    /* err_blk's single param (v0) is the error value. A raw entry returns it as the pair's
+     * error word, with a 0 value word — the same shape emit_return_value builds. */
+    if (cx->ret_raw == REP_TAGGED) {
+      IrVal rv[1] = {(IrVal)0};
+      irb_return(cx->f, err_blk, rv, 1);
+    } else {
+      IrVal rv[2] = {irb_const_i64(cx->f, err_blk, 0), (IrVal)0};
+      irb_return(cx->f, err_blk, rv, 2);
+    }
   }
   enter_frame_block(cx, cont);
 }
@@ -2941,8 +3119,9 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
   int n = 2 + p->arity;
   for (int k = 0; k < n; k++) pt[k] = IRB_I64;
   IrFunc *w = irb_func_new(cx->m, pt, n, r1, 1);
-  IrFunc *sf = cx->f; IrBlock sb = cx->cur; IrVal ssp = cx->sp;
+  IrFunc *sf = cx->f; IrBlock sb = cx->cur; IrVal ssp = cx->sp; uint8_t srr = cx->ret_raw;
   cx->f = w;
+  cx->ret_raw = REP_TAGGED;    /* the wrapper has the closure ABI: one tagged result */
   cx->cur = irb_block(w, pt, n);
   IrVal cargs[1 + CG_MAX_PARAMS];
   cargs[0] = 0;                                     /* sp (param 0; self at 1 is dropped) */
@@ -2950,7 +3129,7 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
   IrVal r = irb_call(w, cx->cur, p->func, cargs, 1 + p->arity);
   irb_return(w, cx->cur, &r, 1);
   p->wrapper = w;
-  cx->f = sf; cx->cur = sb; cx->sp = ssp;
+  cx->f = sf; cx->cur = sb; cx->sp = ssp; cx->ret_raw = srr;
   return w;
 }
 
@@ -4040,41 +4219,18 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
         IrVal a[] = {cx->sp, fnref64, arg};
         return emit_rt_call(cx, "jacl_gen_new", a, 3);
       }
-      /* Raw entry (#94 slice 2a): take it only when *every* raw param has an argument the
-       * typer proved to the same width. A single unproved argument sends the whole call to
-       * the boxed entry — the two conventions cannot be mixed per-argument, and "mostly
-       * proved" is not a thing a calling convention can be. */
-      int use_raw = p->rawfunc != NULL;
-      for (int i = 0; use_raw && i < (int)argc; i++) {
-        if (p->prep[i] == REP_TAGGED) continue;
-        uint8_t want = p->prep[i] == REP_I32 ? TYPE_I32 : TYPE_I64;
-        if (node->data.command.args[i]->inferred_type != want) use_raw = 0;
+      /* Raw entry (#94 slice 2a/2b). */
+      IrVal raw2[2];
+      int rawk = emit_raw_call(cx, node, p, raw2);
+      if (cx->failed) return 0;
+      if (rawk == 1) return raw2[0];
+      if (rawk == 2) {
+        /* A raw return arriving in a dyn context: re-box the value, unless the error word
+         * says there is no value. Branchless — see emit_select_nonzero. */
+        IrVal boxed = emit_box_raw(cx, p->rawret, raw2[0]);
+        return emit_select_nonzero(cx, raw2[1], raw2[1], boxed);
       }
       IrVal args[1 + CG_MAX_PARAMS];
-      if (use_raw) {
-        /* Each raw argument is compiled straight to a word, so nothing is boxed here and
-         * nothing is unboxed on the other side. The tagged ones go through the usual path. */
-        for (int i = 0; i < (int)argc; i++) {
-          int pm = pin_mark(cx);
-          for (int j = 0; j < i; j++) (void)pin_push(cx, args[1 + j]);
-          IrVal v;
-          if (p->prep[i] == REP_I32) {
-            IrVal raw = compile_i32_tree_raw(cx, node->data.command.args[i]);
-            v = raw;                                  /* already sign-extended to 64 bits */
-          } else if (p->prep[i] == REP_I64) {
-            v = compile_i64_tree(cx, node->data.command.args[i]);
-          } else {
-            v = compile_expr(cx, node->data.command.args[i]);
-          }
-          if (cx->failed) return 0;
-          for (int j = 0; j < i; j++) args[1 + j] = pin_get(cx, pm + j);
-          pin_release(cx, pm, i);
-          args[1 + i] = v;
-        }
-        args[0] = cx->sp;
-        emit_trace_line(cx, node->start.line);
-        return irb_call(cx->f, cx->cur, p->rawfunc, args, (int)argc + 1);
-      }
       if (argc && !compile_operands(cx, node->data.command.args, argc, args + 1)) return 0;
       args[0] = cx->sp; /* data-SP ABI: thread sp as the leading argument */
       emit_trace_line(cx, node->start.line);  /* record the call site on the caller frame */
@@ -5000,9 +5156,42 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
  * return it". */
 static void compile_tail(Cx *cx, AstNode *node);
 
+/* Return from a raw entry: the value word and the error word, in that order (#94 slice 2b).
+ * `err` is 0 on the normal path; when it is non-zero `raw` must be 0, so a caller that does
+ * not look at the error cannot read a plausible number out of a failed call (V7). */
+static void emit_return_pair(Cx *cx, IrVal raw, IrVal err) {
+  IrVal r[] = {raw, err};
+  irb_return(cx->f, cx->cur, r, 2);
+}
+
+/* Return a *tagged* value from whichever entry we are compiling. In a boxed entry that is
+ * the whole story. In a raw entry the tagged word has to be split into the pair, which is
+ * the slow half of the convention — the fast half is compile_tail's typed path below, which
+ * never builds the tagged word at all. Branchless: a select via a 0/~0 mask, because the
+ * flagged case is rare and a branch here would end the block for no gain. */
 static void emit_return_value(Cx *cx, IrVal v) {
-  IrVal r[] = {v};
-  irb_return(cx->f, cx->cur, r, 1);
+  if (cx->ret_raw == REP_TAGGED) {
+    IrVal r[] = {v};
+    irb_return(cx->f, cx->cur, r, 1);
+    return;
+  }
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal bad = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, emit_has_any_flag(cx, v));
+  IrVal mask = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SUB, zero, bad);        /* 0 or ~0 */
+  IrVal keep = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, mask,
+                          irb_const_i64(cx->f, cx->cur, -1));                  /* ~mask */
+  IrVal flagged = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, v,
+                             irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR));
+  IrVal err = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, flagged, mask);
+  IrVal raw;
+  if (cx->ret_raw == REP_I32) {
+    raw = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, v));      /* slot invariant */
+  } else {
+    IrVal ua[] = {cx->sp, v};
+    raw = emit_rt_call(cx, "jacl_i64_unbox", ua, 2);
+  }
+  raw = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, raw, keep);
+  emit_return_pair(cx, raw, err);
 }
 
 static void compile_if_tail(Cx *cx, AstNode **args, uint32_t argc, uint32_t start) {
@@ -5102,8 +5291,11 @@ static void compile_tail(Cx *cx, AstNode *node) {
       AstNode *head = node->data.command.head;
       Proc *p = proc_lookup(cx, head->data.lit_string.value, head->data.lit_string.length);
       /* Variadic procs pack a rest vector at the call site (handled in compile_expr);
-       * skip the fixed-arity tail-call fast path and use the value+return fallback. */
-      if (p && !p->variadic) {
+       * skip the fixed-arity tail-call fast path and use the value+return fallback.
+       * A raw entry cannot tail-call the boxed entry either: `return_call` requires the two
+       * functions to share a result signature, and a raw entry returns the (value, error)
+       * pair (#94 slice 2b). The fallback below is correct for it, just not a tail call. */
+      if (p && !p->variadic && cx->ret_raw == REP_TAGGED) {
         uint32_t argc = node->data.command.arg_count;
         if ((int)argc != p->arity) {
           cx_failf(cx, "codegen: proc '%.*s' arity mismatch",
@@ -5120,6 +5312,21 @@ static void compile_tail(Cx *cx, AstNode *node) {
         return;
       }
     }
+  }
+
+  /* A raw entry returning a tree the typer already proved at the return's own width: compile
+   * it straight to a raw word and hand back `(value, 0)`. This is the point of the slice —
+   * no box at the return, no unbox at the call site. Overflow inside the tree has already
+   * become a branch to the error block, which returns the pair (V6). */
+  if (cx->ret_raw == REP_I32 && node->inferred_type == TYPE_I32) {
+    IrVal raw = compile_i32_tree_raw(cx, node);
+    if (!cx->failed) emit_return_pair(cx, raw, irb_const_i64(cx->f, cx->cur, 0));
+    return;
+  }
+  if (cx->ret_raw == REP_I64 && node->inferred_type == TYPE_I64) {
+    IrVal raw = compile_i64_tree(cx, node);
+    if (!cx->failed) emit_return_pair(cx, raw, irb_const_i64(cx->f, cx->cur, 0));
+    return;
   }
 
   /* Fallback: compute the value normally and return it. */
@@ -5312,6 +5519,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
      * so only the *meaning* of the slot differs, not the IR signature. */
     uint8_t prep[CG_MAX_PARAMS];
     IrFunc *rawfunc = NULL;
+    uint8_t rawret = REP_TAGGED;
     for (int k = 0; k < CG_MAX_PARAMS; k++) prep[k] = REP_TAGGED;
     if (!gen && !variadic) {
       const char *ptypes_tok[CG_MAX_PARAMS]; uint32_t ptlens[CG_MAX_PARAMS];
@@ -5322,7 +5530,22 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
         if (!memcmp(ptypes_tok[k], "i32", 3)) { prep[k] = REP_I32; any = 1; }
         else if (!memcmp(ptypes_tok[k], "i64", 3)) { prep[k] = REP_I64; any = 1; }
       }
-      if (any) rawfunc = irb_func_new(m, ptypes, nparams + 1, r1, 1);
+      /* Return annotation (#94 slice 2b): a raw-able width makes the raw entry two-result,
+       * `(value, error)`. A stream return is a vector, never a raw word. */
+      if (argc >= 4 && !returns_stream) {
+        AstNode *rt = def->data.command.args[argc - 2];
+        if (rt && rt->type == AST_LIT_STRING && rt->data.lit_string.length == 3) {
+          const char *t = rt->data.lit_string.value;
+          if (!memcmp(t, "i32", 3)) rawret = REP_I32;
+          else if (!memcmp(t, "i64", 3)) rawret = REP_I64;
+        }
+      }
+      if (any || rawret != REP_TAGGED) {
+        IrType r2[] = {IRB_I64, IRB_I64};
+        rawfunc = irb_func_new(m, ptypes, nparams + 1,
+                               rawret != REP_TAGGED ? r2 : r1,
+                               rawret != REP_TAGGED ? 2 : 1);
+      }
     }
 
     if (cx->nprocs == cx->cap_procs) {
@@ -5332,7 +5555,7 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     }
     cx->procs[cx->nprocs++] =
         (Proc){pname, plen, func, arity, gen, returns_stream, variadic, variadic ? arity - 1 : arity,
-               def, NULL, rawfunc, {0}};
+               def, NULL, rawfunc, {0}, rawret};
     for (int k = 0; k < CG_MAX_PARAMS; k++) cx->procs[cx->nprocs - 1].prep[k] = prep[k];
   }
 }
@@ -5359,6 +5582,7 @@ static void compile_procs(Cx *cx) {
     /* The body goes into the raw entry when there is one; `func` becomes the adapter below. */
     IrFunc *bodyfn = p->rawfunc ? p->rawfunc : p->func;
     cx->f = bodyfn;
+    cx->ret_raw = p->rawfunc ? p->rawret : (uint8_t)REP_TAGGED;
     cx->cur = irb_block(bodyfn, ptypes, nparams + 1);
     cx->sp = 0; /* param 0 */
     cx->cur_is_generator = p->is_generator;
@@ -5425,6 +5649,7 @@ static void compile_procs(Cx *cx) {
      * and is correct without knowing the raw entry exists. */
     if (p->rawfunc) {
       cx->f = p->func;
+      cx->ret_raw = REP_TAGGED;         /* the boxed entry returns one tagged word */
       cx->cur = irb_block(p->func, ptypes, nparams + 1);
       cx->sp = 0;
       env_reset(cx);
@@ -5442,7 +5667,17 @@ static void compile_procs(Cx *cx) {
           fwd[k + 1] = a;
         }
       }
-      irb_return_call(cx->f, cx->cur, p->rawfunc, fwd, nparams + 1);
+      if (p->rawret == REP_TAGGED) {
+        irb_return_call(cx->f, cx->cur, p->rawfunc, fwd, nparams + 1);
+      } else {
+        /* A two-result raw entry cannot be tail-called from a one-result adapter, so the
+         * adapter calls it and re-boxes: the error word when there is one, else the value. */
+        IrVal got[2];
+        irb_call_multi(cx->f, cx->cur, p->rawfunc, fwd, nparams + 1, got);
+        IrVal boxed = emit_box_raw(cx, p->rawret, got[0]);
+        IrVal r[] = {emit_select_nonzero(cx, got[1], got[1], boxed)};
+        irb_return(cx->f, cx->cur, r, 1);
+      }
     }
   }
 }
@@ -5456,6 +5691,7 @@ static void compile_pending_closures(Cx *cx) {
     IrType ptypes[2 + CG_MAX_PARAMS];
     for (int k = 0; k < 2 + p.nparams; k++) ptypes[k] = IRB_I64;
     cx->f = p.func;
+    cx->ret_raw = REP_TAGGED;           /* a closure body is always the boxed convention */
     cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
     cx->sp = 0; /* param 0; self is param 1 */
     cx->cur_is_generator = 0;

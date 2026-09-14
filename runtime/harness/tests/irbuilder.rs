@@ -148,6 +148,40 @@ fn direct_intra_module_call() {
 }
 
 #[test]
+fn multi_result_call_binds_every_result() {
+    // `v2, v3 = call 0(v0, v1)` — one instruction, two consecutive value ids. The builder's
+    // old `nresults == 1 ? 1 : 0` clamp dropped the second result silently, so nothing above
+    // it could use a multi-result callee. parse_self_contained also asserts the printed text
+    // is canonical, which is the real gate on the `v2, v3 = ` binding.
+    let text = emit("multires");
+    assert!(
+        text.contains("v2, v3 = call 0(v0, v1)"),
+        "expected a two-value binding:\n{text}"
+    );
+    let m = parse_self_contained("multires");
+    // divmod(23, 5) = (4, 3); the caller folds them as q * 10 + r.
+    check(&m, 1, &[Value::I32(23), Value::I32(5)], 43);
+    check(&m, 1, &[Value::I32(-7), Value::I32(2)], -31); // (-3, -1) -> -30 + -1
+}
+
+#[test]
+fn single_result_call_refuses_a_multi_result_callee() {
+    // The guard that makes the old failure impossible: asking irb_call (one result) for a
+    // two-result callee aborts instead of dropping the extra. Observed out-of-process,
+    // because the refusal is an abort().
+    let out = Command::new(emitter())
+        .arg("multires_misuse")
+        .output()
+        .expect("run emit_demo");
+    assert!(!out.status.success(), "irb_call accepted a two-result callee");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("irb_call callee has 2 results"),
+        "expected the multi-result refusal, got:\n{err}"
+    );
+}
+
+#[test]
 fn memory_load_store_round_trip() {
     let m = parse_self_contained("mem_roundtrip");
     // Store above the unconditional 16 KiB NULL guard (#1094: `[0, module_null_guard())` is
@@ -275,6 +309,7 @@ fn encoded_binary_matches_text_module() {
         "add2",
         "sum_to",
         "call_addone",
+        "multires",
         "mem_roundtrip",
         "call_jacl_add",
         "closure",

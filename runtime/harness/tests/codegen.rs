@@ -401,7 +401,14 @@ fn typed_arithmetic_lowers_to_native_i32() {
     let ir = emit_text("typed_nested");
     assert!(ir.contains("i64.mul") && ir.contains("i64.add"), "expected native ops:\n{ir}");
     assert!(!ir.contains("jacl_mul") && !ir.contains("jacl_add"), "should not call the runtime:\n{ir}");
-    assert!(ir.contains("i64.const 61"), "expected the overflow bit to reach the error flag:\n{ir}");
+    // The sticky overflow bit used to be folded into the result's error flag by a shift of
+    // 61. With a raw return (#94 slice 2b) there is no result word to put a flag in, so the
+    // bit becomes control flow instead: a branch that returns the error-tagged i32
+    // (FLAG_ERROR | TAG_I32) as the pair's error word. Same rule, different channel — V6.
+    assert!(
+        ir.contains("i64.const 2449958197289549824"),
+        "expected the overflow branch's error-tagged i32:\n{ir}"
+    );
     run_case("typed_nested", i32_val(7)); // and it's still correct
 }
 
@@ -460,6 +467,61 @@ fn guard_falls_through_to_the_runtime() {
     assert_eq!(run_case_full("guard_div_zero").1, b"true\n");
     assert_eq!(run_case_full("guard_float_mix").1, b"3.5\n");
     run_case("guard_mod_neg", i32_val(-1));
+}
+
+// ---- #94 slice 2b: raw returns ----
+
+#[test]
+fn typed_proc_returns_a_raw_word_and_an_error_word() {
+    // A raw word has no bit for the error flag (INVARIANTS.md V6), so the flag is a second
+    // result. A typed caller takes the value word straight into its arithmetic and folds the
+    // error word into the sticky overflow bit it already had — no box at the return, no
+    // unbox at the call site, and no runtime call anywhere in the chain.
+    let ir = emit_text("typed_raw_ret");
+    assert!(
+        ir.contains("-> (i64, i64)"),
+        "the raw entry must return the (value, error) pair:\n{ir}"
+    );
+    assert!(
+        ir.lines().any(|l| l.trim_start().starts_with("v") && l.contains(", v") && l.contains("= call ")),
+        "expected a two-result call binding:\n{ir}"
+    );
+    run_case("typed_raw_ret", i32_val(23)); // (10+1) + (10+2)
+    run_case("typed_raw_ret_i64", i32_val(5_000_001));
+}
+
+#[test]
+fn a_raw_return_still_carries_its_errors() {
+    // The error word is the whole error channel for a raw return, so both ways a typed body
+    // can fail have to travel it: a domain error (zero divisor) and an overflow.
+    assert_eq!(run_case_full("typed_raw_ret_err").1, b"");
+    run_case("typed_raw_ret_err", i32_val(1));
+    run_case("typed_raw_ret_ovf", i32_val(1));
+}
+
+// ---- jacl #95: a flagged dyn cannot become a static value ----
+
+/// `JACL_FLAG_ERROR | JACL_FLAG_SECRET | JACL_FLAG_TAINTED` — bits 61..63 as one i64 mask.
+const FLAGS_ALL: i64 = -2305843009213693952; // 0xE000_0000_0000_0000
+
+#[test]
+fn raw_crossing_tests_all_three_flags() {
+    // Where a dyn value crosses into a raw, untagged word, the word has nowhere to put any of
+    // the three flags. INVARIANTS.md V3 says a flagged value must not become a static one at
+    // all, so the crossing tests the whole mask, not just the error bit. Narrowing this back
+    // to `1 << 61` would launder taint and secret into a plain number, so pin the constant.
+    // Each fixture calls a raw-returning proc with a *dyn* argument, so the call site cannot
+    // take the raw entry and the result comes back tagged — which is what makes it cross.
+    for case in ["flag_cross_i64", "flag_cross_i32"] {
+        let ir = emit_text(case);
+        assert!(
+            ir.contains(&format!("i64.const {FLAGS_ALL}")),
+            "{case}: the crossing must mask error|secret|tainted:\n{ir}"
+        );
+    }
+    // And the values still compute: 5 * 3 + 1 = 16, (4 + 1) + 1 = 6.
+    run_case("flag_cross_i64", i32_val(16));
+    run_case("flag_cross_i32", i32_val(6));
 }
 
 #[test]
@@ -562,14 +624,18 @@ fn typed_compare_and_divrem_are_native() {
 #[test]
 fn typed_params_use_a_raw_entry_with_a_boxed_adapter() {
     // A proc with typed params gets two entries: the body compiled against raw words, and a
-    // boxed adapter that unboxes and tail-calls it. Direct calls that can prove the argument
-    // types take the raw one; closures, exports and indirect calls keep the boxed one and are
+    // boxed adapter that unboxes and forwards. Direct calls that can prove the argument types
+    // take the raw one; closures, exports and indirect calls keep the boxed one and are
     // correct without knowing the raw entry exists.
-    let ir = emit_text("typed_raw_params");
+    //
+    // When the return is *not* raw-able the adapter tail-calls, since both entries return one
+    // value. A raw return (#94 slice 2b) makes the raw entry two-result, and `return_call`
+    // requires a shared result signature — so that adapter calls and re-boxes instead.
+    let ir = emit_text("typed_raw_params_dynret");
     assert!(ir.contains("return_call"), "expected the adapter to tail-call the raw entry:\n{ir}");
-    // Two functions share the proc's signature — the adapter and the body.
     let n = ir.matches("(i64, i64, i64) -> (i64)").count();
     assert!(n >= 2, "expected a raw entry alongside the boxed one, found {n}:\n{ir}");
+    run_case("typed_raw_params_dynret", i32_val(7));
     run_case("typed_raw_params", i32_val(7));
 }
 

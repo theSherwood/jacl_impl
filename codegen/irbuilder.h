@@ -97,8 +97,19 @@ void  irb_store(IrFunc *f, IrBlock b, IrStoreOp op, IrVal addr, IrVal value,
                 uint64_t offset, uint8_t align);
 
 /* Direct call to a function in this module. Returns the result value id when the
- * callee has exactly one result, else 0 (the builder currently models 0/1 results). */
+ * callee has exactly one result, else 0. A callee with more than one result aborts —
+ * use irb_call_multi, so results can never be dropped without saying so. */
 IrVal irb_call(IrFunc *f, IrBlock b, const IrFunc *callee, const IrVal *args, int nargs);
+
+/* Direct call to a multi-result callee. Writes the callee's `nresults` value ids into
+ * `results` (which must have room for them) and returns the first. The ids are consecutive,
+ * and the text form binds them together: `v2, v3 = call 0(v0, v1)`.
+ *
+ * The motivating shape is a typed proc returning `(raw_value, error_flag)`: a raw untagged
+ * word has no bit for the error flag (INVARIANTS.md V6), so the flag has to be a second
+ * result. Works with irb_call (1 result) unchanged — this is the >1 case only. */
+IrVal irb_call_multi(IrFunc *f, IrBlock b, const IrFunc *callee,
+                     const IrVal *args, int nargs, IrVal *results);
 
 /* `ref.func` — a forgeable i32 funcref (the callee's link-relocated function index),
  * suitable as the index operand of irb_call_indirect. */
@@ -118,7 +129,8 @@ IrVal irb_suspend(IrFunc *f, IrBlock b, IrVal value);
 
 /* Indirect call through the function table: `call_indirect (sig) v<idx> (args)`.
  * `idx` is an i32 function index (e.g. from irb_ref_func or a closure's fnref).
- * Single-result (i64 for the JACL closure ABI); returns its value id. */
+ * Single-result (i64 for the JACL closure ABI); returns its value id. A signature with
+ * more than one result aborts — there is no multi-result indirect call yet. */
 IrVal irb_call_indirect(IrFunc *f, IrBlock b,
                         const IrType *params, int nparams,
                         const IrType *results, int nresults,
@@ -127,7 +139,8 @@ IrVal irb_call_indirect(IrFunc *f, IrBlock b,
 /* §7 named import call, name-inline form: `call.import "name" (sig) v<handle> (args)`.
  * The linker resolves `name` against the runtime artifact's exports. `handle` is an
  * i32 value (use irb_const_i32(.., 0) for a linked import). Single-result (i64 for
- * jacl_* runtime calls); returns its value id. */
+ * jacl_* runtime calls); returns its value id. A signature with more than one result
+ * aborts — there is no multi-result import call yet. */
 IrVal irb_call_import(IrFunc *f, IrBlock b, const char *name,
                       const IrType *params, int nparams,
                       const IrType *results, int nresults,
