@@ -13,6 +13,11 @@
 #define JACLVAL_TRUE         ((int64_t)(((uint64_t)0x01 << 56) | 1)) /* JACL_TRUE */
 #define JACLVAL_NIL          ((int64_t)0)                        /* JACL_NIL   */
 #define JACLVAL_FLAG_ERROR   ((int64_t)((uint64_t)1 << 61))       /* JACL_FLAG_ERROR */
+#define JACLVAL_FLAG_SECRET  ((int64_t)((uint64_t)1 << 62))       /* JACL_FLAG_SECRET */
+#define JACLVAL_FLAG_TAINTED ((int64_t)((uint64_t)1 << 63))       /* JACL_FLAG_TAINTED */
+/* The three flags a raw, untagged word has nowhere to put. Tested as one mask at every
+ * dyn -> static crossing (jacl #95, INVARIANTS.md V3). */
+#define JACLVAL_FLAGS_ALL    (JACLVAL_FLAG_ERROR | JACLVAL_FLAG_SECRET | JACLVAL_FLAG_TAINTED)
 #define JACL_TAG_MASK_SHIFTED ((int64_t)((uint64_t)0xFF << 56))   /* type index + flag bits */
 static int64_t jaclval_i32(int32_t x) {
   return (int64_t)(JACL_TAG_I32_SHIFTED | (uint64_t)(uint32_t)x);
@@ -842,6 +847,7 @@ static IrVal emit_i32_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot)
 /* Lower `node` to a native i32 value, ORing each op's overflow into `ovf_slot`. Typed
  * `+ - *` (and `+% -% *%`) stay unboxed recursively; literals are i32 constants; anything
  * else is computed boxed then unboxed. */
+static IrVal emit_has_any_flag(Cx *cx, IrVal v);                     /* fwd */
 static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (cx->failed) return 0;
   if (node->type == AST_LIT_INT) {
@@ -888,7 +894,16 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
     }
     return acc;
   }
-  return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
+  /* A dyn value crossing into a raw i32. `unbox_i32` is a truncation, so every one of the
+   * three flags is about to be thrown away; under jacl #95 a flagged value must not become a
+   * static one at all. The i32 tier already has a channel for exactly this — the sticky
+   * overflow bit — so the flag test just ORs into it, and the tree root turns it into an
+   * error flag (`box_i32_checked`) or a branch (`compile_i32_tree_raw`) like any overflow.
+   * Branchless, and no new mechanism. */
+  IrVal boxed = compile_expr(cx, node);            /* var-refs, calls, dyn ops, … */
+  if (cx->failed) return 0;
+  ovf_mark(cx, ovf_slot, emit_has_any_flag(cx, boxed));
+  return unbox_i32(cx, boxed);
 }
 /* ---- typed i64: a raw, untagged 64-bit word (#106) ----
  *
@@ -969,12 +984,18 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
     }
     return acc;
   }
-  { /* A dyn value crossing into the raw world: the word cannot carry an error, so an error
-     * here has to leave by the same branch an overflow takes. */
+  { /* A dyn value crossing into the raw world. The word has no spare bits, so *none* of the
+     * three flags can survive the crossing — and under jacl #95 a flagged value must not
+     * become a static one at all. All three leave by the branch an overflow takes, with the
+     * error bit forced on so a merely tainted value arrives as an error rather than as a
+     * plain number that quietly lost its flag. (An already-error value is unchanged by the
+     * OR, so error propagation keeps its old behaviour exactly.) */
     IrVal v = compile_expr(cx, node);
     if (cx->failed) return 0;
     int pv = pin_push(cx, v);
-    emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
+    IrVal flagged = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, v,
+                               irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR));
+    emit_error_branch_if(cx, emit_has_any_flag(cx, v), flagged);
     v = pin_get(cx, pv);
     pin_drop(cx, pv);
     IrVal a[] = {cx->sp, v};
@@ -1206,6 +1227,17 @@ static IrVal emit_truthy(Cx *cx, IrVal cond) {
 static IrVal emit_is_error_bit(Cx *cx, IrVal v) {
   IrVal bit = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR);
   IrVal masked = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, v, bit);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  return irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, masked, zero);
+}
+/* Any of error / taint / secret. Used only where a dyn value crosses into a *static*
+ * representation: a raw word has no bits for any of the three, so all three have to leave by
+ * the same branch, and the rule that a flagged value cannot become a static one (jacl #95,
+ * INVARIANTS.md V3) is what makes dropping them sound rather than a silent hole. Costs
+ * exactly what the error-only test cost — a wider mask constant, the same two instructions. */
+static IrVal emit_has_any_flag(Cx *cx, IrVal v) {
+  IrVal bits = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAGS_ALL);
+  IrVal masked = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, v, bits);
   IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
   return irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, masked, zero);
 }

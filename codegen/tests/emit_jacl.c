@@ -78,6 +78,13 @@ static const char *source_for(const char *name) {
    * becomes a tail-calling adapter that every other caller keeps using. 3 + 4 = 7. */
   if (!strcmp(name, "typed_raw_params"))
     return "proc add {i32 a i32 b} i32 { + $a $b }\n[add 3 4]";
+  /* jacl #95 — a dyn value crossing into a raw word. Neither `[g 5]` nor `[inc $x]` is an
+   * arithmetic tree, so each takes the crossing fallback, where all three flags (error,
+   * taint, secret) have to be tested: the raw word has no bits to carry any of them. */
+  if (!strcmp(name, "flag_cross_i64"))
+    return "proc g {i64 n} i64 { * $n 3 }\nproc f {} i64 {\n def i64 a [g 5]\n [+ $a 1] }\n[f]";
+  if (!strcmp(name, "flag_cross_i32"))
+    return "proc inc {i32 n} i32 { + $n 1 }\nproc f {i32 x} i32 { + [inc $x] 1 }\n[f 4]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

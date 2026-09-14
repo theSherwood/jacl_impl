@@ -462,6 +462,29 @@ fn guard_falls_through_to_the_runtime() {
     run_case("guard_mod_neg", i32_val(-1));
 }
 
+// ---- jacl #95: a flagged dyn cannot become a static value ----
+
+/// `JACL_FLAG_ERROR | JACL_FLAG_SECRET | JACL_FLAG_TAINTED` — bits 61..63 as one i64 mask.
+const FLAGS_ALL: i64 = -2305843009213693952; // 0xE000_0000_0000_0000
+
+#[test]
+fn raw_crossing_tests_all_three_flags() {
+    // Where a dyn value crosses into a raw, untagged word, the word has nowhere to put any of
+    // the three flags. INVARIANTS.md V3 says a flagged value must not become a static one at
+    // all, so the crossing tests the whole mask, not just the error bit. Narrowing this back
+    // to `1 << 61` would launder taint and secret into a plain number, so pin the constant.
+    for case in ["flag_cross_i64", "flag_cross_i32"] {
+        let ir = emit_text(case);
+        assert!(
+            ir.contains(&format!("i64.const {FLAGS_ALL}")),
+            "{case}: the crossing must mask error|secret|tainted:\n{ir}"
+        );
+    }
+    // And the values still compute: 5 * 3 + 1 = 16, (4 + 1) + 1 = 6.
+    run_case("flag_cross_i64", i32_val(16));
+    run_case("flag_cross_i32", i32_val(6));
+}
+
 #[test]
 fn call_argument_survives_a_block_move() {
     // `[f 1 [if …]]` — the second argument's lowering leaves the block the first was
