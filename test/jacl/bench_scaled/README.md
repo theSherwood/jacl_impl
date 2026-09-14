@@ -9,13 +9,25 @@ JACL original** — that equality is the correctness gate for the comparison.
 | Scenario | What it stresses | Output |
 |---|---|---|
 | `fib` | recursive call dispatch + integer arithmetic (fib 34, ~11.4M calls) | `5702887` |
+| `fib_typed` | the same, annotated — what typing is worth on a call-heavy shape | `5702887` |
 | `sieve` | doubly-nested integer loop: `<=`, `%`, `==` (primes < 60000) | `6057` |
+| `sieve_typed` | the same, annotated — what typing is worth on a loop-heavy shape | `6057` |
 | `map_lookup` | hot hash-map reads (3M lookups over a 200-entry map) | `493733` |
 | `box_churn` | short-lived single-slot allocations (3M) | `21000000` |
 | `string_concat` | O(N²) immutable string building (400 rounds) | `160400` |
 
 `_baseline.jacl` (`print 0`) exists only to measure the TEMEN JIT's per-run compile
 tax; it is not a workload.
+
+> **Pass `_baseline.jacl` first, always.** The tax is ~260 ms on this harness, and the
+> scenarios above do 80–100 ms of actual work — so the raw `jit_min_us` column is *mostly
+> tax*, and two builds that differ by a few ms of guest execution look identical in it. Only
+> the `exec_est_us` column (`jit_min - baseline`), printed when a `_baseline` scenario is
+> present, is guest execution. `bench_temen` now warns when you leave it out; that warning
+> exists because the mistake was made and a wrong conclusion shipped with it (jacl #125).
+>
+> Even `exec_est_us` has a few ms of run-to-run variance, so treat anything under ~5% as
+> unresolved rather than as a measured null.
 
 ## What is measured
 

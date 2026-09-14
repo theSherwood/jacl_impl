@@ -93,6 +93,26 @@ typedef struct {
   int         fixed_arity;  /* count of fixed params before the rest (variadic only) */
   AstNode    *def; /* the proc AST_COMMAND, recompiled in pass 2 */
   IrFunc     *wrapper; /* lazily-created closure-ABI adapter for `$proc` value refs */
+  /* ---- raw-convention entry (#94 slice 2a) ----
+   *
+   * A proc with at least one `i32`/`i64` param gets a *second* function whose typed params
+   * arrive as raw, untagged words instead of tagged JaclVals — so a direct call that can
+   * prove the argument types skips the box at the call site and the unbox in the callee.
+   *
+   * Two entry points rather than one changed convention, deliberately. Making the single
+   * entry raw would oblige *every* caller to agree, and one that did not — a closure value,
+   * a module export, an indirect call — would hand a tagged JaclVal to code reading a raw
+   * word. That is silent garbage, the one failure mode INVARIANTS.md V7 forbids, and proving
+   * "this proc is never referenced as a value" across a whole program is exactly the kind of
+   * analysis that is easy to get subtly wrong. With two entries the boxed one stays correct
+   * for every caller that cannot prove anything, and the proof obligation is local to a call
+   * site that already has the types in hand.
+   *
+   * The body is compiled into `rawfunc`; `func` becomes a thin adapter that unboxes and
+   * forwards. Returns stay boxed — a raw return has no bit for the error flag (V6), so
+   * giving it one is its own slice. */
+  IrFunc     *rawfunc;              /* NULL when no param is a raw-able width */
+  uint8_t     prep[CG_MAX_PARAMS];  /* BindRep per param; REP_TAGGED where not proved */
 } Proc;
 
 /* A closure literal whose body is compiled after its creation site (a worklist, so
@@ -4020,7 +4040,41 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
         IrVal a[] = {cx->sp, fnref64, arg};
         return emit_rt_call(cx, "jacl_gen_new", a, 3);
       }
+      /* Raw entry (#94 slice 2a): take it only when *every* raw param has an argument the
+       * typer proved to the same width. A single unproved argument sends the whole call to
+       * the boxed entry — the two conventions cannot be mixed per-argument, and "mostly
+       * proved" is not a thing a calling convention can be. */
+      int use_raw = p->rawfunc != NULL;
+      for (int i = 0; use_raw && i < (int)argc; i++) {
+        if (p->prep[i] == REP_TAGGED) continue;
+        uint8_t want = p->prep[i] == REP_I32 ? TYPE_I32 : TYPE_I64;
+        if (node->data.command.args[i]->inferred_type != want) use_raw = 0;
+      }
       IrVal args[1 + CG_MAX_PARAMS];
+      if (use_raw) {
+        /* Each raw argument is compiled straight to a word, so nothing is boxed here and
+         * nothing is unboxed on the other side. The tagged ones go through the usual path. */
+        for (int i = 0; i < (int)argc; i++) {
+          int pm = pin_mark(cx);
+          for (int j = 0; j < i; j++) (void)pin_push(cx, args[1 + j]);
+          IrVal v;
+          if (p->prep[i] == REP_I32) {
+            IrVal raw = compile_i32_tree_raw(cx, node->data.command.args[i]);
+            v = raw;                                  /* already sign-extended to 64 bits */
+          } else if (p->prep[i] == REP_I64) {
+            v = compile_i64_tree(cx, node->data.command.args[i]);
+          } else {
+            v = compile_expr(cx, node->data.command.args[i]);
+          }
+          if (cx->failed) return 0;
+          for (int j = 0; j < i; j++) args[1 + j] = pin_get(cx, pm + j);
+          pin_release(cx, pm, i);
+          args[1 + i] = v;
+        }
+        args[0] = cx->sp;
+        emit_trace_line(cx, node->start.line);
+        return irb_call(cx->f, cx->cur, p->rawfunc, args, (int)argc + 1);
+      }
       if (argc && !compile_operands(cx, node->data.command.args, argc, args + 1)) return 0;
       args[0] = cx->sp; /* data-SP ABI: thread sp as the leading argument */
       emit_trace_line(cx, node->start.line);  /* record the call site on the caller frame */
@@ -5253,13 +5307,33 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
     for (int k = 0; k < nparams; k++) ptypes[k + 1] = IRB_I64;
     IrFunc *func = irb_func_new(m, ptypes, nparams + 1, r1, 1);
 
+    /* A raw-convention twin, when at least one param is a width a raw word can hold. The
+     * slots stay i64 — a raw i32 rides sign-extended, the same arrangement the frame uses —
+     * so only the *meaning* of the slot differs, not the IR signature. */
+    uint8_t prep[CG_MAX_PARAMS];
+    IrFunc *rawfunc = NULL;
+    for (int k = 0; k < CG_MAX_PARAMS; k++) prep[k] = REP_TAGGED;
+    if (!gen && !variadic) {
+      const char *ptypes_tok[CG_MAX_PARAMS]; uint32_t ptlens[CG_MAX_PARAMS];
+      int nt = extract_param_types(def->data.command.args[1], ptypes_tok, ptlens);
+      int any = 0;
+      for (int k = 0; k < nt && k < nparams; k++) {
+        if (!ptypes_tok[k] || ptlens[k] != 3) continue;
+        if (!memcmp(ptypes_tok[k], "i32", 3)) { prep[k] = REP_I32; any = 1; }
+        else if (!memcmp(ptypes_tok[k], "i64", 3)) { prep[k] = REP_I64; any = 1; }
+      }
+      if (any) rawfunc = irb_func_new(m, ptypes, nparams + 1, r1, 1);
+    }
+
     if (cx->nprocs == cx->cap_procs) {
       cx->cap_procs = cx->cap_procs ? cx->cap_procs * 2 : 8;
       cx->procs = realloc(cx->procs, (size_t)cx->cap_procs * sizeof(Proc));
       if (!cx->procs) { fprintf(stderr, "codegen: oom\n"); abort(); }
     }
     cx->procs[cx->nprocs++] =
-        (Proc){pname, plen, func, arity, gen, returns_stream, variadic, variadic ? arity - 1 : arity, def, NULL};
+        (Proc){pname, plen, func, arity, gen, returns_stream, variadic, variadic ? arity - 1 : arity,
+               def, NULL, rawfunc, {0}};
+    for (int k = 0; k < CG_MAX_PARAMS; k++) cx->procs[cx->nprocs - 1].prep[k] = prep[k];
   }
 }
 
@@ -5282,8 +5356,10 @@ static void compile_procs(Cx *cx) {
     int nparams = p->is_generator ? 1 : arity;
     IrType ptypes[1 + CG_MAX_PARAMS];
     for (int k = 0; k <= nparams; k++) ptypes[k] = IRB_I64;
-    cx->f = p->func;
-    cx->cur = irb_block(p->func, ptypes, nparams + 1);
+    /* The body goes into the raw entry when there is one; `func` becomes the adapter below. */
+    IrFunc *bodyfn = p->rawfunc ? p->rawfunc : p->func;
+    cx->f = bodyfn;
+    cx->cur = irb_block(bodyfn, ptypes, nparams + 1);
     cx->sp = 0; /* param 0 */
     cx->cur_is_generator = p->is_generator;
     env_reset(cx);
@@ -5300,8 +5376,28 @@ static void compile_procs(Cx *cx) {
         env_define(cx, names[k], lens[k], v, /*is_mut=*/0, /*is_cell=*/0);
       }
     } else {
-      for (int k = 0; k < arity; k++)
-        env_define(cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+      for (int k = 0; k < arity; k++) {
+        IrVal slot = (IrVal)(k + 1);
+        BindRep rep = p->rawfunc ? (BindRep)p->prep[k] : REP_TAGGED;
+        /* A captured param is read by a *closure* body, which knows nothing of this entry's
+         * convention and would read a raw word as a tag. So the raw slot is boxed once here
+         * and the name binds tagged: the calling convention is unchanged, only what the
+         * callee does with the word on arrival. (Slice 1a's `def i64` dodged this by
+         * refusing the raw representation for captured names outright; a param cannot, since
+         * the convention is fixed before the body is seen.) */
+        if (rep != REP_TAGGED && is_captured_name(cx, names[k], lens[k])) {
+          if (rep == REP_I32) slot = box_i32(cx, unbox_i32(cx, slot));
+          else { IrVal ba[] = {cx->sp, slot}; slot = emit_rt_call(cx, "jacl_i64_box", ba, 2); }
+          rep = REP_TAGGED;
+        }
+        env_define(cx, names[k], lens[k], slot, /*is_mut=*/0, /*is_cell=*/0);
+        /* In the raw entry a typed param's slot holds an untagged word, so the binding says
+         * so and every read goes through `env_value`/`env_raw_*` as it does for a `def`. */
+        if (rep != REP_TAGGED) {
+          Binding *b = env_lookup(cx, names[k], lens[k]);
+          if (b) b->rep = rep;
+        }
+      }
     }
 
     /* By-value `[Buf N T]` params: copy the caller's array into a fresh one so callee
@@ -5323,6 +5419,31 @@ static void compile_procs(Cx *cx) {
     compile_tail(cx, body); /* emits the proc's return / return_call (done) */
     scope_exit(cx);
     if (cx->failed) return;
+
+    /* The boxed entry: unbox each typed param and forward. Every caller that cannot prove
+     * the argument types — a closure value, a module export, an indirect call — lands here
+     * and is correct without knowing the raw entry exists. */
+    if (p->rawfunc) {
+      cx->f = p->func;
+      cx->cur = irb_block(p->func, ptypes, nparams + 1);
+      cx->sp = 0;
+      env_reset(cx);
+      IrVal fwd[1 + CG_MAX_PARAMS];
+      fwd[0] = (IrVal)0;
+      for (int k = 0; k < nparams; k++) {
+        IrVal a = (IrVal)(k + 1);
+        if (p->prep[k] == REP_I32) {
+          /* sign-extended, to the slot invariant the raw entry reads */
+          fwd[k + 1] = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, a));
+        } else if (p->prep[k] == REP_I64) {
+          IrVal ua[] = {(IrVal)0, a};
+          fwd[k + 1] = emit_rt_call(cx, "jacl_i64_unbox", ua, 2);
+        } else {
+          fwd[k + 1] = a;
+        }
+      }
+      irb_return_call(cx->f, cx->cur, p->rawfunc, fwd, nparams + 1);
+    }
   }
 }
 

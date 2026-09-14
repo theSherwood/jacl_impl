@@ -219,6 +219,35 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Typed params: a raw entry beside the boxed one
+
+A proc with `i32`/`i64` params gets a **second entry point** (jacl #94 slice 2a). The body is
+compiled against raw, untagged words; the original boxed-convention function becomes a thin
+adapter that unboxes and tail-calls it. A direct call that can prove its argument types calls
+the raw entry, so the box at the call site and the unbox in the callee both disappear.
+
+Two entries rather than one changed convention, deliberately. A single raw convention would
+oblige *every* caller to agree, and one that could not — a closure value, a module export, an
+indirect call — would hand a tagged JaclVal to code reading a raw word. That is the silent
+garbage V7 forbids, and proving "this proc is never referenced as a value" across a whole
+program is exactly the analysis that is easy to get subtly wrong. With two entries the boxed
+one stays correct for every caller that can prove nothing, and the proof obligation is local
+to a call site that already has the types in hand.
+
+Two rules the implementation must keep:
+
+- **All raw params or none, per call.** One unproved argument sends the whole call to the
+  boxed entry. The conventions cannot be mixed per-argument, and "mostly proved" is not a
+  thing a calling convention can be.
+- **A captured param is boxed on arrival.** The closure body that reads it knows nothing of
+  this entry's convention and would read a raw word as a tag. The convention is unchanged;
+  only what the callee does with the word on arrival is. (Slice 1a's `def i64` dodged this by
+  refusing the raw representation for captured names outright — a *param* cannot, since the
+  convention is fixed before the body is seen.)
+
+Returns stay boxed. A raw return has no bit for the error flag (V6), so giving it one is its
+own slice.
+
 ### Typed i32: a raw, untagged word
 
 A binding the typer proved is `i32` holds an untagged, **sign-extended** 32-bit word in its

@@ -74,6 +74,10 @@ static const char *source_for(const char *name) {
    * call and no monomorphic-guard diamond. 20 % 6 == 2, so the taken branch is 20 / 6 = 3. */
   if (!strcmp(name, "typed_cmp_divrem"))
     return "proc f {i32 a i32 b} i32 { if [== [% $a $b] 2] { / $a $b } { 0 } }\n[f 20 6]";
+  /* #94 slice 2a — a typed param arrives as a raw word at the raw entry; the boxed entry
+   * becomes a tail-calling adapter that every other caller keeps using. 3 + 4 = 7. */
+  if (!strcmp(name, "typed_raw_params"))
+    return "proc add {i32 a i32 b} i32 { + $a $b }\n[add 3 4]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */
