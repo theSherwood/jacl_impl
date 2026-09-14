@@ -55,6 +55,38 @@ int run(int n) {
     ok &= ((jacl_ne(ti, jaclrt_i32(8)) & JACL_FLAG_TAINTED) != 0);
   }
 
+  /* jacl #95 — taint and secret belong to *dynamic* values. Coercing a flagged value to any
+   * static type is an **error**, not a flag drop: the static representation has no bits to
+   * carry the flag, so allowing it would launder the value into a plain number. The refusal
+   * keeps the flags, so the fact is not lost with the cast.
+   *
+   * This is the only place the rule can be exercised at all — taint and secret have no
+   * source-level producer yet (NOT_IMPLEMENTED.md), so a `.jacl` corpus case cannot build a
+   * flagged value. The rule is enforced at the crossings so it holds the day one lands. */
+  {
+    JaclVal ti = jaclrt_i32(7) | JACL_FLAG_TAINTED;
+    JaclVal si = jaclrt_i32(7) | JACL_FLAG_SECRET;
+    JaclVal i32n = jacl_str_new("i32", 3), i64n = jacl_str_new("i64", 3);
+
+    ok &= jaclrt_is_error(jacl_to_cast(ti, i32n));
+    ok &= jaclrt_is_error(jacl_to_cast(ti, i64n));
+    ok &= jaclrt_is_error(jacl_to_cast(si, i32n));
+    ok &= ((jacl_to_cast(ti, i32n) & JACL_FLAG_TAINTED) != 0);   /* the refusal keeps the flag */
+    ok &= ((jacl_to_cast(si, i32n) & JACL_FLAG_SECRET) != 0);
+
+    /* the declared-binding widening (`def i64 x V`) is the same crossing */
+    ok &= jaclrt_is_error(jacl_widen_to(ti, jaclrt_i32(0x0E)));
+    ok &= jaclrt_is_error(jacl_widen_to(si, jaclrt_i32(0x10)));
+
+    /* and the raw-word crossing never hands back a laundered payload */
+    ok &= (jacl_i64_unbox(ti) == 0);
+    ok &= (jacl_i64_unbox(si) == 0);
+    ok &= (jacl_i64_unbox(jaclrt_i32(7)) == 7);                  /* unflagged still works */
+
+    /* an unflagged value is unaffected by any of it */
+    ok &= (jaclrt_as_i32(jacl_to_cast(jaclrt_i32(7), i32n)) == 7);
+  }
+
   /* #98: `box` snapshots without a deep copy for immediates, and still copies the two
    * mutable aggregates — a boxed arr does not observe later mutation of the source. */
   ok &= (jaclrt_as_i32(jacl_box_get(jacl_box_new(jaclrt_i32(5)))) == 5);

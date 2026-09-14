@@ -90,9 +90,10 @@ way out, which is what makes a typed `i64` holding `37` the same map key as the 
 tier to reach `dyn` at all — it cannot borrow a tag to remember it was unsigned, because
 under this model no tag carries that meaning.
 
-**A static value cannot carry the taint/secret flags** (jacl #95). An untagged word has
-nowhere to put them. That stops being a rule we enforce and becomes a fact of the
-representation.
+**A static value cannot carry the taint/secret flags** (jacl #95, `INVARIANTS.md` V3).
+Coercing a flagged `dyn` to any static type is an **error**, not a flag drop: an untagged word
+has no bits to carry the flag, so the alternative to refusing is laundering a tainted value
+into a plain number. The refusal keeps the flags, so the fact is not lost with the cast.
 
 ### The bigint tier
 
