@@ -1,0 +1,8 @@
+# The annotated twin of fib.jacl. #94 slice 2 is about keeping a typed value unboxed across
+# a *call* — params and returns — so this is the shape that measures it.
+proc fib {i32 n} i32 {
+  if [< $n 2] { + $n 0 } else {
+    + [fib [- $n 1]] [fib [- $n 2]]
+  }
+}
+print [fib 34]

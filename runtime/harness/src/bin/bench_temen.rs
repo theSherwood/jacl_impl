@@ -214,7 +214,18 @@ fn main() {
         ));
     }
 
-    // Baseline-subtracted execution estimate.
+    // Baseline-subtracted execution estimate. Without one, say so loudly: `jit_min_us` is
+    // dominated by a fixed ~260ms compile+startup tax, so for workloads in the tens of
+    // milliseconds the raw column is mostly tax and an A/B against it resolves nothing. This
+    // warning exists because that mistake was made and shipped a wrong conclusion.
+    if jit_baseline_min.is_none() {
+        eprintln!(
+            "\n!! No `_baseline` scenario given, so `jit_min_us` below INCLUDES the per-run\n\
+             !! compile+startup tax (~260ms on this harness) and is NOT guest execution time.\n\
+             !! Do not A/B those numbers. Re-run with test/jacl/bench_scaled/_baseline.jacl\n\
+             !! FIRST to get the `exec_est_us` column, which is what to compare."
+        );
+    }
     if let Some(base) = jit_baseline_min {
         eprintln!(
             "\nJIT per-run compile+startup tax (from _baseline): {:.1} us",
