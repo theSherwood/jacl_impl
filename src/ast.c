@@ -495,7 +495,7 @@ struct AstNode {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
     } command;
-    struct { int32_t   value; }                                    lit_int;
+    struct { int64_t   value; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
     struct { const char* name;    uint32_t length; }               var_ref;
@@ -679,7 +679,7 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
   switch (node->type) {
     case AST_LIT_INT: {
       char tmp[32];
-      int n = snprintf(tmp, sizeof(tmp), "%d", (int)node->data.lit_int.value);
+      int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)node->data.lit_int.value);
       ast__buf_str(b, tmp, (uint32_t)n);
       break;
     }

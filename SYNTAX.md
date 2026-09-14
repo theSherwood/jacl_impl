@@ -48,6 +48,29 @@ Interpolation inside `"…"` strings uses one non-trivial form for embedded expr
 - `\$` — escaped literal `$`
 - Forms nest: `"value: $[+ $x [vec-len $v]]"`
 
+## Integer literals
+
+An integer literal reaches `INT64_MAX` in every base:
+
+```jacl
+print 5000000000                              # decimal
+print 0xFFFFFFFF                              # hex
+print 0b111111111111111111111111111111111     # binary
+print 9223372036854775807                     # INT64_MAX
+```
+
+An unannotated literal is `dyn` — an integer of conceptually arbitrary precision, whose
+width is the compiler's business and never the program's. Under an annotation it is exactly
+that width, and a literal the width cannot hold is a type error (`def i32 x 5000000000`).
+Anything past `INT64_MAX` is a lex error for now — there is no bigint tier yet, so it is
+refused rather than promoted. `-9223372036854775808` is therefore out of reach as a literal
+(the digits are lexed before the `-` folds in); spell it as arithmetic.
+
+The five integer types: `i32`, `u32`, `i64`, `u64` are C variables — untagged, exactly that
+width at runtime, no implicit conversions between them (`[+ $u64 $i64]` is a type error;
+write the `to`). `dyn` is an integer, and promotes rather than overflowing. Full rules:
+`docs/TEMEN_NUMERICS.md` § "The integer model".
+
 ## Wrapping arithmetic: `+%` `-%` `*%`
 
 `+ - *` never wrap: on a dynamic value they promote to a wide int, and on a value the typer

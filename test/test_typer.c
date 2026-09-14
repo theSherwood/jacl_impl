@@ -129,13 +129,35 @@ static ParseResult run_typer(const char* src, arena_t* arena) {
 
 /* --- Test cases --------------------------------------------------- */
 
-static void test_int_literal_default(void) {
-  current_test = "int_literal_default";
+/* The integer model: an unannotated integer literal is `dyn`, not `i32`. Its width is the
+ * compiler's business (inline i32, boxed i64, boxed bigint), never the program's. */
+static void test_int_literal_default_is_dyn(void) {
+  current_test = "int_literal_default_is_dyn";
   arena_t a = {0};
   ParseResult r = run_typer("def x 5", &a);
   /* def NAME VALUE — args[1] is the literal */
   AstNode* def = r.nodes[0];
-  ASSERT_TYPE(def->data.command.args[1], TYPE_I32);
+  ASSERT_TYPE(def->data.command.args[1], TYPE_DYN);
+  arena_destroy(&a);
+}
+
+/* ...including one too wide for an i32. Magnitude does not make a literal static. */
+static void test_int_literal_past_i32_is_dyn(void) {
+  current_test = "int_literal_past_i32_is_dyn";
+  arena_t a = {0};
+  ParseResult r = run_typer("def x 5000000000", &a);
+  AstNode* def = r.nodes[0];
+  ASSERT_TYPE(def->data.command.args[1], TYPE_DYN);
+  arena_destroy(&a);
+}
+
+/* Under an annotation it is exactly that width. */
+static void test_int_literal_declared_i32(void) {
+  current_test = "int_literal_declared_i32";
+  arena_t a = {0};
+  ParseResult r = run_typer("def i32 x 5", &a);
+  AstNode* def = r.nodes[0];
+  ASSERT_TYPE(def->data.command.args[2], TYPE_I32);
   arena_destroy(&a);
 }
 
@@ -351,9 +373,10 @@ static void test_await_of_future_narrows_to_element(void) {
   /* Body's tail is i32 (default int literal type). Spawn's element
    * idx is set to JACL_SCALAR_TYPE_IDX(TYPE_I32); await unwraps to i32. */
   ParseResult r = run_typer(
-      "def f [spawn { 42 }]\n"
+      "def i32 n 42\n"
+      "def f [spawn { $n }]\n"
       "def x [await $f]", &a);
-  AstNode* aw = find_cmd(r.nodes[1], "await");
+  AstNode* aw = find_cmd(r.nodes[2], "await");
   ASSERT_NOT_NULL(aw);
   ASSERT_TYPE(aw, TYPE_I32);
   arena_destroy(&a);
@@ -436,8 +459,8 @@ static void test_try_unifies_body_and_handler(void) {
   current_test = "try_unifies_body_and_handler";
   arena_t a = {0};
   /* Body and handler both produce i32 → try result narrows to i32. */
-  ParseResult r = run_typer("def res [try { 1 } e { 2 }]", &a);
-  AstNode* tr = find_cmd(r.nodes[0], "try");
+  ParseResult r = run_typer("def i32 n 1\ndef res [try { $n } e { $n }]", &a);
+  AstNode* tr = find_cmd(r.nodes[1], "try");
   ASSERT_NOT_NULL(tr);
   ASSERT_TYPE(tr, TYPE_I32);
   arena_destroy(&a);
@@ -473,7 +496,7 @@ static void test_with_ctx_inherits_body_type(void) {
   /* with-ctx overrides body — result is the body's tail type. */
   ParseResult r = run_typer(
       "ctx mut i32 level 0\n"
-      "proc f {} { with-ctx { level 5 } { 42 } }", &a);
+      "proc f {} { with-ctx { level 5 } { def i32 n 42\n$n } }", &a);
   AstNode* proc = r.nodes[1];
   AstNode* wc = find_cmd(proc, "with-ctx");
   ASSERT_NOT_NULL(wc);
@@ -485,8 +508,8 @@ static void test_race_homogeneous_narrows(void) {
   current_test = "race_homogeneous_narrows";
   arena_t a = {0};
   /* All race bodies produce i32 — race result narrows to i32. */
-  ParseResult r = run_typer("def res [race { 1 } { 2 }]", &a);
-  AstNode* rc = find_cmd(r.nodes[0], "race");
+  ParseResult r = run_typer("def i32 n 1\ndef res [race { $n } { $n }]", &a);
+  AstNode* rc = find_cmd(r.nodes[1], "race");
   ASSERT_NOT_NULL(rc);
   ASSERT_TYPE(rc, TYPE_I32);
   arena_destroy(&a);
@@ -931,8 +954,8 @@ static void test_addr_of_scalar_field_returns_ptr(void) {
 static void test_box_of_int_typed(void) {
   current_test = "box_of_int_typed";
   arena_t a = {0};
-  ParseResult r = run_typer("def b [box 42]", &a);
-  AstNode* box = find_cmd(r.nodes[0], "box");
+  ParseResult r = run_typer("def i32 n 42\ndef b [box $n]", &a);
+  AstNode* box = find_cmd(r.nodes[1], "box");
   ASSERT_NOT_NULL(box);
   ASSERT_TYPE(box, TYPE_BOX);
   if (box) {
@@ -950,9 +973,10 @@ static void test_deref_box_narrows_to_int(void) {
   current_test = "deref_box_narrows_to_int";
   arena_t a = {0};
   ParseResult r = run_typer(
-      "def b [box 42]\n"
+      "def i32 n 42\n"
+      "def b [box $n]\n"
       "def x [deref $b]", &a);
-  AstNode* d = find_cmd(r.nodes[1], "deref");
+  AstNode* d = find_cmd(r.nodes[2], "deref");
   ASSERT_NOT_NULL(d);
   ASSERT_TYPE(d, TYPE_I32);
   arena_destroy(&a);
@@ -974,10 +998,11 @@ static void test_swap_box_narrows_to_element(void) {
   current_test = "swap_box_narrows_to_element";
   arena_t a = {0};
   ParseResult r = run_typer(
-      "def b [box 0]\n"
+      "def i32 z 0\n"
+      "def b [box $z]\n"
       "proc inc {x} { + $x 1 }\n"
       "def n [swap $b $inc]", &a);
-  AstNode* s = find_cmd(r.nodes[2], "swap");
+  AstNode* s = find_cmd(r.nodes[3], "swap");
   ASSERT_NOT_NULL(s);
   ASSERT_TYPE(s, TYPE_I32);
   arena_destroy(&a);
@@ -1128,7 +1153,9 @@ static void test_for_vec_enumerate(void) {
 int main(void) {
   printf("=== test_typer ===\n");
 
-  test_int_literal_default();
+  test_int_literal_default_is_dyn();
+  test_int_literal_past_i32_is_dyn();
+  test_int_literal_declared_i32();
   test_int_literal_promoted_to_i64();
   test_float_literal_default();
   test_float_literal_promoted_to_f64();

@@ -88,7 +88,7 @@ typedef struct {
   uint32_t  length;   /* length in bytes in the source */
   union {
     const char* text;      /* TOKEN_WORD, TOKEN_STRING, etc. */
-    int32_t     int_val;   /* TOKEN_INT */
+    int64_t     int_val;   /* TOKEN_INT (i32 when it fits; i64 literals reach INT64_MAX) */
     float       float_val; /* TOKEN_FLOAT */
     const char* error_msg; /* TOKEN_ERROR */
   } payload;
@@ -513,17 +513,16 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (ovf || val > (uint64_t)INT32_MAX) {
+    if (ovf || val > (uint64_t)INT64_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
-      tok.payload.error_msg =
-        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
+      tok.payload.error_msg = "integer literal out of i64 range";
       lexer__arr_push(arr, tok);
       (*error_count)++;
       return;
     }
     {
       Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
-      tok.payload.int_val = (int32_t)val;
+      tok.payload.int_val = (int64_t)val;
       lexer__arr_push(arr, tok);
     }
     return;
@@ -554,17 +553,16 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (ovf || val > (uint64_t)INT32_MAX) {
+    if (ovf || val > (uint64_t)INT64_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
-      tok.payload.error_msg =
-        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
+      tok.payload.error_msg = "integer literal out of i64 range";
       lexer__arr_push(arr, tok);
       (*error_count)++;
       return;
     }
     {
       Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
-      tok.payload.int_val = (int32_t)val;
+      tok.payload.int_val = (int64_t)val;
       lexer__arr_push(arr, tok);
     }
     return;
@@ -622,17 +620,20 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    if (ovf || int_val > (uint64_t)INT32_MAX) {
+    /* An integer literal reaches INT64_MAX. One past it is refused rather than promoted to
+     * a float: `docs/TEMEN_NUMERICS.md`'s tower goes to bigint next, and that tier does not
+     * exist yet (#106 slice 2). Note `-9223372036854775808` is out of reach for the same
+     * reason C needs `LLONG_MIN` — the digits are lexed before the sign is folded in. */
+    if (ovf || int_val > (uint64_t)INT64_MAX) {
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
-      tok.payload.error_msg =
-        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
+      tok.payload.error_msg = "integer literal out of i64 range";
       lexer__arr_push(arr, tok);
       (*error_count)++;
       return;
     }
     {
       Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
-      tok.payload.int_val = (int32_t)int_val;
+      tok.payload.int_val = (int64_t)int_val;
       lexer__arr_push(arr, tok);
     }
   }

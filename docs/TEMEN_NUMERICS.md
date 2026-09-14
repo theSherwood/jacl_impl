@@ -7,6 +7,86 @@ entry points. Everything here is about the *runtime* tower; the typer's static w
 (`i32`, `u64`, `f64`, …) drive which values flow in, but the runtime tower below is what
 actually executes.
 
+## The integer model
+
+One rule decides everything below it:
+
+> **A static type is a promise about representation. `dyn` is a promise about value.**
+
+There are five integer types. Four of them — `i32`, `u32`, `i64`, `u64` — are **C
+variables**: untagged, exactly the width the name says, no spare bits, no flags, no
+runtime type word. What a program declares is what the machine holds. The fifth, `dyn`, is
+**an integer**, conceptually of arbitrary precision; its width is a representation the
+compiler picks, re-picks, and never lets the program observe.
+
+### `dyn`: one word, three representations
+
+A `dyn` integer is always a tagged 64-bit word, in one of three forms:
+
+| form | when | tag |
+|---|---|---|
+| inline `i32` | the value fits `[INT32_MIN, INT32_MAX]` | `0x02` |
+| pointer to a boxed, untagged `i64` | it fits 64 bits signed | `0x0E` |
+| pointer to a boxed, untagged bigint | anything larger | `0x09` (reserved) |
+
+The form is chosen by **magnitude alone** — never by the path that computed the value.
+That is what `jacl_int_result` enforces, and it is not a nicety: `jacl_val_equal` settles
+integers by value while `jmap_key_hash` mixes the raw bits, so two representations of one
+number are *distinguishable* unless exactly one is canonical. A wide-computed `37` hashing
+to a different bucket than the inline `37` it compares equal to was a real, quiet map-lookup
+miss (jacl #107).
+
+Canonicalization is therefore the load-bearing part of "width is an implementation detail",
+and it runs in both directions: a value that grows past i32 boxes, and a value that shrinks
+back into i32 range un-boxes.
+
+### What follows from the rule
+
+**`dyn` arithmetic cannot fail on magnitude.** It promotes: inline i32 → boxed i64 →
+bigint. The only failures left are domain errors (division by zero, `%` by zero). This is
+the property that makes `dyn` worth having, and it is why the bigint tier is not optional
+garnish — see "Known gap" below.
+
+**A declared width errors on overflow.** The promoted value is not an `i32`, so an
+`i32`-annotated proc returning one would break its own signature. Wrapping silently is
+worse still: it would mean *adding an annotation changes a program's answers*, which would
+make widening the typer's reach a semantic change rather than a speed one. `+% -% *%` wrap,
+because there the program asked.
+
+**A declared width errors on a literal it cannot hold.** `def i32 x 5000000000` is a type
+error, for the same reason and at compile time. A *constant expression* counts as a literal
+here — `[* 2000000 1500]` under a declared `i64` multiplies at 64 bits — but adopting a
+width never changes the operation: `def f64 x [/ 1 2]` is still integer division, giving
+`0.0` exactly as C does. See `TYPE_SYSTEM.md` § 6.
+
+**No implicit conversions between static types — C widths, not C conversions.**
+`[+ $u64 $i64]` is a type error; write the `to` you mean. C's integer-promotion and
+usual-arithmetic-conversion ranking is a famous footgun (the signed operand converts to
+unsigned, and a negative number becomes enormous), and there is no reason to inherit it
+along with the widths.
+
+**`dyn` → static is explicit and checked; static → `dyn` is implicit and canonicalizes.**
+`[to "i32" $d]` is a **domain error** if `$d` does not fit — narrowing never truncates.
+The other direction needs no syntax and cannot fail: the value is re-canonicalized on the
+way out, which is what makes a typed `i64` holding `37` the same map key as the literal
+`37`.
+
+**Signedness is a static property only.** There is no such thing as a `dyn u64`: `dyn` is
+"integer", signed, unbounded. A static `u64` above `INT64_MAX` therefore needs the bigint
+tier to reach `dyn` at all — it cannot borrow a tag to remember it was unsigned, because
+under this model no tag carries that meaning.
+
+**A static value cannot carry the taint/secret flags** (jacl #95). An untagged word has
+nowhere to put them. That stops being a rule we enforce and becomes a fact of the
+representation.
+
+### Known gap
+
+`dyn` today errors past `INT64_MAX` instead of promoting to bigint, because the bigint tier
+does not exist yet (jacl #106 slice 2). That is a **violation of the model, not a rule of
+it** — the rule is that `dyn` never fails on magnitude. Read the "Wide (i64/u64) overflow"
+section below as a description of a temporary state.
+
 ## Values: inline scalars vs heap wides
 
 A `JaclVal` is a 64-bit tagged word — an 8-bit tag over a 56-bit payload (see
@@ -43,6 +123,37 @@ index, an accumulator that never leaves 32-bit range must not silently box itsel
 i64 every time it is touched. "Allocate only when the value genuinely needs the width" is
 the governing principle.
 
+## Integer literals
+
+An integer literal reaches `INT64_MAX`. The lexer accumulates every base (decimal, `0x`,
+`0b`) into a `uint64_t` and refuses anything past `INT64_MAX` — *refuses*, rather than
+promoting to a float or a bigint, because the bigint tier does not exist yet (jacl #106
+slice 2). Two consequences worth knowing:
+
+- `-9223372036854775808` is out of reach, for the same reason C needs `LLONG_MIN`: the
+  digits are lexed before the leading `-` folds in, so the magnitude is one past the
+  ceiling. Spell it `[- 0 9223372036854775807]` minus one, or wait for the bigint tier.
+- A literal one past `INT64_MAX` is a lex error, not a silently truncated number. It used
+  to be the latter (jacl #105).
+
+A literal that fits i32 lowers to the inline i32 constant the rest of the compiler expects.
+A wider one has no inline form — a dynamic wide int lives on the heap — so codegen builds it
+at run time through `jacl_i64_box`, the same canonicalizing box a typed i64 uses when it
+crosses to `dyn`. That is what lets a wide literal be a map key: it hashes like every other
+spelling of the same number.
+
+The typer types an out-of-i32 literal `i64` — including under an i32 *expectation*, because
+an i32 expectation is not always a user annotation: a binop unifies its operands by
+expecting the first one's type, which is what `[- 0 9223372036854775807]` is. A declared
+width is not enforced against a literal initializer either way; `def i32 x 5000000000`
+binds the i64, exactly as `def i8 x 300` already bound 300. That gap predates i64 literals
+and is not narrowed here.
+
+Two places still carry the literal as an i32 and now refuse a wider one instead of
+narrowing it silently: the staged-syntax plain-data form (`syn_rt.c` / `syn_wire.c`, i.e. a
+wide literal inside a quoted macro body) and a `[Buf N T]` length, which no buffer could
+reach anyway.
+
 ## Arithmetic
 
 `jacl_add` / `jacl_sub` / `jacl_mul` / `jacl_div` / `jacl_mod` take two `JaclVal`s and
@@ -68,6 +179,42 @@ return one, propagating the error flag (see below). The dispatch, in order:
 guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as `0 - x`,
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
+
+### Typed i64: a raw, untagged word
+
+A binding the typer proved is `i64` holds an **untagged 64-bit word** — a C variable, no tag
+and no spare bits (jacl #106). `codegen.c` tracks that on the binding (`Binding.rep`), and
+reads go through `env_value`, which boxes a raw binding back into a tagged JaclVal. That
+default is deliberate: a site that has not been taught about raw words gets a correct (if
+slower) value rather than reading a raw word as a tag, and a missed coercion would be silent
+garbage. Only the typed-arithmetic path opts into reading raw.
+
+Boxing on the way out canonicalizes, so a typed i64 holding `37` reaches dynamic code as the
+inline `37` that every other spelling produces — the same map key, the same `==`.
+
+Because the word has no spare bits, an overflowing typed op cannot return an error *value*
+the way an i32 tree's root does. It branches instead, through the enclosing `[try …]`
+handler or the function's error return, so the observable rule is the same ("a declared width
+errors on overflow, catchably") by a different mechanism. Add and subtract detect it inline
+from the operand and result signs; multiply asks `jacl_i64_mul_ovf`, because there is no sign
+trick for it and the obvious "divide back and compare" traps the host on `INT64_MIN / -1`.
+
+Slice 1a covers an immutable local inside a proc. A top-level binding is mirrored into the
+global map and a captured `mut` lives in a heap cell — both store a JaclVal, so an i64 bound
+that way stays tagged until those paths learn about raw words, as do `i64` proc parameters
+and returns (slice 1b) and `u64` (slice 1c).
+
+One wart inherited from the type system: `typer__infer_command` clears the expected type at
+command boundaries, so a declared type does not reach a binop over *literals* —
+`def i64 d [* 2000000 1500]` multiplies at i32 and reports the overflow rather than
+multiplying at 64 bits. `def i64 d [* $k 1500]` (one typed operand) does use the declared
+width. That matches C, where the same initializer also computes in `int`, and it now fails
+loudly rather than silently; widening it is a typer change with its own blast radius
+(jacl #112 — literals should be `dyn`, and a `dyn` product should promote).
+
+i64 literals sharpen the asymmetry without resolving it: `[* 5000000000 2]` promotes,
+because one operand is already too wide for i32 and the whole node types `i64`, while
+`[* 100000 100000]` still errors — same product, different spelling.
 
 ### Canonical dynamic integers
 

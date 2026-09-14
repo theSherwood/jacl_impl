@@ -23,6 +23,11 @@ HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(
 static const char *source_for(const char *name) {
   if (!strcmp(name, "add"))      return "[+ 1 2]";
   if (!strcmp(name, "nested"))   return "[+ 1 [* 2 3]]";
+  /* Typed twin of `nested`: a bare literal tree is `dyn` (jacl #112), so the typed-lowering
+   * test needs an actual annotation. `[* 2 3]` is a constant subtree and adopts the i32 the
+   * parameter gives it, which is what keeps the whole body on the unboxed path. */
+  if (!strcmp(name, "typed_nested"))
+    return "proc f {i32 n} i32 { + $n [* 2 3] }\n[f 1]";
   if (!strcmp(name, "submul"))   return "[- [* 4 5] 3]";
   if (!strcmp(name, "variadic")) return "[+ 1 2 3 4]";
   if (!strcmp(name, "div_mod"))  return "[+ [/ 20 6] [% 20 6]]";
@@ -59,6 +64,9 @@ static const char *source_for(const char *name) {
   if (!strcmp(name, "typed_wrap"))
     return "proc dbl {i32 n} i32 { +% $n $n }\ndef r [dbl 2000000000]\n[if [error? $r] { 1 } { 0 }]";
   if (!strcmp(name, "typed_no_ovf")) return "proc dbl {i32 n} i32 { + $n $n }\n[dbl 21]";
+  /* #106 slice 1a — a `def i64` local is a raw, untagged 64-bit word. */
+  if (!strcmp(name, "i64_raw"))
+    return "proc f {} {\n def i64 k 2000000\n def i64 d [* $k 1500]\n [+ $d 0] }\n[f]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

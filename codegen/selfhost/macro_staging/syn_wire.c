@@ -1,5 +1,6 @@
 /* syn_wire — AST subtree <-> flat byte buffer. See syn_wire.h. */
 #include "syn_wire.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,7 +35,13 @@ static void w_node(W *w, AstNode *n) {
   w_u32(w, n->scope_mark);
   w_u8(w, (unsigned)((n->is_caret ? 1u : 0u) | (n->is_gensym ? 2u : 0u)));
   switch (n->type) {
-    case AST_LIT_INT:   w_u32(w, (uint32_t)n->data.lit_int.value); break;
+    /* The staged form carries the literal as an i32 (syn_rt.c mirrors this wire byte for
+     * byte). A wider literal fails the encode rather than truncating — widening the staged
+     * syntax representation is jacl #113. */
+    case AST_LIT_INT:
+      if (n->data.lit_int.value < INT32_MIN || n->data.lit_int.value > INT32_MAX) { w->err = 1; return; }
+      w_u32(w, (uint32_t)(int32_t)n->data.lit_int.value);
+      break;
     case AST_LIT_FLOAT: { uint32_t b; memcpy(&b, &n->data.lit_float.value, 4); w_u32(w, b); } break;
     case AST_LIT_STRING: w_str(w, n->data.lit_string.value, n->data.lit_string.length); break;
     case AST_VAR_REF:    w_str(w, n->data.var_ref.name, n->data.var_ref.length); break;

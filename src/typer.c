@@ -215,6 +215,8 @@ static void typer__error(TyperCtx* tc, uint32_t line, uint32_t col,
 }
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
+static void typer__check_lit_range(TyperCtx* tc, AstNode* node, JaclType want);
+static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
 static bool typer__body_yields(AstNode* node);
 static uint32_t typer__register_inline_struct(TyperCtx* tc,
@@ -1077,7 +1079,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
   if (node->data.command.arg_count != 2) return true; /* shape error; caller reports */
   AstNode* n_arg = node->data.command.args[0];
   AstNode* t_arg = node->data.command.args[1];
-  if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0) {
+  if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0 &&
+      n_arg->data.lit_int.value <= INT32_MAX) {
     *out_len = (uint32_t)n_arg->data.lit_int.value;
   }
   if (t_arg->type == AST_LIT_STRING) {
@@ -1779,6 +1782,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   tc->expected_type   = declared_type;
   if (!def_proc_mono) typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
+  /* The expectation reaches a bare literal directly, but a *command* value resets it at its
+   * own boundary — so `def i64 d [* 2000000 1500]` walked as dyn. A constant subtree takes
+   * its width from context (see typer__retype_literal), so hand it the declared one here and
+   * the multiply happens at 64 bits rather than promoting and then needing a cast back. */
+  if (!def_proc_mono && value_node) (void)typer__retype_literal(tc, value_node, declared_type);
 
   /* Untyped binding of a standalone proc-literal RHS (`def f [proc {i32 x} i32
    * {…}]`): the value walk types it TYPE_CLOSURE but doesn't intern a shape.
@@ -2269,7 +2277,7 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
         if (sd->field_name_lens[fi] != fnl ||
             memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
         JaclType field_t = (JaclType)sd->field_types[fi];
-        JaclType val_t   = (JaclType)value->inferred_type;
+        JaclType val_t   = typer__retype_literal(tc, value, field_t);
         if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
             val_t != field_t &&
             !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
@@ -3886,14 +3894,26 @@ static void typer__idx_to_for_binding(TyperCtx* tc, uint32_t idx,
   }
 }
 
+/* Is this head a *selecting* form — one whose value is one of its branch tails rather than
+ * something it computes? `[if c { 2 } { 3 }]` in an i32 position is an i32 position for each
+ * branch; the form itself contributes no arithmetic of its own, so clearing the expectation
+ * across it would make `proc f {} i32 { if $c { 2 } { 3 } }` return dyn now that a bare
+ * literal is dyn. A *computing* form is the opposite and keeps the reset: it evaluates at
+ * its own operand types, the way C computes `double x = 1 / 2;` in int. */
+static bool typer__head_selects(uint8_t hid) {
+  return hid == HEAD_IF || hid == HEAD_TRY || hid == HEAD_RACE || hid == HEAD_WITH_CTX;
+}
+
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   /* Reset expected_type at command boundaries so sub-expressions don't
    * inherit parent context. Individual handlers (typed def/mut, set,
    * binary ops, proc calls) re-establish it for their own arguments.
    * Restored on exit so the caller's expected_type is preserved.
-   * Mirrors compiler.c:5199. */
+   * Mirrors compiler.c:5199. Selecting forms are the exception — see above.
+   * (A selecting form's *condition* inherits the expectation too; it is only ever tested
+   * for truthiness, so nothing reads the type it picks up.) */
   JaclType outer_et = tc->expected_type;
-  tc->expected_type = TYPE_DYN;
+  if (!typer__head_selects(node->data.command.head_id)) tc->expected_type = TYPE_DYN;
   typer__infer_command_inner(tc, node);
   tc->expected_type = outer_et;
 }
@@ -4876,7 +4896,7 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
         if (sd->field_name_lens[fi] != fnl ||
             memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
         JaclType field_t = (JaclType)sd->field_types[fi];
-        JaclType val_t   = (JaclType)val->inferred_type;
+        JaclType val_t   = typer__retype_literal(tc, val, field_t);
         if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
             val_t != field_t &&
             !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
@@ -4968,9 +4988,9 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
           tgt->scope_mark);
       if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
           b->struct_idx != UINT32_MAX) {
-        int32_t idx_lit = fld->data.lit_int.value;
+        int64_t idx_lit = fld->data.lit_int.value;
         if (b->type == TYPE_BUF &&
-            (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
+            (idx_lit < 0 || (uint64_t)idx_lit >= (uint64_t)b->buf_len)) {
           char buf_ty[96];
           /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
            * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
@@ -5011,8 +5031,8 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
           }
           char err[192];
           snprintf(err, sizeof(err),
-              "type error: buf index %d out of bounds for %s",
-              (int)idx_lit, buf_ty);
+              "type error: buf index %lld out of bounds for %s",
+              (long long)idx_lit, buf_ty);
           typer__error(tc, fld->start.line, fld->start.column, err);
           node->inferred_type = TYPE_DYN;
           return;
@@ -6187,6 +6207,13 @@ static int typer__infer_cmd_binop(TyperCtx* tc, AstNode* node, AstNode* head) {
     typer__infer_node(tc, rhs);
     tc->expected_type = saved_et;
     JaclType rhs_t = (JaclType)rhs->inferred_type;
+    /* A bare integer literal is `dyn`, so a literal on the *left* would drag the whole
+     * node to dyn and lose the typed lowering `[+ $n 1]` gets — `[+ 1 $n]` and `[+ $n 1]`
+     * would then disagree about whether overflow promotes or errors. Operands can't simply
+     * be inferred in the other order (one may contain a `def` the other reads), but a
+     * literal is a leaf with no scope effects, so it is safe to retype after the fact. */
+    lhs_t = typer__retype_literal(tc, lhs, rhs_t);
+    rhs_t = typer__retype_literal(tc, rhs, lhs_t);
     /* Concrete-mismatch (both sides non-DYN, different types):
      *  - Arithmetic (+ - * / %): always error per decision 1
      *    (no implicit widening; explicit cast required).
@@ -6973,9 +7000,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
 
 static void typer__infer_block(TyperCtx* tc, AstNode* node) {
   typer__scope_push(tc);
-  for (uint32_t i = 0; i < node->data.block.count; i++) {
+  /* A block's value is its tail, so an expectation on the block is an expectation on that
+   * one statement — everything before it is evaluated for effect and inherits nothing. */
+  JaclType saved_et = tc->expected_type;
+  uint32_t nstmt = node->data.block.count;
+  uint32_t tail = (nstmt > 0 && !node->data.block.trailing_semi) ? nstmt - 1 : nstmt;
+  for (uint32_t i = 0; i < nstmt; i++) {
+    tc->expected_type = (i == tail) ? saved_et : TYPE_DYN;
     typer__infer_node(tc, node->data.block.commands[i]);
   }
+  tc->expected_type = saved_et;
   if (node->data.block.count > 0 && !node->data.block.trailing_semi) {
     AstNode* last = node->data.block.commands[node->data.block.count - 1];
     node->inferred_type = last->inferred_type;
@@ -7033,19 +7067,104 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
   }
 }
 
+/* The inclusive range of an integer type, or false if `t` is not an integer width.
+ * u64's upper bound does not fit an int64_t; the lexer already caps a literal at INT64_MAX,
+ * so a literal can never exceed it and the bound is reported as INT64_MAX. */
+static bool typer__int_range(JaclType t, int64_t* lo, int64_t* hi) {
+  switch (t) {
+    case TYPE_I8:  *lo = INT8_MIN;   *hi = INT8_MAX;   return true;
+    case TYPE_U8:  *lo = 0;          *hi = UINT8_MAX;  return true;
+    case TYPE_I16: *lo = INT16_MIN;  *hi = INT16_MAX;  return true;
+    case TYPE_U16: *lo = 0;          *hi = UINT16_MAX; return true;
+    case TYPE_I32: *lo = INT32_MIN;  *hi = INT32_MAX;  return true;
+    case TYPE_U32: *lo = 0;          *hi = UINT32_MAX; return true;
+    case TYPE_I64: *lo = INT64_MIN;  *hi = INT64_MAX;  return true;
+    case TYPE_U64: *lo = 0;          *hi = INT64_MAX;  return true;
+    default: return false;
+  }
+}
+
+/* A declared width holds exactly the values it says it holds, so a literal outside it is a
+ * type error — not a truncation, and not a silent widening of the binding. The float widths
+ * are deliberately unchecked: a literal too large for an f32 loses precision, which is a
+ * different question from not fitting at all. */
+/* A bare numeric literal takes its width from context, but the context is not always known
+ * until after the value has been walked — a struct field's declared type is found by name,
+ * after the fact, and a binop's unifying type is whatever the *other* operand turned out to
+ * be. Operands cannot simply be walked in a different order (one may contain a `def` another
+ * reads), but a literal is a leaf with no scope effects, so it is safe to retype in place.
+ * Returns the node's type, updated or not. */
+/* Is this a compile-time integer constant — a literal, or `+ - *` over such? A constant
+ * subtree has no width of its own any more than a bare literal does, so it takes one from
+ * context: `proc f {i32 n} i32 { + $n [* 2 3] }` stays on the typed path instead of falling
+ * to dyn at the inner command's boundary.
+ *
+ * Deliberately *integer* targets only, and deliberately not `/` or `%`. Letting a constant
+ * subtree adopt a float width would make `def f64 x [/ 1 2]` evaluate as 0.5, where C — and
+ * every other language that types `1 / 2` by its operands — gives 0.0. The width a constant
+ * adopts may change the range it must fit; it must never change the operation performed. */
+static bool typer__is_int_const_expr(AstNode* n) {
+  if (n->type == AST_LIT_INT) return true;
+  if (n->type != AST_COMMAND) return false;
+  uint8_t hid = n->data.command.head_id;
+  if (hid != HEAD_PLUS && hid != HEAD_MINUS && hid != HEAD_STAR) return false;
+  if (n->data.command.arg_count == 0) return false;
+  for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+    if (!typer__is_int_const_expr(n->data.command.args[i])) return false;
+  return true;
+}
+
+static void typer__retype_int_const(TyperCtx* tc, AstNode* n, JaclType want) {
+  n->inferred_type = want;
+  if (n->type == AST_LIT_INT) { typer__check_lit_range(tc, n, want); return; }
+  for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+    typer__retype_int_const(tc, n->data.command.args[i], want);
+}
+
+static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want) {
+  JaclType have = (JaclType)v->inferred_type;
+  if (have != TYPE_DYN || want == TYPE_DYN || !is_numeric_type(want)) return have;
+  int64_t lo, hi;
+  bool int_want = typer__int_range(want, &lo, &hi);
+  if (v->type == AST_LIT_INT) {
+    if (int_want) typer__check_lit_range(tc, v, want);  /* a width that cannot hold it errors */
+    v->inferred_type = want;
+    return want;
+  }
+  if (v->type == AST_LIT_FLOAT) {
+    if (want != TYPE_F32 && want != TYPE_F64) return have;  /* 1.5 is not an i32, ever */
+    v->inferred_type = want;
+    return want;
+  }
+  if (int_want && typer__is_int_const_expr(v)) { typer__retype_int_const(tc, v, want); return want; }
+  return have;
+}
+
+static void typer__check_lit_range(TyperCtx* tc, AstNode* node, JaclType want) {
+  int64_t lo, hi;
+  if (!typer__int_range(want, &lo, &hi)) return;
+  int64_t v = node->data.lit_int.value;
+  if (v >= lo && v <= hi) return;
+  char err[160];
+  snprintf(err, sizeof(err), "type error: integer literal %lld out of range for %s",
+           (long long)v, type_name(want));
+  typer__error(tc, node->start.line, node->start.column, err);
+}
+
 static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   if (!node) return;
   switch (node->type) {
     case AST_LIT_INT: {
-      /* Mirror compiler.c:11061-11093: expected_type can promote an int
-       * literal to i64/u64/f64/u32/f32. Default is i32. */
-      switch (tc->expected_type) {
-        case TYPE_I64: node->inferred_type = TYPE_I64; break;
-        case TYPE_U64: node->inferred_type = TYPE_U64; break;
-        case TYPE_F64: node->inferred_type = TYPE_F64; break;
-        case TYPE_U32: node->inferred_type = TYPE_U32; break;
-        case TYPE_F32: node->inferred_type = TYPE_F32; break;
-        default:       node->inferred_type = TYPE_I32; break;
+      /* The integer model (docs/TEMEN_NUMERICS.md): an unannotated integer literal is
+       * `dyn` — an integer, conceptually of arbitrary precision. Under an expectation of
+       * a concrete numeric width it *is* that width exactly, and a literal the width
+       * cannot hold is a type error rather than a truncation. */
+      JaclType want = tc->expected_type;
+      if (is_numeric_type(want) && want != TYPE_DYN) {
+        node->inferred_type = want;
+        typer__check_lit_range(tc, node, want);
+      } else {
+        node->inferred_type = TYPE_DYN;
       }
       break;
     }

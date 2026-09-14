@@ -272,6 +272,10 @@ JaclVal jacl_sub(JaclVal a, JaclVal b);
 JaclVal jacl_mul(JaclVal a, JaclVal b);
 JaclVal jacl_div(JaclVal a, JaclVal b);    /* div-by-zero -> error */
 JaclVal jacl_mod(JaclVal a, JaclVal b);    /* mod-by-zero -> error */
+/* Raw <-> tagged for a typed i64 (an untagged 64-bit word); the box direction canonicalizes. */
+int64_t jacl_i64_unbox(JaclVal v);
+JaclVal jacl_i64_box(int64_t x);
+int64_t jacl_i64_mul_ovf(int64_t a, int64_t b);   /* 1 when a*b overflows 64 bits */
 /* `+% -% *%` — wrap modulo the operand width (i32 or wide); non-integers are a type error. */
 JaclVal jacl_wrap_add(JaclVal a, JaclVal b);
 JaclVal jacl_wrap_sub(JaclVal a, JaclVal b);

@@ -228,6 +228,60 @@ literals → var-refs → blocks → commands → declarations, making
 each shape's typing total before moving to the next. Recorded for
 the same shape of work if a future change re-opens the migration.
 
+### 6. The integer model — C widths, or arbitrary precision
+
+`docs/TEMEN_NUMERICS.md` § "The integer model" is authoritative; this is the half the typer
+owns. The governing rule:
+
+> **A static type is a promise about representation. `dyn` is a promise about value.**
+
+`i32`, `u32`, `i64`, `u64` are C variables — untagged, exactly that width at runtime.
+`dyn` is an integer of conceptually arbitrary precision whose representation (inline i32,
+boxed i64, boxed bigint) is never observable. Four typer consequences:
+
+**An unannotated integer literal is `dyn`, not `i32`.** `[* 100000 100000]` promotes; it
+does not overflow. This is the rule that makes the model consistent, and it is why the
+inline i32 representation stops meaning "the static type i32" and starts meaning "`dyn`'s
+narrow form".
+
+**A constant takes its width from context; nothing else does.** A bare literal, and a
+`+ - *` tree whose leaves are all literals, has no width of its own — so it adopts the one
+its context supplies, and a context that cannot hold it is an error. This is what keeps
+`proc f {i32 n} i32 { + $n [* 2 3] }` on the typed path, and what makes
+`def i64 d [* 2000000 1500]` multiply at 64 bits instead of promoting and needing a cast
+back.
+
+Two limits on that, both deliberate. It applies to **integer** targets only: letting a
+constant subtree adopt a float width would make `def f64 x [/ 1 2]` evaluate as `0.5`,
+where C — and every language that types `1 / 2` by its operands — gives `0.0`. *The width a
+constant adopts may change the range it must fit; it must never change the operation
+performed.* And `/` and `%` are excluded from the constant shapes for the same reason.
+
+Context arrives after the fact in two cases, so the adoption is a **retype in place**
+(`typer__retype_literal`) rather than a second walk: a binop's unifying width is whatever
+the *other* operand turned out to be, and a struct field's declared type is found by name
+after the value was walked. Operands cannot simply be walked in a different order — one may
+contain a `def` another reads — but a constant subtree has no scope effects, so retyping it
+afterwards is safe.
+
+**A selecting form propagates the expectation; a computing form does not.** `if`, `try`,
+`race` and `with-ctx` produce one of their branch tails and compute nothing of their own, so
+an expectation on the form is an expectation on each branch:
+`proc f {} i32 { if $c { 2 } { 3 } }` returns `i32`. Every other command keeps the
+boundary reset — it evaluates at its own operand types. A block propagates to its tail
+statement only; the statements before it are evaluated for effect and inherit nothing.
+
+**A declared width rejects a literal it cannot hold.** `def i32 x 5000000000` and
+`def i8 x 300` are type errors, at the `def`.
+
+**No implicit conversions between static types.** `[+ $u64 $i64]` is a type error; write
+the `to`. We take C's *widths*, not C's conversion ranking — under which the signed operand
+silently becomes unsigned and a negative number becomes enormous.
+
+Crossing the barrier keeps decision 2's shape, now with a range check: `dyn` → static is
+explicit (`[to "i32" $d]`) and a **domain error** when the value does not fit — narrowing
+never truncates. Static → `dyn` is implicit, cannot fail, and canonicalizes on the way out.
+
 ## Cross-module typing
 
 Pre-pass in `compiler__collect_typer_imports` triggers dependency

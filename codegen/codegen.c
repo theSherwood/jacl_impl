@@ -51,6 +51,14 @@ static const char *binary_runtime_fn(uint8_t head_id) {
 #define IRB_MAX_FRAME 256
 #define CG_MAX_PARAMS 64
 
+/* How a binding's value is represented in its frame slot. A `dyn` binding holds a tagged
+ * JaclVal; one the typer proved is `i64` holds an untagged 64-bit word — a C variable, no
+ * tag, no spare bits (#106). Reading always goes through `env_value`, which coerces a raw
+ * binding back to a tagged JaclVal, so a site that has not been taught about raw values
+ * gets a correct (if slower) value instead of reading a raw word as a tag. A missed
+ * coercion would be silent garbage, so the default has to be the safe one. */
+typedef enum { REP_TAGGED = 0, REP_I64 } BindRep;
+
 typedef struct {
   const char *name;
   uint32_t    len;
@@ -60,6 +68,7 @@ typedef struct {
   /* static annotation carried from a typed [Arr T]/[Buf N T] def (compile-time checks) */
   const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
   int32_t     buf_size;                            /* fixed Buf length, or -1 */
+  BindRep     rep;                                 /* tagged JaclVal, or a raw i64 word */
 } Binding;
 
 /* A top-level proc: name -> its TEMEN function + arity. Registered before any body is
@@ -237,6 +246,41 @@ static void locals_push(Cx *cx, Binding b) {
   cx->locals[cx->nlocals++] = b;
 }
 
+/* Read a binding as a tagged JaclVal — the safe default. A raw i64 binding is boxed here,
+ * and the box canonicalizes (#107), so a typed i64 holding 37 reaches dynamic code as the
+ * inline 37 every other spelling produces. */
+static IrVal emit_rt_call(Cx *cx, const char *fn, const IrVal *args, int nargs);   /* fwd */
+static IrVal env_value(Cx *cx, Binding *bd) {
+  if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
+  if (bd->rep == REP_I64) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_i64_box", a, 2); }
+  return bd->value;
+}
+/* Read a binding as a raw 64-bit word, for the typed-i64 arithmetic path. A tagged binding
+ * is unwrapped through the runtime, which is the slow direction — the typed path is meant
+ * to be reading raw bindings. */
+static IrVal env_raw_i64(Cx *cx, Binding *bd) {
+  if (bd->rep == REP_I64 && !bd->is_cell) return bd->value;
+  IrVal a[] = {cx->sp, env_value(cx, bd)};
+  return emit_rt_call(cx, "jacl_i64_unbox", a, 2);
+}
+
+/* Does this AST_LIT_INT fit the i32 the rest of the compiler assumes? An integer literal
+ * reaches INT64_MAX (#106), so the paths that can only carry an i32 have to ask. */
+static int lit_fits_i32(AstNode *n) {
+  return n->data.lit_int.value >= INT32_MIN && n->data.lit_int.value <= INT32_MAX;
+}
+/* A JaclVal for an integer literal. Anything that fits i32 is the inline constant the rest
+ * of the compiler expects. A wider literal has no inline form — a dynamic wide int lives on
+ * the heap — so it is built at runtime through the same canonicalizing box a typed i64 uses
+ * when it crosses to dyn (#106/#107). The call cannot end a block, so a literal still
+ * "stays put" for the pinning rules below. */
+static IrVal lit_int_val(Cx *cx, int64_t v) {
+  if (v >= INT32_MIN && v <= INT32_MAX)
+    return irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)v));
+  IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, v)};
+  return emit_rt_call(cx, "jacl_i64_box", a, 2);
+}
+
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
   /* Re-binding is allowed for the throwaway `_`, and at the outermost module scope where a
@@ -249,7 +293,7 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
       cx_failf(cx, "codegen: variable '%.*s' already defined in this scope", name, len);
       return;
     }
-  locals_push(cx, (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1});
+  locals_push(cx, (Binding){name, len, value, is_mut, is_cell, NULL, 0, -1, REP_TAGGED});
 }
 
 /* ---- operand pins ----
@@ -262,7 +306,7 @@ static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int 
  * current SSA id. Pins are LIFO and live only within one expression. */
 static int pin_push(Cx *cx, IrVal v) {
   int slot = cx->nlocals;
-  locals_push(cx, (Binding){"", 0, v, /*is_mut=*/0, /*is_cell=*/0, NULL, 0, -1});
+  locals_push(cx, (Binding){"", 0, v, /*is_mut=*/0, /*is_cell=*/0, NULL, 0, -1, REP_TAGGED});
   return slot;
 }
 static IrVal pin_get(Cx *cx, int slot) { return cx->locals[slot].value; }
@@ -698,7 +742,10 @@ static int i32_operand_stays_put(AstNode *n) {
  * else is computed boxed then unboxed. */
 static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (cx->failed) return 0;
-  if (node->type == AST_LIT_INT) return irb_const_i32(cx->f, cx->cur, node->data.lit_int.value);
+  if (node->type == AST_LIT_INT) {
+    if (!lit_fits_i32(node)) { cx_fail(cx, "integer literal out of range for i32"); return 0; }
+    return irb_const_i32(cx->f, cx->cur, (int32_t)node->data.lit_int.value);
+  }
   if (i32_arith(node)) {
     uint8_t hid = node->data.command.head_id;
     int wraps = i32_arith_wraps(hid);
@@ -731,6 +778,111 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   }
   return unbox_i32(cx, compile_expr(cx, node)); /* var-refs, calls, dyn ops, … */
 }
+/* ---- typed i64: a raw, untagged 64-bit word (#106) ----
+ *
+ * Where the typer proved `i64`, the value is a machine word in a frame slot — no tag, and
+ * therefore no spare bits to carry an error flag the way an i32 tree's result does. So an
+ * overflowing op cannot return an error *value*: it branches out through the enclosing
+ * `[try …]` handler or the function's error return, which is the same observable rule
+ * ("a declared width errors on overflow, catchably") reached by a different mechanism.
+ *
+ * The branch is emitted once, at the tree's root, off a sticky bit the ops OR into — so the
+ * ops themselves stay straight-line and an operand's block moves cannot strand the
+ * accumulator (the sticky bit and the accumulator both ride the frame as pins). */
+static void emit_error_branch_if(Cx *cx, IrVal truth, IrVal errv);   /* fwd */
+static IrVal emit_is_error_bit(Cx *cx, IrVal v);                     /* fwd */
+static int i64_arith(AstNode *node) {
+  if (node->type != AST_COMMAND || node->inferred_type != TYPE_I64) return 0;
+  uint8_t hid = node->data.command.head_id;
+  return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR ||
+         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
+}
+static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot);
+
+/* `a op b` on raw words, ORing "this overflowed" into the sticky pin. There is no wider
+ * machine type to compute in, so the overflow is derived from the operands and the result:
+ *   add  — the operands agreed in sign and the result disagrees with them
+ *   sub  — the operands differed in sign and the result disagrees with the left one
+ *   mul  — dividing back does not recover the left operand (guarding the zero case) */
+static IrVal emit_i64_op(Cx *cx, IrBinOp op, IrVal a, IrVal b, int wraps, int ovf_slot) {
+  IrVal r = irb_intbin(cx->f, cx->cur, IRB_I64, op, a, b);
+  if (wraps) return r;
+  IrVal wide;
+  if (op == IRB_MUL) {
+    /* No sign trick for multiply, and "divide back and compare" traps on INT64_MIN / -1,
+     * so the runtime answers this one. Add and subtract stay inline. */
+    IrVal ma[] = {cx->sp, a, b};
+    wide = emit_rt_call(cx, "jacl_i64_mul_ovf", ma, 3);
+  } else {
+    IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+    IrVal ab = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, a, b);
+    IrVal ar = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, a, r);
+    /* add overflows when the operands agreed in sign (a^b >= 0) and the result disagrees
+     * with them (a^r < 0); subtract, when they differed (a^b < 0) and a^r < 0 */
+    IrVal same_sign = irb_intcmp(cx->f, cx->cur, IRB_I64, op == IRB_ADD ? IRB_GE_S : IRB_LT_S,
+                                 ab, zero);
+    IrVal flipped = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_LT_S, ar, zero);
+    IrVal bad = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, same_sign, flipped);
+    wide = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, bad);
+  }
+  cx->locals[ovf_slot].value =
+      irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, pin_get(cx, ovf_slot), wide);
+  return r;
+}
+
+static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
+  if (cx->failed) return 0;
+  if (node->type == AST_LIT_INT)
+    return irb_const_i64(cx->f, cx->cur, (int64_t)node->data.lit_int.value);
+  if (node->type == AST_VAR_REF) {
+    Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
+    if (bd) return env_raw_i64(cx, bd);
+  }
+  if (i64_arith(node)) {
+    uint8_t hid = node->data.command.head_id;
+    int wraps = i32_arith_wraps(hid);
+    IrBinOp op = (hid == HEAD_PLUS || hid == HEAD_PLUS_PCT) ? IRB_ADD
+               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB : IRB_MUL;
+    uint32_t argc = node->data.command.arg_count;
+    IrVal acc = compile_raw_i64(cx, node->data.command.args[0], ovf_slot);
+    for (uint32_t i = 1; i < argc; i++) {
+      AstNode *arg = node->data.command.args[i];
+      int pa = i32_operand_stays_put(arg) ? -1 : pin_push(cx, acc);   /* raw words ride as is */
+      IrVal r = compile_raw_i64(cx, arg, ovf_slot);
+      if (pa >= 0) { acc = pin_get(cx, pa); pin_drop(cx, pa); }
+      if (cx->failed) return 0;
+      acc = emit_i64_op(cx, op, acc, r, wraps, ovf_slot);
+    }
+    return acc;
+  }
+  { /* A dyn value crossing into the raw world: the word cannot carry an error, so an error
+     * here has to leave by the same branch an overflow takes. */
+    IrVal v = compile_expr(cx, node);
+    if (cx->failed) return 0;
+    int pv = pin_push(cx, v);
+    emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
+    v = pin_get(cx, pv);
+    pin_drop(cx, pv);
+    IrVal a[] = {cx->sp, v};
+    return emit_rt_call(cx, "jacl_i64_unbox", a, 2); }
+}
+
+/* Compile a typed i64 tree to a raw word, branching out on overflow at the root. */
+static IrVal compile_i64_tree(Cx *cx, AstNode *node) {
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrVal v = compile_raw_i64(cx, node, ovf);
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+  int pv = pin_push(cx, v);
+  IrVal bit = pin_get(cx, ovf);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
+  IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
+  emit_error_branch_if(cx, truth, errv);
+  v = pin_get(cx, pv);
+  pin_release(cx, ovf, 2);
+  return v;
+}
+
 /* Compile a whole typed i32 tree to a boxed JaclVal, error-flagged if any op overflowed. */
 static IrVal compile_i32_tree(Cx *cx, AstNode *node) {
   int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
@@ -1947,12 +2099,13 @@ static IrVal compile_filter_transform(Cx *cx, IrVal src, IrVal clo, int is_filte
   return (IrVal)w;   /* the merge block's extra param = the result */
 }
 
-/* Statement-position error auto-return (old-VM semantics): if a non-tail statement
- * evaluates to an error-flagged value, return it from the enclosing function now.
- * Splits the current block: err path returns, cont path carries the frame on. */
-static void emit_stmt_error_check(Cx *cx, IrVal v) {
+/* Leave the current computation with `errv` when `truth` is set — to the enclosing
+ * `[try …]` handler if there is one, else returning it from the function. Emission
+ * continues in the not-taken block. This is the statement-position error auto-return's
+ * machinery, shared so a typed i64 overflow can use it: a raw 64-bit word has no spare bits
+ * to carry an error flag, so its overflow has to be a branch rather than a value (#106). */
+static void emit_error_branch_if(Cx *cx, IrVal truth, IrVal errv) {
   if (cx->failed || !frame_guard(cx)) return;
-  IrVal truth = emit_is_error_bit(cx, v);
   int w = frame_width(cx);
   IrBlock cont = new_i64_block(cx, w);
   IrVal frame[IRB_MAX_FRAME + 2];
@@ -1962,17 +2115,24 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
      * to the handler block instead of returning from the function. */
     IrVal hf[IRB_MAX_FRAME + 2];
     for (int i = 0; i < cx->try_width; i++) hf[i] = frame[i];
-    hf[cx->try_width] = v;
+    hf[cx->try_width] = errv;
     irb_br_if(cx->f, cx->cur, truth, cx->try_target, hf, cx->try_width + 1, cont, frame, w);
   } else {
     IrBlock err_blk = new_i64_block(cx, 1);
-    IrVal ef[1] = {v};
+    IrVal ef[1] = {errv};
     irb_br_if(cx->f, cx->cur, truth, err_blk, ef, 1, cont, frame, w);
     cx->cur = err_blk;
     IrVal rv[1] = {(IrVal)0};      /* err_blk's single param: the error value */
     irb_return(cx->f, err_blk, rv, 1);
   }
   enter_frame_block(cx, cont);
+}
+
+/* Statement-position error auto-return (old-VM semantics): if a non-tail statement
+ * evaluates to an error-flagged value, return it from the enclosing function now. */
+static void emit_stmt_error_check(Cx *cx, IrVal v) {
+  if (cx->failed) return;
+  emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
@@ -2059,6 +2219,7 @@ static int32_t buf_ann_size(AstNode *ann) {
   if (ann->data.command.head->data.lit_string.length != 3 ||
       memcmp(ann->data.command.head->data.lit_string.value, "Buf", 3) != 0) return -1;
   if (ann->data.command.arg_count < 1 || ann->data.command.args[0]->type != AST_LIT_INT) return -1;
+  if (!lit_fits_i32(ann->data.command.args[0])) return -1;   /* no buffer is that long */
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
@@ -2667,7 +2828,11 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
   v = syn_vpush(cx, v, syn_i32(cx, (t->is_caret ? 1 : 0) | (t->is_gensym ? 2 : 0)));
   switch (t->type) {
     case AST_LIT_INT:
-      v = syn_vpush(cx, v, syn_i32(cx, t->data.lit_int.value));
+      /* The staged-syntax plain-data form carries the literal as an i32 (syn_rt.c and
+       * syn_wire.c agree on that shape). Refuse a wider one rather than truncate it;
+       * widening the staged form is jacl #113. */
+      if (!lit_fits_i32(t)) { cx_fail(cx, "integer literal out of range for a quoted syntax node"); return 0; }
+      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.lit_int.value));
       break;
     case AST_LIT_FLOAT: {
       union { float f; uint32_t u; } fb; fb.f = (float)t->data.lit_float.value;
@@ -2952,19 +3117,18 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     if (node->data.command.args[0]->type == AST_VAR_REF) {
       Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
                                node->data.command.args[0]->data.var_ref.length);
-      int32_t ix = (int32_t)node->data.command.args[1]->data.lit_int.value;
+      int64_t ix = node->data.command.args[1]->data.lit_int.value;
       if (bb && bb->buf_size >= 0 && (ix < 0 || ix >= bb->buf_size)) {
         char msg[128];
-        snprintf(msg, sizeof msg, "buf index %d out of bounds for [Buf %d %.*s]",
-                 ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
+        snprintf(msg, sizeof msg, "buf index %lld out of bounds for [Buf %d %.*s]",
+                 (long long)ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
         cx_fail(cx, msg);
         return 0;
       }
     }
     IrVal bv = compile_expr(cx, node->data.command.args[0]);
     if (cx->failed) return 0;
-    IrVal idx = irb_const_i64(cx->f, cx->cur,
-                              jaclval_i32((int32_t)node->data.command.args[1]->data.lit_int.value));
+    IrVal idx = lit_int_val(cx, node->data.command.args[1]->data.lit_int.value);
     IrVal a[] = {cx->sp, bv, idx};
     return emit_rt_call(cx, "jacl_index_get", a, 3);
   }
@@ -3004,7 +3168,7 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     (void)pin_push(cx, compile_expr(cx, node->data.command.args[0]));
     if (cx->failed) return 0;
     if (keyn->type == AST_LIT_INT) {
-      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)keyn->data.lit_int.value)));
+      (void)pin_push(cx, lit_int_val(cx, keyn->data.lit_int.value));
       IrVal val = compile_expr(cx, node->data.command.args[2]);
       if (cx->failed) return 0;
       IrVal a[] = {cx->sp, pin_get(cx, dpm), pin_get(cx, dpm + 1), val};
@@ -3235,19 +3399,35 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       cx_fail(cx, "binding form needs a name and a value");
       return 0;
     }
-    cx->move_ok = 1;   /* the value goes straight into the binding */
-    IrVal val = compile_expr(cx, bargs[tshift + 1]);
-    if (cx->failed) return 0;
-    /* `def i64/u64/f64 x V` — widen the value to the declared wide scalar so
-     * arithmetic on it promotes past 32 bits. */
-    if (tshift && bargs[0]->type == AST_LIT_STRING && bargs[0]->data.lit_string.length == 3) {
-      const char *tw = bargs[0]->data.lit_string.value;
-      int kind = !memcmp(tw, "i64", 3) ? 0x0E : !memcmp(tw, "u64", 3) ? 0x0F
-               : !memcmp(tw, "f64", 3) ? 0x10 : 0;
-      if (kind) {
-        IrVal kc = irb_const_i64(cx->f, cx->cur, jaclval_i32(kind));
-        IrVal wa[] = {cx->sp, val, kc};
-        val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
+    /* `def i64 x V` — the binding holds a raw, untagged 64-bit word (#106), so compile the
+     * value straight to one rather than boxing it and immediately unboxing. */
+    /* Slice 1a keeps the raw representation to the case with no other machinery in the way:
+     * an immutable local inside a proc. A top-level binding is mirrored into the global map,
+     * and a captured `mut` lives in a heap cell — both of those store a JaclVal, so an i64
+     * bound that way stays tagged until those paths learn about raw words. */
+    int decl_i64 = tshift && bargs[0]->type == AST_LIT_STRING &&
+                   bargs[0]->data.lit_string.length == 3 &&
+                   memcmp(bargs[0]->data.lit_string.value, "i64", 3) == 0 &&
+                   hid == HEAD_DEF && !cx->at_top_level && !is_captured_name(cx, name, len);
+    IrVal val;
+    if (decl_i64) {
+      val = compile_i64_tree(cx, bargs[tshift + 1]);
+      if (cx->failed) return 0;
+    } else {
+      cx->move_ok = 1;   /* the value goes straight into the binding */
+      val = compile_expr(cx, bargs[tshift + 1]);
+      if (cx->failed) return 0;
+      /* `def u64/f64 x V` — widen the value to the declared wide scalar so arithmetic on it
+       * promotes past 32 bits. (u64 and f64 are still tagged: #106 slices 1c and the float
+       * work.) */
+      if (tshift && bargs[0]->type == AST_LIT_STRING && bargs[0]->data.lit_string.length == 3) {
+        const char *tw = bargs[0]->data.lit_string.value;
+        int kind = !memcmp(tw, "u64", 3) ? 0x0F : !memcmp(tw, "f64", 3) ? 0x10 : 0;
+        if (kind) {
+          IrVal kc = irb_const_i64(cx->f, cx->cur, jaclval_i32(kind));
+          IrVal wa[] = {cx->sp, val, kc};
+          val = emit_rt_call(cx, "jacl_widen_to", wa, 3);
+        }
       }
     }
     /* Re-declaring an existing mutable inside a proc rebinds it rather than block-
@@ -3284,6 +3464,10 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
     } else {
       env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
+      if (decl_i64 && !cx->failed) {
+        Binding *nb = env_lookup(cx, name, len);
+        if (nb) nb->rep = REP_I64;          /* the slot holds an untagged 64-bit word */
+      }
       /* Carry a typed-collection stamp onto the binding: from the def's own
        * annotation (`def [Arr T] a V`) or from a typed constructor value
        * (`def a [[Arr T] …]` — the ctor's head IS the annotation). */
@@ -3317,8 +3501,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       int spm = pin_mark(cx);
       (void)pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
       if (cx->failed) return 0;
-      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur,
-                                jaclval_i32((int32_t)dot->data.command.args[1]->data.lit_int.value)));
+      (void)pin_push(cx, lit_int_val(cx, dot->data.command.args[1]->data.lit_int.value));
       IrVal val = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
       IrVal bv = pin_get(cx, spm), idx = pin_get(cx, spm + 1);
@@ -3783,9 +3966,8 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     int apm = pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
     if (cx->failed) return 0;
     AstNode *ixn = dot->data.command.args[1];
-    IrVal idx = (ixn->type == AST_LIT_INT)
-                    ? irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)ixn->data.lit_int.value))
-                    : compile_expr(cx, ixn);
+    IrVal idx = (ixn->type == AST_LIT_INT) ? lit_int_val(cx, ixn->data.lit_int.value)
+                                           : compile_expr(cx, ixn);
     if (cx->failed) return 0;
     IrVal base = pin_get(cx, apm);
     pin_drop(cx, apm);
@@ -4337,7 +4519,7 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
     case AST_SYNTAX_QUOTE:
       return compile_synquote(cx, node->data.syntax_quote.child);
     case AST_LIT_INT:
-      return irb_const_i64(cx->f, cx->cur, jaclval_i32(node->data.lit_int.value));
+      return lit_int_val(cx, node->data.lit_int.value);
 
     case AST_LIT_FLOAT: {
       /* inline f32 JaclVal: tag 0x03 over the float's bit pattern */
@@ -4389,8 +4571,7 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
         cx_failf(cx, "codegen: undefined variable '%.*s'", nm, nl);
         return 0;
       }
-      if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
-      return bd->value;
+      return env_value(cx, bd);
     }
 
     case AST_BREAK:
