@@ -39,7 +39,8 @@ static void w_node(W *w, AstNode *n) {
      * byte). A wider literal fails the encode rather than truncating — widening the staged
      * syntax representation is jacl #113. */
     case AST_LIT_INT:
-      if (n->data.lit_int.value < INT32_MIN || n->data.lit_int.value > INT32_MAX) { w->err = 1; return; }
+      if (n->data.lit_int.big ||
+          n->data.lit_int.value < INT32_MIN || n->data.lit_int.value > INT32_MAX) { w->err = 1; return; }
       w_u32(w, (uint32_t)(int32_t)n->data.lit_int.value);
       break;
     case AST_LIT_FLOAT: { uint32_t b; memcpy(&b, &n->data.lit_float.value, 4); w_u32(w, b); } break;

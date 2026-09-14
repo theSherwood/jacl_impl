@@ -41,7 +41,12 @@ static inline int jacl_is_iwide(JaclVal v) {
   uint32_t t = jaclrt_type_index(v);
   return t == 0x0E || t == 0x0F;
 }
-static inline int jacl_is_anyint(JaclVal v) { return jaclrt_is_i32(v) || jacl_is_iwide(v); }
+/* `is_iwide` is the *machine*-wide test (a 64-bit cell); `is_anyint` spans the whole dynamic
+ * integer tower, bigint included. Anything that reads a payload as an int64 must use the
+ * former — a bigint has no int64 to read. */
+static inline int jacl_is_anyint(JaclVal v) {
+  return jaclrt_is_i32(v) || jacl_is_iwide(v) || jaclrt_type_index(v) == 0x09;
+}
 static inline int64_t jacl_int_val(JaclVal v) {
   return jaclrt_is_i32(v) ? (int64_t)jaclrt_as_i32(v) : jacl_wide_bits(v);
 }
@@ -51,6 +56,7 @@ static inline double jacl_num_f64(JaclVal v) {
   if (jaclrt_is_i32(v)) return (double)jaclrt_as_i32(v);
   if (jaclrt_type_index(v) == 0x03) return (double)jaclrt_as_f32(v);
   if (jacl_is_f64(v)) { union { int64_t b; double d; } c; c.b = jacl_wide_bits(v); return c.d; }
+  if (jaclrt_type_index(v) == 0x09) return jacl_big_to_f64(v);
   return (double)jacl_wide_bits(v);
 }
 static JaclVal jacl_f64_new(double d) {
@@ -60,17 +66,23 @@ static JaclVal jacl_f64_new(double d) {
 /* Wide-int arithmetic with the overflow detected rather than left to wrap.
  *
  * Signed 64-bit overflow is UB in C, so the wide branches below cannot simply add and hope:
- * they ask `__builtin_*_overflow` first. There is nothing wider to promote into yet, so an
- * overflowing wide op is an **error** — the same answer a declared i32 gets (#102/#103), and
- * loud rather than silently wrong. When the bigint tier lands (#106) this becomes a
- * promotion instead, which turns a failing program into a working one. `+% -% *%` are
- * unaffected: they are defined to wrap and compute through unsigned types. */
-#define JACL_WIDE_OP(fn, builtin)                                                    \
+ * they ask `__builtin_*_overflow` first. An overflowing op **promotes to a bigint** — the
+ * model's rule that a `dyn` integer never fails on magnitude, which until bigint.c existed
+ * the docs had to label a violation rather than a rule (#106 slice 6). `+% -% *%` are
+ * unaffected: they are defined to wrap and compute through unsigned types.
+ *
+ * u64 is the exception, and it is the tag that forces it: promoting drops the record that
+ * the value was meant to be unsigned, and `dyn` has no unsigned form to promote *into* (the
+ * model puts signedness on the static side only). A u64 that overflows still errors. */
+#define JACL_WIDE_OP(fn, builtin, bigfn)                                             \
   static inline JaclVal fn(JaclVal a, JaclVal b) {                                   \
     int64_t r;                                                                       \
-    if (builtin(jacl_int_val(a), jacl_int_val(b), &r))                               \
-      return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);                      \
-    return jacl_int_result(jacl_iwide_tag(a, b), r) | prop_flags(a, b);               \
+    if (builtin(jacl_int_val(a), jacl_int_val(b), &r)) {                             \
+      if (jacl_iwide_tag(a, b) == 0x0F)                                              \
+        return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);                   \
+      return bigfn(a, b) | prop_flags(a, b);                                         \
+    }                                                                                \
+    return jacl_int_result(jacl_iwide_tag(a, b), r) | prop_flags(a, b);              \
   }
 
 /* result tag for a wide-int binop: u64 if either side is u64, else i64 */
@@ -97,9 +109,9 @@ static inline JaclVal jacl_int_result(uint32_t tidx, int64_t bits) {
     return jaclrt_i32((int32_t)bits);
   return jacl_wide_new(tidx, bits);
 }
-JACL_WIDE_OP(jacl_wide_add, __builtin_add_overflow)
-JACL_WIDE_OP(jacl_wide_sub, __builtin_sub_overflow)
-JACL_WIDE_OP(jacl_wide_mul, __builtin_mul_overflow)
+JACL_WIDE_OP(jacl_wide_add, __builtin_add_overflow, jacl_big_add)
+JACL_WIDE_OP(jacl_wide_sub, __builtin_sub_overflow, jacl_big_sub)
+JACL_WIDE_OP(jacl_wide_mul, __builtin_mul_overflow, jacl_big_mul)
 
 #define ERR_IF_ERR(a, b) do { if (jaclrt_is_error(a)) return (a); if (jaclrt_is_error(b)) return (b); } while (0)
 
@@ -115,6 +127,10 @@ JaclVal jacl_add(JaclVal a, JaclVal b) {
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) + jacl_num_f64(b)) | prop_flags(a, b);
+  /* Either side already a bigint: stay in the top tier. It dispatches ahead of the machine-
+   * wide branch below, which reads both payloads as int64 and has none to read here. */
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jacl_big_add(a, b) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jacl_wide_add(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
@@ -132,6 +148,10 @@ JaclVal jacl_sub(JaclVal a, JaclVal b) {
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) - jacl_num_f64(b)) | prop_flags(a, b);
+  /* Either side already a bigint: stay in the top tier. It dispatches ahead of the machine-
+   * wide branch below, which reads both payloads as int64 and has none to read here. */
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jacl_big_sub(a, b) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jacl_wide_sub(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
@@ -149,6 +169,10 @@ JaclVal jacl_mul(JaclVal a, JaclVal b) {
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
     return jacl_f64_new(jacl_num_f64(a) * jacl_num_f64(b)) | prop_flags(a, b);
+  /* Either side already a bigint: stay in the top tier. It dispatches ahead of the machine-
+   * wide branch below, which reads both payloads as int64 and has none to read here. */
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jacl_big_mul(a, b) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jacl_wide_mul(a, b);
   if (jacl_is_num(a) && jacl_is_num(b))
@@ -160,6 +184,8 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
   if ((jacl_is_f64(a) || jacl_is_f64(b)) && (jacl_is_anyint(a) || jacl_is_anyfloat(a)) &&
       (jacl_is_anyint(b) || jacl_is_anyfloat(b)))
     return jacl_f64_new(jacl_num_f64(a) / jacl_num_f64(b)) | prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jacl_big_divmod(a, b, /*want_rem=*/0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b))) {
     int64_t y = jacl_int_val(b);
     if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
@@ -175,6 +201,8 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
 }
 JaclVal jacl_mod(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jacl_big_divmod(a, b, /*want_rem=*/1) | prop_flags(a, b);
   if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
   int32_t x = jaclrt_as_i32(a), y = jaclrt_as_i32(b);
   if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
@@ -258,7 +286,14 @@ int jacl_val_equal(JaclVal a, JaclVal b) {
   if (((a ^ b) & mask) == 0) return 1;
   if (jaclrt_is_string(a) && jaclrt_is_string(b)) return jacl_str_eq(a, b);
   if ((jacl_is_anyint(a) || jacl_is_anyfloat(a)) && (jacl_is_anyint(b) || jacl_is_anyfloat(b))) {
-    if (jacl_is_anyint(a) && jacl_is_anyint(b)) return jacl_int_val(a) == jacl_int_val(b);
+    if (jacl_is_anyint(a) && jacl_is_anyint(b)) {
+      /* A bigint has no int64 to read, so the comparison goes through the tower-wide one.
+       * (Canonical form means a bigint never equals an i32 or i64 — the narrow value would
+       * not have been a bigint — but settling it by magnitude keeps the rule true of any
+       * value that reaches here, rather than true only of values built correctly.) */
+      if (jacl_is_bigint(a) || jacl_is_bigint(b)) return jacl_big_cmp(a, b) == 0;
+      return jacl_int_val(a) == jacl_int_val(b);
+    }
     return jacl_num_f64(a) == jacl_num_f64(b);
   }
   uint32_t t = jaclrt_type_index(a), tb2 = jaclrt_type_index(b);
@@ -334,6 +369,8 @@ JaclVal jacl_lt(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
   if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
     return jaclrt_bool(jaclrt_as_i32(a) < jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jaclrt_bool(jacl_big_cmp(a, b) < 0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jaclrt_bool(jacl_int_val(a) < jacl_int_val(b)) | prop_flags(a, b);
   if ((jacl_is_anyfloat(a) || jacl_is_anyint(a)) && (jacl_is_anyfloat(b) || jacl_is_anyint(b)))
@@ -344,6 +381,8 @@ JaclVal jacl_le(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
   if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
     return jaclrt_bool(jaclrt_as_i32(a) <= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jaclrt_bool(jacl_big_cmp(a, b) <= 0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jaclrt_bool(jacl_int_val(a) <= jacl_int_val(b)) | prop_flags(a, b);
   if ((jacl_is_anyfloat(a) || jacl_is_anyint(a)) && (jacl_is_anyfloat(b) || jacl_is_anyint(b)))
@@ -354,6 +393,8 @@ JaclVal jacl_gt(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
   if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
     return jaclrt_bool(jaclrt_as_i32(a) > jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jaclrt_bool(jacl_big_cmp(a, b) > 0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jaclrt_bool(jacl_int_val(a) > jacl_int_val(b)) | prop_flags(a, b);
   if ((jacl_is_anyfloat(a) || jacl_is_anyint(a)) && (jacl_is_anyfloat(b) || jacl_is_anyint(b)))
@@ -364,6 +405,8 @@ JaclVal jacl_ge(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
   if (jaclrt_is_i32(a) && jaclrt_is_i32(b))
     return jaclrt_bool(jaclrt_as_i32(a) >= jaclrt_as_i32(b)) | prop_flags(a, b);
+  if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_bigint(a) || jacl_is_bigint(b)))
+    return jaclrt_bool(jacl_big_cmp(a, b) >= 0) | prop_flags(a, b);
   if (jacl_is_anyint(a) && jacl_is_anyint(b) && (jacl_is_iwide(a) || jacl_is_iwide(b)))
     return jaclrt_bool(jacl_int_val(a) >= jacl_int_val(b)) | prop_flags(a, b);
   if ((jacl_is_anyfloat(a) || jacl_is_anyint(a)) && (jacl_is_anyfloat(b) || jacl_is_anyint(b)))
@@ -1336,6 +1379,12 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
     while (j) { j--; repr_put(rb, &tmp[j], 1); }
     return;
   }
+  if (t == 0x09) {                                       /* bigint: exact decimal */
+    char big[JACL_BIG_DECIMAL_MAX];
+    uint32_t n = jacl_big_to_decimal(v, big, sizeof big);
+    if (n) repr_put(rb, big, n); else repr_put(rb, "<bigint>", 8);
+    return;
+  }
   if (t == 0x10) { repr_fmt_fp(rb, jacl_num_f64(v)); return; }        /* f64: full precision */
   if (t == 0x06) {                                       /* VECTOR: [vec e0 e1 …] */
     repr_put(rb, "[vec", 4);
@@ -1432,7 +1481,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x1E && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x1E && t != 0x09 && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

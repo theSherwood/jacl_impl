@@ -700,29 +700,32 @@ static int test_hex_max_valid(void) {
   TEST_PASS();
 }
 
-/* jacl #105: the accumulator used to be a signed int64, so a literal at or past 2^63
- * wrapped negative, slipped past the `> INT32_MAX` check, and was truncated into the token
- * as a different number — `12345678901234567890` compiled as -350287150. Each base needs
- * its own case: the range check is duplicated per base. */
-static int test_decimal_past_int64_rejected(void) {
+/* jacl #106: a decimal literal past INT64_MAX is a **bigint** — the token carries its digit
+ * span instead of a value, and the number is built at run time. (It used to be an error, and
+ * before jacl #105 it was worse: the accumulator was a signed int64, so a literal at or past
+ * 2^63 wrapped negative, slipped past the range check, and was truncated into the token as a
+ * *different number* — `12345678901234567890` compiled as -350287150.) */
+static int test_decimal_past_int64_is_bigint(void) {
   setup();
   LexResult r = lexer_lex("12345678901234567890", &test_arena);   /* > INT64_MAX */
-  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 2); /* INT + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].is_big);
+  ASSERT_U32_EQ(r.tokens[0].length, 20);
+  ASSERT(memcmp(r.tokens[0].payload.text, "12345678901234567890", 20) == 0);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-static int test_decimal_past_uint64_rejected(void) {
+static int test_decimal_past_uint64_is_bigint(void) {
   setup();
   LexResult r = lexer_lex("18446744073709551616", &test_arena);  /* 2^64 */
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].is_big);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -794,12 +797,14 @@ static int test_binary_max_valid(void) {
   TEST_PASS();
 }
 
+/* Hex and binary keep the old ceiling: a literal that wide in those bases is far likelier a
+ * typo than an intent, and the digit-span path is decimal-only. */
 static int test_overflow_error_has_span(void) {
   setup();
-  LexResult r = lexer_lex("99999999999999999999", &test_arena);  /* > INT64_MAX */
+  LexResult r = lexer_lex("0xFFFFFFFFFFFFFFFFF", &test_arena);   /* 68 bits */
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_U32_EQ(r.tokens[0].offset, 0);
-  ASSERT_U32_EQ(r.tokens[0].length, 20);
+  ASSERT_U32_EQ(r.tokens[0].length, 19);
   ASSERT_U32_EQ(r.tokens[0].line, 1);
   ASSERT_U32_EQ(r.tokens[0].column, 1);
   teardown();
@@ -2996,8 +3001,8 @@ int main(void) {
     {"hex_int64_max",            test_hex_int64_max},
     {"hex_max_valid",            test_hex_max_valid},
     {"bin_33bits_is_i64",        test_binary_33bits_is_i64},
-    {"dec_past_int64_rejected",  test_decimal_past_int64_rejected},
-    {"dec_past_uint64_rejected", test_decimal_past_uint64_rejected},
+    {"dec_past_int64_is_bigint", test_decimal_past_int64_is_bigint},
+    {"dec_past_uint64_is_bigint",test_decimal_past_uint64_is_bigint},
     {"hex_past_int64_rejected",  test_hex_past_int64_rejected},
     {"bin_past_int64_rejected",  test_binary_past_int64_rejected},
     {"float_huge_integral",      test_float_with_huge_integral_part},

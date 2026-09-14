@@ -27,7 +27,7 @@ A `dyn` integer is always a tagged 64-bit word, in one of three forms:
 |---|---|---|
 | inline `i32` | the value fits `[INT32_MIN, INT32_MAX]` | `0x02` |
 | pointer to a boxed, untagged `i64` | it fits 64 bits signed | `0x0E` |
-| pointer to a boxed, untagged bigint | anything larger | `0x09` (reserved) |
+| pointer to a boxed, untagged bigint | anything larger | `0x09` |
 
 The form is chosen by **magnitude alone** — never by the path that computed the value.
 That is what `jacl_int_result` enforces, and it is not a nicety: `jacl_val_equal` settles
@@ -45,7 +45,7 @@ back into i32 range un-boxes.
 **`dyn` arithmetic cannot fail on magnitude.** It promotes: inline i32 → boxed i64 →
 bigint. The only failures left are domain errors (division by zero, `%` by zero). This is
 the property that makes `dyn` worth having, and it is why the bigint tier is not optional
-garnish — see "Known gap" below.
+garnish — see "The bigint tier" below.
 
 **A declared width errors on overflow.** The promoted value is not an `i32`, so an
 `i32`-annotated proc returning one would break its own signature. Wrapping silently is
@@ -94,12 +94,35 @@ under this model no tag carries that meaning.
 nowhere to put them. That stops being a rule we enforce and becomes a fact of the
 representation.
 
-### Known gap
+### The bigint tier
 
-`dyn` today errors past `INT64_MAX` instead of promoting to bigint, because the bigint tier
-does not exist yet (jacl #106 slice 2). That is a **violation of the model, not a rule of
-it** — the rule is that `dyn` never fails on magnitude. Read the "Wide (i64/u64) overflow"
-section below as a description of a temporary state.
+`runtime/bigint.c`. Sign-magnitude, base 2^32, little-endian limbs, in a `JOBJ_BLOB` cell:
+no outgoing pointers, so the collector needs no new tracing and a bigint can never hold a
+reference alive. Base 2^32 rather than 2^64 so a limb product fits a `uint64_t` — a 2^64
+base needs a 128-bit intermediate, which is not portable C and not something to assume of
+the VM target.
+
+**Canonical form is an invariant, not a convention**: a bigint whose value fits an i64 must
+not exist. Every construction goes through one function, `jbig_canon`, which demotes. Two
+things depend on it — `==` and map-key hashing agree across the whole tower (#107), and a
+bigint compared against an i32 or i64 can be settled by magnitude alone.
+
+Hashing is **by value**, over the limbs. A pointer hash would put two equal numbers in
+different buckets, which is precisely the bug #107 was.
+
+Two bounds worth knowing, both deliberate and both loud rather than silent:
+
+- **~1233 decimal digits** (128 limbs). "Arbitrary precision" is the *model*; the
+  implementation states a limit and exceeds it with a domain error rather than wrapping or
+  smashing a stack buffer. Raising it is one constant plus moving the multiply scratch off
+  the stack — the scratch is what the bound really protects.
+- **Division needs a single-limb divisor.** Big-by-big needs Knuth algorithm D (jacl #121);
+  until then it is a domain error, never a wrong answer.
+
+`u64` is the one type that still errors on overflow rather than promoting, and the tag is
+what forces it: promoting drops the record that the value was meant to be unsigned, and
+`dyn` has no unsigned form to promote *into* — the model puts signedness on the static side
+only.
 
 ## Values: inline scalars vs heap wides
 
@@ -139,16 +162,17 @@ the governing principle.
 
 ## Integer literals
 
-An integer literal reaches `INT64_MAX`. The lexer accumulates every base (decimal, `0x`,
-`0b`) into a `uint64_t` and refuses anything past `INT64_MAX` — *refuses*, rather than
-promoting to a float or a bigint, because the bigint tier does not exist yet (jacl #106
-slice 2). Two consequences worth knowing:
+There is no size at which writing a `dyn` integer stops working. A **decimal** literal past
+`INT64_MAX` becomes a bigint: the token carries its digit span instead of a value, and
+codegen builds the number at run time through `jacl_big_from_decimal` (there is no constant
+form to fold it into — not inline, not a 64-bit cell). `-9223372036854775808` therefore
+works now, having been unreachable twice over: the digits are lexed before the leading `-`
+folds in, so the *magnitude* is what has to lex, and it is one past the i64 ceiling.
 
-- `-9223372036854775808` is out of reach, for the same reason C needs `LLONG_MIN`: the
-  digits are lexed before the leading `-` folds in, so the magnitude is one past the
-  ceiling. Spell it `[- 0 9223372036854775807]` minus one, or wait for the bigint tier.
-- A literal one past `INT64_MAX` is a lex error, not a silently truncated number. It used
-  to be the latter (jacl #105).
+`0x` and `0b` keep the `INT64_MAX` ceiling and error past it. A hex or binary literal that
+wide is far likelier a typo than an intent, and the digit-span path is decimal-only.
+
+A literal that overflows is never a silently truncated number — it used to be (jacl #105).
 
 A literal that fits i32 lowers to the inline i32 constant the rest of the compiler expects.
 A wider one has no inline form — a dynamic wide int lives on the heap — so codegen builds it
@@ -226,7 +250,7 @@ is the low half of a pointer, re-tagged as a perfectly plausible integer. Where 
 unsure, the binding stays tagged and correct-but-slower, the same safe default slice 1a set.
 
 `u32` and `u64` are **not** raw yet, and the reason is not effort. A static `u64` above
-`INT64_MAX` has no `dyn` representation to cross into until the bigint tier exists, and
+`INT64_MAX` has no `dyn` representation to cross into — the bigint tier is signed, and
 `u32`/`u64` have no native typed arithmetic (the IR has `div_u`/`rem_u`/`lt_u`, but nothing
 emits them), so giving them raw slots today would add a box on every operation and make them
 *slower*. Both wait on their own slice.
@@ -293,12 +317,13 @@ Two things deliberately keep their wide form:
 
 ### Wide (i64/u64) overflow
 
-There is nothing wider to promote into yet, so an overflowing wide op returns an
-**error-flagged value** rather than wrapping: `jacl_add`/`sub`/`mul` ask
-`__builtin_*_overflow` before building the result. Signed 64-bit overflow is also UB in C,
-so the previous unguarded `jacl_int_val(a) + jacl_int_val(b)` was not merely a silent wrap
-— it was undefined (jacl #104). When the bigint tier lands (jacl #106) this becomes a
-promotion, which turns a failing program into a working one.
+An overflowing wide op **promotes to a bigint**: `jacl_add`/`sub`/`mul` ask
+`__builtin_*_overflow` before building the result, and hand an overflow to the bigint tier.
+Signed 64-bit overflow is UB in C, so the original unguarded
+`jacl_int_val(a) + jacl_int_val(b)` was not merely a silent wrap — it was undefined
+(jacl #104). It errored for a while after that, which was loud but still a violation of the
+model; it now promotes, which is the rule. `u64` is the exception, for the reason given
+above.
 
 ### Overflow: three behaviors, one per spelling
 

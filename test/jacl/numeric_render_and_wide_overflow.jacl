@@ -8,7 +8,7 @@
 # expect: 1e+20
 # expect: inf
 # expect: 4000000000
-# expect: true
+# expect: 16000000000000000000
 # expect: 8000000000
 # expect: -2446744073709551616
 #
@@ -36,6 +36,6 @@ print [* [* $big $big] [* $big $big]]   # 1e40 really is infinity for an f32
 def s 2000000000
 def a [+ $s $s]                 # 4000000000, promoted to a wide int
 print $a
-print [error? [* $a $a]]        # 1.6e19 does not fit in i64 -> error, not a wrap
+print [* $a $a]                 # 1.6e19 does not fit i64 -> promotes to a bigint, not a wrap
 print [+% $a $a]                # in range, so wrapping has nothing to do
 print [*% $a $a]                # asked for a wrap, got the wrap

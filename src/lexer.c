@@ -92,6 +92,10 @@ typedef struct {
     float       float_val; /* TOKEN_FLOAT */
     const char* error_msg; /* TOKEN_ERROR */
   } payload;
+  /* TOKEN_INT only: the literal is too large for an i64, so `payload.text` (with `length`)
+   * is its digit span instead of a value — a bigint literal (jacl #106). Decimal only; a hex
+   * or binary literal that wide is refused, since it is far likelier a typo than an intent. */
+  uint8_t   is_big;
 } Token;
 
 /* -------------------------------------------------------------------------
@@ -620,15 +624,18 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
-    /* An integer literal reaches INT64_MAX. One past it is refused rather than promoted to
-     * a float: `docs/TEMEN_NUMERICS.md`'s tower goes to bigint next, and that tier does not
-     * exist yet (#106 slice 2). Note `-9223372036854775808` is out of reach for the same
-     * reason C needs `LLONG_MIN` — the digits are lexed before the sign is folded in. */
+    /* Past INT64_MAX the literal becomes a **bigint**: the token carries its digit span
+     * rather than a value, and codegen builds the number at run time (`docs/TEMEN_NUMERICS.md`
+     * § "The integer model" — a `dyn` integer has no width the program can observe, so there
+     * is no size at which writing one stops working). `-9223372036854775808` still needs to
+     * be spelled as arithmetic, for the reason C needs `LLONG_MIN`: the digits are lexed
+     * before the sign folds in, so the *magnitude* is what reaches here — and one past
+     * INT64_MAX is now a bigint rather than an error, which makes that spelling work. */
     if (ovf || int_val > (uint64_t)INT64_MAX) {
-      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
-      tok.payload.error_msg = "integer literal out of i64 range";
+      Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
+      tok.is_big = 1;
+      tok.payload.text = lex->source + start;     /* `length` spans the digits */
       lexer__arr_push(arr, tok);
-      (*error_count)++;
       return;
     }
     {
