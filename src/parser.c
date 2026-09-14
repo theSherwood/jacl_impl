@@ -193,7 +193,12 @@ AstNode* parser__parse_atom(Parser* p) {
       node->type = AST_LIT_INT;
       node->start = parser__token_start(tok);
       node->end   = parser__token_end(tok);
-      node->data.lit_int.value = tok->payload.int_val;
+      /* A literal past INT64_MAX carries its digit span instead of a value (jacl #106):
+       * the number is built at run time. `value` stays 0, which every width-checking path
+       * already refuses via `big`. */
+      node->data.lit_int.value   = tok->is_big ? 0 : tok->payload.int_val;
+      node->data.lit_int.big     = tok->is_big ? tok->payload.text : NULL;
+      node->data.lit_int.big_len = tok->is_big ? tok->length : 0;
       /* Default to TYPE_I32 — matches the compiler's literal default
        * and the typer's default. The typer will overwrite during
        * its walk for narrowed contexts (e.g., declared i64 binding).
@@ -520,7 +525,9 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
       rhs->type = AST_LIT_INT;
       rhs->start = parser__token_start(rhs_tok);
       rhs->end   = parser__token_end(rhs_tok);
-      rhs->data.lit_int.value = rhs_tok->payload.int_val;
+      rhs->data.lit_int.value   = rhs_tok->is_big ? 0 : rhs_tok->payload.int_val;
+      rhs->data.lit_int.big     = rhs_tok->is_big ? rhs_tok->payload.text : NULL;
+      rhs->data.lit_int.big_len = rhs_tok->is_big ? rhs_tok->length : 0;
       rhs->inferred_type = TYPE_I32;
       rhs_end = rhs->end;
     } else if (rhs_tok->type == TOKEN_VAR) {

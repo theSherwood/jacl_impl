@@ -563,6 +563,10 @@ typedef struct {
     float       float_val;
     const char* error_msg;
   } payload;
+  /* TOKEN_INT only: the literal is too large for an i64, so `payload.text` (with `length`)
+   * is its digit span instead of a value — a bigint literal (jacl #106). Decimal only; a hex
+   * or binary literal that wide is refused, since it is far likelier a typo than an intent. */
+  uint8_t   is_big;
 } Token;
 
 typedef struct {
@@ -742,7 +746,7 @@ struct AstNode {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
     } command;
-    struct { int64_t   value; }                                    lit_int;
+    struct { int64_t   value; const char* big; uint32_t big_len; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
     struct { const char* name;    uint32_t length; }               var_ref;

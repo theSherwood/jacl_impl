@@ -5,6 +5,7 @@
 #include "collections.c"
 #include "stream.c"
 #include "builtins.c"
+#include "bigint.c"     /* after builtins.c: uses jacl_int_result / jacl_wide_bits */
 #include "flatbuf.c"
 #include "closure.c"
 #include "fiber.c"

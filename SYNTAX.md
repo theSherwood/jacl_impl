@@ -62,9 +62,16 @@ print 9223372036854775807                     # INT64_MAX
 An unannotated literal is `dyn` — an integer of conceptually arbitrary precision, whose
 width is the compiler's business and never the program's. Under an annotation it is exactly
 that width, and a literal the width cannot hold is a type error (`def i32 x 5000000000`).
-Anything past `INT64_MAX` is a lex error for now — there is no bigint tier yet, so it is
-refused rather than promoted. `-9223372036854775808` is therefore out of reach as a literal
-(the digits are lexed before the `-` folds in); spell it as arithmetic.
+
+A **decimal** literal has no upper limit: past `INT64_MAX` it becomes a bigint.
+
+```jacl
+print 170141183460469231731687303715884105727
+print [- 0 9223372036854775808]    # INT64_MIN, spellable because the magnitude is a bigint
+```
+
+`0x` and `0b` still stop at `INT64_MAX` — a hex or binary literal that wide is far likelier
+a typo than an intent.
 
 The five integer types: `i32`, `u32`, `i64`, `u64` are C variables — untagged, exactly that
 width at runtime, no implicit conversions between them (`[+ $u64 $i64]` is a type error;

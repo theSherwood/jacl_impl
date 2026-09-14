@@ -1,0 +1,64 @@
+# expect: 9223372036854775808
+# expect: 18446744073709551614
+# expect: 85070591730234615847396907784232501249
+# expect: -85070591730234615847396907784232501249
+# expect: 0
+# expect: true
+# expect: false
+# expect: true
+# expect: 9223372036854775807
+# expect: 1
+# expect: 265252859812191058636308480000000
+# expect: 170141183460469231731687303715884105727
+# expect: 170141183460469231731687303715884105728
+# expect: -9223372036854775808
+# expect: true
+# expect: big
+# expect: true
+#
+# The third representation of a dynamic integer (jacl #106 slice 6). `dyn` is an integer of
+# conceptually arbitrary precision, so its arithmetic **cannot fail on magnitude** — only on
+# a domain error. Until the bigint tier existed, `dyn` errored past INT64_MAX, which the docs
+# had to label a violation of the model rather than a rule of it.
+#
+# Canonical form is the invariant that makes the tower's three representations unobservable:
+# a bigint whose value fits an i64 does not exist, because every construction demotes.
+
+def a 9223372036854775807          # INT64_MAX, a boxed i64
+print [+ $a 1]                     # promotes
+print [* $a 2]
+print [* $a $a]
+print [- 0 [* $a $a]]
+
+# ...and demotes on the way back down. This is the half that matters for #107: a value that
+# shrinks into i64 (or i32) range must come back to the narrow form, or it would compare
+# equal to an inline number while hashing to a different bucket.
+print [- [* $a $a] [* $a $a]]      # 0, as an inline i32
+print [== [- [* $a $a] [* $a $a]] 0]
+print [== [* $a 2] $a]             # a bigint is never equal to a number an i64 could hold
+print [< $a [* $a 2]]
+
+print [/ [* $a 2] 2]               # single-limb divisor
+print [% [+ [* $a 2] 1] 2]
+
+proc fact {n acc} { if [<= $n 1] { $acc } { [fact [- $n 1] [* $acc $n]] } }
+print [fact 30 1]
+
+# A literal past INT64_MAX is a bigint too — there is no size at which writing a `dyn`
+# integer stops working.
+print 170141183460469231731687303715884105727
+print [+ 170141183460469231731687303715884105727 1]
+
+# And it makes INT64_MIN spellable at last: the magnitude lexes as a bigint, and the
+# subtraction canonicalizes the result back down into a boxed i64.
+print [- 0 9223372036854775808]
+print [== [- 0 9223372036854775808] [- [- 0 9223372036854775807] 1]]
+
+# Hashing is by value, never by cell address — a pointer hash would leak the representation
+# straight into which bucket a key lands in.
+def m [map-set {} [* $a $a] "big"]
+print [map-get $m [* $a $a]]
+
+# Division by a divisor that needs more than one limb is not implemented — big-by-big needs
+# Knuth algorithm D (jacl #121). It is a domain error, never a wrong answer.
+print [error? [/ [* $a $a] $a]]

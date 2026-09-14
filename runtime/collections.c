@@ -78,6 +78,9 @@ static uint32_t jmap_key_hash(JaclVal k) {
     for (uint32_t i = 0; i < n; i++) h = (h ^ jmap_key_hash(jacl_vec_get(k, i))) * 16777619u;
     return h;
   }
+  /* A bigint is a pointer, and hashing the pointer would put two equal numbers in different
+   * buckets — the exact failure #107 was. It hashes its limbs instead. */
+  if (jaclrt_type_index(k) == 0x09) return jacl_big_hash(k);
   uint64_t x = k;                                  /* scalar: mix the bits (splitmix64-ish) */
   x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
   return (uint32_t)x;

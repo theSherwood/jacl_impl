@@ -346,6 +346,22 @@ JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
 JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
 JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v);
 JaclVal jacl_wide_new(uint32_t tidx, int64_t bits); /* heap i64/u64/f64 cell */
+/* ---- bigint: the third representation of a dynamic integer (bigint.c, jacl #106) ----
+ * Canonical form is an invariant: a bigint whose value fits an i64 does not exist, so `==`,
+ * ordering and map-key hashing agree across the whole tower. All of these take *any* dynamic
+ * integers (inline i32, boxed i64, or bigint) and return a canonical result. */
+int      jacl_is_bigint(JaclVal v);
+JaclVal  jacl_big_add(JaclVal a, JaclVal b);
+JaclVal  jacl_big_sub(JaclVal a, JaclVal b);
+JaclVal  jacl_big_mul(JaclVal a, JaclVal b);
+JaclVal  jacl_big_divmod(JaclVal a, JaclVal b, int want_rem);
+int      jacl_big_cmp(JaclVal a, JaclVal b);        /* -1 / 0 / 1 */
+uint32_t jacl_big_hash(JaclVal v);                  /* by value, never by cell address */
+double   jacl_big_to_f64(JaclVal v);                /* lossy past 2^53, as asking for a float means */
+uint32_t jacl_big_to_decimal(JaclVal v, char *buf, uint32_t cap);
+JaclVal  jacl_big_from_decimal(JaclVal s);           /* how a bigint *literal* is built */
+/* Enough for the limb bound bigint.c enforces, plus a sign and a terminator. */
+#define JACL_BIG_DECIMAL_MAX 1300
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname);     /* [to TYPE V] */
 JaclVal jacl_dot_dyn(JaclVal v, JaclVal k);         /* dynamic ->: index or field */
