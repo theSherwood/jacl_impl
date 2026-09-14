@@ -557,6 +557,22 @@ fn typed_compare_and_divrem_are_native() {
     run_case("typed_cmp_divrem", i32_val(3)); // and it is still correct
 }
 
+// ---- #94 slice 2a: typed params arrive raw ----
+
+#[test]
+fn typed_params_use_a_raw_entry_with_a_boxed_adapter() {
+    // A proc with typed params gets two entries: the body compiled against raw words, and a
+    // boxed adapter that unboxes and tail-calls it. Direct calls that can prove the argument
+    // types take the raw one; closures, exports and indirect calls keep the boxed one and are
+    // correct without knowing the raw entry exists.
+    let ir = emit_text("typed_raw_params");
+    assert!(ir.contains("return_call"), "expected the adapter to tail-call the raw entry:\n{ir}");
+    // Two functions share the proc's signature — the adapter and the body.
+    let n = ir.matches("(i64, i64, i64) -> (i64)").count();
+    assert!(n >= 2, "expected a raw entry alongside the boxed one, found {n}:\n{ir}");
+    run_case("typed_raw_params", i32_val(7));
+}
+
 // ---- #114: a typed i32 is a raw 32-bit word ----
 
 #[test]

@@ -1,0 +1,52 @@
+# expect: 6765
+# expect: 7
+# expect: 7
+# expect: 10000000000
+# expect: 30
+# expect: 8
+# expect: true
+# expect: 8
+# expect: 6000000005
+#
+# A proc with `i32`/`i64` params gets a second, raw-convention entry: a direct call that can
+# prove the argument types passes an untagged word, and the callee reads it as one, so the
+# box at the call site and the unbox in the callee both disappear (jacl #94 slice 2a).
+#
+# Two entries rather than one changed convention, deliberately. A single raw convention would
+# oblige *every* caller to agree, and one that could not — a closure value, a module export,
+# an indirect call — would hand a tagged JaclVal to code reading a raw word. That is the
+# silent garbage INVARIANTS.md V7 forbids. With two entries the boxed one stays correct for
+# every caller that cannot prove anything, and this case exercises each of those paths.
+
+proc fib {i32 n} i32 { if [< $n 2] { + $n 0 } else { + [fib [- $n 1]] [fib [- $n 2]] } }
+print [fib 20]                 # recursive direct calls, all raw
+
+proc add {i32 a i32 b} i32 { + $a $b }
+print [add 3 4]
+
+proc mixed {i32 a b} { + $a $b }   # one typed param, one not
+print [mixed 3 4]
+
+proc wide {i64 x} i64 { * $x 2 }
+print [wide 5000000000]
+
+# The boxed entry, via a closure value: the proc is referenced as a value, so the call site
+# has no idea which convention the callee wants.
+def f $add
+print [$f 10 20]
+
+# The boxed entry again, via an argument the typer did not prove. One unproved argument sends
+# the whole call to the boxed entry — the conventions cannot be mixed per-argument.
+def d 7
+print [add $d 1]
+
+# Overflow still errors: a raw param changes the boundary, not the arithmetic rules.
+proc over {i32 n} i32 { * $n $n }
+print [error? [over 100000]]
+
+# A captured typed param is boxed once on arrival and binds tagged, because the closure body
+# that reads it knows nothing of this entry's convention.
+proc adder {i32 n} { proc {x} { + $x $n } }
+print [[adder 5] 3]
+proc wadder {i64 n} [Proc [i64] i64] { proc {x} { + $x $n } }
+print [[wadder 5] 6000000000]
