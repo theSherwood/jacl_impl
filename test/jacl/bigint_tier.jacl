@@ -14,7 +14,8 @@
 # expect: -9223372036854775808
 # expect: true
 # expect: big
-# expect: true
+# expect: 9223372036854775807
+# expect: 7
 #
 # The third representation of a dynamic integer (jacl #106 slice 6). `dyn` is an integer of
 # conceptually arbitrary precision, so its arithmetic **cannot fail on magnitude** — only on
@@ -59,6 +60,8 @@ print [== [- 0 9223372036854775808] [- [- 0 9223372036854775807] 1]]
 def m [map-set {} [* $a $a] "big"]
 print [map-get $m [* $a $a]]
 
-# Division by a divisor that needs more than one limb is not implemented — big-by-big needs
-# Knuth algorithm D (jacl #121). It is a domain error, never a wrong answer.
-print [error? [/ [* $a $a] $a]]
+# Division by a divisor that needs more than one limb (jacl #121, Knuth algorithm D). This
+# line used to assert a domain error; `/` and `%` now work across the whole tower, so there
+# is no arithmetic left that fails on magnitude alone.
+print [/ [* $a $a] $a]
+print [% [+ [* $a $a] 7] $a]
