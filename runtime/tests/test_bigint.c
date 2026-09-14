@@ -34,7 +34,7 @@ static JaclVal big(const char *s) {
 }
 
 /* Negation as `0 - v`, which is what codegen emits for unary minus and the only form that
- * works at every width — the runtime's jacl_neg is i32-only (see jacl #129). */
+ * works at every width — the runtime's jacl_neg is i32-only (see jacl #130). */
 static JaclVal negv(JaclVal v) { return jacl_sub(jaclrt_i32(0), v); }
 
 /* |v|, for the |r| < |b| check. */
