@@ -66,7 +66,21 @@ unsigned, and a negative number becomes enormous), and there is no reason to inh
 along with the widths.
 
 **`dyn` → static is explicit and checked; static → `dyn` is implicit and canonicalizes.**
-`[to "i32" $d]` is a **domain error** if `$d` does not fit — narrowing never truncates.
+`[to "i32" $d]` is a **domain error** if `$d` does not fit — the class `[/ 1 0]` produces,
+never a truncation. This is the one place the model could leak: a `dyn`, whose whole
+contract is that its width is not observable, must not become a *different number* by being
+stored. (`[to "i32" 5000000000]` used to answer `705032704`.) The rule covers the declared
+widening too, where the only lossy case is sign: `def u64 x [- 0 5]` is an error rather than
+`18446744073709551611`.
+
+Dropping a float's **fractional** part is a different operation and stays — `[to "i32" 3.9]`
+is `3`, as a float-to-int conversion means everywhere. What is refused is a float whose
+*magnitude* the target cannot hold, and a non-finite one; both are undefined behaviour to
+convert in C rather than merely lossy, so the check runs in double arithmetic before the
+cast. It is written as `d >= (double)lo && d < (double)hi + 1.0` because `(double)INT64_MAX`
+rounds *up* to 2^63, so the inclusive form would admit a value one past the end — and
+because NaN has to fail, which a positively-phrased test gives for free.
+
 The other direction needs no syntax and cannot fail: the value is re-canonicalized on the
 way out, which is what makes a typed `i64` holding `37` the same map key as the literal
 `37`.

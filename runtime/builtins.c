@@ -729,30 +729,67 @@ JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
   int32_t k = jaclrt_as_i32(kind);
   if (k == 0x10) return jacl_is_f64(v) ? v : jacl_f64_new(jacl_num_f64(v));
   if (k == 0x0E || k == 0x0F) {
+    /* Widening cannot lose a value, with one exception: a negative number is not a u64, and
+     * reinterpreting its bits would answer 18446744073709551611 for `def u64 x [- 0 5]`.
+     * Same ruling as the narrowing crossing below — a domain error, not a different number. */
+    if (k == 0x0F) {
+      if (jacl_is_anyint(v) && jacl_int_val(v) < 0) return jaclrt_set_error(jaclrt_i32(0));
+      if (jacl_is_anyfloat(v) && jacl_num_f64(v) < 0) return jaclrt_set_error(jaclrt_i32(0));
+    }
     if (jacl_is_iwide(v)) return v;
     if (jaclrt_is_i32(v)) return jacl_wide_new((uint32_t)k, (int64_t)jaclrt_as_i32(v));
   }
   return v;
 }
-/* [to TYPE V] — numeric/string casts (subset of the old VM's `to`). */
+/* [to T V] — the explicit crossing from `dyn` into a static width, and the one place the
+ * integer model could leak. A `dyn`'s whole contract is that its width is not observable, so
+ * it must not become a *different number* by being stored: a value the target cannot hold is
+ * a **domain error** — the same class, and the same shape, `jacl_div` returns for a zero
+ * divisor — never a truncation (jacl #116). It used to be a truncation:
+ * `[to "i32" 5000000000]` quietly answered 705032704.
+ *
+ * Dropping a float's *fractional* part is a different operation and stays: `[to "i32" 3.9]`
+ * is 3, as a float-to-int conversion means everywhere. What is refused is a float whose
+ * *magnitude* the target cannot hold, and a non-finite one — both of which are undefined
+ * behaviour to convert in C, not merely lossy, so the check has to happen in double
+ * arithmetic before the cast rather than after it.
+ *
+ * `u64`'s upper bound is reported as INT64_MAX because a `dyn` source cannot be anything
+ * else: `dyn` is a signed integer tower, and its top half needs the bigint tier (#119). */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   if (jaclrt_is_error(v)) return v;
   char tn[16];
   uint32_t tl = jacl_str_len(tname);
   if (tl > sizeof tn - 1) tl = sizeof tn - 1;
   jacl_str_bytes(tname, tn, sizeof tn);
-  if (tl == 3 && !memcmp(tn, "i64", 3)) return jacl_wide_new(0x0E, jacl_is_anyfloat(v) ? (int64_t)jacl_num_f64(v) : jacl_int_val(v));
-  if (tl == 3 && !memcmp(tn, "u64", 3)) return jacl_wide_new(0x0F, jacl_is_anyfloat(v) ? (int64_t)jacl_num_f64(v) : jacl_int_val(v));
+  if (tl == 3 && !memcmp(tn, "str", 3)) return jacl_to_string(v);
   if (tl == 3 && !memcmp(tn, "f64", 3)) return jacl_f64_new(jacl_num_f64(v));
   if (tl == 3 && !memcmp(tn, "f32", 3)) return jaclrt_f32v((float)jacl_num_f64(v));
-  if (tl == 3 && !memcmp(tn, "i32", 3)) {
-    if (jaclrt_is_i32(v)) return v;
-    if (jacl_is_anyint(v)) return jaclrt_i32((int32_t)jacl_int_val(v));
-    if (jacl_is_anyfloat(v)) return jaclrt_i32((int32_t)jacl_num_f64(v));
-    return jaclrt_error();
+
+  int64_t  lo, hi;
+  uint32_t tidx;
+  if      (tl == 3 && !memcmp(tn, "i32", 3)) { lo = INT32_MIN; hi = INT32_MAX; tidx = 0x02; }
+  else if (tl == 3 && !memcmp(tn, "i64", 3)) { lo = INT64_MIN; hi = INT64_MAX; tidx = 0x0E; }
+  else if (tl == 3 && !memcmp(tn, "u64", 3)) { lo = 0;         hi = INT64_MAX; tidx = 0x0F; }
+  else return jaclrt_error();
+
+  int64_t x;
+  if (jacl_is_anyfloat(v)) {
+    double d = jacl_num_f64(v);
+    /* `(double)hi + 1.0` rather than `d <= (double)hi`: (double)INT64_MAX rounds *up* to
+     * 2^63, so the inclusive form would admit a value one past the end. NaN fails both
+     * comparisons, which is why the test is written positively. */
+    if (!(d >= (double)lo && d < (double)hi + 1.0))
+      return jaclrt_set_error(jaclrt_i32(0));
+    x = (int64_t)d;
+  } else if (jacl_is_anyint(v)) {
+    x = jacl_int_val(v);
+    if (x < lo || x > hi) return jaclrt_set_error(jaclrt_i32(0));
+  } else {
+    return jaclrt_error();                 /* not a number: not a narrowing question */
   }
-  if (tl == 3 && !memcmp(tn, "str", 3)) return jacl_to_string(v);
-  return jaclrt_error();
+  if (tidx == 0x02) return jaclrt_i32((int32_t)x);
+  return jacl_wide_new(tidx, x);           /* explicit widening keeps the form asked for */
 }
 
 /* [lines S] — split a string on newlines into a vector of strings. */
