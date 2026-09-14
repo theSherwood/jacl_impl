@@ -57,7 +57,16 @@ static const char *binary_runtime_fn(uint8_t head_id) {
  * binding back to a tagged JaclVal, so a site that has not been taught about raw values
  * gets a correct (if slower) value instead of reading a raw word as a tag. A missed
  * coercion would be silent garbage, so the default has to be the safe one. */
-typedef enum { REP_TAGGED = 0, REP_I64 } BindRep;
+typedef enum { REP_TAGGED = 0, REP_I32, REP_I64 } BindRep;
+
+/* The frame is all-i64, so a raw 32-bit binding lives in the low half of its slot. The
+ * invariant, stamped at every store and relied on by every read:
+ *
+ *     a REP_I32 slot holds the **sign-extended** value.
+ *
+ * Sign- rather than zero-extension so the slot reads as the same number at 64 bits, which is
+ * what makes a stray 64-bit compare on it right instead of subtly wrong. (Pins are a
+ * different thing and stay zero-extended: a pin round-trips bits, not a value.) */
 
 typedef struct {
   const char *name;
@@ -250,9 +259,15 @@ static void locals_push(Cx *cx, Binding b) {
  * and the box canonicalizes (#107), so a typed i64 holding 37 reaches dynamic code as the
  * inline 37 every other spelling produces. */
 static IrVal emit_rt_call(Cx *cx, const char *fn, const IrVal *args, int nargs);   /* fwd */
+static IrVal box_i32(Cx *cx, IrVal v);                                            /* fwd */
+static IrVal unbox_i32(Cx *cx, IrVal boxed);                                      /* fwd */
 static IrVal env_value(Cx *cx, Binding *bd) {
   if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
   if (bd->rep == REP_I64) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_i64_box", a, 2); }
+  /* i32 needs no runtime help either way: the inline tagged form *is* the payload with a tag
+   * above it, so re-tagging is a narrow and an OR. No allocation, so nothing to canonicalize
+   * — an i32 is already the narrowest representation of its value. */
+  if (bd->rep == REP_I32) return box_i32(cx, unbox_i32(cx, bd->value));
   return bd->value;
 }
 /* Read a binding as a raw 64-bit word, for the typed-i64 arithmetic path. A tagged binding
@@ -262,6 +277,14 @@ static IrVal env_raw_i64(Cx *cx, Binding *bd) {
   if (bd->rep == REP_I64 && !bd->is_cell) return bd->value;
   IrVal a[] = {cx->sp, env_value(cx, bd)};
   return emit_rt_call(cx, "jacl_i64_unbox", a, 2);
+}
+/* Read a binding as a native i32. Both representations keep the payload in the low 32 bits —
+ * a REP_I32 slot holds the sign-extended value, a tagged i32 holds the tag above it — so the
+ * narrow is the whole conversion either way, and this costs nothing over the tagged read it
+ * replaces. A cell still has to be loaded first. */
+static IrVal env_raw_i32(Cx *cx, Binding *bd) {
+  if (bd->rep == REP_I32 && !bd->is_cell) return unbox_i32(cx, bd->value);
+  return unbox_i32(cx, env_value(cx, bd));
 }
 
 /* Does this AST_LIT_INT fit the i32 the rest of the compiler assumes? An integer literal
@@ -746,6 +769,12 @@ static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
     if (!lit_fits_i32(node)) { cx_fail(cx, "integer literal out of range for i32"); return 0; }
     return irb_const_i32(cx->f, cx->cur, (int32_t)node->data.lit_int.value);
   }
+  /* A raw i32 binding is read straight out of its slot. Only REP_I32 takes this path — a
+   * tagged binding keeps the fallback below, so nothing changes for it. */
+  if (node->type == AST_VAR_REF) {
+    Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
+    if (bd && bd->rep == REP_I32 && !bd->is_cell) return env_raw_i32(cx, bd);
+  }
   if (i32_arith(node)) {
     uint8_t hid = node->data.command.head_id;
     int wraps = i32_arith_wraps(hid);
@@ -881,6 +910,28 @@ static IrVal compile_i64_tree(Cx *cx, AstNode *node) {
   v = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return v;
+}
+
+/* Compile a typed i32 tree to a raw, sign-extended word for a REP_I32 slot, branching out on
+ * overflow at the root.
+ *
+ * The boxed sibling below can fold the sticky overflow bit into the result's error flag,
+ * because a tagged i32 has a spare bit to put it in. A raw word does not, so the same bit has
+ * to become control flow — through the enclosing `[try …]` or the function's error return.
+ * Identical trade to `compile_i64_tree`, forced by the same fact about the representation. */
+static IrVal compile_i32_tree_raw(Cx *cx, AstNode *node) {
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrVal v = compile_i32(cx, node, ovf);
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+  int pv = pin_push(cx, irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, v));  /* the invariant */
+  IrVal bit = pin_get(cx, ovf);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
+  IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
+  emit_error_branch_if(cx, truth, errv);
+  IrVal out = pin_get(cx, pv);
+  pin_release(cx, ovf, 2);
+  return out;
 }
 
 /* Compile a whole typed i32 tree to a boxed JaclVal, error-flagged if any op overflowed. */
@@ -3405,13 +3456,25 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
      * an immutable local inside a proc. A top-level binding is mirrored into the global map,
      * and a captured `mut` lives in a heap cell — both of those store a JaclVal, so an i64
      * bound that way stays tagged until those paths learn about raw words. */
-    int decl_i64 = tshift && bargs[0]->type == AST_LIT_STRING &&
+    int decl_raw = tshift && bargs[0]->type == AST_LIT_STRING &&
                    bargs[0]->data.lit_string.length == 3 &&
-                   memcmp(bargs[0]->data.lit_string.value, "i64", 3) == 0 &&
                    hid == HEAD_DEF && !cx->at_top_level && !is_captured_name(cx, name, len);
+    int decl_i64 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "i64", 3) == 0;
+    /* `def i32 x V` is raw only where the typer actually *proved* the value is an i32
+     * (#114). The gate matters more here than it does for i64: i64's fallback crossing goes
+     * through `jacl_i64_unbox`, which type-checks and hands back 0 for a non-number, whereas
+     * narrowing a tagged value to i32 is a bare truncation — on a string binding that is the
+     * low half of a pointer, re-tagged as a perfectly plausible integer. Silent garbage is
+     * the one failure mode this representation must not have, so where the typer is unsure
+     * the binding stays tagged. */
+    int decl_i32 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "i32", 3) == 0 &&
+                   bargs[tshift + 1]->inferred_type == TYPE_I32;
     IrVal val;
     if (decl_i64) {
       val = compile_i64_tree(cx, bargs[tshift + 1]);
+      if (cx->failed) return 0;
+    } else if (decl_i32) {
+      val = compile_i32_tree_raw(cx, bargs[tshift + 1]);
       if (cx->failed) return 0;
     } else {
       cx->move_ok = 1;   /* the value goes straight into the binding */
@@ -3464,9 +3527,9 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
     } else {
       env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
-      if (decl_i64 && !cx->failed) {
+      if ((decl_i64 || decl_i32) && !cx->failed) {
         Binding *nb = env_lookup(cx, name, len);
-        if (nb) nb->rep = REP_I64;          /* the slot holds an untagged 64-bit word */
+        if (nb) nb->rep = decl_i64 ? REP_I64 : REP_I32;   /* an untagged word, not a JaclVal */
       }
       /* Carry a typed-collection stamp onto the binding: from the def's own
        * annotation (`def [Arr T] a V`) or from a typed constructor value

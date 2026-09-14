@@ -67,6 +67,9 @@ static const char *source_for(const char *name) {
   /* #106 slice 1a — a `def i64` local is a raw, untagged 64-bit word. */
   if (!strcmp(name, "i64_raw"))
     return "proc f {} {\n def i64 k 2000000\n def i64 d [* $k 1500]\n [+ $d 0] }\n[f]";
+  /* #114 — a `def i32` local is a raw, untagged, sign-extended word. */
+  if (!strcmp(name, "i32_raw"))
+    return "proc f {} {\n def i32 a 100\n def i32 b [* $a $a]\n [+ $b 1] }\n[f]";
   if (!strcmp(name, "typed_ovf_if_operand"))
     return "proc f {i32 x} i32 { + $x [if [> $x 0] { 2 } { 3 }] }\n[f 1]";
   /* error cases (driver exits nonzero) */

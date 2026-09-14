@@ -180,6 +180,43 @@ guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
+### Typed i32: a raw, untagged word
+
+A binding the typer proved is `i32` holds an untagged, **sign-extended** 32-bit word in its
+frame slot (jacl #114) — the same change slice 1a made for `i64`. The frame is all-i64, so
+the invariant is worth stating once because every store depends on it:
+
+> A `REP_I32` slot holds the **sign-extended** value.
+
+Sign- rather than zero-extension so the slot reads as the same number at 64 bits, which is
+what makes a stray 64-bit compare on it right instead of subtly wrong. (Pins stay
+zero-extended; a pin round-trips bits, not a value.)
+
+This is a smaller change than it sounds, because typed i32 *arithmetic* was already raw:
+`compile_i32` returns native values and `box_i32_checked` boxed once at the root of the
+tree. It was the **binding** that carried a tag. What actually changes:
+
+- Reading an i32 binding for arithmetic is a narrow instead of an untag, and crossing back to
+  `dyn` is a narrow and an OR — no runtime call in either direction, unlike `i64`, whose
+  crossing may allocate. An i32 is already the narrowest representation of its value, so
+  there is nothing for the crossing to canonicalize.
+- **Overflow becomes control flow.** The boxed tree folds its sticky overflow bit into the
+  result's error flag, which works only because a tagged i32 has a spare bit to put it in. A
+  raw word does not, so the same bit becomes a branch through the enclosing `[try …]` or the
+  function's error return — identical trade to `i64`, forced by the same fact.
+
+One guard is load-bearing: the raw representation is taken **only where the typer proved the
+value is `i32`**. Unlike `i64`, whose fallback crossing goes through `jacl_i64_unbox` and
+type-checks, narrowing a tagged value to i32 is a bare truncation — on a string binding that
+is the low half of a pointer, re-tagged as a perfectly plausible integer. Where the typer is
+unsure, the binding stays tagged and correct-but-slower, the same safe default slice 1a set.
+
+`u32` and `u64` are **not** raw yet, and the reason is not effort. A static `u64` above
+`INT64_MAX` has no `dyn` representation to cross into until the bigint tier exists, and
+`u32`/`u64` have no native typed arithmetic (the IR has `div_u`/`rem_u`/`lt_u`, but nothing
+emits them), so giving them raw slots today would add a box on every operation and make them
+*slower*. Both wait on their own slice.
+
 ### Typed i64: a raw, untagged word
 
 A binding the typer proved is `i64` holds an **untagged 64-bit word** — a C variable, no tag
