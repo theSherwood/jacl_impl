@@ -43,6 +43,37 @@ index, an accumulator that never leaves 32-bit range must not silently box itsel
 i64 every time it is touched. "Allocate only when the value genuinely needs the width" is
 the governing principle.
 
+## Integer literals
+
+An integer literal reaches `INT64_MAX`. The lexer accumulates every base (decimal, `0x`,
+`0b`) into a `uint64_t` and refuses anything past `INT64_MAX` — *refuses*, rather than
+promoting to a float or a bigint, because the bigint tier does not exist yet (jacl #106
+slice 2). Two consequences worth knowing:
+
+- `-9223372036854775808` is out of reach, for the same reason C needs `LLONG_MIN`: the
+  digits are lexed before the leading `-` folds in, so the magnitude is one past the
+  ceiling. Spell it `[- 0 9223372036854775807]` minus one, or wait for the bigint tier.
+- A literal one past `INT64_MAX` is a lex error, not a silently truncated number. It used
+  to be the latter (jacl #105).
+
+A literal that fits i32 lowers to the inline i32 constant the rest of the compiler expects.
+A wider one has no inline form — a dynamic wide int lives on the heap — so codegen builds it
+at run time through `jacl_i64_box`, the same canonicalizing box a typed i64 uses when it
+crosses to `dyn`. That is what lets a wide literal be a map key: it hashes like every other
+spelling of the same number.
+
+The typer types an out-of-i32 literal `i64` — including under an i32 *expectation*, because
+an i32 expectation is not always a user annotation: a binop unifies its operands by
+expecting the first one's type, which is what `[- 0 9223372036854775807]` is. A declared
+width is not enforced against a literal initializer either way; `def i32 x 5000000000`
+binds the i64, exactly as `def i8 x 300` already bound 300. That gap predates i64 literals
+and is not narrowed here.
+
+Two places still carry the literal as an i32 and now refuse a wider one instead of
+narrowing it silently: the staged-syntax plain-data form (`syn_rt.c` / `syn_wire.c`, i.e. a
+wide literal inside a quoted macro body) and a `[Buf N T]` length, which no buffer could
+reach anyway.
+
 ## Arithmetic
 
 `jacl_add` / `jacl_sub` / `jacl_mul` / `jacl_div` / `jacl_mod` take two `JaclVal`s and
@@ -98,7 +129,12 @@ command boundaries, so a declared type does not reach a binop over *literals* �
 `def i64 d [* 2000000 1500]` multiplies at i32 and reports the overflow rather than
 multiplying at 64 bits. `def i64 d [* $k 1500]` (one typed operand) does use the declared
 width. That matches C, where the same initializer also computes in `int`, and it now fails
-loudly rather than silently; widening it is a typer change with its own blast radius.
+loudly rather than silently; widening it is a typer change with its own blast radius
+(jacl #112 — literals should be `dyn`, and a `dyn` product should promote).
+
+i64 literals sharpen the asymmetry without resolving it: `[* 5000000000 2]` promotes,
+because one operand is already too wide for i32 and the whole node types `i64`, while
+`[* 100000 100000]` still errors — same product, different spelling.
 
 ### Canonical dynamic integers
 

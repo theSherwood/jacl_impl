@@ -264,6 +264,23 @@ static IrVal env_raw_i64(Cx *cx, Binding *bd) {
   return emit_rt_call(cx, "jacl_i64_unbox", a, 2);
 }
 
+/* Does this AST_LIT_INT fit the i32 the rest of the compiler assumes? An integer literal
+ * reaches INT64_MAX (#106), so the paths that can only carry an i32 have to ask. */
+static int lit_fits_i32(AstNode *n) {
+  return n->data.lit_int.value >= INT32_MIN && n->data.lit_int.value <= INT32_MAX;
+}
+/* A JaclVal for an integer literal. Anything that fits i32 is the inline constant the rest
+ * of the compiler expects. A wider literal has no inline form — a dynamic wide int lives on
+ * the heap — so it is built at runtime through the same canonicalizing box a typed i64 uses
+ * when it crosses to dyn (#106/#107). The call cannot end a block, so a literal still
+ * "stays put" for the pinning rules below. */
+static IrVal lit_int_val(Cx *cx, int64_t v) {
+  if (v >= INT32_MIN && v <= INT32_MAX)
+    return irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)v));
+  IrVal a[] = {cx->sp, irb_const_i64(cx->f, cx->cur, v)};
+  return emit_rt_call(cx, "jacl_i64_box", a, 2);
+}
+
 static void env_define(Cx *cx, const char *name, uint32_t len, IrVal value, int is_mut, int is_cell) {
   int mark = cx->nmarks ? cx->marks[cx->nmarks - 1] : 0;
   /* Re-binding is allowed for the throwaway `_`, and at the outermost module scope where a
@@ -725,7 +742,10 @@ static int i32_operand_stays_put(AstNode *n) {
  * else is computed boxed then unboxed. */
 static IrVal compile_i32(Cx *cx, AstNode *node, int ovf_slot) {
   if (cx->failed) return 0;
-  if (node->type == AST_LIT_INT) return irb_const_i32(cx->f, cx->cur, node->data.lit_int.value);
+  if (node->type == AST_LIT_INT) {
+    if (!lit_fits_i32(node)) { cx_fail(cx, "integer literal out of range for i32"); return 0; }
+    return irb_const_i32(cx->f, cx->cur, (int32_t)node->data.lit_int.value);
+  }
   if (i32_arith(node)) {
     uint8_t hid = node->data.command.head_id;
     int wraps = i32_arith_wraps(hid);
@@ -2199,6 +2219,7 @@ static int32_t buf_ann_size(AstNode *ann) {
   if (ann->data.command.head->data.lit_string.length != 3 ||
       memcmp(ann->data.command.head->data.lit_string.value, "Buf", 3) != 0) return -1;
   if (ann->data.command.arg_count < 1 || ann->data.command.args[0]->type != AST_LIT_INT) return -1;
+  if (!lit_fits_i32(ann->data.command.args[0])) return -1;   /* no buffer is that long */
   return (int32_t)ann->data.command.args[0]->data.lit_int.value;
 }
 
@@ -2807,7 +2828,11 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
   v = syn_vpush(cx, v, syn_i32(cx, (t->is_caret ? 1 : 0) | (t->is_gensym ? 2 : 0)));
   switch (t->type) {
     case AST_LIT_INT:
-      v = syn_vpush(cx, v, syn_i32(cx, t->data.lit_int.value));
+      /* The staged-syntax plain-data form carries the literal as an i32 (syn_rt.c and
+       * syn_wire.c agree on that shape). Refuse a wider one rather than truncate it;
+       * widening the staged form is jacl #113. */
+      if (!lit_fits_i32(t)) { cx_fail(cx, "integer literal out of range for a quoted syntax node"); return 0; }
+      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.lit_int.value));
       break;
     case AST_LIT_FLOAT: {
       union { float f; uint32_t u; } fb; fb.f = (float)t->data.lit_float.value;
@@ -3092,19 +3117,18 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     if (node->data.command.args[0]->type == AST_VAR_REF) {
       Binding *bb = env_lookup(cx, node->data.command.args[0]->data.var_ref.name,
                                node->data.command.args[0]->data.var_ref.length);
-      int32_t ix = (int32_t)node->data.command.args[1]->data.lit_int.value;
+      int64_t ix = node->data.command.args[1]->data.lit_int.value;
       if (bb && bb->buf_size >= 0 && (ix < 0 || ix >= bb->buf_size)) {
         char msg[128];
-        snprintf(msg, sizeof msg, "buf index %d out of bounds for [Buf %d %.*s]",
-                 ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
+        snprintf(msg, sizeof msg, "buf index %lld out of bounds for [Buf %d %.*s]",
+                 (long long)ix, bb->buf_size, (int)bb->elem_type_len, bb->elem_type ? bb->elem_type : "");
         cx_fail(cx, msg);
         return 0;
       }
     }
     IrVal bv = compile_expr(cx, node->data.command.args[0]);
     if (cx->failed) return 0;
-    IrVal idx = irb_const_i64(cx->f, cx->cur,
-                              jaclval_i32((int32_t)node->data.command.args[1]->data.lit_int.value));
+    IrVal idx = lit_int_val(cx, node->data.command.args[1]->data.lit_int.value);
     IrVal a[] = {cx->sp, bv, idx};
     return emit_rt_call(cx, "jacl_index_get", a, 3);
   }
@@ -3144,7 +3168,7 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     (void)pin_push(cx, compile_expr(cx, node->data.command.args[0]));
     if (cx->failed) return 0;
     if (keyn->type == AST_LIT_INT) {
-      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)keyn->data.lit_int.value)));
+      (void)pin_push(cx, lit_int_val(cx, keyn->data.lit_int.value));
       IrVal val = compile_expr(cx, node->data.command.args[2]);
       if (cx->failed) return 0;
       IrVal a[] = {cx->sp, pin_get(cx, dpm), pin_get(cx, dpm + 1), val};
@@ -3477,8 +3501,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       int spm = pin_mark(cx);
       (void)pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
       if (cx->failed) return 0;
-      (void)pin_push(cx, irb_const_i64(cx->f, cx->cur,
-                                jaclval_i32((int32_t)dot->data.command.args[1]->data.lit_int.value)));
+      (void)pin_push(cx, lit_int_val(cx, dot->data.command.args[1]->data.lit_int.value));
       IrVal val = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
       IrVal bv = pin_get(cx, spm), idx = pin_get(cx, spm + 1);
@@ -3943,9 +3966,8 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     int apm = pin_push(cx, compile_expr(cx, dot->data.command.args[0]));
     if (cx->failed) return 0;
     AstNode *ixn = dot->data.command.args[1];
-    IrVal idx = (ixn->type == AST_LIT_INT)
-                    ? irb_const_i64(cx->f, cx->cur, jaclval_i32((int32_t)ixn->data.lit_int.value))
-                    : compile_expr(cx, ixn);
+    IrVal idx = (ixn->type == AST_LIT_INT) ? lit_int_val(cx, ixn->data.lit_int.value)
+                                           : compile_expr(cx, ixn);
     if (cx->failed) return 0;
     IrVal base = pin_get(cx, apm);
     pin_drop(cx, apm);
@@ -4497,7 +4519,7 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
     case AST_SYNTAX_QUOTE:
       return compile_synquote(cx, node->data.syntax_quote.child);
     case AST_LIT_INT:
-      return irb_const_i64(cx->f, cx->cur, jaclval_i32(node->data.lit_int.value));
+      return lit_int_val(cx, node->data.lit_int.value);
 
     case AST_LIT_FLOAT: {
       /* inline f32 JaclVal: tag 0x03 over the float's bit pattern */

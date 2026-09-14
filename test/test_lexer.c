@@ -637,39 +637,52 @@ static int test_int32_max(void) {
   TEST_PASS();
 }
 
-/* M12 US-001: integer overflow detection */
+/* M12 US-001: integer literal range. The ceiling is INT64_MAX — a literal past i32 is an
+ * ordinary i64 literal (jacl #106), not an error. */
 
-static int test_decimal_overflow(void) {
+static int test_decimal_past_i32_is_i64(void) {
   setup();
   LexResult r = lexer_lex("2147483648", &test_arena);
-  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 2); /* INT + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].payload.int_val == 2147483648LL);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-static int test_hex_overflow_0xFFFFFFFF(void) {
+static int test_decimal_int64_max(void) {
+  setup();
+  LexResult r = lexer_lex("9223372036854775807", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].payload.int_val == 9223372036854775807LL);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_past_i32_is_i64(void) {
   setup();
   LexResult r = lexer_lex("0xFFFFFFFF", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].payload.int_val == 4294967295LL);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-static int test_hex_overflow_0x80000000(void) {
+static int test_hex_int64_max(void) {
   setup();
-  LexResult r = lexer_lex("0x80000000", &test_arena);
+  LexResult r = lexer_lex("0x7FFFFFFFFFFFFFFF", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].payload.int_val == 9223372036854775807LL);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -693,10 +706,10 @@ static int test_hex_max_valid(void) {
  * its own case: the range check is duplicated per base. */
 static int test_decimal_past_int64_rejected(void) {
   setup();
-  LexResult r = lexer_lex("12345678901234567890", &test_arena);
+  LexResult r = lexer_lex("12345678901234567890", &test_arena);   /* > INT64_MAX */
   ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
   ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
@@ -708,7 +721,7 @@ static int test_decimal_past_uint64_rejected(void) {
   LexResult r = lexer_lex("18446744073709551616", &test_arena);  /* 2^64 */
   ASSERT_U32_EQ(r.count, 2);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
   ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
@@ -720,7 +733,7 @@ static int test_hex_past_int64_rejected(void) {
   LexResult r = lexer_lex("0xFFFFFFFFFFFFFFFFF", &test_arena);   /* 68 bits */
   ASSERT_U32_EQ(r.count, 2);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
   ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
@@ -733,7 +746,7 @@ static int test_binary_past_int64_rejected(void) {
                           &test_arena);                          /* 2^64 */
   ASSERT_U32_EQ(r.count, 2);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i64 range") != NULL);
   ASSERT_U32_EQ(r.error_count, 1);
   teardown();
   ASSERT(check_no_leaks());
@@ -755,14 +768,14 @@ static int test_float_with_huge_integral_part(void) {
   TEST_PASS();
 }
 
-static int test_binary_overflow_33bits(void) {
+static int test_binary_33bits_is_i64(void) {
   setup();
-  /* 33 ones = exceeds i32 */
+  /* 33 ones: past i32, an ordinary i64 literal */
   LexResult r = lexer_lex("0b111111111111111111111111111111111", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
-  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
-  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT(r.tokens[0].payload.int_val == 8589934591LL);
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -783,10 +796,10 @@ static int test_binary_max_valid(void) {
 
 static int test_overflow_error_has_span(void) {
   setup();
-  LexResult r = lexer_lex("2147483648", &test_arena);
+  LexResult r = lexer_lex("99999999999999999999", &test_arena);  /* > INT64_MAX */
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_U32_EQ(r.tokens[0].offset, 0);
-  ASSERT_U32_EQ(r.tokens[0].length, 10);
+  ASSERT_U32_EQ(r.tokens[0].length, 20);
   ASSERT_U32_EQ(r.tokens[0].line, 1);
   ASSERT_U32_EQ(r.tokens[0].column, 1);
   teardown();
@@ -2977,11 +2990,12 @@ int main(void) {
     {"invalid_suffix_hex",       test_invalid_suffix_on_hex},
     {"int32_max",                test_int32_max},
     /* M12 US-001: integer overflow */
-    {"decimal_overflow",         test_decimal_overflow},
-    {"hex_overflow_FFFFFFFF",    test_hex_overflow_0xFFFFFFFF},
-    {"hex_overflow_80000000",    test_hex_overflow_0x80000000},
+    {"dec_past_i32_is_i64",      test_decimal_past_i32_is_i64},
+    {"dec_int64_max",            test_decimal_int64_max},
+    {"hex_past_i32_is_i64",      test_hex_past_i32_is_i64},
+    {"hex_int64_max",            test_hex_int64_max},
     {"hex_max_valid",            test_hex_max_valid},
-    {"bin_overflow_33bits",      test_binary_overflow_33bits},
+    {"bin_33bits_is_i64",        test_binary_33bits_is_i64},
     {"dec_past_int64_rejected",  test_decimal_past_int64_rejected},
     {"dec_past_uint64_rejected", test_decimal_past_uint64_rejected},
     {"hex_past_int64_rejected",  test_hex_past_int64_rejected},

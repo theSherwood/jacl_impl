@@ -1077,7 +1077,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
   if (node->data.command.arg_count != 2) return true; /* shape error; caller reports */
   AstNode* n_arg = node->data.command.args[0];
   AstNode* t_arg = node->data.command.args[1];
-  if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0) {
+  if (n_arg->type == AST_LIT_INT && n_arg->data.lit_int.value > 0 &&
+      n_arg->data.lit_int.value <= INT32_MAX) {
     *out_len = (uint32_t)n_arg->data.lit_int.value;
   }
   if (t_arg->type == AST_LIT_STRING) {
@@ -4968,9 +4969,9 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
           tgt->scope_mark);
       if (b && (b->type == TYPE_BUF || b->type == TYPE_PTR) &&
           b->struct_idx != UINT32_MAX) {
-        int32_t idx_lit = fld->data.lit_int.value;
+        int64_t idx_lit = fld->data.lit_int.value;
         if (b->type == TYPE_BUF &&
-            (idx_lit < 0 || (uint32_t)idx_lit >= b->buf_len)) {
+            (idx_lit < 0 || (uint64_t)idx_lit >= (uint64_t)b->buf_len)) {
           char buf_ty[96];
           /* Nested form [Buf N [Buf M T]] (Phase 5b: registry-encoded).
            * b->struct_idx points at a TYPE_SHAPE_BUF entry; read M
@@ -5011,8 +5012,8 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
           }
           char err[192];
           snprintf(err, sizeof(err),
-              "type error: buf index %d out of bounds for %s",
-              (int)idx_lit, buf_ty);
+              "type error: buf index %lld out of bounds for %s",
+              (long long)idx_lit, buf_ty);
           typer__error(tc, fld->start.line, fld->start.column, err);
           node->inferred_type = TYPE_DYN;
           return;
@@ -7038,14 +7039,22 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   switch (node->type) {
     case AST_LIT_INT: {
       /* Mirror compiler.c:11061-11093: expected_type can promote an int
-       * literal to i64/u64/f64/u32/f32. Default is i32. */
+       * literal to i64/u64/f64/u32/f32. Default is i32 — unless the literal
+       * is too wide for one, in which case it is an i64 literal (jacl #106).
+       * The lexer already refused anything past INT64_MAX. */
+      bool wide = node->data.lit_int.value < INT32_MIN ||
+                  node->data.lit_int.value > INT32_MAX;
       switch (tc->expected_type) {
         case TYPE_I64: node->inferred_type = TYPE_I64; break;
         case TYPE_U64: node->inferred_type = TYPE_U64; break;
         case TYPE_F64: node->inferred_type = TYPE_F64; break;
         case TYPE_U32: node->inferred_type = TYPE_U32; break;
         case TYPE_F32: node->inferred_type = TYPE_F32; break;
-        default:       node->inferred_type = TYPE_I32; break;
+        /* TYPE_I32 falls through to the default on purpose. An i32 expectation is not
+         * always a user annotation — a binop unifies its operands by expecting the first
+         * one's type — so a literal too wide for i32 still types i64 and the enclosing
+         * node widens with it. `[- 0 9223372036854775807]` is exactly that shape. */
+        default:       node->inferred_type = wide ? TYPE_I64 : TYPE_I32; break;
       }
       break;
     }

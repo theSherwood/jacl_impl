@@ -1,0 +1,37 @@
+# expect: 5000000000
+# expect: -9223372036854775807
+# expect: 9223372036854775807
+# expect: 4294967295
+# expect: 8589934591
+# expect: 5000000001
+# expect: 2500000000
+# expect: true
+# expect: wide
+# expect: 8000000000
+#
+# An integer literal reaches INT64_MAX (jacl #106). One that fits i32 is still the inline
+# i32 every other spelling produces; a wider one has no inline form — a dynamic wide int
+# lives on the heap — so it is boxed through the canonicalizing helper (#107). That is what
+# makes a wide literal usable as a map key: it hashes the same as any other spelling of the
+# same number.
+#
+# The lexer refuses one past INT64_MAX rather than promoting it, because the bigint tier
+# does not exist yet (#106 slice 2). `-9223372036854775808` is out of reach for the same
+# reason C needs `LLONG_MIN`: the digits are lexed before the sign folds in.
+
+print 5000000000
+print [- 0 9223372036854775807]
+print 9223372036854775807
+print 0xFFFFFFFF                       # hex past i32
+print 0b111111111111111111111111111111111   # 33 ones
+
+print [+ 5000000000 1]
+print [/ 10000000000 4]
+print [== 5000000000 5000000000]
+
+def m [map-set {} 5000000000 "wide"]
+print [map-get $m 5000000000]
+
+# A wide literal also feeds the typed i64 path as a plain 64-bit constant.
+def i64 z 4000000000
+print [+ $z 4000000000]

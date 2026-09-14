@@ -99,6 +99,30 @@ static int test_lit_int_decimal(void) {
   TEST_PASS();
 }
 
+/* jacl #106: an integer literal reaches INT64_MAX, and the AST node carries the full
+ * width — it used to be an int32_t field that truncated on the way in. */
+static int test_lit_int_past_i32(void) {
+  setup();
+  AstNode* n = parse_atom("5000000000");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT(n->data.lit_int.value == 5000000000LL);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_int_int64_max(void) {
+  setup();
+  AstNode* n = parse_atom("9223372036854775807");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT(n->data.lit_int.value == 9223372036854775807LL);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_lit_int_hex(void) {
   setup();
   AstNode* n = parse_atom("0xFF");
@@ -3425,6 +3449,8 @@ int main(void) {
     {"parse_result_fields",  test_parse_result_fields},
     /* US-003 */
     {"lit_int_decimal",      test_lit_int_decimal},
+    {"lit_int_past_i32",     test_lit_int_past_i32},
+    {"lit_int_int64_max",    test_lit_int_int64_max},
     {"lit_int_hex",          test_lit_int_hex},
     {"lit_int_binary",       test_lit_int_binary},
     {"lit_float",            test_lit_float},

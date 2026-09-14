@@ -150,6 +150,16 @@ static void test_int_literal_promoted_to_i64(void) {
   arena_destroy(&a);
 }
 
+/* jacl #106: a literal too wide for i32 types as i64 without an annotation. */
+static void test_int_literal_past_i32_is_i64(void) {
+  current_test = "int_literal_past_i32_is_i64";
+  arena_t a = {0};
+  ParseResult r = run_typer("def x 5000000000", &a);
+  AstNode* def = r.nodes[0];
+  ASSERT_TYPE(def->data.command.args[1], TYPE_I64);
+  arena_destroy(&a);
+}
+
 static void test_float_literal_default(void) {
   current_test = "float_literal_default";
   arena_t a = {0};
@@ -1130,6 +1140,7 @@ int main(void) {
 
   test_int_literal_default();
   test_int_literal_promoted_to_i64();
+  test_int_literal_past_i32_is_i64();
   test_float_literal_default();
   test_float_literal_promoted_to_f64();
   test_string_literal();

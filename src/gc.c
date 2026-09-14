@@ -1433,7 +1433,7 @@ typedef struct {
     uint32_t  scope_mark;  /* hygiene: 0 = no macro context */
     union {
         struct { JaclVal head; JaclVal args; }  command;       /* head: syntax, args: vec of syntax */
-        struct { int32_t value; }               lit_int;
+        struct { int64_t value; }               lit_int;
         struct { float   value; }               lit_float;
         struct { JaclVal value; }               lit_string;    /* JaclVal string */
         struct { JaclVal name; }                var_ref;       /* JaclVal string */

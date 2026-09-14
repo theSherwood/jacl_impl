@@ -407,7 +407,7 @@ typedef struct {
     uint32_t  scope_mark;  /* hygiene: 0 = no macro context */
     union {
         struct { JaclVal head; JaclVal args; }  command;
-        struct { int32_t value; }               lit_int;
+        struct { int64_t value; }               lit_int;
         struct { float   value; }               lit_float;
         struct { JaclVal value; }               lit_string;
         struct { JaclVal name; }                var_ref;
@@ -559,7 +559,7 @@ typedef struct {
   uint32_t  length;
   union {
     const char* text;
-    int32_t     int_val;
+    int64_t     int_val;   /* TOKEN_INT (i32 when it fits; i64 literals reach INT64_MAX) */
     float       float_val;
     const char* error_msg;
   } payload;
@@ -742,7 +742,7 @@ struct AstNode {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
     } command;
-    struct { int32_t   value; }                                    lit_int;
+    struct { int64_t   value; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
     struct { const char* name;    uint32_t length; }               var_ref;

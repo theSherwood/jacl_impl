@@ -48,6 +48,23 @@ Interpolation inside `"…"` strings uses one non-trivial form for embedded expr
 - `\$` — escaped literal `$`
 - Forms nest: `"value: $[+ $x [vec-len $v]]"`
 
+## Integer literals
+
+An integer literal reaches `INT64_MAX` in every base:
+
+```jacl
+print 5000000000                              # decimal
+print 0xFFFFFFFF                              # hex
+print 0b111111111111111111111111111111111     # binary
+print 9223372036854775807                     # INT64_MAX
+```
+
+A literal that fits `i32` is an `i32`; a wider one is an `i64`. Anything past
+`INT64_MAX` is a lex error — there is no bigint tier yet, so it is refused rather than
+promoted. `-9223372036854775808` is therefore out of reach as a literal (the digits are
+lexed before the `-` folds in); spell it as arithmetic. Full rules:
+`docs/TEMEN_NUMERICS.md`.
+
 ## Wrapping arithmetic: `+%` `-%` `*%`
 
 `+ - *` never wrap: on a dynamic value they promote to a wide int, and on a value the typer
