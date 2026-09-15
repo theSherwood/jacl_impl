@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SYNW_VERSION 1
+/* Must match syn_wire.c. v2 widened AST_LIT_INT to 8 bytes (jacl #113). */
+#define SYNW_VERSION 2
 /* kind = AstNodeType ordinal (src/jacl.h): keep in sync. */
 #define K_COMMAND    0
 #define K_LIT_INT    1
@@ -25,6 +26,10 @@ static uint32_t r_u32(R *r) {
   if (r->err || r->pos + 4 > r->len) { r->err = 1; return 0; }
   uint32_t v; memcpy(&v, r->buf + r->pos, 4); r->pos += 4; return v;
 }
+static uint64_t r_u64(R *r) {
+  if (r->err || r->pos + 8 > r->len) { r->err = 1; return 0; }
+  uint64_t v; memcpy(&v, r->buf + r->pos, 8); r->pos += 8; return v;
+}
 static JaclVal r_str(R *r) {
   uint32_t n = r_u32(r);
   if (r->err || r->pos + n > r->len) { r->err = 1; return JACL_NIL; }
@@ -43,9 +48,14 @@ static JaclVal r_node(R *r) {
   v = jacl_vec_push(v, jaclrt_i32((int32_t)sm));
   v = jacl_vec_push(v, jaclrt_i32((int32_t)fl));
   switch (type) {
+    /* The integer goes through jacl_i64_box, which canonicalizes — so the plain-data form
+     * holds an inline i32 wherever one fits and a boxed i64 only where it must (jacl #107,
+     * #113). Without that, a quoted 37 computed wide would not equal an inline 37. */
     case K_LIT_INT:
+      v = jacl_vec_push(v, jacl_i64_box((int64_t)r_u64(r)));
+      break;
     case K_LIT_FLOAT:
-      v = jacl_vec_push(v, jaclrt_i32((int32_t)r_u32(r)));
+      v = jacl_vec_push(v, jaclrt_i32((int32_t)r_u32(r)));   /* f32 bits, still 4 */
       break;
     case K_LIT_STRING:
     case K_VAR_REF:
@@ -104,6 +114,7 @@ static void w_need(W *w, size_t n) {
 }
 static void w_u8(W *w, unsigned v) { w_need(w, 1); if (w->err) return; w->buf[w->len++] = (unsigned char)v; }
 static void w_u32(W *w, uint32_t v) { w_need(w, 4); if (w->err) return; memcpy(w->buf + w->len, &v, 4); w->len += 4; }
+static void w_u64(W *w, uint64_t v) { w_need(w, 8); if (w->err) return; memcpy(w->buf + w->len, &v, 8); w->len += 8; }
 static void w_str(W *w, JaclVal s) {
   uint32_t n = jacl_str_len(s);
   w_u32(w, n);
@@ -132,9 +143,13 @@ static void w_node(W *w, JaclVal v) {
   w_u32(w, sm);
   w_u8(w, fl);
   switch (type) {
+    /* jacl_i64_unbox is the exact inverse of the jacl_i64_box the reader applies, so an
+     * inline i32 and a boxed i64 both come back as the number they are (jacl #113). */
     case K_LIT_INT:
+      w_u64(w, (uint64_t)jacl_i64_unbox(jacl_vec_get(v, 3)));
+      break;
     case K_LIT_FLOAT:
-      w_u32(w, (uint32_t)jaclrt_as_i32(jacl_vec_get(v, 3)));
+      w_u32(w, (uint32_t)jaclrt_as_i32(jacl_vec_get(v, 3)));   /* f32 bits, still 4 */
       break;
     case K_LIT_STRING:
     case K_VAR_REF:

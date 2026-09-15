@@ -33,6 +33,14 @@ jobs:
         # what we want.
         run: timeout 900 ./build.sh --parallel
 
+      - name: Staged-syntax codec agreement
+        # syn_wire (compiler side) and syn_rt (runtime side) are two hand-written
+        # implementations of one byte format, in separate files, that must agree exactly.
+        # Nothing in CI checked that until now — the format was changed for jacl #113 and the
+        # only thing that caught a mistake was running this script by hand. It needs gcc
+        # (already installed above), takes a couple of seconds, and skips cleanly without it.
+        run: bash codegen/selfhost/macro_staging/run_rt_codec_test.sh
+
   workflow-sync:
     name: Workflow sync check
     runs-on: ubuntu-latest

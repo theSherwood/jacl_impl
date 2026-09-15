@@ -1122,6 +1122,49 @@ fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
 }
 
 #[test]
+fn a_quoted_wide_literal_survives_macro_staging() {
+    // jacl #113. The staged-syntax wire carried AST_LIT_INT as 4 bytes, so a macro body
+    // holding a literal past i32 could not be staged at all — `compile_synquote` and
+    // `synw_encode` both refused it (correctly: #105 says a literal that does not fit is an
+    // error, never a different number). The wire is 8 bytes as of SYNW_VERSION 2.
+    //
+    // This runs through the *staged* driver, so the whole path is live: compile_synquote ->
+    // synw_encode -> the guest -> synrt_decode -> plain-data vec -> synrt_encode -> back. The
+    // asserts are inside the program, because a wrong answer here would be a *plausible*
+    // number and only a comparison catches it.
+    // Both directions of the wire, because they are different code: a macro *argument* goes
+    // compiler -> guest (syn_wire's writer, syn_rt's reader) and the *result* comes back
+    // guest -> compiler (syn_rt's writer, syn_wire's reader). A zero-argument macro only
+    // exercises the return trip — the first version of this test was exactly that, and stayed
+    // green with a deliberately truncating argument codec.
+    let src = r#"
+defmacro wide {} {
+  syntax-quote [+ 5000000000 1]
+}
+defmacro widest {} {
+  syntax-quote [- 0 9223372036854775807]
+}
+defmacro passthru {n} {
+  syntax-quote [+ ~n 0]
+}
+assert [== [wide] 5000000001]
+assert [== [widest] -9223372036854775807]
+assert [== [passthru 5000000000] 5000000000]
+assert [== [passthru 9223372036854775807] 9223372036854775807]
+"#;
+    let path = std::env::temp_dir().join(format!("jacl_wide_quote_{}.jacl", std::process::id()));
+    std::fs::write(&path, src).expect("write fixture");
+    let (ret, stdout) = run_jacl_file(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        !is_jacl_error(ret),
+        "a quoted wide literal did not survive staging (0x{:016x})",
+        ret as u64
+    );
+    assert!(stdout.is_empty(), "unexpected output: {:?}", String::from_utf8_lossy(&stdout));
+}
+
+#[test]
 fn syntax_tour_runs_clean_on_temen() {
     // tour.jacl exercises one feature area per section — values, bindings, the three modes,
     // interpolation, procs, lambdas, if/while/for, streams, destructuring, structs, maps,
