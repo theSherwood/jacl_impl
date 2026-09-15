@@ -40,30 +40,42 @@ const cap = (pf, lf) => {
   const n = Number(lf());
   return n === 0 ? '' : new TextDecoder().decode(new Uint8Array(ex.memory.buffer, Number(pf()), n).slice());
 };
+// The compiler card emits a BINARY TEMEN object, so its bytes must reach temen_link_run
+// untouched. Decoding them as UTF-8 and re-encoding does not round-trip: every byte that is
+// not valid UTF-8 becomes U+FFFD (three bytes), which both corrupts and lengthens the object.
+// Measured on a real one: 178,896 bytes in, 228,017 out, first divergence at offset 20.
+const capRaw = (pf, lf) => {
+  const n = Number(lf());
+  return n === 0 ? new Uint8Array(0) : new Uint8Array(ex.memory.buffer, Number(pf()), n).slice();
+};
 
 const card = readFileSync(compPath);
 const rt = readFileSync(rtPath);
 const src = new TextEncoder().encode(SRC);
 
-// 1. compile the source to IR with the self-hosted compiler-guest.
+// 1. compile the source with the self-hosted compiler-guest -> a binary TEMEN object.
 ex.temen_run_onramp(load(card), U(card.length), load(src), U(src.length));
 let status = ex.temen_status();
-const ir = cap(ex.temen_stdout_ptr, ex.temen_stdout_len);
-if ((status !== 0 && status !== 5) || ir.startsWith('%%ERROR%%')) {
-  console.error(`concurrent_run: COMPILE FAILED status=${status} ${ir.slice(0, 300)}`);
+const prog = capRaw(ex.temen_stdout_ptr, ex.temen_stdout_len);
+const head = new TextDecoder().decode(prog.slice(0, 9));   // enough for the %%ERROR%% marker
+if ((status !== 0 && status !== 5) || head.startsWith('%%ERROR%%') || prog.length === 0) {
+  const text = new TextDecoder().decode(prog).slice(0, 300);
+  console.error(`concurrent_run: COMPILE FAILED status=${status} ${text}`);
   process.exit(1);
 }
 
 // 2. link against the runtime and RUN — this is where a wasm Instant::now() would have trapped.
-const prog = new TextEncoder().encode(ir);
 const entry = new TextEncoder().encode('__jacl_entry');
 ex.temen_link_run(load(prog), U(prog.length), load(rt), U(rt.length), load(entry), U(entry.length), U(0), U(0));
 status = ex.temen_status();
 const out = cap(ex.temen_stdout_ptr, ex.temen_stdout_len);
 const err = cap(ex.temen_stderr_ptr, ex.temen_stderr_len);
 
-console.log(`concurrent_run: status=${status} stdout=${JSON.stringify(out)}${err ? ` stderr=${JSON.stringify(err.slice(0, 300))}` : ''}`);
-const ok = (status === 0 || status === 5) && out.includes('woke');
+console.log(`concurrent_run: status=${status} stdout=${JSON.stringify(out.slice(-120))}${err ? ` stderr=${JSON.stringify(err.slice(0, 300))}` : ''}`);
+// `endsWith`, not `includes`: the compiled object has the string literal "woke" in its data
+// section, so an `includes` check passes on a stdout buffer that is really just the leftover
+// object from step 1 — which is exactly what it was doing while this gate was broken.
+const ok = (status === 0 || status === 5) && out.trimEnd().endsWith('woke');
 if (!ok) {
   console.error('FAIL: the concurrent sleep program did not run to completion (regression: browser run trap)');
   process.exit(1);
