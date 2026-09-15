@@ -85,15 +85,16 @@ static const char *source_for(const char *name) {
   /* jacl #95 — a dyn value crossing into a raw word, where all three flags (error, taint,
    * secret) have to be tested because the raw word has no bits to carry any of them.
    *
-   * Each callee has a raw-able declared return but is called with a *dyn* argument, so the
-   * call site cannot take the raw entry (#94 slice 2b: one unproved argument sends the whole
-   * call to the boxed entry) — the result comes back tagged and has to cross. Calling them
-   * with proved arguments instead would take the raw pair and never reach the crossing at
-   * all, which is why these read the way they do. */
+   * `[to "T" $dyn]` is the crossing: the sanctioned, range-checked dyn -> static cast
+   * (#116), whose result the typer types as T while the runtime hands it back *tagged*. So a
+   * typed tree consuming it has to unwrap it, and that is where the flags would be dropped.
+   * (These used to pass a dyn straight into a typed param, which reached the same code —
+   * until #117 connected the typer's channel and made that the compile error TYPE_SYSTEM.md
+   * § 2 always said it was.) */
   if (!strcmp(name, "flag_cross_i64"))
-    return "proc g {i64 n} i64 { * $n 3 }\nproc f {} i64 {\n def d 5\n def i64 a [g $d]\n [+ $a 1] }\n[f]";
+    return "proc f {} i64 {\n def d 5\n def i64 a [to \"i64\" $d]\n [+ $a 1] }\n[f]";
   if (!strcmp(name, "flag_cross_i32"))
-    return "proc inc {i32 n} i32 { + $n 1 }\nproc f {} i32 {\n def d 4\n [+ [inc $d] 1] }\n[f]";
+    return "proc f {} i32 {\n def d 4\n [+ [to \"i32\" $d] 1] }\n[f]";
   /* #94 slice 2b — a typed proc returns a raw word plus an error word. `add` is called from
    * a typed tree (raw in, raw out, nothing boxed) and from dyn position (re-boxed). */
   if (!strcmp(name, "typed_raw_ret"))
@@ -592,7 +593,22 @@ static char *jacl_emit__serialize(const char *source, int binary, size_t *out_le
 #endif /* JACL_EMIT_ONLY */
   { const char *me = expand_macros_inplace(parse.nodes, parse.count, &arena);
     if (me) { char *o = emit_err("macro error: ", me); arena_destroy(&arena); return o; } }
-  typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
+  { /* jacl #117: the typer's verdict is a compile error, not a note nobody reads. */
+    TyperResult tr = {0};
+    typer_infer(parse.nodes, parse.count, &tr, NULL, 0, NULL, 0);
+    if (tr.error_count > 0) {
+      char msg[320];
+      if (tr.error_count > 1)
+        snprintf(msg, sizeof msg, "%u:%u: %s (and %u more)", tr.first_error_line,
+                 tr.first_error_col, tr.first_error, tr.error_count - 1);
+      else
+        snprintf(msg, sizeof msg, "%u:%u: %s", tr.first_error_line, tr.first_error_col,
+                 tr.first_error);
+      char *out = emit_err("type error: ", msg);
+      arena_destroy(&arena);
+      return out;
+    }
+  }
   char err[256] = {0};
   IrModule *m = temen_codegen_program(parse.nodes, parse.count, 0, /*in_guest=*/0, err, sizeof err);
   if (!m) { arena_destroy(&arena); return emit_err("", err[0] ? err : "codegen error"); }
@@ -785,8 +801,24 @@ int main(int argc, char **argv) {
     if (me) { fprintf(stderr, "%s\n", me); arena_destroy(&arena); return 1; } }
 
   /* Type inference: annotates each node's inferred_type, which the codegen uses for
-   * type-driven (unboxed) lowering. */
-  typer_infer(cg_nodes, cg_count, NULL, NULL, 0, NULL, 0);
+   * type-driven (unboxed) lowering — and reports type errors, which until jacl #117 it
+   * computed and threw away at every call site in the tree. */
+  {
+    TyperResult tr = {0};
+    typer_infer(cg_nodes, cg_count, &tr, NULL, 0, NULL, 0);
+    if (tr.error_count > 0) {
+      /* The channel captures the first error and counts the rest, so say how many there are —
+       * otherwise fixing one only reveals the next with no sense of how deep it goes. */
+      if (tr.error_count > 1)
+        fprintf(stderr, "type error: %u:%u: %s (and %u more)\n", tr.first_error_line,
+                tr.first_error_col, tr.first_error, tr.error_count - 1);
+      else
+        fprintf(stderr, "type error: %u:%u: %s\n", tr.first_error_line, tr.first_error_col,
+                tr.first_error);
+      arena_destroy(&arena);
+      return 1;
+    }
+  }
 
   char err[256] = {0};
   IrModule *m = temen_codegen_program(cg_nodes, cg_count, is_module_program, /*in_guest=*/0, err, sizeof err);

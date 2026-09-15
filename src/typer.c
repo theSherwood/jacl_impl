@@ -7154,6 +7154,31 @@ static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want) {
     return want;
   }
   if (int_want && typer__is_int_const_expr(v)) { typer__retype_int_const(tc, v, want); return want; }
+  /* A selecting form commits its *branches*, not itself. `set $p->x [if c { 4 } { 5 }]` is
+   * two literals under a declared i32 field, exactly like `def i32 x [if c { 4 } { 5 }]` —
+   * which already works, because the `def` path establishes the expectation *before*
+   * inferring the value. The sites that check *after* inference cannot do that (a
+   * struct/ctx field-set only learns the declared type once the receiver resolves), so they
+   * come through here, and without this the two spellings disagreed: one compiled, the other
+   * demanded a cast for the same two literals. Adopt only when every branch adopts — a
+   * partial adoption would leave the node claiming a type one arm does not have. */
+  if (v->type == AST_COMMAND && typer__head_selects(v->data.command.head_id)) {
+    AstNode **args = v->data.command.args;
+    uint32_t argc = v->data.command.arg_count;
+    uint32_t blocks = 0;
+    for (uint32_t i = 0; i < argc; i++) {
+      AstNode *b = args[i];
+      if (!b || b->type != AST_BLOCK) continue;
+      uint32_t n = b->data.block.count;
+      if (n == 0 || b->data.block.trailing_semi) return have;   /* no value to commit */
+      blocks++;
+      if (typer__retype_literal(tc, b->data.block.commands[n - 1], want) != want) return have;
+      b->inferred_type = want;
+    }
+    if (blocks == 0) return have;
+    v->inferred_type = want;
+    return want;
+  }
   return have;
 }
 

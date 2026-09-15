@@ -16,8 +16,8 @@
 | category | count |
 |---|---|
 | emit-fail | 1 |
-| err-no-fail | 89 |
-| err-pass | 39 |
+| err-no-fail | 68 |
+| err-pass | 60 |
 | pass | 441 |
 | wrong-output | 1 |
 

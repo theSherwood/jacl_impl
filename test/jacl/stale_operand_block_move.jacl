@@ -39,7 +39,9 @@ proc main {} {
   print [map-get $m "b"]
 
   # struct constructor: the instance and the field name must survive the value
-  print [Point x $one y [if [> 1 0] { 9 } { 8 }]]
+  # `$one` is dyn and `x` is a declared i32 field: a field-set is a commitment site, so the
+  # crossing is explicit (TYPE_SYSTEM.md § 2). Unrelated to the pinning this case is about.
+  print [Point x [to "i32" $one] y [if [> 1 0] { 9 } { 8 }]]
 
   # builtin from the arity table: [arr-get ARR IDX]
   def a [arr 4 5 6]

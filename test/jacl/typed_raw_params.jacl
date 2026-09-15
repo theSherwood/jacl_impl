@@ -35,10 +35,13 @@ print [wide 5000000000]
 def f $add
 print [$f 10 20]
 
-# The boxed entry again, via an argument the typer did not prove. One unproved argument sends
-# the whole call to the boxed entry — the conventions cannot be mixed per-argument.
+# A dyn argument cannot reach a typed param implicitly — that is a commitment site, and the
+# barrier fires there (TYPE_SYSTEM.md § 2, jacl #116). The cast is the crossing, and it is
+# range-checked. Note what that means for the raw entry: `[to "i32" $d]` is *proved* i32, so
+# this call takes the raw convention too. The boxed entry is now reached only where the typer
+# cannot see a signature at all — a proc referenced as a value, an indirect call, an import.
 def d 7
-print [add $d 1]
+print [add [to "i32" $d] 1]
 
 # Overflow still errors: a raw param changes the boundary, not the arithmetic rules.
 proc over {i32 n} i32 { * $n $n }
