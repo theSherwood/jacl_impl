@@ -18,6 +18,17 @@ OUT="${DIR}/build"
 TEMEN_LLVM="${DIR}/../vendor/temen/crates/temen-llvm"
 mkdir -p "$OUT"
 
+# The LLVM -> TEMEN on-ramp, built **release**. This used to be `cargo run` with no profile,
+# i.e. debug, which cost twice over: the translator itself runs ~6x slower (measured on the
+# self-hosted compiler card, 6131ms -> 1030ms, byte-identical output), and it meant CI compiled
+# the LLVM-bindings crate in *two* profiles, because codegen/selfhost/build_compiler_temen.sh
+# has always used release. One profile, one compile, same bytes.
+TRANSLATE="${TEMEN_LLVM_TRANSLATE:-$TEMEN_LLVM/target/release/temen-llvm-translate}"
+if [ ! -x "$TRANSLATE" ]; then
+  echo "=== building temen-llvm-translate (release) from vendor/temen ==="
+  ( cd "$TEMEN_LLVM" && cargo build --release --bin temen-llvm-translate )
+fi
+
 # 1. runtime C -> LLVM bitcode. -fno-*vectorize keeps the IR in temen-llvm's scalar
 #    subset (the backend ingests auto-vec selectively; the runtime stays scalar).
 clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
@@ -25,8 +36,7 @@ clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
 echo "runtime bitcode:  $OUT/jaclrt.bc"
 
 # 2. bitcode -> TEMEN-IR module (exports in-band), via the standalone CLI.
-cargo run --quiet --manifest-path "$TEMEN_LLVM/Cargo.toml" --bin temen-llvm-translate -- \
-  "$OUT/jaclrt.bc" -o "$OUT/jaclrt.temen"
+"$TRANSLATE" "$OUT/jaclrt.bc" -o "$OUT/jaclrt.temen"
 echo "runtime module:   $OUT/jaclrt.temen"
 
 # 3. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's
@@ -38,6 +48,5 @@ clang -O2 -emit-llvm -c -DNDEBUG -fno-vectorize -fno-slp-vectorize \
 # Emit the **binary** object (.temeno, ~200 KB) rather than text (~1.3 MB): the browser re-decodes this
 # runtime on every macro body, and decoding the binary is ~4x faster than parsing the text — the
 # dominant per-macro cost (tour macro staging ~90ms→~20ms per body).
-cargo run --quiet --manifest-path "$TEMEN_LLVM/Cargo.toml" --bin temen-llvm-translate -- \
-  "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.temeno"
+"$TRANSLATE" "$OUT/jaclrt_staging.bc" -o "$OUT/jaclrt_staging.temeno"
 echo "staging runtime:  $OUT/jaclrt_staging.temeno"
