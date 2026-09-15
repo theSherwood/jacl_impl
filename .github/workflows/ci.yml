@@ -75,11 +75,36 @@ jobs:
       # merged green, and the deploy then failed 17 times before anyone looked. The run path is
       # the part that broke and the cheap part to cover — it needs no Emscripten, unlike
       # stage_gate.mjs, which still runs post-merge only.
-      - name: Build the cdylib and the two .temen inputs
-        run: |
-          ( cd vendor/temen/browser && cargo build --release --lib --target wasm32-unknown-unknown )
-          bash runtime/build.sh
-          bash codegen/selfhost/build_compiler_temen.sh
+      #
+      # The three builds are separate steps on purpose: the first version was one step, and its
+      # 2m46s told us nothing about which of the three to attack.
+
+      # The cdylib is built entirely from vendor/temen, a *pinned* submodule — it does not
+      # depend on any jacl_impl source, so on a PR that does not bump temen the correct answer
+      # is a download, not a build. Keyed on the submodule commit, so bumping temen misses the
+      # cache and rebuilds, which is exactly right.
+      - name: Resolve the temen pin
+        id: pin
+        run: echo "sha=$(git -C vendor/temen rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the wasm32 cdylib
+        id: cdylib-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm
+          key: temen-browser-wasm32-${{ steps.pin.outputs.sha }}
+
+      - name: Build the cdylib (wasm32)
+        if: steps.cdylib-cache.outputs.cache-hit != 'true'
+        run: ( cd vendor/temen/browser && cargo build --release --lib --target wasm32-unknown-unknown )
+
+      # These two *do* depend on repo sources — the runtime and the compiler are what a PR
+      # changes — so they are rebuilt every time and only their cargo deps are cached.
+      - name: Bake the runtime IR (jaclrt.temen)
+        run: bash runtime/build.sh
+
+      - name: Build the self-hosted compiler card (jacl_compiler.temen)
+        run: bash codegen/selfhost/build_compiler_temen.sh
 
       # Both asset scripts are deliberately fail-soft: they exit 0 when the toolchain is
       # missing, so the Pages build can degrade to precompiled examples. That is wrong for a
