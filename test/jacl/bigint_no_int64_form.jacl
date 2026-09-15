@@ -1,0 +1,40 @@
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: 9223372036854775807
+# expect: -9223372036854775808
+# expect: 5
+#
+# A bigint has no int64 form, and nothing may pretend otherwise (jacl #138). `jacl_is_anyint`
+# admits a bigint while `jacl_int_val` does not handle one, so three single-operand callers
+# read the JaclBig header (`sign`, `n`) as an int64 and got a plausible number back — a 2-limb
+# positive bigint reads as 8589934593. Binary arithmetic was never affected: it routes bigints
+# to the bigint path before reaching that read.
+#
+# Each line below used to succeed with a wrong number, or succeed when it should have refused.
+
+def big 18446744073709551615          # > INT64_MAX, so a bigint by canonical form
+
+# The explicit cast. `[to "i64" $big]` answered 8589934593 rather than refusing — the exact
+# truncation jacl #116 exists to forbid. `i32` refused, but only because that garbage happened
+# to exceed INT32_MAX: the right answer for the wrong reason.
+print [error? [to "i64" $big]]
+print [error? [to "i32" $big]]
+print [error? [to "u64" $big]]
+
+# Wrapping modulo 2^64 has no meaning for a bigint; `[+% $big 1]` answered 8589934594.
+print [error? [+% $big 1]]
+print [error? [*% $big 2]]
+
+# A negative bigint widening into u64. The guard exists to refuse negative -> u64, and this is
+# the one case it let through: `sign = -1` and `n` read together are positive for any limb
+# count, so the test it performed always passed.
+print [error? [to "u64" [- 0 $big]]]
+
+# And none of the refusals is blanket — the values that do fit still convert and still wrap.
+print [to "i64" 9223372036854775807]
+print [+% 9223372036854775807 1]
+print [to "i32" 5]
