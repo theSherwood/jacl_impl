@@ -185,17 +185,17 @@ at run time through `jacl_i64_box`, the same canonicalizing box a typed i64 uses
 crosses to `dyn`. That is what lets a wide literal be a map key: it hashes like every other
 spelling of the same number.
 
-The typer types an out-of-i32 literal `i64` — including under an i32 *expectation*, because
-an i32 expectation is not always a user annotation: a binop unifies its operands by
-expecting the first one's type, which is what `[- 0 9223372036854775807]` is. A declared
-width is not enforced against a literal initializer either way; `def i32 x 5000000000`
-binds the i64, exactly as `def i8 x 300` already bound 300. That gap predates i64 literals
-and is not narrowed here.
+A **declared** width refuses a literal it cannot hold: `def i32 x 5000000000` is a type
+error, not a binding of the i64 (#112, enforced from #117 — the typer had the rule before
+it had a reader). An i32 *expectation* is not the same thing as an annotation, though: a
+binop unifies its operands by expecting the first one's type, which is what
+`[- 0 9223372036854775807]` is, so that still compiles and the literal stays wide.
 
-Two places still carry the literal as an i32 and now refuse a wider one instead of
-narrowing it silently: the staged-syntax plain-data form (`syn_rt.c` / `syn_wire.c`, i.e. a
-wide literal inside a quoted macro body) and a `[Buf N T]` length, which no buffer could
-reach anyway.
+One place still carries the literal as an i32 and refuses a wider one rather than narrowing
+it silently: a `[Buf N T]` length, which no buffer could reach anyway. The staged-syntax
+form used to be the other; as of #113 its wire carries 64 bits (`SYNW_VERSION 2`), so every
+literal ordinary code accepts can also appear in a quoted macro body. A *bigint* literal
+cannot — it has no 64-bit form at all, and that is still refused rather than truncated.
 
 ## Arithmetic
 

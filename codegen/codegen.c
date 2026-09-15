@@ -3207,11 +3207,15 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
   v = syn_vpush(cx, v, syn_i32(cx, (t->is_caret ? 1 : 0) | (t->is_gensym ? 2 : 0)));
   switch (t->type) {
     case AST_LIT_INT:
-      /* The staged-syntax plain-data form carries the literal as an i32 (syn_rt.c and
-       * syn_wire.c agree on that shape). Refuse a wider one rather than truncate it;
-       * widening the staged form is jacl #113. */
-      if (!lit_fits_i32(t)) { cx_fail(cx, "integer literal out of range for a quoted syntax node"); return 0; }
-      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.lit_int.value));
+      /* Any literal ordinary code accepts can be quoted (jacl #113): `lit_int_val` gives the
+       * inline constant where one fits and builds the canonical boxed i64 where it does not,
+       * which is exactly what the staged wire now carries. A *bigint* literal has no 64-bit
+       * form at all and is refused rather than truncated (#105's ruling). */
+      if (t->data.lit_int.big) {
+        cx_fail(cx, "bigint literal in a quoted syntax node is unsupported (jacl #113)");
+        return 0;
+      }
+      v = syn_vpush(cx, v, lit_int_val(cx, t->data.lit_int.value));
       break;
     case AST_LIT_FLOAT: {
       union { float f; uint32_t u; } fb; fb.f = (float)t->data.lit_float.value;

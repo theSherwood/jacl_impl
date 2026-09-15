@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SYNW_VERSION 1
+/* v2 widened AST_LIT_INT from 4 bytes to 8 (jacl #113). Both ends of this wire are built
+ * from these sources in-tree, so there is no old-reader compatibility to keep — but any
+ * prebuilt `.temen` that embeds the codec has to be rebuilt (scripts/rebuild-assets.sh). */
+#define SYNW_VERSION 2
 
 /* ---- encode ---------------------------------------------------------------- */
 
@@ -22,6 +25,7 @@ static void w_need(W *w, size_t n) {
 }
 static void w_u8(W *w, unsigned v) { w_need(w, 1); if (w->err) return; w->buf[w->len++] = (unsigned char)v; }
 static void w_u32(W *w, uint32_t v) { w_need(w, 4); if (w->err) return; memcpy(w->buf + w->len, &v, 4); w->len += 4; }
+static void w_u64(W *w, uint64_t v) { w_need(w, 8); if (w->err) return; memcpy(w->buf + w->len, &v, 8); w->len += 8; }
 static void w_str(W *w, const char *s, uint32_t n) { w_u32(w, n); w_need(w, n); if (w->err) return; if (n) memcpy(w->buf + w->len, s, n); w->len += n; }
 
 static void w_node(W *w, AstNode *n);
@@ -35,13 +39,15 @@ static void w_node(W *w, AstNode *n) {
   w_u32(w, n->scope_mark);
   w_u8(w, (unsigned)((n->is_caret ? 1u : 0u) | (n->is_gensym ? 2u : 0u)));
   switch (n->type) {
-    /* The staged form carries the literal as an i32 (syn_rt.c mirrors this wire byte for
-     * byte). A wider literal fails the encode rather than truncating — widening the staged
-     * syntax representation is jacl #113. */
+    /* The staged form carries the literal as an i64 (syn_rt.c mirrors this wire byte for
+     * byte), so every literal ordinary code accepts can also be quoted — jacl #113.
+     *
+     * A *bigint* literal still cannot: it has no 64-bit form at all, so the wire would have
+     * to carry its digit span and the plain-data side a heap bigint. Refused loudly, which is
+     * the #105 ruling — a literal that does not fit is an error, never a different number. */
     case AST_LIT_INT:
-      if (n->data.lit_int.big ||
-          n->data.lit_int.value < INT32_MIN || n->data.lit_int.value > INT32_MAX) { w->err = 1; return; }
-      w_u32(w, (uint32_t)(int32_t)n->data.lit_int.value);
+      if (n->data.lit_int.big) { w->err = 1; return; }
+      w_u64(w, (uint64_t)n->data.lit_int.value);
       break;
     case AST_LIT_FLOAT: { uint32_t b; memcpy(&b, &n->data.lit_float.value, 4); w_u32(w, b); } break;
     case AST_LIT_STRING: w_str(w, n->data.lit_string.value, n->data.lit_string.length); break;
@@ -76,6 +82,7 @@ typedef struct { const unsigned char *buf; size_t len, pos; int err; arena_t *ar
 
 static unsigned r_u8(R *r) { if (r->err || r->pos + 1 > r->len) { r->err = 1; return 0; } return r->buf[r->pos++]; }
 static uint32_t r_u32(R *r) { if (r->err || r->pos + 4 > r->len) { r->err = 1; return 0; } uint32_t v; memcpy(&v, r->buf + r->pos, 4); r->pos += 4; return v; }
+static uint64_t r_u64(R *r) { if (r->err || r->pos + 8 > r->len) { r->err = 1; return 0; } uint64_t v; memcpy(&v, r->buf + r->pos, 8); r->pos += 8; return v; }
 static const char *r_str(R *r, uint32_t *out_n) {
   uint32_t n = r_u32(r);
   if (r->err || r->pos + n > r->len) { r->err = 1; *out_n = 0; return NULL; }
@@ -97,7 +104,10 @@ static AstNode *r_node(R *r) {
   n->is_caret = (fl & 1u) ? 1 : 0;
   n->is_gensym = (fl & 2u) ? 1 : 0;
   switch (n->type) {
-    case AST_LIT_INT:   n->data.lit_int.value = (int32_t)r_u32(r); break;
+    case AST_LIT_INT:
+      n->data.lit_int.value = (int64_t)r_u64(r);
+      n->data.lit_int.big = NULL; n->data.lit_int.big_len = 0;   /* never a bigint on the wire */
+      break;
     case AST_LIT_FLOAT: { uint32_t b = r_u32(r); memcpy(&n->data.lit_float.value, &b, 4); } break;
     case AST_LIT_STRING: n->data.lit_string.value = r_str(r, &n->data.lit_string.length); break;
     case AST_VAR_REF:    n->data.var_ref.name = r_str(r, &n->data.var_ref.length); break;
