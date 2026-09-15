@@ -55,14 +55,17 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      # Without this the job is dominated by building temen-llvm (LLVM bindings) and the
-      # cdylib's dependency tree from scratch. Cached, the whole job is a couple of minutes.
+      # temen-llvm is its OWN workspace (its own Cargo.lock and target/), so leaving it out
+      # meant the LLVM-bindings crate — the slowest thing in the job by far — was never cached
+      # and was rebuilt every run. That is what made "Build the self-hosted compiler card"
+      # 1m44s when the translation itself is ~2s.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             vendor/temen
             vendor/temen/browser
+            vendor/temen/crates/temen-llvm
 
       - name: Install clang/LLVM 18 (temen-llvm bakes the .temen assets)
         run: |
