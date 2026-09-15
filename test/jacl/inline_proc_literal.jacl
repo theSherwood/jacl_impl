@@ -13,7 +13,10 @@ proc main {} {
 
   # The `\` sugar form — must produce the identical result.
   mut i64 b 0
-  for [transform [range 1 4] [\ * $it 10]] q { set b [+ $b $q] }
+  # `[to "i64" …]` should not be needed: `transform`/`filter` lose the receiver's element
+  # type, so the `for` binding comes out dyn (jacl #117, the stream half). Drop the cast when
+  # that is fixed — the barrier itself is correct (TYPE_SYSTEM.md § 2).
+  for [transform [range 1 4] [\ * $it 10]] q { set b [+ $b [to "i64" $q]] }
   print $b
 
   # Inline proc return type is inferred just like the lambda: i64 here.

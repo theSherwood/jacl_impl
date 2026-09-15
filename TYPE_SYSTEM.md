@@ -199,6 +199,26 @@ any flows implicitly; any → typed requires cast) than to Dart's
 fully-sound mode. The `[to T …]` cast at commitment sites is the
 single, well-named place a tag check happens.
 
+**Enforced since jacl #117.** Until then every `typer_infer` call site passed `NULL` for
+`TyperResult`, so `typer__error` was a documented no-op and this whole section described a
+rule nothing checked. Connecting the channel made **21** corpus cases that expected a
+compile error and had been compiling anyway start failing correctly — and refused 10 that
+were written against the unenforced rule. Nine of those needed a `[to T …]` the rule always
+called for; one was `assert-type` describing a representation rather than a type (#118).
+
+A **selecting form commits its branches, not itself**: `set $p->x [if c { 4 } { 5 }]` is two
+literals under a declared `i32` field, and adopts that width exactly as `def i32 x [if c
+{ 4 } { 5 }]` does. Before #117 the two spellings disagreed — the `def` established the
+expectation before inferring, while a field-set only learns the declared type once the
+receiver resolves, so it demanded a cast for the same two literals. Adoption requires
+*every* branch to adopt; a partial one would leave the node claiming a type one arm does
+not have.
+
+Two `typer_infer` call sites still pass `NULL`, deliberately: the macro-body and prelude
+pre-typing passes in `src/syntax.c`. Those type a *template* in isolation, with params bound
+as locals and no call-site types, so a body that is valid at every expansion can look
+ill-typed there. They annotate; the expansion's own pass judges.
+
 ### 3. `inline_repr` stays in the compiler
 
 `Compiler.inline_repr` (`INLINE_NONE` / `INLINE_STACK` / `INLINE_REF`)

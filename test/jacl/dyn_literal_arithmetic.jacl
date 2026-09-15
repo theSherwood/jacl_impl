@@ -45,6 +45,8 @@ def i64 wide [* 2000000 1500]
 print $wide
 
 # But adopting a width never changes the *operation*. `[/ 1 2]` is integer division whatever
-# it is assigned to — the same answer C gives for `double x = 1 / 2;`.
-def f64 half [/ 1 2]
+# it is assigned to — the same answer C gives for `double x = 1 / 2;`. Unlike C, the crossing
+# is explicit: an integer subtree adopts an *integer* width from context, and reaching an f64
+# slot is a dyn -> static commitment that wants `[to …]` (TYPE_SYSTEM.md § 2).
+def f64 half [to "f64" [/ 1 2]]
 print $half

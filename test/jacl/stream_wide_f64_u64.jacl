@@ -24,7 +24,10 @@ proc main {} {
   print [collect [transform [us] [\ + $it 5]]]        # 15 25
   print [collect [filter [us] [\ > $it 12]]]          # 20
   mut f64 fsum 0.0
-  for [transform [fs] [\ * $it 2.0]] g { set fsum [+ $fsum $g] }
+  # `[to "f64" …]` should not be needed: `transform`/`filter` lose the receiver's element
+  # type, so the `for` binding comes out dyn (jacl #117, the stream half). Drop the cast when
+  # that is fixed — the barrier itself is correct (TYPE_SYSTEM.md § 2).
+  for [transform [fs] [\ * $it 2.0]] g { set fsum [+ $fsum [to "f64" $g]] }
   print $fsum                                          # 3.0 + 10.0 = 13.0
   print [collect [filter [transform [fs] [\ * $it 2.0]] [\ > $it 5.0]]]  # 10.0
   print "ok"

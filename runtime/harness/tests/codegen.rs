@@ -510,8 +510,9 @@ fn raw_crossing_tests_all_three_flags() {
     // the three flags. INVARIANTS.md V3 says a flagged value must not become a static one at
     // all, so the crossing tests the whole mask, not just the error bit. Narrowing this back
     // to `1 << 61` would launder taint and secret into a plain number, so pin the constant.
-    // Each fixture calls a raw-returning proc with a *dyn* argument, so the call site cannot
-    // take the raw entry and the result comes back tagged — which is what makes it cross.
+    // `[to "T" $dyn]` is the crossing: the sanctioned range-checked cast (#116), whose result
+    // the typer types as T while the runtime hands it back tagged — so the typed tree that
+    // consumes it has to unwrap it, and that is where a flag would be dropped.
     for case in ["flag_cross_i64", "flag_cross_i32"] {
         let ir = emit_text(case);
         assert!(
@@ -519,9 +520,9 @@ fn raw_crossing_tests_all_three_flags() {
             "{case}: the crossing must mask error|secret|tainted:\n{ir}"
         );
     }
-    // And the values still compute: 5 * 3 + 1 = 16, (4 + 1) + 1 = 6.
-    run_case("flag_cross_i64", i32_val(16));
-    run_case("flag_cross_i32", i32_val(6));
+    // And the values still compute: 5 + 1 = 6, 4 + 1 = 5.
+    run_case("flag_cross_i64", i32_val(6));
+    run_case("flag_cross_i32", i32_val(5));
 }
 
 #[test]

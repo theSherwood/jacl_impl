@@ -1207,7 +1207,12 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     /* Phase 3 typer pass: walk the macro body AST so its literals,
      * var-refs, etc. carry inferred_type before compile_block_expr's
      * dual-track checks fire. Without this the macro body's nodes
-     * default to TYPE_DYN and produce typer gaps during compile. */
+     * default to TYPE_DYN and produce typer gaps during compile.
+     *
+     * The NULL result is deliberate, unlike the two call sites jacl #117 connected. This
+     * is a *template* typed in isolation: its params are bound as locals with no call-site
+     * types, so a body that is perfectly valid at every expansion can look ill-typed here.
+     * This pass exists to annotate, not to judge; the expansion's own pass judges. */
     typer_infer(&entry->body, 1, NULL, NULL, 0, body_compiler.struct_registry,
                 body_compiler.struct_registry ? body_compiler.struct_registry->count : 0);
 
@@ -1321,7 +1326,11 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             /* Phase 3 typer pass: walk the prelude AST so cloned macro
              * template nodes carry inferred_type when later instantiated
              * into user code. Without this, literals/var-refs inside
-             * prelude macro bodies remain TYPE_DYN by arena zero-init. */
+             * prelude macro bodies remain TYPE_DYN by arena zero-init.
+             *
+             * NULL result for the same reason as the macro-body pass above (jacl #117):
+             * prelude macro bodies are templates, annotated here and judged where they
+             * expand. */
             typer_infer(ppre.nodes, ppre.count, NULL, NULL, 0, NULL, 0);
 
             gc__current_heap = prev_heap;

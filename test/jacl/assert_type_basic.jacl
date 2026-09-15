@@ -19,7 +19,10 @@ proc main {} {
   assert-type $s str
   assert-type [typed-add 1 2] i64
   assert-type [shout "hello"] str
-  assert-type [+ 1 2] i32
+  # `[+ 1 2]` is all literals, so it is dyn (#112) — and now that the typer's verdict is
+  # actually read (#117), the static answer is the one that runs. This line asserted `i32`
+  # when it was describing the value's *representation* rather than its type (jacl #118).
+  assert-type [+ 1 2] dyn
   assert-type [vec 1 2 3] vec
   assert-type [== 1 1] bool
   print "ok"
