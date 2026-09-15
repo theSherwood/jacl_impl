@@ -41,6 +41,66 @@ jobs:
         # (already installed above), takes a couple of seconds, and skips cleanly without it.
         run: bash codegen/selfhost/macro_staging/run_rt_codec_test.sh
 
+  playground-run-gate:
+    name: Playground run path
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # vendor/temen — the cdylib and temen-llvm
+
+      - name: Setup Rust (wasm32 for the temen-browser cdylib)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Without this the job is dominated by building temen-llvm (LLVM bindings) and the
+      # cdylib's dependency tree from scratch. Cached, the whole job is a couple of minutes.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            vendor/temen
+            vendor/temen/browser
+
+      - name: Install clang/LLVM 18 (temen-llvm bakes the .temen assets)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      # This job exists because of jacl #134: the playground's gates only ran in pages.yml,
+      # which is push-to-main only, so a PR could not see them. PR #92 broke the run-path gate,
+      # merged green, and the deploy then failed 17 times before anyone looked. The run path is
+      # the part that broke and the cheap part to cover — it needs no Emscripten, unlike
+      # stage_gate.mjs, which still runs post-merge only.
+      - name: Build the cdylib and the two .temen inputs
+        run: |
+          ( cd vendor/temen/browser && cargo build --release --lib --target wasm32-unknown-unknown )
+          bash runtime/build.sh
+          bash codegen/selfhost/build_compiler_temen.sh
+
+      # Both asset scripts are deliberately fail-soft: they exit 0 when the toolchain is
+      # missing, so the Pages build can degrade to precompiled examples. That is wrong for a
+      # gate — a skip must not read as a pass — so assert the inputs exist before running it.
+      - name: Check the gate's inputs were produced
+        run: |
+          missing=0
+          for f in vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm \
+                   runtime/build/jaclrt.temen \
+                   codegen/selfhost/build/jacl_compiler.temen; do
+            if [ ! -s "$f" ]; then echo "missing or empty: $f" >&2; missing=1; fi
+          done
+          [ "$missing" = 0 ] || { echo "the asset build skipped something (fail-soft) — not a pass" >&2; exit 1; }
+
+      - name: Gate — concurrent run path
+        run: |
+          node demo/temen/concurrent_run.mjs \
+            vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm \
+            codegen/selfhost/build/jacl_compiler.temen \
+            runtime/build/jaclrt.temen
+
   workflow-sync:
     name: Workflow sync check
     runs-on: ubuntu-latest
