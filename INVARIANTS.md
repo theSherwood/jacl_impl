@@ -61,6 +61,14 @@ not become a *different number* by being stored — that is the one place the mo
 Dropping a float's *fractional* part is a different operation and is allowed; refusing is about
 magnitude.
 
+**The leak is easier to open than it looks.** `[to "i64" 18446744073709551615]` answered
+`8589934593` for a while (jacl #138) — not because the range check was missing, but because
+reading the value gave a number that passed it. `jacl_is_anyint` admits a bigint and
+`jacl_int_val` does not handle one, so the check ran against the `JaclBig` header. Anything
+enforcing this invariant has to be sure it is reading the *value*, and by V2 a bigint has no
+int64 to read: its magnitude necessarily exceeds what an i64 holds, so every static integer
+width refuses it by construction.
+
 ## V5. A declared width errors on overflow; `dyn` promotes; `+% -% *%` wrap
 
 Three behaviours, one per spelling (jacl #102, #103, #106). A declared `i32` cannot promote —

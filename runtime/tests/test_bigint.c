@@ -21,8 +21,12 @@
  *     matching the i32 and i64 tiers. Algorithm D works on magnitudes, so every sign
  *     question is settled in jacl_big_divmod, and only a test says it was settled right.
  *
+ * Section 5 covers jacl #138, a separate bug this file's operands make easy to reach: a
+ * bigint has no int64 form, but `jacl_is_anyint` admits one while `jacl_int_val` does not
+ * handle it, so three callers read the JaclBig header as a number.
+ *
  * Returns 812. Any other value names what failed, so a red run says where to look without
- * a rebuild: 101-104 are the four sections below, 201-206 the individual checks inside the
+ * a rebuild: 101-105 are the five sections below, 201-206 the individual checks inside the
  * property loop.
  */
 #include "jaclrt.h"
@@ -154,7 +158,59 @@ int run(int n) {
     ok &= jaclrt_is_error(jacl_mod(b, jaclrt_i32(0)));
   }
 
-  return ok ? 812 : 104;
+  if (!ok) return 104;
+
+  /* ---- 5. a bigint has no int64 form, and nothing may pretend otherwise (jacl #138) ---- */
+  {
+    /* `jacl_is_anyint` admits a bigint but `jacl_int_val` does not handle one, so three
+     * single-operand callers read the JaclBig header (`sign`, `n`) as an int64 and got a
+     * plausible number: a 2-limb positive bigint reads as 8589934593. The binary arithmetic
+     * ops were never affected - they route bigints to the bigint path first. */
+    JaclVal b  = big("18446744073709551615");                 /* > INT64_MAX: fits no width */
+    JaclVal nb = jacl_sub(jaclrt_i32(0), b);                  /* and its negation */
+    JaclVal i64max = big("9223372036854775807");
+    ok &= jacl_is_bigint(b) && jacl_is_bigint(nb);
+    ok &= !jacl_is_bigint(i64max);                            /* canonical: this is an i64 */
+
+    /* (a) the cast. `[to "i64" b]` answered 8589934593 rather than refusing - exactly the
+     * truncation jacl #116 exists to forbid. `i32` refused, but only because the garbage
+     * happened to exceed INT32_MAX: right answer, wrong reason. */
+    ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("i64", 3)));
+    ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("i32", 3)));
+    ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("u64", 3)));
+    ok &= jaclrt_is_error(jacl_to_cast(nb, jacl_str_new("i64", 3)));
+    /* ...and the in-range path still converts, so the refusal is not blanket */
+    ok &= jacl_val_equal(jacl_to_cast(i64max, jacl_str_new("i64", 3)), i64max);
+    ok &= jacl_val_equal(jacl_to_cast(jaclrt_i32(7), jacl_str_new("i32", 3)), jaclrt_i32(7));
+    ok &= jaclrt_is_error(jacl_to_cast(i64max, jacl_str_new("i32", 3)));   /* genuinely too big */
+
+    /* (b) the wrapping ops. Wrapping modulo 2^64 is not defined for a bigint; it used to
+     * return the header arithmetic (`[+% b 1]` = 8589934594). */
+    ok &= jaclrt_is_error(jacl_wrap_add(b, jaclrt_i32(1)));
+    ok &= jaclrt_is_error(jacl_wrap_sub(b, jaclrt_i32(1)));
+    ok &= jaclrt_is_error(jacl_wrap_mul(b, jaclrt_i32(2)));
+    ok &= jaclrt_is_error(jacl_wrap_add(jaclrt_i32(1), b));   /* either operand */
+    /* ...and wrapping still wraps where it is defined */
+    ok &= jacl_val_equal(jacl_wrap_add(jaclrt_i32(2000000000), jaclrt_i32(2000000000)),
+                         jaclrt_i32(-294967296));
+    ok &= jacl_val_equal(jacl_wrap_add(i64max, jaclrt_i32(1)),
+                         big("-9223372036854775808"));         /* wide pair still wraps */
+
+    /* (c) the u64 widening guard. `negative -> u64` is a domain error, and a negative *bigint*
+     * used to slip past it: the old test read `sign = -1` and `n` together, which is positive
+     * for any limb count, so the one case the guard is about was the one it let through. */
+    JaclVal u64k = jaclrt_i32(0x0F), i64k = jaclrt_i32(0x0E);
+    ok &= jaclrt_is_error(jacl_widen_to(nb, u64k));
+    ok &= jaclrt_is_error(jacl_widen_to(b,  u64k));            /* > INT64_MAX: no 64-bit cell */
+    ok &= jaclrt_is_error(jacl_widen_to(b,  i64k));
+    ok &= jaclrt_is_error(jacl_widen_to(jaclrt_i32(-5), u64k));  /* the original guard holds */
+    /* ...and widening a value that does fit still widens */
+    ok &= !jaclrt_is_error(jacl_widen_to(jaclrt_i32(5), u64k));
+    ok &= !jaclrt_is_error(jacl_widen_to(i64max, i64k));
+    if (!ok) return 105;
+  }
+
+  return ok ? 812 : 106;
 }
 
 #include "jaclrt.c"

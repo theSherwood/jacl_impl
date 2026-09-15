@@ -124,6 +124,15 @@ toward zero and the remainder takes the dividend's sign, matching the i32 and i6
 algorithm D works on magnitudes, so every sign question is settled by the caller. There is
 now **no arithmetic that fails on magnitude alone** — only on a domain error.
 
+A bigint reaches a static width only to be refused. Canonical form (V2) means a bigint's
+magnitude exceeds what an i64 holds, so no `i32`/`i64`/`u64` can take one — `[to "T" <big>]`
+and a `u64` widening are both domain errors, and `+% -% *%` on one is a type error because
+wrapping modulo 2^64 has no meaning for it. Getting this wrong was jacl #138: three callers
+paired `jacl_is_anyint` (which admits a bigint) with `jacl_int_val` (which does not handle
+one), so they read the `JaclBig` header as a number and `[to "i64" <big>]` answered
+`8589934593`. The positive-bigint-into-`u64` case becomes a real conversion when `u64`'s
+range is widened to `UINT64_MAX` (jacl #119).
+
 `u64` is the one type that still errors on overflow rather than promoting, and the tag is
 what forces it: promoting drops the record that the value was meant to be unsigned, and
 `dyn` has no unsigned form to promote *into* — the model puts signedness on the static side
