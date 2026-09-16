@@ -18,6 +18,15 @@
 # expect: 1
 # expect: true
 # expect: 9223372036854775807
+# expect: 18446744073709551615
+# expect: 1844674407370955161
+# expect: 5
+# expect: false
+# expect: true
+# expect: 18446744073709551614
+# expect: 18446744073709551615
+# expect: true
+# expect: true
 # expect: v37
 #
 # `u32` and `u64` are first-class static types: a raw, untagged, **zero**-extended machine
@@ -34,6 +43,11 @@
 # 3. `+% -% *%` still wrap modulo the declared width, unsigned or not.
 # 4. Coercing to `dyn` canonicalizes, so a typed u32 holding 37 is the same map key as the
 #    literal 37 (the typed half of jacl #107).
+#
+# The top half of `u64` is reachable now (steps 4-5): the range caps that used to stop at
+# `INT64_MAX` were the only thing keeping the tagged path's wrong `/ % < >` answers out of
+# reach, and with `u64` a static raw type they have nothing left to protect. In a `dyn`
+# position such a value is a bigint, because a signed tower has no other form for it.
 
 def m [map 37 "v37"]
 
@@ -100,6 +114,22 @@ proc u64_ops {} {
 
 proc u64_call {u64 a} u64 { - $a 0 }
 print [u64_call 9223372036854775807]
+
+# the whole u64 range, which the caps used to make unreachable
+proc u64_top {} {
+  def u64 m 18446744073709551615
+  def u64 ten 10
+  print $m
+  print [/ $m $ten]
+  print [% $m $ten]
+  print [< $m $ten]
+  print [> $m $ten]
+  print [-% $m 1]
+}
+[u64_top]
+print [to "u64" 18446744073709551615]
+print [error? [to "u64" [- 0 5]]]
+print [error? [to "i64" 18446744073709551615]]     # still no i64 form
 
 # a typed u32 in a dyn position canonicalizes, so it keys the map
 proc as_key {} {

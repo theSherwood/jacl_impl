@@ -40,7 +40,19 @@ static inline int jacl_is_num(JaclVal v) {
 static inline float jacl_num_f32(JaclVal v) {
   return jaclrt_is_i32(v) ? (float)jaclrt_as_i32(v) : jaclrt_as_f32(v);
 }
-/* ---- wide numbers (heap cells: i64 0x0E, u64 0x0F, f64 0x10 — 8 payload bytes) ---- */
+/* ---- wide numbers (heap cells: i64 0x0E, f64 0x10 — 8 payload bytes) ----
+ *
+ * There used to be a third, `0x0F` "wide but unsigned", and its deletion is jacl #119 step 3.
+ * It recorded that a value was meant to be unsigned and **no operation honoured it**: every
+ * read went through `jacl_int_val` into an `int64_t` and used the signed op, so `/`, `%` and
+ * every ordering answered wrongly above `INT64_MAX` while the representation and the printer
+ * were right across the whole range. That is the cost of tracking unsignedness with none of
+ * the benefit, and it is why the tag was deleted rather than taught to compute.
+ *
+ * What replaced it: signedness now lives entirely on the static side (`REP_U32`/`REP_U64` raw
+ * words with the real unsigned opcodes), and a u64 crossing into `dyn` becomes a plain signed
+ * dynamic integer by magnitude — inline i32, boxed i64, or bigint. The tower below is purely
+ * signed, which is what `docs/TEMEN_NUMERICS.md` § "The integer model" always said it was. */
 JaclVal jacl_wide_new(uint32_t tidx, int64_t bits) {
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_BLOB, 8);
   *(int64_t *)jacl_obj_payload(o) = bits;
@@ -50,8 +62,7 @@ static inline int64_t jacl_wide_bits(JaclVal v) {
   return *(int64_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
 }
 static inline int jacl_is_iwide(JaclVal v) {
-  uint32_t t = jaclrt_type_index(v);
-  return t == 0x0E || t == 0x0F;
+  return jaclrt_type_index(v) == 0x0E;
 }
 /* `is_iwide` is the *machine*-wide test (a 64-bit cell); `is_anyint` spans the whole dynamic
  * integer tower, bigint included. Anything that reads a payload as an int64 must use the
@@ -99,24 +110,18 @@ static JaclVal jacl_f64_new(double d) {
  * the docs had to label a violation rather than a rule (#106 slice 6). `+% -% *%` are
  * unaffected: they are defined to wrap and compute through unsigned types.
  *
- * u64 is the exception, and it is the tag that forces it: promoting drops the record that
- * the value was meant to be unsigned, and `dyn` has no unsigned form to promote *into* (the
- * model puts signedness on the static side only). A u64 that overflows still errors. */
+ * `u64` used to be the exception — an overflowing one errored rather than promoting, because
+ * promoting would drop the `0x0F` tag that recorded the value as unsigned. With the tag gone
+ * (jacl #119 step 3) there is no exception left: every dynamic integer promotes, and a static
+ * `u64` gets its overflow error from its own typed lowering instead, where the width is a
+ * compile-time fact rather than something the tower has to remember. */
 #define JACL_WIDE_OP(fn, builtin, bigfn)                                             \
   static inline JaclVal fn(JaclVal a, JaclVal b) {                                   \
     int64_t r;                                                                       \
-    if (builtin(jacl_int_val(a), jacl_int_val(b), &r)) {                             \
-      if (jacl_iwide_tag(a, b) == 0x0F)                                              \
-        return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);                   \
+    if (builtin(jacl_int_val(a), jacl_int_val(b), &r))                               \
       return bigfn(a, b) | prop_flags(a, b);                                         \
-    }                                                                                \
-    return jacl_int_result(jacl_iwide_tag(a, b), r) | prop_flags(a, b);              \
+    return jacl_int_result(r) | prop_flags(a, b);                                    \
   }
-
-/* result tag for a wide-int binop: u64 if either side is u64, else i64 */
-static inline uint32_t jacl_iwide_tag(JaclVal a, JaclVal b) {
-  return (jaclrt_type_index(a) == 0x0F || jaclrt_type_index(b) == 0x0F) ? 0x0F : 0x0E;
-}
 /* ---- canonical dynamic integers (#107) ----
  *
  * A dynamic integer takes the narrowest representation that holds it, so the representation
@@ -126,16 +131,14 @@ static inline uint32_t jacl_iwide_tag(JaclVal a, JaclVal b) {
  * pointer, for a heap wide int). A wide-computed `37` then hashes to a different bucket
  * than the inline `37` it compares equal to, and a map lookup silently misses.
  *
- * Every *dynamic* wide result therefore returns through here. Two things deliberately do
- * not: `u64` keeps its wide form, since the tag is the only record that the value is meant
- * to be unsigned and dropping it would change which tag later arithmetic picks; and
- * explicit widening (`def i64 x 37`, `[to "i64" 37]`) keeps what the program asked for —
- * that is the typed side of the rule, and it needs the native i64 representation from
- * jacl #106 slice 1 before it can be honored end to end. */
-static inline JaclVal jacl_int_result(uint32_t tidx, int64_t bits) {
-  if (tidx == 0x0E && bits >= INT32_MIN && bits <= INT32_MAX)
-    return jaclrt_i32((int32_t)bits);
-  return jacl_wide_new(tidx, bits);
+ * Every *dynamic* wide result returns through here, with no exceptions — it used to take the
+ * result tag and skip canonicalizing for `0x0F`, which is gone (jacl #119 step 3). Explicit
+ * widening (`def i64 x 37`, `[to "i64" 37]`) is the one thing that does not come through
+ * here: that is the *typed* side of the rule, where a declared type should mean exactly that
+ * representation at runtime. */
+static inline JaclVal jacl_int_result(int64_t bits) {
+  if (bits >= INT32_MIN && bits <= INT32_MAX) return jaclrt_i32((int32_t)bits);
+  return jacl_wide_new(0x0E, bits);
 }
 JACL_WIDE_OP(jacl_wide_add, __builtin_add_overflow, jacl_big_add)
 JACL_WIDE_OP(jacl_wide_sub, __builtin_sub_overflow, jacl_big_sub)
@@ -150,7 +153,7 @@ JaclVal jacl_add(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_add_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) + (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result((int64_t)jaclrt_as_i32(a) + (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -171,7 +174,7 @@ JaclVal jacl_sub(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_sub_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) - (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result((int64_t)jaclrt_as_i32(a) - (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -192,7 +195,7 @@ JaclVal jacl_mul(JaclVal a, JaclVal b) {
     int32_t r;
     if (!__builtin_mul_overflow(jaclrt_as_i32(a), jaclrt_as_i32(b), &r))
       return jaclrt_i32(r) | prop_flags(a, b);
-    return jacl_int_result(0x0E, (int64_t)jaclrt_as_i32(a) * (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
+    return jacl_int_result((int64_t)jaclrt_as_i32(a) * (int64_t)jaclrt_as_i32(b)) | prop_flags(a, b);
   }
   if ((jacl_is_f64(a) && (jacl_is_anyfloat(b) || jacl_is_anyint(b))) ||
       (jacl_is_f64(b) && (jacl_is_anyfloat(a) || jacl_is_anyint(a))))
@@ -221,7 +224,7 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
      * i64 at all. `dyn` promotes rather than failing on magnitude, so hand this one case to
      * the bigint tier, which canonicalizes it back down if it ever fits again (#104, #121). */
     if (x == INT64_MIN && y == -1) return jacl_big_divmod(a, b, /*want_rem=*/0) | prop_flags(a, b);
-    return jacl_int_result(jacl_iwide_tag(a, b), x / y) | prop_flags(a, b);
+    return jacl_int_result(x / y) | prop_flags(a, b);
   }
   if (jacl_is_num(a) && jacl_is_num(b) && !(jaclrt_is_i32(a) && jaclrt_is_i32(b)))
     return jaclrt_f32v(jacl_num_f32(a) / jacl_num_f32(b)) | prop_flags(a, b);
@@ -242,7 +245,7 @@ JaclVal jacl_mod(JaclVal a, JaclVal b) {
     int64_t x = jacl_int_val(a), y = jacl_int_val(b);
     if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
     if (x == INT64_MIN && y == -1) return jaclrt_i32(0) | prop_flags(a, b);   /* exact; no UB */
-    return jacl_int_result(jacl_iwide_tag(a, b), x % y) | prop_flags(a, b);
+    return jacl_int_result(x % y) | prop_flags(a, b);
   }
   if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
   int32_t x = jaclrt_as_i32(a), y = jaclrt_as_i32(b);
@@ -263,7 +266,7 @@ JaclVal jacl_wrap_add(JaclVal a, JaclVal b) {
            prop_flags(a, b);
   { int64_t x, y;
     if (jacl_int_val_checked(a, &x) && jacl_int_val_checked(b, &y))
-      return jacl_int_result(jacl_iwide_tag(a, b), (int64_t)((uint64_t)x + (uint64_t)y)) |
+      return jacl_int_result((int64_t)((uint64_t)x + (uint64_t)y)) |
              prop_flags(a, b); }
   return jaclrt_error();   /* incl. a bigint: wrapping modulo 2^64 is not defined for one (#138) */
 }
@@ -274,7 +277,7 @@ JaclVal jacl_wrap_sub(JaclVal a, JaclVal b) {
            prop_flags(a, b);
   { int64_t x, y;
     if (jacl_int_val_checked(a, &x) && jacl_int_val_checked(b, &y))
-      return jacl_int_result(jacl_iwide_tag(a, b), (int64_t)((uint64_t)x - (uint64_t)y)) |
+      return jacl_int_result((int64_t)((uint64_t)x - (uint64_t)y)) |
              prop_flags(a, b); }
   return jaclrt_error();   /* incl. a bigint: wrapping modulo 2^64 is not defined for one (#138) */
 }
@@ -285,7 +288,7 @@ JaclVal jacl_wrap_mul(JaclVal a, JaclVal b) {
            prop_flags(a, b);
   { int64_t x, y;
     if (jacl_int_val_checked(a, &x) && jacl_int_val_checked(b, &y))
-      return jacl_int_result(jacl_iwide_tag(a, b), (int64_t)((uint64_t)x * (uint64_t)y)) |
+      return jacl_int_result((int64_t)((uint64_t)x * (uint64_t)y)) |
              prop_flags(a, b); }
   return jaclrt_error();   /* incl. a bigint: wrapping modulo 2^64 is not defined for one (#138) */
 }
@@ -306,7 +309,7 @@ int64_t jacl_i64_unbox(JaclVal v) {
   if (jacl_is_anyfloat(v)) return (int64_t)jacl_num_f64(v);
   return 0;                      /* not a number: the typer should have refused this */
 }
-JaclVal jacl_i64_box(int64_t x) { return jacl_int_result(0x0E, x); }
+JaclVal jacl_i64_box(int64_t x) { return jacl_int_result(x); }
 /* Did `a * b` overflow 64 bits? Add and subtract are checked inline in the emitted code from
  * the operand and result signs; multiply has no such trick, and the obvious "divide back and
  * compare" traps the host on `INT64_MIN / -1`. So it asks the compiler here instead. */
@@ -327,7 +330,7 @@ int64_t jacl_i64_mul_ovf(int64_t a, int64_t b) {
  * a bit pattern, not a signed number — every use casts.) */
 JaclVal jacl_u64_box(int64_t bits) {
   uint64_t x = (uint64_t)bits;
-  if (x <= (uint64_t)INT64_MAX) return jacl_int_result(0x0E, (int64_t)x);
+  if (x <= (uint64_t)INT64_MAX) return jacl_int_result((int64_t)x);
   return jacl_big_from_u64(x);
 }
 /* The other direction. Codegen branches on the flags before it ever calls this, so a flagged
@@ -346,11 +349,8 @@ int64_t jacl_u64_unbox(JaclVal v) {
     return jacl_big_to_u64(v, &u) ? (int64_t)u : 0;
   }
   if (jacl_is_iwide(v)) {
+    /* A wide cell is signed, so a negative value has no u64 form. */
     int64_t x = jacl_wide_bits(v);
-    /* A 0x0F cell already holds the unsigned bit pattern; a 0x0E one is signed, so a negative
-     * value has no u64 form. (0x0F is on its way out — jacl #119 step 3 — but while it exists
-     * this has to read it as what it is.) */
-    if (jaclrt_type_index(v) == 0x0F) return x;
     return x < 0 ? 0 : x;
   }
   return 0;                      /* not an integer: the typer should have refused this */
@@ -860,34 +860,44 @@ JaclVal jacl_global_set(JaclVal name, JaclVal v) {
   return v;
 }
 
-/* Widen a value to a declared wide scalar kind (typed defs): 14=i64, 15=u64, 16=f64. */
+/* Widen a value to a declared wide scalar kind (typed defs): 14=i64, 15=u64, 16=f64.
+ *
+ * `u64` no longer has a representation of its own — the `0x0F` tag is gone (jacl #119 step 3)
+ * and the dynamic tower is purely signed — so what a `u64` widening *is* has narrowed to the
+ * one thing it was always really doing: a **range check**. A value in `[0, UINT64_MAX]` comes
+ * back in its canonical dynamic form; anything else is a domain error. */
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
   if (jaclrt_is_error(v) || !jaclrt_is_i32(kind)) return v;
   if (jacl_is_flagged(v)) return jacl_flagged_refusal(v);
   int32_t k = jaclrt_as_i32(kind);
   if (k == 0x10) return jacl_is_f64(v) ? v : jacl_f64_new(jacl_num_f64(v));
-  if (k == 0x0E || k == 0x0F) {
-    /* Widening cannot lose a value, with one exception: a negative number is not a u64, and
-     * reinterpreting its bits would answer 18446744073709551611 for `def u64 x [- 0 5]`.
-     * Same ruling as the narrowing crossing below — a domain error, not a different number. */
-    if (k == 0x0F) {
-      int64_t n;
-      if (jacl_int_val_checked(v, &n) && n < 0) return jaclrt_set_error(jaclrt_i32(0));
-      if (jacl_is_anyfloat(v) && jacl_num_f64(v) < 0) return jaclrt_set_error(jaclrt_i32(0));
-    }
-    /* A bigint fits no 64-bit cell: canonical form means its magnitude exceeds what an i64
-     * holds (#107), so neither i64 nor (today) u64 can take it. It used to reach the bare
-     * `return v` below and end up *inside* the static binding — and the u64 sign guard above
-     * missed it too, because the old `jacl_is_anyint(v) && jacl_int_val(v) < 0` read the
-     * `JaclBig` header rather than the value: for a negative bigint `sign = -1` and `n` read
-     * together are positive, so the one case that comment is about was the one it let through
-     * (jacl #138). A domain error now, at both widths.
+  if (k == 0x0F) {
+    /* A negative number is not a u64, and reinterpreting its bits would answer
+     * 18446744073709551611 for `def u64 x [- 0 5]`. Same ruling as the narrowing crossing
+     * below — a domain error, not a different number.
      *
-     * The positive-bigint-into-u64 case becomes representable when u64's range is widened to
-     * UINT64_MAX (jacl #119); that is the conversion this refusal will give way to. */
+     * The bigint case reads the *value*, not the header. The old guard
+     * (`jacl_is_anyint(v) && jacl_int_val(v) < 0`) read the `JaclBig` header instead, which
+     * for a negative bigint is positive, so the one case it was about was the one it let
+     * through (jacl #138). Now a positive bigint in (INT64_MAX, UINT64_MAX] is *in range* and
+     * is already its own canonical dynamic form, so it passes through unchanged — that is
+     * #119 step 5, the conversion the old blanket refusal gave way to. */
+    if (jacl_is_bigint(v)) {
+      uint64_t u;
+      return jacl_big_to_u64(v, &u) ? v : jaclrt_set_error(jaclrt_i32(0));
+    }
+    { int64_t n;
+      if (jacl_int_val_checked(v, &n) && n < 0) return jaclrt_set_error(jaclrt_i32(0)); }
+    if (jacl_is_anyfloat(v) && jacl_num_f64(v) < 0) return jaclrt_set_error(jaclrt_i32(0));
+    return v;                  /* in range, and already canonical */
+  }
+  if (k == 0x0E) {
+    /* A bigint fits no i64 cell: canonical form means its magnitude exceeds what an i64 holds
+     * (#107). It used to reach the bare `return v` below and end up *inside* the static
+     * binding (jacl #138); a domain error now. */
     if (jacl_is_bigint(v)) return jaclrt_set_error(jaclrt_i32(0));
     if (jacl_is_iwide(v)) return v;
-    if (jaclrt_is_i32(v)) return jacl_wide_new((uint32_t)k, (int64_t)jaclrt_as_i32(v));
+    if (jaclrt_is_i32(v)) return jacl_wide_new(0x0E, (int64_t)jaclrt_as_i32(v));
   }
   return v;
 }
@@ -904,8 +914,12 @@ JaclVal jacl_widen_to(JaclVal v, JaclVal kind) {
  * behaviour to convert in C, not merely lossy, so the check has to happen in double
  * arithmetic before the cast rather than after it.
  *
- * `u64`'s upper bound is reported as INT64_MAX because a `dyn` source cannot be anything
- * else: `dyn` is a signed integer tower, and its top half needs the bigint tier (#119). */
+ * `u64`'s range is the full `[0, UINT64_MAX]` (jacl #119 step 4). It used to stop at
+ * `INT64_MAX`, and that cap was load-bearing while `u64` was a *tagged* type computed with
+ * signed ops: it was the only thing keeping the wrong `/ % < >` answers out of reach. Now that
+ * `u64` is a static raw type with its own unsigned lowering, the cap has nothing left to
+ * protect, and its top half is reachable — as a bigint, which is what the whole range means in
+ * a signed tower. The check below therefore runs in `uint64_t` for that one target. */
 JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   if (jaclrt_is_error(v)) return v;
   /* A tainted or secret value cannot become a statically typed one (jacl #95): the target
@@ -920,11 +934,33 @@ JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   if (tl == 3 && !memcmp(tn, "f64", 3)) return jacl_f64_new(jacl_num_f64(v));
   if (tl == 3 && !memcmp(tn, "f32", 3)) return jaclrt_f32v((float)jacl_num_f64(v));
 
+  /* `u64` is handled apart because its upper bound does not fit an `int64_t`. Everything about
+   * it is the same rule — refuse what the target cannot hold — read in `uint64_t`. */
+  if (tl == 3 && !memcmp(tn, "u64", 3)) {
+    if (jacl_is_anyfloat(v)) {
+      double d = jacl_num_f64(v);
+      /* 2^64 written out, and `d < 2^64` rather than `d <= (double)UINT64_MAX`: that constant
+       * rounds *up* to 2^64, so the inclusive form would admit a value one past the end. NaN
+       * fails both comparisons, which is why the test is written positively. */
+      if (!(d >= 0.0 && d < 18446744073709551616.0)) return jaclrt_set_error(jaclrt_i32(0));
+      return jacl_u64_box((int64_t)(uint64_t)d);
+    }
+    { int64_t n;
+      if (jacl_int_val_checked(v, &n))
+        return n < 0 ? jaclrt_set_error(jaclrt_i32(0)) : jacl_u64_box(n); }
+    if (jacl_is_bigint(v)) {
+      /* In range now (#119 step 5) — and a bigint in (INT64_MAX, UINT64_MAX] is already its
+       * own canonical dynamic form, so this is a check rather than a conversion. */
+      uint64_t u;
+      return jacl_big_to_u64(v, &u) ? v : jaclrt_set_error(jaclrt_i32(0));
+    }
+    return jaclrt_error();                 /* not a number: not a narrowing question */
+  }
+
   int64_t  lo, hi;
   uint32_t tidx;
   if      (tl == 3 && !memcmp(tn, "i32", 3)) { lo = INT32_MIN; hi = INT32_MAX; tidx = 0x02; }
   else if (tl == 3 && !memcmp(tn, "i64", 3)) { lo = INT64_MIN; hi = INT64_MAX; tidx = 0x0E; }
-  else if (tl == 3 && !memcmp(tn, "u64", 3)) { lo = 0;         hi = INT64_MAX; tidx = 0x0F; }
   else return jaclrt_error();
 
   int64_t x;
@@ -939,19 +975,17 @@ JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   } else if (jacl_int_val_checked(v, &x)) {
     if (x < lo || x > hi) return jaclrt_set_error(jaclrt_i32(0));
   } else if (jacl_is_bigint(v)) {
-    /* No static integer width can hold a bigint, and canonical form is what makes that a
-     * rule rather than a guess: a value an i64 could hold is never a bigint (#107), so its
-     * magnitude necessarily exceeds i64's — and i32's, and u64's, whose range still stops at
-     * INT64_MAX here. A domain error, the same answer an out-of-range i64 gets.
+    /* Neither `i32` nor `i64` can hold a bigint, and canonical form is what makes that a rule
+     * rather than a guess: a value an i64 could hold is never a bigint (#107), so its
+     * magnitude necessarily exceeds i64's, and i32's. A domain error, the same answer an
+     * out-of-range i64 gets.
      *
      * This used to fall into the `is_anyint` branch above and read the bigint's header as its
      * value (#138): `[to "i64" 18446744073709551615]` answered 8589934593 instead of
      * refusing. The `i32` case did refuse, but only because that garbage happened to exceed
      * INT32_MAX — the right answer for the wrong reason.
      *
-     * When u64's range is widened to UINT64_MAX (jacl #119), a *positive* bigint in
-     * (INT64_MAX, UINT64_MAX] becomes representable and wants a real conversion here rather
-     * than this refusal. That is the one case this branch will have to grow. */
+     * `u64` no longer reaches here: its whole range, bigint half included, is settled above. */
     return jaclrt_set_error(jaclrt_i32(0));
   } else {
     return jaclrt_error();                 /* not a number: not a narrowing question */
@@ -1022,7 +1056,16 @@ static int type_name_matches(JaclVal v, const char *tn, uint32_t tl) {
   if (tl == 3 && !memcmp(tn, "f32", 3)) return t == 0x03;
   if (tl == 3 && !memcmp(tn, "f64", 3)) return t == 0x03 || t == 0x10;
   if (tl == 3 && !memcmp(tn, "i64", 3)) return t == 0x02 || t == 0x0E;
-  if (tl == 3 && !memcmp(tn, "u64", 3)) return t == 0x02 || t == 0x0F;
+  /* `u64` has no dynamic representation of its own any more (jacl #119 step 3), so the only
+   * thing a tagged value can still be checked against is the range: a non-negative integer
+   * anywhere in the signed tower, bigint half included. (A static `u64` is a compile-time fact
+   * the typer settles; this is the residual runtime check — see jacl #118 on whether it should
+   * exist at all.) */
+  if (tl == 3 && !memcmp(tn, "u64", 3)) {
+    if (t == 0x09) { uint64_t u; return jacl_big_to_u64(v, &u); }
+    int64_t n;
+    return jacl_int_val_checked(v, &n) && n >= 0;
+  }
   if (tl == 3 && !memcmp(tn, "vec", 3)) return t == 0x06;
   if (tl == 3 && !memcmp(tn, "map", 3)) return t == 0x07;
   if (tl == 3 && !memcmp(tn, "arr", 3)) return t == 0x1A;
@@ -1493,10 +1536,10 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
   if (t == 0x01) { if (jaclrt_as_bool(v)) repr_put(rb, "true", 4); else repr_put(rb, "false", 5); return; }
   if (t == 0x02) { repr_i32(rb, jaclrt_as_i32(v)); return; }
   if (t == 0x03) { repr_f32(rb, jaclrt_as_f32(v)); return; }
-  if (t == 0x0E || t == 0x0F) {                          /* wide ints: 64-bit itoa */
+  if (t == 0x0E) {                                       /* wide ints: 64-bit itoa */
     int64_t x = jacl_wide_bits(v);
     char tmp[24]; int j = 0;
-    int neg = (t == 0x0E && x < 0);
+    int neg = x < 0;   /* the tower is signed; there is no unsigned wide cell (jacl #119) */
     uint64_t u = neg ? (uint64_t)(-x) : (uint64_t)x;
     if (u == 0) tmp[j++] = '0';
     while (u) { tmp[j++] = (char)('0' + (u % 10)); u /= 10; }
@@ -1606,7 +1649,7 @@ static void repr_val(JaclRepr *rb, JaclVal v, int quote_strings) {
 JaclVal jacl_to_string(JaclVal v) {
   if (jaclrt_is_string(v)) return v;
   uint32_t t = jaclrt_type_index(v);
-  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x1E && t != 0x09 && t != 0x0E && t != 0x0F && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
+  if (t != 0x00 && t != 0x01 && t != 0x02 && t != 0x03 && t != 0x06 && t != 0x07 && t != 0x12 && t != 0x1A && t != 0x1B && t != 0x1C && t != 0x1E && t != 0x09 && t != 0x0E && t != 0x10 && t != 0x0B && t != 0x0C && t != 0x08) return jaclrt_error();
   char buf[2048];
   JaclRepr rb = {buf, 0, sizeof buf};
   repr_val(&rb, v, 1);

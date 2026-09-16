@@ -1217,13 +1217,38 @@ static IrVal emit_uint_op(Cx *cx, int bits, IrBinOp op, IrVal a, IrVal b, int wr
  * `ovf_slot`. The shape mirrors `compile_i32` / `compile_raw_i64`: typed arithmetic stays
  * unboxed recursively, literals are constants, a raw slot is read straight, a raw-return call
  * hands its pair over, and anything else is computed boxed and then crossed. */
+/* A literal past `INT64_MAX` arrives as its **digit span** rather than a value (the lexer's
+ * `is_big`). `u64` is the one static width that can hold one, so it is the one width that has
+ * to read the digits — the typer checks the same thing with the same shape
+ * (`typer__big_lit_u64`); this is the backstop that turns the checked literal into a word. */
+static int lit_big_u64(AstNode *n, uint64_t *out) {
+  const char *d = n->data.lit_int.big;
+  uint32_t len = n->data.lit_int.big_len;
+  if (!d || len == 0 || len > 20) return 0;        /* UINT64_MAX is 20 digits */
+  uint64_t u = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    if (d[i] < '0' || d[i] > '9') return 0;
+    uint64_t t = u * 10u + (uint64_t)(d[i] - '0');
+    if (t / 10u != u) return 0;                    /* overflowed 64 bits */
+    u = t;
+  }
+  *out = u;
+  return 1;
+}
 static IrVal compile_uint(Cx *cx, AstNode *node, int bits, int ovf_slot) {
   if (cx->failed) return 0;
   if (node->type == AST_LIT_INT) {
-    /* An out-of-range literal is the typer's to refuse (#112); this is the backstop, and the
-     * reason it can be this simple is that the caps keep a u64 literal inside `int64_t`. */
+    /* An out-of-range literal is the typer's to refuse (#112); this is the backstop. */
+    if (node->data.lit_int.big) {
+      uint64_t u;
+      if (bits == 64 && lit_big_u64(node, &u))
+        return irb_const_i64(cx->f, cx->cur, (int64_t)u);
+      cx_fail(cx, bits == 32 ? "integer literal out of range for u32"
+                             : "integer literal out of range for u64");
+      return 0;
+    }
     int64_t v = node->data.lit_int.value;
-    if (node->data.lit_int.big || v < 0 || (bits == 32 && v > (int64_t)UINT32_MAX)) {
+    if (v < 0 || (bits == 32 && v > (int64_t)UINT32_MAX)) {
       cx_fail(cx, bits == 32 ? "integer literal out of range for u32"
                              : "integer literal out of range for u64");
       return 0;

@@ -183,8 +183,15 @@ int run(int n) {
      * happened to exceed INT32_MAX: right answer, wrong reason. */
     ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("i64", 3)));
     ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("i32", 3)));
-    ok &= jaclrt_is_error(jacl_to_cast(b,  jacl_str_new("u64", 3)));
     ok &= jaclrt_is_error(jacl_to_cast(nb, jacl_str_new("i64", 3)));
+    /* `u64` is the one width that *can* hold this one now — its range is the full
+     * [0, UINT64_MAX] (jacl #119 steps 4-5), and a bigint in (INT64_MAX, UINT64_MAX] is
+     * already its own canonical dynamic form, so the cast is a check rather than a
+     * conversion. This is the refusal #138 had to leave in place; it is gone. */
+    ok &= jacl_val_equal(jacl_to_cast(b, jacl_str_new("u64", 3)), b);
+    ok &= jaclrt_is_error(jacl_to_cast(nb, jacl_str_new("u64", 3)));     /* negative: no u64 */
+    ok &= jaclrt_is_error(jacl_to_cast(big("18446744073709551616"),      /* one past the end */
+                                       jacl_str_new("u64", 3)));
     /* ...and the in-range path still converts, so the refusal is not blanket */
     ok &= jacl_val_equal(jacl_to_cast(i64max, jacl_str_new("i64", 3)), i64max);
     ok &= jacl_val_equal(jacl_to_cast(jaclrt_i32(7), jacl_str_new("i32", 3)), jaclrt_i32(7));
@@ -204,11 +211,16 @@ int run(int n) {
 
     /* (c) the u64 widening guard. `negative -> u64` is a domain error, and a negative *bigint*
      * used to slip past it: the old test read `sign = -1` and `n` together, which is positive
-     * for any limb count, so the one case the guard is about was the one it let through. */
+     * for any limb count, so the one case the guard is about was the one it let through.
+     *
+     * A `u64` widening is now *only* a range check — u64 has no representation of its own
+     * (jacl #119 step 3), so there is nothing left for it to widen *into*. The bigint half of
+     * its range passes through unchanged. */
     JaclVal u64k = jaclrt_i32(0x0F), i64k = jaclrt_i32(0x0E);
     ok &= jaclrt_is_error(jacl_widen_to(nb, u64k));
-    ok &= jaclrt_is_error(jacl_widen_to(b,  u64k));            /* > INT64_MAX: no 64-bit cell */
-    ok &= jaclrt_is_error(jacl_widen_to(b,  i64k));
+    ok &= jacl_val_equal(jacl_widen_to(b, u64k), b);           /* in range, already canonical */
+    ok &= jaclrt_is_error(jacl_widen_to(big("18446744073709551616"), u64k));   /* one past */
+    ok &= jaclrt_is_error(jacl_widen_to(b,  i64k));            /* > INT64_MAX: no i64 cell */
     ok &= jaclrt_is_error(jacl_widen_to(jaclrt_i32(-5), u64k));  /* the original guard holds */
     /* ...and widening a value that does fit still widens */
     ok &= !jaclrt_is_error(jacl_widen_to(jaclrt_i32(5), u64k));
@@ -277,23 +289,43 @@ int run(int n) {
     ok &= jacl_u64_mul_ovf((int64_t)1 << 32, (int64_t)1 << 32) == 1;
     if (!ok) return 110;
 
-    /* (e) **pinning the `0x0F` tag's current behaviour.** The tag records unsignedness and no
-     * operation honours it: every read goes through `jacl_int_val` into an `int64_t` and uses
-     * the signed op. The representation and the printer are right across the whole range; the
-     * dispatch is not. These values are unreachable from JACL source (the range caps in
-     * `typer__int_range` / `jacl_to_cast` stop at INT64_MAX) but reachable from `flatbuf.c`,
-     * which mints one for a raw machine address. When step 3 deletes the tag, this block is
-     * what has to change — which is the evidence the tag is gone rather than merely unused. */
-    JaclVal umax = jacl_wide_new(0x0F, (int64_t)UINT64_MAX);
+    /* (e) **the `0x0F` tag is gone** (jacl #119 step 3). This block used to pin its wrong
+     * answers: the tag recorded that a value was meant to be unsigned and no operation
+     * honoured it — every read went through `jacl_int_val` into an `int64_t` and used the
+     * signed op — so `/ % < >` answered wrongly above `INT64_MAX` while the representation
+     * and the printer were right across the whole range. Those values were unreachable from
+     * JACL source (the range caps stopped at `INT64_MAX`) but reachable from `flatbuf.c`,
+     * which minted one for a raw machine address.
+     *
+     * With signedness moved entirely to the static side, the tower is purely signed and the
+     * same values are a **bigint**, which computes correctly. The pin is now the other way
+     * round: it asserts the answers rather than the bug, and that no wide cell carries the
+     * old tag. */
+    JaclVal umax = jacl_u64_box((int64_t)UINT64_MAX);
+    JaclVal nb   = jacl_sub(jaclrt_i32(0), umax);              /* its negation */
     JaclVal ten  = jaclrt_i32(10);
-    ok &= jaclrt_type_index(umax) == 0x0F;
-    ok &= jacl_val_equal(jacl_add(umax, jaclrt_i32(0)), umax);       /* + - * are exact */
-    ok &= jacl_val_equal(jacl_div(umax, ten), jaclrt_i32(0));        /* WRONG: want 1844674407370955161 */
-    ok &= jacl_val_equal(jacl_mod(umax, ten), umax);                 /* WRONG: want 5 */
-    ok &= jacl_val_equal(jacl_lt(umax, ten), jaclrt_bool(1));          /* WRONG: want false */
-    ok &= jacl_val_equal(jacl_gt(umax, ten), jaclrt_bool(0));          /* WRONG: want true */
-    /* the tag propagates through arithmetic, and `assert-type u64` accepts it */
-    ok &= jaclrt_type_index(jacl_add(umax, jaclrt_i32(0))) == 0x0F;
+    ok &= jaclrt_type_index(umax) != 0x0F;                     /* the tag, gone */
+    ok &= jacl_is_bigint(umax);                                /* a signed tower has one form */
+    ok &= jacl_val_equal(umax, big("18446744073709551615"));
+    ok &= jacl_val_equal(jacl_add(umax, jaclrt_i32(0)), umax);
+    ok &= jacl_val_equal(jacl_div(umax, ten), big("1844674407370955161"));
+    ok &= jacl_val_equal(jacl_mod(umax, ten), jaclrt_i32(5));
+    ok &= jacl_val_equal(jacl_lt(umax, ten), jaclrt_bool(0));
+    ok &= jacl_val_equal(jacl_gt(umax, ten), jaclrt_bool(1));
+    /* nothing in the tower produces a 0x0F any more, including the ops that used to
+     * propagate it */
+    ok &= jaclrt_type_index(jacl_add(umax, jaclrt_i32(0))) != 0x0F;
+    ok &= jaclrt_type_index(jacl_widen_to(jaclrt_i32(5), jaclrt_i32(0x0F))) != 0x0F;
+    ok &= jaclrt_type_index(jacl_to_cast(jaclrt_i32(5), jacl_str_new("u64", 3))) != 0x0F;
+    /* `+% -% *%` promote now rather than erroring: `u64` was the tower's one overflow
+     * exception, and it was the tag that forced it. */
+    ok &= jacl_val_equal(jacl_add(i64max, i64max), big("18446744073709551614"));
+    /* and `assert-type u64` is a range question, the only one a signed tower can answer:
+     * it passes the value through, or errors. */
+    ok &= jacl_val_equal(jacl_assert_type(umax, jacl_str_new("u64", 3)), umax);
+    ok &= jacl_val_equal(jacl_assert_type(i64max, jacl_str_new("u64", 3)), i64max);
+    ok &= jaclrt_is_error(jacl_assert_type(jaclrt_i32(-1), jacl_str_new("u64", 3)));
+    ok &= jaclrt_is_error(jacl_assert_type(nb, jacl_str_new("u64", 3)));
     if (!ok) return 111;
   }
 

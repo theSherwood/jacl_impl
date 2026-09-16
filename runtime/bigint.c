@@ -70,10 +70,10 @@ static JaclVal jbig_canon(int32_t sign, const uint32_t *limb, uint32_t n) {
   if (n == 0) return jaclrt_i32(0);
   if (n <= 2) {
     uint64_t u = (uint64_t)limb[0] | (n == 2 ? ((uint64_t)limb[1] << 32) : 0u);
-    if (sign > 0 && u <= (uint64_t)INT64_MAX) return jacl_int_result(0x0E, (int64_t)u);
+    if (sign > 0 && u <= (uint64_t)INT64_MAX) return jacl_int_result((int64_t)u);
     if (sign < 0) {
-      if (u == (uint64_t)INT64_MAX + 1u) return jacl_int_result(0x0E, INT64_MIN);
-      if (u <= (uint64_t)INT64_MAX)      return jacl_int_result(0x0E, -(int64_t)u);
+      if (u == (uint64_t)INT64_MAX + 1u) return jacl_int_result(INT64_MIN);
+      if (u <= (uint64_t)INT64_MAX)      return jacl_int_result(-(int64_t)u);
     }
   }
   if (n > JBIG_MAX_LIMBS) return jaclrt_set_error(jaclrt_i32(0));

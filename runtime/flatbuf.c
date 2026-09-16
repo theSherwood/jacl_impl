@@ -63,7 +63,11 @@ static JaclVal fb_load(const void *slot, int32_t code) {
     case 4: return jaclrt_i32(*(const int32_t *)slot);
     case 5: return jaclrt_i32((int32_t)*(const uint32_t *)slot);
     case 6: return jacl_wide_new(0x0E, *(const int64_t *)slot);
-    case 7: return jacl_wide_new(0x0F, (int64_t)*(const uint64_t *)slot);
+    /* A `u64` field is a program-visible number, so it crosses into the signed dynamic tower
+     * by magnitude — bigint above `INT64_MAX` (jacl #119; the `0x0F` tag it used to get is
+     * gone). Unlike case 6 this canonicalizes, which is the rule (V2); case 6 not doing so is
+     * a separate pre-existing wart. */
+    case 7: return jacl_u64_box((int64_t)*(const uint64_t *)slot);
     case 8: return jaclrt_f32v(*(const float *)slot);
     case 9: { union { double d; int64_t b; } c; c.d = *(const double *)slot; return jacl_wide_new(0x10, c.b); }
     default: return jaclrt_nil();
@@ -181,7 +185,12 @@ JaclVal jacl_fbuf_addr(JaclVal b, JaclVal idx) {
   long addr = jacl_fb_pti((char *)fb_data(b) + (long)i * fb_esize(code));
   JaclObj *p = (JaclObj *)jacl_alloc(JOBJ_NODE, 2 * 8);
   JaclVal *pp = (JaclVal *)jacl_obj_payload(p);
-  pp[0] = jacl_wide_new(0x0F, addr);        /* the raw address as u64 */
+  /* The raw address, as an *internal* header slot rather than a program-visible number: it is
+   * read straight back with `jacl_int_val`, so it has to stay something that has an int64 form
+   * — an inline i32 or a wide cell, never a bigint (jacl #138). `jacl_int_result` gives
+   * exactly that, and a linear-memory address is a small positive number, so the question of
+   * what an address means in `dyn` position never arises here. */
+  pp[0] = jacl_int_result(addr);
   pp[1] = jaclrt_i32(code);
   return jaclrt_from_ptr(JACL_TAG_FPTR, p);
 }
@@ -218,15 +227,20 @@ JaclVal jacl_fptr_offset(JaclVal p, JaclVal n) {
   long naddr = addr + (long)jaclrt_as_i32(n) * fb_esize(code);
   JaclObj *q = (JaclObj *)jacl_alloc(JOBJ_NODE, 2 * 8);
   JaclVal *qq = (JaclVal *)jacl_obj_payload(q);
-  qq[0] = jacl_wide_new(0x0F, naddr);
+  qq[0] = jacl_int_result(naddr);          /* an internal header slot; see fb_ptr_at above */
   qq[1] = jaclrt_i32(code);
   return jaclrt_from_ptr(JACL_TAG_FPTR, q);
 }
 /* The raw linear-memory address of a flat pointer or buffer — the value an extern receives
  * when a [Buf N T] / [Ptr T] decays at a C-ABI call boundary. */
 JaclVal jacl_fptr_raw(JaclVal p) {
-  if (jaclrt_type_index(p) == 0x1F) return jacl_wide_new(0x0F, (long)jacl_int_val(fb_hdr(p)[0]));
-  if (jaclrt_type_index(p) == 0x1E) return jacl_wide_new(0x0F, jacl_fb_pti(fb_data(p)));
+  /* This one *is* program-visible, so it goes through the unsigned crossing: an address is
+   * genuinely an unsigned 64-bit quantity, and `jacl_u64_box` reads it as one and hands back
+   * the canonical signed dynamic integer. For every address this VM's linear-memory window can
+   * produce that is a plain positive number; the bigint branch exists so the top half of the
+   * range cannot silently read as negative if that ever stops being true. */
+  if (jaclrt_type_index(p) == 0x1F) return jacl_u64_box((long)jacl_int_val(fb_hdr(p)[0]));
+  if (jaclrt_type_index(p) == 0x1E) return jacl_u64_box(jacl_fb_pti(fb_data(p)));
   return p;
 }
 /* The bare i64 address a buffer / flat pointer decays to at a C-ABI extern boundary — the

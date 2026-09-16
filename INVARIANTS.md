@@ -78,6 +78,12 @@ answers. `dyn` promotes through the whole tower and therefore **cannot fail on m
 only domain errors remain. Wrapping is available, but only when the program asks for it by
 name.
 
+"`dyn` promotes" has no exceptions. `u64` was one until jacl #119: an overflowing dynamic
+`u64` *errored*, because the `0x0F` tag was the only record that the value was meant to be
+unsigned and promoting would have dropped it. The fix was to stop tracking signedness in the
+tower at all — it is a static property (V1) — so a declared `u64` gets its overflow error from
+its own typed lowering, where the width is a compile-time fact, and the tower stays uniform.
+
 ## V6. A raw-word representation needs a separate channel for the error
 
 A tagged result can carry an error flag; a raw untagged word cannot. So where a value is a raw
