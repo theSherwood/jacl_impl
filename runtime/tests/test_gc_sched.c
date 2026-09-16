@@ -25,7 +25,13 @@ long __vm_vcpu_tls_get(void);
 #define GC_STRIDE  1000000L
 #define GC_STACK   (1u << 16)
 
-static char    gc_stack[GC_MAXW][GC_STACK] __attribute__((aligned(16)));
+static char    gc_stack[GC_MAXW][GC_STACK] __attribute__((aligned(16)));    /* the task FIBER stacks */
+/* Each worker vCPU's own **data stack**. `thread.spawn` takes the new vCPU's data-stack base and
+ * reserves nothing for it — only the root gets a stack carved out of the window — so spawning with
+ * `(void *)0` based the worker's stack at address 0 and the first frame it needed faulted (jacl
+ * #141). It is a separate array from the fiber stacks above: a worker and the task it resumes are
+ * two stacks, live at the same time. */
+static char    gc_vcpu_stack[GC_MAXW][GC_STACK] __attribute__((aligned(16)));
 static int32_t gc_result[GC_MAXW];   /* the task's return: 1 = keeper survived every collection */
 
 long gc_worker(long arg);   /* the thread.spawn entry: a scheduler loop over one task fiber */
@@ -38,7 +44,7 @@ int run(int n) {
   jacl_gc_worker_unregister();   /* root only orchestrates; it must not be in the quiesce set */
 
   int h[GC_WORKERS];
-  for (int k = 0; k < GC_WORKERS; k++) h[k] = __vm_thread_spawn(gc_worker, (void *)0, 0);
+  for (int k = 0; k < GC_WORKERS; k++) h[k] = __vm_thread_spawn(gc_worker, gc_vcpu_stack[k], 0);
   for (int k = 0; k < GC_WORKERS; k++) __vm_thread_join(h[k]);
 
   int ok = (jacl_gc_violation_count() == 0);
