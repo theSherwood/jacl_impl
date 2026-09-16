@@ -198,6 +198,43 @@ fn report(tag: &str, m: &Module) {
     println!("wasm-JIT analyze: mixed_ok={}  (reachable={}, reachable-neither-subset-nor-leaf={})",
         a.mixed_ok, nreach, reach_neither);
 
+    // Name the blockers. `analyze` yields booleans only, so the reason is re-derived here from the
+    // disqualifying instruction kinds each one contains — which is the actionable part: it says
+    // whether a function is out because of concurrency (a runtime-build question, jacl #96) or
+    // because of a capability import or an unlowered shape (a different fix entirely).
+    if reach_neither > 0 {
+        let mut names = std::collections::BTreeMap::<usize, &str>::new();
+        for e in &m.exports {
+            names.insert(e.func as usize, e.name.as_str());
+        }
+        println!("   blockers (reachable, neither in-subset nor an interp leaf):");
+        for i in 0..m.funcs.len() {
+            if !(reach[i] && !a.in_subset[i] && !a.interp_leaf[i]) { continue; }
+            let mut why: Vec<&str> = Vec::new();
+            let push = |w: &'static str, v: &mut Vec<&'static str>| {
+                if !v.contains(&w) { v.push(w); }
+            };
+            for b in &m.funcs[i].blocks {
+                for inst in &b.insts {
+                    match inst {
+                        Inst::AtomicLoad { .. } | Inst::AtomicStore { .. }
+                        | Inst::AtomicRmw { .. } | Inst::AtomicCmpxchg { .. } => push("atomics", &mut why),
+                        Inst::MemoryWait { .. } | Inst::MemoryNotify { .. } => push("futex", &mut why),
+                        Inst::ContNew { .. } | Inst::ContResume { .. }
+                        | Inst::Suspend { .. } => push("fibers", &mut why),
+                        Inst::ThreadSpawn { .. } | Inst::ThreadJoin { .. } => push("threads", &mut why),
+                        Inst::GcRoots { .. } => push("gc.roots", &mut why),
+                        Inst::CapCall { .. } => push("cap.call", &mut why),
+                        Inst::CallImport { .. } => push("call.import", &mut why),
+                        _ => {}
+                    }
+                }
+            }
+            if why.is_empty() { why.push("other (shape/size/non-subset callee)"); }
+            println!("     f{:<4} {:<34} {}", i, names.get(&i).copied().unwrap_or("-"), why.join(", "));
+        }
+    }
+
     // full census of CapCall (type_id, op) among REACHABLE functions
     let mut cap = std::collections::BTreeMap::<(u32, u32), usize>::new();
     for (fi, f) in m.funcs.iter().enumerate() {
