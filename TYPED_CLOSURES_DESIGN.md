@@ -95,6 +95,34 @@ position supplies:
 
 Same mechanism; the only difference is whether the context pins the return.
 
+**Status (jacl #117, the stream half).** The HOF-over-a-typed-stream case above
+now actually holds; for a long while the doc was right and the implementation
+was not, and the reason is worth recording because nothing about it is visible
+from the JACL side.
+
+`typer__proc_result_enc` is the call-site probe that binds a mapper's params to
+the element type and reads its body tail. It accepted only `HEAD_PROC`. But in
+the **emit-only** build — which is the TEMEN codegen path — prelude macros are
+deliberately *not* expanded (`jacl_expand_skip_prelude` in `emit_jacl.c`);
+codegen name-handles them instead. So `[\ * $it 2]` reaches the typer
+**unexpanded**, as a command whose head is the bare word `\` and whose
+`head_id` is `HEAD_NONE`. The probe bailed on its first line, every mapper
+looked like an unknown command, and the output element type fell back to `dyn`.
+
+The visible symptom was a cast that should not have been needed: `for
+[transform [range 1 4] [\ * $it 10]] x { set s [+ $s [to "i64" $x]] }` over a
+declared-`i64` `mut`. Several corpus cases carried one, with a comment saying
+so. The fix normalizes all three callable spellings — `[proc …]`,
+`[\ {params} {body}]` (params wrapped in a BLOCK, matching codegen's
+`in_block=1`), and `[\ <head> <args>…]` (implicit `it`) — so the typer and
+`compile_closure` agree on what a lambda is.
+
+One boundary is deliberate and pinned by `test_transform_mixed_width_mapper_stays_dyn`:
+a mapper that *mixes* widths, e.g. `[\ * $it 1.5]` over an `i64` source, stays
+`dyn`. That is #115's strict-mixed rule doing its job — the probe surfaces the
+error, rolls back, and the element falls to the lenient dyn path — not a
+remnant of this bug.
+
 ### 2.5 `dyn` is an ordinary type
 
 `dyn` is allowed anywhere a type can appear, including inside `[Proc …]`

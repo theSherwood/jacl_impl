@@ -3703,16 +3703,114 @@ static const TyperImportProc* typer__find_bound_export(TyperCtx* tc,
   return NULL;
 }
 
-/* Infer the return type of a `[\ body]` lambda with its implicit $it param
- * bound to a known element type. Used by `transform` to type the output stream
- * by the lambda's return type (a scoped case of anon-closure return typing).
+/* Scratch storage for normalizing an implicit-`it` lambda; see below. Stack-
+ * allocated by the caller, never an arena — the probe only *reads* these
+ * wrappers. */
+typedef struct {
+  AstNode  params;          /* synthetic `{it}` params command */
+  AstNode  name;            /* synthetic `it` param name */
+  AstNode  body;            /* synthetic body command */
+  AstNode* body_stmts[1];
+} TyperInlineScratch;
+
+/* Normalize an inline callable to (params, body statements) for the call-site
+ * probe below. Returns false when `n` is not one.
  *
- * A lambda `[\ * $it 10]` parses as a HEAD_NONE command with head "\" and args
- * [*, $it, 10]; its body is the application reconstructed as {head: args[0],
- * args: args[1..]}. We bind $it to it_enc's type, type that body, and read its
- * inferred type. Returns the element encoding (scalar sentinel / struct idx)
- * or UINT32_MAX (dyn) when the lambda isn't a recognizable single-expression
- * form. */
+ * Three spellings reach here, and the second and third are the reason jacl
+ * #117's stream half stayed broken. In the **emit-only** build — which is the
+ * TEMEN codegen path — prelude macros are deliberately *not* expanded
+ * (`jacl_expand_skip_prelude`, emit_jacl.c): they are name-handled by codegen
+ * instead. So a `[\ …]` lambda reaches the typer **unexpanded**, as a command
+ * whose head is the bare word `\` and whose head_id is therefore HEAD_NONE.
+ * `typer__proc_result_enc` accepted only HEAD_PROC, so every `transform`/
+ * `filter` mapper looked like an unknown command, the probe bailed on its first
+ * line, and the output element type fell back to `dyn` — which is why a typed
+ * stream pipeline needed a redundant `[to "i64" …]` on its `for` binding.
+ *
+ * (A doc comment describing this exact normalization, HEAD_NONE detail and all,
+ * sat above `typer__proc_result_enc` with no function under it — the diagnosis
+ * was written down in the tree; the code implementing it was not. That comment
+ * is folded in here.)
+ *
+ *   [proc NAME {params} (ret)? {body}]   the expanded / hand-written form
+ *   [\ {params} {body}]                  explicit-params lambda
+ *   [\ <head> <arg>…]                    implicit-`it` lambda: the body is that
+ *                                        command, and the param list is `{it}`
+ *
+ * The shapes match `compile_closure`'s call site in codegen.c, which is the
+ * property that matters: both sides must agree on what a lambda is. The
+ * implicit form has no params node and no body *block* in the AST, so it is
+ * rebuilt into `sc`. That is sound because the nodes the probe *stamps* are the
+ * real children (`args[0]`, `args[1..]`) — exactly the ones codegen later
+ * compiles — while the synthetic wrappers are discarded.
+ *
+ * `"it"` is spelled out here because codegen spells it out too; the knowledge
+ * lives in the two places that have to agree, and the `\` prelude macro stays
+ * pure sugar for every other consumer. */
+static bool typer__inline_callable(AstNode* n, TyperInlineScratch* sc,
+                                   AstNode** out_params, AstNode*** out_stmts,
+                                   uint32_t* out_count) {
+  if (!n || n->type != AST_COMMAND) return false;
+
+  if (n->data.command.head_id == HEAD_PROC) {
+    uint32_t ac = n->data.command.arg_count;
+    if (ac != 3 && ac != 4) return false;
+    AstNode* body = n->data.command.args[ac == 4 ? 3 : 2];
+    if (!body || body->type != AST_BLOCK || body->data.block.count == 0) return false;
+    *out_params = n->data.command.args[1];
+    *out_stmts  = body->data.block.commands;
+    *out_count  = body->data.block.count;
+    return true;
+  }
+
+  AstNode* h = n->data.command.head;
+  if (!h || h->type != AST_LIT_STRING || h->data.lit_string.length != 1 ||
+      h->data.lit_string.value[0] != '\\') return false;
+  uint32_t ac = n->data.command.arg_count;
+  if (ac == 0) return false;
+
+  if (ac == 2 && n->data.command.args[0]->type == AST_BLOCK &&
+                 n->data.command.args[1]->type == AST_BLOCK) {
+    /* `[\\ {n} {body}]`: the params arrive wrapped in a BLOCK (codegen calls
+     * `compile_closure` with `in_block=1` here, and `closure_param_names`
+     * unwraps it the same way). `typer__parse_params` wants the command inside.
+     * A multi-command param block is not a shape either side supports, so bail
+     * to dyn rather than guess. */
+    AstNode* pblk = n->data.command.args[0];
+    AstNode* body = n->data.command.args[1];
+    if (body->data.block.count == 0) return false;
+    if (pblk->data.block.count != 1 ||
+        pblk->data.block.commands[0]->type != AST_COMMAND) return false;
+    *out_params = pblk->data.block.commands[0];
+    *out_stmts  = body->data.block.commands;
+    *out_count  = body->data.block.count;
+    return true;
+  }
+  if (n->data.command.args[0]->type == AST_BLOCK) return false;  /* malformed */
+
+  memset(sc, 0, sizeof *sc);
+  sc->name.type                    = AST_LIT_STRING;
+  sc->name.data.lit_string.value   = "it";
+  sc->name.data.lit_string.length  = 2;
+  sc->params.type                      = AST_COMMAND;
+  sc->params.data.command.head         = &sc->name;
+  sc->params.data.command.args         = NULL;
+  sc->params.data.command.arg_count    = 0;
+  sc->params.data.command.head_id      = HEAD_NONE;
+  sc->body.type                        = AST_COMMAND;
+  sc->body.data.command.head           = n->data.command.args[0];
+  sc->body.data.command.args           = n->data.command.args + 1;
+  sc->body.data.command.arg_count      = ac - 1;
+  sc->body.data.command.head_id        = ast__compute_head_id(n->data.command.args[0]);
+  sc->body.start                       = n->start;
+  sc->body.scope_mark                  = n->scope_mark;
+  sc->body_stmts[0] = &sc->body;
+  *out_params = &sc->params;
+  *out_stmts  = sc->body_stmts;
+  *out_count  = 1;
+  return true;
+}
+
 static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                                        const uint32_t* arg_encs,
                                        uint32_t argc, bool* out_param_wide) {
@@ -3734,15 +3832,14 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
    * same inference as a `[\ … ]` lambda. The `\` prelude macro stays pure
    * sugar — the typer has no knowledge of its expansion (no hardcoded `it`). */
   if (out_param_wide) *out_param_wide = false;
-  if (!proc || proc->type != AST_COMMAND) return UINT32_MAX;
-  if (proc->data.command.head_id != HEAD_PROC) return UINT32_MAX;
-  uint32_t ac = proc->data.command.arg_count;
-  if (ac != 3 && ac != 4) return UINT32_MAX;
-  AstNode* params = proc->data.command.args[1];
-  AstNode* body   = proc->data.command.args[ac == 4 ? 3 : 2];
-  if (!body || body->type != AST_BLOCK) return UINT32_MAX;
-  uint32_t bc = body->data.block.count;
-  if (bc == 0) return UINT32_MAX;
+  /* Accepts a `[\\ …]` lambda as well as `[proc …]` — in the emit-only build the
+   * prelude's `\\` is never expanded, so the mapper of a `transform`/`filter`
+   * arrives as a bare `\\` command (jacl #117). */
+  TyperInlineScratch sc;
+  AstNode*  params;
+  AstNode** stmts;
+  uint32_t  bc;
+  if (!typer__inline_callable(proc, &sc, &params, &stmts, &bc)) return UINT32_MAX;
 
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
@@ -3785,8 +3882,8 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                      pn[i]->scope_mark, bt, bs);
   }
   for (uint32_t i = 0; i < bc; i++)
-    typer__infer_node(tc, body->data.block.commands[i]);
-  AstNode* tail = body->data.block.commands[bc - 1];
+    typer__infer_node(tc, stmts[i]);
+  AstNode* tail = stmts[bc - 1];
   JaclType rt = (JaclType)tail->inferred_type;
   uint32_t rsidx = tail->inferred_struct_idx;
   typer__scope_pop(tc);
@@ -3818,7 +3915,7 @@ static uint32_t typer__proc_result_enc(TyperCtx* tc, AstNode* proc,
                        pn[i]->data.lit_string.length,
                        pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
     for (uint32_t i = 0; i < bc; i++)
-      typer__infer_node(tc, body->data.block.commands[i]);
+      typer__infer_node(tc, stmts[i]);
     typer__scope_pop(tc);
   }
 

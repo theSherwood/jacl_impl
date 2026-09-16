@@ -9,10 +9,9 @@ proc main {} {
   # the kept set instead of matching.
   mut i64 s 0
   for [filter [transform [range 1 4] [\ * $it 1000000000]] [\ > $it 1500000000]] x {
-  # `[to "i64" …]` should not be needed: `transform`/`filter` lose the receiver's element
-  # type, so the `for` binding comes out dyn (jacl #117, the stream half). Drop the cast when
-  # that is fixed — the barrier itself is correct (TYPE_SYSTEM.md § 2).
-    set s [+ $s [to "i64" $x]]     # keeps 2e9 + 3e9 = 5_000_000_000
+    # No cast needed: `transform` types the element from the mapper's return and `filter`
+    # preserves it, so the `for` binding is i64 (jacl #117, the stream half).
+    set s [+ $s $x]                # keeps 2e9 + 3e9 = 5_000_000_000
   }
   print $s
 
