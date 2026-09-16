@@ -1,6 +1,7 @@
 # JACL on TEMEN — Phase 3 scope: concurrency on fibers
 
-> Status: **DoD met; one hard blocker + one deferred refinement.** Branch:
+> Status: **DoD met; one deferred refinement** (the STW quiesce blocker was jacl #142, fixed).
+> Branch:
 > `temen-backend-phase3` (off merged `main`, temen pin `7a82f64`). Companions:
 > `TEMEN_BACKEND_DESIGN.md` §4.3, `TEMEN_BACKEND_PLAN.md` §5, `TEMEN_BACKEND_PHASE2.md`.
 >
@@ -45,17 +46,27 @@
 >   (the current job is mirrored into `running_job` before any park point); a fiber context
 >   quiesces by suspending, never by parking its vCPU (`park_if_requested` refuses in-task).
 >
-> Verified under stress on the JIT: `mt::par_gc` and `mt::job_gc` — the latter proves
+> Verified under stress on **both backends**: `mt::par_gc` and `mt::job_gc` — the latter proves
 > **reclamation** (16 rounds × 16 jobs; final live count bounded far below total spawns) and
-> **held-future liveness** (a round-0 future re-awaited after ~34 collections) — 12/12 mixed.
+> **held-future liveness** (a round-0 future re-awaited after ~34 collections).
 >
-> **REMAINING (corpus-unobservable):** the temen **interpreter**'s cooperative single-thread
-> scheduler still livelocks occasionally on the pool's futex traffic under heavy concurrent GC
-> (rarer at `57e20b1`: 2/3 differential probes passed vs 0/6 before; a simulation artifact — the
-> JIT, real OS-thread vCPUs, is sound), so `mt::par_gc`/`mt::job_gc` are JIT-only via
-> `run_test_jit`. The legacy `jacl_sched_run_batch` is dead code (superseded; retire it with the
-> work-stealing refinement). (History — including two withdrawn temen asks — in
-> `spikes/temen_pool_gc/` and `docs/TEMEN_PHASE3_ASKS.md`.)
+> **The STW quiesce livelock (jacl #142) is FIXED.** It was long recorded here as a temen
+> *interpreter* artifact — "the cooperative single-thread scheduler livelocks on the pool's
+> futex traffic under heavy concurrent GC" — which is why `mt::par_gc`/`mt::job_gc` were
+> JIT-only and `mt::{sched_batch,batch_heap,gc_sched}` were ignored. That attribution was
+> wrong on both counts: the defect was **ours**, and it hit the JIT just as hard.
+> `jacl_gc_collect` ran inside a task fiber, and a `memory.wait` issued from a fiber parks the
+> **fiber**, not the OS thread (temen §3.6 slice 5a) — so the elected collector's quiesce wait
+> handed its vCPU back to its own scheduler loop with the collection unfinished and the GC lock
+> held, and that loop then parked the vCPU waiting for the `jacl_gc_done` its own parked fiber
+> owed it. Everyone else queued behind the held lock. The fix splits the **election** (in
+> `jacl_gc_collect`, wherever the allocation pressure hit) from the **waiting**
+> (`jacl_gc_quiesce_and_sweep`, always on a bare worker context): an in-task winner sets a
+> handoff flag and suspends, and its own scheduler loop runs the barrier + mark-sweep at its
+> next `park_if_requested`. All five tests are differential again, `run_test_jit` is gone, and
+> nothing in `mt.rs` is `#[ignore]`d. The legacy `jacl_sched_run_batch` is dead code
+> (superseded; retire it with the work-stealing refinement). (History — including two withdrawn
+> temen asks — in `spikes/temen_pool_gc/` and `docs/TEMEN_PHASE3_ASKS.md`.)
 
 ## Goal
 
@@ -146,7 +157,7 @@ non-canonical shape flagged at bring-up and is reconciled here.)
   task and parks its vCPU), then `gc.roots` scans all suspended fibers + the collector.
   Validated by `test_gc_sched.c` (cross-worker keeper survival, zero violations).
 
-### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c done; P3.4d DONE: continuation scheduler (`runtime/sched.c`) — parallel/race/spawn/await/nested run on it, tested interp==jit==old-VM. Remaining: the P3.4c multi-worker STW quiesce is unsound under heavy concurrent GC (corpus-unobservable; affects legacy run_batch too) — see top-of-doc.**
+### P3.4 — Re-platform the M:N scheduler — **P3.4a/b/c/d DONE: continuation scheduler (`runtime/sched.c`) — parallel/race/spawn/await/nested run on it, tested interp==jit==old-VM. The P3.4c multi-worker STW quiesce livelock is fixed (jacl #142) and now gated on both backends — see top-of-doc.**
 - Port the NxM Chase-Lev work-stealing scheduler (`runtime.c`) onto fibers +
   `thread.spawn` + futex (real OS threads as workers, fibers as tasks).
 
@@ -163,10 +174,15 @@ non-canonical shape flagged at bring-up and is reconciled here.)
 > `jacl_gc_worker_register`/`unregister`, `jacl_gc_task_begin`/`end` (bracket a task
 > resume), `jacl_gc_safepoint` (in `jacl_alloc` + loop back-edges: **suspends** the task
 > to the scheduler so its roots are scannable), `jacl_gc_worker_park_if_requested`
-> (scheduler-loop top: parks the root-free vCPU), and the `jacl_gc_collect` collector
-> (elect via CAS → bump epoch → wait for all to suspend+park → scan+sweep STOPPED →
-> resume). The collector is the `gc.roots` caller, so its own task's roots are covered;
-> all other tasks are suspended fibers, which `gc.roots` scans. The parked flag is
+> (scheduler-loop top: parks the root-free vCPU, runs a handed-off collection, and never
+> parks while this worker *is* the collector), and the `jacl_gc_collect` collector (elect via
+> CAS → bump epoch → wait for all to suspend+park → scan+sweep STOPPED → resume). The
+> waiting half lives in `jacl_gc_quiesce_and_sweep` and only ever runs from a **bare** worker
+> context: a `memory.wait` issued inside a fiber parks the fiber, so an in-task winner
+> suspends and its own scheduler loop finishes the collection (jacl #142 — see top-of-doc).
+> The collector's own task is a suspended fiber like every other, which `gc.roots` scans;
+> `jacl_gc_quiesce_and_sweep` is `always_inline` so the conservative scan of the collector's
+> live stack covers the same frames it always did. The parked flag is
 > **epoch-stamped** (not a sticky boolean), which was the load-bearing fix — a sticky flag
 > let a next collection mistake a stale park for a fresh one and a worker mutated during
 > STW. Validated by `test_gc_sched.c`: each worker's on-stack-of-its-fiber keeper survives
