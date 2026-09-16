@@ -276,6 +276,11 @@ JaclVal jacl_mod(JaclVal a, JaclVal b);    /* mod-by-zero -> error */
 int64_t jacl_i64_unbox(JaclVal v);
 JaclVal jacl_i64_box(int64_t x);
 int64_t jacl_i64_mul_ovf(int64_t a, int64_t b);   /* 1 when a*b overflows 64 bits */
+/* Raw <-> tagged for a typed u32/u64 (an untagged, **zero-extended** word; jacl #119). The
+ * box direction canonicalizes into the *signed* tower — past INT64_MAX that means a bigint. */
+JaclVal jacl_u64_box(int64_t bits);
+int64_t jacl_u64_unbox(JaclVal v);
+int64_t jacl_u64_mul_ovf(int64_t a, int64_t b);   /* 1 when a*b carries out of 64 bits */
 /* `+% -% *%` — wrap modulo the operand width (i32 or wide); non-integers are a type error. */
 JaclVal jacl_wrap_add(JaclVal a, JaclVal b);
 JaclVal jacl_wrap_sub(JaclVal a, JaclVal b);
@@ -360,6 +365,8 @@ uint32_t jacl_big_hash(JaclVal v);                  /* by value, never by cell a
 double   jacl_big_to_f64(JaclVal v);                /* lossy past 2^53, as asking for a float means */
 uint32_t jacl_big_to_decimal(JaclVal v, char *buf, uint32_t cap);
 JaclVal  jacl_big_from_decimal(JaclVal s);           /* how a bigint *literal* is built */
+JaclVal  jacl_big_from_u64(uint64_t x);              /* a raw u64 crossing into the signed tower */
+int      jacl_big_to_u64(JaclVal v, uint64_t *out);  /* 1 when it has a u64 form */
 /* Enough for the limb bound bigint.c enforces, plus a sign and a terminator. */
 #define JACL_BIG_DECIMAL_MAX 1300
 JaclVal jacl_widen_to(JaclVal v, JaclVal kind);     /* typed-def widening */

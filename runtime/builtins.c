@@ -315,6 +315,54 @@ int64_t jacl_i64_mul_ovf(int64_t a, int64_t b) {
   return __builtin_mul_overflow(a, b, &r) ? 1 : 0;
 }
 
+/* ---- raw <-> tagged for typed u32/u64 (jacl #119) ----
+ *
+ * A `u32`/`u64` binding the typer proved holds an untagged, **zero-extended** machine word.
+ * These are its boundary with the dynamic world, and they differ from the i64 pair in exactly
+ * one place: the signed tower has no unsigned form, so the box direction reads the word as a
+ * `uint64_t` and hands anything above `INT64_MAX` to bigint. A u32 never reaches that, so a
+ * boxed u32 is always an inline i32 or a boxed i64.
+ *
+ * (`bits` is `int64_t` because that is the only integer type the emitted IR has. The value is
+ * a bit pattern, not a signed number — every use casts.) */
+JaclVal jacl_u64_box(int64_t bits) {
+  uint64_t x = (uint64_t)bits;
+  if (x <= (uint64_t)INT64_MAX) return jacl_int_result(0x0E, (int64_t)x);
+  return jacl_big_from_u64(x);
+}
+/* The other direction. Codegen branches on the flags before it ever calls this, so a flagged
+ * value here means some other entry point; and an `int64_t` return has no way to signal, so
+ * the values it cannot represent become 0 — the same answer a non-number gets, never a
+ * laundered payload. That hole is closed on the *typer* side: a `dyn` value only reaches a
+ * static width through an explicit, range-checked cast (#112), so a negative or an
+ * out-of-range magnitude cannot arrive here from source. */
+int64_t jacl_u64_unbox(JaclVal v) {
+  if (jacl_is_flagged(v)) return 0;
+  if (jaclrt_is_i32(v)) { int32_t x = jaclrt_as_i32(v); return x < 0 ? 0 : (int64_t)x; }
+  if (jacl_is_bigint(v)) {
+    /* A bigint is above INT64_MAX by its canonical-form invariant, and negative ones are out
+     * of range, so the only representable case is a positive 2-limb magnitude. */
+    uint64_t u;
+    return jacl_big_to_u64(v, &u) ? (int64_t)u : 0;
+  }
+  if (jacl_is_iwide(v)) {
+    int64_t x = jacl_wide_bits(v);
+    /* A 0x0F cell already holds the unsigned bit pattern; a 0x0E one is signed, so a negative
+     * value has no u64 form. (0x0F is on its way out — jacl #119 step 3 — but while it exists
+     * this has to read it as what it is.) */
+    if (jaclrt_type_index(v) == 0x0F) return x;
+    return x < 0 ? 0 : x;
+  }
+  return 0;                      /* not an integer: the typer should have refused this */
+}
+/* Did `a * b` carry out of 64 bits, read as unsigned? Add and subtract are checked inline in
+ * the emitted code (a carry-out is `r <u a`, a borrow is `a <u b`); multiply has no such
+ * trick, so it asks the compiler here — the unsigned sibling of `jacl_i64_mul_ovf`. */
+int64_t jacl_u64_mul_ovf(int64_t a, int64_t b) {
+  uint64_t r;
+  return __builtin_mul_overflow((uint64_t)a, (uint64_t)b, &r) ? 1 : 0;
+}
+
 JaclVal jacl_neg(JaclVal a) {
   if (jaclrt_is_error(a)) return a;
   if (!jaclrt_is_i32(a)) return jaclrt_error();

@@ -292,11 +292,33 @@ type-checks, narrowing a tagged value to i32 is a bare truncation — on a strin
 is the low half of a pointer, re-tagged as a perfectly plausible integer. Where the typer is
 unsure, the binding stays tagged and correct-but-slower, the same safe default slice 1a set.
 
-`u32` and `u64` are **not** raw yet, and the reason is not effort. A static `u64` above
-`INT64_MAX` has no `dyn` representation to cross into — the bigint tier is signed, and
-`u32`/`u64` have no native typed arithmetic (the IR has `div_u`/`rem_u`/`lt_u`, but nothing
-emits them), so giving them raw slots today would add a box on every operation and make them
-*slower*. Both wait on their own slice.
+### Typed u32 / u64: raw *unsigned* words
+
+`u32` and `u64` are raw words too (jacl #119), with the same shape and three differences that
+all come from the same place — signedness lives on the static side, so the unsigned widths are
+the only place the machine's unsigned opcodes are the right ones:
+
+- the slot invariant is **zero**-extension, not sign-extension. A u32 above `INT32_MAX`
+  sign-extended would read as negative at 64 bits, which is exactly the subtle wrongness the
+  invariant exists to prevent.
+- `/` and `%` are `div_u` / `rem_u`, and the orderings are `lt_u` / `le_u` / `gt_u` / `ge_u`.
+  `+ - *` and `== !=` are bit-identical to the signed ops and unchanged. Division has **one**
+  domain case rather than two — a zero divisor; there is no unsigned analogue of
+  `INT_MIN / -1`, so the substituted-divisor mask collapses to `b | (b == 0)`.
+- overflow is a **carry-out**, not a sign flip. `a + b` carries exactly when `r <u a` and
+  `a - b` borrows exactly when `a <u b`; multiply asks `jacl_u64_mul_ovf`. One consequence is
+  worth stating: `INT64_MAX + INT64_MAX` is a perfectly good `u64` where the `i64` spelling
+  errors, and `2 - 4000000000` is an error as `u32` where the `i64` spelling is fine.
+
+Boxing on the way out goes through `jacl_u64_box`, which canonicalizes into the **signed**
+tower, so a `u64` past `INT64_MAX` becomes a bigint — there is nothing else for it to be. That
+conversion is what makes the `0x0F` tag removable rather than merely undesirable.
+
+Until this landed, none of the unsigned opcodes had a single emitter: every `u32`/`u64`
+operation went through the dynamic tower, which reads each operand as an `int64_t` and uses
+the signed op. For `u32` that happens to be right — every u32 value fits a signed i64, so the
+promotion makes the signed op exact — so the change there is speed. For `u64` above
+`INT64_MAX` it was not, and the only reason no program observed it is the range caps below.
 
 ### Typed i64: a raw, untagged word
 
@@ -319,8 +341,9 @@ trick for it and the obvious "divide back and compare" traps the host on `INT64_
 
 Slice 1a covers an immutable local inside a proc. A top-level binding is mirrored into the
 global map and a captured `mut` lives in a heap cell — both store a JaclVal, so an i64 bound
-that way stays tagged until those paths learn about raw words, as do `i64` proc parameters
-and returns (slice 1b) and `u64` (slice 1c).
+that way stays tagged until those paths learn about raw words. Proc parameters and returns
+came with slice 1b, and `u32`/`u64` with jacl #119; those same two exceptions apply to all of
+them, and the `u64` fallback is the last remaining producer of a `0x0F` tag from JACL source.
 
 One wart inherited from the type system: `typer__infer_command` clears the expected type at
 command boundaries, so a declared type does not reach a binop over *literals* —

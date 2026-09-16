@@ -43,7 +43,7 @@ the exact failure a taint system exists to prevent, so the crossing has to refus
 silently succeed. The refusal keeps the flags, so the fact is not lost along with the cast.
 
 Enforced at every `dyn` → static crossing: `jacl_to_cast`, `jacl_widen_to`, `jacl_i64_unbox`,
-and codegen's `emit_has_any_flag` before a raw-word crossing. The codegen test costs exactly
+`jacl_u64_unbox`, and codegen's `emit_has_any_flag` before a raw-word crossing. The codegen test costs exactly
 what the error-only test it replaced cost — a wider mask constant, the same two instructions.
 
 **Status:** taint and secret have no source-level producer yet (`NOT_IMPLEMENTED.md`), so

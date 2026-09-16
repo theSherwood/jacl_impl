@@ -658,6 +658,37 @@ fn typed_i32_local_is_a_raw_word() {
     assert!(ir.contains("br_if"), "expected overflow to become control flow:\n{ir}");
 }
 
+// ---- #119: u32 / u64 are raw *unsigned* words ----
+
+#[test]
+fn typed_u32_u64_use_the_unsigned_opcodes() {
+    // The static unsigned widths had no lowering at all: every `u32`/`u64` operation went
+    // through the dynamic tower, which reads each operand as an `int64_t` and uses the
+    // *signed* op. `IRB_DIV_U`, `IRB_REM_U`, `IRB_LT_U` and friends existed in the IR and
+    // nothing emitted any of them. Now the proved case does.
+    let ir = emit_text("u32_raw");
+    assert!(ir.contains("i32.div_u"), "expected a native unsigned divide:\n{ir}");
+    assert!(!ir.contains("i32.div_s"), "a u32 divide must not be signed:\n{ir}");
+    for call in ["jacl_div", "jacl_add", "jacl_widen_to"] {
+        assert!(!ir.contains(call), "should not call {call}:\n{ir}");
+    }
+    // Crossing back into a dyn position canonicalizes, and a u32 never exceeds INT64_MAX, so
+    // the cheaper signed box is exact there.
+    assert!(ir.contains("jacl_i64_box"), "expected the dyn crossing to canonicalize:\n{ir}");
+    run_case("u32_raw", i32_val(400000000));
+
+    let ir = emit_text("u64_raw");
+    assert!(ir.contains("i64.div_u"), "expected a native unsigned divide:\n{ir}");
+    // Two `lt_u`: the program's own `<`, and the carry-out check on `+` — which for unsigned
+    // is `r <u a`, not the operand-sign trick the signed path uses.
+    assert!(ir.matches("i64.lt_u").count() >= 2, "expected unsigned compares:\n{ir}");
+    assert!(!ir.contains("i64.lt_s"), "a u64 compare must not be signed:\n{ir}");
+    // A u64 *can* exceed INT64_MAX, and the dynamic tower is signed, so its box is the one
+    // that reaches bigint.
+    assert!(ir.contains("jacl_u64_box"), "expected the unsigned dyn crossing:\n{ir}");
+    run_case("u64_raw", i32_val(3));
+}
+
 // ---- P2.8: strings + collections ----
 
 #[test]

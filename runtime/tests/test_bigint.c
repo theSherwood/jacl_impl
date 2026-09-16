@@ -25,8 +25,14 @@
  * bigint has no int64 form, but `jacl_is_anyint` admits one while `jacl_int_val` does not
  * handle it, so three callers read the JaclBig header as a number.
  *
- * Returns 812. Any other value names what failed, so a red run says where to look without
- * a rebuild: 101-105 are the five sections below, 201-206 the individual checks inside the
+ * Section 6 covers jacl #119's raw-`u64` crossings, which land on bigint for the same reason:
+ * the dynamic tower is signed, so a u64 above `INT64_MAX` has no i64 form. It also **pins
+ * today's answers** for the `0x0F` "wide but unsigned" tag, some of which are wrong — that
+ * tag is on its way out (step 3), and a test that changes when it goes is the difference
+ * between the tag being gone and the tag merely being unused.
+ *
+ * Returns 819. Any other value names what failed, so a red run says where to look without
+ * a rebuild: 101-106 are the six sections below, 201-206 the individual checks inside the
  * property loop.
  */
 #include "jaclrt.h"
@@ -210,7 +216,88 @@ int run(int n) {
     if (!ok) return 105;
   }
 
-  return ok ? 812 : 106;
+  /* ---- 6. jacl #119: a raw u64 crossing into the signed tower ---- */
+  {
+    int ok = 1;
+    JaclVal i64max = big("9223372036854775807");
+    /* (a) `jacl_big_from_u64` covers the whole [0, UINT64_MAX] range and canonicalizes: below
+     * INT64_MAX it demotes, so a u64 and an i64 spelling of the same number are the same
+     * JaclVal (#107), and above it there is a bigint because there is nothing else. */
+    ok &= jacl_val_equal(jacl_big_from_u64(0u), jaclrt_i32(0));
+    ok &= jacl_val_equal(jacl_big_from_u64(37u), jaclrt_i32(37));
+    ok &= !jacl_is_bigint(jacl_big_from_u64(37u));           /* demoted, not a 1-limb bigint */
+    ok &= jacl_val_equal(jacl_big_from_u64((uint64_t)INT64_MAX), i64max);
+    ok &= !jacl_is_bigint(jacl_big_from_u64((uint64_t)INT64_MAX));
+    ok &= jacl_val_equal(jacl_big_from_u64((uint64_t)INT64_MAX + 1u),
+                         big("9223372036854775808"));
+    ok &= jacl_is_bigint(jacl_big_from_u64((uint64_t)INT64_MAX + 1u));
+    ok &= jacl_val_equal(jacl_big_from_u64(UINT64_MAX), big("18446744073709551615"));
+    if (!ok) return 107;
+
+    /* (b) the round trip, and the two shapes that have no u64 form. */
+    uint64_t out = 0;
+    ok &= jacl_big_to_u64(big("18446744073709551615"), &out) && out == UINT64_MAX;
+    ok &= jacl_big_to_u64(big("9223372036854775808"), &out) &&
+          out == (uint64_t)INT64_MAX + 1u;
+    ok &= !jacl_big_to_u64(big("-9223372036854775809"), &out);   /* negative */
+    ok &= !jacl_big_to_u64(big("18446744073709551616"), &out);   /* one past UINT64_MAX */
+    ok &= !jacl_big_to_u64(jaclrt_i32(5), &out);                 /* not a bigint at all */
+    if (!ok) return 108;
+
+    /* (c) `jacl_u64_box` / `jacl_u64_unbox`, the pair codegen emits at the raw boundary. */
+    ok &= jacl_val_equal(jacl_u64_box(37), jaclrt_i32(37));
+    ok &= jacl_val_equal(jacl_u64_box(INT64_MAX), i64max);
+    ok &= jacl_val_equal(jacl_u64_box((int64_t)((uint64_t)INT64_MAX + 1u)),
+                         big("9223372036854775808"));
+    ok &= jacl_val_equal(jacl_u64_box(-1), big("18446744073709551615"));  /* read as unsigned */
+    ok &= jacl_u64_unbox(jaclrt_i32(37)) == 37;
+    ok &= jacl_u64_unbox(jaclrt_i32(-1)) == 0;                   /* no u64 form */
+    ok &= jacl_u64_unbox(i64max) == INT64_MAX;
+    ok &= (uint64_t)jacl_u64_unbox(big("18446744073709551615")) == UINT64_MAX;
+    ok &= jacl_u64_unbox(big("-9223372036854775809")) == 0;      /* no u64 form */
+    /* A tainted or secret value has nowhere to put its flag in an untagged word, so it is
+     * refused rather than laundered into a plain number (jacl #95) — the same guard
+     * `jacl_i64_unbox` has, and for the same reason. (The *error* flag is not tested here:
+     * codegen branches on all three before it calls this at all, so this is the second line
+     * of defence for the two flags a value can carry without being an error.) */
+    ok &= jacl_u64_unbox(jaclrt_i32(5) | JACL_FLAG_TAINTED) == 0;
+    ok &= jacl_u64_unbox(jaclrt_i32(5) | JACL_FLAG_SECRET) == 0;
+    /* and it is the inverse of the box across the whole range */
+    { uint64_t vs[] = {0u, 1u, 37u, (uint64_t)INT32_MAX, (uint64_t)INT32_MAX + 1u,
+                       (uint64_t)INT64_MAX, (uint64_t)INT64_MAX + 1u, UINT64_MAX};
+      for (unsigned i = 0; i < sizeof vs / sizeof vs[0]; i++)
+        ok &= (uint64_t)jacl_u64_unbox(jacl_u64_box((int64_t)vs[i])) == vs[i]; }
+    if (!ok) return 109;
+
+    /* (d) the carry-out check the emitted code cannot do inline. */
+    ok &= jacl_u64_mul_ovf(0, 0) == 0;
+    ok &= jacl_u64_mul_ovf((int64_t)UINT32_MAX, (int64_t)UINT32_MAX) == 0;   /* fits */
+    ok &= jacl_u64_mul_ovf(INT64_MAX, 2) == 0;                               /* fits unsigned */
+    ok &= jacl_u64_mul_ovf(-1, 2) == 1;                                      /* UINT64_MAX * 2 */
+    ok &= jacl_u64_mul_ovf((int64_t)1 << 32, (int64_t)1 << 32) == 1;
+    if (!ok) return 110;
+
+    /* (e) **pinning the `0x0F` tag's current behaviour.** The tag records unsignedness and no
+     * operation honours it: every read goes through `jacl_int_val` into an `int64_t` and uses
+     * the signed op. The representation and the printer are right across the whole range; the
+     * dispatch is not. These values are unreachable from JACL source (the range caps in
+     * `typer__int_range` / `jacl_to_cast` stop at INT64_MAX) but reachable from `flatbuf.c`,
+     * which mints one for a raw machine address. When step 3 deletes the tag, this block is
+     * what has to change — which is the evidence the tag is gone rather than merely unused. */
+    JaclVal umax = jacl_wide_new(0x0F, (int64_t)UINT64_MAX);
+    JaclVal ten  = jaclrt_i32(10);
+    ok &= jaclrt_type_index(umax) == 0x0F;
+    ok &= jacl_val_equal(jacl_add(umax, jaclrt_i32(0)), umax);       /* + - * are exact */
+    ok &= jacl_val_equal(jacl_div(umax, ten), jaclrt_i32(0));        /* WRONG: want 1844674407370955161 */
+    ok &= jacl_val_equal(jacl_mod(umax, ten), umax);                 /* WRONG: want 5 */
+    ok &= jacl_val_equal(jacl_lt(umax, ten), jaclrt_bool(1));          /* WRONG: want false */
+    ok &= jacl_val_equal(jacl_gt(umax, ten), jaclrt_bool(0));          /* WRONG: want true */
+    /* the tag propagates through arithmetic, and `assert-type u64` accepts it */
+    ok &= jaclrt_type_index(jacl_add(umax, jaclrt_i32(0))) == 0x0F;
+    if (!ok) return 111;
+  }
+
+  return ok ? 819 : 106;
 }
 
 #include "jaclrt.c"

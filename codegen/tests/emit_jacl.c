@@ -70,6 +70,15 @@ static const char *source_for(const char *name) {
   /* #114 — a `def i32` local is a raw, untagged, sign-extended word. */
   if (!strcmp(name, "i32_raw"))
     return "proc f {} {\n def i32 a 100\n def i32 b [* $a $a]\n [+ $b 1] }\n[f]";
+  /* jacl #119 — `u32`/`u64` are raw, untagged, **zero**-extended words with their own
+   * arithmetic on the real unsigned opcodes. 4000000000 / 10 = 400000000, which the signed
+   * divide the dynamic tower uses would get wrong if the value did not fit a signed i64. */
+  if (!strcmp(name, "u32_raw"))
+    return "proc f {} {\n def u32 a 4000000000\n def u32 b [/ $a 10]\n [+ $b 0] }\n[f]";
+  /* The u64 form, above `INT32_MAX`: a native unsigned divide and an unsigned compare, and the
+   * carry-out check on `+` is two unsigned compares rather than the signed sign trick. */
+  if (!strcmp(name, "u64_raw"))
+    return "proc f {u64 a u64 b} u64 { if [< $a $b] { / $b $a } { + $a $b } }\n[f 3000000000 9000000000]";
   /* #94 slice 1 — proved-typed comparisons, `/` and `%` lower to native ops with no runtime
    * call and no monomorphic-guard diamond. 20 % 6 == 2, so the taken branch is 20 / 6 = 3. */
   if (!strcmp(name, "typed_cmp_divrem"))
