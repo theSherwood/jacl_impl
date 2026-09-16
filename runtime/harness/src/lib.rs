@@ -146,6 +146,36 @@ pub fn run_test(driver: &str, n: i32) -> i32 {
     iv
 }
 
+/// Like `run_test`, but for a driver whose **point is that it traps**: returns each backend's
+/// outcome as a short string, `("Returned(n)" | "Trap(T)", …)` for (interp, JIT). A trap terminates
+/// the run and cannot be observed from inside the guest, so this is the only place a "this must
+/// fault" rule can be asserted (jacl #141).
+pub fn run_test_outcome(driver: &str, n: i32) -> (String, String) {
+    let driver_abs = format!("{RUNTIME_DIR}/tests/{driver}");
+    let bc = compile_driver(&driver_abs);
+    let t = temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate bitcode");
+    let module = t.module;
+    temen_verify::verify_module(&module).expect("verify translated IR");
+    let full = vec![Value::I64(t.entry_sp as i64), Value::I32(n)];
+
+    let mut fuel = 2_000_000_000u64;
+    let interp = match temen_interp::run(&module, 0, &full, &mut fuel) {
+        Ok(v) => match v.first() {
+            Some(Value::I32(x)) => format!("Returned({x})"),
+            other => format!("Returned({other:?})"),
+        },
+        Err(t) => format!("Trap({t:?})"),
+    };
+
+    let slots = vec![t.entry_sp as i64, n as i64];
+    let jit = match temen_jit::compile_and_run(&module, 0, &slots).expect("jit compile") {
+        JitOutcome::Returned(s) => format!("Returned({})", s[0] as i32),
+        JitOutcome::Trapped(t) => format!("Trap({t:?})"),
+        other => format!("{other:?}"),
+    };
+    (interp, jit)
+}
+
 /// Like `run_test`, but runs **only the Cranelift JIT** (the real backend, real OS-thread
 /// vCPUs). Used for the concurrent-GC stress test: under heavy concurrent collection the temen
 /// *interpreter*'s cooperative single-thread scheduler flakily livelocks on the runtime's

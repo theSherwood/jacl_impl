@@ -41,6 +41,46 @@ jobs:
         # (already installed above), takes a couple of seconds, and skips cleanly without it.
         run: bash codegen/selfhost/macro_staging/run_rt_codec_test.sh
 
+  harness:
+    name: Runtime harness (differential interp vs JIT)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # vendor/temen — temen-llvm, temen-interp, temen-jit
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            runtime/harness
+            vendor/temen
+            vendor/temen/crates/temen-llvm
+
+      - name: Install clang/LLVM 18 (temen-llvm translates the runtime bitcode)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      # This job exists because of jacl #141. The `test` job above runs `./build.sh`, which is
+      # the *reference VM*'s unit suite; the Rust harness — which owns the differential
+      # interp-vs-JIT check AGENTS.md names as the way the backend is verified — ran in no job
+      # at all. Three `mt.rs` tests had been failing with `MemoryFault` on **both** backends,
+      # and nothing said so, because nothing ran them. The same shape as #134: coverage that
+      # exists but runs somewhere nobody looks.
+      #
+      # The outer `timeout` matters here in a way it does not for build.sh: the temen
+      # interpreter multiplexes every `thread.spawn`ed vCPU onto one OS thread, so a
+      # multi-worker scheduler test can livelock rather than fail (which is why `par_gc` and
+      # `job_gc` are JIT-only). A hang must surface as a CI failure, not as a 6-hour job.
+      - name: Harness tests
+        run: ( cd runtime/harness && timeout 1800 cargo test --release )
+
   playground-run-gate:
     name: Playground run path
     runs-on: ubuntu-latest

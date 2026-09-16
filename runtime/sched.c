@@ -200,6 +200,10 @@ static int32_t  jacl_pool_shutdown;
 static int32_t  jacl_pool_started;
 static int32_t  jacl_owner_rr;       /* round-robin owner assignment */
 static int      jacl_pool_handles[JACL_POOL_WORKERS];
+/* The pool workers' own vCPU data stacks — see `jacl_batch_vcpu_stack` below for why every
+ * `thread.spawn` needs one (jacl #141). Sized by the pool, not by MAX_WORKERS: `pool_ensure`
+ * spawns `JACL_POOL_WORKERS - 1` of them. */
+static char     jacl_pool_vcpu_stack[JACL_POOL_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
 static int      jacl_pool_nthreads;
 static JaclObj *jacl_root_job;
 /* Per-worker list of VM-wait-parked fibers (jobs whose fiber reported JACL_FIBER_PARKED, e.g. a
@@ -432,7 +436,7 @@ static void pool_ensure(void) {
   if (nw > JACL_SCHED_MAX_WORKERS) nw = JACL_SCHED_MAX_WORKERS;
   jacl_pool_nthreads = nw - 1;
   for (int k = 0; k < jacl_pool_nthreads; k++)
-    jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, (void *)0, 0);
+    jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, jacl_pool_vcpu_stack[k], 0);
 }
 
 /* Root the scheduler's WINDOW state during a collection: the per-worker ready queues, each
@@ -539,6 +543,12 @@ long       jacl_batch_result[JACL_BATCH_MAX];
 long       jacl_batch_n;
 static long jacl_batch_next;
 static char jacl_batch_worker_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
+/* The batch workers' own **vCPU data stacks** — distinct from the fiber stacks above (jacl #141).
+ * `thread.spawn` takes the new vCPU's data-stack base and reserves nothing for it: only the *root*
+ * gets a stack carved out of the window (`entry_sp`, TEMEN_IR ThreadSpawn — "every vCPU owns its own
+ * in-window data stack, exactly like a fiber"). These used to be spawned with `(void *)0`, so the
+ * worker's stack was based at address 0 and the first frame it needed faulted. */
+static char jacl_batch_vcpu_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
 
 static long jacl_batch_worker(long arg) {
   (void)arg;
@@ -575,7 +585,8 @@ void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int n
   jacl_batch_n = n;
   jacl_gc_worker_unregister();
   int h[JACL_SCHED_MAX_WORKERS];
-  for (int k = 0; k < nworkers; k++) h[k] = __vm_thread_spawn(jacl_batch_worker, (void *)0, 0);
+  for (int k = 0; k < nworkers; k++)
+    h[k] = __vm_thread_spawn(jacl_batch_worker, jacl_batch_vcpu_stack[k], 0);
   for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
   jacl_gc_worker_register();
   for (long i = 0; i < n; i++) result[i] = jacl_batch_result[i];
