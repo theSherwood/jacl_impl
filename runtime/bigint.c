@@ -70,10 +70,10 @@ static JaclVal jbig_canon(int32_t sign, const uint32_t *limb, uint32_t n) {
   if (n == 0) return jaclrt_i32(0);
   if (n <= 2) {
     uint64_t u = (uint64_t)limb[0] | (n == 2 ? ((uint64_t)limb[1] << 32) : 0u);
-    if (sign > 0 && u <= (uint64_t)INT64_MAX) return jacl_int_result(0x0E, (int64_t)u);
+    if (sign > 0 && u <= (uint64_t)INT64_MAX) return jacl_int_result((int64_t)u);
     if (sign < 0) {
-      if (u == (uint64_t)INT64_MAX + 1u) return jacl_int_result(0x0E, INT64_MIN);
-      if (u <= (uint64_t)INT64_MAX)      return jacl_int_result(0x0E, -(int64_t)u);
+      if (u == (uint64_t)INT64_MAX + 1u) return jacl_int_result(INT64_MIN);
+      if (u <= (uint64_t)INT64_MAX)      return jacl_int_result(-(int64_t)u);
     }
   }
   if (n > JBIG_MAX_LIMBS) return jaclrt_set_error(jaclrt_i32(0));
@@ -377,6 +377,32 @@ JaclVal jacl_big_divmod(JaclVal a, JaclVal b, int want_rem) {
   jbig_mag_divmod(la, na, lb, nb, q, r);
   if (want_rem) return jbig_canon(siga, r, nb);
   return jbig_canon(siga * sigb, q, na - nb + 1);
+}
+
+/* A raw `u64` word crossing into `dyn`. The dynamic tower is signed — `docs/TEMEN_NUMERICS.md`
+ * § "The integer model": *"`dyn` has no unsigned form to promote into"* — so a u64 above
+ * `INT64_MAX` has no i64 form and becomes a **bigint**. That is what makes deleting the `0x0F`
+ * "wide but unsigned" tag possible rather than merely desirable (jacl #119): the tag exists
+ * only because this conversion did not.
+ *
+ * Below `INT64_MAX` nothing new happens — `jbig_canon` demotes to the narrowest fitting
+ * representation, so a `u64` and an `i64` spelling of the same number are the same JaclVal,
+ * which is the canonicalization `==` and map-key hashing depend on (#107). */
+JaclVal jacl_big_from_u64(uint64_t x) {
+  uint32_t limb[2] = {(uint32_t)x, (uint32_t)(x >> 32)};
+  return jbig_canon(1, limb, 2);
+}
+/* The inverse, where one exists. A bigint is *above* `INT64_MAX` by the canonical-form
+ * invariant, so the only value a u64 can hold is a positive two-limb magnitude — a negative
+ * bigint and anything past `UINT64_MAX` have no u64 form and are refused rather than
+ * truncated (jacl #138: a bigint has no int64 form, and reading its header as one is how that
+ * bug looked). Returns 1 and writes `*out` on success, 0 otherwise. */
+int jacl_big_to_u64(JaclVal v, uint64_t *out) {
+  if (!jacl_is_bigint(v)) return 0;
+  JaclBig *b = jbig_of(v);
+  if (b->sign < 0 || b->n > 2) return 0;
+  *out = (uint64_t)b->limb[0] | (b->n == 2 ? ((uint64_t)b->limb[1] << 32) : 0u);
+  return 1;
 }
 
 /* Build from a decimal digit string — how a bigint *literal* reaches the runtime, since one

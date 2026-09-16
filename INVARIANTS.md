@@ -43,7 +43,7 @@ the exact failure a taint system exists to prevent, so the crossing has to refus
 silently succeed. The refusal keeps the flags, so the fact is not lost along with the cast.
 
 Enforced at every `dyn` → static crossing: `jacl_to_cast`, `jacl_widen_to`, `jacl_i64_unbox`,
-and codegen's `emit_has_any_flag` before a raw-word crossing. The codegen test costs exactly
+`jacl_u64_unbox`, and codegen's `emit_has_any_flag` before a raw-word crossing. The codegen test costs exactly
 what the error-only test it replaced cost — a wider mask constant, the same two instructions.
 
 **Status:** taint and secret have no source-level producer yet (`NOT_IMPLEMENTED.md`), so
@@ -77,6 +77,12 @@ signature forbids — and silently wrapping would mean adding an annotation chan
 answers. `dyn` promotes through the whole tower and therefore **cannot fail on magnitude**;
 only domain errors remain. Wrapping is available, but only when the program asks for it by
 name.
+
+"`dyn` promotes" has no exceptions. `u64` was one until jacl #119: an overflowing dynamic
+`u64` *errored*, because the `0x0F` tag was the only record that the value was meant to be
+unsigned and promoting would have dropped it. The fix was to stop tracking signedness in the
+tower at all — it is a static property (V1) — so a declared `u64` gets its overflow error from
+its own typed lowering, where the width is a compile-time fact, and the tower stays uniform.
 
 ## V6. A raw-word representation needs a separate channel for the error
 

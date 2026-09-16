@@ -7087,7 +7087,13 @@ static bool typer__is_int_width(JaclType t) {
 /* The inclusive range of an integer type, or false if `t` is not an integer width.
  * u64's upper bound does not fit an int64_t; the lexer already caps a literal at INT64_MAX,
  * so a literal can never exceed it and the bound is reported as INT64_MAX. */
-static bool typer__int_range(JaclType t, int64_t* lo, int64_t* hi) {
+/* The inclusive range a declared integer width holds. `hi` is a `uint64_t` because `u64`'s
+ * upper bound is `UINT64_MAX`, which no `int64_t` holds — that cap used to be `INT64_MAX`, and
+ * it was load-bearing while `u64` was a *tagged* type computed with signed ops (jacl #119: it
+ * was the only thing keeping the wrong `/ % < >` answers unreachable). `u64` is a static raw
+ * type with its own unsigned lowering now, so the cap has nothing left to protect. `lo` stays
+ * signed because every lower bound is <= 0. */
+static bool typer__int_range(JaclType t, int64_t* lo, uint64_t* hi) {
   switch (t) {
     case TYPE_I8:  *lo = INT8_MIN;   *hi = INT8_MAX;   return true;
     case TYPE_U8:  *lo = 0;          *hi = UINT8_MAX;  return true;
@@ -7096,9 +7102,28 @@ static bool typer__int_range(JaclType t, int64_t* lo, int64_t* hi) {
     case TYPE_I32: *lo = INT32_MIN;  *hi = INT32_MAX;  return true;
     case TYPE_U32: *lo = 0;          *hi = UINT32_MAX; return true;
     case TYPE_I64: *lo = INT64_MIN;  *hi = INT64_MAX;  return true;
-    case TYPE_U64: *lo = 0;          *hi = INT64_MAX;  return true;
+    case TYPE_U64: *lo = 0;          *hi = UINT64_MAX; return true;
     default: return false;
   }
+}
+
+/* A literal past `INT64_MAX` reaches the parser as its **digit span**, not a value (the lexer's
+ * `is_big`, because a `dyn` integer has no width at which writing one stops working). `u64` is
+ * the one static width that can hold such a literal, so it is the one width that has to read
+ * the digits. Returns false on a non-numeric digit or anything past `UINT64_MAX`. */
+static bool typer__big_lit_u64(const AstNode* n, uint64_t* out) {
+  const char* d = n->data.lit_int.big;
+  uint32_t len = n->data.lit_int.big_len;
+  if (!d || len == 0 || len > 20) return false;      /* UINT64_MAX is 20 digits */
+  uint64_t u = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    if (d[i] < '0' || d[i] > '9') return false;
+    uint64_t t = u * 10u + (uint64_t)(d[i] - '0');
+    if (t / 10u != u) return false;                  /* overflowed 64 bits */
+    u = t;
+  }
+  *out = u;
+  return true;
 }
 
 /* A declared width holds exactly the values it says it holds, so a literal outside it is a
@@ -7141,7 +7166,7 @@ static void typer__retype_int_const(TyperCtx* tc, AstNode* n, JaclType want) {
 static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want) {
   JaclType have = (JaclType)v->inferred_type;
   if (have != TYPE_DYN || want == TYPE_DYN || !is_numeric_type(want)) return have;
-  int64_t lo, hi;
+  int64_t lo; uint64_t hi;
   bool int_want = typer__int_range(want, &lo, &hi);
   if (v->type == AST_LIT_INT) {
     if (int_want) typer__check_lit_range(tc, v, want);  /* a width that cannot hold it errors */
@@ -7183,11 +7208,21 @@ static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want) {
 }
 
 static void typer__check_lit_range(TyperCtx* tc, AstNode* node, JaclType want) {
-  int64_t lo, hi;
+  int64_t lo; uint64_t hi;
   if (!typer__int_range(want, &lo, &hi)) return;
-  int64_t v = node->data.lit_int.value;
-  if (v >= lo && v <= hi) return;
   char err[160];
+  if (node->data.lit_int.big) {
+    /* A digit-span literal, so `value` is 0 and means nothing. Only a width whose top is
+     * `UINT64_MAX` can hold one, and only up to it. */
+    uint64_t u;
+    if (hi == UINT64_MAX && typer__big_lit_u64(node, &u)) return;
+    snprintf(err, sizeof(err), "type error: integer literal %.*s out of range for %s",
+             (int)node->data.lit_int.big_len, node->data.lit_int.big, type_name(want));
+    typer__error(tc, node->start.line, node->start.column, err);
+    return;
+  }
+  int64_t v = node->data.lit_int.value;
+  if (v >= lo && (v < 0 || (uint64_t)v <= hi)) return;
   snprintf(err, sizeof(err), "type error: integer literal %lld out of range for %s",
            (long long)v, type_name(want));
   typer__error(tc, node->start.line, node->start.column, err);

@@ -62,16 +62,19 @@ static const char *binary_runtime_fn(uint8_t head_id) {
  * binding back to a tagged JaclVal, so a site that has not been taught about raw values
  * gets a correct (if slower) value instead of reading a raw word as a tag. A missed
  * coercion would be silent garbage, so the default has to be the safe one. */
-typedef enum { REP_TAGGED = 0, REP_I32, REP_I64 } BindRep;
+typedef enum { REP_TAGGED = 0, REP_I32, REP_I64, REP_U32, REP_U64 } BindRep;
 
 /* The frame is all-i64, so a raw 32-bit binding lives in the low half of its slot. The
  * invariant, stamped at every store and relied on by every read:
  *
- *     a REP_I32 slot holds the **sign-extended** value.
+ *     a REP_I32 slot holds the **sign-extended** value,
+ *     a REP_U32 slot holds the **zero-extended** value.
  *
- * Sign- rather than zero-extension so the slot reads as the same number at 64 bits, which is
- * what makes a stray 64-bit compare on it right instead of subtly wrong. (Pins are a
- * different thing and stay zero-extended: a pin round-trips bits, not a value.) */
+ * Either way the slot reads as the same *number* at 64 bits, which is what makes a stray
+ * 64-bit compare on it right instead of subtly wrong — and for the unsigned width that means
+ * zero-extension, since a u32 above `INT32_MAX` sign-extended would read as negative. (Pins
+ * are a different thing and stay zero-extended whatever the rep: a pin round-trips bits, not
+ * a value.) */
 
 typedef struct {
   const char *name;
@@ -82,7 +85,7 @@ typedef struct {
   /* static annotation carried from a typed [Arr T]/[Buf N T] def (compile-time checks) */
   const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
   int32_t     buf_size;                            /* fixed Buf length, or -1 */
-  BindRep     rep;                                 /* tagged JaclVal, or a raw i64 word */
+  BindRep     rep;                                 /* tagged JaclVal, or a raw machine word */
 } Binding;
 
 /* A top-level proc: name -> its TEMEN function + arity. Registered before any body is
@@ -301,9 +304,31 @@ static void locals_push(Cx *cx, Binding b) {
 static IrVal emit_rt_call(Cx *cx, const char *fn, const IrVal *args, int nargs);   /* fwd */
 static IrVal box_i32(Cx *cx, IrVal v);                                            /* fwd */
 static IrVal unbox_i32(Cx *cx, IrVal boxed);                                      /* fwd */
+
+/* The four raw reps are two independent dimensions — width and signedness — so the sites that
+ * only care about one ask these rather than switching on all four. */
+static int rep_unsigned(uint8_t rep) { return rep == REP_U32 || rep == REP_U64; }
+static uint8_t rep_for_type(uint8_t t) {
+  return t == TYPE_I32 ? REP_I32 : t == TYPE_I64 ? REP_I64
+       : t == TYPE_U32 ? REP_U32 : t == TYPE_U64 ? REP_U64 : REP_TAGGED;
+}
+static uint8_t type_for_rep(uint8_t rep) {
+  return rep == REP_I32 ? TYPE_I32 : rep == REP_I64 ? TYPE_I64
+       : rep == REP_U32 ? TYPE_U32 : rep == REP_U64 ? TYPE_U64 : TYPE_DYN;
+}
+/* The runtime's raw->tagged direction for a rep. The unsigned widths box into the **signed**
+ * tower (`docs/TEMEN_NUMERICS.md`: `dyn` has no unsigned form), so a u64 past `INT64_MAX`
+ * becomes a bigint — `jacl_u64_box` makes that choice. A u32 can never reach it, so the
+ * cheaper signed box is exact there. */
+static const char *rep_box_fn(uint8_t rep) {
+  return rep == REP_U64 ? "jacl_u64_box" : "jacl_i64_box";
+}
 static IrVal env_value(Cx *cx, Binding *bd) {
   if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_cell_get", a, 2); }
-  if (bd->rep == REP_I64) { IrVal a[] = {cx->sp, bd->value}; return emit_rt_call(cx, "jacl_i64_box", a, 2); }
+  if (bd->rep == REP_I64 || bd->rep == REP_U32 || bd->rep == REP_U64) {
+    IrVal a[] = {cx->sp, bd->value};
+    return emit_rt_call(cx, rep_box_fn(bd->rep), a, 2);
+  }
   /* i32 needs no runtime help either way: the inline tagged form *is* the payload with a tag
    * above it, so re-tagging is a narrow and an OR. No allocation, so nothing to canonicalize
    * — an i32 is already the narrowest representation of its value. */
@@ -325,6 +350,17 @@ static IrVal env_raw_i64(Cx *cx, Binding *bd) {
 static IrVal env_raw_i32(Cx *cx, Binding *bd) {
   if (bd->rep == REP_I32 && !bd->is_cell) return unbox_i32(cx, bd->value);
   return unbox_i32(cx, env_value(cx, bd));
+}
+/* Read a binding as a raw **unsigned** word of `bits` width. A matching raw slot is the word
+ * itself; anything else goes through `jacl_u64_unbox`, which — unlike the i32 read above —
+ * cannot be a bare narrow, because a u32 above `INT32_MAX` is boxed as a *wide cell* and
+ * narrowing that would take the low half of its pointer. */
+static IrVal env_raw_uint(Cx *cx, Binding *bd, int bits) {
+  uint8_t want = bits == 32 ? REP_U32 : REP_U64;
+  IrVal w;
+  if (bd->rep == want && !bd->is_cell) w = bd->value;
+  else { IrVal a[] = {cx->sp, env_value(cx, bd)}; w = emit_rt_call(cx, "jacl_u64_unbox", a, 2); }
+  return bits == 32 ? unbox_i32(cx, w) : w;
 }
 
 /* Does this AST_LIT_INT fit the i32 the rest of the compiler assumes? An integer literal
@@ -1073,6 +1109,252 @@ static IrVal compile_i64_tree(Cx *cx, AstNode *node) {
   return v;
 }
 
+/* ---- typed u32 / u64: raw *unsigned* words (#119) ----
+ *
+ * `docs/TEMEN_NUMERICS.md` § "The integer model" puts signedness on the **static** side only:
+ * `u32`/`u64` are C-like exact-width types, and `dyn` is signed always. Before this the static
+ * unsigned types had no lowering at all — every `u32`/`u64` operation went through the dynamic
+ * tower on tagged values, which reads every operand as an `int64_t` and uses the *signed* op.
+ * For `u32` that happens to give the right answer (every u32 value fits a signed i64, so the
+ * promotion makes the signed op exact), so this is a speed change there. For `u64` above
+ * `INT64_MAX` it does not: `/`, `%` and every comparison answered wrongly, and the only reason
+ * no program saw it is the range caps in `typer__int_range` / `jacl_to_cast` that keep those
+ * values unreachable from source.
+ *
+ * `+ - *` are bit-identical to the signed ops. Everything that differs is here:
+ *   - `/` and `%` use `IRB_DIV_U` / `IRB_REM_U`, and have **one** domain case rather than two.
+ *     There is no unsigned analogue of `INT_MIN / -1`, so the signed version's substituted-
+ *     divisor mask collapses to `b | (b == 0)`.
+ *   - comparisons use `IRB_LT_U` / `IRB_LE_U` / `IRB_GT_U` / `IRB_GE_U` (`typed_cmp_op`).
+ *   - overflow is a **carry-out**, not a sign flip, so `emit_i64_op`'s operand-sign trick does
+ *     not transfer: `a + b` carries exactly when `r <u a`, `a - b` borrows exactly when
+ *     `a <u b`, and multiply has no such trick so it asks `jacl_u64_mul_ovf`. At 32 bits the
+ *     i32 shape still works, with the operands **zero**-extended instead of sign-extended.
+ *
+ * One pair of functions covers both widths, since the shapes are identical apart from those
+ * three points and the pin: a native i32 cannot ride the all-i64 frame, so a 32-bit
+ * accumulator is zero-extended across a move and narrowed back (`pin_i32_push`), while a
+ * 64-bit one rides as is. */
+static int uint_arith(AstNode *node, int bits) {
+  if (node->type != AST_COMMAND) return 0;
+  if (node->inferred_type != (bits == 32 ? TYPE_U32 : TYPE_U64)) return 0;
+  uint8_t hid = node->data.command.head_id;
+  return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR ||
+         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT ||
+         hid == HEAD_SLASH || hid == HEAD_PERCENT;
+}
+/* The unsigned width the typer proved for `node`, or 0. */
+static int uint_width(AstNode *n) {
+  return n->inferred_type == TYPE_U32 ? 32 : n->inferred_type == TYPE_U64 ? 64 : 0;
+}
+/* Can lowering `node` leave the current block? Same reasoning as `i32_operand_stays_put`. */
+static int uint_operand_stays_put(AstNode *n, int bits) {
+  switch (n->type) {
+    case AST_LIT_INT: case AST_VAR_REF: return 1;
+    case AST_COMMAND:
+      if (!uint_arith(n, bits)) return 0;
+      for (uint32_t i = 0; i < n->data.command.arg_count; i++)
+        if (!uint_operand_stays_put(n->data.command.args[i], bits)) return 0;
+      return 1;
+    default: return 0;
+  }
+}
+
+/* `a / b` or `a % b` on raw unsigned words, branchless, matching what the tower *should*
+ * answer for these types. Only a zero divisor can reach the machine instruction and trap, and
+ * `b | (b == 0)` substitutes a divisor of 1 for it with no mask arithmetic. The payload is
+ * then masked to 0 and the sticky error bit set, so `[/ $a 0]` inside a typed tree produces
+ * the same error-flagged 0 the runtime does. */
+static IrVal emit_uint_divrem(Cx *cx, int bits, IrBinOp op, IrVal a, IrVal b, int ovf_slot) {
+  IrType ty = bits == 32 ? IRB_I32 : IRB_I64;
+  IrVal zero = bits == 32 ? irb_const_i32(cx->f, cx->cur, 0) : irb_const_i64(cx->f, cx->cur, 0);
+  IrVal one  = bits == 32 ? irb_const_i32(cx->f, cx->cur, 1) : irb_const_i64(cx->f, cx->cur, 1);
+  IrVal is0  = irb_intcmp(cx->f, cx->cur, ty, IRB_EQ, b, zero);          /* i32 0/1 */
+  IrVal is0t = bits == 32 ? is0 : irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, is0);
+  IrVal bsafe = irb_intbin(cx->f, cx->cur, ty, IRB_OR, b, is0t);         /* 0 -> 1, else b */
+  IrVal r = irb_intbin(cx->f, cx->cur, ty, op, a, bsafe);
+  IrVal mask = irb_intbin(cx->f, cx->cur, ty, IRB_SUB, is0t, one);       /* 0 -> ~0, 1 -> 0 */
+  r = irb_intbin(cx->f, cx->cur, ty, IRB_AND, r, mask);
+  ovf_mark(cx, ovf_slot, is0);
+  return r;
+}
+
+/* `a op b` on raw unsigned words, ORing the carry-out into the sticky pin. */
+static IrVal emit_uint_op(Cx *cx, int bits, IrBinOp op, IrVal a, IrVal b, int wraps, int ovf_slot) {
+  if (wraps) return irb_intbin(cx->f, cx->cur, bits == 32 ? IRB_I32 : IRB_I64, op, a, b);
+  if (bits == 32) {
+    /* Compute in 64 bits on the **zero**-extended operands so the carry out of 32 is
+     * observable, then narrow. `(2^32-1)^2` does not fit a *signed* i64, but the comparison
+     * below is bitwise (`IRB_NE`), so the product only has to be exact modulo 2^64 — and it
+     * is, since the true product is below 2^64. */
+    IrVal ea = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, a);
+    IrVal eb = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, b);
+    IrVal r64 = irb_intbin(cx->f, cx->cur, IRB_I64, op, ea, eb);
+    IrVal narrow = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, r64);
+    IrVal back = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, narrow);
+    ovf_mark(cx, ovf_slot, irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, back, r64));
+    return narrow;
+  }
+  IrVal r = irb_intbin(cx->f, cx->cur, IRB_I64, op, a, b);
+  if (op == IRB_MUL) {
+    /* No carry trick for multiply, and "divide back and compare" costs a second division, so
+     * the runtime answers this one — the unsigned sibling of `jacl_i64_mul_ovf`. */
+    IrVal ma[] = {cx->sp, a, b};
+    IrVal w = emit_rt_call(cx, "jacl_u64_mul_ovf", ma, 3);
+    cx->locals[ovf_slot].value =
+        irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, pin_get(cx, ovf_slot), w);
+    return r;
+  }
+  /* add carries exactly when the sum wrapped below the left operand; subtract borrows exactly
+   * when the left operand was the smaller one. Two unsigned compares, no sign reasoning. */
+  IrVal bad = op == IRB_ADD ? irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_LT_U, r, a)
+                            : irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_LT_U, a, b);
+  ovf_mark(cx, ovf_slot, bad);
+  return r;
+}
+
+/* Lower `node` to a raw unsigned word of `bits` width, ORing each op's carry-out into
+ * `ovf_slot`. The shape mirrors `compile_i32` / `compile_raw_i64`: typed arithmetic stays
+ * unboxed recursively, literals are constants, a raw slot is read straight, a raw-return call
+ * hands its pair over, and anything else is computed boxed and then crossed. */
+/* A literal past `INT64_MAX` arrives as its **digit span** rather than a value (the lexer's
+ * `is_big`). `u64` is the one static width that can hold one, so it is the one width that has
+ * to read the digits — the typer checks the same thing with the same shape
+ * (`typer__big_lit_u64`); this is the backstop that turns the checked literal into a word. */
+static int lit_big_u64(AstNode *n, uint64_t *out) {
+  const char *d = n->data.lit_int.big;
+  uint32_t len = n->data.lit_int.big_len;
+  if (!d || len == 0 || len > 20) return 0;        /* UINT64_MAX is 20 digits */
+  uint64_t u = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    if (d[i] < '0' || d[i] > '9') return 0;
+    uint64_t t = u * 10u + (uint64_t)(d[i] - '0');
+    if (t / 10u != u) return 0;                    /* overflowed 64 bits */
+    u = t;
+  }
+  *out = u;
+  return 1;
+}
+static IrVal compile_uint(Cx *cx, AstNode *node, int bits, int ovf_slot) {
+  if (cx->failed) return 0;
+  if (node->type == AST_LIT_INT) {
+    /* An out-of-range literal is the typer's to refuse (#112); this is the backstop. */
+    if (node->data.lit_int.big) {
+      uint64_t u;
+      if (bits == 64 && lit_big_u64(node, &u))
+        return irb_const_i64(cx->f, cx->cur, (int64_t)u);
+      cx_fail(cx, bits == 32 ? "integer literal out of range for u32"
+                             : "integer literal out of range for u64");
+      return 0;
+    }
+    int64_t v = node->data.lit_int.value;
+    if (v < 0 || (bits == 32 && v > (int64_t)UINT32_MAX)) {
+      cx_fail(cx, bits == 32 ? "integer literal out of range for u32"
+                             : "integer literal out of range for u64");
+      return 0;
+    }
+    return bits == 32 ? irb_const_i32(cx->f, cx->cur, (int32_t)(uint32_t)v)
+                      : irb_const_i64(cx->f, cx->cur, v);
+  }
+  if (node->type == AST_VAR_REF) {
+    Binding *bd = env_lookup(cx, node->data.var_ref.name, node->data.var_ref.length);
+    if (bd && bd->rep == (bits == 32 ? REP_U32 : REP_U64) && !bd->is_cell)
+      return env_raw_uint(cx, bd, bits);
+  }
+  if (uint_arith(node, bits)) {
+    uint8_t hid = node->data.command.head_id;
+    int wraps = i32_arith_wraps(hid);
+    int divrem = i32_divrem(hid);
+    IrBinOp op = (hid == HEAD_PLUS || hid == HEAD_PLUS_PCT) ? IRB_ADD
+               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB
+               : (hid == HEAD_SLASH) ? IRB_DIV_U
+               : (hid == HEAD_PERCENT) ? IRB_REM_U : IRB_MUL;
+    uint32_t argc = node->data.command.arg_count;
+    IrVal acc = compile_uint(cx, node->data.command.args[0], bits, ovf_slot);
+    for (uint32_t i = 1; i < argc; i++) {
+      AstNode *arg = node->data.command.args[i];
+      int pa = uint_operand_stays_put(arg, bits) ? -1
+             : (bits == 32 ? pin_i32_push(cx, acc) : pin_push(cx, acc));
+      IrVal r = compile_uint(cx, arg, bits, ovf_slot);
+      if (pa >= 0) {
+        acc = bits == 32 ? pin_i32_get(cx, pa) : pin_get(cx, pa);
+        pin_drop(cx, pa);
+      }
+      if (cx->failed) return 0;
+      acc = divrem ? emit_uint_divrem(cx, bits, op, acc, r, ovf_slot)
+                   : emit_uint_op(cx, bits, op, acc, r, wraps, ovf_slot);
+    }
+    return acc;
+  }
+  /* A call to a proc whose raw return is this very width (#94 slice 2b): take the value word
+   * straight in, and fold the callee's error word into the sticky bit this tree already has
+   * for a carry-out. No box, no unbox, no new mechanism. */
+  {
+    Proc *rp = tail_call_proc(cx, node);
+    if (rp && rp->rawret == (bits == 32 ? REP_U32 : REP_U64)) {
+      IrVal pr[2];
+      if (emit_raw_call(cx, node, rp, pr) == 2) {
+        if (cx->failed) return 0;
+        IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+        ovf_mark(cx, ovf_slot, irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, pr[1], zero));
+        return bits == 32 ? unbox_i32(cx, pr[0]) : pr[0];
+      }
+      if (cx->failed) return 0;
+    }
+  }
+  /* A tagged value crossing into a raw unsigned word. Under jacl #95 a flagged value must not
+   * become a static one at all, and the word has no spare bit to carry the flag, so all three
+   * flags OR into the sticky bit — the same channel a carry-out uses. The unbox is a runtime
+   * call rather than a narrow because a u32 above `INT32_MAX` is boxed as a wide cell. */
+  IrVal boxed = compile_expr(cx, node);
+  if (cx->failed) return 0;
+  ovf_mark(cx, ovf_slot, emit_has_any_flag(cx, boxed));
+  IrVal ua[] = {cx->sp, boxed};
+  IrVal w = emit_rt_call(cx, "jacl_u64_unbox", ua, 2);
+  return bits == 32 ? unbox_i32(cx, w) : w;
+}
+
+/* Box a typed unsigned result, folding the sticky carry-out bit into the error flag — the
+ * unsigned `box_i32_checked`. Unlike that one this needs a call: the canonical dynamic form of
+ * a value past `INT32_MAX` is a wide cell (and past `INT64_MAX`, a bigint), which is an
+ * allocation, not an OR. */
+static IrVal box_uint_checked(Cx *cx, int bits, IrVal v, int ovf_slot) {
+  IrVal w = bits == 32 ? irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v) : v;
+  IrVal ba[] = {cx->sp, w};
+  IrVal boxed = emit_rt_call(cx, rep_box_fn(bits == 32 ? REP_U32 : REP_U64), ba, 2);
+  IrVal sh = irb_const_i64(cx->f, cx->cur, 61);   /* JACL_FLAG_ERROR */
+  IrVal bit = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SHL, pin_get(cx, ovf_slot), sh);
+  return irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, boxed, bit);
+}
+
+/* Compile a whole typed unsigned tree to a boxed JaclVal, error-flagged on any carry-out. */
+static IrVal compile_uint_tree(Cx *cx, AstNode *node, int bits) {
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrVal v = compile_uint(cx, node, bits, ovf);
+  IrVal res = cx->failed ? 0 : box_uint_checked(cx, bits, v, ovf);
+  pin_release(cx, ovf, 1);
+  return res;
+}
+
+/* Compile a typed unsigned tree to a raw word for a REP_U32/REP_U64 slot, branching out on a
+ * carry-out at the root. Same trade as `compile_i32_tree_raw` and for the same reason: a raw
+ * word has no spare bit to hold the error, so the sticky bit becomes control flow. The 32-bit
+ * form **zero**-extends, which is that slot's invariant. */
+static IrVal compile_uint_tree_raw(Cx *cx, AstNode *node, int bits) {
+  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrVal v = compile_uint(cx, node, bits, ovf);
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+  int pv = pin_push(cx, bits == 32 ? irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v) : v);
+  IrVal bit = pin_get(cx, ovf);
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
+  IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
+  emit_error_branch_if(cx, truth, errv);
+  IrVal out = pin_get(cx, pv);
+  pin_release(cx, ovf, 2);
+  return out;
+}
+
 /* Compile a typed i32 tree to a raw, sign-extended word for a REP_I32 slot, branching out on
  * overflow at the root.
  *
@@ -1115,8 +1397,7 @@ static int emit_raw_call(Cx *cx, AstNode *node, Proc *p, IrVal out[2]) {
   if (!check_buf_arg_sizes(cx, p, node)) return 0;
   for (int i = 0; i < (int)argc; i++) {
     if (p->prep[i] == REP_TAGGED) continue;
-    uint8_t want = p->prep[i] == REP_I32 ? TYPE_I32 : TYPE_I64;
-    if (node->data.command.args[i]->inferred_type != want) return 0;
+    if (node->data.command.args[i]->inferred_type != type_for_rep(p->prep[i])) return 0;
   }
   /* Each raw argument is compiled straight to a word, so nothing is boxed here and nothing
    * is unboxed on the other side. The tagged ones go through the usual path. */
@@ -1129,6 +1410,9 @@ static int emit_raw_call(Cx *cx, AstNode *node, Proc *p, IrVal out[2]) {
       v = compile_i32_tree_raw(cx, node->data.command.args[i]);  /* sign-extended to 64 bits */
     } else if (p->prep[i] == REP_I64) {
       v = compile_i64_tree(cx, node->data.command.args[i]);
+    } else if (p->prep[i] == REP_U32 || p->prep[i] == REP_U64) {
+      v = compile_uint_tree_raw(cx, node->data.command.args[i],  /* zero-extended at 32 bits */
+                                p->prep[i] == REP_U32 ? 32 : 64);
     } else {
       v = compile_expr(cx, node->data.command.args[i]);
     }
@@ -1167,9 +1451,13 @@ static Proc *tail_call_proc(Cx *cx, AstNode *node) {
  * This is the sieve half of #94's measurement. `fib` gained 3.2x from typing because its hot
  * ops are `+` and `-`; `sieve` gained only 1.6x because its inner loop is `<=`, `%` and `==`.
  *
- * Returns 0 (not a comparison to lower) or the operand width in bits. Mixed widths are a type
- * error (#115), so an unequal pair is left to the dynamic path rather than silently widened. */
-static int typed_cmp_width(AstNode *node) {
+ * Returns 0 (not a comparison to lower) or the operand width in bits, setting `*uns` when the
+ * proved type is one of the unsigned widths — the ordering comparisons are the place where
+ * signedness actually changes the answer, so it has to reach the opcode (#119). Mixed widths
+ * are a type error (#115), so an unequal pair is left to the dynamic path rather than silently
+ * widened. */
+static int typed_cmp_width(AstNode *node, int *uns) {
+  *uns = 0;
   if (node->type != AST_COMMAND || node->data.command.arg_count != 2) return 0;
   uint8_t hid = node->data.command.head_id;
   if (hid != HEAD_LT && hid != HEAD_LE && hid != HEAD_GT && hid != HEAD_GE &&
@@ -1177,15 +1465,18 @@ static int typed_cmp_width(AstNode *node) {
   uint8_t a = node->data.command.args[0]->inferred_type;
   uint8_t b = node->data.command.args[1]->inferred_type;
   if (a != b) return 0;
-  return a == TYPE_I32 ? 32 : a == TYPE_I64 ? 64 : 0;
+  *uns = (a == TYPE_U32 || a == TYPE_U64);
+  return (a == TYPE_I32 || a == TYPE_U32) ? 32 : (a == TYPE_I64 || a == TYPE_U64) ? 64 : 0;
 }
 
-static IrCmpOp typed_cmp_op(uint8_t hid) {
+/* `==` and `!=` are bitwise, so they are the same op either way; only the four orderings
+ * split. */
+static IrCmpOp typed_cmp_op(uint8_t hid, int uns) {
   switch (hid) {
-    case HEAD_LT: return IRB_LT_S;
-    case HEAD_LE: return IRB_LE_S;
-    case HEAD_GT: return IRB_GT_S;
-    case HEAD_GE: return IRB_GE_S;
+    case HEAD_LT: return uns ? IRB_LT_U : IRB_LT_S;
+    case HEAD_LE: return uns ? IRB_LE_U : IRB_LE_S;
+    case HEAD_GT: return uns ? IRB_GT_U : IRB_GT_S;
+    case HEAD_GE: return uns ? IRB_GE_U : IRB_GE_S;
     case HEAD_EQ_EQ: return IRB_EQ;
     default: return IRB_NE;                      /* HEAD_BANG_EQ */
   }
@@ -1195,17 +1486,19 @@ static IrCmpOp typed_cmp_op(uint8_t hid) {
  * value — so the tree's sticky bit rides along and folds into the bool's error flag at the
  * root, exactly as `box_i32_checked` does for an arithmetic tree. A bool has a spare bit for
  * it; the flag is orthogonal to the tag. */
-static IrVal compile_typed_cmp(Cx *cx, AstNode *node, int bits) {
+static IrVal compile_typed_cmp(Cx *cx, AstNode *node, int bits, int uns) {
   AstNode **args = node->data.command.args;
-  IrCmpOp cop = typed_cmp_op(node->data.command.head_id);
+  IrCmpOp cop = typed_cmp_op(node->data.command.head_id, uns);
   int wide = (bits == 64);
   int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
 
-  IrVal a = wide ? compile_raw_i64(cx, args[0], ovf) : compile_i32(cx, args[0], ovf);
+  IrVal a = uns ? compile_uint(cx, args[0], bits, ovf)
+          : wide ? compile_raw_i64(cx, args[0], ovf) : compile_i32(cx, args[0], ovf);
   if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
-  int pa = i32_operand_stays_put(args[1]) ? -1
+  int pa = (uns ? uint_operand_stays_put(args[1], bits) : i32_operand_stays_put(args[1])) ? -1
          : (wide ? pin_push(cx, a) : pin_i32_push(cx, a));
-  IrVal b = wide ? compile_raw_i64(cx, args[1], ovf) : compile_i32(cx, args[1], ovf);
+  IrVal b = uns ? compile_uint(cx, args[1], bits, ovf)
+          : wide ? compile_raw_i64(cx, args[1], ovf) : compile_i32(cx, args[1], ovf);
   if (pa >= 0) { a = wide ? pin_get(cx, pa) : pin_i32_get(cx, pa); pin_drop(cx, pa); }
   if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
 
@@ -1378,7 +1671,18 @@ static IrVal emit_select_nonzero(Cx *cx, IrVal sel, IrVal when_nz, IrVal when_z)
 static IrVal emit_box_raw(Cx *cx, uint8_t rep, IrVal raw) {
   if (rep == REP_I32) return box_i32(cx, unbox_i32(cx, raw));
   IrVal ba[] = {cx->sp, raw};
-  return emit_rt_call(cx, "jacl_i64_box", ba, 2);
+  return emit_rt_call(cx, rep_box_fn(rep), ba, 2);
+}
+/* The other direction: a tagged value into the raw word a `rep` slot holds. The narrow-then-
+ * extend on the 32-bit widths is the slot invariant (sign-extended for i32, zero-extended for
+ * u32), not a range check. `sp` is a parameter because the boxed adapter entry runs with its
+ * own stack pointer in slot 0 rather than `cx->sp`. */
+static IrVal emit_unbox_to_rep(Cx *cx, uint8_t rep, IrVal sp, IrVal v) {
+  if (rep == REP_I32) return irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, v));
+  IrVal ua[] = {sp, v};
+  IrVal w = emit_rt_call(cx, rep_unsigned(rep) ? "jacl_u64_unbox" : "jacl_i64_unbox", ua, 2);
+  if (rep == REP_U32) w = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, unbox_i32(cx, w));
+  return w;
 }
 
 static int frame_guard(Cx *cx) {
@@ -3801,6 +4105,14 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
      * the binding stays tagged. */
     int decl_i32 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "i32", 3) == 0 &&
                    bargs[tshift + 1]->inferred_type == TYPE_I32;
+    /* `def u32/u64 x V` — same trade, same gate (#119). The unsigned widths need the typer's
+     * proof for the reason i32 does and more so: their tagged-to-raw crossing is a runtime
+     * unbox, and handing it a string would return 0 rather than garbage, but 0 is still not
+     * an answer. Where the typer is unsure the binding stays tagged (V7). */
+    int decl_u32 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "u32", 3) == 0 &&
+                   bargs[tshift + 1]->inferred_type == TYPE_U32;
+    int decl_u64 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "u64", 3) == 0 &&
+                   bargs[tshift + 1]->inferred_type == TYPE_U64;
     IrVal val;
     if (decl_i64) {
       val = compile_i64_tree(cx, bargs[tshift + 1]);
@@ -3808,13 +4120,19 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     } else if (decl_i32) {
       val = compile_i32_tree_raw(cx, bargs[tshift + 1]);
       if (cx->failed) return 0;
+    } else if (decl_u32 || decl_u64) {
+      val = compile_uint_tree_raw(cx, bargs[tshift + 1], decl_u32 ? 32 : 64);
+      if (cx->failed) return 0;
     } else {
       cx->move_ok = 1;   /* the value goes straight into the binding */
       val = compile_expr(cx, bargs[tshift + 1]);
       if (cx->failed) return 0;
-      /* `def u64/f64 x V` — widen the value to the declared wide scalar so arithmetic on it
-       * promotes past 32 bits. (u64 and f64 are still tagged: #106 slices 1c and the float
-       * work.) */
+      /* `def f64 x V` — widen the value to the declared wide scalar so arithmetic on it
+       * promotes past 32 bits. The `u64` case is the same fallback for a `u64` binding the
+       * typer could *not* prove (a top-level or captured one, or a value of unproved type):
+       * it stays tagged, and the `0x0F` tag is the only record that it means unsigned. That
+       * tag is on its way out (#119 step 3) — a proved `u64` binding above now takes the raw
+       * path and never acquires one. */
       if (tshift && bargs[0]->type == AST_LIT_STRING && bargs[0]->data.lit_string.length == 3) {
         const char *tw = bargs[0]->data.lit_string.value;
         int kind = !memcmp(tw, "u64", 3) ? 0x0F : !memcmp(tw, "f64", 3) ? 0x10 : 0;
@@ -3859,9 +4177,10 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       env_define(cx, name, len, cell, /*is_mut=*/1, /*is_cell=*/1);
     } else {
       env_define(cx, name, len, val, hid == HEAD_MUT, /*is_cell=*/0);
-      if ((decl_i64 || decl_i32) && !cx->failed) {
-        Binding *nb = env_lookup(cx, name, len);
-        if (nb) nb->rep = decl_i64 ? REP_I64 : REP_I32;   /* an untagged word, not a JaclVal */
+      if ((decl_i64 || decl_i32 || decl_u32 || decl_u64) && !cx->failed) {
+        Binding *nb = env_lookup(cx, name, len);   /* an untagged word, not a JaclVal */
+        if (nb) nb->rep = decl_i64 ? REP_I64 : decl_i32 ? REP_I32
+                        : decl_u32 ? REP_U32 : REP_U64;
       }
       /* Carry a typed-collection stamp onto the binding: from the def's own
        * annotation (`def [Arr T] a V`) or from a typed constructor value
@@ -4090,8 +4409,12 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     }
     /* Type-driven: native i32 arithmetic when the typer proved i32 (boxed once). */
     if (i32_arith(node)) return compile_i32_tree(cx, node);
+    /* ...the unsigned widths likewise, on the real unsigned opcodes (#119). */
+    { int uw = uint_width(node);
+      if (uw && uint_arith(node, uw)) return compile_uint_tree(cx, node, uw); }
     /* ...and a native comparison when it proved both operands the same integer width (#94). */
-    { int cw = typed_cmp_width(node); if (cw) return compile_typed_cmp(cx, node, cw); }
+    { int uns; int cw = typed_cmp_width(node, &uns);
+      if (cw) return compile_typed_cmp(cx, node, cw, uns); }
     /* Dynamic fold. The accumulator is pinned across each operand's compilation: an operand
      * (an `[if …]`, or a nested guarded binop) may leave the current block, which would
      * strand a value computed before it. With that in hand the operands inherit this node's
@@ -5187,13 +5510,7 @@ static void emit_return_value(Cx *cx, IrVal v) {
   IrVal flagged = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR, v,
                              irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR));
   IrVal err = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, flagged, mask);
-  IrVal raw;
-  if (cx->ret_raw == REP_I32) {
-    raw = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, v));      /* slot invariant */
-  } else {
-    IrVal ua[] = {cx->sp, v};
-    raw = emit_rt_call(cx, "jacl_i64_unbox", ua, 2);
-  }
+  IrVal raw = emit_unbox_to_rep(cx, cx->ret_raw, cx->sp, v);
   raw = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, raw, keep);
   emit_return_pair(cx, raw, err);
 }
@@ -5329,6 +5646,11 @@ static void compile_tail(Cx *cx, AstNode *node) {
   }
   if (cx->ret_raw == REP_I64 && node->inferred_type == TYPE_I64) {
     IrVal raw = compile_i64_tree(cx, node);
+    if (!cx->failed) emit_return_pair(cx, raw, irb_const_i64(cx->f, cx->cur, 0));
+    return;
+  }
+  if (rep_unsigned(cx->ret_raw) && node->inferred_type == type_for_rep(cx->ret_raw)) {
+    IrVal raw = compile_uint_tree_raw(cx, node, cx->ret_raw == REP_U32 ? 32 : 64);
     if (!cx->failed) emit_return_pair(cx, raw, irb_const_i64(cx->f, cx->cur, 0));
     return;
   }
@@ -5533,6 +5855,8 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
         if (!ptypes_tok[k] || ptlens[k] != 3) continue;
         if (!memcmp(ptypes_tok[k], "i32", 3)) { prep[k] = REP_I32; any = 1; }
         else if (!memcmp(ptypes_tok[k], "i64", 3)) { prep[k] = REP_I64; any = 1; }
+        else if (!memcmp(ptypes_tok[k], "u32", 3)) { prep[k] = REP_U32; any = 1; }
+        else if (!memcmp(ptypes_tok[k], "u64", 3)) { prep[k] = REP_U64; any = 1; }
       }
       /* Return annotation (#94 slice 2b): a raw-able width makes the raw entry two-result,
        * `(value, error)`. A stream return is a vector, never a raw word. */
@@ -5542,6 +5866,8 @@ static void register_procs(Cx *cx, IrModule *m, AstNode **nodes, uint32_t count)
           const char *t = rt->data.lit_string.value;
           if (!memcmp(t, "i32", 3)) rawret = REP_I32;
           else if (!memcmp(t, "i64", 3)) rawret = REP_I64;
+          else if (!memcmp(t, "u32", 3)) rawret = REP_U32;
+          else if (!memcmp(t, "u64", 3)) rawret = REP_U64;
         }
       }
       if (any || rawret != REP_TAGGED) {
@@ -5614,8 +5940,7 @@ static void compile_procs(Cx *cx) {
          * refusing the raw representation for captured names outright; a param cannot, since
          * the convention is fixed before the body is seen.) */
         if (rep != REP_TAGGED && is_captured_name(cx, names[k], lens[k])) {
-          if (rep == REP_I32) slot = box_i32(cx, unbox_i32(cx, slot));
-          else { IrVal ba[] = {cx->sp, slot}; slot = emit_rt_call(cx, "jacl_i64_box", ba, 2); }
+          slot = emit_box_raw(cx, rep, slot);
           rep = REP_TAGGED;
         }
         env_define(cx, names[k], lens[k], slot, /*is_mut=*/0, /*is_cell=*/0);
@@ -5661,15 +5986,9 @@ static void compile_procs(Cx *cx) {
       fwd[0] = (IrVal)0;
       for (int k = 0; k < nparams; k++) {
         IrVal a = (IrVal)(k + 1);
-        if (p->prep[k] == REP_I32) {
-          /* sign-extended, to the slot invariant the raw entry reads */
-          fwd[k + 1] = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, a));
-        } else if (p->prep[k] == REP_I64) {
-          IrVal ua[] = {(IrVal)0, a};
-          fwd[k + 1] = emit_rt_call(cx, "jacl_i64_unbox", ua, 2);
-        } else {
-          fwd[k + 1] = a;
-        }
+        /* extended to the slot invariant the raw entry reads */
+        fwd[k + 1] = p->prep[k] == REP_TAGGED ? a
+                   : emit_unbox_to_rep(cx, p->prep[k], (IrVal)0, a);
       }
       if (p->rawret == REP_TAGGED) {
         irb_return_call(cx->f, cx->cur, p->rawfunc, fwd, nparams + 1);

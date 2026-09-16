@@ -124,19 +124,21 @@ toward zero and the remainder takes the dividend's sign, matching the i32 and i6
 algorithm D works on magnitudes, so every sign question is settled by the caller. There is
 now **no arithmetic that fails on magnitude alone** — only on a domain error.
 
-A bigint reaches a static width only to be refused. Canonical form (V2) means a bigint's
-magnitude exceeds what an i64 holds, so no `i32`/`i64`/`u64` can take one — `[to "T" <big>]`
-and a `u64` widening are both domain errors, and `+% -% *%` on one is a type error because
-wrapping modulo 2^64 has no meaning for it. Getting this wrong was jacl #138: three callers
-paired `jacl_is_anyint` (which admits a bigint) with `jacl_int_val` (which does not handle
-one), so they read the `JaclBig` header as a number and `[to "i64" <big>]` answered
-`8589934593`. The positive-bigint-into-`u64` case becomes a real conversion when `u64`'s
-range is widened to `UINT64_MAX` (jacl #119).
+A bigint reaches `i32` or `i64` only to be refused. Canonical form (V2) means a bigint's
+magnitude exceeds what an i64 holds, so neither can take one — `[to "T" <big>]` and an `i64`
+widening are both domain errors, and `+% -% *%` on one is a type error because wrapping
+modulo 2^64 has no meaning for it. Getting this wrong was jacl #138: three callers paired
+`jacl_is_anyint` (which admits a bigint) with `jacl_int_val` (which does not handle one), so
+they read the `JaclBig` header as a number and `[to "i64" <big>]` answered `8589934593`.
 
-`u64` is the one type that still errors on overflow rather than promoting, and the tag is
-what forces it: promoting drops the record that the value was meant to be unsigned, and
-`dyn` has no unsigned form to promote *into* — the model puts signedness on the static side
-only.
+**`u64` is the exception, and the only one:** its range is the full `[0, UINT64_MAX]`
+(jacl #119), so a *positive* bigint in `(INT64_MAX, UINT64_MAX]` is in range — and, by
+canonical form, is already its own dynamic representation. `[to "u64" 18446744073709551615]`
+is therefore a check rather than a conversion, and it answers with the value. A negative
+bigint, and anything past `UINT64_MAX`, is still a domain error.
+
+Signedness is a static property only: `dyn` has no unsigned form to promote *into*, so there
+is nothing in the tower that the top half of `u64` can be other than a bigint.
 
 ## Values: inline scalars vs heap wides
 
@@ -156,8 +158,15 @@ pointer:
 | tag | type | boxed payload |
 |---|---|---|
 | `0x0E` | `i64` | 64-bit signed |
-| `0x0F` | `u64` | 64-bit unsigned |
 | `0x10` | `f64` | IEEE-754 double (bit-cast to `int64`) |
+
+There used to be a third, `0x0F` "wide but unsigned", deleted by jacl #119. It recorded that a
+value was meant to be unsigned and **no operation honoured it**: every read went through
+`jacl_int_val` into an `int64_t` and used the signed op, so `/`, `%` and every ordering
+answered wrongly above `INT64_MAX` while the representation and the printer were right across
+the whole range. That is the cost of tracking unsignedness with none of the benefit, which is
+why it was deleted rather than taught to compute. Signedness lives entirely on the static side
+now, and the tower below is purely signed — which is what V1 always said it was.
 
 `jacl_wide_new(tidx, bits)` allocates the box; `jacl_wide_bits(v)` reads it back. Because
 a wide is a heap object, **producing one costs an allocation** — a fact that shapes the
@@ -220,9 +229,10 @@ return one, propagating the error flag (see below). The dispatch, in order:
 2. **Either side f64 → f64.** If one operand is an f64 (and the other is any int or float),
    the op runs in double precision and boxes an f64. `f32` participates through the shared
    `jacl_num_f64` view.
-3. **Either side a wide int → wide int.** If either operand is already an `i64`/`u64` (so
-   the value is wide regardless of the other side), the op runs in 64-bit and boxes with
-   `jacl_iwide_tag` — `u64` if either side is `u64`, else `i64`.
+3. **Either side a wide int → wide int.** If either operand is already an `i64` (so the value
+   is wide regardless of the other side), the op runs in 64-bit and canonicalizes through
+   `jacl_int_result`. There is one wide integer tag, so there is no result-tag question to
+   answer; `jacl_iwide_tag` — "`u64` if either side is `u64`" — went with the `0x0F` tag.
 4. **Otherwise fall back to f32** for mixed small-numeric operands, or return an
    error-flagged value if an operand is not numeric at all.
 
@@ -292,11 +302,36 @@ type-checks, narrowing a tagged value to i32 is a bare truncation — on a strin
 is the low half of a pointer, re-tagged as a perfectly plausible integer. Where the typer is
 unsure, the binding stays tagged and correct-but-slower, the same safe default slice 1a set.
 
-`u32` and `u64` are **not** raw yet, and the reason is not effort. A static `u64` above
-`INT64_MAX` has no `dyn` representation to cross into — the bigint tier is signed, and
-`u32`/`u64` have no native typed arithmetic (the IR has `div_u`/`rem_u`/`lt_u`, but nothing
-emits them), so giving them raw slots today would add a box on every operation and make them
-*slower*. Both wait on their own slice.
+### Typed u32 / u64: raw *unsigned* words
+
+`u32` and `u64` are raw words too (jacl #119), with the same shape and three differences that
+all come from the same place — signedness lives on the static side, so the unsigned widths are
+the only place the machine's unsigned opcodes are the right ones:
+
+- the slot invariant is **zero**-extension, not sign-extension. A u32 above `INT32_MAX`
+  sign-extended would read as negative at 64 bits, which is exactly the subtle wrongness the
+  invariant exists to prevent.
+- `/` and `%` are `div_u` / `rem_u`, and the orderings are `lt_u` / `le_u` / `gt_u` / `ge_u`.
+  `+ - *` and `== !=` are bit-identical to the signed ops and unchanged. Division has **one**
+  domain case rather than two — a zero divisor; there is no unsigned analogue of
+  `INT_MIN / -1`, so the substituted-divisor mask collapses to `b | (b == 0)`.
+- overflow is a **carry-out**, not a sign flip. `a + b` carries exactly when `r <u a` and
+  `a - b` borrows exactly when `a <u b`; multiply asks `jacl_u64_mul_ovf`. One consequence is
+  worth stating: `INT64_MAX + INT64_MAX` is a perfectly good `u64` where the `i64` spelling
+  errors, and `2 - 4000000000` is an error as `u32` where the `i64` spelling is fine.
+
+Boxing on the way out goes through `jacl_u64_box`, which canonicalizes into the **signed**
+tower, so a `u64` past `INT64_MAX` becomes a bigint — there is nothing else for it to be. That
+conversion is what made deleting the `0x0F` tag possible rather than merely desirable.
+
+Until this landed, none of the unsigned opcodes had a single emitter: every `u32`/`u64`
+operation went through the dynamic tower, which reads each operand as an `int64_t` and uses
+the signed op. For `u32` that happens to be right — every u32 value fits a signed i64, so the
+promotion makes the signed op exact — so the change there is speed. For `u64` above
+`INT64_MAX` it was not, and the only reason no program observed it is that the range caps in
+`typer__int_range` and `jacl_to_cast` stopped at `INT64_MAX`. Those caps are gone too: with a
+real static lowering underneath them they had nothing left to protect, so a `u64` literal,
+cast and binding now cover the whole `[0, UINT64_MAX]` range.
 
 ### Typed i64: a raw, untagged word
 
@@ -319,8 +354,10 @@ trick for it and the obvious "divide back and compare" traps the host on `INT64_
 
 Slice 1a covers an immutable local inside a proc. A top-level binding is mirrored into the
 global map and a captured `mut` lives in a heap cell — both store a JaclVal, so an i64 bound
-that way stays tagged until those paths learn about raw words, as do `i64` proc parameters
-and returns (slice 1b) and `u64` (slice 1c).
+that way stays tagged until those paths learn about raw words. Proc parameters and returns
+came with slice 1b, and `u32`/`u64` with jacl #119; those same two exceptions apply to all of
+them. A `u64` binding that falls back to tagged now holds a plain signed dynamic integer,
+which is why the fallback's `jacl_widen_to` call has narrowed to a pure range check.
 
 One wart inherited from the type system: `typer__infer_command` clears the expected type at
 command boundaries, so a declared type does not reach a binop over *literals* —
@@ -348,25 +385,29 @@ while `jmap_key_hash` mixes the raw bits — a *pointer*, for a heap wide int. A
 map lookup silently missed (jacl #107). It only surfaced once a map outgrew the small-map
 linear scan, which is what kept it quiet.
 
-Two things deliberately keep their wide form:
+One thing deliberately keeps its wide form: **explicit widening** (`def i64 x 37`,
+`[to "i64" 37]`) — that is the *typed* side of the rule, where a declared type should mean
+exactly that representation at runtime. Honoring it end to end needs the native i64 lowering
+(jacl #106 slice 1), which is also what gives the typed → dyn crossing a place to
+canonicalize; until then such a value stays wide and is not interchangeable with an inline
+i32 as a map key.
 
-- **`u64`** — the tag is the only record that the value is meant to be unsigned, and
-  dropping it would change which tag later arithmetic picks.
-- **Explicit widening** (`def i64 x 37`, `[to "i64" 37]`) — that is the *typed* side of the
-  rule, where a declared type should mean exactly that representation at runtime. Honoring
-  it end to end needs the native i64 lowering (jacl #106 slice 1), which is also what gives
-  the typed → dyn crossing a place to canonicalize; until then such a value stays wide and
-  is not interchangeable with an inline i32 as a map key.
+`u64` used to be a second exception — the `0x0F` tag was the only record that a value was
+meant to be unsigned, so canonicalizing would have dropped it and changed which tag later
+arithmetic picked. With the tag gone (jacl #119) there is nothing to preserve, and every
+dynamic integer comes through `jacl_int_result` without exception.
 
-### Wide (i64/u64) overflow
+### Wide (i64) overflow
 
 An overflowing wide op **promotes to a bigint**: `jacl_add`/`sub`/`mul` ask
 `__builtin_*_overflow` before building the result, and hand an overflow to the bigint tier.
 Signed 64-bit overflow is UB in C, so the original unguarded
 `jacl_int_val(a) + jacl_int_val(b)` was not merely a silent wrap — it was undefined
 (jacl #104). It errored for a while after that, which was loud but still a violation of the
-model; it now promotes, which is the rule. `u64` is the exception, for the reason given
-above.
+model; it now promotes, which is the rule, with **no exceptions**. `u64` was one until
+jacl #119: an overflowing one errored, because promoting would drop the `0x0F` tag. A static
+`u64` still errors on overflow — but from its own typed lowering, where the width is a
+compile-time fact rather than something the tower has to remember.
 
 ### Overflow: three behaviors, one per spelling
 

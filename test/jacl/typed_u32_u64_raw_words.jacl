@@ -1,0 +1,139 @@
+# expect: 4000000000
+# expect: 400000000
+# expect: 0
+# expect: false
+# expect: true
+# expect: 4000000005
+# expect: 3705032704
+# expect: 294967298
+# expect: 3705032704
+# expect: true
+# expect: 42
+# expect: true
+# expect: 99
+# expect: true
+# expect: 18446744073709551614
+# expect: false
+# expect: 3074457345618258602
+# expect: 1
+# expect: true
+# expect: 9223372036854775807
+# expect: 18446744073709551615
+# expect: 1844674407370955161
+# expect: 5
+# expect: false
+# expect: true
+# expect: 18446744073709551614
+# expect: 18446744073709551615
+# expect: true
+# expect: true
+# expect: v37
+#
+# `u32` and `u64` are first-class static types: a raw, untagged, **zero**-extended machine
+# word with its own arithmetic on the real unsigned opcodes (jacl #119). `dyn`, by contrast, is
+# signed always — `docs/TEMEN_NUMERICS.md` § "The integer model" — so a static unsigned value
+# crossing into a dyn position becomes a plain signed dynamic integer, by magnitude.
+#
+# The three places signedness actually changes the answer, and one place it must not:
+#
+# 1. `/` and `%` divide unsigned, and the orderings compare unsigned.
+# 2. Overflow is a **carry-out**, not a sign flip — so `INT64_MAX + INT64_MAX` is a perfectly
+#    good u64 (it is what makes this different from the i64 case, which errors there), while
+#    `2 - 4000000000` as u32 is an error rather than a large positive number.
+# 3. `+% -% *%` still wrap modulo the declared width, unsigned or not.
+# 4. Coercing to `dyn` canonicalizes, so a typed u32 holding 37 is the same map key as the
+#    literal 37 (the typed half of jacl #107).
+#
+# The top half of `u64` is reachable now (steps 4-5): the range caps that used to stop at
+# `INT64_MAX` were the only thing keeping the tagged path's wrong `/ % < >` answers out of
+# reach, and with `u64` a static raw type they have nothing left to protect. In a `dyn`
+# position such a value is a bigint, because a signed tower has no other form for it.
+
+def m [map 37 "v37"]
+
+proc u32_ops {} {
+  def u32 big 4000000000        # past INT32_MAX; exact in a 32-bit word
+  def u32 ten 10
+  print $big
+  print [/ $big $ten]           # unsigned divide: 400000000, not 0
+  print [% $big $ten]
+  print [< $big $ten]           # unsigned compare: big is the larger one
+  print [> $big $ten]
+}
+[u32_ops]
+
+proc u32_call {u32 a u32 b} u32 { + $a [/ $b 2] }
+print [u32_call 4000000000 10]
+
+proc u32_wrap {} {
+  def u32 big 4000000000
+  def u32 two 2
+  print [+% $big $big]          # 8e9 mod 2^32
+  print [-% $two $big]          # borrows, mod 2^32
+  print [*% $big $two]
+}
+[u32_wrap]
+
+# carry-out and borrow are errors, and catchable
+proc u32_ovf {} {
+  def u32 big 4000000000
+  def u32 two 2
+  def u32 boom [* $big $two]    # 8e9 — no 32-bit word holds it
+  print "unreachable"
+  $boom
+}
+print [error? [u32_ovf]]
+print [try { [u32_ovf] } e { 42 }]
+
+proc u32_borrow {} {
+  def u32 big 4000000000
+  def u32 two 2
+  def u32 boom [- $two $big]    # negative has no u32 form
+  $boom
+}
+print [error? [u32_borrow]]
+print [try { [u32_borrow] } e { 99 }]
+
+proc u32_divzero {} {
+  def u32 big 4000000000
+  def u32 z 0
+  print [error? [/ $big $z]]
+}
+[u32_divzero]
+
+proc u64_ops {} {
+  def u64 m 9223372036854775807   # INT64_MAX
+  def u64 three 3
+  print [+% $m $m]                # 2*INT64_MAX fits u64 — and dyn holds it as a bigint
+  print [error? [+ $m $m]]        # ...so it is not an overflow, unlike the i64 case
+  print [/ $m $three]
+  print [% $m $three]
+  print [error? [* $m $m]]        # this one really does carry out
+}
+[u64_ops]
+
+proc u64_call {u64 a} u64 { - $a 0 }
+print [u64_call 9223372036854775807]
+
+# the whole u64 range, which the caps used to make unreachable
+proc u64_top {} {
+  def u64 m 18446744073709551615
+  def u64 ten 10
+  print $m
+  print [/ $m $ten]
+  print [% $m $ten]
+  print [< $m $ten]
+  print [> $m $ten]
+  print [-% $m 1]
+}
+[u64_top]
+print [to "u64" 18446744073709551615]
+print [error? [to "u64" [- 0 5]]]
+print [error? [to "i64" 18446744073709551615]]     # still no i64 form
+
+# a typed u32 in a dyn position canonicalizes, so it keys the map
+proc as_key {} {
+  def u32 small 37
+  [map-get $m $small]
+}
+print [as_key]

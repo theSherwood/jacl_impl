@@ -1,5 +1,6 @@
 # expect: true
 # expect: true
+# expect: 18446744073709551615
 # expect: true
 # expect: true
 # expect: true
@@ -23,7 +24,14 @@ def big 18446744073709551615          # > INT64_MAX, so a bigint by canonical fo
 # to exceed INT32_MAX: the right answer for the wrong reason.
 print [error? [to "i64" $big]]
 print [error? [to "i32" $big]]
-print [error? [to "u64" $big]]
+
+# `u64` is the one width that can hold this one, since jacl #119 lifted its range to the full
+# [0, UINT64_MAX] — the cap that used to stop it at INT64_MAX was there to keep the *tagged*
+# u64's wrong `/ % < >` answers unreachable, and a static raw u64 with its own unsigned lowering
+# leaves it nothing to protect. A bigint in (INT64_MAX, UINT64_MAX] is already its own canonical
+# dynamic form, so the cast is a check rather than a conversion.
+print [to "u64" $big]
+print [error? [to "u64" 18446744073709551616]]   # one past the end: still a domain error
 
 # Wrapping modulo 2^64 has no meaning for a bigint; `[+% $big 1]` answered 8589934594.
 print [error? [+% $big 1]]
