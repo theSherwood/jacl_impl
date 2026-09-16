@@ -588,6 +588,109 @@ static void test_proc_stream_return_compound(void) {
   arena_destroy(&a);
 }
 
+/* jacl #117 (the stream half): a typed stream's element type survives
+ * `transform` and `filter`, and `transform`'s output element is the **mapper's
+ * return type** rather than the receiver's element type.
+ *
+ * This lives here rather than only in the corpus for the reason at the top of
+ * this file: the failure was a typer-only divergence that produced correct
+ * output. Every case below ran and printed the right numbers while the element
+ * type was `dyn` — the only visible symptom was a `[to T …]` the program should
+ * not have needed.
+ *
+ * `[\ …]` is deliberately left unexpanded here, which is exactly how the
+ * emit-only build hands it to the typer (`jacl_expand_skip_prelude`): a command
+ * whose head is the bare word `\` and whose head_id is HEAD_NONE. That is the
+ * shape the old code rejected. */
+static void assert_elem_idx(AstNode* n, uint32_t want, const char* what) {
+  if (!n) {
+    fprintf(stderr, "  FAIL %s: %s node is NULL\n", current_test, what);
+    failures++;
+    return;
+  }
+  if (n->inferred_struct_idx != want) {
+    fprintf(stderr, "  FAIL %s: %s elem idx expected %u got %u\n",
+            current_test, what, want, n->inferred_struct_idx);
+    failures++;
+  } else { passes++; }
+}
+
+static void test_transform_elem_is_mapper_return(void) {
+  current_test = "transform_elem_is_mapper_return";
+  arena_t a = {0};
+  /* i64 source, i64-returning implicit-`it` mapper → [Stream i64] */
+  ParseResult r = run_typer("def s [transform [range 1 4] [\\ * $it 10]]", &a);
+  AstNode* xf = find_cmd(r.nodes[0], "transform");
+  ASSERT_NOT_NULL(xf);
+  ASSERT_TYPE(xf, TYPE_STREAM);
+  assert_elem_idx(xf, JACL_SCALAR_TYPE_IDX(TYPE_I64), "transform");
+  arena_destroy(&a);
+}
+
+static void test_transform_elem_follows_type_change(void) {
+  current_test = "transform_elem_follows_type_change";
+  arena_t a = {0};
+  /* i64 source, bool-returning mapper → [Stream bool]. The receiver's element
+   * type is NOT the answer — this is the half a "preserve the receiver" rule
+   * gets wrong. */
+  ParseResult r = run_typer("def s [transform [range 1 4] [\\ > $it 2]]", &a);
+  AstNode* xf = find_cmd(r.nodes[0], "transform");
+  ASSERT_NOT_NULL(xf);
+  assert_elem_idx(xf, JACL_SCALAR_TYPE_IDX(TYPE_BOOL), "transform");
+  arena_destroy(&a);
+}
+
+static void test_transform_elem_explicit_params_lambda(void) {
+  current_test = "transform_elem_explicit_params_lambda";
+  arena_t a = {0};
+  /* The `[\ {params} {body}]` spelling: the params arrive wrapped in a BLOCK
+   * (codegen's `in_block=1`), which the normalizer has to unwrap. */
+  ParseResult r = run_typer("def s [transform [range 1 4] [\\ {n} { > $n 2 }]]", &a);
+  AstNode* xf = find_cmd(r.nodes[0], "transform");
+  ASSERT_NOT_NULL(xf);
+  assert_elem_idx(xf, JACL_SCALAR_TYPE_IDX(TYPE_BOOL), "transform");
+  arena_destroy(&a);
+}
+
+static void test_transform_elem_proc_literal(void) {
+  current_test = "transform_elem_proc_literal";
+  arena_t a = {0};
+  /* The `[proc {params} {body}]` spelling — the form the old code already
+   * accepted, kept here so a refactor cannot regress it while fixing the others. */
+  ParseResult r = run_typer("def s [transform [range 1 4] [proc {x} { * $x 10 }]]", &a);
+  AstNode* xf = find_cmd(r.nodes[0], "transform");
+  ASSERT_NOT_NULL(xf);
+  assert_elem_idx(xf, JACL_SCALAR_TYPE_IDX(TYPE_I64), "transform");
+  arena_destroy(&a);
+}
+
+static void test_filter_preserves_transformed_elem(void) {
+  current_test = "filter_preserves_transformed_elem";
+  arena_t a = {0};
+  /* `filter` hands back whatever it was given, so the element type survives a
+   * transform → filter chain. */
+  ParseResult r = run_typer(
+      "def s [filter [transform [range 1 4] [\\ * $it 10]] [\\ > $it 15]]", &a);
+  AstNode* fl = find_cmd(r.nodes[0], "filter");
+  ASSERT_NOT_NULL(fl);
+  assert_elem_idx(fl, JACL_SCALAR_TYPE_IDX(TYPE_I64), "filter");
+  arena_destroy(&a);
+}
+
+/* The boundary: a mapper that MIXES widths stays dyn. Not this bug — jacl #115's
+ * strict-mixed rule surfaces the error, the probe rolls back, and the element
+ * falls to the lenient dyn path. Pinned so a future "widen the probe" change has
+ * to decide about this case on purpose. */
+static void test_transform_mixed_width_mapper_stays_dyn(void) {
+  current_test = "transform_mixed_width_mapper_stays_dyn";
+  arena_t a = {0};
+  ParseResult r = run_typer("def s [transform [range 1 4] [\\ * $it 1.5]]", &a);
+  AstNode* xf = find_cmd(r.nodes[0], "transform");
+  ASSERT_NOT_NULL(xf);
+  assert_elem_idx(xf, UINT32_MAX, "transform");
+  arena_destroy(&a);
+}
+
 static void test_range_stream_elem_i64(void) {
   current_test = "range_stream_elem_i64";
   arena_t a = {0};
@@ -1263,6 +1366,12 @@ int main(void) {
   test_for_map_key_value();
   test_for_map_value_single();
   test_for_vec_enumerate();
+  test_transform_elem_is_mapper_return();
+  test_transform_elem_follows_type_change();
+  test_transform_elem_explicit_params_lambda();
+  test_transform_elem_proc_literal();
+  test_filter_preserves_transformed_elem();
+  test_transform_mixed_width_mapper_stays_dyn();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

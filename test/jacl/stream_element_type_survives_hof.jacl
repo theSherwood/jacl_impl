@@ -1,0 +1,71 @@
+# expect: 60
+# expect: 5000000000
+# expect: 12
+# expect: ok
+#
+# A typed stream's element type survives `transform` and `filter` (jacl #117, the stream half).
+#
+# `transform` types its output element as the **mapper's return type** — not the receiver's
+# element type, which is the half a naive "preserve the receiver" rule gets wrong — and `filter`
+# preserves whatever it was handed. The `assert-type` lines are the real assertions: they are a
+# compile-time check, so a regression fails the build rather than the output. The prints pin the
+# runtime half.
+#
+# What a program feels: a `for` binding over a transformed stream commits straight into a
+# declared-width `mut` with no `[to T …]` in sight. Every one of those casts used to be
+# mandatory, and several corpus cases carried one with a comment saying so.
+#
+# Why it was broken was invisible from the JACL side. In the **emit-only** build — the TEMEN
+# codegen path — prelude macros are deliberately not expanded (`jacl_expand_skip_prelude`);
+# codegen name-handles them instead. So `[\ … ]` reached the typer as a command whose head is the
+# bare word `\` with `head_id == HEAD_NONE`, and the call-site probe that types a mapper's body
+# accepted only `HEAD_PROC`. It bailed on its first line, every mapper looked like an unknown
+# command, and the element type died at the boundary.
+#
+# All three callable spellings are exercised, because the typer has to agree with
+# `compile_closure` about what a lambda is:
+#   [\ <head> <arg>…]        implicit-`it`     (blocks 1-3)
+#   [\ {params} {body}]      explicit params   (block 4)
+#   [proc {params} {body}]   the proc form     (block 5)
+#
+# Note what is deliberately NOT asserted: a mapper that mixes widths, e.g. `[\ * $it 1.5]` over
+# an i64 source, stays `dyn`. That is not this bug — it is #115's strict-mixed rule doing its job:
+# the probe surfaces the mixed-type error, rolls back, and the element falls to the lenient dyn
+# path. Asserting f64 there would be asserting a bug.
+
+proc main {} {
+  # 1. the mapper's RETURN type becomes the element type — and no cast is needed on the way
+  #    into a declared width
+  mut i64 s 0
+  for [transform [range 1 4] [\ * $it 10]] a {
+    assert-type $a i64
+    set s [+ $s $a]
+  }
+  print $s                                            # 10+20+30 = 60
+
+  # 2. a type-CHANGING mapper: i64 -> bool. The receiver's element type is not the answer.
+  for [transform [range 1 4] [\ > $it 2]] b { assert-type $b bool }
+
+  # 3. filter preserves it, including past INT32_MAX — a regression here would corrupt the kept
+  #    set rather than merely mistype it
+  mut i64 w 0
+  for [filter [transform [range 1 4] [\ * $it 1000000000]] [\ > $it 1500000000]] y {
+    assert-type $y i64
+    set w [+ $w $y]
+  }
+  print $w                                            # 2e9 + 3e9
+
+  # 4. the explicit-params lambda spelling
+  mut i64 t 0
+  for [transform [range 1 4] [\ {n} { * $n 2 }]] g {
+    assert-type $g i64
+    set t [+ $t $g]
+  }
+  print $t                                            # 2+4+6 = 12
+
+  # 5. the proc spelling, type-changing
+  for [transform [range 1 4] [proc {m} { > $m 1 }]] h { assert-type $h bool }
+
+  print "ok"
+}
+main

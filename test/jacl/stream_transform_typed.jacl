@@ -3,29 +3,34 @@
 # transform over a typed stream produces a stream of the lambda's RETURN type.
 # The typer binds the lambda's implicit $it to the source element type, infers
 # the body, and uses its tail type as the output element type (a scoped case
-# of anonymous-closure return inference). The body's own annotations are
-# restored to it:dyn afterward so codegen is unaffected.
+# of anonymous-closure return inference).
+#
+# The typed body is KEPT when the probe types cleanly — that is what lets the
+# element type escape the boundary at all (jacl #117, the stream half). The
+# restore-to-dyn pass survives only as the ROLLBACK for a probe that errored: a
+# mapper mixing widths (`[\ * $it 1.5]` over an i64 source) trips #115's
+# strict-mixed rule, and that body degrades to the lenient dyn path rather than
+# failing the compile. (This header used to say the body was restored
+# unconditionally, which stopped being true when `keep_typed` landed.)
 proc main {} {
   # i64 source, i64-returning lambda -> [Stream i64]; for-binding narrows
   mut i64 s 0
-  # `[to "i64" …]` should not be needed: `transform`/`filter` lose the receiver's element
-  # type, so the `for` binding comes out dyn (jacl #117, the stream half). Drop the cast when
-  # that is fixed — the barrier itself is correct (TYPE_SYSTEM.md § 2).
-  for [transform [range 1 4] [\ * $it 10]] x { set s [+ $s [to "i64" $x]] }   # 10+20+30 = 60
+  # No cast needed: the mapper's return type reaches the element type, so the `for` binding
+  # is i64 and commits into a declared-i64 `mut` directly (jacl #117, the stream half).
+  for [transform [range 1 4] [\ * $it 10]] x { set s [+ $s $x] }   # 10+20+30 = 60
   print $s
-  # `dyn`, not `i64`: `transform` loses the receiver's element type (jacl #117, the stream
-  # half). This line asserted i64 while the typer's verdict was unread; now that it is read
-  # it describes what the typer actually concludes. Change it back when the element typing
-  # is fixed — that is the assertion that will catch the fix.
-  for [transform [range 1 4] [\ * $it 10]] y { assert-type $y dyn }
+  # i64: the source element type binds the mapper's implicit `$it`, and the mapper's body
+  # tail type becomes the output element type.
+  for [transform [range 1 4] [\ * $it 10]] y { assert-type $y i64 }
 
-  # type-changing lambda: i64 -> bool. `dyn` for the same reason as above — the mapper's
-  # return type does not reach the element type either (jacl #117, the stream half).
-  for [transform [range 1 4] [\ > $it 2]] b { assert-type $b dyn }
+  # type-changing lambda: i64 -> bool. The output element is the mapper's RETURN type, not
+  # the source element type — which is the half of this that a "preserve the receiver" rule
+  # would have got wrong.
+  for [transform [range 1 4] [\ > $it 2]] b { assert-type $b bool }
 
   # composed: range i64 -> (*10) i64 -> (>15) bool
   for [transform [transform [range 1 4] [\ * $it 10]] [\ > $it 15]] c {
-    assert-type $c dyn
+    assert-type $c bool
   }
   print "ok"
 }
