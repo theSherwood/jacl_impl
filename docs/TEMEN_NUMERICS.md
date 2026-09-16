@@ -236,9 +236,14 @@ return one, propagating the error flag (see below). The dispatch, in order:
 4. **Otherwise fall back to f32** for mixed small-numeric operands, or return an
    error-flagged value if an operand is not numeric at all.
 
-`jacl_div` guards divide-by-zero (returns an error-flagged `0`) and the
-`INT32_MIN / -1` overflow (returns `INT32_MIN`, avoiding UB). `jacl_mod` is i32-only and
-guards the same two edge cases. Unary minus `[- x]` is lowered by the codegen as `0 - x`,
+`jacl_div` and `jacl_mod` guard divide-by-zero (an error-flagged `0`) and the
+`INT_MIN / -1` overflow. The overflow guard **promotes**: `INT32_MIN / -1` is `2147483648`
+as a boxed i64 and `INT64_MIN / -1` is a bigint, which is the same rule the rest of this
+section follows — a `dyn` operand's width is not declared, so magnitude never wraps and never
+fails. (The i32 branch returned a wrapped `INT32_MIN` until jacl #94 item 1, on the grounds
+that it was avoiding the C undefined behaviour. It was, but by wrapping — so `[/ -2147483648 -1]`
+and `[* -2147483648 -1]` gave different answers for one number.) `INT_MIN % -1` is exactly 0 at
+both widths and needs no promotion. Unary minus `[- x]` is lowered by the codegen as `0 - x`,
 so it flows through `jacl_sub` and inherits every promotion above (including
 `- INT32_MIN → 2147483648` as a boxed i64).
 
@@ -432,13 +437,31 @@ print [+ $a $a]                     # 4000000000 — dynamic, promotes
 print [+% $a $a]                    # -294967296 — asked for a wrap
 ```
 
-`/` and `%` join `+ - *` on the typed path (jacl #94), and comparisons get a native op of
-their own. Two inputs must never reach a machine divide, because both trap: a zero divisor,
-and `INT32_MIN / -1`, whose true quotient is not an i32. Neither can be computed and checked
-afterwards, so both are steered around by substituting a divisor of 1 — which gives the right
-answer for the second case for free (`INT32_MIN / 1` is `INT32_MIN`; `INT32_MIN % 1` is 0,
-which is what the runtime returns for each). The zero case then needs only its payload masked
-to 0 and the sticky failure bit set. No branch, so it composes inside a larger tree.
+`/` and `%` join `+ - *` on the typed path (jacl #94) at **i32, u32, u64 and i64**, and
+comparisons get a native op of their own. Two inputs must never reach a machine divide,
+because both trap: a zero divisor, and `INT_MIN / -1`, whose true quotient is not that width.
+Neither can be computed and checked afterwards, so both are steered around by substituting a
+divisor of 1. (The unsigned widths have only the first case — there is no unsigned analogue of
+`INT_MIN / -1` — so their mask collapses to `b | (b == 0)`.)
+
+They are then **reported differently, because only one of them is an overflow**:
+
+- a zero divisor is a *domain error*: the payload is masked to 0 and the sticky failure bit
+  set, giving the same error-flagged 0 the runtime returns.
+- `INT_MIN / -1` is an *overflow* — the answer exists (2^31 / 2^63), it just does not fit the
+  declared width — so the rule in the table above applies and the sticky bit is set for it too.
+- `INT_MIN % -1` is exactly 0 and fits, so remainder reports nothing for it, and the
+  substituted divisor produces that 0 for free.
+
+No branch, so it all composes inside a larger tree.
+
+Both of the first two used to be wrong (jacl #94 item 1). The typed `/` reported nothing for
+`INT_MIN / -1` and returned the substituted `INT_MIN / 1`, so a typed `[/ INT32_MIN -1]`
+wrapped silently while the typed `[* INT32_MIN -1]` beside it errored. And typed `i64` `/` and
+`%` were not lowered at all — the one arithmetic pair `i64_arith` did not claim — so they
+called `jacl_div`/`jacl_mod`, whose bigint promotion then crossed back into the raw i64 slot
+through `jacl_i64_unbox`, which has no error channel and answered **0**. The native lowering
+fixed a wrong answer as well as removing the call.
 
 A typed comparison folds that same sticky bit into the bool's error flag, so
 `[< [* $a $b] $c]` with an overflowing multiply is an error rather than a comparison against

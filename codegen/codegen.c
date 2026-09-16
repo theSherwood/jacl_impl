@@ -856,17 +856,25 @@ static int i32_operand_stays_put(AstNode *n) {
   }
 }
 
-/* `a / b` or `a % b` on native i32s, branchless, matching `jacl_div`/`jacl_mod` exactly.
+/* `a / b` or `a % b` on native i32s, branchless.
  *
  * Two inputs must never reach the machine instruction: a zero divisor (a trap) and
  * `INT32_MIN / -1`, whose true quotient is not an i32 (also a trap). Neither can be computed
- * and checked afterwards, so both are steered around by substituting a divisor of 1 — which
- * happens to give the right answer for the second case for free (`INT32_MIN / 1` is
- * `INT32_MIN`, and `INT32_MIN % 1` is 0, which is what the runtime returns for each).
+ * and checked afterwards, so both are steered around by substituting a divisor of 1.
  *
- * The zero case then only needs its payload masked to 0 and the sticky error bit set, so a
- * `[/ $a 0]` inside a typed tree produces the same error-flagged 0 the runtime does. No
- * branch, so it composes with the rest of the tree rather than moving the emission point. */
+ * They are then *reported* differently, because only one of them is an overflow:
+ *   - a zero divisor is a domain error: the payload is masked to 0 and the sticky bit set, so
+ *     `[/ $a 0]` in a typed tree gives the same error-flagged 0 the runtime does.
+ *   - `INT32_MIN / -1` is an **overflow** — the answer exists (2^31), it just does not fit the
+ *     declared width — so V5's "a declared width errors on overflow" applies and the sticky bit
+ *     is set for it too. This used to report nothing and return the substituted `INT32_MIN / 1`,
+ *     which made a typed `[/ INT32_MIN -1]` wrap silently while the typed `[* INT32_MIN -1]`
+ *     beside it errored (jacl #94 item 1). The old comment justified that by agreement with
+ *     `jacl_div` — but `jacl_div` was wrong here too, and is fixed alongside this.
+ *   - `INT32_MIN % -1` is exactly 0 and fits, so remainder reports nothing for it, and the
+ *     substituted divisor produces that 0 for free.
+ *
+ * No branch, so it composes with the rest of the tree rather than moving the emission point. */
 static IrVal emit_i32_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot) {
   IrVal zero = irb_const_i32(cx->f, cx->cur, 0);
   IrVal one  = irb_const_i32(cx->f, cx->cur, 1);
@@ -891,7 +899,8 @@ static IrVal emit_i32_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot)
   IrVal notzero = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_XOR, is_zero, one);
   IrVal zmask   = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_SUB, zero, notzero);  /* 0 or ~0 */
   r = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, r, zmask);
-  ovf_mark(cx, ovf_slot, is_zero);
+  /* divide reports both steered inputs; remainder only the zero one (see above) */
+  ovf_mark(cx, ovf_slot, op == IRB_DIV_S ? bad : is_zero);
   return r;
 }
 
@@ -992,7 +1001,8 @@ static int i64_arith(AstNode *node) {
   if (node->type != AST_COMMAND || node->inferred_type != TYPE_I64) return 0;
   uint8_t hid = node->data.command.head_id;
   return hid == HEAD_PLUS || hid == HEAD_MINUS || hid == HEAD_STAR ||
-         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT;
+         hid == HEAD_PLUS_PCT || hid == HEAD_MINUS_PCT || hid == HEAD_STAR_PCT ||
+         hid == HEAD_SLASH || hid == HEAD_PERCENT;
 }
 static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot);
 
@@ -1001,6 +1011,49 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot);
  *   add  — the operands agreed in sign and the result disagrees with them
  *   sub  — the operands differed in sign and the result disagrees with the left one
  *   mul  — dividing back does not recover the left operand (guarding the zero case) */
+/* `a / b` or `a % b` on raw i64 words, branchless — the 64-bit sibling of `emit_i32_divrem`,
+ * with the same two steered inputs (a zero divisor; `INT64_MIN / -1`, whose true quotient 2^63
+ * is not an i64) and the same split in what they report. It is a *separate* function rather
+ * than a width parameter because the constants and the sticky-bit extension differ, and the
+ * i32 version computes its mask in i32 where this one cannot.
+ *
+ * The dynamic tower answers `INT64_MIN / -1` by promoting to bigint (#104) — which is right
+ * for `dyn`, and is exactly why the raw tier has to refuse it: the value does not fit the
+ * declared width, so it takes the overflow branch. Before this, a typed i64 `/` was not
+ * lowered at all and went through `jacl_div`; the promoted bigint then crossed back into the
+ * raw slot through `jacl_i64_unbox`, which has no error channel and returned **0**. So the
+ * native lowering fixes a wrong answer as well as removing a call (jacl #94 item 1). */
+static IrVal emit_i64_divrem(Cx *cx, IrBinOp op, IrVal a, IrVal b, int ovf_slot) {
+  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal one  = irb_const_i64(cx->f, cx->cur, 1);
+  IrVal mone = irb_const_i64(cx->f, cx->cur, -1);
+  IrVal imin = irb_const_i64(cx->f, cx->cur, INT64_MIN);
+
+  IrVal is_zero = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, b, zero);   /* i32 0/1 */
+  IrVal a_min   = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, a, imin);
+  IrVal b_mone  = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, b, mone);
+  IrVal is_ovf  = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_AND, a_min, b_mone);
+  IrVal bad     = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_OR, is_zero, is_ovf);
+  IrVal bad64   = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, bad);
+
+  /* bsafe = bad ? 1 : b, as a mask so there is no branch */
+  IrVal bmask = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SUB, zero, bad64);  /* 0 or ~0 */
+  IrVal keepb = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_XOR, bmask, mone);  /* ~bmask */
+  IrVal bsafe = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_OR,
+                           irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, b, keepb),
+                           irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, one, bmask));
+
+  IrVal r = irb_intbin(cx->f, cx->cur, IRB_I64, op, a, bsafe);
+  /* a zero divisor yields 0, whatever the substituted divide produced */
+  IrVal z64   = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, is_zero);
+  IrVal zmask = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SUB, z64, one);    /* 0 -> ~0, 1 -> 0 */
+  r = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_AND, r, zmask);
+  /* divide reports both steered inputs; `INT64_MIN % -1` is exactly 0 and fits, so remainder
+   * reports only the zero divisor. */
+  ovf_mark(cx, ovf_slot, op == IRB_DIV_S ? bad : is_zero);
+  return r;
+}
+
 static IrVal emit_i64_op(Cx *cx, IrBinOp op, IrVal a, IrVal b, int wraps, int ovf_slot) {
   IrVal r = irb_intbin(cx->f, cx->cur, IRB_I64, op, a, b);
   if (wraps) return r;
@@ -1040,8 +1093,11 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
   if (i64_arith(node)) {
     uint8_t hid = node->data.command.head_id;
     int wraps = i32_arith_wraps(hid);
+    int divrem = i32_divrem(hid);
     IrBinOp op = (hid == HEAD_PLUS || hid == HEAD_PLUS_PCT) ? IRB_ADD
-               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB : IRB_MUL;
+               : (hid == HEAD_MINUS || hid == HEAD_MINUS_PCT) ? IRB_SUB
+               : (hid == HEAD_SLASH) ? IRB_DIV_S
+               : (hid == HEAD_PERCENT) ? IRB_REM_S : IRB_MUL;
     uint32_t argc = node->data.command.arg_count;
     IrVal acc = compile_raw_i64(cx, node->data.command.args[0], ovf_slot);
     for (uint32_t i = 1; i < argc; i++) {
@@ -1050,7 +1106,8 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
       IrVal r = compile_raw_i64(cx, arg, ovf_slot);
       if (pa >= 0) { acc = pin_get(cx, pa); pin_drop(cx, pa); }
       if (cx->failed) return 0;
-      acc = emit_i64_op(cx, op, acc, r, wraps, ovf_slot);
+      acc = divrem ? emit_i64_divrem(cx, op, acc, r, ovf_slot)
+                   : emit_i64_op(cx, op, acc, r, wraps, ovf_slot);
     }
     return acc;
   }

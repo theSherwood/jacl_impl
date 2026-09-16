@@ -7,13 +7,25 @@
 # expect: 2
 # expect: true
 # expect: true
-# expect: -2147483648
+# expect: true
 # expect: 0
+# expect: 2147483648
+# expect: 0
+# expect: 2147483648
 # expect: true
 # expect: false
 # expect: true
 # expect: true
 # expect: true
+# expect: 714285714
+# expect: 2
+# expect: -714285714
+# expect: -2
+# expect: true
+# expect: true
+# expect: -9223372036854775808
+# expect: true
+# expect: 0
 # expect: true
 #
 # Where the typer proved both operands, a comparison and a `/` or `%` lower to native ops
@@ -21,10 +33,18 @@
 # path, but pays a runtime tag test and a diamond to find out it may; a proved operand needs
 # neither, so the code is straight-line and composes inside a larger expression.
 #
-# Semantics are unchanged — this case exists to pin that. `/` and `%` have two inputs that
-# must never reach the machine instruction, because both trap: a zero divisor, and
-# `INT32_MIN / -1` whose true quotient is not an i32. They are steered around branchlessly,
-# and the answers still match the runtime exactly.
+# `/` and `%` have two inputs that must never reach the machine instruction, because both
+# trap: a zero divisor, and `INT_MIN / -1` whose true quotient is not that width. They are
+# steered around branchlessly by substituting a divisor of 1, and then reported differently,
+# because only one of them is an overflow:
+#   - a zero divisor is a **domain error** — the same error-flagged 0 the runtime returns.
+#   - `INT_MIN / -1` is an **overflow**: the answer exists (2^31 / 2^63), it just does not fit
+#     the declared width, so V5's "a declared width errors on overflow" applies. Left dynamic,
+#     the same arithmetic **promotes** instead, and agrees with the `[* INT_MIN -1]` beside it.
+#   - `INT_MIN % -1` is exactly 0 and fits, so remainder reports nothing for it.
+# The last two used to disagree with all of that (jacl #94 item 1): the typed `/` returned a
+# wrapped `INT_MIN` with no error while the typed `*` on the same numbers errored, and the
+# dynamic `/` wrapped where the dynamic `*` promoted.
 
 proc dv {i32 a i32 b} i32 { / $a $b }
 proc md {i32 a i32 b} i32 { % $a $b }
@@ -41,9 +61,14 @@ print [md 20 -6]
 print [error? [dv 1 0]]
 print [error? [md 1 0]]
 
-# INT32_MIN / -1 would trap; the answer matches the runtime's rather than faulting.
-print [dv -2147483648 -1]
+# INT32_MIN / -1 would trap. Typed, it is an overflow error; the remainder fits and is 0.
+print [error? [dv -2147483648 -1]]
 print [md -2147483648 -1]
+# Left dynamic, the same three expressions promote rather than wrap or error, and the `/`
+# agrees with the `*` — one number, one answer, whichever operator reaches it.
+print [/ -2147483648 -1]
+print [% -2147483648 -1]
+print [* -2147483648 -1]
 
 proc lt {i32 a i32 b} { < $a $b }
 proc ge {i32 a i32 b} { >= $a $b }
@@ -60,6 +85,30 @@ proc wide {} {
   print [== $a $a]
 }
 [wide]
+
+# Typed i64 `/` and `%` lower natively too. Before that they were the one arithmetic pair
+# `i64_arith` did not claim, so they called `jacl_div`/`jacl_mod` — and `INT64_MIN / -1` then
+# promoted to a bigint inside the tower and crossed back into the raw slot through
+# `jacl_i64_unbox`, which has no error channel and answered **0**. So the native lowering
+# fixed a wrong answer as well as removing the call.
+proc dv64 {i64 a i64 b} i64 { / $a $b }
+proc md64 {i64 a i64 b} i64 { % $a $b }
+print [dv64 5000000000 7]
+print [md64 5000000000 7]
+print [dv64 -5000000000 7]    # truncation toward zero at 64 bits too
+print [md64 -5000000000 7]
+print [error? [dv64 5000000000 0]]
+print [error? [md64 5000000000 0]]
+
+# INT64_MIN, reached by arithmetic because it cannot be written as a literal (the lexer sees
+# the digits of 2^63, which is past INT64_MAX, and only the negation brings it back in range).
+proc lo {} i64 {
+  mut i64 x -9223372036854775807   # a declared width, so `[- $x 1]` is i64 and stays raw
+  - $x 1
+}
+print [lo]
+print [error? [dv64 [lo] -1]]   # true quotient 2^63: does not fit the declared width
+print [md64 [lo] -1]            # exactly 0, and it fits
 
 # An operand that overflows must not be compared as a wrapped value: the tree's sticky
 # failure bit folds into the bool's error flag, because a bool has a spare bit for it.
