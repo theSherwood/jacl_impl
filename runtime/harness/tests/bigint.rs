@@ -3,5 +3,6 @@ use jacl_runtime_harness::run_test;
 
 #[test]
 fn bigint_divmod() {
-    assert_eq!(run_test("test_bigint.c", 0), 819, "bigint division: add-back, q*b+r==a, signs");
+    assert_eq!(run_test("test_bigint.c", 0), 820,
+        "bigint division: add-back, q*b+r==a, signs; INT_MIN / -1 promotes at both widths");
 }

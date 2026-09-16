@@ -329,7 +329,31 @@ int run(int n) {
     if (!ok) return 111;
   }
 
-  return ok ? 819 : 106;
+  /* ---- 7. jacl #94 item 1: `INT_MIN / -1` promotes, at both widths ---- */
+  {
+    int ok = 1;
+    /* The i32 branch of `jacl_div` used to return a wrapped `INT32_MIN` here, with a comment
+     * saying it was avoiding the C undefined behaviour — which it was, but by wrapping, which
+     * the integer model forbids for `dyn`: these operands' width is not declared, so the rule
+     * is promote, never wrap. `jacl_mul` on the same numbers already promoted, so the two
+     * operators disagreed about one number. */
+    JaclVal i32min = jaclrt_i32(INT32_MIN), mone = jaclrt_i32(-1);
+    ok &= jacl_val_equal(jacl_div(i32min, mone), big("2147483648"));
+    ok &= jacl_val_equal(jacl_div(i32min, mone), jacl_mul(i32min, mone));   /* they agree now */
+    ok &= jacl_val_equal(jacl_mod(i32min, mone), jaclrt_i32(0));            /* exact; unchanged */
+    /* the answer canonicalizes back down when it fits again, so it is a *value*, not a tier */
+    ok &= jacl_val_equal(jacl_div(jacl_div(i32min, mone), jaclrt_i32(2)), jaclrt_i32(1073741824));
+    /* the 64-bit sibling was already right (#104) — pinned here so the pair stays together */
+    JaclVal i64min = big("-9223372036854775808");
+    ok &= jacl_val_equal(jacl_div(i64min, mone), big("9223372036854775808"));
+    ok &= jacl_val_equal(jacl_mod(i64min, mone), jaclrt_i32(0));
+    /* a zero divisor stays a domain error at every width */
+    ok &= jaclrt_is_error(jacl_div(i32min, jaclrt_i32(0)));
+    ok &= jaclrt_is_error(jacl_mod(i64min, jaclrt_i32(0)));
+    if (!ok) return 112;
+  }
+
+  return ok ? 820 : 106;
 }
 
 #include "jaclrt.c"

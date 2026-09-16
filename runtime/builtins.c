@@ -231,8 +231,15 @@ JaclVal jacl_div(JaclVal a, JaclVal b) {
   if (!jaclrt_is_i32(a) || !jaclrt_is_i32(b)) return jaclrt_error();
   int32_t x = jaclrt_as_i32(a), y = jaclrt_as_i32(b);
   if (y == 0) return jaclrt_set_error(jaclrt_i32(0)) | prop_flags(a, b);
-  int32_t q = (x == INT32_MIN && y == -1) ? INT32_MIN : x / y;   /* avoid UB overflow */
-  return jaclrt_i32(q) | prop_flags(a, b);
+  /* `INT32_MIN / -1` is C undefined behaviour, and its true value (2^31) does not fit an i32.
+   * These are `dyn` operands, so the rule is the same one the wide tier above uses and the one
+   * `[* INT32_MIN -1]` right beside this already followed: **promote, never wrap**. Computing
+   * in 64 bits and handing the result to `jacl_int_result` does both — it boxes 2^31 and
+   * canonicalizes anything that still fits back to an inline i32 (jacl #94 item 1; this
+   * returned a wrapped `INT32_MIN` before, so `[/ -2147483648 -1]` and `[* -2147483648 -1]`
+   * disagreed about the same number). */
+  if (x == INT32_MIN && y == -1) return jacl_int_result(-(int64_t)INT32_MIN) | prop_flags(a, b);
+  return jaclrt_i32(x / y) | prop_flags(a, b);
 }
 JaclVal jacl_mod(JaclVal a, JaclVal b) {
   ERR_IF_ERR(a, b);
