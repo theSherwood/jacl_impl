@@ -1,0 +1,125 @@
+# expect: 55
+# expect: 8000002000000
+# expect: 5050
+# expect: 5050
+# expect: 5050
+# expect: 4
+# expect: 99
+# expect: hit
+# expect: 12
+# expect: 21
+#
+# A `mut` the typer proved holds an untagged machine word, and keeps it across `set`
+# (jacl #94 item 2). Before this, `decl_raw` required `def` and `set` always compiled its
+# right-hand side with the boxed compiler, so a mutable typed binding was tagged and every
+# assignment boxed a value the next read unboxed again. That made every **loop accumulator**
+# in the language tagged, and its arithmetic fall back to the dynamic tower — which is the
+# whole reason an annotated `sieve` was worth 1.6x while an annotated `fib`, which carries
+# nothing across an assignment, was worth 3.2x.
+#
+# The representation is the one `def` has had since #106/#114/#119, so the rules it already
+# obeys are what this case pins for the mutable form: exact arithmetic at the declared width,
+# canonicalization on the way out to `dyn`, and an overflow that becomes control flow because
+# a raw word has no spare bit for an error flag (V6).
+
+# 1. An i64 accumulator across a loop back-edge. The frame carries one i64 per local and a
+#    raw word IS an i64, so it threads the back-edge with no conversion at all.
+proc sum_to {i64 n} i64 {
+  mut i64 acc 0
+  mut i64 i 1
+  while [<= $i $n] {
+    set acc [+ $acc $i]
+    set i [+ $i 1]
+  }
+  $acc
+}
+print [sum_to 10]
+print [sum_to 4000000]     # 8000002000000 — past i32, so a tagged accumulator would have
+                           # boxed a wide cell on every one of four million iterations
+
+# 2. The other three widths take the same path.
+proc i32_acc {i32 n} i32 {
+  mut i32 s 0
+  mut i32 k 1
+  while [<= $k $n] {
+    set s [+ $s $k]
+    set k [+ $k 1]
+  }
+  $s
+}
+print [i32_acc 100]
+proc u32_acc {u32 n} u32 {
+  mut u32 s 0
+  mut u32 k 1
+  while [<= $k $n] {
+    set s [+ $s $k]
+    set k [+ $k 1]
+  }
+  $s
+}
+print [u32_acc 100]
+proc u64_acc {u64 n} u64 {
+  mut u64 s 0
+  mut u64 k 1
+  while [<= $k $n] {
+    set s [+ $s $k]
+    set k [+ $k 1]
+  }
+  $s
+}
+print [u64_acc 100]
+
+# 3. Signed division and remainder on a mutable accumulator — the #94 item 1 lowering,
+#    reached here through `set` rather than `def`.
+proc divmod_acc {i64 n} i64 {
+  mut i64 q $n
+  set q [/ $q 7]
+  set q [% $q 5]
+  $q
+}
+print [divmod_acc 5000000000]   # 5000000000 / 7 = 714285714, % 5 = 4
+
+# 4. Overflow on a `set` is still a catchable error, not a wrap: the value does not fit the
+#    declared width, and a raw word cannot carry the error flag, so the tree branches out.
+proc ovf {} i32 {
+  mut i32 x 2000000000
+  set x [+ $x $x]
+  $x
+}
+print [try { [ovf] } e { 99 }]
+
+# 5. Crossing back to `dyn` canonicalizes, so a raw accumulator holding 37 is the same map
+#    key as the literal 37 (the mutable half of #107).
+def keymap [map 37 "hit"]
+proc key37 {} {
+  mut i64 k 30
+  set k [+ $k 7]
+  [map-get $keymap $k]
+}
+print [key37]
+
+# 6. A `mut` is function-scoped and re-declarable, so a second `mut` for the same name
+#    rebinds the slot the first one created. The slot's representation is fixed by that first
+#    declaration while the value assigned later need not match it, so the two get reconciled
+#    on the way in — here a bare (tagged) re-declaration into a raw slot.
+proc redecl {} i64 {
+  mut i64 n 5
+  if [> $n 0] {
+    mut n 11
+  }
+  set n [+ $n 1]
+  $n
+}
+print [redecl]
+
+# 7. A `mut` captured by a closure still lives in a heap cell and stays tagged — the one case
+#    the raw representation deliberately does not claim, because a cell stores a JaclVal. The
+#    mutation must still be shared with the closure.
+proc captured {} {
+  mut i64 c 1
+  def bump [\ {} { set c [+ $c 10] }]
+  [bump]
+  [bump]
+  $c
+}
+print [captured]
