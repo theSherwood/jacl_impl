@@ -105,6 +105,10 @@ static int32_t jacl_gc_lock;
 static int32_t jacl_gc_collector = -1;
 static int32_t jacl_gc_stopped;
 static int32_t jacl_gc_violations;
+/* #142 handoff: set by a task fiber that won the collector election, consumed by that
+ * worker's own scheduler loop (which then runs the collection on the OS thread). */
+static int32_t jacl_gc_handoff[JACL_MAX_WORKERS];
+static long    jacl_gc_swept[JACL_MAX_WORKERS];   /* the collection's result, across the suspend */
 #define JACL_GC_WAIT_NS 1000000L   /* 1 ms futex timeout: every wait re-checks (hang-proof) */
 
 /* The current worker (vCPU) index: the per-vCPU TLS word temen seeds to a dense id. */
@@ -132,7 +136,8 @@ void jacl_heap_init(void) {
   memset(jacl_startmap, 0, sizeof(jacl_startmap));
   memset(jacl_region_owner, 0, sizeof(jacl_region_owner));
   /* quiesce state: the main thread is worker 0 and joins the quiesce set */
-  for (int w = 0; w < JACL_MAX_WORKERS; w++) { jacl_gc_active[w] = 0; jacl_gc_parked[w] = 0; jacl_gc_in_task[w] = 0; }
+  for (int w = 0; w < JACL_MAX_WORKERS; w++) { jacl_gc_active[w] = 0; jacl_gc_parked[w] = 0; jacl_gc_in_task[w] = 0;
+                                             jacl_gc_handoff[w] = 0; jacl_gc_swept[w] = 0; }
   jacl_gc_epoch = 0; jacl_gc_done = 0; jacl_gc_lock = 0; jacl_gc_collector = -1;
   jacl_gc_stopped = 0; jacl_gc_violations = 0;
   jacl_gc_active[jacl_gc_self()] = 1;
@@ -232,6 +237,9 @@ void jacl_gc_worker_unregister(void) {
 void jacl_gc_task_begin(void) { __vm_atomic_store32(&jacl_gc_in_task[jacl_gc_self()], 1); }
 void jacl_gc_task_end(void)   { __vm_atomic_store32(&jacl_gc_in_task[jacl_gc_self()], 0); }
 
+/* The elected collector's work (barrier + mark-sweep + publish); defined below. */
+static inline __attribute__((always_inline)) long jacl_gc_quiesce_and_sweep(int w);
+
 /* Task safepoint (called from jacl_alloc and from compiler-inserted loop back-edges):
  * if a collection is in progress and we are a mutator task (not the collector), SUSPEND
  * the running fiber back to the scheduler — which flushes our live roots onto the fiber
@@ -262,6 +270,17 @@ void jacl_gc_worker_park_if_requested(void) {
    * running on another vCPU, and the fiber's roots would go unscanned). The worker
    * parks once the suspend unwinds to its bare loop (in_task=0). */
   if (__vm_atomic_load32(&jacl_gc_in_task[w])) return;
+  /* Our own task won the collector election and suspended, handing us the collection
+   * (jacl #142): run it HERE, on this vCPU's OS thread, so the quiesce wait blocks the
+   * thread rather than parking a fiber. */
+  if (__vm_atomic_load32(&jacl_gc_handoff[w])) {
+    __vm_atomic_store32(&jacl_gc_handoff[w], 0);
+    jacl_gc_swept[w] = jacl_gc_quiesce_and_sweep(w);
+    return;
+  }
+  /* Never park while we hold the collection: only we can publish the `done` a park
+   * waits for, so parking here would be waiting on ourselves. */
+  if (w == __vm_atomic_load32(&jacl_gc_collector)) return;
   int e = __vm_atomic_load32(&jacl_gc_epoch);
   if (e == __vm_atomic_load32(&jacl_gc_done)) return;
   /* publish "parked for epoch e" — monotonic, so a later collection can't mistake a
@@ -453,7 +472,12 @@ static long jacl_gc_collect_stw(void) {
  * resume everyone. Returns the swept count when this call did the collection, or -1 when
  * another worker was already collecting (this call yielded as a mutator instead — the
  * caller should retry). On the single-thread path (only worker 0 registered) the barrier
- * is a no-op and this is just the P1 collection. */
+ * is a no-op and this is just the P1 collection.
+ *
+ * Election happens here; the WAITING half lives in jacl_gc_quiesce_and_sweep and always
+ * runs from a bare worker context, because a futex wait inside a fiber parks the fiber
+ * (jacl #142). A winner that is in-task therefore suspends and lets its scheduler loop
+ * finish the job. */
 long jacl_gc_collect(void) {
   int w = jacl_gc_self();
   if (__vm_atomic_cas32(&jacl_gc_lock, 0, 1) != 0) {
@@ -462,7 +486,41 @@ long jacl_gc_collect(void) {
   }
   __vm_atomic_store32(&jacl_gc_collector, w);
   /* request a stop: epoch != done now signals "collection in progress" */
-  int e = __vm_atomic_add32(&jacl_gc_epoch, 1) + 1;
+  __vm_atomic_add32(&jacl_gc_epoch, 1);
+  if (__vm_atomic_load32(&jacl_gc_in_task[w])) {
+    /* We are inside a task fiber, and the quiesce barrier must WAIT. A `memory.wait`
+     * issued from a fiber parks the FIBER, not the OS thread (temen §3.6 slice 5a), so
+     * waiting here would return our vCPU to its own scheduler loop with the collection
+     * unfinished and the lock held — and that loop would then park the vCPU waiting for
+     * the `done` our parked fiber owes it. Deadlock, one worker deep, with everyone else
+     * queueing behind the held lock (jacl #142).
+     *
+     * So hand the collection to our scheduler loop and SUSPEND: the loop sees the
+     * handoff at its next safepoint and runs the barrier + mark-sweep on the OS thread,
+     * where a wait blocks the thread as the barrier intends. Suspending also spills this
+     * fiber's roots into the scanned table, so our own live objects survive exactly as a
+     * quiescing mutator's do. */
+    jacl_gc_swept[w] = 0;
+    __vm_atomic_store32(&jacl_gc_handoff[w], 1);
+    __vm_fiber_suspend(0);
+    return jacl_gc_swept[w];   /* `w` is the pre-suspend index, so a resume on another vCPU still reads our slot */
+  }
+  return jacl_gc_quiesce_and_sweep(w);   /* bare context (root / single-thread): wait inline */
+}
+
+/* The elected collector's work, always run from a BARE worker context (never inside a
+ * fiber — see jacl_gc_collect): stop every other registered worker, run the STW
+ * mark-sweep, publish `done`, release the lock. The caller holds the GC lock and has
+ * already bumped the epoch, so re-reading `jacl_gc_epoch` here yields this
+ * collection's epoch.
+ *
+ * `always_inline` is load-bearing, not taste: the mark phase scans the collector's live
+ * stack conservatively, so an extra frame between jacl_gc_collect and the sweep widens
+ * the scanned region over dead frames and spuriously retains their words (it made
+ * `strings_gc`'s "garbage is reclaimed" assertion fail on the JIT). Inlining keeps the
+ * collector's frame shape exactly what it was before the split. */
+static inline __attribute__((always_inline)) long jacl_gc_quiesce_and_sweep(int w) {
+  int e = __vm_atomic_load32(&jacl_gc_epoch);
   /* barrier: wait for every other registered worker to suspend its task and park */
   for (int i = 0; i < JACL_MAX_WORKERS; i++) {
     if (i == w) continue;

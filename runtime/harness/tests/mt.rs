@@ -32,20 +32,17 @@ fn a_spawned_vcpu_needs_its_own_data_stack() {
          simulation artifact");
 }
 
-/* The three multi-worker scheduler tests below are **ignored**, not deleted, and not switched to
- * JIT-only. Their reported failure was a `MemoryFault` from the NULL vCPU data stacks fixed above;
- * with that gone they reach the runtime's stop-the-world GC barrier and **livelock there on both
- * backends** — the root sits in `thread_join` while every worker spins in
- * `jacl_gc_worker_park_if_requested`'s timed wait for a `jacl_gc_done` that never arrives
- * (confirmed by gdb: `temen-vcpu-{1,2,3}` all in `os_thread_rt::thread_wait`, the root in
- * `thread_join`). That is a second, distinct defect that the fault was hiding, and it contradicts
- * the note on `run_test_jit` — the JIT is *not* unaffected. It has its own issue.
- *
- * Ignored rather than left red, so the harness job this change adds to CI is green and the gap is
- * one explicit line rather than three failures everyone learns to scroll past. `#[ignore]` still
- * runs them under `--ignored`, which is how the fix gets verified. */
+/* The three multi-worker scheduler tests below were ignored twice over, for two stacked defects.
+ * The first was the `MemoryFault` from the NULL vCPU data stacks fixed above (jacl #141). With that
+ * gone they reached the runtime's stop-the-world GC barrier and livelocked there on BOTH backends
+ * (jacl #142): `jacl_gc_collect` ran inside a task fiber, and a `memory.wait` issued from a fiber
+ * parks the FIBER, not the OS thread (temen §3.6 slice 5a) — so the elected collector's quiesce
+ * wait handed its vCPU back to its own scheduler loop with the collection unfinished and the GC
+ * lock held, and that loop then parked the vCPU waiting for the `jacl_gc_done` its own parked
+ * fiber owed it. Every other worker queued behind the held lock. The fix splits the election from
+ * the waiting: an in-task winner suspends, and its scheduler loop runs the barrier + mark-sweep on
+ * the OS thread (`jacl_gc_quiesce_and_sweep`). All three are gated here now, on interp AND JIT. */
 #[test]
-#[ignore = "livelocks in the runtime's STW GC barrier on BOTH backends — see the note above"]
 fn sched_batch() {
     let r = run_test("test_sched_mt.c", 0);
     assert_eq!(r, 888,
@@ -54,7 +51,6 @@ fn sched_batch() {
 }
 
 #[test]
-#[ignore = "livelocks in the runtime's STW GC barrier on BOTH backends — see the note above"]
 fn batch_heap() {
     let r = run_test("test_batch_heap.c", 0);
     assert_eq!(r, 808,
@@ -62,7 +58,6 @@ fn batch_heap() {
 }
 
 #[test]
-#[ignore = "livelocks in the runtime's STW GC barrier on BOTH backends — see the note above"]
 fn gc_sched() {
     let r = run_test("test_gc_sched.c", 0);
     assert_eq!(r, 999,
@@ -78,12 +73,13 @@ fn par_min() {
 
 #[test]
 fn par_gc() {
-    // JIT-only: the continuation pool is now GC-sound under heavy concurrent collection on the
-    // real backend (real OS-thread vCPUs) — the job registry roots every live job so a job (incl.
-    // the program root) is never swept mid-collection. The temen *interpreter*'s cooperative
-    // single-thread scheduler livelocks on the pool's futex traffic under this load (a simulation
-    // artifact — see run_test_jit), so the differential oracle can't drive this case.
-    let r = jacl_runtime_harness::run_test_jit("test_par_gc.c", 0);
+    // The continuation pool is GC-sound under heavy concurrent collection: the job registry roots
+    // every live job, so a job (incl. the program root) is never swept mid-collection. This was
+    // JIT-only on the theory that the temen *interpreter*'s cooperative single-thread scheduler
+    // livelocked on the pool's futex traffic. That was a misattribution: the livelock was jacl
+    // #142 in our own GC barrier (see the note above), and with that fixed the interpreter drives
+    // this case fine — so it is back on the differential oracle, where it belongs.
+    let r = run_test("test_par_gc.c", 0);
     assert_eq!(r, 555,
         "continuation pool: parallel runs NT allocating blocks across pinned workers while they \
          force collections; every keeper survives, results match, no violation (diag {r})");
@@ -92,9 +88,9 @@ fn par_gc() {
 
 #[test]
 fn job_gc() {
-    // JIT-only for the same reason as par_gc (interp cooperative-scheduler livelock under
-    // heavy concurrent GC). Jobs are plain GC objects: completed rounds get reclaimed
-    // (live-count bound) and a future held across many collections stays re-awaitable.
-    let r = jacl_runtime_harness::run_test_jit("test_job_gc.c", 0);
+    // Jobs are plain GC objects: completed rounds get reclaimed (live-count bound) and a future
+    // held across many collections stays re-awaitable. Differential again for the same reason as
+    // par_gc — the "interp cooperative-scheduler livelock" this was pinned to was jacl #142.
+    let r = run_test("test_job_gc.c", 0);
     assert_eq!(r, 555, "jobs are GC'd when dead, live while held (diag {r})");
 }

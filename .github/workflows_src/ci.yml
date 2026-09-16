@@ -76,8 +76,11 @@ jobs:
       #
       # The outer `timeout` matters here in a way it does not for build.sh: the temen
       # interpreter multiplexes every `thread.spawn`ed vCPU onto one OS thread, so a
-      # multi-worker scheduler test can livelock rather than fail (which is why `par_gc` and
-      # `job_gc` are JIT-only). A hang must surface as a CI failure, not as a 6-hour job.
+      # multi-worker scheduler test can livelock rather than fail. A hang must surface as a CI
+      # failure, not as a 6-hour job. (`par_gc` and `job_gc` used to be JIT-only on that
+      # theory; the livelock was actually jacl #142 in our own GC barrier, and with that fixed
+      # every mt.rs test is differential again. The timeout stays — it is the guard that would
+      # have turned #142 into a red job instead of a hang in the first place.)
       - name: Harness tests
         run: ( cd runtime/harness && timeout 1800 cargo test --release )
 
