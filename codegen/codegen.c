@@ -363,6 +363,53 @@ static IrVal env_raw_uint(Cx *cx, Binding *bd, int bits) {
   return bits == 32 ? unbox_i32(cx, w) : w;
 }
 
+/* ---- value-level representation conversions (#94 item 2) ----
+ *
+ * `env_value` / `env_raw_*` above convert when READING a binding. These are the same two
+ * directions on a loose value, for the sites that WRITE one: a `set`, and a `mut`
+ * re-declaration. They exist because a slot's representation is fixed at its first
+ * declaration while the value assigned to it later need not match — `mut` is
+ * function-scoped and re-declarable, so `mut i64 n 1` followed by a bare `mut n 2` in an
+ * if-branch re-binds the same slot from an unannotated (tagged) value. */
+
+/* A raw word of representation `rep` as a tagged JaclVal. Mirrors `env_value`'s raw arm,
+ * including its canonicalization (#107): a raw i64 holding 37 boxes to the inline 37. */
+static IrVal raw_to_tagged(Cx *cx, IrVal raw, uint8_t rep) {
+  if (rep == REP_TAGGED) return raw;
+  if (rep == REP_I32) return box_i32(cx, unbox_i32(cx, raw));
+  IrVal a[] = {cx->sp, raw};
+  return emit_rt_call(cx, rep_box_fn(rep), a, 2);
+}
+/* A tagged JaclVal as a raw word of representation `rep` — the slot invariants apply, so a
+ * REP_I32 word is sign-extended and a REP_U32 word zero-extended. Mirrors `env_raw_*`'s
+ * fallback arm and makes the same trade it does: the `jacl_*_unbox` crossings type-check,
+ * the i32 narrow does not (the representation's documented hazard, #114), which is why a
+ * raw i32 slot is only ever created where the typer proved the value. */
+static IrVal tagged_to_raw(Cx *cx, IrVal v, uint8_t rep) {
+  if (rep == REP_TAGGED) return v;
+  if (rep == REP_I32)
+    return irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, unbox_i32(cx, v));
+  IrVal a[] = {cx->sp, v};
+  if (rep == REP_I64) return emit_rt_call(cx, "jacl_i64_unbox", a, 2);
+  IrVal w = emit_rt_call(cx, "jacl_u64_unbox", a, 2);
+  if (rep == REP_U64) return w;
+  return irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, unbox_i32(cx, w));
+}
+/* Write `val` — which is in representation `from` — into `bd`, converting if the binding's
+ * representation differs. A cell always stores a JaclVal. Two raw representations that
+ * disagree go the long way round through the tagged form: #115 refuses that assignment in
+ * the typer, so this is the unreachable-but-not-garbage arm rather than a path worth
+ * making fast. */
+static void bind_store(Cx *cx, Binding *bd, IrVal val, uint8_t from) {
+  if (bd->is_cell) {
+    IrVal a[] = {cx->sp, bd->value, raw_to_tagged(cx, val, from)};
+    (void)emit_rt_call(cx, "jacl_cell_set", a, 3);
+    return;
+  }
+  if (from != bd->rep) val = tagged_to_raw(cx, raw_to_tagged(cx, val, from), bd->rep);
+  bd->value = val;
+}
+
 /* Does this AST_LIT_INT fit the i32 the rest of the compiler assumes? An integer literal
  * reaches INT64_MAX (#106), so the paths that can only carry an i32 have to ask. */
 static int lit_fits_i32(AstNode *n) {
@@ -4145,15 +4192,22 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     }
     /* `def i64 x V` — the binding holds a raw, untagged 64-bit word (#106), so compile the
      * value straight to one rather than boxing it and immediately unboxing. */
-    /* Slice 1a keeps the raw representation to the case with no other machinery in the way:
-     * an immutable local inside a proc. A top-level binding is mirrored into the global map,
-     * and a captured `mut` lives in a heap cell — both of those store a JaclVal, so an i64
-     * bound that way stays tagged until those paths learn about raw words. */
+    /* Slice 1a kept the raw representation to an *immutable* local inside a proc, because
+     * `set` had no raw store. It does now (#94 item 2), so a `mut` takes it too — which is
+     * the case that matters for speed: every loop accumulator is a `mut`, so until this
+     * every loop-carried typed value round-tripped through the tagged form and its
+     * arithmetic fell back to the dynamic tower. (That is the whole of why an annotated
+     * `sieve` was 1.6x while an annotated `fib`, which carries nothing across an
+     * assignment, was 3.2x.)
+     *
+     * Still excluded, and for the same reasons as before: a top-level binding is mirrored
+     * into the global map, and a captured `mut` lives in a heap cell — both store a
+     * JaclVal, so a value bound that way stays tagged until those paths learn raw words. */
     int decl_raw = tshift && bargs[0]->type == AST_LIT_STRING &&
                    bargs[0]->data.lit_string.length == 3 &&
-                   hid == HEAD_DEF && !cx->at_top_level && !is_captured_name(cx, name, len);
+                   !cx->at_top_level && !is_captured_name(cx, name, len);
     int decl_i64 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "i64", 3) == 0;
-    /* `def i32 x V` is raw only where the typer actually *proved* the value is an i32
+    /* `def`/`mut i32 x V` is raw only where the typer actually *proved* the value is an i32
      * (#114). The gate matters more here than it does for i64: i64's fallback crossing goes
      * through `jacl_i64_unbox`, which type-checks and hands back 0 for a non-number, whereas
      * narrowing a tagged value to i32 is a bare truncation — on a string binding that is the
@@ -4162,7 +4216,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
      * the binding stays tagged. */
     int decl_i32 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "i32", 3) == 0 &&
                    bargs[tshift + 1]->inferred_type == TYPE_I32;
-    /* `def u32/u64 x V` — same trade, same gate (#119). The unsigned widths need the typer's
+    /* `def`/`mut u32/u64 x V` — same trade, same gate (#119). The unsigned widths need the typer's
      * proof for the reason i32 does and more so: their tagged-to-raw crossing is a runtime
      * unbox, and handing it a string would return 0 rather than garbage, but 0 is still not
      * an answer. Where the typer is unsure the binding stays tagged (V7). */
@@ -4171,6 +4225,10 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     int decl_u64 = decl_raw && memcmp(bargs[0]->data.lit_string.value, "u64", 3) == 0 &&
                    bargs[tshift + 1]->inferred_type == TYPE_U64;
     IrVal val;
+    /* Which representation `val` arrives in — the binding's own reads dispatch on the slot's
+     * `rep`, so a writer has to say what it is handing over. */
+    uint8_t val_rep = decl_i64 ? REP_I64 : decl_i32 ? REP_I32
+                    : decl_u32 ? REP_U32 : decl_u64 ? REP_U64 : REP_TAGGED;
     if (decl_i64) {
       val = compile_i64_tree(cx, bargs[tshift + 1]);
       if (cx->failed) return 0;
@@ -4208,8 +4266,10 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     if (hid == HEAD_MUT && !cx->at_top_level) {
       Binding *ex = env_lookup(cx, name, len);
       if (ex && ex->is_mut) {
-        if (ex->is_cell) { IrVal a[] = {cx->sp, ex->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
-        else ex->value = val;
+        /* The slot's representation is whatever its FIRST declaration chose; this
+         * re-declaration's annotation (or lack of one) decides only how `val` arrives, so
+         * the two can disagree and `bind_store` reconciles them. */
+        bind_store(cx, ex, val, val_rep);
         return val;
       }
     }
@@ -4336,12 +4396,42 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     }
     const char *name; uint32_t len;
     if (!binding_name(cx, node, &name, &len)) return 0;
-    cx->move_ok = 1;   /* the value goes straight into the binding */
-    IrVal val = compile_expr(cx, node->data.command.args[1]);
+    /* A raw binding keeps its representation across the assignment (#94 item 2): compile the
+     * RHS straight to a raw word rather than boxing it here and unboxing on the next read,
+     * so a typed accumulator stays unboxed through a loop and its arithmetic stays native.
+     *
+     * Gated on the typer having proved the RHS is the slot's type, which is the same gate
+     * the declaration used — and not merely belt-and-braces: #115's commitment-site rule
+     * already refuses a `dyn` RHS here, so a mismatch means the typer was unsure, and V7
+     * says an unsure value stays tagged. The fallback converts on the way in, which is what
+     * a read of a tagged binding does today, so it is no worse than before for that case.
+     *
+     * The rep is read BEFORE compiling: the raw tree compilers push pins, and a pin push can
+     * reallocate `cx->locals` and invalidate a `Binding *`, so the binding is looked up
+     * again afterwards (as this path already did). */
+    uint8_t srep = REP_TAGGED;
+    {
+      Binding *pre = env_lookup(cx, name, len);
+      if (pre && !pre->is_cell && pre->rep != REP_TAGGED &&
+          node->data.command.args[1]->inferred_type == type_for_rep(pre->rep))
+        srep = pre->rep;
+    }
+    IrVal val;
+    switch (srep) {
+      case REP_I64: val = compile_i64_tree(cx, node->data.command.args[1]); break;
+      case REP_I32: val = compile_i32_tree_raw(cx, node->data.command.args[1]); break;
+      case REP_U32: val = compile_uint_tree_raw(cx, node->data.command.args[1], 32); break;
+      case REP_U64: val = compile_uint_tree_raw(cx, node->data.command.args[1], 64); break;
+      default:
+        cx->move_ok = 1;   /* the value goes straight into the binding */
+        val = compile_expr(cx, node->data.command.args[1]);
+        break;
+    }
     if (cx->failed) return 0;
     Binding *bd = env_lookup(cx, name, len);
     if (!bd) {
-      /* `set` of a top-level (module-global) binding: write the global map. */
+      /* `set` of a top-level (module-global) binding: write the global map. A global is
+       * never raw (`decl_raw` excludes top level), so `val` is tagged here. */
       if (is_global_name(cx, name, len)) {
         IrVal key = compile_string_literal(cx, name, len);
         IrVal a[] = {cx->sp, key, val};
@@ -4350,8 +4440,11 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       cx_failf(cx, "codegen: set of undefined variable '%.*s'", name, len); return 0;
     }
     if (!bd->is_mut) { cx_failf(cx, "codegen: cannot mutate immutable binding '%.*s'", name, len); return 0; }
-    if (bd->is_cell) { IrVal a[] = {cx->sp, bd->value, val}; (void)emit_rt_call(cx, "jacl_cell_set", a, 3); }
-    else bd->value = val; /* uncaptured: plain SSA rebind */
+    bind_store(cx, bd, val, srep);
+    /* Like the `def`/`mut` forms above, a raw binding's assignment has a raw word as its
+     * expression value. Statement position discards it, and a raw store has no bit for an
+     * error flag anyway (V6) — the tree compiler already turned any failure into the branch
+     * out of this statement, so there is nothing for a consumer to inspect. */
     return val;
   }
 

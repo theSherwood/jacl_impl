@@ -357,10 +357,22 @@ errors on overflow, catchably") by a different mechanism. Add and subtract detec
 from the operand and result signs; multiply asks `jacl_i64_mul_ovf`, because there is no sign
 trick for it and the obvious "divide back and compare" traps the host on `INT64_MIN / -1`.
 
-Slice 1a covers an immutable local inside a proc. A top-level binding is mirrored into the
-global map and a captured `mut` lives in a heap cell — both store a JaclVal, so an i64 bound
-that way stays tagged until those paths learn about raw words. Proc parameters and returns
-came with slice 1b, and `u32`/`u64` with jacl #119; those same two exceptions apply to all of
+Slice 1a covered an immutable local inside a proc; jacl #94 item 2 extended it to a **mutable**
+one, which is the case that matters for speed. `set` used to compile its right-hand side with
+the boxed compiler whatever the binding's representation, so a `mut` stayed tagged and every
+assignment boxed a value the next read unboxed again — and since every loop accumulator is a
+`mut`, no loop-carried typed value ever reached the native path. (That is the whole reason an
+annotated `sieve` was worth 1.6x while an annotated `fib`, which carries nothing across an
+assignment, was worth 3.2x.) A raw word is an i64 and the frame carries one i64 per local, so
+it threads a loop back-edge with no conversion; the slot's representation is fixed at its first
+declaration, and `bind_store` reconciles a later write that arrives in a different one (a `mut`
+is function-scoped and re-declarable, so `mut i64 n 1` followed by a bare `mut n 2` assigns a
+tagged value into a raw slot).
+
+Two exceptions remain, and they are the original two: a top-level binding is mirrored into the
+global map and a **captured** `mut` lives in a heap cell — both store a JaclVal, so a value
+bound that way stays tagged until those paths learn about raw words. Proc parameters and returns
+came with slice 1b, and `u32`/`u64` with jacl #119; the same two exceptions apply to all of
 them. A `u64` binding that falls back to tagged now holds a plain signed dynamic integer,
 which is why the fallback's `jacl_widen_to` call has narrowed to a pure range check.
 
