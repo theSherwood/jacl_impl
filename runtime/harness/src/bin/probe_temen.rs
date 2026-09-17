@@ -158,7 +158,7 @@ fn report(tag: &str, m: &Module) {
     let nreach = reach.iter().filter(|&&r| r).count();
 
     // bytecode engine verdict
-    let bc = bytecode::compile_module(&m.funcs, &m.types);
+    let bc = bytecode::compile_module(&m.funcs, &m.types, None);
     println!("bytecode::compile_module (all-or-nothing): {}",
         if bc.is_some() { "ACCEPTED ✓" } else { "None ✗ (STATUS_UNSUPPORTED)" });
 
@@ -405,5 +405,169 @@ fn main() {
     temen_wasm_jit::outline_cap_calls(&mut outlined);
     report("AFTER optimize_module + outline_cap_calls (mixed-tier prep)", &outlined);
 
+    coop_report(&outlined);
+
     run_compare(&module);
+}
+
+/// Replica of the browser driver's `coop_emit_for` eligibility chain (`browser/src/lib.rs`), so the
+/// **cooperative tier-up** decision is measurable from this repo without a cdylib, a built asset set
+/// or a JS driver.
+///
+/// Why this exists separately from `report`'s `analyze` line: they answer different questions and
+/// only one of them is the question jacl #96 / #83 are actually about.
+///
+///   * `analyze` uses the **strict** `interp_leaf` table — a cross-tier callee must be a
+///     memory-free, call-free leaf. It reports `mixed_ok`, which greps show gates nothing in the
+///     engine (tests and one comment only).
+///   * `coop_emit_for` uses the **#888 widened** B2 table — any `marshallable_sig` non-in-subset
+///     function can be a cross-tier callee over the live bounce. This is what actually runs, and
+///     what temen #1552 changed by adding `uses_gc_roots()` to `bounce_serviceable`'s seeds.
+///
+/// The chain, mirrored below in the driver's order: `outline_cap_calls` → pick paged / B2 / local
+/// table → `compile_module_tierup*` → `emit[i]` → `emittable_leaf = emit && all-i64 sig` →
+/// `eligible = leaf && est_emitted_size >= floor` → decline iff no leaf and no `vm_jit_*` import.
+///
+/// Two deliberate divergences from the driver, both noted in the output:
+///   * `onramp_check` is browser-internal, so it is not applied here; the real driver gates on it
+///     first and may decline a card this reports on.
+///   * the driver bumps the emit module's `size_log2` to the *run window*; we keep the module's own,
+///     since there is no window without a run.
+fn coop_report(m0: &Module) {
+    println!("\n===== COOP TIER-UP: the #888 widened B2 table (what `coop_emit_for` runs) =====");
+
+    if m0.memory.is_none() {
+        println!("no memory declared -> coop_emit_for returns STATUS_UNSUPPORTED");
+        return;
+    }
+
+    let mut m = m0.clone();
+    temen_wasm_jit::outline_cap_calls(&mut m);
+
+    let scalar = |t: &temen_ir::ValType| {
+        matches!(
+            t,
+            temen_ir::ValType::I32
+                | temen_ir::ValType::I64
+                | temen_ir::ValType::F32
+                | temen_ir::ValType::F64
+        )
+    };
+    let max_slots = temen_wasm_jit::XCALL_MAX_SLOTS;
+    let all_shimmable = m.funcs.iter().all(|f| {
+        f.params.iter().all(scalar)
+            && f.results.iter().all(scalar)
+            && f.params.len().max(f.results.len()) <= max_slots
+    });
+    // `tierup_table_log2` (browser/src/lib.rs): at least ONRAMP_JIT_TABLE_LOG2 = 10, grown so
+    // `1 << log2` covers every function.
+    let table_log2 =
+        10u8.max((m.funcs.len().max(1) as u64).next_power_of_two().trailing_zeros() as u8);
+    let paged = all_shimmable
+        && (m.data.iter().any(|d| d.readonly) || temen_wasm_jit::module_uses_unmap_protect(&m));
+    let page_log2 = temen_interp::host_page_size().trailing_zeros() as u8;
+
+    let mode = if paged {
+        "B2 paged"
+    } else if all_shimmable {
+        "B2"
+    } else {
+        "local table"
+    };
+    println!("emit mode: {mode}  (all_shimmable={all_shimmable}, paged={paged}, table_log2={table_log2})");
+
+    let emitted_res = if paged {
+        temen_wasm_jit::compile_module_tierup_b2_paged(&m, false, table_log2 as u32, page_log2)
+    } else if all_shimmable {
+        temen_wasm_jit::compile_module_tierup_b2(&m, false, table_log2 as u32)
+    } else {
+        temen_wasm_jit::compile_module_tierup(&m, false)
+    };
+    let (wasm, emit) = match emitted_res {
+        Ok(v) => v,
+        Err(e) => {
+            println!("compile_module_tierup* FAILED ({e:?}) -> STATUS_UNSUPPORTED");
+            return;
+        }
+    };
+
+    let all_i64 =
+        |ts: &[temen_ir::ValType]| ts.iter().all(|t| *t == temen_ir::ValType::I64);
+    let emittable_leaf: Vec<bool> = m
+        .funcs
+        .iter()
+        .enumerate()
+        .map(|(i, f)| emit[i] && all_i64(&f.params) && all_i64(&f.results))
+        .collect();
+
+    let n_emit = emit.iter().filter(|&&e| e).count();
+    let n_leaf = emittable_leaf.iter().filter(|&&e| e).count();
+    println!(
+        "emitted wasm: {} bytes | emit[]={}/{} funcs | emittable_leaf={} (emit && all-i64 sig)",
+        wasm.len(),
+        n_emit,
+        m.funcs.len(),
+        n_leaf
+    );
+
+    let jit_importer = m.imports.iter().any(|im| im.name.starts_with("vm_jit_"));
+    if n_leaf == 0 && !jit_importer {
+        println!("NO emittable leaf and no vm_jit_* import -> coop_emit_for DECLINES (STATUS_UNSUPPORTED)");
+    } else if n_leaf == 0 {
+        println!("no emittable leaf, but a vm_jit_* import is present -> opens for the §22-unit win only");
+    }
+
+    // The floor sweep. `eligible` is what the interpreter consults to raise a TierUp event, so
+    // "how many functions would ever tier up" is a floor question on top of the emit set.
+    let default_floor = temen_wasm_jit::MIN_TIERUP_EMITTED_FN_BYTES;
+    println!("\ntier-up eligibility by floor (eligible = emittable_leaf && est_emitted_size >= floor):");
+    for floor in [default_floor, 0usize] {
+        let n_elig = m
+            .funcs
+            .iter()
+            .zip(&emittable_leaf)
+            .filter(|(f, &leaf)| leaf && temen_wasm_jit::est_emitted_size(f) >= floor)
+            .count();
+        let tag = if floor == default_floor { " (default)" } else { " (#83's experiment)" };
+        println!("   floor={floor:<5}{tag:<22} eligible={n_elig}");
+    }
+
+    // Name what is eligible at floor 0 — #83's experiment forced exactly this set to tier up, and
+    // the question temen #1552 raised is whether an allocating JACL program still has one.
+    let mut names = std::collections::BTreeMap::<usize, &str>::new();
+    for e in &m.exports {
+        names.insert(e.func as usize, e.name.as_str());
+    }
+    let elig0: Vec<usize> = (0..m.funcs.len()).filter(|&i| emittable_leaf[i]).collect();
+    if elig0.is_empty() {
+        println!("\nat floor 0: NOTHING is eligible — no function can tier up at any floor.");
+    } else {
+        println!("\nat floor 0, these {} would tier up:", elig0.len());
+        for i in elig0.iter().take(30) {
+            println!(
+                "   f{:<5} {:<34} est_emitted={}",
+                i,
+                names.get(i).copied().unwrap_or("-"),
+                temen_wasm_jit::est_emitted_size(&m.funcs[*i])
+            );
+        }
+        if elig0.len() > 30 {
+            println!("   … and {} more", elig0.len() - 30);
+        }
+    }
+
+    // The #1552 cascade, made visible: which functions carry `gc.roots`, and which functions were
+    // taken off the emit set because they can reach one. `bounce_serviceable` seeds on
+    // `uses_gc_roots()` and runs a monotone backward fixpoint, so a `gc.roots` user's callers stop
+    // being serviceable cross-tier callees and the emit fixpoint drops them too.
+    let gcr: Vec<usize> = (0..m.funcs.len()).filter(|&i| m.funcs[i].uses_gc_roots()).collect();
+    println!("\ngc.roots-bearing functions: {}", gcr.len());
+    for i in &gcr {
+        println!(
+            "   f{:<5} {:<34} emit={}",
+            i,
+            names.get(i).copied().unwrap_or("-"),
+            emit[*i]
+        );
+    }
 }
