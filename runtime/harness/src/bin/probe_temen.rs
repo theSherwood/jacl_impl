@@ -158,7 +158,7 @@ fn report(tag: &str, m: &Module) {
     let nreach = reach.iter().filter(|&&r| r).count();
 
     // bytecode engine verdict
-    let bc = bytecode::compile_module(&m.funcs, &m.types);
+    let bc = bytecode::compile_module(&m.funcs, &m.types, None);
     println!("bytecode::compile_module (all-or-nothing): {}",
         if bc.is_some() { "ACCEPTED ✓" } else { "None ✗ (STATUS_UNSUPPORTED)" });
 
