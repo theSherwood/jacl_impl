@@ -858,8 +858,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   /* Unified TEMEN container header (WIRE.md), 16 bytes little-endian:
    *   [0..8)  MAGIC   = "TEMEN\0\0\0"
    *   [8..10) kind    : u16   — 0 = KIND_MODULE (runnable), 1 = KIND_OBJECT (pre-link unit)
-   *   [10..12) version: u16   = 10 (v10; v10 adds a per-offer impl-export policy byte, but we emit
-   *                              zero impl-exports, so the payload is otherwise byte-identical to v9)
+   *   [10..12) version: u16   = 11 (v11 adds a module-declared shadow-arena flag to the memory
+   *                              descriptor, INVARIANTS.md #16; JACL declares no arena, so we emit
+   *                              the absent flag and the payload is otherwise byte-identical to v10,
+   *                              which itself added a per-offer impl-export policy byte we never set)
    *   [12..16) flags  : u32   = 0 (reserved; a set bit fails closed on decode)
    * The object dialect (a pre-link unit carrying `data.self` link-form addresses, decoded by
    * `decode_unit`) is now the header `kind`, not a payload flag byte. Emit KIND_OBJECT only when the
@@ -870,10 +872,12 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   static const uint8_t magic[8] = {'T', 'E', 'M', 'E', 'N', 0, 0, 0};
   out_raw(&o, magic, 8);
   out_u8(&o, has_data_self ? 0x01 : 0x00); out_u8(&o, 0x00); /* kind:u16 LE (0=module, 1=object) */
-  out_u8(&o, 10); out_u8(&o, 0x00);                          /* version:u16 LE = 10 */
+  out_u8(&o, 11); out_u8(&o, 0x00);                          /* version:u16 LE = 11 */
   out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); /* flags:u32 LE = 0 */
-  /* Memory descriptor: presence flag, then size_log2. */
-  if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); }
+  /* Memory descriptor: presence flag, then size_log2, then the v11 shadow-arena flag (and, if
+   * set, its `[base, end)` as two ulebs). JACL's GC owns its heap placement and declares no
+   * durable shadow arena, so the flag is always absent. */
+  if (m->has_memory) { out_u8(&o, 1); out_u8(&o, m->mem_log2); out_u8(&o, 0); }
   else out_u8(&o, 0);
   /* Data segments: count, then each `readonly` flag (irb data is always `ro`), offset,
    * length-prefixed bytes. */
