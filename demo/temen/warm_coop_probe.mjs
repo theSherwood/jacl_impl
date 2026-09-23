@@ -43,6 +43,9 @@ for (const prog of progs) {
   const src = enc.encode(readFileSync(prog, 'utf8'));
   // Fresh warm session per program (the image is program-independent, but re-open keeps each row clean).
   const mp = Number(ex.temen_alloc(snap.length)); u8().set(snap, mp);
+  // EMIT_CAP=<bytes> matches the playground's `temen_coop_set_emit_cap` (JACL_EMIT_CAP_BYTES in
+  // demo/src/temen-jacl-wasm.ts); unset leaves the engine default.
+  if (process.env.EMIT_CAP) ex.temen_coop_set_emit_cap(Number(process.env.EMIT_CAP));
   const opened = ex.temen_warm_open(mp, snap.length);
   ex.temen_dealloc(mp, snap.length);
   if (opened === -1n || ex.temen_status() !== 0) { console.log(`${prog}: temen_warm_open FAILED (status ${ex.temen_status()})`); continue; }
