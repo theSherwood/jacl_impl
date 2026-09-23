@@ -17,7 +17,10 @@ which targeted the retired native VM.
   calling fiber. TEMEN parks the fiber, not the worker (the §3.6 5a contract `sleep` already relies on),
   and `worker_loop`'s `repoll_blocked` resumes it. No new scheduler machinery.
 - The channel layer is **platform-neutral**; `runtime/chan_unir.c` is the only file that knows about
-  Unir. A Unix or Windows backend would add a sibling file and a case in each switch.
+  Unir. It implements five `chan_be_*` functions, and a Unix or Windows backend would implement the
+  same five. It is compiled only with `JACL_UNIR`, which `runtime/build.sh` and the harness's
+  `translate_runtime` set because they link the unit. Every other build of `jaclrt.c` (the self-hosted
+  compiler card, C-driver tests, the staging runtime) gets stubs, and `channel` returns an error value.
 
 ## Surface (from `SHELL_API_DESIGN.md`)
 
@@ -64,9 +67,15 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, UNIR_REV
 ## The Unir backend
 
 - **The vat.** The runtime creates its `unir_vat` on first use with `unir_vat_root(...)`. Regions map
-  in a fixed range of the window above the image (`JACL_UNIR_MAP_BASE`..`JACL_UNIR_MAP_END`). The
-  host runs the module with a window large enough to hold that range; the harness asserts the image
-  fits below it. Child carves arrive with #19.
+  over a static, 64 KiB-aligned 8 MiB array in the runtime (`jacl_unir_map`) that holds nothing else.
+  That needs no window configuration from the host, and it is zero-initialized, so it adds nothing to
+  the `.temen` file. Each channel maps its region twice, one 64 KiB page per end at the default
+  capacity, so the area holds about 60 channels until the binding learns to unmap. Child carves arrive
+  with #19.
+- **Authority.** Creating a region is AddressSpace op 5, the runtime's one new import
+  (`vm_region_create`); mapping and waiting go through handles the runtime already holds. An embedder
+  that instantiates the runtime grants it (`Imports::provide("vm_region_create", HostCap::memory(5))`),
+  as the harness, `jacl_temen` and `bench_temen` now do.
 - **A channel within one vat** is one edge region mapped twice, once per end. It exercises the full
   edge protocol (credit, wake, terminals) with no second vat, which is what makes #18 testable before
   #19 wires stages across vats.
@@ -80,9 +89,10 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, UNIR_REV
   or waking on the edge's bell directly when a worker's only blocked fiber is on one edge.
 - **The unit's heap.** The runtime has no `malloc`, and calling `jacl_alloc` from inside the unit would
   hit GC safepoints mid-call. `chan_unir.c` defines `unir_host_alloc`/`unir_host_free` over a static
-  pool outside `jacl_heap_mem`: power-of-two size classes from 16 B to 4 KiB with free lists, and a
-  `cas32` spin lock that is never held across a park. The unit allocates a few hundred bytes per edge
-  end and per spawn.
+  256 KiB pool outside `jacl_heap_mem`: power-of-two size classes from 16 B to 4 KiB with free lists,
+  and a `cas32` spin lock that is never held across a park. The unit allocates a few hundred bytes per
+  edge end and per spawn. The pool's lock is separate from the lock held while a channel opens,
+  because the unit allocates while it opens.
 
 ## Build
 
@@ -102,16 +112,20 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, UNIR_REV
 
 ## Tests
 
-- **C-driver harness tests** (`runtime/tests/test_chan.c`, run on interp and JIT through `run_test`):
-  - bytes round-trip through one channel across two fibers, including writes larger than a frame and
-    reads smaller than one;
-  - a full channel parks the writer until the reader drains it;
-  - end of stream after `close $w`, with the buffered bytes still delivered;
-  - `close $r` gives the writer an error value;
-  - a second fiber on a busy end gets `channel busy`.
-- **JACL-level tests** (`runtime/harness/tests/codegen.rs` cases): `channel`, `write`, `read` and
-  `close` from JACL source, with a producer in a `spawn` and the consumer in the main job.
-- The existing baselines stay green: `./build.sh`, `./build.sh --tsan`, and the harness.
+`runtime/harness/tests/channels.jacl`, run by `codegen.rs::channels_run_on_temen` on the interpreter
+and the JIT (`run_diff` requires they agree), is self-checking like `tour.jacl`:
+
+- round trips, and reads smaller than a frame that keep the rest;
+- a write larger than a frame, split and reassembled in order;
+- end of stream after `close $w`, with the buffered bytes still delivered;
+- a writer and a reader in two jobs over a two-frame ring, each parking in turn, with every byte
+  arriving once and in order;
+- `channel busy` for a second job entering an end that is in use;
+- `close $r` making the writer's next write an error value, and bad arguments as error values.
+
+It lives beside the harness, not in `test/jacl/`, because that corpus also feeds the playground,
+whose runtime build does not grant `vm_region_create` yet. The C-driver harness (`run_test`) cannot
+host these tests: it runs without a powerbox, so there is no AddressSpace to create regions with.
 
 ## Later (not #18)
 

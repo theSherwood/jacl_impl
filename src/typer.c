@@ -4546,6 +4546,11 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
     { HEAD_WRITE_FILE,  TYPE_NIL    },
     { HEAD_APPEND_FILE, TYPE_NIL    },
     { HEAD_DELETE_FILE, TYPE_NIL    },
+    /* Channels: [channel] is a [w r] vec; write/close return nil (or an error value);
+     * read is a [Buf n u8] or nil at end of stream, so it stays dyn. */
+    { HEAD_CHANNEL,     TYPE_VEC    },
+    { HEAD_WRITE,       TYPE_NIL    },
+    { HEAD_CLOSE,       TYPE_NIL    },
     { HEAD_FILE_EXISTS, TYPE_BOOL   },
     { HEAD_LIST_DIR,    TYPE_VEC    },
     /* Atom watchers — both side-effecting, return nil. */

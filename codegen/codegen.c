@@ -5251,6 +5251,11 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_VEC_CONCAT, "jacl_vec_concat", 2},
       {HEAD_LINES,      "jacl_lines",      1},
       {HEAD_INTERPRET_PRELUDE, "jacl_interpret_prelude", 0},
+      {HEAD_CHANNEL,    "jacl_channel",    0},
+      {HEAD_CHANNEL,    "jacl_channel_n",  1},
+      {HEAD_READ,       "jacl_chan_read",  2},
+      {HEAD_WRITE,      "jacl_chan_write", 2},
+      {HEAD_CLOSE,      "jacl_chan_close", 1},
     };
     /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
     if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&
@@ -5349,6 +5354,11 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
     }
     for (size_t bi = 0; bi < sizeof(BI) / sizeof(BI[0]); bi++) {
       if (BI[bi].hid != (HeadId)hid) continue;
+      /* A head may have several arities (`[channel]`, `[channel CAP]`): take the entry whose
+       * arity matches, and report the first one's if none does. */
+      for (size_t bj = bi + 1; node->data.command.arg_count != BI[bi].arity &&
+                               bj < sizeof(BI) / sizeof(BI[0]); bj++)
+        if (BI[bj].hid == (HeadId)hid && BI[bj].arity == node->data.command.arg_count) bi = bj;
       if (node->data.command.arg_count != BI[bi].arity) {
         char msg[160];
         snprintf(msg, sizeof msg, "builtin '%.*s' expects %u argument%s but got %u",

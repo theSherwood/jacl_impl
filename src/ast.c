@@ -138,6 +138,9 @@ typedef enum {
   /* File-system surface growth (docs/TEMEN_FS_DESIGN.md phase 4) */
   HEAD_DELETE_FILE, HEAD_FILE_EXISTS, HEAD_LIST_DIR,
 
+  /* Byte channels (docs/UNIR_CHANNELS.md) */
+  HEAD_CHANNEL, HEAD_READ, HEAD_WRITE, HEAD_CLOSE,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -197,6 +200,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "hash", 4) == 0) return HEAD_HASH;
       if (memcmp(s, "swap", 4) == 0) return HEAD_SWAP;
       if (memcmp(s, "addr", 4) == 0) return HEAD_ADDR;
+      if (memcmp(s, "read", 4) == 0) return HEAD_READ;
       return HEAD_NONE;
     case 5:
       if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;
@@ -213,6 +217,8 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "atom?", 5) == 0) return HEAD_ATOM_Q;
       if (memcmp(s, "watch", 5) == 0) return HEAD_WATCH;
       if (memcmp(s, "deref", 5) == 0) return HEAD_DEREF;
+      if (memcmp(s, "write", 5) == 0) return HEAD_WRITE;
+      if (memcmp(s, "close", 5) == 0) return HEAD_CLOSE;
       if (memcmp(s, "unbox", 5) == 0) return HEAD_UNBOX;
       if (memcmp(s, "reset", 5) == 0) return HEAD_RESET;
       if (memcmp(s, "first", 5) == 0) return HEAD_FIRST;
@@ -234,6 +240,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       return HEAD_NONE;
     case 7:
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
+      if (memcmp(s, "channel", 7) == 0) return HEAD_CHANNEL;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
       if (memcmp(s, "arr-get", 7) == 0) return HEAD_ARR_GET;

@@ -115,7 +115,9 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
     let imports = temen_run::Imports::new()
         .provide("write", temen_run::HostCap::stdout())
         .provide("exit", temen_run::HostCap::exit())
-        .provide("stdin", temen_run::HostCap::stdin());
+        .provide("stdin", temen_run::HostCap::stdin())
+        // Channels create Unir edge regions (AddressSpace op 5; docs/UNIR_CHANNELS.md).
+        .provide("vm_region_create", temen_run::HostCap::memory(5));
     let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {case}: {e}"));
     let run = inst
@@ -1136,7 +1138,9 @@ fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
     let imports = temen_run::Imports::new()
         .provide("write", temen_run::HostCap::stdout())
         .provide("exit", temen_run::HostCap::exit())
-        .provide("stdin", temen_run::HostCap::stdin());
+        .provide("stdin", temen_run::HostCap::stdin())
+        // Channels create Unir edge regions (AddressSpace op 5; docs/UNIR_CHANNELS.md).
+        .provide("vm_region_create", temen_run::HostCap::memory(5));
     let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {path}: {e}"));
     let run = inst
@@ -1193,6 +1197,23 @@ assert [== [passthru 9223372036854775807] 9223372036854775807]
         ret as u64
     );
     assert!(stdout.is_empty(), "unexpected output: {:?}", String::from_utf8_lossy(&stdout));
+}
+
+const CHANNELS_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/channels.jacl");
+
+#[test]
+fn channels_run_on_temen() {
+    // Byte channels on Unir edges (docs/UNIR_CHANNELS.md, theSherwood/unir#18): round trips,
+    // partial reads, frame splitting, end of stream, a writer and a reader parking on a
+    // two-frame ring across two jobs, both closes, and bad arguments. Self-checking like the
+    // tour: a failed assert returns an error value. `run_diff` enforces interp == jit.
+    let (ret, stdout) = run_jacl_file(CHANNELS_JACL);
+    assert!(
+        !is_jacl_error(ret),
+        "channels.jacl returned a JACL error (0x{:016x}); stdout: {:?}",
+        ret as u64,
+        String::from_utf8_lossy(&stdout)
+    );
 }
 
 #[test]

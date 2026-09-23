@@ -715,6 +715,9 @@ typedef enum {
   /* File-system surface growth (docs/TEMEN_FS_DESIGN.md phase 4) */
   HEAD_DELETE_FILE, HEAD_FILE_EXISTS, HEAD_LIST_DIR,
 
+  /* Byte channels (docs/UNIR_CHANNELS.md) */
+  HEAD_CHANNEL, HEAD_READ, HEAD_WRITE, HEAD_CLOSE,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
