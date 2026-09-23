@@ -407,7 +407,8 @@ fn main() {
 
     // The linked module exactly as `emit_temen` encodes it — what `coop_emit_for` receives. Not
     // `opt`/`outlined`: the driver never runs the optimizer, and it outlines once itself.
-    coop_report(&module);
+    let profile = profile_run(&module);
+    coop_report(&module, profile.as_ref());
 
     run_compare(&module);
 }
@@ -441,7 +442,40 @@ fn main() {
 ///     first and may decline a card this reports on.
 ///   * the driver bumps the emit module's `size_log2` to the *run window*; we keep the module's own,
 ///     since there is no window without a run.
-fn coop_report(m0: &Module) {
+/// Per-op execution counts from one interpreter run, keyed by IR location `(func, block, inst)`; a
+/// terminator's `inst` carries `SRC_TERM`.
+type Profile = std::collections::HashMap<(u32, u32, u32), u64>;
+
+/// The terminator flag in a profile key. Public in temen-interp only from temen #1658, which the
+/// `callprof` feature requires anyway; a default build never reads a profile, so it needs no value.
+#[cfg(feature = "callprof")]
+use temen_interp::bytecode::SRC_TERM;
+#[cfg(not(feature = "callprof"))]
+const SRC_TERM: u32 = 0;
+
+/// Run the linked module once on the single-vCPU bytecode engine with temen-interp's per-op profiler
+/// armed. Outlining (which the emit side applies) only appends wrappers and rewrites each cap site
+/// 1:1 in place, so these locations index the outlined module's original functions unchanged.
+#[cfg(feature = "callprof")]
+fn profile_run(m: &Module) -> Option<Profile> {
+    bytecode::callprof_reset(m.funcs.len());
+    let mut host = powerbox_host(m);
+    let mut fuel = u64::MAX;
+    match bytecode::compile_and_run_with_host(m, 0, &[], &mut fuel, &mut host) {
+        Some(Ok(_)) => Some(bytecode::callprof_op_snapshot().into_iter().collect()),
+        other => {
+            println!("profile run did not complete ({}); no dynamic weighting", describe(&other));
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "callprof"))]
+fn profile_run(_: &Module) -> Option<Profile> {
+    None
+}
+
+fn coop_report(m0: &Module, profile: Option<&Profile>) {
     println!("\n===== COOP TIER-UP: the #888 widened B2 table (what `coop_emit_for` runs) =====");
 
     if m0.memory.is_none() {
@@ -579,13 +613,13 @@ fn coop_report(m0: &Module) {
         );
     }
 
-    spill_bound(&m, &emit, &names, "the emitter's own emit set at this pin");
+    spill_bound(&m, &emit, &names, "the emitter's own emit set at this pin", profile);
     // Model: every function whose own body the emitter lowers, with no cascade from its callees. The
     // emit set above is cascaded — a caller of an unserviceable callee (one that suspends, waits, or
     // reaches gc.roots) is dropped with it — so it can leave out exactly the allocating code the spill
     // cost is about. This pass is the bound once that cascade is gone.
     let in_subset = temen_wasm_jit::analyze(&m).in_subset;
-    spill_bound(&m, &in_subset, &names, "model: every in-subset function emitted, no callee cascade");
+    spill_bound(&m, &in_subset, &names, "model: every in-subset function emitted, no callee cascade", profile);
 }
 
 /// temen #1627's first checklist item: a **static bound** on what spilling live values at every
@@ -610,6 +644,7 @@ fn spill_bound(
     emit: &[bool],
     names: &std::collections::BTreeMap<usize, &str>,
     over: &str,
+    profile: Option<&Profile>,
 ) {
     use temen_ir::{Terminator, ValType};
     println!("\n===== temen #1627 STATIC SPILL BOUND over {over} =====");
@@ -669,6 +704,12 @@ fn spill_bound(
     let (mut pure_calls, mut tail_calls, mut untyped, mut emitted_insts) =
         (0usize, 0usize, 0usize, 0usize);
     let mut at_definition = 0usize;
+    // Dynamic tallies, when a profile is present: executed spill-site calls, the stores they would
+    // do under each discipline, and executed instructions in the emitted functions (the
+    // denominator; the `IntCmp` a fused branch absorbs is uncounted, so the ratio errs high).
+    let hits = |key: (u32, u32, u32)| profile.and_then(|p| p.get(&key)).copied().unwrap_or(0);
+    let (mut dyn_calls, mut dyn_at_call, mut dyn_at_def, mut dyn_insts) = (0u64, 0u64, 0u64, 0u64);
+    let mut dyn_per_fn: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
     for fi in (0..n).filter(|&i| emit[i]) {
         let f = &m.funcs[fi];
         let vtypes = temen_verify::func_value_types(f, &m.funcs, &m.types, m.memory.is_some());
@@ -742,8 +783,19 @@ fn spill_bound(
                     }
                 }
                 sites.push((fi, reason, live));
+                let ran = hits((fi as u32, bi as u32, k as u32));
+                dyn_calls += ran;
+                dyn_at_call += ran * live as u64;
+                *dyn_per_fn.entry(fi).or_default() += ran * live as u64;
             }
-            at_definition += spilled.iter().filter(|&&x| x).count();
+            let defined = spilled.iter().filter(|&&x| x).count();
+            at_definition += defined;
+            if profile.is_some() {
+                // A block runs once per execution of its terminator.
+                let runs = hits((fi as u32, bi as u32, b.insts.len() as u32 | SRC_TERM));
+                dyn_at_def += runs * defined as u64;
+                dyn_insts += (0..b.insts.len()).map(|k| hits((fi as u32, bi as u32, k as u32))).sum::<u64>();
+            }
         }
     }
 
@@ -818,6 +870,25 @@ fn spill_bound(
     println!("sites by live count  {}", hist.join("  "));
     if untyped > 0 {
         println!("({untyped} live values had no derivable type and were counted as integers — the bound errs high)");
+    }
+
+    if profile.is_some() {
+        let dpct = |x: u64| 100.0 * x as f64 / dyn_insts.max(1) as f64;
+        println!(
+            "dynamic, one interpreter run: {dyn_insts} instructions executed in these functions, \
+             {dyn_calls} spill-site calls\n   spill at each call   {dyn_at_call:>10} stores = {:.1}%\n   \
+             spill at definition  {dyn_at_def:>10} stores = {:.1}%",
+            dpct(dyn_at_call),
+            dpct(dyn_at_def)
+        );
+        let mut hot: Vec<(usize, u64)> = dyn_per_fn.into_iter().filter(|e| e.1 > 0).collect();
+        hot.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("functions by executed spill stores (at each call, top 10):");
+        for &(fi, st) in hot.iter().take(10) {
+            println!("   f{:<5} {:<34} {:>10} stores", fi, names.get(&fi).copied().unwrap_or("-"), st);
+        }
+    } else {
+        println!("(static only: build with `--features callprof` to weight each site by how often it ran)");
     }
 
     let mut per_fn: std::collections::BTreeMap<usize, (usize, usize)> =

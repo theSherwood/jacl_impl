@@ -16,6 +16,12 @@ publish = false
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# Weight probe_temen's temen #1627 spill bound by per-call-site execution counts from temen-interp's
+# opt-in per-op profiler. Off by default: it instruments the interpreter's dispatch loop, so it must
+# never be on for a benchmark build.
+callprof = ["temen-interp/callprof"]
+
 [dependencies]
 temen-ir     = { path = "../../vendor/temen/crates/temen-ir" }
 temen-llvm   = { path = "../../vendor/temen/crates/temen-llvm" }
