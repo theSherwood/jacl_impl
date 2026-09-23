@@ -509,6 +509,10 @@ fn coop_report(m0: &Module, profile: Option<&Profile>) {
         && (m.data.iter().any(|d| d.readonly) || temen_wasm_jit::module_uses_unmap_protect(&m));
     let page_log2 = temen_interp::host_page_size().trailing_zeros() as u8;
 
+    // temen #1627: a collecting guest emits over the shared table in spill mode instead of not at
+    // all. The local-table fallback has no spill path, so it keeps #1546's module veto.
+    let spill = all_shimmable && m.funcs.iter().any(temen_ir::Func::uses_gc_roots);
+
     let mode = if paged {
         "B2 paged"
     } else if all_shimmable {
@@ -516,12 +520,20 @@ fn coop_report(m0: &Module, profile: Option<&Profile>) {
     } else {
         "local table"
     };
-    println!("emit mode: {mode}  (all_shimmable={all_shimmable}, paged={paged}, table_log2={table_log2})");
+    println!(
+        "emit mode: {mode}  (all_shimmable={all_shimmable}, paged={paged}, spill={spill}, table_log2={table_log2})"
+    );
 
     let emitted_res = if paged {
-        temen_wasm_jit::compile_module_tierup_b2_paged(&m, false, table_log2 as u32, page_log2)
+        temen_wasm_jit::compile_module_tierup_b2_paged(
+            &m,
+            false,
+            table_log2 as u32,
+            page_log2,
+            spill,
+        )
     } else if all_shimmable {
-        temen_wasm_jit::compile_module_tierup_b2(&m, false, table_log2 as u32)
+        temen_wasm_jit::compile_module_tierup_b2(&m, false, table_log2 as u32, spill)
     } else {
         temen_wasm_jit::compile_module_tierup(&m, false)
     };

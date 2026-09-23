@@ -305,13 +305,9 @@ the emitted tier reloads after calls, since the backing may move on grow). So:
   `tierups=0`. In-guest macro staging is green end-to-end (`build_compiler_temen.sh --selftest`:
   SELFTEST/STAGETEST/INTERPTEST/SNAPTEST all pass).
 
-**Known separate limitation (not a regression):** a **macro** program (`tour.jacl`) still declines the
-coop tier-up to the interpreter (`parity=MISMATCH` in the bench harness; correct output via the
-interpreter fallback in the real browser). This is **not** the allocator — an **arena** card built at
-the same pin traps on `tour` identically. The cause is the in-guest Jit-capability macro staging
-(`__vm_jit_compile_linked` mid-run) during a coop tier-up run, orthogonal to the heap. Macro-free
-programs get the tier-up; macro programs run correctly on the interpreter as before. Tracking that
-in-guest-JIT-during-coop case is a separate engine follow-up.
+**Superseded:** at this pin a **macro** program (`tour.jacl`) still declined the coop tier-up to the
+interpreter. It no longer does: see "Re-measured at temen `10ec5e8a`" below, where the tour tiers up with
+`parity=OK` through two in-guest `Jit.invoke`s.
 
 ### Slice 2 — frontend decomposition (`warmup` / `compile`) + two-phase driver — **DONE**
 
@@ -355,6 +351,50 @@ local arena. Needs Slice 1's non-growing window so the image is snapshot-restora
 The coop tier-up (Slice 1's unblock) measures **1.37×** on the tour; the warm+JIT `eval_run` path
 (Slice 3's `temen_warm_eval`) measures **2.01×**. Both hold parity vs the interpreter oracle. The
 warm+JIT path is the one to ship for the playground compile.
+
+### Re-measured at temen `10ec5e8a` — the collector no longer vetoes the emit (temen #1627)
+
+Between the two previous pins, temen #1546 made any module containing `gc.roots` emit **no wasm**, to
+avoid an unsound scan. The compiler card links jaclrt for in-guest macro staging, so it carries
+`jacl_gc_collect_stw`, and the veto sent every coop and warm-coop compile back to the interpreter. The
+playground's default `tierup` mode fell back to `warmEval` without saying so. temen #1627 replaces the
+veto with **spill mode**: emitted frames push their live values to a host-owned stack around every call
+that can reach the collector, and each bounce hands those words to the scan. JACL needed no change.
+
+Measured with the threads `temen_browser.wasm` @ `10ec5e8a`, node, best of 3–4 runs:
+
+| compile | warm-interp | warm-coop (`EMIT_CAP=512000`, the playground's cap) | events |
+|---|--:|--:|---|
+| `try_basic` (93 B) | 17 ms | 26 ms (0.66×) | 7 tier-ups, 0 bounces |
+| `arithmetic` (339 B) | 21 ms | 26 ms (0.81×) | 23 tier-ups, 1 bounce |
+| **`tour` (14 KB, macros)** | **238 ms** | **74 ms (3.21×)** | 86 tier-ups, 101 bounces, 2 `Jit.invoke`s |
+
+- **Output is identical** to the interpreter everywhere, including the tour. Its macro staging runs
+  `Jit.invoke` mid-run on the coop tier and does not decline, as it did at `fdeb72a9`.
+- **The spill is live.** On the tour's cold coop compile (`bench_tierup.mjs`, which now reports this),
+  15 of the 101 bounces carried spilled words: 894 in total, at most 120 in one bounce. The warm-coop
+  compile in Chromium below carried 687. Whether a collection actually ran during
+  one of those bounces is not observable from outside.
+- **Small compiles pay about 5–9 ms** of fixed coop cost. That is below perception; the tour's saving is not.
+- **Real Chromium** (headless, cross-origin isolated, the same warm-coop compile of the tour four times):
+  parity OK every run. The first run took 1.5 s, which is the one-off emit that the playground's
+  background pre-warm absorbs. Later runs took 82–137 ms against 256 ms on warm-interp. The renderer was
+  still alive 15 s after the last run, which is the TurboFan OOM scenario the 512 KB emit cap
+  (`a6fd123d`) exists for.
+
+**Program cards** (a JACL program linked with jaclrt, run through `runJitModule`;
+`demo/temen/bench_tierup_cards.mjs`): all 12 cards measured (`arithmetic`, three `gc_*` programs and the
+eight `bench_scaled` programs) take the coop path with byte-identical stdout at floors 4096, 0 and ∞. But
+**tier-up itself gains nothing on them**:
+- At floor ∞ (the coop path with no tier-ups) the times match the default floor. `collection_churn`
+  runs at 2.60× the plain `temen_run_onramp` speed either way.
+- **No bounce on any card carried a spilled word.** As #96 predicted, only runtime helpers emit;
+  `jacl_alloc` reaches futex waits, so a program's own code stays interpreted.
+- The coop path's speedup over `temen_run_onramp` on allocation-heavy cards (1.5–2.6×) comes from the
+  run itself, not emitted code. The likely cause is the coop run's flat growable window against the
+  on-ramp's 2^40 reservation; this is not isolated. The playground runs programs with
+  `temen_run_onramp`, so it does not get that speedup today, and it doesn't pay the coop open cost either
+  (about 25 ms, which makes short programs about 3× slower).
 
 ## Relationship to temen issues
 

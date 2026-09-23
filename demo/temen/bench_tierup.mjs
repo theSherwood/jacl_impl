@@ -25,14 +25,27 @@ const u8 = () => new Uint8Array(memory.buffer);
 const readStdout = () => dec.decode(u8().slice(Number(ex.temen_stdout_ptr()), Number(ex.temen_stdout_ptr()) + Number(ex.temen_stdout_len())));
 
 // Event counters observed from outside (same hooks as browser/bench_tierup_cards.mjs).
-const counts = { tierups: 0, invokes: 0, bounces: 0, path: 'interp' };
-const reset = () => { counts.tierups = 0; counts.invokes = 0; counts.bounces = 0; counts.path = 'interp'; };
+// `spilled`: words the emitted frames had pushed at each bounce (temen #1627's spill stack, the third
+// `temen_coop_call_interp` argument), summed; `spillBounces` counts the bounces that carried any.
+const counts = {};
+const reset = () => Object.assign(counts,
+  { tierups: 0, invokes: 0, bounces: 0, spilled: 0, spillMax: 0, spillBounces: 0, path: 'interp' });
+reset();
 const exCounted = Object.fromEntries(Object.entries(Object.getOwnPropertyDescriptors(ex)).map(([k, d]) => {
   const v = d.value;
   if (typeof v !== 'function') return [k, v];
   if (k === 'temen_coop_func') return [k, (...a) => { counts.tierups++; return v(...a); }];
   if (k === 'temen_coop_jit_wasm_ptr') return [k, (...a) => { counts.invokes++; return v(...a); }];
-  if (k === 'temen_coop_call_interp') return [k, (...a) => { counts.bounces++; return v(...a); }];
+  if (k === 'temen_coop_call_interp') {
+    return [k, (...a) => {
+      const n = Number(a[2] ?? 0);
+      counts.bounces++;
+      counts.spilled += n;
+      if (n > 0) counts.spillBounces++;
+      if (n > counts.spillMax) counts.spillMax = n;
+      return v(...a);
+    }];
+  }
   if (k === 'temen_onramp_jit_run_open') return [k, (...a) => { const r = v(...a); if (r === 0) counts.path = 'whole-program'; return r; }];
   if (k === 'temen_coop_open') return [k, (...a) => { const r = v(...a); if (r === 0) counts.path = 'coop'; return r; }];
   return [k, v];
@@ -84,5 +97,6 @@ for (const p of progs) {
   console.log(`  temen_coop_open: shared=0 → ${openShared0}   shared=1 → ${openShared1}   ${openShared0 === 0 ? '(ADMITTED ✓)' : '(refused)'}`);
   if (cold.threw) { console.log(`  pump: THREW ${cold.threw}`); }
   console.log(`  bytecode ${bMs.toFixed(0)}ms | auto path=${warm.path} cold ${cold.ms.toFixed(0)}ms warm ${warmMs.toFixed(0)}ms (${(bMs / warmMs).toFixed(2)}x)`);
-  console.log(`  events: tierups=${warm.tierups} jit_invokes=${warm.invokes} bounces=${warm.bounces} | parity=${parity}\n`);
+  console.log(`  events: tierups=${warm.tierups} jit_invokes=${warm.invokes} bounces=${warm.bounces} | parity=${parity}`);
+  console.log(`  spill: ${warm.spillBounces} bounce(s) carried words, ${warm.spilled} total, max ${warm.spillMax}\n`);
 }
