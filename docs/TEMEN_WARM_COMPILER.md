@@ -390,11 +390,34 @@ eight `bench_scaled` programs) take the coop path with byte-identical stdout at 
   runs at 2.60× the plain `temen_run_onramp` speed either way.
 - **No bounce on any card carried a spilled word.** As #96 predicted, only runtime helpers emit;
   `jacl_alloc` reaches futex waits, so a program's own code stays interpreted.
-- The coop path's speedup over `temen_run_onramp` on allocation-heavy cards (1.5–2.6×) comes from the
-  run itself, not emitted code. The likely cause is the coop run's flat growable window against the
-  on-ramp's 2^40 reservation; this is not isolated. The playground runs programs with
-  `temen_run_onramp`, so it does not get that speedup today, and it doesn't pay the coop open cost either
-  (about 25 ms, which makes short programs about 3× slower).
+- The coop path's speedup over `temen_run_onramp` on allocation-heavy cards (1.5–2.6×) came from the
+  run itself, not emitted code: the on-ramp's 2^40 reservation fell back to temen-mem's `Paged` backing
+  on wasm, which takes a lock and a tree lookup on every access, while the coop window was flat
+  (temen #1710). Fixed by temen #1724; see the next section.
+
+### Re-measured at temen `e7923dc2` — the playground's Run path, 1.4–2.4× (temen #1724)
+
+temen #1724 replaced the on-ramp's wasm backing with `Region::Sparse`, a lock-free table of 64 KiB
+segments allocated on first write. Both playground Run paths reach it: `runTemen` for an unedited
+example and `linkRun` for edited source, since both end in `onramp_exec`. No JACL change.
+
+`temen_run_onramp`, threads cdylib, node, the same cards byte-for-byte at both pins, identical stdout
+and status on every card:
+
+| card | temen `10ec5e8a` | `e7923dc2` |
+|---|--:|--:|
+| `collection_churn` | 49.6 s | 20.5 s (**2.42×**) |
+| `map_lookup` | 27.0 s | 15.0 s (**1.81×**) |
+| `box_churn` | 18.0 s | 11.1 s (**1.63×**) |
+| `string_concat` | 9.7 s | 6.9 s (**1.41×**) |
+| `gc_memory_bounded` / `gc_high_churn` (best of 5) | 101 / 98 ms | 46 / 60 ms (**2.20× / 1.65×**) |
+| `arithmetic`, `gc_multi_cycle` (best of 5) | | 1.05× |
+| `fib`, `sieve` and the typed variants | | 0.98–1.04× |
+
+The compile side: the plain-onramp compile of `tour` (the `guest` compile mode) goes from 469 ms to
+300 ms, and `arithmetic` from 84 to 72 ms. The warm-snapshot paths (warm-interp, warm-coop) are
+unchanged, because the warm session's window was already flat.
+
 
 ## Relationship to temen issues
 
