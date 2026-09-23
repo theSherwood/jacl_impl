@@ -405,7 +405,9 @@ fn main() {
     temen_wasm_jit::outline_cap_calls(&mut outlined);
     report("AFTER optimize_module + outline_cap_calls (mixed-tier prep)", &outlined);
 
-    coop_report(&outlined);
+    // The linked module exactly as `emit_temen` encodes it — what `coop_emit_for` receives. Not
+    // `opt`/`outlined`: the driver never runs the optimizer, and it outlines once itself.
+    coop_report(&module);
 
     run_compare(&module);
 }
@@ -427,6 +429,12 @@ fn main() {
 /// The chain, mirrored below in the driver's order: `outline_cap_calls` → pick paged / B2 / local
 /// table → `compile_module_tierup*` → `emit[i]` → `emittable_leaf = emit && all-i64 sig` →
 /// `eligible = leaf && est_emitted_size >= floor` → decline iff no leaf and no `vm_jit_*` import.
+///
+/// The input must be the **linked module exactly as `emit_temen` encodes it** — the driver runs no
+/// optimizer, and it applies `outline_cap_calls` once, which this does too. Passing an
+/// already-outlined module is not harmless: outlining is not idempotent. Each wrapper still holds its
+/// `call.cap`, so a second pass hoists that into a further wrapper and turns the first into pure
+/// compute plus a `Call` — an emittable function the driver never sees, inflating every count below.
 ///
 /// Two deliberate divergences from the driver, both noted in the output:
 ///   * `onramp_check` is browser-internal, so it is not applied here; the real driver gates on it
@@ -568,6 +576,268 @@ fn coop_report(m0: &Module) {
             i,
             names.get(i).copied().unwrap_or("-"),
             emit[*i]
+        );
+    }
+
+    spill_bound(&m, &emit, &names, "the emitter's own emit set at this pin");
+    // Model: every function whose own body the emitter lowers, with no cascade from its callees. The
+    // emit set above is cascaded — a caller of an unserviceable callee (one that suspends, waits, or
+    // reaches gc.roots) is dropped with it — so it can leave out exactly the allocating code the spill
+    // cost is about. This pass is the bound once that cascade is gone.
+    let in_subset = temen_wasm_jit::analyze(&m).in_subset;
+    spill_bound(&m, &in_subset, &names, "model: every in-subset function emitted, no callee cascade");
+}
+
+/// temen #1627's first checklist item: a **static bound** on what spilling live values at every
+/// host-reaching call would cost the emitted tier — measured before anyone writes the emitter change.
+///
+/// Over the emitter's own emit set, a call from emitted code is a **spill site** when its callee can
+/// reach the host: a callee that is not emitted (the call is a bounce into the interpreter), any
+/// indirect call (the shared table can route it anywhere), an inline host op, or an emitted callee
+/// that can itself reach one of those — a backward fixpoint over direct and tail calls. A call to an
+/// emitted callee that never reaches the host is pure compute and needs no spill. A tail call leaves
+/// nothing live in the caller, so it spills nothing whatever its callee.
+///
+/// A spill site's cost is the integer values **live across** it, which block-local SSA makes a scan of
+/// one block: defined before the call (a block param or an earlier result) and read after it, by a
+/// later instruction or the terminator. An argument read only by the call itself is not counted — the
+/// callee holds its own copy. A value whose type `func_value_types` cannot derive counts as integer, so
+/// the bound errs high, and the output says how many there were.
+///
+/// Static only: every site counts once, however often it runs. The dynamic cost needs the run.
+fn spill_bound(
+    m: &Module,
+    emit: &[bool],
+    names: &std::collections::BTreeMap<usize, &str>,
+    over: &str,
+) {
+    use temen_ir::{Terminator, ValType};
+    println!("\n===== temen #1627 STATIC SPILL BOUND over {over} =====");
+    let n = m.funcs.len();
+    if !emit.iter().any(|&e| e) {
+        if m.funcs.iter().any(|f| f.uses_gc_roots()) {
+            println!(
+                "no emitted code to bound: the module reaches gc.roots, so temen #1546 §2's module veto \
+                 emits nothing at this pin. Measure against the last pre-veto pin (temen d93b4953), or \
+                 after #1627 relaxes the veto."
+            );
+        } else {
+            println!("no emitted code to bound.");
+        }
+        return;
+    }
+
+    // Reaches-the-host: seeded by every non-emitted function (calling it is a bounce) and by any body
+    // holding an indirect call or a host op, then propagated backwards over direct and tail calls.
+    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut reaches_host: Vec<bool> = emit.iter().map(|&e| !e).collect();
+    for (i, f) in m.funcs.iter().enumerate() {
+        for b in &f.blocks {
+            for inst in &b.insts {
+                match inst {
+                    Inst::Call { func, .. } => callees[i].push(*func as usize),
+                    Inst::CallIndirect { .. }
+                    | Inst::CapCall { .. }
+                    | Inst::CallImport { .. }
+                    | Inst::CallImportDyn { .. }
+                    | Inst::CallSym { .. } => reaches_host[i] = true,
+                    _ => {}
+                }
+            }
+            match &b.term {
+                Terminator::ReturnCall { func, .. } => callees[i].push(*func as usize),
+                Terminator::ReturnCallIndirect { .. } => reaches_host[i] = true,
+                _ => {}
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..n {
+            if !reaches_host[i] && callees[i].iter().any(|&c| reaches_host[c]) {
+                reaches_host[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let fn_results: Vec<usize> = m.funcs.iter().map(|f| f.results.len()).collect();
+    let mut sites: Vec<(usize, &'static str, usize)> = Vec::new(); // (func, reason, live ints)
+    let (mut pure_calls, mut tail_calls, mut untyped, mut emitted_insts) =
+        (0usize, 0usize, 0usize, 0usize);
+    let mut at_definition = 0usize;
+    for fi in (0..n).filter(|&i| emit[i]) {
+        let f = &m.funcs[fi];
+        let vtypes = temen_verify::func_value_types(f, &m.funcs, &m.types, m.memory.is_some());
+        for (bi, b) in f.blocks.iter().enumerate() {
+            emitted_insts += b.insts.len();
+            if matches!(
+                b.term,
+                Terminator::ReturnCall { .. } | Terminator::ReturnCallIndirect { .. }
+            ) {
+                tail_calls += 1;
+            }
+            // Block-local numbering: the params, then each instruction's results in order.
+            let mut start = Vec::with_capacity(b.insts.len());
+            let mut next = b.params.len();
+            for inst in &b.insts {
+                start.push(next);
+                next += inst.result_count(&fn_results, &m.types);
+            }
+            // The last position reading each value: an instruction index, or `insts.len()` for the terminator.
+            let mut last_use: Vec<Option<usize>> = vec![None; next];
+            for (k, inst) in b.insts.iter().enumerate() {
+                inst.clone().for_each_operand_mut(&mut |v| {
+                    if let Some(slot) = last_use.get_mut(*v as usize) {
+                        *slot = Some(k);
+                    }
+                });
+            }
+            let term_pos = b.insts.len();
+            b.term.clone().for_each_operand_mut(&mut |v| {
+                if let Some(slot) = last_use.get_mut(*v as usize) {
+                    *slot = Some(term_pos);
+                }
+            });
+            let mut spilled = vec![false; next];
+            for (k, inst) in b.insts.iter().enumerate() {
+                let reason = match inst {
+                    Inst::Call { func, .. } => {
+                        let g = *func as usize;
+                        if !emit[g] {
+                            "bounce (callee not emitted)"
+                        } else if reaches_host[g] {
+                            "emitted callee reaches the host"
+                        } else {
+                            pure_calls += 1;
+                            continue;
+                        }
+                    }
+                    Inst::CallIndirect { .. } => "indirect call",
+                    Inst::CapCall { .. }
+                    | Inst::CallImport { .. }
+                    | Inst::CallImportDyn { .. }
+                    | Inst::CallSym { .. } => "inline host op",
+                    _ => continue,
+                };
+                let types = vtypes.get(bi);
+                let mut live = 0;
+                for v in 0..start[k] {
+                    if last_use[v].is_some_and(|u| u > k) {
+                        let int = match types.and_then(|t| t.get(v)) {
+                            Some(ValType::I32) | Some(ValType::I64) => true,
+                            Some(_) => false,
+                            None => {
+                                untyped += 1;
+                                true
+                            }
+                        };
+                        if int {
+                            live += 1;
+                            spilled[v] = true;
+                        }
+                    }
+                }
+                sites.push((fi, reason, live));
+            }
+            at_definition += spilled.iter().filter(|&&x| x).count();
+        }
+    }
+
+    let n_emit = emit.iter().filter(|&&e| e).count();
+    let stores: usize = sites.iter().map(|s| s.2).sum();
+    let max_live = sites.iter().map(|s| s.2).max().unwrap_or(0);
+    let none_live = sites.iter().filter(|s| s.2 == 0).count();
+    println!("emitted functions: {n_emit} of {n}, holding {emitted_insts} IR instructions");
+    println!(
+        "calls in emitted code: {}  ->  spill sites {}  |  pure compute, no spill {}  |  tail calls {} (nothing live)",
+        sites.len() + pure_calls,
+        sites.len(),
+        pure_calls,
+        tail_calls
+    );
+    for reason in [
+        "bounce (callee not emitted)",
+        "indirect call",
+        "emitted callee reaches the host",
+        "inline host op",
+    ] {
+        let r: Vec<usize> = sites
+            .iter()
+            .filter(|s| s.1 == reason)
+            .map(|s| s.2)
+            .collect();
+        if !r.is_empty() {
+            println!(
+                "   {:<34} {:>5} sites, {:>6} live ints",
+                reason,
+                r.len(),
+                r.iter().sum::<usize>()
+            );
+        }
+    }
+    let mean = if sites.is_empty() {
+        0.0
+    } else {
+        stores as f64 / sites.len() as f64
+    };
+    println!(
+        "live integers across spill sites: {stores} in total (= spill stores), max {max_live} at one site, \
+         mean {mean:.2}; {none_live} sites have none live"
+    );
+    let pct = |x: usize| 100.0 * x as f64 / emitted_insts.max(1) as f64;
+    println!(
+        "static ratio against {emitted_insts} emitted IR instructions:\n   \
+         spill at each call   {stores:>6} stores = {:.1}%   (a value live across 3 calls is stored 3 times)\n   \
+         spill at definition  {at_definition:>6} stores = {:.1}%   (each such value stored once per block execution, \
+         into a fixed slot in the frame's spill area)",
+        pct(stores),
+        pct(at_definition)
+    );
+    let buckets: [(usize, usize, &str); 7] = [
+        (0, 0, "0"),
+        (1, 1, "1"),
+        (2, 2, "2"),
+        (3, 3, "3"),
+        (4, 7, "4-7"),
+        (8, 15, "8-15"),
+        (16, usize::MAX, "16+"),
+    ];
+    let hist: Vec<String> = buckets
+        .iter()
+        .map(|&(lo, hi, label)| {
+            format!(
+                "{label}:{}",
+                sites.iter().filter(|s| s.2 >= lo && s.2 <= hi).count()
+            )
+        })
+        .collect();
+    println!("sites by live count  {}", hist.join("  "));
+    if untyped > 0 {
+        println!("({untyped} live values had no derivable type and were counted as integers — the bound errs high)");
+    }
+
+    let mut per_fn: std::collections::BTreeMap<usize, (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for &(fi, _, live) in &sites {
+        let e = per_fn.entry(fi).or_default();
+        e.0 += 1;
+        e.1 += live;
+    }
+    let mut ranked: Vec<(usize, usize, usize)> =
+        per_fn.into_iter().map(|(fi, (s, l))| (fi, s, l)).collect();
+    ranked.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+    println!("\nemitted functions by spill stores (top 15):");
+    for &(fi, s, l) in ranked.iter().take(15) {
+        println!(
+            "   f{:<5} {:<34} {:>4} sites  {:>5} live ints",
+            fi,
+            names.get(&fi).copied().unwrap_or("-"),
+            s,
+            l
         );
     }
 }
