@@ -52,6 +52,10 @@ static const char *source_for(const char *name) {
    * `pin_call_arg` is the issue's repro (a proc call's second argument), `pin_def_in_operand`
    * covers a binding made inside an operand surviving the pin release, and `arg_arith` is the
    * payoff: argument-position arithmetic now reaches the monomorphic guard. */
+  /* jacl #170: a closure called through a binding, with an argument that moves blocks — the callee's
+   * i32 function index was pinned into the (i64) frame and failed verification. */
+  if (!strcmp(name, "pin_closure_call_arg"))
+    return "def f [\\ + $it 1]\n[f [if [> 1 0] { 10 } { 20 }]]";
   if (!strcmp(name, "pin_call_arg"))
     return "proc f {a, b} {+ $a $b}\ndef r [f 1 [if [> 1 0] { 2 } { 3 }]]\n[+ $r 0]";
   if (!strcmp(name, "pin_def_in_operand")) return "def a [+ 1 [def x 2]]\n[+ $a $x]";

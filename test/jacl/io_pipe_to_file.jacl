@@ -2,6 +2,8 @@
 # expect: green
 # expect: blue
 # expect: 
+# Shells out to `echo`, so it needs the exec capability: `jacl_temen run --exec echo` (jacl #171;
+# ungranted, `!echo` is an error value). The harness runs it that way.
 !echo "red
 green
 blue" | write-file "/tmp/jacl_io_pipe.txt"
