@@ -944,6 +944,14 @@ fn swap_loses_no_update_across_parallel_workers() {
 }
 
 #[test]
+fn top_level_code_and_procs_share_a_top_level_mut() {
+    // jacl #168: top-level code used to keep its own copy of a top-level `mut`, so a proc's `set`
+    // never reached a later top-level read (0 here), nor a top-level `set` a proc (0).
+    run_case("global_set_by_proc", i32_val(5));
+    run_case("global_set_at_top", i32_val(7));
+}
+
+#[test]
 fn parallel_tasks_setting_different_globals_lose_nothing() {
     // jacl #167: the module globals are one persistent map whose root every `set` replaces. With a
     // plain store, a task writing back a root built before another task's update undid that update —

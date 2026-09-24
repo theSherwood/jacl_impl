@@ -284,6 +284,12 @@ static const char *source_for(const char *name) {
     return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
   if (!strcmp(name, "race"))
     return "[race { [+ 40 2] } { [+ 100 100] }]";
+  /* jacl #168: a top-level `mut` a proc touches is one value — a proc's `set` is seen by top-level
+   * code after it, and a top-level `set` by a proc. */
+  if (!strcmp(name, "global_set_by_proc"))
+    return "mut g 0\nproc f {} { set g 5 }\nf\n[+ $g 0]";
+  if (!strcmp(name, "global_set_at_top"))
+    return "mut h 0\nproc r {} { + $h 0 }\nset h 7\n[r]";
   /* jacl #167: 4 tasks each increment their own top-level global 1000 times on parallel workers;
    * the globals map's root is replaced by compare-and-swap, so no task undoes another's update. */
   if (!strcmp(name, "globals_race"))

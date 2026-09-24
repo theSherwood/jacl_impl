@@ -203,6 +203,9 @@ typedef struct {
   /* module globals — names bound at top level, visible from any proc/closure via the
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
   const char *globals[128]; uint32_t globalslen[128]; int nglobals;
+  /* A top-level `mut` that some proc reads or sets (jacl #168): it lives in the global map only —
+   * no top-level local or cell — so top-level code, its closures and every proc see one value. */
+  uint8_t global_shared[128];
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
   int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
@@ -224,7 +227,13 @@ static int is_global_name(Cx *cx, const char *s, uint32_t l) {
 }
 static void global_add(Cx *cx, const char *s, uint32_t l) {
   if (is_global_name(cx, s, l) || cx->nglobals >= 128) return;
-  cx->globals[cx->nglobals] = s; cx->globalslen[cx->nglobals] = l; cx->nglobals++;
+  cx->globals[cx->nglobals] = s; cx->globalslen[cx->nglobals] = l; cx->global_shared[cx->nglobals] = 0;
+  cx->nglobals++;
+}
+static int is_shared_global(Cx *cx, const char *s, uint32_t l) {
+  for (int i = 0; i < cx->nglobals; i++)
+    if (cx->globalslen[i] == l && memcmp(cx->globals[i], s, l) == 0) return cx->global_shared[i];
+  return 0;
 }
 
 static void cx_fail(Cx *cx, const char *msg); /* fwd */
@@ -2113,6 +2122,53 @@ static void add_free_varrefs(AstNode *node, const char **bound, uint32_t *blen, 
     if (node->data.command.head) add_free_varrefs(node->data.command.head, bound, blen, nb, set, slen, sn);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) add_free_varrefs(node->data.command.args[i], bound, blen, nb, set, slen, sn);
   }
+}
+
+/* Mark the global a var-ref or `set` target names, unless the enclosing proc binds it itself. Walks
+ * the whole body (nested closures too) and marks as it goes — no bounded name set — so a large proc
+ * cannot hide a reference. `bound` saturating at CG_CAP_MAX only marks more (still correct). */
+static void mark_global_ref(Cx *cx, const char *nm, uint32_t nl, const char **bound, uint32_t *blen, int nb) {
+  if (set_has(bound, blen, nb, nm, nl)) return;
+  for (int g = 0; g < cx->nglobals; g++)
+    if (cx->globalslen[g] == nl && memcmp(cx->globals[g], nm, nl) == 0) cx->global_shared[g] = 1;
+}
+static void mark_free_global_refs(Cx *cx, AstNode *node, const char **bound, uint32_t *blen, int nb) {
+  if (node->type == AST_VAR_REF) {
+    mark_global_ref(cx, node->data.var_ref.name, node->data.var_ref.length, bound, blen, nb);
+  } else if (node->type == AST_RETURN) {
+    if (node->data.return_stmt.value) mark_free_global_refs(cx, node->data.return_stmt.value, bound, blen, nb);
+  } else if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) mark_free_global_refs(cx, node->data.block.commands[i], bound, blen, nb);
+  } else if (node->type == AST_COMMAND) {
+    if (node->data.command.head_id == HEAD_SET && node->data.command.arg_count >= 1 &&
+        node->data.command.args[0]->type == AST_LIT_STRING)
+      mark_global_ref(cx, node->data.command.args[0]->data.lit_string.value,
+                      node->data.command.args[0]->data.lit_string.length, bound, blen, nb);
+    if (node->data.command.head) mark_free_global_refs(cx, node->data.command.head, bound, blen, nb);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) mark_free_global_refs(cx, node->data.command.args[i], bound, blen, nb);
+  }
+}
+
+/* Mark the top-level `mut`s some proc refers to (jacl #168). Top-level code keeps a top-level
+ * binding in a local (fast in a top-level loop) and mirrors it into the global map where it is
+ * defined, while procs read and write the map. A `mut` a proc touches would then have two copies:
+ * a proc's `set` never reached top-level reads, and a top-level `set` never reached a proc. So
+ * such a `mut` gets no top-level local and every access goes through the map. A `def` cannot be
+ * set, so its mirror stays exact. The scan is conservative (a proc param or a typed local
+ * shadowing the name also counts), which only costs that name the map lookup. */
+static void mark_proc_global_refs(Cx *cx, AstNode *node) {
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) mark_proc_global_refs(cx, node->data.block.commands[i]);
+    return;
+  }
+  if (node->type != AST_COMMAND) return;
+  AstNode **a = node->data.command.args; uint32_t ac = node->data.command.arg_count;
+  if (node->data.command.head_id == HEAD_PROC && ac >= 3 && a[ac - 1]->type == AST_BLOCK) {
+    const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
+    collect_bound(a[ac - 1], bound, blen, &nb);
+    mark_free_global_refs(cx, a[ac - 1], bound, blen, nb);
+  }
+  for (uint32_t i = 0; i < ac; i++) mark_proc_global_refs(cx, a[i]);
 }
 
 /* Build the "captured names" set for the function whose body region is `node`: the free
@@ -4334,6 +4390,15 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
       return box;
     }
+    /* A top-level `mut` some proc reads or sets lives in the global map only (jacl #168): no local
+     * or cell, so top-level code and its closures reach it through the map as the procs do, and a
+     * write on either side is seen by the other. (See mark_proc_global_refs.) */
+    if (hid == HEAD_MUT && cx->at_top_level && is_shared_global(cx, name, len)) {
+      IrVal key = compile_string_literal(cx, name, len);
+      IrVal ga[] = {cx->sp, key, val};
+      (void)emit_rt_call(cx, "jacl_global_set", ga, 3);
+      return val;
+    }
     /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
      * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
     if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
@@ -6306,6 +6371,7 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
     if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
   register_externs(&cx, nodes, count);  /* pass 0b: extern (FFI) declarations */
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
+  for (uint32_t i = 0; i < count; i++) mark_proc_global_refs(&cx, nodes[i]); /* …the ones procs touch */
   for (uint32_t i = 0; i < count && !cx.wants_trace; i++)   /* gate: instrument only if used */
     if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;
   register_procs(&cx, m, nodes, count); /* pass 1 */
