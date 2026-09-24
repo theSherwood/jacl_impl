@@ -201,6 +201,71 @@ jobs:
             vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm \
             "$RUNNER_TEMP/hi.temen" $'hi\n'
 
+  playground-workers-gate:
+    name: Playground Run on the Worker driver
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # vendor/temen — both engines, par.js/worker.js, temen-llvm
+
+      - name: Setup Rust (wasm32 for the temen-browser cdylib)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # The Worker driver's engine is temen's threads build (`-Z build-std`), built by
+      # build_assets.sh with `cargo +nightly`; installed beside stable, not as the default.
+      - name: Install Rust nightly (the threads engine)
+        run: rustup toolchain install nightly --profile minimal --component rust-src --target wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            vendor/temen
+            vendor/temen/browser
+            vendor/temen/crates/temen-llvm
+            runtime/harness
+
+      - name: Install clang/LLVM 18 (temen-llvm bakes the .temen assets)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      - name: Install llvm-link 21 (links the unir unit into the runtime)
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build the playground (assets + bundle)
+        run: |
+          bash demo/temen/build_assets.sh
+          ( cd demo && bash build_demo.sh )
+
+      # build_assets.sh's Worker-driver step is fail-soft (the Pages build degrades to single-threaded
+      # Runs without it); the gate must not read a skip as a pass.
+      - name: Check the Worker driver was built
+        run: test -s demo/temen-web/target/wasm32-unknown-unknown/release/temen_browser.wasm
+
+      - name: Install Chromium (Playwright)
+        run: |
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      # jacl #152: the real page, in Chromium, with the COOP/COEP headers the Worker driver needs —
+      # a precompiled pool-starting example and an edited `parallel` program run on the Workers
+      # (output checked), and a program that starts no pool stays single-threaded.
+      - name: Gate — Run on the Worker driver
+        run: node demo/temen/workers_gate.mjs demo
+
   workflow-sync:
     name: Workflow sync check
     runs-on: ubuntu-latest
