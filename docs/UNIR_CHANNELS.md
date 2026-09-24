@@ -100,12 +100,11 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, UNIR_REV
   (`cargo run --release -- cabi-ll <dir>`, which writes `unir_cabi.ll` and copies `unir.h`).
   `jacl_impl` vendors both files under `runtime/unir/`, with the unir commit in `UNIR_REV`, the way the
   playground bundle is committed. A runtime build then needs no Rust toolchain.
-- **Exports.** The vendored unit exports every `unir.h` function except `unir_spawn` and
-  `unir_join` (`cabi-ll runtime/unir unir_vat_root unir_region_create …`, listing the rest).
-  `unir_spawn` carries TEMEN's Instantiator op, and the bytecode engine refuses a module that has both
-  that op and fibers, so linking it would send every JACL program to the tree-walker.
-  `codegen.rs::the_runtime_compiles_to_bytecode` guards this. Spawning stages (#19) needs that
-  restriction lifted in TEMEN first.
+- **Exports.** The vendored unit exports all of `unir.h`, including `unir_spawn` for pipelines
+  (`docs/UNIR_PIPELINES.md`). `unir_spawn` carries TEMEN's Instantiator op, and the bytecode engine
+  refuses a module that has both that op and fibers, which sends every JACL program to the
+  tree-walker; `codegen.rs::the_runtime_compiles_to_bytecode` fails until TEMEN lifts that. `cabi-ll`
+  takes an export list (`cabi-ll <dir> [function...]`) for a runtime that leaves spawning out.
 - **Linking.** `runtime/build.sh` compiles `jaclrt.c` to `.ll` with clang 18 as today, then runs
   `llvm-link jaclrt.ll runtime/unir/unir_cabi.ll` and translates the result once. The unit's IR comes
   from rustc's LLVM 21, and LLVM 18's `llvm-link` cannot read it, so **this step needs `llvm-link`

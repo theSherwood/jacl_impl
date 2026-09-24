@@ -1,6 +1,6 @@
 # Pipelines of vats on Unir (`!a | !b`)
 
-**Status:** design, 2026-09-24, for [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19),
+**Status:** partly built, 2026-09-24 (stages, `jacl_pipeline`, pipefail; see Order of work), for [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19),
 the exit criterion of Unir stage 1b. It builds on `docs/UNIR_CHANNELS.md` (channels on edges within
 one vat). The user-facing semantics are `SHELL_API_DESIGN.md`'s. This note maps them onto vats and
 edges, and names the pieces TEMEN and unir still lack.
@@ -45,16 +45,20 @@ The stage-pair rules are `SHELL_API_DESIGN.md`'s, with an edge as the pipe:
 
 ### The program side: stdin, stdout, stderr, and channels passed as values
 
-A program vat is endowed with three edges, `stdin`, `stdout` and `stderr` (each may be absent), plus the
-parent's `stdout` Stream so `write` still binds. These are conventional names in its endowment, not
-special cases.
+A program vat is endowed with three edges, `unir.stdin`, `unir.stdout` and `unir.stderr` (stdin is
+absent for the first stage), plus the parent's host Stream as `stdout`, so its `write` import still
+binds. These are conventional names in its endowment, not special cases, and they are not the bare
+`stdin`/`stdout`, which TEMEN's stdio convention binds the `read`/`write` imports to. A vat endowed
+with `unir.stdout` is a stage.
 
-- `[stdin]` returns the `stdin` read end as a channel (nil when there is none), so `read [stdin] N`
-  works. `print` writes to `stdout` when the vat has it, and to the host `stdout` otherwise, so a
-  program that prints is a pipeline stage with no changes. Errors and diagnostics go to `stderr`.
-- At exit, the runtime completes `stdout` and `stderr` if the program returned normally. If it
-  returned an error value, the runtime severs them with `io-error`, and the error travels down the
-  pipeline as a sever (unir §10, default reaction Fail).
+- `[stdin]`, `[stdout]` and `[stderr]` return those edges as channel ends (nil outside a stage), so
+  `read [stdin] N` and `write [stdout] $bytes` work. `print` writes to `unir.stdout` when the vat has
+  it, and to the host stream otherwise, so a program that prints is a pipeline stage with no changes.
+  `[args]` is the argv it was spawned with (op 15's payload), a vector of strings.
+- At exit, the runtime completes `stdout` if the program returned normally, and severs it with
+  `io-error` if it returned an error value, so the error travels down the pipeline as a sever (unir
+  §10, default reaction Fail). It writes that error's message to `stderr` and completes it either way:
+  a sever would drop the message. It cancels `stdin`, so the stage before it stops.
 - The exit status is the join status. `SHELL_API_DESIGN.md`'s pipefail applies: a stage that severs,
   traps or returns an error makes the pipeline's value an error value naming that stage.
 
@@ -130,13 +134,22 @@ they are an upstream PR, filed from this note.
 
 ## Order of work
 
-1. TEMEN PR: child-entry `synth_manifest_start`, and `vm_region_create` in `CHILD_BINDABLE`. Then
-   bump both repos' pins.
-2. unir PR: the C ABI additions and `TemenProgram` with a module name, with tests in `e2e/temen`
-   (a C root spawning two named programs).
-3. `jacl_impl` PR: stage programs (`[stdin]`, `print` to `unir.stdout`, completion at exit), then
-   `jacl_pipeline` and codegen for `|` chains with `!cmd`, then Job, suspend/resume/cancel, and the
-   tests above.
+1. TEMEN (theSherwood/temen#1776): `synth_manifest_child_start`, `vm_region_create` in
+   `CHILD_BINDABLE`, `__vm_instantiate_detached`, and `TranslateOptions::powerbox_layout`. Without
+   the last, jaclrt's globals sit in the powerbox argument area, and op 15's payload (a stage's argv)
+   lands on them; the harness and `runtime/build.sh` translate jaclrt with it. **Done.**
+2. unir: detached spawn (op 15) with programs as module capabilities, and the C ABI for it
+   (`unir_vat_child`, `unir_vat_args`, `unir_endowed`, `unir_spawn` with grants,
+   `unir_consumer_suspend`/`resume`), tested from a C root. **Done.**
+3. `jacl_impl`: stage programs and `jacl_pipeline` with pipefail (`runtime/pipe_unir.c`, codegen for
+   `!cmd` and `|` chains of them), tested by `codegen.rs::pipelines_run_on_temen`. **Done**, on the
+   tree-walker: bytecode refuses a module with both a spawn and fibers, so it cannot land until TEMEN
+   lifts that (`the_runtime_compiles_to_bytecode` fails meanwhile), and Cranelift refuses fiber
+   children (temen#1469).
+4. Next: Job, suspend/resume/cancel; channel ends passed by move; JACL values feeding a first stage's
+   stdin; `$bin` as a map value, which needs TEMEN to list a vat's capabilities by name. Until then
+   `!name` resolves the capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat
+   does not hold runs through `exec` as before.
 
 ## Out of scope for #19
 

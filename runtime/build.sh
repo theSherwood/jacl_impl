@@ -42,7 +42,7 @@ clang -O2 -S -emit-llvm -DNDEBUG -DJACL_UNIR -fno-vectorize -fno-slp-vectorize \
 echo "runtime IR:       $OUT/jaclrt.ll (with unir $(cat "$DIR/unir/UNIR_REV"))"
 
 # 2. linked IR -> TEMEN-IR module (exports in-band), via the standalone CLI.
-"$TRANSLATE" "$OUT/jaclrt.ll" -o "$OUT/jaclrt.temen"
+"$TRANSLATE" "$OUT/jaclrt.ll" -o "$OUT/jaclrt.temen" --powerbox-layout
 echo "runtime module:   $OUT/jaclrt.temen"
 
 # 3. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's

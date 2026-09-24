@@ -1,0 +1,10 @@
+##
+## fail — returns an error value without reading its stdin: the runtime writes the message to
+## stderr, severs stdout, and cancels stdin.
+##
+
+proc main {} {
+  error "boom"
+}
+
+main

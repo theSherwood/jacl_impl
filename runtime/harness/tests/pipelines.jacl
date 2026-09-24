@@ -1,0 +1,32 @@
+# mode: concurrent
+##
+## pipelines.jacl — `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19).
+## Self-checking. Run by codegen.rs::pipelines_run_on_temen, which grants the programs in
+## tests/pipelines/ as `bin.gen`, `bin.upcase` and `bin.fail`.
+##
+
+proc main {} {
+  # Two vats and an edge between them; the shell reads the last stage's stdout.
+  def out {!gen hello world | !upcase}
+  assert [== [length $out] 600]
+  assert [== [slice $out 0 12] "HELLO\nWORLD\n"]
+
+  # One stage, and three.
+  def one {!gen ab}
+  assert [== [length $one] 150]
+  def three {!gen ab | !upcase | !upcase}
+  assert [== [slice $three 0 6] "AB\nAB\n"]
+
+  # A stage that fails fails the pipeline, which names it and carries its stderr; the stage
+  # after it sees a sever, and the one before it a cancelled stdout.
+  def bad {!gen x | !fail | !upcase}
+  assert [error? $bad]
+  assert [== [error-val $bad] "pipeline: stage failed: fail: boom"]
+
+  # A program this vat was not granted.
+  def none {!gen a | !nope}
+  assert [error? $none]
+  0
+}
+
+main

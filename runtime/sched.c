@@ -52,6 +52,7 @@ int  __vm_atomic_cas32(void *p, int expected, int desired);
 int  __vm_wait32(void *p, int expected, long timeout_ns);
 int  __vm_notify(void *p, int count);
 long __vm_vcpu_tls_get(void);
+void __vm_vcpu_tls_set(long v);
 
 /* The ambient dynamic-scope $ctx (a persistent map). Each task snapshots it at spawn and
  * runs with its own copy, so a parent's later `set $ctx->…` doesn't reach an in-flight task
@@ -411,7 +412,9 @@ static void worker_loop(int is_main) {
   }
 }
 
-static long worker_thread(long arg) { (void)arg; jacl_gc_worker_register(); worker_loop(0); jacl_gc_worker_unregister(); return 0; }
+/* `arg` is the worker's index (1..): its TLS word is set from it rather than trusting the
+ * engine's seed, which is not 0-based in every engine for a §14 child domain. */
+static long worker_thread(long arg) { __vm_vcpu_tls_set(arg); jacl_gc_worker_register(); worker_loop(0); jacl_gc_worker_unregister(); return 0; }
 
 /* Initialize the scheduler state (queue, lock, flags). No worker threads yet — a purely
  * sequential program (no spawn/parallel/race) runs its root job on main alone and never spawns
@@ -436,7 +439,7 @@ static void pool_ensure(void) {
   if (nw > JACL_SCHED_MAX_WORKERS) nw = JACL_SCHED_MAX_WORKERS;
   jacl_pool_nthreads = nw - 1;
   for (int k = 0; k < jacl_pool_nthreads; k++)
-    jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, jacl_pool_vcpu_stack[k], 0);
+    jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, jacl_pool_vcpu_stack[k], k + 1);
 }
 
 /* Root the scheduler's WINDOW state during a collection: the per-worker ready queues, each
@@ -454,6 +457,7 @@ void jacl_sched_mark_roots(void) {
   }
   if (jacl_root_job) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_root_job));
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
+  { extern JaclVal jacl_stage_ends[3]; for (int i = 0; i < 3; i++) jacl_gc_mark(jacl_stage_ends[i]); }   /* a stage's stdio */
   { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
   { extern JaclVal jacl_vfs; jacl_gc_mark(jacl_vfs); }   /* in-memory virtual filesystem */
   { extern JaclVal jacl_proc_sigs; jacl_gc_mark(jacl_proc_sigs); }   /* fnref -> proc signature */
@@ -474,6 +478,8 @@ JaclVal jacl_sched_run_main(JaclVal fnref) {
   for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k]);
   jacl_gc_worker_register();
   JaclVal result = (JaclVal)job_get(root, 8);
+  /* A pipeline stage ends its edges and returns a join status instead (pipe_unir.c). */
+  { extern JaclVal jacl_stage_finish(JaclVal); result = jacl_stage_finish(result); }
   /* Surface an uncaught runtime error: if the program value escaped error-flagged (never
    * caught by a try), print it (`<error: MESSAGE>`) so the failure — and its message — is
    * observable, rather than exiting silently with a discarded error value. */
