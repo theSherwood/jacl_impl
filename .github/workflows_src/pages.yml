@@ -54,6 +54,14 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
+      # runtime/build.sh llvm-links the vendored unir unit (runtime/unir/unir_cabi.ll), which is
+      # rustc's LLVM 21 IR; LLVM 18's llvm-link cannot read it (docs/UNIR_CHANNELS.md, Build).
+      - name: Install llvm-link 21 (links the unir unit into the runtime)
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21
+          llvm-link-21 --version
+
       # Produces the TEMEN backend assets: temen_browser.wasm + jacl_emit.{js,wasm} + jaclrt.temen
       # (+ a couple precompiled example .temen). Reuses the same script the docs describe.
       - name: Build TEMEN assets

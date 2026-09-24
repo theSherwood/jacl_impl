@@ -146,7 +146,9 @@ fn cmd_run(args: &[String]) -> ! {
     let imports = temen_run::Imports::new()
         .provide("write", temen_run::HostCap::stdout())
         .provide("exit", temen_run::HostCap::exit())
-        .provide("stdin", temen_run::HostCap::stdin());
+        .provide("stdin", temen_run::HostCap::stdin())
+        // Channels create Unir edge regions (AddressSpace op 5; docs/UNIR_CHANNELS.md).
+        .provide("vm_region_create", temen_run::HostCap::memory(5));
     let inst = temen_run::instantiate_with_imports(module, imports)
         .unwrap_or_else(|e| die(&format!("instantiate: {e}")));
 

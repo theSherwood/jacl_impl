@@ -313,6 +313,12 @@ JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
 JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
 JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructure: name|pos */
+/* Byte channels (chan.c; docs/UNIR_CHANNELS.md). An end is a JACL_TAG_STREAM over a JOBJ_BLOB. */
+JaclVal jacl_channel(void);                        /* [channel] -> [w r], 16 frames */
+JaclVal jacl_channel_n(JaclVal cap);               /* [channel CAP] */
+JaclVal jacl_chan_write(JaclVal w, JaclVal bytes); /* [write W BYTES]: nil, or an error value */
+JaclVal jacl_chan_read(JaclVal r, JaclVal n);      /* [read R N]: [Buf k u8], nil at EOF, or error */
+JaclVal jacl_chan_close(JaclVal ch);               /* [close CH]: complete (w) / cancel (r) */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_timeout_begin(JaclVal secs);          /* [timeout D { body }] — open a deadline */
 JaclVal jacl_timeout_end(JaclVal body_val);        /* close it: error if the deadline fired */

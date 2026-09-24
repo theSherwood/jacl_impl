@@ -60,6 +60,37 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
     bc
 }
 
+/// The runtime unity TU built as `runtime/build.sh` builds it: with `JACL_UNIR`, so channels
+/// run on Unir edges, and llvm-linked with the vendored unir unit (`runtime/unir/unir_cabi.ll`,
+/// docs/UNIR_CHANNELS.md). The unit is rustc's LLVM 21 IR, so this needs `llvm-link` from LLVM 21
+/// or later (`LLVM_LINK`, default `llvm-link-21`). Returns the linked textual IR.
+fn compile_runtime_with_unir() -> PathBuf {
+    let dir = std::env::temp_dir();
+    let tag = format!("{}_{:?}", std::process::id(), std::thread::current().id());
+    let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let c_ll = dir.join(format!("jaclrt_unir_c_{tag}.ll"));
+    let linked = dir.join(format!("jaclrt_unir_{tag}.ll"));
+    let status = Command::new("clang")
+        .args(["-O2", "-S", "-emit-llvm", "-fno-vectorize", "-fno-slp-vectorize", "-DNDEBUG"])
+        .args(["-DJACL_UNIR", "--target=x86_64-unknown-linux-gnu"])
+        .arg("-I").arg(RUNTIME_DIR)
+        .arg(format!("{RUNTIME_DIR}/jaclrt.c"))
+        .arg("-o").arg(&c_ll)
+        .status()
+        .expect("spawn clang (is clang installed?)");
+    assert!(status.success(), "clang failed to compile the runtime");
+    let llvm_link = std::env::var("LLVM_LINK").unwrap_or_else(|_| "llvm-link-21".into());
+    let status = Command::new(&llvm_link)
+        .arg("-S")
+        .arg(&c_ll)
+        .arg(format!("{RUNTIME_DIR}/unir/unir_cabi.ll"))
+        .arg("-o").arg(&linked)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {llvm_link} (LLVM 21+ llvm-link; set LLVM_LINK): {e}"));
+    assert!(status.success(), "{llvm_link} failed to link the unir unit");
+    linked
+}
+
 /// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
 /// own — the separately-compiled runtime artifact. The returned `exports` name each
 /// `jacl_*` function with its module index, so a program module can resolve a
@@ -67,8 +98,8 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
 /// path: compile the runtime once, link many programs against it). This is the
 /// in-process analogue of `runtime/build.sh`'s `clang … | temen-llvm-translate`.
 pub fn translate_runtime() -> temen_llvm::Translated {
-    let bc = compile_driver(&format!("{RUNTIME_DIR}/jaclrt.c"));
-    temen_llvm::translate_bc_path(&bc).expect("temen-llvm: translate runtime")
+    let ll = compile_runtime_with_unir();
+    temen_llvm::translate_ll_path(&ll).expect("temen-llvm: translate runtime")
     // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
     // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
     // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call

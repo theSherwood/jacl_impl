@@ -1,0 +1,107 @@
+# mode: concurrent
+##
+## channels.jacl — byte channels on Unir edges (docs/UNIR_CHANNELS.md,
+## theSherwood/unir#18). Self-checking: every section ends in `assert`.
+## Run by codegen.rs::channels_run_on_temen against the runtime built with
+## JACL_UNIR; it lives here, not in test/jacl, because the playground's
+## runtime has no Unir backend.
+##
+
+proc main {} {
+  # One job: the bytes fit in the ring, so nothing parks.
+  def {w, r} [channel]
+  assert [== [write $w "hello"] $nil]
+  def got [read $r 100]
+  assert [== [buf-len $got] 5]
+  assert [== [buf-get $got 0] 104]
+  assert [== [buf-get $got 4] 111]
+
+  # A read of N takes at most N bytes and keeps the rest for the next read.
+  write $w "abcdef"
+  assert [== [buf-len [read $r 4]] 4]
+  def rest [read $r 100]
+  assert [== [buf-len $rest] 2]
+  assert [== [buf-get $rest 1] 102]
+
+  # A write larger than a frame (1016 bytes) is split; the reader sees every byte in order.
+  mut big "abcdefgh"
+  mut i 0
+  while [< $i 9] {
+    set big "$big$big"
+    set i [+ $i 1]
+  }
+  write $w $big
+  mut seen 0
+  mut good $true
+  while [< $seen 4096] {
+    def b [read $r 1000]
+    assert [<= [buf-len $b] 1000]
+    mut k 0
+    while [< $k [buf-len $b]] {
+      if [!= [buf-get $b $k] [+ 97 [% [+ $seen $k] 8]]] { set good $false }
+      set k [+ $k 1]
+    }
+    set seen [+ $seen [buf-len $b]]
+  }
+  assert [== $seen 4096]
+  assert $good
+
+  # Closing the write end is end of stream, after the buffered bytes.
+  write $w "xy"
+  close $w
+  assert [== [buf-len [read $r 10]] 2]
+  assert [== [read $r 10] $nil]
+  assert [error? [write $w "more"]]
+
+  # Two jobs through a two-frame ring: the writer parks while it is full, the reader while it
+  # is empty, and every byte arrives once, in order.
+  def {pw, pr} [channel 2]
+  def producer [spawn {
+    mut n 0
+    while [< $n 100] {
+      write $pw "abc"
+      set n [+ $n 1]
+    }
+    close $pw
+    $n
+  }]
+  mut total 0
+  mut ordered $true
+  mut b [read $pr 7]
+  while [!= $b $nil] {
+    mut k 0
+    while [< $k [buf-len $b]] {
+      if [!= [buf-get $b $k] [+ 97 [% [+ $total $k] 3]]] { set ordered $false }
+      set k [+ $k 1]
+    }
+    set total [+ $total [buf-len $b]]
+    set b [read $pr 7]
+  }
+  assert [== $total 300]
+  assert $ordered
+  assert [== [await $producer] 100]
+
+  # One operation per end: a second job entering an end that is in use gets an error value.
+  # The spawned reader parks in its read (the ring is empty); `sleep` lets it get there.
+  def {bw, br} [channel]
+  def reader [spawn { read $br 1 }]
+  sleep 0.05
+  assert [error? [read $br 1]]
+  write $bw "z"
+  assert [== [buf-get [await $reader] 0] 122]
+
+  # Closing the read end: the writer's next write is an error value, not a trap.
+  def {cw, cr} [channel]
+  close $cr
+  assert [error? [write $cw "late"]]
+  assert [error? [read $cr 1]]
+
+  # Bad arguments are error values.
+  assert [error? [channel 0]]
+  assert [error? [read $cw 1]]
+  assert [error? [write $cr "x"]]
+  assert [error? [write $cw 42]]
+  0
+}
+
+main
