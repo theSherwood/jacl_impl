@@ -117,6 +117,7 @@ jobs:
             vendor/temen
             vendor/temen/browser
             vendor/temen/crates/temen-llvm
+            runtime/harness
 
       - name: Install clang/LLVM 18 (temen-llvm bakes the .temen assets)
         run: |
@@ -187,6 +188,18 @@ jobs:
             vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm \
             codegen/selfhost/build/jacl_compiler.temen \
             runtime/build/jaclrt.temen
+
+      # The gate above covers the *link-and-run* path (`temen_link_run`), which drops unreachable
+      # runtime code before running. A precompiled card (`emit_temen`, what the playground ships for
+      # an unedited example) runs through `temen_run_onramp` instead, and nothing here ran one: after
+      # jacl #158 every card was refused (STATUS_UNSUPPORTED) and CI stayed green (fixed in #162).
+      - name: Gate — precompiled card run path
+        run: |
+          printf 'print "hi"\n' > "$RUNNER_TEMP/hi.jacl"
+          ( cd runtime/harness && cargo run --quiet --bin emit_temen -- "$RUNNER_TEMP/hi.jacl" "$RUNNER_TEMP/hi.temen" )
+          node demo/temen/run_temen.mjs \
+            vendor/temen/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm \
+            "$RUNNER_TEMP/hi.temen" $'hi\n'
 
   workflow-sync:
     name: Workflow sync check
