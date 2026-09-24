@@ -86,12 +86,17 @@ fn i32_val(x: i32) -> i64 {
 /// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
 /// `[print …]` program's host I/O works the same way a pure-compute one returns a value.
 fn run_case_full(case: &str) -> (i64, Vec<u8>) {
-    run_case_with(case, &temen_run::RunConfig::default()).unwrap_or_else(|e| panic!("run {case}: {e}"))
+    run_case_with(case, &temen_run::RunConfig::default(), None).unwrap_or_else(|e| panic!("run {case}: {e}"))
 }
 
 /// [`run_case_full`] under an explicit [`temen_run::RunConfig`] (environment, limits), with the
-/// run's own failure returned rather than panicked on.
-fn run_case_with(case: &str, cfg: &temen_run::RunConfig) -> Result<(i64, Vec<u8>), String> {
+/// run's own failure returned rather than panicked on. `backend` `None` runs interp and JIT and
+/// enforces they agree (`run_diff`); `Some` runs that backend alone.
+fn run_case_with(
+    case: &str,
+    cfg: &temen_run::RunConfig,
+    backend: Option<temen_run::Backend>,
+) -> Result<(i64, Vec<u8>), String> {
     let program =
         decode_emitted(&emit(case)).unwrap_or_else(|e| panic!("decode {case}: {e}"));
 
@@ -126,7 +131,10 @@ fn run_case_with(case: &str, cfg: &temen_run::RunConfig) -> Result<(i64, Vec<u8>
         .provide("vm_region_create", temen_run::HostCap::memory(5));
     let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {case}: {e}"));
-    let run = inst.run_diff(cfg)?;
+    let run = match backend {
+        None => inst.run_diff(cfg)?,
+        Some(b) => inst.run(b, cfg)?,
+    };
     let result = match run.outcome {
         temen_run::Outcome::Returned(ref v) => match v.first() {
             Some(Value::I64(x)) => *x,
@@ -924,10 +932,25 @@ fn workers_env(n: &str) -> temen_run::RunConfig {
 }
 
 #[test]
+fn swap_loses_no_update_across_parallel_workers() {
+    // 8 x 2000 swaps on one atom, on 4 workers: `swap` commits with a compare-and-swap and retries
+    // a lost race. A get-then-set lost updates here on both backends (as gc_stress_atom did).
+    //
+    // JIT only: under CPU load the tree-walker sometimes traps MemoryFault on this workload, with the
+    // old get-then-set `swap` too — a separate, pre-existing bug (jacl #167). Back to `None`
+    // (interp == JIT) once that is fixed.
+    for _ in 0..3 {
+        let (v, _) = run_case_with("swap_race", &workers_env("4"), Some(temen_run::Backend::Jit))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(v, i32_val(16000), "every swap must land");
+    }
+}
+
+#[test]
 fn the_worker_count_comes_from_the_run_not_the_build() {
     // One module, two pool sizes: the answer does not depend on how many workers ran it.
     for n in ["1", "4"] {
-        let (v, _) = run_case_with("parallel3", &workers_env(n)).unwrap_or_else(|e| panic!("N={n}: {e}"));
+        let (v, _) = run_case_with("parallel3", &workers_env(n), None).unwrap_or_else(|e| panic!("N={n}: {e}"));
         assert_eq!(v, i32_val(42), "parallel3 with JACL_WORKERS={n}");
     }
 
@@ -938,10 +961,10 @@ fn the_worker_count_comes_from_the_run_not_the_build() {
         limits: temen_run::Limits { max_vcpus: 1, ..Default::default() },
         ..Default::default()
     };
-    let (v, _) = run_case_with("parallel3", &one_vcpu(vec![])).expect("the default pool spawns nothing");
+    let (v, _) = run_case_with("parallel3", &one_vcpu(vec![]), None).expect("the default pool spawns nothing");
     assert_eq!(v, i32_val(42));
     assert!(
-        run_case_with("parallel3", &one_vcpu(workers_env("4").env)).is_err(),
+        run_case_with("parallel3", &one_vcpu(workers_env("4").env), None).is_err(),
         "JACL_WORKERS=4 must spawn pool workers, which a one-vCPU quota refuses"
     );
 }

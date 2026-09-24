@@ -48,6 +48,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # The parallel Worker driver's engine (jacl #152) is temen's *threads* build: shared, imported
+      # memory, which needs `-Z build-std` (nightly + rust-src). build_assets.sh builds it with
+      # `cargo +nightly`; without it the step SKIPs and every Run stays single-threaded. Installed
+      # beside stable, not as the default, so every other build keeps the stable toolchain.
+      - name: Install Rust nightly (the threads engine for the Worker driver)
+        run: rustup toolchain install nightly --profile minimal --component rust-src --target wasm32-unknown-unknown
+
       - name: Install clang/LLVM 18 (temen-llvm bakes jaclrt.temen)
         run: |
           sudo apt-get update
@@ -88,6 +95,13 @@ jobs:
           cp demo/wasm/jacl_emit.wasm   _site/wasm/jacl_emit.wasm
           cp demo/temen/jaclrt.temen        _site/temen/jaclrt.temen
           cp -r demo/temen/cards/.         _site/temen/cards/ 2>/dev/null || true
+          # The Worker driver (jacl #152): temen's threads engine + par.js/worker.js in the layout they
+          # resolve each other from, and the service worker that gives Pages cross-origin isolation.
+          # Absent when build_assets.sh skipped the threads build; Runs then stay single-threaded.
+          if [ -d demo/temen-web ]; then
+            cp -r demo/temen-web _site/temen-web
+            cp demo/coi-serviceworker.js _site/coi-serviceworker.js
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

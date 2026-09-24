@@ -6,3 +6,7 @@ wasm/jacl_emit.js
 wasm/jacl_emit.wasm
 temen/cards/
 temen/jaclrt.temen
+# The Worker driver (build_assets.sh step 1a): temen's threads engine + par.js/worker.js, and the
+# service worker that gives GitHub Pages cross-origin isolation.
+temen-web/
+coi-serviceworker.js

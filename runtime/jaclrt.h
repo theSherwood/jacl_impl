@@ -310,6 +310,7 @@ JaclVal jacl_struct_put(JaclVal s, JaclVal name, JaclVal v);
 JaclVal jacl_box_new(JaclVal v);                   /* [box V] — mutable single-slot ref */
 JaclVal jacl_box_get(JaclVal b);                   /* [deref B] */
 JaclVal jacl_box_set(JaclVal b, JaclVal v);        /* [reset B V] */
+JaclVal jacl_box_cas(JaclVal b, JaclVal cur, JaclVal nv); /* [swap B F]'s commit: true iff B held CUR */
 JaclVal jacl_is_box_v(JaclVal v);                  /* box? */
 JaclVal jacl_field_get(JaclVal v, JaclVal name);   /* struct field / map entry by name */
 JaclVal jacl_field_or_index(JaclVal v, JaclVal name, JaclVal idx); /* destructure: name|pos */

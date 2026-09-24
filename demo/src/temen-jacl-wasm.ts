@@ -63,6 +63,14 @@ interface TemenBrowserExports {
     stdinPtr: number | bigint,
     stdinLen: number | bigint,
   ): bigint;
+  // Link only: the linked module's `temen-encode` bytes land in the stdout stash (0, or -STATUS).
+  temen_link_encode_lib(
+    handle: number,
+    progPtr: number | bigint,
+    progLen: number | bigint,
+    entryPtr: number | bigint,
+    entryLen: number | bigint,
+  ): number;
   // Warm-runtime snapshot (TEMEN_WARM_COMPILER.md Slice 3): open a two-phase (`warmup`/`eval_run`)
   // guest once — the host runs `warmup` and snapshots the post-init window — then `eval_run` each
   // input over the restored warm image (skipping the guest init floor). `open` returns `-1` on
@@ -282,6 +290,34 @@ export class TemenJaclRunner {
       return { output: stdout, error: detail, isError: true };
     }
     return { output: stdout + stderr, error: null, isError: false };
+  }
+
+  /**
+   * {@link linkRun} without the run: link the frontend's IR against `runtime` and return the linked
+   * module's bytes — a `.temen` like a precompiled card, ready for another driver (the parallel
+   * Worker one, {@link WorkerDriver}). Same link pipeline as `linkRun` (`temen_link_encode_lib` and
+   * `temen_link_run_lib` share `link_program`), so a module that runs here also links there.
+   */
+  linkEncode(programIr: string | Uint8Array, runtime: Uint8Array): Uint8Array | { error: string } {
+    const ex = this.ex;
+    const prog = typeof programIr === "string" ? new TextEncoder().encode(programIr) : programIr;
+    let lib: number;
+    try {
+      lib = this.libHandle(runtime);
+    } catch (e) {
+      return { error: String(e instanceof Error ? e.message : e) };
+    }
+    const entry = new TextEncoder().encode(JACL_ENTRY);
+    const rc = ex.temen_link_encode_lib(
+      lib,
+      this.load(prog),
+      this.usize(prog.length),
+      this.load(entry),
+      this.usize(entry.length),
+    );
+    if (rc !== 0) return { error: statusMessage(ex.temen_status()) };
+    const n = Number(ex.temen_stdout_len());
+    return new Uint8Array(ex.memory.buffer, Number(ex.temen_stdout_ptr()), n).slice();
   }
 
   /**

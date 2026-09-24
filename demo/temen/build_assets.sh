@@ -30,8 +30,38 @@ mkdir -p "$DEMO/wasm"
 cp "$TEMEN/browser/target/wasm32-unknown-unknown/release/temen_browser.wasm" "$DEMO/wasm/temen_browser.wasm"
 echo "  -> demo/wasm/temen_browser.wasm ($(wc -c < "$DEMO/wasm/temen_browser.wasm") bytes)"
 
+# --- 1a. the parallel Worker driver (jacl #152): temen's threads engine + its page-side orchestration --
+# A Run whose program starts the scheduler's pool runs each worker on its own Web Worker. That needs
+# temen's *threads* build (shared, imported memory; nightly + rust-src for build-std) and its
+# `par.js`/`worker.js`, kept in the layout they resolve each other from (`web/` beside `target/…`), and
+# cross-origin isolation, which GitHub Pages can only get through `coi-serviceworker.js`. Fail-soft:
+# without them every Run stays on the single-threaded engine above (playground.ts checks at run time).
+# Its own target dir, so it never replaces the plain build at the same path.
+echo "Building the threads engine for the Worker driver…"
+THREADS_TARGET="$TEMEN/browser/target-threads"
+if ( cd "$TEMEN/browser" && CARGO_TARGET_DIR="$THREADS_TARGET" \
+     RUSTFLAGS="-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals \
+       -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--max-memory=4294967296 \
+       -Clink-arg=--export=__stack_pointer -Clink-arg=--export=__tls_base \
+       -Clink-arg=--export=__tls_size -Clink-arg=--export=__tls_align \
+       -Clink-arg=--export=__wasm_init_tls" \
+     cargo +nightly build -Z build-std=std,panic_abort --release --lib --target wasm32-unknown-unknown ); then
+  mkdir -p "$DEMO/temen-web/web" "$DEMO/temen-web/target/wasm32-unknown-unknown/release"
+  cp "$THREADS_TARGET/wasm32-unknown-unknown/release/temen_browser.wasm" \
+     "$DEMO/temen-web/target/wasm32-unknown-unknown/release/temen_browser.wasm"
+  for f in par.js worker.js foreign-mem.js engine-mem.js; do cp "$TEMEN/browser/web/$f" "$DEMO/temen-web/web/$f"; done
+  cp "$TEMEN/browser/web/coi-serviceworker.js" "$DEMO/coi-serviceworker.js"
+  echo "  -> demo/temen-web/ (threads engine $(wc -c < "$DEMO/temen-web/target/wasm32-unknown-unknown/release/temen_browser.wasm") bytes + par.js/worker.js) + demo/coi-serviceworker.js"
+else
+  echo "  SKIP: no threads build (needs nightly + rust-src + the wasm32 target) — Runs stay single-threaded"
+fi
+
 # --- 1b. runtime IR (jaclrt.temen): baked once, shipped for in-browser live linking -----------------
-if [ ! -f "$ROOT/runtime/build/jaclrt.temen" ]; then
+# Rebuilt when missing *or* older than any runtime source: an existence check alone linked the live
+# path against a stale runtime after a runtime change (a call to a new runtime function then fails at
+# run time as an unbound import).
+if [ ! -f "$ROOT/runtime/build/jaclrt.temen" ] || \
+   [ -n "$(find "$ROOT/runtime" -maxdepth 1 \( -name '*.c' -o -name '*.h' \) -newer "$ROOT/runtime/build/jaclrt.temen")" ]; then
   echo "Baking runtime IR (runtime/build.sh)…"
   bash "$ROOT/runtime/build.sh"
 fi
