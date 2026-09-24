@@ -82,7 +82,11 @@ fn main() {
     let rt = jacl_runtime_harness::translate_runtime();
     let cat = jacl_runtime_harness::translate_catalog();
 
-    let linked = temen_ir::link_with_manifest(&[
+    // Read before linking: the linker resolves the data-image funcrefs and clears the list.
+    let no_data_funcrefs = [&rt.module, &cat.module, &program]
+        .iter()
+        .all(|m| m.data_funcrefs.is_empty());
+    let mut linked = temen_ir::link_with_manifest(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {
@@ -93,6 +97,18 @@ fn main() {
     ])
     .expect("link");
     let entry = linked.resolve_export("__jacl_entry").expect("entry export missing after link");
+    // Drop what the program cannot reach, as temen's own link-and-run path does
+    // (`link_program_multi`). A card is a whole executable, not a library: the runtime's exports
+    // resolved the program's calls and are done. Without this every card carries the whole runtime,
+    // including unir's `Vat::join`, whose Instantiator ops next to the scheduler's fibers make the
+    // bytecode engine refuse the card (instantiate + fiber) — a hello-world became UNSUPPORTED on
+    // the browser on-ramp even though it spawns no vat. Skipped when a unit baked a funcidx into
+    // its data image, for the reason `stub_unreachable_funcs` documents.
+    if no_data_funcrefs {
+        linked.exports.retain(|e| e.name == "__jacl_entry");
+        let _ = temen_ir::stub_unreachable_funcs(&mut linked, &[entry]);
+        let _ = temen_ir::prune_unused_imports(&mut linked);
+    }
     let module = temen_ir::synth_manifest_start(linked, entry, false).expect("powerbox");
 
     let bytes = temen_encode::encode_module(&module);

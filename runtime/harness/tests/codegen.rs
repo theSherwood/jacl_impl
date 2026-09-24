@@ -1060,21 +1060,21 @@ fn staged_driver() -> &'static Path {
     BIN.get_or_init(|| {
         let profile_dir = target_profile_dir();
         let staticlib = profile_dir.join("libjacl_runtime_harness.a");
-        if !staticlib.exists() {
-            // `cargo test` builds only the test binary + rlib, not the `[staticlib]` artifact the
-            // C driver links against — materialize it (a no-op when already built).
-            let mut cmd = Command::new(env!("CARGO"));
-            cmd.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
-            if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
-                cmd.arg("--release");
-            }
-            let st = cmd.status().expect("spawn cargo build --lib");
-            assert!(
-                st.success() && staticlib.exists(),
-                "could not build {} for the staged driver",
-                staticlib.display()
-            );
+        // `cargo test` builds only the test binary + rlib, not the `[staticlib]` artifact the C
+        // driver links against — materialize it. Always ask cargo (a no-op when it is current):
+        // checking only that the file exists linked a stale one after a temen bump, whose decoder
+        // rejected the wire version the C encoder now emits.
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+        if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
+            cmd.arg("--release");
         }
+        let st = cmd.status().expect("spawn cargo build --lib");
+        assert!(
+            st.success() && staticlib.exists(),
+            "could not build {} for the staged driver",
+            staticlib.display()
+        );
         let out = std::env::temp_dir().join(format!("jacl_emit_staged_{}", std::process::id()));
         let status = Command::new("gcc")
             .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
@@ -1213,6 +1213,18 @@ fn channels_run_on_temen() {
         "channels.jacl returned a JACL error (0x{:016x}); stdout: {:?}",
         ret as u64,
         String::from_utf8_lossy(&stdout)
+    );
+}
+
+#[test]
+fn the_runtime_compiles_to_bytecode() {
+    // temen's bytecode engine refuses a module with both an Instantiator op and fibers, and
+    // falls back to the tree-walker. The scheduler uses fibers, so the vendored unir unit
+    // leaves out `unir_spawn`/`unir_join` (docs/UNIR_CHANNELS.md, Build).
+    let rt = translate_runtime();
+    assert!(
+        temen_interp::bytecode::SharedProgram::compile(&rt.module).is_some(),
+        "jaclrt is outside the bytecode engine's subset"
     );
 }
 
