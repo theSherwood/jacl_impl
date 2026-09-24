@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JACL Playground</title>
+<!-- Cross-origin isolation for the parallel Worker driver (shared memory; jacl #152). GitHub Pages
+     cannot send COOP/COEP headers, so this service worker adds them (reloading once on first visit).
+     Absent (a build without the threads engine), Runs stay single-threaded. -->
+<script src="coi-serviceworker.js"></script>
 <style>
 :root {
   --bg: #ffffff;

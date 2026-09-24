@@ -40,6 +40,7 @@ const jaclHighlight = HighlightStyle.define([
   { tag: t.operator,                 color: "#905" },
 ]);
 import { TemenJaclRunner, JaclFrontend, RunResult, EmitResult } from "./temen-jacl-wasm";
+import { WorkerDriver } from "./temen-workers";
 
 // Kick the engine off at module load — before the editor is built, before examples.json — so the
 // cdylib streams + compiles in parallel with everything else the page does at startup (it needs no
@@ -373,6 +374,7 @@ interface RunTiming {
   mode?: CompileMode;
   cached?: boolean;
   precompiled?: boolean; // ran a shipped .temen (unedited example) — no live compile at all
+  workers?: number; // ran on the parallel Worker driver with this many pool workers
 }
 
 function displayResult(result: RunResult, timing: RunTiming) {
@@ -397,7 +399,9 @@ function displayResult(result: RunResult, timing: RunTiming) {
   }
   if (timing.runMs !== undefined) parts.push(`run ${timing.runMs.toFixed(0)}ms`);
   const total = (timing.compileMs ?? 0) + (timing.runMs ?? 0);
-  const modeTag = timing.precompiled ? " [precompiled]" : timing.mode ? ` [${MODE_LABEL[timing.mode]}]` : "";
+  const modeTag =
+    (timing.precompiled ? " [precompiled]" : timing.mode ? ` [${MODE_LABEL[timing.mode]}]` : "") +
+    (timing.workers ? ` [${timing.workers} workers]` : "");
   const breakdown =
     parts.join(" · ") + (parts.length > 1 ? ` · total ${total.toFixed(0)}ms` : "") + modeTag;
 
@@ -470,6 +474,28 @@ async function compileWith(mode: CompileMode, live: Live, source: string): Promi
   return { emitted: temenRunner!.emitIrViaCompiler(live.compiler!, source), ran: mode === "tierup" ? "guest" : mode };
 }
 
+/**
+ * The parallel Worker driver (jacl #152), loaded on the first Run that wants it; `null` when this page
+ * can't run it (not cross-origin isolated, or one core) — Runs then stay single-threaded.
+ */
+let workerBoot: Promise<WorkerDriver | null> | null = null;
+function ensureWorkers(): Promise<WorkerDriver | null> {
+  workerBoot ??= WorkerDriver.create("temen-web").catch((e) => {
+    console.warn("[temen] Worker driver unavailable:", e);
+    return null;
+  });
+  return workerBoot;
+}
+
+/**
+ * Whether a program starts the scheduler's worker pool — the only programs Workers speed up. The pool
+ * starts on the first `spawn` (which `parallel` and `race` call); anything else would pay the Worker
+ * driver's start-up (~50 ms) for nothing. Measured in Chromium on 4 cores: `print "hi"` 5 ms
+ * single-threaded vs 55 ms on Workers; a 4-way `parallel` fold 120.7 s vs 31.8 s. A false positive (the
+ * word in a comment or string) only costs that start-up.
+ */
+const STARTS_THE_POOL = /\b(spawn|parallel|race)\b/;
+
 /** Run the current source on the TEMEN backend: a precompiled example verbatim, else compile+link live. */
 async function runOnTemen(source: string) {
   const runner = await ensureTemen();
@@ -478,12 +504,14 @@ async function runOnTemen(source: string) {
     return;
   }
   try {
+    const workers = STARTS_THE_POOL.test(source) ? await ensureWorkers() : null;
     // Fast path: an *unedited* precompiled example runs its shipped .temen directly.
     const entry = temenEntryForCurrentSource(source);
     if (entry) {
       const tRun = performance.now();
       const bytes = new Uint8Array(await (await fetch(`temen/${entry.temen}`)).arrayBuffer());
-      displayResult(runner.runTemen(bytes), { runMs: performance.now() - tRun, precompiled: true });
+      const result = workers ? await workers.run(bytes) : runner.runTemen(bytes);
+      displayResult(result, { runMs: performance.now() - tRun, precompiled: true, workers: workers?.workers });
       return;
     }
     // Live path: compile edited source to IR in the browser, then link vs the runtime + run.
@@ -516,8 +544,15 @@ async function runOnTemen(source: string) {
     }
     const compileMs = cached ? 0 : performance.now() - tCompile;
     const tRun = performance.now();
-    const result = runner.linkRun(ir, live.runtime);
-    displayResult(result, { compileMs, runMs: performance.now() - tRun, mode: ran, cached });
+    let result: RunResult;
+    if (workers) {
+      // Link here (the single-threaded engine holds the resident runtime), run on the Workers.
+      const linked = runner.linkEncode(ir, live.runtime);
+      result = linked instanceof Uint8Array ? await workers.run(linked) : { output: "", error: linked.error, isError: true };
+    } else {
+      result = runner.linkRun(ir, live.runtime);
+    }
+    displayResult(result, { compileMs, runMs: performance.now() - tRun, mode: ran, cached, workers: workers?.workers });
   } catch (e) {
     output.textContent = "";
     const span = document.createElement("span");
