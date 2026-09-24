@@ -67,6 +67,14 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
+      # runtime/build.sh llvm-links the vendored unir unit (runtime/unir/unir_cabi.ll), which is
+      # rustc's LLVM 21 IR; LLVM 18's llvm-link cannot read it (docs/UNIR_CHANNELS.md, Build).
+      - name: Install llvm-link 21 (links the unir unit into the runtime)
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21
+          llvm-link-21 --version
+
       # This job exists because of jacl #141. The `test` job above runs `./build.sh`, which is
       # the *reference VM*'s unit suite; the Rust harness — which owns the differential
       # interp-vs-JIT check AGENTS.md names as the way the backend is verified — ran in no job
@@ -115,6 +123,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      # runtime/build.sh llvm-links the vendored unir unit (runtime/unir/unir_cabi.ll), which is
+      # rustc's LLVM 21 IR; LLVM 18's llvm-link cannot read it (docs/UNIR_CHANNELS.md, Build).
+      - name: Install llvm-link 21 (links the unir unit into the runtime)
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21
+          llvm-link-21 --version
 
       # This job exists because of jacl #134: the playground's gates only ran in pages.yml,
       # which is push-to-main only, so a PR could not see them. PR #92 broke the run-path gate,
