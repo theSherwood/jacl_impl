@@ -870,14 +870,12 @@ JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v) {
  * A persistent map keyed by name; like $ctx, the global holds a heap value so it is a GC
  * root (jacl_globals_mark_root, called from jacl_sched_mark_roots). */
 JaclVal jacl_module_globals;   /* nil -> empty map lazily */
-static JaclVal jacl_globals_map(void) {
-  if (jaclrt_is_nil(jacl_module_globals)) jacl_module_globals = jacl_map_empty();
-  return jacl_module_globals;
-}
-JaclVal jacl_global_get(JaclVal name) { return jacl_map_get(jacl_globals_map(), name); }
+JaclVal jacl_global_get(JaclVal name) { return jacl_map_get(jacl_root_map(jacl_root_peek(&jacl_module_globals)), name); }
 JaclVal jacl_global_set(JaclVal name, JaclVal v) {
-  jacl_module_globals = jacl_map_set(jacl_globals_map(), name, v);
-  return v;
+  for (;;) {   /* replaced by compare-and-swap: parallel tasks set globals too (see jacl_root_peek) */
+    JaclVal seen = jacl_root_peek(&jacl_module_globals);
+    if (jacl_root_replace(&jacl_module_globals, seen, jacl_map_set(jacl_root_map(seen), name, v))) return v;
+  }
 }
 
 /* Widen a value to a declared wide scalar kind (typed defs): 14=i64, 15=u64, 16=f64.
@@ -1286,14 +1284,22 @@ JaclVal jacl_ptr_addr(JaclVal p) {
  * looks it up by the fnref stashed in the closure. A map keyed by i32(fnref); the global
  * is a GC root (jacl_sched_mark_roots). */
 JaclVal jacl_proc_sigs;
+/* Called each time a proc or closure value is made — in a loop, from every worker at once (jacl
+ * #167). A function's signature never changes, so a registered one is left alone: after the first,
+ * registration is a read. The first goes through the root's compare-and-swap (see jacl_root_peek). */
 JaclVal jacl_proc_sig_register(JaclVal fnref, JaclVal sig) {
-  if (jaclrt_is_nil(jacl_proc_sigs)) jacl_proc_sigs = jacl_map_empty();
-  jacl_proc_sigs = jacl_map_set(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref), sig);
-  return jaclrt_nil();
+  JaclVal key = jaclrt_i32((int32_t)(uint64_t)fnref);
+  for (;;) {
+    JaclVal seen = jacl_root_peek(&jacl_proc_sigs);
+    JaclVal map = jacl_root_map(seen);
+    if (!jaclrt_is_nil(jacl_map_get(map, key))) return jaclrt_nil();
+    if (jacl_root_replace(&jacl_proc_sigs, seen, jacl_map_set(map, key, sig))) return jaclrt_nil();
+  }
 }
 JaclVal jacl_proc_sig_get(JaclVal fnref) {
-  if (jaclrt_is_nil(jacl_proc_sigs)) return jaclrt_nil();
-  return jacl_map_get(jacl_proc_sigs, jaclrt_i32((int32_t)(uint64_t)fnref));
+  JaclVal seen = jacl_root_peek(&jacl_proc_sigs);
+  if (jaclrt_is_nil(seen)) return jaclrt_nil();
+  return jacl_map_get(seen, jaclrt_i32((int32_t)(uint64_t)fnref));
 }
 
 /* ---- call-stack trace capture (for `[stack-trace]`) ----

@@ -237,6 +237,21 @@ uint32_t jacl_vec_count(JaclVal vec);
  * hash/eq for strings + scalars). An empty map is JACL_TAG_MAP over a NULL root. */
 void     jacl_map_init(void);                        /* install key handlers (call once) */
 JaclVal  jacl_map_empty(void);
+
+/* A runtime-global persistent map — the module globals, the proc-signature registry, the in-memory
+ * filesystem — is read and replaced by every worker of a parallel run. Plain loads and stores of its
+ * root race: on temen's tree-walker a program whose workers registered signatures concurrently
+ * faulted on a garbage root (jacl #167). So the root is read with an atomic load and replaced only
+ * by a compare-and-swap against the root the new map was built from; an updater that loses the race
+ * rebuilds from the winner's map (`for (;;) { seen = jacl_root_peek(&r); next = f(jacl_root_map(seen));
+ * if (jacl_root_replace(&r, seen, next)) break; }`). Maps are persistent, so an older root a reader
+ * still holds is a whole map. */
+static inline JaclVal jacl_root_peek(JaclVal *root) { return __atomic_load_n(root, __ATOMIC_ACQUIRE); }
+/* The map a peeked root denotes: nil (never written) is the empty map. */
+static inline JaclVal jacl_root_map(JaclVal seen) { return jaclrt_is_nil(seen) ? jacl_map_empty() : seen; }
+static inline bool jacl_root_replace(JaclVal *root, JaclVal seen, JaclVal next) {
+  return __atomic_compare_exchange_n(root, &seen, next, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
 JaclVal  jacl_map_set(JaclVal map, JaclVal key, JaclVal val);   /* persistent: returns a new map */
 JaclVal  jacl_map_get(JaclVal map, JaclVal key);     /* value, or JACL_NIL if absent */
 int      jacl_map_has(JaclVal map, JaclVal key);
