@@ -1250,6 +1250,18 @@ fn channels_run_on_temen() {
 }
 
 #[test]
+fn the_runtime_compiles_to_bytecode() {
+    // temen's bytecode engine refuses a module with both an Instantiator op and fibers, and
+    // falls back to the tree-walker. The scheduler uses fibers, so the vendored unir unit
+    // leaves out `unir_spawn`/`unir_join` (docs/UNIR_CHANNELS.md, Build).
+    let rt = translate_runtime();
+    assert!(
+        temen_interp::bytecode::SharedProgram::compile(&rt.module).is_some(),
+        "jaclrt is outside the bytecode engine's subset"
+    );
+}
+
+#[test]
 fn syntax_tour_runs_clean_on_temen() {
     // tour.jacl exercises one feature area per section — values, bindings, the three modes,
     // interpolation, procs, lambdas, if/while/for, streams, destructuring, structs, maps,
