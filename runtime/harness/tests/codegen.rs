@@ -1299,7 +1299,7 @@ fn pipelines_run_on_temen() {
     // `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19): each program in
     // tests/pipelines/ is linked as a detached child image and granted as `bin.<name>`, with an
     // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour.
-    // On the tree-walker and bytecode; Cranelift refuses a child with fibers (temen#1469).
+    // On every engine: Cranelift runs a stage's fibers and threads since temen#1469.
     let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail"]
         .iter()
         .map(|name| {
@@ -1326,7 +1326,11 @@ fn pipelines_run_on_temen() {
         );
     }
     let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
-    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Bytecode] {
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
         let mut grant = |h: &mut temen_interp::Host| {
             for (name, image) in &stages {
                 let m = h.grant_module(image);
@@ -1335,6 +1339,7 @@ fn pipelines_run_on_temen() {
             h.grant_instantiator(0, 1 << 26);
             h.grant_budget(-1, -1, -1);
         };
+        let compiles = temen_jit::child_compiles();
         let run = inst
             .run_with_caps_and_host(
                 backend,
@@ -1343,6 +1348,13 @@ fn pipelines_run_on_temen() {
                 Some(&mut grant),
             )
             .unwrap_or_else(|e| panic!("run pipelines.jacl on {backend:?}: {e}"));
+        // On Cranelift the stages must run as JIT children, not be refused or fall back.
+        if matches!(backend, temen_run::Backend::Jit) {
+            assert!(
+                temen_jit::child_compiles() > compiles,
+                "no stage was JIT-compiled"
+            );
+        }
         let ret = match run.outcome {
             temen_run::Outcome::Returned(ref v) => match v.first() {
                 Some(Value::I64(x)) => *x,
