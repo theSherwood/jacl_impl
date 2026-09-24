@@ -2544,6 +2544,11 @@ static int expr_is_typed_stream(Cx *cx, AstNode *n) {
  * loop (like the stream drains). Re-entrancy — a watcher that itself resets/swaps the atom —
  * works for free: that nested commit runs its own emitted firing loop during the call. On a
  * box (no watcher slot) jacl_atom_watchers yields nil and the loop exits immediately. */
+/* Hidden, un-nameable frame slots for `swap`'s compare-and-swap retry loop (see HEAD_SWAP). */
+#define SW_REF "\x01""sw-ref"
+#define SW_CLO "\x01""sw-clo"
+#define SW_CUR "\x01""sw-cur"
+#define SW_NEW "\x01""sw-new"
 #define WT_W   "\x01""wt-w"
 #define WT_OLD "\x01""wt-old"
 #define WT_NEW "\x01""wt-new"
@@ -5048,23 +5053,54 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
     IrVal a[] = {cx->sp, v, tn};
     return emit_rt_call(cx, "jacl_to_cast", a, 3);
   }
-  /* `[swap $ref $f]` — apply the closure to the deref'd value, store it back,
-   * and yield the new value (box or atom). */
+  /* `[swap $ref $f]` — apply the closure to the deref'd value, store it back, and yield the new
+   * value (box or atom). Atomic (jacl #152): the store is a compare-and-swap against the value `f`
+   * was applied to (`jacl_box_cas`), and a lost race — another worker committed in between — reads
+   * and applies again. A frame-threaded loop like emit_fire_watchers', since SSA values do not
+   * cross blocks. `f` may therefore run more than once, as a retrying swap's does. */
   if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
     IrVal rc[2];
     if (!compile_operands(cx, node->data.command.args, 2, rc)) return 0;
-    IrVal ref = rc[0], clo = rc[1];
-    IrVal da[] = {cx->sp, ref};
-    IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
-    IrVal fa[] = {cx->sp, clo};
-    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
-    IrType r1[] = {IRB_I64};
-    IrVal cargs[] = {cx->sp, clo, cur};
-    IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
-    IrVal sa[] = {cx->sp, ref, nv};
-    (void)emit_rt_call(cx, "jacl_box_set", sa, 3);
+    IrVal nil = irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    scope_enter(cx);
+    env_define(cx, SW_REF, 7, rc[0], 0, 0);
+    env_define(cx, SW_CLO, 7, rc[1], 0, 0);
+    env_define(cx, SW_CUR, 7, nil, /*is_mut=*/1, 0);
+    env_define(cx, SW_NEW, 7, nil, /*is_mut=*/1, 0);
+    if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+    int wd = frame_width(cx);
+    IrBlock attempt = new_i64_block(cx, wd);
+    IrBlock done = new_i64_block(cx, wd);
+    IrVal frame[IRB_MAX_FRAME + 2];
+    fill_frame(cx, frame);
+    irb_br(cx->f, cx->cur, attempt, frame, wd);
+
+    enter_frame_block(cx, attempt);
+    {
+      IrVal ref = env_lookup(cx, SW_REF, 7)->value, clo = env_lookup(cx, SW_CLO, 7)->value;
+      IrVal da[] = {cx->sp, ref};
+      IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
+      IrVal fa[] = {cx->sp, clo};
+      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
+      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
+      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+      IrType r1[] = {IRB_I64};
+      IrVal cargs[] = {cx->sp, clo, cur};
+      IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      IrVal ca[] = {cx->sp, ref, cur, nv};
+      IrVal committed = emit_rt_call(cx, "jacl_box_cas", ca, 4);
+      env_lookup(cx, SW_CUR, 7)->value = cur;
+      env_lookup(cx, SW_NEW, 7)->value = nv;
+      IrVal ctrue = irb_const_i64(cx->f, cx->cur, JACLVAL_TRUE);
+      IrVal ok = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, committed, ctrue);
+      fill_frame(cx, frame);
+      irb_br_if(cx->f, cx->cur, ok, done, frame, wd, attempt, frame, wd);
+    }
+    enter_frame_block(cx, done);
+    IrVal ref = env_lookup(cx, SW_REF, 7)->value;
+    IrVal cur = env_lookup(cx, SW_CUR, 7)->value;
+    IrVal nv = env_lookup(cx, SW_NEW, 7)->value;
+    scope_exit(cx);
     IrVal r = emit_fire_watchers(cx, ref, cur, nv, nv);   /* atoms notify watchers (old, new) */
     if (cx->failed) return 0;
     return r;

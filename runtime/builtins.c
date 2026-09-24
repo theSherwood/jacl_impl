@@ -716,6 +716,19 @@ JaclVal jacl_box_set(JaclVal b, JaclVal v) {
   (void)jacl_cell_set(jaclrt_from_ptr(JACL_TAG_CELL, jaclrt_as_ptr(b)), v);
   return v;
 }
+/* `[swap B F]`'s commit (jacl #152): store NV into B iff it still holds CUR — the value the caller
+ * read and applied F to — and say whether it did. False means another worker committed in between,
+ * and the caller retries from its value. With a plain get-then-set, concurrent swaps on one atom lost
+ * updates once the pool ran on more than one thread (gc_stress_atom: 489–499 of 500). A non-box is
+ * reported as committed, so the caller's loop ends (its get already yielded the error). */
+JaclVal jacl_box_cas(JaclVal b, JaclVal cur, JaclVal nv) {
+  if (jaclrt_is_error(b)) return JACL_TRUE;
+  uint32_t t = jaclrt_type_index(b);
+  if (t != 0x0B && t != 0x0A && t != 0x0C) return JACL_TRUE;
+  int64_t *slot = (int64_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(b));
+  int64_t expected = (int64_t)cur;
+  return jaclrt_bool(__atomic_compare_exchange_n(slot, &expected, (int64_t)nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+}
 JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0B); }
 /* [sleep S] — S seconds (i32 or f32): park on a private futex word until the
  * timeout elapses (the futex wait re-checks GC, so a sleeping fiber's worker

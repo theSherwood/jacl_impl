@@ -284,6 +284,14 @@ static const char *source_for(const char *name) {
     return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
   if (!strcmp(name, "race"))
     return "[race { [+ 40 2] } { [+ 100 100] }]";
+  /* jacl #152: `swap` is a compare-and-swap — 8 tasks x 2000 swaps on one atom lose no update even
+   * when the pool runs them on parallel workers (a plain get-then-set did, once N > 1). */
+  if (!strcmp(name, "swap_race"))
+    return "proc add1 {x} { + $x 1 }\n"
+           "proc bump {a} {\n  mut i 0\n  while [< $i 2000] {\n    swap $a $add1\n    set i [+ $i 1]\n  }\n  0\n}\n"
+           "def a [atom 0]\n"
+           "def fs [parallel { bump $a } { bump $a } { bump $a } { bump $a } { bump $a } { bump $a } { bump $a } { bump $a }]\n"
+           "[deref $a]";
   /* nested await: a spawned task awaits another task's future (needs the parking scheduler) */
   if (!strcmp(name, "nested_await"))
     return "def a [spawn { [+ 40 2] }]\ndef b [spawn { [+ [await $a] 0] }]\n[await $b]";
