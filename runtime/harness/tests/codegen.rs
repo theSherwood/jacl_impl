@@ -924,6 +924,16 @@ fn workers_env(n: &str) -> temen_run::RunConfig {
 }
 
 #[test]
+fn swap_loses_no_update_across_parallel_workers() {
+    // 8 x 2000 swaps on one atom, on 4 workers: `swap` commits with a compare-and-swap and retries
+    // a lost race. A get-then-set lost updates here on both backends (as gc_stress_atom did).
+    for _ in 0..3 {
+        let (v, _) = run_case_with("swap_race", &workers_env("4")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(v, i32_val(16000), "every swap must land");
+    }
+}
+
+#[test]
 fn the_worker_count_comes_from_the_run_not_the_build() {
     // One module, two pool sizes: the answer does not depend on how many workers ran it.
     for n in ["1", "4"] {

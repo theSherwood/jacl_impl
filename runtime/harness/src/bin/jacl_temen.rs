@@ -4,7 +4,7 @@
 //! shippable fs data images those grants can mount:
 //!
 //! ```text
-//! jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp]
+//! jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]
 //! jacl_temen bundle <assets-dir> -o <out.fsimg>
 //! ```
 //!
@@ -87,9 +87,10 @@ enum FsGrant {
     Image(PathBuf),
 }
 
-/// `run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp]`.
+/// `run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]`.
 fn cmd_run(args: &[String]) -> ! {
     let mut prog: Option<PathBuf> = None;
+    let mut workers: Option<u32> = None;
     let mut grant = FsGrant::None;
     let mut interp = false;
     let mut bytecode = false;
@@ -105,6 +106,16 @@ fn cmd_run(args: &[String]) -> ! {
             "--no-fs" => grant = FsGrant::None,
             "--interp" => interp = true,
             "--bytecode" => bytecode = true,
+            // The scheduler's pool size for this run (jacl #152): passed as `JACL_WORKERS=N` in the
+            // §3e environment, which `sched_init` reads. Absent, the runtime's default (1) stands.
+            "--workers" => {
+                workers = Some(
+                    it.next()
+                        .and_then(|n| n.parse().ok())
+                        .filter(|&n| n >= 1)
+                        .unwrap_or_else(|| die("--workers needs a count >= 1")),
+                )
+            }
             other if prog.is_none() => prog = Some(PathBuf::from(other)),
             other => die(&format!("run: unexpected argument '{other}'")),
         }
@@ -180,8 +191,12 @@ fn cmd_run(args: &[String]) -> ! {
         (false, true) => temen_run::Backend::TreeWalk,
         (false, false) => temen_run::Backend::Jit,
     };
+    let cfg = temen_run::RunConfig {
+        env: workers.map(|n| format!("JACL_WORKERS={n}").into_bytes()).into_iter().collect(),
+        ..Default::default()
+    };
     let run = inst
-        .run_with_caps(backend, &temen_run::RunConfig::default(), &caps)
+        .run_with_caps(backend, &cfg, &caps)
         .unwrap_or_else(|e| die(&format!("run: {e}")));
     use std::io::Write;
     std::io::stdout().write_all(&run.stdout).ok();
@@ -197,6 +212,6 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("bundle") => cmd_bundle(&args[1..]),
-        _ => die("usage: jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp]\n       jacl_temen bundle <assets-dir> -o <out.fsimg>"),
+        _ => die("usage: jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]\n       jacl_temen bundle <assets-dir> -o <out.fsimg>"),
     }
 }
