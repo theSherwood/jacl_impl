@@ -142,10 +142,9 @@ they are an upstream PR, filed from this note.
    (`unir_vat_child`, `unir_vat_args`, `unir_endowed`, `unir_spawn` with grants,
    `unir_consumer_suspend`/`resume`), tested from a C root. **Done.**
 3. `jacl_impl`: stage programs and `jacl_pipeline` with pipefail (`runtime/pipe_unir.c`, codegen for
-   `!cmd` and `|` chains of them), tested by `codegen.rs::pipelines_run_on_temen`. **Done**, on the
-   tree-walker: bytecode refuses a module with both a spawn and fibers, so it cannot land until TEMEN
-   lifts that (`the_runtime_compiles_to_bytecode` fails meanwhile), and Cranelift refuses fiber
-   children (temen#1469).
+   `!cmd` and `|` chains of them), tested by `codegen.rs::pipelines_run_on_temen` on the tree-walker
+   and bytecode. Bytecode needed theSherwood/temen#1789 (per-domain fiber registries, so a module may
+   both spawn and use fibers). Cranelift still refuses fiber children (temen#1469). **Done.**
 4. Next: Job, suspend/resume/cancel; channel ends passed by move; JACL values feeding a first stage's
    stdin; `$bin` as a map value, which needs TEMEN to list a vat's capabilities by name. Until then
    `!name` resolves the capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat

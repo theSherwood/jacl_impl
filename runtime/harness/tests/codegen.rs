@@ -1233,9 +1233,8 @@ const STAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines")
 fn pipelines_run_on_temen() {
     // `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19): each program in
     // tests/pipelines/ is linked as a detached child image and granted as `bin.<name>`, with an
-    // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour. On the tree-walker only for
-    // now: bytecode refuses a module with both spawns and fibers, and Cranelift refuses a child
-    // with fibers (temen#1469).
+    // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour.
+    // On the tree-walker and bytecode; Cranelift refuses a child with fibers (temen#1469).
     let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail"]
         .iter()
         .map(|name| {
@@ -1253,36 +1252,46 @@ fn pipelines_run_on_temen() {
         .collect();
     let (linked, entry) = emit_and_link_file(PIPELINES_JACL);
     let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    // `Backend::Bytecode` falls back to the tree-walker for a module outside its subset; these
+    // must not, or the bytecode run below would silently be a second tree-walk.
+    for m in std::iter::once(&pb).chain(stages.iter().map(|(_, m)| m)) {
+        assert!(
+            temen_interp::bytecode::SharedProgram::compile(m).is_some(),
+            "a pipeline image is outside the bytecode engine's subset"
+        );
+    }
     let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
-    let mut grant = |h: &mut temen_interp::Host| {
-        for (name, image) in &stages {
-            let m = h.grant_module(image);
-            h.register_cap_name(&format!("bin.{name}"), m);
-        }
-        h.grant_instantiator(0, 1 << 26);
-        h.grant_budget(-1, -1, -1);
-    };
-    let run = inst
-        .run_with_caps_and_host(
-            temen_run::Backend::TreeWalk,
-            &temen_run::RunConfig::default(),
-            &[],
-            Some(&mut grant),
-        )
-        .expect("run pipelines.jacl");
-    let ret = match run.outcome {
-        temen_run::Outcome::Returned(ref v) => match v.first() {
-            Some(Value::I64(x)) => *x,
-            other => panic!("unexpected returned value {other:?}"),
-        },
-        temen_run::Outcome::Exited(c) => panic!("exited({c}) instead of returning"),
-    };
-    assert!(
-        !is_jacl_error(ret),
-        "pipelines.jacl returned a JACL error (0x{:016x}); stdout: {:?}",
-        ret as u64,
-        String::from_utf8_lossy(&run.stdout)
-    );
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Bytecode] {
+        let mut grant = |h: &mut temen_interp::Host| {
+            for (name, image) in &stages {
+                let m = h.grant_module(image);
+                h.register_cap_name(&format!("bin.{name}"), m);
+            }
+            h.grant_instantiator(0, 1 << 26);
+            h.grant_budget(-1, -1, -1);
+        };
+        let run = inst
+            .run_with_caps_and_host(
+                backend,
+                &temen_run::RunConfig::default(),
+                &[],
+                Some(&mut grant),
+            )
+            .unwrap_or_else(|e| panic!("run pipelines.jacl on {backend:?}: {e}"));
+        let ret = match run.outcome {
+            temen_run::Outcome::Returned(ref v) => match v.first() {
+                Some(Value::I64(x)) => *x,
+                other => panic!("{backend:?}: unexpected returned value {other:?}"),
+            },
+            temen_run::Outcome::Exited(c) => panic!("{backend:?}: exited({c}) instead of returning"),
+        };
+        assert!(
+            !is_jacl_error(ret),
+            "pipelines.jacl returned a JACL error on {backend:?} (0x{:016x}); stdout: {:?}",
+            ret as u64,
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
 }
 
 #[test]
