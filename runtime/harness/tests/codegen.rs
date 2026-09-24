@@ -1134,10 +1134,10 @@ fn staged_driver() -> &'static Path {
     .as_path()
 }
 
-/// Emit an arbitrary `.jacl` *file* through the staged driver's `--file` mode (`JACL_STAGE_ON_TEMEN=1`
-/// so macros expand on the TEMEN engine), then run it through the same link → powerbox → interp==jit
-/// path as `run_case_full`. Returns the program's returned `JaclVal` and captured stdout.
-fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
+/// Emit a `.jacl` *file* through the staged driver's `--file` mode (`JACL_STAGE_ON_TEMEN=1` so
+/// macros expand on the TEMEN engine) and link it with the runtime. Returns the linked module
+/// and its entry.
+fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
     let out = Command::new(staged_driver())
         .env("JACL_STAGE_ON_TEMEN", "1")
         .arg("--file")
@@ -1165,16 +1165,26 @@ fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
     let entry = linked
         .resolve_export("__prog_entry")
         .unwrap_or_else(|| panic!("{path}: entry export missing after link"));
+    (linked, entry)
+}
 
-    let pb = temen_ir::synth_manifest_start(linked, entry, false)
-        .unwrap_or_else(|e| panic!("synth_manifest_start {path}: {e}"));
-    let imports = temen_run::Imports::new()
+/// The capabilities a JACL program's manifest imports, as every harness grants them.
+fn jacl_imports() -> temen_run::Imports {
+    temen_run::Imports::new()
         .provide("write", temen_run::HostCap::stdout())
         .provide("exit", temen_run::HostCap::exit())
         .provide("stdin", temen_run::HostCap::stdin())
         // Channels create Unir edge regions (AddressSpace op 5; docs/UNIR_CHANNELS.md).
-        .provide("vm_region_create", temen_run::HostCap::memory(5));
-    let inst = temen_run::instantiate_with_imports(pb, imports)
+        .provide("vm_region_create", temen_run::HostCap::memory(5))
+}
+
+/// Emit an arbitrary `.jacl` *file* and run it through the same link → powerbox → interp==jit
+/// path as `run_case_full`. Returns the program's returned `JaclVal` and captured stdout.
+fn run_jacl_file(path: &str) -> (i64, Vec<u8>) {
+    let (linked, entry) = emit_and_link_file(path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false)
+        .unwrap_or_else(|e| panic!("synth_manifest_start {path}: {e}"));
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports())
         .unwrap_or_else(|e| panic!("instantiate {path}: {e}"));
     let run = inst
         .run_diff(&temen_run::RunConfig::default())
@@ -1247,6 +1257,74 @@ fn channels_run_on_temen() {
         ret as u64,
         String::from_utf8_lossy(&stdout)
     );
+}
+
+const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");
+const STAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
+
+#[test]
+fn pipelines_run_on_temen() {
+    // `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19): each program in
+    // tests/pipelines/ is linked as a detached child image and granted as `bin.<name>`, with an
+    // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour.
+    // On the tree-walker and bytecode; Cranelift refuses a child with fibers (temen#1469).
+    let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail"]
+        .iter()
+        .map(|name| {
+            let path = format!("{STAGES_DIR}/{name}.jacl");
+            let (linked, entry) = emit_and_link_file(&path);
+            let image = temen_ir::synth_manifest_child_start(linked, entry, false)
+                .unwrap_or_else(|e| panic!("synth_manifest_child_start {path}: {e}"));
+            assert_eq!(
+                image.memory.map(|m| m.size_log2),
+                Some(26),
+                "a stage's window must be pipe_unir.c's JACL_STAGE_LOG2"
+            );
+            (name.to_string(), image)
+        })
+        .collect();
+    let (linked, entry) = emit_and_link_file(PIPELINES_JACL);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    // `Backend::Bytecode` falls back to the tree-walker for a module outside its subset; these
+    // must not, or the bytecode run below would silently be a second tree-walk.
+    for m in std::iter::once(&pb).chain(stages.iter().map(|(_, m)| m)) {
+        assert!(
+            temen_interp::bytecode::SharedProgram::compile(m).is_some(),
+            "a pipeline image is outside the bytecode engine's subset"
+        );
+    }
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Bytecode] {
+        let mut grant = |h: &mut temen_interp::Host| {
+            for (name, image) in &stages {
+                let m = h.grant_module(image);
+                h.register_cap_name(&format!("bin.{name}"), m);
+            }
+            h.grant_instantiator(0, 1 << 26);
+            h.grant_budget(-1, -1, -1);
+        };
+        let run = inst
+            .run_with_caps_and_host(
+                backend,
+                &temen_run::RunConfig::default(),
+                &[],
+                Some(&mut grant),
+            )
+            .unwrap_or_else(|e| panic!("run pipelines.jacl on {backend:?}: {e}"));
+        let ret = match run.outcome {
+            temen_run::Outcome::Returned(ref v) => match v.first() {
+                Some(Value::I64(x)) => *x,
+                other => panic!("{backend:?}: unexpected returned value {other:?}"),
+            },
+            temen_run::Outcome::Exited(c) => panic!("{backend:?}: exited({c}) instead of returning"),
+        };
+        assert!(
+            !is_jacl_error(ret),
+            "pipelines.jacl returned a JACL error on {backend:?} (0x{:016x}); stdout: {:?}",
+            ret as u64,
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
 }
 
 #[test]

@@ -141,6 +141,9 @@ typedef enum {
   /* Byte channels (docs/UNIR_CHANNELS.md) */
   HEAD_CHANNEL, HEAD_READ, HEAD_WRITE, HEAD_CLOSE,
 
+  /* Pipeline stages (docs/UNIR_PIPELINES.md) */
+  HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -201,6 +204,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "swap", 4) == 0) return HEAD_SWAP;
       if (memcmp(s, "addr", 4) == 0) return HEAD_ADDR;
       if (memcmp(s, "read", 4) == 0) return HEAD_READ;
+      if (memcmp(s, "args", 4) == 0) return HEAD_ARGS;
       return HEAD_NONE;
     case 5:
       if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;
@@ -219,6 +223,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "deref", 5) == 0) return HEAD_DEREF;
       if (memcmp(s, "write", 5) == 0) return HEAD_WRITE;
       if (memcmp(s, "close", 5) == 0) return HEAD_CLOSE;
+      if (memcmp(s, "stdin", 5) == 0) return HEAD_STDIN;
       if (memcmp(s, "unbox", 5) == 0) return HEAD_UNBOX;
       if (memcmp(s, "reset", 5) == 0) return HEAD_RESET;
       if (memcmp(s, "first", 5) == 0) return HEAD_FIRST;
@@ -229,6 +234,8 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "range", 5) == 0) return HEAD_RANGE;
       return HEAD_NONE;
     case 6:
+      if (memcmp(s, "stdout", 6) == 0) return HEAD_STDOUT;
+      if (memcmp(s, "stderr", 6) == 0) return HEAD_STDERR;
       if (memcmp(s, "return", 6) == 0) return HEAD_RETURN;
       if (memcmp(s, "filter", 6) == 0) return HEAD_FILTER;
       if (memcmp(s, "concat", 6) == 0) return HEAD_CONCAT;

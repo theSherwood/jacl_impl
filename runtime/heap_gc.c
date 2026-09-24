@@ -126,7 +126,12 @@ static inline void startbit_set(uint32_t off)   { uint32_t g = off / JACL_GRANUL
 static inline void startbit_clear(uint32_t off) { uint32_t g = off / JACL_GRANULE; jacl_startmap[g >> 3] &= (uint8_t)~(1u << (g & 7)); }
 static inline int  startbit_test(uint32_t off)  { uint32_t g = off / JACL_GRANULE; return (jacl_startmap[g >> 3] >> (g & 7)) & 1; }
 
+void __vm_vcpu_tls_set(long v);
 void jacl_heap_init(void) {
+  /* The main vCPU is worker 0. The TLS word is the worker index everywhere (jacl_gc_self,
+   * jacl_sched_self), so set it rather than trust the engine's seed: a §14 child domain's root
+   * vCPU is not seeded 0 by every engine (the tree-walker numbers vCPUs across domains). */
+  __vm_vcpu_tls_set(0);
   jacl_region_bump = 0;
   for (int w = 0; w < JACL_MAX_WORKERS; w++) {
     jacl_worker[w].bump = 0;

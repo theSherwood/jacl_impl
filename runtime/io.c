@@ -164,6 +164,8 @@ JaclVal jacl_list_dir(JaclVal path) {
   return jacl_names_sorted_vec(arr);
 }
 
+void jacl_out(const char *b, long n);   /* chan.c: a pipeline stage's stdout edge, or fd 1 */
+
 /* `print V` — write V's text form + newline to stdout; returns nil (like the old VM). */
 JaclVal jacl_print(JaclVal v) {
   char buf[64];
@@ -177,9 +179,9 @@ JaclVal jacl_print(JaclVal v) {
     uint32_t len = jaclrt_is_string(s) ? jacl_str_len(s) : 0;
     if (len > sizeof sb - 1) len = sizeof sb - 1;
     if (len) jacl_str_bytes(s, sb, sizeof sb);
-    write(1, "<error: ", 8);
-    write(1, sb, (long)len);
-    write(1, ">\n", 2);
+    jacl_out("<error: ", 8);
+    jacl_out(sb, (long)len);
+    jacl_out(">\n", 2);
     return jaclrt_nil();
   }
   uint32_t t = jacl_tag_of(v);
@@ -188,25 +190,25 @@ JaclVal jacl_print(JaclVal v) {
     char sb[1024];
     if (len > sizeof sb - 1) len = sizeof sb - 1;
     jacl_str_bytes(v, sb, sizeof sb);
-    write(1, sb, (long)len);
-    write(1, "\n", 1);
+    jacl_out(sb, (long)len);
+    jacl_out("\n", 1);
   } else if (t == 0x02) {                          /* i32 */
     int len = jacl_itoa((long)jaclrt_as_i32(v), buf);
     buf[len++] = '\n';
-    write(1, buf, len);
+    jacl_out(buf, len);
   } else if (t == 0x03) {                          /* f32: shared repr via to_string */
     JaclVal s = jacl_to_string(v);
     uint32_t len = jacl_str_len(s);
     char fb[64];
     if (len > sizeof fb - 1) len = sizeof fb - 1;
     jacl_str_bytes(v ? s : s, fb, sizeof fb);
-    write(1, fb, (long)len);
-    write(1, "\n", 1);
+    jacl_out(fb, (long)len);
+    jacl_out("\n", 1);
   } else if (t == 0x00) {                          /* nil */
-    write(1, "nil\n", 4);
+    jacl_out("nil\n", 4);
   } else if (t == 0x01) {                          /* bool */
-    if (jaclrt_as_bool(v)) write(1, "true\n", 5);
-    else write(1, "false\n", 6);
+    if (jaclrt_as_bool(v)) jacl_out("true\n", 5);
+    else jacl_out("false\n", 6);
   } else if (t == 0x06 || t == 0x07 || t == 0x12 || t == 0x1A || t == 0x1B || t == 0x1C || t == 0x1E ||
              t == 0x08 || t == 0x09 || t == 0x0E || t == 0x10 ||
              t == 0x0B || t == 0x0C) {   /* collections (incl. typed vec/ptr/flat buf) + closure + wide/bigint + box/atom */
@@ -215,10 +217,10 @@ JaclVal jacl_print(JaclVal v) {
     char sb[2048];
     if (len > sizeof sb - 1) len = sizeof sb - 1;
     jacl_str_bytes(s, sb, sizeof sb);
-    write(1, sb, (long)len);
-    write(1, "\n", 1);
+    jacl_out(sb, (long)len);
+    jacl_out("\n", 1);
   } else {
-    write(1, "?\n", 2);
+    jacl_out("?\n", 2);
   }
   return jaclrt_nil();
 }

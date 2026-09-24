@@ -1,0 +1,23 @@
+##
+## upcase — copies stdin to stdout with ASCII letters uppercased. A severed stdin is an error
+## value, which it returns, so a failure upstream fails it too.
+##
+
+proc main {} {
+  def out [stdout]
+  mut b [read [stdin] 1016]
+  while [!= $b $nil] {
+    if [error? $b] { return $b }
+    mut k 0
+    while [< $k [buf-len $b]] {
+      def c [buf-get $b $k]
+      if [&& [>= $c 97] [<= $c 122]] { buf-set $b $k [- $c 32] }
+      set k [+ $k 1]
+    }
+    write $out $b
+    set b [read [stdin] 1016]
+  }
+  0
+}
+
+main
