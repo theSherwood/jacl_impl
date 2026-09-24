@@ -134,10 +134,9 @@ they are an upstream PR, filed from this note.
 
 ## Order of work
 
-1. TEMEN (theSherwood/temen#1776): `synth_manifest_child_start`, `vm_region_create` in
-   `CHILD_BINDABLE`, `__vm_instantiate_detached`, and `TranslateOptions::powerbox_layout`. Without
-   the last, jaclrt's globals sit in the powerbox argument area, and op 15's payload (a stage's argv)
-   lands on them; the harness and `runtime/build.sh` translate jaclrt with it. **Done.**
+1. TEMEN (theSherwood/temen#1776, #1777): `synth_manifest_child_start`, `vm_region_create` in
+   `CHILD_BINDABLE`, `__vm_instantiate_detached`, and an entry-less unit's globals kept clear of the
+   powerbox argument area, where op 15's payload (a stage's argv) lands. **Done.**
 2. unir: detached spawn (op 15) with programs as module capabilities, and the C ABI for it
    (`unir_vat_child`, `unir_vat_args`, `unir_endowed`, `unir_spawn` with grants,
    `unir_consumer_suspend`/`resume`), tested from a C root. **Done.**

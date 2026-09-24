@@ -91,13 +91,6 @@ fn compile_runtime_with_unir() -> PathBuf {
     linked
 }
 
-/// How the runtime is translated: a library that a program link makes a powerbox program, so its
-/// globals must clear the argument area its host seeds, where a pipeline stage's arguments arrive
-/// (docs/UNIR_PIPELINES.md). runtime/build.sh passes the same `--powerbox-layout`.
-fn runtime_options() -> temen_llvm::TranslateOptions {
-    temen_llvm::TranslateOptions { powerbox_layout: true, ..Default::default() }
-}
-
 /// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
 /// own — the separately-compiled runtime artifact. The returned `exports` name each
 /// `jacl_*` function with its module index, so a program module can resolve a
@@ -106,8 +99,7 @@ fn runtime_options() -> temen_llvm::TranslateOptions {
 /// in-process analogue of `runtime/build.sh`'s `clang … | temen-llvm-translate`.
 pub fn translate_runtime() -> temen_llvm::Translated {
     let ll = compile_runtime_with_unir();
-    temen_llvm::translate_ll_path_with_options(&ll, runtime_options())
-        .expect("temen-llvm: translate runtime")
+    temen_llvm::translate_ll_path(&ll).expect("temen-llvm: translate runtime")
     // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
     // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
     // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call
