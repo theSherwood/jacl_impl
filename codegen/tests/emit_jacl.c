@@ -284,6 +284,17 @@ static const char *source_for(const char *name) {
     return "def [a b c] [parallel { 10 } { 20 } { 12 }]\n[+ [+ $a $b] $c]";
   if (!strcmp(name, "race"))
     return "[race { [+ 40 2] } { [+ 100 100] }]";
+  /* jacl #167: 4 tasks each increment their own top-level global 1000 times on parallel workers;
+   * the globals map's root is replaced by compare-and-swap, so no task undoes another's update. */
+  if (!strcmp(name, "globals_race"))
+    return "mut g0 0\nmut g1 0\nmut g2 0\nmut g3 0\n"
+           "proc main {} {\n"
+           "  def fs [parallel {\n    mut i 0\n    while [< $i 1000] { set g0 [+ $g0 1]; set i [+ $i 1] }\n"
+           "  } {\n    mut i 0\n    while [< $i 1000] { set g1 [+ $g1 1]; set i [+ $i 1] }\n"
+           "  } {\n    mut i 0\n    while [< $i 1000] { set g2 [+ $g2 1]; set i [+ $i 1] }\n"
+           "  } {\n    mut i 0\n    while [< $i 1000] { set g3 [+ $g3 1]; set i [+ $i 1] }\n  }]\n"
+           "  [+ [+ $g0 $g1] [+ $g2 $g3]]\n}\n"
+           "main";
   /* jacl #152: `swap` is a compare-and-swap — 8 tasks x 2000 swaps on one atom lose no update even
    * when the pool runs them on parallel workers (a plain get-then-set did, once N > 1). */
   if (!strcmp(name, "swap_race"))

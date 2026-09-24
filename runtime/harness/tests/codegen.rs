@@ -934,15 +934,24 @@ fn workers_env(n: &str) -> temen_run::RunConfig {
 #[test]
 fn swap_loses_no_update_across_parallel_workers() {
     // 8 x 2000 swaps on one atom, on 4 workers: `swap` commits with a compare-and-swap and retries
-    // a lost race. A get-then-set lost updates here on both backends (as gc_stress_atom did).
-    //
-    // JIT only: under CPU load the tree-walker sometimes traps MemoryFault on this workload, with the
-    // old get-then-set `swap` too — a separate, pre-existing bug (jacl #167). Back to `None`
-    // (interp == JIT) once that is fixed.
+    // a lost race. A get-then-set lost updates here on both backends (as gc_stress_atom did). Taking
+    // `$add1` in the loop also registers its signature from every worker at once — the race that
+    // faulted the tree-walker (jacl #167).
     for _ in 0..3 {
-        let (v, _) = run_case_with("swap_race", &workers_env("4"), Some(temen_run::Backend::Jit))
-            .unwrap_or_else(|e| panic!("{e}"));
+        let (v, _) = run_case_with("swap_race", &workers_env("4"), None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(v, i32_val(16000), "every swap must land");
+    }
+}
+
+#[test]
+fn parallel_tasks_setting_different_globals_lose_nothing() {
+    // jacl #167: the module globals are one persistent map whose root every `set` replaces. With a
+    // plain store, a task writing back a root built before another task's update undid that update —
+    // of a *different* global. The root is replaced by compare-and-swap now: 4 tasks x 1000
+    // increments of their own global sum to 4000 on 4 workers, on interp and JIT.
+    for _ in 0..3 {
+        let (v, _) = run_case_with("globals_race", &workers_env("4"), None).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(v, i32_val(4000), "every global's increments must land");
     }
 }
 

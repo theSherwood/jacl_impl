@@ -39,10 +39,8 @@ static int jacl_itoa(long v, char *buf) {
  * interpreter and the JIT (the map lives in guest memory, fresh per run). The global holds a
  * heap value, so it is a GC root (jacl_vfs_mark_root, from jacl_sched_mark_roots). */
 JaclVal jacl_vfs;   /* path(string) -> content(string); nil == empty */
-static JaclVal jacl_vfs_map(void) {
-  if (jaclrt_is_nil(jacl_vfs)) jacl_vfs = jacl_map_empty();
-  return jacl_vfs;
-}
+/* Read-only view; every update replaces the root by compare-and-swap (see jacl_root_peek). */
+static JaclVal jacl_vfs_map(void) { return jacl_root_map(jacl_root_peek(&jacl_vfs)); }
 
 /* A write succeeds only if the path's parent directory "exists": the model knows just the
  * root and /tmp (where the corpus writes), so a path like /tmp/foo.txt is writable but
@@ -79,8 +77,10 @@ JaclVal jacl_write_file(JaclVal content, JaclVal path) {
   if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
   if (jacl_fs_granted()) return jacl_fscap_write_file(content, path);
   if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
-  jacl_vfs = jacl_map_set(jacl_vfs_map(), path, content);
-  return jaclrt_nil();
+  for (;;) {
+    JaclVal seen = jacl_root_peek(&jacl_vfs);
+    if (jacl_root_replace(&jacl_vfs, seen, jacl_map_set(jacl_root_map(seen), path, content))) return jaclrt_nil();
+  }
 }
 
 /* `[append-file CONTENT PATH]` — extend an existing file, or create it like write-file. */
@@ -89,14 +89,17 @@ JaclVal jacl_append_file(JaclVal content, JaclVal path) {
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path) || !jaclrt_is_string(content)) return jaclrt_error();
   if (jacl_fs_granted()) return jacl_fscap_append_file(content, path);
-  JaclVal cur = jacl_map_get(jacl_vfs_map(), path);
-  if (jaclrt_is_nil(cur)) {                    /* new file: same rule as write-file */
-    if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
-    jacl_vfs = jacl_map_set(jacl_vfs_map(), path, content);
-  } else {
-    jacl_vfs = jacl_map_set(jacl_vfs_map(), path, jacl_str_concat(cur, content));
+  for (;;) {
+    JaclVal seen = jacl_root_peek(&jacl_vfs), map = jacl_root_map(seen);
+    JaclVal cur = jacl_map_get(map, path), next;
+    if (jaclrt_is_nil(cur)) {                  /* new file: same rule as write-file */
+      if (!jacl_vfs_parent_ok(path)) return jaclrt_error();
+      next = jacl_map_set(map, path, content);
+    } else {
+      next = jacl_map_set(map, path, jacl_str_concat(cur, content));
+    }
+    if (jacl_root_replace(&jacl_vfs, seen, next)) return jaclrt_nil();
   }
-  return jaclrt_nil();
 }
 
 /* Is PATH one of the guest VFS's model directories ("/" and "/tmp" exist; nothing else)? */
@@ -114,10 +117,11 @@ JaclVal jacl_delete_file(JaclVal path) {
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path)) return jaclrt_error();
   if (jacl_fs_granted()) return jacl_fscap_delete_file(path);
-  JaclVal v = jacl_map_get(jacl_vfs_map(), path);
-  if (jaclrt_is_nil(v)) return jaclrt_error();
-  jacl_vfs = jacl_map_remove(jacl_vfs_map(), path);
-  return jaclrt_nil();
+  for (;;) {
+    JaclVal seen = jacl_root_peek(&jacl_vfs), map = jacl_root_map(seen);
+    if (jaclrt_is_nil(jacl_map_get(map, path))) return jaclrt_error();
+    if (jacl_root_replace(&jacl_vfs, seen, jacl_map_remove(map, path))) return jaclrt_nil();
+  }
 }
 
 /* `[file-exists? PATH]` — a file or directory at PATH (bool; never errors on missing). */
