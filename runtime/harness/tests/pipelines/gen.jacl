@@ -1,0 +1,20 @@
+##
+## gen WORD... — prints its arguments, one per line, fifty times over: a pipeline stage whose
+## output spans many frames (docs/UNIR_PIPELINES.md).
+##
+
+proc main {} {
+  def a [args]
+  mut rep 0
+  while [< $rep 50] {
+    mut k 1
+    while [< $k [vec-len $a]] {
+      print [vec-get $a $k]
+      set k [+ $k 1]
+    }
+    set rep [+ $rep 1]
+  }
+  0
+}
+
+main

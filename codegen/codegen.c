@@ -3688,12 +3688,55 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
 /* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
  * and each is called exactly once — at -O2 clang would inline it straight back and undo the
  * split (measured: without this the caller's estimated emitted size barely moves). */
+/* Whether `node` is `!cmd` or a `|` chain of them, `[| [| !a !b] !c]`: a pipeline of program
+ * stages. A chain with any other stage keeps `|`'s argument threading. */
+static int is_shell_chain(AstNode *node) {
+  if (node->type == AST_SHELL_CMD) return 1;
+  return node->type == AST_COMMAND && node->data.command.head_id == HEAD_PIPE &&
+         node->data.command.arg_count == 2 &&
+         node->data.command.args[1]->type == AST_SHELL_CMD &&
+         is_shell_chain(node->data.command.args[0]);
+}
+
+/* The vector of argv vectors `[[name arg…] …]` for a shell chain, left to right. */
+static IrVal compile_shell_stages(Cx *cx, AstNode *node) {
+  IrVal stages;
+  if (node->type == AST_SHELL_CMD) {
+    IrVal empty[] = {cx->sp};
+    stages = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+  } else {
+    stages = compile_shell_stages(cx, node->data.command.args[0]);
+    node = node->data.command.args[1];
+  }
+  if (cx->failed) return 0;
+  IrVal empty[] = {cx->sp};
+  IrVal argv = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
+  IrVal headv = compile_expr(cx, node->data.shell_cmd.head);
+  if (cx->failed) return 0;
+  { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
+  for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+    IrVal e = compile_elem_pinned(cx, node->data.shell_cmd.args[i], &argv);
+    if (cx->failed) return 0;
+    IrVal a[] = {cx->sp, argv, e};
+    argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
+  }
+  IrVal a[] = {cx->sp, stages, argv};
+  return emit_rt_call(cx, "jacl_vec_push", a, 3);
+}
+
 __attribute__((noinline))
 static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *handled) {
   *handled = 1;
   if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
     AstNode *lhs = node->data.command.args[0];
     AstNode *rhs = node->data.command.args[1];
+    if (is_shell_chain(node)) {
+      /* `!a x | !b | !c` — one pipeline of program stages (docs/UNIR_PIPELINES.md). */
+      IrVal stages = compile_shell_stages(cx, node);
+      if (cx->failed) return 0;
+      IrVal a[] = {cx->sp, stages};
+      return emit_rt_call(cx, "jacl_pipeline", a, 2);
+    }
     if (rhs->type == AST_COMMAND) {
       uint32_t oc = rhs->data.command.arg_count;
       AstNode **na = (AstNode **)calloc(oc + 1, sizeof(AstNode *));
@@ -5292,6 +5335,10 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_READ,       "jacl_chan_read",  2},
       {HEAD_WRITE,      "jacl_chan_write", 2},
       {HEAD_CLOSE,      "jacl_chan_close", 1},
+      {HEAD_STDIN,      "jacl_stdin",      0},
+      {HEAD_STDOUT,     "jacl_stdout",     0},
+      {HEAD_STDERR,     "jacl_stderr",     0},
+      {HEAD_ARGS,       "jacl_args",       0},
     };
     /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
     if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&
@@ -5644,21 +5691,11 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
     }
 
     case AST_SHELL_CMD: {
-      /* `!cmd args...` — build argv [name, arg1, ...] and run it through the "exec" capability,
-       * capturing stdout as a string. Ungranted, jacl_exec_capture returns a catchable error. */
-      IrVal empty[] = {cx->sp};
-      IrVal argv = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
-      IrVal headv = compile_expr(cx, node->data.shell_cmd.head);
+      /* `!cmd args...` — a one-stage pipeline (compile_shell_stages). */
+      IrVal stages = compile_shell_stages(cx, node);
       if (cx->failed) return 0;
-      { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        IrVal e = compile_elem_pinned(cx, node->data.shell_cmd.args[i], &argv);
-        if (cx->failed) return 0;
-        IrVal a[] = {cx->sp, argv, e};
-        argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
-      }
-      IrVal ca[] = {cx->sp, argv};
-      return emit_rt_call(cx, "jacl_exec_capture", ca, 2);
+      IrVal a[] = {cx->sp, stages};
+      return emit_rt_call(cx, "jacl_pipeline", a, 2);
     }
 
     default:

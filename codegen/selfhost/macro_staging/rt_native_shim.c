@@ -3,6 +3,7 @@
  * Atomics become plain ops (single-threaded); wait/notify/suspend/gc_roots are inert. */
 #include <stdint.h>
 long __vm_vcpu_tls_get(void) { return 0; }
+void __vm_vcpu_tls_set(long v) { (void)v; }
 long __vm_atomic_add(void *p, long v) { long *q = p; long o = *q; *q += v; return o; }
 int  __vm_atomic_add32(void *p, int v) { int *q = p; int o = *q; *q += v; return o; }
 void __vm_atomic_store32(void *p, int v) { *(int *)p = v; }

@@ -88,6 +88,19 @@ static JaclChan *chan_claim(JaclVal v, uint32_t end, const char *op, JaclVal *er
 
 static void chan_release(JaclChan *c) { __vm_atomic_store32(&c->busy, 0); }
 
+/* Writes every byte on a claimed write end, in frames of at most `max`. */
+static JaclVal chan_write_all(JaclChan *c, const uint8_t *p, uint32_t n) {
+  for (uint32_t off = 0; off < n;) {
+    uint32_t k = n - off < c->max ? n - off : c->max;
+    int64_t s = chan_be_write(c->handle, p + off, k);
+    if (s == CHAN_BE_END) return chan_err("write: the reader closed the channel");
+    if (s == CHAN_BE_SEVERED) return chan_severed(c->handle, CHAN_W);
+    if (s < 0) return chan_err("write: channel failed");
+    off += k;
+  }
+  return JACL_NIL;
+}
+
 /* [channel] / [channel CAP] -> [w r]: a bounded byte channel of CAP frames (default 16). */
 JaclVal jacl_channel_n(JaclVal cap) {
   int32_t n = jaclrt_is_nil(cap) ? 16 : jaclrt_is_i32(cap) ? jaclrt_as_i32(cap) : -1;
@@ -122,15 +135,7 @@ JaclVal jacl_chan_write(JaclVal w, JaclVal bytes) {
   JaclVal err;
   JaclChan *c = chan_claim(w, CHAN_W, "write: channel closed", &err);
   if (!c) return err;
-  JaclVal out = JACL_NIL;
-  for (uint32_t off = 0; off < n;) {
-    uint32_t k = n - off < c->max ? n - off : c->max;
-    int64_t s = chan_be_write(c->handle, p + off, k);
-    if (s == CHAN_BE_END) { out = chan_err("write: the reader closed the channel"); break; }
-    if (s == CHAN_BE_SEVERED) { out = chan_severed(c->handle, CHAN_W); break; }
-    if (s < 0) { out = chan_err("write: channel failed"); break; }
-    off += k;
-  }
+  JaclVal out = chan_write_all(c, p, n);
   chan_release(c);
   return out;
 }
@@ -177,10 +182,24 @@ JaclVal jacl_chan_close(JaclVal ch) {
 
 #ifdef JACL_UNIR
 #include "chan_unir.c"
+#include "pipe_unir.c"
 #else
 static int     chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max) { (void)cap; (void)w; (void)r; (void)max; return 0; }
 static int64_t chan_be_write(void *w, const uint8_t *p, uint32_t n) { (void)w; (void)p; (void)n; return CHAN_BE_FAILED; }
 static int64_t chan_be_read(void *r, uint8_t *buf, uint32_t cap) { (void)r; (void)buf; (void)cap; return CHAN_BE_FAILED; }
 static void    chan_be_close(void *h, uint32_t end) { (void)h; (void)end; }
 static int     chan_be_cause(void *h, uint32_t end) { (void)h; (void)end; return -1; }
+/* Without vats there are no stages: output is the host's, `[stdin]` etc. are nil, `[args]` empty,
+ * and `!cmd` runs through the `exec` capability (pipe_unir.c). */
+JaclVal jacl_stage_ends[3] = {JACL_NIL, JACL_NIL, JACL_NIL};
+void jacl_out(const char *b, long n) { write(1, b, n); }
+JaclVal jacl_stage_finish(JaclVal result) { return result; }
+JaclVal jacl_stdin(void) { return JACL_NIL; }
+JaclVal jacl_stdout(void) { return JACL_NIL; }
+JaclVal jacl_stderr(void) { return JACL_NIL; }
+JaclVal jacl_args(void) { return jacl_vec_empty(); }
+JaclVal jacl_pipeline(JaclVal stages) {
+  if (jaclrt_as_i32(jacl_len(stages)) == 1) return jacl_exec_capture(jacl_vec_get_at(stages, jaclrt_i32(0)));
+  return chan_err("pipeline: needs vats (a TEMEN runtime built with JACL_UNIR)");
+}
 #endif

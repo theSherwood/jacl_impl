@@ -718,6 +718,9 @@ typedef enum {
   /* Byte channels (docs/UNIR_CHANNELS.md) */
   HEAD_CHANNEL, HEAD_READ, HEAD_WRITE, HEAD_CLOSE,
 
+  /* Pipeline stages (docs/UNIR_PIPELINES.md) */
+  HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
