@@ -86,6 +86,12 @@ fn i32_val(x: i32) -> i64 {
 /// stdout. This is the uniform powerbox entry: every program runs through the reactor, so a
 /// `[print …]` program's host I/O works the same way a pure-compute one returns a value.
 fn run_case_full(case: &str) -> (i64, Vec<u8>) {
+    run_case_with(case, &temen_run::RunConfig::default()).unwrap_or_else(|e| panic!("run {case}: {e}"))
+}
+
+/// [`run_case_full`] under an explicit [`temen_run::RunConfig`] (environment, limits), with the
+/// run's own failure returned rather than panicked on.
+fn run_case_with(case: &str, cfg: &temen_run::RunConfig) -> Result<(i64, Vec<u8>), String> {
     let program =
         decode_emitted(&emit(case)).unwrap_or_else(|e| panic!("decode {case}: {e}"));
 
@@ -120,9 +126,7 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
         .provide("vm_region_create", temen_run::HostCap::memory(5));
     let inst = temen_run::instantiate_with_imports(pb, imports)
         .unwrap_or_else(|e| panic!("instantiate {case}: {e}"));
-    let run = inst
-        .run_diff(&temen_run::RunConfig::default())
-        .unwrap_or_else(|e| panic!("run {case}: {e}"));
+    let run = inst.run_diff(cfg)?;
     let result = match run.outcome {
         temen_run::Outcome::Returned(ref v) => match v.first() {
             Some(Value::I64(x)) => *x,
@@ -130,7 +134,7 @@ fn run_case_full(case: &str) -> (i64, Vec<u8>) {
         },
         temen_run::Outcome::Exited(c) => panic!("{case}: program exited({c})"),
     };
-    (result, run.stdout)
+    Ok((result, run.stdout))
 }
 
 /// Compile + run `case`, asserting the returned JaclVal equals `want` (stdout unused).
@@ -911,6 +915,35 @@ fn parallel_two() {
 #[test]
 fn parallel_three() {
     run_case("parallel3", i32_val(42)); // 10 + 20 + 12
+}
+
+// ---- jacl #152: the pool size is the host's per-run choice (`JACL_WORKERS`) ----
+
+fn workers_env(n: &str) -> temen_run::RunConfig {
+    temen_run::RunConfig { env: vec![format!("JACL_WORKERS={n}").into_bytes()], ..Default::default() }
+}
+
+#[test]
+fn the_worker_count_comes_from_the_run_not_the_build() {
+    // One module, two pool sizes: the answer does not depend on how many workers ran it.
+    for n in ["1", "4"] {
+        let (v, _) = run_case_with("parallel3", &workers_env(n)).unwrap_or_else(|e| panic!("N={n}: {e}"));
+        assert_eq!(v, i32_val(42), "parallel3 with JACL_WORKERS={n}");
+    }
+
+    // ...and the count really is read: with room for no vCPU beyond the root, the default pool (1,
+    // which spawns nothing) still runs, while asking for 4 has to spawn and is refused.
+    let one_vcpu = |env: Vec<Vec<u8>>| temen_run::RunConfig {
+        env,
+        limits: temen_run::Limits { max_vcpus: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let (v, _) = run_case_with("parallel3", &one_vcpu(vec![])).expect("the default pool spawns nothing");
+    assert_eq!(v, i32_val(42));
+    assert!(
+        run_case_with("parallel3", &one_vcpu(workers_env("4").env)).is_err(),
+        "JACL_WORKERS=4 must spawn pool workers, which a one-vCPU quota refuses"
+    );
 }
 
 // --- Destructuring bind on TEMEN (item 6 slice 3a): retires test_destructure_*.c. Each is the

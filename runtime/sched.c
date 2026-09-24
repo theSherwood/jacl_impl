@@ -76,12 +76,17 @@ extern JaclVal jacl_ctx_cur;
  *     interpreter AND produces identical output under the JIT — exactly what the
  *     interp==jit differential oracle requires.
  *
- * The multi-worker real-parallelism pool below is retained unchanged and is opt-in: build
- * with -DJACL_POOL_WORKERS=N for a genuinely OS-threaded JIT deployment. Cooperative mode
- * gives up parallelism (a performance property), not correctness. */
+ * The multi-worker real-parallelism pool below is opt-in, and chosen **per run** by the host
+ * (jacl #152): the `JACL_WORKERS=N` entry of the §3e environment (see jacl_env_workers). A
+ * host that runs each vCPU on its own OS thread or Web Worker (temen's JIT, the browser's
+ * parallel Worker driver) passes N; a cooperative one passes nothing and gets 1. So one card
+ * serves both, and the livelocking combination is reached only by a host asking for it.
+ * -DJACL_POOL_WORKERS=N changes the default for a run whose environment names no count.
+ * Cooperative mode gives up parallelism (a performance property), not correctness. */
 #ifndef JACL_POOL_WORKERS
 #define JACL_POOL_WORKERS      1            /* main = worker 0; cooperative single-thread default */
 #endif
+static int jacl_pool_workers = JACL_POOL_WORKERS;   /* this run's pool size, set by sched_init */
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
 #define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
 
@@ -199,11 +204,12 @@ static int32_t  jacl_pool_event;     /* bumped+notified on enqueue/shutdown (wak
 static int32_t  jacl_pool_shutdown;
 static int32_t  jacl_pool_started;
 static int32_t  jacl_owner_rr;       /* round-robin owner assignment */
-static int      jacl_pool_handles[JACL_POOL_WORKERS];
+static int      jacl_pool_handles[JACL_SCHED_MAX_WORKERS];
 /* The pool workers' own vCPU data stacks — see `jacl_batch_vcpu_stack` below for why every
- * `thread.spawn` needs one (jacl #141). Sized by the pool, not by MAX_WORKERS: `pool_ensure`
- * spawns `JACL_POOL_WORKERS - 1` of them. */
-static char     jacl_pool_vcpu_stack[JACL_POOL_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
+ * `thread.spawn` needs one (jacl #141). Sized for the largest pool a run may ask for; only the
+ * `jacl_pool_workers - 1` that `pool_ensure` spawns are ever touched, and the window is paged
+ * lazily, so the rest cost address space, not memory. */
+static char     jacl_pool_vcpu_stack[JACL_SCHED_MAX_WORKERS][JACL_SCHED_STACK] __attribute__((aligned(16)));
 static int      jacl_pool_nthreads;
 static JaclObj *jacl_root_job;
 /* Per-worker list of VM-wait-parked fibers (jobs whose fiber reported JACL_FIBER_PARKED, e.g. a
@@ -242,7 +248,7 @@ static JaclObj *rq_pop(int self) {           /* under slock — from THIS worker
   jp(j)[18] = 0;
   return j;
 }
-static void pool_wake(void) { __vm_atomic_add32(&jacl_pool_event, 1); __vm_notify(&jacl_pool_event, JACL_POOL_WORKERS); }
+static void pool_wake(void) { __vm_atomic_add32(&jacl_pool_event, 1); __vm_notify(&jacl_pool_event, jacl_pool_workers); }
 
 /* Complete a job (under slock): publish result, mark DONE, move its waiters to the ready
  * queue (each gets the result as its resume arg). The lock orders the result write before any
@@ -413,10 +419,52 @@ static void worker_loop(int is_main) {
 
 static long worker_thread(long arg) { (void)arg; jacl_gc_worker_register(); worker_loop(0); jacl_gc_worker_unregister(); return 0; }
 
+/* The §3e args blob (temen DESIGN §3e / D44): `{argc:u32, envc:u32}` then argc + envc packed
+ * NUL-terminated strings, argv first, at a fixed window offset — `temen_ir::module_args_base()`,
+ * the null guard (16 KiB) plus `POWERBOX_ARGS_BASE` (128), bounded by the null guard plus
+ * `POWERBOX_ARGS_END` (16 KiB). Every temen module keeps that region free of globals (temen#1777;
+ * before it, this runtime's own worker table sat on it). temen-llvm's `getenv` reads the same
+ * bytes, but it is only synthesized for a unit with a `main`, and the runtime is a library. A host
+ * that seeds nothing leaves the region zero (argc = envc = 0): no entry. Only reached from
+ * jacl_sched_run_main, so the off-TEMEN unit tests (rt_native_shim.c), which never run the
+ * scheduler, never touch the address. */
+#define JACL_ARGS_BLOB     ((const unsigned char *)(uintptr_t)(16384 + 128))
+#define JACL_ARGS_BLOB_END ((const unsigned char *)(uintptr_t)(16384 + 16384))
+
+/* `JACL_WORKERS=N` from the environment, or `dflt` when the entry is absent or not a number. */
+static long jacl_env_workers(long dflt) {
+  static const char key[] = "JACL_WORKERS=";
+  const unsigned char *b = JACL_ARGS_BLOB, *end = JACL_ARGS_BLOB_END;
+  uint32_t argc = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+  uint32_t envc = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+  const unsigned char *s = b + 8;
+  for (uint64_t i = 0; i < (uint64_t)argc + envc && s < end; i++) {
+    const unsigned char *str = s;
+    while (s < end && *s) s++;        /* to this string's NUL */
+    if (s >= end) break;              /* unterminated: a malformed blob names nothing */
+    s++;
+    if (i < argc) continue;           /* an argv string, not an env entry */
+    int k = 0;
+    while (key[k] && str[k] == (unsigned char)key[k]) k++;
+    if (key[k]) continue;             /* some other variable */
+    const unsigned char *v = str + k;
+    long n = 0;
+    if (!*v) return dflt;
+    for (; *v; v++) {
+      if (*v < '0' || *v > '9') return dflt;   /* not a count */
+      if (n <= JACL_SCHED_MAX_WORKERS) n = n * 10 + (*v - '0');   /* saturates past the clamp */
+    }
+    return n;
+  }
+  return dflt;
+}
+
 /* Initialize the scheduler state (queue, lock, flags). No worker threads yet — a purely
  * sequential program (no spawn/parallel/race) runs its root job on main alone and never spawns
- * a thread. */
+ * a thread. The pool size is read here, once per run. */
 static void sched_init(void) {
+  long nw = jacl_env_workers(JACL_POOL_WORKERS);
+  jacl_pool_workers = nw < 1 ? 1 : nw > JACL_SCHED_MAX_WORKERS ? JACL_SCHED_MAX_WORKERS : (int)nw;
   jacl_sched_lock = 0; jacl_pool_event = 0; jacl_pool_shutdown = 0;
   jacl_pool_started = 0; jacl_pool_nthreads = 0; jacl_owner_rr = 0;
   for (int w = 0; w < JACL_SCHED_MAX_WORKERS; w++) { jacl_rq_head[w] = 0; jacl_rq_count[w] = 0; jacl_running_job[w] = 0; jacl_blocked_head[w] = 0; }
@@ -432,9 +480,7 @@ static int next_owner(void) {
  * the queue (the root job is already enqueued by the time this runs). */
 static void pool_ensure(void) {
   if (__vm_atomic_cas32(&jacl_pool_started, 0, 1) != 0) return;
-  int nw = JACL_POOL_WORKERS;
-  if (nw > JACL_SCHED_MAX_WORKERS) nw = JACL_SCHED_MAX_WORKERS;
-  jacl_pool_nthreads = nw - 1;
+  jacl_pool_nthreads = jacl_pool_workers - 1;
   for (int k = 0; k < jacl_pool_nthreads; k++)
     jacl_pool_handles[k] = __vm_thread_spawn(worker_thread, jacl_pool_vcpu_stack[k], 0);
 }
