@@ -71,7 +71,11 @@ pub unsafe extern "C" fn jacl_temen_stage(
             std::mem::forget(boxed); // ownership transfers to C; reclaimed via jacl_temen_stage_free
             0
         }
-        Err(_) => 3,
+        Err(e) => {
+            // The C side only sees the code; name the cause where a failing build can read it.
+            eprintln!("jacl_temen_stage: {e}");
+            3
+        }
     }
 }
 
