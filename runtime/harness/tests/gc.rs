@@ -27,3 +27,12 @@ fn gc_out_of_memory_traps_in_the_allocator() {
     assert_eq!(interp, "Trap(Unreachable)", "a live heap past 16 MiB must stop in jacl_alloc (interp)");
     assert_eq!(jit, "Trap(Unreachable)", "a live heap past 16 MiB must stop in jacl_alloc (JIT)");
 }
+
+/// jacl #175: a mark-stack overflow must not lose reachable objects. A node with more children than
+/// the mark stack holds used to leave the excess marked but untraced, and what only they reached
+/// was swept while live.
+#[test]
+fn gc_mark_stack_overflow_keeps_everything_reachable() {
+    assert_eq!(run_test("test_gc_mark_overflow.c", 0), 175,
+        "every leaf behind a fan wider than the mark stack must survive collection intact");
+}

@@ -390,6 +390,11 @@ long jacl_live_count(void) {
 #define MARK_STACK_CAP 65536
 static uint32_t mark_stack[MARK_STACK_CAP];
 static uint32_t mark_sp;
+/* A push that found the stack full: the object is marked but was never queued, so no later push
+ * will queue it either (it is already marked) and its payload goes untraced. mark_drain recovers
+ * by rescanning the heap for marked nodes (jacl #175) — without that, whatever only such an
+ * object reached was swept while live. */
+static int mark_overflow;
 
 /* Resolve a candidate window-offset word (possibly an INTERIOR pointer — the
  * optimizer often holds a pointer to an object's payload, not its cell start) to
@@ -415,6 +420,7 @@ static void mark_push_word(long word) {
   if (o->obj_type == JOBJ_FREE || o->mark) return;
   o->mark = 1;
   if (mark_sp < MARK_STACK_CAP) mark_stack[mark_sp++] = soff;
+  else mark_overflow = 1;
 }
 
 /* Public: mark a heap-typed JaclVal as reachable. Used by jacl_mark_runtime_roots
@@ -432,22 +438,51 @@ void jacl_gc_mark_word(long w) {
   mark_push_word(w);
 }
 
-static void mark_drain(void) {
-  while (mark_sp) {
-    uint32_t off = mark_stack[--mark_sp];
-    JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-    if (o->obj_type != JOBJ_NODE) continue;        /* BLOBs have no outgoing pointers */
-    /* conservative trace: scan payload words for candidate object-starts */
-    uint8_t* p = (uint8_t*)jacl_obj_payload(o);
-    uint8_t* end = (uint8_t*)o + o->size;
-    for (; p + 8 <= end; p += 8) {
-      long w = (long)*(uint64_t*)p;
-      /* heap pointers are stored as JaclVal payloads or raw cell pointers; mask off
-         any tag byte so a tagged heap JaclVal resolves to its cell offset */
-      mark_push_word(w & (long)JACL_PAYLOAD_MASK);
-      mark_push_word(w);
+static inline void mark_trace(uint32_t off) {
+  JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
+  if (o->obj_type != JOBJ_NODE) return;            /* BLOBs have no outgoing pointers */
+  /* conservative trace: scan payload words for candidate object-starts */
+  uint8_t* p = (uint8_t*)jacl_obj_payload(o);
+  uint8_t* end = (uint8_t*)o + o->size;
+  for (; p + 8 <= end; p += 8) {
+    long w = (long)*(uint64_t*)p;
+    /* heap pointers are stored as JaclVal payloads or raw cell pointers; mask off
+       any tag byte so a tagged heap JaclVal resolves to its cell offset */
+    mark_push_word(w & (long)JACL_PAYLOAD_MASK);
+    mark_push_word(w);
+  }
+}
+
+/* Overflow recovery: some marked object was never queued, so rescan the heap and re-trace every
+ * marked node (re-tracing is harmless: its children are marked already or get marked now),
+ * draining as we go; repeat until a pass overflows nothing. Each overflow marked a new object, so
+ * this ends.
+ *
+ * `noinline` is load-bearing, like `always_inline` on jacl_gc_quiesce_and_sweep: the roots were
+ * scanned conservatively from the collector's own stack, and inlining this into the collection
+ * grew that frame over dead stack whose stale words kept garbage alive (strings_gc's "garbage is
+ * reclaimed" failed on the JIT). Kept out of line, the common path compiles as it did before. */
+__attribute__((noinline)) static void mark_rescan(void) {
+  while (mark_overflow) {
+    mark_overflow = 0;
+    uint32_t hi = jacl_region_hwm();
+    for (uint32_t byte = 0; byte < (hi / JACL_GRANULE + 7) / 8; byte++) {
+      uint8_t bits = jacl_startmap[byte];
+      for (uint32_t b = 0; bits && b < 8; b++) {
+        if (!(bits & (1u << b))) continue;
+        uint32_t off = (byte * 8 + b) * JACL_GRANULE;
+        if (!((JaclObj*)&jacl_heap_mem[off])->mark) continue;
+        mark_trace(off);
+        while (mark_sp) mark_trace(mark_stack[--mark_sp]);
+      }
     }
   }
+}
+
+/* Trace everything queued, then recover from any overflow (jacl #175). */
+static void mark_drain(void) {
+  while (mark_sp) mark_trace(mark_stack[--mark_sp]);
+  if (mark_overflow) mark_rescan();
 }
 
 /* Hand regions [r, r+k) back to the pool (world stopped): clear their start bits, and retire
@@ -493,6 +528,7 @@ static long jacl_gc_collect_stw(void) {
   long n = __vm_gc_roots(jacl_heap_lo(), jacl_heap_hi(), (long)JACL_PAYLOAD_MASK, rootbuf, 8192);
   long scan = n < 8192 ? n : 8192;
   mark_sp = 0;
+  mark_overflow = 0;
   for (long i = 0; i < scan; i++) mark_push_word(rootbuf[i]);
   /* 2b. runtime-internal roots (intern table, …) — not visible to gc.roots */
   jacl_mark_runtime_roots();
