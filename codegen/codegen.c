@@ -1949,23 +1949,24 @@ static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint3
   enter_frame_block(cx, call_blk);
   {
     IrVal cv = (IrVal)w;                          /* threaded cval */
-    IrVal fnargs[] = {cx->sp, cv};
-    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
     IrVal cargs[2 + CG_MAX_PARAMS];
     IrType sig[2 + CG_MAX_PARAMS];
     sig[0] = sig[1] = IRB_I64;
-    /* `cv` (a param of this block) and `fnw` have to survive the arguments' compilation:
-     * an argument may move the emission point, and neither rides the frame on its own. */
+    /* `cv` (a param of this block) has to survive the arguments' compilation: an argument may
+     * move the emission point, and it does not ride the frame on its own. The callee index is
+     * read from it *after* the arguments — a pin rides the frame as an i64 block param, so the
+     * i32 `call_indirect` index cannot be pinned (it failed verification, jacl #170). */
     int pm = pin_mark(cx);
-    int p_cv = pin_push(cx, cv), p_fn = pin_push(cx, fnw);
+    int p_cv = pin_push(cx, cv);
     uint32_t nca = argc < CG_MAX_PARAMS ? argc : CG_MAX_PARAMS;
     IrVal av[CG_MAX_PARAMS];
     if (nca && !compile_operands(cx, args, nca, av)) return 0;
     for (uint32_t i = 0; i < nca; i++) { cargs[2 + i] = av[i]; sig[2 + i] = IRB_I64; }
     cargs[0] = cx->sp; cargs[1] = pin_get(cx, p_cv);
-    fnw = pin_get(cx, p_fn);
-    pin_release(cx, pm, 2);
+    pin_release(cx, pm, 1);
+    IrVal fnargs[] = {cx->sp, cargs[1]};
+    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
     IrType r1[] = {IRB_I64};
     IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
     fill_frame(cx, frame);

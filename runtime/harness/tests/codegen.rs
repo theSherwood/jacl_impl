@@ -548,6 +548,15 @@ fn call_argument_survives_a_block_move() {
 }
 
 #[test]
+fn closure_call_argument_survives_a_block_move() {
+    // `[f [if …]]` with `f` a closure binding: the callee survives the argument's block move as
+    // the closure (an i64 pin) and its i32 function index is read after the arguments. Pinning
+    // the index itself put an i32 into an i64 frame param, and the verifier rejected the module
+    // (jacl #170; `test/jacl/stale_operand_block_move.jacl`).
+    run_case("pin_closure_call_arg", i32_val(11));
+}
+
+#[test]
 fn a_binding_made_inside_an_operand_survives() {
     // A pin is released by truncating the env, so an operand that binds a real name must not
     // be truncated away with it (#100).
@@ -1297,6 +1306,32 @@ fn channels_run_on_temen() {
         ret as u64,
         String::from_utf8_lossy(&stdout)
     );
+}
+
+#[test]
+fn shell_out_runs_when_exec_is_granted() {
+    // `!cmd` resolves the `exec` capability by name; ungranted it is a catchable error value, by
+    // design (a subprocess is pure host authority). test/jacl/io_pipe_to_file.jacl shells out to
+    // `echo`, so it only passes with that grant (jacl #171) — here temen-run's real `host_exec`
+    // backend, attenuated to `echo`, on the tree-walker and the JIT, against the file's own
+    // `# expect:` lines.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/io_pipe_to_file.jacl");
+    let src = std::fs::read_to_string(path).expect("read io_pipe_to_file.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let (linked, entry) = emit_and_link_file(path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
+        let caps = [("exec", temen_run::exec::host_exec(&["echo"]))];
+        let run = inst
+            .run_with_caps(backend, &temen_run::RunConfig::default(), &caps)
+            .unwrap_or_else(|e| panic!("run io_pipe_to_file on {backend:?}: {e}"));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), want, "{backend:?}");
+    }
+    // ...and ungranted, the shell-out is the catchable error the program then prints.
+    let run = inst.run_with_caps(temen_run::Backend::Jit, &temen_run::RunConfig::default(), &[]).expect("run");
+    assert!(String::from_utf8_lossy(&run.stdout).starts_with("<error"), "an ungranted `!cmd` is an error value");
 }
 
 const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");

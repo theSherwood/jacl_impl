@@ -4,7 +4,7 @@
 //! shippable fs data images those grants can mount:
 //!
 //! ```text
-//! jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]
+//! jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--exec PROG[,PROG…]] [--interp] [--workers N]
 //! jacl_temen bundle <assets-dir> -o <out.fsimg>
 //! ```
 //!
@@ -87,9 +87,10 @@ enum FsGrant {
     Image(PathBuf),
 }
 
-/// `run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]`.
+/// `run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--exec PROG[,PROG…]] [--interp] [--workers N]`.
 fn cmd_run(args: &[String]) -> ! {
     let mut prog: Option<PathBuf> = None;
+    let mut exec_allow: Option<Vec<String>> = None;
     let mut workers: Option<u32> = None;
     let mut grant = FsGrant::None;
     let mut interp = false;
@@ -104,6 +105,17 @@ fn cmd_run(args: &[String]) -> ! {
                 grant = FsGrant::Image(it.next().map(PathBuf::from).unwrap_or_else(|| die("--fs-image needs FILE")))
             }
             "--no-fs" => grant = FsGrant::None,
+            // Shell-out (`!cmd`) is default-deny like the filesystem: this grants temen-run's real
+            // subprocess backend attenuated to exactly these programs (jacl #171). Without it a
+            // `!cmd` is a catchable error value.
+            "--exec" => {
+                exec_allow = Some(
+                    it.next()
+                        .map(|l| l.split(',').filter(|p| !p.is_empty()).map(String::from).collect())
+                        .filter(|l: &Vec<String>| !l.is_empty())
+                        .unwrap_or_else(|| die("--exec needs PROG[,PROG…]")),
+                )
+            }
             "--interp" => interp = true,
             "--bytecode" => bytecode = true,
             // The scheduler's pool size for this run (jacl #152): passed as `JACL_WORKERS=N` in the
@@ -164,7 +176,7 @@ fn cmd_run(args: &[String]) -> ! {
         .unwrap_or_else(|e| die(&format!("instantiate: {e}")));
 
     // The grant (TEMEN_FS_DESIGN.md host-policy ladder). Explicit, default-deny.
-    let caps: Vec<(&str, temen_run::HostCap)> = match &grant {
+    let mut caps: Vec<(&str, temen_run::HostCap)> = match &grant {
         FsGrant::None => Vec::new(),
         FsGrant::Root(dir) => {
             // The program's `/` is DIR; create it (and DIR/tmp, the language's baseline
@@ -181,6 +193,10 @@ fn cmd_run(args: &[String]) -> ! {
             vec![("fs", cap)]
         }
     };
+    if let Some(allow) = &exec_allow {
+        let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
+        caps.push(("exec", temen_run::exec::host_exec(&allow)));
+    }
 
     // `--bytecode` selects the wasm-safe bytecode engine (the browser tier). For JACL modules it
     // currently falls back to the tree-walker at compile time — the `gc.roots + thread` seam veto
@@ -212,6 +228,6 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("bundle") => cmd_bundle(&args[1..]),
-        _ => die("usage: jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--interp] [--workers N]\n       jacl_temen bundle <assets-dir> -o <out.fsimg>"),
+        _ => die("usage: jacl_temen run <prog.jacl> [--fs-root DIR | --fs-image FILE | --no-fs] [--exec PROG[,PROG…]] [--interp] [--workers N]\n       jacl_temen bundle <assets-dir> -o <out.fsimg>"),
     }
 }
