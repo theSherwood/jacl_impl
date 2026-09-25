@@ -8,3 +8,22 @@ fn gc_mark_sweep() {
             "gc invariants for n={n} garbage objects (reachable graph survives, n reclaimed x2)");
     }
 }
+
+/// jacl #159: a sweep hands a region with no live cell back to the pool, so a heap full of dead
+/// cells of one size (the dead boxes of a wide-int loop) has room for another size, and a large
+/// cell's regions are reused. Before, both ran out of memory with the heap all but empty.
+#[test]
+fn gc_reclaims_regions_across_size_classes() {
+    assert_eq!(run_test("test_gc_regions.c", 0), 159,
+        "a heap of dead 16-byte cells must make room for strings, and 1 MiB blobs must reuse regions");
+}
+
+/// jacl #159: when the heap really is full, the allocator stops the guest itself — it used to
+/// return NULL, and the caller's write through it faulted at address 8 (or, at a larger offset,
+/// landed in live memory).
+#[test]
+fn gc_out_of_memory_traps_in_the_allocator() {
+    let (interp, jit) = jacl_runtime_harness::run_test_outcome("test_gc_oom.c", 0);
+    assert_eq!(interp, "Trap(Unreachable)", "a live heap past 16 MiB must stop in jacl_alloc (interp)");
+    assert_eq!(jit, "Trap(Unreachable)", "a live heap past 16 MiB must stop in jacl_alloc (JIT)");
+}
