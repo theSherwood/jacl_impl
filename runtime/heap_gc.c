@@ -14,7 +14,8 @@
  * (__vm_gc_roots) — the words on the control stack/registers that point into the
  * heap. Heap edges are traced conservatively (each live cell's payload words are
  * scanned for candidate object-starts). Non-moving ⇒ found pointers stay valid; the
- * sweep returns each unmarked cell to its owning worker's size-class free list.
+ * sweep returns each unmarked cell to its owning worker's size-class free list, and a
+ * region left with no live cell at all to the shared pool, so any size can reuse it.
  * Multi-vCPU stop-the-world quiescing is P3.4c; until then the only safe point is the
  * single thread's allocation call, exactly as in P2.
  *
@@ -22,7 +23,8 @@
  * bitmap** rather than `off += size`: with per-worker regions the live cells are no
  * longer one contiguous run (region tails and unclaimed regions are gaps), but every
  * allocated cell still has exactly one start bit, so the bitmap is the authoritative
- * iterator. Free cells clear their start bit, so they are skipped.
+ * iterator. A free cell keeps its start bit (its header says JOBJ_FREE), which is what lets
+ * each sweep rebuild the free lists from the bitmap; a reclaimed region clears all of its.
  *
  * Backing store: a large static region (no window growth yet). Swapping the chunk
  * source to __vm_map-grown window pages is a localized follow-up that needs the
@@ -71,9 +73,24 @@ static uint8_t  jacl_heap_mem[JACL_HEAP_BYTES] __attribute__((aligned(16)));
 static uint8_t  jacl_startmap[JACL_HEAP_BYTES / JACL_GRANULE / 8];
 
 /* shared region pool: a monotonic byte cursor bumped atomically, plus the owning
- * worker of each handed-out region (so the sweep returns a cell to its owner). */
+ * worker of each handed-out region (so the sweep returns a cell to its owner).
+ *
+ * `jacl_region_free[r]` is 1 for a region below the cursor that a sweep found with no live
+ * cell and handed back (jacl #159). Without it a swept cell could only ever be reused by its
+ * own size class: a heap full of dead 16-byte boxes then had no room for one 32-byte string,
+ * and the collection that should have made room reported nothing to reclaim. Region 0 is never
+ * handed back (offset 0 is the null sentinel, and a large cell must never start there). */
 static long     jacl_region_bump;
 static uint8_t  jacl_region_owner[JACL_NREGIONS];
+static int32_t  jacl_region_free[JACL_NREGIONS];
+
+/* The claimed high-water mark. A failed claim still bumps the cursor (the atomic add happens
+ * before the bounds check), so after exhaustion the cursor runs past the heap; everything that
+ * walks the bitmap must stop at the heap's end. */
+static uint32_t jacl_region_hwm(void) {
+  long b = __vm_atomic_add((void*)&jacl_region_bump, 0);
+  return b > (long)JACL_HEAP_BYTES ? JACL_HEAP_BYTES : (uint32_t)b;
+}
 
 /* per-worker (per-vCPU) heap: a current bump region + exact-size free lists. Only the
  * owning worker reads/writes its own entry on the allocation fast path (lock-free);
@@ -123,7 +140,6 @@ static inline uint32_t* free_next_slot(JaclObj* o) { return (uint32_t*)((uint8_t
 static inline uint32_t round_granule(uint32_t n) { return (n + (JACL_GRANULE - 1)) & ~(JACL_GRANULE - 1); }
 
 static inline void startbit_set(uint32_t off)   { uint32_t g = off / JACL_GRANULE; jacl_startmap[g >> 3] |=  (uint8_t)(1u << (g & 7)); }
-static inline void startbit_clear(uint32_t off) { uint32_t g = off / JACL_GRANULE; jacl_startmap[g >> 3] &= (uint8_t)~(1u << (g & 7)); }
 static inline int  startbit_test(uint32_t off)  { uint32_t g = off / JACL_GRANULE; return (jacl_startmap[g >> 3] >> (g & 7)) & 1; }
 
 void __vm_vcpu_tls_set(long v);
@@ -140,6 +156,7 @@ void jacl_heap_init(void) {
   }
   memset(jacl_startmap, 0, sizeof(jacl_startmap));
   memset(jacl_region_owner, 0, sizeof(jacl_region_owner));
+  memset(jacl_region_free, 0, sizeof(jacl_region_free));
   /* quiesce state: the main thread is worker 0 and joins the quiesce set */
   for (int w = 0; w < JACL_MAX_WORKERS; w++) { jacl_gc_active[w] = 0; jacl_gc_parked[w] = 0; jacl_gc_in_task[w] = 0;
                                              jacl_gc_handoff[w] = 0; jacl_gc_swept[w] = 0; }
@@ -154,13 +171,29 @@ __attribute__((noinline)) static long jacl_pti(void *p) { return (long)p; }
 long jacl_heap_lo(void) { return jacl_pti(&jacl_heap_mem[0]); }
 long jacl_heap_hi(void) { return jacl_pti(&jacl_heap_mem[JACL_HEAP_BYTES]); }
 
-/* Claim `bytes` (rounded up to whole regions) from the shared pool with a single
- * atomic bump — the only cross-worker synchronization on the allocation path. Marks
- * each claimed region as owned by `w` and returns the base offset, or
- * JACL_REGION_NONE when the pool is exhausted. */
+/* Claim `bytes` (rounded up to whole regions) from the shared pool: a run of regions a
+ * sweep handed back, else fresh ones from a single atomic bump — the only cross-worker
+ * synchronization on the allocation path. Marks each claimed region as owned by `w` and
+ * returns the base offset, or JACL_REGION_NONE when the pool is exhausted. */
 static uint32_t jacl_grab_regions(int w, uint32_t bytes) {
   uint32_t need = round_granule(bytes);
   need = (need + (JACL_REGION_BYTES - 1)) & ~(JACL_REGION_BYTES - 1);
+  uint32_t k = need / JACL_REGION_BYTES;
+  /* 1. a run of k handed-back regions. Each is taken by CAS (other workers claim too), and a
+   *    partly-taken run is given back. Region 0 is never free, so the scan starts at 1. */
+  uint32_t top = jacl_region_hwm() / JACL_REGION_BYTES;
+  for (uint32_t r = 1; r + k <= top; r++) {
+    if (!__vm_atomic_load32(&jacl_region_free[r])) continue;
+    uint32_t got = 0;
+    while (got < k && __vm_atomic_cas32(&jacl_region_free[r + got], 1, 0) == 1) got++;
+    if (got == k) {
+      for (uint32_t i = 0; i < k; i++) jacl_region_owner[r + i] = (uint8_t)w;
+      return r * JACL_REGION_BYTES;
+    }
+    for (uint32_t i = 0; i < got; i++) __vm_atomic_store32(&jacl_region_free[r + i], 1);
+    r += got;
+  }
+  /* 2. fresh regions past the cursor */
   long base = __vm_atomic_add((void*)&jacl_region_bump, (long)need);
   if (base < 0 || base + (long)need > (long)(JACL_NREGIONS * JACL_REGION_BYTES))
     return JACL_REGION_NONE;
@@ -208,7 +241,8 @@ static uint32_t jacl_alloc_off(uint32_t cell) {
   if (cell > JACL_REGION_BYTES) {
     uint32_t base = jacl_grab_regions(w, cell);
     if (base == JACL_REGION_NONE) return 0;
-    /* base==0 is unreachable here: small allocations always claim region 0 first. */
+    /* base==0 is unreachable here: small allocations always claim region 0 first, and
+     * region 0 is never handed back. */
     return base;
   }
   /* 4. refill: claim a fresh region from the shared pool, then bump */
@@ -301,6 +335,12 @@ void jacl_gc_worker_park_if_requested(void) {
 
 long jacl_gc_violation_count(void) { return __vm_atomic_load32(&jacl_gc_violations); }
 
+/* The heap is exhausted: a collection reclaimed nothing and no cell fits. Every caller writes
+ * into the cell it gets back — often immediately, often deep inside the HAMT or vector code —
+ * so returning NULL turned out-of-memory into a write through address 0 (jacl #159). Stop the
+ * guest here instead, with this function's name on the backtrace. */
+__attribute__((noinline, noreturn)) static void jacl_heap_exhausted(void) { __builtin_trap(); }
+
 __attribute__((noinline))
 void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
   uint32_t cell = round_granule((uint32_t)sizeof(JaclObj) + payload);
@@ -314,10 +354,10 @@ void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
     long r = jacl_gc_collect();
     off = jacl_alloc_off(cell);
     if (off) break;
-    if (r == 0) return 0;                              /* we collected, reclaimed nothing → OOM */
+    if (r == 0) break;                                 /* we collected, reclaimed nothing → OOM */
     /* r < 0: another worker collected; retry. r > 0: reclaimed but no fit yet; retry/bound. */
   }
-  if (!off) return 0;
+  if (!off) jacl_heap_exhausted();
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
   o->size = cell;
   o->obj_type = (uint8_t)obj_type;
@@ -330,7 +370,7 @@ void* jacl_alloc(uint32_t obj_type, uint32_t payload) {
 
 long jacl_live_count(void) {
   long n = 0;
-  uint32_t hi = (uint32_t)jacl_region_bump;          /* high-water of claimed regions */
+  uint32_t hi = jacl_region_hwm();                   /* high-water of claimed regions */
   uint32_t nbytes = (hi / JACL_GRANULE + 7) / 8;
   for (uint32_t byte = 0; byte < nbytes; byte++) {
     uint8_t bits = jacl_startmap[byte];
@@ -410,12 +450,25 @@ static void mark_drain(void) {
   }
 }
 
+/* Hand regions [r, r+k) back to the pool (world stopped): clear their start bits, and retire
+ * any worker's bump region among them — that worker refills on its next allocation. */
+static void jacl_release_regions(uint32_t r, uint32_t k) {
+  memset(&jacl_startmap[r * (JACL_REGION_BYTES / JACL_GRANULE / 8)], 0,
+         k * (JACL_REGION_BYTES / JACL_GRANULE / 8));
+  for (int w = 0; w < JACL_MAX_WORKERS; w++) {
+    uint32_t lim = jacl_worker[w].limit;
+    if (lim > r * JACL_REGION_BYTES && lim <= (r + k) * JACL_REGION_BYTES)
+      jacl_worker[w].bump = jacl_worker[w].limit = 0;
+  }
+  for (uint32_t i = 0; i < k; i++) jacl_region_free[r + i] = 1;
+}
+
 /* The mark-sweep itself, run only while the world is stopped (every other worker has
  * suspended its task and parked its vCPU). gc.roots scans all suspended fibers + this
  * collector's own (caller) frames, so all roots are found; single-threaded by
  * construction here, so it reuses the P1 algorithm verbatim. */
 static long jacl_gc_collect_stw(void) {
-  uint32_t hi = (uint32_t)jacl_region_bump;
+  uint32_t hi = jacl_region_hwm();
   uint32_t nbytes = (hi / JACL_GRANULE + 7) / 8;
   /* 1. clear marks (walk the start bitmap) */
   for (uint32_t byte = 0; byte < nbytes; byte++) {
@@ -446,38 +499,59 @@ static long jacl_gc_collect_stw(void) {
   jacl_sched_mark_roots();   /* pending spawn futures (main is parked in join during a flush) */
   /* 3. trace */
   mark_drain();
-  /* 4. sweep: unmarked live cells -> their owning worker's free list */
-  long swept = 0;
-  for (uint32_t byte = 0; byte < nbytes; byte++) {
-    uint8_t bits = jacl_startmap[byte];
-    if (!bits) continue;
-    for (uint32_t b = 0; b < 8; b++) {
-      if (!(bits & (1u << b))) continue;
-      uint32_t off = (byte * 8 + b) * JACL_GRANULE;
-      if (off >= hi) break;
-      JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-      if (o->obj_type != JOBJ_FREE && !o->mark) {
-        uint32_t cls = o->size / JACL_GRANULE;
-        int owner = jacl_region_owner[off / JACL_REGION_BYTES];
-        o->obj_type = JOBJ_FREE;
-        startbit_clear(off);
-        if (cls <= JACL_NCLASS) {
-          *free_next_slot(o) = jacl_worker[owner].freelist[cls];
-          jacl_worker[owner].freelist[cls] = off;
-        }
-        swept++;
-      }
+  /* 4. sweep, a region at a time. Unmarked cells become free; a region left with no live cell
+   *    goes back to the pool (any size can reuse it); every other region's free cells are pushed
+   *    onto its owner's free lists, which are rebuilt from scratch here so none can point into a
+   *    region that was handed back. Returns the cells freed plus the regions handed back: either
+   *    is room the caller's retry can use. */
+  for (int w = 0; w < JACL_MAX_WORKERS; w++)
+    for (uint32_t c = 0; c <= JACL_NCLASS; c++) jacl_worker[w].freelist[c] = 0;
+  const uint32_t rbytes = JACL_REGION_BYTES / JACL_GRANULE / 8;   /* bitmap bytes per region */
+  long swept = 0, released = 0;
+  for (uint32_t r = 0; r < hi / JACL_REGION_BYTES; ) {
+    uint32_t base = r * JACL_REGION_BYTES;
+    if (jacl_region_free[r]) { r++; continue; }
+    JaclObj* head = (JaclObj*)&jacl_heap_mem[base];
+    if (startbit_test(base) && head->size > JACL_REGION_BYTES) {   /* a large cell's own run */
+      uint32_t span = (head->size + JACL_REGION_BYTES - 1) / JACL_REGION_BYTES;
+      if (!head->mark) { swept++; released += span; jacl_release_regions(r, span); }
+      r += span;
+      continue;
     }
+    uint32_t live = 0;
+    for (int pass = 0; pass < 2; pass++) {   /* 0: free the dead, count the live; 1: free lists */
+      for (uint32_t byte = base / JACL_GRANULE / 8; byte < base / JACL_GRANULE / 8 + rbytes; byte++) {
+        uint8_t bits = jacl_startmap[byte];
+        for (uint32_t b = 0; bits && b < 8; b++) {
+          if (!(bits & (1u << b))) continue;
+          uint32_t off = (byte * 8 + b) * JACL_GRANULE;
+          JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
+          if (pass == 0) {
+            if (o->obj_type == JOBJ_FREE) continue;
+            if (o->mark) live++;
+            else { o->obj_type = JOBJ_FREE; swept++; }
+          } else {
+            uint32_t cls = o->size / JACL_GRANULE;
+            if (o->obj_type != JOBJ_FREE || cls > JACL_NCLASS) continue;
+            JaclWorker* wh = &jacl_worker[jacl_region_owner[r]];
+            *free_next_slot(o) = wh->freelist[cls];
+            wh->freelist[cls] = off;
+          }
+        }
+      }
+      if (pass == 0 && !live && r != 0) { released++; jacl_release_regions(r, 1); break; }
+    }
+    r++;
   }
-  return swept;
+  return swept + released;
 }
 
 /* The collector: elect one collector (CAS), stop every other registered worker (each
  * suspends its task at a safepoint and parks its vCPU), run the STW mark-sweep, then
- * resume everyone. Returns the swept count when this call did the collection, or -1 when
- * another worker was already collecting (this call yielded as a mutator instead — the
- * caller should retry). On the single-thread path (only worker 0 registered) the barrier
- * is a no-op and this is just the P1 collection.
+ * resume everyone. Returns the swept count (cells freed plus regions handed back) when this
+ * call did the collection, or -1 when another worker was already collecting (this call
+ * yielded as a mutator instead — the caller should retry). On the single-thread path (only
+ * worker 0 registered) the barrier is a no-op and this is just the P1 collection.
  *
  * Election happens here; the WAITING half lives in jacl_gc_quiesce_and_sweep and always
  * runs from a bare worker context, because a futex wait inside a fiber parks the fiber
