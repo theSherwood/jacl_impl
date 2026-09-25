@@ -8,6 +8,16 @@
 >
 > The model is settled in broad strokes; specific sub-decisions
 > remain open and are flagged below.
+>
+> **Unir amendments (2026-09-25; `docs/UNIR_PIPELINES.md`).** On Unir a
+> stage is a vat, not an OS process, and three points are settled for it:
+> a **Job is the Future** of the task that runs the pipeline, so `&` is
+> `spawn` (§5) and `cancel` / `suspend` / `resume` are operations on
+> Futures (§2, §3); until a value can cross a vat boundary a program's
+> value is its **exit record**, `{exit, duration}` or `{exits, duration}`
+> for a pipeline, the finished Job of §2 without `pid` or `stdout`; and a
+> program's output is a **typed edge**, of which §7's byte stream is the
+> bytes floor.
 
 ## Motivation
 
