@@ -438,7 +438,7 @@ void jacl_gc_mark_word(long w) {
   mark_push_word(w);
 }
 
-static void mark_trace(uint32_t off) {
+static inline void mark_trace(uint32_t off) {
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
   if (o->obj_type != JOBJ_NODE) return;            /* BLOBs have no outgoing pointers */
   /* conservative trace: scan payload words for candidate object-starts */
@@ -453,14 +453,17 @@ static void mark_trace(uint32_t off) {
   }
 }
 
-/* Trace everything queued. If any push overflowed, some marked object was never queued, so
- * rescan the heap and re-trace every marked node (re-tracing is harmless: its children are
- * marked already or get marked now), draining as we go; repeat until a pass overflows nothing.
- * Each overflow marked a new object, so this ends. */
-static void mark_drain(void) {
-  for (;;) {
-    while (mark_sp) mark_trace(mark_stack[--mark_sp]);
-    if (!mark_overflow) return;
+/* Overflow recovery: some marked object was never queued, so rescan the heap and re-trace every
+ * marked node (re-tracing is harmless: its children are marked already or get marked now),
+ * draining as we go; repeat until a pass overflows nothing. Each overflow marked a new object, so
+ * this ends.
+ *
+ * `noinline` is load-bearing, like `always_inline` on jacl_gc_quiesce_and_sweep: the roots were
+ * scanned conservatively from the collector's own stack, and inlining this into the collection
+ * grew that frame over dead stack whose stale words kept garbage alive (strings_gc's "garbage is
+ * reclaimed" failed on the JIT). Kept out of line, the common path compiles as it did before. */
+__attribute__((noinline)) static void mark_rescan(void) {
+  while (mark_overflow) {
     mark_overflow = 0;
     uint32_t hi = jacl_region_hwm();
     for (uint32_t byte = 0; byte < (hi / JACL_GRANULE + 7) / 8; byte++) {
@@ -474,6 +477,12 @@ static void mark_drain(void) {
       }
     }
   }
+}
+
+/* Trace everything queued, then recover from any overflow (jacl #175). */
+static void mark_drain(void) {
+  while (mark_sp) mark_trace(mark_stack[--mark_sp]);
+  if (mark_overflow) mark_rescan();
 }
 
 /* Hand regions [r, r+k) back to the pool (world stopped): clear their start bits, and retire
