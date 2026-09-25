@@ -1,19 +1,23 @@
 # Pipelines of vats on Unir (`!a | !b`)
 
-**Status:** partly built, 2026-09-24 (stages, `jacl_pipeline`, pipefail; see Order of work), for [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19),
-the exit criterion of Unir stage 1b. It builds on `docs/UNIR_CHANNELS.md` (channels on edges within
-one vat). The user-facing semantics are `SHELL_API_DESIGN.md`'s. This note maps them onto vats and
-edges, and names the pieces TEMEN and unir still lack.
+**Status:** partly built; design revised 2026-09-25 (values and outputs, job control, typed outputs; see
+Order of work). For [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19), the exit
+criterion of Unir stage 1b. It builds on `docs/UNIR_CHANNELS.md` (channels on edges within one vat).
+The user-facing semantics are `SHELL_API_DESIGN.md`'s, with the Unir amendments it points to here.
+This note maps them onto vats and edges, and names the pieces TEMEN and unir still lack.
 
 ## What exists today
 
-- `|` is argument threading only: `a | f x` compiles to `f a x` (`codegen.c` `compile_cmd_control_forms`).
-  The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
-- `!cmd` blocks: `jacl_exec_capture` runs a host subprocess through the `exec` capability and returns
-  its stdout as a string.
-- Channels run on Unir edges, but only within one vat.
-- Nothing resolves a name to "spawn this vat", nothing lets a JACL program start as an op-13 child,
-  and JACL closures cannot cross a vat boundary. Captures are heap pointers, and there is no value codec.
+- `!a | !b` of program stages runs as vats joined by edges (`jacl_pipeline`), on all three TEMEN
+  engines. It returns the last stage's output as a string, or the pipefail error. That return value
+  is a stopgap: see "A program has a value and an output".
+- `|` between JACL values is argument threading: `a | f x` compiles to `f a x`. A chain that mixes
+  programs and JACL stages is not wired yet. The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
+- A lone `!cmd` the vat holds no program for runs a host subprocess through the `exec` capability
+  (`jacl_exec_capture`) and returns its stdout as a string.
+- The parser marks `!cmd &` as background (`shell_cmd.background`); codegen ignores the mark.
+- JACL tasks have no cancel, suspend or resume.
+- Nothing carries a JACL value across a vat boundary: there is no value codec.
 
 ## Design
 
@@ -64,7 +68,7 @@ with `unir.stdout` is a stage.
 
 **stderr** gets its own edge per stage, not a substream of stdout. Credit is per edge, so a shared edge
 would let a flood of diagnostics stall the data. By default the shell reads every stage's stderr,
-forwards it to the pane labelled by stage, and keeps a bounded tail in the Job, which is what pipefail
+forwards it to the pane labelled by stage, and keeps a bounded tail per stage, which is what pipefail
 reports. `|!` (stderr into the next stage) and `|+` (both, merged) are then wiring choices on the same
 edges. A merge is the consumer reading several rings (unir §12.8).
 
@@ -74,31 +78,83 @@ with its region granted at spawn. An end has exactly one owner (unir invariant 5
 moves it**: the parent's copy is closed, and using it is an error value. Until temen#1707 is fixed, a
 moved end's mapping stays in the parent's map area (see Later in `UNIR_CHANNELS.md`).
 
-### The shell side: `jacl_pipeline`
+### A program has a value and an output (decided 2026-09-25)
 
-Codegen lowers a `|` chain that contains a `!cmd` to one runtime call,
-`jacl_pipeline(stages, first_input, want_value)`, where each stage is an argv vector. The runtime:
+A program stage has two results, and they are kept apart:
 
-1. creates the edge regions (one per link, plus one stderr edge per stage), since the parent creates
-   every region (see TEMEN below);
-2. spawns each program vat with its argv, its edges, and any channel ends passed as arguments;
-3. wires JACL ends as channels in this vat;
-4. returns a **Job** (`SHELL_API_DESIGN.md` §Job: `exits`, `stdout` when the last stage is a program
-   and the pipeline sits in value position, `duration`). Stage vats are joined when the Job is awaited.
+- **Its value.** `!prog args` evaluates to the program's value, and a pipeline to its last stage's
+  value (`SHELL_API_DESIGN.md` §4). Until a value can cross a vat boundary (see "One codec"), a
+  program's value is its **exit record**: `{exit, duration}` for one program, `{exits, duration}` for
+  a pipeline, one exit per stage. A stage that fails, traps or severs makes the value the pipefail
+  error instead: an error value naming that stage and carrying the end of its stderr
+  (`SHELL_API_DESIGN.md` §9). Once
+  values cross, a JACL program's value is what its `main` returns; a host program run through `exec`
+  keeps the exit record.
+- **Its output.** An edge of type `T` (see "Typed outputs"). It flows to the next program stage; into
+  a JACL stage, which reads it as a channel (`!gen 3 | collect` is the output's elements, a string
+  when `T` is text); or, with nothing after it, into the **enclosing output**. In the shell that is
+  the host stream (later the pane); inside a stage it is the stage's own `unir.stdout`, copied
+  there, because an edge has one writer and cannot be handed to the child.
 
-### Terminals and job control
+Stage 1b's first cut returned the output as the value because nothing else could come back. That
+fixed text as the result type of every pipeline, which is what the typed-stream design exists to
+avoid, so the value and the output are separated before anything else builds on the stopgap.
 
-| shell action | on the edges | what the stages see |
+### Who wires the output: the fiber that evaluates the pipeline
+
+Evaluating a pipeline spawns its stages, joins them with edges, and then **wires the last output**:
+into a JACL stage's channel, or copied into the enclosing output. The fiber doing that is whichever
+one evaluates the expression, with no special drainer. So:
+
+- `spawn {!a | !b}` wires the output inside the spawned task, and the pipeline runs to completion
+  whether or not anyone awaits it.
+- `!a | !b &` is **`spawn {!a | !b}`** (`SHELL_API_DESIGN.md` §5): the parser's background mark
+  lowers to a spawn of the chain.
+
+### Background and job control: the Future is the Job
+
+The Future a spawn returns is the handle to the running pipeline. There is no separate Job object.
+
+| operation | on a task running a pipeline | on any other task |
 |---|---|---|
-| a stage exits normally | its `unir.stdout` completes | the next stage reads to end of stream and exits |
-| a stage fails | its `unir.stdout` severs (`io-error`) | the next stage's read severs, so it fails too (pipefail) |
-| `cancel $job` (kill) | the shell severs every end it holds with `cancelled` | each stage's next edge operation severs |
-| `suspend $job` | the shell sets the credit limit to what it has already granted on the ends it reads (`set_credit_limit`) | the upstream stages fill their rings and park: backpressure, no signals |
-| `resume $job` | the credit limit is lifted | they continue; no byte is lost or repeated |
+| `await $f` | the pipeline's value (the exit record), or the pipefail error | the task's value |
+| `cancel $f` | severs every end the task holds with `cancelled`; each stage's next edge operation severs, and awaiting gives the `cancelled` error | the task ends with a `cancelled` error at its next safepoint |
+| `suspend $f` | sets the credit limit on the ends the task reads to what it has already granted (`unir_consumer_suspend`): the stages fill their rings and park, by backpressure, with no signals | the task parks at its next safepoint |
+| `resume $f` | lifts the limit; the stages continue, and no byte is lost or repeated | the task continues |
 
-Suspend and resume act on the ends the shell holds. For `!a | !b`, the shell reads `!b`'s output, so
-suspending stops `!b` once its ring is full, and `!a` stops behind it. That is flow control as §13.1
-defines job control. It needs `unir_consumer_set_credit_limit` in the C ABI.
+A stage that exits normally completes its output, and the next stage reads to the end and exits. A
+stage that fails severs its output with `io-error`, so the next stage fails too (pipefail). These
+are the stages' own behaviour (see the program side), not operations on the Future.
+
+Suspending acts on the ends the task holds. For `!a | !b`, the task reads `!b`'s output, so
+suspending stops `!b` once its ring is full, and `!a` stops behind it. That is flow control as unir
+§13.1 defines job control.
+
+### Typed outputs (unir stage 2; stage 1b is bytes)
+
+Unir's streams are typed (unir §1, §3), and stage 1b's are all bytes, the floor. Nothing here depends
+on the element type, so the design is written for a typed output and stage 1b implements `T = bytes`:
+
+| | stage 1b | with types (unir stage 2) |
+|---|---|---|
+| a program's output | `unir.stdout`, bytes | an edge of type `T`, declared by the program and advertised at connect (unir §3) |
+| `!a \| !b` | a byte ring | the same ring; the handshake checks that `b` accepts `a`'s `T`, edge by edge, before data flows |
+| `!a \| collect` | frames as bytes, giving a string | frames as `T`: fixed-width heads read as JACL structs, zero-copy (unir §13.1); `collect` gives a vector of `T` |
+| the enclosing output | bytes copied to the host stream | the pane is a typed sink, rendering by type rather than scraping text |
+| `print`, `[stdout]`, `write` | the output edge | the bytes floor: text written to a bytes output |
+
+So a program declares its output type (default bytes) where it declares its entry; stage 1b records
+the slot and always says bytes. Channels stay frame-based (`docs/UNIR_CHANNELS.md`), so a typed frame
+changes the payload, not the API, and `collect` is defined over `T` from the start.
+
+### One codec: JACL values as meta-schema frames
+
+Three things need a JACL value as a frame: a program's **value** coming back to its parent; **argument
+values**, including capabilities and moved channel ends, where argv is strings today (unir §13.1:
+passing `--gpu=$gpu` passes a capability); and **typed JACL-to-JACL outputs**. They get one codec, and
+it is a subset of unir's meta-schema (unir §3) from the start: structs, sums, lists, text, the integer
+ladder, floats and capability fields. That makes it the first slice of unir stage 2 rather than a
+JACL-private format that stage 2 would have to replace (unir decision 50).
 
 ## What TEMEN and unir need first
 
@@ -119,17 +175,21 @@ they are an upstream PR, filed from this note.
   (prints N numbered lines), `upcase` (copies stdin to stdout, uppercased), `fail` (writes to stderr,
   then returns an error), `slow` (echoes stdin to stdout), and `tee` (copies stdin to stdout and to a
   channel passed as its argument).
-- **End to end on TEMEN, on the interpreter and the JIT:**
-  - `!gen 100 | !upcase` in value position: the output is every line, uppercased (Complete through
-    two vats).
-  - `!gen 100 | !fail | !upcase`: the pipeline is an error naming `fail` and carrying its stderr, and
-    `upcase` saw a sever (Severed).
-  - `!gen 10 | !tee $w | !upcase`, with `$r` read in this vat: both outputs are complete, and `$w` is
-    closed in this vat after the call (the end moved).
-  - `cancel` on a running `!gen 1000000 | !slow`: both stages end `Severed(cancelled)`, and the Job's
-    exits say so.
-  - `suspend` then `resume` on `!gen 10000 | !upcase`: while suspended, the byte count the shell has
-    read stays fixed. After resuming, the output is complete and in order.
+- **End to end on TEMEN, on the tree-walker, bytecode and Cranelift:**
+  - `!gen 100 | !upcase | collect`: every line, uppercased (Complete through two vats into a JACL
+    stage).
+  - `!gen 100 | !upcase` in value position: the exit record, with both exits 0; the output went to
+    the enclosing output. In statement position the same output passes through.
+  - `!gen 100 | !fail | !upcase`: the pipeline's value is an error naming `fail` and carrying its
+    stderr, and `upcase` saw a sever (Severed).
+  - `!gen 10 | !tee $w | !upcase | collect`, with `$r` read in this vat: both outputs are complete,
+    and `$w` is closed in this vat after the call (the end moved).
+  - `!gen 1000000 | !slow &`, then `cancel`: both stages end `Severed(cancelled)`, and awaiting the
+    Future gives the `cancelled` error.
+  - `!gen 10000 | !upcase | tally $n &`, then `suspend` and `resume`, where `tally` is a JACL stage
+    that adds the bytes it reads to the cell `$n`: while suspended, `$n` stays fixed; after resuming,
+    the output is complete and in order.
+  - `cancel`, `suspend` and `resume` on a task with no pipeline act at its safepoints.
 - The #18 channel tests, and every existing baseline, stay green.
 
 ## Order of work
@@ -145,15 +205,23 @@ they are an upstream PR, filed from this note.
    bytecode and Cranelift. Bytecode needed theSherwood/temen#1789 (per-domain fiber registries, so a
    module may both spawn and use fibers). Cranelift needed temen#1469 (a child task runs its own
    fibers and `thread.spawn` vCPUs); the test asserts its stages are JIT-compiled. **Done.**
-4. Next: Job, suspend/resume/cancel; channel ends passed by move; JACL values feeding a first stage's
-   stdin; `$bin` as a map value, which needs TEMEN to list a vat's capabilities by name. Until then
-   `!name` resolves the capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat
-   does not hold runs through `exec` as before.
+4. Values and outputs, in this order: `!cmd → JACL` wiring (the last output read as a channel) and
+   `collect`; the enclosing output (statement and value position, a stage's own output inside a
+   stage); the exit record as a program's value; `&` as `spawn`; `cancel`, `suspend` and `resume`
+   on Futures, carried out on edges for a task running a pipeline. The pipeline tests move from
+   reading the value as text to `| collect`.
+5. Then: channel ends passed by move; JACL values feeding a first stage's stdin; `$bin` as a map
+   value, which needs TEMEN to list a vat's capabilities by name. Until then `!name` resolves the
+   capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat does not hold runs
+   through `exec` as before.
+6. The value codec over unir's meta-schema (unir stage 2's first slice): programs' values, argument
+   values, typed JACL-to-JACL outputs.
 
 ## Out of scope for #19
 
-- Blocks as vat stages (needs a value codec).
+- Blocks as vat stages (needs the value codec, and a closure's captures in it).
 - The `|!`, `|+` and `|&` operators (the stderr edges exist; only the syntax and wiring choices wait).
 - `create-process`'s explicit fd records.
 - `&`/detached lifetime and GC-driven kill.
-- Typed edges (unir stage 2).
+- Output types other than bytes, and the value codec (unir stage 2; see "Typed outputs" and "One
+  codec").
