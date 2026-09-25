@@ -790,6 +790,7 @@ struct AstNode {
     struct { AstNode* expr; }                                      spread;
     struct { AstNode* head; AstNode** args; uint32_t arg_count;
              uint8_t background;
+             uint8_t stream;  /* codegen: its chain's output feeds a JACL stage, as a channel */
              uint8_t head_id; /* HeadId for shell heads (rarely well-known) */
     }  shell_cmd;
     struct { uint8_t is_mutable;

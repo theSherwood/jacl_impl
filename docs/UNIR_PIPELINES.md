@@ -8,11 +8,18 @@ This note maps them onto vats and edges, and names the pieces TEMEN and unir sti
 
 ## What exists today
 
-- `!a | !b` of program stages runs as vats joined by edges (`jacl_pipeline`), on all three TEMEN
-  engines. It returns the last stage's output as a string, or the pipefail error. That return value
-  is a stopgap: see "A program has a value and an output".
-- `|` between JACL values is argument threading: `a | f x` compiles to `f a x`. A chain that mixes
-  programs and JACL stages is not wired yet. The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
+- `!a | !b` of program stages runs as vats joined by edges, on all three TEMEN engines. Its value is
+  the exit record, `{exit}` or `{exits}`, and its output goes to the enclosing output
+  (`jacl_pipeline`); into a JACL stage, `!a | f` gives `f` the output as a channel read end
+  (`jacl_pipeline_stream`), and `collect` reads a read end into a string. A failed stage fails the
+  pipeline either way: the value, or the read that reaches the end, is the pipefail error. Inside a
+  stage the enclosing output is the stage's `unir.stdout` (`jacl_out`), which nothing tests yet:
+  a stage holds no programs to run.
+- The exit record has no `duration` yet: TEMEN has a `Clock` capability, but the C frontend has no
+  way to call it (`__vm_host_call` reaches only embedder `HostProc` capabilities).
+- `|` between JACL values is argument threading: `a | f x` compiles to `f a x`. `!a | f` is the
+  same call, with the chain compiled as a read end (`shell_cmd.stream`). JACL values into a program
+  stage are not wired yet. The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
 - A lone `!cmd` the vat holds no program for runs a host subprocess through the `exec` capability
   (`jacl_exec_capture`) and returns its stdout as a string.
 - The parser marks `!cmd &` as background (`shell_cmd.background`); codegen ignores the mark.
@@ -207,9 +214,10 @@ they are an upstream PR, filed from this note.
    fibers and `thread.spawn` vCPUs); the test asserts its stages are JIT-compiled. **Done.**
 4. Values and outputs, in this order: `!cmd → JACL` wiring (the last output read as a channel) and
    `collect`; the enclosing output (statement and value position, a stage's own output inside a
-   stage); the exit record as a program's value; `&` as `spawn`; `cancel`, `suspend` and `resume`
-   on Futures, carried out on edges for a task running a pipeline. The pipeline tests move from
-   reading the value as text to `| collect`.
+   stage); the exit record as a program's value. **Done**, but for `duration`. Then `&` as `spawn`;
+   `cancel`, `suspend` and `resume` on Futures, carried out on edges for a task running a
+   pipeline. The pipeline tests read the output with `| collect` and a JACL stage, and check what
+   reaches the enclosing output.
 5. Then: channel ends passed by move; JACL values feeding a first stage's stdin; `$bin` as a map
    value, which needs TEMEN to list a vat's capabilities by name. Until then `!name` resolves the
    capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat does not hold runs
@@ -222,6 +230,8 @@ they are an upstream PR, filed from this note.
 - Blocks as vat stages (needs the value codec, and a closure's captures in it).
 - The `|!`, `|+` and `|&` operators (the stderr edges exist; only the syntax and wiring choices wait).
 - `create-process`'s explicit fd records.
-- `&`/detached lifetime and GC-driven kill.
+- `&`/detached lifetime and GC-driven kill. Likewise a pipeline's read end dropped before its end:
+  its stages are not reaped until something reads it to the end or closes it.
+- A pipeline's `duration`, until the C frontend can reach TEMEN's `Clock`.
 - Output types other than bytes, and the value codec (unir stage 2; see "Typed outputs" and "One
   codec").

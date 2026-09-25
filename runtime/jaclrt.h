@@ -335,6 +335,10 @@ JaclVal jacl_channel_n(JaclVal cap);               /* [channel CAP] */
 JaclVal jacl_chan_write(JaclVal w, JaclVal bytes); /* [write W BYTES]: nil, or an error value */
 JaclVal jacl_chan_read(JaclVal r, JaclVal n);      /* [read R N]: [Buf k u8], nil at EOF, or error */
 JaclVal jacl_chan_close(JaclVal ch);               /* [close CH]: complete (w) / cancel (r) */
+JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's bytes as a str */
+/* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
+JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
+JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_timeout_begin(JaclVal secs);          /* [timeout D { body }] — open a deadline */
 JaclVal jacl_timeout_end(JaclVal body_val);        /* close it: error if the deadline fired */

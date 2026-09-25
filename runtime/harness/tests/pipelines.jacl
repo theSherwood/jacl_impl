@@ -2,30 +2,64 @@
 ##
 ## pipelines.jacl — `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19).
 ## Self-checking. Run by codegen.rs::pipelines_run_on_temen, which grants the programs in
-## tests/pipelines/ as `bin.gen`, `bin.upcase` and `bin.fail`.
+## tests/pipelines/ as `bin.gen`, `bin.upcase` and `bin.fail`, and checks what reached the
+## host's stdout.
 ##
 
+# A JACL stage: the byte count of a read end, or its error.
+proc count {ch} {
+  mut n 0
+  mut b [read $ch 1016]
+  while [!= $b $nil] {
+    if [error? $b] { return $b }
+    set n [+ $n [buf-len $b]]
+    set b [read $ch 1016]
+  }
+  $n
+}
+
 proc main {} {
-  # Two vats and an edge between them; the shell reads the last stage's stdout.
-  def out {!gen hello world | !upcase}
+  # Two vats and an edge between them; `collect` reads the last stage's stdout into a string.
+  def out {!gen hello world | !upcase | collect}
   assert [== [length $out] 600]
   assert [== [slice $out 0 12] "HELLO\nWORLD\n"]
 
   # One stage, and three.
-  def one {!gen ab}
+  def one {!gen ab | collect}
   assert [== [length $one] 150]
-  def three {!gen ab | !upcase | !upcase}
+  def three {!gen ab | !upcase | !upcase | collect}
   assert [== [slice $three 0 6] "AB\nAB\n"]
 
-  # A stage that fails fails the pipeline, which names it and carries its stderr; the stage
-  # after it sees a sever, and the one before it a cancelled stdout.
+  # Any JACL stage reads the output as a channel.
+  def n {!gen ab | !upcase | count}
+  assert [== $n 150]
+
+  # In value position the output goes to the enclosing output (here the host's stdout, which
+  # the harness checks) and the value is the exit record; in statement position, the same.
+  def r {!gen hi | !upcase}
+  def exits [map-get $r "exits"]
+  assert [== [vec-len $exits] 2]
+  assert [== [vec-get $exits 0] 0]
+  assert [== [vec-get $exits 1] 0]
+  def r1 {!gen q}
+  assert [== [map-get $r1 "exit"] 0]
+  !gen side
+
+  # A stage that fails fails the pipeline (pipefail), which names it and carries its stderr;
+  # the stage after it sees a sever, and the one before it a cancelled stdout. So in value
+  # position, and so for its reader.
   def bad {!gen x | !fail | !upcase}
   assert [error? $bad]
   assert [== [error-val $bad] "pipeline: stage failed: fail: boom"]
+  def badc {!gen x | !fail | !upcase | collect}
+  assert [== [error-val $badc] "pipeline: stage failed: fail: boom"]
+  def badn {!gen x | !fail | count}
+  assert [== [error-val $badn] "pipeline: stage failed: fail: boom"]
 
   # A program this vat was not granted.
   def none {!gen a | !nope}
   assert [error? $none]
+  assert [error? {!gen a | !nope | collect}]
   0
 }
 
