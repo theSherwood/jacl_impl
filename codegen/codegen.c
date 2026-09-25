@@ -3781,19 +3781,32 @@ static IrVal compile_shell_stages(Cx *cx, AstNode *node) {
   return emit_rt_call(cx, "jacl_vec_push", a, 3);
 }
 
+/* A shell chain's last program. */
+static AstNode *shell_chain_last(AstNode *node) {
+  return node->type == AST_SHELL_CMD ? node : node->data.command.args[1];
+}
+
+/* A shell chain run as one pipeline (docs/UNIR_PIPELINES.md). Its value is the exit record, and
+ * its output goes to the enclosing output; or, if it feeds a JACL stage, its value is its
+ * output as a channel read end. */
+static IrVal compile_shell_chain(Cx *cx, AstNode *node) {
+  IrVal stages = compile_shell_stages(cx, node);
+  if (cx->failed) return 0;
+  IrVal a[] = {cx->sp, stages};
+  int stream = shell_chain_last(node)->data.shell_cmd.stream;
+  return emit_rt_call(cx, stream ? "jacl_pipeline_stream" : "jacl_pipeline", a, 2);
+}
+
 __attribute__((noinline))
 static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *handled) {
   *handled = 1;
   if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
     AstNode *lhs = node->data.command.args[0];
     AstNode *rhs = node->data.command.args[1];
-    if (is_shell_chain(node)) {
-      /* `!a x | !b | !c` — one pipeline of program stages (docs/UNIR_PIPELINES.md). */
-      IrVal stages = compile_shell_stages(cx, node);
-      if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, stages};
-      return emit_rt_call(cx, "jacl_pipeline", a, 2);
-    }
+    /* `!a x | !b | !c` — one pipeline of program stages. */
+    if (is_shell_chain(node)) return compile_shell_chain(cx, node);
+    /* `!a | f` — f reads the pipeline's output as a channel. */
+    if (is_shell_chain(lhs)) shell_chain_last(lhs)->data.shell_cmd.stream = 1;
     if (rhs->type == AST_COMMAND) {
       uint32_t oc = rhs->data.command.arg_count;
       AstNode **na = (AstNode **)calloc(oc + 1, sizeof(AstNode *));
@@ -4883,7 +4896,9 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     }
     IrVal result;
     if (hid == HEAD_COLLECT && !is_gen) {
-      result = src;   /* collect of a vec is itself */
+      /* A channel read end's bytes as a string; a vec is itself. */
+      IrVal ca[] = {cx->sp, src};
+      result = emit_rt_call(cx, "jacl_collect", ca, 2);
     } else if ((hid == HEAD_FILTER || hid == HEAD_TRANSFORM) && !is_gen) {
       /* filter/transform over a non-generator source dispatch on runtime type: a map
        * builds a map (2-param key/value callback), else a vec. */
@@ -5756,13 +5771,9 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       return map;
     }
 
-    case AST_SHELL_CMD: {
-      /* `!cmd args...` — a one-stage pipeline (compile_shell_stages). */
-      IrVal stages = compile_shell_stages(cx, node);
-      if (cx->failed) return 0;
-      IrVal a[] = {cx->sp, stages};
-      return emit_rt_call(cx, "jacl_pipeline", a, 2);
-    }
+    case AST_SHELL_CMD:
+      /* `!cmd args...` — a one-stage pipeline. */
+      return compile_shell_chain(cx, node);
 
     default:
       {

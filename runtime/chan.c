@@ -26,6 +26,7 @@ typedef struct {
   void    *handle;     /* the backend's end */
   uint32_t tail_off;   /* read end: the unread bytes of the current frame */
   uint32_t tail_len;
+  uint32_t pipe;       /* a pipeline's read end: its state's offset in this blob (pipe_unir.c), else 0 */
   uint8_t  tail[];     /* read end: `max` bytes */
 } JaclChan;
 
@@ -34,6 +35,10 @@ static int64_t chan_be_write(void *w, const uint8_t *p, uint32_t n);
 static int64_t chan_be_read(void *r, uint8_t *buf, uint32_t cap);
 static void    chan_be_close(void *h, uint32_t end);
 static int     chan_be_cause(void *h, uint32_t end);
+/* A pipeline's read end: its next frame into `tail`, as chan_be_read, but a failure's error value
+ * in `*err` (a failed stage fails the read); and its close. */
+static int64_t pipe_read(JaclChan *c, JaclVal *err);
+static void    pipe_close(JaclChan *c);
 
 static JaclChan *chan_of(JaclVal v) {
   if (jaclrt_type_index(v) != 0x15) return 0;
@@ -47,8 +52,8 @@ static JaclVal chan_err(const char *msg) {
   return jacl_error_new(jacl_str_new(msg, n));
 }
 
-/* unir-wire's Cause, in order (unir spec §10). */
-static JaclVal chan_severed(void *h, uint32_t end) {
+/* unir-wire's Cause, in order (unir spec §10); -1 or out of range is `unknown`. */
+static JaclVal chan_cause_err(int c) {
   static const char *const names[] = {
     "channel severed: peer-reset", "channel severed: transport-timeout",
     "channel severed: io-error", "channel severed: malformed-frame",
@@ -56,18 +61,22 @@ static JaclVal chan_severed(void *h, uint32_t end) {
     "channel severed: revoked", "channel severed: cancelled",
     "channel severed: budget-exhausted", "channel severed: unknown",
   };
-  int c = chan_be_cause(h, end);
   return chan_err(c >= 0 && c < 10 ? names[c] : names[9]);
 }
+static JaclVal chan_severed(void *h, uint32_t end) { return chan_cause_err(chan_be_cause(h, end)); }
 
-static JaclVal chan_end(uint32_t end, void *h, uint32_t max) {
+/* An end, with `extra` zeroed bytes after a read end's tail for a pipeline's state. */
+static JaclVal chan_end_ex(uint32_t end, void *h, uint32_t max, uint32_t extra) {
   uint32_t tail = end == CHAN_R ? max : 0;
-  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_BLOB, (uint32_t)sizeof(JaclChan) + tail);
+  uint32_t at = ((uint32_t)sizeof(JaclChan) + tail + 7u) & ~7u;
+  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_BLOB, at + extra);
   JaclChan *c = (JaclChan *)jacl_obj_payload(o);
   c->end = end; c->busy = 0; c->closed = 0; c->max = max; c->handle = h;
-  c->tail_off = 0; c->tail_len = 0;
+  c->tail_off = 0; c->tail_len = 0; c->pipe = extra ? at : 0;
+  if (extra) memset((uint8_t *)c + at, 0, extra);
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
 }
+static JaclVal chan_end(uint32_t end, void *h, uint32_t max) { return chan_end_ex(end, h, max, 0); }
 
 /* Claims `v` as an open end of kind `end` for one operation; 0 and `*err` set if it can't. */
 static JaclChan *chan_claim(JaclVal v, uint32_t end, const char *op, JaclVal *err) {
@@ -140,30 +149,56 @@ JaclVal jacl_chan_write(JaclVal w, JaclVal bytes) {
   return out;
 }
 
-/* [read R N]: up to N bytes as a [Buf n u8]; nil at end of stream. */
-JaclVal jacl_chan_read(JaclVal r, JaclVal n) {
-  if (!jaclrt_is_i32(n) || jaclrt_as_i32(n) < 1) return chan_err("read: N must be a positive i32");
-  JaclVal err;
-  JaclChan *c = chan_claim(r, CHAN_R, "read: channel closed", &err);
-  if (!c) return err;
-  JaclVal out = JACL_NIL;
-  while (c->tail_len == 0) {              /* skip empty frames: a byte stream has none */
-    int64_t s = chan_be_read(c->handle, c->tail, c->max);
-    if (s == CHAN_BE_END) { chan_release(c); return JACL_NIL; }
-    if (s == CHAN_BE_SEVERED) { chan_release(c); return chan_severed(c->handle, CHAN_R); }
-    if (s < 0) { chan_release(c); return chan_err("read: channel failed"); }
+/* Fills a claimed read end's tail with its next frame, skipping empty ones (a byte stream has
+ * none): 1, 0 at the end of the stream, or -1 with `*err` set. */
+static int chan_fill(JaclChan *c, JaclVal *err) {
+  while (c->tail_len == 0) {
+    int64_t s = c->pipe ? pipe_read(c, err) : chan_be_read(c->handle, c->tail, c->max);
+    if (s == CHAN_BE_END) return 0;
+    if (s < 0) {
+      if (!c->pipe) *err = s == CHAN_BE_SEVERED ? chan_severed(c->handle, CHAN_R) : chan_err("read: channel failed");
+      return -1;
+    }
     c->tail_off = 0;
     c->tail_len = (uint32_t)s;
   }
+  return 1;
+}
+
+/* [read R N]: up to N bytes as a [Buf n u8]; nil at end of stream. */
+JaclVal jacl_chan_read(JaclVal r, JaclVal n) {
+  if (!jaclrt_is_i32(n) || jaclrt_as_i32(n) < 1) return chan_err("read: N must be a positive i32");
+  JaclVal err = JACL_NIL;
+  JaclChan *c = chan_claim(r, CHAN_R, "read: channel closed", &err);
+  if (!c) return err;
+  int got = chan_fill(c, &err);
+  if (got <= 0) { chan_release(c); return err; }
   uint32_t k = (uint32_t)jaclrt_as_i32(n);
   if (k > c->tail_len) k = c->tail_len;
   int32_t dims = (int32_t)k;
-  out = fb_alloc_nd(1, 1, &dims);          /* may reach a GC safepoint; `c` is non-moving */
+  JaclVal out = fb_alloc_nd(1, 1, &dims);  /* may reach a GC safepoint; `c` is non-moving */
   memcpy(fb_data(out), c->tail + c->tail_off, k);
   c->tail_off += k;
   c->tail_len -= k;
   chan_release(c);
   return out;
+}
+
+/* [collect R]: a read end's remaining bytes as a string, or its error (a pipeline's: the
+ * failed stage's); anything else is returned as it is (collect of a vector is itself). */
+JaclVal jacl_collect(JaclVal src) {
+  JaclChan *c = chan_of(src);
+  if (!c || c->end != CHAN_R) return src;
+  JaclVal keep[2] = {jacl_str_new("", 0), JACL_NIL};   /* on the data stack across parks */
+  c = chan_claim(src, CHAN_R, "collect: channel closed", &keep[1]);
+  if (!c) return keep[1];
+  int got;
+  while ((got = chan_fill(c, &keep[1])) > 0) {
+    keep[0] = jacl_str_concat(keep[0], jacl_str_new((const char *)c->tail + c->tail_off, c->tail_len));
+    c->tail_len = 0;
+  }
+  chan_release(c);
+  return got < 0 ? keep[1] : keep[0];
 }
 
 /* [close CH]: a write end completes (the reader sees the buffered bytes, then nil); a read
@@ -174,7 +209,8 @@ JaclVal jacl_chan_close(JaclVal ch) {
   if (__vm_atomic_cas32(&c->busy, 0, 1) != 0) return chan_err("channel busy");
   if (!c->closed) {
     c->closed = 1;
-    chan_be_close(c->handle, c->end);
+    if (c->pipe) pipe_close(c);
+    else chan_be_close(c->handle, c->end);
   }
   chan_release(c);
   return JACL_NIL;
@@ -198,8 +234,11 @@ JaclVal jacl_stdin(void) { return JACL_NIL; }
 JaclVal jacl_stdout(void) { return JACL_NIL; }
 JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
-JaclVal jacl_pipeline(JaclVal stages) {
+static int64_t pipe_read(JaclChan *c, JaclVal *err) { (void)c; (void)err; return CHAN_BE_FAILED; }
+static void    pipe_close(JaclChan *c) { (void)c; }
+JaclVal jacl_pipeline_stream(JaclVal stages) {
   if (jaclrt_as_i32(jacl_len(stages)) == 1) return jacl_exec_capture(jacl_vec_get_at(stages, jaclrt_i32(0)));
   return chan_err("pipeline: needs vats (a TEMEN runtime built with JACL_UNIR)");
 }
+JaclVal jacl_pipeline(JaclVal stages) { return jacl_pipeline_stream(stages); }
 #endif

@@ -7404,14 +7404,9 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
         typer__infer_node(tc, node->data.shell_cmd.args[i]);
       }
-      /* Foreground shell command (`!cmd`) compiles to OP_EXEC and
-       * returns a stream. Background (`!cmd &`) returns a Job map
-       * (typed dyn). The compiler also downgrades to a custom-exec
-       * closure call (returns DYN) when prelude provides a non-native
-       * `exec`; we don't try to detect that — leave such cases as the
-       * residual EXTRA in the audit. */
-      node->inferred_type =
-          node->data.shell_cmd.background ? TYPE_DYN : TYPE_STREAM;
+      /* `!cmd`'s value is its exit record, or, feeding a JACL stage, its output as a
+       * channel read end (docs/UNIR_PIPELINES.md): dyn either way. */
+      node->inferred_type = TYPE_DYN;
       break;
     case AST_CTX_DECL: {
       /* ctx [mut] Type name = default_expr — recurse into default_expr

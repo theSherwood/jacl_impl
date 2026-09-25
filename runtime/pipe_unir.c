@@ -8,9 +8,11 @@
  * runtime ends them (see jacl_stage_finish) and returns status 0, or 1 if the program
  * returned an error value, for its parent's join.
  *
- * The **shell** side is jacl_pipeline: `!a x | !b` spawns the program capabilities
- * `bin.a` and `bin.b` from this vat's endowment, joined by edges, and returns the last
- * stage's output as a string, or an error value naming the first stage that failed. */
+ * The **shell** side: `!a x | !b` spawns the program capabilities `bin.a` and `bin.b` from
+ * this vat's endowment, joined by edges. The fiber that evaluates it wires the last output
+ * (decision 50): jacl_pipeline_stream gives it to a JACL stage as a channel read end, and
+ * jacl_pipeline copies it to the enclosing output and returns the exit record. Either way a
+ * stage that failed fails the pipeline, with an error value naming it (pipefail). */
 
 /* A JACL image's declared memory, log2, which a detached child's window must equal. The
  * runtime's statics set it (heap, the map area, fiber stacks); jacl_impl#161 shrinks it. The
@@ -162,44 +164,130 @@ static JaclVal pipe_err(const char *what, JaclVal name, JaclVal detail) {
   return jacl_error_new(m);
 }
 
-/* Appends `n` bytes to `acc`, keeping at most `keep` bytes (0: all) from its end. */
-static JaclVal pipe_append(JaclVal acc, const uint8_t *b, int64_t n, uint32_t keep) {
-  acc = jacl_str_concat(acc, jacl_str_new((const char *)b, (uint32_t)n));
-  uint32_t len = jacl_str_len(acc);
-  if (!keep || len <= keep) return acc;
-  char all[JACL_STAGE_ERR_TAIL + 1016 + 1];   /* `acc` held at most `keep` before this frame */
-  jacl_str_bytes(acc, all, sizeof all);
-  return jacl_str_new(all + len - keep, keep);
+/* A running pipeline: the state its read end carries after its tail (JaclChan.pipe). Bytes
+ * only, since a channel's blob holds no traced pointers: the stages' names and the ends of
+ * their stderr are copied in. */
+#define JACL_STAGE_NAME 128u
+typedef struct {
+  int32_t n, spawned;
+  int32_t done;                 /* the stages were joined and the ends freed */
+  int32_t cause;                /* the output's sever cause (unir spec §10), or -1 */
+  unir_consumer *outc;          /* the last stage's stdout; also the channel's handle */
+  unir_consumer *errc[JACL_STAGES_MAX];
+  int64_t child[JACL_STAGES_MAX];
+  int64_t status[JACL_STAGES_MAX];
+  uint32_t tail_len[JACL_STAGES_MAX];
+  char name[JACL_STAGES_MAX][JACL_STAGE_NAME];
+  uint8_t tail[JACL_STAGES_MAX][JACL_STAGE_ERR_TAIL];
+} JaclPipe;
+
+static JaclPipe *pipe_of(JaclChan *c) { return (JaclPipe *)((uint8_t *)c + c->pipe); }
+
+/* Keeps the last JACL_STAGE_ERR_TAIL bytes of stage i's stderr. */
+static void pipe_tail(JaclPipe *p, int32_t i, const uint8_t *b, int64_t n) {
+  uint32_t keep = JACL_STAGE_ERR_TAIL, have = p->tail_len[i];
+  if ((uint64_t)n >= keep) { memcpy(p->tail[i], b + n - keep, keep); p->tail_len[i] = keep; return; }
+  uint32_t k = (uint32_t)n, drop = have + k > keep ? have + k - keep : 0;
+  memmove(p->tail[i], p->tail[i] + drop, have - drop);
+  memcpy(p->tail[i] + have - drop, b, k);
+  p->tail_len[i] = have - drop + k;
 }
 
-/* [pipeline STAGES]: STAGES is a vector of argv vectors. Each stage runs the program
- * capability `bin.<argv 0>` as a child vat; stage i's stdout is stage i+1's stdin, and the
- * last one's is read here. Returns that output as a string, or an error value naming the
- * first stage that failed (with the end of its stderr). A lone `!cmd` whose program this
- * vat does not hold runs through the `exec` capability instead, as it always has. */
-JaclVal jacl_pipeline(JaclVal stages) {
+/* Drains every stage's stderr, waiting up to `timeout_ns` per frame (-1: to its end), so no
+ * stage blocks on a full stderr ring. */
+static void pipe_pump(JaclPipe *p, int64_t timeout_ns) {
+  uint8_t buf[1016];
+  for (int32_t i = 0; i < p->spawned; i++)
+    for (int64_t e; (e = unir_consumer_read(p->errc[i], buf, sizeof buf, timeout_ns, 0)) >= 0;)
+      pipe_tail(p, i, buf, e);
+}
+
+/* Waits for the stages to end and reaps them: their stderr to its end, then their statuses. */
+static void pipe_finish(JaclPipe *p) {
+  if (p->done) return;
+  pipe_pump(p, -1);
+  for (int32_t i = 0; i < p->spawned; i++) {
+    p->status[i] = unir_join(jacl_unir_vat, p->child[i]);
+    unir_consumer_free(p->errc[i]);
+  }
+  if (p->outc) unir_consumer_free(p->outc);
+  p->outc = 0;
+  p->done = 1;
+}
+
+/* A finished pipeline's failure (pipefail: the first stage that failed, with the end of its
+ * stderr; else a stage that could not spawn; else a sever of the output), or nil. */
+static JaclVal pipe_failure(JaclPipe *p) {
+  for (int32_t i = 0; i < p->n; i++) {
+    uint32_t nl = 0;
+    while (p->name[i][nl]) nl++;
+    JaclVal name = jacl_str_new(p->name[i], nl);
+    if (i >= p->spawned) return pipe_err("could not spawn ", name, JACL_NIL);
+    if (p->status[i] == 0) continue;
+    JaclVal tail = p->tail_len[i] ? jacl_str_new((const char *)p->tail[i], p->tail_len[i]) : JACL_NIL;
+    return pipe_err("stage failed: ", name, tail);
+  }
+  return p->cause >= 0 ? chan_cause_err(p->cause) : JACL_NIL;
+}
+
+static int64_t pipe_read(JaclChan *c, JaclVal *err) {
+  JaclPipe *p = pipe_of(c);
+  for (;;) {
+    int64_t s = p->done ? UNIR_EENDED : unir_consumer_read(p->outc, c->tail, c->max, JACL_STAGE_POLL_NS, 0);
+    if (!p->done) pipe_pump(p, 0);
+    if (s >= 0) return s;
+    if (s == UNIR_ESTALLED) continue;
+    if (!p->done) {
+      uint32_t e = s == UNIR_EENDED ? unir_consumer_ended(p->outc) : 3 | (9u << 2);
+      if ((e & 3) == 3) p->cause = (int32_t)((e >> 2) & 0xF);
+      pipe_finish(p);
+    }
+    *err = pipe_failure(p);
+    return jaclrt_is_nil(*err) ? CHAN_BE_END : CHAN_BE_FAILED;
+  }
+}
+
+/* Closing a pipeline's read end cancels the last stage's stdout, which ends the stages in turn
+ * (each one's cancelled stdout, then its stdin), and reaps them. */
+static void pipe_close(JaclChan *c) {
+  JaclPipe *p = pipe_of(c);
+  if (p->outc) unir_consumer_cancel(p->outc);
+  pipe_finish(p);
+}
+
+/* The value of a pipeline that succeeded (decision 50): `{exit S}` for one program, `{exits [S…]}`
+ * for more. Its `duration` waits on a clock the C frontend can reach (docs/UNIR_PIPELINES.md). */
+static JaclVal pipe_record(JaclPipe *p) {
+  if (p->n == 1)
+    return jacl_map_set(jacl_map_empty(), jacl_str_new("exit", 4), jaclrt_i32((int32_t)p->status[0]));
+  JaclVal keep[1] = {jacl_vec_empty()};
+  for (int32_t i = 0; i < p->n; i++) keep[0] = jacl_vec_push(keep[0], jaclrt_i32((int32_t)p->status[i]));
+  return jacl_map_set(jacl_map_empty(), jacl_str_new("exits", 5), keep[0]);
+}
+
+/* [pipeline-stream STAGES]: STAGES is a vector of argv vectors. Each stage runs the program
+ * capability `bin.<argv 0>` as a child vat, and stage i's stdout is stage i+1's stdin. Returns
+ * the last stage's stdout as a channel read end, whose reads drain every stage's stderr and,
+ * at its end, reap the stages: a stage that failed fails that read (pipefail). An error value
+ * if the pipeline cannot start. A lone `!cmd` whose program this vat does not hold runs
+ * through the `exec` capability instead, as it always has, and gives its output as a string.
+ *
+ * A read end dropped before its end is not reaped (docs/UNIR_PIPELINES.md, Later). */
+JaclVal jacl_pipeline_stream(JaclVal stages) {
   int32_t n = jaclrt_as_i32(jacl_len(stages));
   if (n < 1 || n > JACL_STAGES_MAX) return pipe_err("1..16 stages", JACL_NIL, JACL_NIL);
-  /* JACL values live across parks only in `keep` (on the fiber's data stack, which the
-   * collector scans): [0] the output, [1 + i] stage i's stderr tail, [1 + n + i] its argv. */
-  JaclVal keep[1 + 2 * JACL_STAGES_MAX];
-  int64_t module[JACL_STAGES_MAX], child[JACL_STAGES_MAX];
-  int64_t out[JACL_STAGES_MAX], err[JACL_STAGES_MAX];
-  unir_consumer *errc[JACL_STAGES_MAX];
-  keep[0] = jacl_str_new("", 0);
   unir_lock(&jacl_unir_open_lock);
   unir_vat *vat = unir_vat_get();
   unir_unlock(&jacl_unir_open_lock);
+  int64_t module[JACL_STAGES_MAX], out[JACL_STAGES_MAX], err[JACL_STAGES_MAX];
+  char nb[4 + JACL_STAGE_NAME] = "bin.";
   for (int32_t i = 0; i < n; i++) {
     JaclVal argv = jacl_vec_get_at(stages, jaclrt_i32(i));
-    keep[1 + i] = jacl_str_new("", 0);
-    keep[1 + n + i] = argv;
     JaclVal name = jacl_vec_get_at(argv, jaclrt_i32(0));
     if (!jaclrt_is_string(name)) return pipe_err("a program name must be a string", JACL_NIL, JACL_NIL);
-    char nb[128] = "bin.";
     uint32_t nl = jacl_str_len(name);
-    if (nl > sizeof nb - 5) return pipe_err("program name too long: ", name, JACL_NIL);
-    jacl_str_bytes(name, nb + 4, sizeof nb - 4);
+    if (nl >= JACL_STAGE_NAME) return pipe_err("program name too long: ", name, JACL_NIL);
+    jacl_str_bytes(name, nb + 4, JACL_STAGE_NAME);
     module[i] = vat ? unir_endowed(vat, nb, 4 + nl) : UNIR_ENOCAP;
     if (module[i] < 0) {
       if (n == 1) return jacl_exec_capture(argv);
@@ -212,13 +300,23 @@ JaclVal jacl_pipeline(JaclVal stages) {
     err[i] = unir_region_create(vat, (uint64_t)len);
     if (out[i] < 0 || err[i] < 0) return pipe_err("out of edge memory", JACL_NIL, JACL_NIL);
   }
+  /* The read end, and with it the pipeline's state; it lives across the stages' spawns in
+   * `keep` (on the fiber's data stack, which the collector scans), as do the argvs. */
+  uint32_t max = (uint32_t)unir_edge_max_payload(JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
+  JaclVal keep[2] = {stages, chan_end_ex(CHAN_R, 0, max, (uint32_t)sizeof(JaclPipe))};
+  JaclChan *c = chan_of(keep[1]);
+  JaclPipe *p = pipe_of(c);
+  p->n = n;
+  p->cause = -1;
   int host = jacl_host_stdout();
-  unir_consumer *outc = 0;
-  int32_t spawned = 0;
+  for (int32_t i = 0; i < n; i++) {
+    JaclVal argv = jacl_vec_get_at(keep[0], jaclrt_i32(i));
+    jacl_str_bytes(jacl_vec_get_at(argv, jaclrt_i32(0)), p->name[i], JACL_STAGE_NAME);
+  }
   for (int32_t i = 0; i < n; i++) {
     char ab[4096];
     uint64_t alen = 0;
-    JaclVal argv = keep[1 + n + i];
+    JaclVal argv = jacl_vec_get_at(keep[0], jaclrt_i32(i));
     int32_t argc = jaclrt_as_i32(jacl_len(argv));
     for (int32_t k = 0; k < argc; k++) {
       JaclVal s = jacl_to_string(jacl_vec_get_at(argv, jaclrt_i32(k)));
@@ -234,45 +332,38 @@ JaclVal jacl_pipeline(JaclVal stages) {
     g[ng++] = (unir_grant){"unir.stdout", 11, out[i]};
     g[ng++] = (unir_grant){"unir.stderr", 11, err[i]};
     if (host >= 0) g[ng++] = (unir_grant){"stdout", 6, host};
-    child[i] = unir_spawn(vat, module[i], JACL_STAGE_LOG2, (const uint8_t *)ab, alen, g, ng,
-                          JACL_STAGE_FUEL);
-    errc[i] = child[i] >= 0 ? unir_consumer_open(vat, err[i], JACL_STAGE_FRAMES, JACL_UNIR_SLOT) : 0;
-    if (child[i] < 0 || !errc[i]) break;
-    spawned++;
+    p->child[i] = unir_spawn(vat, module[i], JACL_STAGE_LOG2, (const uint8_t *)ab, alen, g, ng,
+                             JACL_STAGE_FUEL);
+    p->errc[i] = p->child[i] >= 0 ? unir_consumer_open(vat, err[i], JACL_STAGE_FRAMES, JACL_UNIR_SLOT) : 0;
+    if (p->child[i] < 0 || !p->errc[i]) break;
+    p->spawned++;
   }
-  if (spawned == n) {
-    outc = unir_consumer_open(vat, out[n - 1], JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
-  } else if (spawned) {
+  if (p->spawned == n) {
+    p->outc = unir_consumer_open(vat, out[n - 1], JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
+    c->handle = p->outc;
+  }
+  if (!p->outc) {
     /* The last stage that did start has no reader: cancel its stdout so it can finish. */
-    unir_consumer *c = unir_consumer_open(vat, out[spawned - 1], JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
-    if (c) { unir_consumer_cancel(c); unir_consumer_free(c); }
-  }
-  uint8_t buf[1016];
-  /* Read the output to its end, draining every stderr edge between frames so no stage
-   * blocks on a full stderr ring. */
-  int done = outc == 0;
-  while (!done) {
-    int64_t s = unir_consumer_read(outc, buf, sizeof buf, JACL_STAGE_POLL_NS, 0);
-    if (s >= 0) keep[0] = pipe_append(keep[0], buf, s, 0);
-    else if (s != UNIR_ESTALLED) done = 1;
-    for (int32_t i = 0; i < spawned; i++)
-      for (int64_t e; (e = unir_consumer_read(errc[i], buf, sizeof buf, 0, 0)) >= 0;)
-        keep[1 + i] = pipe_append(keep[1 + i], buf, e, JACL_STAGE_ERR_TAIL);
-  }
-  for (int32_t i = 0; i < spawned; i++)
-    for (int64_t e; (e = unir_consumer_read(errc[i], buf, sizeof buf, -1, 0)) >= 0;)
-      keep[1 + i] = pipe_append(keep[1 + i], buf, e, JACL_STAGE_ERR_TAIL);
-  JaclVal result = keep[0];
-  for (int32_t i = 0; i < spawned; i++) {
-    int64_t status = unir_join(vat, child[i]);
-    if (status != 0 && !jaclrt_is_error(result)) {
-      JaclVal name = jacl_vec_get_at(keep[1 + n + i], jaclrt_i32(0));
-      JaclVal tail = jacl_str_len(keep[1 + i]) ? keep[1 + i] : JACL_NIL;
-      result = pipe_err("stage failed: ", name, tail);
+    if (p->spawned) {
+      unir_consumer *oc = unir_consumer_open(vat, out[p->spawned - 1], JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
+      if (oc) { unir_consumer_cancel(oc); unir_consumer_free(oc); }
     }
-    unir_consumer_free(errc[i]);
+    pipe_finish(p);
+    JaclVal e = pipe_failure(p);
+    return jaclrt_is_nil(e) ? pipe_err("could not open the output", JACL_NIL, JACL_NIL) : e;
   }
-  if (outc) unir_consumer_free(outc);
-  if (spawned < n) return pipe_err("could not spawn ", jacl_vec_get_at(keep[1 + n + spawned], jaclrt_i32(0)), JACL_NIL);
-  return result;
+  return keep[1];
+}
+
+/* [pipeline STAGES]: runs the pipeline as jacl_pipeline_stream does, copying its output to the
+ * enclosing output (`jacl_out`: the host stream in the shell, this stage's stdout in a stage), and
+ * returns its exit record, or the failure. */
+JaclVal jacl_pipeline(JaclVal stages) {
+  JaclVal keep[2] = {jacl_pipeline_stream(stages), JACL_NIL};
+  JaclChan *c = chan_of(keep[0]);
+  if (!c || !c->pipe) return keep[0];      /* an error value, or `exec`'s output */
+  int64_t s;
+  while ((s = pipe_read(c, &keep[1])) >= 0) jacl_out((const char *)c->tail, (long)s);
+  c->closed = 1;
+  return s == CHAN_BE_END ? pipe_record(pipe_of(c)) : keep[1];
 }

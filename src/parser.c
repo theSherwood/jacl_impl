@@ -2026,6 +2026,7 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
 
     /* Check for background execution: !cmd & */
     node->data.shell_cmd.background = 0;
+    node->data.shell_cmd.stream = 0;
     if (parser__peek(p)->type == TOKEN_AMP) {
       parser__advance(p); /* consume '&' */
       node->data.shell_cmd.background = 1;

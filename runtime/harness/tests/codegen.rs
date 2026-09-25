@@ -1411,6 +1411,13 @@ fn pipelines_run_on_temen() {
             ret as u64,
             String::from_utf8_lossy(&run.stdout)
         );
+        // Only the pipelines in value and statement position reached the enclosing output.
+        let want = ["HI\n", "q\n", "side\n"].map(|l| l.repeat(50)).concat();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            want,
+            "{backend:?}: the host's stdout"
+        );
     }
 }
 
