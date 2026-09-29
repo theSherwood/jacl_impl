@@ -68,14 +68,17 @@ void unir_host_free(void *ptr, uint64_t size, uint64_t align) {
 static unir_vat *jacl_unir_vat;
 static int jacl_stage(void);
 
-/* The vat, created on first use: a pipeline stage's (pipe_unir.c) holds the arguments its
- * parent passed. 0 if the map area is not page-aligned. Under the open lock. */
+/* The vat, created on first use: a spawned one's (a pipeline stage's, pipe_unir.c, or a
+ * service's client's, service_unir.c) holds the arguments and capabilities its parent passed,
+ * which unir_vat_child reads; a root's is unir_vat_root. 0 if the map area is not page-aligned.
+ * Under the open lock. */
 static unir_vat *unir_vat_get(void) {
   if (!jacl_unir_vat) {
     uint64_t base = (uint64_t)jacl_fb_pti(jacl_unir_map);
     if (base & 0xFFFF) return 0;
     uint64_t end = base + JACL_UNIR_MAP_BYTES;
-    jacl_unir_vat = jacl_stage() ? unir_vat_child(base, end) : unir_vat_root(base, end);
+    jacl_unir_vat = unir_vat_child(base, end);
+    if (!jacl_unir_vat) jacl_unir_vat = unir_vat_root(base, end);
   }
   return jacl_unir_vat;
 }

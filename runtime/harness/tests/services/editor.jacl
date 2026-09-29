@@ -1,0 +1,99 @@
+##
+## editor — a text editor whose document lives in unir's store vat (theSherwood/unir#51,
+## docs/UNIR_SERVICES.md). Run as the vat's client, twice on one store, with no output: it
+## checks itself, and a failed check is its error value, which the vat reports.
+##
+## Every keystroke is a commit, a new version on ref `doc`; undo and redo move the ref along the
+## versions' parents and back, and typing after an undo branches the history. Saving flushes the
+## store's log; what was typed after it is lost at a restart.
+##
+## First run (no `doc`): type "hello world", undo back to "hello", redo and undo once, keep the
+## undone tip as ref `doc/world`, type " there" (a branch), publish and save, then type "!!!"
+## and exit unsaved. Second run: `doc` is "hello there" again; follow it, undo and redo across
+## the restart, each move heard as an event, and read the other branch back from `doc/world`.
+##
+
+## The payload of reply REQ's variant KIND; any other reply fails the editor.
+proc ask {s, req, kind} {
+  def r [service-call $s $req]
+  assert [not [error? $r]]
+  assert [map-has $r $kind]
+  map-get $r $kind
+}
+
+## The text of version V (none: empty).
+proc text {s, v} {
+  if [== $v $nil] { return "" }
+  def info [ask $s [map "Info" $v] "Info"]
+  buf-string [ask $s [map "Read" [map "version" $v "at" 0 "len" [map-get $info "len"]]] "Data"]
+}
+
+## Types STR at AT on version HEAD of `doc`, one commit per character; the last version.
+proc type {s, head, at, str} {
+  mut h $head
+  mut i 0
+  while [< $i [length $str]] {
+    def edit [map "at" [+ $at $i] "delete" 0 "insert" [index $str $i]]
+    set h [ask $s [map "Commit" [map "name" "doc" "base" $h "edits" [vec $edit]]] "Version"]
+    set i [+ $i 1]
+  }
+  $h
+}
+
+## Moves ref NAME from FROM to TO; TO.
+proc move {s, name, from, to} {
+  ask $s [map "Advance" [map "name" $name "expected" $from "to" $to]] "Version"
+}
+
+## Undo: `doc` from HEAD back to its parent; the parent.
+proc undo {s, head} {
+  def parents [map-get [ask $s [map "Info" $head] "Info"] "parents"]
+  move $s "doc" $head [vec-get $parents 0]
+}
+
+proc first-run {s} {
+  mut h [type $s $nil 0 "hello world"]
+  assert [== [text $s $h] "hello world"]
+  def tip $h
+  mut redo [vec]
+  mut i 0
+  while [< $i 6] {
+    set redo [vec-push $redo $h]
+    set h [undo $s $h]
+    set i [+ $i 1]
+  }
+  assert [== [text $s $h] "hello"]
+  set h [move $s "doc" $h [vec-get $redo 5]]
+  assert [== [text $s $h] "hello "]
+  set h [undo $s $h]
+  move $s "doc/world" $nil $tip
+  set h [type $s $h 5 " there"]
+  assert [== [text $s $h] "hello there"]
+  assert [== [vec-len [ask $s [map "Publish" $h] "Id"]] 32]
+  ask $s "Flush" "Durable"
+  set h [type $s $h 11 "!!!"]
+  assert [== [text $s $h] "hello there!!!"]
+  0
+}
+
+proc second-run {s, head} {
+  assert [== [text $s $head] "hello there"]
+  assert [== [ask $s [map "Follow" "doc"] "Head"] $head]
+  def back [undo $s $head]
+  assert [== [text $s $back] "hello ther"]
+  assert [== [service-event $s $true] [map "changes" [map "name" "doc" "to" $back]]]
+  move $s "doc" $back $head
+  assert [== [service-event $s $true] [map "changes" [map "name" "doc" "to" $head]]]
+  assert [== [service-event $s $false] $nil]
+  assert [== [text $s [ask $s [map "Head" "doc/world"] "Head"]] "hello world"]
+  0
+}
+
+proc main {} {
+  def s [service "store"]
+  assert [not [error? $s]]
+  def head [ask $s [map "Head" "doc"] "Head"]
+  if [== $head $nil] { first-run $s } else { second-run $s $head }
+}
+
+main

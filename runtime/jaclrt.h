@@ -337,6 +337,9 @@ JaclVal jacl_chan_read(JaclVal r, JaclVal n);      /* [read R N]: [Buf k u8], ni
 JaclVal jacl_chan_close(JaclVal ch);               /* [close CH]: complete (w) / cancel (r) */
 JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's bytes as a str, or its values as a vec */
 JaclVal jacl_emit(JaclVal v);                      /* [emit V]: V as a message of the enclosing output */
+JaclVal jacl_service(JaclVal name);                /* [service NAME]: a session with a granted service */
+JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its reply */
+JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
@@ -457,6 +460,7 @@ JaclVal jacl_fbuf_new_nd(JaclVal code, JaclVal ndims, JaclVal d0, JaclVal d1,
                          JaclVal d2, JaclVal d3, JaclVal d4, JaclVal d5);  /* nested [Buf …] */
 JaclVal jacl_fbuf_copy(JaclVal b);                         /* independent by-value copy */
 JaclVal jacl_fbuf_len(JaclVal b);
+JaclVal jacl_fbuf_string(JaclVal b);   /* [buf-string B]: a byte buffer's bytes as a string */
 JaclVal jacl_fbuf_get(JaclVal b, JaclVal idx);
 JaclVal jacl_fbuf_set(JaclVal b, JaclVal idx, JaclVal v);
 JaclVal jacl_fbuf_addr(JaclVal b, JaclVal idx);            /* [addr $b->i] -> flat pointer */

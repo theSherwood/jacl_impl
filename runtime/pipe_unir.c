@@ -34,7 +34,7 @@
 #define JACL_STAGE_POLL_NS 1000000
 /* A stage's spawn payload, its arguments and environment as one value (docs/CTX_ENV.md): at most
  * the args area (unir.h, unir_spawn). */
-#define JACL_STAGE_ARGS 16224u
+#define JACL_STAGE_ARGS 16216u
 /* The largest program value a stage sends back (its stderr, substream 2); a larger one comes back
  * as an error saying so. */
 #define JACL_STAGE_VALUE (16u << 10)
@@ -213,6 +213,7 @@ static void stage_send_value(JaclVal v) {
  * since a sever would drop the message; stdin cancels, so its producer stops. Not a stage: the
  * value, unchanged. */
 JaclVal jacl_stage_finish(JaclVal result) {
+  jacl_services_close();
   if (!jacl_stage()) return result;
   stage_open();
   int failed = jaclrt_is_error(result);

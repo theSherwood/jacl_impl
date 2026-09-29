@@ -727,6 +727,12 @@ typedef enum {
   /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
   HEAD_WITH_ENV,
 
+  /* Services (docs/UNIR_SERVICES.md) */
+  HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT,
+
+  /* A byte buffer as a string */
+  HEAD_BUF_STRING,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 

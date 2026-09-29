@@ -1200,6 +1200,7 @@ print $magic->0                                          ; 127 (arrow indexing)
 print [buf-get $magic 1]                                 ; 69
 [buf-set $magic 0 0xff]                                  ; bounds-checked write
 print [buf-len $magic]                                   ; 4 (compile-time fold)
+print [buf-string $bytes]                                ; a u8 buffer's bytes as a string
 
 [buf-unchecked-get $magic $i]                            ; escape hatch — no bounds check
 [buf-unchecked-set $magic $i $v]
@@ -1334,6 +1335,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Same-scope shadowing error | compile-time |
 | Shell interop (`!cmd`, `exec`) | `OP_EXEC` with FULL/STDIN/BG/PIPE flags; OS pipes, stdin/stdout |
 | Jobs | a Job is the Future of the task running the pipeline: `&` is `spawn`; `cancel`/`suspend`/`resume` (`docs/UNIR_PIPELINES.md`) |
+| Services | `[service NAME]`, `[service-call S REQ]`, `[service-event S WAIT]`: a session with a service vat granted as NAME, requests and replies as plain values (`docs/UNIR_SERVICES.md`) |
 
 ### Not yet implemented
 

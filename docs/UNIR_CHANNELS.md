@@ -45,7 +45,7 @@ which targeted the retired native VM.
 ```
 runtime/chan.c        platform-neutral: the JaclChan object, read/write/close, framing, the busy flag
 runtime/chan_unir.c   the Unir backend over unir.h, plus the unit's heap (unir_host_alloc/free)
-runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, UNIR_REV
+runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.ll, UNIR_REV
 ```
 
 - **The object.** A channel end is one GC object (`JOBJ_BLOB`, so no traced pointers). It holds the
