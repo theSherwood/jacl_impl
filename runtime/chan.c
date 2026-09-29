@@ -12,6 +12,11 @@
  * holds no traced pointers: its backend handle lives in the backend's own heap. */
 
 enum { CHAN_W = 1, CHAN_R = 2 };
+/* What an end carries (theSherwood/unir#43). A channel from `[channel]` carries bytes. A stage's
+ * stdio edge and a pipeline's output are decided by their first frame: a program's first `emit`
+ * offers the value schema (unir spec §3, typed edges), and its first byte write means bytes. On a
+ * CHAN_VALUES read end each frame is one verified message, read as one JACL value. */
+enum { CHAN_UNKNOWN = 0, CHAN_BYTES = 1, CHAN_VALUES = 2 };
 
 /* Backend results: >= 0 is success (a read's frame length); these are the failures. */
 #define CHAN_BE_END     (-1)   /* the stream ended cleanly (read: EOF; write: reader cancelled) */
@@ -27,12 +32,16 @@ typedef struct {
   uint32_t tail_off;   /* read end: the unread bytes of the current frame */
   uint32_t tail_len;
   uint32_t pipe;       /* a pipeline's read end: its state's offset in this blob (pipe_unir.c), else 0 */
+  uint32_t typed;      /* CHAN_UNKNOWN until a stage edge's first frame says; CHAN_BYTES; CHAN_VALUES */
+  void    *agree;      /* a CHAN_VALUES read end's agreement (unir spec §3), in the backend's heap */
   uint8_t  tail[];     /* read end: `max` bytes */
 } JaclChan;
 
 static int     chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max);
 static int64_t chan_be_write(void *w, const uint8_t *p, uint32_t n);
-static int64_t chan_be_read(void *r, uint8_t *buf, uint32_t cap);
+/* A read end's next frame into its `tail`: its length, or a CHAN_BE_* failure. On a stage edge
+ * the first read learns whether it carries bytes or values (`typed`). */
+static int64_t chan_be_read(JaclChan *c);
 static void    chan_be_close(void *h, uint32_t end);
 static int     chan_be_cause(void *h, uint32_t end);
 /* A pipeline's read end: its next frame into `tail`, as chan_be_read, but a failure's error value
@@ -41,6 +50,8 @@ static int64_t pipe_read(JaclChan *c, JaclVal *err);
 static void    pipe_close(JaclChan *c);
 /* A pipeline stage's stdin read end once the stage's stdout has ended (pipe_unir.c). */
 static int     stage_stdin_orphaned(JaclChan *c);
+/* The value in a CHAN_VALUES read end's tail (a verified message; value.c). */
+static JaclVal chan_value(JaclChan *c);
 
 static JaclChan *chan_of(JaclVal v) {
   if (jaclrt_type_index(v) != 0x15) return 0;
@@ -75,6 +86,7 @@ static JaclVal chan_end_ex(uint32_t end, void *h, uint32_t max, uint32_t extra) 
   JaclChan *c = (JaclChan *)jacl_obj_payload(o);
   c->end = end; c->busy = 0; c->closed = 0; c->max = max; c->handle = h;
   c->tail_off = 0; c->tail_len = 0; c->pipe = extra ? at : 0;
+  c->typed = CHAN_BYTES; c->agree = 0;
   if (extra) memset((uint8_t *)c + at, 0, extra);
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
 }
@@ -146,6 +158,11 @@ JaclVal jacl_chan_write(JaclVal w, JaclVal bytes) {
   JaclVal err;
   JaclChan *c = chan_claim(w, CHAN_W, "write: channel closed", &err);
   if (!c) return err;
+  if (c->typed == CHAN_VALUES) {
+    chan_release(c);
+    return chan_err("write: this output carries values; use emit");
+  }
+  c->typed = CHAN_BYTES;
   JaclVal out = chan_write_all(c, p, n);
   chan_release(c);
   return out;
@@ -156,7 +173,7 @@ JaclVal jacl_chan_write(JaclVal w, JaclVal bytes) {
 static int chan_fill(JaclChan *c, JaclVal *err) {
   while (c->tail_len == 0) {
     if (stage_stdin_orphaned(c)) { *err = chan_err("read: stdout ended"); return -1; }
-    int64_t s = c->pipe ? pipe_read(c, err) : chan_be_read(c->handle, c->tail, c->max);
+    int64_t s = c->pipe ? pipe_read(c, err) : chan_be_read(c);
     if (s == CHAN_BE_END) return 0;
     if (s < 0) {
       if (!c->pipe) *err = s == CHAN_BE_SEVERED ? chan_severed(c->handle, CHAN_R) : chan_err("read: channel failed");
@@ -168,7 +185,8 @@ static int chan_fill(JaclChan *c, JaclVal *err) {
   return 1;
 }
 
-/* [read R N]: up to N bytes as a [Buf n u8]; nil at end of stream. */
+/* [read R N]: up to N bytes as a [Buf n u8]; nil at end of stream. On an end that carries
+ * values, the next value (N is not used): nil at the end, or a nil message. */
 JaclVal jacl_chan_read(JaclVal r, JaclVal n) {
   if (!jaclrt_is_i32(n) || jaclrt_as_i32(n) < 1) return chan_err("read: N must be a positive i32");
   JaclVal err = JACL_NIL;
@@ -176,6 +194,12 @@ JaclVal jacl_chan_read(JaclVal r, JaclVal n) {
   if (!c) return err;
   int got = chan_fill(c, &err);
   if (got <= 0) { chan_release(c); return err; }
+  if (c->typed == CHAN_VALUES) {
+    JaclVal v = chan_value(c);   /* may collect; `c` is non-moving and `r` holds it */
+    c->tail_len = 0;
+    chan_release(c);
+    return v;
+  }
   uint32_t k = (uint32_t)jaclrt_as_i32(n);
   if (k > c->tail_len) k = c->tail_len;
   int32_t dims = (int32_t)k;
@@ -187,8 +211,9 @@ JaclVal jacl_chan_read(JaclVal r, JaclVal n) {
   return out;
 }
 
-/* [collect R]: a read end's remaining bytes as a string, or its error (a pipeline's: the
- * failed stage's); anything else is returned as it is (collect of a vector is itself). */
+/* [collect R]: a read end's remaining bytes as a string, or its values as a vector (an end that
+ * carries values), or its error (a pipeline's: the failed stage's); anything else is returned as
+ * it is (collect of a vector is itself). */
 JaclVal jacl_collect(JaclVal src) {
   JaclChan *c = chan_of(src);
   if (!c || c->end != CHAN_R) return src;
@@ -197,7 +222,14 @@ JaclVal jacl_collect(JaclVal src) {
   if (!c) return keep[1];
   int got;
   while ((got = chan_fill(c, &keep[1])) > 0) {
-    keep[0] = jacl_str_concat(keep[0], jacl_str_new((const char *)c->tail + c->tail_off, c->tail_len));
+    if (c->typed == CHAN_VALUES) {
+      if (jaclrt_is_string(keep[0])) keep[0] = jacl_vec_empty();
+      keep[1] = chan_value(c);
+      keep[0] = jacl_vec_push(keep[0], keep[1]);
+      keep[1] = JACL_NIL;
+    } else {
+      keep[0] = jacl_str_concat(keep[0], jacl_str_new((const char *)c->tail + c->tail_off, c->tail_len));
+    }
     c->tail_len = 0;
   }
   chan_release(c);
@@ -221,11 +253,13 @@ JaclVal jacl_chan_close(JaclVal ch) {
 
 #ifdef JACL_UNIR
 #include "chan_unir.c"
+#include "value.c"
 #include "pipe_unir.c"
 #else
 static int     chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max) { (void)cap; (void)w; (void)r; (void)max; return 0; }
 static int64_t chan_be_write(void *w, const uint8_t *p, uint32_t n) { (void)w; (void)p; (void)n; return CHAN_BE_FAILED; }
-static int64_t chan_be_read(void *r, uint8_t *buf, uint32_t cap) { (void)r; (void)buf; (void)cap; return CHAN_BE_FAILED; }
+static int64_t chan_be_read(JaclChan *c) { (void)c; return CHAN_BE_FAILED; }
+static JaclVal chan_value(JaclChan *c) { (void)c; return chan_err("values: unavailable"); }
 static void    chan_be_close(void *h, uint32_t end) { (void)h; (void)end; }
 static int     chan_be_cause(void *h, uint32_t end) { (void)h; (void)end; return -1; }
 /* Without vats there are no stages: output is the host's, `[stdin]` etc. are nil, `[args]` empty,
@@ -237,6 +271,7 @@ JaclVal jacl_stdin(void) { return JACL_NIL; }
 JaclVal jacl_stdout(void) { return JACL_NIL; }
 JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
+JaclVal jacl_emit(JaclVal v) { jacl_print(v); return JACL_NIL; }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

@@ -1,0 +1,19 @@
+##
+## nums N [maps] — emits the integers 0..N-1 as values, or with `maps` each as `[map n I]`: a stage
+## whose output is typed (theSherwood/unir#43), so its reader gets values, not bytes.
+##
+
+proc main {} {
+  def a [args]
+  def n [vec-get $a 1]
+  def maps [== [vec-len $a] 3]
+  mut i 0
+  while [< $i $n] {
+    def e [if $maps { emit [map n $i] } else { emit $i }]
+    if [error? $e] { return $e }
+    set i [+ $i 1]
+  }
+  0
+}
+
+main

@@ -1,7 +1,8 @@
 # Pipelines of vats on Unir (`!a | !b`)
 
-**Status:** partly built; design revised 2026-09-25 (values and outputs, job control, typed outputs; see
-Order of work). For [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19), the exit
+**Status:** built through the value codec (2026-09-29: program values, argument values and typed
+outputs, theSherwood/unir#43); design revised 2026-09-25 (values and outputs, job control, typed
+outputs; see Order of work). For [theSherwood/unir#19](https://github.com/theSherwood/unir/issues/19), the exit
 criterion of Unir stage 1b. It builds on `docs/UNIR_CHANNELS.md` (channels on edges within one vat).
 The user-facing semantics are `SHELL_API_DESIGN.md`'s, with the Unir amendments it points to here.
 This note maps them onto vats and edges, and names the pieces TEMEN and unir still lack.
@@ -9,24 +10,23 @@ This note maps them onto vats and edges, and names the pieces TEMEN and unir sti
 ## What exists today
 
 - `!a | !b` of program stages runs as vats joined by edges, on all three TEMEN engines. Its value is
-  the exit record, `{exit}` or `{exits}`, and its output goes to the enclosing output
-  (`jacl_pipeline`); into a JACL stage, `!a | f` gives `f` the output as a channel read end
-  (`jacl_pipeline_stream`), and `collect` reads a read end into a string. A failed stage fails the
-  pipeline either way: the value, or the read that reaches the end, is the pipefail error. Inside a
-  stage the enclosing output is the stage's `unir.stdout` (`jacl_out`), which nothing tests yet:
-  a stage holds no programs to run.
-- The exit record has no `duration` yet: TEMEN has a `Clock` capability, but the C frontend has no
-  way to call it (`__vm_host_call` reaches only embedder `HostProc` capabilities).
+  the last program's value, and its output goes to the enclosing output (`jacl_pipeline`); into a
+  JACL stage, `!a | f` gives `f` the output as a channel read end (`jacl_pipeline_stream`), and
+  `collect` reads a read end into a string, or a vector when it carries values. A failed stage
+  fails the pipeline either way: the value, or the read that reaches the end, is the pipefail
+  error. Inside a stage the enclosing output is the stage's `unir.stdout` (`jacl_out`), which
+  nothing tests yet: a stage holds no programs to run.
+- Values cross vat boundaries through one codec (see "One codec"): a program's value comes back to
+  its spawner, arguments arrive as values, and `emit` makes a program's output typed.
 - `|` between JACL values is argument threading: `a | f x` compiles to `f a x`. `!a | f` is the
   same call, with the chain compiled as a read end (`shell_cmd.stream`). JACL values into a program
   stage are not wired yet. The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
 - A lone `!cmd` the vat holds no program for runs a host subprocess through the `exec` capability
   (`jacl_exec_capture`) and returns its stdout as a string.
-- `!a | !b &` is `spawn {!a | !b}`: its Future is the Job, and awaiting it gives the exit record.
+- `!a | !b &` is `spawn {!a | !b}`: its Future is the Job, and awaiting it gives the pipeline's value.
   `cancel`, `suspend` and `resume` act on any Future, as "Background and job control" describes. A
   stage that never touches its stdio is not cancellable, and a cancel of its pipeline waits on it
   (theSherwood/unir#35).
-- Nothing carries a JACL value across a vat boundary: there is no value codec.
 
 ## Design
 
@@ -91,14 +91,13 @@ moved end's mapping stays in the parent's map area (see Later in `UNIR_CHANNELS.
 
 A program stage has two results, and they are kept apart:
 
-- **Its value.** `!prog args` evaluates to the program's value, and a pipeline to its last stage's
-  value (`SHELL_API_DESIGN.md` §4). Until a value can cross a vat boundary (see "One codec"), a
-  program's value is its **exit record**: `{exit, duration}` for one program, `{exits, duration}` for
-  a pipeline, one exit per stage. A stage that fails, traps or severs makes the value the pipefail
-  error instead: an error value naming that stage and carrying the end of its stderr
-  (`SHELL_API_DESIGN.md` §9). Once
-  values cross, a JACL program's value is what its `main` returns; a host program run through `exec`
-  keeps the exit record.
+- **Its value.** `!prog args` evaluates to the program's value, what its program returns, and a
+  pipeline to its last stage's value (`SHELL_API_DESIGN.md` §4). A stage that fails makes the
+  value the pipefail error instead: the first failed stage's own error value, which crosses like
+  any value, or, for a stage that trapped or was severed and so returned none, an error value
+  naming it and carrying the end of its stderr (`SHELL_API_DESIGN.md` §9). A host program run
+  through `exec` gives its output as a string, as before. *(Until the codec, a program's value was
+  its exit record, `{exit}` or `{exits}`; nothing reads exit statuses as values any more.)*
 - **Its output.** An edge of type `T` (see "Typed outputs"). It flows to the next program stage; into
   a JACL stage, which reads it as a channel (`!gen 3 | collect` is the output's elements, a string
   when `T` is text); or, with nothing after it, into the **enclosing output**. In the shell that is
@@ -126,7 +125,7 @@ The Future a spawn returns is the handle to the running pipeline. There is no se
 
 | operation | on a task running a pipeline | on any other task |
 |---|---|---|
-| `await $f` | the pipeline's value (the exit record), or the pipefail error | the task's value |
+| `await $f` | the pipeline's value (its last program's), or the pipefail error | the task's value |
 | `cancel $f` | severs every end the task holds with `cancelled`, reaps the stages, and ends the task; awaiting gives the `cancelled` error | the task ends with the `cancelled` error at its next job-control point |
 | `suspend $f` | sets the credit limit on the ends the task reads to what it has already granted (`unir_consumer_suspend`) and holds the task: the stages fill their rings and park, by backpressure, with no signals | the task is held at its next job-control point |
 | `resume $f` | lifts the limit; the stages continue, and no byte is lost or repeated | the task continues |
@@ -163,7 +162,8 @@ suspending stops `!b` once its ring is full, and `!a` stops behind it. That is f
 ### Typed outputs (unir stage 2; stage 1b is bytes)
 
 Unir's streams are typed (unir §1, §3), and stage 1b's are all bytes, the floor. Nothing here depends
-on the element type, so the design is written for a typed output and stage 1b implements `T = bytes`:
+on the element type, so the design is written for a typed output; stage 1b implemented `T = bytes`,
+and #43 adds `T = value`, JACL values (the codec's `Value`):
 
 | | stage 1b | with types (unir stage 2) |
 |---|---|---|
@@ -173,9 +173,20 @@ on the element type, so the design is written for a typed output and stage 1b im
 | the enclosing output | bytes copied to the host stream | the pane is a typed sink, rendering by type rather than scraping text |
 | `print`, `[stdout]`, `write` | the output edge | the bytes floor: text written to a bytes output |
 
-So a program declares its output type (default bytes) where it declares its entry; stage 1b records
-the slot and always says bytes. Channels stay frame-based (`docs/UNIR_CHANNELS.md`), so a typed frame
-changes the payload, not the API, and `collect` is defined over `T` from the start.
+**How a program's output gets its type (built, #43).** By its first write, not a declaration: the
+first `emit V` offers the value schema on stdout (unir §3's in-band handshake: a `Hello` and the
+schema on substream 0, answered in the ring header) and every message after it is one value; the
+first `print` or `write` makes it bytes, as before. The reader learns which from the first frame:
+an offer is accepted when its schema is the value schema (or one it succeeds), anything else is a
+bytes edge. After that, `emit` on a bytes output and `write` on a value output are errors, and
+`print` on a value output emits the printed text as one value. A declaration at the entry, as first
+sketched, would let the shell check a pipeline before it runs; it waits for programs to carry
+metadata the shell can read before spawning them.
+
+On a value edge, `read R N` gives the next value (N is unused), `collect` a vector of them, and a
+pipeline's output copied to the enclosing output is emitted there: printed, in the shell. Each
+message is verified before it is decoded: the stage edges are untrusted, so nothing takes the
+cast-in-place path yet. Channels made by `[channel]` stay bytes.
 
 ### One codec: JACL values as meta-schema frames
 
@@ -185,6 +196,23 @@ passing `--gpu=$gpu` passes a capability); and **typed JACL-to-JACL outputs**. T
 it is a subset of unir's meta-schema (unir §3) from the start: structs, sums, lists, text, the integer
 ladder, floats and capability fields. That makes it the first slice of unir stage 2 rather than a
 JACL-private format that stage 2 would have to replace (unir decision 50).
+
+**Built (theSherwood/unir#43).** The schema is `runtime/unir/value.usc`, compiled by unir-schemac to
+`runtime/unir/jacl_value.h` (`runtime/unir/gen.sh`): a recursive sum over nil, bool, i32, i64, u32,
+u64, f32, f64, text, bytes, vectors, maps (a list of key/value entries) and errors (the payload in a
+one-element list: a sum cannot hold itself inline). Integers and floats keep their width, so a value
+comes back as the type it left as. `runtime/value.c` encodes a JACL value canonically (unir §3) and
+decodes only frames unir's verifier accepted (`unir_schema_verify`, or a typed edge's agreement),
+copied first into this vat's memory. What cannot cross is an error value when encoded: closures,
+futures, channel ends, atoms, structs and other objects with identity, bigints past 64 bits, and
+tainted or secret values (the wire has no bits for the flags). Capability fields, and with them
+channel ends passed by move, wait on theSherwood/unir#42.
+
+| what | where it travels |
+|---|---|
+| a stage's arguments and environment | its spawn payload: the value `[argv env]`, at most 16,224 bytes |
+| a program's value | its stderr edge, substream 2, after its text, in frames; at most 16 KiB |
+| a typed output's messages | its stdout edge after the handshake, one value per frame (at most 1016 bytes) |
 
 ## What TEMEN and unir need first
 
@@ -204,19 +232,30 @@ they are an upstream PR, filed from this note.
 - **Programs as fixtures** (`runtime/harness/tests/pipelines/`): small JACL programs compiled to
   child images and granted as `bin.<name>`: `gen` (prints its arguments fifty times), `upcase`
   (copies stdin to stdout, uppercased), `fail` (returns an error without reading), `forever` (writes
-  the alphabet until a write fails) and `sink` (reads stdin to its end). Still to come with channel
-  ends passed by move: `tee` (copies stdin to stdout and to a channel passed as its argument).
+  the alphabet until a write fails), `sink` (reads stdin to its end), `envdump` (prints what it sees
+  of `$ctx` and `$env`), `value` (returns a value of every kind, its own arguments, an error, or
+  one that cannot cross), `nums` (emits integers, or maps, as values) and `double` (reads values and
+  emits them doubled). Still to come with channel ends passed by move: `tee` (copies stdin to
+  stdout and to a channel passed as its argument).
 - **End to end on TEMEN, on the tree-walker, bytecode and Cranelift:**
   - `!gen 100 | !upcase | collect`: every line, uppercased (Complete through two vats into a JACL
     stage).
-  - `!gen 100 | !upcase` in value position: the exit record, with both exits 0; the output went to
-    the enclosing output. In statement position the same output passes through.
-  - `!gen 100 | !fail | !upcase`: the pipeline's value is an error naming `fail` and carrying its
-    stderr, and `upcase` saw a sever (Severed).
+  - `!gen 100 | !upcase` in value position: `upcase`'s value, 0; the output went to the enclosing
+    output. In statement position the same output passes through.
+  - `!gen 100 | !fail | !upcase`: the pipeline's value is `fail`'s own error, and `upcase` saw a
+    sever (Severed).
+  - `!value all`: a map holding an i32, an i64, a negative, an f64, a long string, a bool, nil, a
+    nested vector and a map comes back equal; `!value err` an error carrying a map; `!value "atom"`
+    the error saying the atom cannot cross; `!value "args" 42 $xs [map …]` its arguments, as the
+    values passed.
+  - `!nums 5 | collect` and `!nums 4 maps | collect`: vectors of the emitted values;
+    `!nums 300 | !double | collect`: 300 doubled integers through a typed stage;
+    `!nums 10 | sumvals`, a JACL stage reading values with `read`; `!nums 3 | !double` in value
+    position: `double`'s value, with the values printed to the enclosing output.
   - `!gen 10 | !tee $w | !upcase | collect`, with `$r` read in this vat: both outputs are complete,
     and `$w` is closed in this vat after the call (the end moved).
-  - `!gen bg | !upcase &`: awaiting the Future gives the exit record, and the output reaches the
-    enclosing output.
+  - `!gen bg | !upcase &`: awaiting the Future gives the pipeline's value, and the output reaches
+    the enclosing output.
   - `!forever | !sink &`, then `cancel`, where `forever` writes until a write fails and `sink` only
     reads: both stages end and are reaped, and awaiting gives the `cancelled` error.
   - `spawn {!forever | !upcase | tally $n}`, then `suspend` and `resume`, where `tally` is a JACL
@@ -250,7 +289,8 @@ they are an upstream PR, filed from this note.
    capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat does not hold runs
    through `exec` as before.
 6. The value codec over unir's meta-schema (unir stage 2's first slice): programs' values, argument
-   values, typed JACL-to-JACL outputs.
+   values, typed JACL-to-JACL outputs. **Done** (theSherwood/unir#43), but for capability fields
+   (theSherwood/unir#42), a message larger than one frame, and a value larger than 16 KiB.
 
 ## Out of scope for #19
 
@@ -260,5 +300,6 @@ they are an upstream PR, filed from this note.
 - `&`/detached lifetime and GC-driven kill. Likewise a pipeline's read end dropped before its end:
   its stages are not reaped until something reads it to the end or closes it.
 - A pipeline's `duration`, until the C frontend can reach TEMEN's `Clock`.
-- Output types other than bytes, and the value codec (unir stage 2; see "Typed outputs" and "One
-  codec").
+- Output types other than bytes and JACL values; a typed message larger than one frame, and a
+  program value larger than 16 KiB; the cast-in-place read of a trusted edge; reading a nil message
+  apart from the end of a value stream (`read` gives nil for both; `collect` keeps them).

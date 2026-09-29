@@ -1,0 +1,17 @@
+##
+## double — reads integers from stdin as values and emits each doubled: a typed stage between
+## two others.
+##
+
+proc main {} {
+  mut v [read [stdin] 1]
+  while [!= $v $nil] {
+    if [error? $v] { return $v }
+    def e [emit [* $v 2]]
+    if [error? $e] { return $e }
+    set v [read [stdin] 1]
+  }
+  "doubled"
+}
+
+main

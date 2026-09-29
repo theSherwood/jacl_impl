@@ -4551,7 +4551,9 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
     { HEAD_CHANNEL,     TYPE_VEC    },
     { HEAD_WRITE,       TYPE_NIL    },
     { HEAD_CLOSE,       TYPE_NIL    },
-    /* [args] is a vec of strings; [stdin] a read channel or nil, so it stays dyn. */
+    /* [emit V]: V as the next message of the enclosing output: nil, or an error value. */
+    { HEAD_EMIT,        TYPE_NIL    },
+    /* [args] is a vec of values; [stdin] a read channel or nil, so it stays dyn. */
     { HEAD_ARGS,        TYPE_VEC    },
     { HEAD_FILE_EXISTS, TYPE_BOOL   },
     { HEAD_LIST_DIR,    TYPE_VEC    },

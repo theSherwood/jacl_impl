@@ -13,11 +13,12 @@
 > stage is a vat, not an OS process, and three points are settled for it:
 > a **Job is the Future** of the task that runs the pipeline, so `&` is
 > `spawn` (§5) and `cancel` / `suspend` / `resume` are operations on
-> Futures (§2, §3); until a value can cross a vat boundary a program's
-> value is its **exit record**, `{exit, duration}` or `{exits, duration}`
-> for a pipeline, the finished Job of §2 without `pid` or `stdout`; and a
-> program's output is a **typed edge**, of which §7's byte stream is the
-> bytes floor.
+> Futures (§2, §3); a program's value is **what its program returns**,
+> carried back across the vat boundary by the value codec (theSherwood/unir#43;
+> until then it was an exit record, `{exit}` or `{exits}`), and a failed
+> stage's own error value is the pipefail error; and a program's output is a
+> **typed edge**, of which §7's byte stream is the bytes floor and JACL
+> values, written with `emit`, the first typed one.
 
 ## Motivation
 

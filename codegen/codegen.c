@@ -5491,6 +5491,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_STDOUT,     "jacl_stdout",     0},
       {HEAD_STDERR,     "jacl_stderr",     0},
       {HEAD_ARGS,       "jacl_args",       0},
+      {HEAD_EMIT,       "jacl_emit",       1},
       {HEAD_CANCEL,     "jacl_cancel",     1},
       {HEAD_SUSPEND,    "jacl_suspend",    1},
       {HEAD_RESUME,     "jacl_resume",     1},

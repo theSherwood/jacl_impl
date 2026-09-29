@@ -21,7 +21,7 @@ static uint8_t jacl_unir_map[JACL_UNIR_MAP_BYTES] __attribute__((aligned(65536))
 /* The unit's heap: unir_host_alloc/free over a static pool outside the GC heap. Size classes
  * of 16 << k bytes (k < 9, so up to 4 KiB), each with a free list, carved from a bump arena.
  * Its lock is held only inside these two functions, which never park or call out. */
-#define JACL_UNIR_POOL_BYTES (256u << 10)
+#define JACL_UNIR_POOL_BYTES (1u << 20)
 #define JACL_UNIR_CLASSES 9
 static uint8_t jacl_unir_pool[JACL_UNIR_POOL_BYTES] __attribute__((aligned(16)));
 static uint32_t jacl_unir_pool_used;
@@ -111,9 +111,51 @@ static int64_t chan_be_write(void *w, const uint8_t *p, uint32_t n) {
   return s < 0 ? CHAN_BE_FAILED : 0;
 }
 
-static int64_t chan_be_read(void *r, uint8_t *buf, uint32_t cap) {
-  int64_t s = unir_consumer_read((unir_consumer *)r, buf, cap, -1, 0);
-  if (s == UNIR_EENDED) return chan_unir_ended(unir_consumer_ended((unir_consumer *)r));
+static unir_schema *jv_schema(void);
+
+/* One attempt, waiting up to `timeout_ns`, at read end `c`'s next frame on its edge `h`: its
+ * length, with the frame in `c->tail`, or a UNIR_E* code. A CHAN_UNKNOWN end first learns what
+ * the edge carries (unir spec §3): an offer on substream 0 is accepted as the value schema, and
+ * the end then reads verified messages; any other first frame means bytes, read as they are. A
+ * writer offering another schema is refused (UNIR_EREFUSED). */
+static int64_t chan_unir_next(JaclChan *c, unir_consumer *h, int64_t timeout_ns) {
+  if (c->typed == CHAN_UNKNOWN) {
+    int64_t sub = unir_consumer_next_substream(h, timeout_ns);
+    if (sub < 0) return sub;
+    if (sub == 0) {
+      /* The writer sends its whole offer at once, so the accept waits no longer than it takes. */
+      unir_schema *s = jv_schema();
+      int64_t st = UNIR_EINVALID;
+      c->agree = s ? unir_consumer_accept(h, s, -1, &st) : 0;
+      if (!c->agree) return st < 0 ? st : UNIR_EINVALID;
+      c->typed = CHAN_VALUES;
+    } else {
+      c->typed = CHAN_BYTES;
+    }
+  }
+  if (c->typed == CHAN_BYTES) return unir_consumer_read(h, c->tail, c->max, timeout_ns, 0);
+  uint32_t entry = 0;
+  const uint8_t *frame = 0;
+  int64_t n = unir_agreement_recv((unir_agreement *)c->agree, h, timeout_ns, &entry, &frame);
+  if (n < 0) return n;
+  if ((uint64_t)n > c->max) {   /* a materialized message past a frame; none with one schema */
+    unir_consumer_sever(h, 3 /* malformed-frame */);
+    return UNIR_EENDED;
+  }
+  memcpy(c->tail, frame, (size_t)n);   /* the verified message, private to this vat */
+  return n;
+}
+
+/* Frees a read end's agreement, once nothing reads it. */
+static void chan_unir_forget(JaclChan *c) {
+  if (c->agree) unir_agreement_free((unir_agreement *)c->agree);
+  c->agree = 0;
+}
+
+static int64_t chan_be_read(JaclChan *c) {
+  unir_consumer *r = (unir_consumer *)c->handle;
+  int64_t s = chan_unir_next(c, r, -1);
+  if (s == UNIR_EENDED) return chan_unir_ended(unir_consumer_ended(r));
   return s < 0 ? CHAN_BE_FAILED : s;
 }
 
