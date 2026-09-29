@@ -1306,8 +1306,8 @@ stay listed as historical record.
 16. **Boolean/logical operators** — see `NOT_IMPLEMENTED.md` §6 (duplicate of Q2).
 17. **Standard library surface** — see `NOT_IMPLEMENTED.md` §6.
 18. ~~**Job detection**~~ — resolved: static. The compiler decides at the `!cmd` call site whether to emit `OP_EXEC` with `EXEC_FLAG_BG` (Job) or basic mode (foreground stream).
-19. **`cancel` semantics** — see `NOT_IMPLEMENTED.md` §6. Current impl: `[cancel $job]` desugars to `[signal $job SIGTERM]` — SIGTERM only, no escalation; cooperative cancel on plain Future is open.
-20. ~~**`&` syntax**~~ — resolved: `&` is parser-recognized only on `!cmd` heads (`shell_cmd.background` AST flag), compiles to `OP_EXEC | EXEC_FLAG_BG`. Does **not** apply to arbitrary JACL procs — `expensive-work &` is not a valid background form; use `[spawn { ... }]` for JACL-side concurrency.
+19. ~~**`cancel` semantics**~~ — resolved on Unir (`docs/UNIR_PIPELINES.md`, "Background and job control"): `cancel`, `suspend` and `resume` act on any Future, cooperatively at the task's job-control points (await, sleep, a pipeline's reads); on a task running a pipeline they act on its edges. No signal ladder.
+20. ~~**`&` syntax**~~ — resolved: `&` is parser-recognized only on `!cmd` heads (`shell_cmd.background` AST flag); `!a | !b &` compiles to `spawn {!a | !b}`. Does **not** apply to arbitrary JACL procs — `expensive-work &` is not a valid background form; use `[spawn { ... }]` for JACL-side concurrency.
 21. **Alias scoping** — see `NOT_IMPLEMENTED.md` §6.
 22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
 23. ~~**`signal` on plain Future**~~ — resolved: runtime error. `OP_SIGNAL` requires the operand to be a Job map (checks `_is_job` marker); anything else returns `"signal requires a Job map"`.
@@ -1370,7 +1370,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Pragmas (`#{ ... }`) | removed |
 | Same-scope shadowing error | compile-time |
 | Shell interop (`!cmd`, `exec`) | `OP_EXEC` with FULL/STDIN/BG/PIPE flags; OS pipes, stdin/stdout |
-| Jobs (Future + OS process) | `exec` BG mode + `signal`/`cancel`; map carries `pid`. `&` sugar + cancel semantics still design-open |
+| Jobs | a Job is the Future of the task running the pipeline: `&` is `spawn`; `cancel`/`suspend`/`resume` (`docs/UNIR_PIPELINES.md`) |
 
 ### Not yet implemented
 

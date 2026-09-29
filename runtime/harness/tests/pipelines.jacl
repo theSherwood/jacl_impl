@@ -2,8 +2,7 @@
 ##
 ## pipelines.jacl — `!a | !b` across child vats (docs/UNIR_PIPELINES.md, theSherwood/unir#19).
 ## Self-checking. Run by codegen.rs::pipelines_run_on_temen, which grants the programs in
-## tests/pipelines/ as `bin.gen`, `bin.upcase` and `bin.fail`, and checks what reached the
-## host's stdout.
+## tests/pipelines/ as `bin.<name>`, and checks what reached the host's stdout.
 ##
 
 # A JACL stage: the byte count of a read end, or its error.
@@ -16,6 +15,30 @@ proc count {ch} {
     set b [read $ch 1016]
   }
   $n
+}
+
+# A JACL stage: checks that a read end carries `forever`'s alphabet uppercased, in order, and
+# keeps the count in the atom N.
+proc tally {ch n} {
+  mut k 0
+  mut b [read $ch 1016]
+  while [!= $b $nil] {
+    if [error? $b] { return $b }
+    mut i 0
+    while [< $i [buf-len $b]] {
+      if [!= [buf-get $b $i] [+ 65 [% $k 26]]] { return [error "out of order"] }
+      set k [+ $k 1]
+      set i [+ $i 1]
+    }
+    reset $n $k
+    set b [read $ch 1016]
+  }
+  $k
+}
+
+# Waits until the atom N passes K.
+proc wait-past {n k} {
+  while [<= [deref $n] $k] { sleep 0.001 }
 }
 
 proc main {} {
@@ -31,8 +54,8 @@ proc main {} {
   assert [== [slice $three 0 6] "AB\nAB\n"]
 
   # Any JACL stage reads the output as a channel.
-  def n {!gen ab | !upcase | count}
-  assert [== $n 150]
+  def cnt {!gen ab | !upcase | count}
+  assert [== $cnt 150]
 
   # In value position the output goes to the enclosing output (here the host's stdout, which
   # the harness checks) and the value is the exit record; in statement position, the same.
@@ -60,6 +83,50 @@ proc main {} {
   def none {!gen a | !nope}
   assert [error? $none]
   assert [error? {!gen a | !nope | collect}]
+
+  # `&` is spawn: the Future is the Job, and awaiting it gives the exit record. The output went
+  # to the enclosing output.
+  def bg {!gen bg | !upcase &}
+  def rb [await $bg]
+  assert [== [vec-len [map-get $rb "exits"]] 2]
+
+  # Cancel severs the pipeline's edges (cancelled); each stage ends through its edges and is
+  # reaped, and awaiting the Future gives the error. `sink` never writes, so it learns at its
+  # next read.
+  def k {!forever | !sink &}
+  sleep 0.02
+  assert [cancel $k]
+  assert [== [error-val [await $k]] "cancelled"]
+  assert [== [cancel $k] $false]
+
+  # Suspend holds a pipeline under backpressure and resume releases it, with nothing lost or
+  # repeated (tally checks every byte).
+  def n [atom 0]
+  def t [spawn {!forever | !upcase | tally $n}]
+  wait-past $n 0
+  assert [suspend $t]
+  sleep 0.02
+  def held [deref $n]
+  sleep 0.05
+  assert [== [deref $n] $held]
+  assert [resume $t]
+  wait-past $n [+ $held 1000]
+  cancel $t
+  assert [== [error-val [await $t]] "cancelled"]
+
+  # A task with no pipeline acts on them at its job-control points (here, sleep).
+  def c [atom 0]
+  def s [spawn { while $true { swap $c [\ + $it 1]; sleep 0.001 } }]
+  wait-past $c 0
+  suspend $s
+  sleep 0.01
+  def cs [deref $c]
+  sleep 0.02
+  assert [== [deref $c] $cs]
+  resume $s
+  wait-past $c $cs
+  cancel $s
+  assert [== [error-val [await $s]] "cancelled"]
   0
 }
 

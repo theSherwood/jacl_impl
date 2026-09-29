@@ -84,18 +84,40 @@ JaclVal jacl_stderr(void) { return stage_end(2); }
 /* Writes to a stage's write end, waiting while another fiber's operation holds it: the wait
  * on the busy word parks this fiber, so the holder (perhaps parked for credit on this
  * worker) can finish. */
-static void stage_write(JaclVal end, const uint8_t *b, uint32_t n) {
+static int stage_write(JaclVal end, const uint8_t *b, uint32_t n) {
   JaclChan *c = chan_of(end);
   while (__vm_atomic_cas32(&c->busy, 0, 1) != 0) __vm_wait32(&c->busy, 1, JACL_STAGE_POLL_NS);
-  if (!c->closed) (void)chan_write_all(c, b, n);
+  int ok = !c->closed && jaclrt_is_nil(chan_write_all(c, b, n));
   chan_release(c);
+  return ok;
 }
 
-/* stdout for `print`: the stage's stdout edge, else the host stream. */
+/* Whether this stage's stdout has ended: its reader cancelled it, or the shell severed it. Polls
+ * the edge, since a stage that is not writing has not observed it; the busy flag keeps the poll
+ * off a write in flight. */
+static int stage_stdout_ended(void) {
+  JaclChan *c = jaclrt_is_nil(jacl_stage_ends[1]) ? 0 : chan_of(jacl_stage_ends[1]);
+  if (!c || __vm_atomic_cas32(&c->busy, 0, 1) != 0) return 0;
+  int ended = !c->closed && unir_producer_poll((unir_producer *)c->handle) != 0;
+  chan_release(c);
+  return ended;
+}
+
+/* A stage learns that its pipeline was cancelled, or its reader went away, only through its
+ * edges (unir spec §10: kill is Severed(cancelled)). A read of its stdin fails once its stdout
+ * has ended, so a stage that only reads ends too. */
+static int stage_stdin_orphaned(JaclChan *c) {
+  return !jaclrt_is_nil(jacl_stage_ends[0]) && c == chan_of(jacl_stage_ends[0]) && stage_stdout_ended();
+}
+
+/* stdout for `print`: the stage's stdout edge, else the host stream. `print` has no error to
+ * return, so a task that prints to an ended stdout ends there, as SIGPIPE ends a Unix program
+ * (jacl_task_end). It ends cleanly: its reader went away, which is not its failure, so pipefail
+ * still names the stage that did fail. The program's own task ending ends the stage. */
 void jacl_out(const char *b, long n) {
   JaclVal out = jacl_stage() ? stage_end(1) : JACL_NIL;
   if (jaclrt_is_nil(out)) { write(1, b, n); return; }
-  stage_write(out, (const uint8_t *)b, (uint32_t)n);
+  if (!stage_write(out, (const uint8_t *)b, (uint32_t)n) && stage_stdout_ended()) jacl_task_end(JACL_NIL);
 }
 
 /* At exit: report an error value on stderr, end the stdio edges the program left open, and
@@ -230,9 +252,31 @@ static JaclVal pipe_failure(JaclPipe *p) {
   return p->cause >= 0 ? chan_cause_err(p->cause) : JACL_NIL;
 }
 
+/* Cancels a running pipeline: severs every edge end this vat holds with `cancelled`, so the last
+ * stage fails its next write and each stage's end ends the one before it, and reaps the stages. */
+static void pipe_cancel(JaclPipe *p) {
+  unir_consumer_sever(p->outc, 7 /* cancelled */);
+  for (int32_t i = 0; i < p->spawned; i++) unir_consumer_sever(p->errc[i], 7);
+  p->cause = 7;
+  pipe_finish(p);
+}
+
 static int64_t pipe_read(JaclChan *c, JaclVal *err) {
   JaclPipe *p = pipe_of(c);
   for (;;) {
+    /* Job control for the task reading this pipeline acts on its edges (decision 50). Suspend
+     * withholds credit, so the stages stall by backpressure, and holds the task; resume grants
+     * credit again. Cancel severs and reaps, then ends the task. */
+    int ctl = p->done ? 0 : jacl_ctl_pending();
+    if (ctl & JACL_CTL_CANCEL) {
+      pipe_cancel(p);
+      jacl_ctl_point();
+    } else if (ctl & JACL_CTL_SUSPEND) {
+      unir_consumer_suspend(p->outc);
+      jacl_ctl_point();
+      unir_consumer_resume(p->outc);
+      continue;
+    }
     int64_t s = p->done ? UNIR_EENDED : unir_consumer_read(p->outc, c->tail, c->max, JACL_STAGE_POLL_NS, 0);
     if (!p->done) pipe_pump(p, 0);
     if (s >= 0) return s;

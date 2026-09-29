@@ -1,0 +1,18 @@
+##
+## forever — writes the alphabet over and over, seven letters a write, until a write fails, and
+## returns that failure. Seven is coprime to 26, so a reader that checks the letters catches a
+## write lost or repeated (job control's tests in pipelines.jacl).
+##
+
+proc main {} {
+  def out [stdout]
+  def abc "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+  mut k 0
+  while $true {
+    def e [write $out [slice $abc $k [+ $k 7]]]
+    if [error? $e] { return $e }
+    set k [% [+ $k 7] 26]
+  }
+}
+
+main

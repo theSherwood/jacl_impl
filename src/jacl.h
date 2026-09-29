@@ -721,6 +721,9 @@ typedef enum {
   /* Pipeline stages (docs/UNIR_PIPELINES.md) */
   HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS,
 
+  /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
+  HEAD_SUSPEND, HEAD_RESUME,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 

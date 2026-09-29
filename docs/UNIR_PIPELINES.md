@@ -22,8 +22,10 @@ This note maps them onto vats and edges, and names the pieces TEMEN and unir sti
   stage are not wired yet. The lexer knows `|` and `||`, not `|!`, `|+` or `|&`.
 - A lone `!cmd` the vat holds no program for runs a host subprocess through the `exec` capability
   (`jacl_exec_capture`) and returns its stdout as a string.
-- The parser marks `!cmd &` as background (`shell_cmd.background`); codegen ignores the mark.
-- JACL tasks have no cancel, suspend or resume.
+- `!a | !b &` is `spawn {!a | !b}`: its Future is the Job, and awaiting it gives the exit record.
+  `cancel`, `suspend` and `resume` act on any Future, as "Background and job control" describes. A
+  stage that never touches its stdio is not cancellable, and a cancel of its pipeline waits on it
+  (theSherwood/unir#35).
 - Nothing carries a JACL value across a vat boundary: there is no value codec.
 
 ## Design
@@ -125,9 +127,30 @@ The Future a spawn returns is the handle to the running pipeline. There is no se
 | operation | on a task running a pipeline | on any other task |
 |---|---|---|
 | `await $f` | the pipeline's value (the exit record), or the pipefail error | the task's value |
-| `cancel $f` | severs every end the task holds with `cancelled`; each stage's next edge operation severs, and awaiting gives the `cancelled` error | the task ends with a `cancelled` error at its next safepoint |
-| `suspend $f` | sets the credit limit on the ends the task reads to what it has already granted (`unir_consumer_suspend`): the stages fill their rings and park, by backpressure, with no signals | the task parks at its next safepoint |
+| `cancel $f` | severs every end the task holds with `cancelled`, reaps the stages, and ends the task; awaiting gives the `cancelled` error | the task ends with the `cancelled` error at its next job-control point |
+| `suspend $f` | sets the credit limit on the ends the task reads to what it has already granted (`unir_consumer_suspend`) and holds the task: the stages fill their rings and park, by backpressure, with no signals | the task is held at its next job-control point |
 | `resume $f` | lifts the limit; the stages continue, and no byte is lost or repeated | the task continues |
+
+Each returns whether it reached a live task: false for a finished one, or the program's own.
+
+**Job-control points.** Tasks are cooperative, so a request takes effect where the task is not
+running: while it is queued, parked on an `await`, or held. A running task acts on it at its next
+job-control point: an `await`, each millisecond of a `sleep`, and each poll of a pipeline's output.
+At those points its fiber holds nothing another task needs, so a cancelled task's fiber is simply
+never resumed (`runtime/sched.c`). A task that computes without reaching one runs on until it does.
+
+**How a stage learns.** A stage sees only its edges (unir §10: kill is `Severed(cancelled)`, with
+no signal ladder). Once its stdout has ended, whether its reader cancelled it or the shell severed
+it:
+
+- a `write` to it is an error value;
+- a `print` to it ends the task that printed, cleanly, as SIGPIPE ends a Unix program. The reader
+  went away, which is not the stage's failure, so pipefail still names the stage that did fail;
+- a read of its stdin fails (`unir_producer_poll`), so a stage that only reads ends too.
+
+A stage that ends cancels its stdin, which ends the stage before it the same way. A stage that never
+touches its stdio (a loop, a long sleep) is out of reach, and the shell's reap waits for it; a
+parent-side kill is theSherwood/unir#35.
 
 A stage that exits normally completes its output, and the next stage reads to the end and exits. A
 stage that fails severs its output with `io-error`, so the next stage fails too (pipefail). These
@@ -178,10 +201,11 @@ they are an upstream PR, filed from this note.
 
 ## Tests
 
-- **Programs as fixtures:** small JACL programs compiled to child images and granted in `$bin` as `gen`
-  (prints N numbered lines), `upcase` (copies stdin to stdout, uppercased), `fail` (writes to stderr,
-  then returns an error), `slow` (echoes stdin to stdout), and `tee` (copies stdin to stdout and to a
-  channel passed as its argument).
+- **Programs as fixtures** (`runtime/harness/tests/pipelines/`): small JACL programs compiled to
+  child images and granted as `bin.<name>`: `gen` (prints its arguments fifty times), `upcase`
+  (copies stdin to stdout, uppercased), `fail` (returns an error without reading), `forever` (writes
+  the alphabet until a write fails) and `sink` (reads stdin to its end). Still to come with channel
+  ends passed by move: `tee` (copies stdin to stdout and to a channel passed as its argument).
 - **End to end on TEMEN, on the tree-walker, bytecode and Cranelift:**
   - `!gen 100 | !upcase | collect`: every line, uppercased (Complete through two vats into a JACL
     stage).
@@ -191,12 +215,14 @@ they are an upstream PR, filed from this note.
     stderr, and `upcase` saw a sever (Severed).
   - `!gen 10 | !tee $w | !upcase | collect`, with `$r` read in this vat: both outputs are complete,
     and `$w` is closed in this vat after the call (the end moved).
-  - `!gen 1000000 | !slow &`, then `cancel`: both stages end `Severed(cancelled)`, and awaiting the
-    Future gives the `cancelled` error.
-  - `!gen 10000 | !upcase | tally $n &`, then `suspend` and `resume`, where `tally` is a JACL stage
-    that adds the bytes it reads to the cell `$n`: while suspended, `$n` stays fixed; after resuming,
-    the output is complete and in order.
-  - `cancel`, `suspend` and `resume` on a task with no pipeline act at its safepoints.
+  - `!gen bg | !upcase &`: awaiting the Future gives the exit record, and the output reaches the
+    enclosing output.
+  - `!forever | !sink &`, then `cancel`, where `forever` writes until a write fails and `sink` only
+    reads: both stages end and are reaped, and awaiting gives the `cancelled` error.
+  - `spawn {!forever | !upcase | tally $n}`, then `suspend` and `resume`, where `tally` is a JACL
+    stage that checks every byte is the next letter and keeps the count in the atom `$n`: while
+    suspended, `$n` stays fixed; after resuming it grows, with nothing lost or repeated.
+  - `cancel`, `suspend` and `resume` on a task with no pipeline act at its job-control points.
 - The #18 channel tests, and every existing baseline, stay green.
 
 ## Order of work
@@ -214,10 +240,11 @@ they are an upstream PR, filed from this note.
    fibers and `thread.spawn` vCPUs); the test asserts its stages are JIT-compiled. **Done.**
 4. Values and outputs, in this order: `!cmd → JACL` wiring (the last output read as a channel) and
    `collect`; the enclosing output (statement and value position, a stage's own output inside a
-   stage); the exit record as a program's value. **Done**, but for `duration`. Then `&` as `spawn`;
-   `cancel`, `suspend` and `resume` on Futures, carried out on edges for a task running a
-   pipeline. The pipeline tests read the output with `| collect` and a JACL stage, and check what
-   reaches the enclosing output.
+   stage); the exit record as a program's value; `&` as `spawn`; `cancel`, `suspend` and `resume`
+   on Futures, carried out on edges for a task running a pipeline. **Done**, but for `duration`
+   and a kill for stages that never touch their edges (theSherwood/unir#35). The pipeline tests
+   read the output with `| collect` and a JACL stage, check what reaches the enclosing output, and
+   cancel, suspend and resume running pipelines.
 5. Then: channel ends passed by move; JACL values feeding a first stage's stdin; `$bin` as a map
    value, which needs TEMEN to list a vat's capabilities by name. Until then `!name` resolves the
    capability `bin.<name>` in the vat's endowment, and a lone `!name` the vat does not hold runs

@@ -39,6 +39,8 @@ static int     chan_be_cause(void *h, uint32_t end);
  * in `*err` (a failed stage fails the read); and its close. */
 static int64_t pipe_read(JaclChan *c, JaclVal *err);
 static void    pipe_close(JaclChan *c);
+/* A pipeline stage's stdin read end once the stage's stdout has ended (pipe_unir.c). */
+static int     stage_stdin_orphaned(JaclChan *c);
 
 static JaclChan *chan_of(JaclVal v) {
   if (jaclrt_type_index(v) != 0x15) return 0;
@@ -153,6 +155,7 @@ JaclVal jacl_chan_write(JaclVal w, JaclVal bytes) {
  * none): 1, 0 at the end of the stream, or -1 with `*err` set. */
 static int chan_fill(JaclChan *c, JaclVal *err) {
   while (c->tail_len == 0) {
+    if (stage_stdin_orphaned(c)) { *err = chan_err("read: stdout ended"); return -1; }
     int64_t s = c->pipe ? pipe_read(c, err) : chan_be_read(c->handle, c->tail, c->max);
     if (s == CHAN_BE_END) return 0;
     if (s < 0) {
@@ -236,6 +239,7 @@ JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
 static int64_t pipe_read(JaclChan *c, JaclVal *err) { (void)c; (void)err; return CHAN_BE_FAILED; }
 static void    pipe_close(JaclChan *c) { (void)c; }
+static int     stage_stdin_orphaned(JaclChan *c) { (void)c; return 0; }
 JaclVal jacl_pipeline_stream(JaclVal stages) {
   if (jaclrt_as_i32(jacl_len(stages)) == 1) return jacl_exec_capture(jacl_vec_get_at(stages, jaclrt_i32(0)));
   return chan_err("pipeline: needs vats (a TEMEN runtime built with JACL_UNIR)");
