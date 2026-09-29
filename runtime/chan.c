@@ -237,6 +237,11 @@ JaclVal jacl_stdin(void) { return JACL_NIL; }
 JaclVal jacl_stdout(void) { return JACL_NIL; }
 JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
+JaclVal jacl_env_cur = JACL_NIL;
+JaclVal jacl_env(void) {
+  if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();
+  return jacl_env_cur;
+}
 static int64_t pipe_read(JaclChan *c, JaclVal *err) { (void)c; (void)err; return CHAN_BE_FAILED; }
 static void    pipe_close(JaclChan *c) { (void)c; }
 static int     stage_stdin_orphaned(JaclChan *c) { (void)c; return 0; }

@@ -806,56 +806,27 @@ def config [atom [map "debug" $false "port" 8080]]
 
 ## Environment variables
 
-`$env` is an atom containing a `[map string string]` that syncs bidirectionally with the OS environment via atom listeners.
-
-### Reading
+`$env` is this vat's environment: a read-only `[map str str]`, exactly what the vat was spawned with. The root vat's is its host's environment block. A program started from JACL gets an **empty** environment unless its spawner passes one; nothing is inherited implicitly (`docs/CTX_ENV.md`, theSherwood/unir#20).
 
 ```
-[$env HOME]           # atom deref → map → key lookup → "/Users/adam"
-[$env PATH]           # → "/usr/bin:..."
+[map-get $env HOME]              # the root: from the host's environment block
 ```
 
-### Writing
+`with-env M { body }` sets the environment the programs started in `body` are spawned with: `M` exactly, not a change to this vat's `$env`. `M` is a map expression or a `{KEY VALUE …}` block; values become strings.
 
 ```
-# swap atomically applies a function to the atom's value
-swap $env [\ map-set $it NODE_ENV "production"]
-# listener fires → setenv("NODE_ENV", "production")
+with-env {DEBUG 1} { !prog }            # prog's $env is {DEBUG "1"}
+with-env $env { !prog }                 # pass this vat's environment through
+with-env [map-set $env DEBUG 1] { … }   # pass it through with one change
 ```
 
-### Scoped changes
+`with-env M { body }` is `with-ctx {env M} { body }`: it follows `$ctx`'s scoping, so a `spawn` in `body` starts its programs with `M` too.
 
-`with-env` temporarily modifies `$env`, runs a block, then restores the original. The listener syncs to the OS at each step:
-
-```
-with-env {DEBUG "1", NODE_ENV "production"} {
-  !npm run build    # child process sees DEBUG=1 and NODE_ENV=production
-  do-stuff          # JACL code sees them via [$env DEBUG]
-}
-# restored — DEBUG and NODE_ENV back to original values
-```
-
-### Built-in aliases
-
-A small set of read-only convenience variables that stay in sync with `$env` via listeners:
-
-| Variable | Synced from       | Description               |
-| -------- | ----------------- | ------------------------- |
-| `$home`  | `[$env HOME]`     | User home directory       |
-| `$pwd`   | Working directory | Current working directory |
-| `$pid`   | Process ID        | Current process ID        |
-
-These update automatically. For example, `cd` updates the working directory, swaps `PWD` in `$env`, and the listener updates `$pwd`:
-
-```
-print $pwd         # /Users/adam/code
-cd "src"
-print $pwd         # /Users/adam/code/src
-```
+Not in this design: writing `$env` through to an OS environment (a vat has none, and an environment that changed under its children would be ambient authority), and `$home` / `$pwd` / `$pid`.
 
 ### Atom listeners (general-purpose mechanism)
 
-The env sync is built on a general-purpose listener mechanism for atoms. Any atom can have watchers:
+Any atom can have watchers:
 
 ```
 def counter [atom 0]
@@ -870,14 +841,6 @@ unwatch $counter "log"
 ```
 
 Watchers fire synchronously in the thread that committed the change, after every `reset` / `swap` mutation, with `(old, new)`. Each watcher is keyed; re-registering the same key replaces the previous closure, and `unwatch` removes it. Multiple watchers fire in registration order. The full surface (storage, threading, re-entrancy, GC) is in `ATOM_WATCH_DESIGN.md`.
-
-The `$env` atom has a built-in listener that:
-
-- Calls `setenv()`/`unsetenv()` for each changed key
-- Updates `$home` if `HOME` changed
-- Updates `$pwd` if `PWD` changed
-
-No special-casing of `$env` in the language — it's an atom with a listener, same as any user-created atom.
 
 ## Implicit context (`$ctx`)
 
@@ -896,7 +859,7 @@ No special-casing of `$env` in the language — it's an atom with a listener, sa
 | Field | Type            | Mutable | Description                                               |
 | ----- | --------------- | ------- | --------------------------------------------------------- |
 | `pwd` | `str`           | yes     | Working directory                                         |
-| `env` | `[map str str]` | yes     | Environment variables (relationship with `$env` atom TBD) |
+| `env` | `[map str str]` | yes     | The environment for programs started from here; `with-env` sets it (see Environment variables) |
 
 ### Dynamic scoping
 
@@ -1265,7 +1228,7 @@ extern and JACL proc call sites when the pointee matches.
 - Streams — lazy sequence type, explicit `collect`, sequence ops work on both streams and vectors
 - Concurrency — `spawn`/`await`, `parallel`, `race`, `par-each`, `timeout`; all compose with pipes
 - Callable values — maps (key lookup) and atoms (deref + delegate) are callable in `[]` head position
-- Environment variables — `$env` is an atom of a map, synced to OS via listeners; `[$env HOME]` for access; `with-env` for scoped changes; `$home`/`$pwd`/`$pid` as synced aliases
+- Environment variables — `$env` is the vat's own environment (a read-only map); `with-env` sets the one its programs are spawned with (`docs/CTX_ENV.md`)
 - Atom listeners — `watch` adds watchers to any atom; env sync is one application
 - I/O redirection — commands (`write-file`, `append-file`), not operators; string/stream piped to `!cmd` feeds stdin
 - Aliases — compile-time macros that rewrite call sites with arg appending
@@ -1311,7 +1274,7 @@ stay listed as historical record.
 21. **Alias scoping** — see `NOT_IMPLEMENTED.md` §6.
 22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
 23. ~~**`signal` on plain Future**~~ — resolved: runtime error. `OP_SIGNAL` requires the operand to be a Job map (checks `_is_job` marker); anything else returns `"signal requires a Job map"`.
-24. **`$ctx` vs `$env` relationship** — see `NOT_IMPLEMENTED.md` §6.
+24. ~~**`$ctx` vs `$env` relationship**~~ — resolved (`docs/CTX_ENV.md`): `$env` is the vat's own environment; `$ctx.env` is the one its programs are spawned with, set by `with-env`. Neither is inherited across a vat boundary implicitly.
 
 ## Implementation status
 

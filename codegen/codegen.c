@@ -3881,6 +3881,38 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
   }
   if (hid == HEAD_FOR) return compile_for(cx, node);
   if (hid == HEAD_TRY) return compile_try(cx, node);
+  if (hid == HEAD_WITH_ENV && node->data.command.arg_count == 2 &&
+      node->data.command.args[1]->type == AST_BLOCK) {
+    /* [with-env M { body }] is [with-ctx {env M} { body }]: the programs started in the body are
+     * spawned with environment M (docs/CTX_ENV.md). M is an expression, or a `{KEY VALUE …}`
+     * block, which reads as [map KEY VALUE …]. */
+    AstNode *m = node->data.command.args[0];
+    if (m->type == AST_BLOCK) {
+      AstNode **kv = calloc(2 * m->data.block.count + 1, sizeof(AstNode *));
+      for (uint32_t i = 0; i < m->data.block.count; i++) {
+        AstNode *c = m->data.block.commands[i];
+        if (c->type != AST_COMMAND || !c->data.command.head ||
+            c->data.command.head->type != AST_LIT_STRING || c->data.command.arg_count != 1) {
+          cx_fail(cx, "with-env entries must be `KEY VALUE` pairs");
+          return 0;
+        }
+        kv[2 * i] = c->data.command.head;
+        kv[2 * i + 1] = c->data.command.args[0];
+      }
+      m = synth_command(synth_word("map", 3), kv, 2 * m->data.block.count);
+    }
+    AstNode **ea = calloc(1, sizeof(AstNode *));
+    ea[0] = m;
+    AstNode *ov = calloc(1, sizeof(AstNode));
+    ov->type = AST_BLOCK;
+    ov->data.block.commands = calloc(1, sizeof(AstNode *));
+    ov->data.block.commands[0] = synth_command(synth_word("env", 3), ea, 1);
+    ov->data.block.count = 1;
+    AstNode **wa = calloc(2, sizeof(AstNode *));
+    wa[0] = ov;
+    wa[1] = node->data.command.args[1];
+    return compile_expr(cx, synth_command(synth_word("with-ctx", 8), wa, 2));
+  }
   if (hid == HEAD_WITH_CTX && node->data.command.arg_count == 2 &&
       node->data.command.args[0]->type == AST_BLOCK &&
       node->data.command.args[1]->type == AST_BLOCK) {
@@ -5664,6 +5696,10 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
           IrVal key = compile_string_literal(cx, nm, nl);
           IrVal a[] = {cx->sp, key};
           return emit_rt_call(cx, "jacl_global_get", a, 2);
+        }
+        if (nl == 3 && memcmp(nm, "env", 3) == 0) {   /* this vat's environment (docs/CTX_ENV.md) */
+          IrVal a[] = {cx->sp};
+          return emit_rt_call(cx, "jacl_env", a, 1);
         }
         cx_failf(cx, "codegen: undefined variable '%.*s'", nm, nl);
         return 0;

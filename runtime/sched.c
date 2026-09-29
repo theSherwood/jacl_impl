@@ -490,6 +490,44 @@ static long worker_thread(long arg) { __vm_vcpu_tls_set(arg); jacl_gc_worker_reg
 #define JACL_ARGS_BLOB     ((const unsigned char *)(uintptr_t)(16384 + 128))
 #define JACL_ARGS_BLOB_END ((const unsigned char *)(uintptr_t)(16384 + 16384))
 
+/* Parses an arguments blob of the §3e shape — `{argc: u32, envc: u32}`, then argc strings and envc
+ * `KEY=VALUE` strings, each NUL-terminated — within `len` bytes: `*argv` gets the strings as a
+ * vector and `*env` the entries as a map, for each that is not NULL. The root's blob is the host's;
+ * a stage's is its spawn payload, which pipe_unir.c writes in the same shape (docs/CTX_ENV.md). A
+ * malformed tail names nothing. The caller keeps `*argv` and `*env` where the collector sees them. */
+void jacl_args_blob(const unsigned char *b, uint64_t len, JaclVal *argv, JaclVal *env) {
+  if (argv) *argv = jacl_vec_empty();
+  if (env) *env = jacl_map_empty();
+  if (len < 8) return;
+  uint32_t argc = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+  uint32_t envc = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+  const unsigned char *s = b + 8, *end = b + len;
+  for (uint64_t i = 0; i < (uint64_t)argc + envc && s < end; i++) {
+    const unsigned char *str = s;
+    while (s < end && *s) s++;
+    if (s >= end) break;              /* unterminated */
+    uint32_t n = (uint32_t)(s - str);
+    s++;
+    if (i < argc) {
+      if (argv) *argv = jacl_vec_push(*argv, jacl_str_new((const char *)str, n));
+      continue;
+    }
+    uint32_t k = 0;
+    while (k < n && str[k] != '=') k++;
+    if (!env || k == n) continue;     /* not KEY=VALUE */
+    *env = jacl_map_set(*env, jacl_str_new((const char *)str, k),
+                        jacl_str_new((const char *)str + k + 1, n - k - 1));
+  }
+}
+
+/* The root vat's environment: the host's blob (its endowment from the host). Called only from
+ * JACL code on TEMEN, like jacl_sched_run_main's read of the same bytes. */
+JaclVal jacl_root_env(void) {
+  JaclVal keep[1] = {JACL_NIL};
+  jacl_args_blob(JACL_ARGS_BLOB, (uint64_t)(JACL_ARGS_BLOB_END - JACL_ARGS_BLOB), 0, &keep[0]);
+  return keep[0];
+}
+
 /* `JACL_WORKERS=N` from the environment, or `dflt` when the entry is absent or not a number. */
 static long jacl_env_workers(long dflt) {
   static const char key[] = "JACL_WORKERS=";
@@ -563,6 +601,7 @@ void jacl_sched_mark_roots(void) {
   jacl_gc_mark(jacl_cancelled_err);
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
   { extern JaclVal jacl_stage_ends[3]; for (int i = 0; i < 3; i++) jacl_gc_mark(jacl_stage_ends[i]); }   /* a stage's stdio */
+  { extern JaclVal jacl_env_cur; jacl_gc_mark(jacl_env_cur); }   /* this vat's $env */
   { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
   { extern JaclVal jacl_vfs; jacl_gc_mark(jacl_vfs); }   /* in-memory virtual filesystem */
   { extern JaclVal jacl_proc_sigs; jacl_gc_mark(jacl_proc_sigs); }   /* fnref -> proc signature */
