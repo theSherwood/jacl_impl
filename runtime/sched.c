@@ -90,6 +90,7 @@ extern JaclVal jacl_ctx_cur;
 static int jacl_pool_workers = JACL_POOL_WORKERS;   /* this run's pool size, set by sched_init */
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
 #define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
+#define JACL_SCHED_CTL         ((long)-2)   /* job-control point suspend value (jacl_ctl_point) */
 
 static int jacl_sched_self(void) {
   int w = (int)__vm_vcpu_tls_get();
@@ -174,10 +175,14 @@ static void mark_task_stacks(void) {
  *   i64@(p+10) resume_arg (await result, set when woken)
  *   i64@(p+12) next_waiter (job link) i64@(p+14) waiters_head (jobs parked on this)
  *   i64@(p+16) stack ptr
+ *   p[24] job control (JACL_CTL_CANCEL / JACL_CTL_SUSPEND requested; JOB_HELD while on the suspended list)
+ *   i64@(p+26) the job this one is parked on in an await (0 otherwise)
+ *   i64@(p+28) with JOB_ENDS set, the value a cancelled job ends with (jacl_task_end)
  * Conservative tracing keeps prime/closure, result, resume_arg, and the waiter chain alive;
  * fn/fiber/stack are out-of-heap small/addresses and are ignored. */
 enum { JACL_JOB_NEW = 0, JACL_JOB_DONE = 2 };
-#define JOB_PAYLOAD 96     /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker; i64@22=ctx snapshot */
+#define JOB_PAYLOAD 120    /* p[18]=in_rq, p[19]=resuming, p[20]=owner worker; i64@22=ctx snapshot */
+enum { JOB_HELD = 4, JOB_ENDS = 8 };   /* p[24] also holds JACL_CTL_CANCEL / JACL_CTL_SUSPEND (jaclrt.h) */
 static inline int32_t *jp(JaclObj *j)              { return (int32_t *)jacl_obj_payload(j); }
 static inline long  job_get(JaclObj *j, int i)     { return *(int64_t *)(jp(j) + i); }
 static inline void  job_set(JaclObj *j, int i, long v) { *(int64_t *)(jp(j) + i) = v; }
@@ -191,6 +196,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
   job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
   p[18] = 0; p[19] = 0; p[20] = owner;
   job_set(j, 22, (long)jacl_ctx_cur);   /* snapshot the spawner's $ctx (nil for the root) */
+  p[24] = 0; job_set(j, 26, 0); job_set(j, 28, 0);
   return j;
 }
 
@@ -218,6 +224,10 @@ static JaclObj *jacl_root_job;
  * such a job is on no target's await chain). Re-polled by the OWNER worker (jobs are pinned) at
  * its idle cadence, so a parked fiber never busy-spins and never blocks its sibling jobs. */
 static JaclObj *jacl_blocked_head[JACL_SCHED_MAX_WORKERS];
+/* Suspended jobs (JOB_HELD), linked through p[12] like the blocked list; `resume` re-queues one.
+ * The value a cancelled job completes with. Both under slock, and GC roots. */
+static JaclObj *jacl_suspended_head;
+static JaclVal  jacl_cancelled_err = JACL_NIL;
 
 /* Jobs are ordinary GC objects — no global registry, no cap, no leak. Root coverage, per the
  * Ask 3 contract (docs/TEMEN_PHASE3_ASKS.md; temen >= vm#217):
@@ -262,11 +272,47 @@ static void complete_job(JaclObj *j, long v) {
   while (w) {
     JaclObj *next = (JaclObj *)job_get(w, 12);
     job_set(w, 12, 0);
+    job_set(w, 26, 0);          /* no longer parked on `j` */
     job_set(w, 10, v);          /* resume_arg = result */
     rq_push(w);
     w = next;
   }
   if (jp(j)[1]) __vm_atomic_store32(&jacl_pool_shutdown, 1);   /* root done → shut the pool */
+}
+
+/* ---- job control (docs/UNIR_PIPELINES.md, "Background and job control") ----
+ * `cancel`, `suspend` and `resume` act on a Future's job cooperatively. A request sets a flag
+ * (p[24]); the scheduler acts on it wherever the job is not running — queued, parked on an
+ * await, or suspended — and a running job acts on it at its next job-control point
+ * (jacl_ctl_point: await, sleep, a pipeline's reads), where its fiber holds nothing another
+ * job needs. A cancelled job's fiber is never resumed again: the job completes with the
+ * `cancelled` error. A suspended job waits on the suspended list for `resume`. */
+
+static void list_unlink(JaclObj **head, JaclObj *j) {   /* under slock; links through p[12] */
+  for (JaclObj **at = head; *at; at = (JaclObj **)(jp(*at) + 12))
+    if (*at == j) { *at = (JaclObj *)job_get(j, 12); job_set(j, 12, 0); return; }
+}
+
+/* Ends a job that is not running, at a point where its fiber holds nothing. Under slock. */
+static void job_cancel_now(JaclObj *j) {
+  if (job_get(j, 16)) release_task_stack((void *)job_get(j, 16));
+  job_set(j, 16, 0);
+  int ends = __vm_atomic_load32(&jp(j)[24]) & JOB_ENDS;
+  complete_job(j, ends ? job_get(j, 28) : (long)jacl_cancelled_err);
+}
+
+/* Acts on a pending request for a job that is not running and is about to (it was popped, or
+ * it stopped at a job-control point): 1 if it was cancelled or put on the suspended list, 0 if
+ * it should run. Its resume arg is kept, so a job suspended as its await ended still gets the
+ * awaited result on resume. Under slock. */
+static int job_ctl_take(JaclObj *j) {
+  int f = __vm_atomic_load32(&jp(j)[24]);
+  if (f & JACL_CTL_CANCEL) { job_cancel_now(j); return 1; }
+  if (!(f & JACL_CTL_SUSPEND)) return 0;
+  __vm_atomic_store32(&jp(j)[24], f | JOB_HELD);
+  job_set(j, 12, (long)jacl_suspended_head);
+  jacl_suspended_head = j;
+  return 1;
 }
 
 /* ---- the GC-cooperative resume ----
@@ -333,15 +379,22 @@ static void finish_job_outcome(JaclObj *job, int oc, long out) {
      * the top when the bare scheduler loop re-resumes it. Re-queue immediately with nil. */
     job_set(job, 10, (long)JACL_NIL);
     rq_push(job);
+  } else if (out == JACL_SCHED_CTL) {
+    /* A job-control point: end or hold the job, or, if the request was withdrawn, run on. */
+    job_set(job, 10, (long)JACL_NIL);
+    if (!job_ctl_take(job)) rq_push(job);
   } else {
     JaclObj *target = (JaclObj *)out;
-    if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
+    if (__vm_atomic_load32(&jp(job)[24]) & JACL_CTL_CANCEL) {
+      job_cancel_now(job);                       /* an await is a job-control point */
+    } else if (target == job || __vm_atomic_load32(&jp(target)[0]) == JACL_JOB_DONE) {
       /* self-cycle, or target already finished: re-run us with the result (nil for a cycle) */
       job_set(job, 10, (target == job) ? (long)JACL_NIL : job_get(target, 8));
       rq_push(job);
     } else {
       job_set(job, 12, job_get(target, 14));    /* park job on target's waiter list */
       job_set(target, 14, (long)job);
+      job_set(job, 26, (long)target);
     }
   }
   sunlock();
@@ -381,7 +434,10 @@ static void worker_loop(int is_main) {
     jacl_gc_worker_park_if_requested();
     slock();
     JaclObj *job = rq_pop(self);
+    int taken = 0;
+    while (job && job_ctl_take(job)) { taken = 1; job = rq_pop(self); }
     sunlock();
+    if (taken) pool_wake();                       /* a cancelled job's waiters are ready */
     if (!job) {
       /* No ready job. Drive any VM-wait-parked fibers (e.g. sleepers) by re-polling them; if a
        * whole sweep made no progress, idle one JACL_WAIT_NS tick (lets wall-clock advance toward
@@ -502,6 +558,9 @@ void jacl_sched_mark_roots(void) {
       jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, b));   /* VM-wait-parked fibers awaiting re-poll */
   }
   if (jacl_root_job) jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, jacl_root_job));
+  for (JaclObj *b = jacl_suspended_head; b; b = (JaclObj *)job_get(b, 12))
+    jacl_gc_mark(jaclrt_from_ptr(JACL_TAG_STREAM, b));
+  jacl_gc_mark(jacl_cancelled_err);
   { extern JaclVal jacl_ctx_cur; jacl_gc_mark(jacl_ctx_cur); }   /* the ambient $ctx map */
   { extern JaclVal jacl_stage_ends[3]; for (int i = 0; i < 3; i++) jacl_gc_mark(jacl_stage_ends[i]); }   /* a stage's stdio */
   { extern JaclVal jacl_module_globals; jacl_gc_mark(jacl_module_globals); }  /* top-level globals */
@@ -550,6 +609,82 @@ JaclVal jacl_await(JaclVal future) {
    * lockless DONE/result fast path (that pairing reorders under temen-llvm + the JIT). */
   return (JaclVal)__vm_fiber_suspend((long)j);
 }
+
+/* The job a Future names, or 0. Channel ends (JOBJ_BLOB) and lazy streams (a JOBJ_NODE, but a
+ * smaller one) share the tag, so the cell must be a node with a job's payload. */
+static JaclObj *job_of(JaclVal v) {
+  if (jaclrt_type_index(v) != 0x15) return 0;
+  JaclObj *j = (JaclObj *)jaclrt_as_ptr(v);
+  return j->obj_type == JOBJ_NODE && j->size >= sizeof(JaclObj) + JOB_PAYLOAD ? j : 0;
+}
+
+/* The running job's pending cancel or suspend, or 0; 0 outside a job's fiber. */
+int jacl_ctl_pending(void) {
+  int self = jacl_sched_self();
+  if (!__vm_atomic_load32(&jacl_gc_in_task[self])) return 0;
+  JaclObj *j = jacl_running_job[self];
+  return j ? __vm_atomic_load32(&jp(j)[24]) & (JACL_CTL_CANCEL | JACL_CTL_SUSPEND) : 0;
+}
+
+/* A job-control point: with a request pending, hand this job's fiber to the scheduler, which
+ * ends it (cancel: this call does not return) or holds it until `resume`. */
+void jacl_ctl_point(void) {
+  if (jacl_ctl_pending()) (void)__vm_fiber_suspend(JACL_SCHED_CTL);
+}
+
+/* Ends the running task where it stands, as a cancel would, but with the value `v`: its fiber is
+ * not resumed again. The program's own task may end this way too, which ends the program. For a
+ * point where the task holds nothing, such as a stage's `print` to an ended stdout (pipe_unir.c).
+ * `v` is kept in the job, which the collector traces. */
+void jacl_task_end(JaclVal v) {
+  int self = jacl_sched_self();
+  if (!__vm_atomic_load32(&jacl_gc_in_task[self]) || !jacl_running_job[self]) return;
+  JaclObj *j = jacl_running_job[self];
+  slock();
+  job_set(j, 28, (long)v);
+  __vm_atomic_store32(&jp(j)[24], __vm_atomic_load32(&jp(j)[24]) | JACL_CTL_CANCEL | JOB_ENDS);
+  sunlock();
+  (void)__vm_fiber_suspend(JACL_SCHED_CTL);
+}
+
+/* Sets request `bit` on a live job, and acts at once where the job is not running. Returns
+ * whether it was delivered: false for a finished job, the program's own, or a non-Future. */
+static JaclVal job_request(JaclVal fut, int bit) {
+  JaclObj *j = job_of(fut);
+  if (!j) return jaclrt_set_error(jacl_str_new("not a future", 12));
+  if (bit == JACL_CTL_CANCEL && jaclrt_is_nil(jacl_cancelled_err))
+    jacl_cancelled_err = jacl_error_new(jacl_str_new("cancelled", 9));   /* before the lock: allocates */
+  slock();
+  int live = __vm_atomic_load32(&jp(j)[0]) != JACL_JOB_DONE && !jp(j)[1];
+  if (live) {
+    int f = __vm_atomic_load32(&jp(j)[24]);
+    if (bit == JACL_CTL_SUSPEND) {
+      __vm_atomic_store32(&jp(j)[24], f | JACL_CTL_SUSPEND);
+    } else if (bit == JACL_CTL_CANCEL) {
+      __vm_atomic_store32(&jp(j)[24], f | JACL_CTL_CANCEL);
+      JaclObj *target = (JaclObj *)job_get(j, 26);
+      if (f & JOB_HELD) {                        /* suspended: end it where it waits */
+        list_unlink(&jacl_suspended_head, j);
+        job_cancel_now(j);
+      } else if (target) {                       /* parked on an await: leave the waiter list */
+        list_unlink((JaclObj **)(jp(target) + 14), j);
+        job_set(j, 26, 0);
+        job_cancel_now(j);
+      }
+    } else {                                     /* resume */
+      __vm_atomic_store32(&jp(j)[24], f & ~(JACL_CTL_SUSPEND | JOB_HELD));
+      if (f & JOB_HELD) { list_unlink(&jacl_suspended_head, j); rq_push(j); }
+    }
+  }
+  sunlock();
+  pool_wake();
+  return jaclrt_bool(live);
+}
+
+/* [cancel F] / [suspend F] / [resume F]: true if the request reached a live task. */
+JaclVal jacl_cancel(JaclVal fut)  { return job_request(fut, JACL_CTL_CANCEL); }
+JaclVal jacl_suspend(JaclVal fut) { return job_request(fut, JACL_CTL_SUSPEND); }
+JaclVal jacl_resume(JaclVal fut)  { return job_request(fut, 0); }
 
 /* ---- parallel / race ----
  * Run on the calling job's fiber: create the block jobs, enqueue them, await each. The locals

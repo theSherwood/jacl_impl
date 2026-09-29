@@ -339,6 +339,15 @@ JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's 
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
+/* Job control on Futures (sched.c): true if the request reached a live task. */
+JaclVal jacl_cancel(JaclVal fut);
+JaclVal jacl_suspend(JaclVal fut);
+JaclVal jacl_resume(JaclVal fut);
+#define JACL_CTL_CANCEL  1
+#define JACL_CTL_SUSPEND 2
+int  jacl_ctl_pending(void);   /* the running task's pending request, or 0 */
+void jacl_ctl_point(void);     /* act on it: end (cancel) or hold (suspend) the task */
+void jacl_task_end(JaclVal v); /* end the running task (the program's own too) with value V */
 JaclVal jacl_sleep(JaclVal secs);                  /* [sleep S] — futex-timeout sleep */
 JaclVal jacl_timeout_begin(JaclVal secs);          /* [timeout D { body }] — open a deadline */
 JaclVal jacl_timeout_end(JaclVal body_val);        /* close it: error if the deadline fired */

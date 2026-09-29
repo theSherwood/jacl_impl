@@ -144,6 +144,9 @@ typedef enum {
   /* Pipeline stages (docs/UNIR_PIPELINES.md) */
   HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS,
 
+  /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
+  HEAD_SUSPEND, HEAD_RESUME,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -243,10 +246,12 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "error?", 6) == 0) return HEAD_ERROR_Q;
       if (memcmp(s, "signal", 6) == 0) return HEAD_SIGNAL;
       if (memcmp(s, "cancel", 6) == 0) return HEAD_CANCEL;
+      if (memcmp(s, "resume", 6) == 0) return HEAD_RESUME;
       if (memcmp(s, "extern", 6) == 0) return HEAD_EXTERN;
       return HEAD_NONE;
     case 7:
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
+      if (memcmp(s, "suspend", 7) == 0) return HEAD_SUSPEND;
       if (memcmp(s, "channel", 7) == 0) return HEAD_CHANNEL;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;

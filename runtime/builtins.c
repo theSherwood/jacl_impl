@@ -777,6 +777,7 @@ JaclVal jacl_sleep(JaclVal secs) {
     jacl_to_budget[lvl] -= total;
   }
   while (total > 0) {
+    jacl_ctl_point();                            /* a sleeping task can be cancelled or suspended */
     long chunk = total > 1000000L ? 1000000L : total;   /* 1 ms slices: stay GC-responsive */
     (void)__vm_wait32(&jacl_sleep_word, 0, chunk);
     total -= chunk;

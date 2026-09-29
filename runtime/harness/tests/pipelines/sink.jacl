@@ -1,0 +1,15 @@
+##
+## sink — reads stdin to its end and writes nothing: a stage that learns its pipeline was
+## cancelled only through its next read (pipe_unir.c, stage_stdin_orphaned).
+##
+
+proc main {} {
+  mut b [read [stdin] 1016]
+  while [!= $b $nil] {
+    if [error? $b] { return $b }
+    set b [read [stdin] 1016]
+  }
+  0
+}
+
+main

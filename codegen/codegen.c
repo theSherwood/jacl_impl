@@ -1993,6 +1993,8 @@ static int kw_is(AstNode *n, const char *kw, uint32_t kl) {
 
 #define CG_CAP_MAX CG_MAX_PARAMS
 
+static int is_shell_chain(AstNode *node);
+static AstNode *shell_chain_last(AstNode *node);
 static int set_has(const char **ns, const uint32_t *ls, int n, const char *s, uint32_t l) {
   for (int i = 0; i < n; i++) if (ls[i] == l && memcmp(ns[i], s, l) == 0) return 1;
   return 0;
@@ -2122,6 +2124,9 @@ static void add_free_varrefs(AstNode *node, const char **bound, uint32_t *blen, 
     }
     if (node->data.command.head) add_free_varrefs(node->data.command.head, bound, blen, nb, set, slen, sn);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) add_free_varrefs(node->data.command.args[i], bound, blen, nb, set, slen, sn);
+  } else if (node->type == AST_SHELL_CMD) {
+    add_free_varrefs(node->data.shell_cmd.head, bound, blen, nb, set, slen, sn);
+    for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) add_free_varrefs(node->data.shell_cmd.args[i], bound, blen, nb, set, slen, sn);
   }
 }
 
@@ -2147,6 +2152,9 @@ static void mark_free_global_refs(Cx *cx, AstNode *node, const char **bound, uin
                       node->data.command.args[0]->data.lit_string.length, bound, blen, nb);
     if (node->data.command.head) mark_free_global_refs(cx, node->data.command.head, bound, blen, nb);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) mark_free_global_refs(cx, node->data.command.args[i], bound, blen, nb);
+  } else if (node->type == AST_SHELL_CMD) {
+    mark_free_global_refs(cx, node->data.shell_cmd.head, bound, blen, nb);
+    for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) mark_free_global_refs(cx, node->data.shell_cmd.args[i], bound, blen, nb);
   }
 }
 
@@ -2188,6 +2196,11 @@ static void capset_scan(Cx *cx, AstNode *node) {
   }
   if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
   if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
+  /* `!a | !b &` runs as `spawn {!a | !b}` (compile_shell_chain): its names are a closure's. */
+  if (is_shell_chain(node) && shell_chain_last(node)->data.shell_cmd.background) {
+    add_free_varrefs(node, NULL, NULL, 0, cx->capset, cx->capsetlen, &cx->ncapset);
+    return;
+  }
   if (node->type == AST_COMMAND) {
     uint8_t hid = node->data.command.head_id;
     /* spawn/parallel/race run each { block } as a 0-param closure (compile_closure). Treat
@@ -3790,10 +3803,36 @@ static AstNode *shell_chain_last(AstNode *node) {
  * its output goes to the enclosing output; or, if it feeds a JACL stage, its value is its
  * output as a channel read end. */
 static IrVal compile_shell_chain(Cx *cx, AstNode *node) {
+  AstNode *last = shell_chain_last(node);
+  if (last->data.shell_cmd.background) {
+    /* `!a | !b &` is `spawn {!a | !b}` (decision 50): the Future is the Job. The spawned chain
+     * is a copy with the mark cleared, so the AST is left as parsed. */
+    AstNode *fg = calloc(1, sizeof(AstNode));
+    *fg = *last;
+    fg->data.shell_cmd.background = 0;
+    AstNode *chain = fg;
+    if (node != last) {
+      AstNode **pa = calloc(2, sizeof(AstNode *));
+      pa[0] = node->data.command.args[0];
+      pa[1] = fg;
+      chain = synth_command(node->data.command.head, pa, 2);
+    }
+    AstNode *block = calloc(1, sizeof(AstNode));
+    block->type = AST_BLOCK;
+    block->start = node->start;
+    block->end = node->end;
+    block->data.block.commands = calloc(1, sizeof(AstNode *));
+    block->data.block.commands[0] = chain;
+    block->data.block.count = 1;
+    IrVal clos = compile_closure(cx, NULL, 0, block, NULL);
+    if (cx->failed) return 0;
+    IrVal a[] = {cx->sp, clos};
+    return emit_rt_call(cx, "jacl_spawn", a, 2);
+  }
   IrVal stages = compile_shell_stages(cx, node);
   if (cx->failed) return 0;
   IrVal a[] = {cx->sp, stages};
-  int stream = shell_chain_last(node)->data.shell_cmd.stream;
+  int stream = last->data.shell_cmd.stream;
   return emit_rt_call(cx, stream ? "jacl_pipeline_stream" : "jacl_pipeline", a, 2);
 }
 
@@ -5420,6 +5459,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_STDOUT,     "jacl_stdout",     0},
       {HEAD_STDERR,     "jacl_stderr",     0},
       {HEAD_ARGS,       "jacl_args",       0},
+      {HEAD_CANCEL,     "jacl_cancel",     1},
+      {HEAD_SUSPEND,    "jacl_suspend",    1},
+      {HEAD_RESUME,     "jacl_resume",     1},
     };
     /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
     if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&

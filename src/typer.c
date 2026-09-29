@@ -4570,6 +4570,8 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
     /* Job control — bool indicates delivered/cancelled. */
     { HEAD_SIGNAL,      TYPE_BOOL   },
     { HEAD_CANCEL,      TYPE_BOOL   },
+    { HEAD_SUSPEND,     TYPE_BOOL   },
+    { HEAD_RESUME,      TYPE_BOOL   },
     /* Concurrency: parallel resolves N futures and pushes a vec of
      * results in input order (vm.c:5066 — `cont_arg = jacl_vector_ptr(vec)`).
      * spawn/await/race stay DYN: spawn returns a future (no

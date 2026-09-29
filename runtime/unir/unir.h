@@ -85,6 +85,9 @@ int64_t unir_producer_write(unir_producer *p, uint16_t substream, const uint8_t 
 int64_t unir_producer_complete(unir_producer *p);
 int64_t unir_producer_sever(unir_producer *p, uint32_t cause);
 uint32_t unir_producer_ended(const unir_producer *p);
+/* Observes the consumer without writing and returns `unir_producer_ended`: how a producer with
+ * nothing to write learns that its reader cancelled or severed (job control). */
+uint32_t unir_producer_poll(unir_producer *p);
 void unir_producer_free(unir_producer *p);
 
 /* Maps the edge region `cap`, attaches as its consumer, and grants the first credit. */
