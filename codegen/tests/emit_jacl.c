@@ -256,6 +256,8 @@ static const char *source_for(const char *name) {
   /* index / slice builtins (item 6 slice 3a: test_index_builtin / test_slice_builtin) */
   if (!strcmp(name, "string_index"))
     return "[if [== [index \"hello\" 1] \"e\"] { 1 } { 0 }]"; /* -> 1 */
+  if (!strcmp(name, "string_index_heap"))  /* past an inline string's 7 bytes */
+    return "[if [== [index \"hello world\" 7] \"o\"] { 1 } { 0 }]";
   if (!strcmp(name, "vec_index"))
     return "[+ [index [vec 10 20 30] 1] 0]";           /* -> 20 */
   if (!strcmp(name, "string_slice"))

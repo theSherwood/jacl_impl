@@ -1088,6 +1088,11 @@ fn string_index() {
 }
 
 #[test]
+fn string_index_heap() {
+    run_case("string_index_heap", i32_val(1)); // [index "hello world" 7] == "o"
+}
+
+#[test]
 fn vec_index() {
     run_case("vec_index", i32_val(20)); // [index [vec 10 20 30] 1]
 }
@@ -1430,6 +1435,76 @@ fn pipelines_run_on_temen() {
             want,
             "{backend:?}: the host's stdout"
         );
+    }
+}
+
+const EDITOR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/editor.jacl");
+const STORE_VAT_LL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.ll");
+
+#[test]
+fn an_editor_keeps_its_document_in_the_store_vat() {
+    // A JACL program as a client of unir's store vat (docs/UNIR_SERVICES.md, theSherwood/unir#51):
+    // the vendored vat is the root, persisting to a directory granted as `fs`; the editor is its
+    // one client, spawned with the store granted as `store`. Two runs on one directory, each a new
+    // store session: the editor types, undoes, redoes, branches and saves, then after the restart
+    // finds what it saved and not what it typed after. Self-checking; the vat reports its status.
+    let (linked, entry) = emit_and_link_file(EDITOR_JACL);
+    let editor = temen_ir::synth_manifest_child_start(linked, entry, false)
+        .unwrap_or_else(|e| panic!("synth_manifest_child_start {EDITOR_JACL}: {e}"));
+    let log2 = editor.memory.map(|m| m.size_log2).expect("a window");
+    let opts = temen_llvm::TranslateOptions { child_entry: false, ..Default::default() };
+    let vat = temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
+        .expect("translate unir_store_vat.ll")
+        .module;
+    // The vat's window: its image's and 256 times over (unir e2e/temen/store, ROOT_LOG2).
+    let vat_log2 = vat.memory.map(|m| m.size_log2).expect("a window") + 8;
+    let inst = temen_run::instantiate(vat).expect("instantiate the store vat");
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let dir = std::env::temp_dir()
+            .join(format!("jacl_editor_{}_{backend:?}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let mut run = |source: u64| {
+            let mut grant = |h: &mut temen_interp::Host| {
+                let m = h.grant_module(&editor);
+                h.register_cap_name("store-client", m);
+                h.grant_instantiator(0, 1 << log2);
+                h.grant_budget(-1, -1, -1);
+            };
+            let config = temen_run::RunConfig {
+                memory_size_log2: Some(vat_log2),
+                stdin: format!("serve 1 {source} {log2}").into_bytes(),
+                ..Default::default()
+            };
+            let fs = temen_run::fs::host_fs(dir.clone());
+            let run = inst
+                .run_with_caps_and_host(backend, &config, &[("fs", fs)], Some(&mut grant))
+                .unwrap_or_else(|e| panic!("run the store vat on {backend:?}: {e}"));
+            let out = String::from_utf8_lossy(&run.stdout).into_owned();
+            // The vat's report is its last three lines (a client may print before it).
+            let report: Vec<&str> = out.lines().rev().take(3).collect();
+            let status = report
+                .last()
+                .and_then(|l| l.strip_prefix("clients ["))
+                .and_then(|l| l.strip_suffix(']'))
+                .and_then(|l| l.parse::<i64>().ok())
+                .unwrap_or_else(|| panic!("{backend:?}: no client status in {out:?}"));
+            assert!(
+                status != -1 && !is_jacl_error(status),
+                "{backend:?}, session {source}: the editor failed (0x{:016x}); the vat said {out:?}",
+                status as u64
+            );
+            report[..2].iter().rev().map(|l| l.to_string()).collect::<Vec<_>>()
+        };
+        // 11 versions typed, 6 more on the branch, and 3 unsaved.
+        assert_eq!(run(1), ["doc \"hello there!!!\"", "versions 20"], "{backend:?}");
+        // The unsaved 3 are gone; undo and redo mint nothing.
+        assert_eq!(run(2), ["doc \"hello there\"", "versions 17"], "{backend:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

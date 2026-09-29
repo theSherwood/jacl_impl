@@ -157,6 +157,13 @@ JaclVal jacl_fbuf_len(JaclVal b) {
   if (jaclrt_type_index(b) != 0x1E) return jaclrt_error();
   return jaclrt_i32(fb_outer(b));
 }
+/* `buf-string` — a one-dimensional byte buffer's bytes as a string (a JACL string is bytes), as
+ * `collect` makes of a byte stream: how a program reads as text the bytes a channel or a service
+ * gives it. */
+JaclVal jacl_fbuf_string(JaclVal b) {
+  if (jaclrt_type_index(b) != 0x1E || fb_ndims(b) != 1 || fb_code(b) > 1) return jaclrt_error();
+  return jacl_str_new((const char *)fb_data(b), (uint32_t)fb_outer(b));
+}
 /* `$b->i` — a leaf scalar (ndims==1) or a sub-view onto the same blob (ndims>1). */
 JaclVal jacl_fbuf_get(JaclVal b, JaclVal idx) {
   if (jaclrt_type_index(b) != 0x1E || !jaclrt_is_i32(idx)) return jaclrt_error();

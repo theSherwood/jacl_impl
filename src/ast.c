@@ -150,6 +150,12 @@ typedef enum {
   /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
   HEAD_WITH_ENV,
 
+  /* Services (docs/UNIR_SERVICES.md) */
+  HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT,
+
+  /* A byte buffer as a string */
+  HEAD_BUF_STRING,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -257,6 +263,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "unwatch", 7) == 0) return HEAD_UNWATCH;
       if (memcmp(s, "suspend", 7) == 0) return HEAD_SUSPEND;
       if (memcmp(s, "channel", 7) == 0) return HEAD_CHANNEL;
+      if (memcmp(s, "service", 7) == 0) return HEAD_SERVICE;
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
       if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
       if (memcmp(s, "arr-get", 7) == 0) return HEAD_ARR_GET;
@@ -307,6 +314,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-str", 10) == 0) return HEAD_SYNTAX_STR;
       if (memcmp(s, "ptr-offset", 10) == 0) return HEAD_PTR_OFFSET;
       if (memcmp(s, "write-file", 10) == 0) return HEAD_WRITE_FILE;
+      if (memcmp(s, "buf-string", 10) == 0) return HEAD_BUF_STRING;
       return HEAD_NONE;
     case 11:
       if (memcmp(s, "byte-length", 11) == 0) return HEAD_BYTE_LENGTH;
@@ -325,6 +333,10 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-datum", 12) == 0) return HEAD_SYNTAX_DATUM;
       if (memcmp(s, "syntax-error", 12) == 0) return HEAD_SYNTAX_ERROR;
       if (memcmp(s, "file-exists?", 12) == 0) return HEAD_FILE_EXISTS;
+      if (memcmp(s, "service-call", 12) == 0) return HEAD_SERVICE_CALL;
+      return HEAD_NONE;
+    case 13:
+      if (memcmp(s, "service-event", 13) == 0) return HEAD_SERVICE_EVENT;
       return HEAD_NONE;
     case 15:
       if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;

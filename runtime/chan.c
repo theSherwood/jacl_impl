@@ -254,6 +254,7 @@ JaclVal jacl_chan_close(JaclVal ch) {
 #ifdef JACL_UNIR
 #include "chan_unir.c"
 #include "value.c"
+#include "service_unir.c"
 #include "pipe_unir.c"
 #else
 static int     chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max) { (void)cap; (void)w; (void)r; (void)max; return 0; }
@@ -272,6 +273,9 @@ JaclVal jacl_stdout(void) { return JACL_NIL; }
 JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
 JaclVal jacl_emit(JaclVal v) { jacl_print(v); return JACL_NIL; }
+JaclVal jacl_service(JaclVal name) { (void)name; return chan_err("service: unavailable without vats"); }
+JaclVal jacl_service_call(JaclVal s, JaclVal r) { (void)s; (void)r; return chan_err("service-call: unavailable without vats"); }
+JaclVal jacl_service_event(JaclVal s, JaclVal w) { (void)s; (void)w; return chan_err("service-event: unavailable without vats"); }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

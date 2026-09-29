@@ -13,6 +13,7 @@ typedef struct unir_producer unir_producer;
 typedef struct unir_consumer unir_consumer;
 typedef struct unir_schema unir_schema;
 typedef struct unir_agreement unir_agreement;
+typedef struct unir_service unir_service;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -32,6 +33,7 @@ typedef struct unir_grant {
 #define UNIR_EREFUSED (-9)      /* the consumer refused the offer; it cancels the edge */
 #define UNIR_EUNTYPED (-10)     /* no offer: the edge's first frame is not on substream 0 */
 #define UNIR_EMALFORMED (-11)   /* not a canonical message of that type */
+#define UNIR_EMISMATCH (-12)    /* a value that does not fit the type it is sent as */
 
 /* `*_ended`: 0 while open; else bits 0-1 kind (1 complete, 2 cancelled, 3 severed), for a
  * sever bits 2-5 the cause (unir-wire Cause) and bit 6 the side (1 = consumer). */
@@ -141,5 +143,24 @@ unir_agreement *unir_consumer_accept(unir_consumer *c, const unir_schema *reader
 int64_t unir_agreement_recv(unir_agreement *a, unir_consumer *c, int64_t timeout_ns,
                             uint32_t *entry, const uint8_t **frame);
 void unir_agreement_free(unir_agreement *a);
+
+/* Services (unir spec §13, issue #50): a session with a service vat granted as `name`, i.e.
+ * `name.requests`, `name.replies` and `name.post`. The service offers its schema first; this
+ * end adopts it. Values cross as the runtime's value frames, `values` being the runtime's
+ * value schema (a connection schema whose entry 0 is its value type), converted to and from
+ * the service's messages by structure. Stores 0 or an error in `*status`. */
+unir_service *unir_service_open(unir_vat *vat, const uint8_t *name, uint64_t name_len,
+                                uint32_t capacity, uint32_t slot_size, const uint8_t *values,
+                                uint64_t values_len, int64_t *status);
+/* Sends `request` (a value frame) and waits for its reply: returns the reply's length as a
+ * value frame, which unir_service_result copies out. UNIR_EMISMATCH: the request does not fit
+ * the service's request type (nothing was sent). Events that arrive meanwhile are kept. */
+int64_t unir_service_call(unir_vat *vat, unir_service *s, const uint8_t *request, uint64_t len);
+/* The next event, `{name: value}`: kept, or the next to arrive, waiting for it when `wait`;
+ * its length as a value frame, 0 if there is none, or an error. */
+int64_t unir_service_event(unir_vat *vat, unir_service *s, uint32_t wait);
+/* Copies the last result out; its length, or UNIR_ETOO_SMALL. */
+int64_t unir_service_result(const unir_service *s, uint8_t *out, uint64_t cap);
+void unir_service_close(unir_vat *vat, unir_service *s);
 
 #endif
