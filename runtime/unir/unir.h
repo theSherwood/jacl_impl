@@ -11,6 +11,8 @@
 typedef struct unir_vat unir_vat;
 typedef struct unir_producer unir_producer;
 typedef struct unir_consumer unir_consumer;
+typedef struct unir_schema unir_schema;
+typedef struct unir_agreement unir_agreement;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -27,6 +29,9 @@ typedef struct unir_grant {
 #define UNIR_ESUBSTRATE (-6)    /* a vat operation failed */
 #define UNIR_EINVALID (-7)      /* a malformed argument */
 #define UNIR_ENOCAP (-8)        /* the vat was endowed with nothing under that name */
+#define UNIR_EREFUSED (-9)      /* the consumer refused the offer; it cancels the edge */
+#define UNIR_EUNTYPED (-10)     /* no offer: the edge's first frame is not on substream 0 */
+#define UNIR_EMALFORMED (-11)   /* not a canonical message of that type */
 
 /* `*_ended`: 0 while open; else bits 0-1 kind (1 complete, 2 cancelled, 3 severed), for a
  * sever bits 2-5 the cause (unir-wire Cause) and bit 6 the side (1 = consumer). */
@@ -97,6 +102,9 @@ unir_consumer *unir_consumer_open(unir_vat *vat, int64_t cap, uint32_t capacity,
  * if `substream` is not NULL, stores its substream. */
 int64_t unir_consumer_read(unir_consumer *c, uint8_t *buf, uint64_t cap, int64_t timeout_ns,
                            uint16_t *substream);
+/* Waits for the next frame and returns its substream without consuming it (a typed edge's
+ * offer is on substream 0; see unir_consumer_accept). */
+int64_t unir_consumer_next_substream(unir_consumer *c, int64_t timeout_ns);
 int64_t unir_consumer_cancel(unir_consumer *c);
 /* Grants no credit past what this end has read, so the producer parks once the ring is
  * full (job control's suspend, by backpressure); resume lifts that. */
@@ -105,5 +113,33 @@ int64_t unir_consumer_resume(unir_consumer *c);
 int64_t unir_consumer_sever(unir_consumer *c, uint32_t cause);
 uint32_t unir_consumer_ended(const unir_consumer *c);
 void unir_consumer_free(unir_consumer *c);
+
+/* Typed edges (unir spec §3, issues #41, #43). A schema is a connection schema's canonical
+ * encoding, as unir-schemac emits it (`<name>_schema`); NULL if malformed or invalid. */
+unir_schema *unir_schema_new(const uint8_t *bytes, uint64_t len);
+void unir_schema_free(unir_schema *s);
+/* 0 if `frame` is the canonical encoding of a message of catalog entry `entry`, else
+ * UNIR_EMALFORMED (UNIR_EINVALID: no such entry). Verify only memory no peer can write. */
+int64_t unir_schema_verify(const unir_schema *s, uint32_t entry, const uint8_t *frame,
+                           uint64_t len);
+
+/* Offers `s` as the edge's first traffic (a Hello, then the schema) and waits for the
+ * consumer's answer: 0 once accepted, then entry i's messages go on substream i + 1;
+ * UNIR_EREFUSED; or an edge error. */
+int64_t unir_producer_offer(unir_producer *p, const unir_schema *s, int64_t timeout_ns);
+
+/* Reads the producer's offer and answers it: accepts a writer schema that `reader` succeeds
+ * or equals, else refuses (and cancels). Stores 0 or an error in `*status`. UNIR_EUNTYPED:
+ * the edge carries no offer (a bytes edge), and its first frame stays unread. A malformed
+ * offer severs the edge with malformed-frame (UNIR_EENDED). */
+unir_agreement *unir_consumer_accept(unir_consumer *c, const unir_schema *reader,
+                                     int64_t timeout_ns, int64_t *status);
+/* Receives the next message on `c`: copied into the agreement's private 8-aligned buffer,
+ * verified, and materialized into the reader's shape under version skew. Returns its length,
+ * with its catalog entry in `*entry` and the frame in `*frame` (valid until the next call on
+ * `a`). A frame that does not verify severs the edge with malformed-frame (UNIR_EENDED). */
+int64_t unir_agreement_recv(unir_agreement *a, unir_consumer *c, int64_t timeout_ns,
+                            uint32_t *entry, const uint8_t **frame);
+void unir_agreement_free(unir_agreement *a);
 
 #endif

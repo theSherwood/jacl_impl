@@ -1,0 +1,25 @@
+##
+## value KIND — returns a value for its spawner to read (theSherwood/unir#43): `all`, one of each
+## kind that crosses; `args`, its own arguments, which arrive as values; `err`, an error carrying
+## a map; `atom`, a value that cannot cross, so its spawner reads the error saying so.
+##
+
+proc main {} {
+  def a [args]
+  def kind [vec-get $a 1]
+  if [== $kind "args"] {
+    $a
+  } else {
+    if [== $kind "err"] {
+      [error [map code 3 why "because"]]
+    } else {
+      if [== $kind "atom"] {
+        [atom 0]
+      } else {
+        [map i 7 big 5000000000 neg -7 f 1.5 s "longer than seven bytes" t $true n $nil v [vec 1 [vec 2 3] "x"] m [map k "v"]]
+      }
+    }
+  }
+}
+
+main

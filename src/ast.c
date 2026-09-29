@@ -142,7 +142,7 @@ typedef enum {
   HEAD_CHANNEL, HEAD_READ, HEAD_WRITE, HEAD_CLOSE,
 
   /* Pipeline stages (docs/UNIR_PIPELINES.md) */
-  HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS,
+  HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS, HEAD_EMIT,
 
   /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
   HEAD_SUSPEND, HEAD_RESUME,
@@ -211,6 +211,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "addr", 4) == 0) return HEAD_ADDR;
       if (memcmp(s, "read", 4) == 0) return HEAD_READ;
       if (memcmp(s, "args", 4) == 0) return HEAD_ARGS;
+      if (memcmp(s, "emit", 4) == 0) return HEAD_EMIT;
       return HEAD_NONE;
     case 5:
       if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;

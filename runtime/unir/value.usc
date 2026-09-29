@@ -1,0 +1,29 @@
+// A JACL value as it crosses a vat boundary (theSherwood/unir#43): a program's value, a
+// stage's arguments, and the messages of a typed output. A subset of unir's meta-schema
+// (unir spec §3), compiled to C by unir-schemac (runtime/unir/gen.sh).
+//
+// Integers and floats keep their JACL width, so a value comes back as the type it left as.
+// An error is its payload with the error flag set; the payload rides in a one-element list,
+// since a sum cannot hold itself inline.
+
+struct Entry { key: Value, value: Value }
+
+sum Value: u8 {
+  Nil,
+  Bool(bool),
+  I32(i32),
+  I64(i64),
+  U32(u32),
+  U64(u64),
+  F32(f32),
+  F64(f64),
+  Text(text),
+  Bytes(bytes),
+  Vec(list<Value>),
+  Map(list<Entry>),
+  Error(list<Value>),
+}
+
+connection Values { values: Value }
+
+root Value

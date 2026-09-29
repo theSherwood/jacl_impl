@@ -39,6 +39,18 @@ proc tally {ch n} {
   $k
 }
 
+# A JACL stage over a typed output: the sum of the integers it reads, as values.
+proc sumvals {ch} {
+  mut t 0
+  mut v [read $ch 1]
+  while [!= $v $nil] {
+    if [error? $v] { return $v }
+    set t [+ $t $v]
+    set v [read $ch 1]
+  }
+  $t
+}
+
 # Waits until the atom N passes K.
 proc wait-past {n k} {
   while [<= [deref $n] $k] { sleep 0.001 }
@@ -61,37 +73,79 @@ proc main {} {
   assert [== $cnt 150]
 
   # In value position the output goes to the enclosing output (here the host's stdout, which
-  # the harness checks) and the value is the exit record; in statement position, the same.
+  # the harness checks) and the value is the last program's value; in statement position, the
+  # same.
   def r {!gen hi | !upcase}
-  def exits [map-get $r "exits"]
-  assert [== [vec-len $exits] 2]
-  assert [== [vec-get $exits 0] 0]
-  assert [== [vec-get $exits 1] 0]
+  assert [== $r 0]
   def r1 {!gen q}
-  assert [== [map-get $r1 "exit"] 0]
+  assert [== $r1 0]
   !gen side
 
-  # A stage that fails fails the pipeline (pipefail), which names it and carries its stderr;
-  # the stage after it sees a sever, and the one before it a cancelled stdout. So in value
-  # position, and so for its reader.
+  # A stage that fails fails the pipeline (pipefail) with its own error value; the stage after
+  # it sees a sever, and the one before it a cancelled stdout. So in value position, and so for
+  # its reader.
   def bad {!gen x | !fail | !upcase}
   assert [error? $bad]
-  assert [== [error-val $bad] "pipeline: stage failed: fail: boom"]
+  assert [== [error-val $bad] "boom"]
   def badc {!gen x | !fail | !upcase | collect}
-  assert [== [error-val $badc] "pipeline: stage failed: fail: boom"]
+  assert [== [error-val $badc] "boom"]
   def badn {!gen x | !fail | count}
-  assert [== [error-val $badn] "pipeline: stage failed: fail: boom"]
+  assert [== [error-val $badn] "boom"]
+
+  # Values cross (theSherwood/unir#43): a program's value comes back as the value it returned,
+  # maps, vectors and errors included, and its arguments arrive as the values passed.
+  def all {!value all}
+  assert [== [map-get $all "i"] 7]
+  assert [== [map-get $all "big"] 5000000000]
+  assert [== [map-get $all "neg"] -7]
+  assert [== [map-get $all "f"] 1.5]
+  assert [== [map-get $all "s"] "longer than seven bytes"]
+  assert [== [map-get $all "t"] $true]
+  assert [map-has $all "n"]
+  assert [== [map-get $all "n"] $nil]
+  def v [map-get $all "v"]
+  assert [== [vec-len $v] 3]
+  assert [== [vec-get [vec-get $v 1] 1] 3]
+  assert [== [vec-get $v 2] "x"]
+  assert [== [map-get [map-get $all "m"] "k"] "v"]
+  def e {!value err}
+  assert [error? $e]
+  assert [== [map-get [error-val $e] "code"] 3]
+  assert [== [map-get [error-val $e] "why"] "because"]
+  assert [error? {!value "atom"}]
+  def xs [vec 1 2]
+  def a {!value "args" 42 $xs [map k 5000000000]}
+  assert [== [vec-get $a 0] "value"]
+  assert [== [vec-get $a 2] 42]
+  assert [== [vec-get [vec-get $a 3] 1] 2]
+  assert [== [map-get [vec-get $a 4] "k"] 5000000000]
+  # A pipeline's value is its last program's.
+  assert [== {!gen x | !value all | collect} ""]
+  assert [== [map-get {!gen x | !value all} "i"] 7]
+
+  # A typed output: `emit` makes a program's stdout carry values, and its reader gets them as
+  # values, through typed stages too.
+  def ns {!nums 5 | collect}
+  assert [== [vec-len $ns] 5]
+  assert [== [vec-get $ns 4] 4]
+  def ms {!nums 4 maps | collect}
+  assert [== [vec-len $ms] 4]
+  assert [== [map-get [vec-get $ms 3] "n"] 3]
+  def ds {!nums 300 | !double | collect}
+  assert [== [vec-len $ds] 300]
+  assert [== [vec-get $ds 299] 598]
+  assert [== {!nums 3 | !double} "doubled"]
+  assert [== {!nums 10 | sumvals} 45]
 
   # A program this vat was not granted.
   def none {!gen a | !nope}
   assert [error? $none]
   assert [error? {!gen a | !nope | collect}]
 
-  # `&` is spawn: the Future is the Job, and awaiting it gives the exit record. The output went
-  # to the enclosing output.
+  # `&` is spawn: the Future is the Job, and awaiting it gives the pipeline's value. The output
+  # went to the enclosing output.
   def bg {!gen bg | !upcase &}
-  def rb [await $bg]
-  assert [== [vec-len [map-get $rb "exits"]] 2]
+  assert [== [await $bg] 0]
 
   # Cancel severs the pipeline's edges (cancelled); each stage ends through its edges and is
   # reaped, and awaiting the Future gives the error. `sink` never writes, so it learns at its
@@ -143,9 +197,8 @@ proc main {} {
   # A `spawn` inside `with-env` starts its programs with the same environment.
   def sp [with-env {K w} {spawn {!envdump K | collect}}]
   assert [== [await $sp] "ctx 0 env 1\nK=w\n"]
-  # Values become strings; a key holding `=` is an error.
+  # The environment crosses as a value.
   assert [== [with-env {N 7} {!envdump N | collect}] "ctx 0 env 1\nN=7\n"]
-  assert [error? [with-env {"a=b" 1} {!envdump | collect}]]
   0
 }
 

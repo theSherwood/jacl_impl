@@ -37,7 +37,7 @@ with-env [map-set $env DEBUG 1] { … }  # pass it through with one change
 the map the children are spawned with, not a change to this vat's `$env`. It is sugar for
 `with-ctx {env M} { body }`: the pending children's environment is the `$ctx` field `env`, so it
 follows `$ctx`'s scoping (a `spawn` in `body` inherits it; it is restored when `body` ends). Keys and
-values are converted to strings; a key holding `=` or a NUL, or a value holding a NUL, is an error.
+values are converted to strings.
 
 This is the issue's recommendation, "fold `$env` into the endowment map", made concrete: a child's
 environment is part of what its spawn endows, next to its named grants and its arguments. There is
@@ -49,19 +49,17 @@ A vat's own `$env`:
 - **The root vat:** the host's environment block (temen DESIGN §3e: the `envc` strings of the
   powerbox args blob). That is the root's endowment from its host, which chose what to put there.
 
-## The wire: one blob shape for both
+## The wire
 
-A stage's arguments travel as `unir_spawn`'s argument bytes (op 15's payload). They now have the
-§3e shape, so the root and a stage parse their environment with one function:
+A stage's arguments travel as `unir_spawn`'s argument bytes (op 15's payload): the value
+`[argv env]`, encoded by the value codec (theSherwood/unir#43; `runtime/value.c`), which the stage
+verifies before it decodes. `argv[0]` is the program name, and the other arguments arrive as the
+values passed (docs/UNIR_PIPELINES.md, "One codec"); `env` is the string map above. The root's
+environment is still the host's §3e blob (`{argc, envc}`, then NUL-terminated strings, the
+environment's as `KEY=VALUE`).
 
-```
-{argc: u32, envc: u32}   little-endian
-argc NUL-terminated strings (argv; argv[0] is the program name)
-envc NUL-terminated strings "KEY=VALUE"
-```
-
-A pipeline's arguments and environment together are bounded by the args area (4 KiB per stage
-today); an overflow is an error rather than a truncation.
+A stage's payload is bounded by the args area (16,224 bytes); an overflow is an error rather than
+a truncation.
 
 ## Not here
 
