@@ -1,2 +1,5 @@
 # Vendored from theSherwood/unir (runtime/unir/UNIR_REV); regenerate, do not edit.
 runtime/unir/unir_cabi.ll linguist-generated=true -diff
+# Vendored and generated (theSherwood/unir; regenerate, never edit): collapsed in review diffs.
+runtime/unir/unir_cabi.ll linguist-generated=true
+runtime/unir/jacl_value.h linguist-generated=true
