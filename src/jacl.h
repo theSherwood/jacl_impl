@@ -724,6 +724,9 @@ typedef enum {
   /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
   HEAD_SUSPEND, HEAD_RESUME,
 
+  /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
+  HEAD_WITH_ENV,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 

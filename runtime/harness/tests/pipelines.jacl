@@ -5,6 +5,9 @@
 ## tests/pipelines/ as `bin.<name>`, and checks what reached the host's stdout.
 ##
 
+# A `$ctx` field the stages must not see (docs/CTX_ENV.md).
+ctx str secret ""
+
 # A JACL stage: the byte count of a read end, or its error.
 proc count {ch} {
   mut n 0
@@ -127,6 +130,22 @@ proc main {} {
   wait-past $c $cs
   cancel $s
   assert [== [error-val [await $s]] "cancelled"]
+
+  # `$ctx` and `$env` reach a stage only when passed (docs/CTX_ENV.md). The root's `$env` is the
+  # host's environment block; a stage's is empty unless its spawner passes one with `with-env`.
+  assert [== [map-get $env "JACL_TEST_ENV"] "root"]
+  with-ctx {secret "s"} {
+    assert [== {!envdump JACL_TEST_ENV | collect} "ctx 0 env 0\n"]
+  }
+  assert [== [with-env {K v} {!envdump K JACL_TEST_ENV | collect}] "ctx 0 env 1\nK=v\n"]
+  assert [== [with-env $env {!envdump JACL_TEST_ENV | collect}] "ctx 0 env 1\nJACL_TEST_ENV=root\n"]
+  assert [== {!envdump K | collect} "ctx 0 env 0\n"]
+  # A `spawn` inside `with-env` starts its programs with the same environment.
+  def sp [with-env {K w} {spawn {!envdump K | collect}}]
+  assert [== [await $sp] "ctx 0 env 1\nK=w\n"]
+  # Values become strings; a key holding `=` is an error.
+  assert [== [with-env {N 7} {!envdump N | collect}] "ctx 0 env 1\nN=7\n"]
+  assert [error? [with-env {"a=b" 1} {!envdump | collect}]]
   0
 }
 

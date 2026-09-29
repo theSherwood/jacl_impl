@@ -147,6 +147,9 @@ typedef enum {
   /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
   HEAD_SUSPEND, HEAD_RESUME,
 
+  /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
+  HEAD_WITH_ENV,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -273,6 +276,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
     case 8:
       if (memcmp(s, "continue", 8) == 0) return HEAD_CONTINUE;
       if (memcmp(s, "with-ctx", 8) == 0) return HEAD_WITH_CTX;
+      if (memcmp(s, "with-env", 8) == 0) return HEAD_WITH_ENV;
       if (memcmp(s, "parallel", 8) == 0) return HEAD_PARALLEL;
       if (memcmp(s, "vec-push", 8) == 0) return HEAD_VEC_PUSH;
       if (memcmp(s, "arr-push", 8) == 0) return HEAD_ARR_PUSH;

@@ -339,6 +339,9 @@ JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's 
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
+JaclVal jacl_env(void);                            /* $env: this vat's environment (docs/CTX_ENV.md) */
+JaclVal jacl_root_env(void);                       /* the host's environment block, as a map */
+void    jacl_args_blob(const unsigned char *b, uint64_t len, JaclVal *argv, JaclVal *env);
 /* Job control on Futures (sched.c): true if the request reached a live task. */
 JaclVal jacl_cancel(JaclVal fut);
 JaclVal jacl_suspend(JaclVal fut);

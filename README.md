@@ -53,7 +53,7 @@ campaign (see `DESIGN.md` "M12/M13 hardening note", `AUDIT.md`, and
 `AUDIT_HISTORY.md`).
 
 **Not yet implemented** (tracked in `NOT_IMPLEMENTED.md`): `match`/case,
-callable values (`[$map key]`), `$env` / `with-env`, aliases, globbing,
+callable values (`[$map key]`), aliases, globbing,
 regular-expression literals (the NFA engine exists in `lib/regex` but
 isn't wired in), and the bignum numeric tower (`lib/bignum` exists,
 not yet dispatched). The infix `()` mode was removed — use `[]`.

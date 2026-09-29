@@ -26,6 +26,10 @@
 /* How much of a failed stage's stderr its error value carries: the end of it. */
 #define JACL_STAGE_ERR_TAIL 512u
 #define JACL_STAGE_POLL_NS 1000000
+/* A stage's arguments and environment, as its spawn payload (docs/CTX_ENV.md): at most this many
+ * bytes, well inside the args area. */
+#define JACL_STAGE_ARGS 4096u
+#define JACL_STAGE_ENV_MAX 64
 
 extern int __vm_cap_resolve(const char *name, long len);
 int __vm_cap_count(void);
@@ -147,22 +151,35 @@ JaclVal jacl_stage_finish(JaclVal result) {
   return (JaclVal)(failed ? 1 : 0);
 }
 
-/* [args]: the argv this stage was spawned with, as a vector of strings; empty otherwise. */
-JaclVal jacl_args(void) {
-  JaclVal out = jacl_vec_empty();
-  if (!jacl_stage()) return out;
-  char ab[4096];
+/* This stage's spawn payload (the §3e blob shape; docs/CTX_ENV.md) parsed: its argv and $env. */
+static void stage_args(JaclVal *argv, JaclVal *env) {
+  unsigned char ab[JACL_STAGE_ARGS];
   unir_lock(&jacl_unir_open_lock);
   unir_vat *vat = unir_vat_get();
-  int64_t n = vat ? unir_vat_args(vat, (uint8_t *)ab, sizeof ab) : -1;
+  int64_t n = vat ? unir_vat_args(vat, ab, sizeof ab) : -1;
   unir_unlock(&jacl_unir_open_lock);
-  for (int64_t at = 0; at < n;) {
-    int64_t end = at;
-    while (end < n && ab[end]) end++;
-    out = jacl_vec_push(out, jacl_str_new(ab + at, (uint32_t)(end - at)));
-    at = end + 1;
+  jacl_args_blob(ab, n < 0 ? 0 : (uint64_t)n, argv, env);
+}
+
+/* [args]: the argv this stage was spawned with, as a vector of strings; empty otherwise. */
+JaclVal jacl_args(void) {
+  JaclVal keep[1] = {JACL_NIL};
+  if (!jacl_stage()) return jacl_vec_empty();
+  stage_args(&keep[0], 0);
+  return keep[0];
+}
+
+/* $env: this vat's environment, read once. A stage's is what its spawner passed (empty unless it
+ * passed one); the root's is the host's environment block. A GC root. */
+JaclVal jacl_env_cur = JACL_NIL;
+JaclVal jacl_env(void) {
+  if (jaclrt_is_nil(jacl_env_cur)) {
+    JaclVal keep[1] = {JACL_NIL};
+    if (jacl_stage()) stage_args(0, &keep[0]);
+    else keep[0] = jacl_root_env();
+    jacl_env_cur = keep[0];
   }
-  return out;
+  return jacl_env_cur;
 }
 
 /* This vat's host stdout stream, re-granted to stages so their `write` import binds (TEMEN's
@@ -184,6 +201,68 @@ static JaclVal pipe_err(const char *what, JaclVal name, JaclVal detail) {
   if (!jaclrt_is_nil(name)) m = jacl_str_concat(m, name);
   if (!jaclrt_is_nil(detail)) m = jacl_str_concat(jacl_str_concat(m, jacl_str_new(": ", 2)), detail);
   return jacl_error_new(m);
+}
+
+/* Appends string `s` and a NUL to `b` at `*at`: 0 if it does not fit or holds a NUL. */
+static int blob_put(char *b, uint32_t *at, uint32_t cap, JaclVal s) {
+  uint32_t n = jaclrt_is_string(s) ? jacl_str_len(s) : 0;
+  if (*at + n + 1 > cap) return 0;
+  if (n) jacl_str_bytes(s, b + *at, cap - *at);
+  b[*at + n] = 0;
+  for (uint32_t i = 0; i < n; i++)
+    if (!b[*at + i]) return 0;
+  *at += n + 1;
+  return 1;
+}
+
+/* Writes stage `argv`'s spawn payload into `ab`: `{argc, envc}`, the argv strings, then the `envc`
+ * environment strings in `eb`. Its length, or 0 if it does not fit. */
+static uint32_t stage_blob(char *ab, JaclVal argv, const char *eb, uint32_t elen, int32_t envc) {
+  int32_t argc = jaclrt_as_i32(jacl_len(argv));
+  uint32_t at = 8;
+  for (int32_t k = 0; k < argc; k++)
+    if (!blob_put(ab, &at, JACL_STAGE_ARGS, jacl_to_string(jacl_vec_get_at(argv, jaclrt_i32(k))))) return 0;
+  if (at + elen > JACL_STAGE_ARGS) return 0;
+  memcpy(ab + at, eb, elen);
+  for (int b = 0; b < 4; b++) {
+    ab[b] = (char)((uint32_t)argc >> (8 * b));
+    ab[4 + b] = (char)((uint32_t)envc >> (8 * b));
+  }
+  return at + elen;
+}
+
+/* The environment for the programs this task starts: `$ctx`'s `env` field, which `with-env` sets
+ * (docs/CTX_ENV.md), as `KEY=VALUE` strings in `eb`. Returns their count, or -1 with `*err` set.
+ * No field, no environment: a child inherits nothing implicitly. */
+static int32_t pipe_env(char *eb, uint32_t cap, uint32_t *elen, JaclVal *err) {
+  JaclVal keep[2 * JACL_STAGE_ENV_MAX + 1];
+  keep[0] = jacl_map_get(jacl_ctx_get(), jacl_str_new("env", 3));
+  *elen = 0;
+  if (jaclrt_is_nil(keep[0])) return 0;
+  if (jaclrt_type_index(keep[0]) != jaclrt_type_index(jacl_map_empty())) {
+    *err = pipe_err("with-env: the environment must be a map", JACL_NIL, JACL_NIL);
+    return -1;
+  }
+  uint32_t n = jacl_map_count(keep[0]);
+  if (n > JACL_STAGE_ENV_MAX) {
+    *err = pipe_err("with-env: more than 64 entries", JACL_NIL, JACL_NIL);
+    return -1;
+  }
+  n = jacl_map_entries(keep[0], keep + 1, keep + 1 + JACL_STAGE_ENV_MAX, n);
+  for (uint32_t i = 0; i < n; i++) {
+    JaclVal k = jacl_to_string(keep[1 + i]);
+    uint32_t at = *elen;
+    int ok = blob_put(eb, &at, cap, k) && at - *elen > 1;   /* `KEY\0`, KEY not empty */
+    for (uint32_t j = *elen; ok && j + 1 < at; j++) ok = eb[j] != '=';
+    if (ok) eb[at - 1] = '=';                     /* `KEY=`: the value follows */
+    if (!ok || !blob_put(eb, &at, cap, jacl_to_string(keep[1 + JACL_STAGE_ENV_MAX + i]))) {
+      *err = pipe_err("with-env: an empty key, a key holding `=`, a NUL, or too large an environment: ",
+                      k, JACL_NIL);
+      return -1;
+    }
+    *elen = at;
+  }
+  return (int32_t)n;
 }
 
 /* A running pipeline: the state its read end carries after its tail (JaclChan.pipe). Bytes
@@ -338,6 +417,18 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
       return pipe_err("no program ", name, JACL_NIL);
     }
   }
+  /* Each stage's payload: {argc, envc}, its argv, and the environment (docs/CTX_ENV.md). */
+  char eb[JACL_STAGE_ARGS / 2];
+  uint32_t elen = 0;
+  JaclVal perr = JACL_NIL;
+  int32_t envc = pipe_env(eb, sizeof eb, &elen, &perr);
+  if (envc < 0) return perr;
+  for (int32_t i = 0; i < n; i++) {
+    char ab[JACL_STAGE_ARGS];
+    JaclVal argv = jacl_vec_get_at(stages, jaclrt_i32(i));
+    if (!stage_blob(ab, argv, eb, elen, envc))
+      return pipe_err("arguments too long, or holding a NUL: ", jacl_vec_get_at(argv, jaclrt_i32(0)), JACL_NIL);
+  }
   int64_t len = unir_edge_len(JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
   for (int32_t i = 0; i < n; i++) {
     out[i] = unir_region_create(vat, (uint64_t)len);
@@ -358,18 +449,8 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
     jacl_str_bytes(jacl_vec_get_at(argv, jaclrt_i32(0)), p->name[i], JACL_STAGE_NAME);
   }
   for (int32_t i = 0; i < n; i++) {
-    char ab[4096];
-    uint64_t alen = 0;
-    JaclVal argv = jacl_vec_get_at(keep[0], jaclrt_i32(i));
-    int32_t argc = jaclrt_as_i32(jacl_len(argv));
-    for (int32_t k = 0; k < argc; k++) {
-      JaclVal s = jacl_to_string(jacl_vec_get_at(argv, jaclrt_i32(k)));
-      uint32_t sl = jaclrt_is_string(s) ? jacl_str_len(s) : 0;
-      if (alen + sl + 1 > sizeof ab) break;
-      if (sl) jacl_str_bytes(s, ab + alen, (uint32_t)(sizeof ab - alen));
-      alen += sl;
-      ab[alen++] = 0;
-    }
+    char ab[JACL_STAGE_ARGS];
+    uint32_t alen = stage_blob(ab, jacl_vec_get_at(keep[0], jaclrt_i32(i)), eb, elen, envc);
     unir_grant g[4];
     uint32_t ng = 0;
     if (i > 0) g[ng++] = (unir_grant){"unir.stdin", 10, out[i - 1]};

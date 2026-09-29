@@ -1343,7 +1343,7 @@ fn pipelines_run_on_temen() {
     // tests/pipelines/ is linked as a detached child image and granted as `bin.<name>`, with an
     // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour.
     // On every engine: Cranelift runs a stage's fibers and threads since temen#1469.
-    let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail", "forever", "sink"]
+    let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail", "forever", "sink", "envdump"]
         .iter()
         .map(|name| {
             let path = format!("{STAGES_DIR}/{name}.jacl");
@@ -1386,7 +1386,11 @@ fn pipelines_run_on_temen() {
         let run = inst
             .run_with_caps_and_host(
                 backend,
-                &temen_run::RunConfig::default(),
+                // The root's `$env` (docs/CTX_ENV.md).
+                &temen_run::RunConfig {
+                    env: vec![b"JACL_TEST_ENV=root".to_vec()],
+                    ..Default::default()
+                },
                 &[],
                 Some(&mut grant),
             )

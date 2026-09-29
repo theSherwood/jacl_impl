@@ -1,0 +1,18 @@
+##
+## envdump KEY... — prints how many entries its `$ctx` and `$env` hold, then `KEY=VALUE` for each
+## KEY its `$env` holds: what a stage can see of the vat that spawned it (docs/CTX_ENV.md).
+##
+
+proc main {} {
+  print "ctx $[length [map-keys $ctx]] env $[length [map-keys $env]]"
+  def a [args]
+  mut k 1
+  while [< $k [vec-len $a]] {
+    def key [vec-get $a $k]
+    if [map-has $env $key] { print "$key=$[map-get $env $key]" }
+    set k [+ $k 1]
+  }
+  0
+}
+
+main
