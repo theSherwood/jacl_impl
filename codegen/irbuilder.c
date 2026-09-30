@@ -860,10 +860,14 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   /* Unified TEMEN container header (WIRE.md), 16 bytes little-endian:
    *   [0..8)  MAGIC   = "TEMEN\0\0\0"
    *   [8..10) kind    : u16   — 0 = KIND_MODULE (runnable), 1 = KIND_OBJECT (pre-link unit)
-   *   [10..12) version: u16   = 12 (v12 adds thread-local templates to the object dialect: a
-   *                              template section after `data.funcref`, and a `tls` flag byte on
-   *                              `data.self`/`data.sym`, `data.ptr` entries and data exports. JACL has
-   *                              no thread-locals: an empty section and a 0 flag on each `data.self`.
+   *   [10..12) version: u16   = 13 (v13 adds a data-image funcref-slot section after the data
+   *                              segments, in both dialects; JACL bakes no funcref into data, so it
+   *                              is empty. v13 also lets the shadow-arena flag be `2`, a non-default
+   *                              stride; we declare no arena. v12 added thread-local templates to the
+   *                              object dialect: a template section after `data.funcref`, and a
+   *                              `tls` flag byte on `data.self`/`data.sym`, `data.ptr` entries and
+   *                              data exports. JACL has no thread-locals: an empty section and a 0
+   *                              flag on each `data.self`.
    *                              v11 added a module-declared shadow-arena flag to the memory
    *                              descriptor, INVARIANTS.md #16; JACL declares no arena, so we emit
    *                              the absent flag. v10 added a per-offer impl-export policy byte we
@@ -878,7 +882,7 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   static const uint8_t magic[8] = {'T', 'E', 'M', 'E', 'N', 0, 0, 0};
   out_raw(&o, magic, 8);
   out_u8(&o, has_data_self ? 0x01 : 0x00); out_u8(&o, 0x00); /* kind:u16 LE (0=module, 1=object) */
-  out_u8(&o, 12); out_u8(&o, 0x00);                          /* version:u16 LE = 12 */
+  out_u8(&o, 13); out_u8(&o, 0x00);                          /* version:u16 LE = 13 */
   out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); /* flags:u32 LE = 0 */
   /* Memory descriptor: presence flag, then size_log2, then the v11 shadow-arena flag (and, if
    * set, its `[base, end)` as two ulebs). JACL's GC owns its heap placement and declares no
@@ -894,6 +898,9 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
     out_uleb(&o, m->data[i].len);
     out_raw(&o, m->data[i].bytes, m->data[i].len);
   }
+  /* Data-image funcref slots (v13), in both dialects: none — irb never bakes a function index into
+   * the data image. */
+  out_uleb(&o, 0);
   /* Object-only `data.ptr` relocation section (v9), written only in the object dialect: none —
    * irb never embeds a raw pointer inside the data image (own-data addresses are `data.self`
    * instructions in code). Omitted for a runnable module, which has no such section. */
