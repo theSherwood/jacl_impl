@@ -19,10 +19,11 @@
 static uint8_t jacl_unir_map[JACL_UNIR_MAP_BYTES] __attribute__((aligned(65536)));
 
 /* The unit's heap: unir_host_alloc/free over a static pool outside the GC heap. Size classes
- * of 16 << k bytes (k < 9, so up to 4 KiB), each with a free list, carved from a bump arena.
+ * of 16 << k bytes (k < 13, so up to 64 KiB: a service's schema, which a client adopts into one
+ * buffer, passes 4 KiB), each with a free list, carved from a bump arena.
  * Its lock is held only inside these two functions, which never park or call out. */
 #define JACL_UNIR_POOL_BYTES (1u << 20)
-#define JACL_UNIR_CLASSES 9
+#define JACL_UNIR_CLASSES 13
 static uint8_t jacl_unir_pool[JACL_UNIR_POOL_BYTES] __attribute__((aligned(16)));
 static uint32_t jacl_unir_pool_used;
 static void *jacl_unir_free[JACL_UNIR_CLASSES];

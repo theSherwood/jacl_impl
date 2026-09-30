@@ -10,7 +10,8 @@
 ## First run (no `doc`): type "hello world", undo back to "hello", redo and undo once, keep the
 ## undone tip as ref `doc/world`, type " there" (a branch), publish and save, then type "!!!"
 ## and exit unsaved. Second run: `doc` is "hello there" again; follow it, undo and redo across
-## the restart, each move heard as an event numbered by the ref's move sequence, and read the
+## the restart, each move heard as an event positioned by the store's epoch and the ref's move
+## sequence, and read the
 ## other branch back from `doc/world`.
 ##
 
@@ -77,9 +78,10 @@ proc first-run {s} {
   0
 }
 
-## `doc`'s position, as the store vat's event: its move sequence and version.
-proc change {seq, to} {
-  map "changes" [map "name" "doc" "seq" $seq "to" $to]
+## `doc`'s position, as the store vat's event: the store's epoch (how many times it has been
+## opened) at the move, the ref's move sequence, and the version.
+proc change {epoch, seq, to} {
+  map "changes" [map "name" "doc" "epoch" $epoch "seq" $seq "to" $to]
 }
 
 proc second-run {s, head} {
@@ -87,13 +89,13 @@ proc second-run {s, head} {
   assert [== [ask $s [map "Follow" "doc"] "Head"] $head]
   ## Following hears the position now: `doc` moved 25 times before the save (11 keystrokes,
   ## 6 undos, a redo, an undo, 6 more keystrokes); the 3 unsaved moves are gone. Each undo and
-  ## redo after it is one more.
-  assert [== [service-event $s $true] [change 25 $head]]
+  ## redo after it is one more, in this run's epoch: the second time the store was opened.
+  assert [== [service-event $s $true] [change 1 25 $head]]
   def back [undo $s $head]
   assert [== [text $s $back] "hello ther"]
-  assert [== [service-event $s $true] [change 26 $back]]
+  assert [== [service-event $s $true] [change 2 26 $back]]
   move $s "doc" $back $head
-  assert [== [service-event $s $true] [change 27 $head]]
+  assert [== [service-event $s $true] [change 2 27 $head]]
   assert [== [service-event $s $false] $nil]
   assert [== [text $s [ask $s [map "Head" "doc/world"] "Head"]] "hello world"]
   0
