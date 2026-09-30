@@ -1439,19 +1439,19 @@ fn pipelines_run_on_temen() {
 }
 
 const EDITOR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/editor.jacl");
+const FILES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/files.jacl");
 const STORE_VAT_LL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.ll");
 
-#[test]
-fn an_editor_keeps_its_document_in_the_store_vat() {
-    // A JACL program as a client of unir's store vat (docs/UNIR_SERVICES.md, theSherwood/unir#51):
-    // the vendored vat is the root, persisting to a directory granted as `fs`; the editor is its
-    // one client, spawned with the store granted as `store`. Two runs on one directory, each a new
-    // store session: the editor types, undoes, redoes, branches and saves, then after the restart
-    // finds what it saved and not what it typed after. Self-checking; the vat reports its status.
-    let (linked, entry) = emit_and_link_file(EDITOR_JACL);
-    let editor = temen_ir::synth_manifest_child_start(linked, entry, false)
-        .unwrap_or_else(|e| panic!("synth_manifest_child_start {EDITOR_JACL}: {e}"));
-    let log2 = editor.memory.map(|m| m.size_log2).expect("a window");
+/// Runs the JACL program at `path` as the one client of unir's store vat, twice on one store
+/// directory (sessions 1 and 2), on every engine: the vendored vat is the root, persisting to a
+/// directory granted as `fs`, and the program is spawned with the store granted as `store`.
+/// Self-checking: a failed check is the client's error status, which fails the test. Calls
+/// `check` with each engine and each run's report: ref `doc`'s text and the version count.
+fn serve_twice(path: &str, check: impl Fn(temen_run::Backend, [Vec<String>; 2])) {
+    let (linked, entry) = emit_and_link_file(path);
+    let client = temen_ir::synth_manifest_child_start(linked, entry, false)
+        .unwrap_or_else(|e| panic!("synth_manifest_child_start {path}: {e}"));
+    let log2 = client.memory.map(|m| m.size_log2).expect("a window");
     let opts = temen_llvm::TranslateOptions { child_entry: false, ..Default::default() };
     let vat = temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
         .expect("translate unir_store_vat.ll")
@@ -1464,13 +1464,14 @@ fn an_editor_keeps_its_document_in_the_store_vat() {
         temen_run::Backend::Bytecode,
         temen_run::Backend::Jit,
     ] {
+        let name = Path::new(path).file_stem().and_then(|n| n.to_str()).unwrap_or("client");
         let dir = std::env::temp_dir()
-            .join(format!("jacl_editor_{}_{backend:?}", std::process::id()));
+            .join(format!("jacl_{name}_{}_{backend:?}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let mut run = |source: u64| {
+        let run = |source: u64| {
             let mut grant = |h: &mut temen_interp::Host| {
-                let m = h.grant_module(&editor);
+                let m = h.grant_module(&client);
                 h.register_cap_name("store-client", m);
                 h.grant_instantiator(0, 1 << log2);
                 h.grant_budget(-1, -1, -1);
@@ -1495,17 +1496,40 @@ fn an_editor_keeps_its_document_in_the_store_vat() {
                 .unwrap_or_else(|| panic!("{backend:?}: no client status in {out:?}"));
             assert!(
                 status != -1 && !is_jacl_error(status),
-                "{backend:?}, session {source}: the editor failed (0x{:016x}); the vat said {out:?}",
+                "{backend:?}, session {source}: {name} failed (0x{:016x}); the vat said {out:?}",
                 status as u64
             );
             report[..2].iter().rev().map(|l| l.to_string()).collect::<Vec<_>>()
         };
-        // 11 versions typed, 6 more on the branch, and 3 unsaved.
-        assert_eq!(run(1), ["doc \"hello there!!!\"", "versions 20"], "{backend:?}");
-        // The unsaved 3 are gone; undo and redo mint nothing.
-        assert_eq!(run(2), ["doc \"hello there\"", "versions 17"], "{backend:?}");
+        let first = run(1);
+        check(backend, [first, run(2)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[test]
+fn an_editor_keeps_its_document_in_the_store_vat() {
+    // A JACL program as a client of unir's store vat (docs/UNIR_SERVICES.md, theSherwood/unir#51):
+    // the editor types, undoes, redoes, branches and saves, then after the restart finds what it
+    // saved and not what it typed after.
+    serve_twice(EDITOR_JACL, |backend, [first, second]| {
+        // 11 versions typed, 6 more on the branch, and 3 unsaved.
+        assert_eq!(first, ["doc \"hello there!!!\"", "versions 20"], "{backend:?}");
+        // The unsaved 3 are gone; undo and redo mint nothing.
+        assert_eq!(second, ["doc \"hello there\"", "versions 17"], "{backend:?}");
+    });
+}
+
+#[test]
+fn a_directory_of_files_lives_in_the_store_vat() {
+    // A versioned directory (theSherwood/unir#57, #65): files written on refs of their own, then
+    // committed into directory `root` twice; after the restart the tree is as committed and the
+    // first commit still holds the first version of main.
+    serve_twice(FILES_JACL, |backend, [first, second]| {
+        // Four file versions (main twice) and two directory versions; nothing on `doc`.
+        assert_eq!(first, ["doc \"\"", "versions 6"], "{backend:?}");
+        assert_eq!(second, ["doc \"\"", "versions 6"], "{backend:?}");
+    });
 }
 
 #[test]

@@ -62,11 +62,22 @@ counts the times the store was opened and `seq` the ref's moves, so a follower k
 greatest `(epoch, seq)` and needs them in no order, across restarts too; one that lags gets only the
 latest (unir decisions 58, 60). Since unir stage 4 a version is a document, text plus annotations, and
 the vat also annotates, merges, diffs and replicates (`Annotate`, `Annotations`, `Merge`, `Diff`,
-`Pull`/`Push`), which no JACL program uses yet.
+`Pull`/`Push`), which no JACL program uses yet. Directories (unir decision 65): `Put` commits files'
+versions into a directory ref by name (`[map "Put" [map "name" R "base" B "entries" [vec [map "path" P
+"version" V]]]]`, a version of nil removing the name), and `List` pages its entries; a directory's
+version is any other version, so `Info`, `Advance` and `Merge` work on it too.
 
 `runtime/harness/tests/services/editor.jacl` is an editor over it, run twice on one store by
 `an_editor_keeps_its_document_in_the_store_vat`: it types, undoes, redoes, branches and saves, and
 after the restart finds what it saved and not what it typed after.
+`runtime/harness/tests/services/files.jacl` keeps a directory of files, run twice on one store by
+`a_directory_of_files_lives_in_the_store_vat`: each file is written on a ref of its own, and two
+commits put them into `root`; after the restart the tree is as committed, and the first commit
+still holds the first version of the file the second rewrote.
+
+The unir unit allocates through `unir_host_alloc` (`runtime/chan_unir.c`), a pool of size classes up
+to 64 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed
+4 KiB with directories.
 
 ## Build
 

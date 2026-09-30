@@ -1,0 +1,90 @@
+##
+## files — a versioned directory in unir's store vat (theSherwood/unir#57, #65, decision 65),
+## run as the vat's client twice on one store, with no output: it checks itself, and a failed
+## check is its error value, which the vat reports.
+##
+## Each file is edited on a ref of its own (`file/NAME`), a version per write; a commit puts
+## the files' versions into directory ref `root`, one new version of the whole tree. First run:
+## write README and src/main.jacl, commit; rewrite main, add notes, commit; save. Second run:
+## the tree is as committed, its history has both commits, and the first commit still holds the
+## first main.
+##
+
+## The payload of reply REQ's variant KIND; any other reply fails the program.
+proc ask {s, req, kind} {
+  def r [service-call $s $req]
+  assert [not [error? $r]]
+  assert [map-has $r $kind]
+  map-get $r $kind
+}
+
+## The text of version V.
+proc text {s, v} {
+  def info [ask $s [map "Info" $v] "Info"]
+  buf-string [ask $s [map "Read" [map "version" $v "at" 0 "len" [map-get $info "len"]]] "Data"]
+}
+
+## Writes TEXT as the whole of file NAME: a new version on ref `file/NAME`; the version.
+proc write-file {s, name, body} {
+  def ref [concat "file/" $name]
+  def head [ask $s [map "Head" $ref] "Head"]
+  def len [if [== $head $nil] { 0 } else { map-get [ask $s [map "Info" $head] "Info"] "len" }]
+  def edit [map "at" 0 "delete" $len "insert" $body]
+  ask $s [map "Commit" [map "name" $ref "base" $head "edits" [vec $edit]]] "Version"
+}
+
+## Commits the files NAMES, at their refs' heads, into `root`; the new directory version.
+proc commit {s, names} {
+  mut entries [vec]
+  for $names n {
+    set entries [vec-push $entries [map "path" $n "version" [ask $s [map "Head" [concat "file/" $n]] "Head"]]]
+  }
+  def root [ask $s [map "Head" "root"] "Head"]
+  ask $s [map "Put" [map "name" "root" "base" $root "entries" $entries]] "Version"
+}
+
+## Directory D's entries, as a map from name to version.
+proc ls {s, d} {
+  mut out [map]
+  for [ask $s [map "List" [map "version" $d "at" 0]] "Entries"] e {
+    set out [map-set $out [map-get $e "path"] [map-get $e "version"]]
+  }
+  $out
+}
+
+proc first-run {s} {
+  write-file $s "README" "a tree in the store\n"
+  write-file $s "src/main.jacl" "puts hello\n"
+  def c1 [commit $s [vec "README" "src/main.jacl"]]
+  write-file $s "src/main.jacl" "puts {hello, tree}\n"
+  write-file $s "notes" "todo: merge\n"
+  def c2 [commit $s [vec "src/main.jacl" "notes"]]
+  def tree [ls $s $c2]
+  assert [== [map-len $tree] 3]
+  assert [== [text $s [map-get $tree "src/main.jacl"]] "puts {hello, tree}\n"]
+  assert [== [text $s [map-get [ls $s $c1] "src/main.jacl"]] "puts hello\n"]
+  ask $s "Flush" "Durable"
+  0
+}
+
+proc second-run {s, root} {
+  def tree [ls $s $root]
+  assert [== [map-len $tree] 3]
+  assert [== [text $s [map-get $tree "README"]] "a tree in the store\n"]
+  assert [== [text $s [map-get $tree "notes"]] "todo: merge\n"]
+  ## The commit before: its main is the first one written.
+  def parents [map-get [ask $s [map "Info" $root] "Info"] "parents"]
+  def first [ls $s [vec-get $parents 0]]
+  assert [== [map-len $first] 2]
+  assert [== [text $s [map-get $first "src/main.jacl"]] "puts hello\n"]
+  0
+}
+
+proc main {} {
+  def s [service "store"]
+  assert [not [error? $s]]
+  def root [ask $s [map "Head" "root"] "Head"]
+  if [== $root $nil] { first-run $s } else { second-run $s $root }
+}
+
+main
