@@ -62,7 +62,8 @@ counts the times the store was opened and `seq` the ref's moves, so a follower k
 greatest `(epoch, seq)` and needs them in no order, across restarts too; one that lags gets only the
 latest (unir decisions 58, 60). Since unir stage 4 a version is a document, text plus annotations, and
 the vat also annotates, merges, diffs and replicates (`Annotate`, `Annotations`, `Merge`, `Diff`,
-`Pull`/`Push`), which no JACL program uses yet. Directories (unir decision 65): `Put` commits files'
+`Pull`/`Push`, and `Feed`, which streams a ref's bundles on a `fed` substream as it moves: unir
+decision 66), which no JACL program uses yet. Directories (unir decision 65): `Put` commits files'
 versions into a directory ref by name (`[map "Put" [map "name" R "base" B "entries" [vec [map "path" P
 "version" V]]]]`, a version of nil removing the name), and `List` pages its entries; a directory's
 version is any other version, so `Info`, `Advance` and `Merge` work on it too.
