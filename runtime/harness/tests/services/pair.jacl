@@ -6,7 +6,8 @@
 ## its machine reports. The harness defines `[role]`, which machine this is: 0 or 1.
 ##
 ## Machine 0 types "hello"; machine 1 waits to see it, then types " world". Machine 0 waits to
-## see that, then both type at once: 0 "> " at the start, 1 "!" at the end. Both wait for the
+## see that, then both type at once: 0 "> " at the start, 1 "!" at the end (right after " world",
+## so machine 0 may see it arrive with " world"). Both wait for the
 ## merge, "> hello world!", then make ref `done`, which ends replication.
 ##
 
@@ -54,7 +55,19 @@ proc type {s, at, str} {
   }
 }
 
-## Waits, following `doc`, until its text is WANT; the version that has it.
+## Waits, following `doc`, until it is at least N characters long; the version that is. A
+## follower that lags hears only the latest position (unir decision 58), so it may skip every
+## version between two it sees: wait for a condition later versions keep, not for one text.
+proc until-len {s, n} {
+  mut h [ask $s [map "Head" "doc"] "Head"]
+  while [< [doc-len $s $h] $n] {
+    set h [map-get [map-get [service-event $s $true] "changes"] "to"]
+  }
+  $h
+}
+
+## Waits, following `doc`, until its text is WANT, which must be one no later version changes;
+## the version that has it.
 proc until-text {s, want} {
   mut h [ask $s [map "Head" "doc"] "Head"]
   while [not [== [text $s $h] $want]] {
@@ -69,7 +82,8 @@ proc main {} {
   ask $s [map "Follow" "doc"] "Head"
   if [== [role] 0] {
     type $s $nil "hello"
-    until-text $s "hello world"
+    ## "hello world", or already "hello world!": machine 1 types on without waiting.
+    until-len $s 11
     type $s 0 "> "
   } else {
     until-text $s "hello"
