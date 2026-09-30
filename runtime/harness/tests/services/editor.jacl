@@ -10,7 +10,8 @@
 ## First run (no `doc`): type "hello world", undo back to "hello", redo and undo once, keep the
 ## undone tip as ref `doc/world`, type " there" (a branch), publish and save, then type "!!!"
 ## and exit unsaved. Second run: `doc` is "hello there" again; follow it, undo and redo across
-## the restart, each move heard as an event, and read the other branch back from `doc/world`.
+## the restart, each move heard as an event numbered by the ref's move sequence, and read the
+## other branch back from `doc/world`.
 ##
 
 ## The payload of reply REQ's variant KIND; any other reply fails the editor.
@@ -76,14 +77,23 @@ proc first-run {s} {
   0
 }
 
+## `doc`'s position, as the store vat's event: its move sequence and version.
+proc change {seq, to} {
+  map "changes" [map "name" "doc" "seq" $seq "to" $to]
+}
+
 proc second-run {s, head} {
   assert [== [text $s $head] "hello there"]
   assert [== [ask $s [map "Follow" "doc"] "Head"] $head]
+  ## Following hears the position now: `doc` moved 25 times before the save (11 keystrokes,
+  ## 6 undos, a redo, an undo, 6 more keystrokes); the 3 unsaved moves are gone. Each undo and
+  ## redo after it is one more.
+  assert [== [service-event $s $true] [change 25 $head]]
   def back [undo $s $head]
   assert [== [text $s $back] "hello ther"]
-  assert [== [service-event $s $true] [map "changes" [map "name" "doc" "to" $back]]]
+  assert [== [service-event $s $true] [change 26 $back]]
   move $s "doc" $back $head
-  assert [== [service-event $s $true] [map "changes" [map "name" "doc" "to" $head]]]
+  assert [== [service-event $s $true] [change 27 $head]]
   assert [== [service-event $s $false] $nil]
   assert [== [text $s [ask $s [map "Head" "doc/world"] "Head"]] "hello world"]
   0
