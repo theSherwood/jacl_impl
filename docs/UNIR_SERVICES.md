@@ -56,8 +56,10 @@ spawns `K` clients with windows of `2^LOG2` bytes, each granted the store as `st
 
 Its requests (unir `crates/unir-store-vat/vat.usc`): `Commit` (edits to a text buffer as one version
 on a ref, or a `Conflict`), `Read`, `Head`, `Info` (length, lines, stamp, parents), `Advance` (move a
-ref by compare-and-swap: undo and redo), `Publish`, `Flush` (save), and `Follow` (hear a ref's moves as
-`changes` events, latest move only).
+ref by compare-and-swap: undo and redo), `Publish`, `Flush` (save), and `Follow` (hear a ref's position
+now, then its moves, as `changes` events `[map "name" N "seq" S "to" V]`). `seq` counts the ref's moves
+and grows with each, so a follower keeps the event with the highest and needs them in no order; one that
+lags gets only the latest (unir decision 58).
 
 `runtime/harness/tests/services/editor.jacl` is an editor over it, run twice on one store by
 `an_editor_keeps_its_document_in_the_store_vat`: it types, undoes, redoes, branches and saves, and
