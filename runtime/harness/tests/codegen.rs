@@ -1532,6 +1532,239 @@ fn a_directory_of_files_lives_in_the_store_vat() {
     });
 }
 
+const PAIR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/pair.jacl");
+
+/// The host side of unir's two-machine link (unir `e2e/temen/src/link.rs`, which this follows):
+/// a connection's outgoing direction, granted as a host procedure whose op 0 writes `(ptr, len)`
+/// from the caller's window to its socket and returns 0, or -1.
+fn link_sink(sock: std::sync::Arc<std::net::TcpStream>) -> temen_run::HostCap {
+    temen_run::HostCap::host_proc(0, move || {
+        let sock = std::sync::Arc::clone(&sock);
+        let proc: temen_interp::HostProc = Box::new(move |_, args, mem, _| {
+            use std::io::Write;
+            let (Some(mem), [ptr, len, ..]) = (mem, args) else {
+                return Ok(vec![-1]);
+            };
+            let ok = mem
+                .read_bytes(*ptr as u64, *len as u64)
+                .is_some_and(|b| (&*sock).write_all(&b).is_ok());
+            Ok(vec![if ok { 0 } else { -1 }])
+        });
+        (proc, temen_interp::CapState::Uncaptured)
+    })
+}
+
+/// Both connections' incoming directions, one host procedure a reader thread per socket feeds:
+/// op 0 reads up to `(ptr, len)` into the caller's window, waiting for bytes when `wait`, and
+/// returns `(connection << 32) | count`, a count of 0 at that connection's close; -2 if nothing
+/// is queued and it may not wait (the bytecode engine runs every vat on the caller's thread, so
+/// there the guest polls); -1 on failure.
+fn link_links(socks: [std::sync::Arc<std::net::TcpStream>; 2], wait: bool) -> temen_run::HostCap {
+    use std::sync::mpsc::{self, TryRecvError};
+    let (tx, rx) = mpsc::channel::<(usize, Vec<u8>)>();
+    for (i, sock) in socks.into_iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = vec![0; 1 << 16];
+            loop {
+                let n = (&*sock).read(&mut buf).unwrap_or(0);
+                if tx.send((i, buf[..n].to_vec())).is_err() || n == 0 {
+                    return;
+                }
+            }
+        });
+    }
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    temen_run::HostCap::host_proc(0, move || {
+        let queue = std::sync::Arc::clone(&queue);
+        // A delivery longer than the caller's buffer, and how much of it was handed over.
+        let mut rest: Option<((usize, Vec<u8>), usize)> = None;
+        let proc: temen_interp::HostProc = Box::new(move |_, args, mem, _| {
+            let (Some(mem), [ptr, len, ..]) = (mem, args) else {
+                return Ok(vec![-1]);
+            };
+            if rest.is_none() {
+                let q = queue.lock().expect("the readers' queue");
+                let got = if wait {
+                    q.recv().ok()
+                } else {
+                    match q.try_recv() {
+                        Err(TryRecvError::Empty) => return Ok(vec![-2]),
+                        r => r.ok(),
+                    }
+                };
+                let Some(d) = got else { return Ok(vec![-1]) };
+                rest = Some((d, 0));
+            }
+            let ((i, bytes), at) = rest.take().expect("taken above");
+            let n = (bytes.len() - at).min(*len as usize);
+            if mem.write_bytes(*ptr as u64, &bytes[at..at + n]).is_none() {
+                return Ok(vec![-1]);
+            }
+            if at + n < bytes.len() {
+                rest = Some(((i, bytes), at + n));
+            }
+            Ok(vec![((i as i64) << 32) | n as i64])
+        });
+        (proc, temen_interp::CapState::Uncaptured)
+    })
+}
+
+/// 64 random bits from the OS, a host procedure's op 0: each store's session source, so the two
+/// machines' chunk ids never collide.
+fn entropy() -> temen_run::HostCap {
+    temen_run::HostCap::host_proc(0, || {
+        let draw: temen_interp::HostProc = Box::new(|_, _, _, _| {
+            use std::io::Read;
+            let mut b = [0u8; 8];
+            let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+            Ok(vec![if ok.is_ok() { i64::from_le_bytes(b) } else { 0 }])
+        });
+        (draw, temen_interp::CapState::Stateless)
+    })
+}
+
+#[test]
+fn two_editors_share_a_document_across_machines() {
+    // Two machines, each a temen instance running unir's store vat as `peer ROLE LOG2`, joined by
+    // two loopback TCP connections (unir decisions 64, 66): each vat serves its machine's JACL
+    // editor, and a puller on each side carries ref `doc` from the other, machine 1's merging.
+    // The editors take turns, then type at once; both machines end at the same version.
+    let vat = {
+        let opts = temen_llvm::TranslateOptions {
+            child_entry: false,
+            ..Default::default()
+        };
+        temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
+            .expect("translate unir_store_vat.ll")
+            .module
+    };
+    // The vat's pullers and senders are the unit itself, spawned as children (`store-self`).
+    let helper = {
+        let opts = temen_llvm::TranslateOptions {
+            child_entry: true,
+            ..Default::default()
+        };
+        temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
+            .expect("translate unir_store_vat.ll as a child")
+            .module
+    };
+    let vat_log2 = vat.memory.map(|m| m.size_log2).expect("a window") + 8;
+    let source = std::fs::read_to_string(PAIR_JACL).expect("pair.jacl");
+    let editors: Vec<(temen_ir::Module, u8)> = (0..2)
+        .map(|role| {
+            // The role, as `[role]`: the one line the two machines' programs differ by.
+            let path =
+                std::env::temp_dir().join(format!("jacl_pair_{role}_{}.jacl", std::process::id()));
+            std::fs::write(&path, format!("proc role {{}} {{ {role} }}\n{source}"))
+                .expect("write the editor");
+            let (linked, entry) = emit_and_link_file(path.to_str().expect("a UTF-8 path"));
+            let _ = std::fs::remove_file(&path);
+            let image = temen_ir::synth_manifest_child_start(linked, entry, false)
+                .unwrap_or_else(|e| panic!("synth_manifest_child_start pair.jacl: {e}"));
+            let log2 = image.memory.map(|m| m.size_log2).expect("a window");
+            (image, log2)
+        })
+        .collect();
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = listener.local_addr().expect("its address");
+        let pair = || {
+            let out = std::net::TcpStream::connect(addr).expect("connect");
+            let (inn, _) = listener.accept().expect("accept");
+            for s in [&out, &inn] {
+                s.set_nodelay(true).expect("nodelay");
+            }
+            (std::sync::Arc::new(out), std::sync::Arc::new(inn))
+        };
+        // Connection 0 carries machine 1's puller into machine 0's vat; connection 1 the reverse.
+        let (out1, in0) = pair();
+        let (out0, in1) = pair();
+        let socks = [&in0, &out0, &in1, &out1].map(std::sync::Arc::clone);
+        let (done, finished) = std::sync::mpsc::channel();
+        for (role, inn, out) in [(0, in0, out0), (1, in1, out1)] {
+            let (vat, helper, done) = (vat.clone(), helper.clone(), done.clone());
+            let (editor, log2) = editors[role].clone();
+            std::thread::spawn(move || {
+                let inst = temen_run::instantiate(vat).expect("instantiate the store vat");
+                let config = temen_run::RunConfig {
+                    memory_size_log2: Some(vat_log2),
+                    stdin: format!("peer {role} {log2}").into_bytes(),
+                    ..Default::default()
+                };
+                let caps = [
+                    ("link.in", link_sink(std::sync::Arc::clone(&inn))),
+                    ("link.out", link_sink(std::sync::Arc::clone(&out))),
+                    (
+                        "links",
+                        link_links([inn, out], backend != temen_run::Backend::Bytecode),
+                    ),
+                    ("entropy", entropy()),
+                ];
+                let mut grant = |h: &mut temen_interp::Host| {
+                    let m = h.grant_module(&editor);
+                    h.register_cap_name("store-client", m);
+                    let m = h.grant_module(&helper);
+                    h.register_cap_name("store-self", m);
+                    h.grant_instantiator(0, 1 << log2);
+                    h.grant_budget(-1, -1, -1);
+                };
+                let out =
+                    match inst.run_with_caps_and_host(backend, &config, &caps, Some(&mut grant)) {
+                        Ok(run) => String::from_utf8_lossy(&run.stdout).into_owned(),
+                        Err(e) => format!("run failed: {e}\n"),
+                    };
+                let _ = done.send((role, out));
+            });
+        }
+        // A machine whose editor failed never makes `done`, so the other would wait for it
+        // forever: past a deadline, fail with what has finished.
+        let mut outs = [String::new(), String::new()];
+        for _ in 0..2 {
+            match finished.recv_timeout(std::time::Duration::from_secs(300)) {
+                Ok((role, out)) => outs[role] = out,
+                Err(_) => panic!("{backend:?}: a machine never finished; the other said {outs:?}"),
+            }
+        }
+        // Ends the reader threads, blocked on sockets both machines are done with.
+        for s in socks {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        // Each machine reports its head's id and text, its editor's and puller's statuses, and
+        // its senders'.
+        let field = |out: &str, key: &str| {
+            out.lines()
+                .find_map(|l| l.strip_prefix(key).map(str::to_owned))
+                .unwrap_or_else(|| panic!("{backend:?}: no {key:?} in {out:?}"))
+        };
+        for out in &outs {
+            assert_eq!(field(out, "doc "), "> hello world!", "{backend:?}: {out}");
+            // The editor's status, a JACL value, and the puller's.
+            let clients: Vec<i64> = field(out, "clients ")
+                .trim_matches(['[', ']'])
+                .split(", ")
+                .map(|x| x.parse().expect("a status"))
+                .collect();
+            assert!(
+                clients.len() == 2 && clients[0] != -1 && !is_jacl_error(clients[0]),
+                "{backend:?}: the editor failed: {out}"
+            );
+            assert_eq!(clients[1], 0, "{backend:?}: the puller failed: {out}");
+            assert_eq!(field(out, "senders "), "[0, 0]", "{backend:?}: {out}");
+        }
+        assert_eq!(
+            field(&outs[0], "head "),
+            field(&outs[1], "head "),
+            "{backend:?}: {outs:?}"
+        );
+    }
+}
+
 #[test]
 fn the_runtime_compiles_to_bytecode() {
     // temen's bytecode engine refuses a module with both an Instantiator op and fibers, and

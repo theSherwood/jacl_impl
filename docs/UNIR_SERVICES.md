@@ -68,6 +68,16 @@ versions into a directory ref by name (`[map "Put" [map "name" R "base" B "entri
 "version" V]]]]`, a version of nil removing the name), and `List` pages its entries; a directory's
 version is any other version, so `Info`, `Advance` and `Merge` work on it too.
 
+**Two machines** (unir decisions 64, 66). Run with `peer ROLE LOG2` instead, the vat is one of two
+machines replicating ref `doc` over a pair of connections: its client image, granted as
+`store-client` with a window of `2^LOG2` bytes, is the machine's editor, and the unit itself,
+translated as a child and granted as `store-self`, runs the machine's vat, its puller (which carries
+`doc` from the other machine's vat, machine 1 merging) and its connections' outgoing halves. The
+host grants the connections as `link.in` and `link.out`, host procedures that write a buffer to
+one, and `links`, one that reads whichever has bytes; and `entropy`, 64 random bits, from which each
+vat draws its session source. Replication stops once each machine's editor has made ref `done`, and
+each machine reports its head's id and text, its editor's and puller's statuses, and its senders'.
+
 `runtime/harness/tests/services/editor.jacl` is an editor over it, run twice on one store by
 `an_editor_keeps_its_document_in_the_store_vat`: it types, undoes, redoes, branches and saves, and
 after the restart finds what it saved and not what it typed after.
@@ -75,6 +85,9 @@ after the restart finds what it saved and not what it typed after.
 `a_directory_of_files_lives_in_the_store_vat`: each file is written on a ref of its own, and two
 commits put them into `root`; after the restart the tree is as committed, and the first commit
 still holds the first version of the file the second rewrote.
+`runtime/harness/tests/services/pair.jacl` is one of two editors on one document, run by
+`two_editors_share_a_document_across_machines` on two TEMEN instances joined by loopback TCP: they
+take turns typing, then type at once, and both machines end at the same version, `"> hello world!"`.
 
 The unir unit allocates through `unir_host_alloc` (`runtime/chan_unir.c`), a pool of size classes up
 to 64 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed
