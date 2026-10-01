@@ -1742,9 +1742,15 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   AstNode* then_block = parser__parse_block(p);
   if (then_block->type == AST_ERROR) return then_block;
 
-  /* Skip newlines to check for elif/else */
+  /* Skip newlines to check for elif/else. If neither follows, the newlines end the if
+   * statement: put them back, or a next line that starts with an operator (`+ $v 1`) is
+   * read as a continuation of the if (#192). */
+  uint32_t after_then = p->pos;
   while (parser__peek(p)->type == TOKEN_NEWLINE) {
     parser__advance(p);
+  }
+  if (parser__peek(p)->type != TOKEN_ELIF && parser__peek(p)->type != TOKEN_ELSE) {
+    p->pos = after_then;
   }
 
   if (parser__peek(p)->type == TOKEN_ELIF) {

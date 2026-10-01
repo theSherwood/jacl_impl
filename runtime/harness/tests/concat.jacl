@@ -1,0 +1,8 @@
+##
+## concat — strings joined; a non-string joined as its string form (#193).
+##
+
+proc role {} { 0 }
+print [concat "[" [role] "] " "connected"]
+print [concat "a" 1 $true $nil "b"]
+print [concat "x" "y"]

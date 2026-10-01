@@ -310,6 +310,7 @@ JaclVal jacl_ge(JaclVal a, JaclVal b);
 JaclVal jacl_not(JaclVal a);               /* bool negation */
 JaclVal jacl_typeof(JaclVal v);            /* -> type-name string */
 JaclVal jacl_len(JaclVal v);               /* string/vec/map length -> i32 (else error) */
+JaclVal jacl_byte_len(JaclVal v);          /* [byte-length S]: a string's bytes -> i32 (else error) */
 JaclVal jacl_vec_get_at(JaclVal v, JaclVal idx);   /* JaclVal-uniform vec-get (i32 index) */
 JaclVal jacl_map_has_v(JaclVal m, JaclVal k);      /* JaclVal-uniform map-has? -> bool */
 int     jacl_val_equal(JaclVal a, JaclVal b);      /* structural equality (vec/map recursive) */
@@ -370,6 +371,7 @@ JaclVal jacl_global_get(JaclVal name);             /* module global read */
 JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
 JaclVal jacl_read_file(JaclVal path);                     /* read-file (cap or guest VFS) */
 JaclVal jacl_read_line(void);                             /* read-line: the host stdin's next line */
+JaclVal jacl_try_read_line(void);                         /* try-read-line: the same, or false if not yet */
 JaclVal jacl_write_file(JaclVal content, JaclVal path);   /* write-file */
 JaclVal jacl_append_file(JaclVal content, JaclVal path);  /* append-file */
 JaclVal jacl_delete_file(JaclVal path);                   /* delete-file: nil, or error on missing */

@@ -158,6 +158,7 @@ typedef enum {
 
   /* A line of the host's stdin */
   HEAD_READ_LINE,
+  HEAD_TRY_READ_LINE,
 
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
@@ -341,6 +342,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       return HEAD_NONE;
     case 13:
       if (memcmp(s, "service-event", 13) == 0) return HEAD_SERVICE_EVENT;
+      if (memcmp(s, "try-read-line", 13) == 0) return HEAD_TRY_READ_LINE;
       return HEAD_NONE;
     case 15:
       if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;

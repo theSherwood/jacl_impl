@@ -2,7 +2,7 @@
 //! unir_store_vat.ll`) run as `peer ROLE LOG2`, its editor a JACL program (theSherwood/unir#62,
 //! docs/UNIR_SERVICES.md). Machine 0 listens and machine 1 connects; the vats replicate ref `doc`
 //! over two connections between them, machine 1 merging, until both editors have made ref
-//! `done`.
+//! `~done`.
 //!
 //! The host side follows unir's (`e2e/temen/src/link.rs`): each connection's outgoing direction
 //! is a host procedure writing to its socket, and both incoming directions one procedure a reader
@@ -170,13 +170,16 @@ pub struct Images {
 
 /// Runs one machine over `link` on `backend` until both editors are done, and returns its output:
 /// whatever its editor printed, then the vat's report (its head's id and text, its editor's and
-/// puller's statuses, its senders'). `setup` sees the root's host before the run, to attach live
-/// I/O (`Host::set_stdin_source`, `Host::set_stdout_tee`): the editor reads what the root's stdin
-/// holds after the vat's command, and prints to the root's stdout.
+/// puller's statuses, its senders'). With `dir`, the vat keeps its store in `dir/store.log`
+/// (theSherwood/unir#86): a machine run again on it picks up where it left off. `setup` sees the
+/// root's host before the run, to attach live I/O (`Host::set_stdin_source`,
+/// `Host::set_stdout_tee`): the editor reads what the root's stdin holds after the vat's
+/// command, and prints to the root's stdout.
 pub fn run(
     images: &Images,
     link: Link,
     backend: Backend,
+    dir: Option<&Path>,
     setup: &mut dyn FnMut(&mut temen_interp::Host),
 ) -> String {
     let inst = temen_run::instantiate(images.vat.clone()).expect("instantiate the store vat");
@@ -188,12 +191,15 @@ pub fn run(
         ..Default::default()
     };
     let socks = [Arc::clone(&link.inn), Arc::clone(&link.out)];
-    let caps = [
+    let mut caps = vec![
         ("link.in", sink(Arc::clone(&link.inn))),
         ("link.out", sink(Arc::clone(&link.out))),
         ("links", links([Arc::clone(&link.inn), Arc::clone(&link.out)], backend != Backend::Bytecode)),
         ("entropy", entropy()),
     ];
+    if let Some(dir) = dir {
+        caps.push(("fs", temen_run::fs::host_fs(dir.to_path_buf())));
+    }
     let mut grant = |h: &mut temen_interp::Host| {
         let m = h.grant_module(&images.editor);
         h.register_cap_name("store-client", m);

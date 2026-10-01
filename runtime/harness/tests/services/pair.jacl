@@ -8,7 +8,7 @@
 ## Machine 0 types "hello"; machine 1 waits to see it, then types " world". Machine 0 waits to
 ## see that, then both type at once: 0 "> " at the start, 1 "!" at the end (right after " world",
 ## so machine 0 may see it arrive with " world"). Both wait for the
-## merge, "> hello world!", then make ref `done`, which ends replication.
+## merge, "> hello world!", then make ref `~done`, which ends replication.
 ##
 
 ## The payload of reply REQ's variant KIND; any other reply fails the editor.
@@ -91,7 +91,7 @@ proc main {} {
     type $s $nil "!"
   }
   until-text $s "> hello world!"
-  ask $s [map "Commit" [map "name" "done" "base" $nil "edits" [vec]]] "Version"
+  ask $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]] "Version"
   0
 }
 

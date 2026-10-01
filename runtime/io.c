@@ -63,24 +63,43 @@ static int jacl_vfs_parent_ok(JaclVal path) {
 /* `[read-file PATH]` — the file's contents, or an error value on a missing file. With an
  * embedder-granted "fs" capability the read goes through real cap ops (fscap.c); without
  * one the pure-guest VFS map serves — same observable semantics either way. */
-/* `[read-line]` — the host stdin's next line, without its newline; nil at end of input. A line
- * longer than the buffer keeps its first JACL_LINE_MAX bytes. Reads a byte at a time, so it never
- * consumes past the line: whatever reads stdin next starts at the following one. */
+/* `[try-read-line]` — the host stdin's next line, without its newline, if a whole one is there:
+ * false if not yet (the host's stdin answered -EAGAIN, temen#2019: it has nothing now), nil at end
+ * of input. What it read of a line not yet whole waits here for the next call. A line longer than
+ * the buffer keeps its first JACL_LINE_MAX bytes. Reads a byte at a time, so it never consumes past
+ * the line: whatever reads stdin next starts at the following one. */
 #define JACL_LINE_MAX 4096
-JaclVal jacl_read_line(void) {
-  char buf[JACL_LINE_MAX];
-  uint32_t n = 0;
-  int any = 0;
+#define JACL_EAGAIN (-11)
+static char jacl_line[JACL_LINE_MAX];
+static uint32_t jacl_line_len;
+static int jacl_line_any;
+JaclVal jacl_try_read_line(void) {
   for (;;) {
     char c;
-    if (read(0, &c, 1) != 1) break;
-    any = 1;
+    long r = read(0, &c, 1);
+    if (r == JACL_EAGAIN) return JACL_FALSE;
+    if (r != 1) break;
+    jacl_line_any = 1;
     if (c == '\n') break;
-    if (n < JACL_LINE_MAX) buf[n++] = c;
+    if (jacl_line_len < JACL_LINE_MAX) jacl_line[jacl_line_len++] = c;
   }
-  if (!any) return JACL_NIL;
-  if (n && buf[n - 1] == '\r') n--;
-  return jacl_str_new(buf, n);
+  if (!jacl_line_any) return JACL_NIL;
+  uint32_t n = jacl_line_len;
+  if (n && jacl_line[n - 1] == '\r') n--;
+  jacl_line_len = 0;
+  jacl_line_any = 0;
+  return jacl_str_new(jacl_line, n);
+}
+
+/* `[read-line]` — `[try-read-line]` that waits for the line: in 10 ms slices while the host has
+ * nothing yet, a cancellable point each (as `sleep`). */
+JaclVal jacl_read_line(void) {
+  for (;;) {
+    JaclVal l = jacl_try_read_line();
+    if (l != JACL_FALSE) return l;
+    jacl_ctl_point();
+    (void)__vm_wait32(&jacl_sleep_word, 0, 10000000L);
+  }
 }
 
 JaclVal jacl_read_file(JaclVal path) {

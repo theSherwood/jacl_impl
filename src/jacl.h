@@ -735,6 +735,7 @@ typedef enum {
 
   /* A line of the host's stdin */
   HEAD_READ_LINE,
+  HEAD_TRY_READ_LINE,
 
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;

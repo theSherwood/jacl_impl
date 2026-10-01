@@ -75,7 +75,9 @@ translated as a child and granted as `store-self`, runs the machine's vat, its p
 `doc` from the other machine's vat, machine 1 merging) and its connections' outgoing halves. The
 host grants the connections as `link.in` and `link.out`, host procedures that write a buffer to
 one, and `links`, one that reads whichever has bytes; and `entropy`, 64 random bits, from which each
-vat draws its session source. Replication stops once each machine's editor has made ref `done`, and
+vat draws its session source; and optionally `fs`, a file system where the vat keeps its store as
+`store.log` (theSherwood/unir#86), so a machine run again on it picks up where it left off.
+Replication stops once each machine's editor has made ref `~done` (a session ref, so a restart never finds it), and
 each machine reports its head's id and text, its editor's and puller's statuses, and its senders'.
 The editor also gets the vat's stdin: whatever follows the command on it is the editor's to read
 (`[read-line]`). `runtime/harness/src/node.rs` is that host, shared by the tests and `unir_node`.
@@ -88,18 +90,22 @@ cargo run --release --bin unir_node -- --connect 127.0.0.1:4000    # another, or
 ```
 
 (from `runtime/harness`). Each runs the vat in peer mode with `tests/services/ed.jacl`, or the JACL
-editor named after the flags, reading its terminal a line at a time. In `ed.jacl`, a line is
-appended as typed; `:i N TEXT` inserts before line N, `:c N TEXT` changes it, `:d N` deletes it, `:p`
-shows the document, and `:q` (or end of input) quits. After each command it shows the document if
-either machine changed it, so pressing Enter shows what the other person typed. An edit that loses a
-race is made again on the version that won, by the same line number. A machine's run ends once both
-editors have quit.
+editor named after the flags. In `ed.jacl`, a line is appended as typed; `:i N TEXT` inserts before
+line N, `:c N TEXT` changes it, `:d N` deletes it, `:p` shows the document, and `:q` (or end of
+input) quits. It shows the document whenever either machine changes it, while it waits for input
+(#195): `unir_node` reads the terminal on a thread of its own, so the editor's `[try-read-line]`
+never waits on it (temen#2019), and the editor polls its terminal and the vat's `doc` events in turn.
+An edit is made to the version last shown and merged into the head (#196), so a line number means the
+line the user saw by it, wherever the other machine's edits have moved it since
+(`an_edit_means_the_line_its_user_saw`). A machine's run ends once both editors have quit.
 
-It runs on the tree-walker: on the JIT a child's short timed waits last ~20 ms each
-(theSherwood/temen#2012) and the JACL scheduler waits in 1 ms ticks, so an edit takes 110–150 ms
-against 30–40 ms (`--jit` runs it there anyway). Not on the bytecode engine, which runs every vat on
-one thread: an editor reading its terminal starves the vats that replicate. The document lives in
-memory: when both machines have quit, it is gone.
+It runs on temen's JIT unless `--engine tree-walk` or `--engine bytecode` says otherwise. Each edit
+shown takes well under 10 ms on the JIT, about 40 ms on the bytecode engine and about 70 ms on the
+tree-walker, for about 7 s more compiling at the start.
+
+Each machine keeps its store in a directory, `unir-node-0` or `unir-node-1` in the current one
+unless `--dir DIR` names another: quit both and start them again, and the document is as you left
+it (`two_people_pick_up_where_they_left_off`).
 
 `runtime/harness/tests/services/editor.jacl` is an editor over it, run twice on one store by
 `an_editor_keeps_its_document_in_the_store_vat`: it types, undoes, redoes, branches and saves, and

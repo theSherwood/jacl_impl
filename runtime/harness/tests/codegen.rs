@@ -1163,7 +1163,11 @@ fn staged_driver() -> &'static Path {
             "could not build {} for the staged driver",
             staticlib.display()
         );
-        let out = std::env::temp_dir().join(format!("jacl_emit_staged_{}", std::process::id()));
+        // Beside the staticlib, so a run overwrites the last one's rather than leaving 23 MB in
+        // the temp directory each time (#198); built under a name of its own and renamed into
+        // place, since several test binaries may build it at once.
+        let out = profile_dir.join("jacl_emit_staged");
+        let tmp = profile_dir.join(format!("jacl_emit_staged.{}", std::process::id()));
         let status = Command::new("gcc")
             .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
             .arg("-I")
@@ -1180,10 +1184,11 @@ fn staged_driver() -> &'static Path {
                 "-lc",
             ])
             .arg("-o")
-            .arg(&out)
+            .arg(&tmp)
             .status()
             .expect("spawn gcc (staged driver)");
         assert!(status.success(), "gcc failed to build the TEMEN-staged codegen driver");
+        std::fs::rename(&tmp, &out).expect("move the staged driver into place");
         out
     })
     .as_path()
@@ -1311,6 +1316,39 @@ fn read_line_reads_the_host_stdin_a_line_at_a_time() {
     let (ret, stdout) = run_jacl_file_with_stdin(READ_LINE_JACL, b"hello\r\n\nworld");
     assert!(!is_jacl_error(ret), "read_line.jacl failed (0x{:016x})", ret as u64);
     assert_eq!(String::from_utf8_lossy(&stdout), "1: hello\n2: \n3: world\nlines: 3\n");
+}
+
+const BYTE_LENGTH_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/byte_length.jacl");
+
+#[test]
+fn byte_length_counts_a_strings_bytes() {
+    // #194: the TEMEN codegen had no entry for `byte-length`. "é" is two bytes; a non-string is
+    // an error value.
+    let (ret, stdout) = run_jacl_file(BYTE_LENGTH_JACL);
+    assert!(!is_jacl_error(ret), "byte_length.jacl failed (0x{:016x})", ret as u64);
+    assert_eq!(String::from_utf8_lossy(&stdout), "5\n6\n0\ntrue\n");
+}
+
+const CONCAT_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/concat.jacl");
+
+#[test]
+fn concat_joins_a_non_string_as_its_string_form() {
+    // #193: an integer among `concat`'s arguments was read as a string pointer, and the run
+    // faulted or hung.
+    let (ret, stdout) = run_jacl_file(CONCAT_JACL);
+    assert!(!is_jacl_error(ret), "concat.jacl failed (0x{:016x})", ret as u64);
+    assert_eq!(String::from_utf8_lossy(&stdout), "[0] connected\na1truenilb\nxy\n");
+}
+
+const EARLY_RETURN_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/early_return.jacl");
+
+#[test]
+fn return_leaves_the_proc_from_anywhere_in_it() {
+    // #192: a `return` nested in an if or a loop evaluated to its value and the proc went on;
+    // and the parser read a line after an else-less `if` that starts with `+` as part of it.
+    let (ret, stdout) = run_jacl_file(EARLY_RETURN_JACL);
+    assert!(!is_jacl_error(ret), "early_return.jacl failed (0x{:016x})", ret as u64);
+    assert_eq!(String::from_utf8_lossy(&stdout), "10\n6\n300\nnil\nfell through\n11\n8\n");
 }
 
 const CHANNELS_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/channels.jacl");
@@ -1571,12 +1609,14 @@ fn child_image(path: &str, prelude: &str) -> (temen_ir::Module, u8) {
 }
 
 /// Runs two machines ([`jacl_runtime_harness::node`]) joined by loopback TCP on `backend`, each
-/// with its editor and the live I/O `setup` gives it, and returns each machine's output. A
-/// machine whose editor failed never makes `done`, so the other would wait for it forever: past
+/// with its editor and the live I/O `setup` gives it, and with `dirs`, its store kept in its own,
+/// and returns each machine's output. A
+/// machine whose editor failed never makes `~done`, so the other would wait for it forever: past
 /// a deadline, fail with what has finished.
 fn two_machines(
     editors: [(temen_ir::Module, u8); 2],
     backend: temen_run::Backend,
+    dirs: Option<&[std::path::PathBuf; 2]>,
     mut setup: impl FnMut(usize) -> Box<dyn FnMut(&mut temen_interp::Host) + Send>,
 ) -> [String; 2] {
     use jacl_runtime_harness::node;
@@ -1589,11 +1629,12 @@ fn two_machines(
         let link = if role == 0 { None } else { Some(node::connect(addr).expect("connect")) };
         let listener = (role == 0).then(|| listener.try_clone().expect("the listener"));
         let (done, mut setup) = (done.clone(), setup(role));
+        let dir = dirs.map(|d| d[role].clone());
         std::thread::spawn(move || {
             let link = link.unwrap_or_else(|| {
                 node::accept(listener.as_ref().expect("machine 0 listens")).expect("accept")
             });
-            let _ = done.send((role, node::run(&images, link, backend, &mut *setup)));
+            let _ = done.send((role, node::run(&images, link, backend, dir.as_deref(), &mut *setup)));
         });
     }
     let mut outs = [String::new(), String::new()];
@@ -1636,52 +1677,72 @@ const ED_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/ed.ja
 enum Key {
     /// Types this line.
     Line(&'static str),
-    /// Presses Enter, which shows the document if it changed, until this appears in what the
-    /// terminal shows after the last thing awaited.
+    /// Types nothing until this appears in what the terminal shows after the last thing awaited.
     Await(&'static str),
+    /// Holds the editor in its read, as a terminal that blocks, until this appears on the other
+    /// machine's terminal: what this one shows stays as it was meanwhile.
+    Hold(&'static str),
 }
 
-/// A machine's terminal for a script: its stdin source and stdout tee, and what it showed.
-fn terminal(script: Vec<Key>) -> (Box<dyn FnMut(&mut temen_interp::Host) + Send>, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
-    let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let tee = std::sync::Arc::clone(&shown);
-    let setup = move |h: &mut temen_interp::Host| {
-        let (tee, seen) = (std::sync::Arc::clone(&tee), std::sync::Arc::clone(&tee));
-        h.set_stdout_tee(Box::new(move |b| tee.lock().unwrap().extend_from_slice(b)));
-        let mut keys: std::collections::VecDeque<Key> = script.clone().into();
-        // Where the last awaited text ended.
-        let mut from = 0;
-        h.set_stdin_source(Box::new(move || loop {
-            match keys.front().cloned() {
-                None => return Vec::new(),
-                Some(Key::Line(l)) => {
-                    keys.pop_front();
-                    return format!("{l}\n").into_bytes();
-                }
-                Some(Key::Await(want)) => {
-                    let out = String::from_utf8_lossy(&seen.lock().unwrap()[from..]).into_owned();
-                    match out.find(want) {
+type Shown = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+
+/// Runs `ed.jacl` on two machines ([`two_machines`]), each driven by its script through its
+/// terminal, its store kept in `dirs` if given; returns each machine's output and what each
+/// terminal showed.
+fn ed_session(
+    backend: temen_run::Backend,
+    dirs: Option<&[std::path::PathBuf; 2]>,
+    scripts: [Vec<Key>; 2],
+) -> ([String; 2], [String; 2]) {
+    let editor = child_image(ED_JACL, "");
+    let shown: [Shown; 2] = Default::default();
+    let mut scripts = scripts.map(Some);
+    let outs = two_machines([editor.clone(), editor], backend, dirs, |role| {
+        let (mine, other) = (std::sync::Arc::clone(&shown[role]), std::sync::Arc::clone(&shown[1 - role]));
+        let mut keys: std::collections::VecDeque<Key> = scripts[role].take().expect("one run").into();
+        Box::new(move |h: &mut temen_interp::Host| {
+            let tee = std::sync::Arc::clone(&mine);
+            h.set_stdout_tee(Box::new(move |b| tee.lock().unwrap().extend_from_slice(b)));
+            let (mine, other) = (std::sync::Arc::clone(&mine), std::sync::Arc::clone(&other));
+            let mut keys = std::mem::take(&mut keys);
+            // Where the last awaited text ended.
+            let mut from = 0;
+            h.set_stdin_source(Box::new(move || loop {
+                let after = |t: &Shown, at: usize| String::from_utf8_lossy(&t.lock().unwrap()[at..]).into_owned();
+                match keys.front().cloned() {
+                    None => return Some(Vec::new()),
+                    Some(Key::Line(l)) => {
+                        keys.pop_front();
+                        return Some(format!("{l}\n").into_bytes());
+                    }
+                    Some(Key::Await(want)) => match after(&mine, from).find(want) {
                         Some(i) => {
                             from += i + want.len();
                             keys.pop_front();
                         }
-                        None => {
-                            std::thread::sleep(std::time::Duration::from_millis(20));
-                            return b"\n".to_vec();
+                        // Nothing typed yet (temen#2019): the editor must show what arrives
+                        // without a line from here (#195).
+                        None => return None,
+                    },
+                    Some(Key::Hold(want)) => {
+                        while !after(&other, 0).contains(want) {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
                         }
+                        keys.pop_front();
                     }
                 }
-            }
-        }));
-    };
-    (Box::new(setup), shown)
+            }));
+        })
+    });
+    (outs, shown.map(|s| String::from_utf8_lossy(&s.lock().unwrap()).into_owned()))
 }
 
 #[test]
 fn two_people_edit_one_document_from_two_machines() {
     // ed.jacl on each machine, driven a line at a time through its stdin as a person would type
-    // it, each waiting to see the other's edits arrive. They append, insert, change and delete
-    // lines in turn, then edit at once; both machines end with the same document.
+    // it, each waiting to see the other's edits arrive, which the editor shows without being sent
+    // a line (#195). They append, insert, change and delete lines in turn, then edit at once; both
+    // machines end with the same document.
     use Key::{Await, Line};
     let scripts = [
         vec![
@@ -1709,28 +1770,95 @@ fn two_people_edit_one_document_from_two_machines() {
             Line(":q"),
         ],
     ];
-    let editor = child_image(ED_JACL, "");
-    // Not the bytecode engine, which runs every vat on one thread: there an editor reading its
-    // terminal starves the vats that replicate (observed: refreshing every 20 ms, machine 1 never
-    // saw machine 0's first line), and a terminal that waits for a person would stop them
-    // outright. An interactive host on that engine pumps a cooperative session instead
-    // (`temen_run::Instance::open_coop_session`).
-    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
-        let mut shown = Vec::new();
-        let outs = two_machines([editor.clone(), editor.clone()], backend, |role| {
-            let (setup, out) = terminal(scripts[role].clone());
-            shown.push(out);
-            setup
-        });
+    // On every engine, the bytecode one included, which runs every vat on one thread: the editor
+    // never blocks on its terminal (temen#2019), so the vats that replicate run while it waits
+    // (#197).
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let (outs, shown) = ed_session(backend, None, scripts.clone());
         // Each terminal's last view of the document is the final one (both awaited it), then the
         // machine's report.
         let last = "--\n1  top\n2  zero\n3  TWO\n4  bottom\n(waiting for the other machine to quit)\nhead ";
         for (out, shown) in outs.iter().zip(&shown) {
             check_machine(backend, out);
-            let shown = String::from_utf8_lossy(&shown.lock().unwrap()).into_owned();
             assert!(shown.contains(last), "{backend:?}: the terminal showed {shown:?}");
         }
         assert_eq!(field(&outs[0], "head "), field(&outs[1], "head "), "{backend:?}: {outs:?}");
+    }
+}
+
+#[test]
+fn an_edit_means_the_line_its_user_saw() {
+    // #196: machine 0's user sees "a b c" and deletes line 3; meanwhile machine 1's user inserts
+    // a line at the top, which moves "c" to line 4. The delete is made to the version machine 0's
+    // user saw and merged, so it removes "c", not the "b" that is line 3 by then.
+    use Key::{Await, Hold, Line};
+    let scripts = [
+        vec![
+            Line("a"),
+            Line("b"),
+            Line("c"),
+            // Machine 0 has shown "a b c"; it stays so while machine 1 inserts.
+            Hold("--\n1  new\n"),
+            Line(":d 3"),
+            Await("--\n1  new\n2  a\n3  b\n"),
+            Line(":q"),
+        ],
+        // Machine 1 shows "new a b c" on the way, so it waits for machine 0's final view.
+        vec![Await("3  c"), Line(":i 1 new"), Hold("--\n1  new\n2  a\n3  b\n"), Line(":q")],
+    ];
+    let backend = temen_run::Backend::TreeWalk;
+    let (outs, shown) = ed_session(backend, None, scripts);
+    for out in &outs {
+        check_machine(backend, out);
+    }
+    assert_eq!(field(&outs[0], "head "), field(&outs[1], "head "), "{outs:?}");
+    // Machine 0 never showed "new a b c": its view went from what its user saw to the merge.
+    assert!(shown[0].contains("--\n1  new\n2  a\n3  b\n(waiting"), "the terminal showed {:?}", shown[0]);
+}
+
+#[test]
+fn two_people_pick_up_where_they_left_off() {
+    // theSherwood/unir#86: each machine keeps its store in a directory. Two people write a line
+    // each and quit; run again on the same directories, both editors open on that document and
+    // go on editing it, and replication runs again (its stop ref, `~done`, is a session ref, so
+    // the second session does not find the first's).
+    use Key::{Await, Line};
+    let dirs = [0, 1].map(|m| {
+        let d = std::env::temp_dir().join(format!("jacl-unir-node-{}-{m}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("a scratch directory");
+        d
+    });
+    let sessions = [
+        [
+            vec![Await("(empty)"), Line("one"), Await("2  two"), Line(":q")],
+            vec![Await("1  one"), Line("two"), Line(":q")],
+        ],
+        [
+            vec![Await("1  one\n2  two\n"), Line(":c 1 ONE"), Await("3  three"), Line(":q")],
+            vec![Await("1  one\n2  two\n"), Line("three"), Await("1  ONE"), Line(":q")],
+        ],
+    ];
+    let backend = temen_run::Backend::TreeWalk;
+    for scripts in sessions {
+        let (outs, _) = ed_session(backend, Some(&dirs), scripts);
+        for out in &outs {
+            check_machine(backend, out);
+        }
+        assert_eq!(field(&outs[0], "head "), field(&outs[1], "head "), "{outs:?}");
+    }
+    // A third start shows the document as the second session left it.
+    let (outs, shown) = ed_session(backend, Some(&dirs), [vec![Line(":q")], vec![Line(":q")]]);
+    for (out, shown) in outs.iter().zip(&shown) {
+        check_machine(backend, out);
+        assert!(shown.starts_with("1  ONE\n2  two\n3  three\n"), "the terminal showed {shown:?}");
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
     }
 }
 
@@ -1746,7 +1874,7 @@ fn two_editors_share_a_document_across_machines() {
         temen_run::Backend::Bytecode,
         temen_run::Backend::Jit,
     ] {
-        let outs = two_machines(editors.clone(), backend, |_| Box::new(|_| {}));
+        let outs = two_machines(editors.clone(), backend, None, |_| Box::new(|_| {}));
         for out in &outs {
             assert_eq!(field(out, "doc "), "> hello world!", "{backend:?}: {out}");
             check_machine(backend, out);
