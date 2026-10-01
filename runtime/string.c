@@ -135,6 +135,10 @@ JaclVal jacl_str_slice(JaclVal s, JaclVal a, JaclVal b) {
 JaclVal jacl_str_concat(JaclVal a, JaclVal b) {
   if (jaclrt_is_error(a)) return a;
   if (jaclrt_is_error(b)) return b;
+  /* A non-string is concatenated as its string form, as interpolation does: read as a
+   * string, a number's bits were a pointer, and the copy faulted or ran off (#193). */
+  if (!jaclrt_is_string(a) && jaclrt_is_error(a = jacl_to_string(a))) return a;
+  if (!jaclrt_is_string(b) && jaclrt_is_error(b = jacl_to_string(b))) return b;
   uint32_t la = jacl_str_len(a), lb = jacl_str_len(b), n = la + lb;
   if (n <= 7) {
     char tmp[8];

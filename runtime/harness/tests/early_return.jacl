@@ -1,0 +1,31 @@
+##
+## return — from anywhere in a proc, not only its tail (#192); and a statement after an `if`
+## with no `else` is a statement of its own, even when it starts with an operator.
+##
+
+proc first {v} {
+  if [== $v 0] { return 10 }
+  + $v 1
+}
+proc in-loop {n} {
+  mut i 0
+  while $true {
+    if [== $i $n] { return [* $i 100] }
+    set i [+ $i 1]
+  }
+}
+proc bare {v} {
+  if $v { [return] }
+  "fell through"
+}
+proc caller {x} {
+  def r [if [== $x 0] { first 0 } else { 7 }]
+  + $r 1
+}
+print [first 0]
+print [first 5]
+print [in-loop 3]
+print [bare $true]
+print [bare $false]
+print [caller 0]
+print [caller 1]

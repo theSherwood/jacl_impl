@@ -544,6 +544,12 @@ JaclVal jacl_len(JaclVal v) {
   if (t == 0x1E) return jacl_fbuf_len(v);                         /* flat scalar buffer */
   return jaclrt_error();
 }
+/* `[byte-length S]` — the string's length in bytes (#194), what a byte offset into it counts. */
+JaclVal jacl_byte_len(JaclVal v) {
+  if (jaclrt_is_error(v)) return v;
+  if (!jaclrt_is_string(v)) return jaclrt_error();
+  return jaclrt_i32((int32_t)jacl_str_len(v));
+}
 /* JaclVal-uniform wrappers over ops whose native signatures take/return raw ints —
  * the codegen's builtin-dispatch ABI is (JaclVal args…) -> JaclVal throughout. */
 JaclVal jacl_vec_get_at(JaclVal v, JaclVal idx) {

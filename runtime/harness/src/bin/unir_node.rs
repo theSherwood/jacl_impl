@@ -2,19 +2,19 @@
 //! docs/UNIR_SERVICES.md):
 //!
 //! ```text
-//! unir_node --listen ADDR  [--jit] [EDITOR.jacl]     # machine 0: waits for machine 1
-//! unir_node --connect ADDR [--jit] [EDITOR.jacl]     # machine 1: joins machine 0
+//! unir_node --listen ADDR  [--dir DIR] [--engine E] [EDITOR.jacl]     # machine 0: waits for machine 1
+//! unir_node --connect ADDR [--dir DIR] [--engine E] [EDITOR.jacl]     # machine 1: joins machine 0
 //! ```
 //!
 //! Each runs unir's store vat in peer mode with a JACL editor (`tests/services/ed.jacl` unless
 //! another is named) as its client, reading the terminal a line at a time and printing to it as it
-//! goes. The two vats replicate ref `doc` over TCP, machine 1 merging what both type at once. A
-//! machine's run ends once both editors have quit; it then prints its report (its head's id and
-//! text, its editor's and puller's statuses, its senders'). The tree-walker runs it unless `--jit`
-//! asks for the JIT: there a child's short timed waits last ~20 ms each (temen#2012), and the
-//! JACL runtime's scheduler waits in 1 ms ticks, so an edit takes 110–150 ms against 30–40 ms on
-//! the tree-walker. The bytecode engine, which runs every vat on one thread, cannot serve a
-//! terminal that waits for a person.
+//! goes. The two vats replicate ref `doc` over TCP, machine 1 merging what both type at once. Each
+//! keeps its store in `DIR` (`unir-node-0` or `unir-node-1` in the current directory unless
+//! given), so the document is there when both run again (theSherwood/unir#86). A machine's run
+//! ends once both editors have quit; it then prints its report (its head's id and text, its
+//! editor's and puller's statuses, its senders'). temen's JIT runs it unless `--engine` names
+//! `tree-walk` or `bytecode`: an edit shown takes well under 10 ms there, against ~70 ms on the
+//! tree-walker and ~40 ms on the bytecode engine, for ~7 s more compiling at the start.
 
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
@@ -78,16 +78,25 @@ fn editor_image(path: &PathBuf) -> (temen_ir::Module, u8) {
 fn main() {
     let mut listen: Option<String> = None;
     let mut connect: Option<String> = None;
-    let mut jit = false;
+    let mut backend = temen_run::Backend::Jit;
+    let mut dir: Option<PathBuf> = None;
     let mut editor = PathBuf::from(ED_JACL);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--listen" => listen = Some(args.next().unwrap_or_else(|| die("--listen needs ADDR"))),
             "--connect" => connect = Some(args.next().unwrap_or_else(|| die("--connect needs ADDR"))),
-            "--jit" => jit = true,
+            "--dir" => dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--dir needs DIR")))),
+            "--engine" => {
+                backend = match args.next().as_deref() {
+                    Some("jit") => temen_run::Backend::Jit,
+                    Some("tree-walk") => temen_run::Backend::TreeWalk,
+                    Some("bytecode") => temen_run::Backend::Bytecode,
+                    _ => die("--engine needs jit, tree-walk or bytecode"),
+                }
+            }
             "-h" | "--help" => {
-                println!("usage: unir_node (--listen ADDR | --connect ADDR) [--jit] [EDITOR.jacl]");
+                println!("usage: unir_node (--listen ADDR | --connect ADDR) [--dir DIR] [--engine E] [EDITOR.jacl]");
                 return;
             }
             other => editor = PathBuf::from(other),
@@ -111,22 +120,37 @@ fn main() {
         }
         _ => die("give exactly one of --listen ADDR and --connect ADDR"),
     };
-    eprintln!("unir-node: connected. Type a line to add it; :i N, :c N, :d N, :p, :q.");
-    let backend = if jit { temen_run::Backend::Jit } else { temen_run::Backend::TreeWalk };
+    let dir = dir.unwrap_or_else(|| PathBuf::from(format!("unir-node-{}", link.role)));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| die(&format!("{}: {e}", dir.display())));
+    eprintln!(
+        "unir-node: connected; the store is in {}. Type a line to add it; :i N, :c N, :d N, :p, :q.",
+        dir.display()
+    );
+    // The terminal is read a line at a time on a thread of its own, so the editor's read never
+    // waits on it: with no line yet the source answers "nothing yet" (temen#2019), and the editor
+    // goes on showing the other machine's edits as they arrive (#195).
+    let (tx, lines) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || loop {
+        let mut line = String::new();
+        let n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+        if n == 0 || tx.send(line.into_bytes()).is_err() {
+            return;
+        }
+    });
+    let mut lines = Some(lines);
     let mut terminal = |h: &mut temen_interp::Host| {
         h.set_stdout_tee(Box::new(|b| {
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(b);
             let _ = out.flush();
         }));
-        h.set_stdin_source(Box::new(|| {
-            let mut line = String::new();
-            match std::io::stdin().lock().read_line(&mut line) {
-                Ok(_) => line.into_bytes(),
-                Err(_) => Vec::new(),
-            }
+        let lines = lines.take().expect("one run");
+        h.set_stdin_source(Box::new(move || match lines.try_recv() {
+            Ok(line) => Some(line),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
         }));
     };
     // The terminal saw everything as it was printed, the report included.
-    let _ = node::run(&images, link, backend, &mut terminal);
+    let _ = node::run(&images, link, backend, Some(&dir), &mut terminal);
 }

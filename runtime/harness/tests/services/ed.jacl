@@ -9,12 +9,13 @@
 ##   :c N TEXT     change line N to TEXT
 ##   :d N          delete line N
 ##   :p            show the document
-##   (empty line)  show the document if it changed
 ##   :q            quit (as does the end of input)
 ##
-## After each command it shows the document if either machine changed it since it last did. An
-## edit that loses a race with the other machine's is made again on the version that won, by the
-## same line number. Quitting makes ref `done`; replication ends once both editors have quit.
+## It shows the document whenever either machine changes it, while it waits for input (#195): it
+## follows `doc`, and waits on its terminal and the vat's events at once. An edit is made to the
+## version last shown, the one its user saw, and merged into `doc` (#196): a line number means the
+## line the user saw by it, wherever the other machine's edits have moved it since. Quitting makes
+## ref `~done`; replication ends once both editors have quit.
 ##
 
 ## The payload of reply REQ's variant KIND; any other reply fails the editor.
@@ -45,7 +46,7 @@ proc offset {ls, n} {
   mut at 0
   mut i 0
   while [< $i [- $n 1]] {
-    set at [+ $at [+ [length [vec-get $ls $i]] 1]]
+    set at [+ $at [+ [byte-length [vec-get $ls $i]] 1]]
     set i [+ $i 1]
   }
   $at
@@ -61,24 +62,38 @@ proc edit-of {ls, op, n, text} {
     def last [if [== $op "i"] { + $count 1 } else { $count }]
     if [|| [< $n 1] [> $n $last]] { $nil } else {
       def at [offset $ls $n]
-      def old [if [== $op "i"] { 0 } else { + [length [vec-get $ls [- $n 1]]] 1 }]
+      def old [if [== $op "i"] { 0 } else { + [byte-length [vec-get $ls [- $n 1]]] 1 }]
       def new [if [== $op "d"] { "" } else { concat $text "\n" }]
       map "at" $at "delete" $old "insert" $new
     }
   }
 }
 
-## Makes edit OP (see `edit-of`) to `doc` as one version; on a conflict, again on the version that
-## won. Whether line N existed.
-proc apply {s, op, n, text} {
-  mut head [ask $s [map "Head" "doc"] "Head"]
+## Makes edit OP (see `edit-of`) to version SEEN, the one its user saw, and merges it into `doc`:
+## committed on `~ed`, this editor's working ref (a session ref: it lives as long as this run),
+## moved to SEEN first, so the store's merge carries the edit past whatever `doc` took since.
+## Before the document's first version there is nothing to merge with: then it is committed to
+## `doc`, and if the other machine made one first, made again on that by the same line number.
+## Whether line N existed.
+proc apply {s, seen, op, n, text} {
+  mut base $seen
   mut result $nil
   while [== $result $nil] {
-    def edit [edit-of [doc-lines $s $head] $op $n $text]
+    def edit [edit-of [doc-lines $s $base] $op $n $text]
     if [== $edit $nil] { set result $false } else {
-      def r [service-call $s [map "Commit" [map "name" "doc" "base" $head "edits" [vec $edit]]]]
-      assert [not [error? $r]]
-      if [map-has $r "Version"] { set result $true } else { set head [map-get $r "Conflict"] }
+      if [== $base $nil] {
+        def r [service-call $s [map "Commit" [map "name" "doc" "base" $nil "edits" [vec $edit]]]]
+        assert [not [error? $r]]
+        if [map-has $r "Version"] { set result $true } else { set base [map-get $r "Conflict"] }
+      } else {
+        def mine [ask $s [map "Head" "~ed"] "Head"]
+        if [not [== $mine $base]] {
+          ask $s [map "Advance" [map "name" "~ed" "expected" $mine "to" $base]] "Version"
+        }
+        def v [ask $s [map "Commit" [map "name" "~ed" "base" $base "edits" [vec $edit]]] "Version"]
+        ask $s [map "Merge" [map "name" "doc" "theirs" $v]] "Version"
+        set result $true
+      }
     }
   }
   $result
@@ -114,20 +129,20 @@ proc number {s} {
   vec $n [slice $s [+ $i 1] [length $s]]
 }
 
-## Runs command LINE; whether to go on.
-proc command {s, line} {
+## Runs command LINE on version SEEN (the one last shown); whether to go on.
+proc command {s, seen, line} {
   if [|| [== [length $line] 0] [not [== [index $line 0] ":"]]] {
-    if [> [length $line] 0] { apply $s "a" 0 $line }
+    if [> [length $line] 0] { apply $s $seen "a" 0 $line }
     $true
   } else {
     def op [if [> [length $line] 1] { index $line 1 } else { "" }]
     if [== $op "q"] { $false } else {
-      if [== $op "p"] { show $s [ask $s [map "Head" "doc"] "Head"] } else {
+      if [== $op "p"] { show $s $seen } else {
         if [|| [== $op "i"] [|| [== $op "c"] [== $op "d"]]] {
           def arg [number [slice $line 3 [length $line]]]
           def n [vec-get $arg 0]
           if [== $n $nil] { print "? :$op needs a line number" } else {
-            if [not [apply $s $op $n [vec-get $arg 1]]] { print "? no line $n" }
+            if [not [apply $s $seen $op $n [vec-get $arg 1]]] { print "? no line $n" }
           }
         } else { print "? unknown command :$op" }
       }
@@ -136,25 +151,40 @@ proc command {s, line} {
   }
 }
 
+## Whether `doc` moved: takes every event the vat has queued, without waiting.
+proc moved {s} {
+  mut any $false
+  mut more $true
+  while $more {
+    if [== [service-event $s $false] $nil] { set more $false } else { set any $true }
+  }
+  $any
+}
+
 proc main {} {
   def s [service "store"]
   assert [not [error? $s]]
-  mut shown [ask $s [map "Head" "doc"] "Head"]
+  mut shown [ask $s [map "Follow" "doc"] "Head"]
   show $s $shown
   mut go $true
   while $go {
-    def line [read-line]
-    if [== $line $nil] { set go $false } else {
-      set go [command $s $line]
+    def line [try-read-line]
+    ## After a command, or when `doc` moved while nothing was typed: show it if it changed.
+    mut look $true
+    if [== $line $false] { set look [moved $s] } else {
+      if [== $line $nil] { set go $false } else { set go [command $s $shown $line] }
+    }
+    if [&& $go $look] {
       def head [ask $s [map "Head" "doc"] "Head"]
-      if [&& $go [not [== $head $shown]]] {
+      if [not [== $head $shown]] {
         print "--"
         show $s $head
         set shown $head
       }
     }
+    if [not $look] { sleep 0.01 }
   }
-  ask $s [map "Commit" [map "name" "done" "base" $nil "edits" [vec]]] "Version"
+  ask $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]] "Version"
   print "(waiting for the other machine to quit)"
   0
 }

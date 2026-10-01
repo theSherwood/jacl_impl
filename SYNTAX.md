@@ -1202,6 +1202,7 @@ print [buf-get $magic 1]                                 ; 69
 print [buf-len $magic]                                   ; 4 (compile-time fold)
 print [buf-string $bytes]                                ; a u8 buffer's bytes as a string
 def line [read-line]                                     ; the host stdin's next line; nil at its end
+def line [try-read-line]                                 ; the same without waiting: false if no whole line yet
 
 [buf-unchecked-get $magic $i]                            ; escape hatch — no bounds check
 [buf-unchecked-set $magic $i $v]

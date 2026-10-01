@@ -504,6 +504,7 @@ static IrVal compile_elem_pinned(Cx *cx, AstNode *elem, IrVal *acc);
  * that includes values that did not come from `compile_expr`: a literal's `i64.const`, or a
  * string literal's `jacl_str_new`, is just as block-local. Pin those with `pin_push`. */
 static IrVal compile_expr(Cx *cx, AstNode *node);   /* fwd */
+static IrVal compile_early_return(Cx *cx, AstNode *rv);   /* fwd: a nested `return` (#192) */
 static int compile_operands(Cx *cx, AstNode **args, uint32_t n, IrVal *out) {
   int mark = pin_mark(cx);
   int mv = cx->move_ok_here;   /* pinned siblings ⇒ the operands may move blocks too */
@@ -3953,15 +3954,14 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
    * generator is illegal (stream consumers discard it). A top-level bare `[return]`
    * as a block statement is intercepted by compile_tail's block loop (which ends the
    * body / exhausts the generator); reaching here means a nested/mid-expression
-   * position, where we mirror AST_RETURN's fallback: evaluate to the value (or nil). */
+   * position, which returns from the proc as AST_RETURN does (#192). */
   if (hid == HEAD_RETURN) {
     AstNode *rv = node->data.command.arg_count >= 1 ? node->data.command.args[0] : NULL;
     if (cx->cur_is_generator && rv) {
       cx_fail(cx, "cannot return a value from a generator (proc contains `yield`)");
       return 0;
     }
-    cx->move_ok = cx->move_ok_here;      /* pass-through: inherit this node's permission */
-    return rv ? compile_expr(cx, rv) : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    return compile_early_return(cx, rv);
   }
 
   /* `yield V` — suspend the current fiber, yielding V; result is the resume arg. */
@@ -5466,7 +5466,9 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_BUF_USET,   "jacl_arr_set_at", 3},
       {HEAD_BUF_LEN,    "jacl_len",        1},
       {HEAD_BUF_STRING, "jacl_fbuf_string", 1},
+      {HEAD_BYTE_LENGTH, "jacl_byte_len",  1},
       {HEAD_READ_LINE,  "jacl_read_line",  0},
+      {HEAD_TRY_READ_LINE, "jacl_try_read_line", 0},
       {HEAD_SLEEP,      "jacl_sleep",      1},
       {HEAD_ATOM,       "jacl_atom_new",   1},
       {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},
@@ -5758,13 +5760,9 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
     case AST_RETURN:
-      /* Tail-position return: evaluate to the value; the proc wraps the body value in
-       * a single `return`. Early/mid-block return (out of loops) is not yet supported. */
-      if (node->data.return_stmt.value) {
-        cx->move_ok = cx->move_ok_here;   /* pass-through: inherit this node's permission */
-        return compile_expr(cx, node->data.return_stmt.value);
-      }
-      return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+      /* A return compile_tail did not take: one nested in an if, a loop or an expression.
+       * It returns from the proc here (#192). */
+      return compile_early_return(cx, node->data.return_stmt.value);
 
     case AST_LIT_STRING:
       return compile_string_literal(cx, node->data.lit_string.value, node->data.lit_string.length);
@@ -5890,6 +5888,22 @@ static void emit_return_pair(Cx *cx, IrVal raw, IrVal err) {
  * the slow half of the convention — the fast half is compile_tail's typed path below, which
  * never builds the tagged word at all. Branchless: a select via a 0/~0 mask, because the
  * flagged case is rare and a branch here would end the block for no gain. */
+static void emit_return_value(Cx *cx, IrVal v);
+
+/* A `return` out of the middle of the proc (#192): one nested in an if, a loop or an
+ * expression, which compile_tail never sees. Returns `rv` (nil if none) from the proc there,
+ * then goes on emitting into an unreachable block of the current frame's shape, as
+ * break/continue do, so an enclosing if/loop join still terminates normally. */
+static IrVal compile_early_return(Cx *cx, AstNode *rv) {
+  cx->move_ok = 1;   /* consumed right here by the return */
+  IrVal v = rv ? compile_expr(cx, rv) : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  if (cx->failed) return 0;
+  emit_return_value(cx, v);
+  IrBlock dead = new_i64_block(cx, frame_width(cx));
+  enter_frame_block(cx, dead);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+
 static void emit_return_value(Cx *cx, IrVal v) {
   if (cx->ret_raw == REP_TAGGED) {
     IrVal r[] = {v};

@@ -1,0 +1,8 @@
+##
+## byte-length — a string's length in bytes (#194): what a byte offset into it counts.
+##
+
+print [byte-length "hello"]
+print [byte-length "héllo"]
+print [byte-length ""]
+print [error? [byte-length 5]]
