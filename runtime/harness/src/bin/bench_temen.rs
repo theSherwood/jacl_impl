@@ -96,6 +96,7 @@ fn build_instance(
         .map_err(|e| format!("powerbox: {e}"))?;
     let imports = temen_run::Imports::new()
         .provide("write", temen_run::HostCap::stdout())
+        .provide("read", temen_run::HostCap::stdin())
         .provide("exit", temen_run::HostCap::exit())
         .provide("stdin", temen_run::HostCap::stdin())
         // Channels create Unir edge regions (AddressSpace op 5; docs/UNIR_CHANNELS.md).

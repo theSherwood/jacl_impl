@@ -77,6 +77,29 @@ host grants the connections as `link.in` and `link.out`, host procedures that wr
 one, and `links`, one that reads whichever has bytes; and `entropy`, 64 random bits, from which each
 vat draws its session source. Replication stops once each machine's editor has made ref `done`, and
 each machine reports its head's id and text, its editor's and puller's statuses, and its senders'.
+The editor also gets the vat's stdin: whatever follows the command on it is the editor's to read
+(`[read-line]`). `runtime/harness/src/node.rs` is that host, shared by the tests and `unir_node`.
+
+## Two people, two terminals
+
+```
+cargo run --release --bin unir_node -- --listen 127.0.0.1:4000     # one terminal: machine 0
+cargo run --release --bin unir_node -- --connect 127.0.0.1:4000    # another, or another host
+```
+
+(from `runtime/harness`). Each runs the vat in peer mode with `tests/services/ed.jacl`, or the JACL
+editor named after the flags, reading its terminal a line at a time. In `ed.jacl`, a line is
+appended as typed; `:i N TEXT` inserts before line N, `:c N TEXT` changes it, `:d N` deletes it, `:p`
+shows the document, and `:q` (or end of input) quits. After each command it shows the document if
+either machine changed it, so pressing Enter shows what the other person typed. An edit that loses a
+race is made again on the version that won, by the same line number. A machine's run ends once both
+editors have quit.
+
+It runs on the tree-walker: on the JIT a child's short timed waits last ~20 ms each
+(theSherwood/temen#2012) and the JACL scheduler waits in 1 ms ticks, so an edit takes 110–150 ms
+against 30–40 ms (`--jit` runs it there anyway). Not on the bytecode engine, which runs every vat on
+one thread: an editor reading its terminal starves the vats that replicate. The document lives in
+memory: when both machines have quit, it is gone.
 
 `runtime/harness/tests/services/editor.jacl` is an editor over it, run twice on one store by
 `an_editor_keeps_its_document_in_the_store_vat`: it types, undoes, redoes, branches and saves, and
@@ -88,6 +111,8 @@ still holds the first version of the file the second rewrote.
 `runtime/harness/tests/services/pair.jacl` is one of two editors on one document, run by
 `two_editors_share_a_document_across_machines` on two TEMEN instances joined by loopback TCP: they
 take turns typing, then type at once, and both machines end at the same version, `"> hello world!"`.
+`two_people_edit_one_document_from_two_machines` drives `ed.jacl` on both machines through scripted
+terminals, each waiting to see the other's edits before its next.
 
 The unir unit allocates through `unir_host_alloc` (`runtime/chan_unir.c`), a pool of size classes up
 to 64 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed

@@ -156,6 +156,9 @@ typedef enum {
   /* A byte buffer as a string */
   HEAD_BUF_STRING,
 
+  /* A line of the host's stdin */
+  HEAD_READ_LINE,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -306,6 +309,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "defstruct", 9) == 0) return HEAD_DEFSTRUCT;
       if (memcmp(s, "ptr-deref", 9) == 0) return HEAD_PTR_DEREF;
       if (memcmp(s, "read-file", 9) == 0) return HEAD_READ_FILE;
+      if (memcmp(s, "read-line", 9) == 0) return HEAD_READ_LINE;
       return HEAD_NONE;
     case 10:
       if (memcmp(s, "vec-concat", 10) == 0) return HEAD_VEC_CONCAT;

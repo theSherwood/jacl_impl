@@ -1201,6 +1201,7 @@ print [buf-get $magic 1]                                 ; 69
 [buf-set $magic 0 0xff]                                  ; bounds-checked write
 print [buf-len $magic]                                   ; 4 (compile-time fold)
 print [buf-string $bytes]                                ; a u8 buffer's bytes as a string
+def line [read-line]                                     ; the host stdin's next line; nil at its end
 
 [buf-unchecked-get $magic $i]                            ; escape hatch — no bounds check
 [buf-unchecked-set $magic $i $v]

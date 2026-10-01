@@ -733,6 +733,9 @@ typedef enum {
   /* A byte buffer as a string */
   HEAD_BUF_STRING,
 
+  /* A line of the host's stdin */
+  HEAD_READ_LINE,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 

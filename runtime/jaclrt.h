@@ -369,6 +369,7 @@ JaclVal jacl_tvec_mark(JaclVal v);                 /* re-tag a vec as typed [Vec
 JaclVal jacl_global_get(JaclVal name);             /* module global read */
 JaclVal jacl_global_set(JaclVal name, JaclVal v);  /* module global write */
 JaclVal jacl_read_file(JaclVal path);                     /* read-file (cap or guest VFS) */
+JaclVal jacl_read_line(void);                             /* read-line: the host stdin's next line */
 JaclVal jacl_write_file(JaclVal content, JaclVal path);   /* write-file */
 JaclVal jacl_append_file(JaclVal content, JaclVal path);  /* append-file */
 JaclVal jacl_delete_file(JaclVal path);                   /* delete-file: nil, or error on missing */

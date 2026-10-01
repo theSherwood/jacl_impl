@@ -1,0 +1,13 @@
+##
+## read-line — the host stdin a line at a time (no newline, a trailing CR dropped), nil at its end.
+## Prints each line it reads with its number, then how many there were.
+##
+
+mut n 0
+mut line [read-line]
+while [not [== $line $nil]] {
+  set n [+ $n 1]
+  print "$n: $line"
+  set line [read-line]
+}
+print "lines: $n"
