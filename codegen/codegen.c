@@ -5466,6 +5466,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_BUF_USET,   "jacl_arr_set_at", 3},
       {HEAD_BUF_LEN,    "jacl_len",        1},
       {HEAD_BUF_STRING, "jacl_fbuf_string", 1},
+      {HEAD_READ_LINE,  "jacl_read_line",  0},
       {HEAD_SLEEP,      "jacl_sleep",      1},
       {HEAD_ATOM,       "jacl_atom_new",   1},
       {HEAD_ATOM_Q,     "jacl_is_atom_v",  1},

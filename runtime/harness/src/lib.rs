@@ -22,6 +22,10 @@ use temen_jit::JitOutcome;
 /// in-process, for the native frontend's `JACL_STAGE_ON_TEMEN` path.
 pub mod stage_ffi;
 
+/// One of two machines editing one document over TCP: unir's store vat in peer mode, its editor a
+/// JACL program (`unir_node`).
+pub mod node;
+
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 /// Decode the emit driver's default output — a v9 temen-encode **object** (`irb_to_encoded`).
@@ -88,6 +92,7 @@ fn compile_runtime_with_unir() -> PathBuf {
         .status()
         .unwrap_or_else(|e| panic!("spawn {llvm_link} (LLVM 21+ llvm-link; set LLVM_LINK): {e}"));
     assert!(status.success(), "{llvm_link} failed to link the unir unit");
+    let _ = std::fs::remove_file(&c_ll);
     linked
 }
 
@@ -99,7 +104,10 @@ fn compile_runtime_with_unir() -> PathBuf {
 /// in-process analogue of `runtime/build.sh`'s `clang … | temen-llvm-translate`.
 pub fn translate_runtime() -> temen_llvm::Translated {
     let ll = compile_runtime_with_unir();
-    temen_llvm::translate_ll_path(&ll).expect("temen-llvm: translate runtime")
+    let t = temen_llvm::translate_ll_path(&ll).expect("temen-llvm: translate runtime");
+    // Each is ~6 MB, written per call: left behind, a test suite's runs fill the disk.
+    let _ = std::fs::remove_file(&ll);
+    t
     // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
     // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
     // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call

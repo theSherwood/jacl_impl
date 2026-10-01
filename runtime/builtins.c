@@ -1013,17 +1013,18 @@ JaclVal jacl_to_cast(JaclVal v, JaclVal tname) {
   return jacl_wide_new(tidx, x);           /* explicit widening keeps the form asked for */
 }
 
-/* [lines S] — split a string on newlines into a vector of strings. */
+/* [lines S] — split a string on newlines into a vector of strings. Reads the string's bytes in
+ * place, so a string of any length splits whole: the GC does not move them, and `s` stays a root
+ * across each allocation because its bytes are looked up again after it. */
 JaclVal jacl_lines(JaclVal s) {
   if (jaclrt_is_error(s)) return s;
   if (!jaclrt_is_string(s)) return jaclrt_error();
-  char buf[2048];
+  char inl[8];
   uint32_t len = jacl_str_len(s);
-  if (len > sizeof buf - 1) len = sizeof buf - 1;
-  jacl_str_bytes(s, buf, sizeof buf);
   JaclVal out = jacl_vec_empty();
   uint32_t start = 0;
   for (uint32_t i = 0; i <= len; i++) {
+    const char *buf = str_bytes_at(s, inl);
     if (i == len || buf[i] == '\n') {
       uint32_t end = i;
       if (end > start && buf[end - 1] == '\r') end--;   /* strip a trailing CR (CRLF) */

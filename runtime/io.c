@@ -12,6 +12,8 @@
 
 /* temen-llvm libc shim: lowers to Stream.write on the stashed stdout handle. */
 int write(int fd, const char *buf, long n);
+/* ... and to Stream.read on the stdin handle (the "stdin" grant, else the first stream granted). */
+long read(int fd, void *buf, long n);
 
 /* The value's 5-bit type index behind an OPAQUE boundary. Without this, clang reassociates
  * a cascade of `jaclrt_type_index(v) == K` tests into a single `switch (v & TYPE_MASK)`
@@ -61,6 +63,26 @@ static int jacl_vfs_parent_ok(JaclVal path) {
 /* `[read-file PATH]` — the file's contents, or an error value on a missing file. With an
  * embedder-granted "fs" capability the read goes through real cap ops (fscap.c); without
  * one the pure-guest VFS map serves — same observable semantics either way. */
+/* `[read-line]` — the host stdin's next line, without its newline; nil at end of input. A line
+ * longer than the buffer keeps its first JACL_LINE_MAX bytes. Reads a byte at a time, so it never
+ * consumes past the line: whatever reads stdin next starts at the following one. */
+#define JACL_LINE_MAX 4096
+JaclVal jacl_read_line(void) {
+  char buf[JACL_LINE_MAX];
+  uint32_t n = 0;
+  int any = 0;
+  for (;;) {
+    char c;
+    if (read(0, &c, 1) != 1) break;
+    any = 1;
+    if (c == '\n') break;
+    if (n < JACL_LINE_MAX) buf[n++] = c;
+  }
+  if (!any) return JACL_NIL;
+  if (n && buf[n - 1] == '\r') n--;
+  return jacl_str_new(buf, n);
+}
+
 JaclVal jacl_read_file(JaclVal path) {
   if (jaclrt_is_error(path)) return path;
   if (!jaclrt_is_string(path)) return jaclrt_error();
