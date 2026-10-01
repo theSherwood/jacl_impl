@@ -94,11 +94,13 @@ fn sink(sock: Arc<TcpStream>) -> HostCap {
 }
 
 /// Both connections' incoming directions, one host procedure a reader thread per socket feeds:
-/// op 0 reads up to `(ptr, len)` into the caller's window, waiting for bytes when `wait`, and
-/// returns `(connection << 32) | count`, a count of 0 at that connection's close; -2 if nothing is
-/// queued and it may not wait (the bytecode engine runs every vat on the caller's thread, so
-/// there the guest polls); -1 on failure.
-fn links(socks: [Arc<TcpStream>; 2], wait: bool) -> HostCap {
+/// op 0 reads up to `(ptr, len)` into the caller's window and returns `(connection << 32) |
+/// count`, a count of 0 at that connection's close; -2 if nothing is queued yet, and the guest
+/// polls; -1 on failure. It never waits: a host procedure runs holding the root's host lock, which
+/// the vat's senders need to write, so a root waiting here for the other machine's bytes could
+/// keep its own from ever being sent. Both machines did, at the end of replication, given few
+/// enough CPUs (two).
+fn links(socks: [Arc<TcpStream>; 2]) -> HostCap {
     let (tx, rx) = mpsc::channel::<(usize, Vec<u8>)>();
     for (i, sock) in socks.into_iter().enumerate() {
         let tx = tx.clone();
@@ -120,14 +122,9 @@ fn links(socks: [Arc<TcpStream>; 2], wait: bool) -> HostCap {
         let proc: temen_interp::HostProc = Box::new(move |_, args, mem, _| {
             let (Some(mem), [ptr, len, ..]) = (mem, args) else { return Ok(vec![-1]) };
             if rest.is_none() {
-                let q = queue.lock().expect("the readers' queue");
-                let got = if wait {
-                    q.recv().ok()
-                } else {
-                    match q.try_recv() {
-                        Err(TryRecvError::Empty) => return Ok(vec![-2]),
-                        r => r.ok(),
-                    }
+                let got = match queue.lock().expect("the readers' queue").try_recv() {
+                    Err(TryRecvError::Empty) => return Ok(vec![-2]),
+                    r => r.ok(),
                 };
                 let Some(d) = got else { return Ok(vec![-1]) };
                 rest = Some((d, 0));
@@ -194,7 +191,7 @@ pub fn run(
     let mut caps = vec![
         ("link.in", sink(Arc::clone(&link.inn))),
         ("link.out", sink(Arc::clone(&link.out))),
-        ("links", links([Arc::clone(&link.inn), Arc::clone(&link.out)], backend != Backend::Bytecode)),
+        ("links", links([Arc::clone(&link.inn), Arc::clone(&link.out)])),
         ("entropy", entropy()),
     ];
     if let Some(dir) = dir {
