@@ -1682,6 +1682,9 @@ enum Key {
     /// Holds the editor in its read, as a terminal that blocks, until this appears on the other
     /// machine's terminal: what this one shows stays as it was meanwhile.
     Hold(&'static str),
+    /// Types nothing until this appears on the other machine's terminal. Unlike [`Key::Hold`] the
+    /// machine runs meanwhile, as the other one may need it to (#197).
+    Seen(&'static str),
 }
 
 type Shown = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
@@ -1724,6 +1727,12 @@ fn ed_session(
                         // without a line from here (#195).
                         None => return None,
                     },
+                    Some(Key::Seen(want)) => {
+                        if !after(&other, 0).contains(want) {
+                            return None;
+                        }
+                        keys.pop_front();
+                    }
                     Some(Key::Hold(want)) => {
                         while !after(&other, 0).contains(want) {
                             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1743,7 +1752,7 @@ fn two_people_edit_one_document_from_two_machines() {
     // it, each waiting to see the other's edits arrive, which the editor shows without being sent
     // a line (#195). They append, insert, change and delete lines in turn, then edit at once; both
     // machines end with the same document.
-    use Key::{Await, Line};
+    use Key::{Await, Line, Seen};
     let scripts = [
         vec![
             Await("(empty)"),
@@ -1755,6 +1764,9 @@ fn two_people_edit_one_document_from_two_machines() {
             Await("3  TWO"),
             Line(":d 2"),
             Await("--\n1  zero\n2  TWO\n"),
+            // Until machine 1 shows the delete: its editor shows only the head, so an insert
+            // arriving with the delete would skip the view it waits for (#197).
+            Seen("--\n1  zero\n2  TWO\n"),
             Line(":i 1 top"),
             Await("--\n1  top\n2  zero\n3  TWO\n4  bottom\n"),
             Line(":q"),
