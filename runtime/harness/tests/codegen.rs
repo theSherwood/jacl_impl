@@ -1403,7 +1403,7 @@ fn pipelines_run_on_temen() {
     // tests/pipelines/ is linked as a detached child image and granted as `bin.<name>`, with an
     // Instantiator to spawn them and a Budget to pay for their windows. Self-checking like the tour.
     // On every engine: Cranelift runs a stage's fibers and threads since temen#1469.
-    let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail", "forever", "sink", "envdump", "value", "nums", "double"]
+    let stages: Vec<(String, temen_ir::Module)> = ["gen", "upcase", "fail", "forever", "sink", "spin", "envdump", "value", "nums", "double"]
         .iter()
         .map(|name| {
             let path = format!("{STAGES_DIR}/{name}.jacl");

@@ -1,0 +1,13 @@
+##
+## spin — counts forever and never touches its stdio: a stage that learns of nothing through its
+## edges, so only a kill ends it (theSherwood/unir#35; job control's tests in pipelines.jacl).
+##
+
+proc main {} {
+  mut k 0
+  while $true {
+    set k [+ $k 1]
+  }
+}
+
+main

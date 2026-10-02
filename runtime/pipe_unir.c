@@ -429,11 +429,14 @@ static JaclVal pipe_failure(JaclPipe *p) {
   return p->cause >= 0 ? chan_cause_err(p->cause) : JACL_NIL;
 }
 
-/* Cancels a running pipeline: severs every edge end this vat holds with `cancelled`, so the last
- * stage fails its next write and each stage's end ends the one before it, and reaps the stages. */
+/* Cancels a running pipeline: severs every edge end this vat holds with `cancelled`, so each stage's
+ * peers see Severed(cancelled) (unir §10), then kills the stages, which reaches one that never
+ * touches its edges (a loop, a sleep, a read of an idle upstream; unir decision 73), and reaps
+ * them. */
 static void pipe_cancel(JaclPipe *p) {
   unir_consumer_sever(p->outc, 7 /* cancelled */);
   for (int32_t i = 0; i < p->spawned; i++) unir_consumer_sever(p->errc[i], 7);
+  for (int32_t i = 0; i < p->spawned; i++) unir_kill(jacl_unir_vat, p->child[i]);
   p->cause = 7;
   pipe_finish(p);
 }

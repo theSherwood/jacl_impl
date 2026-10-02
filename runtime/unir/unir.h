@@ -69,8 +69,14 @@ int64_t unir_spawn(unir_vat *vat, int64_t module, uint32_t size_log2, const uint
                    uint64_t args_len, const unir_grant *grants, uint32_t grants_n,
                    uint64_t fuel);
 
-/* Waits for a child and returns its status; a negative status reads as an error code. */
+/* Waits for a child and returns its status; a negative status reads as an error code. A child
+ * that ran out of fuel, trapped or was killed joins as UNIR_ESUBSTRATE. */
 int64_t unir_join(unir_vat *vat, int64_t child);
+
+/* Ends a child and every vat it spawned, running or blocked; one that has ended is unaffected.
+ * Sever its edges with `cancelled` first, since peers learn only through their edges (unir §10),
+ * then join it. Returns 0. */
+int64_t unir_kill(unir_vat *vat, int64_t child);
 
 /* The region length an edge of this geometry needs; UNIR_EGEOMETRY if invalid. */
 int64_t unir_edge_len(uint32_t capacity, uint32_t slot_size);

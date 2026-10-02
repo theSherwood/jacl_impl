@@ -24,9 +24,7 @@ This note maps them onto vats and edges, and names the pieces TEMEN and unir sti
 - A lone `!cmd` the vat holds no program for runs a host subprocess through the `exec` capability
   (`jacl_exec_capture`) and returns its stdout as a string.
 - `!a | !b &` is `spawn {!a | !b}`: its Future is the Job, and awaiting it gives the pipeline's value.
-  `cancel`, `suspend` and `resume` act on any Future, as "Background and job control" describes. A
-  stage that never touches its stdio is not cancellable, and a cancel of its pipeline waits on it
-  (theSherwood/unir#35).
+  `cancel`, `suspend` and `resume` act on any Future, as "Background and job control" describes.
 
 ## Design
 
@@ -126,7 +124,7 @@ The Future a spawn returns is the handle to the running pipeline. There is no se
 | operation | on a task running a pipeline | on any other task |
 |---|---|---|
 | `await $f` | the pipeline's value (its last program's), or the pipefail error | the task's value |
-| `cancel $f` | severs every end the task holds with `cancelled`, reaps the stages, and ends the task; awaiting gives the `cancelled` error | the task ends with the `cancelled` error at its next job-control point |
+| `cancel $f` | severs every end the task holds with `cancelled`, kills and reaps the stages, and ends the task; awaiting gives the `cancelled` error | the task ends with the `cancelled` error at its next job-control point |
 | `suspend $f` | sets the credit limit on the ends the task reads to what it has already granted (`unir_consumer_suspend`) and holds the task: the stages fill their rings and park, by backpressure, with no signals | the task is held at its next job-control point |
 | `resume $f` | lifts the limit; the stages continue, and no byte is lost or repeated | the task continues |
 
@@ -148,8 +146,9 @@ it:
 - a read of its stdin fails (`unir_producer_poll`), so a stage that only reads ends too.
 
 A stage that ends cancels its stdin, which ends the stage before it the same way. A stage that never
-touches its stdio (a loop, a long sleep) is out of reach, and the shell's reap waits for it; a
-parent-side kill is theSherwood/unir#35.
+touches its stdio (a loop, a long sleep, a read of an idle upstream) learns nothing from its edges,
+so `cancel` also kills every stage once it has severed (`unir_kill`, unir decision 73), and then
+reaps them.
 
 A stage that exits normally completes its output, and the next stage reads to the end and exits. A
 stage that fails severs its output with `io-error`, so the next stage fails too (pipefail). These
@@ -258,6 +257,8 @@ they are an upstream PR, filed from this note.
     the enclosing output.
   - `!forever | !sink &`, then `cancel`, where `forever` writes until a write fails and `sink` only
     reads: both stages end and are reaped, and awaiting gives the `cancelled` error.
+  - `!spin | !sink &`, then `cancel`, where `spin` loops without touching its stdio and `sink`
+    waits on it: both are killed and reaped, and awaiting gives the `cancelled` error.
   - `spawn {!forever | !upcase | tally $n}`, then `suspend` and `resume`, where `tally` is a JACL
     stage that checks every byte is the next letter and keeps the count in the atom `$n`: while
     suspended, `$n` stays fixed; after resuming it grows, with nothing lost or repeated.
@@ -280,8 +281,8 @@ they are an upstream PR, filed from this note.
 4. Values and outputs, in this order: `!cmd → JACL` wiring (the last output read as a channel) and
    `collect`; the enclosing output (statement and value position, a stage's own output inside a
    stage); the exit record as a program's value; `&` as `spawn`; `cancel`, `suspend` and `resume`
-   on Futures, carried out on edges for a task running a pipeline. **Done**, but for `duration`
-   and a kill for stages that never touch their edges (theSherwood/unir#35). The pipeline tests
+   on Futures, carried out on edges for a task running a pipeline, with a kill for stages that
+   never touch their edges (theSherwood/unir#35). **Done**, but for `duration`. The pipeline tests
    read the output with `| collect` and a JACL stage, check what reaches the enclosing output, and
    cancel, suspend and resume running pipelines.
 5. Then: channel ends passed by move; JACL values feeding a first stage's stdin; `$bin` as a map

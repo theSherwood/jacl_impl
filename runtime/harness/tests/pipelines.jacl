@@ -156,6 +156,13 @@ proc main {} {
   assert [== [error-val [await $k]] "cancelled"]
   assert [== [cancel $k] $false]
 
+  # A stage that never touches its stdio learns nothing from the sever, so cancel kills each stage
+  # too (theSherwood/unir#35): `spin` loops, and `sink` waits on an upstream that never writes.
+  def killed {!spin | !sink &}
+  sleep 0.02
+  assert [cancel $killed]
+  assert [== [error-val [await $killed]] "cancelled"]
+
   # Suspend holds a pipeline under backpressure and resume releases it, with nothing lost or
   # repeated (tally checks every byte).
   def n [atom 0]
