@@ -9,6 +9,9 @@
  * struct by field name, `[map Variant payload]` or the variant's name for a sum, a string for
  * text or bytes), and returns its reply, converted back; [service-event S WAIT] returns the next
  * event the service sent, as `[map name value]`, or nil if there is none (and WAIT is false).
+ * A connection that is not request and reply, such as a pane (theSherwood/unir#102), is the same
+ * session: [service-send S [map NAME V]] writes V on the entry named NAME and waits for nothing,
+ * and every entry the other end writes comes as an event.
  * A value that does not fit the service's type is an error value, and nothing is sent.
  *
  * A session is one request at a time from one fiber. Services a program leaves open close when
@@ -92,6 +95,17 @@ JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
   if (!s) return chan_err("service-event: not an open service");
   int w = !jaclrt_is_nil(wait) && !(jaclrt_is_bool(wait) && !jaclrt_as_bool(wait));
   return service_result(s, unir_service_event(jacl_unir_vat, s, w ? 1u : 0u), "service-event");
+}
+
+/* [service-send S [map NAME V]]: V as a message of the entry named NAME; nil, or an error. */
+JaclVal jacl_service_send(JaclVal svc, JaclVal msg) {
+  unir_service *s = service_of(svc);
+  if (!s) return chan_err("service-send: not an open service");
+  uint8_t buf[JACL_SERVICE_SLOT];
+  JaclVal err = JACL_NIL;
+  uint64_t n = jv_encode_into(msg, buf, sizeof buf, &err);
+  if (!n) return err;
+  return service_result(s, unir_service_send(jacl_unir_vat, s, buf, n), "service-send");
 }
 
 /* At exit: close the sessions still open, so each service drops this client. */

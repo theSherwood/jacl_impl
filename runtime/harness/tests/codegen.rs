@@ -1929,3 +1929,117 @@ fn syntax_tour_runs_clean_on_temen() {
         String::from_utf8_lossy(&stdout)
     );
 }
+
+const PANE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/pane.jacl");
+
+/// The scripted terminal for `pane.jacl`: each step's keys, typed once the terminal has been sent
+/// the step's marker at least that many times (what the step before it shows), so the script
+/// follows the program rather than a clock.
+const PANE_SCRIPT: &[(&str, &str, usize)] = &[
+    ("add f0 use b\r", "> ", 1),
+    ("ls\r", "added f0", 1),
+    ("watch\r", "file  bytes", 1),
+    ("add f1 def b\r", "dangling: f0 b", 1),
+    // Ctrl-Z, once the view has changed in the foreground.
+    ("\x1a", "dangling: none", 1),
+    ("add f1 use c\r", "job 1 stopped", 1),
+    ("fg\r", "added f1", 2),
+    ("quit\r", "dangling: f1 c", 1),
+];
+
+#[test]
+fn a_jacl_program_runs_in_a_terminal_pane() {
+    // Stage 5's exit on the JACL side (#203; theSherwood/unir#79, #102): a JACL program is the
+    // client of a pane over a live terminal, which only unir's terminal vat holds. Its keys are
+    // echoed into its input line; `ls` shows typed rows that the driver aligns (a bold header,
+    // numbers to the right); `watch` shows unir's dangling view live as files change; Ctrl-Z moves
+    // that job to the background, where what it shows waits until `fg`.
+    use jacl_runtime_harness::pane;
+    use std::sync::{Arc, Mutex};
+    let (client, log2) = child_image(PANE_JACL, "");
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("jacl_pane_{}_{backend:?}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let shown = Arc::new(Mutex::new(String::new()));
+        let (tee, keys) = (Arc::clone(&shown), Arc::clone(&shown));
+        let (client, dir2) = (client.clone(), dir.clone());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut step = 0;
+            let mut terminal = |h: &mut temen_interp::Host| {
+                let tee = Arc::clone(&tee);
+                h.set_stdout_tee(Box::new(move |b| {
+                    tee.lock().unwrap().push_str(&String::from_utf8_lossy(b))
+                }));
+                let keys = Arc::clone(&keys);
+                h.set_stdin_source(Box::new(move || {
+                    let (typed, marker, times) = *PANE_SCRIPT.get(step)?;
+                    if keys.lock().unwrap().matches(marker).count() < times {
+                        return None;
+                    }
+                    step += 1;
+                    Some(typed.as_bytes().to_vec())
+                }));
+            };
+            let size = pane::Size { rows: 24, cols: 80 };
+            let out = pane::run(&client, log2, backend, &dir2, size, &mut terminal);
+            let _ = done.send(out);
+        });
+        let out = finished
+            .recv_timeout(std::time::Duration::from_secs(600))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{backend:?}: the pane never finished; it showed {:?}",
+                    shown.lock().unwrap()
+                )
+            });
+        let _ = std::fs::remove_dir_all(&dir);
+        let status = out
+            .lines()
+            .rev()
+            .find_map(|l| l.trim().strip_prefix("shell [terminal, view, client] ["))
+            .and_then(|l| l.strip_suffix(']'))
+            .map(|l| {
+                l.split(", ")
+                    .map(|n| n.parse::<i64>().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| panic!("{backend:?}: no report in {out:?}"));
+        assert_eq!(
+            status[..2],
+            [0, 0],
+            "{backend:?}: the terminal or the view failed: {out:?}"
+        );
+        assert!(
+            !is_jacl_error(status[2]) && status[2] != -1,
+            "{backend:?}: pane.jacl failed: {out:?}"
+        );
+        let at = |s: &str| {
+            out.find(s)
+                .unwrap_or_else(|| panic!("{backend:?}: no {s:?} in {out:?}"))
+        };
+        // Keys echoed into the input line as they were typed.
+        at("\r\x1b[K> add f0 use");
+        // The listing, as the driver renders typed rows: the header bold, the size right-aligned.
+        at("\x1b[1mfile  bytes\x1b[0m\r\n\r\x1b[Kf0        6\r\n");
+        // The view, live: the definition added in the foreground shows at once.
+        assert!(at("dangling: f0 b") < at("dangling: none"), "{backend:?}");
+        // In the background the job's output waits for `fg`.
+        assert!(at("job 1 stopped") < at("job 1 continued"), "{backend:?}");
+        assert!(
+            at("job 1 continued") < at("dangling: f1 c"),
+            "{backend:?}: shown while stopped: {out:?}"
+        );
+        // Nothing but the driver's own sequences reached the terminal.
+        assert!(
+            !out.contains("\x1b]") && !out.contains("\x1b[2J"),
+            "{backend:?}"
+        );
+    }
+}

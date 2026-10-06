@@ -162,8 +162,13 @@ unir_service *unir_service_open(unir_vat *vat, const uint8_t *name, uint64_t nam
  * value frame, which unir_service_result copies out. UNIR_EMISMATCH: the request does not fit
  * the service's request type (nothing was sent). Events that arrive meanwhile are kept. */
 int64_t unir_service_call(unir_vat *vat, unir_service *s, const uint8_t *request, uint64_t len);
+/* Sends `message`, a value frame `{name: value}`, on the catalog entry named `name`, waiting
+ * for nothing: a connection that is not request and reply (a pane's content). 0, or
+ * UNIR_EMISMATCH if it is not one entry's name and a value of its type (nothing was sent). */
+int64_t unir_service_send(unir_vat *vat, unir_service *s, const uint8_t *message, uint64_t len);
 /* The next event, `{name: value}`: kept, or the next to arrive, waiting for it when `wait`;
- * its length as a value frame, 0 if there is none, or an error. */
+ * its length as a value frame, 0 if there is none, or an error. A session that never called
+ * hears entry 1 as an event too. */
 int64_t unir_service_event(unir_vat *vat, unir_service *s, uint32_t wait);
 /* Copies the last result out; its length, or UNIR_ETOO_SMALL. */
 int64_t unir_service_result(const unir_service *s, uint8_t *out, uint64_t cap);

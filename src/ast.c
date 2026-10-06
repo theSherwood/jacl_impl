@@ -151,7 +151,7 @@ typedef enum {
   HEAD_WITH_ENV,
 
   /* Services (docs/UNIR_SERVICES.md) */
-  HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT,
+  HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT, HEAD_SERVICE_SEND,
 
   /* A byte buffer as a string */
   HEAD_BUF_STRING,
@@ -339,6 +339,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-error", 12) == 0) return HEAD_SYNTAX_ERROR;
       if (memcmp(s, "file-exists?", 12) == 0) return HEAD_FILE_EXISTS;
       if (memcmp(s, "service-call", 12) == 0) return HEAD_SERVICE_CALL;
+      if (memcmp(s, "service-send", 12) == 0) return HEAD_SERVICE_SEND;
       return HEAD_NONE;
     case 13:
       if (memcmp(s, "service-event", 13) == 0) return HEAD_SERVICE_EVENT;
