@@ -48,6 +48,25 @@ fn tcp(s: TcpStream) -> std::io::Result<Arc<TcpStream>> {
     Ok(Arc::new(s))
 }
 
+/// Whether `addr` may be listened on or connected to: only loopback, unless `allow_remote`
+/// (theSherwood/unir#82, decision 83). Links are unauthenticated and unencrypted until Unir's
+/// cross-host security (theSherwood/unir#71), so a non-loopback address takes an explicit choice.
+pub fn permitted(addr: &str, allow_remote: bool) -> Result<(), String> {
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("{addr}: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("{addr}: no address"));
+    }
+    match addrs.iter().find(|a| !a.ip().is_loopback()) {
+        Some(a) if !allow_remote => Err(format!(
+            "{a} is not loopback; links are not yet authenticated or encrypted, so pass --allow-remote to use it"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Machine 0: waits on `listener` for machine 1's two connections.
 pub fn accept(listener: &TcpListener) -> std::io::Result<Link> {
     let (mut inn, mut out) = (None, None);
@@ -215,4 +234,19 @@ pub fn run(
         let _ = s.shutdown(Shutdown::Both);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::permitted;
+
+    #[test]
+    fn only_loopback_unless_allowed() {
+        assert!(permitted("127.0.0.1:7000", false).is_ok());
+        assert!(permitted("[::1]:7000", false).is_ok());
+        assert!(permitted("10.0.0.1:7000", false).is_err());
+        assert!(permitted("0.0.0.0:7000", false).is_err());
+        assert!(permitted("10.0.0.1:7000", true).is_ok());
+        assert!(permitted("no-port", false).is_err());
+    }
 }
