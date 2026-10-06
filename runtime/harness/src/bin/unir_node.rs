@@ -19,60 +19,14 @@
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::Command;
 
 use jacl_runtime_harness::node;
-use temen_ir::LinkUnit;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const ED_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/ed.jacl");
 
 fn die(msg: &str) -> ! {
     eprintln!("unir-node: {msg}");
     std::process::exit(1);
-}
-
-/// The editor at `path`, compiled as a child image of the store vat (the frontend and codegen's
-/// emit driver, built with gcc as `jacl_temen`'s is, linked with the translated runtime), and its
-/// window's size, log2.
-fn editor_image(path: &PathBuf) -> (temen_ir::Module, u8) {
-    let driver = std::env::temp_dir().join(format!("unir_node_emit_{}", std::process::id()));
-    let status = Command::new("gcc")
-        .args(["-O0", "-w", "-D_DEFAULT_SOURCE"])
-        .arg(format!("{ROOT}/codegen/tests/emit_jacl.c"))
-        .arg(format!("{ROOT}/codegen/codegen.c"))
-        .arg(format!("{ROOT}/codegen/irbuilder.c"))
-        .arg("-o")
-        .arg(&driver)
-        .args(["-lm", "-lpthread"])
-        .status()
-        .unwrap_or_else(|e| die(&format!("gcc: {e}")));
-    if !status.success() {
-        die("gcc failed to build the codegen driver");
-    }
-    let out = Command::new(&driver).arg("--file").arg(path).output();
-    let _ = std::fs::remove_file(&driver);
-    let out = out.unwrap_or_else(|e| die(&format!("emit driver: {e}")));
-    if !out.status.success() {
-        die(&format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
-    }
-    let program = jacl_runtime_harness::decode_emitted(&out.stdout)
-        .unwrap_or_else(|e| die(&format!("decode emitted IR: {e}")));
-    let rt = jacl_runtime_harness::translate_runtime();
-    let linked = temen_ir::link_with_manifest(&[
-        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
-        LinkUnit {
-            module: program,
-            exports: vec![("__jacl_entry".to_string(), 0)],
-            ..Default::default()
-        },
-    ])
-    .unwrap_or_else(|e| die(&format!("link: {e:?}")));
-    let entry = linked.resolve_export("__jacl_entry").unwrap_or_else(|| die("no entry after link"));
-    let image = temen_ir::synth_manifest_child_start(linked, entry, false)
-        .unwrap_or_else(|e| die(&format!("child entry: {e}")));
-    let log2 = image.memory.map(|m| m.size_log2).unwrap_or_else(|| die("the editor has no window"));
-    (image, log2)
 }
 
 fn main() {
@@ -103,7 +57,7 @@ fn main() {
         }
     }
     eprintln!("unir-node: compiling {} and the store vat…", editor.display());
-    let (editor, editor_log2) = editor_image(&editor);
+    let (editor, editor_log2) = jacl_runtime_harness::child_image(&editor).unwrap_or_else(|e| die(&e));
     let (vat, helper) = node::store_images();
     let images = node::Images { vat, helper, editor, editor_log2 };
     let link = match (listen, connect) {

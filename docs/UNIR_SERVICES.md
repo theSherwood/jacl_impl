@@ -14,6 +14,7 @@ edge. Nothing about the service is compiled into the program.
 def s [service "store"]                           ; a session, or an error value
 def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
 [service-event $s $true]                          ; the next event, waiting; nil if none and not waiting
+[service-send $p [map "content" [map "Text" "hi"]]] ; a message on a named entry, waiting for nothing
 ```
 
 - `[service NAME]` connects: the service offers its schema on the reply edge, the runtime adopts it,
@@ -24,6 +25,10 @@ def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
 - `[service-event S WAIT]` returns the next event the service sent, as `[map ENTRY VALUE]`, where
   `ENTRY` is the event's catalog entry name (the store vat's is `changes`). Events that arrive while a
   call waits for its reply are kept for later.
+
+- `[service-send S [map ENTRY VALUE]]` sends `VALUE` as a message of the catalog entry named
+  `ENTRY`, waiting for nothing: a connection that is not request and reply, such as a pane. A session
+  that never calls hears every entry the other end writes as an event.
 
 A value that does not fit the service's type is an error value, and nothing is sent.
 
@@ -130,3 +135,36 @@ to 64 KiB: a client adopts a service's whole schema into one buffer, and the sto
 session table and the three builtins over `unir.h`'s `unir_service_*`. The unit converts between the
 service's types and JACL's value frames (`runtime/unir/value.usc`), so no service needs code here.
 Without the unir backend the builtins return an error value.
+
+## A pane
+
+unir's store vat in its `shell SOURCE LOG2 ROWS COLS` mode (theSherwood/unir#102, unir decision 81)
+also runs a terminal vat, the only vat that holds the terminal, and a composition vat keeping ref `view`
+as the references no file in directory `dir` defines. It grants its client the pane as `pane`
+(`pane.requests` its content, `pane.replies` its events):
+
+- **Content.** `[service-send $p [map "content" ITEM]]`, `ITEM` one of:
+  - `[map "Text" "lines"]`: whole lines;
+  - `[map "Input" "> ls"]`: the line being typed, below everything else;
+  - `[map "Columns" [vec "file" "bytes"]]`, then `[map "Row" [vec [map "Text" "f0"] [map "Int" 6]]]`
+    per row, then `"End"`: a table, which the terminal vat aligns.
+- **Events.** `[service-event $p $false]` returns:
+  - `[map "keys" K]`, where `K` is a named key (`"Enter"`, `"Backspace"`, …) or
+    `[map "Char" CODE]`, `[map "Ctrl" LETTER]` or `[map "Alt" CODE]`;
+  - `[map "geometry" [map "rows" R "cols" C]]`;
+  - `[map "lifecycle" …]`: focus, or `"Close"`.
+
+Nothing a program sends is an escape sequence, and a control character in its text is shown, not
+obeyed. A program must not print: only the terminal vat writes to the terminal.
+
+`runtime/harness/tests/services/pane.jacl` is the example. It runs as follows:
+- It edits keys into its input line.
+- `ls` shows the directory as a table.
+- `watch` starts a job that shows the view live. A job writes to a channel, and the program forwards
+  the foreground job's output to the pane.
+- Ctrl-Z stops forwarding, so the job waits in its write; `fg` resumes forwarding.
+
+`jacl_pane [PROGRAM.jacl]` runs a program this way on the terminal it is started from. It puts the
+terminal in raw mode for the run. `codegen.rs::a_jacl_program_runs_in_a_terminal_pane` drives it with
+a scripted terminal on all three engines.
+

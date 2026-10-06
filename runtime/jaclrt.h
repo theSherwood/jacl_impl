@@ -341,6 +341,7 @@ JaclVal jacl_emit(JaclVal v);                      /* [emit V]: V as a message o
 JaclVal jacl_service(JaclVal name);                /* [service NAME]: a session with a granted service */
 JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its reply */
 JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
+JaclVal jacl_service_send(JaclVal s, JaclVal msg);  /* [service-send S [map NAME V]]: V on entry NAME */
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */

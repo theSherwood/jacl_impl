@@ -26,6 +26,9 @@ pub mod stage_ffi;
 /// JACL program (`unir_node`).
 pub mod node;
 
+/// A JACL program in a terminal pane: unir's store vat in its `shell` mode (`jacl_pane`).
+pub mod pane;
+
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 /// Decode the emit driver's default output — a v9 temen-encode **object** (`irb_to_encoded`).
@@ -94,6 +97,62 @@ fn compile_runtime_with_unir() -> PathBuf {
     assert!(status.success(), "{llvm_link} failed to link the unir unit");
     let _ = std::fs::remove_file(&c_ll);
     linked
+}
+
+/// The JACL program at `path`, compiled as a child image a vat spawns (the frontend and codegen's
+/// emit driver, built with gcc as `jacl_temen`'s is, linked with the translated runtime), and its
+/// window's size, log2.
+pub fn child_image(path: &std::path::Path) -> Result<(temen_ir::Module, u8), String> {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let driver = std::env::temp_dir().join(format!("jacl_child_emit_{}", std::process::id()));
+    let status = Command::new("gcc")
+        .args(["-O0", "-w", "-D_DEFAULT_SOURCE"])
+        .arg(format!("{root}/codegen/tests/emit_jacl.c"))
+        .arg(format!("{root}/codegen/codegen.c"))
+        .arg(format!("{root}/codegen/irbuilder.c"))
+        .arg("-o")
+        .arg(&driver)
+        .args(["-lm", "-lpthread"])
+        .status()
+        .map_err(|e| format!("gcc: {e}"))?;
+    if !status.success() {
+        return Err("gcc failed to build the codegen driver".into());
+    }
+    let out = Command::new(&driver).arg("--file").arg(path).output();
+    let _ = std::fs::remove_file(&driver);
+    let out = out.map_err(|e| format!("emit driver: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let program = decode_emitted(&out.stdout).map_err(|e| format!("decode emitted IR: {e}"))?;
+    let rt = translate_runtime();
+    let linked = temen_ir::link_with_manifest(&[
+        temen_ir::LinkUnit {
+            module: rt.module,
+            exports: rt.exports,
+            ..Default::default()
+        },
+        temen_ir::LinkUnit {
+            module: program,
+            exports: vec![("__jacl_entry".to_string(), 0)],
+            ..Default::default()
+        },
+    ])
+    .map_err(|e| format!("link: {e:?}"))?;
+    let entry = linked
+        .resolve_export("__jacl_entry")
+        .ok_or("no entry after link")?;
+    let image = temen_ir::synth_manifest_child_start(linked, entry, false)
+        .map_err(|e| format!("child entry: {e}"))?;
+    let log2 = image
+        .memory
+        .map(|m| m.size_log2)
+        .ok_or("the program has no window")?;
+    Ok((image, log2))
 }
 
 /// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
