@@ -2,9 +2,12 @@
 //! docs/UNIR_SERVICES.md):
 //!
 //! ```text
-//! unir_node --listen ADDR  [--dir DIR] [--engine E] [EDITOR.jacl]     # machine 0: waits for machine 1
-//! unir_node --connect ADDR [--dir DIR] [--engine E] [EDITOR.jacl]     # machine 1: joins machine 0
+//! unir_node --listen ADDR  [--dir DIR] [--engine E] [--allow-remote] [EDITOR.jacl]  # machine 0: waits for machine 1
+//! unir_node --connect ADDR [--dir DIR] [--engine E] [--allow-remote] [EDITOR.jacl]  # machine 1: joins machine 0
 //! ```
+//!
+//! `ADDR` must be loopback unless `--allow-remote` is given: the link between the machines is
+//! not yet authenticated or encrypted (theSherwood/unir#82, #71).
 //!
 //! Each runs unir's store vat in peer mode with a JACL editor (`tests/services/ed.jacl` unless
 //! another is named) as its client, reading the terminal a line at a time and printing to it as it
@@ -35,11 +38,13 @@ fn main() {
     let mut backend = temen_run::Backend::Jit;
     let mut dir: Option<PathBuf> = None;
     let mut editor = PathBuf::from(ED_JACL);
+    let mut allow_remote = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--listen" => listen = Some(args.next().unwrap_or_else(|| die("--listen needs ADDR"))),
             "--connect" => connect = Some(args.next().unwrap_or_else(|| die("--connect needs ADDR"))),
+            "--allow-remote" => allow_remote = true,
             "--dir" => dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--dir needs DIR")))),
             "--engine" => {
                 backend = match args.next().as_deref() {
@@ -50,11 +55,16 @@ fn main() {
                 }
             }
             "-h" | "--help" => {
-                println!("usage: unir_node (--listen ADDR | --connect ADDR) [--dir DIR] [--engine E] [EDITOR.jacl]");
+                println!(
+                    "usage: unir_node (--listen ADDR | --connect ADDR) [--dir DIR] [--engine E] [--allow-remote] [EDITOR.jacl]"
+                );
                 return;
             }
             other => editor = PathBuf::from(other),
         }
+    }
+    for addr in listen.iter().chain(&connect) {
+        node::permitted(addr, allow_remote).unwrap_or_else(|e| die(&e));
     }
     eprintln!("unir-node: compiling {} and the store vat…", editor.display());
     let (editor, editor_log2) = jacl_runtime_harness::child_image(&editor).unwrap_or_else(|e| die(&e));
