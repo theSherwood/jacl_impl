@@ -34,7 +34,7 @@ TRANSLATE="${TEMEN_LLVM_TRANSLATE:-$TEMEN/crates/temen-llvm/target/release/temen
 TRY="${TRY_TRANSLATE:-$TEMEN/crates/temen-llvm/target/release/examples/try_translate}"
 if [ ! -x "$TRANSLATE" ]; then
   echo "=== building temen-llvm-translate from vendor/temen ==="
-  ( cd "$TEMEN/crates/temen-llvm" && cargo build --release --bin temen-llvm-translate --example try_translate )
+  ( cd "$TEMEN/crates/temen-llvm" && cargo build --release --bin temen-llvm-translate )
 fi
 
 # -DJACL_EMIT_ONLY selects the emit-only frontend unity (src/jacl_emit.c) inside emit_jacl.c:
@@ -93,6 +93,17 @@ echo "=== translating warm-snapshot card (jacl_compiler_snapshot.temen) ==="
 echo "  -> $OUT/jacl_compiler_snapshot.temen ($(wc -c < "$OUT/jacl_compiler_snapshot.temen") bytes)"
 
 if [ "${1:-}" = "--selftest" ]; then
+  # try_translate runs each test program under the on-ramp powerbox. As an example it builds with
+  # temen-llvm's dev-dependencies (the engines), so only the selftests pay for it.
+  if [ ! -x "$TRY" ]; then
+    echo "=== building try_translate from vendor/temen ==="
+    ( cd "$TEMEN/crates/temen-llvm" && cargo build --release --example try_translate )
+  fi
+  # The emitted IR is checked by what codegen keeps stable: an integer literal N is its boxed JaclVal
+  # (tag 0x02 in the top byte, jaclrt.h), and each `+`/`*` calls its runtime entry (`jacl_add`,
+  # `jacl_mul`) behind an inline fast path whose shape is codegen's to change.
+  int_const() { echo "i64.const $(( (2 << 56) + $1 ))"; }
+
   echo "=== selftest: compile a fixed JACL program on the TEMEN engine ==="
   # A driver with a hardcoded source (no stdin), so try_translate — which runs the
   # entry under the on-ramp powerbox but feeds no stdin — can prove source -> IR.
@@ -105,8 +116,8 @@ EOF
   "$LLVM_LINK" -S "$OUT/selftest_main.ll" "$OUT/frontend.ll" "$OUT/codegen.ll" \
                "$OUT/irbuilder.ll" "$OUT/emit_shim.ll" -o "$OUT/selftest.ll"
   TEMEN_STUB_EXTERNS=1 "$TRY" "$OUT/selftest.ll" 2>&1 | tee "$OUT/selftest.out"
-  # 1 + 2*3 = 7 must appear as an i32.mul + i32.add in the emitted IR.
-  if grep -q 'i32.mul' "$OUT/selftest.out" && grep -q 'i32.add' "$OUT/selftest.out"; then
+  # 1 + 2*3 = 7 must appear as a `jacl_mul` + `jacl_add` in the emitted IR.
+  if grep -q '"jacl_mul"' "$OUT/selftest.out" && grep -q '"jacl_add"' "$OUT/selftest.out"; then
     echo "SELFTEST PASS — JACL source compiled to TEMEN IR on the TEMEN engine."
   else
     echo "SELFTEST FAIL — expected mul/add in emitted IR." >&2
@@ -120,9 +131,9 @@ EOF
   # exercise the item-2 data-free string lowering (synrt_str_* instead of a `data` segment the Jit
   # cap forbids, §3b). One translate+run covers the corpus; the per-case markers below assert the
   # expansions match the native goldens (codegen/selfhost/macro_staging/golden):
-  #   twice  21              -> [+ 21 21]            : i32.add of two `i32.const 21`
+  #   twice  21              -> [+ 21 21]            : a `jacl_add` of two boxed 21s
   #   unless [==1 2] {…}      -> [if … {} …]          : an `if`-lowering (br_if)
-  #   quad   5               -> [+ [+ 5 5] [+ 5 5]]  : four `i32.const 5`, three `i32.add` (re-expansion)
+  #   quad   5               -> [+ [+ 5 5] [+ 5 5]]  : four boxed 5s, three `jacl_add` (re-expansion)
   #   pack   10 20 30 40     -> [vec 10 20 30 40]    : four `jacl_vec_push` (variadic `~@rest` splice)
   #   fresh  42              -> [mut g__0 42]        : the `[gensym]` -> synrt_gensym mint runs in-guest
   cat > "$OUT/stagetest_main.c" <<'EOF'
@@ -154,11 +165,11 @@ EOF
   # Slice per-case output with awk so the greps below can't cross a case boundary.
   case_out() { awk "/CASE $1 BEGIN/,/CASE $1 END/" "$OUT/stagetest.out"; }
   sf=0
-  [ "$(case_out twice  | grep -c 'i32.const 21')" -ge 2 ] && case_out twice  | grep -q 'i32.add'      || { echo "STAGETEST FAIL: twice"  >&2; sf=1; }
+  [ "$(case_out twice  | grep -c "$(int_const 21)")" -ge 2 ] && case_out twice | grep -q '"jacl_add"' || { echo "STAGETEST FAIL: twice"  >&2; sf=1; }
   case_out unless | grep -q 'br_if'                                                                    || { echo "STAGETEST FAIL: unless" >&2; sf=1; }
-  [ "$(case_out nested | grep -c 'i32.const 5')" -ge 4 ] && [ "$(case_out nested | grep -c 'i32.add')" -ge 3 ] || { echo "STAGETEST FAIL: nested" >&2; sf=1; }
+  [ "$(case_out nested | grep -c "$(int_const 5)")" -ge 4 ] && [ "$(case_out nested | grep -c '"jacl_add"')" -ge 3 ] || { echo "STAGETEST FAIL: nested" >&2; sf=1; }
   [ "$(case_out splice | grep -c 'jacl_vec_push')" -ge 4 ]                                             || { echo "STAGETEST FAIL: splice" >&2; sf=1; }
-  case_out gensym | grep -q '144115188075855971'                                                       || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
+  case_out gensym | grep -q "$(int_const 99)"                                                          || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/stagetest.out"                                                       && { echo "STAGETEST FAIL: error/NULL in output" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
     echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym) expanded in-guest via the Jit capability."
@@ -244,7 +255,7 @@ extern void jacl_install_temen_stage_hook(void);
 int main(void) {
   jacl_install_temen_stage_hook();
   jacl_emit_warmup();                              /* pay the prelude init once */
-  const char *A = "[+ 1 [* 2 3]]\n";               /* 1 + 2*3 -> i32.mul + i32.add */
+  const char *A = "[+ 1 [* 2 3]]\n";               /* 1 + 2*3 -> jacl_mul + jacl_add */
   const char *B = "defmacro dbl {x} { syntax-quote [+ ~x ~x] }\ndbl 5\n"; /* macro after warmup */
   char *a1 = jacl_emit_compile(A);
   char *bb = jacl_emit_compile(B);
@@ -263,8 +274,8 @@ EOF
   a1_out() { awk '/A1 BEGIN/,/A1 END/' "$OUT/snaptest.out"; }
   b_out()  { awk '/B BEGIN/,/B END/'   "$OUT/snaptest.out"; }
   sf=0
-  a1_out | grep -q 'i32.mul' && a1_out | grep -q 'i32.add' || { echo "SNAPTEST FAIL: warm arithmetic compile" >&2; sf=1; }
-  [ "$(b_out | grep -c 'i32.const 5')" -ge 2 ] && b_out | grep -q 'i32.add' || { echo "SNAPTEST FAIL: macro-after-warmup" >&2; sf=1; }
+  a1_out | grep -q '"jacl_mul"' && a1_out | grep -q '"jacl_add"' || { echo "SNAPTEST FAIL: warm arithmetic compile" >&2; sf=1; }
+  [ "$(b_out | grep -c "$(int_const 5)")" -ge 2 ] && b_out | grep -q '"jacl_add"' || { echo "SNAPTEST FAIL: macro-after-warmup" >&2; sf=1; }
   grep -q 'ISOLATION OK' "$OUT/snaptest.out" || { echo "SNAPTEST FAIL: compiles not isolated" >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/snaptest.out" && { echo "SNAPTEST FAIL: error/NULL in warm compile" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
