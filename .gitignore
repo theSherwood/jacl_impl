@@ -9,6 +9,7 @@ a.out
 .build_*
 .build/
 .build-tsan/
+.build-asan/
 .build-release/
 .build-threads/
 .token-savior/

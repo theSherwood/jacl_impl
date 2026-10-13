@@ -221,6 +221,16 @@ static void typer__check_lit_range(TyperCtx* tc, AstNode* node, JaclType want);
 static bool typer__is_int_width(JaclType t);
 static JaclType typer__retype_literal(TyperCtx* tc, AstNode* v, JaclType want);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
+/* The index of the struct named `name`, or UINT32_MAX. An empty name names no struct: the reserved
+ * slots 0 and 1 have an empty one until filled (slot 0 never is), and comparing against them would
+ * hand memcmp a NULL name. */
+static uint32_t typer__struct_index(const TyperCtx* tc, const char* name, uint32_t name_len) {
+  if (name_len == 0) return UINT32_MAX;
+  for (uint32_t i = 0; i < tc->struct_count; i++)
+    if (tc->structs[i].name_len == name_len && memcmp(tc->structs[i].name, name, name_len) == 0)
+      return i;
+  return UINT32_MAX;
+}
 static bool typer__body_yields(AstNode* node);
 static uint32_t typer__register_inline_struct(TyperCtx* tc,
                                                const char* spec, uint32_t spec_len);
@@ -320,12 +330,10 @@ static bool typer__future_type(TyperCtx* tc, AstNode* node,
     *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     return true;
   }
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0) {
-      *out_struct_idx = si;
-      return true;
-    }
+  uint32_t si = typer__struct_index(tc, nm, nl);
+  if (si != UINT32_MAX) {
+    *out_struct_idx = si;
+    return true;
   }
   /* Unknown type name — still recognize as Future so the compiler
    * can backstop the unknown-type error. Element idx stays sentinel. */
@@ -354,12 +362,10 @@ static bool typer__box_type(TyperCtx* tc, AstNode* node,
     *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     return true;
   }
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0) {
-      *out_struct_idx = si;
-      return true;
-    }
+  uint32_t si = typer__struct_index(tc, nm, nl);
+  if (si != UINT32_MAX) {
+    *out_struct_idx = si;
+    return true;
   }
   /* Unknown type name — still recognize as Box; element idx stays
    * sentinel so downstream code treats it as box-of-dyn. */
@@ -386,12 +392,10 @@ static bool typer__arr_type(TyperCtx* tc, AstNode* node,
     *out_elem_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     return true;
   }
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0) {
-      *out_elem_idx = si;
-      return true;
-    }
+  uint32_t si = typer__struct_index(tc, nm, nl);
+  if (si != UINT32_MAX) {
+    *out_elem_idx = si;
+    return true;
   }
   /* Unknown element type name — still recognize as Arr; elem idx stays
    * sentinel so downstream treats it as arr-of-dyn. */
@@ -426,12 +430,10 @@ static bool typer__stream_type(TyperCtx* tc, AstNode* node,
     *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     return true;
   }
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0) {
-      *out_struct_idx = si;
-      return true;
-    }
+  uint32_t si = typer__struct_index(tc, nm, nl);
+  if (si != UINT32_MAX) {
+    *out_struct_idx = si;
+    return true;
   }
   /* Unknown element — still recognize as Stream; element idx stays
    * sentinel so downstream consumers treat it as [Stream dyn]. */
@@ -580,12 +582,10 @@ static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
       *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
       return true;
     }
-    for (uint32_t si = 0; si < tc->struct_count; si++) {
-      if (tc->structs[si].name_len == nl &&
-          memcmp(tc->structs[si].name, nm, nl) == 0) {
-        *out_struct_idx = si;
-        return true;
-      }
+    uint32_t si = typer__struct_index(tc, nm, nl);
+    if (si != UINT32_MAX) {
+      *out_struct_idx = si;
+      return true;
     }
     /* Unknown pointee name — still recognize as Ptr. */
     return true;
@@ -745,10 +745,8 @@ static uint32_t typer__nested_elem_shape(TyperCtx* tc, AstNode* en) {
     if (is_type_keyword(nm, nl)) {
       inner[i] = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     } else {
-      for (uint32_t si = 0; si < tc->struct_count; si++) {
-        if (tc->structs[si].name_len == nl &&
-            memcmp(tc->structs[si].name, nm, nl) == 0) { inner[i] = si; break; }
-      }
+      uint32_t si = typer__struct_index(tc, nm, nl);
+      if (si != UINT32_MAX) inner[i] = si;
       if (inner[i] == UINT32_MAX) return UINT32_MAX;
     }
   }
@@ -1095,13 +1093,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
       /* Struct element (M4.1): look up by name in the typer's struct
        * registry. Real struct indices live below JACL_SCALAR_VEC_BASE
        * so the encoding is unambiguous with the scalar sentinel. */
-      for (uint32_t si = 0; si < tc->struct_count; si++) {
-        if (tc->structs[si].name_len == nl &&
-            memcmp(tc->structs[si].name, nm, nl) == 0) {
-          *out_struct_idx = si;
-          break;
-        }
-      }
+      uint32_t si = typer__struct_index(tc, nm, nl);
+      if (si != UINT32_MAX) *out_struct_idx = si;
     }
   } else if (t_arg->type == AST_COMMAND &&
              t_arg->data.command.head &&
@@ -1150,13 +1143,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
     if (is_type_keyword(nm, nl)) {
       inner_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
     } else {
-      for (uint32_t si = 0; si < tc->struct_count; si++) {
-        if (tc->structs[si].name_len == nl &&
-            memcmp(tc->structs[si].name, nm, nl) == 0) {
-          inner_idx = si;
-          break;
-        }
-      }
+      uint32_t si = typer__struct_index(tc, nm, nl);
+      if (si != UINT32_MAX) inner_idx = si;
     }
     if (inner_idx != UINT32_MAX) {
       uint32_t shape_idx = type_shape_intern_typed_vec(tc->shared_reg, inner_idx);
@@ -1188,13 +1176,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
         /* dyn keys normalize to the UINT32_MAX convention (VM 0xFFFF). */
         key_idx = (kkw == TYPE_DYN) ? UINT32_MAX : JACL_SCALAR_TYPE_IDX(kkw);
       } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == nl &&
-              memcmp(tc->structs[si].name, nm, nl) == 0) {
-            key_idx = si;
-            break;
-          }
-        }
+        uint32_t si = typer__struct_index(tc, nm, nl);
+        if (si != UINT32_MAX) key_idx = si;
         if (key_idx == UINT32_MAX) return true; /* bad_elem */
       }
     }
@@ -1205,13 +1188,8 @@ static bool typer__buf_type_full(TyperCtx* tc, AstNode* node,
       if (is_type_keyword(nm, nl)) {
         value_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
       } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == nl &&
-              memcmp(tc->structs[si].name, nm, nl) == 0) {
-            value_idx = si;
-            break;
-          }
-        }
+        uint32_t si = typer__struct_index(tc, nm, nl);
+        if (si != UINT32_MAX) value_idx = si;
         if (value_idx == UINT32_MAX) return true; /* bad_elem */
       }
     }
@@ -1580,13 +1558,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
           if (is_type_keyword(nm, nl)) {
             declared_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
           } else {
-            for (uint32_t si = 0; si < tc->struct_count; si++) {
-              if (tc->structs[si].name_len == nl &&
-                  memcmp(tc->structs[si].name, nm, nl) == 0) {
-                declared_struct_idx = si;
-                break;
-              }
-            }
+            uint32_t si = typer__struct_index(tc, nm, nl);
+            if (si != UINT32_MAX) declared_struct_idx = si;
           }
         }
         }
@@ -2648,13 +2621,8 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
           if (is_type_keyword(nm, nl)) {
             elem_sidx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
           } else {
-            for (uint32_t si = 0; si < tc->struct_count; si++) {
-              if (tc->structs[si].name_len == nl &&
-                  memcmp(tc->structs[si].name, nm, nl) == 0) {
-                elem_sidx = si;
-                break;
-              }
-            }
+            uint32_t si = typer__struct_index(tc, nm, nl);
+            if (si != UINT32_MAX) elem_sidx = si;
           }
         }
       }
@@ -2709,14 +2677,9 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
     } else {
       /* Struct-name + name pair? Look up. */
       uint32_t found_idx = UINT32_MAX;
-      for (uint32_t si = 0; si < tc->struct_count; si++) {
-        if (tc->structs[si].name_len == elem->data.lit_string.length &&
-            memcmp(tc->structs[si].name, elem->data.lit_string.value,
-                   elem->data.lit_string.length) == 0) {
-          found_idx = si;
-          break;
-        }
-      }
+      uint32_t si = typer__struct_index(tc, elem->data.lit_string.value,
+                                        elem->data.lit_string.length);
+      if (si != UINT32_MAX) found_idx = si;
       if (found_idx != UINT32_MAX) {
         fi++;
         if (fi >= flat_n) break;
@@ -2750,12 +2713,7 @@ static uint32_t typer__resolve_typename_idx(TyperCtx* tc, AstNode* type_arg) {
   uint32_t    nl = type_arg->data.lit_string.length;
   if (is_type_keyword(nm, nl))
     return JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
-  for (uint32_t si = 0; si < tc->struct_count; si++) {
-    if (tc->structs[si].name_len == nl &&
-        memcmp(tc->structs[si].name, nm, nl) == 0)
-      return si;
-  }
-  return UINT32_MAX;
+  return typer__struct_index(tc, nm, nl);
 }
 
 /* Resolve a proc/extern return-type AST node to (type, struct_idx, key_idx).
@@ -2779,13 +2737,11 @@ static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
       *out_type = type_from_keyword(nm, nl);
       return;
     }
-    for (uint32_t si = 0; si < tc->struct_count; si++) {
-      if (tc->structs[si].name_len == nl &&
-          memcmp(tc->structs[si].name, nm, nl) == 0) {
-        *out_type = TYPE_STRUCT;
-        *out_struct_idx = si;
-        return;
-      }
+    uint32_t si = typer__struct_index(tc, nm, nl);
+    if (si != UINT32_MAX) {
+      *out_type = TYPE_STRUCT;
+      *out_struct_idx = si;
+      return;
     }
     return;
   }
@@ -3313,12 +3269,8 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
 static uint32_t typer__register_inline_struct(TyperCtx* tc,
                                                const char* spec, uint32_t spec_len) {
   /* Already registered? Look up by canonical string. */
-  for (uint32_t i = 0; i < tc->struct_count; i++) {
-    if (tc->structs[i].name_len == spec_len &&
-        memcmp(tc->structs[i].name, spec, spec_len) == 0) {
-      return i;
-    }
-  }
+  uint32_t i = typer__struct_index(tc, spec, spec_len);
+  if (i != UINT32_MAX) return i;
   /* Validate "struct{...}" wrapper */
   if (spec_len < 9 || memcmp(spec, "struct{", 7) != 0 || spec[spec_len - 1] != '}')
     return UINT32_MAX;
@@ -3481,13 +3433,8 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
 
 static const TyperStruct* typer__find_struct(TyperCtx* tc,
                                               const char* name, uint32_t name_len) {
-  for (uint32_t i = 0; i < tc->struct_count; i++) {
-    if (tc->structs[i].name_len == name_len &&
-        memcmp(tc->structs[i].name, name, name_len) == 0) {
-      return &tc->structs[i];
-    }
-  }
-  return NULL;
+  uint32_t i = typer__struct_index(tc, name, name_len);
+  return i == UINT32_MAX ? NULL : &tc->structs[i];
 }
 
 /* Pre-pass: collect proc signatures from top-level so calls can look
@@ -5560,14 +5507,11 @@ static int typer__infer_cmd_if_narrow(TyperCtx* tc, AstNode* node) {
         bt = type_from_keyword(type_arg->data.lit_string.value,
                                type_arg->data.lit_string.length);
       } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
-              memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
-                     type_arg->data.lit_string.length) == 0) {
-            bt = TYPE_STRUCT;
-            bsidx = si;
-            break;
-          }
+        uint32_t si = typer__struct_index(tc, type_arg->data.lit_string.value,
+                                          type_arg->data.lit_string.length);
+        if (si != UINT32_MAX) {
+          bt = TYPE_STRUCT;
+          bsidx = si;
         }
       }
     } else if (type_arg->type == AST_COMMAND) {
@@ -5584,14 +5528,9 @@ static int typer__infer_cmd_if_narrow(TyperCtx* tc, AstNode* node) {
         if (elem_node && elem_node->type == AST_LIT_STRING &&
             !is_type_keyword(elem_node->data.lit_string.value,
                              elem_node->data.lit_string.length)) {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
-                memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
-                       elem_node->data.lit_string.length) == 0) {
-              bsidx = si;
-              break;
-            }
-          }
+          uint32_t si = typer__struct_index(tc, elem_node->data.lit_string.value,
+                                            elem_node->data.lit_string.length);
+          if (si != UINT32_MAX) bsidx = si;
         }
       }
     }
@@ -5666,14 +5605,11 @@ static int typer__infer_cmd_assert_type(TyperCtx* tc, AstNode* node) {
     expected_t = type_from_keyword(tname, tlen);
     expected_known = true;
   } else {
-    for (uint32_t si = 0; si < tc->struct_count; si++) {
-      if (tc->structs[si].name_len == tlen &&
-          memcmp(tc->structs[si].name, tname, tlen) == 0) {
-        expected_t = TYPE_STRUCT;
-        expected_struct_idx = si;
-        expected_known = true;
-        break;
-      }
+    uint32_t si = typer__struct_index(tc, tname, tlen);
+    if (si != UINT32_MAX) {
+      expected_t = TYPE_STRUCT;
+      expected_struct_idx = si;
+      expected_known = true;
     }
   }
   if (!expected_known) {
@@ -6134,13 +6070,8 @@ static void typer__infer_cmd_cmdhead(TyperCtx* tc, AstNode* node, AstNode* head)
       if (is_type_keyword(nm, nl)) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
       } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == nl &&
-              memcmp(tc->structs[si].name, nm, nl) == 0) {
-            node->inferred_struct_idx = si;
-            break;
-          }
-        }
+        uint32_t si = typer__struct_index(tc, nm, nl);
+        if (si != UINT32_MAX) node->inferred_struct_idx = si;
       }
     }
     /* For [Map K V] (kind=3), also propagate the key type idx. */
@@ -6157,13 +6088,8 @@ static void typer__infer_cmd_cmdhead(TyperCtx* tc, AstNode* node, AstNode* head)
           if (kkw != TYPE_DYN)
             node->inferred_key_struct_idx = JACL_SCALAR_TYPE_IDX(kkw);
         } else {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == nl &&
-                memcmp(tc->structs[si].name, nm, nl) == 0) {
-              node->inferred_key_struct_idx = si;
-              break;
-            }
-          }
+          uint32_t si = typer__struct_index(tc, nm, nl);
+          if (si != UINT32_MAX) node->inferred_key_struct_idx = si;
         }
       }
     }
@@ -6933,14 +6859,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
     }
     if (!proc) {
-      for (uint32_t i = 0; i < tc->struct_count; i++) {
-        if (tc->structs[i].name_len == head->data.lit_string.length &&
-            memcmp(tc->structs[i].name, head->data.lit_string.value,
-                   head->data.lit_string.length) == 0) {
-          sdef = &tc->structs[i];
-          sdef_idx = i;
-          break;
-        }
+      uint32_t i = typer__struct_index(tc, head->data.lit_string.value,
+                                       head->data.lit_string.length);
+      if (i != UINT32_MAX) {
+        sdef = &tc->structs[i];
+        sdef_idx = i;
       }
     }
   } else if (head && head->type == AST_COMMAND &&

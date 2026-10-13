@@ -11,8 +11,9 @@
 - Prefer simple, straight-line code to complex abstractions
 - Run tests with a timeout to avoid hanging tests during development.
 - Avoid altering tests unless you know the test is testing the wrong thing.
-- Pre-merge baselines for any change to `src/`: `./build.sh` and
-  `./build.sh --tsan`. See `AUDIT.md` for rationale. (The legacy bytecode
+- Pre-merge baselines for any change to `src/`: `./build.sh`,
+  `./build.sh --tsan` and `./build.sh --asan` (ASan + UBSan; CI runs it).
+  See `AUDIT.md` for rationale. (The legacy bytecode
   VM and its Emscripten `--wasm` check were removed in item 6 — TEMEN is the
   sole backend; the browser build now lives in `demo/temen/build_assets.sh`.)
 - Prefer snake_case for values and functions. Prefer PascalCase for types.
