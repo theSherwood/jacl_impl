@@ -352,9 +352,8 @@ python3 -m http.server 8080           # or any static server
 # open http://localhost:8080
 ```
 
-The bundle (`demo/dist/playground.js`, ~430 KB minified) is committed
-so the playground works from a clone without a Node toolchain;
-`build_demo.sh` only re-bundles when you edit `demo/src/`.
+The editor bundle (`demo/dist/playground.js`) and `demo/examples.json`
+are build outputs, not committed; `build_demo.sh` writes both.
 
 ## Where to read more
 

@@ -1,5 +1,7 @@
 node_modules/
-dist/*.map
+# Produced by build_demo.sh: the editor bundle, and the example list it generates from test/jacl.
+dist/
+examples.json
 # TEMEN-backend generated assets (produced by temen/build_assets.sh + temen/build_emit_wasm.sh, built in CI)
 wasm/temen_browser.wasm
 wasm/jacl_emit.js

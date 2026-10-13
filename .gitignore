@@ -12,7 +12,6 @@ a.out
 .build-release/
 .token-savior/
 build/
-build_wasm/
 *.gch
 __pycache__/
 *.pyc
