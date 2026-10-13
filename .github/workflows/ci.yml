@@ -41,6 +41,14 @@ jobs:
         # (already installed above), takes a couple of seconds, and skips cleanly without it.
         run: bash codegen/selfhost/macro_staging/run_rt_codec_test.sh
 
+      - name: Frontend under ASan + UBSan
+        # The frontend and codegen also run as TEMEN guests, where a memory bug corrupts quietly:
+        # the guest heap reuses freed memory (temen#1603) and nothing checks stack bounds. Natively,
+        # under the sanitizers, the same bug fails the compile. This compiles all of test/jacl that
+        # way (~30s); it found an argument array one slot short in every nested-buffer constructor
+        # (jacl #211).
+        run: bash codegen/tests/sanitize_corpus.sh
+
   harness:
     name: Runtime harness (differential interp vs JIT)
     runs-on: ubuntu-latest
