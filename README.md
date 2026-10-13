@@ -320,7 +320,7 @@ cd runtime/harness && cargo test --test codegen syntax_tour_runs_clean_on_temen
 ```
 
 The execution engine is the TEMEN, vendored at `vendor/temen` (from
-[`theSherwood/vm`](https://github.com/theSherwood/vm)): the C runtime
+[`theSherwood/temen`](https://github.com/theSherwood/temen)): the C runtime
 under `runtime/` is compiled to TEMEN IR via `temen-llvm` and executed on
 the TEMEN's tree-walking interpreter and Cranelift JIT (the runtime
 harness runs both and asserts they agree). See `AUDIT.md` for the
@@ -333,9 +333,9 @@ A live, hosted playground runs in the browser at
 `.github/workflows/pages.yml`). Edit JACL and run it with no install — the
 whole pipeline (source → TEMEN IR → link → run) executes client-side.
 
-It runs on the **TEMEN backend** — the same `vm` engine the rest of the
+It runs on the **TEMEN backend** — the same engine the rest of the
 project uses, vendored at `vendor/temen` from
-[`theSherwood/vm`](https://github.com/theSherwood/vm) and compiled to
+[`theSherwood/temen`](https://github.com/theSherwood/temen) and compiled to
 WebAssembly. Editing recompiles the source to TEMEN IR in the browser
 (`jacl_emit.wasm`, the LLVM-free frontend), then links and runs it against
 the runtime blob (`jaclrt.temen`) on the `temen-browser` cdylib; unedited

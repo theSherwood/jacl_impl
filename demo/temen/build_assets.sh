@@ -36,9 +36,10 @@ echo "  -> demo/wasm/temen_browser.wasm ($(wc -c < "$DEMO/wasm/temen_browser.was
 # `par.js`/`worker.js`, kept in the layout they resolve each other from (`web/` beside `target/…`), and
 # cross-origin isolation, which GitHub Pages can only get through `coi-serviceworker.js`. Fail-soft:
 # without them every Run stays on the single-threaded engine above (playground.ts checks at run time).
-# Its own target dir, so it never replaces the plain build at the same path.
+# Its own target dir, so it never replaces the plain build at the same path; outside the submodule, so
+# the build leaves vendor/temen clean.
 echo "Building the threads engine for the Worker driver…"
-THREADS_TARGET="$TEMEN/browser/target-threads"
+THREADS_TARGET="$ROOT/.build-threads"
 if ( cd "$TEMEN/browser" && CARGO_TARGET_DIR="$THREADS_TARGET" \
      RUSTFLAGS="-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals \
        -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--max-memory=4294967296 \
