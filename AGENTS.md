@@ -2,6 +2,7 @@
 
 - Claim an issue before you start it; parallel sessions can't see each other. Read its comments and search open PRs for its number. If nobody holds it, comment `**Active:** <session link> · branch <branch>`, then re-read: the earliest claim wins. If someone else holds it, don't start, even if asked: tell the user who holds it and let them decide.
 - A claim holds until its PR merges or closes. If you stop without a PR, comment `**Released:**` with what's done and on which branch.
+- Always open a PR when you have changes: every branch with commits gets one. Open it as soon as there are changes, not when the work feels finished.
 
 # When writing code
 
