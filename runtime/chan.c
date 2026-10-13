@@ -255,6 +255,7 @@ JaclVal jacl_chan_close(JaclVal ch) {
 #include "chan_unir.c"
 #include "value.c"
 #include "service_unir.c"
+#include "transcript_unir.c"
 #include "pipe_unir.c"
 #else
 static int     chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max) { (void)cap; (void)w; (void)r; (void)max; return 0; }
@@ -277,6 +278,15 @@ JaclVal jacl_service(JaclVal name) { (void)name; return chan_err("service: unava
 JaclVal jacl_service_call(JaclVal s, JaclVal r) { (void)s; (void)r; return chan_err("service-call: unavailable without vats"); }
 JaclVal jacl_service_event(JaclVal s, JaclVal w) { (void)s; (void)w; return chan_err("service-event: unavailable without vats"); }
 JaclVal jacl_service_send(JaclVal s, JaclVal m) { (void)s; (void)m; return chan_err("service-send: unavailable without vats"); }
+JaclVal jacl_schema(JaclVal d) { (void)d; return chan_err("schema: unavailable without vats"); }
+JaclVal jacl_transcript(JaclVal n, JaclVal t, JaclVal l) { (void)n; (void)t; (void)l; return chan_err("transcript: unavailable without vats"); }
+JaclVal jacl_transcript_line(JaclVal t, JaclVal x) { (void)t; (void)x; return chan_err("transcript-line: unavailable without vats"); }
+JaclVal jacl_transcript_block(JaclVal t, JaclVal c, JaclVal j, JaclVal s) { (void)t; (void)c; (void)j; (void)s; return chan_err("transcript-block: unavailable without vats"); }
+JaclVal jacl_transcript_output(JaclVal t, JaclVal c, JaclVal j) { (void)t; (void)c; (void)j; return chan_err("transcript-output: unavailable without vats"); }
+JaclVal jacl_transcript_push(JaclVal t, JaclVal b, JaclVal v) { (void)t; (void)b; (void)v; return chan_err("transcript-push: unavailable without vats"); }
+JaclVal jacl_transcript_write(JaclVal t, JaclVal b, JaclVal x) { (void)t; (void)b; (void)x; return chan_err("transcript-write: unavailable without vats"); }
+JaclVal jacl_transcript_end(JaclVal t, JaclVal b) { (void)t; (void)b; return chan_err("transcript-end: unavailable without vats"); }
+JaclVal jacl_transcript_flush(JaclVal t) { (void)t; return chan_err("transcript-flush: unavailable without vats"); }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

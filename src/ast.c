@@ -153,6 +153,11 @@ typedef enum {
   /* Services (docs/UNIR_SERVICES.md) */
   HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT, HEAD_SERVICE_SEND,
 
+  /* The transcript (runtime/transcript_unir.c; theSherwood/unir decision 108) */
+  HEAD_SCHEMA, HEAD_TRANSCRIPT, HEAD_TRANSCRIPT_LINE, HEAD_TRANSCRIPT_BLOCK,
+  HEAD_TRANSCRIPT_OUTPUT, HEAD_TRANSCRIPT_PUSH, HEAD_TRANSCRIPT_WRITE, HEAD_TRANSCRIPT_END,
+  HEAD_TRANSCRIPT_FLUSH,
+
   /* A byte buffer as a string */
   HEAD_BUF_STRING,
 
@@ -251,6 +256,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "range", 5) == 0) return HEAD_RANGE;
       return HEAD_NONE;
     case 6:
+      if (memcmp(s, "schema", 6) == 0) return HEAD_SCHEMA;
       if (memcmp(s, "stdout", 6) == 0) return HEAD_STDOUT;
       if (memcmp(s, "stderr", 6) == 0) return HEAD_STDERR;
       if (memcmp(s, "return", 6) == 0) return HEAD_RETURN;
@@ -313,6 +319,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "read-line", 9) == 0) return HEAD_READ_LINE;
       return HEAD_NONE;
     case 10:
+      if (memcmp(s, "transcript", 10) == 0) return HEAD_TRANSCRIPT;
       if (memcmp(s, "vec-concat", 10) == 0) return HEAD_VEC_CONCAT;
       if (memcmp(s, "map-remove", 10) == 0) return HEAD_MAP_REMOVE;
       if (memcmp(s, "syntax-pos", 10) == 0) return HEAD_SYNTAX_POS;
@@ -345,11 +352,22 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "service-event", 13) == 0) return HEAD_SERVICE_EVENT;
       if (memcmp(s, "try-read-line", 13) == 0) return HEAD_TRY_READ_LINE;
       return HEAD_NONE;
+    case 14:
+      if (memcmp(s, "transcript-end", 14) == 0) return HEAD_TRANSCRIPT_END;
+      return HEAD_NONE;
     case 15:
+      if (memcmp(s, "transcript-line", 15) == 0) return HEAD_TRANSCRIPT_LINE;
+      if (memcmp(s, "transcript-push", 15) == 0) return HEAD_TRANSCRIPT_PUSH;
       if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;
       if (memcmp(s, "range-inclusive", 15) == 0) return HEAD_RANGE_INCLUSIVE;
       return HEAD_NONE;
+    case 16:
+      if (memcmp(s, "transcript-block", 16) == 0) return HEAD_TRANSCRIPT_BLOCK;
+      if (memcmp(s, "transcript-write", 16) == 0) return HEAD_TRANSCRIPT_WRITE;
+      if (memcmp(s, "transcript-flush", 16) == 0) return HEAD_TRANSCRIPT_FLUSH;
+      return HEAD_NONE;
     case 17:
+      if (memcmp(s, "transcript-output", 17) == 0) return HEAD_TRANSCRIPT_OUTPUT;
       if (memcmp(s, "interpret-prelude", 17) == 0) return HEAD_INTERPRET_PRELUDE;
       if (memcmp(s, "buf-unchecked-get", 17) == 0) return HEAD_BUF_UGET;
       if (memcmp(s, "buf-unchecked-set", 17) == 0) return HEAD_BUF_USET;

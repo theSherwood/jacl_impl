@@ -1609,10 +1609,9 @@ fn child_image(path: &str, prelude: &str) -> (temen_ir::Module, u8) {
 }
 
 /// Runs two machines ([`jacl_runtime_harness::node`]) joined by loopback TCP on `backend`, each
-/// with its editor and the live I/O `setup` gives it, and with `dirs`, its store kept in its own,
-/// and returns each machine's output. A
-/// machine whose editor failed never makes `~done`, so the other would wait for it forever: past
-/// a deadline, fail with what has finished.
+/// with its editor and the live I/O `setup` gives it, and with `dirs`, its store and its keys kept
+/// in its own, and returns each machine's output. A machine whose editor failed never makes
+/// `~done`, so the other would wait for it forever: past a deadline, fail with what has finished.
 fn two_machines(
     editors: [(temen_ir::Module, u8); 2],
     backend: temen_run::Backend,
@@ -1621,10 +1620,22 @@ fn two_machines(
 ) -> [String; 2] {
     use jacl_runtime_harness::node;
     let (vat, helper) = node::store_images();
+    // A machine run again on its directory is who it was: its keys are kept beside its store.
+    let keys = match dirs {
+        Some([d0, d1]) => match (node::kept(d0, 0), node::kept(d1, 1)) {
+            (Ok(k0), Ok(k1)) => [k0, k1],
+            _ => {
+                let keys = node::pair(&vat, backend).expect("two machines' keys");
+                node::keep(d0, 0, &keys[0]).and_then(|_| node::keep(d1, 1, &keys[1])).expect("kept");
+                keys
+            }
+        },
+        None => node::pair(&vat, backend).expect("two machines' keys"),
+    };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let addr = listener.local_addr().expect("its address");
     let (done, finished) = std::sync::mpsc::channel();
-    for (role, (editor, editor_log2)) in editors.into_iter().enumerate() {
+    for ((role, (editor, editor_log2)), keys) in editors.into_iter().enumerate().zip(keys) {
         let images = node::Images { vat: vat.clone(), helper: helper.clone(), editor, editor_log2 };
         let link = if role == 0 { None } else { Some(node::connect(addr).expect("connect")) };
         let listener = (role == 0).then(|| listener.try_clone().expect("the listener"));
@@ -1634,7 +1645,8 @@ fn two_machines(
             let link = link.unwrap_or_else(|| {
                 node::accept(listener.as_ref().expect("machine 0 listens")).expect("accept")
             });
-            let _ = done.send((role, node::run(&images, link, backend, dir.as_deref(), &mut *setup)));
+            let out = node::run(&images, link, keys, backend, dir.as_deref(), &mut *setup);
+            let _ = done.send((role, out));
         });
     }
     let mut outs = [String::new(), String::new()];
@@ -1654,7 +1666,8 @@ fn field(out: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("no {key:?} in {out:?}"))
 }
 
-/// Checks a machine's report: that its editor and puller succeeded and its senders completed.
+/// Checks a machine's report: that its editor and puller succeeded, and its connection's sender,
+/// the proxy of the other machine's session and the connection itself completed.
 fn check_machine(backend: temen_run::Backend, out: &str) {
     // The editor's status, a JACL value, and the puller's.
     let clients: Vec<i64> = field(out, "clients ")
@@ -1667,7 +1680,9 @@ fn check_machine(backend: temen_run::Backend, out: &str) {
         "{backend:?}: the editor failed: {out}"
     );
     assert_eq!(clients[1], 0, "{backend:?}: the puller failed: {out}");
-    assert_eq!(field(out, "senders "), "[0, 0]", "{backend:?}: {out}");
+    assert_eq!(field(out, "senders "), "[0]", "{backend:?}: {out}");
+    assert_eq!(field(out, "proxies "), "[0]", "{backend:?}: {out}");
+    assert_eq!(field(out, "links "), "ok", "{backend:?}: {out}");
 }
 
 const ED_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/ed.jacl");
@@ -1949,11 +1964,13 @@ const PANE_SCRIPT: &[(&str, &str, usize)] = &[
 
 #[test]
 fn a_jacl_program_runs_in_a_terminal_pane() {
-    // Stage 5's exit on the JACL side (#203; theSherwood/unir#79, #102): a JACL program is the
-    // client of a pane over a live terminal, which only unir's terminal vat holds. Its keys are
-    // echoed into its input line; `ls` shows typed rows that the driver aligns (a bold header,
-    // numbers to the right); `watch` shows unir's dangling view live as files change; Ctrl-Z moves
-    // that job to the background, where what it shows waits until `fg`.
+    // Stage 5's exit on the JACL side (#203; theSherwood/unir#79, #102), on the transcript
+    // (#204; unir decisions 100, 108): a JACL program is the client of a pane over a live
+    // terminal, which only unir's terminal vat holds, and writes what it shows as a transcript's
+    // blocks. Its keys are echoed into its typed line; `ls` shows rows of a schema it declares,
+    // which the driver lays out as a table (a bold header, numbers to the right); `watch` shows
+    // unir's dangling view live as files change; Ctrl-Z moves that job to the background, where
+    // what it shows waits until `fg`.
     use jacl_runtime_harness::pane;
     use std::sync::{Arc, Mutex};
     let (client, log2) = child_image(PANE_JACL, "");
@@ -2024,10 +2041,17 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
             out.find(s)
                 .unwrap_or_else(|| panic!("{backend:?}: no {s:?} in {out:?}"))
         };
-        // Keys echoed into the input line as they were typed.
-        at("\r\x1b[K> add f0 use");
-        // The listing, as the driver renders typed rows: the header bold, the size right-aligned.
-        at("\x1b[1mfile  bytes\x1b[0m\r\n\r\x1b[Kf0        6\r\n");
+        // Keys echoed into the typed line as they were typed.
+        at("\x1b[K> add f0 use");
+        // Each command a block of the transcript, headed by the command in bold.
+        at("\x1b[1madd f0 use b\x1b[0m");
+        // The listing, rows of the File schema pane.jacl declares, as the driver lays out a
+        // table: the header bold, the size right-aligned.
+        at("\x1b[1mls\x1b[0m");
+        assert!(
+            at("\x1b[1mfile  bytes\x1b[0m") < at("\x1b[Kf0        6"),
+            "{backend:?}"
+        );
         // The view, live: the definition added in the foreground shows at once.
         assert!(at("dangling: f0 b") < at("dangling: none"), "{backend:?}");
         // In the background the job's output waits for `fg`.
@@ -2036,9 +2060,10 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
             at("job 1 continued") < at("dangling: f1 c"),
             "{backend:?}: shown while stopped: {out:?}"
         );
-        // Nothing but the driver's own sequences reached the terminal.
+        // Nothing but the driver's own sequences reached the terminal: every escape opens a CSI.
         assert!(
-            !out.contains("\x1b]") && !out.contains("\x1b[2J"),
+            out.match_indices('\x1b')
+                .all(|(i, _)| out[i + 1..].starts_with('[')),
             "{backend:?}"
         );
     }

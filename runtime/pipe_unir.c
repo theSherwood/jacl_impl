@@ -213,6 +213,7 @@ static void stage_send_value(JaclVal v) {
  * since a sever would drop the message; stdin cancels, so its producer stops. Not a stage: the
  * value, unchanged. */
 JaclVal jacl_stage_finish(JaclVal result) {
+  jacl_transcripts_close();
   jacl_services_close();
   if (!jacl_stage()) return result;
   stage_open();

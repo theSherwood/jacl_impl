@@ -342,6 +342,16 @@ JaclVal jacl_service(JaclVal name);                /* [service NAME]: a session 
 JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its reply */
 JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
 JaclVal jacl_service_send(JaclVal s, JaclVal msg);  /* [service-send S [map NAME V]]: V on entry NAME */
+/* The transcript (transcript_unir.c): a shell's blocks, written by unir's writer. */
+JaclVal jacl_schema(JaclVal desc);                 /* [schema DESC]: a connection schema, by structure */
+JaclVal jacl_transcript(JaclVal name, JaclVal t, JaclVal line); /* [transcript NAME T L]: a writer */
+JaclVal jacl_transcript_line(JaclVal t, JaclVal text);
+JaclVal jacl_transcript_block(JaclVal t, JaclVal command, JaclVal job, JaclVal schema);
+JaclVal jacl_transcript_output(JaclVal t, JaclVal command, JaclVal job);
+JaclVal jacl_transcript_push(JaclVal t, JaclVal block, JaclVal v);
+JaclVal jacl_transcript_write(JaclVal t, JaclVal block, JaclVal text);
+JaclVal jacl_transcript_end(JaclVal t, JaclVal block);
+JaclVal jacl_transcript_flush(JaclVal t);
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
