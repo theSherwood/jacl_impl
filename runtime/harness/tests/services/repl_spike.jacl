@@ -1,0 +1,20 @@
+##
+## The REPL (jacl_impl#204): each line is compiled in this program and run in its own domain on the
+## Jit capability, and sees what the lines before it defined: a binding, a proc, a `mut` a later
+## line sets, a closure, and a struct with a proc that takes one.
+##
+print [repl-eval "def x 41"]
+print [repl-eval "proc inc {n} { + \x24n 1 }"]
+print [repl-eval "inc \x24x"]
+print [repl-eval "mut total 0"]
+print [repl-eval "set total [+ \x24total [inc 1]]"]
+print [repl-eval "\x24total"]
+print [repl-eval "def add2 [\\ + \x24it 2]"]
+print [repl-eval "add2 5"]
+print [repl-eval "struct Point {i32 x, i32 y}"]
+print [repl-eval "def p [Point x 3 y 4]"]
+print [repl-eval "+ \x24p->x \x24p->y"]
+print [repl-eval "proc sum {Point q} { + \x24q->x \x24q->y }"]
+print [repl-eval "sum [Point x 10 y 20]"]
+print [repl-eval "\x24p"]
+print [repl-eval "nope"]

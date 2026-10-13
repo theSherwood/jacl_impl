@@ -49,6 +49,14 @@ A vat's own `$env`:
 - **The root vat:** the host's environment block (temen DESIGN §3e: the `envc` strings of the
   powerbox args blob). That is the root's endowment from its host, which chose what to put there.
 
+## Where a task's output goes: `$ctx.out`
+
+`$ctx.out`, when set, names where the task's output goes instead of the host stream: today, a job's
+place in a shell's transcript (`[transcript-job T CMD JOB]`, docs/UNIR_SERVICES.md "The shell"). What
+the task prints, emits, and its pipelines' output go there, in blocks headed by the job's command. It
+follows `$ctx`'s scoping, so the tasks a job spawns write to its place too, and it never crosses into a
+stage, whose output is its own stdout edge. A task whose job has ended writes nowhere.
+
 ## The wire
 
 A stage's arguments travel as `unir_spawn`'s argument bytes (op 15's payload): the value

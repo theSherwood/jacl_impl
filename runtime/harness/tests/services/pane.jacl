@@ -1,7 +1,7 @@
 # mode: concurrent
 ##
 ## pane — a JACL program in a terminal pane (#203, #204; theSherwood/unir#102, decisions 81, 100,
-## 108): run by unir's store vat in its `shell` mode, which grants it the store as `store`, a
+## 116): run by unir's store vat in its `shell` mode, which grants it the store as `store`, a
 ## second session with it as `transcript`, and the pane as `pane`. It writes what it shows as the
 ## blocks of a transcript in the store, a block per command headed by the command, and names the
 ## transcript to the pane; the terminal vat reads the transcript from the store and turns it into

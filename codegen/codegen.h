@@ -38,6 +38,21 @@ struct AstNode;
 IrModule *temen_codegen_program(struct AstNode **nodes, uint32_t count, int module_mode, int in_guest,
                                char *err, size_t errcap);
 
+/* What a REPL's earlier lines defined (jacl_impl#204): the top-level names they bound, which live
+ * in the runtime's global map, and their struct declarations. */
+typedef struct TemenReplEnv {
+  const char **globals; const uint32_t *global_lens; uint32_t nglobals;
+  struct AstNode **structs; uint32_t nstructs;
+} TemenReplEnv;
+
+/* Compile one REPL line to a unit the shell installs (temen §22 `install`) and calls on its own
+ * fiber: func 0 = `(sp, _) -> i64`, the line's forms run in order, returning the last value. The
+ * runtime is already up, so there is no bring-up. Every top-level binding of the line, and each of
+ * its procs as a closure value, goes into the runtime's global map, where a later line finds it by
+ * name (`env`). NULL on an unsupported construct (message in `err`). */
+IrModule *temen_codegen_repl(struct AstNode **nodes, uint32_t count, const TemenReplEnv *env,
+                             char *err, size_t errcap);
+
 /* Does the program reach any concurrency/suspension op (spawn/await/parallel/race/yield/sleep)?
  * The in-guest `interpret` bridge uses this to pick `in_guest` = 1 (inline) vs 2 (scheduler). */
 int temen_program_uses_concurrency(struct AstNode **nodes, uint32_t count);

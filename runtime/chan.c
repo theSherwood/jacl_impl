@@ -15,8 +15,11 @@ enum { CHAN_W = 1, CHAN_R = 2 };
 /* What an end carries (theSherwood/unir#43). A channel from `[channel]` carries bytes. A stage's
  * stdio edge and a pipeline's output are decided by their first frame: a program's first `emit`
  * offers the value schema (unir spec §3, typed edges), and its first byte write means bytes. On a
- * CHAN_VALUES read end each frame is one verified message, read as one JACL value. */
-enum { CHAN_UNKNOWN = 0, CHAN_BYTES = 1, CHAN_VALUES = 2 };
+ * CHAN_VALUES read end each frame is one verified message, read as one JACL value. A pipeline
+ * whose output goes to a job in the transcript (transcript_unir.c) reads it as CHAN_ADOPT: an
+ * offer of any schema is adopted (CHAN_ADOPTED), and each frame is a verified message of it,
+ * forwarded as it is rather than read as a value. */
+enum { CHAN_UNKNOWN = 0, CHAN_BYTES = 1, CHAN_VALUES = 2, CHAN_ADOPT = 3, CHAN_ADOPTED = 4 };
 
 /* Backend results: >= 0 is success (a read's frame length); these are the failures. */
 #define CHAN_BE_END     (-1)   /* the stream ended cleanly (read: EOF; write: reader cancelled) */
@@ -33,7 +36,9 @@ typedef struct {
   uint32_t tail_len;
   uint32_t pipe;       /* a pipeline's read end: its state's offset in this blob (pipe_unir.c), else 0 */
   uint32_t typed;      /* CHAN_UNKNOWN until a stage edge's first frame says; CHAN_BYTES; CHAN_VALUES */
-  void    *agree;      /* a CHAN_VALUES read end's agreement (unir spec §3), in the backend's heap */
+  void    *agree;      /* a CHAN_VALUES or CHAN_ADOPTED read end's agreement (unir spec §3), in the
+                        * backend's heap */
+  uint32_t entry;      /* a CHAN_ADOPTED read end: the catalog entry of the message in `tail` */
   uint8_t  tail[];     /* read end: `max` bytes */
 } JaclChan;
 
@@ -287,6 +292,8 @@ JaclVal jacl_transcript_push(JaclVal t, JaclVal b, JaclVal v) { (void)t; (void)b
 JaclVal jacl_transcript_write(JaclVal t, JaclVal b, JaclVal x) { (void)t; (void)b; (void)x; return chan_err("transcript-write: unavailable without vats"); }
 JaclVal jacl_transcript_end(JaclVal t, JaclVal b) { (void)t; (void)b; return chan_err("transcript-end: unavailable without vats"); }
 JaclVal jacl_transcript_flush(JaclVal t) { (void)t; return chan_err("transcript-flush: unavailable without vats"); }
+JaclVal jacl_transcript_job(JaclVal t, JaclVal c, JaclVal j) { (void)t; (void)c; (void)j; return chan_err("transcript-job: unavailable without vats"); }
+JaclVal jacl_transcript_job_end(JaclVal s, JaclVal c) { (void)s; (void)c; return chan_err("transcript-job-end: unavailable without vats"); }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

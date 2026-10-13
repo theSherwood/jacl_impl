@@ -1,8 +1,9 @@
 //! A JACL program in a terminal pane (#203; theSherwood/unir#102, decision 81): unir's store vat
-//! (`runtime/unir/unir_store_vat.ll`) run as `shell SOURCE LOG2 ROWS COLS`. The vat is the root; it
-//! spawns the terminal vat and the dangling view from its own image (granted as `store-self`), and
-//! the program from the client image (granted as `store-client`), granted the store as `store` and
-//! the pane as `pane`. Only the terminal vat holds the terminal: the root's stdin after the vat's
+//! (`runtime/unir/unir_store_vat.ll`) run as `shell SOURCE LOG2 ROWS COLS [PROGRAM…]`. The vat is
+//! the root; it spawns the terminal vat and the dangling view from its own image (granted as
+//! `store-self`), and the program from the client image (granted as `store-client`), granted the
+//! store as `store`, the pane as `pane`, the Jit capability, and the programs it may run as
+//! `bin.PROGRAM`. Only the terminal vat holds the terminal: the root's stdin after the vat's
 //! command, and its stdout. The store lives in `dir/store.log`.
 
 use std::path::Path;
@@ -20,11 +21,12 @@ pub struct Size {
 
 /// Runs `client` (a JACL program compiled as a child image, its window `2^log2` bytes) in a pane
 /// of `size` on `backend`, and returns everything the terminal was sent, then the vat's report.
-/// `setup` sees the root's host before the run, to attach the terminal
-/// (`Host::set_stdin_source`, `Host::set_stdout_tee`).
+/// The client may run `programs` (child images, by name). `setup` sees the root's host before the
+/// run, to attach the terminal (`Host::set_stdin_source`, `Host::set_stdout_tee`).
 pub fn run(
     client: &temen_ir::Module,
     log2: u8,
+    programs: &[(&str, temen_ir::Module)],
     backend: Backend,
     dir: &Path,
     size: Size,
@@ -35,7 +37,13 @@ pub fn run(
     let inst = temen_run::instantiate(vat).expect("instantiate the store vat");
     let config = RunConfig {
         memory_size_log2: Some(vat_log2),
-        stdin: format!("shell 1 {log2} {} {}", size.rows, size.cols).into_bytes(),
+        stdin: programs
+            .iter()
+            .fold(
+                format!("shell 1 {log2} {} {}", size.rows, size.cols),
+                |s, (name, _)| format!("{s} {name}"),
+            )
+            .into_bytes(),
         ..Default::default()
     };
     let mut grant = |h: &mut temen_interp::Host| {
@@ -43,6 +51,10 @@ pub fn run(
         h.register_cap_name("store-client", m);
         let m = h.grant_module(&helper);
         h.register_cap_name("store-self", m);
+        for (name, image) in programs {
+            let m = h.grant_module(image);
+            h.register_cap_name(&format!("bin.{name}"), m);
+        }
         h.grant_instantiator(0, 1 << log2);
         h.grant_budget(-1, -1, -1);
         setup(h);

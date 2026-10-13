@@ -1,4 +1,4 @@
-/* transcript_unir.c — the transcript (theSherwood/unir decisions 100, 107 and 108; #204). Included
+/* transcript_unir.c — the transcript (theSherwood/unir decisions 100, 107 and 116; #204). Included
  * by chan.c with the unir backend, after value.c and service_unir.c.
  *
  * A shell writes what its jobs show into a transcript: a store document of blocks, each headed by
@@ -18,6 +18,11 @@
  *   [transcript-write T B TEXT]      appends TEXT to output block B
  *   [transcript-end T B]             ends block B, complete
  *   [transcript-flush T]             commits what was queued as one version
+ *   [transcript-job T CMD JOB]       a place in the transcript for job JOB, which CMD started:
+ *                                    a task whose `$ctx.out` is it writes its output there (see
+ *                                    "A job's output" below); an integer handle, or an error
+ *   [transcript-job-end S COMPLETE]  ends job S's place, its last block complete (COMPLETE true)
+ *                                    or cancelled; how many blocks the job opened
  *   [schema DESC]                    the schema DESC describes: a connection schema, written as
  *                                    unir's meta-schema has it (`types`, each "text", "u64",
  *                                    [map "struct" [map "name" N "fields" [vec [map "name" F
@@ -27,9 +32,9 @@
  *                                    3 (latest-wins) makes the block live.
  *
  * Each call that fails returns an error value and leaves the transcript as it was. A call that
- * waits for the store parks its fiber, so a transcript is one call at a time, as a channel's end
- * is: another fiber's call meanwhile is an error ("transcript busy"). A job's output is committed
- * whenever 32 KiB of it is waiting, so the writer never holds more. */
+ * waits for the store parks its fiber, so a transcript is one call at a time: another fiber's call
+ * meanwhile waits its turn, since a shell's jobs write while the shell reads keys and flushes. A
+ * job's output is committed whenever 32 KiB of it is waiting, so the writer never holds more. */
 
 #define JACL_TRANSCRIPTS 2u
 #define JACL_SCHEMAS 64u
@@ -60,23 +65,36 @@ static JaclTranscript *transcript_of(JaclVal t) {
   return i >= 0 && (uint32_t)i < JACL_TRANSCRIPTS && jacl_transcripts[i].t ? &jacl_transcripts[i] : 0;
 }
 
+/* Takes `x` for one call (transcript_done releases it), parking while another fiber's call holds
+ * it: a call holds it only while the store answers. */
+static void transcript_wait(JaclTranscript *x) {
+  while (__vm_atomic_cas32(&x->busy, 0, 1) != 0) {
+    jacl_ctl_point();                              /* a waiting job can be cancelled or suspended */
+    (void)__vm_wait32(&x->busy, 1, 1000000);
+  }
+}
+
 /* The open transcript `t`, taken for one call (transcript_done releases it); 0 with `*err` set
- * if it is not one, or another fiber's call holds it. */
+ * if it is not one. */
 static JaclTranscript *transcript_take(JaclVal t, const char *what, JaclVal *err) {
   JaclTranscript *x = transcript_of(t);
+  if (x) {
+    transcript_wait(x);
+    return x;
+  }
   static char msg[64];
   uint32_t n = 0;
   for (const char *p = what; *p && n < 32; p++) msg[n++] = *p;
-  const char *why = !x ? ": not an open transcript" : ": transcript busy";
-  if (x && __vm_atomic_cas32(&x->busy, 0, 1) == 0) return x;
-  for (const char *p = why; *p && n < sizeof msg - 1; p++) msg[n++] = *p;
+  for (const char *p = ": not an open transcript"; *p && n < sizeof msg - 1; p++) msg[n++] = *p;
   msg[n] = 0;
   *err = chan_err(msg);
   return 0;
 }
 
+/* Gives `x` back after a call, waking a fiber that waits its turn. */
 static JaclVal transcript_done(JaclTranscript *x, JaclVal r) {
   __vm_atomic_store32(&x->busy, 0);
+  (void)__vm_notify(&x->busy, 1);
   return r;
 }
 
@@ -302,6 +320,194 @@ JaclVal jacl_transcript_flush(JaclVal t) {
   if (!x) return err;
   int64_t r = transcript_commit(x);
   return transcript_done(x, r < 0 ? transcript_err("transcript-flush", r) : JACL_NIL);
+}
+
+/* ---- A job's output (#204) ----
+ * A shell runs each line as a job, a task whose `$ctx.out` is the job's place in the transcript
+ * (`transcript-job`), and what the task outputs goes there rather than to the host stream
+ * (pipe_unir.c): into blocks headed by the job's command and number, each opened as output of its
+ * kind comes. `print`'s text goes to an output block (decision 107); `emit`'s values to a block of
+ * this runtime's values; and a pipeline's output to an output block if it is bytes, else to a
+ * block of the schema its last program offered, adopted and forwarded without decoding (decision
+ * 116). Output of another kind than the open block's, or a later pipeline's typed output, ends
+ * that block and opens the next. A write looks its job up by handle under the transcript's turn,
+ * so a task that outlives its job (one its line spawned) writes nowhere once the job has ended. */
+#define JACL_JOBS 64u
+enum { JOB_TEXT = 1, JOB_VALUES = 2, JOB_ADOPTED = 3 };
+
+typedef struct {
+  int32_t used;            /* cas32 */
+  uint32_t gen;            /* bumped as the slot is freed, so a stale handle names nothing */
+  JaclVal t;               /* the transcript: an integer handle */
+  uint32_t job;
+  int64_t block;           /* the open block, or -1 */
+  uint32_t kind;           /* the open block's JOB_* */
+  const void *agree;       /* an adopted block's agreement, while its pipeline runs */
+  uint32_t entry;          /* an adopted block's catalog entry */
+  uint32_t blocks;         /* how many blocks the job opened */
+  uint32_t cmd_len;
+  char cmd[1024];
+} JaclJob;
+
+static JaclJob jacl_jobs[JACL_JOBS];
+
+/* A job's handle: its slot, and the slot's generation above it. */
+static JaclJob *job_of_handle(JaclVal s) {
+  if (!jaclrt_is_i32(s) || jaclrt_as_i32(s) < 0) return 0;
+  uint32_t h = (uint32_t)jaclrt_as_i32(s), i = h % JACL_JOBS;
+  JaclJob *j = &jacl_jobs[i];
+  return __vm_atomic_load32(&j->used) && j->gen == h / JACL_JOBS ? j : 0;
+}
+
+/* Whether the running task's output goes to a job: `$ctx.out` is set, `*s`, the job's handle. */
+static int job_named(JaclVal *s) {
+  if (jaclrt_is_nil(jacl_ctx_cur)) return 0;
+  *s = jacl_map_get(jacl_ctx_cur, jacl_str_new("out", 3));
+  return !jaclrt_is_nil(*s);
+}
+
+/* Job `s` with its transcript's turn taken (transcript_done releases it); 0 if `s` names no job,
+ * as when the job ended while this waited for the turn. */
+static JaclJob *job_take(JaclVal s, JaclTranscript **xp) {
+  JaclJob *j = job_of_handle(s);
+  JaclTranscript *x = j ? transcript_of(j->t) : 0;
+  if (!x) return 0;
+  transcript_wait(x);
+  if (job_of_handle(s) != j) {
+    (void)transcript_done(x, JACL_NIL);
+    return 0;
+  }
+  *xp = x;
+  return j;
+}
+
+/* Job j's block for output of `kind`: the open one if it is of that kind (and, adopted, of that
+ * agreement and entry), else the next, which ends the open one. The next is an output block for
+ * text, else a block of `schema`'s `entry` (an adopted block's: the agreement's schema). The
+ * block, or a UNIR_E* code. Under the transcript's turn. */
+static int64_t job_block(JaclTranscript *x, JaclJob *j, uint32_t kind, const unir_schema *schema,
+                         const void *agree, uint32_t entry) {
+  if (j->block >= 0 && j->kind == kind && j->agree == agree && j->entry == entry) return j->block;
+  if (j->block >= 0) (void)unir_transcript_end(x->t, (uint64_t)j->block, UNIR_ENDED_COMPLETE);
+  j->block = -1;
+  int64_t b;
+  if (kind == JOB_TEXT) {
+    b = unir_transcript_begin_output(x->t, (const uint8_t *)j->cmd, j->cmd_len, j->job);
+  } else if (kind == JOB_ADOPTED) {
+    unir_schema *own = unir_agreement_schema((const unir_agreement *)agree);
+    b = own ? unir_transcript_begin(x->t, (const uint8_t *)j->cmd, j->cmd_len, j->job, own, entry)
+            : UNIR_EINVALID;
+    if (own) unir_schema_free(own);
+  } else {
+    b = unir_transcript_begin(x->t, (const uint8_t *)j->cmd, j->cmd_len, j->job, schema, entry);
+  }
+  if (b < 0) return b;
+  /* Keeps the transcript's count of blocks; the shell names none of a job's to push into. */
+  if (!transcript_note(x, b, -1)) return UNIR_EINVALID;
+  j->block = b;
+  j->kind = kind;
+  j->agree = agree;
+  j->entry = entry;
+  j->blocks++;
+  return b;
+}
+
+/* Text `b[0..n)` to job `s`'s output. Like `print`'s, it has no failure to report. */
+static void job_write(JaclVal s, const uint8_t *b, uint64_t n) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return;
+  int64_t r = job_block(x, j, JOB_TEXT, 0, 0, 0);
+  /* A part at a time, committing whenever a part's worth waits, as transcript-write does. */
+  for (uint64_t done = 0; r >= 0 && done < n;) {
+    uint64_t part = n - done;
+    if (part > JACL_TRANSCRIPT_PENDING - x->pending) part = JACL_TRANSCRIPT_PENDING - x->pending;
+    r = unir_transcript_write(x->t, (uint64_t)j->block, b + done, part);
+    if (r < 0) break;
+    done += part;
+    x->pending += (uint32_t)part;
+    if (x->pending >= JACL_TRANSCRIPT_PENDING) r = transcript_commit(x);
+  }
+  (void)transcript_done(x, JACL_NIL);
+}
+
+/* A message of entry `entry` of the schema `agree` adopted, `frame[0..n)`, to job `s`'s output. */
+static void job_forward(JaclVal s, const void *agree, uint32_t entry, const uint8_t *frame,
+                        uint64_t n) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return;
+  if (job_block(x, j, JOB_ADOPTED, 0, agree, entry) >= 0)
+    (void)unir_transcript_push(x->t, (uint64_t)j->block, frame, n);
+  (void)transcript_done(x, JACL_NIL);
+}
+
+/* `[emit V]` to job `s`: V joins a block of this runtime's values. nil, or an error value. */
+static JaclVal job_emit(JaclVal s, JaclVal v) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return chan_err("emit: the job has ended");
+  static uint8_t frame[JACL_TRANSCRIPT_VALUE];   /* under the transcript's turn */
+  JaclVal err = JACL_NIL;
+  uint64_t n = jv_encode_into(v, frame, sizeof frame, &err);
+  if (!n) return transcript_done(x, err);
+  int64_t r = job_block(x, j, JOB_VALUES, jv_schema(), 0, 0);
+  if (r >= 0) r = unir_transcript_push(x->t, (uint64_t)j->block, frame, n);
+  return transcript_done(x, r < 0 ? transcript_err("emit", r) : JACL_NIL);
+}
+
+/* Ends job `s`'s adopted block, as the pipeline whose output it holds ends: the next pipeline's
+ * output, even of the same schema, is a block of its own. */
+static void job_pipeline_done(JaclVal s) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return;
+  if (j->block >= 0 && j->kind == JOB_ADOPTED) {
+    (void)unir_transcript_end(x->t, (uint64_t)j->block, UNIR_ENDED_COMPLETE);
+    j->block = -1;
+    j->agree = 0;
+  }
+  (void)transcript_done(x, JACL_NIL);
+}
+
+/* [transcript-job T CMD JOB] */
+JaclVal jacl_transcript_job(JaclVal t, JaclVal command, JaclVal job) {
+  if (!transcript_of(t)) return chan_err("transcript-job: not an open transcript");
+  if (!jaclrt_is_string(command) || jacl_str_len(command) >= sizeof jacl_jobs[0].cmd ||
+      !jaclrt_is_i32(job) || jaclrt_as_i32(job) < 0)
+    return chan_err("transcript-job: a command and a job number");
+  for (uint32_t i = 0; i < JACL_JOBS; i++) {
+    JaclJob *j = &jacl_jobs[i];
+    if (__vm_atomic_cas32(&j->used, 0, 1) != 0) continue;
+    j->t = t;
+    j->job = (uint32_t)jaclrt_as_i32(job);
+    j->block = -1;
+    j->kind = 0;
+    j->agree = 0;
+    j->entry = 0;
+    j->blocks = 0;
+    j->cmd_len = (uint32_t)transcript_str(command, j->cmd, sizeof j->cmd);
+    return jaclrt_i32((int32_t)(j->gen * JACL_JOBS + i));
+  }
+  return chan_err("transcript-job: too many jobs");
+}
+
+/* [transcript-job-end S COMPLETE] */
+JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return chan_err("transcript-job-end: not a job");
+  int64_t r = 0;
+  if (j->block >= 0)
+    r = unir_transcript_end(x->t, (uint64_t)j->block,
+                            complete == JACL_FALSE || jaclrt_is_nil(complete) ? UNIR_ENDED_CANCELLED
+                                                                             : UNIR_ENDED_COMPLETE);
+  uint32_t n = j->blocks;
+  j->block = -1;
+  /* Past 2^31 / JACL_JOBS generations a handle would wrap; a slot is freed far less often. */
+  j->gen = (j->gen + 1) % (0x7fffffffu / JACL_JOBS);
+  __vm_atomic_store32(&j->used, 0);
+  return transcript_done(x, r < 0 ? transcript_err("transcript-job-end", r) : jaclrt_i32((int32_t)n));
 }
 
 /* At exit: close the transcripts still open. What was not flushed is lost, as a program's

@@ -135,11 +135,17 @@ static int stage_stdin_orphaned(JaclChan *c) {
   return !jaclrt_is_nil(jacl_stage_ends[0]) && c == chan_of(jacl_stage_ends[0]) && stage_stdout_ended();
 }
 
-/* stdout for `print`: the stage's stdout edge, else the host stream. `print` has no error to
+/* stdout for `print`: the task's job in the transcript, when `$ctx.out` names one
+ * (transcript_unir.c); else the stage's stdout edge, else the host stream. `print` has no error to
  * return, so a task that prints to an ended stdout ends there, as SIGPIPE ends a Unix program
  * (jacl_task_end). It ends cleanly: its reader went away, which is not its failure, so pipefail
  * still names the stage that did fail. The program's own task ending ends the stage. */
 void jacl_out(const char *b, long n) {
+  JaclVal job;
+  if (job_named(&job)) {
+    job_write(job, (const uint8_t *)b, (uint64_t)n);
+    return;
+  }
   JaclVal out = jacl_stage() ? stage_end(1) : JACL_NIL;
   if (jaclrt_is_nil(out)) { write(1, b, n); return; }
   if (chan_of(out)->typed == CHAN_VALUES) {
@@ -151,12 +157,15 @@ void jacl_out(const char *b, long n) {
   if (!stage_write(out, (const uint8_t *)b, (uint32_t)n) && stage_stdout_ended()) jacl_task_end(JACL_NIL);
 }
 
-/* [emit V]: V as the next message of the enclosing output. In a stage that is its stdout, which
- * the first `emit` makes a typed edge: it offers the value schema and waits for the reader to
- * accept (unir spec §3). Elsewhere it is the host stream, where V is printed. nil, or an error
- * value: V cannot cross (value.c) or needs more than one frame, the output already carries bytes,
- * or its reader refused the offer or went away. */
+/* [emit V]: V as the next message of the enclosing output. For a task whose `$ctx.out` names a
+ * job, that is the job's place in the transcript, where V joins a block of values. In a stage it
+ * is its stdout, which the first `emit` makes a typed edge: it offers the value schema and waits
+ * for the reader to accept (unir spec §3). Elsewhere it is the host stream, where V is printed.
+ * nil, or an error value: V cannot cross (value.c) or needs more than one frame, the output
+ * already carries bytes, or its reader refused the offer or went away. */
 JaclVal jacl_emit(JaclVal v) {
+  JaclVal job;
+  if (job_named(&job)) return job_emit(job, v);
   JaclVal out = jacl_stage() ? stage_end(1) : JACL_NIL;
   if (jaclrt_is_nil(out)) { jacl_print(v); return JACL_NIL; }
   JaclChan *c = stage_claim(out);
@@ -574,19 +583,30 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
 }
 
 /* [pipeline STAGES]: runs the pipeline as jacl_pipeline_stream does, copying its output to the
- * enclosing output (`jacl_out`: the host stream in the shell, this stage's stdout in a stage;
- * values are emitted there, which in the shell prints them), and returns the last program's
- * value, or the failure. */
+ * enclosing output, and returns the last program's value, or the failure. For a task whose
+ * `$ctx.out` names a job, the output goes to the job's place in the transcript: bytes as text,
+ * and typed output under the schema its last program offered, adopted (transcript_unir.c).
+ * Otherwise it goes to `jacl_out`: the host stream in the shell, this stage's stdout in a stage;
+ * values are emitted there, which in the shell prints them. */
 JaclVal jacl_pipeline(JaclVal stages) {
   JaclVal keep[3] = {jacl_pipeline_stream(stages), JACL_NIL, JACL_NIL};
   JaclChan *c = chan_of(keep[0]);
   if (!c || !c->pipe) return keep[0];      /* an error value, or `exec`'s output */
+  JaclVal job;
+  int named = job_named(&job);
+  if (named) c->typed = CHAN_ADOPT;        /* before its first frame says what it carries */
   int64_t s;
   while ((s = pipe_read(c, &keep[1])) >= 0) {
+    if (named) {
+      if (c->typed == CHAN_ADOPTED) job_forward(job, c->agree, c->entry, c->tail, (uint64_t)s);
+      else job_write(job, c->tail, (uint64_t)s);
+      continue;
+    }
     if (c->typed != CHAN_VALUES) { jacl_out((const char *)c->tail, (long)s); continue; }
     keep[2] = chan_value(c);
     jacl_emit(keep[2]);
   }
+  if (named) job_pipeline_done(job);
   c->closed = 1;
   if (s != CHAN_BE_END) return keep[1];
   JaclPipe *p = pipe_of(c);

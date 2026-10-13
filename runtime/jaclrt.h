@@ -352,6 +352,8 @@ JaclVal jacl_transcript_push(JaclVal t, JaclVal block, JaclVal v);
 JaclVal jacl_transcript_write(JaclVal t, JaclVal block, JaclVal text);
 JaclVal jacl_transcript_end(JaclVal t, JaclVal block);
 JaclVal jacl_transcript_flush(JaclVal t);
+JaclVal jacl_transcript_job(JaclVal t, JaclVal command, JaclVal job); /* a job's place: `$ctx.out` */
+JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete);
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
@@ -362,6 +364,7 @@ void    jacl_args_blob(const unsigned char *b, uint64_t len, JaclVal *argv, Jacl
 JaclVal jacl_cancel(JaclVal fut);
 JaclVal jacl_suspend(JaclVal fut);
 JaclVal jacl_resume(JaclVal fut);
+JaclVal jacl_done(JaclVal fut);   /* [done? F]: whether F's task has finished; never waits */
 #define JACL_CTL_CANCEL  1
 #define JACL_CTL_SUSPEND 2
 int  jacl_ctl_pending(void);   /* the running task's pending request, or 0 */

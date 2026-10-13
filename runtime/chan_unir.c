@@ -121,18 +121,25 @@ static unir_schema *jv_schema(void);
  * length, with the frame in `c->tail`, or a UNIR_E* code. A CHAN_UNKNOWN end first learns what
  * the edge carries (unir spec §3): an offer on substream 0 is accepted as the value schema, and
  * the end then reads verified messages; any other first frame means bytes, read as they are. A
- * writer offering another schema is refused (UNIR_EREFUSED). */
+ * writer offering another schema is refused (UNIR_EREFUSED). A CHAN_ADOPT end adopts whatever
+ * schema is offered instead, and keeps each message's catalog entry in `c->entry`. */
 static int64_t chan_unir_next(JaclChan *c, unir_consumer *h, int64_t timeout_ns) {
-  if (c->typed == CHAN_UNKNOWN) {
+  if (c->typed == CHAN_UNKNOWN || c->typed == CHAN_ADOPT) {
     int64_t sub = unir_consumer_next_substream(h, timeout_ns);
     if (sub < 0) return sub;
     if (sub == 0) {
       /* The writer sends its whole offer at once, so the accept waits no longer than it takes. */
-      unir_schema *s = jv_schema();
       int64_t st = UNIR_EINVALID;
-      c->agree = s ? unir_consumer_accept(h, s, -1, &st) : 0;
-      if (!c->agree) return st < 0 ? st : UNIR_EINVALID;
-      c->typed = CHAN_VALUES;
+      if (c->typed == CHAN_ADOPT) {
+        c->agree = unir_consumer_adopt(h, -1, &st);
+        if (!c->agree) return st < 0 ? st : UNIR_EINVALID;
+        c->typed = CHAN_ADOPTED;
+      } else {
+        unir_schema *s = jv_schema();
+        c->agree = s ? unir_consumer_accept(h, s, -1, &st) : 0;
+        if (!c->agree) return st < 0 ? st : UNIR_EINVALID;
+        c->typed = CHAN_VALUES;
+      }
     } else {
       c->typed = CHAN_BYTES;
     }
@@ -147,6 +154,7 @@ static int64_t chan_unir_next(JaclChan *c, unir_consumer *h, int64_t timeout_ns)
     return UNIR_EENDED;
   }
   memcpy(c->tail, frame, (size_t)n);   /* the verified message, private to this vat */
+  c->entry = entry;
   return n;
 }
 

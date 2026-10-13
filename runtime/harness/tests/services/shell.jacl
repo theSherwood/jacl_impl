@@ -1,0 +1,258 @@
+# mode: concurrent
+##
+## shell — the JACL shell (#204; theSherwood/unir decisions 100, 116, 117): a REPL in a terminal pane.
+## Run by unir's store vat in its `shell` mode, which grants it the store as `store`, a second
+## session with it as `transcript`, the pane as `pane`, the Jit capability, and the programs it may
+## run as `bin.NAME`. Each line typed is a job: compiled here, by the compiler linked into this
+## program's image, and run as a task in this program's own domain (`[repl-eval]`), so what one line
+## defines the lines after it see. What a job outputs goes to its blocks of the transcript, each
+## headed by the line (`$ctx.out`): what it prints, the values it emits, and its pipelines' output,
+## typed under the schema their last program offered. A job that shows nothing else shows its
+## value, and one that fails shows why.
+##
+##   LINE &     runs LINE in the background
+##   jobs       lists the jobs running or stopped
+##   fg [N]     waits for job N (the last, by default), resuming it if it is stopped
+##   bg [N]     resumes job N in the background
+##   kill [N]   ends job N
+##   Ctrl-C     ends the job waited for; Ctrl-Z stops it
+##   Up, Down   earlier and later lines
+##   quit       ends the shell
+##
+## Keys typed while the shell waits for a job, other than Ctrl-C and Ctrl-Z, wait for it too.
+##
+
+## Asserts that R, what a transcript call returned, is not an error.
+proc ok {r} {
+  assert [not [error? $r]]
+}
+
+## The payload of reply REQ's variant KIND; any other reply fails the program.
+proc ask {s, req, kind} {
+  def r [service-call $s $req]
+  assert [not [error? $r]]
+  assert [map-has $r $kind]
+  map-get $r $kind
+}
+
+## The character a key's code stands for: printable ASCII, else "".
+def printable " !\"#\x24%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+proc char-of {code} {
+  if [&& [>= $code 32] [<= $code 126]] { index $printable [- $code 32] } else { "" }
+}
+
+## LINE split at its spaces.
+proc words {line} {
+  mut out [vec]
+  mut w ""
+  for [range 0 [length $line]] i {
+    def c [index $line $i]
+    if [== $c " "] {
+      if [> [length $w] 0] { set out [vec-push $out $w] }
+      set w ""
+    } else {
+      set w [concat $w $c]
+    }
+  }
+  if [> [length $w] 0] { set out [vec-push $out $w] }
+  $out
+}
+
+## A block of the transcript T, headed by LINE for job N, holding TEXT.
+proc say {t, line, n, text} {
+  def b [transcript-output $t $line $n]
+  ok $b
+  ok [transcript-write $t $b $text]
+  ok [transcript-end $t $b]
+}
+
+## A block of the transcript T, headed by LINE for job N, holding the value V.
+proc show {t, line, n, v} {
+  def b [transcript-block $t $line $n $nil]
+  ok $b
+  ## A value the values schema cannot carry (a closure) is shown as its text.
+  if [error? [transcript-push $t $b $v]] { ok [transcript-push $t $b [to-string $v]] }
+  ok [transcript-end $t $b]
+}
+
+## Starts LINE as job N, a task whose output goes to the job's place in the transcript T. The job's
+## record: its task, its place, its line, and whether it is stopped.
+proc start {t, line, n} {
+  def s [transcript-job $t $line $n]
+  ok $s
+  def f [with-ctx {out $s} { spawn { repl-eval $line } }]
+  map "f" $f "s" $s "line" $line "stopped" $false
+}
+
+## Ends each job in JOBS (an atom of a map from number to record) whose task has finished. One
+## that failed shows why; one that showed nothing else shows its value. (A job's error is only
+## read here: passed on, it would end this proc with it.)
+proc reap {t, jobs} {
+  for [map-keys [deref $jobs]] n {
+    def j [map-get [deref $jobs] $n]
+    if [done? [map-get $j "f"]] {
+      def v [await [map-get $j "f"]]
+      def line [map-get $j "line"]
+      if [error? $v] {
+        def why [to-string [error-val $v]]
+        ok [transcript-job-end [map-get $j "s"] [!= $why "cancelled"]]
+        say $t $line $n [concat "error: " [concat $why "\n"]]
+      } else {
+        def shown [transcript-job-end [map-get $j "s"] $true]
+        ok $shown
+        if [== $shown 0] { show $t $line $n $v }
+      }
+      reset $jobs [map-remove [deref $jobs] $n]
+    }
+  }
+}
+
+## The job WORDS name (`fg 2`), or the last one when they name none; nil if there is no such job.
+proc job-named {jobs, words} {
+  mut found $nil
+  for [map-keys [deref $jobs]] n {
+    if [> [length $words] 1] {
+      if [== [to-string $n] [index $words 1]] { set found $n }
+    } else {
+      if [|| [== $found $nil] [> $n $found]] { set found $n }
+    }
+  }
+  $found
+}
+
+## The text `jobs` shows: a line per job of JOBS.
+proc listing {jobs} {
+  mut text ""
+  for [map-keys [deref $jobs]] n {
+    def j [map-get [deref $jobs] $n]
+    def state [if [map-get $j "stopped"] { "stopped" } else { "running" }]
+    set text [concat $text [concat "[" [concat [to-string $n] [concat "] " [concat $state [concat "  " [concat [map-get $j "line"] "\n"]]]]]]]
+  }
+  $text
+}
+
+proc main {} {
+  def s [service "store"]
+  assert [not [error? $s]]
+  ## The writer's own session, opened before the pane: the vat answers none of this program's
+  ## sessions until it has connected them all, in order.
+  def t [transcript "transcript" "shell/transcript" "shell/line"]
+  assert [not [error? $t]]
+  def p [service "pane"]
+  assert [not [error? $p]]
+  assert [== [service-send $p [map "show" [map "transcript" "shell/transcript" "line" "shell/line"]]] $nil]
+  def jobs [atom [map]]
+  mut last 0
+  ## The job waited for, while there is one: then keys control it rather than edit the line.
+  mut fg $nil
+  mut line ""
+  mut history [vec]
+  mut back 0
+  ## Keys typed while the shell waits for a job, kept for the prompt.
+  mut ahead [vec]
+  mut go $true
+  ## The named keys come as their names; the rest as maps (`Char`, `Ctrl`, `Alt`).
+  def named [map "Enter" 1 "Tab" 1 "Backspace" 1 "Delete" 1 "Escape" 1 "Up" 1 "Down" 1 "Right" 1 "Left" 1 "Home" 1 "End" 1 "PageUp" 1 "PageDown" 1]
+  def shell-commands [map "jobs" 1 "fg" 1 "bg" 1 "kill" 1]
+  ok [transcript-line $t "> "]
+  while $go {
+    reap $t $jobs
+    if [&& [!= $fg $nil] [not [map-has [deref $jobs] $fg]]] {
+      set fg $nil
+      ok [transcript-line $t [concat "> " $line]]
+    }
+    ok [transcript-flush $t]
+    ## Every event waiting, then the line drawn once: a burst of keys, or a paste, is one commit.
+    mut any $false
+    mut more $true
+    while $more {
+      mut e $nil
+      if [&& [== $fg $nil] [> [length $ahead] 0]] {
+        set e [index $ahead 0]
+        set ahead [vec-slice $ahead 1 [length $ahead]]
+      } else {
+        set e [service-event $p $false]
+      }
+      if [== $e $nil] { set more $false } else {
+        set any $true
+        if [map-has $e "keys"] {
+          def k [map-get $e "keys"]
+          def control [if [map-has $named $k] { $false } else { [map-has $k "Ctrl"] }]
+          if [!= $fg $nil] {
+            ## Waiting for a job: Ctrl-C ends it; Ctrl-Z stops it and returns to the prompt.
+            if $control {
+              def j [map-get [deref $jobs] $fg]
+              if [== [map-get $k "Ctrl"] 99] { cancel [map-get $j "f"] }
+              if [== [map-get $k "Ctrl"] 122] {
+                suspend [map-get $j "f"]
+                reset $jobs [map-set [deref $jobs] $fg [map-set $j "stopped" $true]]
+                set fg $nil
+              }
+            } else {
+              set ahead [vec-push $ahead $e]
+            }
+          } else {
+            if [map-has $named $k] {
+              if [&& [== $k "Backspace"] [> [length $line] 0]] {
+                set line [slice $line 0 [- [length $line] 1]]
+              }
+              if [&& [== $k "Up"] [< $back [length $history]]] {
+                set back [+ $back 1]
+                set line [index $history [- [length $history] $back]]
+              }
+              if [&& [== $k "Down"] [> $back 0]] {
+                set back [- $back 1]
+                set line [if [== $back 0] { "" } else { [index $history [- [length $history] $back]] }]
+              }
+              if [== $k "Enter"] {
+                def w [words $line]
+                def cmd [if [> [length $w] 0] { [index $w 0] } else { "" }]
+                if [> [length $line] 0] { set history [vec-push $history $line] }
+                set back 0
+                if [== $line "quit"] { set go $false } else {
+                  if [== $cmd "jobs"] { say $t $line 0 [listing $jobs] }
+                  if [|| [== $cmd "fg"] [|| [== $cmd "bg"] [== $cmd "kill"]]] {
+                    def n [job-named $jobs $w]
+                    if [== $n $nil] { say $t $line 0 "error: no such job\n" } else {
+                      def j [map-get [deref $jobs] $n]
+                      if [== $cmd "kill"] { cancel [map-get $j "f"] } else {
+                        if [map-get $j "stopped"] {
+                          resume [map-get $j "f"]
+                          reset $jobs [map-set [deref $jobs] $n [map-set $j "stopped" $false]]
+                        }
+                        if [== $cmd "fg"] { set fg $n }
+                      }
+                    }
+                  }
+                  if [&& [> [length $w] 0] [not [map-has $shell-commands $cmd]]] {
+                    set last [+ $last 1]
+                    ## A line ending in `&` runs in the background; any other is waited for.
+                    def bg [== [index $line [- [length $line] 1]] "&"]
+                    def src [if $bg { [slice $line 0 [- [length $line] 1]] } else { $line }]
+                    reset $jobs [map-set [deref $jobs] $last [start $t $src $last]]
+                    if [not $bg] { set fg $last }
+                  }
+                }
+                set line ""
+              }
+            } else {
+              if [map-has $k "Char"] { set line [concat $line [char-of [map-get $k "Char"]]] }
+            }
+          }
+        } else {
+          if [&& [map-has $e "lifecycle"] [== [map-get $e "lifecycle"] "Close"]] { set go $false }
+        }
+      }
+    }
+    if $any {
+      ok [transcript-line $t [if [== $fg $nil] { [concat "> " $line] } else { "" }]]
+    } else {
+      sleep 0.005
+    }
+  }
+  for [map-keys [deref $jobs]] n { cancel [map-get [map-get [deref $jobs] $n] "f"] }
+  ask $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]] "Version"
+  0
+}
+
+main

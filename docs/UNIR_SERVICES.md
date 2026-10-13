@@ -150,7 +150,7 @@ Without the unir backend the builtins return an error value.
 ## A pane
 
 unir's store vat in its `shell SOURCE LOG2 ROWS COLS` mode (theSherwood/unir#102, unir decisions 81, 100
-and 108) also runs a terminal vat, the only vat that holds the terminal, and a composition vat keeping
+and 116) also runs a terminal vat, the only vat that holds the terminal, and a composition vat keeping
 ref `view` as the references no file in directory `dir` defines. It grants its client the store twice,
 as `store` and as `transcript` (a session for the transcript's writer, its requests in 64 KiB frames),
 and the pane as `pane` (`pane.requests` what it shows, `pane.replies` its events). A program opens
@@ -181,7 +181,7 @@ obeyed. A program must not print: only the terminal vat writes to the terminal.
 
 ## The transcript
 
-`runtime/transcript_unir.c` is unir's transcript writer (unir decision 108) behind its C ABI, so a
+`runtime/transcript_unir.c` is unir's transcript writer (unir decision 116) behind its C ABI, so a
 program writes blocks without encoding a record:
 
 | builtin | does |
@@ -194,6 +194,8 @@ program writes blocks without encoding a record:
 | `[transcript-write T B TEXT]` | appends `TEXT` to output block `B` |
 | `[transcript-end T B]` | ends block `B` |
 | `[transcript-flush T]` | commits what was queued as one version |
+| `[transcript-job T CMD JOB]` | a place in the transcript for job `JOB`, which `CMD` started: a task whose `$ctx.out` is it writes its output there (see "The shell" below); an integer handle |
+| `[transcript-job-end S COMPLETE]` | ends job `S`'s place, its last block complete or (`COMPLETE` false) cancelled; how many blocks the job opened |
 | `[schema DESC]` | the schema `DESC` describes; an integer handle |
 
 A block's values are messages of its schema: `S` from `[schema DESC]`, or nil for JACL's own values
@@ -213,10 +215,45 @@ transcript-flush $t
 ```
 
 A value that does not fit is an error value, and nothing is written. A call that waits for the store
-parks its fiber, so a transcript is one call at a time, as a channel's end is: another fiber's call
-meanwhile is an error ("transcript busy"). A job's output is committed whenever 32 KiB of it waits.
+parks its fiber, so a transcript is one call at a time: another fiber's call meanwhile waits its turn.
+A job's output is committed whenever 32 KiB of it waits.
 
 `jacl_pane [PROGRAM.jacl]` runs a program this way on the terminal it is started from. It puts the
 terminal in raw mode for the run. `codegen.rs::a_jacl_program_runs_in_a_terminal_pane` drives it with
 a scripted terminal on all three engines.
 
+## The shell
+
+`runtime/harness/tests/services/shell.jacl` is the JACL shell (#204; unir decision 117), a pane client.
+Each line typed is a **job**: compiled in the shell by the compiler linked into its image, and run as a
+task in the shell's own domain (`[repl-eval LINE]`, temen's §22 `Jit` capability). So what one line
+defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a closure, a struct.
+
+- **Output goes to the job's blocks.** The shell starts each job with `$ctx.out` naming the job's place
+  in the transcript (`transcript-job`), and the task's output goes there rather than to the host
+  stream: what it prints into an output block, the values it emits into a block of values, and its
+  pipelines' output, bytes as text and typed output under the schema the last program offered
+  (adopted, unir decision 116). Each block is headed by the line. A job that shows nothing else shows
+  its value as a block; one that fails shows why.
+- **Programs are the shell's grants.** `!name args` runs the program the shell was granted as
+  `bin.name` (docs/UNIR_PIPELINES.md); unir's `shell` mode passes the client each program its command
+  names (`shell SOURCE LOG2 ROWS COLS [PROGRAM…]`), and the Jit capability.
+- **Job control.** The shell waits for a line's job unless the line ends in `&`. While it waits,
+  Ctrl-C ends the job (cancel: its pipelines are severed and their stages killed) and Ctrl-Z stops it
+  (suspend: its pipelines stall under backpressure), returning to the prompt; other keys wait with it.
+  `jobs` lists the jobs running or stopped, `fg [N]` waits for job `N` (the last, by default),
+  resuming it if it is stopped, `bg [N]` resumes it in the background, and `kill [N]` ends it. A
+  background job's output goes to its blocks as it comes.
+- **Editing.** Backspace edits the line, and Up and Down move through the earlier lines.
+
+A trap in a line ends the shell, as one in the shell's own code would, and a line that computes
+without reaching a job-control point (an `await`, a `sleep`, a pipeline's read) cannot be stopped.
+Each line's unit stays installed for the session, since a later line may call what it defined, so a
+session runs as many lines as the shell's dispatch table has free slots for, one per function a line
+compiles to; past that a line is an error (`repl-eval: no slot to install the unit in`).
+
+The shell's image is the runtime with the compiler and the REPL bridge (`codegen/selfhost/repl/`)
+linked in (`repl::shell_image`). `repl.rs::the_shell_runs_each_line_in_its_own_domain` drives it in a
+pane with a scripted terminal on all three engines: definitions across lines, history, a pipeline's
+text, a program's values, a background job listed and killed, a stopped job finishing in the
+background after `bg`, and one waited for again with `fg N` and ended with Ctrl-C.

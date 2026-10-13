@@ -725,6 +725,14 @@ JaclVal jacl_cancel(JaclVal fut)  { return job_request(fut, JACL_CTL_CANCEL); }
 JaclVal jacl_suspend(JaclVal fut) { return job_request(fut, JACL_CTL_SUSPEND); }
 JaclVal jacl_resume(JaclVal fut)  { return job_request(fut, 0); }
 
+/* [done? F]: whether F's task has finished, however it ended; it never waits. A shell polls its
+ * foreground job with it while it reads keys (jacl_impl#204). */
+JaclVal jacl_done(JaclVal fut) {
+  JaclObj *j = job_of(fut);
+  if (!j) return jaclrt_set_error(jacl_str_new("not a future", 12));
+  return jaclrt_bool(__vm_atomic_load32(&jp(j)[0]) == JACL_JOB_DONE);
+}
+
 /* ---- parallel / race ----
  * Run on the calling job's fiber: create the block jobs, enqueue them, await each. The locals
  * (futs[], out) live on the calling fiber, which is always scannable (RUNNING-and-will-suspend

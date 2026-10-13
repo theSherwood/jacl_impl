@@ -98,9 +98,11 @@ A program stage has two results, and they are kept apart:
   its exit record, `{exit}` or `{exits}`; nothing reads exit statuses as values any more.)*
 - **Its output.** An edge of type `T` (see "Typed outputs"). It flows to the next program stage; into
   a JACL stage, which reads it as a channel (`!gen 3 | collect` is the output's elements, a string
-  when `T` is text); or, with nothing after it, into the **enclosing output**. In the shell that is
-  the host stream (later the pane); inside a stage it is the stage's own `unir.stdout`, copied
-  there, because an edge has one writer and cannot be handed to the child.
+  when `T` is text); or, with nothing after it, into the **enclosing output**. In a shell's job that
+  is the job's place in the transcript (`$ctx.out`, docs/CTX_ENV.md), where typed output is forwarded
+  under the schema the program offered; in a program, the host stream; inside a stage it is the
+  stage's own `unir.stdout`, copied there, because an edge has one writer and cannot be handed to the
+  child.
 
 Stage 1b's first cut returned the output as the value because nothing else could come back. That
 fixed text as the result type of every pipeline, which is what the typed-stream design exists to

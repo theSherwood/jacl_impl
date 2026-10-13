@@ -97,7 +97,7 @@ fn main() {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
         }));
     };
-    let _ = pane::run(&client, log2, backend, &dir, size, &mut terminal);
+    let _ = pane::run(&client, log2, &[], backend, &dir, size, &mut terminal);
     stty(&[&saved]);
     println!();
 }

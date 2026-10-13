@@ -442,7 +442,8 @@ static AstNode **combine_modules(ProgramResult *prog, arena_t *arena, uint32_t *
  * Macro bodies expand on the TEMEN engine through the staging hook, so `es.ctx` stays NULL and the
  * heap is only touched by the frontend's transient allocations. A process-lifetime static heap is
  * fine for a compiler front-end (short-lived, grows monotonically). */
-const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+static const char *expand_macros_into(AstNode **nodes, uint32_t count, arena_t *arena,
+                                      MacroTable *mt) {
   static arena_t         em_arena  = {0};
   static BlockPool       em_pool;
   static ThreadHeap      em_heap;
@@ -456,18 +457,29 @@ const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *aren
   }
   ThreadHeap *prev_heap = gc__current_heap;
   gc__current_heap = &em_heap;
-  MacroTable mt;
-  macro_table_init(&mt);
   ExpandState es;
   memset(&es, 0, sizeof(es));
   es.ctx = NULL;   /* no legacy context in an emit-only build */
   uint32_t err_line = 0, err_col = 0;
   jacl_expand_skip_prelude = 1;   /* only user defmacros; prelude macros stay name-handled */
-  const char *err = ast_expand_macros(nodes, count, &mt, &em_heap,
+  const char *err = ast_expand_macros(nodes, count, mt, &em_heap,
                                       &em_intern, arena, &es, &err_line, &err_col);
   jacl_expand_skip_prelude = 0;
   gc__current_heap = prev_heap;
   return err;
+}
+const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {
+  MacroTable mt;
+  macro_table_init(&mt);
+  return expand_macros_into(nodes, count, arena, &mt);
+}
+/* A REPL's lines (jacl_impl#204) share one table, so a line may use a macro an earlier one
+ * defined; `arena` must outlive the session, as the macros' bodies live in it. */
+const char *expand_macros_repl(AstNode **nodes, uint32_t count, arena_t *arena) {
+  static MacroTable mt;
+  static int ready = 0;
+  if (!ready) { macro_table_init(&mt); ready = 1; }
+  return expand_macros_into(nodes, count, arena, &mt);
 }
 #else
 const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_t *arena) {

@@ -1980,7 +1980,7 @@ const PANE_SCRIPT: &[(&str, &str, usize)] = &[
 #[test]
 fn a_jacl_program_runs_in_a_terminal_pane() {
     // Stage 5's exit on the JACL side (#203; theSherwood/unir#79, #102), on the transcript
-    // (#204; unir decisions 100, 108): a JACL program is the client of a pane over a live
+    // (#204; unir decisions 100, 116): a JACL program is the client of a pane over a live
     // terminal, which only unir's terminal vat holds, and writes what it shows as a transcript's
     // blocks. Its keys are echoed into its typed line; `ls` shows rows of a schema it declares,
     // which the driver lays out as a table (a bold header, numbers to the right); `watch` shows
@@ -2020,7 +2020,7 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
                 }));
             };
             let size = pane::Size { rows: 24, cols: 80 };
-            let out = pane::run(&client, log2, backend, &dir2, size, &mut terminal);
+            let out = pane::run(&client, log2, &[], backend, &dir2, size, &mut terminal);
             let _ = done.send(out);
         });
         let out = finished
