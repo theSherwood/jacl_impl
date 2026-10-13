@@ -19,6 +19,16 @@ int run(int n) {
   ok &= (jaclrt_as_i32(jacl_div(jaclrt_i32(20), jaclrt_i32(5))) == 4);
   ok &= (jaclrt_as_i32(jacl_mod(jaclrt_i32(20), jaclrt_i32(6))) == 2);
   ok &= (jaclrt_as_i32(jacl_neg(jaclrt_i32(5))) == -5);
+  /* #130: negation works across the tower. -INT32_MIN leaves i32 range and promotes; an i64 and
+   * an f64 negate; an error passes through. (The bigint tier is test_bigint.c's.) */
+  ok &= !jaclrt_is_i32(jacl_neg(jaclrt_i32(INT32_MIN)));
+  ok &= jaclrt_as_bool(jacl_eq(jacl_neg(jaclrt_i32(INT32_MIN)), jacl_wide_new(0x0E, 2147483648LL)));
+  ok &= jaclrt_as_bool(jacl_eq(jacl_neg(jacl_wide_new(0x0E, 5000000000LL)), jacl_wide_new(0x0E, -5000000000LL)));
+  {
+    union { double d; int64_t b; } x = {1.5}, y = {-1.5};
+    ok &= jaclrt_as_bool(jacl_eq(jacl_neg(jacl_wide_new(0x10, x.b)), jacl_wide_new(0x10, y.b)));
+  }
+  ok &= jaclrt_is_error(jacl_neg(jacl_div(jaclrt_i32(1), jaclrt_i32(0))));
 
   /* domain + type errors, and error propagation */
   ok &= jaclrt_is_error(jacl_div(jaclrt_i32(1), jaclrt_i32(0)));

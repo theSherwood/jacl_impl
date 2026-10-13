@@ -370,11 +370,9 @@ int64_t jacl_u64_mul_ovf(int64_t a, int64_t b) {
   return __builtin_mul_overflow((uint64_t)a, (uint64_t)b, &r) ? 1 : 0;
 }
 
-JaclVal jacl_neg(JaclVal a) {
-  if (jaclrt_is_error(a)) return a;
-  if (!jaclrt_is_i32(a)) return jaclrt_error();
-  return jaclrt_i32(-jaclrt_as_i32(a)) | (a & (JACL_FLAG_TAINTED | JACL_FLAG_SECRET));
-}
+/* Unary minus is `0 - a`, as codegen emits it, so it covers the whole tower (an i32 that leaves
+ * range promotes, as -INT32_MIN does) and keeps a's flags; an error passes through. */
+JaclVal jacl_neg(JaclVal a) { return jacl_sub(jaclrt_i32(0), a); }
 
 /* ---- comparisons ---- */
 /* Structural equality: strings by content, vectors elementwise, maps by content

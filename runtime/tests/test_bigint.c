@@ -43,13 +43,9 @@ static JaclVal big(const char *s) {
   return jacl_big_from_decimal(jacl_str_new(s, n));
 }
 
-/* Negation as `0 - v`, which is what codegen emits for unary minus and the only form that
- * works at every width — the runtime's jacl_neg is i32-only (see jacl #130). */
-static JaclVal negv(JaclVal v) { return jacl_sub(jaclrt_i32(0), v); }
-
 /* |v|, for the |r| < |b| check. */
 static JaclVal absv(JaclVal v) {
-  return jaclrt_as_bool(jacl_lt(v, jaclrt_i32(0))) ? negv(v) : v;
+  return jaclrt_as_bool(jacl_lt(v, jaclrt_i32(0))) ? jacl_neg(v) : v;
 }
 
 int run(int n) {
@@ -104,8 +100,8 @@ int run(int n) {
         b = jacl_div(b, jaclrt_i32((int32_t)(1 + (st % 0xFFFFFu))));
       }
       st ^= st << 13; st ^= st >> 7; st ^= st << 17;
-      if (st & 1) a = negv(a);
-      if (st & 2) b = negv(b);
+      if (st & 1) a = jacl_neg(a);
+      if (st & 2) b = jacl_neg(b);
       if (jacl_val_equal(b, jaclrt_i32(0))) continue;
       if (jaclrt_is_error(a) || jaclrt_is_error(b)) { return 201; }
 
@@ -130,14 +126,14 @@ int run(int n) {
   {
     JaclVal a = big("170141183460469231731687303715884105727");   /* 2^127 - 1 */
     JaclVal b = big("39614081257132168801066942463");
-    JaclVal na = negv(a), nb = negv(b);
+    JaclVal na = jacl_neg(a), nb = jacl_neg(b);
     JaclVal q = jacl_div(a, b), r = jacl_mod(a, b);
-    ok &= jacl_val_equal(jacl_div(na, b), negv(q));
-    ok &= jacl_val_equal(jacl_div(a, nb), negv(q));
+    ok &= jacl_val_equal(jacl_div(na, b), jacl_neg(q));
+    ok &= jacl_val_equal(jacl_div(a, nb), jacl_neg(q));
     ok &= jacl_val_equal(jacl_div(na, nb), q);
-    ok &= jacl_val_equal(jacl_mod(na, b), negv(r));   /* dividend's sign */
+    ok &= jacl_val_equal(jacl_mod(na, b), jacl_neg(r));   /* dividend's sign */
     ok &= jacl_val_equal(jacl_mod(a, nb), r);
-    ok &= jacl_val_equal(jacl_mod(na, nb), negv(r));
+    ok &= jacl_val_equal(jacl_mod(na, nb), jacl_neg(r));
     /* and the identity still holds in every quadrant */
     ok &= jacl_val_equal(jacl_add(jacl_mul(jacl_div(na, b), b), jacl_mod(na, b)), na);
     ok &= jacl_val_equal(jacl_add(jacl_mul(jacl_div(a, nb), nb), jacl_mod(a, nb)), a);
