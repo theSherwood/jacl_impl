@@ -10,9 +10,9 @@ a.out
 .build/
 .build-tsan/
 .build-release/
+.build-threads/
 .token-savior/
 build/
-build_wasm/
 *.gch
 __pycache__/
 *.pyc

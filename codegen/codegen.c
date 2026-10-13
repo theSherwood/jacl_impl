@@ -3127,7 +3127,7 @@ static IrVal emit_fbuf_ctor(Cx *cx, int code, const int32_t *dims, int ndims) {
                  irb_const_i64(cx->f, cx->cur, jaclval_i32(code))};
     return emit_rt_call(cx, "jacl_fbuf_new", a, 3);
   }
-  IrVal a[2 + CG_MAX_BUF_DIMS];
+  IrVal a[3 + CG_MAX_BUF_DIMS];
   a[0] = cx->sp;
   a[1] = irb_const_i64(cx->f, cx->cur, jaclval_i32(code));
   a[2] = irb_const_i64(cx->f, cx->cur, jaclval_i32(ndims));

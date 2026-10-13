@@ -61,10 +61,9 @@
   StreamLanguage syntax mode) bundled by esbuild. There is no
   frontend framework yet — Solid is the preferred default if
   reactivity warrants one later.
-- `cd demo && bash build_demo.sh` does the whole pipeline: symlinks
-  `wasm/`, regenerates `examples.json` from `test/jacl/*.jacl`, runs
-  `npm ci` (one-time) on a fresh clone, then `npm run build` to
-  produce `dist/playground.js`. The npm registry is reachable from
+- `cd demo && bash build_demo.sh` does the whole pipeline: generates
+  `examples.json` from `test/jacl/*.jacl`, runs `npm ci` (one-time) on
+  a fresh clone, then `npm run build` to produce `dist/playground.js`. The npm registry is reachable from
   the sandbox; the browser running the playground on the host is
   not, so the editor must be bundled to a local file the dev server
   serves directly.
@@ -73,9 +72,9 @@
   (StreamLanguage tokenizer), `src/temen-jacl-wasm.ts` (`TemenJaclRunner`
   over the temen-browser cdylib + `JaclFrontend` over `jacl_emit.wasm` —
   the TEMEN backend is the sole engine), `src/splitter.ts` (drag-to-resize
-  divider, persisted to localStorage). The bundle (`dist/playground.js`,
-  ~425 KB minified) is committed so the playground works from a clone
-  without a Node toolchain.
+  divider, persisted to localStorage). The bundle (`dist/playground.js`)
+  and `examples.json` are build outputs, not committed: run
+  `build_demo.sh` before serving `demo/`.
 - `./node_modules/.bin/tsc --noEmit` typechecks; `npm run build` only
   runs esbuild and ignores types, so always typecheck separately when
   changing TS surfaces.
@@ -102,6 +101,8 @@
 - Prefer simple, direct code and flat data.
 - Avoid the standard library.
 - If the code is segfaulting or seeing memory corruption, it is not acceptable.
+- After changing the frontend or codegen, run `bash codegen/tests/sanitize_corpus.sh`: it compiles
+  `test/jacl` with the frontend under ASan + UBSan (CI runs it too).
 - If test code finds a memory handling issue in the implementation, that should be fixed in the implementation.
 - Use typedefs to avoid unnecessary use of the `struct` keyword.
 - Tests should make use of the memory tracking helpers in `test/test_helpers.h`.
