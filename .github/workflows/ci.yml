@@ -33,6 +33,12 @@ jobs:
         # what we want.
         run: timeout 900 ./build.sh --parallel
 
+      - name: Build and run tests under ASan + UBSan
+        # The same suite, instrumented for memory errors, leaks and undefined behaviour. Its first
+        # run found a NULL memcmp in the typer's struct lookup and signed overflow in dead VM
+        # arithmetic (jacl #212).
+        run: timeout 900 ./build.sh --asan --parallel
+
       - name: Staged-syntax codec agreement
         # syn_wire (compiler side) and syn_rt (runtime side) are two hand-written
         # implementations of one byte format, in separate files, that must agree exactly.
