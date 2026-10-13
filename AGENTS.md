@@ -102,6 +102,8 @@
 - Prefer simple, direct code and flat data.
 - Avoid the standard library.
 - If the code is segfaulting or seeing memory corruption, it is not acceptable.
+- After changing the frontend or codegen, run `bash codegen/tests/sanitize_corpus.sh`: it compiles
+  `test/jacl` with the frontend under ASan + UBSan (CI runs it too).
 - If test code finds a memory handling issue in the implementation, that should be fixed in the implementation.
 - Use typedefs to avoid unnecessary use of the `struct` keyword.
 - Tests should make use of the memory tracking helpers in `test/test_helpers.h`.
