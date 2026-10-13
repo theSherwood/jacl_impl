@@ -5797,10 +5797,18 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       scope_enter(cx);
       IrVal last = (bn == 0) ? irb_const_i64(cx->f, cx->cur, jaclval_i32(0)) : 0;
       for (uint32_t i = 0; i < bn; i++) {
+        AstNode *stmt = node->data.block.commands[i];
         cx->move_ok = 1;   /* statement position: nothing outlives the statement */
-        last = compile_expr(cx, node->data.block.commands[i]);
+        last = compile_expr(cx, stmt);
         if (cx->failed) break;
-        if (i + 1 < bn) emit_stmt_error_check(cx, last);   /* error auto-return */
+        /* Error auto-return, but not for a binding, which captures its value here as in a proc's
+         * body (compile_tail's block): `def v [await $f]` in a loop or a branch can be inspected
+         * with error?/error-val too. */
+        int is_binding = stmt->type == AST_COMMAND &&
+                         (stmt->data.command.head_id == HEAD_DEF ||
+                          stmt->data.command.head_id == HEAD_MUT ||
+                          stmt->data.command.head_id == HEAD_SET);
+        if (i + 1 < bn && !is_binding) emit_stmt_error_check(cx, last);
         if (cx->failed) break;
       }
       scope_exit(cx);

@@ -1394,6 +1394,19 @@ fn shell_out_runs_when_exec_is_granted() {
     assert!(String::from_utf8_lossy(&run.stdout).starts_with("<error"), "an ungranted `!cmd` is an error value");
 }
 
+#[test]
+fn a_binding_captures_an_error_in_a_nested_block() {
+    // A `def` binds an error in a loop's body or a branch as it does in a proc's body, rather than
+    // the block returning it (#204: the shell reaps a cancelled job's error in a loop). The file's
+    // own `# expect:` lines, on the tree-walker and the JIT (run_jacl_file's differential).
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/error_def_captures_in_block.jacl");
+    let src = std::fs::read_to_string(path).expect("read error_def_captures_in_block.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let (_, out) = run_jacl_file(path);
+    assert_eq!(String::from_utf8_lossy(&out), want);
+}
+
 const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");
 const STAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 
