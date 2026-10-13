@@ -18,10 +18,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use std::sync::Arc;
-
 use temen_ir::{Inst, LinkUnit, Module};
-use temen_interp::{bytecode, cap_id, Region, Value};
+use temen_interp::{bytecode, cap_id, Value};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const CAP_SELF: u32 = u32::MAX;
@@ -292,7 +290,7 @@ fn powerbox_host(m: &Module) -> temen_interp::Host {
 }
 
 /// Run `_start` (func 0) on the single-vCPU engine vs the multi-vCPU cooperative/parallel driver
-/// (`drive_parallel`, the native stand-in for the browser's per-vCPU Workers), both over a real
+/// (`drive_threads`, the native stand-in for the browser's per-vCPU Workers), both over a real
 /// powerbox with `write` bound to a captured stdout. With the vendored temen carrying the `vcpu.tls`
 /// lowering and the `gc.roots + thread` veto removal, both engines run a linked JACL program to
 /// completion (correct stdout); before those two slices they returned `None` / trapped `Malformed`.
@@ -306,22 +304,14 @@ fn run_compare(m: &Module) {
     println!("single-vCPU  (compile_and_run_with_host):  {}   stdout={:?}",
         describe(&single), String::from_utf8_lossy(&host.stdout));
 
-    // Size the shared backing to the module's declared window (`1 << size_log2`); JACL declares a
-    // multi-MiB heap, so a fixed small Region would let the guest write past it and segfault.
-    let size = m.memory.as_ref().map_or(1usize << 20, |mc| 1usize << mc.size_log2);
-    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-    let base = unsafe { std::alloc::alloc_zeroed(layout) };
-    assert!(!base.is_null());
-    let back = Arc::new(unsafe { Region::shared(base, size as u64) });
+    // No backing: the driver reserves the module's window itself, as every other driver does.
     let mut host = powerbox_host(m);
     let mut fuel = u64::MAX;
     let par = bytecode::compile_and_run_capture_over_parallel_with_host(
-        m, 0, &[], &mut fuel, &[], Arc::clone(&back), &mut host,
+        m, 0, &[], &mut fuel, &[], None, &mut host,
     ).map(|(r, _)| r);
-    println!("multi-vCPU   (drive_parallel):             {}   stdout={:?}",
+    println!("multi-vCPU   (drive_threads):              {}   stdout={:?}",
         describe(&par), String::from_utf8_lossy(&host.stdout));
-    drop(back);
-    unsafe { std::alloc::dealloc(base, layout) };
 
     println!("(correct stdout on the multi-vCPU path = the gc.roots+thread machinery ran green;");
     println!(" Malformed = that engine cannot service JACL's startup.)");

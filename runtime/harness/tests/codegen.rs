@@ -985,7 +985,7 @@ fn the_worker_count_comes_from_the_run_not_the_build() {
     // which spawns nothing) still runs, while asking for 4 has to spawn and is refused.
     let one_vcpu = |env: Vec<Vec<u8>>| temen_run::RunConfig {
         env,
-        limits: temen_run::Limits { max_vcpus: 1, ..Default::default() },
+        limits: temen_run::Limits { spawn: Some(1), ..Default::default() },
         ..Default::default()
     };
     let (v, _) = run_case_with("parallel3", &one_vcpu(vec![]), None).expect("the default pool spawns nothing");

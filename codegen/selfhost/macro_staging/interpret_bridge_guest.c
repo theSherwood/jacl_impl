@@ -56,17 +56,18 @@ extern const char *expand_macros_inplace(AstNode **nodes, uint32_t count, arena_
  * error, exactly like the ungranted-cap path (interpcap.c). */
 static JaclVal jacl_interpret_on_temen_guest(JaclVal src) {
   if (!jacl_is_string(src)) return INTERP_ERR;
+  /* The source copy lives in the arena: the tokens and the AST point into it, so it must last
+   * through codegen. */
+  arena_t arena = {0};
   uint32_t slen = jacl_str_len(src);
-  char *buf = (char *)malloc((size_t)slen + 1);
-  if (!buf) return INTERP_ERR;
+  char *buf = (char *)arena_alloc(&arena, (size_t)slen + 1);
+  if (!buf) { arena_destroy(&arena); return INTERP_ERR; }
   jacl_str_bytes(src, buf, slen + 1);
   buf[slen] = 0;
 
   /* 1. frontend: source -> typed AST (the reference-VM static-error oracle is intentionally skipped —
    * it is a compile-time diagnostic that reaches vm.c, which this path exists to retire). */
-  arena_t arena = {0};
   LexResult toks = lexer_lex(buf, &arena);
-  free(buf);
   if (toks.error_count) { arena_destroy(&arena); return INTERP_ERR; }
   ParseResult parse = parser_parse(toks, &arena);
   if (parse.error_count) { arena_destroy(&arena); return INTERP_ERR; }

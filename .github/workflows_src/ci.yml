@@ -166,8 +166,12 @@ jobs:
       - name: Bake the runtime IR (jaclrt.temen)
         run: bash runtime/build.sh
 
-      - name: Build the self-hosted compiler card (jacl_compiler.temen)
-        run: bash codegen/selfhost/build_compiler_temen.sh
+      # --selftest also runs the compiler-guest's own tests on TEMEN: compile, in-guest macro staging,
+      # in-guest `[interpret]` (which no other gate reaches) and the warm-snapshot API. Nothing ran
+      # them, so their checks went stale, and a use-after-free in the interpret bridge stayed hidden
+      # until temen's guest heap began reusing freed memory (jacl #209).
+      - name: Build the self-hosted compiler card (jacl_compiler.temen) and run its selftests
+        run: bash codegen/selfhost/build_compiler_temen.sh --selftest
 
       # Both asset scripts are deliberately fail-soft: they exit 0 when the toolchain is
       # missing, so the Pages build can degrade to precompiled examples. That is wrong for a
