@@ -1951,7 +1951,9 @@ const PANE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/pan
 /// the step's marker at least that many times (what the step before it shows), so the script
 /// follows the program rather than a clock.
 const PANE_SCRIPT: &[(&str, &str, usize)] = &[
-    ("add f0 use b\r", "> ", 1),
+    // Enter only once the line is echoed: a burst of keys may be drawn as its last frame alone.
+    ("add f0 use b", "> ", 1),
+    ("\r", "> add f0 use b", 1),
     ("ls\r", "added f0", 1),
     ("watch\r", "file  bytes", 1),
     ("add f1 def b\r", "dangling: f0 b", 1),
@@ -2042,7 +2044,7 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
                 .unwrap_or_else(|| panic!("{backend:?}: no {s:?} in {out:?}"))
         };
         // Keys echoed into the typed line as they were typed.
-        at("\x1b[K> add f0 use");
+        at("\x1b[K> add f0 use b");
         // Each command a block of the transcript, headed by the command in bold.
         at("\x1b[1madd f0 use b\x1b[0m");
         // The listing, rows of the File schema pane.jacl declares, as the driver lays out a
