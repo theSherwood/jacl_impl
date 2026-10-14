@@ -29,10 +29,11 @@ if ! command -v "$CLANG" >/dev/null || ! command -v "$LLVM_LINK" >/dev/null; the
   exit 0
 fi
 
-# On-ramp binaries: use prebuilt if given, else build from the vendored temen submodule.
+# On-ramp binaries: use prebuilt if given, else build from the vendored temen submodule, on every run
+# (a no-op when up to date), so a binary left from before vendor/temen moved is never used.
 TRANSLATE="${TEMEN_LLVM_TRANSLATE:-$TEMEN/crates/temen-llvm/target/release/temen-llvm-translate}"
 TRY="${TRY_TRANSLATE:-$TEMEN/crates/temen-llvm/target/release/examples/try_translate}"
-if [ ! -x "$TRANSLATE" ]; then
+if [ -z "${TEMEN_LLVM_TRANSLATE:-}" ]; then
   echo "=== building temen-llvm-translate from vendor/temen ==="
   ( cd "$TEMEN/crates/temen-llvm" && cargo build --release --bin temen-llvm-translate )
 fi
@@ -95,7 +96,7 @@ echo "  -> $OUT/jacl_compiler_snapshot.temen ($(wc -c < "$OUT/jacl_compiler_snap
 if [ "${1:-}" = "--selftest" ]; then
   # try_translate runs each test program under the on-ramp powerbox. As an example it builds with
   # temen-llvm's dev-dependencies (the engines), so only the selftests pay for it.
-  if [ ! -x "$TRY" ]; then
+  if [ -z "${TRY_TRANSLATE:-}" ]; then
     echo "=== building try_translate from vendor/temen ==="
     ( cd "$TEMEN/crates/temen-llvm" && cargo build --release --example try_translate )
   fi
