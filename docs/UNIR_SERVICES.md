@@ -278,7 +278,7 @@ A line's unit stays installed while its code may still be called. A line that de
 a closure keeps its slot in the shell's dispatch table for the session, since a later line may call
 it; any other line (a leaf: one function taking no function's reference, `irb_module_is_leaf`) gives
 its slot back when it returns. The compiled code's handle, a capability, is given up as soon as the
-unit is installed, since the capability table holds 256. So a session runs any number of leaf lines,
+unit is installed, since the capability table holds 1,024. So a session runs any number of leaf lines,
 and as many defining lines as the dispatch table has free slots for (about 700 in the harness); past
 that such a line is an error (`repl-eval: no slot to install the unit in`).
 `repl.rs::a_session_outlasts_the_jit_tables` runs 1,000 lines, then defines a proc and calls it.
