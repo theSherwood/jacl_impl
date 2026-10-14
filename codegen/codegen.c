@@ -6730,7 +6730,9 @@ IrModule *temen_codegen_macro_body(const char **names, const uint32_t *lens, uin
  * extended runtime) — temen-llvm C cannot emit those cross-unit imports. Links like any JACL
  * program. Any arity: the argument wire carries the N parameter syntax values back-to-back,
  * and the entry reads them in order (stateful `synrt_read_arg`). NULL on an unsupported
- * construct (message in `err`). */
+ * construct (message in `err`). `in_guest`: 0 native; 1 in a guest whose staging runtime the entry
+ * brings up for each run (the compiler card's); 2 in a guest whose runtime is already up and live,
+ * which the entry must not reset (the shell's REPL, jacl_impl#214). */
 IrModule *temen_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
                                    int variadic, AstNode *body, int in_guest,
                                    char *err, size_t errcap) {
@@ -6761,12 +6763,12 @@ IrModule *temen_codegen_staged_macro(const char **names, const uint32_t *lens, u
   IrBlock main_block = in_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
   cx.f = mainf; cx.cur = main_block; cx.sp = 0;
-  if (in_guest) {
+  if (in_guest == 1) {
     /* Bring up the runtime here (no scheduler): heap, interns, map registry. */
     emit_void_call(&cx, "jacl_heap_init");
     emit_void_call(&cx, "jacl_intern_init");
     emit_void_call(&cx, "jacl_map_init");
-  } else {
+  } else if (!in_guest) {
     (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
   }
   /* Read the argument syntax values (one per fixed macro param, in order; the trailing rest param,
