@@ -70,15 +70,14 @@ static void stage_open(void) {
   static const char *const names[3] = {"unir.stdin", "unir.stdout", "unir.stderr"};
   uint32_t max = (uint32_t)unir_edge_max_payload(JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
   void *h[3] = {0, 0, 0};
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
+  unir_vat *vat = vat_take();
   for (int i = 0; vat && i < 3; i++) {
     int64_t cap = unir_endowed(vat, names[i], i ? 11 : 10);
     if (cap < 0) continue;
     h[i] = i ? (void *)unir_producer_open(vat, cap, JACL_STAGE_FRAMES, JACL_UNIR_SLOT)
              : (void *)unir_consumer_open(vat, cap, JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
   }
-  unir_unlock(&jacl_unir_open_lock);
+  vat_give();
   /* Wrapped outside the lock: chan_end allocates, which may collect. stdin and stdout carry
    * bytes or values (their first frame decides); stderr is this runtime's own convention. */
   for (int i = 0; i < 3; i++) {
@@ -135,11 +134,17 @@ static int stage_stdin_orphaned(JaclChan *c) {
   return !jaclrt_is_nil(jacl_stage_ends[0]) && c == chan_of(jacl_stage_ends[0]) && stage_stdout_ended();
 }
 
-/* stdout for `print`: the stage's stdout edge, else the host stream. `print` has no error to
+/* stdout for `print`: the task's job in the transcript, when `$ctx.out` names one
+ * (transcript_unir.c); else the stage's stdout edge, else the host stream. `print` has no error to
  * return, so a task that prints to an ended stdout ends there, as SIGPIPE ends a Unix program
  * (jacl_task_end). It ends cleanly: its reader went away, which is not its failure, so pipefail
  * still names the stage that did fail. The program's own task ending ends the stage. */
 void jacl_out(const char *b, long n) {
+  JaclVal job;
+  if (job_named(&job)) {
+    job_write(job, (const uint8_t *)b, (uint64_t)n);
+    return;
+  }
   JaclVal out = jacl_stage() ? stage_end(1) : JACL_NIL;
   if (jaclrt_is_nil(out)) { write(1, b, n); return; }
   if (chan_of(out)->typed == CHAN_VALUES) {
@@ -151,12 +156,15 @@ void jacl_out(const char *b, long n) {
   if (!stage_write(out, (const uint8_t *)b, (uint32_t)n) && stage_stdout_ended()) jacl_task_end(JACL_NIL);
 }
 
-/* [emit V]: V as the next message of the enclosing output. In a stage that is its stdout, which
- * the first `emit` makes a typed edge: it offers the value schema and waits for the reader to
- * accept (unir spec §3). Elsewhere it is the host stream, where V is printed. nil, or an error
- * value: V cannot cross (value.c) or needs more than one frame, the output already carries bytes,
- * or its reader refused the offer or went away. */
+/* [emit V]: V as the next message of the enclosing output. For a task whose `$ctx.out` names a
+ * job, that is the job's place in the transcript, where V joins a block of values. In a stage it
+ * is its stdout, which the first `emit` makes a typed edge: it offers the value schema and waits
+ * for the reader to accept (unir spec §3). Elsewhere it is the host stream, where V is printed.
+ * nil, or an error value: V cannot cross (value.c) or needs more than one frame, the output
+ * already carries bytes, or its reader refused the offer or went away. */
 JaclVal jacl_emit(JaclVal v) {
+  JaclVal job;
+  if (job_named(&job)) return job_emit(job, v, -1);
   JaclVal out = jacl_stage() ? stage_end(1) : JACL_NIL;
   if (jaclrt_is_nil(out)) { jacl_print(v); return JACL_NIL; }
   JaclChan *c = stage_claim(out);
@@ -213,7 +221,9 @@ static void stage_send_value(JaclVal v) {
  * since a sever would drop the message; stdin cancels, so its producer stops. Not a stage: the
  * value, unchanged. */
 JaclVal jacl_stage_finish(JaclVal result) {
+  jacl_transcripts_close();
   jacl_services_close();
+  jacl_handlers_join();
   if (!jacl_stage()) return result;
   stage_open();
   int failed = jaclrt_is_error(result);
@@ -242,10 +252,9 @@ JaclVal jacl_stage_finish(JaclVal result) {
 static void stage_args(JaclVal *argv, JaclVal *env) {
   int32_t cap = (int32_t)JACL_STAGE_ARGS;
   JaclVal keep[2] = {fb_alloc_nd(1, 1, &cap), JACL_NIL};
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
+  unir_vat *vat = vat_take();
   int64_t n = vat ? unir_vat_args(vat, (uint8_t *)fb_data(keep[0]), JACL_STAGE_ARGS) : -1;
-  unir_unlock(&jacl_unir_open_lock);
+  vat_give();
   keep[1] = n > 0 ? jv_decode((const uint8_t *)fb_data(keep[0]), (uint64_t)n) : JACL_NIL;
   int ok = !jaclrt_is_error(keep[1]) && jaclrt_type_index(keep[1]) == 0x06 && jacl_vec_count(keep[1]) == 2;
   JaclVal a = ok ? jacl_vec_get(keep[1], 0) : JACL_NIL, e = ok ? jacl_vec_get(keep[1], 1) : JACL_NIL;
@@ -403,7 +412,9 @@ static void pipe_finish(JaclPipe *p) {
   if (p->done) return;
   pipe_pump(p, -1);
   for (int32_t i = 0; i < p->spawned; i++) {
-    p->status[i] = unir_join(jacl_unir_vat, p->child[i]);
+    unir_vat *vat = vat_take();
+    p->status[i] = unir_join(vat, p->child[i]);
+    vat_give();
     unir_consumer_free(p->errc[i]);
   }
   if (p->outc) unir_consumer_free(p->outc);
@@ -436,7 +447,9 @@ static JaclVal pipe_failure(JaclPipe *p) {
 static void pipe_cancel(JaclPipe *p) {
   unir_consumer_sever(p->outc, 7 /* cancelled */);
   for (int32_t i = 0; i < p->spawned; i++) unir_consumer_sever(p->errc[i], 7);
-  for (int32_t i = 0; i < p->spawned; i++) unir_kill(jacl_unir_vat, p->child[i]);
+  unir_vat *vat = vat_take();
+  for (int32_t i = 0; i < p->spawned; i++) unir_kill(vat, p->child[i]);
+  vat_give();
   p->cause = 7;
   pipe_finish(p);
 }
@@ -494,9 +507,8 @@ static void pipe_close(JaclChan *c) {
 JaclVal jacl_pipeline_stream(JaclVal stages) {
   int32_t n = jaclrt_as_i32(jacl_len(stages));
   if (n < 1 || n > JACL_STAGES_MAX) return pipe_err("1..16 stages", JACL_NIL, JACL_NIL);
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
-  unir_unlock(&jacl_unir_open_lock);
+  unir_vat *vat = vat_take();
+  vat_give();
   int64_t module[JACL_STAGES_MAX], out[JACL_STAGES_MAX], err[JACL_STAGES_MAX];
   char nb[4 + JACL_STAGE_NAME] = "bin.";
   for (int32_t i = 0; i < n; i++) {
@@ -506,7 +518,9 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
     uint32_t nl = jacl_str_len(name);
     if (nl >= JACL_STAGE_NAME) return pipe_err("program name too long: ", name, JACL_NIL);
     jacl_str_bytes(name, nb + 4, JACL_STAGE_NAME);
+    if (vat) vat_take();
     module[i] = vat ? unir_endowed(vat, nb, 4 + nl) : UNIR_ENOCAP;
+    if (vat) vat_give();
     if (module[i] < 0) {
       if (n == 1) return jacl_exec_capture(argv);
       return pipe_err("no program ", name, JACL_NIL);
@@ -522,11 +536,15 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
     if (jaclrt_is_error(pay[1 + i])) return pay[1 + i];
   }
   int64_t len = unir_edge_len(JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
+  vat_take();
   for (int32_t i = 0; i < n; i++) {
     out[i] = unir_region_create(vat, (uint64_t)len);
     err[i] = unir_region_create(vat, (uint64_t)len);
-    if (out[i] < 0 || err[i] < 0) return pipe_err("out of edge memory", JACL_NIL, JACL_NIL);
+    if (out[i] < 0 || err[i] < 0) break;
   }
+  vat_give();
+  for (int32_t i = 0; i < n; i++)
+    if (out[i] < 0 || err[i] < 0) return pipe_err("out of edge memory", JACL_NIL, JACL_NIL);
   /* The read end, and with it the pipeline's state; it lives across the stages' spawns in
    * `keep` (on the fiber's data stack, which the collector scans), as do the argvs. */
   uint32_t max = (uint32_t)unir_edge_max_payload(JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
@@ -542,6 +560,8 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
     JaclVal argv = jacl_vec_get_at(keep[0], jaclrt_i32(i));
     jacl_str_bytes(jacl_vec_get_at(argv, jaclrt_i32(0)), p->name[i], JACL_STAGE_NAME);
   }
+  /* The spawns and opens under the vat's lock; nothing here allocates on the heap. */
+  vat_take();
   for (int32_t i = 0; i < n; i++) {
     unir_grant g[4];
     uint32_t ng = 0;
@@ -565,27 +585,40 @@ JaclVal jacl_pipeline_stream(JaclVal stages) {
       unir_consumer *oc = unir_consumer_open(vat, out[p->spawned - 1], JACL_STAGE_FRAMES, JACL_UNIR_SLOT);
       if (oc) { unir_consumer_cancel(oc); unir_consumer_free(oc); }
     }
+    vat_give();
     pipe_finish(p);
     JaclVal e = pipe_failure(p);
     return jaclrt_is_nil(e) ? pipe_err("could not open the output", JACL_NIL, JACL_NIL) : e;
   }
+  vat_give();
   return keep[1];
 }
 
 /* [pipeline STAGES]: runs the pipeline as jacl_pipeline_stream does, copying its output to the
- * enclosing output (`jacl_out`: the host stream in the shell, this stage's stdout in a stage;
- * values are emitted there, which in the shell prints them), and returns the last program's
- * value, or the failure. */
+ * enclosing output, and returns the last program's value, or the failure. For a task whose
+ * `$ctx.out` names a job, the output goes to the job's place in the transcript: bytes as text,
+ * and typed output under the schema its last program offered, adopted (transcript_unir.c).
+ * Otherwise it goes to `jacl_out`: the host stream in the shell, this stage's stdout in a stage;
+ * values are emitted there, which in the shell prints them. */
 JaclVal jacl_pipeline(JaclVal stages) {
   JaclVal keep[3] = {jacl_pipeline_stream(stages), JACL_NIL, JACL_NIL};
   JaclChan *c = chan_of(keep[0]);
   if (!c || !c->pipe) return keep[0];      /* an error value, or `exec`'s output */
+  JaclVal job;
+  int named = job_named(&job);
+  if (named) c->typed = CHAN_ADOPT;        /* before its first frame says what it carries */
   int64_t s;
   while ((s = pipe_read(c, &keep[1])) >= 0) {
+    if (named) {
+      if (c->typed == CHAN_ADOPTED) job_forward(job, c->agree, c->entry, c->tail, (uint64_t)s);
+      else job_write(job, c->tail, (uint64_t)s);
+      continue;
+    }
     if (c->typed != CHAN_VALUES) { jacl_out((const char *)c->tail, (long)s); continue; }
     keep[2] = chan_value(c);
     jacl_emit(keep[2]);
   }
+  if (named) job_pipeline_done(job);
   c->closed = 1;
   if (s != CHAN_BE_END) return keep[1];
   JaclPipe *p = pipe_of(c);

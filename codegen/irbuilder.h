@@ -64,6 +64,9 @@ typedef int      IrBlock;  /* block index within a func */
 
 IrModule *irb_module_new(void);
 void      irb_module_free(IrModule *m);
+/* Whether `m` is one function that takes no function's reference (no `ref.func`): once a call of
+ * it returns, nothing can reach its code. */
+int       irb_module_is_leaf(const IrModule *m);
 
 /* Declare a linear memory of 2^size_log2 bytes (temen-text `memory <size_log2>`).
  * Required for load/store to have backing storage. Without it no memory is emitted. */

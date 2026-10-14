@@ -338,10 +338,28 @@ JaclVal jacl_chan_read(JaclVal r, JaclVal n);      /* [read R N]: [Buf k u8], ni
 JaclVal jacl_chan_close(JaclVal ch);               /* [close CH]: complete (w) / cancel (r) */
 JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's bytes as a str, or its values as a vec */
 JaclVal jacl_emit(JaclVal v);                      /* [emit V]: V as a message of the enclosing output */
+JaclVal jacl_emit_as(JaclVal v, JaclVal schema);   /* [emit V S]: in a job, V as a value of schema S */
 JaclVal jacl_service(JaclVal name);                /* [service NAME]: a session with a granted service */
 JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its reply */
 JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
 JaclVal jacl_service_send(JaclVal s, JaclVal msg);  /* [service-send S [map NAME V]]: V on entry NAME */
+/* The transcript (transcript_unir.c): a shell's blocks, written by unir's writer. */
+JaclVal jacl_schema(JaclVal desc);                 /* [schema DESC]: a connection schema, by structure */
+JaclVal jacl_transcript(JaclVal name, JaclVal t, JaclVal line); /* [transcript NAME T L]: a writer */
+JaclVal jacl_transcript_line(JaclVal t, JaclVal text);
+JaclVal jacl_transcript_block(JaclVal t, JaclVal command, JaclVal job, JaclVal schema);
+JaclVal jacl_transcript_output(JaclVal t, JaclVal command, JaclVal job);
+JaclVal jacl_transcript_push(JaclVal t, JaclVal block, JaclVal v);
+JaclVal jacl_transcript_write(JaclVal t, JaclVal block, JaclVal text);
+JaclVal jacl_transcript_end(JaclVal t, JaclVal block);
+JaclVal jacl_transcript_flush(JaclVal t);
+JaclVal jacl_transcript_job(JaclVal t, JaclVal command, JaclVal job); /* a job's place: `$ctx.out` */
+JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete);
+JaclVal jacl_transcript_pick(JaclVal t, JaclVal block, JaclVal value); /* a reference's name */
+/* What a shell starts beside its transcript: a handler for a file, and the legacy adapter. */
+JaclVal jacl_handler_open(JaclVal image, JaclVal args, JaclVal text, JaclVal fuel, JaclVal memory);
+JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal rows, JaclVal cols, JaclVal fuel,
+                        JaclVal memory);
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
@@ -352,6 +370,8 @@ void    jacl_args_blob(const unsigned char *b, uint64_t len, JaclVal *argv, Jacl
 JaclVal jacl_cancel(JaclVal fut);
 JaclVal jacl_suspend(JaclVal fut);
 JaclVal jacl_resume(JaclVal fut);
+JaclVal jacl_done(JaclVal fut);   /* [done? F]: whether F's task has finished; never waits */
+JaclVal jacl_clock(void);         /* [clock]: the host's time, in ns (clockcap.c) */
 #define JACL_CTL_CANCEL  1
 #define JACL_CTL_SUSPEND 2
 int  jacl_ctl_pending(void);   /* the running task's pending request, or 0 */

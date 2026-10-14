@@ -55,6 +55,8 @@ static const char *binary_runtime_fn(uint8_t head_id) {
  * for it naturally becomes the phi of the two edges. */
 #define IRB_MAX_FRAME 256
 #define CG_MAX_PARAMS 64
+/* Top-level names a program, or a REPL session's lines together, may bind (the global map's). */
+#define CG_MAX_GLOBALS 1024
 
 /* How a binding's value is represented in its frame slot. A `dyn` binding holds a tagged
  * JaclVal; one the typer proved is `i64` holds an untagged 64-bit word — a C variable, no
@@ -202,10 +204,10 @@ typedef struct {
 
   /* module globals — names bound at top level, visible from any proc/closure via the
    * runtime global map (jacl_global_get/set). Populated by a pre-scan of the top-level forms. */
-  const char *globals[128]; uint32_t globalslen[128]; int nglobals;
+  const char *globals[CG_MAX_GLOBALS]; uint32_t globalslen[CG_MAX_GLOBALS]; int nglobals;
   /* A top-level `mut` that some proc reads or sets (jacl #168): it lives in the global map only —
    * no top-level local or cell — so top-level code, its closures and every proc see one value. */
-  uint8_t global_shared[128];
+  uint8_t global_shared[CG_MAX_GLOBALS];
   int at_top_level;   /* compiling the top-level forms → def/mut also mirror into the global map */
   int wants_trace;    /* program uses `[stack-trace]` → emit call-stack instrumentation */
   const char *cur_proc; uint32_t cur_proc_len;  /* name of the proc being compiled (for traces) */
@@ -217,6 +219,8 @@ typedef struct {
   int data_free;     /* in-guest staging (temen_codegen_staged_macro in_guest): string literals must
                       * NOT emit a `data` segment (the §22 `Jit` cap rejects them), so they build
                       * incrementally from immediate bytes via synrt_str_* — see compile_string_literal. */
+  int repl;          /* compiling a REPL line (temen_codegen_repl): a global may hold a closure an
+                      * earlier line defined, so a command headed by one calls it. */
 } Cx;
 typedef struct SDef SDef;
 
@@ -226,7 +230,7 @@ static int is_global_name(Cx *cx, const char *s, uint32_t l) {
   return 0;
 }
 static void global_add(Cx *cx, const char *s, uint32_t l) {
-  if (is_global_name(cx, s, l) || cx->nglobals >= 128) return;
+  if (is_global_name(cx, s, l) || cx->nglobals >= CG_MAX_GLOBALS) return;
   cx->globals[cx->nglobals] = s; cx->globalslen[cx->nglobals] = l; cx->global_shared[cx->nglobals] = 0;
   cx->nglobals++;
 }
@@ -3617,6 +3621,26 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
   return w;
 }
 
+/* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter, its signature
+ * registered so `print $proc` shows `<proc name(types) -> ret>`. */
+static IrVal proc_value(Cx *cx, Proc *pv) {
+  IrFunc *w = proc_value_wrapper(cx, pv);
+  IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
+  IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
+  IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
+  IrVal na[] = {cx->sp, fnref64, nupv};
+  IrVal clos = emit_rt_call(cx, "jacl_closure_new", na, 3);
+  uint32_t pargc = pv->def->data.command.arg_count;
+  AstNode *params = pv->def->data.command.args[1];
+  AstNode *ret_ann = (pargc >= 4) ? pv->def->data.command.args[pargc - 2] : NULL;
+  char sig[256];
+  size_t sl = format_proc_sig(sig, sizeof sig, pv->name, pv->len, /*is_closure=*/0, params, ret_ann);
+  IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
+  IrVal ra[] = {cx->sp, fnref64, sigv};
+  (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
+  return clos;
+}
+
 /* Lower one expression to an i64 SSA value (a JaclVal) in the current block. */
 /* Lower a `syntax-quote` template into runtime construction of a plain-data syntax
  * value — a jaclrt vector [kind, scope_mark, flags, ...payload], the representation
@@ -4923,6 +4947,15 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       if (hb->is_cell) { IrVal a[] = {cx->sp, cval}; cval = emit_rt_call(cx, "jacl_cell_get", a, 2); }
       return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
     }
+    /* At a REPL, an earlier line's proc is a closure in the global map (temen_codegen_repl). */
+    const char *gn = node->data.command.head->data.lit_string.value;
+    uint32_t gl = node->data.command.head->data.lit_string.length;
+    if (cx->repl && is_global_name(cx, gn, gl)) {
+      IrVal key = compile_string_literal(cx, gn, gl);
+      IrVal a[] = {cx->sp, key};
+      IrVal cval = emit_rt_call(cx, "jacl_global_get", a, 2);
+      return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
+    }
   }
 
   /* Streams, EAGER for now: [collect S] / [transform S C] / [filter S C] evaluate
@@ -5496,13 +5529,31 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_STDERR,     "jacl_stderr",     0},
       {HEAD_ARGS,       "jacl_args",       0},
       {HEAD_EMIT,       "jacl_emit",       1},
+      {HEAD_EMIT,       "jacl_emit_as",    2},
       {HEAD_SERVICE,    "jacl_service",    1},
       {HEAD_SERVICE_CALL, "jacl_service_call", 2},
       {HEAD_SERVICE_EVENT, "jacl_service_event", 2},
       {HEAD_SERVICE_SEND, "jacl_service_send", 2},
+      {HEAD_SCHEMA,     "jacl_schema",     1},
+      {HEAD_TRANSCRIPT, "jacl_transcript", 3},
+      {HEAD_TRANSCRIPT_LINE, "jacl_transcript_line", 2},
+      {HEAD_TRANSCRIPT_BLOCK, "jacl_transcript_block", 4},
+      {HEAD_TRANSCRIPT_OUTPUT, "jacl_transcript_output", 3},
+      {HEAD_TRANSCRIPT_PUSH, "jacl_transcript_push", 3},
+      {HEAD_TRANSCRIPT_WRITE, "jacl_transcript_write", 3},
+      {HEAD_TRANSCRIPT_END, "jacl_transcript_end", 2},
+      {HEAD_TRANSCRIPT_FLUSH, "jacl_transcript_flush", 1},
+      {HEAD_TRANSCRIPT_JOB, "jacl_transcript_job", 3},
+      {HEAD_TRANSCRIPT_JOB_END, "jacl_transcript_job_end", 2},
+      {HEAD_TRANSCRIPT_PICK, "jacl_transcript_pick", 3},
+      {HEAD_HANDLER_OPEN, "jacl_handler_open", 5},
+      {HEAD_LEGACY_JOB, "jacl_legacy_job", 6},
+      {HEAD_REPL_EVAL,  "jacl_repl_eval",  1},
       {HEAD_CANCEL,     "jacl_cancel",     1},
       {HEAD_SUSPEND,    "jacl_suspend",    1},
       {HEAD_RESUME,     "jacl_resume",     1},
+      {HEAD_DONE_Q,     "jacl_done",       1},
+      {HEAD_CLOCK,      "jacl_clock",      0},
     };
     /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
     if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&
@@ -5678,28 +5729,9 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
           IrVal a[] = {cx->sp};
           return emit_rt_call(cx, "jacl_ctx_get", a, 1);
         }
-        /* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter. */
+        /* A top-level proc as a value (`$cb`). */
         Proc *pv = proc_lookup(cx, nm, nl);
-        if (pv && !pv->is_generator) {
-          IrFunc *w = proc_value_wrapper(cx, pv);
-          IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
-          IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
-          IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
-          IrVal na[] = {cx->sp, fnref64, nupv};
-          IrVal clos = emit_rt_call(cx, "jacl_closure_new", na, 3);
-          /* Register the proc's signature so `print $proc` shows `<proc name(types) -> ret>`. */
-          {
-            uint32_t pargc = pv->def->data.command.arg_count;
-            AstNode *params = pv->def->data.command.args[1];
-            AstNode *ret_ann = (pargc >= 4) ? pv->def->data.command.args[pargc - 2] : NULL;
-            char sig[256];
-            size_t sl = format_proc_sig(sig, sizeof sig, pv->name, pv->len, /*is_closure=*/0, params, ret_ann);
-            IrVal sigv = compile_string_literal(cx, sig, (uint32_t)sl);
-            IrVal ra[] = {cx->sp, fnref64, sigv};
-            (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
-          }
-          return clos;
-        }
+        if (pv && !pv->is_generator) return proc_value(cx, pv);
         /* A top-level (module-global) binding, read from anywhere via the global map. */
         if (is_global_name(cx, nm, nl)) {
           IrVal key = compile_string_literal(cx, nm, nl);
@@ -5788,10 +5820,18 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       scope_enter(cx);
       IrVal last = (bn == 0) ? irb_const_i64(cx->f, cx->cur, jaclval_i32(0)) : 0;
       for (uint32_t i = 0; i < bn; i++) {
+        AstNode *stmt = node->data.block.commands[i];
         cx->move_ok = 1;   /* statement position: nothing outlives the statement */
-        last = compile_expr(cx, node->data.block.commands[i]);
+        last = compile_expr(cx, stmt);
         if (cx->failed) break;
-        if (i + 1 < bn) emit_stmt_error_check(cx, last);   /* error auto-return */
+        /* Error auto-return, but not for a binding, which captures its value here as in a proc's
+         * body (compile_tail's block): `def v [await $f]` in a loop or a branch can be inspected
+         * with error?/error-val too. */
+        int is_binding = stmt->type == AST_COMMAND &&
+                         (stmt->data.command.head_id == HEAD_DEF ||
+                          stmt->data.command.head_id == HEAD_MUT ||
+                          stmt->data.command.head_id == HEAD_SET);
+        if (i + 1 < bn && !is_binding) emit_stmt_error_check(cx, last);
         if (cx->failed) break;
       }
       scope_exit(cx);
@@ -6541,6 +6581,78 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
   }
 
   if (!cx.failed) compile_pending_closures(&cx); /* closure bodies (incl. nested) */
+
+  int failed = cx.failed;
+  free(cx.locals);
+  free(cx.marks);
+  free(cx.procs);
+  free(cx.pending);
+  if (failed) { irb_module_free(m); return NULL; }
+  return m;
+}
+
+/* A REPL line (jacl_impl#204; declared in codegen.h). Its unit is installed and called from the
+ * shell's own code, so func 0 has the guest ABI `(sp, _) -> i64` and runs on the shell's fiber,
+ * where a line may await, spawn and park as the shell does. Lines share one environment, the
+ * runtime's global map: every top-level binding lives there, as a `mut` some proc reads does
+ * (jacl #168), and so does each proc of the line, as a closure value. */
+IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv *env,
+                             char *err, size_t errcap) {
+  Cx cx;
+  memset(&cx, 0, sizeof cx);
+  cx.repl = 1;
+  cx.data_free = 1;   /* a unit carries no data segment (temen §22) */
+  cx.err = err; cx.errcap = errcap;
+
+  IrModule *m = irb_module_new();
+  cx.m = m;
+  IrType i64_2[] = {IRB_I64, IRB_I64};
+  IrType r1[] = {IRB_I64};
+  IrFunc *entry = irb_func_new(m, i64_2, 2, r1, 1);
+  IrBlock entry_block = irb_block(entry, i64_2, 2);
+
+  for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i]);
+  for (uint32_t i = 0; i < count; i++)
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+  register_externs(&cx, nodes, count);
+  for (uint32_t i = 0; i < env->nglobals; i++) global_add(&cx, env->globals[i], env->global_lens[i]);
+  scan_top_globals(&cx, nodes, count);
+  for (int i = 0; i < cx.nglobals; i++) cx.global_shared[i] = 1;
+  for (uint32_t i = 0; i < count && !cx.wants_trace; i++)
+    if (contains_stack_trace(nodes[i])) cx.wants_trace = 1;
+  register_procs(&cx, m, nodes, count);
+  if (!cx.failed) compile_procs(&cx);
+
+  if (!cx.failed) {
+    cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    env_reset(&cx);
+    capset_reset(&cx);
+    cx.cur_proc = "<repl>"; cx.cur_proc_len = 6;
+    /* The line's procs first, so its forms and the lines after it reach them by name. */
+    for (int i = 0; i < cx.nprocs && !cx.failed; i++) {
+      Proc *p = &cx.procs[i];
+      if (p->is_generator) continue;
+      IrVal v = proc_value(&cx, p);
+      IrVal key = compile_string_literal(&cx, p->name, p->len);
+      IrVal ga[] = {cx.sp, key, v};
+      (void)emit_rt_call(&cx, "jacl_global_set", ga, 3);
+    }
+    cx.at_top_level = 1;
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
+    scope_enter(&cx);
+    IrVal last = 0; int have = 0;
+    for (uint32_t i = 0; i < count && !cx.failed; i++) {
+      if (is_proc_def(nodes[i])) continue;
+      cx.move_ok = 1;
+      last = compile_expr(&cx, nodes[i]);
+      have = 1;
+    }
+    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, JACLVAL_NIL);
+    scope_exit(&cx);
+    cx.at_top_level = 0;
+    if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
+  }
+  if (!cx.failed) compile_pending_closures(&cx);
 
   int failed = cx.failed;
   free(cx.locals);

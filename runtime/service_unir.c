@@ -38,10 +38,9 @@ JaclVal jacl_service(JaclVal name) {
   jacl_str_bytes(name, nb, sizeof nb);
   int64_t st = UNIR_EINVALID;
   int32_t slot = -1;
-  /* Under the open lock, which the connect holds while it waits for the service's offer: the
-   * service is running (it spawned this vat), so the wait is short. */
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
+  /* The connect holds the vat while it waits for the service's offer: the service is running
+   * (it spawned this vat), so the wait is short. */
+  unir_vat *vat = vat_take();
   for (uint32_t i = 0; i < JACL_SERVICES && slot < 0; i++)
     if (!jacl_services[i]) slot = (int32_t)i;
   unir_service *s = vat && slot >= 0
@@ -49,7 +48,7 @@ JaclVal jacl_service(JaclVal name) {
                           jv_values_schema, sizeof jv_values_schema, &st)
       : 0;
   if (s) jacl_services[slot] = s;
-  unir_unlock(&jacl_unir_open_lock);
+  vat_give();
   if (s) return jaclrt_i32(slot);
   if (slot < 0) return chan_err("service: too many open");
   return chan_err(st == UNIR_ENOCAP ? "service: none granted by that name"
@@ -85,16 +84,27 @@ JaclVal jacl_service_call(JaclVal svc, JaclVal req) {
   JaclVal err = JACL_NIL;
   uint64_t n = jv_encode_into(req, buf, sizeof buf, &err);
   if (!n) return err;
-  return service_result(s, unir_service_call(jacl_unir_vat, s, buf, n), "service-call");
+  unir_vat *vat = vat_take();
+  int64_t r = unir_service_call(vat, s, buf, n);
+  vat_give();
+  return service_result(s, r, "service-call");
 }
 
 /* [service-event S WAIT]: the service's next event as [map name value]; nil if there is none and
- * WAIT is false. */
+ * WAIT is false. Waiting, it polls, giving the vat back between polls, from 50 microseconds apart
+ * to a millisecond. */
 JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
   unir_service *s = service_of(svc);
   if (!s) return chan_err("service-event: not an open service");
   int w = !jaclrt_is_nil(wait) && !(jaclrt_is_bool(wait) && !jaclrt_as_bool(wait));
-  return service_result(s, unir_service_event(jacl_unir_vat, s, w ? 1u : 0u), "service-event");
+  for (long idle = 50000;; idle = idle < 1000000 ? idle * 2 : 1000000) {
+    unir_vat *vat = vat_take();
+    int64_t r = unir_service_event(vat, s, 0);
+    vat_give();
+    if (r != 0 || !w) return service_result(s, r, "service-event");
+    jacl_ctl_point();   /* a waiting job can be cancelled or suspended */
+    vat_idle(idle);
+  }
 }
 
 /* [service-send S [map NAME V]]: V as a message of the entry named NAME; nil, or an error. */
@@ -105,14 +115,19 @@ JaclVal jacl_service_send(JaclVal svc, JaclVal msg) {
   JaclVal err = JACL_NIL;
   uint64_t n = jv_encode_into(msg, buf, sizeof buf, &err);
   if (!n) return err;
-  return service_result(s, unir_service_send(jacl_unir_vat, s, buf, n), "service-send");
+  unir_vat *vat = vat_take();
+  int64_t r = unir_service_send(vat, s, buf, n);
+  vat_give();
+  return service_result(s, r, "service-send");
 }
 
 /* At exit: close the sessions still open, so each service drops this client. */
 static void jacl_services_close(void) {
   for (uint32_t i = 0; i < JACL_SERVICES; i++) {
     if (!jacl_services[i]) continue;
-    unir_service_close(jacl_unir_vat, jacl_services[i]);
+    unir_vat *vat = vat_take();
+    unir_service_close(vat, jacl_services[i]);
+    vat_give();
     jacl_services[i] = 0;
   }
 }

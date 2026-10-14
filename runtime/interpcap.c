@@ -138,3 +138,25 @@ JaclVal jacl_interpret2(JaclVal prelude, JaclVal src) {
   }
   return jacl_interp_run(JINTERP_SANDBOX, src, names, nlen);
 }
+
+/* `[repl-eval SRC]` (jacl_impl#204): SRC compiled as one line of the shell's REPL, installed into this
+ * domain on the §22 Jit capability and run on the calling fiber, returning its value. Only an image
+ * the shell's compiler is linked into has one (JACL_REPL, codegen/selfhost/repl/); elsewhere it is
+ * an error, since a program has no compiler of its own. */
+#ifdef JACL_REPL
+JaclVal jacl_repl_eval_impl(JaclVal src);
+JaclVal jacl_repl_eval(JaclVal src) {
+  if (jaclrt_is_error(src)) return src;
+  if (!jaclrt_is_string(src)) {
+    static const char msg[] = "repl-eval: SRC is not a string";
+    return jacl_error_new(jacl_str_new(msg, sizeof msg - 1));
+  }
+  return jacl_repl_eval_impl(src);
+}
+#else
+JaclVal jacl_repl_eval(JaclVal src) {
+  (void)src;
+  static const char msg[] = "repl-eval: no compiler in this image";
+  return jacl_error_new(jacl_str_new(msg, sizeof msg - 1));
+}
+#endif

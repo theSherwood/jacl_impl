@@ -1,0 +1,10 @@
+## A session longer than the Jit's tables: 1,000 lines, each compiled into a unit of its own and
+## installed, its value the line before's plus one; then a proc defined on a line of its own, and
+## called on the next.
+mut v 0
+for [range 0 1000] i {
+  set v [repl-eval [concat "+ " [concat [to-string $v] " 1"]]]
+}
+print $v
+repl-eval "proc seven {} { 7 }"
+print [repl-eval "seven"]

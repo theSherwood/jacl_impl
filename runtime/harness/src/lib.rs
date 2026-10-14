@@ -29,6 +29,9 @@ pub mod node;
 /// A JACL program in a terminal pane: unir's store vat in its `shell` mode (`jacl_pane`).
 pub mod pane;
 
+/// The JACL shell's REPL: the runtime with the compiler linked in (jacl_impl#204).
+pub mod repl;
+
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 /// Decode the emit driver's default output — a v9 temen-encode **object** (`irb_to_encoded`).
@@ -103,8 +106,17 @@ fn compile_runtime_with_unir() -> PathBuf {
 /// emit driver, built with gcc as `jacl_temen`'s is, linked with the translated runtime), and its
 /// window's size, log2.
 pub fn child_image(path: &std::path::Path) -> Result<(temen_ir::Module, u8), String> {
+    link_image(emit_program(path)?, translate_runtime(), true)
+}
+
+/// The JACL program at `path`, compiled by the frontend and codegen's emit driver (built with gcc,
+/// as `jacl_temen`'s is), unlinked.
+pub fn emit_program(path: &std::path::Path) -> Result<temen_ir::Module, String> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    let driver = std::env::temp_dir().join(format!("jacl_child_emit_{}", std::process::id()));
+    // One driver per thread: tests run in parallel in one process.
+    let tag = format!("{}_{:?}", std::process::id(), std::thread::current().id());
+    let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let driver = std::env::temp_dir().join(format!("jacl_child_emit_{tag}"));
     let status = Command::new("gcc")
         .args(["-O0", "-w", "-D_DEFAULT_SOURCE"])
         .arg(format!("{root}/codegen/tests/emit_jacl.c"))
@@ -128,8 +140,16 @@ pub fn child_image(path: &std::path::Path) -> Result<(temen_ir::Module, u8), Str
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let program = decode_emitted(&out.stdout).map_err(|e| format!("decode emitted IR: {e}"))?;
-    let rt = translate_runtime();
+    decode_emitted(&out.stdout).map_err(|e| format!("decode emitted IR: {e}"))
+}
+
+/// `program` linked with the runtime `rt` and given its entry: a child's a vat spawns (`child`), or
+/// a root's; and its window's size, log2.
+pub fn link_image(
+    program: temen_ir::Module,
+    rt: temen_llvm::Translated,
+    child: bool,
+) -> Result<(temen_ir::Module, u8), String> {
     let linked = temen_ir::link_with_manifest(&[
         temen_ir::LinkUnit {
             module: rt.module,
@@ -146,8 +166,12 @@ pub fn child_image(path: &std::path::Path) -> Result<(temen_ir::Module, u8), Str
     let entry = linked
         .resolve_export("__jacl_entry")
         .ok_or("no entry after link")?;
-    let image = temen_ir::synth_manifest_child_start(linked, entry, false)
-        .map_err(|e| format!("child entry: {e}"))?;
+    let image = if child {
+        temen_ir::synth_manifest_child_start(linked, entry, false)
+    } else {
+        temen_ir::synth_manifest_start(linked, entry, false)
+    }
+    .map_err(|e| format!("entry: {e}"))?;
     let log2 = image
         .memory
         .map(|m| m.size_log2)

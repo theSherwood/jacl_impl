@@ -1,10 +1,12 @@
 # mode: concurrent
 ##
-## pane — a JACL program in a terminal pane (#203; theSherwood/unir#102, decision 81): run by
-## unir's store vat in its `shell` mode, which grants it the store as `store` and the pane as
-## `pane`. The terminal vat turns the terminal's bytes into keys and this program's content into
-## the terminal's bytes; nothing here is an escape sequence. Keys are edited into the input line
-## (shown below everything else) and Enter runs it:
+## pane — a JACL program in a terminal pane (#203, #204; theSherwood/unir#102, decisions 81, 100,
+## 117): run by unir's store vat in its `shell` mode, which grants it the store as `store`, a
+## second session with it as `transcript`, and the pane as `pane`. It writes what it shows as the
+## blocks of a transcript in the store, a block per command headed by the command, and names the
+## transcript to the pane; the terminal vat reads the transcript from the store and turns it into
+## the terminal's bytes, and the terminal's bytes into keys. Nothing here is an escape sequence.
+## Keys are edited into the typed line, and Enter runs it:
 ##
 ##   add FILE TEXT   append the line TEXT to FILE, and put FILE in directory `dir`
 ##   ls              the directory, as a table: its files' names and sizes, typed
@@ -14,24 +16,38 @@
 ##   quit            end
 ##
 ## Ctrl-Z moves the foreground job to the background. A job writes what it shows to a channel;
-## the program forwards the foreground job's output to the pane, and stops forwarding when the job
-## goes to the background, so the job waits in its write, under backpressure, until `fg` (§13.1:
-## suspend is backpressure).
+## the program forwards the foreground job's output into the job's block, and stops forwarding
+## when the job goes to the background, so the job waits in its write, under backpressure, until
+## `fg` (§13.1: suspend is backpressure).
 ##
 
-## The payload of reply REQ's variant KIND; any other reply fails the program. ST is the store's
-## session and its lock: a session is one request at a time, and the main loop and job 1 share
-## it, so each takes the lock (fibers switch only where they wait, so the check and the set are
-## one step).
-proc ask {st, req, kind} {
-  def lock [map-get $st "lock"]
-  while [deref $lock] { sleep 0.001 }
-  reset $lock $true
-  def r [service-call [map-get $st "s"] $req]
-  reset $lock $false
+## Takes S's lock. S holds the store's two sessions, `s` (requests) and `t` (the transcript),
+## and their lock: each is one call at a time, and the main loop and job 1's forwarder share
+## them, so each takes the lock (fibers switch only where they wait, so the check and the set
+## are one step).
+proc lock {s} {
+  def l [map-get $s "lock"]
+  while [deref $l] { sleep 0.001 }
+  reset $l $true
+}
+
+proc unlock {s} {
+  reset [map-get $s "lock"] $false
+}
+
+## The payload of reply REQ's variant KIND; any other reply fails the program.
+proc ask {s, req, kind} {
+  lock $s
+  def r [service-call [map-get $s "s"] $req]
+  unlock $s
   assert [not [error? $r]]
   assert [map-has $r $kind]
   map-get $r $kind
+}
+
+## Asserts that R, what a transcript call returned, is not an error.
+proc ok {r} {
+  assert [not [error? $r]]
 }
 
 ## The text of version V (none: empty).
@@ -42,10 +58,23 @@ proc text {s, v} {
   }
 }
 
-## Shows ITEM, a pane content item (unir-pane's `pane.usc`: `Text`, `Input`, `Columns`, `Row`,
-## `End`).
-proc show {p, item} {
-  assert [== [service-send $p [map "content" $item]] $nil]
+## The typed line, TEXT.
+proc typed {s, text} {
+  lock $s
+  ok [transcript-line [map-get $s "t"] $text]
+  unlock $s
+}
+
+## Writes TEXT as job JOB's output, a block of its own headed by COMMAND.
+proc say {s, command, job, text} {
+  lock $s
+  def t [map-get $s "t"]
+  def b [transcript-output $t $command $job]
+  ok $b
+  ok [transcript-write $t $b $text]
+  ok [transcript-end $t $b]
+  ok [transcript-flush $t]
+  unlock $s
 }
 
 ## Appends the line LINE to file NAME (its own ref) and puts it in directory `dir`.
@@ -59,18 +88,26 @@ proc add {s, name, line} {
   ask $s [map "Put" [map "name" "dir" "base" $dir "entries" [vec $entry]]] "Version"
 }
 
-## The directory, as a table of typed rows: each file's name (text) and size (an integer).
-proc ls {s, p} {
-  show $p [map "Columns" [vec "file" "bytes"]]
+## The directory, as a table: a block of job JOB's whose values are rows of the File schema in
+## S, each file's name (text) and size (an integer).
+proc ls {s, job} {
   def dir [ask $s [map "Head" "dir"] "Head"]
+  mut rows [vec]
   if [!= $dir $nil] {
     def entries [ask $s [map "List" [map "version" $dir "at" 0]] "Entries"]
     for $entries e {
       def size [byte-length [text $s [map-get $e "version"]]]
-      show $p [map "Row" [vec [map "Text" [map-get $e "path"]] [map "Int" $size]]]
+      set rows [vec-push $rows [map "file" [map-get $e "path"] "bytes" $size]]
     }
   }
-  show $p "End"
+  lock $s
+  def t [map-get $s "t"]
+  def b [transcript-block $t "ls" $job [map-get $s "files"]]
+  ok $b
+  for $rows r { ok [transcript-push $t $b $r] }
+  ok [transcript-end $t $b]
+  ok [transcript-flush $t]
+  unlock $s
 }
 
 ## Job 1: writes the dangling view's text to W, as `dangling: …` lines, each time it changes,
@@ -92,14 +129,23 @@ proc watch {s, w, running} {
   0
 }
 
-## Forwards job 1's output, read from R, to the pane while the job is in the foreground (FG).
-proc forward {p, r, fg} {
-  mut b [read $r 4096]
-  while [!= $b $nil] {
+## Forwards job 1's output, read from R, into its block B while the job is in the foreground
+## (FG); ends the block when the job ends.
+proc forward {s, b, r, fg} {
+  def t [map-get $s "t"]
+  mut x [read $r 4096]
+  while [!= $x $nil] {
     while [not [deref $fg]] { sleep 0.005 }
-    show $p [map "Text" [buf-string $b]]
-    set b [read $r 4096]
+    lock $s
+    ok [transcript-write $t $b [buf-string $x]]
+    ok [transcript-flush $t]
+    unlock $s
+    set x [read $r 4096]
   }
+  lock $s
+  ok [transcript-end $t $b]
+  ok [transcript-flush $t]
+  unlock $s
   0
 }
 
@@ -141,20 +187,34 @@ proc words {line} {
   vec-push $out $word
 }
 
+## The File schema: a table's row, a file's name and its size, as unir's meta-schema describes a
+## connection schema (its entry 0 is what a block of it holds).
+def file-schema [map "types" [vec "text" "u64" [map "struct" [map "name" "File" "fields" [vec [map "name" "file" "type" 0] [map "name" "bytes" "type" 1]]]]] "substreams" [vec [map "name" "files" "type" 2 "profile" 1]]]
+
 proc main {} {
   def session [service "store"]
   assert [not [error? $session]]
-  def s [map "s" $session "lock" [atom $false]]
+  ## The writer's own session, opened before the pane: the vat answers none of this program's
+  ## sessions until it has connected them all, in order, and the terminal reads the store before
+  ## it offers the pane.
+  def t [transcript "transcript" "pane/transcript" "pane/line"]
+  assert [not [error? $t]]
   def p [service "pane"]
   assert [not [error? $p]]
+  assert [== [service-send $p [map "show" [map "transcript" "pane/transcript" "line" "pane/line"]]] $nil]
+  def files [schema $file-schema]
+  assert [not [error? $files]]
+  def s [map "s" $session "t" $t "files" $files "lock" [atom $false]]
   def running [atom $true]
   def fg [atom $false]
   mut job $nil
+  ## Each command's block is a job of its own; `watch` is job 1.
+  mut jobs 1
   mut line ""
   mut go $true
   ## The named keys come as their names; the rest as maps (`Char`, `Ctrl`, `Alt`).
   def named [map "Enter" 1 "Tab" 1 "Backspace" 1 "Delete" 1 "Escape" 1 "Up" 1 "Down" 1 "Right" 1 "Left" 1 "Home" 1 "End" 1 "PageUp" 1 "PageDown" 1]
-  show $p [map "Input" "> "]
+  typed $s "> "
   while $go {
     def e [service-event $p $false]
     if [== $e $nil] { sleep 0.005 } else {
@@ -171,33 +231,39 @@ proc main {} {
           if [map-has $k "Ctrl"] {
             if [&& [== [map-get $k "Ctrl"] 122] [deref $fg]] {
               reset $fg $false
-              show $p [map "Text" "job 1 stopped"]
+              say $s "^Z" 0 "job 1 stopped\n"
             }
           }
           if [map-has $k "Char"] { set line [concat $line [char-of [map-get $k "Char"]]] }
         }
         if $enter {
-          show $p [map "Text" [concat "> " $line]]
           def ws [words $line]
           def cmd [vec-get $ws 0]
+          def command $line
           set line ""
+          set jobs [+ $jobs 1]
           if [== $cmd "quit"] { set go $false }
-          if [== $cmd "ls"] { ls $s $p }
+          if [== $cmd "ls"] { ls $s $jobs }
           if [&& [== $cmd "add"] [>= [length $ws] 3]] {
             add $s [vec-get $ws 1] [join-from $ws 2]
-            show $p [map "Text" [concat "added " [vec-get $ws 1]]]
+            say $s $command $jobs [concat "added " [concat [vec-get $ws 1] "\n"]]
           }
           if [&& [== $cmd "watch"] [== $job $nil]] {
+            lock $s
+            def b [transcript-output $t $command 1]
+            ok $b
+            ok [transcript-flush $t]
+            unlock $s
             def {w, r} [channel 2]
-            set job [vec [spawn { watch $s $w $running }] [spawn { forward $p $r $fg }]]
+            set job [vec [spawn { watch $s $w $running }] [spawn { forward $s $b $r $fg }]]
             reset $fg $true
           }
           if [&& [== $cmd "fg"] [!= $job $nil]] {
             reset $fg $true
-            show $p [map "Text" "job 1 continued"]
+            say $s $command 0 "job 1 continued\n"
           }
         }
-        show $p [map "Input" [concat "> " $line]]
+        typed $s [concat "> " $line]
       } else {
         if [&& [map-has $e "lifecycle"] [== [map-get $e "lifecycle"] "Close"]] { set go $false }
       }

@@ -1,0 +1,17 @@
+# expect: loop true
+# expect: branch true
+# expect: done
+# A def binds an error in a nested block (a loop's body, a branch) as it does in a proc's body: the
+# name holds it, to inspect with error?, rather than the block returning it.
+proc check {} {
+  for [vec 1] n {
+    def v [error "in a loop"]
+    print [concat "loop " [to-string [error? $v]]]
+  }
+  if $true {
+    def w [error "in a branch"]
+    print [concat "branch " [to-string [error? $w]]]
+  }
+  print "done"
+}
+check

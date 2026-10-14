@@ -14,6 +14,8 @@ typedef struct unir_consumer unir_consumer;
 typedef struct unir_schema unir_schema;
 typedef struct unir_agreement unir_agreement;
 typedef struct unir_service unir_service;
+typedef struct unir_transcript unir_transcript;
+typedef struct unir_legacy unir_legacy;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -149,6 +151,12 @@ unir_agreement *unir_consumer_accept(unir_consumer *c, const unir_schema *reader
 int64_t unir_agreement_recv(unir_agreement *a, unir_consumer *c, int64_t timeout_ns,
                             uint32_t *entry, const uint8_t **frame);
 void unir_agreement_free(unir_agreement *a);
+/* Reads the producer's offer and agrees to it whatever its schema (issue #160): a reader that
+ * knows none in advance, such as a shell forwarding a job's output. As unir_consumer_accept
+ * otherwise. */
+unir_agreement *unir_consumer_adopt(unir_consumer *c, int64_t timeout_ns, int64_t *status);
+/* A copy of the schema `a` reads messages as (the writer's, once adopted); unir_schema_free it. */
+unir_schema *unir_agreement_schema(const unir_agreement *a);
 
 /* Services (unir spec §13, issue #50): a session with a service vat granted as `name`, i.e.
  * `name.requests`, `name.replies` and `name.post`. The service offers its schema first; this
@@ -163,7 +171,7 @@ unir_service *unir_service_open(unir_vat *vat, const uint8_t *name, uint64_t nam
  * the service's request type (nothing was sent). Events that arrive meanwhile are kept. */
 int64_t unir_service_call(unir_vat *vat, unir_service *s, const uint8_t *request, uint64_t len);
 /* Sends `message`, a value frame `{name: value}`, on the catalog entry named `name`, waiting
- * for nothing: a connection that is not request and reply (a pane's content). 0, or
+ * for nothing: a connection that is not request and reply (a pane's `show`). 0, or
  * UNIR_EMISMATCH if it is not one entry's name and a value of its type (nothing was sent). */
 int64_t unir_service_send(unir_vat *vat, unir_service *s, const uint8_t *message, uint64_t len);
 /* The next event, `{name: value}`: kept, or the next to arrive, waiting for it when `wait`;
@@ -173,5 +181,82 @@ int64_t unir_service_event(unir_vat *vat, unir_service *s, uint32_t wait);
 /* Copies the last result out; its length, or UNIR_ETOO_SMALL. */
 int64_t unir_service_result(const unir_service *s, uint8_t *out, uint64_t cap);
 void unir_service_close(unir_vat *vat, unir_service *s);
+
+/* A runtime's values as schemas and messages (issue #160), converted by structure as a
+ * service's are; `values` is the runtime's value schema. unir_schema_from_value: the
+ * connection schema the value frame `frame` describes, as the meta-schema's ConnectionSchema
+ * (`types`, each a Type variant such as "text" or {"struct": {name, fields}}, and `substreams`,
+ * each {name, type, profile, class}); NULL if it is not a valid one. unir_value_message: the
+ * value as a message of `schema`'s entry `entry`, copied to `out` if it fits `cap`; returns its
+ * length either way, UNIR_EMISMATCH if it does not fit the type, or UNIR_EINVALID. */
+unir_schema *unir_schema_from_value(const unir_schema *values, const uint8_t *frame,
+                                    uint64_t len);
+int64_t unir_value_message(const unir_schema *values, const uint8_t *frame, uint64_t len,
+                           const unir_schema *schema, uint32_t entry, uint8_t *out,
+                           uint64_t cap);
+
+/* The transcript (unir spec §15, decisions 100 and 107; issue #160): a writer of the
+ * transcript at ref `transcript`, with its typed line at ref `line`, committing through a
+ * session with the store vat granted as `name` (its requests' ring, then its replies'). Stores
+ * 0 or an error in `*status`. Blocks are named by their index, which unir_transcript_begin
+ * and unir_transcript_begin_output return; changes are queued until unir_transcript_flush
+ * commits them as one version, but the line is committed at once. */
+unir_transcript *unir_transcript_open(unir_vat *vat, const uint8_t *name, uint64_t name_len,
+                                      uint32_t requests_capacity, uint32_t requests_slot_size,
+                                      uint32_t replies_capacity, uint32_t replies_slot_size,
+                                      const uint8_t *transcript, uint64_t transcript_len,
+                                      const uint8_t *line, uint64_t line_len, int64_t *status);
+int64_t unir_transcript_line(unir_vat *vat, unir_transcript *t, const uint8_t *text,
+                             uint64_t len);
+/* A block of job `job`'s values, messages of `schema`'s entry `entry`; live (each value
+ * replacing the last) if the entry is latest-wins. */
+int64_t unir_transcript_begin(unir_transcript *t, const uint8_t *command, uint64_t len,
+                              uint64_t job, const unir_schema *schema, uint32_t entry);
+/* A block of job `job`'s output: text in a document of its own (decision 107). */
+int64_t unir_transcript_begin_output(unir_transcript *t, const uint8_t *command, uint64_t len,
+                                     uint64_t job);
+/* A message of the block's schema (verified; UNIR_EINVALID if it is not one). */
+int64_t unir_transcript_push(unir_transcript *t, uint64_t block, const uint8_t *frame,
+                             uint64_t len);
+int64_t unir_transcript_write(unir_transcript *t, uint64_t block, const uint8_t *bytes,
+                              uint64_t len);
+/* Ends the block as its job's output edge ended: `ended` is that edge's `*_ended` word. */
+int64_t unir_transcript_end(unir_transcript *t, uint64_t block, uint32_t ended);
+int64_t unir_transcript_flush(unir_vat *vat, unir_transcript *t);
+void unir_transcript_close(unir_vat *vat, unir_transcript *t);
+
+/* A shell's session beside its transcript (issue #172; decisions 105, 106). Each spawns the image
+ * granted as `module` (from unir_endowed), with a window of 2^size_log2 bytes (its declared
+ * memory), `args`, and `fuel` and `memory`; an edge to it has `capacity` slots of `slot_size`
+ * bytes. unir_handler_open: a handler for a file, granted the file's edge as `file` and passed
+ * the surface the session set aside for handlers (`handler.show`, `handler.draw`,
+ * `handler.post`) with `stdout`, and sent `text` (UTF-8) as the file; returns the handler, or an
+ * error. */
+int64_t unir_handler_open(unir_vat *vat, int64_t module, uint32_t size_log2, const uint8_t *args,
+                          uint64_t args_len, const uint8_t *text, uint64_t text_len,
+                          uint32_t capacity, uint32_t slot_size, uint64_t fuel, uint64_t memory);
+/* The legacy adapter as a job: `args` followed by the job's size for a pane `rows` by `cols`;
+ * passed the program's terminal (`pty`) with `stdout`. NULL with `*err` set if it could not
+ * start. unir_legacy_event: a pane event as the runtime heard it, a value frame of `values` (the
+ * runtime's value schema): {"keys": K} or {"geometry": {rows, cols}}; UNIR_EINVALID for any
+ * other. unir_legacy_next waits up to
+ * `timeout_ns` (negative: as long as it takes) for the program's next screen and keeps it: its
+ * length, 0 if none came, UNIR_EENDED once the program ended; unir_legacy_screen copies it out,
+ * a message of unir_schema_grid's entry 0. unir_legacy_close ends the job and returns the
+ * adapter's exit status. */
+unir_legacy *unir_legacy_open(unir_vat *vat, int64_t module, uint32_t size_log2,
+                              const uint8_t *args, uint64_t args_len, uint32_t rows,
+                              uint32_t cols, uint32_t capacity, uint32_t slot_size, uint64_t fuel,
+                              uint64_t memory, int64_t *err);
+int64_t unir_legacy_event(unir_vat *vat, unir_legacy *l, const unir_schema *values,
+                          const uint8_t *frame, uint64_t len);
+int64_t unir_legacy_next(unir_vat *vat, unir_legacy *l, int64_t timeout_ns);
+int64_t unir_legacy_screen(const unir_legacy *l, uint8_t *out, uint64_t cap);
+int64_t unir_legacy_close(unir_vat *vat, unir_legacy *l);
+/* The connections a renderer knows: references (`link.usc`; a block of them is drawn
+ * underlined) and a legacy job's screens (`grid.usc`; latest-wins, so the block is live). Free
+ * with unir_schema_free. */
+unir_schema *unir_schema_link(void);
+unir_schema *unir_schema_grid(void);
 
 #endif
