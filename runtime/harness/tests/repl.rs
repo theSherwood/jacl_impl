@@ -79,7 +79,7 @@ fn a_line_yields_at_its_loops() {
 #[test]
 fn a_session_outlasts_the_jit_tables() {
     // 1,000 lines, each compiled into a unit of its own. A line's compiled code is a capability,
-    // and the capability table holds 256 (temen §22), so the REPL gives each up once its unit is
+    // and the capability table holds 1,024 (temen §22), so the REPL gives each up once its unit is
     // installed; and the dispatch table has room for about 700 units, so a line that leaves
     // nothing referring to its code gives its slot back once it returns. A line that defines a
     // proc keeps its own, so the next line calls it.

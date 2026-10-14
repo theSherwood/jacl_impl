@@ -293,7 +293,7 @@ line's entry or above a frame that keeps a closure of the unit live to its retur
 closures and generators the collection keeps (`jacl_gc_collect_noting`), frees every unit none of
 whose slots is noted, and tries again. The code behind a freed slot stays in the JIT's code arena,
 which only the embedder can compact (temen §22, code reclaim). The compiled code's handle, a
-capability, is given up as soon as the unit is installed, since the capability table holds 256.
+capability, is given up as soon as the unit is installed, since the capability table holds 1,024.
 A line's source, tokens and AST are freed once it has compiled, unless it declares a struct or a
 macro, which later lines' compiles use; a session that kept every line's ran out of memory at about
 1,350 lines. `repl.rs::a_session_outlasts_the_jit_tables` runs 1,000 lines, then defines a proc and
