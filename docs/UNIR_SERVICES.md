@@ -229,9 +229,10 @@ A value that does not fit is an error value, and nothing is written. A call that
 parks its fiber, so a transcript is one call at a time: another fiber's call meanwhile waits its turn.
 A job's output is committed whenever 32 KiB of it waits.
 
-`jacl_pane [PROGRAM.jacl]` runs a program this way on the terminal it is started from. It puts the
-terminal in raw mode for the run. `codegen.rs::a_jacl_program_runs_in_a_terminal_pane` drives it with
-a scripted terminal on all three engines.
+`jacl_pane [PROGRAM.jacl]` runs a program this way on the terminal it is started from: the shell
+below, unless another is named. It puts the terminal in raw mode for the run.
+`codegen.rs::a_jacl_program_runs_in_a_terminal_pane` drives it with a scripted terminal on all three
+engines.
 
 ## The shell
 

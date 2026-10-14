@@ -4,20 +4,21 @@
 //! jacl_pane [--dir DIR] [--engine E] [PROGRAM.jacl]
 //! ```
 //!
-//! Runs unir's store vat in its `shell` mode with the program (`tests/services/pane.jacl` unless
-//! another is named) as the client of a pane over this terminal. The terminal is put in raw mode
+//! Runs unir's store vat in its `shell` mode with the program as the client of a pane over this
+//! terminal: the JACL shell (`tests/services/shell.jacl`, with the compiler linked in, #204) unless
+//! another is named. The terminal is put in raw mode
 //! for the run and restored after; its bytes go to temen as they are typed, and only unir's
 //! terminal vat reads them and writes to it. The store lives in `DIR` (`jacl-pane` in the current
 //! directory unless given). temen's JIT runs it unless `--engine` names `tree-walk` or
 //! `bytecode`.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use jacl_runtime_harness::pane;
+use jacl_runtime_harness::{pane, repl};
 
-const PANE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/pane.jacl");
+const SHELL_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/shell.jacl");
 
 fn die(msg: &str) -> ! {
     eprintln!("jacl-pane: {msg}");
@@ -39,7 +40,7 @@ fn stty(args: &[&str]) -> Option<String> {
 fn main() {
     let mut dir = PathBuf::from("jacl-pane");
     let mut backend = temen_run::Backend::Jit;
-    let mut program = PathBuf::from(PANE_JACL);
+    let mut program = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -54,12 +55,21 @@ fn main() {
                     _ => die("--engine is jit, tree-walk or bytecode"),
                 }
             }
-            p => program = PathBuf::from(p),
+            p => program = Some(PathBuf::from(p)),
         }
     }
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| die(&format!("{}: {e}", dir.display())));
-    eprintln!("jacl-pane: compiling {}", program.display());
-    let (client, log2) = jacl_runtime_harness::child_image(&program).unwrap_or_else(|e| die(&e));
+    let (client, log2) = match &program {
+        Some(p) => {
+            eprintln!("jacl-pane: compiling {}", p.display());
+            jacl_runtime_harness::child_image(p)
+        }
+        None => {
+            eprintln!("jacl-pane: building the shell");
+            repl::shell_image(Path::new(SHELL_JACL), true)
+        }
+    }
+    .unwrap_or_else(|e| die(&e));
     let size = stty(&["size"])
         .and_then(|s| {
             let mut it = s.split_whitespace().map(|n| n.parse::<u16>().ok());
