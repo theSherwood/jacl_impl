@@ -92,7 +92,8 @@ unir_producer *unir_producer_open(unir_vat *vat, int64_t cap, uint32_t capacity,
 
 /* End operations take no vat: they wait on and notify only their own edge's words, so
  * different ends may be used concurrently, e.g. by fibers parked in them. One end, one
- * operation at a time. */
+ * operation at a time. A call that takes the vat reads and grows its tables, so a vat is one
+ * such call at a time: a runtime whose fibers run on several threads serializes them. */
 
 /* Writes one frame, parking while there is no credit; a negative timeout never stalls. */
 int64_t unir_producer_write(unir_producer *p, uint16_t substream, const uint8_t *buf,

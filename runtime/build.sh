@@ -26,9 +26,11 @@ mkdir -p "$OUT"
 # i.e. debug, which cost twice over: the translator itself runs ~6x slower (measured on the
 # self-hosted compiler card, 6131ms -> 1030ms, byte-identical output), and it meant CI compiled
 # the LLVM-bindings crate in *two* profiles, because codegen/selfhost/build_compiler_temen.sh
-# has always used release. One profile, one compile, same bytes.
+# has always used release. One profile, one compile, same bytes. Built on every run unless
+# TEMEN_LLVM_TRANSLATE names one: a binary left from before vendor/temen moved translates for the old
+# pin (one rejected `__vm_kill`), and cargo makes an up-to-date build a no-op.
 TRANSLATE="${TEMEN_LLVM_TRANSLATE:-$TEMEN_LLVM/target/release/temen-llvm-translate}"
-if [ ! -x "$TRANSLATE" ]; then
+if [ -z "${TEMEN_LLVM_TRANSLATE:-}" ]; then
   echo "=== building temen-llvm-translate (release) from vendor/temen ==="
   ( cd "$TEMEN_LLVM" && cargo build --release --bin temen-llvm-translate )
 fi

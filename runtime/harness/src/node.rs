@@ -99,7 +99,7 @@ fn reader(sock: &Arc<TcpStream>) -> Receiver<Vec<u8>> {
 /// being sent. The guest polls.
 fn link(sock: Arc<TcpStream>) -> HostCap {
     let queue = Arc::new(Mutex::new(reader(&sock)));
-    HostCap::host_proc(0, move || {
+    HostCap::host_proc(0, move |_| {
         let (sock, queue) = (Arc::clone(&sock), Arc::clone(&queue));
         // A delivery longer than the caller's buffer, and how much of it was handed over.
         let mut rest: Option<(Vec<u8>, usize)> = None;
@@ -220,7 +220,7 @@ pub fn kept(dir: &Path, role: u8) -> Result<Keys, String> {
 /// the key the machine's names vouch for, the same here; op 3 returns 0, the root key never
 /// rotating; op 5 returns -1, introducing no petnames.
 fn keys(k: Keys) -> HostCap {
-    HostCap::host_proc(0, move || {
+    HostCap::host_proc(0, move |_| {
         let k = k.clone();
         let give: temen_interp::HostProc = Box::new(move |op, args, mem, _| {
             let put = match (op, args) {
@@ -245,7 +245,7 @@ fn keys(k: Keys) -> HostCap {
 /// The time (the guest's `Clock`): op 0 the nanoseconds since `epoch`, op 1 the seconds since the
 /// Unix epoch, which a token's validity is in.
 fn clock(epoch: Instant) -> HostCap {
-    HostCap::host_proc(0, move || {
+    HostCap::host_proc(0, move |_| {
         let tick: temen_interp::HostProc = Box::new(move |op, _, _, _| {
             Ok(vec![match op {
                 1 => std::time::SystemTime::now()
@@ -261,7 +261,7 @@ fn clock(epoch: Instant) -> HostCap {
 /// 64 random bits from the OS, a host procedure's op 0: each store's session source, so the two
 /// machines' chunk ids never collide.
 fn entropy() -> HostCap {
-    HostCap::host_proc(0, || {
+    HostCap::host_proc(0, |_| {
         let draw: temen_interp::HostProc = Box::new(|_, _, _, _| {
             let mut b = [0u8; 8];
             let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));

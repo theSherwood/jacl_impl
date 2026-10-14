@@ -1408,7 +1408,7 @@ fn clock_reads_the_granted_clock() {
     let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
     let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
     let clock = || {
-        temen_run::HostCap::host_proc(0, || {
+        temen_run::HostCap::host_proc(0, |_| {
             let next = std::sync::atomic::AtomicI64::new(1 << 40);
             let read: temen_interp::HostProc = Box::new(move |_, _, _, _| {
                 Ok(vec![next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
