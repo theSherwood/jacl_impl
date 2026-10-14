@@ -1,0 +1,46 @@
+# mode: concurrent
+##
+## wake — a pane client that waits on the vat's notification (#219; theSherwood/unir#208): run by
+## unir's store vat in its `shell` mode, as pane.jacl is, which grants it the notification the
+## pane's events signal as `shell.n`. A wait of a number of seconds ends at its time, or sooner once
+## a task writes to a transcript or ends; a key the terminal types ends one with the key. The waits
+## a task ends would otherwise last ten minutes.
+##
+
+## Asserts that R is not an error.
+proc ok {r} {
+  assert [not [error? $r]]
+}
+
+proc main {} {
+  def s [service "store"]
+  ok $s
+  def t [transcript "transcript" "wake/transcript" "wake/line"]
+  ok $t
+  def p [service "pane" "shell.n"]
+  ok $p
+  ok [service-send $p [map "show" [map "transcript" "wake/transcript" "line" "wake/line"]]]
+  ## A vat has one notification: another name is refused before anything connects.
+  assert [error? [service "pane" "other.n"]]
+  ## The terminal sends its size first: an event, waited for on the notification.
+  assert [map-has [service-event $p $true] "geometry"]
+  ## Nothing more comes within 50 ms: nil.
+  assert [== [service-event $p 0.05] $nil]
+  ## A task's write ends a wait early.
+  def w [spawn { sleep 0.05; ok [transcript-line $t "written"] }]
+  assert [== [service-event $p 600] $nil]
+  await $w
+  ## So does a task's end.
+  def e [spawn { sleep 0.05 }]
+  assert [== [service-event $p 600] $nil]
+  await $e
+  ## The terminal types a key once this line shows.
+  ok [transcript-line $t "ready"]
+  def k [service-event $p 600]
+  assert [map-has $k "keys"]
+  ok [transcript-line $t "keyed"]
+  assert [map-has [service-call $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]]] "Version"]
+  0
+}
+
+main

@@ -177,6 +177,8 @@ static void mark_task_stacks(void) {
  *   i64@(p+12) next_waiter (job link) i64@(p+14) waiters_head (jobs parked on this)
  *   i64@(p+16) stack ptr
  *   p[24] job control (JACL_CTL_CANCEL / JACL_CTL_SUSPEND requested; JOB_HELD while on the suspended list)
+ *   p[25] while parked waiting on the vat's notification, for how long in µs, -1 for as long as it
+ *         takes (jacl_event_wait); else 0
  *   i64@(p+26) the job this one is parked on in an await (0 otherwise)
  *   i64@(p+28) with JOB_ENDS set, the value a cancelled job ends with (jacl_task_end)
  * Conservative tracing keeps prime/closure, result, resume_arg, and the waiter chain alive;
@@ -197,7 +199,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
   job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
   p[18] = 0; p[19] = 0; p[20] = owner;
   job_set(j, 22, (long)jacl_ctx_cur);   /* snapshot the spawner's $ctx (nil for the root) */
-  p[24] = 0; job_set(j, 26, 0); job_set(j, 28, 0);
+  p[24] = 0; p[25] = 0; job_set(j, 26, 0); job_set(j, 28, 0);
   return j;
 }
 
@@ -261,7 +263,19 @@ static JaclObj *rq_pop(int self) {           /* under slock — from THIS worker
   jp(j)[18] = 0;
   return j;
 }
-static void pool_wake(void) { __vm_atomic_add32(&jacl_pool_event, 1); __vm_notify(&jacl_pool_event, jacl_pool_workers); }
+#ifdef JACL_UNIR
+/* chan_unir.c: the vat's notification, which an idle worker waits on when it can (#219). */
+static void vat_wake(void);
+static void vat_stir(void);
+static int vat_wait_idle(long ns);
+#endif
+static void pool_wake(void) {
+  __vm_atomic_add32(&jacl_pool_event, 1);
+  __vm_notify(&jacl_pool_event, jacl_pool_workers);
+#ifdef JACL_UNIR
+  vat_wake();   /* a worker may be waiting on the vat's notification instead */
+#endif
+}
 
 /* Complete a job (under slock): publish result, mark DONE, move its waiters to the ready
  * queue (each gets the result as its resume arg). The lock orders the result write before any
@@ -280,6 +294,9 @@ static void complete_job(JaclObj *j, long v) {
     w = next;
   }
   if (jp(j)[1]) __vm_atomic_store32(&jacl_pool_shutdown, 1);   /* root done → shut the pool */
+#ifdef JACL_UNIR
+  vat_stir();   /* a fiber waiting for a service's next event sees a task end: a shell reaps (#219) */
+#endif
 }
 
 /* ---- job control (docs/UNIR_PIPELINES.md, "Background and job control") ----
@@ -431,6 +448,32 @@ static int repoll_blocked(int self) {
   return progressed;
 }
 
+/* How long this idle worker may wait before it re-polls the fibers parked on it: a tick, unless
+ * each of them waits on the vat's notification (jacl_event_wait), which wakes the worker itself
+ * (#219). Then until the first of their timeouts, or as long as it takes (-1). A worker with others
+ * keeps the tick, at which it answers a collection. */
+static long idle_ns(int self) {
+  if (jacl_pool_nthreads) return JACL_WAIT_NS;
+  long ns = -1;
+  for (JaclObj *b = jacl_blocked_head[self]; b; b = (JaclObj *)job_get(b, 12)) {
+    long us = jp(b)[25];
+    if (!us) return JACL_WAIT_NS;
+    if (us > 0 && (ns < 0 || us * 1000 < ns)) ns = us * 1000;
+  }
+  return ns;
+}
+
+/* An idle worker's wait, up to `ns` (negative: as long as it takes): on the vat's notification
+ * when it can, which a service's event or this runtime's own signal ends at once (#219); else for
+ * a pool wake. */
+static void idle_wait(long ns) {
+#ifdef JACL_UNIR
+  if (vat_wait_idle(ns)) return;
+#endif
+  int ev = __vm_atomic_load32(&jacl_pool_event);
+  __vm_wait32(&jacl_pool_event, ev, ns < 0 ? JACL_WAIT_NS : ns);
+}
+
 static void worker_loop(int is_main) {
   int self = jacl_sched_self();
   for (;;) {
@@ -443,23 +486,22 @@ static void worker_loop(int is_main) {
     if (taken) pool_wake();                       /* a cancelled job's waiters are ready */
     if (!job) {
       /* No ready job. Drive any VM-wait-parked fibers (e.g. sleepers) by re-polling them; if a
-       * whole sweep made no progress, idle one JACL_WAIT_NS tick (lets wall-clock advance toward
-       * their deadlines) before sweeping again — a cooperative wait, never a busy spin. */
+       * whole sweep made no progress, idle (idle_ns: a JACL_WAIT_NS tick lets wall-clock advance
+       * toward their deadlines) before sweeping again — a cooperative wait, never a busy spin. */
       if (jacl_blocked_head[self]) {
         int progressed = repoll_blocked(self);
         if (is_main && __vm_atomic_load32(&jp(jacl_root_job)[0]) == JACL_JOB_DONE) break;
         if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
         if (!progressed && jacl_blocked_head[self]) {
+          long ns = idle_ns(self);
           jacl_running_job[self] = 0;             /* idle: hold no root */
-          int ev = __vm_atomic_load32(&jacl_pool_event);
-          __vm_wait32(&jacl_pool_event, ev, JACL_WAIT_NS);
+          idle_wait(ns);
         }
         continue;
       }
       if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
       jacl_running_job[self] = 0;                 /* idle: hold no root */
-      int ev = __vm_atomic_load32(&jacl_pool_event);
-      __vm_wait32(&jacl_pool_event, ev, JACL_WAIT_NS);
+      idle_wait(JACL_WAIT_NS);
       continue;
     }
     jacl_running_job[self] = job;                 /* root it before resume (closes the pop→resume window) */
@@ -675,6 +717,17 @@ static JaclObj *ctl_job(void) {
   uintptr_t here = (uintptr_t)&j;
   return here - (uintptr_t)job_get(j, 16) < JACL_TASK_STACK_BYTES ? j : 0;
 }
+
+#ifdef JACL_UNIR
+/* #219 — the running job is about to park waiting on the vat's notification, for `us` µs (-1:
+ * as long as it takes), or is back from it (0): its worker, idle, waits on the notification for
+ * it rather than re-polling it in ticks (idle_ns). Off a job's own fiber nothing is marked, and
+ * the fiber is re-polled in ticks. */
+static void jacl_event_wait(int32_t us) {
+  JaclObj *j = ctl_job();
+  if (j) jp(j)[25] = us;
+}
+#endif
 
 /* The running job's pending cancel or suspend, or 0; 0 off a job's own fiber. */
 int jacl_ctl_pending(void) {

@@ -16,6 +16,7 @@ typedef struct unir_agreement unir_agreement;
 typedef struct unir_service unir_service;
 typedef struct unir_transcript unir_transcript;
 typedef struct unir_legacy unir_legacy;
+typedef struct unir_notification unir_notification;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -159,6 +160,20 @@ unir_agreement *unir_consumer_adopt(unir_consumer *c, int64_t timeout_ns, int64_
 /* A copy of the schema `a` reads messages as (the writer's, once adopted); unir_schema_free it. */
 unir_schema *unir_agreement_schema(const unir_agreement *a);
 
+/* Notifications (unir spec §16, decision 56; issue #208). unir_notification_open: the
+ * notification the vat was endowed with under `name`, mapped, for the vat's life; NULL if there is
+ * none. A session's root wires one for its shell (`shell.n`), which its pane's events signal
+ * while the pane is armed (unir_service_arm). unir_notification_wait takes the badges signalled
+ * since the last wait into `*badges` (if not NULL), waiting up to `timeout_ns` (negative: as long
+ * as it takes) while there are none: 0 if none came, a timeout or a spurious wakeup, so a waiter
+ * retries what it waits for either way. It returns 0 or UNIR_ESUBSTRATE. A wait takes every
+ * badge, so a notification has one waiter at a time. unir_notification_signal signals `badge`
+ * (nonzero, else UNIR_EINVALID), waking the waiter: how a vat's own tasks wake the one waiting.
+ * Neither takes the vat, as an end's operations do not: a runtime waits while its tasks use it. */
+unir_notification *unir_notification_open(unir_vat *vat, const char *name, uint64_t name_len);
+int64_t unir_notification_wait(unir_notification *n, int64_t timeout_ns, uint64_t *badges);
+int64_t unir_notification_signal(unir_notification *n, uint64_t badge);
+
 /* Services (unir spec §13, issue #50): a session with a service vat granted as `name`, i.e.
  * `name.requests`, `name.replies` and `name.post`. The service offers its schema first; this
  * end adopts it. Values cross as the runtime's value frames, `values` being the runtime's
@@ -179,6 +194,12 @@ int64_t unir_service_send(unir_vat *vat, unir_service *s, const uint8_t *message
  * its length as a value frame, 0 if there is none, or an error. A session that never called
  * hears entry 1 as an event too. */
 int64_t unir_service_event(unir_vat *vat, unir_service *s, uint32_t wait);
+/* Arms `s` for a wait on a notification: unless an event is kept or has arrived, the service's
+ * end signals the notification it was wired to on its next event. 1 if it armed, 0 if an event is
+ * ready (then do not wait), or an error. unir_service_disarm it before its next use, whatever the
+ * wait returned. */
+int64_t unir_service_arm(unir_vat *vat, unir_service *s);
+int64_t unir_service_disarm(unir_vat *vat, unir_service *s);
 /* Copies the last result out; its length, or UNIR_ETOO_SMALL. */
 int64_t unir_service_result(const unir_service *s, uint8_t *out, uint64_t cap);
 void unir_service_close(unir_vat *vat, unir_service *s);

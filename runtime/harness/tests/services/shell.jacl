@@ -2,8 +2,10 @@
 ##
 ## shell — the JACL shell (#204; theSherwood/unir decisions 100, 117, 118): a REPL in a terminal pane.
 ## Run by unir's store vat in its `shell` or `session` mode, which grants it the store as `store`, a
-## second session with it as `transcript`, the pane as `pane`, the Jit capability, and the programs
-## it may run as `bin.NAME`. Each line typed is a job: compiled here, by the compiler linked into
+## second session with it as `transcript`, the pane as `pane`, the notification the pane's events
+## signal as `shell.n`, the Jit capability, and the programs it may run as `bin.NAME`. Waiting, it
+## waits on that notification, which its jobs' writes and ends signal too (#219). Each line typed
+## is a job: compiled here, by the compiler linked into
 ## this program's image, and run as a task in this program's own domain (`[repl-eval]`), so what one
 ## line defines the lines after it see. What a job outputs goes to its blocks of the transcript,
 ## each headed by the line (`$ctx.out`): what it prints, the values it emits, and its pipelines'
@@ -180,7 +182,7 @@ proc main {} {
   ## sessions until it has connected them all, in order.
   def t [transcript "transcript" "shell/transcript" "shell/line"]
   assert [not [error? $t]]
-  def p [service "pane"]
+  def p [service "pane" "shell.n"]
   assert [not [error? $p]]
   assert [== [service-send $p [map "show" [map "transcript" "shell/transcript" "line" "shell/line"]]] $nil]
   ## The profile, evaluated here, before the first prompt: what it defines every line sees, and
@@ -200,6 +202,8 @@ proc main {} {
   ## Keys typed while the shell waits for a job, kept for the prompt.
   mut ahead [vec]
   mut go $true
+  ## Whether the last pass found nothing to do: then this pass's first read waits.
+  mut idle $false
   ## The named keys come as their names; the rest as maps (`Char`, `Ctrl`, `Alt`).
   def named [map "Enter" 1 "Tab" 1 "Backspace" 1 "Delete" 1 "Escape" 1 "Up" 1 "Down" 1 "Right" 1 "Left" 1 "Home" 1 "End" 1 "PageUp" 1 "PageDown" 1]
   def shell-commands [map "jobs" 1 "fg" 1 "bg" 1 "kill" 1]
@@ -221,7 +225,10 @@ proc main {} {
         set e [index $ahead 0]
         set ahead [vec-slice $ahead 1 [length $ahead]]
       } else {
-        set e [service-event $p $false]
+        ## Waiting, for the pane's next event, or until a job writes or ends, so the next pass
+        ## commits what it wrote or reaps it (#219). A second at most: a pass a second, idle.
+        set e [service-event $p [if $idle { 1 } else { $false }]]
+        set idle $false
       }
       if [== $e $nil] { set more $false } else {
         set any $true
@@ -310,9 +317,8 @@ proc main {} {
     }
     if $any {
       ok [transcript-line $t [if [== $fg $nil] { [concat "\x24 " $line] } else { "" }]]
-    } else {
-      sleep 0.005
     }
+    set idle [not $any]
   }
   for [map-keys [deref $jobs]] n { cancel [map-get [map-get [deref $jobs] $n] "f"] }
   ask $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]] "Version"

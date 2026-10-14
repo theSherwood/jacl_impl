@@ -8,7 +8,10 @@
  * value, converted to the service's request type by structure (unir's `Dynamic`: a map for a
  * struct by field name, `[map Variant payload]` or the variant's name for a sum, a string for
  * text or bytes), and returns its reply, converted back; [service-event S WAIT] returns the next
- * event the service sent, as `[map name value]`, or nil if there is none (and WAIT is false).
+ * event the service sent, as `[map name value]`, or nil if none came within WAIT.
+ * [service NAME N] opens a service whose events signal the notification the vat was endowed with
+ * as N (unir decision #208.1): a wait for its events then waits on that notification, as an idle
+ * worker does, rather than polling (#219).
  * A connection that is not request and reply, such as a pane (theSherwood/unir#102), is the same
  * session: [service-send S [map NAME V]] writes V on the entry named NAME and waits for nothing,
  * and every entry the other end writes comes as an event.
@@ -22,6 +25,8 @@
 #define JACL_SERVICE_SLOT 4096u
 
 static unir_service *jacl_services[JACL_SERVICES];
+/* Whether each was opened with the vat's notification, which its events signal while it is armed. */
+static uint8_t jacl_service_woken[JACL_SERVICES];
 
 static unir_service *service_of(JaclVal s) {
   if (!jaclrt_is_i32(s)) return 0;
@@ -29,13 +34,21 @@ static unir_service *service_of(JaclVal s) {
   return i >= 0 && (uint32_t)i < JACL_SERVICES ? jacl_services[i] : 0;
 }
 
-/* [service NAME]: a session with the service granted as NAME, an integer handle; or an error. */
-JaclVal jacl_service(JaclVal name) {
+/* A session with the service granted as NAME, an integer handle; or an error. With `note` a
+ * string, the service's events signal the vat's notification granted as `note`, which is opened
+ * with it. */
+static JaclVal service_open(JaclVal name, JaclVal note) {
   if (!jaclrt_is_string(name)) return chan_err("service: the name is not a string");
-  char nb[128];
-  uint32_t len = jacl_str_len(name);
+  char nb[128], nn[64];
+  uint32_t len = jacl_str_len(name), nlen = 0;
   if (len >= sizeof nb) return chan_err("service: the name is too long");
   jacl_str_bytes(name, nb, sizeof nb);
+  if (!jaclrt_is_nil(note)) {
+    if (!jaclrt_is_string(note)) return chan_err("service: the notification's name is not a string");
+    nlen = jacl_str_len(note);
+    if (nlen >= sizeof nn) return chan_err("service: the notification's name is too long");
+    jacl_str_bytes(note, nn, sizeof nn);
+  }
   int64_t st = UNIR_EINVALID;
   int32_t slot = -1;
   /* The connect holds the vat while it waits for the service's offer: the service is running
@@ -43,16 +56,39 @@ JaclVal jacl_service(JaclVal name) {
   unir_vat *vat = vat_take();
   for (uint32_t i = 0; i < JACL_SERVICES && slot < 0; i++)
     if (!jacl_services[i]) slot = (int32_t)i;
-  unir_service *s = vat && slot >= 0
+  const char *why = !jaclrt_is_nil(note) ? vat_note_open(vat, nn, nlen) : 0;
+  unir_service *s = !why && vat && slot >= 0
       ? unir_service_open(vat, (const uint8_t *)nb, len, JACL_SERVICE_FRAMES, JACL_SERVICE_SLOT,
                           jv_values_schema, sizeof jv_values_schema, &st)
       : 0;
-  if (s) jacl_services[slot] = s;
+  if (s) {
+    jacl_services[slot] = s;
+    jacl_service_woken[slot] = !jaclrt_is_nil(note);
+  }
   vat_give();
   if (s) return jaclrt_i32(slot);
+  if (why) {
+    static char msg[64];
+    uint32_t n = 0;
+    for (const char *p = "service: "; *p; p++) msg[n++] = *p;
+    for (const char *p = why; *p && n < sizeof msg - 1; p++) msg[n++] = *p;
+    msg[n] = 0;
+    return chan_err(msg);
+  }
   if (slot < 0) return chan_err("service: too many open");
   return chan_err(st == UNIR_ENOCAP ? "service: none granted by that name"
                                     : "service: the service did not connect");
+}
+
+/* [service NAME]: a session with the service granted as NAME, an integer handle; or an error. */
+JaclVal jacl_service(JaclVal name) { return service_open(name, JACL_NIL); }
+
+/* [service NAME N]: as [service NAME], for a service whose events signal the notification the vat
+ * was endowed with as N (a shell's pane signals `shell.n` in unir's session). A vat has one
+ * notification: an N other than the first one opened is an error. */
+JaclVal jacl_service_n(JaclVal name, JaclVal note) {
+  if (jaclrt_is_nil(note)) return chan_err("service: the notification's name is not a string");
+  return service_open(name, note);
 }
 
 /* The result `r` of a service call or event: its value, nil for none, or an error. */
@@ -90,20 +126,49 @@ JaclVal jacl_service_call(JaclVal svc, JaclVal req) {
   return service_result(s, r, "service-call");
 }
 
-/* [service-event S WAIT]: the service's next event as [map name value]; nil if there is none and
- * WAIT is false. Waiting, it polls, giving the vat back between polls, from 50 microseconds apart
- * to a millisecond. */
+/* [service-event S WAIT]: the service's next event as [map name value], or nil if none came: at
+ * once if WAIT is false or nil; when one comes if WAIT is true; and if WAIT is a number of
+ * seconds, within that long, or sooner once one of this program's tasks writes to a transcript or
+ * ends (vat_stir), so a shell waiting for its pane notices its jobs (#219). Waiting for a service
+ * opened with the vat's notification, it arms the service, whose next event signals the
+ * notification, and parks until the notification's waiter or a task's write moves
+ * jacl_unir_events; only a task's write or end moves jacl_unir_stirs. Any other service it polls,
+ * giving the vat back between polls, from 50 microseconds apart to a millisecond. */
 JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
   unir_service *s = service_of(svc);
   if (!s) return chan_err("service-event: not an open service");
-  int w = !jaclrt_is_nil(wait) && !(jaclrt_is_bool(wait) && !jaclrt_as_bool(wait));
+  /* How long it may wait: not at all (0), as long as it takes (-1), or WAIT seconds. */
+  long left = jaclrt_is_bool(wait) && jaclrt_as_bool(wait) ? -1 : 0;
+  if (!jaclrt_is_nil(wait) && !jaclrt_is_bool(wait)) {
+    double secs = jacl_secs(wait);
+    if (!(secs >= 0)) return chan_err("service-event: WAIT is not a boolean or a number of seconds");
+    left = secs < 1e9 ? (long)(secs * 1e9) : (long)1e18;
+  }
+  int woken = jacl_service_woken[jaclrt_as_i32(svc)];
+  int32_t start = __vm_atomic_load32(&jacl_unir_stirs);
   for (long idle = 50000;; idle = idle < 1000000 ? idle * 2 : 1000000) {
+    int32_t seen = __vm_atomic_load32(&jacl_unir_events);
+    if (left > 0 && __vm_atomic_load32(&jacl_unir_stirs) != start) return JACL_NIL;   /* a task wrote or ended */
     unir_vat *vat = vat_take();
     int64_t r = unir_service_event(vat, s, 0);
+    int64_t armed = r == 0 && left && woken ? unir_service_arm(vat, s) : 0;
     vat_give();
-    if (r != 0 || !w) return service_result(s, r, "service-event");
+    if (r != 0 || !left) return service_result(s, r, "service-event");
+    /* Armed, or polling: wait for the next poll, an event, a task's write, or the time WAIT
+     * allows, at most a slice at a time. Not armed but woken, an event is ready: look again. */
+    if (armed > 0 || !woken) {
+      long ns = left < 0 || left > JACL_UNIR_SLICE_NS ? JACL_UNIR_SLICE_NS : left;
+      if (!woken && idle < ns) ns = idle;
+      int32_t mark = !woken ? 0 : left < 0 ? -1 : (int32_t)(ns / 1000 + 1);
+      if (vat_await(seen, ns, mark) == 2 && left > 0) left = left > ns ? left - ns : 0;
+    }
+    if (armed > 0) {
+      vat = vat_take();
+      (void)unir_service_disarm(vat, s);
+      vat_give();
+    }
     jacl_ctl_point();   /* a waiting job can be cancelled or suspended */
-    vat_idle(idle);
+    if (!left) return JACL_NIL;
   }
 }
 
@@ -129,5 +194,6 @@ static void jacl_services_close(void) {
     unir_service_close(vat, jacl_services[i]);
     vat_give();
     jacl_services[i] = 0;
+    jacl_service_woken[i] = 0;
   }
 }

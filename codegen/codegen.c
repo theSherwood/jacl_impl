@@ -5540,6 +5540,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_EMIT,       "jacl_emit",       1},
       {HEAD_EMIT,       "jacl_emit_as",    2},
       {HEAD_SERVICE,    "jacl_service",    1},
+      {HEAD_SERVICE,    "jacl_service_n",  2},
       {HEAD_SERVICE_CALL, "jacl_service_call", 2},
       {HEAD_SERVICE_EVENT, "jacl_service_event", 2},
       {HEAD_SERVICE_SEND, "jacl_service_send", 2},

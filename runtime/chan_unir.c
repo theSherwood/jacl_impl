@@ -71,11 +71,12 @@ static unir_vat *jacl_unir_vat;
 static int jacl_stage(void);
 static unir_vat *unir_vat_get(void);
 
-/* The vat, one call at a time: of unir.h's calls only an edge's end operations take no vat, and
- * this runtime's fibers run on several workers. A call waits its turn parked, never spinning
- * against a fiber parked inside one. A call that waits for a peer (a service's reply, a child
- * that starts or ends) holds the vat meanwhile; a wait that may be long (a service's next event,
- * a legacy job's next screen) polls instead, giving it back between polls. The vat, or 0. */
+/* The vat, one call at a time: of unir.h's calls only an edge's end operations and a
+ * notification's take no vat, and this runtime's fibers run on several workers. A call waits its
+ * turn parked, never spinning against a fiber parked inside one. A call that waits for a peer (a
+ * service's reply, a child that starts or ends) holds the vat meanwhile; a wait that may be long
+ * (a service's next event, a legacy job's next screen) does not: it waits on the vat's
+ * notification, or polls, giving the vat back between polls. The vat, or 0. */
 static int32_t jacl_unir_vat_lock;
 static unir_vat *vat_take(void) {
   while (__vm_atomic_cas32(&jacl_unir_vat_lock, 0, 1) != 0)
@@ -90,6 +91,81 @@ static void vat_give(void) {
 /* Waits `ns` nanoseconds parked, as a poll's interval. */
 static int32_t jacl_unir_idle;
 static void vat_idle(long ns) { (void)__vm_wait32(&jacl_unir_idle, 0, ns); }
+
+/* The vat's notification (unir decision #208.1), once a service is opened with it ([service NAME
+ * N]): the service's events signal it while it is armed, and this runtime signals it itself
+ * (vat_stir, pool_wake), so an idle worker waits on it rather than in ticks (vat_wait_idle; #219).
+ * A wait takes every badge, so one worker waits on it at a time. */
+static unir_notification *jacl_unir_note;
+static char jacl_unir_note_name[64];
+static int32_t jacl_unir_note_waiting;
+/* The badge this runtime signals itself with; a root's are small. */
+#define JACL_UNIR_OWN (1ull << 63)
+/* The longest one wait lasts: an unbounded one is made of these (temen#1711). */
+#define JACL_UNIR_SLICE_NS 1000000000L
+
+/* Moves whenever a service opened with the notification may have an event, or a task wrote to a
+ * transcript or ended: what a fiber waiting for a service's next event parks on (vat_await). */
+static int32_t jacl_unir_events;
+/* Moves when a task writes to a transcript or ends (vat_stir): what ends a timed wait early. */
+static int32_t jacl_unir_stirs;
+
+/* Wakes the worker waiting on the notification, if one is open. */
+static void vat_wake(void) {
+  if (jacl_unir_note) (void)unir_notification_signal(jacl_unir_note, JACL_UNIR_OWN);
+}
+
+/* What a fiber waiting for a service's next event wants to see: a task wrote to a transcript, or
+ * ended. Wakes it, and the worker waiting on the notification for it. */
+static void vat_stir(void) {
+  (void)__vm_atomic_add32(&jacl_unir_stirs, 1);
+  (void)__vm_atomic_add32(&jacl_unir_events, 1);
+  (void)__vm_notify(&jacl_unir_events, 1 << 30);
+  vat_wake();
+}
+
+/* An idle worker's wait on the notification, up to `ns` (negative: as long as it takes), if one
+ * is open and no other worker waits on it: 1 if it waited. A badge from outside, a service's
+ * event, moves jacl_unir_events, so the fibers parked for one see it when the worker re-polls
+ * them; this runtime's own signals moved it already. */
+static int vat_wait_idle(long ns) {
+  if (!jacl_unir_note || __vm_atomic_cas32(&jacl_unir_note_waiting, 0, 1) != 0) return 0;
+  uint64_t badges = 0;
+  (void)unir_notification_wait(jacl_unir_note, ns, &badges);
+  __vm_atomic_store32(&jacl_unir_note_waiting, 0);
+  if (badges & ~JACL_UNIR_OWN) {
+    (void)__vm_atomic_add32(&jacl_unir_events, 1);
+    (void)__vm_notify(&jacl_unir_events, 1 << 30);
+  }
+  return 1;
+}
+
+/* Parks the calling fiber until jacl_unir_events moves from `seen` or `ns` passes; 2 if it
+ * passed. `mark` is how long its job waits on the notification, in µs (-1: as long as it takes),
+ * so its worker, idle, waits there for it rather than re-polling it in ticks (idle_ns); 0 for a
+ * poll's interval, which needs the ticks. */
+static int vat_await(int32_t seen, long ns, int32_t mark) {
+  if (mark) jacl_event_wait(mark);
+  int w = __vm_wait32(&jacl_unir_events, seen, ns);
+  if (mark) jacl_event_wait(0);
+  return w;
+}
+
+/* Opens the vat's notification, the one it was endowed with under `name`, unless it is open:
+ * under the vat's lock. 0, or why not. A vat has one: another name is refused. */
+static const char *vat_note_open(unir_vat *vat, const char *name, uint32_t len) {
+  if (jacl_unir_note) {
+    uint32_t k = 0;
+    while (k < len && jacl_unir_note_name[k] == name[k]) k++;
+    return k == len && !jacl_unir_note_name[k] ? 0 : "the vat has one notification";
+  }
+  if (len >= sizeof jacl_unir_note_name) return "the notification's name is too long";
+  unir_notification *n = vat ? unir_notification_open(vat, name, len) : 0;
+  if (!n) return "no notification granted by that name";
+  for (uint32_t k = 0; k < len; k++) jacl_unir_note_name[k] = name[k];
+  jacl_unir_note = n;
+  return 0;
+}
 
 /* The vat, created on first use: a spawned one's (a pipeline stage's, pipe_unir.c, or a
  * service's client's, service_unir.c) holds the arguments and capabilities its parent passed,

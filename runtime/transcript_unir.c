@@ -107,10 +107,12 @@ static JaclTranscript *transcript_take(JaclVal t, const char *what, JaclVal *err
   return 0;
 }
 
-/* Gives `x` back after a call, waking a fiber that waits its turn. */
+/* Gives `x` back after a call, waking a fiber that waits its turn, and one waiting for a
+ * service's next event (vat_stir): a shell commits what a job wrote (#219). */
 static JaclVal transcript_done(JaclTranscript *x, JaclVal r) {
   __vm_atomic_store32(&x->busy, 0);
   (void)__vm_notify(&x->busy, 1);
+  vat_stir();
   return r;
 }
 
