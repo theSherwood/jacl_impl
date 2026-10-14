@@ -1,0 +1,10 @@
+##
+## #218: each loop in a line is a job-control point, once a slice of its headers has run. There
+## the line's task yields to the program's other tasks, and acts on a pending cancel or suspend.
+## The first line loops until a task it started has run, which it can do only once the line yields;
+## without a yield the line gives up after 200,000 iterations. The second line's generator loops
+## across slices on a fiber of its own, where no job-control point acts, so it yields exactly its
+## elements.
+##
+print [repl-eval "mut ran 0; def t [spawn { set ran 1 }]; mut n 0; while {&& [== \x24ran 0] [< \x24n 200000]} { set n [+ \x24n 1] }; \x24ran"]
+print [repl-eval "proc upto {n} { mut i 0; while {< \x24i \x24n} { yield \x24i; set i [+ \x24i 1] } }; mut s 0; for [upto 40000] x { set s [+ \x24s 1] }; \x24s"]

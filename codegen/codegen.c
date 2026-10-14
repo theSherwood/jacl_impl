@@ -792,6 +792,15 @@ static void emit_void_call(Cx *cx, const char *fn) {
   (void)irb_call_import(cx->f, cx->cur, fn, sig, 1, NULL, 0, h, args, 1);
 }
 
+/* #218 — enter a loop's header. In a REPL line it is a job-control point too, once a slice
+ * (`jacl_loop_point`), so a line that loops without reaching another (an await, a sleep, a
+ * pipeline's read) still yields to the shell, and can be cancelled or stopped. A program's loops
+ * have none: a program runs in a vat of its own, which `kill` ends wherever it is. */
+static void enter_loop_header(Cx *cx, IrBlock header) {
+  enter_frame_block(cx, header);
+  if (cx->repl) emit_void_call(cx, "jacl_loop_point");
+}
+
 static IrVal compile_string_literal(Cx *cx, const char *s, uint32_t len);  /* fwd */
 static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node);              /* fwd */
 
@@ -2414,7 +2423,7 @@ static IrVal compile_while(Cx *cx, AstNode *node) {
   irb_br(cx->f, cx->cur, header, frame, w);
 
   /* header: test the condition */
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   cx->move_ok = 1;   /* consumed right here, so a block move is fine */
   IrVal cond = compile_expr(cx, args[0]);
   if (cx->failed) return 0;
@@ -2465,7 +2474,7 @@ static IrVal compile_for_generator(Cx *cx, AstNode *gen_call, const char *name, 
   irb_br(cx->f, cx->cur, header, frame, w);
 
   /* header: v = gen_next(g); name = v; if gen_done(g) -> exit else body */
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   {
     Binding *bg = env_lookup(cx, FOR_GEN_SENTINEL, FOR_GEN_SENTINEL_LEN);
     IrVal na[] = {cx->sp, bg->value};
@@ -2518,7 +2527,7 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   irb_br(cx->f, cx->cur, header, frame, w);
 
   /* header: i < end ? */
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   {
     Binding *bi = env_lookup(cx, name, nlen);
     Binding *be = env_lookup(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN);
@@ -2726,7 +2735,7 @@ static IrVal stream_into_vec(Cx *cx, IrVal src, int is_gen, IrVal clo, int is_fi
   irb_br(cx->f, cx->cur, header, frame, w);
 
   IrVal elem = 0;
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   if (is_gen) {
     Binding *bs = env_lookup(cx, ST_SRC, 7);
     IrVal na[] = {cx->sp, bs->value};
@@ -2839,7 +2848,7 @@ static IrVal stream_into_map(Cx *cx, IrVal src, IrVal clo, int is_filter) {
   irb_br(cx->f, cx->cur, header, frame, w);
 
   /* header: i < len(src) (entry count) */
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   {
     Binding *bs = env_lookup(cx, ST_SRC, 7);
     Binding *bi = env_lookup(cx, ST_IDX, 7);
@@ -3391,7 +3400,7 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
   irb_br(cx->f, cx->cur, header, frame, w);
 
   /* header: continue iff (i < len) is exactly true (an error compare exits) */
-  enter_frame_block(cx, header);
+  enter_loop_header(cx, header);
   {
     Binding *bi = env_lookup(cx, FOR_IDX_SENTINEL, FOR_IDX_SENTINEL_LEN);
     Binding *be = env_lookup(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN);
