@@ -5529,6 +5529,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_STDERR,     "jacl_stderr",     0},
       {HEAD_ARGS,       "jacl_args",       0},
       {HEAD_EMIT,       "jacl_emit",       1},
+      {HEAD_EMIT,       "jacl_emit_as",    2},
       {HEAD_SERVICE,    "jacl_service",    1},
       {HEAD_SERVICE_CALL, "jacl_service_call", 2},
       {HEAD_SERVICE_EVENT, "jacl_service_event", 2},
@@ -5544,11 +5545,15 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_TRANSCRIPT_FLUSH, "jacl_transcript_flush", 1},
       {HEAD_TRANSCRIPT_JOB, "jacl_transcript_job", 3},
       {HEAD_TRANSCRIPT_JOB_END, "jacl_transcript_job_end", 2},
+      {HEAD_TRANSCRIPT_PICK, "jacl_transcript_pick", 3},
+      {HEAD_HANDLER_OPEN, "jacl_handler_open", 5},
+      {HEAD_LEGACY_JOB, "jacl_legacy_job", 6},
       {HEAD_REPL_EVAL,  "jacl_repl_eval",  1},
       {HEAD_CANCEL,     "jacl_cancel",     1},
       {HEAD_SUSPEND,    "jacl_suspend",    1},
       {HEAD_RESUME,     "jacl_resume",     1},
       {HEAD_DONE_Q,     "jacl_done",       1},
+      {HEAD_CLOCK,      "jacl_clock",      0},
     };
     /* Stamped-element static check: [arr-push $a LIT] against a typed binding. */
     if ((HeadId)hid == HEAD_ARR_PUSH && node->data.command.arg_count == 2 &&

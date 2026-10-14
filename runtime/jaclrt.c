@@ -12,6 +12,7 @@
 #include "sched.c"
 #include "fscap.c"
 #include "execcap.c"
+#include "clockcap.c"
 #include "interpcap.c"
 #include "io.c"
 #include "chan.c"     /* after flatbuf.c: builds [Buf n u8] results */

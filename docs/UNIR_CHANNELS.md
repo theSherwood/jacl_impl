@@ -89,10 +89,18 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.l
   or waking on the edge's bell directly when a worker's only blocked fiber is on one edge.
 - **The unit's heap.** The runtime has no `malloc`, and calling `jacl_alloc` from inside the unit would
   hit GC safepoints mid-call. `chan_unir.c` defines `unir_host_alloc`/`unir_host_free` over a static
-  256 KiB pool outside `jacl_heap_mem`: power-of-two size classes from 16 B to 4 KiB with free lists,
+  4 MiB pool outside `jacl_heap_mem`: power-of-two size classes from 16 B to 256 KiB with free lists,
   and a `cas32` spin lock that is never held across a park. The unit allocates a few hundred bytes per
-  edge end and per spawn. The pool's lock is separate from the lock held while a channel opens,
-  because the unit allocates while it opens.
+  edge end and per spawn, a service's whole schema at once, and a legacy job's screen (up to 100 KiB)
+  as one read. A request the pool cannot serve fails the unit's allocation, which traps. The pool's
+  lock is separate from the vat's, because the unit allocates inside its calls.
+- **The vat, one call at a time.** Of `unir.h`'s calls only an edge's end operations take no vat; the
+  others read and grow the vat's tables (its posts, mapped notifications and children), and this
+  runtime's fibers run on several workers. So every call that takes the vat holds a parking lock
+  (`vat_take`/`vat_give`): a fiber waits its turn parked, never spinning against one parked inside a
+  call. A call that waits for a peer (a service's reply, a child that starts or ends) holds the vat
+  meanwhile; a wait that may be long (`[service-event S true]`, a legacy job's next screen) polls,
+  giving the vat back between polls.
 
 ## Build
 

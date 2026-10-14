@@ -46,15 +46,28 @@ const PROGRAMS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 /// The scripted terminal for `shell.jacl`: each step's keys, typed once the terminal has been sent
 /// the step's marker at least that many times, so the script follows the shell rather than a clock.
 const SHELL_SCRIPT: &[(&str, &str, usize)] = &[
-    ("def x 41\r", "> ", 1),
+    ("def x 41\r", "$ ", 1),
     ("proc sq {n} { * $n $n }\r", "\x1b[1mdef x 41", 1),
     ("sq [+ $x 1]\r", "\x1b[1mproc sq", 1),
     // Up, then Enter: the line before again.
     ("\x1b[A\r", "1764", 1),
     ("!gen hi | !upcase\r", "1764", 2),
     ("!nums 3 maps\r", "HI", 1),
+    // A value of a schema: a reference, which the driver underlines.
+    (
+        "emit [map \"name\" \"notes.txt\"] [schema \"link\"]\r",
+        "\x1b[1m!nums 3 maps",
+        1,
+    ),
+    // Keys typed while the shell waits for a job are its input; those it leaves come back to the
+    // prompt once it ends, and are erased there.
+    (
+        "sleep 1; concat \"in \" [to-string [length [deref $ctx->in]]]\rab",
+        "\x1b[4mnotes.txt",
+        1,
+    ),
     // A job in the background, listed, then ended.
-    ("!forever | !sink &\rjobs\r", "\x1b[1m!nums 3 maps", 1),
+    ("\x7f\x7f!forever | !sink &\rjobs\r", "$ ab", 1),
     ("kill\r", "running", 1),
     // A job waited for, stopped at once (Ctrl-Z) and listed; another stopped, then resumed in the
     // background (`bg`), where it finishes, its output in its block; then the first waited for
@@ -201,6 +214,17 @@ fn shell_session(
     // A line that fails to compile shows why.
     assert!(
         at("\x1b[1mnope\x1b[0m") < at("unsupported command head"),
+        "{backend:?}"
+    );
+    // A value emitted under a schema is a block of it: a reference, underlined.
+    assert!(
+        at("\x1b[1memit [map") < at("\x1b[4mnotes.txt\x1b[0m"),
+        "{backend:?}"
+    );
+    // A job's input is the keys typed while the shell waits for it; it left them, so they came
+    // back to the prompt.
+    assert!(
+        at("\x1b[1msleep 1; concat") < at("in 2") && at("in 2") < at("$ ab"),
         "{backend:?}"
     );
     // A pipeline's text is its job's output block; a program's values are a block of values.

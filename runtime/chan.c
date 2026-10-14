@@ -279,6 +279,7 @@ JaclVal jacl_stdout(void) { return JACL_NIL; }
 JaclVal jacl_stderr(void) { return JACL_NIL; }
 JaclVal jacl_args(void) { return jacl_vec_empty(); }
 JaclVal jacl_emit(JaclVal v) { jacl_print(v); return JACL_NIL; }
+JaclVal jacl_emit_as(JaclVal v, JaclVal s) { (void)v; (void)s; return chan_err("emit: a value of a schema goes only to a job's output"); }
 JaclVal jacl_service(JaclVal name) { (void)name; return chan_err("service: unavailable without vats"); }
 JaclVal jacl_service_call(JaclVal s, JaclVal r) { (void)s; (void)r; return chan_err("service-call: unavailable without vats"); }
 JaclVal jacl_service_event(JaclVal s, JaclVal w) { (void)s; (void)w; return chan_err("service-event: unavailable without vats"); }
@@ -294,6 +295,9 @@ JaclVal jacl_transcript_end(JaclVal t, JaclVal b) { (void)t; (void)b; return cha
 JaclVal jacl_transcript_flush(JaclVal t) { (void)t; return chan_err("transcript-flush: unavailable without vats"); }
 JaclVal jacl_transcript_job(JaclVal t, JaclVal c, JaclVal j) { (void)t; (void)c; (void)j; return chan_err("transcript-job: unavailable without vats"); }
 JaclVal jacl_transcript_job_end(JaclVal s, JaclVal c) { (void)s; (void)c; return chan_err("transcript-job-end: unavailable without vats"); }
+JaclVal jacl_transcript_pick(JaclVal t, JaclVal b, JaclVal v) { (void)t; (void)b; (void)v; return chan_err("transcript-pick: unavailable without vats"); }
+JaclVal jacl_handler_open(JaclVal i, JaclVal a, JaclVal t, JaclVal f, JaclVal m) { (void)i; (void)a; (void)t; (void)f; (void)m; return chan_err("handler-open: unavailable without vats"); }
+JaclVal jacl_legacy_job(JaclVal i, JaclVal a, JaclVal r, JaclVal c, JaclVal f, JaclVal m) { (void)i; (void)a; (void)r; (void)c; (void)f; (void)m; return chan_err("legacy-job: unavailable without vats"); }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

@@ -15,6 +15,7 @@ typedef struct unir_schema unir_schema;
 typedef struct unir_agreement unir_agreement;
 typedef struct unir_service unir_service;
 typedef struct unir_transcript unir_transcript;
+typedef struct unir_legacy unir_legacy;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -223,5 +224,39 @@ int64_t unir_transcript_write(unir_transcript *t, uint64_t block, const uint8_t 
 int64_t unir_transcript_end(unir_transcript *t, uint64_t block, uint32_t ended);
 int64_t unir_transcript_flush(unir_vat *vat, unir_transcript *t);
 void unir_transcript_close(unir_vat *vat, unir_transcript *t);
+
+/* A shell's session beside its transcript (issue #172; decisions 105, 106). Each spawns the image
+ * granted as `module` (from unir_endowed), with a window of 2^size_log2 bytes (its declared
+ * memory), `args`, and `fuel` and `memory`; an edge to it has `capacity` slots of `slot_size`
+ * bytes. unir_handler_open: a handler for a file, granted the file's edge as `file` and passed
+ * the surface the session set aside for handlers (`handler.show`, `handler.draw`,
+ * `handler.post`) with `stdout`, and sent `text` (UTF-8) as the file; returns the handler, or an
+ * error. */
+int64_t unir_handler_open(unir_vat *vat, int64_t module, uint32_t size_log2, const uint8_t *args,
+                          uint64_t args_len, const uint8_t *text, uint64_t text_len,
+                          uint32_t capacity, uint32_t slot_size, uint64_t fuel, uint64_t memory);
+/* The legacy adapter as a job: `args` followed by the job's size for a pane `rows` by `cols`;
+ * passed the program's terminal (`pty`) with `stdout`. NULL with `*err` set if it could not
+ * start. unir_legacy_event: a pane event as the runtime heard it, a value frame of `values` (the
+ * runtime's value schema): {"keys": K} or {"geometry": {rows, cols}}; UNIR_EINVALID for any
+ * other. unir_legacy_next waits up to
+ * `timeout_ns` (negative: as long as it takes) for the program's next screen and keeps it: its
+ * length, 0 if none came, UNIR_EENDED once the program ended; unir_legacy_screen copies it out,
+ * a message of unir_schema_grid's entry 0. unir_legacy_close ends the job and returns the
+ * adapter's exit status. */
+unir_legacy *unir_legacy_open(unir_vat *vat, int64_t module, uint32_t size_log2,
+                              const uint8_t *args, uint64_t args_len, uint32_t rows,
+                              uint32_t cols, uint32_t capacity, uint32_t slot_size, uint64_t fuel,
+                              uint64_t memory, int64_t *err);
+int64_t unir_legacy_event(unir_vat *vat, unir_legacy *l, const unir_schema *values,
+                          const uint8_t *frame, uint64_t len);
+int64_t unir_legacy_next(unir_vat *vat, unir_legacy *l, int64_t timeout_ns);
+int64_t unir_legacy_screen(const unir_legacy *l, uint8_t *out, uint64_t cap);
+int64_t unir_legacy_close(unir_vat *vat, unir_legacy *l);
+/* The connections a renderer knows: references (`link.usc`; a block of them is drawn
+ * underlined) and a legacy job's screens (`grid.usc`; latest-wins, so the block is live). Free
+ * with unir_schema_free. */
+unir_schema *unir_schema_link(void);
+unir_schema *unir_schema_grid(void);
 
 #endif

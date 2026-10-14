@@ -1,14 +1,15 @@
 # mode: concurrent
 ##
-## shell — the JACL shell (#204; theSherwood/unir decisions 100, 116, 117): a REPL in a terminal pane.
-## Run by unir's store vat in its `shell` mode, which grants it the store as `store`, a second
-## session with it as `transcript`, the pane as `pane`, the Jit capability, and the programs it may
-## run as `bin.NAME`. Each line typed is a job: compiled here, by the compiler linked into this
-## program's image, and run as a task in this program's own domain (`[repl-eval]`), so what one line
-## defines the lines after it see. What a job outputs goes to its blocks of the transcript, each
-## headed by the line (`$ctx.out`): what it prints, the values it emits, and its pipelines' output,
-## typed under the schema their last program offered. A job that shows nothing else shows its
-## value, and one that fails shows why.
+## shell — the JACL shell (#204; theSherwood/unir decisions 100, 117, 118): a REPL in a terminal pane.
+## Run by unir's store vat in its `shell` or `session` mode, which grants it the store as `store`, a
+## second session with it as `transcript`, the pane as `pane`, the Jit capability, and the programs
+## it may run as `bin.NAME`. Each line typed is a job: compiled here, by the compiler linked into
+## this program's image, and run as a task in this program's own domain (`[repl-eval]`), so what one
+## line defines the lines after it see. What a job outputs goes to its blocks of the transcript,
+## each headed by the line (`$ctx.out`): what it prints, the values it emits, and its pipelines'
+## output, typed under the schema their last program offered. A job that shows nothing else shows
+## its value, and one that fails shows why. Before the first prompt the shell evaluates its profile,
+## the store's document `profile` if there is one, so every line sees what the profile defines.
 ##
 ##   LINE &     runs LINE in the background
 ##   jobs       lists the jobs running or stopped
@@ -19,7 +20,11 @@
 ##   Up, Down   earlier and later lines
 ##   quit       ends the shell
 ##
-## Keys typed while the shell waits for a job, other than Ctrl-C and Ctrl-Z, wait for it too.
+## While the shell waits for a job, the pane's keys other than Ctrl-C and Ctrl-Z, and its sizes, are
+## the job's input (`$ctx.in`, an atom of a vector of them, which the job empties as it takes
+## them); what it leaves is typed at the prompt once it ends. A reference activated in the
+## transcript runs `open NAME` as a job, NAME the reference's, which shows only what it outputs:
+## the profile says what opening a name means (unir decision 106).
 ##
 
 ## Asserts that R, what a transcript call returned, is not an error.
@@ -33,6 +38,20 @@ proc ask {s, req, kind} {
   assert [not [error? $r]]
   assert [map-has $r $kind]
   map-get $r $kind
+}
+
+## The text of version V of a document in the store S, read 2 KiB at a time: a reply is one of
+## the session's frames, which hold 4 KiB.
+proc text {s, v} {
+  def len [map-get [ask $s [map "Info" $v] "Info"] "len"]
+  mut out ""
+  mut at 0
+  while [< $at $len] {
+    def n [if [< [- $len $at] 2048] { [- $len $at] } else { 2048 }]
+    set out [concat $out [buf-string [ask $s [map "Read" [map "version" $v "at" $at "len" $n]] "Data"]]]
+    set at [+ $at $n]
+  }
+  $out
 }
 
 ## The character a key's code stands for: printable ASCII, else "".
@@ -75,19 +94,40 @@ proc show {t, line, n, v} {
   ok [transcript-end $t $b]
 }
 
-## Starts LINE as job N, a task whose output goes to the job's place in the transcript T. The job's
-## record: its task, its place, its line, and whether it is stopped.
-proc start {t, line, n} {
+## Starts SRC as job N, LINE its command: a task whose output goes to the job's place in the
+## transcript T and whose input is the pane's events while the shell waits for it. The job's
+## record: its task, its place, its input, its line, whether it is stopped, and whether it is
+## QUIET, showing only its output.
+proc start {t, line, src, n, quiet} {
   def s [transcript-job $t $line $n]
   ok $s
-  def f [with-ctx {out $s} { spawn { repl-eval $line } }]
-  map "f" $f "s" $s "line" $line "stopped" $false
+  def in [atom [vec]]
+  def f [with-ctx {out $s; in $in} { spawn { repl-eval $src } }]
+  map "f" $f "s" $s "in" $in "line" $line "stopped" $false "quiet" $quiet
+}
+
+## TEXT as a string literal: the characters a string would read as code, escaped.
+def escapes [map "\"" "\\x22" "\\" "\\x5c" "\x24" "\\x24" "[" "\\x5b" "]" "\\x5d"]
+proc quoted {text} {
+  mut out "\""
+  for [range 0 [length $text]] i {
+    def c [index $text $i]
+    set out [concat $out [if [map-has $escapes $c] { [map-get $escapes $c] } else { $c }]]
+  }
+  concat $out "\""
+}
+
+## Gives job J (a record) the pane's event E as its input.
+proc give {j, e} {
+  swap [map-get $j "in"] [\ vec-push $it $e]
 }
 
 ## Ends each job in JOBS (an atom of a map from number to record) whose task has finished. One
-## that failed shows why; one that showed nothing else shows its value. (A job's error is only
-## read here: passed on, it would end this proc with it.)
+## that failed shows why; one that showed nothing else shows its value, unless it is quiet. (A
+## job's error is only read here: passed on, it would end this proc with it.) The events the
+## ended jobs left in their input, for the prompt.
 proc reap {t, jobs} {
+  mut left [vec]
   for [map-keys [deref $jobs]] n {
     def j [map-get [deref $jobs] $n]
     if [done? [map-get $j "f"]] {
@@ -100,11 +140,13 @@ proc reap {t, jobs} {
       } else {
         def shown [transcript-job-end [map-get $j "s"] $true]
         ok $shown
-        if [== $shown 0] { show $t $line $n $v }
+        if [&& [== $shown 0] [not [map-get $j "quiet"]]] { show $t $line $n $v }
       }
+      set left [vec-concat $left [deref [map-get $j "in"]]]
       reset $jobs [map-remove [deref $jobs] $n]
     }
   }
+  $left
 }
 
 ## The job WORDS name (`fg 2`), or the last one when they name none; nil if there is no such job.
@@ -141,6 +183,13 @@ proc main {} {
   def p [service "pane"]
   assert [not [error? $p]]
   assert [== [service-send $p [map "show" [map "transcript" "shell/transcript" "line" "shell/line"]]] $nil]
+  ## The profile, evaluated here, before the first prompt: what it defines every line sees, and
+  ## what fails in it shows as a block.
+  def profile [ask $s [map "Head" "profile"] "Head"]
+  if [!= $profile $nil] {
+    def v [repl-eval [text $s $profile]]
+    if [error? $v] { say $t "profile" 0 [concat "error: " [concat [to-string [error-val $v]] "\n"]] }
+  }
   def jobs [atom [map]]
   mut last 0
   ## The job waited for, while there is one: then keys control it rather than edit the line.
@@ -154,12 +203,13 @@ proc main {} {
   ## The named keys come as their names; the rest as maps (`Char`, `Ctrl`, `Alt`).
   def named [map "Enter" 1 "Tab" 1 "Backspace" 1 "Delete" 1 "Escape" 1 "Up" 1 "Down" 1 "Right" 1 "Left" 1 "Home" 1 "End" 1 "PageUp" 1 "PageDown" 1]
   def shell-commands [map "jobs" 1 "fg" 1 "bg" 1 "kill" 1]
-  ok [transcript-line $t "> "]
+  ok [transcript-line $t "\x24 "]
   while $go {
-    reap $t $jobs
+    ## What an ended job left was typed after what waits already.
+    set ahead [vec-concat $ahead [reap $t $jobs]]
     if [&& [!= $fg $nil] [not [map-has [deref $jobs] $fg]]] {
       set fg $nil
-      ok [transcript-line $t [concat "> " $line]]
+      ok [transcript-line $t [concat "\x24 " $line]]
     }
     ok [transcript-flush $t]
     ## Every event waiting, then the line drawn once: a burst of keys, or a paste, is one commit.
@@ -189,7 +239,7 @@ proc main {} {
                 set fg $nil
               }
             } else {
-              set ahead [vec-push $ahead $e]
+              give [map-get [deref $jobs] $fg] $e
             }
           } else {
             if [map-has $named $k] {
@@ -229,7 +279,7 @@ proc main {} {
                     ## A line ending in `&` runs in the background; any other is waited for.
                     def bg [== [index $line [- [length $line] 1]] "&"]
                     def src [if $bg { [slice $line 0 [- [length $line] 1]] } else { $line }]
-                    reset $jobs [map-set [deref $jobs] $last [start $t $src $last]]
+                    reset $jobs [map-set [deref $jobs] $last [start $t $src $src $last $false]]
                     if [not $bg] { set fg $last }
                   }
                 }
@@ -241,11 +291,25 @@ proc main {} {
           }
         } else {
           if [&& [map-has $e "lifecycle"] [== [map-get $e "lifecycle"] "Close"]] { set go $false }
+          ## A size is the job's waited for, as its keys are.
+          if [&& [map-has $e "geometry"] [!= $fg $nil]] {
+            give [map-get [deref $jobs] $fg] $e
+          }
+          ## A reference activated: `open NAME`, a job of its own beside any other.
+          if [&& [map-has $e "acts"] [map-has [map-get $e "acts"] "Activate"]] {
+            def pick [map-get [map-get $e "acts"] "Activate"]
+            def name [transcript-pick $t [map-get $pick "block"] [map-get $pick "value"]]
+            if [&& [!= $name $nil] [not [error? $name]]] {
+              set last [+ $last 1]
+              def src [concat "open " [quoted $name]]
+              reset $jobs [map-set [deref $jobs] $last [start $t [concat "open " $name] $src $last $true]]
+            }
+          }
         }
       }
     }
     if $any {
-      ok [transcript-line $t [if [== $fg $nil] { [concat "> " $line] } else { "" }]]
+      ok [transcript-line $t [if [== $fg $nil] { [concat "\x24 " $line] } else { "" }]]
     } else {
       sleep 0.005
     }

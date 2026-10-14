@@ -1,4 +1,4 @@
-/* transcript_unir.c — the transcript (theSherwood/unir decisions 100, 107 and 116; #204). Included
+/* transcript_unir.c — the transcript (theSherwood/unir decisions 100, 107 and 117; #204). Included
  * by chan.c with the unir backend, after value.c and service_unir.c.
  *
  * A shell writes what its jobs show into a transcript: a store document of blocks, each headed by
@@ -23,13 +23,18 @@
  *                                    "A job's output" below); an integer handle, or an error
  *   [transcript-job-end S COMPLETE]  ends job S's place, its last block complete (COMPLETE true)
  *                                    or cancelled; how many blocks the job opened
+ *   [transcript-pick T B V]          the name of reference V of block B, a block of references;
+ *                                    nil if there is none (see "References" below)
  *   [schema DESC]                    the schema DESC describes: a connection schema, written as
  *                                    unir's meta-schema has it (`types`, each "text", "u64",
  *                                    [map "struct" [map "name" N "fields" [vec [map "name" F
  *                                    "type" I] …]]] …, and `substreams`, each [map "name" N
  *                                    "type" I "profile" P]); an integer handle, or an error. A
  *                                    block's values are messages of its entry 0, and a profile of
- *                                    3 (latest-wins) makes the block live.
+ *                                    3 (latest-wins) makes the block live. [schema "link"] is
+ *                                    unir's link document, whose values are references: a
+ *                                    renderer draws each as its name, underlined, and a person
+ *                                    can activate it (unir decision 106).
  *
  * Each call that fails returns an error value and leaves the transcript as it was. A call that
  * waits for the store parks its fiber, so a transcript is one call at a time: another fiber's call
@@ -47,6 +52,12 @@
 /* Output written and not yet committed, at most. */
 #define JACL_TRANSCRIPT_PENDING 32768u
 
+/* A reference a block holds (see "References" below): its block, and its name. */
+typedef struct {
+  uint32_t block, len;
+  char *name;
+} JaclRef;
+
 typedef struct {
   unir_transcript *t;
   int32_t busy;       /* 1 while a call is in flight (cas32) */
@@ -54,10 +65,15 @@ typedef struct {
   /* Each block's schema: an index into jacl_schemas, or -1 for this runtime's own values. */
   int8_t *schema;
   uint32_t blocks, cap;
+  /* The references written, in order. */
+  JaclRef *refs;
+  uint32_t nrefs, refcap;
 } JaclTranscript;
 
 static JaclTranscript jacl_transcripts[JACL_TRANSCRIPTS];
 static unir_schema *jacl_schemas[JACL_SCHEMAS];
+/* [schema "link"]'s slot in jacl_schemas, once made. */
+static int32_t jacl_link_slot = -1;
 
 static JaclTranscript *transcript_of(JaclVal t) {
   if (!jaclrt_is_i32(t)) return 0;
@@ -123,13 +139,27 @@ static JaclVal transcript_err(const char *what, int64_t r) {
 
 /* [schema DESC] */
 JaclVal jacl_schema(JaclVal desc) {
+  int32_t slot = -1;
+  for (uint32_t i = 0; i < JACL_SCHEMAS && slot < 0; i++)
+    if (!jacl_schemas[i]) slot = (int32_t)i;
+  /* A name: unir's own schema by that name, one slot however often it is asked for. */
+  if (jaclrt_is_string(desc)) {
+    char nb[8];
+    if (transcript_str(desc, nb, sizeof nb) != 4 || nb[0] != 'l' || nb[1] != 'i' || nb[2] != 'n' ||
+        nb[3] != 'k')
+      return chan_err("schema: no schema by that name");
+    if (jacl_link_slot >= 0) return jaclrt_i32(jacl_link_slot);
+    if (slot < 0) return chan_err("schema: too many");
+    unir_schema *s = unir_schema_link();
+    if (!s) return chan_err("schema: unavailable");
+    jacl_schemas[slot] = s;
+    jacl_link_slot = slot;
+    return jaclrt_i32(slot);
+  }
   static uint8_t buf[JACL_TRANSCRIPT_VALUE];
   JaclVal err = JACL_NIL;
   uint64_t n = jv_encode_into(desc, buf, sizeof buf, &err);
   if (!n) return err;
-  int32_t slot = -1;
-  for (uint32_t i = 0; i < JACL_SCHEMAS && slot < 0; i++)
-    if (!jacl_schemas[i]) slot = (int32_t)i;
   if (slot < 0) return chan_err("schema: too many");
   unir_schema *s = unir_schema_from_value(jv_schema(), buf, n);
   if (!s) return chan_err("schema: not a valid connection schema");
@@ -145,10 +175,8 @@ JaclVal jacl_transcript(JaclVal name, JaclVal transcript, JaclVal line) {
   if (nl < 0 || tl < 0 || ll < 0) return chan_err("transcript: the names are not strings");
   int64_t st = UNIR_EINVALID;
   int32_t slot = -1;
-  /* Under the open lock, as a service's session is opened: the store is running, so its offer
-   * comes at once. */
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
+  /* As a service's session is opened: the store is running, so its offer comes at once. */
+  unir_vat *vat = vat_take();
   for (uint32_t i = 0; i < JACL_TRANSCRIPTS && slot < 0; i++)
     if (!jacl_transcripts[i].t) slot = (int32_t)i;
   unir_transcript *t = vat && slot >= 0
@@ -157,8 +185,8 @@ JaclVal jacl_transcript(JaclVal name, JaclVal transcript, JaclVal line) {
                              (const uint8_t *)tb, (uint64_t)tl, (const uint8_t *)lb, (uint64_t)ll,
                              &st)
       : 0;
-  if (t) jacl_transcripts[slot] = (JaclTranscript){t, 0, 0, 0, 0, 0};
-  unir_unlock(&jacl_unir_open_lock);
+  if (t) jacl_transcripts[slot] = (JaclTranscript){.t = t};
+  vat_give();
   if (t) return jaclrt_i32(slot);
   if (slot < 0) return chan_err("transcript: too many open");
   return chan_err(st == UNIR_ENOCAP ? "transcript: no store granted by that name"
@@ -176,7 +204,9 @@ JaclVal jacl_transcript_line(JaclVal t, JaclVal text) {
   JaclVal err = JACL_NIL;
   JaclTranscript *x = transcript_take(t, "transcript-line", &err);
   if (!x) return err;
-  int64_t r = unir_transcript_line(jacl_unir_vat, x->t, (const uint8_t *)b, n);
+  unir_vat *vat = vat_take();
+  int64_t r = unir_transcript_line(vat, x->t, (const uint8_t *)b, n);
+  vat_give();
   return transcript_done(x, r < 0 ? transcript_err("transcript-line", r) : JACL_NIL);
 }
 
@@ -194,6 +224,57 @@ static int transcript_note(JaclTranscript *x, int64_t b, int8_t schema) {
   }
   x->schema[x->blocks++] = schema;
   return 1;
+}
+
+/* ---- References (unir decision 106) ----
+ * A value of the link document's is a reference: a name a job's output gives what the shell
+ * granted it. The writer keeps no values, so the transcript keeps each reference's name as it is
+ * written, for the shell to resolve an activation (`pane.usc`'s Pick: a block's place among the
+ * transcript's, and the value's within it) to the name it designates. A pipeline's references,
+ * forwarded without decoding, are not kept. */
+
+/* Keeps `v`'s name as block `b`'s next reference: a map's "name", or a list's first value. A
+ * value with no name, or no memory for it, is not kept. Under the transcript's turn. */
+static void transcript_ref(JaclTranscript *x, int64_t b, JaclVal v) {
+  JaclVal name = jaclrt_type_index(v) == 0x07 ? jacl_map_get(v, jacl_str_new("name", 4))
+               : jaclrt_type_index(v) == 0x06 && jacl_vec_count(v) > 0 ? jacl_vec_get(v, 0)
+               : JACL_NIL;
+  char nb[1024];
+  int64_t n = transcript_str(name, nb, sizeof nb);
+  if (n < 0) return;
+  if (x->nrefs == x->refcap) {
+    uint32_t cap = x->refcap ? x->refcap * 2 : 16;
+    JaclRef *r = (JaclRef *)unir_host_alloc((uint64_t)cap * sizeof *r, 8);
+    if (!r) return;
+    for (uint32_t i = 0; i < x->nrefs; i++) r[i] = x->refs[i];
+    if (x->refs) unir_host_free(x->refs, (uint64_t)x->refcap * sizeof *r, 8);
+    x->refs = r;
+    x->refcap = cap;
+  }
+  char *copy = n ? (char *)unir_host_alloc((uint64_t)n, 1) : 0;
+  if (n && !copy) return;
+  for (int64_t i = 0; i < n; i++) copy[i] = nb[i];
+  x->refs[x->nrefs++] = (JaclRef){(uint32_t)b, (uint32_t)n, copy};
+}
+
+/* [transcript-pick T B V] */
+JaclVal jacl_transcript_pick(JaclVal t, JaclVal block, JaclVal value) {
+  int64_t b, v;
+  if (!jacl_int_val_checked(block, &b) || !jacl_int_val_checked(value, &v))
+    return chan_err("transcript-pick: a block and a value, each a number");
+  JaclVal err = JACL_NIL;
+  JaclTranscript *x = transcript_take(t, "transcript-pick", &err);
+  if (!x) return err;
+  char nb[1024];
+  int64_t n = -1;
+  for (uint32_t i = 0, seen = 0; i < x->nrefs && n < 0; i++) {
+    if ((int64_t)x->refs[i].block != b || (int64_t)seen++ != v) continue;
+    n = x->refs[i].len;
+    for (int64_t k = 0; k < n; k++) nb[k] = x->refs[i].name[k];
+  }
+  /* The string is made once the turn is given back: it may collect. */
+  (void)transcript_done(x, JACL_NIL);
+  return n < 0 ? JACL_NIL : jacl_str_new(nb, (uint32_t)n);
 }
 
 /* [transcript-block T CMD JOB S] */
@@ -265,12 +346,15 @@ JaclVal jacl_transcript_push(JaclVal t, JaclVal block, JaclVal v) {
     n = (uint64_t)m;
   }
   int64_t r = unir_transcript_push(x->t, (uint64_t)b, frame, n);
+  if (r >= 0 && k >= 0 && k == jacl_link_slot) transcript_ref(x, b, v);
   return transcript_done(x, r < 0 ? transcript_err("transcript-push", r) : JACL_NIL);
 }
 
 /* Commits what is queued; 0 or an error. */
 static int64_t transcript_commit(JaclTranscript *x) {
-  int64_t r = unir_transcript_flush(jacl_unir_vat, x->t);
+  unir_vat *vat = vat_take();
+  int64_t r = unir_transcript_flush(vat, x->t);
+  vat_give();
   if (r >= 0) x->pending = 0;
   return r;
 }
@@ -329,7 +413,7 @@ JaclVal jacl_transcript_flush(JaclVal t) {
  * kind comes. `print`'s text goes to an output block (decision 107); `emit`'s values to a block of
  * this runtime's values; and a pipeline's output to an output block if it is bytes, else to a
  * block of the schema its last program offered, adopted and forwarded without decoding (decision
- * 116). Output of another kind than the open block's, or a later pipeline's typed output, ends
+ * 117). Output of another kind than the open block's, or a later pipeline's typed output, ends
  * that block and opens the next. A write looks its job up by handle under the transcript's turn,
  * so a task that outlives its job (one its line spawned) writes nowhere once the job has ended. */
 #define JACL_JOBS 64u
@@ -442,18 +526,40 @@ static void job_forward(JaclVal s, const void *agree, uint32_t entry, const uint
   (void)transcript_done(x, JACL_NIL);
 }
 
-/* `[emit V]` to job `s`: V joins a block of this runtime's values. nil, or an error value. */
-static JaclVal job_emit(JaclVal s, JaclVal v) {
+/* `[emit V]` to job `s`, or `[emit V S]` with S's slot `k` (-1 without): V joins a block of
+ * this runtime's values, or of S's entry 0, a live block when that is latest-wins. Values of
+ * another schema than the open block's open the next. nil, or an error value. */
+static JaclVal job_emit(JaclVal s, JaclVal v, int32_t k) {
   JaclTranscript *x;
   JaclJob *j = job_take(s, &x);
   if (!j) return chan_err("emit: the job has ended");
-  static uint8_t frame[JACL_TRANSCRIPT_VALUE];   /* under the transcript's turn */
+  static uint8_t value[JACL_TRANSCRIPT_VALUE], msg[JACL_TRANSCRIPT_VALUE];  /* under the turn */
   JaclVal err = JACL_NIL;
-  uint64_t n = jv_encode_into(v, frame, sizeof frame, &err);
+  uint64_t n = jv_encode_into(v, value, sizeof value, &err);
   if (!n) return transcript_done(x, err);
-  int64_t r = job_block(x, j, JOB_VALUES, jv_schema(), 0, 0);
+  const unir_schema *schema = k >= 0 ? jacl_schemas[k] : jv_schema();
+  const uint8_t *frame = value;
+  if (k >= 0) {
+    int64_t m = unir_value_message(jv_schema(), value, n, schema, 0, msg, sizeof msg);
+    if (m < 0) return transcript_done(x, transcript_err("emit", m));
+    if ((uint64_t)m > sizeof msg) return transcript_done(x, chan_err("emit: the value is too large"));
+    frame = msg;
+    n = (uint64_t)m;
+  }
+  /* The schema is the block's agreement, so values of one schema share a block. */
+  int64_t r = job_block(x, j, JOB_VALUES, schema, schema, 0);
   if (r >= 0) r = unir_transcript_push(x->t, (uint64_t)j->block, frame, n);
+  if (r >= 0 && k >= 0 && k == jacl_link_slot) transcript_ref(x, j->block, v);
   return transcript_done(x, r < 0 ? transcript_err("emit", r) : JACL_NIL);
+}
+
+/* [emit V S]: in a job, V as a value of schema S (see job_emit); elsewhere, an error. */
+JaclVal jacl_emit_as(JaclVal v, JaclVal schema) {
+  int32_t k = jaclrt_is_i32(schema) ? jaclrt_as_i32(schema) : -1;
+  if (k < 0 || (uint32_t)k >= JACL_SCHEMAS || !jacl_schemas[k]) return chan_err("emit: not a schema");
+  JaclVal job;
+  if (!job_named(&job)) return chan_err("emit: a value of a schema goes only to a job's output");
+  return job_emit(job, v, k);
 }
 
 /* Ends job `s`'s adopted block, as the pipeline whose output it holds ends: the next pipeline's
@@ -510,14 +616,187 @@ JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete) {
   return transcript_done(x, r < 0 ? transcript_err("transcript-job-end", r) : jaclrt_i32((int32_t)n));
 }
 
+/* ---- Handlers and the legacy adapter (unir decisions 105 and 106; theSherwood/unir#172) ----
+ * What a shell starts beside its transcript, each a child vat from an image it was granted (by
+ * the capability's name), with a window of the image's declared memory and FUEL and MEMORY of
+ * this vat's budget:
+ *
+ *   [handler-open IMAGE ARGS TEXT FUEL MEMORY]
+ *       a handler for a file: IMAGE run with ARGS (a string's bytes), granted the surface the
+ *       session set aside for handlers and sent TEXT as the file, which it shows until a person
+ *       closes it. Its child, or an error. The program ends after its handlers.
+ *   [legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY]
+ *       in a job: the legacy adapter, IMAGE run with ARGS, running a POSIX program in a terminal
+ *       of the job's size in a pane of ROWS by COLS. Each screen it draws replaces the last in
+ *       the job's live grid block, and the pane's events the shell gives the job (`$ctx.in`, an
+ *       atom of a vector of them, which this empties) go to the program, until it ends. The
+ *       adapter's exit status, or an error. Cancelled, it closes the adapter first. */
+#define JACL_HANDLERS 16u
+#define JACL_SCREEN (128u << 10)   /* the largest screen, a message of the grid's */
+static int64_t jacl_handlers[JACL_HANDLERS];
+static int32_t jacl_nhandlers;   /* slots claimed (cas32) */
+
+/* The capability `name` names, taking the vat (vat_give gives it back); with `*module` set,
+ * the vat, or 0 if it holds none by that name (and it is given back). */
+static unir_vat *granted(JaclVal name, int64_t *module) {
+  char nb[128];
+  int64_t n = transcript_str(name, nb, sizeof nb);
+  unir_vat *vat = vat_take();
+  *module = vat && n >= 0 ? unir_endowed(vat, nb, (uint64_t)n) : UNIR_ENOCAP;
+  if (*module >= 0) return vat;
+  vat_give();
+  return 0;
+}
+
+/* [handler-open IMAGE ARGS TEXT FUEL MEMORY] */
+JaclVal jacl_handler_open(JaclVal image, JaclVal args, JaclVal text, JaclVal fuel, JaclVal memory) {
+  int64_t f, m;
+  if (!jaclrt_is_string(args) || !jaclrt_is_string(text) || !jacl_int_val_checked(fuel, &f) ||
+      !jacl_int_val_checked(memory, &m) || f < 0 || m < 0)
+    return chan_err("handler-open: an image, its arguments and the file as strings, and a budget");
+  int32_t slot = -1;
+  for (int32_t n = __vm_atomic_load32(&jacl_nhandlers); slot < 0 && n < (int32_t)JACL_HANDLERS;
+       n = __vm_atomic_load32(&jacl_nhandlers))
+    if (__vm_atomic_cas32(&jacl_nhandlers, n, n + 1) == n) slot = n;
+  if (slot < 0) return chan_err("handler-open: too many handlers");
+  jacl_handlers[slot] = -1;
+  uint32_t al = jacl_str_len(args), tl = jacl_str_len(text);
+  int32_t cap = (int32_t)(al + tl + 2);
+  JaclVal keep[1] = {fb_alloc_nd(1, 1, &cap)};  /* may collect; `keep` is on the data stack */
+  uint8_t *b = (uint8_t *)fb_data(keep[0]);
+  jacl_str_bytes(args, (char *)b, al + 1);
+  jacl_str_bytes(text, (char *)b + al + 1, tl + 1);
+  int64_t module;
+  unir_vat *vat = granted(image, &module);
+  if (!vat) return chan_err("handler-open: no image granted by that name");
+  /* It holds the vat until the file is sent: the handler reads it as it starts. */
+  int64_t h = unir_handler_open(vat, module, 0, b, al, b + al + 1, tl, JACL_SERVICE_FRAMES,
+                                JACL_SERVICE_SLOT, (uint64_t)f, (uint64_t)m);
+  vat_give();
+  if (h < 0) return chan_err("handler-open: the handler did not start");
+  jacl_handlers[slot] = h;
+  return jacl_int_result(h);
+}
+
+/* Sends the legacy adapter `l` the events waiting in `in` (an atom of a vector of them, or nil),
+ * taking them all at once, as the shell adds to it. */
+static void legacy_events(unir_legacy *l, JaclVal in) {
+  if (jaclrt_is_nil(in)) return;
+  JaclVal keep[2] = {JACL_NIL, jacl_vec_empty()};   /* the events taken stay reachable */
+  for (;;) {
+    keep[0] = jacl_box_get(in);
+    if (jaclrt_type_index(keep[0]) != 0x06 || jacl_vec_count(keep[0]) == 0) return;
+    if (jacl_box_cas(in, keep[0], keep[1]) == JACL_TRUE) break;
+  }
+  for (uint32_t i = 0; i < jacl_vec_count(keep[0]); i++) {
+    uint8_t frame[512];
+    JaclVal err = JACL_NIL;
+    uint64_t n = jv_encode_into(jacl_vec_get(keep[0], i), frame, sizeof frame, &err);
+    /* Keys and sizes go; any other event is the shell's, and the adapter refuses it. */
+    if (!n) continue;
+    unir_vat *vat = vat_take();
+    (void)unir_legacy_event(vat, l, jv_schema(), frame, n);
+    vat_give();
+  }
+}
+
+/* A screen, `frame[0..n)`, to job `s`'s live grid block, committed as it comes, so each is a
+ * version a renderer draws. 0, or a UNIR_E* code. */
+static int64_t job_screen(JaclVal s, const unir_schema *grid, const uint8_t *frame, uint64_t n) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return UNIR_EENDED;
+  int64_t r = job_block(x, j, JOB_VALUES, grid, grid, 0);
+  if (r >= 0) r = unir_transcript_push(x->t, (uint64_t)j->block, frame, n);
+  if (r >= 0) r = transcript_commit(x);
+  (void)transcript_done(x, JACL_NIL);
+  return r < 0 ? r : 0;
+}
+
+/* [legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY] */
+JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal rows, JaclVal cols, JaclVal fuel,
+                        JaclVal memory) {
+  int64_t r, c, f, m;
+  if (!jaclrt_is_string(args) || !jacl_int_val_checked(rows, &r) || !jacl_int_val_checked(cols, &c) ||
+      !jacl_int_val_checked(fuel, &f) || !jacl_int_val_checked(memory, &m) || r < 1 || c < 1 ||
+      r > 0xffff || c > 0xffff || f < 0 || m < 0)
+    return chan_err("legacy-job: an image, its arguments, a pane's rows and columns, and a budget");
+  JaclVal s;
+  if (!job_named(&s)) return chan_err("legacy-job: only in a job");
+  JaclVal in = jacl_map_get(jacl_ctx_cur, jacl_str_new("in", 2));
+  static unir_schema *grid;
+  if (!grid) grid = unir_schema_grid();
+  char ab[256];
+  int64_t al = transcript_str(args, ab, sizeof ab), module;
+  int32_t cap = (int32_t)JACL_SCREEN;
+  JaclVal keep[2] = {in, fb_alloc_nd(1, 1, &cap)};  /* may collect; `keep` is on the data stack */
+  uint8_t *screen = (uint8_t *)fb_data(keep[1]);
+  unir_vat *vat = al >= 0 && grid ? granted(image, &module) : 0;
+  if (!vat) return chan_err("legacy-job: no image granted by that name");
+  /* It holds the vat until the adapter has connected. */
+  int64_t err = 0;
+  unir_legacy *l = unir_legacy_open(vat, module, 0, (const uint8_t *)ab, (uint64_t)al, (uint32_t)r,
+                                    (uint32_t)c, JACL_SERVICE_FRAMES, JACL_SERVICE_SLOT,
+                                    (uint64_t)f, (uint64_t)m, &err);
+  vat_give();
+  if (!l) return chan_err("legacy-job: the adapter did not start");
+  int64_t failed = 0;
+  for (;;) {
+    int ctl = jacl_ctl_pending();
+    if (ctl & JACL_CTL_CANCEL) {
+      vat = vat_take();
+      (void)unir_legacy_close(vat, l);
+      vat_give();
+      jacl_ctl_point();   /* does not return */
+    }
+    if (ctl) jacl_ctl_point();   /* stopped, until resumed */
+    legacy_events(l, keep[0]);
+    /* The next screen, polled: a wait would hold the vat. */
+    vat = vat_take();
+    int64_t n = unir_legacy_next(vat, l, 0);
+    vat_give();
+    if (n == UNIR_EENDED) break;
+    if (n == 0) vat_idle(1000000);
+    if (n > 0) n = unir_legacy_screen(l, screen, JACL_SCREEN);
+    if (n > 0) n = job_screen(s, grid, screen, (uint64_t)n);
+    if (n < 0) {
+      failed = n;
+      break;
+    }
+  }
+  vat = vat_take();
+  int64_t st = unir_legacy_close(vat, l);
+  vat_give();
+  if (failed) return chan_err("legacy-job: the adapter failed");
+  return jacl_int_result(st);
+}
+
+/* At exit, once the pane is closed: a handler ends when a person closes it, and this vat after
+ * its handlers. */
+static void jacl_handlers_join(void) {
+  int32_t n = __vm_atomic_load32(&jacl_nhandlers);
+  for (int32_t i = 0; i < n && i < (int32_t)JACL_HANDLERS; i++) {
+    if (jacl_handlers[i] < 0) continue;
+    unir_vat *vat = vat_take();
+    (void)unir_join(vat, jacl_handlers[i]);
+    vat_give();
+  }
+  __vm_atomic_store32(&jacl_nhandlers, 0);
+}
+
 /* At exit: close the transcripts still open. What was not flushed is lost, as a program's
  * unflushed output is. */
 static void jacl_transcripts_close(void) {
   for (uint32_t i = 0; i < JACL_TRANSCRIPTS; i++) {
     JaclTranscript *x = &jacl_transcripts[i];
     if (!x->t) continue;
-    unir_transcript_close(jacl_unir_vat, x->t);
+    unir_vat *vat = vat_take();
+    unir_transcript_close(vat, x->t);
+    vat_give();
     if (x->schema) unir_host_free(x->schema, x->cap, 1);
-    *x = (JaclTranscript){0, 0, 0, 0, 0, 0};
+    for (uint32_t r = 0; r < x->nrefs; r++)
+      if (x->refs[r].len) unir_host_free(x->refs[r].name, x->refs[r].len, 1);
+    if (x->refs) unir_host_free(x->refs, (uint64_t)x->refcap * sizeof *x->refs, 8);
+    *x = (JaclTranscript){0};
   }
 }

@@ -19,16 +19,17 @@
 static uint8_t jacl_unir_map[JACL_UNIR_MAP_BYTES] __attribute__((aligned(65536)));
 
 /* The unit's heap: unir_host_alloc/free over a static pool outside the GC heap. Size classes
- * of 16 << k bytes (k < 13, so up to 64 KiB: a service's schema, which a client adopts into one
- * buffer, passes 4 KiB), each with a free list, carved from a bump arena.
+ * of 16 << k bytes (k < 15, so up to 256 KiB: a legacy job's screen, which the adapter sends as
+ * one frame of up to 100 KiB, is read into one buffer, as a service's schema is, which passes
+ * 4 KiB), each with a free list, carved from a bump arena. A request the pool cannot serve fails
+ * the unit's allocation, which traps.
  * Its lock is held only inside these two functions, which never park or call out. */
-#define JACL_UNIR_POOL_BYTES (1u << 20)
-#define JACL_UNIR_CLASSES 13
+#define JACL_UNIR_POOL_BYTES (4u << 20)
+#define JACL_UNIR_CLASSES 15
 static uint8_t jacl_unir_pool[JACL_UNIR_POOL_BYTES] __attribute__((aligned(16)));
 static uint32_t jacl_unir_pool_used;
 static void *jacl_unir_free[JACL_UNIR_CLASSES];
 static int32_t jacl_unir_pool_lock;   /* the pool's free lists and bump pointer */
-static int32_t jacl_unir_open_lock;   /* the vat, while a channel opens (the unit allocates inside) */
 
 static void unir_lock(int32_t *l) {
   while (__vm_atomic_cas32(l, 0, 1) != 0) {}
@@ -68,11 +69,32 @@ void unir_host_free(void *ptr, uint64_t size, uint64_t align) {
 
 static unir_vat *jacl_unir_vat;
 static int jacl_stage(void);
+static unir_vat *unir_vat_get(void);
+
+/* The vat, one call at a time: of unir.h's calls only an edge's end operations take no vat, and
+ * this runtime's fibers run on several workers. A call waits its turn parked, never spinning
+ * against a fiber parked inside one. A call that waits for a peer (a service's reply, a child
+ * that starts or ends) holds the vat meanwhile; a wait that may be long (a service's next event,
+ * a legacy job's next screen) polls instead, giving it back between polls. The vat, or 0. */
+static int32_t jacl_unir_vat_lock;
+static unir_vat *vat_take(void) {
+  while (__vm_atomic_cas32(&jacl_unir_vat_lock, 0, 1) != 0)
+    (void)__vm_wait32(&jacl_unir_vat_lock, 1, 1000000);
+  return unir_vat_get();
+}
+static void vat_give(void) {
+  __vm_atomic_store32(&jacl_unir_vat_lock, 0);
+  (void)__vm_notify(&jacl_unir_vat_lock, 1);
+}
+
+/* Waits `ns` nanoseconds parked, as a poll's interval. */
+static int32_t jacl_unir_idle;
+static void vat_idle(long ns) { (void)__vm_wait32(&jacl_unir_idle, 0, ns); }
 
 /* The vat, created on first use: a spawned one's (a pipeline stage's, pipe_unir.c, or a
  * service's client's, service_unir.c) holds the arguments and capabilities its parent passed,
  * which unir_vat_child reads; a root's is unir_vat_root. 0 if the map area is not page-aligned.
- * Under the open lock. */
+ * Under the vat's lock. */
 static unir_vat *unir_vat_get(void) {
   if (!jacl_unir_vat) {
     uint64_t base = (uint64_t)jacl_fb_pti(jacl_unir_map);
@@ -88,12 +110,11 @@ static int chan_be_open(uint32_t cap, void **w, void **r, uint32_t *max) {
   int64_t len = unir_edge_len(cap, JACL_UNIR_SLOT);
   int64_t mp = unir_edge_max_payload(cap, JACL_UNIR_SLOT);
   if (len < 0 || mp <= 0) return 0;
-  unir_lock(&jacl_unir_open_lock);
-  unir_vat *vat = unir_vat_get();
+  unir_vat *vat = vat_take();
   int64_t edge = vat ? unir_region_create(vat, (uint64_t)len) : -1;
   unir_producer *p = edge >= 0 ? unir_producer_open(vat, edge, cap, JACL_UNIR_SLOT) : 0;
   unir_consumer *c = p ? unir_consumer_open(vat, edge, cap, JACL_UNIR_SLOT) : 0;
-  unir_unlock(&jacl_unir_open_lock);
+  vat_give();
   if (!c) {
     if (p) unir_producer_free(p);
     return 0;

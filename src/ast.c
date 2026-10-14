@@ -145,7 +145,7 @@ typedef enum {
   HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS, HEAD_EMIT,
 
   /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
-  HEAD_SUSPEND, HEAD_RESUME, HEAD_DONE_Q,
+  HEAD_SUSPEND, HEAD_RESUME, HEAD_DONE_Q, HEAD_CLOCK,
 
   /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
   HEAD_WITH_ENV,
@@ -153,10 +153,13 @@ typedef enum {
   /* Services (docs/UNIR_SERVICES.md) */
   HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT, HEAD_SERVICE_SEND,
 
-  /* The transcript (runtime/transcript_unir.c; theSherwood/unir decision 116) */
+  /* The transcript (runtime/transcript_unir.c; theSherwood/unir decision 117) */
   HEAD_SCHEMA, HEAD_TRANSCRIPT, HEAD_TRANSCRIPT_LINE, HEAD_TRANSCRIPT_BLOCK,
   HEAD_TRANSCRIPT_OUTPUT, HEAD_TRANSCRIPT_PUSH, HEAD_TRANSCRIPT_WRITE, HEAD_TRANSCRIPT_END,
-  HEAD_TRANSCRIPT_FLUSH, HEAD_TRANSCRIPT_JOB, HEAD_TRANSCRIPT_JOB_END,
+  HEAD_TRANSCRIPT_FLUSH, HEAD_TRANSCRIPT_JOB, HEAD_TRANSCRIPT_JOB_END, HEAD_TRANSCRIPT_PICK,
+
+  /* What a shell starts beside its transcript (runtime/transcript_unir.c; theSherwood/unir#172) */
+  HEAD_HANDLER_OPEN, HEAD_LEGACY_JOB,
 
   /* A REPL line, compiled and run in the shell's own domain (runtime/interpcap.c; jacl_impl#204) */
   HEAD_REPL_EVAL,
@@ -245,6 +248,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "error", 5) == 0) return HEAD_ERROR;
       if (memcmp(s, "atom?", 5) == 0) return HEAD_ATOM_Q;
       if (memcmp(s, "done?", 5) == 0) return HEAD_DONE_Q;
+      if (memcmp(s, "clock", 5) == 0) return HEAD_CLOCK;
       if (memcmp(s, "watch", 5) == 0) return HEAD_WATCH;
       if (memcmp(s, "deref", 5) == 0) return HEAD_DEREF;
       if (memcmp(s, "write", 5) == 0) return HEAD_WRITE;
@@ -332,6 +336,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "ptr-offset", 10) == 0) return HEAD_PTR_OFFSET;
       if (memcmp(s, "write-file", 10) == 0) return HEAD_WRITE_FILE;
       if (memcmp(s, "buf-string", 10) == 0) return HEAD_BUF_STRING;
+      if (memcmp(s, "legacy-job", 10) == 0) return HEAD_LEGACY_JOB;
       return HEAD_NONE;
     case 11:
       if (memcmp(s, "byte-length", 11) == 0) return HEAD_BYTE_LENGTH;
@@ -351,6 +356,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "syntax-error", 12) == 0) return HEAD_SYNTAX_ERROR;
       if (memcmp(s, "file-exists?", 12) == 0) return HEAD_FILE_EXISTS;
       if (memcmp(s, "service-call", 12) == 0) return HEAD_SERVICE_CALL;
+      if (memcmp(s, "handler-open", 12) == 0) return HEAD_HANDLER_OPEN;
       if (memcmp(s, "service-send", 12) == 0) return HEAD_SERVICE_SEND;
       return HEAD_NONE;
     case 13:
@@ -363,6 +369,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       return HEAD_NONE;
     case 15:
       if (memcmp(s, "transcript-line", 15) == 0) return HEAD_TRANSCRIPT_LINE;
+      if (memcmp(s, "transcript-pick", 15) == 0) return HEAD_TRANSCRIPT_PICK;
       if (memcmp(s, "transcript-push", 15) == 0) return HEAD_TRANSCRIPT_PUSH;
       if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;
       if (memcmp(s, "range-inclusive", 15) == 0) return HEAD_RANGE_INCLUSIVE;

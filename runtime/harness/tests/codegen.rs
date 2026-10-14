@@ -1395,6 +1395,39 @@ fn shell_out_runs_when_exec_is_granted() {
 }
 
 #[test]
+fn clock_reads_the_granted_clock() {
+    // `[clock]` (runtime/clockcap.c) is the granted "clock" capability's op 0: the host's time in
+    // nanoseconds, which the file reads from a clock that starts at 2^40 and moves 2 ms a read, on
+    // the tree-walker and the JIT, against its own `# expect:` lines (theSherwood/unir#106: a job
+    // stamps what it writes on the clock the host stamps frames with).
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/clock.jacl");
+    let src = std::fs::read_to_string(path).expect("read clock.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let (linked, entry) = emit_and_link_file(path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    let clock = || {
+        temen_run::HostCap::host_proc(0, || {
+            let next = std::sync::atomic::AtomicI64::new(1 << 40);
+            let read: temen_interp::HostProc = Box::new(move |_, _, _, _| {
+                Ok(vec![next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
+            });
+            (read, temen_interp::CapState::Stateless)
+        })
+    };
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
+        let run = inst
+            .run_with_caps(backend, &temen_run::RunConfig::default(), &[("clock", clock())])
+            .unwrap_or_else(|e| panic!("run clock.jacl on {backend:?}: {e}"));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), want, "{backend:?}");
+    }
+    // ...and ungranted, it is an error the program sees.
+    let run = inst.run_with_caps(temen_run::Backend::Jit, &temen_run::RunConfig::default(), &[]).expect("run");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "no clock\n", "an ungranted `[clock]` is an error value");
+}
+
+#[test]
 fn a_binding_captures_an_error_in_a_nested_block() {
     // A `def` binds an error in a loop's body or a branch as it does in a proc's body, rather than
     // the block returning it (#204: the shell reaps a cancelled job's error in a loop). The file's
@@ -1980,7 +2013,7 @@ const PANE_SCRIPT: &[(&str, &str, usize)] = &[
 #[test]
 fn a_jacl_program_runs_in_a_terminal_pane() {
     // Stage 5's exit on the JACL side (#203; theSherwood/unir#79, #102), on the transcript
-    // (#204; unir decisions 100, 116): a JACL program is the client of a pane over a live
+    // (#204; unir decisions 100, 117): a JACL program is the client of a pane over a live
     // terminal, which only unir's terminal vat holds, and writes what it shows as a transcript's
     // blocks. Its keys are echoed into its typed line; `ls` shows rows of a schema it declares,
     // which the driver lays out as a table (a bold header, numbers to the right); `watch` shows

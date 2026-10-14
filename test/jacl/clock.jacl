@@ -1,0 +1,10 @@
+# expect: 1099511627776
+# expect: 2000000
+# [clock] is the host's time in nanoseconds, the granted "clock" capability's op 0: here a clock
+# the test grants, at 2^40 and 2 ms more at each read, so the time is wider than 32 bits. Ungranted,
+# it is a catchable error.
+def t0 [clock]
+if [error? $t0] { print "no clock" } else {
+  print [to-string $t0]
+  print [- [clock] $t0]
+}

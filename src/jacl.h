@@ -722,7 +722,7 @@ typedef enum {
   HEAD_STDIN, HEAD_STDOUT, HEAD_STDERR, HEAD_ARGS, HEAD_EMIT,
 
   /* Job control on Futures (docs/UNIR_PIPELINES.md); `cancel` is HEAD_CANCEL */
-  HEAD_SUSPEND, HEAD_RESUME, HEAD_DONE_Q,
+  HEAD_SUSPEND, HEAD_RESUME, HEAD_DONE_Q, HEAD_CLOCK,
 
   /* The environment a vat's children are spawned with (docs/CTX_ENV.md) */
   HEAD_WITH_ENV,
@@ -730,10 +730,13 @@ typedef enum {
   /* Services (docs/UNIR_SERVICES.md) */
   HEAD_SERVICE, HEAD_SERVICE_CALL, HEAD_SERVICE_EVENT, HEAD_SERVICE_SEND,
 
-  /* The transcript (runtime/transcript_unir.c; theSherwood/unir decision 116) */
+  /* The transcript (runtime/transcript_unir.c; theSherwood/unir decision 117) */
   HEAD_SCHEMA, HEAD_TRANSCRIPT, HEAD_TRANSCRIPT_LINE, HEAD_TRANSCRIPT_BLOCK,
   HEAD_TRANSCRIPT_OUTPUT, HEAD_TRANSCRIPT_PUSH, HEAD_TRANSCRIPT_WRITE, HEAD_TRANSCRIPT_END,
-  HEAD_TRANSCRIPT_FLUSH, HEAD_TRANSCRIPT_JOB, HEAD_TRANSCRIPT_JOB_END,
+  HEAD_TRANSCRIPT_FLUSH, HEAD_TRANSCRIPT_JOB, HEAD_TRANSCRIPT_JOB_END, HEAD_TRANSCRIPT_PICK,
+
+  /* What a shell starts beside its transcript (runtime/transcript_unir.c; theSherwood/unir#172) */
+  HEAD_HANDLER_OPEN, HEAD_LEGACY_JOB,
 
   /* A REPL line, compiled and run in the shell's own domain (runtime/interpcap.c; jacl_impl#204) */
   HEAD_REPL_EVAL,

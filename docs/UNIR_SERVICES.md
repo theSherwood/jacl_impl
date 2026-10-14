@@ -137,8 +137,9 @@ take turns typing, then type at once, and both machines end at the same version,
 terminals, each waiting to see the other's edits before its next.
 
 The unir unit allocates through `unir_host_alloc` (`runtime/chan_unir.c`), a pool of size classes up
-to 64 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed
-4 KiB with directories.
+to 256 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed
+4 KiB with directories. `[service-event S true]` waits by polling, from 50 µs apart to a millisecond,
+since the vat is one call at a time (docs/UNIR_CHANNELS.md) and a call holds it while it waits.
 
 ## Build
 
@@ -150,7 +151,7 @@ Without the unir backend the builtins return an error value.
 ## A pane
 
 unir's store vat in its `shell SOURCE LOG2 ROWS COLS` mode (theSherwood/unir#102, unir decisions 81, 100
-and 116) also runs a terminal vat, the only vat that holds the terminal, and a composition vat keeping
+and 117) also runs a terminal vat, the only vat that holds the terminal, and a composition vat keeping
 ref `view` as the references no file in directory `dir` defines. It grants its client the store twice,
 as `store` and as `transcript` (a session for the transcript's writer, its requests in 64 KiB frames),
 and the pane as `pane` (`pane.requests` what it shows, `pane.replies` its events). A program opens
@@ -181,7 +182,7 @@ obeyed. A program must not print: only the terminal vat writes to the terminal.
 
 ## The transcript
 
-`runtime/transcript_unir.c` is unir's transcript writer (unir decision 116) behind its C ABI, so a
+`runtime/transcript_unir.c` is unir's transcript writer (unir decision 117) behind its C ABI, so a
 program writes blocks without encoding a record:
 
 | builtin | does |
@@ -196,7 +197,11 @@ program writes blocks without encoding a record:
 | `[transcript-flush T]` | commits what was queued as one version |
 | `[transcript-job T CMD JOB]` | a place in the transcript for job `JOB`, which `CMD` started: a task whose `$ctx.out` is it writes its output there (see "The shell" below); an integer handle |
 | `[transcript-job-end S COMPLETE]` | ends job `S`'s place, its last block complete or (`COMPLETE` false) cancelled; how many blocks the job opened |
-| `[schema DESC]` | the schema `DESC` describes; an integer handle |
+| `[transcript-pick T B V]` | the name of reference `V` of block `B`, a block of references; nil if there is none |
+| `[schema DESC]` | the schema `DESC` describes; an integer handle. `[schema "link"]` is unir's link document, whose values are references |
+| `[emit V S]` | in a job, `V` as a value of schema `S`: a block of `S`'s entry 0 (live if it is latest-wins) |
+| `[handler-open IMAGE ARGS TEXT FUEL MEMORY]` | spawns a handler for a file (unir decision 106) from the image granted as `IMAGE`, with `ARGS`, the surface the session set aside for handlers and that budget, and sends it `TEXT` as the file; its child. The program ends after its handlers |
+| `[legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY]` | in a job: runs the legacy adapter (unir decision 105) from `IMAGE`, a POSIX program in a terminal of the job's size in a pane of `ROWS` by `COLS`; its screens are the job's live grid block and the job's input goes to it until the program ends; its exit status |
 
 A block's values are messages of its schema: `S` from `[schema DESC]`, or nil for JACL's own values
 (`value.usc`), which a renderer shows as nested structure. `DESC` is a connection schema written as
@@ -214,6 +219,12 @@ transcript-end $t $b
 transcript-flush $t
 ```
 
+A value of the link document is a **reference**, a name a job's output gives something the shell
+granted it (unir decision 106): a renderer draws it underlined, and a person can activate it. The
+writer keeps no values, so the transcript keeps each reference's name as it is written, for
+`transcript-pick` to resolve an activation (a block's place among the transcript's and the value's
+within it). A pipeline's references, forwarded without decoding, are not kept.
+
 A value that does not fit is an error value, and nothing is written. A call that waits for the store
 parks its fiber, so a transcript is one call at a time: another fiber's call meanwhile waits its turn.
 A job's output is committed whenever 32 KiB of it waits.
@@ -224,7 +235,7 @@ a scripted terminal on all three engines.
 
 ## The shell
 
-`runtime/harness/tests/services/shell.jacl` is the JACL shell (#204; unir decision 117), a pane client.
+`runtime/harness/tests/services/shell.jacl` is the JACL shell (#204; unir decision 118), a pane client.
 Each line typed is a **job**: compiled in the shell by the compiler linked into its image, and run as a
 task in the shell's own domain (`[repl-eval LINE]`, temen's §22 `Jit` capability). So what one line
 defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a closure, a struct.
@@ -233,7 +244,7 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
   in the transcript (`transcript-job`), and the task's output goes there rather than to the host
   stream: what it prints into an output block, the values it emits into a block of values, and its
   pipelines' output, bytes as text and typed output under the schema the last program offered
-  (adopted, unir decision 116). Each block is headed by the line. A job that shows nothing else shows
+  (adopted, unir decision 117). Each block is headed by the line. A job that shows nothing else shows
   its value as a block; one that fails shows why.
 - **Programs are the shell's grants.** `!name args` runs the program the shell was granted as
   `bin.name` (docs/UNIR_PIPELINES.md); unir's `shell` mode passes the client each program its command
@@ -245,6 +256,17 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
   resuming it if it is stopped, `bg [N]` resumes it in the background, and `kill [N]` ends it. A
   background job's output goes to its blocks as it comes.
 - **Editing.** Backspace edits the line, and Up and Down move through the earlier lines.
+- **A job's input.** While the shell waits for a job, the pane's keys (but Ctrl-C and Ctrl-Z) and
+  sizes are the job's (`$ctx->in`, an atom of a vector of them, which the job empties as it takes
+  them: `legacy-job` sends them to the program). What the job leaves is typed at the prompt once it
+  ends, after what was already waiting there.
+- **References.** A reference activated in the transcript runs `open NAME` as a job, `NAME` the
+  reference's, which shows only its output: the profile says what opening a name means.
+- **The profile.** Before the first prompt the shell evaluates the store's document `profile`, if it
+  has one, in its own domain, so every line sees what the profile defines. It reads it 2 KiB at a
+  time, since a reply is one of the session's 4 KiB frames. unir's stage 7 session
+  commits one (`e2e/temen/jacl/profile.jacl` there) that defines its commands, its plumber (`open`)
+  and `legacy`; a profile that fails shows why in a block.
 
 A trap in a line ends the shell, as one in the shell's own code would, and a line that computes
 without reaching a job-control point (an `await`, a `sleep`, a pipeline's read) cannot be stopped.
@@ -256,4 +278,13 @@ The shell's image is the runtime with the compiler and the REPL bridge (`codegen
 linked in (`repl::shell_image`). `repl.rs::the_shell_runs_each_line_in_its_own_domain` drives it in a
 pane with a scripted terminal on all three engines: definitions across lines, history, a pipeline's
 text, a program's values, a background job listed and killed, a stopped job finishing in the
-background after `bg`, and one waited for again with `fg N` and ended with Ctrl-C.
+background after `bg`, one waited for again with `fg N` and ended with Ctrl-C, a reference emitted
+under `[schema "link"]` drawn underlined, and keys typed while a job runs reaching its input and
+coming back to the prompt. `jacl_shell_image OUT` writes the image encoded, for unir's session
+(theSherwood/unir#106) to vendor; there it takes the shell's seat in the typed terminal on all three
+engines, its profile defining the session's commands.
+
+`[clock]` is the host's time in nanoseconds, the granted `clock` capability's op 0
+(`runtime/clockcap.c`), and an error where no clock is granted. temen's own clock is deterministic;
+in unir's session this is the clock its host stamps keys and frames with, so a job can say when it
+wrote what a frame shows, as the session's benchmark needs (`codegen.rs::clock_reads_the_granted_clock`).
