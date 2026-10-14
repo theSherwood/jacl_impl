@@ -2,11 +2,13 @@
 //! `[repl-eval SRC]` compiles a line in the shell and runs it in the shell's own domain, on the §22
 //! Jit capability (`codegen/selfhost/repl/`).
 //!
-//! The image is the runtime as [`crate::translate_runtime`] builds it, with `JACL_REPL`, and the
-//! emit-only frontend, codegen and the REPL's bridge and C library, llvm-linked into one unit. The
-//! frontend's own value runtime defines two names jaclrt does, so the frontend is compiled with its
-//! copies renamed ([`RENAMED`]). A line's unit imports the runtime by name, bound against a table
-//! of every `jacl_*` function the runtime defines, generated here from the runtime's IR.
+//! The image is the runtime as [`crate::translate_runtime`] builds it, with `JACL_REPL` and the
+//! macro-staging glue in its unit (`repl_rt.c`), and the emit-only frontend, codegen, the staging
+//! bridge, and the REPL's bridge and C library, llvm-linked into one unit. A macro defined at the
+//! prompt stages on that runtime (#214). The frontend's own value runtime defines two names jaclrt
+//! does, so the frontend is compiled with its copies renamed ([`RENAMED`]). A line's unit, and a
+//! staged macro's, imports the runtime by name, bound against a table of every `jacl_*` function
+//! the runtime defines, generated here from the runtime's IR.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,8 +19,16 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// line compiles to import jaclrt's.
 const RENAMED: [&str; 2] = ["jacl_arr_new", "jacl_eq"];
 
-/// Functions a unit may import that the bridge defines, beside the runtime's `jacl_*`.
-const BRIDGE: [&str; 2] = ["synrt_str_empty", "synrt_str_push_byte"];
+/// Functions a unit may import that the staging glue defines, beside the runtime's `jacl_*`: a
+/// string literal's bytes, and a staged macro's arguments and result.
+const BRIDGE: [&str; 6] = [
+    "synrt_str_empty",
+    "synrt_str_push_byte",
+    "synrt_read_arg",
+    "synrt_read_rest",
+    "synrt_write_result",
+    "synrt_gensym",
+];
 
 fn clang(src: &str, out: &Path, opt: &str, flags: &[String]) {
     let status = Command::new("clang")
@@ -115,7 +125,12 @@ pub fn translate_shell_runtime() -> temen_llvm::Translated {
 
     let rt = out("rt.ll");
     let rt_flags = ["-DNDEBUG", "-DJACL_UNIR", "-DJACL_REPL", "-I", &runtime].map(String::from);
-    clang(&format!("{runtime}/jaclrt.c"), &rt, "-O2", &rt_flags);
+    clang(
+        &format!("{codegen}/selfhost/repl/repl_rt.c"),
+        &rt,
+        "-O2",
+        &rt_flags,
+    );
 
     // As codegen/selfhost/build_compiler_temen.sh builds the compiler for a guest.
     let mut fe: Vec<String> = [
@@ -144,6 +159,11 @@ pub fn translate_shell_runtime() -> temen_llvm::Translated {
         (
             format!("{codegen}/selfhost/repl/repl_guest.c"),
             "repl.ll",
+            &fe,
+        ),
+        (
+            format!("{codegen}/selfhost/macro_staging/stage_bridge_guest.c"),
+            "stage.ll",
             &fe,
         ),
         (
