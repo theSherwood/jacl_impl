@@ -40,6 +40,28 @@ fn a_repl_line_sees_what_earlier_lines_defined() {
     assert!(failed.is_empty(), "failed on {failed:?}");
 }
 
+#[test]
+fn a_session_outlasts_the_jit_tables() {
+    // 1,000 lines, each compiled into a unit of its own. A line's compiled code is a capability,
+    // and the capability table holds 256 (temen §22), so the REPL gives each up once its unit is
+    // installed; and the dispatch table has room for about 700 units, so a line that leaves
+    // nothing referring to its code gives its slot back once it returns. A line that defines a
+    // proc keeps its own, so the next line calls it.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/repl_long.jacl");
+    let (image, _) =
+        jacl_runtime_harness::repl::shell_image(Path::new(path), false).expect("the image");
+    let inst = temen_run::instantiate(image).expect("instantiate the shell");
+    let run = inst
+        .run(temen_run::Backend::Jit, &temen_run::RunConfig::default())
+        .expect("run");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "1000\n7\n",
+        "{:?}",
+        run.outcome
+    );
+}
+
 const SHELL_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/shell.jacl");
 const PROGRAMS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 

@@ -18,6 +18,7 @@
 extern long __vm_jit_compile_linked(void *ir, long ir_len, void *symtab, long symtab_len);
 extern long __vm_jit_install(long code);
 extern long __vm_jit_release(long code);
+extern long __vm_jit_uninstall(long slot);
 extern long __vm_fiber_new(long (*f)(long), void *stack);
 extern long __vm_fiber_resume(long k, long arg, int *done);
 extern int __vm_atomic_cas32(int *p, int expected, int desired);
@@ -123,10 +124,12 @@ static int repl_window_log2(void) {
   return -1;
 }
 
-/* A line to compile, and what compiling it gave: the installed unit's slot, or why not. */
+/* A line to compile, and what compiling it gave: the installed unit's slot, or why not; and
+ * whether the unit is a leaf (irb_module_is_leaf), whose slot is free again once the line returns. */
 typedef struct {
   char *src;
   long slot;
+  int leaf;
   const char *why;
   char err[256];
 } ReplLine;
@@ -150,6 +153,7 @@ static long repl_compile(long arg) {
   int l = repl_window_log2();
   if (l < 0) { irb_module_free(m); ln->why = "repl-eval: no Jit capability"; return 0; }
   irb_set_memory(m, (uint8_t)l);
+  ln->leaf = irb_module_is_leaf(m);
   size_t len = 0;
   uint8_t *bytes = irb_to_encoded(m, &len);
   irb_module_free(m);
@@ -165,6 +169,10 @@ static long repl_compile(long arg) {
   free(bytes);
   if (code < 0) { ln->why = "repl-eval: the Jit capability refused the unit"; return 0; }
   ln->slot = __vm_jit_install(code);
+  /* The installed unit lives on in its slot. Its handle is a capability, which the line never
+   * needs again, and the table holds 256 (temen §22): kept, they would end a session at about
+   * that many lines. */
+  (void)__vm_jit_release(code);
   if (ln->slot < 0) { ln->why = "repl-eval: no slot to install the unit in"; return 0; }
   repl_note(parse.nodes, parse.count);
   return 0;
@@ -194,5 +202,10 @@ JaclVal jacl_repl_eval_impl(JaclVal src) {
   /* The entry has the guest ABI `(sp, _) -> value`: called through a pointer, it runs on this
    * fiber, over this frame's data stack, so a line may await and park as the shell does. */
   long (*line)(long) = (long (*)(long))(uintptr_t)ln.slot;
-  return (JaclVal)line(0);
+  JaclVal v = (JaclVal)line(0);
+  /* A leaf line has returned, and nothing it made refers to its code: its slot goes back to the
+   * table, so a session runs as many such lines as it likes. A line that defines a proc or makes
+   * a closure keeps its slot for the session. */
+  if (ln.leaf) (void)__vm_jit_uninstall(ln.slot);
+  return v;
 }
