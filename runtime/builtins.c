@@ -1307,6 +1307,16 @@ JaclVal jacl_proc_sig_get(JaclVal fnref) {
   if (jaclrt_is_nil(seen)) return jaclrt_nil();
   return jacl_map_get(seen, jaclrt_i32((int32_t)(uint64_t)fnref));
 }
+/* #215: the REPL has freed the slot, and the function it goes to next registers its own. */
+JaclVal jacl_proc_sig_forget(JaclVal fnref) {
+  JaclVal key = jaclrt_i32((int32_t)(uint64_t)fnref);
+  for (;;) {
+    JaclVal seen = jacl_root_peek(&jacl_proc_sigs);
+    JaclVal map = jacl_root_map(seen);
+    if (jaclrt_is_nil(jacl_map_get(map, key))) return jaclrt_nil();
+    if (jacl_root_replace(&jacl_proc_sigs, seen, jacl_map_remove(map, key))) return jaclrt_nil();
+  }
+}
 
 /* ---- call-stack trace capture (for `[stack-trace]`) ----
  * A shadow call stack of (proc-name, current-line) frames, maintained ONLY when the

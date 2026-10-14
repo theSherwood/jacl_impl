@@ -64,9 +64,13 @@ typedef int      IrBlock;  /* block index within a func */
 
 IrModule *irb_module_new(void);
 void      irb_module_free(IrModule *m);
-/* Whether `m` is one function that takes no function's reference (no `ref.func`): once a call of
- * it returns, nothing can reach its code. */
+/* Whether no function of `m` takes a function's reference (`ref.func`): only its install's slot
+ * reaches its code, so once a call of it returns, nothing can. A unit that names one of its own
+ * functions gets a slot for each (temen §22, unit-own funcrefs). */
 int       irb_module_is_leaf(const IrModule *m);
+/* `m`'s functions, in index order. */
+int       irb_module_nfuncs(const IrModule *m);
+IrFunc   *irb_module_func(const IrModule *m, int i);
 
 /* Declare a linear memory of 2^size_log2 bytes (temen-text `memory <size_log2>`).
  * Required for load/store to have backing storage. Without it no memory is emitted. */

@@ -965,13 +965,16 @@ static void free_block(Block *blk) {
   free(blk->term.ret_vals);
 }
 int irb_module_is_leaf(const IrModule *m) {
-  if (m->nfuncs != 1) return 0;
-  const IrFunc *f = m->funcs[0];
-  for (int b = 0; b < f->nblocks; b++)
-    for (int i = 0; i < f->blocks[b].ninsts; i++)
-      if (f->blocks[b].insts[i].kind == K_REF_FUNC) return 0;
+  for (int k = 0; k < m->nfuncs; k++) {
+    const IrFunc *f = m->funcs[k];
+    for (int b = 0; b < f->nblocks; b++)
+      for (int i = 0; i < f->blocks[b].ninsts; i++)
+        if (f->blocks[b].insts[i].kind == K_REF_FUNC) return 0;
+  }
   return 1;
 }
+int irb_module_nfuncs(const IrModule *m) { return m->nfuncs; }
+IrFunc *irb_module_func(const IrModule *m, int i) { return m->funcs[i]; }
 void irb_module_free(IrModule *m) {
   if (!m) return;
   for (int i = 0; i < m->nfuncs; i++) {

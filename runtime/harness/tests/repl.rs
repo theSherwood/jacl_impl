@@ -98,6 +98,30 @@ fn a_session_outlasts_the_jit_tables() {
     );
 }
 
+#[test]
+fn a_session_redefines_a_proc_past_the_dispatch_table() {
+    // #215: 1,000 definitions of one proc, each called after it, where the dispatch table has room
+    // for about 700 units' slots: the REPL frees the units nothing reaches any more. Old units that
+    // something still reaches keep working: a closure kept under another name, a proc and a line
+    // each running in a task, which make closures after the table has turned over.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/services/repl_redefine.jacl"
+    );
+    let (image, _) =
+        jacl_runtime_harness::repl::shell_image(Path::new(path), false).expect("the image");
+    let inst = temen_run::instantiate(image).expect("instantiate the shell");
+    let run = inst
+        .run(temen_run::Backend::Jit, &temen_run::RunConfig::default())
+        .expect("run");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "1000\n41\n42\n42\n",
+        "{:?}",
+        run.outcome
+    );
+}
+
 const SHELL_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/shell.jacl");
 const PROGRAMS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 

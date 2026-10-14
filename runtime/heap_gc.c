@@ -440,7 +440,7 @@ void jacl_gc_mark_word(long w) {
 
 static inline void mark_trace(uint32_t off) {
   JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
-  if (o->obj_type != JOBJ_NODE) return;            /* BLOBs have no outgoing pointers */
+  if (o->obj_type != JOBJ_NODE && o->obj_type != JOBJ_FUNC) return;   /* BLOBs have no outgoing pointers */
   /* conservative trace: scan payload words for candidate object-starts */
   uint8_t* p = (uint8_t*)jacl_obj_payload(o);
   uint8_t* end = (uint8_t*)o + o->size;
@@ -498,6 +498,13 @@ static void jacl_release_regions(uint32_t r, uint32_t k) {
   for (uint32_t i = 0; i < k; i++) jacl_region_free[r + i] = 1;
 }
 
+/* #215: where a collection notes the slots of the closures and generators it keeps (seen[slot] = 1,
+ * for a slot below jacl_gc_seen_len), while jacl_gc_collect_noting asks. Only a collection run on
+ * the asking worker (jacl_gc_seen_by) reads them, so they are that thread's alone. */
+static uint8_t *jacl_gc_seen;
+static uint32_t jacl_gc_seen_len;
+static int32_t  jacl_gc_seen_by = -1;
+
 /* The mark-sweep itself, run only while the world is stopped (every other worker has
  * suspended its task and parked its vCPU). gc.roots scans all suspended fibers + this
  * collector's own (caller) frames, so all roots are found; single-threaded by
@@ -544,6 +551,7 @@ static long jacl_gc_collect_stw(void) {
     for (uint32_t c = 0; c <= JACL_NCLASS; c++) jacl_worker[w].freelist[c] = 0;
   const uint32_t rbytes = JACL_REGION_BYTES / JACL_GRANULE / 8;   /* bitmap bytes per region */
   long swept = 0, released = 0;
+  uint8_t *seen = __vm_atomic_load32(&jacl_gc_seen_by) == jacl_gc_self() ? jacl_gc_seen : 0;
   for (uint32_t r = 0; r < hi / JACL_REGION_BYTES; ) {
     uint32_t base = r * JACL_REGION_BYTES;
     if (jacl_region_free[r]) { r++; continue; }
@@ -564,8 +572,12 @@ static long jacl_gc_collect_stw(void) {
           JaclObj* o = (JaclObj*)&jacl_heap_mem[off];
           if (pass == 0) {
             if (o->obj_type == JOBJ_FREE) continue;
-            if (o->mark) live++;
-            else { o->obj_type = JOBJ_FREE; swept++; }
+            if (!o->mark) { o->obj_type = JOBJ_FREE; swept++; continue; }
+            live++;
+            if (seen && o->obj_type == JOBJ_FUNC) {
+              uint64_t slot = *(uint64_t*)jacl_obj_payload(o);
+              if (slot < jacl_gc_seen_len) seen[slot] = 1;
+            }
           } else {
             uint32_t cls = o->size / JACL_GRANULE;
             if (o->obj_type != JOBJ_FREE || cls > JACL_NCLASS) continue;
@@ -593,6 +605,20 @@ static long jacl_gc_collect_stw(void) {
  * runs from a bare worker context, because a futex wait inside a fiber parks the fiber
  * (jacl #142). A winner that is in-task therefore suspends and lets its scheduler loop
  * finish the job. */
+/* A collection that notes in `seen` the slot of every closure and generator it keeps (#215), so
+ * the REPL can free a unit none of whose slots is noted. It must be a collection this call runs
+ * (on this worker, or this worker's loop once this task hands it over): a call that only yielded
+ * to another worker's (-1) collects again. */
+long jacl_gc_collect_noting(uint8_t *seen, uint32_t n) {
+  jacl_gc_seen = seen;
+  jacl_gc_seen_len = n;
+  __vm_atomic_store32(&jacl_gc_seen_by, jacl_gc_self());
+  long r;
+  while ((r = jacl_gc_collect()) < 0) {}
+  __vm_atomic_store32(&jacl_gc_seen_by, -1);
+  return r;
+}
+
 long jacl_gc_collect(void) {
   int w = jacl_gc_self();
   if (__vm_atomic_cas32(&jacl_gc_lock, 0, 1) != 0) {

@@ -1,0 +1,29 @@
+##
+## #215: a proc defined 1,000 times, and called after each definition. Each definition's unit names
+## its own functions, so it takes a slot for each of them and one more for its install; the dispatch
+## table has room for about 700, so as it fills, the REPL frees the units nothing reaches any more.
+## Three old units stay reachable all along, each only one way, and must still work after:
+## - `g`'s first definition, through a closure kept under another name;
+## - `slow`'s first definition, running in a task, which makes a closure once `go` is set;
+## - a line running in a task, which makes a closure once `go` is set.
+## Each task counts itself `ready` once it is waiting, before the session goes on.
+##
+repl-eval "mut go 0; mut ready 0"
+repl-eval "proc g {} { 41 }"
+repl-eval "def keep \x24g"
+repl-eval "proc g {} { 0 }"
+repl-eval "proc slow {} { set ready [+ \x24ready 1]; while {== \x24go 0} { sleep 0.001 }; [\\ + \x24it 1] }"
+repl-eval "def t1 [spawn { def c [slow]; c 41 }]"
+def t2 [spawn { repl-eval "set ready [+ \x24ready 1]; while {== \x24go 0} { sleep 0.001 }; def d [\\ + \x24it 1]; d 41" }]
+while {< [repl-eval "\x24ready"] 2} { sleep 0.001 }
+repl-eval "proc slow {} { 0 }"
+mut ok 0
+for [range 0 1000] i {
+  repl-eval [concat "proc f {} { " [concat [to-string $i] " }"]]
+  if {== [repl-eval "f"] $i} { set ok [+ $ok 1] }
+}
+print $ok
+repl-eval "set go 1"
+print [repl-eval "keep"]
+print [repl-eval "await \x24t1"]
+print [await $t2]

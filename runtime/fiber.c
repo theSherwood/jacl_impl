@@ -29,32 +29,35 @@ static void *jacl_grab_fiber_stack(void) {
   return jacl_gen_stacks[jacl_gen_stack_next++];
 }
 
-/* generator payload (24 bytes): i64 [0..1] fiber handle, int32 [2] done, [3] started,
- * i64 [4..5] the prime arg passed on the first resume. */
+/* generator payload (32 bytes, a JOBJ_FUNC: its function's slot first, so a collection can note
+ * which unit's code it may still run, #215; and traced, so the prime arg lives until it is passed):
+ * i64 [0..1] the function's slot, [2..3] fiber handle, int32 [4] done, [5] started, i64 [6..7] the
+ * prime arg passed on the first resume. */
 JaclVal jacl_gen_new(JaclVal fnref, JaclVal arg) {
   void *stk = jacl_grab_fiber_stack();
   if (!stk) return jaclrt_error();
   long h = __vm_fiber_new((long (*)(long))(uintptr_t)(uint64_t)fnref, stk);
-  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_BLOB, 24);
+  JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_FUNC, 32);
   int32_t *p = (int32_t *)jacl_obj_payload(o);
-  *(int64_t *)(p + 0) = h; p[2] = 0; p[3] = 0;
-  *(int64_t *)(p + 4) = (int64_t)arg;
+  *(int64_t *)(p + 0) = (int64_t)fnref;
+  *(int64_t *)(p + 2) = h; p[4] = 0; p[5] = 0;
+  *(int64_t *)(p + 6) = (int64_t)arg;
   return jaclrt_from_ptr(JACL_TAG_STREAM, o);
 }
 
 JaclVal jacl_gen_next(JaclVal gen) {
   int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(gen));
-  long resume_arg = p[3] ? 0 : (long)*(int64_t *)(p + 4); /* prime once */
-  p[3] = 1;
+  long resume_arg = p[5] ? 0 : (long)*(int64_t *)(p + 6); /* prime once */
+  p[5] = 1;
   int done = 0;
-  long v = __vm_fiber_resume(*(int64_t *)(p + 0), resume_arg, &done);
-  p[2] = done;
+  long v = __vm_fiber_resume(*(int64_t *)(p + 2), resume_arg, &done);
+  p[4] = done;
   return (JaclVal)v;
 }
 
 JaclVal jacl_gen_done(JaclVal gen) {
   int32_t *p = (int32_t *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(gen));
-  return jaclrt_bool(p[2] != 0);
+  return jaclrt_bool(p[4] != 0);
 }
 
 /* spawn / await live in sched.c (P3.4d): they run their tasks on the real worker pool
