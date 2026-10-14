@@ -8,12 +8,16 @@ const SPIKE_JACL: &str = concat!(
     "/tests/services/repl_spike.jacl"
 );
 
-/// What `repl_spike.jacl` prints: each line's value; a macro's definition refused, and the next
-/// line not seeing it; and the last line's compile error, which the refusal did not change.
+/// What `repl_spike.jacl` prints: each line's value, two macros' expansions among them; a macro
+/// whose body does not compile refused, new or redefined, and the lines after expanding as before;
+/// and the last line's compile error.
 const SPIKE_OUT: &str = "41\nnil\n42\n0\n2\n2\n<closure>\n7\n\
     nil\n[Point x 3 y 4]\n7\nnil\n30\n[Point x 3 y 4]\n\
-    <error: repl-eval: a macro cannot be defined at the prompt yet>\n\
-    <error: codegen: unsupported command head 'unless'>\n\
+    nil\n42\nnil\n42\n\
+    <error: codegen: unsupported command head 'nope'>\n\
+    <error: codegen: unsupported command head 'bad'>\n\
+    <error: codegen: unsupported command head 'nope'>\n\
+    3\n\
     <error: codegen: unsupported command head 'nope'>\n";
 
 #[test]

@@ -1,8 +1,10 @@
 ##
 ## The REPL (jacl_impl#204): each line is compiled in this program and run in its own domain on the
 ## Jit capability, and sees what the lines before it defined: a binding, a proc, a `mut` a later
-## line sets, a closure, and a struct with a proc that takes one. A macro cannot be defined yet, and
-## the lines after the refusal compile as before.
+## line sets, a closure, a struct with a proc that takes one, and a macro, whose body runs on this
+## runtime as a later line compiles (#214). `churn`'s body allocates more than the heap holds, so
+## collections run while it does, and its argument must survive them. A macro whose body does not
+## compile is refused, a new one or a redefinition, and the table and the lines after are as before.
 ##
 print [repl-eval "def x 41"]
 print [repl-eval "proc inc {n} { + \x24n 1 }"]
@@ -20,4 +22,10 @@ print [repl-eval "sum [Point x 10 y 20]"]
 print [repl-eval "\x24p"]
 print [repl-eval "defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }"]
 print [repl-eval "unless [== 1 2] { + 40 2 }"]
+print [repl-eval "defmacro churn {n} { mut i 0; while {< \x24i 20000} { vec \x24i \x24i \x24i \x24i; set i [+ \x24i 1] }; syntax-quote [+ ~n 1] }"]
+print [repl-eval "churn 41"]
+print [repl-eval "defmacro bad {x} { nope }"]
+print [repl-eval "bad 1"]
+print [repl-eval "defmacro unless {cond body} { nope }"]
+print [repl-eval "unless [== 1 2] { + 1 2 }"]
 print [repl-eval "nope"]

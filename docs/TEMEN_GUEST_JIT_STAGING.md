@@ -278,6 +278,11 @@ structure; pick it unless a concrete need forces in-program linking.
    its own output), `splice`/`pack` (`[vec 10 20 30 40]` via variadic `~@rest`), and `gensym`
    (the `[gensym]` → `synrt_gensym` mint runs in-guest) — each expansion matching its native
    golden (`build_compiler_temen.sh --selftest` STAGETEST, one translate+run over all five).
+   The JACL shell runs the same hook on its own runtime, live (jacl_impl#214,
+   `jacl_install_temen_stage_hook_live`): `in_guest` 2, whose entry brings nothing up; the
+   shell's symbol table, since `synrt_build_symtab`'s in-place casts name the wrong function in
+   that image (temen#2308); and the entry installed and called on the compiling fiber, as a REPL
+   line is (`docs/UNIR_SERVICES.md`).
 5. **`interpret` via guest-JIT (model B)** — reuses 1–4, generalized from a macro *body* to a
    whole *program*. **Slice 1 DONE** (non-concurrent source): `[interpret SRC]` lowers to
    `jacl_interpret1` (`interpcap.c`), which — when a codegen-linked program installs the

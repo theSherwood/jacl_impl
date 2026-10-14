@@ -301,9 +301,14 @@ job-control points (#218): once a slice of their headers has run, the line yield
 task, which reads the keys, and Ctrl-C and Ctrl-Z act there. So they reach a line that computes
 without an `await`, a `sleep` or a pipeline's read; one long call into the runtime is not
 interrupted, but it ends.
-A line cannot define a macro yet: a macro's body runs at compile time on the staging runtime
-(`codegen/selfhost/macro_staging/`), which the shell's image does not link, so such a line is
-refused before the session's macro table holds it, and the lines after it compile as before.
+A line may define a macro (#214). Its body runs as each later line that uses it compiles, on the
+shell's own runtime: staged into a unit of its own through the same Jit capability, linked against
+the same table, and called on the fiber the line compiles on (`stage_bridge_guest.c` in
+`codegen/selfhost/macro_staging/`). A collection that stops it there stops the line's task in its
+stead, so both are scanned. A macro whose body does not compile is refused before the session's
+macro table holds it, so a redefinition leaves the old one, and the lines after compile as before. A
+body that waits (a `sleep`, an `await`) leaves its line unfinished (`repl-eval: the compiler did not
+finish`). A macro's unit keeps its slot by the same rule as a line's, below.
 A line's unit stays installed while its code may still be called. A line that defines a proc or makes
 a closure keeps its slot in the shell's dispatch table for the session, since a later line may call
 it; any other line (a leaf: one function taking no function's reference, `irb_module_is_leaf`) gives
@@ -313,9 +318,9 @@ and as many defining lines as the dispatch table has free slots for (about 700 i
 that such a line is an error (`repl-eval: no slot to install the unit in`).
 `repl.rs::a_session_outlasts_the_jit_tables` runs 1,000 lines, then defines a proc and calls it.
 
-The shell's image is the runtime with the compiler and the REPL bridge (`codegen/selfhost/repl/`)
-linked in (`repl::shell_image`). `repl.rs::the_shell_runs_each_line_in_its_own_domain` drives it in a
-pane with a scripted terminal on all three engines: definitions across lines, history, a pipeline's
+The shell's image is the runtime with the compiler, the REPL bridge (`codegen/selfhost/repl/`) and
+the macro-staging bridge and glue linked in (`repl::shell_image`).
+`repl.rs::the_shell_runs_each_line_in_its_own_domain` drives it in a pane with a scripted terminal on all three engines: definitions across lines, history, a pipeline's
 text, a program's values, a background job listed and killed, a stopped job finishing in the
 background after `bg`, one waited for again with `fg N` and ended with Ctrl-C, a reference emitted
 under `[schema "link"]` drawn underlined, and keys typed while a job runs reaching its input and

@@ -21,6 +21,7 @@ extern long __vm_jit_release(long code);
 extern long __vm_jit_uninstall(long slot);
 extern long __vm_fiber_new(long (*f)(long), void *stack);
 extern long __vm_fiber_resume(long k, long arg, int *done);
+extern long __vm_fiber_suspend(long v);
 extern int __vm_atomic_cas32(int *p, int expected, int desired);
 extern void __vm_atomic_store32(int *p, int v);
 
@@ -28,22 +29,18 @@ extern void __vm_atomic_store32(int *p, int v);
 extern uint32_t jacl_str_len(JaclVal s);
 extern void jacl_str_bytes(JaclVal s, char *out, uint32_t cap);
 extern JaclVal jacl_str_new(const char *s, uint32_t len);
-extern JaclVal jacl_str_concat(JaclVal a, JaclVal b);
 extern JaclVal jacl_error_new(JaclVal v);
 
 /* The frontend's macro expander over the session's table (codegen/tests/emit_jacl.c). */
 extern const char *expand_macros_repl(AstNode **nodes, uint32_t count, arena_t *arena);
 
+/* Macro staging on this runtime (#214): the bridge (macro_staging/stage_bridge_guest.c) and the
+ * glue (stage_glue_guest.c, in repl_rt.c). */
+extern void jacl_install_temen_stage_hook_live(const unsigned char *symtab, size_t len);
+extern void synrt_set_window_log2(unsigned char n);
+
 /* Every runtime function a unit may import, by name (the generated repl_symtab.c). */
 extern size_t jacl_repl_symtab(unsigned char *out, size_t cap);
-
-/* A data-free string literal (codegen's data_free lowering): a unit carries no data segment, so
- * each literal is built from its bytes, here, in the runtime. */
-JaclVal synrt_str_empty(void) { return jacl_str_new("", 0); }
-JaclVal synrt_str_push_byte(JaclVal s, long b) {
-  char c = (char)b;
-  return jacl_str_concat(s, jacl_str_new(&c, 1));
-}
 
 static JaclVal repl_error(const char *msg) {
   return jacl_error_new(jacl_str_new(msg, (uint32_t)strlen(msg)));
@@ -139,18 +136,40 @@ typedef struct {
  * stack has no bound but the memory after it. */
 static long repl_compile(long arg) {
   ReplLine *ln = (ReplLine *)(uintptr_t)arg;
+  int l = repl_window_log2();
+  if (l < 0) { ln->why = "repl-eval: no Jit capability"; return 0; }
+  if (!repl_symtab) {
+    size_t n = jacl_repl_symtab(NULL, 0);
+    unsigned char *t = (unsigned char *)malloc(n);
+    if (!t) { ln->why = "repl-eval: out of memory"; return 0; }
+    jacl_repl_symtab(t, n);
+    repl_symtab = t;
+    repl_symtab_len = n;
+    /* A macro's body runs as the lines that use it compile: a unit of its own, linked against the
+     * same table and run on this runtime (#214). */
+    synrt_set_window_log2((unsigned char)l);
+    jacl_install_temen_stage_hook_live(repl_symtab, repl_symtab_len);
+  }
   LexResult toks = lexer_lex(ln->src, &repl_arena);
   if (toks.error_count) { ln->why = "repl-eval: the line does not lex"; return 0; }
   ParseResult parse = parser_parse(toks, &repl_arena);
   if (parse.error_count) { ln->why = "repl-eval: the line does not parse"; return 0; }
-  /* A macro's body runs at compile time, on the staging runtime (codegen/selfhost/macro_staging/),
-   * which this image does not link: a line defining one is refused before the session's macro
-   * table holds a macro that would fail every later line's expansion. */
-  for (uint32_t i = 0; i < parse.count; i++)
-    if (parse.nodes[i]->type == AST_DEFMACRO) {
-      ln->why = "repl-eval: a macro cannot be defined at the prompt yet";
+  /* A macro whose body does not compile is refused before the session's table holds it, where it
+   * would fail each line that uses it, and the lines after compile as before. */
+  for (uint32_t i = 0; i < parse.count; i++) {
+    AstNode *d = parse.nodes[i];
+    if (d->type != AST_DEFMACRO) continue;
+    IrModule *body = temen_codegen_staged_macro((const char **)d->data.defmacro.param_names,
+                                                d->data.defmacro.param_name_lens,
+                                                d->data.defmacro.param_count,
+                                                d->data.defmacro.variadic, d->data.defmacro.body,
+                                                /*in_guest=*/2, ln->err, sizeof ln->err);
+    if (!body) {
+      ln->why = ln->err[0] ? ln->err : "repl-eval: the macro's body does not compile";
       return 0;
     }
+    irb_module_free(body);
+  }
   const char *merr = expand_macros_repl(parse.nodes, parse.count, &repl_arena);
   if (merr) { ln->why = merr; return 0; }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);
@@ -158,8 +177,6 @@ static long repl_compile(long arg) {
   TemenReplEnv env = {repl_globals, repl_global_lens, repl_nglobals, repl_structs, repl_nstructs};
   IrModule *m = temen_codegen_repl(parse.nodes, parse.count, &env, ln->err, sizeof ln->err);
   if (!m) { ln->why = ln->err[0] ? ln->err : "repl-eval: the line does not compile"; return 0; }
-  int l = repl_window_log2();
-  if (l < 0) { irb_module_free(m); ln->why = "repl-eval: no Jit capability"; return 0; }
   irb_set_memory(m, (uint8_t)l);
   ln->leaf = irb_module_is_leaf(m);
   size_t len = 0;
@@ -167,12 +184,6 @@ static long repl_compile(long arg) {
   irb_module_free(m);
   if (!bytes) { ln->why = "repl-eval: the unit does not encode"; return 0; }
 
-  if (!repl_symtab) {
-    repl_symtab_len = jacl_repl_symtab(NULL, 0);
-    repl_symtab = (unsigned char *)malloc(repl_symtab_len);
-    if (!repl_symtab) { free(bytes); ln->why = "repl-eval: out of memory"; return 0; }
-    jacl_repl_symtab(repl_symtab, repl_symtab_len);
-  }
   long code = __vm_jit_compile_linked(bytes, (long)len, repl_symtab, (long)repl_symtab_len);
   free(bytes);
   if (code < 0) { ln->why = "repl-eval: the Jit capability refused the unit"; return 0; }
@@ -202,7 +213,12 @@ JaclVal jacl_repl_eval_impl(JaclVal src) {
     return repl_error("repl-eval: another line is compiling");
   long k = __vm_fiber_new(repl_compile, repl_stack);
   int done = 0;
-  (void)__vm_fiber_resume(k, (long)(uintptr_t)&ln, &done);
+  long r = __vm_fiber_resume(k, (long)(uintptr_t)&ln, &done);
+  /* A macro's body allocates on this heap (#214), so a collection can stop the compile at a
+   * safepoint, which suspends its fiber with 0. This task stops there in its stead, so the
+   * collection scans both fibers (temen GC.md §3.1), and resumes the compile after. Nothing else
+   * is passed on: a macro's body that waits leaves the line unfinished. */
+  while (!done && r == 0) r = __vm_fiber_resume(k, __vm_fiber_suspend(0), &done);
   __vm_atomic_store32(&repl_compiling, 0);
   if (ln.why) return repl_error(ln.why);
   if (ln.slot <= 0) return repl_error("repl-eval: the compiler did not finish");

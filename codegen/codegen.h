@@ -75,7 +75,9 @@ IrModule *temen_codegen_macro_body(const char **names, const uint32_t *lens, uin
  * `in_guest` selects the entry (func 0) ABI. 0 (native / powerbox): arity-1 `(sp) -> i64`, which
  * `synth_manifest_start` wraps in `_start`. 1 (guest-JIT, docs/TEMEN_GUEST_JIT_STAGING.md §3d):
  * arity-2 `(sp, _) -> i64`, called directly by `__vm_jit_invoke2(code, sp, 0)` (which passes
- * exactly two params); the extra param is ignored. Otherwise identical. */
+ * exactly two params); the extra param is ignored, and the entry brings up its staging runtime
+ * first. 2: as 1, over a runtime already up and live (the shell's REPL, jacl_impl#214), which the
+ * entry leaves as it is. Otherwise identical. */
 IrModule *temen_codegen_staged_macro(const char **names, const uint32_t *lens, uint32_t nparams,
                                    int variadic, struct AstNode *body, int in_guest,
                                    char *err, size_t errcap);
