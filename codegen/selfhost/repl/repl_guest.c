@@ -143,6 +143,14 @@ static long repl_compile(long arg) {
   if (toks.error_count) { ln->why = "repl-eval: the line does not lex"; return 0; }
   ParseResult parse = parser_parse(toks, &repl_arena);
   if (parse.error_count) { ln->why = "repl-eval: the line does not parse"; return 0; }
+  /* A macro's body runs at compile time, on the staging runtime (codegen/selfhost/macro_staging/),
+   * which this image does not link: a line defining one is refused before the session's macro
+   * table holds a macro that would fail every later line's expansion. */
+  for (uint32_t i = 0; i < parse.count; i++)
+    if (parse.nodes[i]->type == AST_DEFMACRO) {
+      ln->why = "repl-eval: a macro cannot be defined at the prompt yet";
+      return 0;
+    }
   const char *merr = expand_macros_repl(parse.nodes, parse.count, &repl_arena);
   if (merr) { ln->why = merr; return 0; }
   typer_infer(parse.nodes, parse.count, NULL, NULL, 0, NULL, 0);

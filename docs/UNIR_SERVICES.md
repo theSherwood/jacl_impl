@@ -270,6 +270,9 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
 
 A trap in a line ends the shell, as one in the shell's own code would, and a line that computes
 without reaching a job-control point (an `await`, a `sleep`, a pipeline's read) cannot be stopped.
+A line cannot define a macro yet: a macro's body runs at compile time on the staging runtime
+(`codegen/selfhost/macro_staging/`), which the shell's image does not link, so such a line is
+refused before the session's macro table holds it, and the lines after it compile as before.
 A line's unit stays installed while its code may still be called. A line that defines a proc or makes
 a closure keeps its slot in the shell's dispatch table for the session, since a later line may call
 it; any other line (a leaf: one function taking no function's reference, `irb_module_is_leaf`) gives

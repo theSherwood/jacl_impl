@@ -1,7 +1,8 @@
 ##
 ## The REPL (jacl_impl#204): each line is compiled in this program and run in its own domain on the
 ## Jit capability, and sees what the lines before it defined: a binding, a proc, a `mut` a later
-## line sets, a closure, and a struct with a proc that takes one.
+## line sets, a closure, and a struct with a proc that takes one. A macro cannot be defined yet, and
+## the lines after the refusal compile as before.
 ##
 print [repl-eval "def x 41"]
 print [repl-eval "proc inc {n} { + \x24n 1 }"]
@@ -17,4 +18,6 @@ print [repl-eval "+ \x24p->x \x24p->y"]
 print [repl-eval "proc sum {Point q} { + \x24q->x \x24q->y }"]
 print [repl-eval "sum [Point x 10 y 20]"]
 print [repl-eval "\x24p"]
+print [repl-eval "defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }"]
+print [repl-eval "unless [== 1 2] { + 40 2 }"]
 print [repl-eval "nope"]
