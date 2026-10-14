@@ -134,9 +134,13 @@ Each returns whether it reached a live task: false for a finished one, or the pr
 
 **Job-control points.** Tasks are cooperative, so a request takes effect where the task is not
 running: while it is queued, parked on an `await`, or held. A running task acts on it at its next
-job-control point: an `await`, each millisecond of a `sleep`, and each poll of a pipeline's output.
-At those points its fiber holds nothing another task needs, so a cancelled task's fiber is simply
-never resumed (`runtime/sched.c`). A task that computes without reaching one runs on until it does.
+job-control point: an `await`, each millisecond of a `sleep`, and each poll of a pipeline's output;
+and in code the shell compiles from a line, a loop's header once a slice of the line's loop headers
+(`JACL_LOOP_SLICE`, 16,384) has run (#218). There the task yields to the others, request or not,
+so a line that never waits doesn't starve the shell's own task. A job-control point acts only on
+the task's own fiber, not on a generator's it resumed. At those points its fiber holds nothing
+another task needs, so a cancelled task's fiber is simply never resumed (`runtime/sched.c`). A
+program's task that computes without reaching one runs on until it does.
 
 **How a stage learns.** A stage sees only its edges (unir §10: kill is `Severed(cancelled)`, with
 no signal ladder). Once its stdout has ended, whether its reader cancelled it or the shell severed

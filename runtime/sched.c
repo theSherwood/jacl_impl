@@ -91,6 +91,7 @@ static int jacl_pool_workers = JACL_POOL_WORKERS;   /* this run's pool size, set
 #define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
 #define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
 #define JACL_SCHED_CTL         ((long)-2)   /* job-control point suspend value (jacl_ctl_point) */
+#define JACL_LOOP_SLICE        (1 << 14)    /* loop headers a shell line runs between yields (jacl_loop_point) */
 
 static int jacl_sched_self(void) {
   int w = (int)__vm_vcpu_tls_get();
@@ -207,6 +208,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
 static JaclObj *jacl_rq[JACL_SCHED_MAX_WORKERS][JACL_RQ_CAP];
 static int32_t  jacl_rq_head[JACL_SCHED_MAX_WORKERS], jacl_rq_count[JACL_SCHED_MAX_WORKERS];
 static JaclObj *jacl_running_job[JACL_SCHED_MAX_WORKERS];  /* each worker's in-flight job (rooted) */
+static uint32_t jacl_loop_count[JACL_SCHED_MAX_WORKERS];   /* loop headers since its last yield (#218) */
 static int32_t  jacl_pool_event;     /* bumped+notified on enqueue/shutdown (wakeups) */
 static int32_t  jacl_pool_shutdown;
 static int32_t  jacl_pool_started;
@@ -284,9 +286,10 @@ static void complete_job(JaclObj *j, long v) {
  * `cancel`, `suspend` and `resume` act on a Future's job cooperatively. A request sets a flag
  * (p[24]); the scheduler acts on it wherever the job is not running — queued, parked on an
  * await, or suspended — and a running job acts on it at its next job-control point
- * (jacl_ctl_point: await, sleep, a pipeline's reads), where its fiber holds nothing another
- * job needs. A cancelled job's fiber is never resumed again: the job completes with the
- * `cancelled` error. A suspended job waits on the suspended list for `resume`. */
+ * (jacl_ctl_point: await, sleep, a pipeline's reads; jacl_loop_point: in a shell line's code, a
+ * loop's header once a slice, #218), where its fiber holds nothing another job needs. A cancelled
+ * job's fiber is never resumed again: the job completes with the `cancelled` error. A suspended
+ * job waits on the suspended list for `resume`. */
 
 static void list_unlink(JaclObj **head, JaclObj *j) {   /* under slock; links through p[12] */
   for (JaclObj **at = head; *at; at = (JaclObj **)(jp(*at) + 12))
@@ -469,6 +472,9 @@ static void worker_loop(int is_main) {
       sunlock();
     } else {
       finish_job_outcome(job, oc, out);
+      /* A job-control point may only have yielded the job's slice (jacl_loop_point): re-poll the
+       * parked fibers before it runs again, or a job that never parks starves them (#218). */
+      if (oc == 1 && out == JACL_SCHED_CTL && jacl_blocked_head[self]) repoll_blocked(self);
     }
     if (is_main && __vm_atomic_load32(&jp(jacl_root_job)[0]) == JACL_JOB_DONE) break;
   }
@@ -657,11 +663,22 @@ static JaclObj *job_of(JaclVal v) {
   return j->obj_type == JOBJ_NODE && j->size >= sizeof(JaclObj) + JOB_PAYLOAD ? j : 0;
 }
 
-/* The running job's pending cancel or suspend, or 0; 0 outside a job's fiber. */
-int jacl_ctl_pending(void) {
+/* The running job, if this code runs on the job's own fiber; else 0. A job-control point suspends
+ * the innermost fiber, so it acts only there: on a fiber the job resumed, a generator's (fiber.c),
+ * the suspend would hand the generator's consumer the scheduler's value as an element. A fiber's
+ * frames lie on the data stack it was made with (`cont.new`'s base, resume_job), so this frame is
+ * on the job's own fiber when it is on the job's stack. */
+static JaclObj *ctl_job(void) {
   int self = jacl_sched_self();
-  if (!__vm_atomic_load32(&jacl_gc_in_task[self])) return 0;
   JaclObj *j = jacl_running_job[self];
+  if (!__vm_atomic_load32(&jacl_gc_in_task[self]) || !j) return 0;
+  uintptr_t here = (uintptr_t)&j;
+  return here - (uintptr_t)job_get(j, 16) < JACL_TASK_STACK_BYTES ? j : 0;
+}
+
+/* The running job's pending cancel or suspend, or 0; 0 off a job's own fiber. */
+int jacl_ctl_pending(void) {
+  JaclObj *j = ctl_job();
   return j ? __vm_atomic_load32(&jp(j)[24]) & (JACL_CTL_CANCEL | JACL_CTL_SUSPEND) : 0;
 }
 
@@ -669,6 +686,20 @@ int jacl_ctl_pending(void) {
  * ends it (cancel: this call does not return) or holds it until `resume`. */
 void jacl_ctl_point(void) {
   if (jacl_ctl_pending()) (void)__vm_fiber_suspend(JACL_SCHED_CTL);
+}
+
+/* #218 — a loop's header, in code the shell compiles from a line. Once a slice of
+ * JACL_LOOP_SLICE headers has run, the next on the job's own fiber is a job-control point,
+ * pending request or not: the scheduler ends or holds the job, or queues it behind the ready ones
+ * and re-polls the parked ones (worker_loop). So a line that computes without reaching another
+ * job-control point can still be stopped, and doesn't starve the shell's own task, which reads the
+ * Ctrl-C: with one worker, the default, both run on it. The slice is a count, since the runtime
+ * reads no clock. */
+void jacl_loop_point(void) {
+  int self = jacl_sched_self();
+  if (jacl_loop_count[self]++ < JACL_LOOP_SLICE || !ctl_job()) return;
+  jacl_loop_count[self] = 0;
+  (void)__vm_fiber_suspend(JACL_SCHED_CTL);
 }
 
 /* Ends the running task where it stands, as a cancel would, but with the value `v`: its fiber is

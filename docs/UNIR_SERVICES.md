@@ -269,8 +269,11 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
   commits one (`e2e/temen/jacl/profile.jacl` there) that defines its commands, its plumber (`open`)
   and `legacy`; a profile that fails shows why in a block.
 
-A trap in a line ends the shell, as one in the shell's own code would, and a line that computes
-without reaching a job-control point (an `await`, a `sleep`, a pipeline's read) cannot be stopped.
+A trap in a line ends the shell, as one in the shell's own code would. A line's loops are
+job-control points (#218): once a slice of their headers has run, the line yields to the shell's own
+task, which reads the keys, and Ctrl-C and Ctrl-Z act there. So they reach a line that computes
+without an `await`, a `sleep` or a pipeline's read; one long call into the runtime is not
+interrupted, but it ends.
 A line cannot define a macro yet: a macro's body runs at compile time on the staging runtime
 (`codegen/selfhost/macro_staging/`), which the shell's image does not link, so such a line is
 refused before the session's macro table holds it, and the lines after it compile as before.

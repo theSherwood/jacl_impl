@@ -44,6 +44,35 @@ fn a_repl_line_sees_what_earlier_lines_defined() {
 }
 
 #[test]
+fn a_line_yields_at_its_loops() {
+    // #218: a line's loops are job-control points, once a slice of their headers has run. The
+    // line's task yields there, so a task it started runs while it loops; and a generator's loop,
+    // on a fiber of its own, yields only its elements.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/services/repl_loops.jacl"
+    );
+    let (image, _) =
+        jacl_runtime_harness::repl::shell_image(Path::new(path), false).expect("the image");
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let inst = temen_run::instantiate(image.clone()).expect("instantiate the shell");
+        let run = inst
+            .run(backend, &temen_run::RunConfig::default())
+            .expect("run");
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            "1\n40000\n",
+            "{backend:?}: {:?}",
+            run.outcome
+        );
+    }
+}
+
+#[test]
 fn a_session_outlasts_the_jit_tables() {
     // 1,000 lines, each compiled into a unit of its own. A line's compiled code is a capability,
     // and the capability table holds 1,024 (temen §22), so the REPL gives each up once its unit is
@@ -96,8 +125,8 @@ const SHELL_SCRIPT: &[(&str, &str, usize)] = &[
     ("kill\r", "running", 1),
     // A job waited for, stopped at once (Ctrl-Z) and listed; another stopped, then resumed in the
     // background (`bg`), where it finishes, its output in its block; then the first waited for
-    // again (`fg 8`) and ended (Ctrl-C). A Ctrl key is typed only while no job is waited for, so it
-    // acts on the job its own line started.
+    // again (`fg 10`) and ended (Ctrl-C). A Ctrl key is typed only while no job is waited for, so
+    // it acts on the job its own line started.
     ("!forever | !upcase\r\x1ajobs\r", "cancelled", 1),
     (
         "sleep 2; print [concat \"wo\" \"ke\"]\r\x1ajobs\r",
@@ -105,9 +134,29 @@ const SHELL_SCRIPT: &[(&str, &str, usize)] = &[
         1,
     ),
     ("bg\rjobs\r", "stopped  sleep 2", 1),
-    ("fg 8\r\x03", "woke", 1),
+    ("fg 10\r\x03", "woke", 1),
     ("nope\r", "cancelled", 2),
-    ("quit\r", "unsupported command head", 1),
+    // #218: lines that loop without reaching a job-control point of their own (an await, a sleep, a
+    // pipeline's read) act on Ctrl-C and Ctrl-Z at their loops' headers. The keys typed after a
+    // Ctrl key are the job's input until it ends, then come back to the prompt: the first line,
+    // ended by Ctrl-C, starts the second, which Ctrl-Z stops; it is waited for again (`fg`) and
+    // Ctrl-C ends it.
+    (
+        "print [concat \"spin\" \"ning\"]; while $true {}\r",
+        "unsupported command head",
+        1,
+    ),
+    (
+        "\x03print [concat \"loop\" \"ing\"]; while $true {}\r",
+        "spinning",
+        1,
+    ),
+    ("\x1ajobs\r", "looping", 1),
+    (
+        "fg\r\x03quit\r",
+        "stopped  print [concat \"loop\" \"ing\"]",
+        1,
+    ),
 ];
 
 fn is_jacl_error(v: i64) -> bool {
@@ -258,6 +307,19 @@ fn shell_session(
         at("\x1b[1m!nums 3 maps") < at("value: I32(2)"),
         "{backend:?}"
     );
+    // Whether a line's value block, its line in bold with the value on the next row, holds the
+    // `cancelled` error.
+    let cancelled = |line: &str| {
+        let head = format!("\x1b[1m{line}\x1b[0m\x1b[");
+        out.match_indices(&head).any(|(i, _)| {
+            out[i + head.len()..]
+                .split_once("H\x1b[K")
+                .is_some_and(|(row, value)| {
+                    row.bytes().all(|b| b.is_ascii_digit() || b == b';')
+                        && value.starts_with("error: cancelled")
+                })
+        })
+    };
     // A job in the background is listed running and ends when killed; one stopped is listed
     // stopped, and ends when it is waited for again and Ctrl-C ends it.
     let (running, stopped) = (
@@ -268,10 +330,22 @@ fn shell_session(
         running < at("error: cancelled") && at("error: cancelled") < stopped,
         "{backend:?}"
     );
-    assert!(out.rfind("error: cancelled") > Some(stopped), "{backend:?}");
+    assert!(cancelled("!forever | !upcase"), "{backend:?}");
     // One stopped and resumed in the background is listed stopped, then running, and finishes.
     assert!(
         at("stopped  sleep 2") < at("running  sleep 2") && at("running  sleep 2") < at("woke"),
+        "{backend:?}"
+    );
+    // #218: each looping line ran, and Ctrl-C ended it. The second was listed stopped by Ctrl-Z
+    // first.
+    let spin = "print [concat \"spin\" \"ning\"]; while $true {}";
+    let looping = "print [concat \"loop\" \"ing\"]; while $true {}";
+    assert!(
+        at("spinning") < at("looping") && cancelled(spin),
+        "{backend:?}"
+    );
+    assert!(
+        at("looping") < at(&format!("stopped  {looping}")) && cancelled(looping),
         "{backend:?}"
     );
 }
