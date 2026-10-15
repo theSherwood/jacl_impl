@@ -1485,7 +1485,7 @@ fn pipelines_run_on_temen() {
                 let m = h.grant_module(image);
                 h.register_cap_name(&format!("bin.{name}"), m);
             }
-            h.grant_instantiator(0, 1 << 26);
+            h.grant_instantiator();
             h.grant_budget(-1, -1, -1);
         };
         let compiles = temen_jit::child_compiles();
@@ -1574,7 +1574,7 @@ fn serve_twice(path: &str, check: impl Fn(temen_run::Backend, [Vec<String>; 2]))
             let mut grant = |h: &mut temen_interp::Host| {
                 let m = h.grant_module(&client);
                 h.register_cap_name("store-client", m);
-                h.grant_instantiator(0, 1 << log2);
+                h.grant_instantiator();
                 h.grant_budget(-1, -1, -1);
             };
             let config = temen_run::RunConfig {
