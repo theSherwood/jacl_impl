@@ -19,15 +19,17 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// line compiles to import jaclrt's.
 const RENAMED: [&str; 2] = ["jacl_arr_new", "jacl_eq"];
 
-/// Functions a unit may import that the staging glue defines, beside the runtime's `jacl_*`: a
-/// string literal's bytes, and a staged macro's arguments and result.
-const BRIDGE: [&str; 6] = [
+/// Functions a unit may import beside the runtime's `jacl_*`: the staging glue's (a string
+/// literal's bytes, and a staged macro's arguments and result), and the REPL's record of a unit's
+/// slots (#215).
+const BRIDGE: [&str; 7] = [
     "synrt_str_empty",
     "synrt_str_push_byte",
     "synrt_read_arg",
     "synrt_read_rest",
     "synrt_write_result",
     "synrt_gensym",
+    "jacl_repl_unit_slot",
 ];
 
 fn clang(src: &str, out: &Path, opt: &str, flags: &[String]) {

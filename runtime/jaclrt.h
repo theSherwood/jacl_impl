@@ -157,6 +157,9 @@ enum {
   JOBJ_BLOB = 1,   /* opaque payload, no outgoing pointers   */
   JOBJ_NODE = 2,   /* payload may contain heap pointers (conservatively traced) */
   JOBJ_STR  = 3,   /* heap string: { u32 len; bytes[] } — no outgoing pointers */
+  JOBJ_FUNC = 4,   /* a closure or a generator: payload word 0 is its function's table slot, and
+                    * the payload is traced as a node's. A collection can note the slots of those
+                    * it keeps (jacl_gc_collect_noting, #215). */
 };
 
 typedef struct JaclObj {
@@ -169,6 +172,7 @@ typedef struct JaclObj {
 void   jacl_heap_init(void);                              /* reset the heap */
 void*  jacl_alloc(uint32_t obj_type, uint32_t payload);   /* -> object cell (header+payload), zeroed payload */
 long   jacl_gc_collect(void);                             /* mark-sweep; returns #cells reclaimed */
+long   jacl_gc_collect_noting(uint8_t *seen, uint32_t n); /* a collection of its own; seen[slot] = 1 for each kept JOBJ_FUNC's slot < n */
 long   jacl_live_count(void);                             /* #live (non-free) cells */
 long   jacl_heap_lo(void);                                /* window-offset bounds, for gc.roots */
 long   jacl_heap_hi(void);
@@ -472,6 +476,7 @@ JaclVal jacl_ptr_addr(JaclVal p);                  /* [ptr-addr P] -> raw addres
 int jacl_fatptr_parts(JaclVal p, JaclVal *base, JaclVal *off); /* fat-ptr { base, offset } */
 JaclVal jacl_proc_sig_register(JaclVal fnref, JaclVal sig);   /* record a proc/closure signature */
 JaclVal jacl_proc_sig_get(JaclVal fnref);                     /* look up a proc/closure signature */
+JaclVal jacl_proc_sig_forget(JaclVal fnref);                  /* the slot is another function's now (#215) */
 JaclVal jacl_trace_push(JaclVal name);   /* push a call-stack frame (name; line 0) */
 JaclVal jacl_trace_line(JaclVal line);   /* set the top frame's current line */
 JaclVal jacl_trace_snapshot(void);       /* capture the stack into jacl_last_trace */
@@ -510,6 +515,7 @@ JaclVal jacl_closure_new(JaclVal fnref, JaclVal nupvals);
 JaclVal jacl_closure_set(JaclVal c, JaclVal i, JaclVal v);
 JaclVal jacl_closure_fn(JaclVal c);
 JaclVal jacl_closure_upval(JaclVal c, JaclVal i);
+void    jacl_closure_keep(JaclVal c);                 /* a REPL closure's function, returning (#215) */
 JaclVal jacl_cell_new(JaclVal v);
 JaclVal jacl_cell_get(JaclVal c);
 JaclVal jacl_cell_set(JaclVal c, JaclVal v);

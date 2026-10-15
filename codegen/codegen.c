@@ -792,6 +792,17 @@ static void emit_void_call(Cx *cx, const char *fn) {
   (void)irb_call_import(cx->f, cx->cur, fn, sig, 1, NULL, 0, h, args, 1);
 }
 
+/* #215 — in a REPL unit's closure function (entry block: v0 sp, v1 self), keep the closure live to
+ * here, its return: then a frame of the unit's code always lies above one holding a closure of the
+ * unit, or above the line's entry, and the REPL frees a unit's slots only once no closure of it is
+ * live and its line has returned (codegen/selfhost/repl/repl_guest.c). */
+static void emit_keep_self(Cx *cx) {
+  IrType sig[] = {IRB_I64, IRB_I64};
+  IrVal h = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal args[] = {0, 1};
+  (void)irb_call_import(cx->f, cx->cur, "jacl_closure_keep", sig, 2, NULL, 0, h, args, 2);
+}
+
 /* #218 — enter a loop's header. In a REPL line it is a job-control point too, once a slice
  * (`jacl_loop_point`), so a line that loops without reaching another (an await, a sleep, a
  * pipeline's read) still yields to the shell, and can be cancelled or stopped. A program's loops
@@ -3621,9 +3632,10 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
   cx->ret_raw = REP_TAGGED;    /* the wrapper has the closure ABI: one tagged result */
   cx->cur = irb_block(w, pt, n);
   IrVal cargs[1 + CG_MAX_PARAMS];
-  cargs[0] = 0;                                     /* sp (param 0; self at 1 is dropped) */
+  cargs[0] = 0;                                     /* sp (param 0; self at 1 is not passed on) */
   for (int k = 0; k < p->arity; k++) cargs[1 + k] = (IrVal)(2 + k);
   IrVal r = irb_call(w, cx->cur, p->func, cargs, 1 + p->arity);
+  if (cx->repl) emit_keep_self(cx);
   irb_return(w, cx->cur, &r, 1);
   p->wrapper = w;
   cx->f = sf; cx->cur = sb; cx->sp = ssp; cx->ret_raw = srr;
@@ -6474,6 +6486,19 @@ static void compile_pending_closures(Cx *cx) {
     cx->f = p.func;
     cx->ret_raw = REP_TAGGED;           /* a closure body is always the boxed convention */
     cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
+    if (cx->repl) {
+      /* The closure's function calls its body, then keeps the closure live (emit_keep_self),
+       * however the body returns: a tail call out of it included. */
+      IrType r1[] = {IRB_I64};
+      IrFunc *body = irb_func_new(cx->m, ptypes, 2 + p.nparams, r1, 1);
+      IrVal args[2 + CG_MAX_PARAMS];
+      for (int k = 0; k < 2 + p.nparams; k++) args[k] = (IrVal)k;
+      IrVal r = irb_call(p.func, cx->cur, body, args, 2 + p.nparams);
+      emit_keep_self(cx);
+      irb_return(p.func, cx->cur, &r, 1);
+      cx->f = body;
+      cx->cur = irb_block(body, ptypes, 2 + p.nparams);
+    }
     cx->sp = 0; /* param 0; self is param 1 */
     cx->cur_is_generator = 0;
     env_reset(cx);
@@ -6601,7 +6626,7 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
 }
 
 /* A REPL line (jacl_impl#204; declared in codegen.h). Its unit is installed and called from the
- * shell's own code, so func 0 has the guest ABI `(sp, _) -> i64` and runs on the shell's fiber,
+ * shell's own code, so func 0 has the guest ABI `(sp, unit) -> i64` and runs on the shell's fiber,
  * where a line may await, spawn and park as the shell does. Lines share one environment, the
  * runtime's global map: every top-level binding lives there, as a `mut` some proc reads does
  * (jacl #168), and so does each proc of the line, as a closure value. */
@@ -6619,6 +6644,10 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
   IrType r1[] = {IRB_I64};
   IrFunc *entry = irb_func_new(m, i64_2, 2, r1, 1);
   IrBlock entry_block = irb_block(entry, i64_2, 2);
+  /* #215: the entry first calls `reg` with its second argument, the REPL's record of the unit. Once
+   * the unit is compiled, `reg` hands that record the slot of each of the unit's functions, if the
+   * unit names one of them (a slot each, temen §22 unit-own funcrefs); in a leaf it does nothing. */
+  IrFunc *reg = irb_func_new(m, i64_2, 2, r1, 1);
 
   for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i]);
   for (uint32_t i = 0; i < count; i++)
@@ -6634,6 +6663,8 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
 
   if (!cx.failed) {
     cx.f = entry; cx.cur = entry_block; cx.sp = 0;
+    IrVal ra[] = {0, 1};
+    (void)irb_call(entry, entry_block, reg, ra, 2);
     env_reset(&cx);
     capset_reset(&cx);
     cx.cur_proc = "<repl>"; cx.cur_proc_len = 6;
@@ -6662,6 +6693,18 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
   }
   if (!cx.failed) compile_pending_closures(&cx);
+  if (!cx.failed) {
+    IrBlock rb = irb_block(reg, i64_2, 2);
+    cx.f = reg; cx.cur = rb; cx.sp = 0;
+    if (!irb_module_is_leaf(m))
+      for (int i = 0; i < irb_module_nfuncs(m); i++) {
+        IrVal fr = irb_ref_func(reg, rb, irb_module_func(m, i));
+        IrVal a[] = {0, 1, irb_convert(reg, rb, IRB_EXTEND_I32U, fr)};
+        (void)emit_rt_call(&cx, "jacl_repl_unit_slot", a, 3);
+      }
+    IrVal z = irb_const_i64(reg, rb, 0);
+    irb_return(reg, rb, &z, 1);
+  }
 
   int failed = cx.failed;
   free(cx.locals);

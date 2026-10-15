@@ -46,8 +46,9 @@ typedef struct TemenReplEnv {
 } TemenReplEnv;
 
 /* Compile one REPL line to a unit the shell installs (temen §22 `install`) and calls on its own
- * fiber: func 0 = `(sp, _) -> i64`, the line's forms run in order, returning the last value. The
- * runtime is already up, so there is no bring-up. Every top-level binding of the line, and each of
+ * fiber: func 0 = `(sp, unit) -> i64`, the line's forms run in order, returning the last value.
+ * `unit` is the REPL's record of the unit, which the entry first hands its functions' slots
+ * (`jacl_repl_unit_slot`, #215). The runtime is already up, so there is no bring-up. Every top-level binding of the line, and each of
  * its procs as a closure value, goes into the runtime's global map, where a later line finds it by
  * name (`env`). NULL on an unsupported construct (message in `err`). */
 IrModule *temen_codegen_repl(struct AstNode **nodes, uint32_t count, const TemenReplEnv *env,

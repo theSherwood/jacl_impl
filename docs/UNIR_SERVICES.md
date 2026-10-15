@@ -282,14 +282,24 @@ stead, so both are scanned. A macro whose body does not compile is refused befor
 macro table holds it, so a redefinition leaves the old one, and the lines after compile as before. A
 body that waits (a `sleep`, an `await`) leaves its line unfinished (`repl-eval: the compiler did not
 finish`). A macro's unit keeps its slot by the same rule as a line's, below.
-A line's unit stays installed while its code may still be called. A line that defines a proc or makes
-a closure keeps its slot in the shell's dispatch table for the session, since a later line may call
-it; any other line (a leaf: one function taking no function's reference, `irb_module_is_leaf`) gives
-its slot back when it returns. The compiled code's handle, a capability, is given up as soon as the
-unit is installed, since the capability table holds 1,024. So a session runs any number of leaf lines,
-and as many defining lines as the dispatch table has free slots for (about 700 in the harness); past
-that such a line is an error (`repl-eval: no slot to install the unit in`).
-`repl.rs::a_session_outlasts_the_jit_tables` runs 1,000 lines, then defines a proc and calls it.
+A line's unit stays installed while its code may still be called. A leaf line (no function of its
+unit takes a function's reference, `irb_module_is_leaf`) gives its slot in the shell's dispatch table
+back when it returns. Any other line's unit names its own functions, so it takes a slot for each as
+it compiles, and one more for its install (temen §22, unit-own funcrefs). It gives them all back once
+nothing can reach its code (#215): its line has returned, and no closure or generator a collection
+keeps holds one of its slots. No frame of its code is live then either, since each lies above its
+line's entry or above a frame that keeps a closure of the unit live to its return
+(`jacl_closure_keep`). When a line finds the table full, the REPL collects, noting the slots of the
+closures and generators the collection keeps (`jacl_gc_collect_noting`), frees every unit none of
+whose slots is noted, and tries again. The code behind a freed slot stays in the JIT's code arena,
+which only the embedder can compact (temen §22, code reclaim). The compiled code's handle, a
+capability, is given up as soon as the unit is installed, since the capability table holds 1,024.
+A line's source, tokens and AST are freed once it has compiled, unless it declares a struct or a
+macro, which later lines' compiles use; a session that kept every line's ran out of memory at about
+1,350 lines. `repl.rs::a_session_outlasts_the_jit_tables` runs 1,000 lines, then defines a proc and
+calls it. `repl.rs::a_session_redefines_a_proc_past_the_dispatch_table` defines a proc 1,000 times,
+calling it after each, while three old units that something still reaches keep working: a closure
+kept under another name, and a proc and a line each running in a task.
 
 The shell's image is the runtime with the compiler, the REPL bridge (`codegen/selfhost/repl/`) and
 the macro-staging bridge and glue linked in (`repl::shell_image`).
