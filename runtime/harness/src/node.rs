@@ -319,7 +319,7 @@ pub fn run(
         h.register_cap_name("store-client", m);
         let m = h.grant_module(&images.helper);
         h.register_cap_name("store-self", m);
-        h.grant_instantiator(0, 1 << log2);
+        h.grant_instantiator();
         h.grant_budget(-1, -1, -1);
         setup(h);
     };

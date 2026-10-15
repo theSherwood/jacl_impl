@@ -59,12 +59,12 @@ stage, whose output is its own stdout edge. A task whose job has ended writes no
 
 ## The wire
 
-A stage's arguments travel as `unir_spawn`'s argument bytes (op 15's payload): the value
-`[argv env]`, encoded by the value codec (theSherwood/unir#43; `runtime/value.c`), which the stage
-verifies before it decodes. `argv[0]` is the program name, and the other arguments arrive as the
-values passed (docs/UNIR_PIPELINES.md, "One codec"); `env` is the string map above. The root's
-environment is still the host's §3e blob (`{argc, envc}`, then NUL-terminated strings, the
-environment's as `KEY=VALUE`).
+A stage's arguments travel as `unir_spawn`'s argument bytes (the payload of temen's spawn record, op
+17): the value `[argv env]`, encoded by the value codec (theSherwood/unir#43; `runtime/value.c`),
+which the stage verifies before it decodes. `argv[0]` is the program name, and the other arguments
+arrive as the values passed (docs/UNIR_PIPELINES.md, "One codec"); `env` is the string map above.
+The root's environment is still the host's §3e blob (`{argc, envc}`, then NUL-terminated strings,
+the environment's as `KEY=VALUE`).
 
 A stage's payload is bounded by the args area (16,224 bytes); an overflow is an error rather than
 a truncation.

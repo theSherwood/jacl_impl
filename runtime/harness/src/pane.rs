@@ -55,7 +55,7 @@ pub fn run(
             let m = h.grant_module(image);
             h.register_cap_name(&format!("bin.{name}"), m);
         }
-        h.grant_instantiator(0, 1 << log2);
+        h.grant_instantiator();
         h.grant_budget(-1, -1, -1);
         setup(h);
     };

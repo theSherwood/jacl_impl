@@ -62,10 +62,11 @@ binds. These are conventional names in its endowment, not special cases, and the
 `stdin`/`stdout`, which TEMEN's stdio convention binds the `read`/`write` imports to. A vat endowed
 with `unir.stdout` is a stage.
 
-- `[stdin]`, `[stdout]` and `[stderr]` return those edges as channel ends (nil outside a stage), so
-  `read [stdin] N` and `write [stdout] $bytes` work. `print` writes to `unir.stdout` when the vat has
-  it, and to the host stream otherwise, so a program that prints is a pipeline stage with no changes.
-  `[args]` is the argv it was spawned with (op 15's payload), a vector of strings.
+- `[stdin]`, `[stdout]` and `[stderr]` return those edges as channel ends (nil outside a stage),
+  so `read [stdin] N` and `write [stdout] $bytes` work. `print` writes to `unir.stdout` when the vat
+  has it, and to the host stream otherwise, so a program that prints is a pipeline stage with no
+  changes. `[args]` is the argv it was spawned with (the payload of temen's spawn record, op 17), a
+  vector of strings.
 - At exit, the runtime completes `stdout` if the program returned normally, and severs it with
   `io-error` if it returned an error value, so the error travels down the pipeline as a sever (unir
   §10, default reaction Fail). It writes that error's message to `stderr` and completes it either way:
