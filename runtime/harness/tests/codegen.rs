@@ -2019,71 +2019,19 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
     // which the driver lays out as a table (a bold header, numbers to the right); `watch` shows
     // unir's dangling view live as files change; Ctrl-Z moves that job to the background, where
     // what it shows waits until `fg`.
-    use jacl_runtime_harness::pane;
-    use std::sync::{Arc, Mutex};
     let (client, log2) = child_image(PANE_JACL, "");
     for backend in [
         temen_run::Backend::TreeWalk,
         temen_run::Backend::Bytecode,
         temen_run::Backend::Jit,
     ] {
-        let dir =
-            std::env::temp_dir().join(format!("jacl_pane_{}_{backend:?}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let shown = Arc::new(Mutex::new(String::new()));
-        let (tee, keys) = (Arc::clone(&shown), Arc::clone(&shown));
-        let (client, dir2) = (client.clone(), dir.clone());
-        let (done, finished) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut step = 0;
-            let mut terminal = |h: &mut temen_interp::Host| {
-                let tee = Arc::clone(&tee);
-                h.set_stdout_tee(Box::new(move |b| {
-                    tee.lock().unwrap().push_str(&String::from_utf8_lossy(b))
-                }));
-                let keys = Arc::clone(&keys);
-                h.set_stdin_source(Box::new(move || {
-                    let (typed, marker, times) = *PANE_SCRIPT.get(step)?;
-                    if keys.lock().unwrap().matches(marker).count() < times {
-                        return None;
-                    }
-                    step += 1;
-                    Some(typed.as_bytes().to_vec())
-                }));
-            };
-            let size = pane::Size { rows: 24, cols: 80 };
-            let out = pane::run(&client, log2, &[], backend, &dir2, size, &mut terminal);
-            let _ = done.send(out);
-        });
-        let out = finished
-            .recv_timeout(std::time::Duration::from_secs(600))
-            .unwrap_or_else(|_| {
-                panic!(
-                    "{backend:?}: the pane never finished; it showed {:?}",
-                    shown.lock().unwrap()
-                )
-            });
-        let _ = std::fs::remove_dir_all(&dir);
-        let status = out
-            .lines()
-            .rev()
-            .find_map(|l| l.trim().strip_prefix("shell [terminal, view, client] ["))
-            .and_then(|l| l.strip_suffix(']'))
-            .map(|l| {
-                l.split(", ")
-                    .map(|n| n.parse::<i64>().unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| panic!("{backend:?}: no report in {out:?}"));
-        assert_eq!(
-            status[..2],
-            [0, 0],
-            "{backend:?}: the terminal or the view failed: {out:?}"
-        );
-        assert!(
-            !is_jacl_error(status[2]) && status[2] != -1,
-            "{backend:?}: pane.jacl failed: {out:?}"
+        let out = pane_session(
+            &client,
+            log2,
+            backend,
+            "pane",
+            PANE_SCRIPT,
+            std::time::Duration::from_secs(600),
         );
         let at = |s: &str| {
             out.find(s)
@@ -2114,5 +2062,104 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
                 .all(|(i, _)| out[i + 1..].starts_with('[')),
             "{backend:?}"
         );
+    }
+}
+
+/// Runs `client` in a pane of unir's store vat in its `shell` mode on `backend`, its terminal
+/// typing each step of `script` once it has been sent the step's marker that many times, so the
+/// script follows the program rather than a clock. Returns what the terminal was sent, once the
+/// terminal and the view ended cleanly and the client did not fail, within `limit`.
+fn pane_session(
+    client: &temen_ir::Module,
+    log2: u8,
+    backend: temen_run::Backend,
+    name: &str,
+    script: &'static [(&'static str, &'static str, usize)],
+    limit: std::time::Duration,
+) -> String {
+    use jacl_runtime_harness::pane;
+    use std::sync::{Arc, Mutex};
+    let dir = std::env::temp_dir().join(format!("jacl_{name}_{}_{backend:?}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let shown = Arc::new(Mutex::new(String::new()));
+    let (tee, keys) = (Arc::clone(&shown), Arc::clone(&shown));
+    let (client, dir2) = (client.clone(), dir.clone());
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut step = 0;
+        let mut terminal = |h: &mut temen_interp::Host| {
+            let tee = Arc::clone(&tee);
+            h.set_stdout_tee(Box::new(move |b| {
+                tee.lock().unwrap().push_str(&String::from_utf8_lossy(b))
+            }));
+            let keys = Arc::clone(&keys);
+            h.set_stdin_source(Box::new(move || {
+                let (typed, marker, times) = *script.get(step)?;
+                if keys.lock().unwrap().matches(marker).count() < times {
+                    return None;
+                }
+                step += 1;
+                Some(typed.as_bytes().to_vec())
+            }));
+        };
+        let size = pane::Size { rows: 24, cols: 80 };
+        let out = pane::run(&client, log2, &[], backend, &dir2, size, &mut terminal);
+        let _ = done.send(out);
+    });
+    let out = finished.recv_timeout(limit).unwrap_or_else(|_| {
+        panic!(
+            "{backend:?}: {name} never finished; it showed {:?}",
+            shown.lock().unwrap()
+        )
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = out
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("shell [terminal, view, client] ["))
+        .and_then(|l| l.strip_suffix(']'))
+        .map(|l| {
+            l.split(", ")
+                .map(|n| n.parse::<i64>().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| panic!("{backend:?}: no report in {out:?}"));
+    assert_eq!(
+        status[..2],
+        [0, 0],
+        "{backend:?}: the terminal or the view failed: {out:?}"
+    );
+    assert!(
+        !is_jacl_error(status[2]) && status[2] != -1,
+        "{backend:?}: {name}.jacl failed: {out:?}"
+    );
+    out
+}
+
+const WAKE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/wake.jacl");
+
+#[test]
+fn a_pane_client_waits_on_its_notification() {
+    // #219 (theSherwood/unir#208): a pane client that opens the pane with the notification its
+    // events signal waits for them on it, its worker too, rather than polling. A wait of a number
+    // of seconds ends at its time, or sooner once a task writes to a transcript or ends, and a
+    // key ends one with the key. wake.jacl's waits that a task ends would last ten minutes, so a
+    // task that did not end one would fail this run at its limit.
+    let (client, log2) = child_image(WAKE_JACL, "");
+    for backend in [
+        temen_run::Backend::TreeWalk,
+        temen_run::Backend::Bytecode,
+        temen_run::Backend::Jit,
+    ] {
+        let out = pane_session(
+            &client,
+            log2,
+            backend,
+            "wake",
+            &[("k", "ready", 1)],
+            std::time::Duration::from_secs(300),
+        );
+        assert!(out.contains("keyed"), "{backend:?}: {out:?}");
     }
 }

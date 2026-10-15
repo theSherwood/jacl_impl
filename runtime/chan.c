@@ -281,6 +281,7 @@ JaclVal jacl_args(void) { return jacl_vec_empty(); }
 JaclVal jacl_emit(JaclVal v) { jacl_print(v); return JACL_NIL; }
 JaclVal jacl_emit_as(JaclVal v, JaclVal s) { (void)v; (void)s; return chan_err("emit: a value of a schema goes only to a job's output"); }
 JaclVal jacl_service(JaclVal name) { (void)name; return chan_err("service: unavailable without vats"); }
+JaclVal jacl_service_n(JaclVal name, JaclVal n) { (void)name; (void)n; return chan_err("service: unavailable without vats"); }
 JaclVal jacl_service_call(JaclVal s, JaclVal r) { (void)s; (void)r; return chan_err("service-call: unavailable without vats"); }
 JaclVal jacl_service_event(JaclVal s, JaclVal w) { (void)s; (void)w; return chan_err("service-event: unavailable without vats"); }
 JaclVal jacl_service_send(JaclVal s, JaclVal m) { (void)s; (void)m; return chan_err("service-send: unavailable without vats"); }

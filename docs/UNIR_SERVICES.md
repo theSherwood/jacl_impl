@@ -14,6 +14,7 @@ edge. Nothing about the service is compiled into the program.
 def s [service "store"]                           ; a session, or an error value
 def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
 [service-event $s $true]                          ; the next event, waiting; nil if none and not waiting
+def p [service "pane" "shell.n"]                  ; a session whose events signal this vat's notification
 [service-send $p [map "content" [map "Text" "hi"]]] ; a message on a named entry, waiting for nothing
 ```
 
@@ -24,7 +25,14 @@ def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
   reply, converted back. One request at a time per session.
 - `[service-event S WAIT]` returns the next event the service sent, as `[map ENTRY VALUE]`, where
   `ENTRY` is the event's catalog entry name (the store vat's is `changes`). Events that arrive while a
-  call waits for its reply are kept for later.
+  call waits for its reply are kept for later. With `WAIT` false or nil it returns at once, nil if no
+  event is there; with `WAIT` true it waits for one; with a number of seconds it waits that long, and
+  returns nil sooner once one of the program's tasks writes to a transcript or ends, so a shell waiting
+  for its pane notices its jobs (#219).
+- `[service NAME N]` connects as `[service NAME]` does, to a service whose events signal the
+  notification the vat was endowed with as `N` (unir decision #208.1): unir's sessions grant a shell
+  its pane's as `shell.n`. Waiting for such a service's events waits on that notification rather than
+  polling (see "Waiting" below). A vat has one notification: a second name is an error.
 
 - `[service-send S [map ENTRY VALUE]]` sends `VALUE` as a message of the catalog entry named
   `ENTRY`, waiting for nothing: a connection that is not request and reply, such as a pane. A session
@@ -138,8 +146,22 @@ terminals, each waiting to see the other's edits before its next.
 
 The unir unit allocates through `unir_host_alloc` (`runtime/chan_unir.c`), a pool of size classes up
 to 256 KiB: a client adopts a service's whole schema into one buffer, and the store vat's passed
-4 KiB with directories. `[service-event S true]` waits by polling, from 50 µs apart to a millisecond,
-since the vat is one call at a time (docs/UNIR_CHANNELS.md) and a call holds it while it waits.
+4 KiB with directories.
+
+### Waiting
+
+The vat is one call at a time (docs/UNIR_CHANNELS.md), so no wait for a service's events may hold it.
+- **A service opened with the vat's notification** (`[service NAME N]`) is armed before the wait
+  (`unir_service_arm`): its next event signals the notification (unir decision #208.1). The waiting
+  fiber parks on a word of its own (`jacl_unir_events`), and its job is marked as waiting on the
+  notification. A worker with nothing to run, whose parked fibers all wait so, waits on the notification
+  itself (`unir_notification_wait`, which takes no vat), until its fibers' first timeout, rather than
+  re-polling them every millisecond. An event from outside wakes the worker, which moves the word and
+  re-polls the fiber. The runtime signals the notification itself when a task writes to a transcript or
+  ends, and when a job becomes ready to run (`pool_wake`). Only one worker waits on it at a time, since
+  a wait takes every badge; with more than one worker, each still re-polls every millisecond, when it
+  also answers a collection.
+- **Any other service** is polled, from 50 µs apart to a millisecond, the vat given back between polls.
 
 ## Build
 
@@ -263,6 +285,11 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
   ends, after what was already waiting there.
 - **References.** A reference activated in the transcript runs `open NAME` as a job, `NAME` the
   reference's, which shows only its output: the profile says what opening a name means.
+- **Waiting.** The shell opens its pane with the notification its events signal (`[service "pane"
+  "shell.n"]`). When a pass of its loop finds nothing to do, its next read of the pane waits on that
+  notification for up to a second, or until a job writes to the transcript or ends (#219). So a key, a
+  job's output and a job's end each start a pass as they come, and an idle shell makes one pass a
+  second.
 - **The profile.** Before the first prompt the shell evaluates the store's document `profile`, if it
   has one, in its own domain, so every line sees what the profile defines. It reads it 2 KiB at a
   time, since a reply is one of the session's 4 KiB frames. unir's stage 7 session

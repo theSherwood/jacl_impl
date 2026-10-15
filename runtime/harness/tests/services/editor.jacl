@@ -95,7 +95,11 @@ proc second-run {s, head} {
   assert [== [text $s $back] "hello ther"]
   assert [== [service-event $s $true] [change 2 26 $back]]
   move $s "doc" $back $head
-  assert [== [service-event $s $true] [change 2 27 $head]]
+  ## A wait of a number of seconds (#219): the event that comes within it, else nil once it has
+  ## passed. A WAIT that is neither a boolean nor seconds is an error.
+  assert [== [service-event $s 60] [change 2 27 $head]]
+  assert [== [service-event $s 0.01] $nil]
+  assert [error? [service-event $s "soon"]]
   assert [== [service-event $s $false] $nil]
   assert [== [text $s [ask $s [map "Head" "doc/world"] "Head"]] "hello world"]
   0

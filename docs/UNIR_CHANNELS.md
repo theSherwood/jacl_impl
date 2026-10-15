@@ -82,11 +82,11 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.l
 - **Waiting.** `unir_producer_write` and `unir_consumer_read` are called with no timeout. Inside a fiber
   their waits park the fiber. The unir binding issues an unbounded wait as 1 s timed waits
   (temen#1711), which only bounds each park.
-- **Wake latency.** A notify from the peer does not wake an *idle* worker: it sleeps on
-  `jacl_pool_event` for `JACL_WAIT_NS` (1 ms) between re-polls. So an idle reader sees new data within
-  about 1 ms; a busy worker sees it at its next re-poll. That is fine for #18 and #19. The fix, if a
-  measurement needs one, is TEMEN's blocking-resume variant (`TEMEN_FIBER_TIMED_WAIT_FOLLOWUP.md` §2),
-  or waking on the edge's bell directly when a worker's only blocked fiber is on one edge.
+- **Wake latency.** A notify from the peer does not wake an *idle* worker: it sleeps for
+  `JACL_WAIT_NS` (1 ms) between re-polls, on `jacl_pool_event` or on the vat's notification when one is
+  open (docs/UNIR_SERVICES.md, "Waiting"). So an idle reader sees new data within about 1 ms; a busy
+  worker sees it at its next re-poll. That is fine for #18 and #19. The fix, if a measurement needs one,
+  is an edge whose peer signals the vat's notification, as a service's does once armed.
 - **The unit's heap.** The runtime has no `malloc`, and calling `jacl_alloc` from inside the unit would
   hit GC safepoints mid-call. `chan_unir.c` defines `unir_host_alloc`/`unir_host_free` over a static
   4 MiB pool outside `jacl_heap_mem`: power-of-two size classes from 16 B to 256 KiB with free lists,
@@ -94,13 +94,15 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.l
   edge end and per spawn, a service's whole schema at once, and a legacy job's screen (up to 100 KiB)
   as one read. A request the pool cannot serve fails the unit's allocation, which traps. The pool's
   lock is separate from the vat's, because the unit allocates inside its calls.
-- **The vat, one call at a time.** Of `unir.h`'s calls only an edge's end operations take no vat; the
-  others read and grow the vat's tables (its posts, mapped notifications and children), and this
-  runtime's fibers run on several workers. So every call that takes the vat holds a parking lock
-  (`vat_take`/`vat_give`): a fiber waits its turn parked, never spinning against one parked inside a
-  call. A call that waits for a peer (a service's reply, a child that starts or ends) holds the vat
-  meanwhile; a wait that may be long (`[service-event S true]`, a legacy job's next screen) polls,
-  giving the vat back between polls.
+- **The vat, one call at a time.** Of `unir.h`'s calls only an edge's end operations and a
+  notification's wait and signal take no vat; the others read and grow the vat's tables (its posts,
+  mapped notifications and children), and this runtime's fibers run on several workers. So every call
+  that takes the vat holds a parking lock (`vat_take`/`vat_give`): a fiber waits its turn parked, never
+  spinning against one parked inside a call. A call that waits for a peer (a service's reply, a child
+  that starts or ends) holds the vat meanwhile; a wait that may be long does not. A service's next
+  event is waited for on the vat's notification when the service was opened with it, and polled for
+  otherwise (docs/UNIR_SERVICES.md, "Waiting"); a legacy job's next screen is polled, the vat given
+  back between polls.
 
 ## Build
 

@@ -344,6 +344,7 @@ JaclVal jacl_collect(JaclVal src);                 /* [collect R]: a read end's 
 JaclVal jacl_emit(JaclVal v);                      /* [emit V]: V as a message of the enclosing output */
 JaclVal jacl_emit_as(JaclVal v, JaclVal schema);   /* [emit V S]: in a job, V as a value of schema S */
 JaclVal jacl_service(JaclVal name);                /* [service NAME]: a session with a granted service */
+JaclVal jacl_service_n(JaclVal name, JaclVal n);   /* [service NAME N]: its events signal the vat's notification N */
 JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its reply */
 JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
 JaclVal jacl_service_send(JaclVal s, JaclVal msg);  /* [service-send S [map NAME V]]: V on entry NAME */
