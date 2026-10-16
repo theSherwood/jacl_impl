@@ -88,6 +88,9 @@ child and granted as `store-self`, runs the machine's vat, its puller (which car
 other machine's vat, machine 1 merging) and its senders. The host grants:
 - `link`, the connection: a host procedure that writes a buffer to it, reads what has arrived
   without waiting, and shuts it down;
+- `bell`, what the root waits on while the connection has nothing: an offloadable host procedure
+  that waits until the host rings it, when something arrives, or until a time on `clock`
+  (theSherwood/unir#225). Without it the root polls `link` every 50 µs;
 - `keys`: the machine's keystore and the other machine's key. With them the machines authenticate
   each other and encrypt what crosses (Noise, with UCAN delegations as the proof: unir decisions 84
   and 86);

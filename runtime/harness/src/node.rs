@@ -7,15 +7,18 @@
 //! unit's `pair` mode makes for two machines ([`pair`]), since a host here has none of unir's code.
 //!
 //! The host side follows unir's (`e2e/temen/src/link.rs`): the connection is one host procedure,
-//! writing to its socket and reading what a reader thread queued from it.
+//! writing to its socket and reading what a reader thread queued from it, and the root waits on
+//! a bell that thread rings (theSherwood/unir#225).
 
 use std::io::Read;
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
+use temen_interp::OffloadOutcome;
 use temen_run::{Backend, HostCap, RunConfig};
 
 /// The vendored store unit.
@@ -73,16 +76,68 @@ pub fn connect(addr: impl ToSocketAddrs) -> std::io::Result<Link> {
     Ok(Link { role: 1, sock: tcp(TcpStream::connect(addr)?)? })
 }
 
+/// What the root waits on when its connection has nothing (theSherwood/unir#225): how many times
+/// the reader thread has rung, and the condition a ring wakes.
+type Bell = Arc<(Mutex<u64>, Condvar)>;
+
+fn ring(bell: &Bell) {
+    let (rung, cv) = &**bell;
+    *rung.lock().expect("the bell") += 1;
+    cv.notify_all();
+}
+
+/// Waits until `bell` has rung more than `seen` times, or until `until`, and returns how many
+/// times it has rung.
+fn wait(bell: &Bell, seen: u64, until: Option<Instant>) -> u64 {
+    let (rung, cv) = &**bell;
+    let rung = rung.lock().expect("the bell");
+    let not_yet = |r: &mut u64| *r == seen;
+    let rung = match until {
+        Some(t) => {
+            let left = t.saturating_duration_since(Instant::now());
+            cv.wait_timeout_while(rung, left, not_yet).expect("the bell").0
+        }
+        None => cv.wait_while(rung, not_yet).expect("the bell"),
+    };
+    *rung
+}
+
+/// Grants `bell` to the root as `bell`, as unir's host does: an offloadable host procedure, so
+/// the root waits on it holding nothing its senders need, on every engine. Op 0 waits, off the
+/// root's thread, until the bell rings or the clock reaches its argument (ns since `epoch`), and
+/// returns 1 if it rang since the last wait returned, else 0. A ring between two waits ends the
+/// next one at once, so none is lost.
+fn grant_bell(h: &mut temen_interp::Host, bell: &Bell, epoch: Instant) {
+    let (bell, seen) = (Arc::clone(bell), Arc::new(AtomicU64::new(0)));
+    let proc = h.grant_host_proc_offloadable(
+        Box::new(move |_, args| {
+            let ns = args.first().map_or(0, |&a| a as u64);
+            let until = epoch.checked_add(Duration::from_nanos(ns));
+            let (bell, seen) = (Arc::clone(&bell), Arc::clone(&seen));
+            OffloadOutcome::Offload(Box::new(move || {
+                let was = seen.load(Ordering::SeqCst);
+                let now = wait(&bell, was, until);
+                seen.store(now, Ordering::SeqCst);
+                i64::from(now != was)
+            }))
+        }),
+        temen_interp::CapState::Uncaptured,
+    );
+    h.register_cap_name("bell", proc);
+}
+
 /// Starts a thread reading `sock` to its close, queueing each read, and the close as an empty
-/// one.
-fn reader(sock: &Arc<TcpStream>) -> Receiver<Vec<u8>> {
+/// one, and ringing `bell` for each.
+fn reader(sock: &Arc<TcpStream>, bell: &Bell) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
-    let sock = Arc::clone(sock);
+    let (sock, bell) = (Arc::clone(sock), Arc::clone(bell));
     std::thread::spawn(move || {
         let mut buf = vec![0; 1 << 16];
         loop {
             let n = (&*sock).read(&mut buf).unwrap_or(0);
-            if tx.send(buf[..n].to_vec()).is_err() || n == 0 {
+            let queued = tx.send(buf[..n].to_vec()).is_ok();
+            ring(&bell);
+            if !queued || n == 0 {
                 return;
             }
         }
@@ -96,9 +151,9 @@ fn reader(sock: &Arc<TcpStream>) -> Receiver<Vec<u8>> {
 /// failure; op 2 shuts the socket down, its writing side with 0, both with 1. Reading never
 /// waits: a host procedure runs holding the root's host lock, which the vat's senders need to
 /// write, so a root waiting here for the other machine's bytes could keep its own from ever
-/// being sent. The guest polls.
-fn link(sock: Arc<TcpStream>) -> HostCap {
-    let queue = Arc::new(Mutex::new(reader(&sock)));
+/// being sent. The root waits on `bell` instead, which the reader thread rings ([`grant_bell`]).
+fn link(sock: Arc<TcpStream>, bell: &Bell) -> HostCap {
+    let queue = Arc::new(Mutex::new(reader(&sock, bell)));
     HostCap::host_proc(0, move |_| {
         let (sock, queue) = (Arc::clone(&sock), Arc::clone(&queue));
         // A delivery longer than the caller's buffer, and how much of it was handed over.
@@ -305,10 +360,12 @@ pub fn run(
         ..Default::default()
     };
     let sock = Arc::clone(&link.sock);
+    // The bell's deadlines are on the clock the root reads, so both count from `epoch`.
+    let (bell, epoch): (Bell, _) = (Arc::default(), Instant::now());
     let mut caps = vec![
-        ("link", self::link(Arc::clone(&link.sock))),
+        ("link", self::link(Arc::clone(&link.sock), &bell)),
         ("entropy", entropy()),
-        ("clock", clock(Instant::now())),
+        ("clock", clock(epoch)),
         ("keys", self::keys(keys)),
     ];
     if let Some(dir) = dir {
@@ -321,6 +378,7 @@ pub fn run(
         h.register_cap_name("store-self", m);
         h.grant_instantiator();
         h.grant_budget(-1, -1, -1);
+        grant_bell(h, &bell, epoch);
         setup(h);
     };
     let out = match inst.run_with_caps_and_host(backend, &config, &caps, Some(&mut grant)) {
