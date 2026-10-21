@@ -286,6 +286,7 @@ JaclVal jacl_service_call(JaclVal s, JaclVal r) { (void)s; (void)r; return chan_
 JaclVal jacl_service_event(JaclVal s, JaclVal w) { (void)s; (void)w; return chan_err("service-event: unavailable without vats"); }
 JaclVal jacl_service_send(JaclVal s, JaclVal m) { (void)s; (void)m; return chan_err("service-send: unavailable without vats"); }
 JaclVal jacl_schema(JaclVal d) { (void)d; return chan_err("schema: unavailable without vats"); }
+JaclVal jacl_service_schema(JaclVal s, JaclVal n) { (void)s; (void)n; return chan_err("service-schema: unavailable without vats"); }
 JaclVal jacl_transcript(JaclVal n, JaclVal t, JaclVal l) { (void)n; (void)t; (void)l; return chan_err("transcript: unavailable without vats"); }
 JaclVal jacl_transcript_line(JaclVal t, JaclVal x) { (void)t; (void)x; return chan_err("transcript-line: unavailable without vats"); }
 JaclVal jacl_transcript_block(JaclVal t, JaclVal c, JaclVal j, JaclVal s) { (void)t; (void)c; (void)j; (void)s; return chan_err("transcript-block: unavailable without vats"); }

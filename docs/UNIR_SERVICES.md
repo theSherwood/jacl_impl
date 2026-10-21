@@ -16,6 +16,8 @@ def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
 [service-event $s $true]                          ; the next event, waiting; nil if none and not waiting
 def p [service "pane" "shell.n"]                  ; a session whose events signal this vat's notification
 [service-send $p [map "content" [map "Text" "hi"]]] ; a message on a named entry, waiting for nothing
+def e [service "events"]                          ; a subscription: granted without its requests
+def t [service-schema $e "events"]                ; one entry's schema, for a transcript block
 ```
 
 - `[service NAME]` connects: the service offers its schema on the reply edge, the runtime adopts it,
@@ -37,6 +39,13 @@ def p [service "pane" "shell.n"]                  ; a session whose events signa
 - `[service-send S [map ENTRY VALUE]]` sends `VALUE` as a message of the catalog entry named
   `ENTRY`, waiting for nothing: a connection that is not request and reply, such as a pane. A session
   that never calls hears every entry the other end writes as an event.
+- A service granted without `NAME.requests` is a **subscription** (unir decision #282.5): it hears
+  what the service writes, as events, and sends nothing, so `service-call` and `service-send` on it
+  are errors. unir's sessions grant a shell the mount's syncs so, as `events`.
+- `[service-schema S NAME]` is the schema of the service's catalog entry `NAME` alone: the service's
+  types, with that entry as entry 0. `transcript-block` takes it, so a shell shows what a
+  subscription hears typed as the service sent it (unir decision #282.5). An error if the service
+  has no entry by that name.
 
 A value that does not fit the service's type is an error value, and nothing is sent.
 

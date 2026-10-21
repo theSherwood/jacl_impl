@@ -174,6 +174,9 @@ typedef enum {
   /* A file's size and kind (docs/TEMEN_FS_DESIGN.md; jacl_impl#244) */
   HEAD_FILE_INFO,
 
+  /* One entry of a service's schema, for a transcript block (theSherwood/unir decision #282.5) */
+  HEAD_SERVICE_SCHEMA,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -368,6 +371,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "try-read-line", 13) == 0) return HEAD_TRY_READ_LINE;
       return HEAD_NONE;
     case 14:
+      if (memcmp(s, "service-schema", 14) == 0) return HEAD_SERVICE_SCHEMA;
       if (memcmp(s, "transcript-end", 14) == 0) return HEAD_TRANSCRIPT_END;
       if (memcmp(s, "transcript-job", 14) == 0) return HEAD_TRANSCRIPT_JOB;
       return HEAD_NONE;

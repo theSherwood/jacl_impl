@@ -169,6 +169,27 @@ JaclVal jacl_schema(JaclVal desc) {
   return jaclrt_i32(slot);
 }
 
+/* [service-schema S NAME]: the schema of open service S's catalog entry NAME alone, the service's
+ * types with that entry as entry 0, so a block can show what the entry carries typed as the service
+ * sent it, as a shell shows a subscription's events (theSherwood/unir decision #282.5). */
+JaclVal jacl_service_schema(JaclVal svc, JaclVal name) {
+  unir_service *s = service_of(svc);
+  if (!s) return chan_err("service-schema: not an open service");
+  char nb[128];
+  int64_t nl = transcript_str(name, nb, sizeof nb);
+  if (nl < 0) return chan_err("service-schema: the entry's name is not a string");
+  int32_t slot = -1;
+  for (uint32_t i = 0; i < JACL_SCHEMAS && slot < 0; i++)
+    if (!jacl_schemas[i]) slot = (int32_t)i;
+  if (slot < 0) return chan_err("service-schema: too many");
+  unir_vat *vat = vat_take();
+  unir_schema *sch = unir_service_schema(s, (const uint8_t *)nb, (uint64_t)nl);
+  vat_give();
+  if (!sch) return chan_err("service-schema: the service has no entry by that name");
+  jacl_schemas[slot] = sch;
+  return jaclrt_i32(slot);
+}
+
 /* [transcript NAME T L] */
 JaclVal jacl_transcript(JaclVal name, JaclVal transcript, JaclVal line) {
   char nb[128], tb[256], lb[256];

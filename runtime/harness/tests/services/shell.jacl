@@ -10,10 +10,18 @@
 ## line defines the lines after it see. What a job outputs goes to its blocks of the transcript,
 ## each headed by the line (`$ctx.out`): what it prints, the values it emits, and its pipelines'
 ## output, typed under the schema their last program offered. A job that shows nothing else shows
-## its value, and one that fails shows why. Before the first prompt the shell evaluates its profile,
-## the store's document `profile` if there is one, so every line sees what the profile defines.
+## its value, and one that fails shows why. Before the first prompt the shell evaluates its
+## commands, the session ref `~shell/commands` the session commits at its start, then the person's
+## own profile, the store's document `profile`, each if there is one, so every line sees what they
+## define, the profile's last (unir decision #282.5).
 ## Its transcript and line are session refs, which a store never journals: on a store reopened
 ## from its log, the next session's shell finds neither (unir decision #282.2).
+## A job reaches the store through the shell's session with it, as `$ctx->store`. Granted a
+## service as `mount`, a job reaches it as `$ctx->mount` (-1 when there is none). Granted a
+## subscription as `events`, the shell shows what it hears as a block at the end of the
+## transcript, typed as the service sent it, each pass that hears something. A session that mounts
+## a directory grants the mount's control and its syncs so (unir decision #282.5); the shell opens
+## the control first, the order the mount connects them in.
 ##
 ##   LINE &     runs LINE in the background
 ##   jobs       lists the jobs running or stopped
@@ -99,14 +107,17 @@ proc show {t, line, n, v} {
 }
 
 ## Starts SRC as job N, LINE its command: a task whose output goes to the job's place in the
-## transcript T and whose input is the pane's events while the shell waits for it. The job's
-## record: its task, its place, its input, its line, whether it is stopped, and whether it is
-## QUIET, showing only its output.
-proc start {t, line, src, n, quiet} {
+## transcript T and whose input is the pane's events while the shell waits for it, reaching the
+## shell's sessions SV (`store`, `mount`) through its context. The job's record: its task, its
+## place, its input, its line, whether it is stopped, and whether it is QUIET, showing only its
+## output.
+proc start {t, sv, line, src, n, quiet} {
   def s [transcript-job $t $line $n]
   ok $s
   def in [atom [vec]]
-  def f [with-ctx {out $s; in $in} { spawn { repl-eval $src } }]
+  def store [map-get $sv "store"]
+  def mount [map-get $sv "mount"]
+  def f [with-ctx {out $s; in $in; store $store; mount $mount} { spawn { repl-eval $src } }]
   map "f" $f "s" $s "in" $in "line" $line "stopped" $false "quiet" $quiet
 }
 
@@ -187,12 +198,23 @@ proc main {} {
   def p [service "pane" "shell.n"]
   assert [not [error? $p]]
   assert [== [service-send $p [map "show" [map "transcript" "~shell/transcript" "line" "~shell/line"]]] $nil]
-  ## The profile, evaluated here, before the first prompt: what it defines every line sees, and
-  ## what fails in it shows as a block.
-  def profile [ask $s [map "Head" "profile"] "Head"]
-  if [!= $profile $nil] {
-    def v [repl-eval [text $s $profile]]
-    if [error? $v] { say $t "profile" 0 [concat "error: " [concat [to-string [error-val $v]] "\n"]] }
+  ## The mount's control and its syncs, when the session mounts a directory: the control first.
+  def m [service "mount"]
+  def mount [if [error? $m] { -1 } else { $m }]
+  def heard [service "events"]
+  def synced [if [error? $heard] { $heard } else { [service-schema $heard "events"] }]
+  def events [if [error? $synced] { $nil } else { $heard }]
+  def sv [map "store" $s "mount" $mount]
+  ## The fields a job reaches the shell's sessions by, declared for every line and the profile.
+  assert [not [error? [repl-eval "ctx i32 store -1; ctx i32 mount -1"]]]
+  ## The commands and then the profile, evaluated here, before the first prompt: what they define
+  ## every line sees, and what fails in one shows as a block.
+  for [vec "~shell/commands" "profile"] doc {
+    def v [ask $s [map "Head" $doc] "Head"]
+    if [!= $v $nil] {
+      def r [repl-eval [text $s $v]]
+      if [error? $r] { say $t $doc 0 [concat "error: " [concat [to-string [error-val $r]] "\n"]] }
+    }
   }
   def jobs [atom [map]]
   mut last 0
@@ -216,6 +238,22 @@ proc main {} {
     if [&& [!= $fg $nil] [not [map-has [deref $jobs] $fg]]] {
       set fg $nil
       ok [transcript-line $t [concat "\x24 " $line]]
+    }
+    ## What the subscription heard since the last pass, one block.
+    if [!= $events $nil] {
+      mut news [vec]
+      mut e [service-event $events $false]
+      while [&& [!= $e $nil] [not [error? $e]]] {
+        set news [vec-push $news [map-get $e "events"]]
+        set e [service-event $events $false]
+      }
+      if [> [length $news] 0] {
+        def b [transcript-block $t "events" 0 $synced]
+        ok $b
+        ## One the block's schema cannot carry is left out: the service's fault, not the person's.
+        for $news x { def pushed [transcript-push $t $b $x] }
+        ok [transcript-end $t $b]
+      }
     }
     ok [transcript-flush $t]
     ## Every event waiting, then the line drawn once: a burst of keys, or a paste, is one commit.
@@ -288,7 +326,7 @@ proc main {} {
                     ## A line ending in `&` runs in the background; any other is waited for.
                     def bg [== [index $line [- [length $line] 1]] "&"]
                     def src [if $bg { [slice $line 0 [- [length $line] 1]] } else { $line }]
-                    reset $jobs [map-set [deref $jobs] $last [start $t $src $src $last $false]]
+                    reset $jobs [map-set [deref $jobs] $last [start $t $sv $src $src $last $false]]
                     if [not $bg] { set fg $last }
                   }
                 }
@@ -311,7 +349,7 @@ proc main {} {
             if [&& [!= $name $nil] [not [error? $name]]] {
               set last [+ $last 1]
               def src [concat "open " [quoted $name]]
-              reset $jobs [map-set [deref $jobs] $last [start $t [concat "open " $name] $src $last $true]]
+              reset $jobs [map-set [deref $jobs] $last [start $t $sv [concat "open " $name] $src $last $true]]
             }
           }
         }

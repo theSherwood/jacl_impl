@@ -751,6 +751,9 @@ typedef enum {
   /* A file's size and kind (docs/TEMEN_FS_DESIGN.md; jacl_impl#244) */
   HEAD_FILE_INFO,
 
+  /* One entry of a service's schema, for a transcript block (theSherwood/unir decision #282.5) */
+  HEAD_SERVICE_SCHEMA,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
