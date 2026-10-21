@@ -41,7 +41,7 @@ static const char *const jacl_interp_prelude_names[] = {
   "lines", "stream_next",
   "exec", "signal", "cancel",
   "read-file", "write-file", "append-file",
-  "delete-file", "file-exists?", "list-dir",
+  "delete-file", "file-exists?", "list-dir", "file-info",
   0
 };
 

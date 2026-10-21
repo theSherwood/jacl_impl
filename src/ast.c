@@ -171,6 +171,9 @@ typedef enum {
   HEAD_READ_LINE,
   HEAD_TRY_READ_LINE,
 
+  /* A file's size and kind (docs/TEMEN_FS_DESIGN.md; jacl_impl#244) */
+  HEAD_FILE_INFO,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
@@ -326,6 +329,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "ptr-deref", 9) == 0) return HEAD_PTR_DEREF;
       if (memcmp(s, "read-file", 9) == 0) return HEAD_READ_FILE;
       if (memcmp(s, "read-line", 9) == 0) return HEAD_READ_LINE;
+      if (memcmp(s, "file-info", 9) == 0) return HEAD_FILE_INFO;
       return HEAD_NONE;
     case 10:
       if (memcmp(s, "transcript", 10) == 0) return HEAD_TRANSCRIPT;

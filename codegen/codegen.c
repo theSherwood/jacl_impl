@@ -5534,6 +5534,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_DELETE_FILE, "jacl_delete_file", 1},
       {HEAD_FILE_EXISTS, "jacl_file_exists", 1},
       {HEAD_LIST_DIR,    "jacl_list_dir",    1},
+      {HEAD_FILE_INFO,   "jacl_file_info",   1},
       {HEAD_APPEND_FILE, "jacl_append_file", 2},
       {HEAD_RANGE,      "jacl_range_vec",  2},
       {HEAD_ASSERT_TYPE,"jacl_assert_type", 2},

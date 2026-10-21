@@ -12,6 +12,8 @@
 ## output, typed under the schema their last program offered. A job that shows nothing else shows
 ## its value, and one that fails shows why. Before the first prompt the shell evaluates its profile,
 ## the store's document `profile` if there is one, so every line sees what the profile defines.
+## Its transcript and line are session refs, which a store never journals: on a store reopened
+## from its log, the next session's shell finds neither (unir decision #282.2).
 ##
 ##   LINE &     runs LINE in the background
 ##   jobs       lists the jobs running or stopped
@@ -180,11 +182,11 @@ proc main {} {
   assert [not [error? $s]]
   ## The writer's own session, opened before the pane: the vat answers none of this program's
   ## sessions until it has connected them all, in order.
-  def t [transcript "transcript" "shell/transcript" "shell/line"]
+  def t [transcript "transcript" "~shell/transcript" "~shell/line"]
   assert [not [error? $t]]
   def p [service "pane" "shell.n"]
   assert [not [error? $p]]
-  assert [== [service-send $p [map "show" [map "transcript" "shell/transcript" "line" "shell/line"]]] $nil]
+  assert [== [service-send $p [map "show" [map "transcript" "~shell/transcript" "line" "~shell/line"]]] $nil]
   ## The profile, evaluated here, before the first prompt: what it defines every line sees, and
   ## what fails in it shows as a block.
   def profile [ask $s [map "Head" "profile"] "Head"]

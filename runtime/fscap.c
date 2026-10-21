@@ -186,6 +186,23 @@ JaclVal jacl_fscap_file_exists(JaclVal path) {
   long r = __vm_host_call(h, 14 /*stat*/, jacl_fs_pti(p), plen, jacl_fs_pti(sb), JFS_STATBUF_LEN);
   return jaclrt_bool(r == 0);
 }
+/* `[file-info PATH]` through the cap: op 14 stat — the size (StatBuf offset 8, LE i64) and
+ * whether the mode is a directory's. The bare root is "." here, as list-dir's is. */
+JaclVal jacl_fscap_file_info(JaclVal path) {
+  int h = jacl_fs();
+  char p[1024];
+  long plen = jacl_fs_path(path, p, sizeof p);
+  if (plen < 0) return jaclrt_error();
+  if (plen == 0) { p[0] = '.'; p[1] = 0; plen = 1; }
+  char sb[JFS_STATBUF_LEN];
+  long r = __vm_host_call(h, 14 /*stat*/, jacl_fs_pti(p), plen, jacl_fs_pti(sb), JFS_STATBUF_LEN);
+  if (r != 0) return jaclrt_error();
+  uint32_t mode;
+  int64_t size;
+  memcpy(&mode, sb, 4);
+  memcpy(&size, sb + 8, 8);
+  return jacl_file_info_map(size, (mode & JFS_S_IFMT) == JFS_S_IFDIR);
+}
 /* `[list-dir PATH]` through the cap: opendir/readdir/closedir (ops 17/18/19), sorted.
  * "/" maps to "." (temen-fs's read_path admits CurDir; norm() folds it to the root). */
 JaclVal jacl_fscap_list_dir(JaclVal path) {

@@ -174,6 +174,25 @@ JaclVal jacl_file_exists(JaclVal path) {
   return jaclrt_bool(jacl_vfs_is_dir(path));
 }
 
+/* What `[file-info PATH]` returns: `[map "size" SIZE "dir" DIR]`. */
+JaclVal jacl_file_info_map(int64_t size, int dir) {
+  JaclVal m = jacl_map_set(jacl_map_empty(), jacl_str_new("size", 4), jacl_i64_box(size));
+  return jacl_map_set(m, jacl_str_new("dir", 3), jaclrt_bool(dir));
+}
+
+/* `[file-info PATH]` — what is at PATH: its size in bytes and whether it is a directory, or an
+ * error value when nothing is (as read-file's missing file). On the guest VFS a file's size is
+ * its content's, and a model directory's is 0. */
+JaclVal jacl_file_info(JaclVal path) {
+  if (jaclrt_is_error(path)) return path;
+  if (!jaclrt_is_string(path)) return jaclrt_error();
+  if (jacl_fs_granted()) return jacl_fscap_file_info(path);
+  JaclVal v = jacl_map_get(jacl_vfs_map(), path);
+  if (!jaclrt_is_nil(v)) return jacl_file_info_map(jacl_str_len(v), 0);
+  if (jacl_vfs_is_dir(path)) return jacl_file_info_map(0, 1);
+  return jaclrt_error();
+}
+
 /* `[list-dir PATH]` — sorted vector of PATH's immediate entry names (no "."/".."), or an
  * error value on a missing directory. On the guest VFS the children are the map keys one
  * level under PATH (deduped through their first '/'); the model dirs are "/" and "/tmp". */

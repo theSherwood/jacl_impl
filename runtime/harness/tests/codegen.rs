@@ -1428,6 +1428,35 @@ fn clock_reads_the_granted_clock() {
 }
 
 #[test]
+fn file_info_tells_a_files_size_and_kind() {
+    // `[file-info PATH]` (runtime/io.c, runtime/fscap.c; #244): on the guest VFS, and through a
+    // granted `fs`, the capability's stat over a real directory, on the tree-walker and the JIT,
+    // against the file's own `# expect:` lines.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/io_file_info.jacl");
+    let src = std::fs::read_to_string(path).expect("read io_file_info.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let (linked, entry) = emit_and_link_file(path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    let dir = std::env::temp_dir().join(format!("jacl_file_info_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("tmp")).expect("a scratch directory");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
+        for granted in [false, true] {
+            let caps: Vec<(&str, temen_run::HostCap)> = match granted {
+                true => vec![("fs", temen_run::fs::host_fs(dir.clone()))],
+                false => vec![],
+            };
+            let run = inst
+                .run_with_caps(backend, &temen_run::RunConfig::default(), &caps)
+                .unwrap_or_else(|e| panic!("run io_file_info on {backend:?}: {e}"));
+            assert_eq!(String::from_utf8_lossy(&run.stdout), want, "{backend:?}, fs granted: {granted}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_binding_captures_an_error_in_a_nested_block() {
     // A `def` binds an error in a loop's body or a branch as it does in a proc's body, rather than
     // the block returning it (#204: the shell reaps a cancelled job's error in a loop). The file's

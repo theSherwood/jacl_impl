@@ -4504,6 +4504,7 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
     { HEAD_ARGS,        TYPE_VEC    },
     { HEAD_FILE_EXISTS, TYPE_BOOL   },
     { HEAD_LIST_DIR,    TYPE_VEC    },
+    { HEAD_FILE_INFO,   TYPE_MAP    },
     /* Atom watchers — both side-effecting, return nil. */
     { HEAD_WATCH,       TYPE_NIL    },
     { HEAD_UNWATCH,     TYPE_NIL    },

@@ -748,6 +748,9 @@ typedef enum {
   HEAD_READ_LINE,
   HEAD_TRY_READ_LINE,
 
+  /* A file's size and kind (docs/TEMEN_FS_DESIGN.md; jacl_impl#244) */
+  HEAD_FILE_INFO,
+
   HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
 } HeadId;
 
