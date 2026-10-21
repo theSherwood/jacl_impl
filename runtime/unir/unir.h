@@ -258,11 +258,11 @@ int64_t unir_handler_open(unir_vat *vat, int64_t module, uint32_t size_log2, con
                           uint64_t args_len, const uint8_t *text, uint64_t text_len,
                           uint32_t capacity, uint32_t slot_size, uint64_t fuel, uint64_t memory);
 /* The legacy adapter as a job: `args` followed by the job's size for a pane `rows` by `cols`;
- * passed the program's terminal (`pty`) with `stdout`. NULL with `*err` set if it could not
- * start. unir_legacy_event: a pane event as the runtime heard it, a value frame of `values` (the
- * runtime's value schema): {"keys": K} or {"geometry": {rows, cols}}; UNIR_EINVALID for any
- * other. unir_legacy_next waits up to
- * `timeout_ns` (negative: as long as it takes) for the program's next screen and keeps it: its
+ * passed the program's terminal (`pty`) with `stdout`, and its bell (`pty.bell`, issue #259) if
+ * this vat holds one. NULL with `*err` set if it could not start. unir_legacy_event: a pane
+ * event as the runtime heard it, a value frame of `values` (the runtime's value schema):
+ * {"keys": K} or {"geometry": {rows, cols}}; UNIR_EINVALID for any other. unir_legacy_next waits
+ * up to `timeout_ns` (negative: as long as it takes) for the program's next screen and keeps it: its
  * length, 0 if none came, UNIR_EENDED once the program ended; unir_legacy_screen copies it out,
  * a message of unir_schema_grid's entry 0. unir_legacy_close ends the job and returns the
  * adapter's exit status. */

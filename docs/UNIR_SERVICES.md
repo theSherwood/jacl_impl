@@ -255,9 +255,11 @@ parks its fiber, so a transcript is one call at a time: another fiber's call mea
 A job's output is committed whenever 32 KiB of it waits.
 
 `jacl_pane [PROGRAM.jacl]` runs a program this way on the terminal it is started from: the shell
-below, unless another is named. It puts the terminal in raw mode for the run.
+below, unless another is named. It puts the terminal in raw mode for the run, and grants the terminal
+vat stdin's bell (`stdin.bell`, unir decision #259.1), which the thread reading the terminal rings
+for each read, so the vat waits for keys rather than polling stdin.
 `codegen.rs::a_jacl_program_runs_in_a_terminal_pane` drives it with a scripted terminal on all three
-engines.
+engines, and fails if the terminal vat polled.
 
 ## The shell
 

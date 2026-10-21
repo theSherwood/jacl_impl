@@ -243,12 +243,17 @@ fn shell_session(
     let (tee, keys) = (Arc::clone(&shown), Arc::clone(&shown));
     let (client, dir2, programs) = (client.clone(), dir.clone(), programs.to_vec());
     let (done, finished) = std::sync::mpsc::channel();
+    // The terminal vat waits on stdin's bell (theSherwood/unir#259). What the terminal shows
+    // releases the script's next keys, so the tee rings it.
+    let bell: Arc<jacl_runtime_harness::bell::Bell> = Arc::default();
+    let waited = Arc::clone(&bell);
     std::thread::spawn(move || {
         let mut step = 0;
         let mut terminal = |h: &mut temen_interp::Host| {
-            let tee = Arc::clone(&tee);
+            let (tee, rung) = (Arc::clone(&tee), Arc::clone(&bell));
             h.set_stdout_tee(Box::new(move |b| {
-                tee.lock().unwrap().push_str(&String::from_utf8_lossy(b))
+                tee.lock().unwrap().push_str(&String::from_utf8_lossy(b));
+                jacl_runtime_harness::bell::ring(&rung);
             }));
             let keys = Arc::clone(&keys);
             h.set_stdin_source(Box::new(move || {
@@ -268,6 +273,7 @@ fn shell_session(
             backend,
             &dir2,
             size,
+            &bell,
             &mut terminal,
         );
         let _ = done.send(out);
@@ -281,6 +287,10 @@ fn shell_session(
             )
         });
     let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        jacl_runtime_harness::bell::waited(&waited),
+        "{backend:?}: the terminal vat polled stdin instead of waiting on its bell"
+    );
     println!("{backend:?}: {out:?}");
     let status = out
         .lines()
