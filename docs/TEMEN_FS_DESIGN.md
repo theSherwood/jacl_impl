@@ -206,6 +206,10 @@ Design rules that keep this coherent as caps accumulate:
    and the TEMEN runtime (guest-VFS model over the map + cap path), driven by corpus tests
    (`io_delete_exists`, `io_list_dir`) that the harness's dual-mode gate runs granted and
    ungranted. The `exec` capability ask is written up in `docs/TEMEN_EXEC_ASK.md`.
+   `file-info` (op 14 stat: the size at offset 8, and the mode's directory bit) followed on
+   the TEMEN runtime for a shell's `ls` (#244): `[map "size" N "dir" B]`, or an error value
+   when nothing is at the path. `codegen.rs::file_info_tells_a_files_size_and_kind` runs
+   `io_file_info` on the guest VFS and with a granted `fs`.
 
 ## Non-goals
 

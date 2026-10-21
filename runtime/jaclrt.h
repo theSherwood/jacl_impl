@@ -404,6 +404,8 @@ JaclVal jacl_append_file(JaclVal content, JaclVal path);  /* append-file */
 JaclVal jacl_delete_file(JaclVal path);                   /* delete-file: nil, or error on missing */
 JaclVal jacl_file_exists(JaclVal path);                   /* file-exists?: bool */
 JaclVal jacl_list_dir(JaclVal path);                      /* list-dir: sorted vec of names, or error */
+JaclVal jacl_file_info(JaclVal path);                     /* file-info: {size, dir}, or error */
+JaclVal jacl_file_info_map(int64_t size, int dir);        /* the map file-info returns */
 /* "fs" named-capability adapter (fscap.c; docs/TEMEN_FS_DESIGN.md). Granted -> the file
  * builtins route through real cap ops; absent -> the pure-guest VFS above serves. */
 int     jacl_fs_granted(void);
@@ -413,6 +415,7 @@ JaclVal jacl_fscap_append_file(JaclVal content, JaclVal path);
 JaclVal jacl_fscap_delete_file(JaclVal path);
 JaclVal jacl_fscap_file_exists(JaclVal path);
 JaclVal jacl_fscap_list_dir(JaclVal path);
+JaclVal jacl_fscap_file_info(JaclVal path);
 JaclVal jacl_names_sorted_vec(JaclVal arr);               /* sort an arr of names -> vec */
 JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
 JaclVal jacl_range_inclusive(JaclVal a, JaclVal b);/* [range-inclusive A B] as a vector */

@@ -209,7 +209,7 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_lines); SYM(jacl_interpret_prelude); \
     /* file-system capability surface */ \
     SYM(jacl_read_file); SYM(jacl_write_file); SYM(jacl_append_file); \
-    SYM(jacl_delete_file); SYM(jacl_file_exists); SYM(jacl_list_dir); \
+    SYM(jacl_delete_file); SYM(jacl_file_exists); SYM(jacl_list_dir); SYM(jacl_file_info); \
     /* builtins reaching capabilities / nested interpret */ \
     SYM(jacl_print); SYM(jacl_exec_capture); SYM(jacl_interpret1); SYM(jacl_interpret2)
   int counting = 1;

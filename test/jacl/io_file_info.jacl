@@ -1,0 +1,22 @@
+# expect: false
+# expect: 7
+# expect: true
+# expect: true
+# expect: error
+# file-info tells what is at a path: its size in bytes, and whether it is a directory
+# ("/" too, the granted root itself); nothing there is an error value, as read-file's missing
+# file is. A directory's size is the filesystem's, so only a file's is printed. Self-cleaning:
+# the file is deleted before the end, so re-runs stay deterministic.
+[write-file "payload" "/tmp/jacl_p4_info_47291.txt"]
+def f [file-info "/tmp/jacl_p4_info_47291.txt"]
+print [map-get $f "dir"]
+print [map-get $f "size"]
+print [map-get [file-info "/tmp"] "dir"]
+print [map-get [file-info "/"] "dir"]
+def r [file-info "/tmp/jacl_p4_no_such_47291"]
+if [error? $r] {
+  print "error"
+} else {
+  print "found"
+}
+[delete-file "/tmp/jacl_p4_info_47291.txt"]
