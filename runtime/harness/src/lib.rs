@@ -22,6 +22,10 @@ use temen_jit::JitOutcome;
 /// in-process, for the native frontend's `JACL_STAGE_ON_TEMEN` path.
 pub mod stage_ffi;
 
+/// Bells a host rings when something arrives for a vat, so the vat waits rather than polls
+/// (theSherwood/unir#225, #259).
+pub mod bell;
+
 /// One of two machines editing one document over TCP: unir's store vat in peer mode, its editor a
 /// JACL program (`unir_node`).
 pub mod node;

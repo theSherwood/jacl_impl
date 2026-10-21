@@ -419,7 +419,7 @@ fn main() {
 ///
 /// The chain, mirrored below in the driver's order: `outline_cap_calls` → pick paged / B2 / local
 /// table → `compile_module_tierup*` → `emit[i]` → `emittable_leaf = emit && all-i64 sig` →
-/// `eligible = leaf && est_emitted_size >= floor` → decline iff no leaf and no `vm_jit_*` import.
+/// `eligible = leaf` (no size floor since temen #2474) → decline iff no leaf and no `vm_jit_*` import.
 ///
 /// The input must be the **linked module exactly as `emit_temen` encodes it** — the driver runs no
 /// optimizer, and it applies `outline_cap_calls` once, which this does too. Passing an
@@ -514,16 +514,18 @@ fn coop_report(m0: &Module, profile: Option<&Profile>) {
         "emit mode: {mode}  (all_shimmable={all_shimmable}, paged={paged}, spill={spill}, table_log2={table_log2})"
     );
 
+    // The pump's bounces cannot park their task (temen #2443), so the probe emits as it does.
+    let host = temen_wasm_jit::BounceHost { spill, parks: false };
     let emitted_res = if paged {
         temen_wasm_jit::compile_module_tierup_b2_paged(
             &m,
             false,
             table_log2 as u32,
             page_log2,
-            spill,
+            host,
         )
     } else if all_shimmable {
-        temen_wasm_jit::compile_module_tierup_b2(&m, false, table_log2 as u32, spill)
+        temen_wasm_jit::compile_module_tierup_b2(&m, false, table_log2 as u32, host)
     } else {
         temen_wasm_jit::compile_module_tierup(&m, false)
     };
@@ -561,32 +563,22 @@ fn coop_report(m0: &Module, profile: Option<&Profile>) {
         println!("no emittable leaf, but a vm_jit_* import is present -> opens for the §22-unit win only");
     }
 
-    // The floor sweep. `eligible` is what the interpreter consults to raise a TierUp event, so
-    // "how many functions would ever tier up" is a floor question on top of the emit set.
-    let default_floor = temen_wasm_jit::MIN_TIERUP_EMITTED_FN_BYTES;
-    println!("\ntier-up eligibility by floor (eligible = emittable_leaf && est_emitted_size >= floor):");
-    for floor in [default_floor, 0usize] {
-        let n_elig = m
-            .funcs
-            .iter()
-            .zip(&emittable_leaf)
-            .filter(|(f, &leaf)| leaf && temen_wasm_jit::est_emitted_size(f) >= floor)
-            .count();
-        let tag = if floor == default_floor { " (default)" } else { " (#83's experiment)" };
-        println!("   floor={floor:<5}{tag:<22} eligible={n_elig}");
-    }
+    // `eligible` is what the interpreter consults to raise a TierUp event. Since temen #2474 it has
+    // no size floor: every emittable leaf is eligible, and the engine measures whether its calls
+    // repay the crossing.
+    println!("\ntier-up eligibility (eligible = emittable_leaf): {n_leaf}");
 
-    // Name what is eligible at floor 0 — #83's experiment forced exactly this set to tier up, and
-    // the question temen #1552 raised is whether an allocating JACL program still has one.
+    // Name what is eligible: the question temen #1552 raised is whether an allocating JACL program
+    // still has one.
     let mut names = std::collections::BTreeMap::<usize, &str>::new();
     for e in &m.exports {
         names.insert(e.func as usize, e.name.as_str());
     }
     let elig0: Vec<usize> = (0..m.funcs.len()).filter(|&i| emittable_leaf[i]).collect();
     if elig0.is_empty() {
-        println!("\nat floor 0: NOTHING is eligible — no function can tier up at any floor.");
+        println!("\nNOTHING is eligible — no function can tier up.");
     } else {
-        println!("\nat floor 0, these {} would tier up:", elig0.len());
+        println!("\nthese {} would tier up:", elig0.len());
         for i in elig0.iter().take(30) {
             println!(
                 "   f{:<5} {:<34} est_emitted={}",

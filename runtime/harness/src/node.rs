@@ -13,13 +13,13 @@
 use std::io::Read;
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use temen_interp::OffloadOutcome;
 use temen_run::{Backend, HostCap, RunConfig};
+
+use crate::bell::{self, Bell, ring};
 
 /// The vendored store unit.
 pub const STORE_VAT_LL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.ll");
@@ -76,51 +76,19 @@ pub fn connect(addr: impl ToSocketAddrs) -> std::io::Result<Link> {
     Ok(Link { role: 1, sock: tcp(TcpStream::connect(addr)?)? })
 }
 
-/// What the root waits on when its connection has nothing (theSherwood/unir#225): how many times
-/// the reader thread has rung, and the condition a ring wakes.
-type Bell = Arc<(Mutex<u64>, Condvar)>;
-
-fn ring(bell: &Bell) {
-    let (rung, cv) = &**bell;
-    *rung.lock().expect("the bell") += 1;
-    cv.notify_all();
-}
-
-/// Waits until `bell` has rung more than `seen` times, or until `until`, and returns how many
-/// times it has rung.
-fn wait(bell: &Bell, seen: u64, until: Option<Instant>) -> u64 {
-    let (rung, cv) = &**bell;
-    let rung = rung.lock().expect("the bell");
-    let not_yet = |r: &mut u64| *r == seen;
-    let rung = match until {
-        Some(t) => {
-            let left = t.saturating_duration_since(Instant::now());
-            cv.wait_timeout_while(rung, left, not_yet).expect("the bell").0
-        }
-        None => cv.wait_while(rung, not_yet).expect("the bell"),
-    };
-    *rung
-}
-
 /// Grants `bell` to the root as `bell`, as unir's host does: an offloadable host procedure, so
 /// the root waits on it holding nothing its senders need, on every engine. Op 0 waits, off the
 /// root's thread, until the bell rings or the clock reaches its argument (ns since `epoch`), and
 /// returns 1 if it rang since the last wait returned, else 0. A ring between two waits ends the
 /// next one at once, so none is lost.
-fn grant_bell(h: &mut temen_interp::Host, bell: &Bell, epoch: Instant) {
-    let (bell, seen) = (Arc::clone(bell), Arc::new(AtomicU64::new(0)));
+fn grant_bell(h: &mut temen_interp::Host, bell: &Arc<Bell>, epoch: Instant) {
+    let (bell, seen) = (Arc::clone(bell), Arc::default());
     let proc = h.grant_host_proc_offloadable(
         Box::new(move |_, args| {
             let ns = args.first().map_or(0, |&a| a as u64);
-            let until = epoch.checked_add(Duration::from_nanos(ns));
-            let (bell, seen) = (Arc::clone(&bell), Arc::clone(&seen));
-            OffloadOutcome::Offload(Box::new(move || {
-                let was = seen.load(Ordering::SeqCst);
-                let now = wait(&bell, was, until);
-                seen.store(now, Ordering::SeqCst);
-                i64::from(now != was)
-            }))
+            bell::wait_for(&bell, &seen, epoch.checked_add(Duration::from_nanos(ns)))
         }),
+        None,
         temen_interp::CapState::Uncaptured,
     );
     h.register_cap_name("bell", proc);
@@ -128,7 +96,7 @@ fn grant_bell(h: &mut temen_interp::Host, bell: &Bell, epoch: Instant) {
 
 /// Starts a thread reading `sock` to its close, queueing each read, and the close as an empty
 /// one, and ringing `bell` for each.
-fn reader(sock: &Arc<TcpStream>, bell: &Bell) -> Receiver<Vec<u8>> {
+fn reader(sock: &Arc<TcpStream>, bell: &Arc<Bell>) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     let (sock, bell) = (Arc::clone(sock), Arc::clone(bell));
     std::thread::spawn(move || {
@@ -152,9 +120,9 @@ fn reader(sock: &Arc<TcpStream>, bell: &Bell) -> Receiver<Vec<u8>> {
 /// waits: a host procedure runs holding the root's host lock, which the vat's senders need to
 /// write, so a root waiting here for the other machine's bytes could keep its own from ever
 /// being sent. The root waits on `bell` instead, which the reader thread rings ([`grant_bell`]).
-fn link(sock: Arc<TcpStream>, bell: &Bell) -> HostCap {
+fn link(sock: Arc<TcpStream>, bell: &Arc<Bell>) -> HostCap {
     let queue = Arc::new(Mutex::new(reader(&sock, bell)));
-    HostCap::host_proc(0, move |_| {
+    HostCap::host_proc(0, move |_, _| {
         let (sock, queue) = (Arc::clone(&sock), Arc::clone(&queue));
         // A delivery longer than the caller's buffer, and how much of it was handed over.
         let mut rest: Option<(Vec<u8>, usize)> = None;
@@ -192,7 +160,7 @@ fn link(sock: Arc<TcpStream>, bell: &Bell) -> HostCap {
             };
             Ok(vec![r])
         });
-        (proc, temen_interp::CapState::Uncaptured)
+        Some((proc, temen_interp::CapState::Uncaptured))
     })
 }
 
@@ -275,7 +243,7 @@ pub fn kept(dir: &Path, role: u8) -> Result<Keys, String> {
 /// the key the machine's names vouch for, the same here; op 3 returns 0, the root key never
 /// rotating; op 5 returns -1, introducing no petnames.
 fn keys(k: Keys) -> HostCap {
-    HostCap::host_proc(0, move |_| {
+    HostCap::host_proc(0, move |_, _| {
         let k = k.clone();
         let give: temen_interp::HostProc = Box::new(move |op, args, mem, _| {
             let put = match (op, args) {
@@ -293,14 +261,14 @@ fn keys(k: Keys) -> HostCap {
             };
             Ok(vec![if written { 0 } else { -1 }])
         });
-        (give, temen_interp::CapState::Uncaptured)
+        Some((give, temen_interp::CapState::Uncaptured))
     })
 }
 
 /// The time (the guest's `Clock`): op 0 the nanoseconds since `epoch`, op 1 the seconds since the
 /// Unix epoch, which a token's validity is in.
 fn clock(epoch: Instant) -> HostCap {
-    HostCap::host_proc(0, move |_| {
+    HostCap::host_proc(0, move |_, _| {
         let tick: temen_interp::HostProc = Box::new(move |op, _, _, _| {
             Ok(vec![match op {
                 1 => std::time::SystemTime::now()
@@ -309,20 +277,20 @@ fn clock(epoch: Instant) -> HostCap {
                 _ => epoch.elapsed().as_nanos() as i64,
             }])
         });
-        (tick, temen_interp::CapState::Stateless)
+        Some((tick, temen_interp::CapState::Stateless))
     })
 }
 
 /// 64 random bits from the OS, a host procedure's op 0: each store's session source, so the two
 /// machines' chunk ids never collide.
 fn entropy() -> HostCap {
-    HostCap::host_proc(0, |_| {
+    HostCap::host_proc(0, |_, _| {
         let draw: temen_interp::HostProc = Box::new(|_, _, _, _| {
             let mut b = [0u8; 8];
             let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
             Ok(vec![if ok.is_ok() { i64::from_le_bytes(b) } else { 0 }])
         });
-        (draw, temen_interp::CapState::Stateless)
+        Some((draw, temen_interp::CapState::Stateless))
     })
 }
 
@@ -361,7 +329,7 @@ pub fn run(
     };
     let sock = Arc::clone(&link.sock);
     // The bell's deadlines are on the clock the root reads, so both count from `epoch`.
-    let (bell, epoch): (Bell, _) = (Arc::default(), Instant::now());
+    let (bell, epoch): (Arc<Bell>, _) = (Arc::default(), Instant::now());
     let mut caps = vec![
         ("link", self::link(Arc::clone(&link.sock), &bell)),
         ("entropy", entropy()),

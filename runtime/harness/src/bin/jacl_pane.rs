@@ -16,7 +16,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use jacl_runtime_harness::{pane, repl};
+use jacl_runtime_harness::{bell, pane, repl};
 
 const SHELL_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/shell.jacl");
 
@@ -82,15 +82,22 @@ fn main() {
     let saved = stty(&["-g"]).unwrap_or_else(|| die("stdin is not a terminal"));
     stty(&["raw", "-echo"]).unwrap_or_else(|| die("could not put the terminal in raw mode"));
     // The terminal is read on a thread of its own, so a read never waits on it: with nothing typed
-    // the source answers "not yet" (temen#2019), and the terminal vat polls.
+    // the source answers "not yet" (temen#2019). The thread rings stdin's bell for each read and for
+    // the end of input, so the terminal vat waits for them rather than polling (theSherwood/unir#259).
     let (tx, bytes) = std::sync::mpsc::channel::<Vec<u8>>();
+    let bell: std::sync::Arc<bell::Bell> = std::sync::Arc::default();
+    let rung = std::sync::Arc::clone(&bell);
     std::thread::spawn(move || {
         let mut buf = [0u8; 256];
         loop {
             let n = std::io::stdin().lock().read(&mut buf).unwrap_or(0);
             if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                // Closed before the ring, so the read it wakes sees the end.
+                drop(tx);
+                bell::ring(&rung);
                 return;
             }
+            bell::ring(&rung);
         }
     });
     let mut bytes = Some(bytes);
@@ -107,7 +114,7 @@ fn main() {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
         }));
     };
-    let _ = pane::run(&client, log2, &[], backend, &dir, size, &mut terminal);
+    let _ = pane::run(&client, log2, &[], backend, &dir, size, &bell, &mut terminal);
     stty(&[&saved]);
     println!();
 }

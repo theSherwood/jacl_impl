@@ -4,12 +4,15 @@
 //! `store-self`), and the program from the client image (granted as `store-client`), granted the
 //! store as `store`, the pane as `pane`, the Jit capability, and the programs it may run as
 //! `bin.PROGRAM`. Only the terminal vat holds the terminal: the root's stdin after the vat's
-//! command, and its stdout. The store lives in `dir/store.log`.
+//! command, its stdout, and stdin's bell, which wakes the vat when the terminal has bytes
+//! (theSherwood/unir#259). The store lives in `dir/store.log`.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use temen_run::{Backend, RunConfig};
 
+use crate::bell::{self, Bell};
 use crate::node::store_images;
 
 /// A pane's size, in character cells.
@@ -22,7 +25,8 @@ pub struct Size {
 /// Runs `client` (a JACL program compiled as a child image, its window `2^log2` bytes) in a pane
 /// of `size` on `backend`, and returns everything the terminal was sent, then the vat's report.
 /// The client may run `programs` (child images, by name). `setup` sees the root's host before the
-/// run, to attach the terminal (`Host::set_stdin_source`, `Host::set_stdout_tee`).
+/// run, to attach the terminal (`Host::set_stdin_source`, `Host::set_stdout_tee`). The caller rings
+/// `bell` whenever stdin may have bytes: the terminal vat waits on it rather than polling stdin.
 pub fn run(
     client: &temen_ir::Module,
     log2: u8,
@@ -30,6 +34,7 @@ pub fn run(
     backend: Backend,
     dir: &Path,
     size: Size,
+    bell: &Arc<Bell>,
     setup: &mut dyn FnMut(&mut temen_interp::Host),
 ) -> String {
     let (vat, helper) = store_images();
@@ -59,8 +64,11 @@ pub fn run(
         h.grant_budget(-1, -1, -1);
         setup(h);
     };
-    let fs = temen_run::fs::host_fs(dir.to_path_buf());
-    match inst.run_with_caps_and_host(backend, &config, &[("fs", fs)], Some(&mut grant)) {
+    let caps = [
+        ("fs", temen_run::fs::host_fs(dir.to_path_buf())),
+        ("stdin.bell", bell::capability(bell)),
+    ];
+    match inst.run_with_caps_and_host(backend, &config, &caps, Some(&mut grant)) {
         Ok(run) => String::from_utf8_lossy(&run.stdout).into_owned(),
         Err(e) => format!("run failed: {e}\n"),
     }
