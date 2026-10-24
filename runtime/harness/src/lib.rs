@@ -38,6 +38,16 @@ pub mod repl;
 
 const RUNTIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
+/// A live terminal's tee: `tee` sees each write to the guest's stdout as it is made, and none of
+/// stderr's (`Host::set_stream_tee` hands it both).
+pub fn stdout_tee(mut tee: impl FnMut(&[u8]) + Send + 'static) -> temen_interp::StreamTee {
+    Box::new(move |role, bytes| {
+        if matches!(role, temen_interp::StreamRole::Out) {
+            tee(bytes)
+        }
+    })
+}
+
 /// Decode the emit driver's default output — a v9 temen-encode **object** (`irb_to_encoded`).
 /// The object carries its own `data.self` link-form data addresses and unresolved `call.sym`s,
 /// which `link` resolves, so there is no separate relocation table: the returned `Module` is a

@@ -17,6 +17,7 @@ typedef struct unir_service unir_service;
 typedef struct unir_transcript unir_transcript;
 typedef struct unir_legacy unir_legacy;
 typedef struct unir_notification unir_notification;
+typedef struct unir_drawer unir_drawer;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -175,20 +176,24 @@ int64_t unir_notification_wait(unir_notification *n, int64_t timeout_ns, uint64_
 int64_t unir_notification_signal(unir_notification *n, uint64_t badge);
 
 /* Services (unir spec §13, issue #50): a session with a service vat granted as `name`, i.e.
- * `name.requests`, `name.replies` and `name.post`. The service offers its schema first; this
- * end adopts it. Values cross as the runtime's value frames, `values` being the runtime's
- * value schema (a connection schema whose entry 0 is its value type), converted to and from
- * the service's messages by structure. Stores 0 or an error in `*status`. */
+ * `name.requests`, `name.replies` and `name.post`; granted without `name.requests`, a
+ * subscription, which hears what the service writes and sends nothing (decision #282.5). The
+ * service offers its schema first; this end adopts it. Values cross as the runtime's value
+ * frames, `values` being the runtime's value schema (a connection schema whose entry 0 is its
+ * value type), converted to and from the service's messages by structure. Stores 0 or an error
+ * in `*status`. */
 unir_service *unir_service_open(unir_vat *vat, const uint8_t *name, uint64_t name_len,
                                 uint32_t capacity, uint32_t slot_size, const uint8_t *values,
                                 uint64_t values_len, int64_t *status);
 /* Sends `request` (a value frame) and waits for its reply: returns the reply's length as a
  * value frame, which unir_service_result copies out. UNIR_EMISMATCH: the request does not fit
- * the service's request type (nothing was sent). Events that arrive meanwhile are kept. */
+ * the service's request type (nothing was sent); UNIR_EINVALID from a subscription. Events
+ * that arrive meanwhile are kept. */
 int64_t unir_service_call(unir_vat *vat, unir_service *s, const uint8_t *request, uint64_t len);
 /* Sends `message`, a value frame `{name: value}`, on the catalog entry named `name`, waiting
  * for nothing: a connection that is not request and reply (a pane's `show`). 0, or
- * UNIR_EMISMATCH if it is not one entry's name and a value of its type (nothing was sent). */
+ * UNIR_EMISMATCH if it is not one entry's name and a value of its type (nothing was sent), or
+ * UNIR_EINVALID from a subscription. */
 int64_t unir_service_send(unir_vat *vat, unir_service *s, const uint8_t *message, uint64_t len);
 /* The next event, `{name: value}`: kept, or the next to arrive, waiting for it when `wait`;
  * its length as a value frame, 0 if there is none, or an error. A session that never called
@@ -203,6 +208,10 @@ int64_t unir_service_disarm(unir_vat *vat, unir_service *s);
 /* Copies the last result out; its length, or UNIR_ETOO_SMALL. */
 int64_t unir_service_result(const unir_service *s, uint8_t *out, uint64_t cap);
 void unir_service_close(unir_vat *vat, unir_service *s);
+/* The schema of the service's entry named `name` alone: the service's types, with that entry as
+ * entry 0, so a shell can show what the entry carries as a transcript block typed as the service
+ * sent it (decision #282.5). NULL if there is no such entry; else unir_schema_free it. */
+unir_schema *unir_service_schema(const unir_service *s, const uint8_t *name, uint64_t len);
 
 /* A runtime's values as schemas and messages (issue #160), converted by structure as a
  * service's are; `values` is the runtime's value schema. unir_schema_from_value: the
@@ -280,5 +289,89 @@ int64_t unir_legacy_close(unir_vat *vat, unir_legacy *l);
  * with unir_schema_free. */
 unir_schema *unir_schema_link(void);
 unir_schema *unir_schema_grid(void);
+
+/* Regions (unir spec §15; decisions #236.1 to #236.3; issue #236): a rectangle of a screen a
+ * program draws in, which a compositor composes. A program draws a frame as an array of cells in
+ * its own memory, row by row, and presents it; only the lines that changed go, and the
+ * compositor shows a frame once all of it has come.
+ *
+ * A cell: a character, its colours and its style. A zeroed cell is blank: a space, plain, in the
+ * theme's colours. A control character shows as U+FFFD; a cell whose character is not a Unicode
+ * scalar, whose style has another bit, or whose colour is not one, is UNIR_EINVALID. */
+typedef struct unir_cell {
+  uint32_t c;     /* a Unicode scalar; 0 is a space */
+  uint32_t fg;    /* its colour: UNIR_COLOR_* */
+  uint32_t bg;    /* the colour behind it */
+  uint32_t style; /* UNIR_STYLE_* bits */
+} unir_cell;
+
+#define UNIR_COLOR_DEFAULT 0u                   /* the theme's text, or its background */
+#define UNIR_COLOR_SLOT(n) (0x01000000u | (n))  /* a theme slot, n < 256; 0-15 the ANSI colours */
+#define UNIR_COLOR_RGB(r, g, b) \
+  (0x02000000u | (uint32_t)(r) << 16 | (uint32_t)(g) << 8 | (uint32_t)(b))
+#define UNIR_STYLE_BOLD 1u
+#define UNIR_STYLE_FAINT 2u
+#define UNIR_STYLE_UNDERLINE 4u
+#define UNIR_STYLE_REVERSE 8u
+
+/* What a program hears: the region's size (rows, cols); a key (key, mods) while the region has
+ * the focus; or the focus gained (focus 1) or lost. A key is a character, or a named key from
+ * UNIR_KEY_ENTER on, with Ctrl (the lower-case byte) or Alt (a character) in `mods`. */
+typedef struct unir_event {
+  uint32_t kind; /* UNIR_EVENT_* */
+  uint32_t rows, cols;
+  uint32_t key, mods;
+  uint32_t focus;
+} unir_event;
+
+#define UNIR_EVENT_SIZE 1u
+#define UNIR_EVENT_KEY 2u
+#define UNIR_EVENT_FOCUS 3u
+#define UNIR_KEY_ENTER 0x110000u
+#define UNIR_KEY_TAB 0x110001u
+#define UNIR_KEY_BACKSPACE 0x110002u
+#define UNIR_KEY_DELETE 0x110003u
+#define UNIR_KEY_ESCAPE 0x110004u
+#define UNIR_KEY_UP 0x110005u
+#define UNIR_KEY_DOWN 0x110006u
+#define UNIR_KEY_RIGHT 0x110007u
+#define UNIR_KEY_LEFT 0x110008u
+#define UNIR_KEY_HOME 0x110009u
+#define UNIR_KEY_END 0x11000au
+#define UNIR_KEY_PAGE_UP 0x11000bu
+#define UNIR_KEY_PAGE_DOWN 0x11000cu
+#define UNIR_MOD_CTRL 1u
+#define UNIR_MOD_ALT 2u
+
+/* The program's end of the region it was endowed with as `name`: `name.lines` and `name.input`,
+ * its edges, and `name.post`, which they signal the compositor through. It offers the region's
+ * schema and accepts it back. NULL with `*status` set if it could not connect. */
+unir_drawer *unir_drawer_open(unir_vat *vat, const char *name, uint64_t name_len, int64_t *status);
+/* Presents `rows` by `cols` cells as the region's next frame (at most 512 by 1024: the rest is
+ * cut), the cursor at (cursor_row, cursor_col), hidden if either is negative or outside. It goes
+ * once the frame going has, replacing any presented since; this sends what the ring has room
+ * for and never waits. 0, UNIR_EINVALID for a cell that is not one (nothing is presented), or an
+ * edge error. */
+int64_t unir_drawer_present(unir_vat *vat, unir_drawer *d, const unir_cell *cells, uint32_t rows,
+                            uint32_t cols, int32_t cursor_row, int32_t cursor_col);
+/* Sends what waits to be sent, then takes the next event into `*e`: 1, 0 if none has come, or an
+ * error (UNIR_EENDED once the compositor ended the region). */
+int64_t unir_drawer_next(unir_vat *vat, unir_drawer *d, unir_event *e);
+/* Arms the region for a wait on the program's notification (unir_notification_wait), which the
+ * compositor's ends signal: 1 if it armed, 0 if an event, or room for a frame waiting to go, is
+ * there (then do not wait). unir_drawer_disarm it after the wait, whatever the wait returned. */
+int64_t unir_drawer_arm(unir_vat *vat, unir_drawer *d);
+int64_t unir_drawer_disarm(unir_vat *vat, unir_drawer *d);
+/* Ends the region: what was presented goes, waiting for room as it must, then the compositor
+ * hears the end, keeping the last frame. */
+void unir_drawer_close(unir_vat *vat, unir_drawer *d);
+/* Writes UTF-8 `text` into row `row` of `cells`, `cols` a row, from column `col`, as a grid
+ * writes text: a character a cell in `style` and colours `fg` on `bg`, a tab as spaces to the next
+ * multiple of 8, any other control character in caret notation, cut at `cols`. Returns the column
+ * after the last cell written, or UNIR_EINVALID if `text` is not UTF-8 or the style or a colour
+ * is not one. */
+int64_t unir_cells_write(unir_cell *cells, uint32_t cols, uint32_t row, uint32_t col,
+                         const uint8_t *text, uint64_t len, uint32_t style, uint32_t fg,
+                         uint32_t bg);
 
 #endif

@@ -1337,7 +1337,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Same-scope shadowing error | compile-time |
 | Shell interop (`!cmd`, `exec`) | `OP_EXEC` with FULL/STDIN/BG/PIPE flags; OS pipes, stdin/stdout |
 | Jobs | a Job is the Future of the task running the pipeline: `&` is `spawn`; `cancel`/`suspend`/`resume` (`docs/UNIR_PIPELINES.md`) |
-| Services | `[service NAME]`, `[service-call S REQ]`, `[service-event S WAIT]`: a session with a service vat granted as NAME, requests and replies as plain values (`docs/UNIR_SERVICES.md`) |
+| Services | `[service NAME]`, `[service-call S REQ]`, `[service-event S WAIT]`, `[service-send S MSG]`, `[service-schema S NAME]`: a session with a service vat granted as NAME, requests and replies as plain values, or a subscription to its events (`docs/UNIR_SERVICES.md`) |
 
 ### Not yet implemented
 

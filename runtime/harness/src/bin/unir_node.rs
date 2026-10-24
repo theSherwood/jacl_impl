@@ -136,7 +136,7 @@ fn main() {
     });
     let mut lines = Some(lines);
     let mut terminal = |h: &mut temen_interp::Host| {
-        h.set_stdout_tee(Box::new(|b| {
+        h.set_stream_tee(jacl_runtime_harness::stdout_tee(|b| {
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(b);
             let _ = out.flush();

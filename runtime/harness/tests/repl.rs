@@ -251,7 +251,7 @@ fn shell_session(
         let mut step = 0;
         let mut terminal = |h: &mut temen_interp::Host| {
             let (tee, rung) = (Arc::clone(&tee), Arc::clone(&bell));
-            h.set_stdout_tee(Box::new(move |b| {
+            h.set_stream_tee(jacl_runtime_harness::stdout_tee(move |b| {
                 tee.lock().unwrap().push_str(&String::from_utf8_lossy(b));
                 jacl_runtime_harness::bell::ring(&rung);
             }));

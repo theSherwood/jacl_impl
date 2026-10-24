@@ -349,6 +349,7 @@ JaclVal jacl_service_call(JaclVal s, JaclVal req); /* [service-call S REQ]: its 
 JaclVal jacl_service_event(JaclVal s, JaclVal wait); /* [service-event S WAIT]: its next event, or nil */
 JaclVal jacl_service_send(JaclVal s, JaclVal msg);  /* [service-send S [map NAME V]]: V on entry NAME */
 /* The transcript (transcript_unir.c): a shell's blocks, written by unir's writer. */
+JaclVal jacl_service_schema(JaclVal s, JaclVal name); /* [service-schema S NAME]: S's entry NAME alone, as a schema */
 JaclVal jacl_schema(JaclVal desc);                 /* [schema DESC]: a connection schema, by structure */
 JaclVal jacl_transcript(JaclVal name, JaclVal t, JaclVal line); /* [transcript NAME T L]: a writer */
 JaclVal jacl_transcript_line(JaclVal t, JaclVal text);
