@@ -3,7 +3,7 @@
 ## shell — the JACL shell (#204; theSherwood/unir decisions 100, 117, 118): a REPL in a terminal pane.
 ## Run by unir's store vat in its `shell` or `session` mode, which grants it the store as `store`, a
 ## second session with it as `transcript`, the pane as `pane`, the notification the pane's events
-## signal as `shell.n`, the Jit capability, and the programs it may run as `bin.NAME`. Waiting, it
+## signal as `n`, the Jit capability, and the programs it may run as `bin.NAME`. Waiting, it
 ## waits on that notification, which its jobs' writes and ends signal too (#219). Each line typed
 ## is a job: compiled here, by the compiler linked into
 ## this program's image, and run as a task in this program's own domain (`[repl-eval]`), so what one
@@ -195,7 +195,7 @@ proc main {} {
   ## sessions until it has connected them all, in order.
   def t [transcript "transcript" "~shell/transcript" "~shell/line"]
   assert [not [error? $t]]
-  def p [service "pane" "shell.n"]
+  def p [service "pane" "n"]
   assert [not [error? $p]]
   assert [== [service-send $p [map "show" [map "transcript" "~shell/transcript" "line" "~shell/line"]]] $nil]
   ## The mount's control and its syncs, when the session mounts a directory: the control first.
