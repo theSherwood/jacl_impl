@@ -2,7 +2,7 @@
 ##
 ## wake — a pane client that waits on the vat's notification (#219; theSherwood/unir#208): run by
 ## unir's store vat in its `shell` mode, as pane.jacl is, which grants it the notification the
-## pane's events signal as `shell.n`. A wait of a number of seconds ends at its time, or sooner once
+## pane's events signal as `n`. A wait of a number of seconds ends at its time, or sooner once
 ## a task writes to a transcript or ends; a key the terminal types ends one with the key. The waits
 ## a task ends would otherwise last ten minutes.
 ##
@@ -17,7 +17,7 @@ proc main {} {
   ok $s
   def t [transcript "transcript" "wake/transcript" "wake/line"]
   ok $t
-  def p [service "pane" "shell.n"]
+  def p [service "pane" "n"]
   ok $p
   ok [service-send $p [map "show" [map "transcript" "wake/transcript" "line" "wake/line"]]]
   ## A vat has one notification: another name is refused before anything connects.
