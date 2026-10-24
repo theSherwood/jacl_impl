@@ -45,10 +45,10 @@ fn main() {
                 && f.params.len().max(f.results.len()) <= max_slots
         });
         let ro_data = m.data.iter().filter(|d| d.readonly).count();
-        let uses_unmap_protect = temen_wasm_jit::module_uses_unmap_protect(&m);
-        let paged = all_shimmable && (ro_data > 0 || uses_unmap_protect);
+        let uses_page_ops = temen_wasm_jit::module_uses_addr_space_page_ops(&m);
+        let paged = all_shimmable && (ro_data > 0 || uses_page_ops);
         println!(
-            "paged predicate: all_shimmable={all_shimmable} readonly_data_segs={ro_data} uses_unmap_protect={uses_unmap_protect} => PAGED={paged}"
+            "paged predicate: all_shimmable={all_shimmable} readonly_data_segs={ro_data} uses_page_ops={uses_page_ops} => PAGED={paged}"
         );
         if let Some(mem) = m.memory.as_ref() {
             let win = 1u64 << mem.size_log2;

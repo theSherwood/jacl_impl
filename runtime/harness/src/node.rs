@@ -309,7 +309,7 @@ pub struct Images {
 /// puller's statuses, its senders'). With `dir`, the vat keeps its store in `dir/store.log`
 /// (theSherwood/unir#86): a machine run again on it picks up where it left off. `setup` sees the
 /// root's host before the run, to attach live I/O (`Host::set_stdin_source`,
-/// `Host::set_stdout_tee`): the editor reads what the root's stdin holds after the vat's
+/// `Host::set_stream_tee`): the editor reads what the root's stdin holds after the vat's
 /// command, and prints to the root's stdout.
 pub fn run(
     images: &Images,

@@ -25,7 +25,7 @@ pub struct Size {
 /// Runs `client` (a JACL program compiled as a child image, its window `2^log2` bytes) in a pane
 /// of `size` on `backend`, and returns everything the terminal was sent, then the vat's report.
 /// The client may run `programs` (child images, by name). `setup` sees the root's host before the
-/// run, to attach the terminal (`Host::set_stdin_source`, `Host::set_stdout_tee`). The caller rings
+/// run, to attach the terminal (`Host::set_stdin_source`, `Host::set_stream_tee`). The caller rings
 /// `bell` whenever stdin may have bytes: the terminal vat waits on it rather than polling stdin.
 pub fn run(
     client: &temen_ir::Module,

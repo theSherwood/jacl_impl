@@ -496,7 +496,8 @@ fn coop_report(m0: &Module, profile: Option<&Profile>) {
     let table_log2 =
         10u8.max((m.funcs.len().max(1) as u64).next_power_of_two().trailing_zeros() as u8);
     let paged = all_shimmable
-        && (m.data.iter().any(|d| d.readonly) || temen_wasm_jit::module_uses_unmap_protect(&m));
+        && (m.data.iter().any(|d| d.readonly)
+            || temen_wasm_jit::module_uses_addr_space_page_ops(&m));
     let page_log2 = temen_interp::host_page_size().trailing_zeros() as u8;
 
     // temen #1627: a collecting guest emits over the shared table in spill mode instead of not at
