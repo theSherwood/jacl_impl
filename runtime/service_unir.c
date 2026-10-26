@@ -84,7 +84,7 @@ static JaclVal service_open(JaclVal name, JaclVal note) {
 JaclVal jacl_service(JaclVal name) { return service_open(name, JACL_NIL); }
 
 /* [service NAME N]: as [service NAME], for a service whose events signal the notification the vat
- * was endowed with as N (a shell's pane signals `shell.n` in unir's session). A vat has one
+ * was endowed with as N (a shell's pane signals `n`, its vat's, in unir's session). A vat has one
  * notification: an N other than the first one opened is an error. */
 JaclVal jacl_service_n(JaclVal name, JaclVal note) {
   if (jaclrt_is_nil(note)) return chan_err("service: the notification's name is not a string");

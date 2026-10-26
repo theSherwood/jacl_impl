@@ -163,7 +163,7 @@ unir_schema *unir_agreement_schema(const unir_agreement *a);
 
 /* Notifications (unir spec §16, decision 56; issue #208). unir_notification_open: the
  * notification the vat was endowed with under `name`, mapped, for the vat's life; NULL if there is
- * none. A session's root wires one for its shell (`shell.n`), which its pane's events signal
+ * none. A session's activator gives its shell one (`n`), which its pane's events signal
  * while the pane is armed (unir_service_arm). unir_notification_wait takes the badges signalled
  * since the last wait into `*badges` (if not NULL), waiting up to `timeout_ns` (negative: as long
  * as it takes) while there are none: 0 if none came, a timeout or a spurious wakeup, so a waiter

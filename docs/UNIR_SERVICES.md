@@ -14,7 +14,7 @@ edge. Nothing about the service is compiled into the program.
 def s [service "store"]                           ; a session, or an error value
 def r [service-call $s [map "Head" "doc"]]        ; a request; its reply
 [service-event $s $true]                          ; the next event, waiting; nil if none and not waiting
-def p [service "pane" "shell.n"]                  ; a session whose events signal this vat's notification
+def p [service "pane" "n"]                        ; a session whose events signal this vat's notification
 [service-send $p [map "content" [map "Text" "hi"]]] ; a message on a named entry, waiting for nothing
 def e [service "events"]                          ; a subscription: granted without its requests
 def t [service-schema $e "events"]                ; one entry's schema, for a transcript block
@@ -32,9 +32,10 @@ def t [service-schema $e "events"]                ; one entry's schema, for a tr
   returns nil sooner once one of the program's tasks writes to a transcript or ends, so a shell waiting
   for its pane notices its jobs (#219).
 - `[service NAME N]` connects as `[service NAME]` does, to a service whose events signal the
-  notification the vat was endowed with as `N` (unir decision #208.1): unir's sessions grant a shell
-  its pane's as `shell.n`. Waiting for such a service's events waits on that notification rather than
-  polling (see "Waiting" below). A vat has one notification: a second name is an error.
+  notification the vat was endowed with as `N` (unir decision #208.1): in unir's sessions a shell's
+  pane signals its vat's own, `n` (unir decision #262.9). Waiting for such a service's events waits
+  on that notification rather than polling (see "Waiting" below). A vat has one notification: a
+  second name is an error.
 
 - `[service-send S [map ENTRY VALUE]]` sends `VALUE` as a message of the catalog entry named
   `ENTRY`, waiting for nothing: a connection that is not request and reply, such as a pane. A session
@@ -300,7 +301,7 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
 - **References.** A reference activated in the transcript runs `open NAME` as a job, `NAME` the
   reference's, which shows only its output: the profile says what opening a name means.
 - **Waiting.** The shell opens its pane with the notification its events signal (`[service "pane"
-  "shell.n"]`). When a pass of its loop finds nothing to do, its next read of the pane waits on that
+  "n"]`). When a pass of its loop finds nothing to do, its next read of the pane waits on that
   notification for up to a second, or until a job writes to the transcript or ends (#219). So a key, a
   job's output and a job's end each start a pass as they come, and an idle shell makes one pass a
   second.
