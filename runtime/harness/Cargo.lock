@@ -584,6 +584,7 @@ name = "temen-durable"
 version = "0.0.0"
 dependencies = [
  "temen-ir",
+ "temen-verify",
 ]
 
 [[package]]
@@ -650,6 +651,7 @@ dependencies = [
  "temen-encode",
  "temen-fiber",
  "temen-ir",
+ "temen-verify",
  "windows-sys 0.59.0",
 ]
 
