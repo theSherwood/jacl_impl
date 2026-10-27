@@ -19,9 +19,9 @@
 ## A job reaches the store through the shell's session with it, as `$ctx->store`. Granted a
 ## service as `mount`, a job reaches it as `$ctx->mount` (-1 when there is none). Granted a
 ## subscription as `events`, the shell shows what it hears as a block at the end of the
-## transcript, typed as the service sent it, each pass that hears something. A session that mounts
-## a directory grants the mount's control and its syncs so (unir decision #282.5); the shell opens
-## the control first, the order the mount connects them in.
+## transcript, typed as the service sent it, as it hears it: a task of the shell's own waits for
+## it on `n`. A session that mounts a directory grants the mount's control and its syncs so (unir
+## decision #282.5); the shell opens the control first, the order the mount connects them in.
 ##
 ##   LINE &     runs LINE in the background
 ##   jobs       lists the jobs running or stopped
@@ -104,6 +104,27 @@ proc show {t, line, n, v} {
   ## A value the values schema cannot carry (a closure) is shown as its text.
   if [error? [transcript-push $t $b $v]] { ok [transcript-push $t $b [to-string $v]] }
   ok [transcript-end $t $b]
+}
+
+## What the subscription EVENTS hears, a block of the transcript T for each burst, typed under
+## SYNCED, written as it comes. Its writes end the shell's wait for its pane (vat_stir), so the next
+## pass commits each at once, not up to a second later (theSherwood/unir#331). It ends with the
+## subscription, or with the program.
+proc hear {t, events, synced} {
+  mut e [service-event $events $true]
+  while [&& [!= $e $nil] [not [error? $e]]] {
+    mut news [vec]
+    while [&& [!= $e $nil] [not [error? $e]]] {
+      set news [vec-push $news [map-get $e "events"]]
+      set e [service-event $events $false]
+    }
+    def b [transcript-block $t "events" 0 $synced]
+    ok $b
+    ## One the block's schema cannot carry is left out: the service's fault, not the person's.
+    for $news x { def pushed [transcript-push $t $b $x] }
+    ok [transcript-end $t $b]
+    set e [service-event $events $true]
+  }
 }
 
 ## Starts SRC as job N, LINE its command: a task whose output goes to the job's place in the
@@ -201,7 +222,7 @@ proc main {} {
   ## The mount's control and its syncs, when the session mounts a directory: the control first.
   def m [service "mount"]
   def mount [if [error? $m] { -1 } else { $m }]
-  def heard [service "events"]
+  def heard [service "events" "n"]
   def synced [if [error? $heard] { $heard } else { [service-schema $heard "events"] }]
   def events [if [error? $synced] { $nil } else { $heard }]
   def sv [map "store" $s "mount" $mount]
@@ -232,28 +253,13 @@ proc main {} {
   def named [map "Enter" 1 "Tab" 1 "Backspace" 1 "Delete" 1 "Escape" 1 "Up" 1 "Down" 1 "Right" 1 "Left" 1 "Home" 1 "End" 1 "PageUp" 1 "PageDown" 1]
   def shell-commands [map "jobs" 1 "fg" 1 "bg" 1 "kill" 1]
   ok [transcript-line $t "\x24 "]
+  if [!= $events $nil] { spawn { hear $t $events $synced } }
   while $go {
     ## What an ended job left was typed after what waits already.
     set ahead [vec-concat $ahead [reap $t $jobs]]
     if [&& [!= $fg $nil] [not [map-has [deref $jobs] $fg]]] {
       set fg $nil
       ok [transcript-line $t [concat "\x24 " $line]]
-    }
-    ## What the subscription heard since the last pass, one block.
-    if [!= $events $nil] {
-      mut news [vec]
-      mut e [service-event $events $false]
-      while [&& [!= $e $nil] [not [error? $e]]] {
-        set news [vec-push $news [map-get $e "events"]]
-        set e [service-event $events $false]
-      }
-      if [> [length $news] 0] {
-        def b [transcript-block $t "events" 0 $synced]
-        ok $b
-        ## One the block's schema cannot carry is left out: the service's fault, not the person's.
-        for $news x { def pushed [transcript-push $t $b $x] }
-        ok [transcript-end $t $b]
-      }
     }
     ok [transcript-flush $t]
     ## Every event waiting, then the line drawn once: a burst of keys, or a paste, is one commit.
