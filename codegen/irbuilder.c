@@ -824,7 +824,12 @@ static void enc_func(Out *o, const IrFunc *f, ImportTable *tab) {
   out_uleb(o, (uint64_t)f->nblocks);
   for (int bi = 0; bi < f->nblocks; bi++) {
     const Block *blk = &f->blocks[bi];
+    /* v14: the block's parent as a distance back from it, then its params, then its captures.
+     * A block uses only its own params and values, so its parent is the entry (block 0) and it
+     * captures nothing. */
+    out_uleb(o, (uint64_t)bi);
     out_types_bin(o, blk->params, blk->nparams);
+    out_uleb(o, 0);
     out_uleb(o, (uint64_t)blk->ninsts);
     for (int ii = 0; ii < blk->ninsts; ii++) enc_inst(o, &blk->insts[ii], tab);
     enc_term(o, &blk->term);
@@ -860,7 +865,10 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   /* Unified TEMEN container header (WIRE.md), 16 bytes little-endian:
    *   [0..8)  MAGIC   = "TEMEN\0\0\0"
    *   [8..10) kind    : u16   — 0 = KIND_MODULE (runnable), 1 = KIND_OBJECT (pre-link unit)
-   *   [10..12) version: u16   = 13 (v13 adds a data-image funcref-slot section after the data
+   *   [10..12) version: u16   = 14 (v14 gives each block header a parent in a dominator tree and a
+   *                              capture list, temen#2454; irb's blocks are block-local, so every
+   *                              parent is the entry and no block captures: see `enc_func`.
+   *                              v13 added a data-image funcref-slot section after the data
    *                              segments, in both dialects; JACL bakes no funcref into data, so it
    *                              is empty. v13 also lets the shadow-arena flag be `2`, a non-default
    *                              stride; we declare no arena. v12 added thread-local templates to the
@@ -882,7 +890,7 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   static const uint8_t magic[8] = {'T', 'E', 'M', 'E', 'N', 0, 0, 0};
   out_raw(&o, magic, 8);
   out_u8(&o, has_data_self ? 0x01 : 0x00); out_u8(&o, 0x00); /* kind:u16 LE (0=module, 1=object) */
-  out_u8(&o, 13); out_u8(&o, 0x00);                          /* version:u16 LE = 13 */
+  out_u8(&o, 14); out_u8(&o, 0x00);                          /* version:u16 LE = 14 */
   out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); /* flags:u32 LE = 0 */
   /* Memory descriptor: presence flag, then size_log2, then the v11 shadow-arena flag (and, if
    * set, its `[base, end)` as two ulebs). JACL's GC owns its heap placement and declares no

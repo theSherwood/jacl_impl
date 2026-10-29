@@ -79,6 +79,9 @@ const browser = await chromium.launch({ args: process.env.CI ? ['--no-sandbox'] 
 const page = await browser.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
+// Why the page fell back to one thread, if it did: it says so on the console (playground.ts).
+const warnings = [];
+page.on('console', (m) => (m.type() === 'warning' || m.type() === 'error') && warnings.push(m.text()));
 await page.goto(`http://localhost:${port}/`);
 await page.waitForFunction(() => !document.getElementById('run-btn').disabled, null, { timeout: 60000 });
 
@@ -124,5 +127,6 @@ await browser.close();
 server.close();
 if (errors.length) console.log('page errors:', errors.slice(0, 5));
 const ok = results.every(Boolean) && errors.length === 0;
+if (!ok && warnings.length) console.log('console:', warnings.slice(0, 5));
 console.log(ok ? 'PASS — the playground runs pool-starting programs on the Worker driver' : 'FAIL');
 process.exit(ok ? 0 : 1);

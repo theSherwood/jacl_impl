@@ -34,10 +34,11 @@ echo "  -> demo/wasm/temen_browser.wasm ($(wc -c < "$DEMO/wasm/temen_browser.was
 # A Run whose program starts the scheduler's pool runs each worker on its own Web Worker. That needs
 # temen's *threads* build (shared, imported memory; nightly + rust-src for build-std) and its
 # `par.js`/`worker.js` with every module they import (one missing fails the Worker's load with no
-# message, as `coop-driver.js` did when temen#2298 added it), kept in the layout they resolve each
-# other from (`web/` beside `target/…`), and cross-origin isolation, which GitHub Pages can only get
-# through `coi-serviceworker.js`. Fail-soft: without them every Run stays on the single-threaded
-# engine above (playground.ts checks at run time).
+# message), kept in the layout they resolve each other from (`web/` beside `target/…`), and
+# cross-origin isolation, which GitHub Pages can only get through `coi-serviceworker.js`. The modules
+# are followed from the files' own imports: a list kept by hand missed `coop-driver.js` when
+# temen#2298 added it, then `engine-imports.js`. Fail-soft: without them every Run stays on the
+# single-threaded engine above (playground.ts checks at run time).
 # Its own target dir, so it never replaces the plain build at the same path; outside the submodule, so
 # the build leaves vendor/temen clean.
 echo "Building the threads engine for the Worker driver…"
@@ -52,7 +53,16 @@ if ( cd "$TEMEN/browser" && CARGO_TARGET_DIR="$THREADS_TARGET" \
   mkdir -p "$DEMO/temen-web/web" "$DEMO/temen-web/target/wasm32-unknown-unknown/release"
   cp "$THREADS_TARGET/wasm32-unknown-unknown/release/temen_browser.wasm" \
      "$DEMO/temen-web/target/wasm32-unknown-unknown/release/temen_browser.wasm"
-  for f in par.js worker.js foreign-mem.js engine-mem.js coop-driver.js; do cp "$TEMEN/browser/web/$f" "$DEMO/temen-web/web/$f"; done
+  queue=(par.js worker.js)
+  declare -A copied=()
+  while ((${#queue[@]})); do
+    f=${queue[0]}
+    queue=("${queue[@]:1}")
+    [[ -n ${copied[$f]:-} ]] && continue
+    copied[$f]=1
+    cp "$TEMEN/browser/web/$f" "$DEMO/temen-web/web/$f"
+    queue+=($(sed -n "s/.* from '\.\/\([^']*\)'.*/\1/p" "$TEMEN/browser/web/$f"))
+  done
   cp "$TEMEN/browser/web/coi-serviceworker.js" "$DEMO/coi-serviceworker.js"
   echo "  -> demo/temen-web/ (threads engine $(wc -c < "$DEMO/temen-web/target/wasm32-unknown-unknown/release/temen_browser.wasm") bytes + par.js/worker.js) + demo/coi-serviceworker.js"
 else
