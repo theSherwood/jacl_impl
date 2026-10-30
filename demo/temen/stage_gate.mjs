@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [emitJsPath, wasmPath, stagingRtPath, jaclrtPath] = process.argv.slice(2);
 if (!emitJsPath || !wasmPath || !stagingRtPath || !jaclrtPath) {
@@ -42,8 +42,7 @@ const SRC =
   'main\n';
 
 // --- temen-browser cdylib: runs the staged macro-body module, and the final linked program. ---------
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath));
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
 const load = (bytes) => {

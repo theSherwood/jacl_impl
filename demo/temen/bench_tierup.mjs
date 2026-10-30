@@ -1,5 +1,5 @@
 // #839 re-measurement (post-#926/#1026, temen): does the JACL compiler-guest now tier up?
-// Mirrors temen's browser/bench_tierup_cards.mjs conventions (temen_browser.wasm + engineImports +
+// Mirrors temen's browser/bench_tierup_cards.mjs conventions (temen_browser.wasm + instantiateEngine +
 // the coop driver's event counters) but for the JACL compiler card: it runs the compiler-guest over
 // a JACL source fed on stdin, on (1) the plain bytecode path (temen_run_onramp) and (2) the playground's
 // automatic runJitModule path (whole-program emit → falls through to temen_coop_open). Reports timing,
@@ -9,7 +9,7 @@
 //   node demo/temen/bench_tierup.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog.jacl>...
 import { readFileSync } from 'node:fs';
 import { runJitModule } from '../../vendor/temen/browser/web/wasmjit-module.js';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [wasmPath, compPath, ...progs] = process.argv.slice(2);
 if (!wasmPath || !compPath || progs.length === 0) {
@@ -18,8 +18,7 @@ if (!wasmPath || !compPath || progs.length === 0) {
 }
 
 const memory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports(memory));
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath), memory);
 const enc = new TextEncoder(), dec = new TextDecoder();
 const u8 = () => new Uint8Array(memory.buffer);
 const readStdout = () => dec.decode(u8().slice(Number(ex.temen_stdout_ptr()), Number(ex.temen_stdout_ptr()) + Number(ex.temen_stdout_len())));

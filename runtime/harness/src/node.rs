@@ -83,14 +83,13 @@ pub fn connect(addr: impl ToSocketAddrs) -> std::io::Result<Link> {
 /// next one at once, so none is lost.
 fn grant_bell(h: &mut temen_interp::Host, bell: &Arc<Bell>, epoch: Instant) {
     let (bell, seen) = (Arc::clone(bell), Arc::default());
-    let proc = h.grant_host_proc_offloadable(
-        Box::new(move |_, args| {
+    let proc = h.grant_host_proc(temen_interp::HostProcGrant::new(
+        temen_interp::ProcHandler::Offloadable(Box::new(move |_, args| {
             let ns = args.first().map_or(0, |&a| a as u64);
             bell::wait_for(&bell, &seen, epoch.checked_add(Duration::from_nanos(ns)))
-        }),
-        None,
+        })),
         temen_interp::CapState::Uncaptured,
-    );
+    ));
     h.register_cap_name("bell", proc);
 }
 

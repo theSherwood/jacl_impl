@@ -11,7 +11,7 @@
 // Exit 0 iff the compile succeeds (temen_status == 0/exit) and the emitted IR contains a `br_if`
 // (the tour's `unless` macro lowers `if` → `br_if`) with no `%%ERROR%%` diagnostic.
 import { readFileSync } from 'node:fs';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [wasmPath, cardPath] = process.argv.slice(2);
 if (!wasmPath || !cardPath) {
@@ -24,8 +24,7 @@ const SRC =
   'defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }\n' +
   'mut hit 0\nunless [== 1 2] { set hit 5 }\nhit\n';
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath));
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
 
