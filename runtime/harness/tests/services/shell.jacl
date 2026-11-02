@@ -361,8 +361,12 @@ proc main {} {
         }
       }
     }
-    if $any {
-      ok [transcript-line $t [if [== $fg $nil] { [concat "\x24 " $line] } else { "" }]]
+    ## While a job has the foreground the line is its own: the shell leaves it as it was, so
+    ## nothing on the display changes until the job shows itself. A full-screen job's region is
+    ## the first thing a person sees after Enter, and what they type once they see it is the
+    ## job's (unir decision #236.10).
+    if [&& $any [== $fg $nil]] {
+      ok [transcript-line $t [concat "\x24 " $line]]
     }
     set idle [not $any]
   }
