@@ -14,7 +14,7 @@
 #include "jaclrt.h"
 
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
-long __vm_thread_join(int h);
+long __vm_thread_join(int h, long *status);
 long __vm_fiber_new(long (*f)(long), void *stack);
 long __vm_fiber_resume(long k, long arg, int *done);
 long __vm_vcpu_tls_get(void);
@@ -45,7 +45,8 @@ int run(int n) {
 
   int h[GC_WORKERS];
   for (int k = 0; k < GC_WORKERS; k++) h[k] = __vm_thread_spawn(gc_worker, gc_vcpu_stack[k], 0);
-  for (int k = 0; k < GC_WORKERS; k++) __vm_thread_join(h[k]);
+  long status;
+  for (int k = 0; k < GC_WORKERS; k++) __vm_thread_join(h[k], &status);
 
   int ok = (jacl_gc_violation_count() == 0);
   int survived = 0;

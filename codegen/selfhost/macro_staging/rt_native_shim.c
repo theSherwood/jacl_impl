@@ -17,6 +17,6 @@ long __vm_gc_roots(long lo, long hi, long m, void *b, long c) { (void)lo;(void)h
 int  __vm_cap_resolve(const char *name, long len) { (void)name; (void)len; return -1; }
 long __vm_host_call(int h, int op, long a, long b, long c, long d) { (void)h;(void)op;(void)a;(void)b;(void)c;(void)d; return -1; }
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg) { (void)fn;(void)stack;(void)arg; return -1; }
-long __vm_thread_join(int h) { (void)h; return 0; }
+long __vm_thread_join(int h, long *status) { (void)h; *status = 0; return 0; }
 long __vm_fiber_new(long (*f)(long), void *stack) { (void)f; (void)stack; return 0; }
 long __vm_fiber_resume(long k, long arg, int *done) { (void)k; (void)arg; if (done) *done = 1; return 0; }

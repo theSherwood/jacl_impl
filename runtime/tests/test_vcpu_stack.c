@@ -25,7 +25,7 @@
 #include "jaclrt.h"
 
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
-long __vm_thread_join(int h);
+long __vm_thread_join(int h, long *status);
 
 #define VS_STACK (1u << 16)
 #define VS_N     64
@@ -41,7 +41,8 @@ int run(int n) {
   /* A real in-window data stack: the worker's frame lands in it and the sum is exact. */
   vs_ok = 0;
   int h = __vm_thread_spawn(vs_worker, vs_stack, 0);
-  (void)__vm_thread_join(h);
+  long status;
+  (void)__vm_thread_join(h, &status);
   return vs_ok ? 141 : 201;
 }
 

@@ -312,8 +312,10 @@ void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->blocks_rejected_fast  = 0;
 }
 
-/* Forward-declare thread-local (defined later in this file) */
-JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
+/* Declared here, defined later in this file. Without `extern` this is a definition: a
+ * thread-local has a storage class, so it is never tentative, and the later one with its
+ * initializer redefines it (gcc 15 rejects that). */
+extern JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
 
 void gc_heap_destroy(ThreadHeap *heap) {
     GCBlock *b = heap->blocks;

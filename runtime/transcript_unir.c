@@ -639,7 +639,7 @@ JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete) {
   return transcript_done(x, r < 0 ? transcript_err("transcript-job-end", r) : jaclrt_i32((int32_t)n));
 }
 
-/* ---- Handlers and the legacy adapter (unir decisions 105 and 106; theSherwood/unir#172) ----
+/* ---- Handlers and full-screen jobs (unir decisions 105, 106, #236.5, #236.7, #236.9) ----
  * What a shell starts beside its transcript, each a child vat from an image it was granted (by
  * the capability's name), with a window of the image's declared memory and FUEL and MEMORY of
  * this vat's budget:
@@ -648,12 +648,13 @@ JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete) {
  *       a handler for a file: IMAGE run with ARGS (a string's bytes), granted the surface the
  *       session set aside for handlers and sent TEXT as the file, which it shows until a person
  *       closes it. Its child, or an error. The program ends after its handlers.
- *   [legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY]
- *       in a job: the legacy adapter, IMAGE run with ARGS, running a POSIX program in a terminal
- *       of the job's size in a pane of ROWS by COLS. Each screen it draws replaces the last in
- *       the job's live grid block, and the pane's events the shell gives the job (`$ctx.in`, an
- *       atom of a vector of them, which this empties) go to the program, until it ends. The
- *       adapter's exit status, or an error. Cancelled, it closes the adapter first. */
+ *   [legacy-job IMAGE ARGS FUEL MEMORY]
+ *       in a job: the legacy adapter, IMAGE run with ARGS, running a POSIX program as the job's
+ *       full-screen job, in a region the shell's jobs session gives it (theSherwood/unir#369).
+ *       The terminal shows the region over the whole display while the program runs, and the
+ *       keys typed go to it, not to the shell. Each screen the adapter reports replaces the last
+ *       in the job's live grid block. The adapter's exit status, or an error. Cancelled, it kills
+ *       the adapter first. */
 #define JACL_HANDLERS 16u
 #define JACL_SCREEN (128u << 10)   /* the largest screen, a message of the grid's */
 static int64_t jacl_handlers[JACL_HANDLERS];
@@ -701,26 +702,17 @@ JaclVal jacl_handler_open(JaclVal image, JaclVal args, JaclVal text, JaclVal fue
   return jacl_int_result(h);
 }
 
-/* Sends the legacy adapter `l` the events waiting in `in` (an atom of a vector of them, or nil),
- * taking them all at once, as the shell adds to it. */
-static void legacy_events(unir_legacy *l, JaclVal in) {
-  if (jaclrt_is_nil(in)) return;
-  JaclVal keep[2] = {JACL_NIL, jacl_vec_empty()};   /* the events taken stay reachable */
-  for (;;) {
-    keep[0] = jacl_box_get(in);
-    if (jaclrt_type_index(keep[0]) != 0x06 || jacl_vec_count(keep[0]) == 0) return;
-    if (jacl_box_cas(in, keep[0], keep[1]) == JACL_TRUE) break;
-  }
-  for (uint32_t i = 0; i < jacl_vec_count(keep[0]); i++) {
-    uint8_t frame[512];
-    JaclVal err = JACL_NIL;
-    uint64_t n = jv_encode_into(jacl_vec_get(keep[0], i), frame, sizeof frame, &err);
-    /* Keys and sizes go; any other event is the shell's, and the adapter refuses it. */
-    if (!n) continue;
-    unir_vat *vat = vat_take();
-    (void)unir_legacy_event(vat, l, jv_schema(), frame, n);
-    vat_give();
-  }
+/* The shell's jobs session (unir decision #236.5), opened on first use, under the vat's lock. */
+static unir_jobs *jacl_unir_jobs;
+/* How long the activator has to answer for a job's region, and how often a job is looked at
+ * again while armed: temen signals nothing when a child ends without reporting. */
+#define JACL_JOB_ANSWER_NS 10000000000L
+#define JACL_JOB_POLL_NS 50000000L
+
+/* Adds the vat's capability `name`, if it holds one, to `g`, `*n` of them. */
+static void job_pass(unir_vat *vat, const char *name, uint32_t len, unir_grant *g, uint64_t *n) {
+  int64_t cap = unir_endowed(vat, name, len);
+  if (cap >= 0) g[(*n)++] = (unir_grant){name, len, cap};
 }
 
 /* A screen, `frame[0..n)`, to job `s`'s live grid block, committed as it comes, so each is a
@@ -736,61 +728,105 @@ static int64_t job_screen(JaclVal s, const unir_schema *grid, const uint8_t *fra
   return r < 0 ? r : 0;
 }
 
-/* [legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY] */
-JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal rows, JaclVal cols, JaclVal fuel,
-                        JaclVal memory) {
-  int64_t r, c, f, m;
-  if (!jaclrt_is_string(args) || !jacl_int_val_checked(rows, &r) || !jacl_int_val_checked(cols, &c) ||
-      !jacl_int_val_checked(fuel, &f) || !jacl_int_val_checked(memory, &m) || r < 1 || c < 1 ||
-      r > 0xffff || c > 0xffff || f < 0 || m < 0)
-    return chan_err("legacy-job: an image, its arguments, a pane's rows and columns, and a budget");
+/* Job `s`'s live grid block, opened once its region is named on the terminal's door, and the
+ * shell's typed line cleared then: what the person sees from here on was drawn after that, so
+ * what they type is the job's (unir decision #236.10). 0, or a UNIR_E* code. */
+static int64_t job_region_named(JaclVal s, const unir_schema *grid) {
+  JaclTranscript *x;
+  JaclJob *j = job_take(s, &x);
+  if (!j) return UNIR_EENDED;
+  int64_t r = job_block(x, j, JOB_VALUES, grid, grid, 0);
+  if (r >= 0) {
+    unir_vat *vat = vat_take();
+    r = unir_transcript_line(vat, x->t, (const uint8_t *)"", 0);
+    vat_give();
+  }
+  if (r >= 0) r = transcript_commit(x);
+  (void)transcript_done(x, JACL_NIL);
+  return r < 0 ? r : 0;
+}
+
+/* [legacy-job IMAGE ARGS FUEL MEMORY] */
+JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal fuel, JaclVal memory) {
+  int64_t f, m;
+  if (!jaclrt_is_string(args) || !jacl_int_val_checked(fuel, &f) ||
+      !jacl_int_val_checked(memory, &m) || f < 0 || m < 0)
+    return chan_err("legacy-job: an image, its arguments and a budget");
   JaclVal s;
-  if (!job_named(&s)) return chan_err("legacy-job: only in a job");
-  JaclVal in = jacl_map_get(jacl_ctx_cur, jacl_str_new("in", 2));
+  JaclJob *named;
+  if (!job_named(&s) || !(named = job_of_handle(s))) return chan_err("legacy-job: only in a job");
+  uint32_t id = named->job;   /* the region's id: the job's number */
   static unir_schema *grid;
   if (!grid) grid = unir_schema_grid();
   char ab[256];
   int64_t al = transcript_str(args, ab, sizeof ab), module;
   int32_t cap = (int32_t)JACL_SCREEN;
-  JaclVal keep[2] = {in, fb_alloc_nd(1, 1, &cap)};  /* may collect; `keep` is on the data stack */
-  uint8_t *screen = (uint8_t *)fb_data(keep[1]);
+  JaclVal keep[1] = {fb_alloc_nd(1, 1, &cap)};  /* may collect; `keep` is on the data stack */
+  uint8_t *screen = (uint8_t *)fb_data(keep[0]);
   unir_vat *vat = al >= 0 && grid ? granted(image, &module) : 0;
   if (!vat) return chan_err("legacy-job: no image granted by that name");
-  /* It holds the vat until the adapter has connected. */
-  int64_t err = 0;
-  unir_legacy *l = unir_legacy_open(vat, module, 0, (const uint8_t *)ab, (uint64_t)al, (uint32_t)r,
-                                    (uint32_t)c, JACL_SERVICE_FRAMES, JACL_SERVICE_SLOT,
-                                    (uint64_t)f, (uint64_t)m, &err);
+  int64_t st = 0;
+  if (!jacl_unir_jobs) jacl_unir_jobs = unir_jobs_open(vat, "jobs", 4, &st);
+  unir_jobs *jobs = jacl_unir_jobs;
+  /* The program's terminal and this vat's output, passed on to the adapter. */
+  unir_grant g[3];
+  uint64_t gn = 0;
+  if (jobs) {
+    job_pass(vat, "stdout", 6, g, &gn);
+    job_pass(vat, "pty", 3, g, &gn);
+    job_pass(vat, "pty.bell", 8, g, &gn);
+  }
+  /* It holds the vat until the activator has answered and the adapter is spawned. */
+  unir_job *job = jobs ? unir_job_open(vat, jobs, id, module, 0, (const uint8_t *)ab,
+                                       (uint64_t)al, g, gn, (uint64_t)f, (uint64_t)m,
+                                       JACL_JOB_ANSWER_NS, &st)
+                       : 0;
   vat_give();
-  if (!l) return chan_err("legacy-job: the adapter did not start");
-  int64_t failed = 0;
-  for (;;) {
+  if (!jobs) return chan_err("legacy-job: no jobs session granted as `jobs`");
+  if (!job) return chan_err("legacy-job: the job's region did not open");
+  int64_t failed = job_region_named(s, grid);
+  int woken = jacl_unir_note != 0;
+  while (!failed) {
     int ctl = jacl_ctl_pending();
     if (ctl & JACL_CTL_CANCEL) {
       vat = vat_take();
-      (void)unir_legacy_close(vat, l);
+      (void)unir_job_kill(vat, job);
+      (void)unir_job_close(vat, jobs, job);
       vat_give();
       jacl_ctl_point();   /* does not return */
     }
     if (ctl) jacl_ctl_point();   /* stopped, until resumed */
-    legacy_events(l, keep[0]);
-    /* The next screen, polled: a wait would hold the vat. */
+    int32_t seen = __vm_atomic_load32(&jacl_unir_events);
     vat = vat_take();
-    int64_t n = unir_legacy_next(vat, l, 0);
+    int64_t n = unir_job_next(vat, jobs, job, 0);
+    int64_t armed = n == 0 && woken ? unir_job_arm(vat, jobs, job) : 0;
     vat_give();
     if (n == UNIR_EENDED) break;
-    if (n == 0) vat_idle(1000000);
-    if (n > 0) n = unir_legacy_screen(l, screen, JACL_SCREEN);
-    if (n > 0) n = job_screen(s, grid, screen, (uint64_t)n);
-    if (n < 0) {
-      failed = n;
+    if (n > 0) {
+      n = unir_job_screen(job, screen, JACL_SCREEN);
+      if (n > 0) n = job_screen(s, grid, screen, (uint64_t)n);
+      if (n < 0) failed = n;
+      continue;
+    }
+    if (n < 0 || armed < 0) {
+      failed = n < 0 ? n : armed;
       break;
+    }
+    /* Armed, it waits on the vat's notification, which the job's report and the jobs session
+     * signal, holding no vat (#242). A job that ends without reporting signals nothing, so it
+     * looks again after JACL_JOB_POLL_NS; without the notification it polls that often. */
+    if (armed > 0 || !woken)
+      (void)vat_await(seen, JACL_JOB_POLL_NS, woken ? (int32_t)(JACL_JOB_POLL_NS / 1000 + 1) : 0);
+    if (armed > 0) {
+      vat = vat_take();
+      (void)unir_job_disarm(vat, jobs, job);
+      vat_give();
     }
   }
   vat = vat_take();
-  int64_t st = unir_legacy_close(vat, l);
+  st = unir_job_close(vat, jobs, job);
   vat_give();
-  if (failed) return chan_err("legacy-job: the adapter failed");
+  if (failed) return chan_err("legacy-job: the job failed");
   return jacl_int_result(st);
 }
 

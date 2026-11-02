@@ -299,7 +299,7 @@ JaclVal jacl_transcript_job(JaclVal t, JaclVal c, JaclVal j) { (void)t; (void)c;
 JaclVal jacl_transcript_job_end(JaclVal s, JaclVal c) { (void)s; (void)c; return chan_err("transcript-job-end: unavailable without vats"); }
 JaclVal jacl_transcript_pick(JaclVal t, JaclVal b, JaclVal v) { (void)t; (void)b; (void)v; return chan_err("transcript-pick: unavailable without vats"); }
 JaclVal jacl_handler_open(JaclVal i, JaclVal a, JaclVal t, JaclVal f, JaclVal m) { (void)i; (void)a; (void)t; (void)f; (void)m; return chan_err("handler-open: unavailable without vats"); }
-JaclVal jacl_legacy_job(JaclVal i, JaclVal a, JaclVal r, JaclVal c, JaclVal f, JaclVal m) { (void)i; (void)a; (void)r; (void)c; (void)f; (void)m; return chan_err("legacy-job: unavailable without vats"); }
+JaclVal jacl_legacy_job(JaclVal i, JaclVal a, JaclVal f, JaclVal m) { (void)i; (void)a; (void)f; (void)m; return chan_err("legacy-job: unavailable without vats"); }
 JaclVal jacl_env_cur = JACL_NIL;
 JaclVal jacl_env(void) {
   if (jaclrt_is_nil(jacl_env_cur)) jacl_env_cur = jacl_root_env();

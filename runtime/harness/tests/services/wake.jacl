@@ -22,8 +22,10 @@ proc main {} {
   ok [service-send $p [map "show" [map "transcript" "wake/transcript" "line" "wake/line"]]]
   ## A vat has one notification: another name is refused before anything connects.
   assert [error? [service "pane" "other.n"]]
-  ## The terminal sends its size first: an event, waited for on the notification.
+  ## The terminal sends its size first, then the focus the pane gains as it shows: events, waited
+  ## for on the notification.
   assert [map-has [service-event $p $true] "geometry"]
+  assert [map-has [service-event $p $true] "lifecycle"]
   ## Nothing more comes within 50 ms: nil.
   assert [== [service-event $p 0.05] $nil]
   ## A task's write ends a wait early.

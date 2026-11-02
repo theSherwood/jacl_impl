@@ -1,5 +1,5 @@
 //! One of two machines editing one document over TCP: unir's store vat (`runtime/unir/
-//! unir_store_vat.ll`) run as `peer ROLE LOG2`, its editor a JACL program (theSherwood/unir#62,
+//! unir_store_vat.temen`) run as `peer ROLE LOG2`, its editor a JACL program (theSherwood/unir#62,
 //! docs/UNIR_SERVICES.md). Machine 0 listens and machine 1 connects, once: the vats replicate ref
 //! `doc` over that one connection in both directions (unir#110), machine 1 merging, until both
 //! editors have made ref `~done`. Each authenticates the other with keys (unir#71): a keystore
@@ -15,25 +15,28 @@ use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use temen_run::{Backend, HostCap, RunConfig};
 
 use crate::bell::{self, Bell, ring};
 
-/// The vendored store unit.
-pub const STORE_VAT_LL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.ll");
+/// The vendored store vat's images, as unir builds and runs them (`store-image`): the root, and
+/// the child it spawns its pullers and senders from.
+const STORE_VAT: [&str; 2] = [
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.temen"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat_child.temen"),
+];
 
-/// The store unit twice: as the root (the vat), and as the child it spawns its pullers and
-/// senders from, granted to it as `store-self`.
+/// The store vat: the root (the vat), and the child it spawns its pullers and senders from,
+/// granted to it as `store-self`. Each is temen's encoding at this pin, so they are re-vendored
+/// as it moves.
 pub fn store_images() -> (temen_ir::Module, temen_ir::Module) {
-    let translate = |child_entry| {
-        let opts = temen_llvm::TranslateOptions { child_entry, ..Default::default() };
-        temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
-            .expect("translate unir_store_vat.ll")
-            .module
+    let read = |path: &str| {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        temen_encode::decode_module(&bytes).unwrap_or_else(|e| panic!("{path}: {e:?}"))
     };
-    (translate(false), translate(true))
+    (read(STORE_VAT[0]), read(STORE_VAT[1]))
 }
 
 /// One machine's connection to the other.
@@ -76,23 +79,6 @@ pub fn connect(addr: impl ToSocketAddrs) -> std::io::Result<Link> {
     Ok(Link { role: 1, sock: tcp(TcpStream::connect(addr)?)? })
 }
 
-/// Grants `bell` to the root as `bell`, as unir's host does: an offloadable host procedure, so
-/// the root waits on it holding nothing its senders need, on every engine. Op 0 waits, off the
-/// root's thread, until the bell rings or the clock reaches its argument (ns since `epoch`), and
-/// returns 1 if it rang since the last wait returned, else 0. A ring between two waits ends the
-/// next one at once, so none is lost.
-fn grant_bell(h: &mut temen_interp::Host, bell: &Arc<Bell>, epoch: Instant) {
-    let (bell, seen) = (Arc::clone(bell), Arc::default());
-    let proc = h.grant_host_proc(temen_interp::HostProcGrant::new(
-        temen_interp::ProcHandler::Offloadable(Box::new(move |_, args| {
-            let ns = args.first().map_or(0, |&a| a as u64);
-            bell::wait_for(&bell, &seen, epoch.checked_add(Duration::from_nanos(ns)))
-        })),
-        temen_interp::CapState::Uncaptured,
-    ));
-    h.register_cap_name("bell", proc);
-}
-
 /// Starts a thread reading `sock` to its close, queueing each read, and the close as an empty
 /// one, and ringing `bell` for each.
 fn reader(sock: &Arc<TcpStream>, bell: &Arc<Bell>) -> Receiver<Vec<u8>> {
@@ -118,7 +104,8 @@ fn reader(sock: &Arc<TcpStream>, bell: &Arc<Bell>) -> Receiver<Vec<u8>> {
 /// failure; op 2 shuts the socket down, its writing side with 0, both with 1. Reading never
 /// waits: a host procedure runs holding the root's host lock, which the vat's senders need to
 /// write, so a root waiting here for the other machine's bytes could keep its own from ever
-/// being sent. The root waits on `bell` instead, which the reader thread rings ([`grant_bell`]).
+/// being sent. The root waits on its notification instead, which a thread of its own signals each
+/// time `bell` rings (theSherwood/unir#349), and the reader thread rings it ([`bell::capability`]).
 fn link(sock: Arc<TcpStream>, bell: &Arc<Bell>) -> HostCap {
     let queue = Arc::new(Mutex::new(reader(&sock, bell)));
     HostCap::host_proc(0, move |_, _| {
@@ -327,10 +314,12 @@ pub fn run(
         ..Default::default()
     };
     let sock = Arc::clone(&link.sock);
-    // The bell's deadlines are on the clock the root reads, so both count from `epoch`.
-    let (bell, epoch): (Arc<Bell>, _) = (Arc::default(), Instant::now());
+    // The root's input bell (#253; theSherwood/unir#349): the reader thread rings it.
+    let bell: Arc<Bell> = Arc::default();
+    let epoch = Instant::now();
     let mut caps = vec![
         ("link", self::link(Arc::clone(&link.sock), &bell)),
+        ("bell", bell::capability(&bell)),
         ("entropy", entropy()),
         ("clock", clock(epoch)),
         ("keys", self::keys(keys)),
@@ -345,7 +334,6 @@ pub fn run(
         h.register_cap_name("store-self", m);
         h.grant_instantiator();
         h.grant_budget(-1, -1, -1);
-        grant_bell(h, &bell, epoch);
         setup(h);
     };
     let out = match inst.run_with_caps_and_host(backend, &config, &caps, Some(&mut grant)) {

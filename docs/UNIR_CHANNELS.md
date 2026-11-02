@@ -45,7 +45,7 @@ which targeted the retired native VM.
 ```
 runtime/chan.c        platform-neutral: the JaclChan object, read/write/close, framing, the busy flag
 runtime/chan_unir.c   the Unir backend over unir.h, plus the unit's heap (unir_host_alloc/free)
-runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.ll, UNIR_REV
+runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's images, UNIR_REV
 ```
 
 - **The object.** A channel end is one GC object (`JOBJ_BLOB`, so no traced pointers). It holds the
@@ -101,8 +101,8 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, unir_store_vat.l
   spinning against one parked inside a call. A call that waits for a peer (a service's reply, a child
   that starts or ends) holds the vat meanwhile; a wait that may be long does not. A service's next
   event is waited for on the vat's notification when the service was opened with it, and polled for
-  otherwise (docs/UNIR_SERVICES.md, "Waiting"); a legacy job's next screen is polled, the vat given
-  back between polls.
+  otherwise (docs/UNIR_SERVICES.md, "Waiting"); a legacy job's next screen is waited for the same
+  way, its report armed to signal the notification (`unir_job_arm`, #242).
 
 ## Build
 

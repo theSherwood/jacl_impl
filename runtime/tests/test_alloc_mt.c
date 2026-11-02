@@ -15,7 +15,7 @@
 #include "jaclrt.h"
 
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
-long __vm_thread_join(int h);
+long __vm_thread_join(int h, long *status);
 long __vm_vcpu_tls_get(void);
 
 #define MT_WORKERS 4
@@ -35,8 +35,9 @@ int run(int n) {
   int h[MT_WORKERS];
   for (int k = 0; k < MT_WORKERS; k++)
     h[k] = __vm_thread_spawn(mt_worker, (void *)0, MT_PER);
+  long status;
   for (int k = 0; k < MT_WORKERS; k++)
-    __vm_thread_join(h[k]);
+    __vm_thread_join(h[k], &status);
 
   /* total allocated across workers */
   long total = 0;

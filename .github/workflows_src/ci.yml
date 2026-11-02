@@ -275,7 +275,7 @@ jobs:
 
       - name: Install Chromium (Playwright)
         run: |
-          npm install --no-save playwright@1.56.1
+          npm install --no-save playwright@1.64.1
           npx playwright install --with-deps chromium
 
       # jacl #152: the real page, in Chromium, with the COOP/COEP headers the Worker driver needs —

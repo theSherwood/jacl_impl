@@ -362,10 +362,10 @@ JaclVal jacl_transcript_flush(JaclVal t);
 JaclVal jacl_transcript_job(JaclVal t, JaclVal command, JaclVal job); /* a job's place: `$ctx.out` */
 JaclVal jacl_transcript_job_end(JaclVal s, JaclVal complete);
 JaclVal jacl_transcript_pick(JaclVal t, JaclVal block, JaclVal value); /* a reference's name */
-/* What a shell starts beside its transcript: a handler for a file, and the legacy adapter. */
+/* What a shell starts beside its transcript: a handler for a file, and the legacy adapter as a
+ * full-screen job in a region. */
 JaclVal jacl_handler_open(JaclVal image, JaclVal args, JaclVal text, JaclVal fuel, JaclVal memory);
-JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal rows, JaclVal cols, JaclVal fuel,
-                        JaclVal memory);
+JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal fuel, JaclVal memory);
 /* Pipelines of vats (pipe_unir.c; docs/UNIR_PIPELINES.md). STAGES is a vector of argvs. */
 JaclVal jacl_pipeline(JaclVal stages);             /* output to jacl_out; the exit record */
 JaclVal jacl_pipeline_stream(JaclVal stages);      /* the output as a read end */
