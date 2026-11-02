@@ -32,7 +32,8 @@
 #include <string.h>
 
 int  __vm_thread_spawn(long (*fn)(long), void *stack, long arg);
-long __vm_thread_join(int h);
+/* temen#2667: *status 0, or -EBADF for a spent handle. The status is stored unconditionally. */
+long __vm_thread_join(int h, long *status);
 long __vm_fiber_new(long (*f)(long), void *stack);
 long __vm_fiber_resume(long k, long arg, int *done);   /* *done = cont.resume status (see JACL_FIBER_*) */
 long __vm_fiber_suspend(long value);
@@ -667,7 +668,8 @@ JaclVal jacl_sched_run_main(JaclVal fnref) {
   slock(); rq_push(root); sunlock(); pool_wake();
   worker_loop(/*is_main=*/1);
   jacl_gc_worker_unregister();                     /* leave the set while joining */
-  for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k]);
+  long status;
+  for (int k = 0; k < jacl_pool_nthreads; k++) __vm_thread_join(jacl_pool_handles[k], &status);
   jacl_gc_worker_register();
   JaclVal result = (JaclVal)job_get(root, 8);
   /* A pipeline stage ends its edges and returns a join status instead (pipe_unir.c). */
@@ -905,7 +907,8 @@ void jacl_sched_run_batch(JaclTaskFn *fn, long *arg, long *result, long n, int n
   int h[JACL_SCHED_MAX_WORKERS];
   for (int k = 0; k < nworkers; k++)
     h[k] = __vm_thread_spawn(jacl_batch_worker, jacl_batch_vcpu_stack[k], 0);
-  for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k]);
+  long status;
+  for (int k = 0; k < nworkers; k++) __vm_thread_join(h[k], &status);
   jacl_gc_worker_register();
   for (long i = 0; i < n; i++) result[i] = jacl_batch_result[i];
   jacl_batch_n = 0;
