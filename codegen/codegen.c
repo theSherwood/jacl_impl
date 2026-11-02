@@ -5571,7 +5571,7 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       {HEAD_TRANSCRIPT_JOB_END, "jacl_transcript_job_end", 2},
       {HEAD_TRANSCRIPT_PICK, "jacl_transcript_pick", 3},
       {HEAD_HANDLER_OPEN, "jacl_handler_open", 5},
-      {HEAD_LEGACY_JOB, "jacl_legacy_job", 6},
+      {HEAD_LEGACY_JOB, "jacl_legacy_job", 4},
       {HEAD_REPL_EVAL,  "jacl_repl_eval",  1},
       {HEAD_CANCEL,     "jacl_cancel",     1},
       {HEAD_SUSPEND,    "jacl_suspend",    1},

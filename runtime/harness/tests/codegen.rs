@@ -1570,7 +1570,6 @@ fn pipelines_run_on_temen() {
 
 const EDITOR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/editor.jacl");
 const FILES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/files.jacl");
-const STORE_VAT_LL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../unir/unir_store_vat.ll");
 
 /// Runs the JACL program at `path` as the one client of unir's store vat, twice on one store
 /// directory (sessions 1 and 2), on every engine: the vendored vat is the root, persisting to a
@@ -1582,10 +1581,7 @@ fn serve_twice(path: &str, check: impl Fn(temen_run::Backend, [Vec<String>; 2]))
     let client = temen_ir::synth_manifest_child_start(linked, entry, false)
         .unwrap_or_else(|e| panic!("synth_manifest_child_start {path}: {e}"));
     let log2 = client.memory.map(|m| m.size_log2).expect("a window");
-    let opts = temen_llvm::TranslateOptions { child_entry: false, ..Default::default() };
-    let vat = temen_llvm::translate_ll_path_with_options(Path::new(STORE_VAT_LL), opts)
-        .expect("translate unir_store_vat.ll")
-        .module;
+    let (vat, helper) = jacl_runtime_harness::node::store_images();
     // The vat's window: its image's and 256 times over (unir e2e/temen/store, ROOT_LOG2).
     let vat_log2 = vat.memory.map(|m| m.size_log2).expect("a window") + 8;
     let inst = temen_run::instantiate(vat).expect("instantiate the store vat");
@@ -1600,9 +1596,13 @@ fn serve_twice(path: &str, check: impl Fn(temen_run::Backend, [Vec<String>; 2]))
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let run = |source: u64| {
+            // The client, and the vat's own child image, which its System spawns the store vat
+            // from (theSherwood/unir#262).
             let mut grant = |h: &mut temen_interp::Host| {
                 let m = h.grant_module(&client);
                 h.register_cap_name("store-client", m);
+                let m = h.grant_module(&helper);
+                h.register_cap_name("store-self", m);
                 h.grant_instantiator();
                 h.grant_budget(-1, -1, -1);
             };
@@ -1643,10 +1643,12 @@ fn an_editor_keeps_its_document_in_the_store_vat() {
     // the editor types, undoes, redoes, branches and saves, then after the restart finds what it
     // saved and not what it typed after.
     serve_twice(EDITOR_JACL, |backend, [first, second]| {
-        // 11 versions typed, 6 more on the branch, and 3 unsaved.
-        assert_eq!(first, ["doc \"hello there!!!\"", "versions 20"], "{backend:?}");
-        // The unsaved 3 are gone; undo and redo mint nothing.
-        assert_eq!(second, ["doc \"hello there\"", "versions 17"], "{backend:?}");
+        // 11 versions typed, 6 more on the branch, 3 unsaved, and the System the vat runs as
+        // (ref `sys/serve`, theSherwood/unir#262).
+        assert_eq!(first, ["doc \"hello there!!!\"", "versions 21"], "{backend:?}");
+        // The unsaved 3 are gone; undo and redo mint nothing. The System is written again: it
+        // names the session its store opens as, which is new.
+        assert_eq!(second, ["doc \"hello there\"", "versions 19"], "{backend:?}");
     });
 }
 
@@ -1656,9 +1658,11 @@ fn a_directory_of_files_lives_in_the_store_vat() {
     // committed into directory `root` twice; after the restart the tree is as committed and the
     // first commit still holds the first version of main.
     serve_twice(FILES_JACL, |backend, [first, second]| {
-        // Four file versions (main twice) and two directory versions; nothing on `doc`.
-        assert_eq!(first, ["doc \"\"", "versions 6"], "{backend:?}");
-        assert_eq!(second, ["doc \"\"", "versions 6"], "{backend:?}");
+        // Four file versions (main twice), two directory versions and the System's
+        // (theSherwood/unir#262); nothing on `doc`.
+        assert_eq!(first, ["doc \"\"", "versions 7"], "{backend:?}");
+        // And the second session's System, which names that session.
+        assert_eq!(second, ["doc \"\"", "versions 8"], "{backend:?}");
     });
 }
 
@@ -1694,7 +1698,7 @@ fn two_machines(
     mut setup: impl FnMut(usize) -> Box<dyn FnMut(&mut temen_interp::Host) + Send>,
 ) -> [String; 2] {
     use jacl_runtime_harness::node;
-    let (vat, helper) = node::store_images();
+    let (vat, helper) = jacl_runtime_harness::node::store_images();
     // A machine run again on its directory is who it was: its keys are kept beside its store.
     let keys = match dirs {
         Some([d0, d1]) => match (node::kept(d0, 0), node::kept(d1, 1)) {
@@ -1741,20 +1745,22 @@ fn field(out: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("no {key:?} in {out:?}"))
 }
 
-/// Checks a machine's report: that its editor and puller succeeded, and its connection's sender,
-/// the proxy of the other machine's session and the connection itself completed.
+/// Checks a machine's report: that its editor succeeded, and its link vat's session with the
+/// store (its puller), its connection's sender, the proxy of the other machine's session and the
+/// connection itself completed. Since theSherwood/unir#262 a networked machine is a System whose
+/// link vat carries its connection, so the puller is the link vat's (`locals`), not the root's.
 fn check_machine(backend: temen_run::Backend, out: &str) {
-    // The editor's status, a JACL value, and the puller's.
+    // The editor's status, a JACL value.
     let clients: Vec<i64> = field(out, "clients ")
         .trim_matches(['[', ']'])
         .split(", ")
         .map(|x| x.parse().expect("a status"))
         .collect();
     assert!(
-        clients.len() == 2 && clients[0] != -1 && !is_jacl_error(clients[0]),
+        clients.len() == 1 && clients[0] != -1 && !is_jacl_error(clients[0]),
         "{backend:?}: the editor failed: {out}"
     );
-    assert_eq!(clients[1], 0, "{backend:?}: the puller failed: {out}");
+    assert_eq!(field(out, "locals "), "[0]", "{backend:?}: the puller failed: {out}");
     assert_eq!(field(out, "senders "), "[0]", "{backend:?}: {out}");
     assert_eq!(field(out, "proxies "), "[0]", "{backend:?}: {out}");
     assert_eq!(field(out, "links "), "ok", "{backend:?}: {out}");
@@ -1882,8 +1888,8 @@ fn two_people_edit_one_document_from_two_machines() {
     ] {
         let (outs, shown) = ed_session(backend, None, scripts.clone());
         // Each terminal's last view of the document is the final one (both awaited it), then the
-        // machine's report.
-        let last = "--\n1  top\n2  zero\n3  TWO\n4  bottom\n(waiting for the other machine to quit)\nhead ";
+        // machine's report, which opens with its link vat's session (theSherwood/unir#262).
+        let last = "--\n1  top\n2  zero\n3  TWO\n4  bottom\n(waiting for the other machine to quit)\nlocals ";
         for (out, shown) in outs.iter().zip(&shown) {
             check_machine(backend, out);
             assert!(shown.contains(last), "{backend:?}: the terminal showed {shown:?}");
@@ -2152,24 +2158,15 @@ fn pane_session(
         jacl_runtime_harness::bell::waited(&waited),
         "{backend:?}: {name}'s terminal vat polled stdin instead of waiting on its bell"
     );
-    let status = out
-        .lines()
-        .rev()
-        .find_map(|l| l.trim().strip_prefix("shell [terminal, view, client] ["))
-        .and_then(|l| l.strip_suffix(']'))
-        .map(|l| {
-            l.split(", ")
-                .map(|n| n.parse::<i64>().unwrap())
-                .collect::<Vec<_>>()
-        })
+    let status = jacl_runtime_harness::pane::report(&out)
         .unwrap_or_else(|| panic!("{backend:?}: no report in {out:?}"));
     assert_eq!(
-        status[..2],
-        [0, 0],
-        "{backend:?}: the terminal or the view failed: {out:?}"
+        status[..3],
+        [0, 0, 0],
+        "{backend:?}: the terminal, the viewer or the view failed: {out:?}"
     );
     assert!(
-        !is_jacl_error(status[2]) && status[2] != -1,
+        !is_jacl_error(status[3]) && status[3] != -1,
         "{backend:?}: {name}.jacl failed: {out:?}"
     );
     out

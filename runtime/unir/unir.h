@@ -15,9 +15,11 @@ typedef struct unir_schema unir_schema;
 typedef struct unir_agreement unir_agreement;
 typedef struct unir_service unir_service;
 typedef struct unir_transcript unir_transcript;
-typedef struct unir_legacy unir_legacy;
+typedef struct unir_jobs unir_jobs;
+typedef struct unir_job unir_job;
 typedef struct unir_notification unir_notification;
 typedef struct unir_drawer unir_drawer;
+typedef struct unir_tui unir_tui;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -38,6 +40,7 @@ typedef struct unir_grant {
 #define UNIR_EUNTYPED (-10)     /* no offer: the edge's first frame is not on substream 0 */
 #define UNIR_EMALFORMED (-11)   /* not a canonical message of that type */
 #define UNIR_EMISMATCH (-12)    /* a value that does not fit the type it is sent as */
+#define UNIR_ELOST (-13)        /* a job's region was lost with its compositor: it was killed */
 
 /* `*_ended`: 0 while open; else bits 0-1 kind (1 complete, 2 cancelled, 3 severed), for a
  * sever bits 2-5 the cause (unir-wire Cause) and bit 6 the side (1 = consumer). */
@@ -266,29 +269,49 @@ void unir_transcript_close(unir_vat *vat, unir_transcript *t);
 int64_t unir_handler_open(unir_vat *vat, int64_t module, uint32_t size_log2, const uint8_t *args,
                           uint64_t args_len, const uint8_t *text, uint64_t text_len,
                           uint32_t capacity, uint32_t slot_size, uint64_t fuel, uint64_t memory);
-/* The legacy adapter as a job: `args` followed by the job's size for a pane `rows` by `cols`;
- * passed the program's terminal (`pty`) with `stdout`, and its bell (`pty.bell`, issue #259) if
- * this vat holds one. NULL with `*err` set if it could not start. unir_legacy_event: a pane
- * event as the runtime heard it, a value frame of `values` (the runtime's value schema):
- * {"keys": K} or {"geometry": {rows, cols}}; UNIR_EINVALID for any other. unir_legacy_next waits
- * up to `timeout_ns` (negative: as long as it takes) for the program's next screen and keeps it: its
- * length, 0 if none came, UNIR_EENDED once the program ended; unir_legacy_screen copies it out,
- * a message of unir_schema_grid's entry 0. unir_legacy_close ends the job and returns the
- * adapter's exit status. */
-unir_legacy *unir_legacy_open(unir_vat *vat, int64_t module, uint32_t size_log2,
-                              const uint8_t *args, uint64_t args_len, uint32_t rows,
-                              uint32_t cols, uint32_t capacity, uint32_t slot_size, uint64_t fuel,
-                              uint64_t memory, int64_t *err);
-int64_t unir_legacy_event(unir_vat *vat, unir_legacy *l, const unir_schema *values,
-                          const uint8_t *frame, uint64_t len);
-int64_t unir_legacy_next(unir_vat *vat, unir_legacy *l, int64_t timeout_ns);
-int64_t unir_legacy_screen(const unir_legacy *l, uint8_t *out, uint64_t cap);
-int64_t unir_legacy_close(unir_vat *vat, unir_legacy *l);
 /* The connections a renderer knows: references (`link.usc`; a block of them is drawn
- * underlined) and a legacy job's screens (`grid.usc`; latest-wins, so the block is live). Free
- * with unir_schema_free. */
+ * underlined) and a full-screen job's screen (`screen.usc`; latest-wins, so the block is live).
+ * Free with unir_schema_free. */
 unir_schema *unir_schema_link(void);
 unir_schema *unir_schema_grid(void);
+
+/* Full-screen jobs (unir spec §12.3, §15; decisions #236.5, #236.7, #236.9). A shell asks its
+ * activator for a job's region on the jobs session its System grants it: unir_jobs_open opens
+ * the one its door names `name` (`name.requests`, `name.replies`); NULL with `*status` set,
+ * UNIR_ENOCAP if there is none.
+ *
+ * unir_job_open asks for job `id`'s region, waiting up to `timeout_ns` for the answer
+ * (UNIR_EREFUSED: an id already open, or a peer that does not run; UNIR_ESTALLED: no answer),
+ * then spawns the image granted as `module`, with a window of 2^size_log2 bytes, `args`, `fuel`
+ * and `memory`, granted the region as `region` (what unir_drawer_open opens: `region.lines`,
+ * `region.input`, `region.post`, and its notification `region.n`), the edge it reports its last
+ * screen on (`region.screen`, `region.wake`), and `grants` besides; the shell keeps none of the
+ * region. The compositor shows the region over its surface while the job draws, and sends it
+ * the keys typed. The legacy adapter is such a job, granted the program's terminal (`pty`, and
+ * `pty.bell`, issue #259) and `stdout`.
+ *
+ * unir_job_next takes what came, waiting up to `timeout_ns` (negative: as long as it takes) when
+ * nothing did: the length of the screen the job reported, kept for unir_job_screen (a message of
+ * unir_schema_grid's entry 0, the job's block's value); 0 if none came; UNIR_EENDED once the job
+ * is done; UNIR_ELOST if its region was lost, or another error, the job killed either way.
+ * unir_job_arm arms the job's report and the jobs session for a wait on the shell's
+ * notification (unir_notification_wait, which takes no vat, issue #208): 1 if both armed, 0 if
+ * something is there to take (then do not wait); unir_job_disarm them after the wait. A job that
+ * ends without reporting signals nothing, so wait with a timeout. unir_job_kill kills it, as
+ * when the pane closes under it. unir_job_close closes its region with the activator and joins
+ * it: its exit status, or UNIR_ESUBSTRATE if it was killed. */
+unir_jobs *unir_jobs_open(unir_vat *vat, const char *name, uint64_t name_len, int64_t *status);
+void unir_jobs_close(unir_vat *vat, unir_jobs *jobs);
+unir_job *unir_job_open(unir_vat *vat, unir_jobs *jobs, uint32_t id, int64_t module,
+                        uint32_t size_log2, const uint8_t *args, uint64_t args_len,
+                        const unir_grant *grants, uint64_t grants_n, uint64_t fuel,
+                        uint64_t memory, int64_t timeout_ns, int64_t *status);
+int64_t unir_job_next(unir_vat *vat, unir_jobs *jobs, unir_job *job, int64_t timeout_ns);
+int64_t unir_job_arm(unir_vat *vat, unir_jobs *jobs, unir_job *job);
+int64_t unir_job_disarm(unir_vat *vat, unir_jobs *jobs, unir_job *job);
+int64_t unir_job_screen(const unir_job *job, uint8_t *out, uint64_t cap);
+int64_t unir_job_kill(unir_vat *vat, unir_job *job);
+int64_t unir_job_close(unir_vat *vat, unir_jobs *jobs, unir_job *job);
 
 /* Regions (unir spec §15; decisions #236.1 to #236.3; issue #236): a rectangle of a screen a
  * program draws in, which a compositor composes. A program draws a frame as an array of cells in
@@ -315,18 +338,22 @@ typedef struct unir_cell {
 #define UNIR_STYLE_REVERSE 8u
 
 /* What a program hears: the region's size (rows, cols); a key (key, mods) while the region has
- * the focus; or the focus gained (focus 1) or lost. A key is a character, or a named key from
+ * the focus; the focus gained (focus 1) or lost; or the pointer over the region (issue #284): its
+ * cell (row, col, from the region's top left) and the buttons held (bit 0 the primary, which a
+ * touch presses; 1 the middle; 2 the secondary). A key is a character, or a named key from
  * UNIR_KEY_ENTER on, with Ctrl (the lower-case byte) or Alt (a character) in `mods`. */
 typedef struct unir_event {
   uint32_t kind; /* UNIR_EVENT_* */
   uint32_t rows, cols;
   uint32_t key, mods;
   uint32_t focus;
+  uint32_t row, col, buttons;
 } unir_event;
 
 #define UNIR_EVENT_SIZE 1u
 #define UNIR_EVENT_KEY 2u
 #define UNIR_EVENT_FOCUS 3u
+#define UNIR_EVENT_POINTER 4u
 #define UNIR_KEY_ENTER 0x110000u
 #define UNIR_KEY_TAB 0x110001u
 #define UNIR_KEY_BACKSPACE 0x110002u
@@ -344,8 +371,10 @@ typedef struct unir_event {
 #define UNIR_MOD_ALT 2u
 
 /* The program's end of the region it was endowed with as `name`: `name.lines` and `name.input`,
- * its edges, and `name.post`, which they signal the compositor through. It offers the region's
- * schema and accepts it back. NULL with `*status` set if it could not connect. */
+ * its edges, and `name.post`, which they signal the compositor through; and, a shell's job,
+ * `name.screen`, which it reports its last frame on as it closes, and `name.wake`, which that
+ * signals the shell through (decision #236.7). It offers the region's schema and accepts it
+ * back. NULL with `*status` set if it could not connect. */
 unir_drawer *unir_drawer_open(unir_vat *vat, const char *name, uint64_t name_len, int64_t *status);
 /* Presents `rows` by `cols` cells as the region's next frame (at most 512 by 1024: the rest is
  * cut), the cursor at (cursor_row, cursor_col), hidden if either is negative or outside. It goes
@@ -363,7 +392,8 @@ int64_t unir_drawer_next(unir_vat *vat, unir_drawer *d, unir_event *e);
 int64_t unir_drawer_arm(unir_vat *vat, unir_drawer *d);
 int64_t unir_drawer_disarm(unir_vat *vat, unir_drawer *d);
 /* Ends the region: what was presented goes, waiting for room as it must, then the compositor
- * hears the end, keeping the last frame. */
+ * hears the end, keeping the last frame; and that frame is reported, if the region has a
+ * report. */
 void unir_drawer_close(unir_vat *vat, unir_drawer *d);
 /* Writes UTF-8 `text` into row `row` of `cells`, `cols` a row, from column `col`, as a grid
  * writes text: a character a cell in `style` and colours `fg` on `bg`, a tab as spaces to the next
@@ -373,5 +403,80 @@ void unir_drawer_close(unir_vat *vat, unir_drawer *d);
 int64_t unir_cells_write(unir_cell *cells, uint32_t cols, uint32_t row, uint32_t col,
                          const uint8_t *text, uint64_t len, uint32_t style, uint32_t fg,
                          uint32_t bg);
+
+/* The TUI library (#237): a program's frames in immediate mode, presented on the region it holds
+ * as a drawer (unir_drawer_open). Each round the program gives it what the drawer heard
+ * (unir_drawer_next, then unir_tui_event), begins a frame (unir_tui_begin), fills it with cells,
+ * text and widgets in rectangles it cuts (unir_tui_split), and presents it on the drawer
+ * (unir_tui_present), which sends only the lines that changed. A widget's data stays the
+ * program's (a list's items and selection, an input's bytes); the library keeps only what is
+ * transient under the widget's id: a list's scroll, an input's cursor, and which widget has the
+ * focus. Tab moves the focus to the next widget in the order the frame drew them, as the next
+ * frame begins; the focused widget takes the keys it knows, and the rest are the program's
+ * (unir_tui_key). A frame takes the keys up to the next Tab; that Tab and those after it wait for
+ * the next frame (unir_tui_pending). Once running, a frame allocates nothing. */
+typedef struct unir_rect {
+  uint32_t x, y; /* its top left: column x of row y */
+  uint32_t w, h;
+} unir_rect;
+
+/* A part of a cut: `n` cells (UNIR_PART_FIXED), `n / d` of the whole (UNIR_PART_RATIO), or at
+ * least `n` cells and a share of what the others leave (UNIR_PART_MIN). */
+typedef struct unir_part {
+  uint32_t kind;
+  uint32_t n, d;
+} unir_part;
+
+#define UNIR_PART_FIXED 0u
+#define UNIR_PART_RATIO 1u
+#define UNIR_PART_MIN 2u
+
+/* A program's frames, before its region has told it a size. Never NULL; unir_tui_free it. */
+unir_tui *unir_tui_new(void);
+void unir_tui_free(unir_tui *t);
+/* Takes `*e`, an event the program's drawer heard: the region's size, which the next frame is
+ * drawn at, or a key, which waits for a frame. 0, or UNIR_EINVALID for an event that is not
+ * one. */
+int64_t unir_tui_event(unir_tui *t, const unir_event *e);
+/* 1 if keys wait for a frame: draw one, whether or not anything else came. Else 0. */
+int64_t unir_tui_pending(const unir_tui *t);
+/* Begins a frame at the region's size, every cell blank; its area, the whole region, in
+ * `*area`. */
+void unir_tui_begin(unir_tui *t, unir_rect *area);
+/* Cuts `*r` into `n` rows, top to bottom (`across` 0), or columns, left to right (`across` 1), by
+ * `parts`, into `out`. 0, or UNIR_EINVALID for a part that is not one or more than 16. */
+int64_t unir_tui_split(const unir_rect *r, uint32_t across, const unir_part *parts, uint32_t n,
+                       unir_rect *out);
+/* Sets cell `col` of row `row` to `*c`, or every cell of `*r`: nothing outside the frame. 0, or
+ * UNIR_EINVALID for a cell that is not one. */
+int64_t unir_tui_put(unir_tui *t, uint32_t row, uint32_t col, const unir_cell *c);
+int64_t unir_tui_fill(unir_tui *t, const unir_rect *r, const unir_cell *c);
+/* Writes UTF-8 `text` into `*r`, a line of it a row, each cut at the rectangle's width, as
+ * unir_cells_write writes text. Returns the rows written, or UNIR_EINVALID if `text` is not
+ * UTF-8 or the style or a colour is not one. */
+int64_t unir_tui_text(unir_tui *t, const unir_rect *r, const uint8_t *text, uint64_t len,
+                      uint32_t style, uint32_t fg, uint32_t bg);
+/* A list of `n` items in `*r`, a row each, item `i` the UTF-8 `items[i]` of `lens[i]` bytes,
+ * item `*selected` reversed with the focus and bold without it. With the focus it takes Up, Down,
+ * Page Up, Page Down, Home and End, which move `*selected`, scrolling to keep it shown. Returns 1
+ * if the selection moved, 0 if not, or UNIR_EINVALID if an item is not UTF-8. */
+int64_t unir_tui_list(unir_tui *t, uint32_t id, const unir_rect *r, const uint8_t *const *items,
+                      const uint64_t *lens, uint32_t n, uint32_t *selected);
+/* A line of text in `*r`'s first row, underlined across it: the UTF-8 `buf[..*len]`, never past
+ * `cap` bytes, edited in place. With the focus it takes printable characters, inserted at its
+ * cursor while they fit, and Backspace, Delete, Left, Right, Home and End, and shows the cursor.
+ * What is not UTF-8 is cut. Returns 1 if the text changed, else 0. */
+int64_t unir_tui_input(unir_tui *t, uint32_t id, const unir_rect *r, uint8_t *buf, uint64_t cap,
+                       uint64_t *len);
+/* A button, `[label]` in `*r`'s first row, reversed with the focus, which takes Enter and Space.
+ * Returns 1 if it was pressed, 0 if not, or UNIR_EINVALID if `label` is not UTF-8. */
+int64_t unir_tui_button(unir_tui *t, uint32_t id, const unir_rect *r, const uint8_t *label,
+                        uint64_t len);
+/* The frame's next key no widget took, now the program's, into `*e`: 1, or 0 once none is left.
+ * Ask after the widgets that may take keys. */
+int64_t unir_tui_key(unir_tui *t, unir_event *e);
+/* Ends the frame and presents it on the drawer `d`, as unir_drawer_present presents cells. 0, or
+ * an edge error. */
+int64_t unir_tui_present(unir_vat *vat, unir_tui *t, unir_drawer *d);
 
 #endif

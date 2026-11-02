@@ -1,14 +1,13 @@
-//! Bells (theSherwood/unir#225, #259): what a host rings when something arrives for a vat, so
-//! the vat waits for it rather than polling. A machine's root waits on its own ([`crate::node`]);
-//! a vat that also waits for its peers has a thread wait on its input's bell and signal its
-//! notification, as unir's terminal vat does for stdin's ([`capability`], [`crate::pane`]).
+//! Bells (theSherwood/unir#225, #259, #349): what a host rings when something arrives for a vat,
+//! so the vat waits for it rather than polling. A vat waits on its notification, which a thread of
+//! its own signals each time its input's bell rings: a machine's root for its link
+//! ([`crate::node`]), and unir's terminal vat for stdin ([`capability`], [`crate::pane`]).
 //!
 //! The wait is an offloadable host procedure's pool job on a condition variable, so a ring from
 //! any thread, or from inside a host call, only notifies it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use temen_interp::{CapState, ForkedProc, HostProcGrant, OffloadOutcome, ProcHandler};
 use temen_run::HostCap;
@@ -33,30 +32,21 @@ pub fn waited(bell: &Bell) -> bool {
     bell.waited.load(Ordering::SeqCst)
 }
 
-/// Waits until `bell` has rung more than `seen` times, or until `until`, and returns how many
-/// times it has rung.
-fn wait(bell: &Bell, seen: u64, until: Option<Instant>) -> u64 {
+/// Waits until `bell` has rung more than `seen` times, and returns how many times it has rung.
+fn wait(bell: &Bell, seen: u64) -> u64 {
     let rung = bell.rung.lock().expect("the bell");
-    let not_yet = |r: &mut u64| *r == seen;
-    let rung = match until {
-        Some(t) => {
-            let left = t.saturating_duration_since(Instant::now());
-            bell.cv.wait_timeout_while(rung, left, not_yet).expect("the bell").0
-        }
-        None => bell.cv.wait_while(rung, not_yet).expect("the bell"),
-    };
-    *rung
+    *bell.cv.wait_while(rung, |r| *r == seen).expect("the bell")
 }
 
-/// A wait on `bell` for the waiter `seen` keeps count for, off its caller's thread: until the bell
-/// rings, or `until`. Answers 1 if it rang since that waiter's last wait returned, else 0, so a
-/// ring between two waits ends the next at once and none is lost.
-pub fn wait_for(bell: &Arc<Bell>, seen: &Arc<AtomicU64>, until: Option<Instant>) -> OffloadOutcome {
+/// A wait on `bell` for the waiter `seen` keeps count for, off its caller's thread, until the bell
+/// rings. Answers 1 if it rang since that waiter's last wait returned, else 0, so a ring between
+/// two waits ends the next at once and none is lost.
+fn wait_for(bell: &Arc<Bell>, seen: &Arc<AtomicU64>) -> OffloadOutcome {
     bell.waited.store(true, Ordering::SeqCst);
     let (bell, seen) = (Arc::clone(bell), Arc::clone(seen));
     OffloadOutcome::Offload(Box::new(move || {
         let was = seen.load(Ordering::SeqCst);
-        let now = wait(&bell, was, until);
+        let now = wait(&bell, was);
         seen.store(now, Ordering::SeqCst);
         i64::from(now != was)
     }))
@@ -69,7 +59,7 @@ pub fn capability(bell: &Arc<Bell>) -> HostCap {
     let make = Arc::new(move || -> temen_interp::OffloadHostProc {
         let (bell, seen) = (Arc::clone(&bell), Arc::default());
         Box::new(move |op, _| match op {
-            0 => wait_for(&bell, &seen, None),
+            0 => wait_for(&bell, &seen),
             1 => {
                 ring(&bell);
                 OffloadOutcome::Done(Ok(vec![0]))

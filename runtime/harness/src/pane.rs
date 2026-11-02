@@ -1,5 +1,5 @@
 //! A JACL program in a terminal pane (#203; theSherwood/unir#102, decision 81): unir's store vat
-//! (`runtime/unir/unir_store_vat.ll`) run as `shell SOURCE LOG2 ROWS COLS [PROGRAM…]`. The vat is
+//! (`runtime/unir/unir_store_vat.temen`) run as `shell SOURCE LOG2 ROWS COLS [PROGRAM…]`. The vat is
 //! the root; it spawns the terminal vat and the dangling view from its own image (granted as
 //! `store-self`), and the program from the client image (granted as `store-client`), granted the
 //! store as `store`, the pane as `pane`, the Jit capability, and the programs it may run as
@@ -20,6 +20,20 @@ use crate::node::store_images;
 pub struct Size {
     pub rows: u16,
     pub cols: u16,
+}
+
+/// The `shell` mode's report, the last line of its output: the statuses of the terminal vat,
+/// the viewer, the view and the client, in that order (unir's `e2e/temen/store/src/shell.rs`).
+/// `None` if there is none.
+pub fn report(out: &str) -> Option<Vec<i64>> {
+    let line = out
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("shell [terminal, viewer, view, client] ["))?;
+    line.strip_suffix(']')?
+        .split(", ")
+        .map(|n| n.parse::<i64>().ok())
+        .collect()
 }
 
 /// Runs `client` (a JACL program compiled as a child image, its window `2^log2` bytes) in a pane

@@ -292,24 +292,15 @@ fn shell_session(
         "{backend:?}: the terminal vat polled stdin instead of waiting on its bell"
     );
     println!("{backend:?}: {out:?}");
-    let status = out
-        .lines()
-        .rev()
-        .find_map(|l| l.trim().strip_prefix("shell [terminal, view, client] ["))
-        .and_then(|l| l.strip_suffix(']'))
-        .map(|l| {
-            l.split(", ")
-                .map(|n| n.parse::<i64>().unwrap())
-                .collect::<Vec<_>>()
-        })
+    let status = jacl_runtime_harness::pane::report(&out)
         .unwrap_or_else(|| panic!("{backend:?}: no report in {out:?}"));
     assert_eq!(
-        status[..2],
-        [0, 0],
-        "{backend:?}: the terminal or the view failed: {out:?}"
+        status[..3],
+        [0, 0, 0],
+        "{backend:?}: the terminal, the viewer or the view failed: {out:?}"
     );
     assert!(
-        !is_jacl_error(status[2]) && status[2] != -1,
+        !is_jacl_error(status[3]) && status[3] != -1,
         "{backend:?}: shell.jacl failed: {out:?}"
     );
     let at = |s: &str| {

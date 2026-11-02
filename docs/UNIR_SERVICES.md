@@ -70,9 +70,12 @@ a wrong shape is refused, never guessed at.
 
 ## The store vat
 
-unir's store vat is vendored as `runtime/unir/unir_store_vat.ll` (`cargo run --release -- store-ll`
-in unir's `e2e/temen`), a root image. Run with `serve K SOURCE LOG2` on stdin, a window of its image's
-memory times 256, a file system granted as `fs`, and the client image granted as `store-client`, it
+unir's store vat is vendored as its images, as unir builds and runs them (`cargo run --release --
+store-image` in unir's `e2e/temen`): the root, `runtime/unir/unir_store_vat.temen`, and the child it
+spawns its store vat, pullers and senders from, `unir_store_vat_child.temen`, granted to it as
+`store-self`. Each is temen's encoding at the pin, so both are re-vendored as the pin moves. Run with
+`serve K SOURCE LOG2` on stdin, a window of its image's memory times 256, a file system granted as
+`fs`, and the client image granted as `store-client`, it
 spawns `K` clients with windows of `2^LOG2` bytes, each granted the store as `store` and the vat's own
 `stdout` (which a JACL image imports as `write`). It persists to `store.log`, reopened as session
 `SOURCE`, and reports each client's status, ref `doc`'s text and the version count.
@@ -236,7 +239,7 @@ program writes blocks without encoding a record:
 | `[schema DESC]` | the schema `DESC` describes; an integer handle. `[schema "link"]` is unir's link document, whose values are references |
 | `[emit V S]` | in a job, `V` as a value of schema `S`: a block of `S`'s entry 0 (live if it is latest-wins) |
 | `[handler-open IMAGE ARGS TEXT FUEL MEMORY]` | spawns a handler for a file (unir decision 106) from the image granted as `IMAGE`, with `ARGS`, the surface the session set aside for handlers and that budget, and sends it `TEXT` as the file; its child. The program ends after its handlers |
-| `[legacy-job IMAGE ARGS ROWS COLS FUEL MEMORY]` | in a job: runs the legacy adapter (unir decision 105) from `IMAGE`, a POSIX program in a terminal of the job's size in a pane of `ROWS` by `COLS`; its screens are the job's live grid block and the job's input goes to it until the program ends; its exit status |
+| `[legacy-job IMAGE ARGS FUEL MEMORY]` | in a job: runs the legacy adapter (unir decision 105) from `IMAGE`, a POSIX program, as the job's full-screen job in a region the shell's jobs session gives it (unir decisions #236.5, #236.9). The terminal shows the region while the program runs and the keys typed go to it; each screen the adapter reports replaces the last in the job's live grid block; its exit status |
 
 A block's values are messages of its schema: `S` from `[schema DESC]`, or nil for JACL's own values
 (`value.usc`), which a renderer shows as nested structure. `DESC` is a connection schema written as
@@ -296,8 +299,8 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
 - **Editing.** Backspace edits the line, and Up and Down move through the earlier lines.
 - **A job's input.** While the shell waits for a job, the pane's keys (but Ctrl-C and Ctrl-Z) and
   sizes are the job's (`$ctx->in`, an atom of a vector of them, which the job empties as it takes
-  them: `legacy-job` sends them to the program). What the job leaves is typed at the prompt once it
-  ends, after what was already waiting there.
+  them). What the job leaves is typed at the prompt once it ends, after what was already waiting
+  there. A full-screen job's keys go to its region, not to the pane (`legacy-job`).
 - **References.** A reference activated in the transcript runs `open NAME` as a job, `NAME` the
   reference's, which shows only its output: the profile says what opening a name means.
 - **Waiting.** The shell opens its pane with the notification its events signal (`[service "pane"
