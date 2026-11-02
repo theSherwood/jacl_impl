@@ -12,7 +12,7 @@
 //
 //   node concurrent_run.mjs <temen_browser.wasm> <jacl_compiler.temen> <jaclrt.temen>
 import { readFileSync } from 'node:fs';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [wasmPath, compPath, rtPath] = process.argv.slice(2);
 if (!wasmPath || !compPath || !rtPath) {
@@ -27,8 +27,7 @@ const SRC =
   'proc main {} {\n  def f [spawn { worker }]\n  await $f\n}\n' +
   'main\n';
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath));
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
 const load = (bytes) => {

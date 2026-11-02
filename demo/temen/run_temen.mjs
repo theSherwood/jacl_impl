@@ -6,7 +6,7 @@
 //
 // Exit 0 iff temen_status == 0 and (no expected given, or stdout matches).
 import { readFileSync } from 'node:fs';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [wasmPath, cardPath, expected] = process.argv.slice(2);
 if (!wasmPath || !cardPath) {
@@ -14,8 +14,7 @@ if (!wasmPath || !cardPath) {
   process.exit(2);
 }
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath));
 
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);

@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { runJitModule } from '../../vendor/temen/browser/web/wasmjit-module.js';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const args = process.argv.slice(2);
 const wasmPath = args.shift();
@@ -34,8 +34,7 @@ if (!wasmPath || args.length === 0) {
 }
 
 const memory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports(memory));
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath), memory);
 const dec = new TextDecoder();
 const u8 = () => new Uint8Array(memory.buffer);
 const readStdout = () => dec.decode(u8().slice(

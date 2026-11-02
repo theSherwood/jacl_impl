@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 const [wasmPath, coldCard, warmCard, prog] = process.argv.slice(2);
 const memory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports(memory));
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath), memory);
 const dec = new TextDecoder(), enc = new TextEncoder();
 const u8 = () => new Uint8Array(memory.buffer);
 const load = (b) => { const p = Number(ex.temen_alloc(b.length)); u8().set(b, p); return p; };

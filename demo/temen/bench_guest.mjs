@@ -10,7 +10,7 @@
 //
 //   node bench_guest.mjs <temen_browser.wasm> <jacl_compiler.temen> <prog1.jacl> [prog2.jacl ...]
 import { readFileSync } from 'node:fs';
-import { engineImports } from '../../vendor/temen/browser/engine-imports.mjs';
+import { instantiateEngine } from '../../vendor/temen/browser/engine-imports.mjs';
 
 const [wasmPath, compPath, ...progs] = process.argv.slice(2);
 if (!wasmPath || !compPath || progs.length === 0) {
@@ -18,8 +18,7 @@ if (!wasmPath || !compPath || progs.length === 0) {
   process.exit(2);
 }
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), engineImports());
-const ex = instance.exports;
+const ex = await instantiateEngine(readFileSync(wasmPath));
 const is64 = ex.temen_abi_is64() === 1;
 const U = (x) => (is64 ? BigInt(x) : x);
 const load = (b) => { const p = ex.temen_alloc(U(b.length)); new Uint8Array(ex.memory.buffer).set(b, Number(p)); return Number(p); };

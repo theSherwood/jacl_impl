@@ -24,7 +24,7 @@
 // cdylib imports (webgpu_op + stdout_chunk + foreign_* stubs; no memory — the plain build owns its own),
 // and `runWarmCoop` drives the cooperative tier-up over an open warm session (the fast `tierup` path).
 // @ts-ignore — vendored JS engine glue, no bundled type declarations.
-import { engineImports } from "../../vendor/temen/browser/engine-imports.mjs";
+import { instantiateEngine } from "../../vendor/temen/browser/engine-imports.mjs";
 // @ts-ignore — vendored JS engine glue, no bundled type declarations.
 import { runWarmCoop } from "../../vendor/temen/browser/web/wasmjit-module.js";
 
@@ -143,10 +143,12 @@ export class TemenJaclRunner {
    */
   static async create(wasmUrl: string): Promise<TemenJaclRunner> {
     const source = await fetch(wasmUrl);
-    // `engineImports()` (no memory arg) is the plain build's import set — the plain cdylib exports its
-    // own memory and imports only the `temen_host.*` host seam (webgpu_op + stdout_chunk + foreign_*).
-    const { instance } = await WebAssembly.instantiateStreaming(source, engineImports());
-    return new TemenJaclRunner(instance.exports as unknown as TemenBrowserExports);
+    // `instantiateEngine(module)` (no memory arg) is the plain build: the plain cdylib exports its
+    // own memory and imports only the `temen_host.*` host seam (webgpu_op + stdout_chunk +
+    // foreign_*), so no memory to adopt. It takes a compiled Module, so compile the stream first.
+    const module = await WebAssembly.compileStreaming(source);
+    const exports = await instantiateEngine(module);
+    return new TemenJaclRunner(exports as unknown as TemenBrowserExports);
   }
 
   /** usize marshalling: `i32` (Number) on wasm32, `i64` (BigInt) on wasm64. */
