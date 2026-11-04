@@ -174,3 +174,23 @@ codegen/selfhost/macro_staging/run_wire_test.sh       # round trips, positions, 
 codegen/selfhost/macro_staging/run_rt_codec_test.sh   # both codecs agree on every kind
 ( cd runtime/harness && cargo test --release --test codegen -- macro gensym )   # end to end on TEMEN
 ```
+
+## Wire v4 and the syntax builtins (jacl_impl#271)
+
+A staged body can look at its arguments and build syntax: `syntax-kind`, `syntax-datum`,
+`syntax-head`, `syntax-args`, `syntax-commands`, `syntax-pos`, `syntax-str`, `make-syntax` and
+`syntax-error` (signatures in `syn_rt.h` and `SYNTAX.md`). They are implemented once in `syn_rt.c`,
+which both glues include, and codegen lowers them for staged bodies only; the guest card's symbol
+list (`stage_glue_guest.c`) and the shell's (`runtime/harness/src/repl.rs`, `BRIDGE`) carry them.
+
+- **The argument wire's header** carries the call's position and each position handle's line and
+  column, which is what `syntax-pos` reads (the runtime keeps handles, not positions, on nodes).
+- **An error result names its node**: `syntax-error MSG NODE` is reported at NODE. A
+  `syntax-error` fails the macro wherever it is called — a loop body drops its value — since it
+  halts compilation.
+- **Head ids**: a command built with `make-syntax` has none; the host gives it the parser's on
+  decode, so codegen sees a `make-syntax` `if` as an `if`.
+- **The body is its own function**, called by the staged entry, so every way out of it — its end,
+  a `return`, an error a statement raised — comes back to the write of the result.
+- **`syntax-str`** mirrors src/ast.c's `ast_pretty_print` (printf `%g` for floats included);
+  `run_rt_codec_test.sh` checks the two agree.

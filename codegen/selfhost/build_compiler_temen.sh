@@ -139,6 +139,8 @@ EOF
   #   fresh  42              -> [mut g__0_N 42]      : the `[gensym]` -> synrt_gensym mint runs in-guest
   #   unless … { print "…$x"; break }                 : wire v3 kinds (interp string, break) cross in-guest
   #   keep 1; keep 2 in one proc                      : two expansions' gensyms are named apart (#271)
+  #   arity  [f 1 2 3]       -> 3                    : syntax builtins in-guest (syntax-args, make-syntax)
+  #   my-unless (make-syntax) -> an `if` (br_if)     : a command the macro built gets its head id
   cat > "$OUT/stagetest_main.c" <<'EOF'
 #include <stdio.h>
 #include <string.h>
@@ -152,6 +154,8 @@ static const char *const CASES[][2] = {
   {"gensym", "defmacro fresh {v} { syntax-quote [mut [gensym] ~v] }\nproc run {} {\n  fresh 42\n  99\n}\nrun\n"},
   {"body",   "defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }\ndef x 7\nwhile $true { unless [== 1 2] { print \"x is $x\"; break } }\n"},
   {"twogen", "defmacro keep {v} { syntax-quote [def [gensym \"k\"] ~v] }\nproc f {} {\n  keep 1\n  keep 2\n  77\n}\nf\n"},
+  {"arity",  "defmacro arity {x} { make-syntax \"lit-int\" [vec-len [syntax-args $x]] }\narity [f 1 2 3]\n"},
+  {"mksyn",  "defmacro my-unless {c b} { make-syntax \"command\" [make-syntax \"lit-string\" \"if\"] [vec $c [make-syntax \"block\" [vec]] $b] }\nmut hit 0\nmy-unless [== 1 2] { set hit 5 }\nhit\n"},
 };
 int main(void) {
   jacl_install_temen_stage_hook();
@@ -177,9 +181,11 @@ EOF
   case_out gensym | grep -q "$(int_const 99)"                                                          || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
   case_out body   | grep -q '"jacl_str_concat"' && case_out body | grep -q '"jacl_print"'              || { echo "STAGETEST FAIL: body"   >&2; sf=1; }
   case_out twogen | grep -q "$(int_const 77)"                                                          || { echo "STAGETEST FAIL: twogen" >&2; sf=1; }
+  case_out arity  | grep -q "$(int_const 3)"                                                           || { echo "STAGETEST FAIL: arity"  >&2; sf=1; }
+  case_out mksyn  | grep -q 'br_if'                                                                    || { echo "STAGETEST FAIL: mksyn"  >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/stagetest.out"                                                       && { echo "STAGETEST FAIL: error/NULL in output" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
-    echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym/body/twogen) expanded in-guest via the Jit capability."
+    echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym/body/twogen/arity/mksyn) expanded in-guest via the Jit capability."
   else
     echo "STAGETEST FAIL — a corpus case did not expand as expected in-guest." >&2
     exit 1
