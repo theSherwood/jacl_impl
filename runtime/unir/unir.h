@@ -70,7 +70,7 @@ int64_t unir_region_create(unir_vat *vat, uint64_t len);
 
 /* Spawns a child running `module` (a module capability whose export 0 is a child entry) in
  * a window of its own, 2^size_log2 bytes (the module's declared memory, paid from the vat's
- * Budget). It starts with `args` (at most 16,224 bytes; see unir_vat_args), exactly
+ * Budget). It starts with `args` (at most 16,208 bytes; see unir_vat_args), exactly
  * `grants`, and `fuel`. Returns the child's capability. */
 int64_t unir_spawn(unir_vat *vat, int64_t module, uint32_t size_log2, const uint8_t *args,
                    uint64_t args_len, const unir_grant *grants, uint32_t grants_n,
