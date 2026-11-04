@@ -110,9 +110,14 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's 
   (`cargo run --release -- cabi-ll <dir>`, which writes `unir_cabi.ll` and copies `unir.h`).
   `jacl_impl` vendors both files under `runtime/unir/`, with the unir commit in `UNIR_REV`, the way the
   playground bundle is committed. A runtime build then needs no Rust toolchain.
-- **Exports.** The vendored unit exports all of `unir.h`, including `unir_spawn` for pipelines
-  (`docs/UNIR_PIPELINES.md`). `cabi-ll` takes an export list (`cabi-ll <dir> [function...]`) for a
-  runtime that leaves spawning out. `codegen.rs::the_runtime_compiles_to_bytecode` guards that the
+- **Exports.** The vendored unit exports the functions `runtime/unir/EXPORTS` lists: `unir.h`'s
+  vat, edge, job, service and screen calls, including `unir_spawn` for pipelines
+  (`docs/UNIR_PIPELINES.md`). It is emitted with that list, `cabi-ll runtime/unir $(cat
+  runtime/unir/EXPORTS)`. Since unir#438 the C ABI also holds the store (`unir_store.h`, which
+  `unir.h` includes, and `unir.h`'s `unir_home_*`). The runtime calls none of it, and exported it
+  would stay in every image: 36 MB more IR here, and a shell image of 3.2 MB instead of 1.8 MB. So
+  the store's headers are vendored for `unir.h` to compile, and its functions are not exported. A
+  runtime that calls one adds it to `EXPORTS`. `codegen.rs::the_runtime_compiles_to_bytecode` guards that the
   runtime stays inside the bytecode engine's subset, which a module that both spawns and uses fibers
   is since theSherwood/temen#1789.
 - **Linking.** `runtime/build.sh` compiles `jaclrt.c` to `.ll` with clang 18 as today, then runs

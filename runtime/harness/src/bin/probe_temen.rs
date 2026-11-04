@@ -106,7 +106,8 @@ fn scan_module(m: &Module, reachable: &[bool]) -> (Seams, Seams, Vec<(usize, Str
             }
             for inst in &b.insts {
                 match inst {
-                    Inst::CapCall { type_id, op, sig, args, .. } => {
+                    Inst::CapCall(c) => {
+                        let temen_ir::CapCall { type_id, op, sig, args, .. } = &**c;
                         match (*type_id, *op) {
                             (cap_id::INSTANTIATOR, 0 | 1 | 5) => set!(instantiate),
                             (cap_id::INSTANTIATOR, _) => set!(coro),
@@ -239,8 +240,8 @@ fn report(tag: &str, m: &Module) {
         if !reach.get(fi).copied().unwrap_or(false) { continue; }
         for b in &f.blocks {
             for inst in &b.insts {
-                if let Inst::CapCall { type_id, op, .. } = inst {
-                    *cap.entry((*type_id, *op)).or_default() += 1;
+                if let Inst::CapCall(c) = inst {
+                    *cap.entry((c.type_id, c.op)).or_default() += 1;
                 }
             }
         }
@@ -339,9 +340,9 @@ fn run_compare(m: &Module) {
                                 Inst::ContNew { .. } => "cont.new",
                                 Inst::ContResume { .. } => "cont.resume",
                                 Inst::Suspend { .. } => "suspend",
-                                Inst::CapCall { type_id, .. } => {
-                                    if *type_id == cap_id::INSTANTIATOR { "cap.instantiator" }
-                                    else if *type_id == CAP_SELF { "cap.self" }
+                                Inst::CapCall(c) => {
+                                    if c.type_id == cap_id::INSTANTIATOR { "cap.instantiator" }
+                                    else if c.type_id == CAP_SELF { "cap.self" }
                                     else { "cap.call" }
                                 }
                                 Inst::CallImport { .. } => "call.import",
