@@ -113,7 +113,7 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's 
 - **Exports.** The vendored unit exports the functions `runtime/unir/EXPORTS` lists: `unir.h`'s
   vat, edge, job, service and screen calls, including `unir_spawn` for pipelines
   (`docs/UNIR_PIPELINES.md`). It is emitted with that list, `cabi-ll runtime/unir $(cat
-  runtime/unir/EXPORTS)`. Since unir#438 the C ABI also holds the store (`unir_store.h`, which
+  runtime/unir/EXPORTS)`. Since unir#408 (unir#395) the C ABI also holds the store (`unir_store.h`, which
   `unir.h` includes, and `unir.h`'s `unir_home_*`). The runtime calls none of it, and exported it
   would stay in every image: 36 MB more IR here, and a shell image of 3.2 MB instead of 1.8 MB. So
   the store's headers are vendored for `unir.h` to compile, and its functions are not exported. A
