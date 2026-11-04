@@ -166,7 +166,8 @@ unsigned char *synw_encode_args(MacroEntry *entry, AstNode *call, size_t *out_le
   if (nfixed > argc) nfixed = argc;
   w_u8(&w, SYNW_VERSION);
   for (uint32_t i = 0; i < nfixed; i++) w_node(&w, call->data.command.args[i]);
-  if (entry->variadic) w_nodes(&w, call->data.command.args + nfixed, argc - nfixed);
+  if (entry->variadic)   /* no rest arguments: `args` may be NULL, so do not offset it */
+    w_nodes(&w, argc > nfixed ? call->data.command.args + nfixed : NULL, argc - nfixed);
   if (w.err) { free(w.buf); return NULL; }
   if (out_len) *out_len = w.len;
   return w.buf;
