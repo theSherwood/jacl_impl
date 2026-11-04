@@ -5,6 +5,7 @@
 #include "syn_rt.c"
 #include <stdio.h>
 #include <stdlib.h>
+void synrt_load_args(void) {}   /* syn_rt's hook into a glue; this tool reads no argument wire */
 int main(void) {
   jacl_heap_init(); jacl_intern_init();
   size_t cap = 1 << 16, len = 0; unsigned char *buf = malloc(cap); int c;

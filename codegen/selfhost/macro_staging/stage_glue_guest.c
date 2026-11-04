@@ -44,14 +44,17 @@ unsigned char synrt_window_log2(void) { return g_window_log2; }
 static const unsigned char *g_arg_buf;
 static size_t g_arg_len, g_arg_pos;
 
-/* Install the argument wire for the next staged run and reset the read cursor past the shared
- * version byte (a bad/empty header parks the cursor at end, so reads yield nil). Called by the
- * staging hook before `__vm_jit_invoke2`. */
+/* Install the argument wire for the next staged run: read past the shared version byte and the
+ * header (a bad/empty wire parks the cursor at end, so reads yield nil). Called by the staging
+ * hook before `__vm_jit_invoke2`. */
 void synrt_set_arg_wire(const unsigned char *buf, size_t len) {
   g_arg_buf = buf;
   g_arg_len = len;
   g_arg_pos = (len >= 1 && buf[0] == (unsigned char)synrt_wire_version()) ? 1 : len;
+  if (g_arg_pos < len) synrt_read_header(buf, len, &g_arg_pos);
 }
+/* syn_rt's hook for `syntax-pos`: the hook installed the wire, header and all, before the run. */
+void synrt_load_args(void) {}
 
 JaclVal synrt_read_arg(void) {
   return synrt_decode_node(g_arg_buf, g_arg_len, &g_arg_pos);
@@ -142,6 +145,11 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_heap_init); SYM(jacl_intern_init); SYM(jacl_map_init); SYM(jacl_sched_run_main); \
     /* the staged-macro I/O glue */ \
     SYM(synrt_read_arg); SYM(synrt_read_rest); SYM(synrt_write_result); SYM(synrt_gensym); \
+    /* the syntax builtins a staged body's syntax-* / make-syntax calls lower to */ \
+    SYM(synrt_syntax_kind); SYM(synrt_syntax_datum); SYM(synrt_syntax_head); \
+    SYM(synrt_syntax_args); SYM(synrt_syntax_commands); SYM(synrt_syntax_pos); \
+    SYM(synrt_syntax_str); SYM(synrt_make_syntax2); SYM(synrt_make_syntax3); \
+    SYM(synrt_syntax_error1); SYM(synrt_syntax_error2); \
     /* data-free string-literal construction (in-guest §3b) */ \
     SYM(synrt_str_empty); SYM(synrt_str_push_byte); \
     /* vectors / arrays (the plain-data syntax representation) */ \

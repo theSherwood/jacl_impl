@@ -912,12 +912,13 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
  * (codegen the body → run in-process via the `jacl_temen_stage` bridge → decode the result)
  * instead of the legacy bytecode VM. The hook takes the macro entry and the call (an
  * AST_COMMAND: its arguments, and the position the expansion's own nodes take) and returns the
- * expanded AST in `*out` (allocated in `arena`); it returns NULL on success or an error string.
- * Left NULL (a build that does not link the TEMEN stage bridge) the behaviour is exactly the
- * legacy path. This is the seam that keeps `src/` free of any codegen/TEMEN dependency: the
- * driver installs it. */
+ * expanded AST in `*out` (allocated in `arena`); it returns NULL on success or an error string,
+ * with `*err_at` set (line > 0) when the error is about a particular node — `syntax-error MSG
+ * NODE` — so it is reported there rather than at the call. Left NULL (a build that does not
+ * link the TEMEN stage bridge) the behaviour is exactly the legacy path. This is the seam that
+ * keeps `src/` free of any codegen/TEMEN dependency: the driver installs it. */
 const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode *call, arena_t *arena,
-                                     AstNode **out) = NULL;
+                                     AstNode **out, SourcePos *err_at) = NULL;
 
 /* Whether to stage macros on TEMEN (Phase 6.2: staging is the **default** once the bridge is
  * linked). It applies only where `jacl_macro_stage_hook` is installed — a build without the
@@ -993,13 +994,16 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                  * then splices + re-expands exactly like the legacy tail below. */
                 if (jacl_macro_stage_hook && jacl_stage_on_temen_enabled()) {
                     AstNode *expanded = NULL;
-                    const char *serr = jacl_macro_stage_hook(entry, node, arena, &expanded);
+                    SourcePos err_at = {0};
+                    const char *serr = jacl_macro_stage_hook(entry, node, arena, &expanded,
+                                                             &err_at);
                     if (serr) {
                         char err[256];
                         snprintf(err, sizeof(err), "macro '%.*s': %s",
                                  (int)name_len, name, serr);
-                        expand__set_error(es, err, node->start.line,
-                                          node->start.column, arena);
+                        uint32_t at_line = err_at.line ? err_at.line : node->start.line;
+                        uint32_t at_col  = err_at.line ? err_at.column : node->start.column;
+                        expand__set_error(es, err, at_line, at_col, arena);
                         return false;
                     }
                     if (!expanded) {

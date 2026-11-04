@@ -50,11 +50,42 @@ JaclVal synrt_decode_node(const unsigned char *buf, size_t len, size_t *pos);
 unsigned char *synrt_encode(JaclVal syn, size_t *out_len);
 
 /* A staged macro's result -> the result wire (malloc'd): the version byte, then status 0
- * and the expansion, or status 1 and a message — the error value's message, or why the
- * value is not syntax. NULL only on allocation failure. */
+ * and the expansion, or status 1, a message — the `syntax-error`'s, the error value's, or why
+ * the value is not syntax — and the handle of the node it is about (0: the call). NULL only
+ * on allocation failure. */
 unsigned char *synrt_encode_result(JaclVal v, size_t *out_len);
 
 /* The gensym var-ref `prefix__n` (prefix nil or "" → "g"; at most 64 bytes of it). */
 JaclVal synrt_gensym_node(JaclVal prefix, uint32_t n);
+
+/* Read the argument wire's header at *pos (just past the version byte): the call's line and
+ * column, then a u32 count and each position handle's line and column. Remembers them for
+ * `syntax-pos`, clears any pending `syntax-error`, and leaves *pos at the first argument. */
+void synrt_read_header(const unsigned char *buf, size_t len, size_t *pos);
+
+/* The syntax builtins a staged macro body's `syntax-*` / `make-syntax` calls lower to. Each
+ * returns an error value (the macro then fails with its message) on a value of the wrong kind.
+ *   syntax-kind S        the kind's name: "command", "lit-int", "var-ref", "block", …
+ *   syntax-datum S       a literal's value, a var-ref's name
+ *   syntax-head S        a command's (or shell command's) head
+ *   syntax-args S        a command's (or shell command's) arguments; an interp-string's segments
+ *   syntax-commands S    a block's commands
+ *   syntax-pos S         [map line N col M]: the argument's position, or the call's
+ *   syntax-str S         the node as the frontend's pretty-printer writes it
+ *   make-syntax K A [B]  "command" HEAD ARGS, "block" CMDS, "interp-string" SEGS, "lit-int" N,
+ *                        "lit-float" X, "lit-string" S, "lit-string-caret" S, "var-ref" NAME
+ *   syntax-error MSG [N] fail the macro with MSG, at N's position (or the call's) — wherever
+ *                        it is called, whatever the body then returns */
+JaclVal synrt_syntax_kind(JaclVal s);
+JaclVal synrt_syntax_datum(JaclVal s);
+JaclVal synrt_syntax_head(JaclVal s);
+JaclVal synrt_syntax_args(JaclVal s);
+JaclVal synrt_syntax_commands(JaclVal s);
+JaclVal synrt_syntax_pos(JaclVal s);
+JaclVal synrt_syntax_str(JaclVal s);
+JaclVal synrt_make_syntax2(JaclVal kind, JaclVal a);
+JaclVal synrt_make_syntax3(JaclVal kind, JaclVal a, JaclVal b);
+JaclVal synrt_syntax_error1(JaclVal msg);
+JaclVal synrt_syntax_error2(JaclVal msg, JaclVal node);
 
 #endif /* SYN_RT_H */

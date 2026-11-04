@@ -43,9 +43,10 @@ static const unsigned char *g_live_symtab;
 static size_t g_live_symtab_len;
 
 /* Matches jacl_macro_stage_hook: expand the macro call `call` in-guest, returning the AST in
- * *out (arena-allocated). NULL on success, else an error string. */
+ * *out (arena-allocated). NULL on success, else an error string, with *err_at set when the
+ * macro's own error names a node. */
 static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode *call, arena_t *arena,
-                                                 AstNode **out) {
+                                                 AstNode **out, SourcePos *err_at) {
   static char errbuf[256];
   *out = NULL;
   int live = g_live_symtab != NULL;
@@ -114,7 +115,7 @@ static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode *c
 
   /* 6. decode the result wire back to an AST (strings copied into `arena`). */
   const char *err = NULL;
-  *out = synw_decode_result(res, reslen, arena, &c, &err);
+  *out = synw_decode_result(res, reslen, arena, &c, &err, err_at);
   free(res);
   synw_call_end(&c);
   return *out ? NULL : err;

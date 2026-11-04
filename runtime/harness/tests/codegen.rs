@@ -1316,6 +1316,15 @@ fn run_jacl_source(name: &str, src: &str) -> (i64, Vec<u8>) {
     out
 }
 
+/// Run `src` through the staged driver, insist it neither fails nor returns an error, and return
+/// what it printed.
+fn staged_stdout(name: &str, src: &str) -> String {
+    let (ret, stdout) = run_jacl_source(name, src);
+    let out = String::from_utf8_lossy(&stdout).into_owned();
+    assert!(!is_jacl_error(ret), "{name} returned an error (0x{:016x}); printed {out:?}", ret as u64);
+    out
+}
+
 /// Compile `src` through the staged driver, expecting it to be refused; returns its stderr.
 fn staged_emit_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("jacl_{name}_{}.jacl", std::process::id()));
@@ -1352,25 +1361,25 @@ proc first-big {xs} {
   }
   -1
 }
-assert [== [first-big [vec 5 150 7 300]] 150]
+print [first-big [vec 5 150 7 300]]
 mut n 0
 while $true {
   set n [+ $n 1]
   unless [< $n 3] { break }
 }
-assert [== $n 3]
+print $n
 mut odd 0
 for [vec 1 2 3 4 5] v {
   unless [== [% $v 2] 1] { continue }
   set odd [+ $odd $v]
 }
-assert [== $odd 9]
+print $odd
 def nums [vec 1 2 3]
-assert [== [sum-all ..$nums] 6]
+print [sum-all ..$nums]
 "#;
-    let (ret, stdout) = run_jacl_source("macro_any_expression", src);
-    assert!(!is_jacl_error(ret), "a macro argument did not survive staging (0x{:016x})", ret as u64);
-    assert_eq!(String::from_utf8_lossy(&stdout), "found 150\n");
+    // Printed rather than asserted: only a program's last statement decides its result, so a
+    // failing top-level `assert` before it goes unnoticed (jacl_impl#273).
+    assert_eq!(staged_stdout("macro_any_expression", src), "found 150\n150\n3\n9\n6\n");
 }
 
 #[test]
@@ -1391,11 +1400,9 @@ while $true {
   set i [+ $i 1]
   stop-when [== $i 4]
 }
-assert [== $i 4]
+print $i
 "#;
-    let (ret, stdout) = run_jacl_source("macro_any_template", src);
-    assert!(!is_jacl_error(ret), "a macro template did not survive staging (0x{:016x})", ret as u64);
-    assert_eq!(String::from_utf8_lossy(&stdout), "x is 7\n");
+    assert_eq!(staged_stdout("macro_any_template", src), "x is 7\n4\n");
 }
 
 #[test]
@@ -1447,6 +1454,169 @@ fn an_error_inside_a_macro_argument_points_at_its_line() {
          unless [== 1 2] {\n  def i32 n \"not a number\"\n}\n",
     );
     assert!(err.contains("type error: 5:"), "unexpected error: {err}");
+}
+
+// The syntax builtins (jacl_impl#271 item 4): a staged macro body can look at its arguments and
+// build syntax, not only fill in a template.
+
+#[test]
+fn a_macro_reads_a_block_of_names() {
+    // `syntax-commands`, `syntax-head`, `syntax-args`, `make-syntax "command"` / `"lit-int"`.
+    let src = r#"
+defmacro enum {names} {
+  mut heads [vec]
+  mut vals [vec]
+  for [syntax-commands $names] i c {
+    if [> [vec-len [syntax-args $c]] 0] {
+      syntax-error "enum: expected a bare name" $c
+    }
+    set heads [vec-push $heads [syntax-head $c]]
+    set vals [vec-push $vals [make-syntax "lit-int" $i]]
+  }
+  def pattern [make-syntax "command" [vec-get $heads 0] [vec-slice $heads 1 [vec-len $heads]]]
+  def values [make-syntax "command" [make-syntax "lit-string" "vec"] $vals]
+  syntax-quote [def ~pattern ~values]
+}
+enum {red, green, blue}
+print "$red $green $blue"
+"#;
+    assert_eq!(staged_stdout("macro_enum", src), "0 1 2\n");
+}
+
+#[test]
+fn a_macro_expands_into_itself() {
+    // `cond` peels one clause and leaves the rest to a smaller `cond`, which the expander expands
+    // in turn: recursion through re-expansion, no helper procs. `syntax-kind` tells a test from
+    // the `else` word; `make-syntax "block"` builds the rest.
+    let src = r#"
+defmacro cond {clauses} {
+  def cs [syntax-commands $clauses]
+  def test [syntax-head [vec-get $cs 0]]
+  def body [vec-get [syntax-args [vec-get $cs 0]] 0]
+  def rest [make-syntax "block" [vec-slice $cs 1 [vec-len $cs]]]
+  if [== [syntax-kind $test] "lit-string"] {
+    $body
+  } elif [== [vec-len $cs] 1] {
+    syntax-quote [if ~test ~body]
+  } else {
+    syntax-quote [if ~test ~body { cond ~rest }]
+  }
+}
+proc sign {x} {
+  cond {
+    [> $x 0] { "positive" }
+    [< $x 0] { "negative" }
+    else { "zero" }
+  }
+}
+print [sign 5]
+print [sign -3]
+print [sign 0]
+"#;
+    assert_eq!(staged_stdout("macro_cond", src), "positive\nnegative\nzero\n");
+}
+
+#[test]
+fn a_macro_names_its_arguments() {
+    // `syntax-datum` of a var-ref is its name; `make-syntax "interp-string"` builds the string.
+    let src = r#"
+defmacro show {..vars} {
+  mut segs [vec]
+  for $vars v {
+    if [!= [syntax-kind $v] "var-ref"] {
+      syntax-error "show: expected a variable" $v
+    }
+    def name [syntax-datum $v]
+    def sep [if [== [vec-len $segs] 0] { "" } else { " " }]
+    set segs [vec-push $segs [make-syntax "lit-string" "$sep$name="]]
+    set segs [vec-push $segs $v]
+  }
+  def msg [make-syntax "interp-string" $segs]
+  syntax-quote [print ~msg]
+}
+def user "ada"
+def count 3
+show $user $count
+"#;
+    assert_eq!(staged_stdout("macro_show", src), "user=ada count=3\n");
+}
+
+#[test]
+fn a_macro_quotes_its_argument() {
+    // `syntax-str` writes the argument as the frontend's pretty-printer does.
+    let src = r#"
+defmacro dbg {expr} {
+  def label [make-syntax "lit-string" [concat [syntax-str $expr] " = "]]
+  syntax-quote [print [concat ~label [to-string ~expr]]]
+}
+def a 5
+def b 3
+dbg [+ $a [* $b 2]]
+"#;
+    assert_eq!(staged_stdout("macro_dbg", src), "[+ $a [* $b 2]] = 11\n");
+}
+
+#[test]
+fn make_syntax_builds_commands_the_compiler_recognizes() {
+    // A command built with `make-syntax` has no head id until the host gives it the parser's, and
+    // codegen dispatches `if` on it. A bare `[gensym]` outside a template mints a name too.
+    let src = r#"
+defmacro my-unless {c b} {
+  make-syntax "command" [make-syntax "lit-string" "if"] [vec $c [make-syntax "block" [vec]] $b]
+}
+defmacro swap {a b} {
+  def t [gensym "t"]
+  def ra [make-syntax "var-ref" [syntax-datum $a]]
+  def rb [make-syntax "var-ref" [syntax-datum $b]]
+  syntax-quote {
+    def ~t ~ra
+    set ~a ~rb
+    set ~b ~t
+  }
+}
+mut hit 0
+my-unless [== 1 2] { set hit 5 }
+mut x 1
+mut y 2
+swap x y
+print "$hit $x $y"
+"#;
+    assert_eq!(staged_stdout("macro_make_syntax", src), "5 2 1\n");
+}
+
+#[test]
+fn syntax_pos_says_where_an_argument_is() {
+    // An argument's own line; a node the macro made has the call's — in a macro with no
+    // parameters too, whose (native) run reads the argument wire only when asked.
+    let src = "defmacro line-of {x} {\n  make-syntax \"lit-int\" [map-get [syntax-pos $x] line]\n}\n\
+               defmacro here {} {\n  def n [make-syntax \"lit-int\" 0]\n  make-syntax \"lit-int\" [map-get [syntax-pos $n] line]\n}\n\
+               print [line-of foo]\n\
+               def z 1\n\
+               print [line-of $z]\n\
+               print [here]\n";
+    assert_eq!(staged_stdout("macro_pos", src), "8\n10\n11\n");
+}
+
+#[test]
+fn syntax_error_is_reported_at_the_node_it_names() {
+    // The error leaves the body early (it is not its last statement), and is reported at the
+    // argument it names rather than at the call.
+    let err = staged_emit_error(
+        "macro_syntax_error",
+        "defmacro only-ints {x} {\n  if [!= [syntax-kind $x] \"lit-int\"] {\n    syntax-error \"expected an integer literal\" $x\n  }\n  $x\n}\n\
+         print [only-ints 1]\n\
+         print [only-ints \"two\"]\n",
+    );
+    assert!(err.contains("8:18: macro 'only-ints': expected an integer literal"), "unexpected error: {err}");
+    // Inside a loop, in `enum`; and a builtin given the wrong kind of value fails the macro.
+    let err = staged_emit_error(
+        "macro_enum_error",
+        "defmacro first {xs} {\n  for [syntax-commands $xs] c {\n    if [> [vec-len [syntax-args $c]] 0] { syntax-error \"a bare name\" $c }\n  }\n  make-syntax \"lit-int\" 1\n}\n\
+         first {a, [b 1], c}\n",
+    );
+    assert!(err.contains("7:11: macro 'first': a bare name"), "unexpected error: {err}");
+    let err = staged_emit_error("macro_builtin_misuse", "defmacro h {x} {\n  syntax-head $x\n}\nh 5\n");
+    assert!(err.contains("4:1: macro 'h': syntax-head: not a command"), "unexpected error: {err}");
 }
 
 const READ_LINE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/read_line.jacl");

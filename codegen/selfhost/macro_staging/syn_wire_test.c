@@ -7,6 +7,7 @@
 #include "../../../src/jacl.c"
 #include "syn_wire.c"
 #include <stdio.h>
+HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(head); }
 
 static AstNode *parse_one(const char *src, arena_t *a) {
   ParseResult pr = parser_parse(lexer_lex(src, a), a);
@@ -128,9 +129,10 @@ static int wide_literals_are_refused(void) {
 
 static int results_carry_the_expansion_or_an_error(void) {
   arena_t a = {0};
-  const unsigned char failed[] = { SYNW_VERSION, SYNW_RESULT_ERROR, 3, 0, 0, 0, 'b', 'a', 'd' };
+  const unsigned char failed[] = { SYNW_VERSION, SYNW_RESULT_ERROR, 3, 0, 0, 0, 'b', 'a', 'd',
+                                    0, 0, 0, 0 };
   const char *err = NULL;
-  AstNode *n = synw_decode_result(failed, sizeof failed, &a, NULL, &err);
+  AstNode *n = synw_decode_result(failed, sizeof failed, &a, NULL, &err, NULL);
   int ok_err = !n && err && strcmp(err, "bad") == 0;
 
   AstNode *orig = parse_one("[+ 1 2]", &a);
@@ -140,15 +142,75 @@ static int results_carry_the_expansion_or_an_error(void) {
   ok_wire[0] = SYNW_VERSION;
   ok_wire[1] = SYNW_RESULT_OK;
   memcpy(ok_wire + 2, node + 1, len - 1);
-  AstNode *exp = synw_decode_result(ok_wire, len + 1, &a, NULL, &err);
+  AstNode *exp = synw_decode_result(ok_wire, len + 1, &a, NULL, &err, NULL);
   int ok_exp = exp && strcmp(ast_pretty_print(exp, &a), ast_pretty_print(orig, &a)) == 0;
   free(node); free(ok_wire);
 
-  n = synw_decode_result(NULL, 0, &a, NULL, &err);
+  n = synw_decode_result(NULL, 0, &a, NULL, &err, NULL);
   int ok_empty = !n && err != NULL;
   return check(ok_err, "a result wire carries the macro's error") +
          check(ok_exp, "a result wire carries the expansion") +
          check(ok_empty, "an empty result is an error, not a crash");
+}
+
+/* The argument wire's header: the call's position, then each handle's line and column. */
+static int args_carry_the_position_table(void) {
+  arena_t a = {0};
+  AstNode *call = parse_one("\n  m 1\n  [+ 2 3]", &a);   /* `m 1` at 2:3 */
+  MacroEntry e = {0};
+  e.param_count = 1;
+  SynwCall c;
+  synw_call_begin(&c, call);
+  size_t n;
+  unsigned char *b = synw_encode_args(&e, call, &n, &c);
+  uint32_t f[3] = {0};
+  if (b && n >= 13) memcpy(f, b + 1, 12);
+  uint32_t line1 = 0, col1 = 0;
+  if (b && n >= 21) { memcpy(&line1, b + 13, 4); memcpy(&col1, b + 17, 4); }
+  int ok = b && b[0] == SYNW_VERSION && f[0] == 2 && f[1] == 3 && f[2] == c.count &&
+           c.count == 1 && line1 == 2 && col1 == 5;
+  free(b);
+  synw_call_end(&c);
+  return check(ok, "the argument wire carries the call's position and each handle's");
+}
+
+/* A macro error names a node by handle; it is reported at that node, or at the call for 0. */
+static int errors_point_at_their_node(void) {
+  arena_t a = {0};
+  AstNode *call = parse_one("\n\nm [+ 1 2]", &a);
+  MacroEntry e = {0};
+  e.param_count = 1;
+  SynwCall c;
+  synw_call_begin(&c, call);
+  size_t n;
+  unsigned char *args = synw_encode_args(&e, call, &n, &c);   /* handles 1 ([+ 1 2]), 2, 3, 4 */
+  unsigned char at_arg[] = { SYNW_VERSION, SYNW_RESULT_ERROR, 1, 0, 0, 0, 'x', 3, 0, 0, 0 };
+  unsigned char at_call[] = { SYNW_VERSION, SYNW_RESULT_ERROR, 1, 0, 0, 0, 'x', 0, 0, 0, 0 };
+  const char *err = NULL;
+  SourcePos p1, p2;
+  synw_decode_result(at_arg, sizeof at_arg, &a, &c, &err, &p1);
+  synw_decode_result(at_call, sizeof at_call, &a, &c, &err, &p2);
+  /* handle 3 is the `1` in `[+ 1 2]`, at 3:6; the call is at 3:1 */
+  int ok = args && p1.line == 3 && p1.column == 6 && p2.line == 3 && p2.column == 1;
+  free(args);
+  synw_call_end(&c);
+  return check(ok, "a macro error is reported at the node it names, or at the call");
+}
+
+/* A command the macro built (handle 0, no head id) gets the parser's head id on decode. */
+static int made_commands_get_their_head_id(void) {
+  arena_t a = {0};
+  AstNode *cmd = parse_one("[if $c {} {}]", &a);
+  cmd->data.command.head_id = HEAD_NONE;   /* as make-syntax leaves it */
+  size_t n;
+  unsigned char *b = synw_encode(cmd, &n, NULL);
+  SynwCall c;
+  synw_call_begin(&c, cmd);
+  AstNode *dec = b ? synw_decode(b, n, &a, &c) : NULL;
+  int ok = dec && dec->data.command.head_id == HEAD_IF;
+  free(b);
+  synw_call_end(&c);
+  return check(ok, "a command the macro built gets the parser's head id");
 }
 
 int main(void) {
@@ -169,6 +231,9 @@ int main(void) {
   fails += gensyms_are_named_for_the_expansion();
   fails += wide_literals_are_refused();
   fails += results_carry_the_expansion_or_an_error();
+  fails += args_carry_the_position_table();
+  fails += errors_point_at_their_node();
+  fails += made_commands_get_their_head_id();
   printf(fails ? "syn_wire: %d FAILED\n" : "syn_wire: all tests passed\n", fails);
   return fails ? 1 : 0;
 }

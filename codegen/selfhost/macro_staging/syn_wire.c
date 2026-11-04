@@ -5,12 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* v3: every node carries a position handle, every expression node kind crosses, and the
- * result wire leads with a status byte. v2 widened AST_LIT_INT from 4 bytes to 8 (jacl
- * #113). Both ends of this wire are built from these sources in-tree, so there is no
- * old-reader compatibility to keep — but any prebuilt `.temen` that embeds the codec has
- * to be rebuilt. Keep in step with syn_rt.c. */
-#define SYNW_VERSION 3
+/* v4: the argument wire leads with the call's position and a (line, col) per position handle
+ * (for `syntax-pos`), and an error result names the node it is about. v3: every node carries
+ * a position handle, every expression node kind crosses, and the result wire leads with a
+ * status byte. v2 widened AST_LIT_INT from 4 bytes to 8 (jacl #113). Both ends of this wire
+ * are built from these sources in-tree, so there is no old-reader compatibility to keep — but
+ * any prebuilt `.temen` that embeds the codec has to be rebuilt. Keep in step with syn_rt.c. */
+#define SYNW_VERSION 4
+
+/* The frontend's head-id table (via the unity driver, as codegen.c uses it): a command the macro
+ * built with `make-syntax` comes back with no head id, and codegen dispatches on it. */
+HeadId jacl_compute_head_id_bridge(AstNode *head);
 
 /* The result wire's status byte. */
 #define SYNW_RESULT_OK    0
@@ -158,16 +163,30 @@ unsigned char *synw_encode(AstNode *node, size_t *out_len, SynwCall *c) {
 }
 
 unsigned char *synw_encode_args(MacroEntry *entry, AstNode *call, size_t *out_len, SynwCall *c) {
-  W w = {0};
-  w.call = c;
+  /* The nodes first, since writing them is what fills the position table the header carries. */
+  W body = {0};
+  body.call = c;
   uint32_t argc = call->data.command.arg_count;
   uint32_t nfixed = (entry->variadic && entry->param_count > 0) ? entry->param_count - 1
                                                                 : entry->param_count;
   if (nfixed > argc) nfixed = argc;
-  w_u8(&w, SYNW_VERSION);
-  for (uint32_t i = 0; i < nfixed; i++) w_node(&w, call->data.command.args[i]);
+  for (uint32_t i = 0; i < nfixed; i++) w_node(&body, call->data.command.args[i]);
   if (entry->variadic)   /* no rest arguments: `args` may be NULL, so do not offset it */
-    w_nodes(&w, argc > nfixed ? call->data.command.args + nfixed : NULL, argc - nfixed);
+    w_nodes(&body, argc > nfixed ? call->data.command.args + nfixed : NULL, argc - nfixed);
+  if (body.err) { free(body.buf); return NULL; }
+
+  W w = {0};
+  w_u8(&w, SYNW_VERSION);
+  w_u32(&w, c->call_start.line);
+  w_u32(&w, c->call_start.column);
+  w_u32(&w, c->count);
+  for (uint32_t i = 0; i < c->count; i++) {
+    w_u32(&w, c->starts[i].line);
+    w_u32(&w, c->starts[i].column);
+  }
+  w_need(&w, body.len);
+  if (!w.err && body.len) { memcpy(w.buf + w.len, body.buf, body.len); w.len += body.len; }
+  free(body.buf);
   if (w.err) { free(w.buf); return NULL; }
   if (out_len) *out_len = w.len;
   return w.buf;
@@ -203,18 +222,20 @@ static AstNode **r_nodes(R *r, uint32_t *out_count) {
   return ns;
 }
 
-/* A node from the argument wire gets back the position it had there; one the macro made
- * takes the macro call's. */
-static void r_place(R *r, AstNode *n, uint32_t handle) {
-  SynwCall *c = r->call;
-  if (!c) return;
-  if (handle >= 1 && handle <= c->count) {
-    n->start = c->starts[handle - 1];
-    n->end = c->ends[handle - 1];
+/* Where handle `h` points: the node's position on the argument wire, or the call's for a node
+ * the macro made (0). */
+static void r_where(SynwCall *c, uint32_t h, SourcePos *start, SourcePos *end) {
+  if (h >= 1 && h <= c->count) {
+    *start = c->starts[h - 1];
+    *end = c->ends[h - 1];
   } else {
-    n->start = c->call_start;
-    n->end = c->call_end;
+    *start = c->call_start;
+    *end = c->call_end;
   }
+}
+
+static void r_place(R *r, AstNode *n, uint32_t handle) {
+  if (r->call) r_where(r->call, handle, &n->start, &n->end);
 }
 
 /* A gensym minted in this run is numbered from zero by the run, so the same names come
@@ -255,6 +276,10 @@ static AstNode *r_node(R *r) {
       n->data.command.head_id = (uint8_t)r_u8(r);
       n->data.command.head = r_opt(r);
       n->data.command.args = r_nodes(r, &n->data.command.arg_count);
+      /* A command the macro built with `make-syntax` carries no head id; give it the one the
+       * parser would have, so `[make-syntax "command" if …]` is an `if`. */
+      if (!r->err && handle == 0 && n->data.command.head_id == HEAD_NONE)
+        n->data.command.head_id = (uint8_t)jacl_compute_head_id_bridge(n->data.command.head);
       break;
     case AST_BLOCK:
       n->data.block.trailing_semi = r_u8(r) ? true : false;
@@ -293,16 +318,19 @@ AstNode *synw_decode(const unsigned char *buf, size_t len, arena_t *arena, SynwC
 }
 
 AstNode *synw_decode_result(const unsigned char *buf, size_t len, arena_t *arena, SynwCall *c,
-                            const char **err) {
+                            const char **err, SourcePos *err_at) {
   R r = { buf, len, 0, 0, arena, c };
   *err = NULL;
+  if (err_at) memset(err_at, 0, sizeof *err_at);
   if (!buf || len == 0) { *err = "the staged macro wrote no result"; return NULL; }
   if (r_u8(&r) != SYNW_VERSION) { *err = "the staged macro's result has the wrong wire version"; return NULL; }
   unsigned status = r_u8(&r);
   if (status == SYNW_RESULT_ERROR) {
     uint32_t n;
     const char *msg = r_str(&r, &n);
+    uint32_t handle = r_u32(&r);   /* the node the error is about; 0: the call */
     *err = msg ? msg : "the staged macro failed";
+    if (err_at && c && !r.err) { SourcePos end; r_where(c, handle, err_at, &end); }
     return NULL;
   }
   AstNode *n = (status == SYNW_RESULT_OK) ? r_node(&r) : NULL;

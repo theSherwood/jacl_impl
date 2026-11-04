@@ -3,7 +3,7 @@
 # For each `defmacro` case, codegen a complete staged-macro program (entry reads the N
 # argument syntax values on stdin, runs the body on TEMEN, writes the result), link it
 # against the staging-extended runtime, and RUN it on the real engine via `stage_macro`:
-#   gen_wire ARGS…  (ASTs -> wire) | stage_macro MACRO.jacl (on TEMEN) | wire_to_ast (-> AST)
+#   gen_wire --args ARGS…  (ASTs -> wire) | stage_macro MACRO.jacl (on TEMEN) | wire_to_ast (-> AST)
 # and assert the expansion. Unlike run_wrapper_test.sh (a hand-written __jacl_macro run
 # natively), this exercises the *codegen'd* body executing on TEMEN plus the real
 # read/encode/write glue — the full final link, including multi-arity macros. Heavy:
@@ -29,7 +29,7 @@ check() {
   local src="$1" want="$2"; shift 2
   printf '%s\n' "$src" > "$B/_stage_case.jacl"
   local got
-  got="$("$B/gen_wire" "$@" | "$SM" "$B/_stage_case.jacl" 2>/dev/null | "$B/wire_to_ast")"
+  got="$("$B/gen_wire" --args "$@" | "$SM" "$B/_stage_case.jacl" 2>/dev/null | "$B/wire_to_ast")"
   if [ "$got" = "$want" ]; then echo "  PASS  ($*)  ->  $got"
   else echo "  FAIL  ($*)  ->  $got  (want $want)" >&2; fail=1; fi
 }

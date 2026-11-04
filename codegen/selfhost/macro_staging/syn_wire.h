@@ -52,9 +52,10 @@ const char *synw_call_refusal(const SynwCall *c, char *buf, size_t cap);
  * allocation failure. Free with `free`. */
 unsigned char *synw_encode(AstNode *node, size_t *out_len, SynwCall *c);
 
-/* The argument wire for calling `entry` at `call`: the version byte, one node per fixed
- * parameter, then — variadic only — a u32 count and that many rest arguments. The
- * caller has checked the arity. NULL as for `synw_encode`. */
+/* The argument wire for calling `entry` at `call`: the version byte; the call's line and
+ * column; a u32 count of position handles and each one's line and column (so the macro can
+ * answer `syntax-pos`); one node per fixed parameter; then — variadic only — a u32 count and
+ * that many rest arguments. The caller has checked the arity. NULL as for `synw_encode`. */
 unsigned char *synw_encode_args(MacroEntry *entry, AstNode *call, size_t *out_len, SynwCall *c);
 
 /* Decode a buffer produced by `synw_encode` into an AstNode tree allocated in `arena`.
@@ -63,9 +64,12 @@ unsigned char *synw_encode_args(MacroEntry *entry, AstNode *call, size_t *out_le
 AstNode *synw_decode(const unsigned char *buf, size_t len, arena_t *arena, SynwCall *c);
 
 /* Decode a staged macro's result wire: the version byte, a status byte, then the
- * expansion (status 0) or an error message (status 1). Returns the expansion, or NULL
- * with `*err` set to the macro's message or to why the wire was unreadable. */
+ * expansion (status 0) or an error message and the handle of the node it is about
+ * (status 1). Returns the expansion, or NULL with `*err` set to the macro's message or to
+ * why the wire was unreadable; for the macro's own error, `*err_at` (if given) is where it
+ * points — the node's position, or the call's — and otherwise has line 0. A command the
+ * macro built with `make-syntax` gets its head id here. */
 AstNode *synw_decode_result(const unsigned char *buf, size_t len, arena_t *arena, SynwCall *c,
-                            const char **err);
+                            const char **err, SourcePos *err_at);
 
 #endif /* SYN_WIRE_H */
