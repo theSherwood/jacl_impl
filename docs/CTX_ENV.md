@@ -66,7 +66,7 @@ arrive as the values passed (docs/UNIR_PIPELINES.md, "One codec"); `env` is the 
 The root's environment is still the host's §3e blob (`{argc, envc}`, then NUL-terminated strings,
 the environment's as `KEY=VALUE`).
 
-A stage's payload is bounded by the args area (16,224 bytes); an overflow is an error rather than
+A stage's payload is bounded by the args area (16,208 bytes); an overflow is an error rather than
 a truncation.
 
 ## Not here
