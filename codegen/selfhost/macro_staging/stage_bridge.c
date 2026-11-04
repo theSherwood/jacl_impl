@@ -25,9 +25,10 @@ extern int jacl_temen_stage(const unsigned char *module_bytes, size_t module_len
 extern void jacl_temen_stage_free(unsigned char *ptr, size_t len);
 
 /* Matches jacl_macro_stage_hook: expand the macro call `call` on TEMEN, returning the AST in
- * *out (arena-allocated). NULL on success, else an error string. */
+ * *out (arena-allocated). NULL on success, else an error string, with *err_at set when the
+ * macro's own error names a node. */
 static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode *call, arena_t *arena,
-                                           AstNode **out) {
+                                           AstNode **out, SourcePos *err_at) {
   static char errbuf[256];
   *out = NULL;
 
@@ -63,7 +64,7 @@ static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode *call, a
 
   /* 4. decode the result wire back to an AST (strings are copied into `arena`). */
   const char *err = NULL;
-  *out = synw_decode_result(res, reslen, arena, &c, &err);
+  *out = synw_decode_result(res, reslen, arena, &c, &err, err_at);
   jacl_temen_stage_free(res, reslen);
   synw_call_end(&c);
   return *out ? NULL : err;

@@ -34,7 +34,8 @@ void *realloc(void *p, size_t n) {
 
 extern long read(int fd, void *buf, long n);
 
-/* Stateful across calls: the argument wire is `version byte, then the parameter values`.
+/* Stateful across calls: the argument wire is `version byte, header, then the parameter values`
+ * (the header is syn_rt's: the call's position and each position handle's).
  * Fixed parameters are one syntax value each; a variadic macro's trailing rest parameter is
  * `u32 count, then count syntax values`. The codegen entry calls `synrt_read_arg` once per
  * fixed parameter (in order) and `synrt_read_rest` for the rest parameter. The first read
@@ -52,9 +53,13 @@ static void synrt_args_ensure(void) {
     len += (size_t)r;
   }
   g_arg_buf = buf; g_arg_len = len; g_arg_ready = 1;
-  /* Skip the shared version byte; a bad/empty header leaves the cursor at end (reads -> nil). */
+  /* Skip the shared version byte and read the header; a bad/empty wire leaves the cursor at end
+   * (reads -> nil). */
   g_arg_pos = (len >= 1 && buf[0] == (unsigned char)synrt_wire_version()) ? 1 : len;
+  if (g_arg_pos < len) synrt_read_header(buf, len, &g_arg_pos);
 }
+/* syn_rt's hook for `syntax-pos`, which needs the header even in a macro with no parameters. */
+void synrt_load_args(void) { synrt_args_ensure(); }
 JaclVal synrt_read_arg(void) {
   synrt_args_ensure();
   return synrt_decode_node(g_arg_buf, g_arg_len, &g_arg_pos);

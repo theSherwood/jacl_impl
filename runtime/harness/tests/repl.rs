@@ -10,7 +10,7 @@ const SPIKE_JACL: &str = concat!(
 
 /// What `repl_spike.jacl` prints: each line's value, two macros' expansions among them; a macro
 /// whose body does not compile refused, new or redefined, and the lines after expanding as before;
-/// and the last line's compile error.
+/// the last line's compile error; and a macro that calls the syntax builtins.
 const SPIKE_OUT: &str = "41\nnil\n42\n0\n2\n2\n<closure>\n7\n\
     nil\n[Point x 3 y 4]\n7\nnil\n30\n[Point x 3 y 4]\n\
     nil\n42\nnil\n42\n\
@@ -18,7 +18,8 @@ const SPIKE_OUT: &str = "41\nnil\n42\n0\n2\n2\n<closure>\n7\n\
     <error: codegen: unsupported command head 'bad'>\n\
     <error: codegen: unsupported command head 'nope'>\n\
     3\n\
-    <error: codegen: unsupported command head 'nope'>\n";
+    <error: codegen: unsupported command head 'nope'>\n\
+    nil\n3\n";
 
 #[test]
 fn a_repl_line_sees_what_earlier_lines_defined() {

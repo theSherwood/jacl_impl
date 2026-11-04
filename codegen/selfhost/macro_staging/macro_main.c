@@ -10,6 +10,9 @@
 
 extern JaclVal __jacl_macro(JaclVal arg0);
 
+/* syn_rt's hook into a glue; this wrapper reads its single argument wire itself. */
+void synrt_load_args(void) {}
+
 int main(void) {
   jacl_heap_init(); jacl_intern_init();
   size_t cap = 1 << 16, len = 0; unsigned char *buf = (unsigned char *)malloc(cap);

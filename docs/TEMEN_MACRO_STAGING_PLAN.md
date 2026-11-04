@@ -286,6 +286,11 @@ or the macro's error message); a gensym a run mints is suffixed with its expansi
 decode, since the native path's per-call module restarts the counter. See
 `codegen/selfhost/macro_staging/README.md`, "Wire v3".
 
+**Phase 2 — syntax builtins on TEMEN (jacl_impl#271 item 4).** Done over the plain-data
+representation, as C in `syn_rt.c` lowered by codegen for staged bodies, with wire v4 for
+`syntax-pos` and node-positioned `syntax-error`. See the README, "Wire v4 and the syntax
+builtins".
+
 ## Phase 6 — drop the legacy VM (in progress)
 
 Goal: the frontend/codegen path stops linking `vm.c` (and the bytecode half of `compiler.c` +

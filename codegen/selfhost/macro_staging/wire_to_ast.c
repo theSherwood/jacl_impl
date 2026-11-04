@@ -4,12 +4,13 @@
 #include "syn_wire.c"
 #include <stdio.h>
 #include <stdlib.h>
+HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(head); }
 int main(void) {
   size_t cap = 1 << 16, len = 0; unsigned char *buf = malloc(cap); int c;
   while ((c = getchar()) != EOF) { if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); } buf[len++] = (unsigned char)c; }
   arena_t a = {0};
   const char *err = NULL;
-  AstNode *n = synw_decode_result(buf, len, &a, NULL, &err);
+  AstNode *n = synw_decode_result(buf, len, &a, NULL, &err, NULL);
   if (!n) { fprintf(stderr, "decode failed: %s\n", err ? err : "?"); return 1; }
   printf("%s\n", ast_pretty_print(n, &a));
   return 0;

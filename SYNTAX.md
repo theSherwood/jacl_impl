@@ -1064,8 +1064,26 @@ No operator precedence in `{}` — left to right.
 
 Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use.
 
-- **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; introspection/construction APIs are available for advanced macros. See DESIGN.md M15 for full details.
-- **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
+- **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; the builtins below inspect and construct syntax for advanced macros. See DESIGN.md M15 for full details.
+- **Hygiene**: designed to be hygienic by default — scope marks keeping macro-introduced names from colliding with caller names — but not yet on TEMEN: codegen resolves names by spelling, so a macro uses `gensym` (unique per expansion) for its temporaries. Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. Tracked in jacl_impl#271.
+
+#### Macro builtins
+
+Available in a `defmacro` body (it runs at compile time, on syntax values):
+
+| Builtin | Result |
+|---|---|
+| `syntax-kind S` | the kind's name: `command`, `lit-int`, `lit-float`, `lit-string`, `var-ref`, `block`, `interp-string`, `quote`, `syntax-quote`, `unquote`, `unquote-splicing`, `break`, `continue`, `return`, `spread`, `shell-cmd` |
+| `syntax-datum S` | a literal's value; a var-ref's name |
+| `syntax-head S` / `syntax-args S` | a command's head / its arguments (`syntax-args` of an interpolated string: its segments) |
+| `syntax-commands S` | a block's commands |
+| `syntax-pos S` | `[map line N col M]` — where the argument is; a node the macro made is at the call |
+| `syntax-str S` | the source text, as the pretty-printer writes it |
+| `make-syntax KIND …` | `"command" HEAD ARGS`, `"block" CMDS`, `"interp-string" SEGS`, `"lit-int" N`, `"lit-float" X`, `"lit-string" S`, `"lit-string-caret" S`, `"var-ref" NAME` |
+| `syntax-error MSG [NODE]` | fail the expansion with MSG, reported at NODE (or the call) |
+| `gensym [PREFIX]` | a fresh var-ref name, unique per expansion |
+
+A macro's expansion is one node, and a block is a new scope: a macro that binds several names for its caller does it with one destructuring `def`.
 
 ### Prelude
 

@@ -1337,7 +1337,7 @@ extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
  * uses it in place of the legacy VM. NULL by default — the driver (which owns codegen + the
  * TEMEN bridge) installs it, keeping src/ free of any codegen/TEMEN dependency. */
 extern const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode *call, arena_t *arena,
-                                            AstNode **out);
+                                            AstNode **out, SourcePos *err_at);
 /* In-guest `[interpret SRC]` hook (docs/TEMEN_GUEST_JIT_STAGING.md §5, model B). When installed
  * (`jacl_install_temen_interpret_hook`, the driver that owns codegen + the TEMEN bridge),
  * `jacl_interpret1` compiles + runs SRC on the §22 Jit capability in this window instead of the host

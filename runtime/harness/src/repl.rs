@@ -20,15 +20,26 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const RENAMED: [&str; 2] = ["jacl_arr_new", "jacl_eq"];
 
 /// Functions a unit may import beside the runtime's `jacl_*`: the staging glue's (a string
-/// literal's bytes, and a staged macro's arguments and result), and the REPL's record of a unit's
-/// slots (#215).
-const BRIDGE: [&str; 7] = [
+/// literal's bytes, a staged macro's arguments and result, and the syntax builtins its body calls),
+/// and the REPL's record of a unit's slots (#215).
+const BRIDGE: [&str; 18] = [
     "synrt_str_empty",
     "synrt_str_push_byte",
     "synrt_read_arg",
     "synrt_read_rest",
     "synrt_write_result",
     "synrt_gensym",
+    "synrt_syntax_kind",
+    "synrt_syntax_datum",
+    "synrt_syntax_head",
+    "synrt_syntax_args",
+    "synrt_syntax_commands",
+    "synrt_syntax_pos",
+    "synrt_syntax_str",
+    "synrt_make_syntax2",
+    "synrt_make_syntax3",
+    "synrt_syntax_error1",
+    "synrt_syntax_error2",
     "jacl_repl_unit_slot",
 ];
 

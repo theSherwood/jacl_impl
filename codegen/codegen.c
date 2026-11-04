@@ -5500,6 +5500,51 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
     return 0;
   }
 
+  /* The syntax builtins, in a staged macro body only: they read and build the plain-data syntax
+   * values of codegen/selfhost/macro_staging/syn_rt.h, which exist only while a macro runs, and
+   * the staging runtime (not the program's) defines them. [head a…] → synrt_*(sp, a…). A bare
+   * `[gensym]` / `[gensym PREFIX]` here mints a name as one inside a syntax-quote does. */
+  if (cx->staged_macro) {
+    static const struct { HeadId hid; const char *fn; uint32_t arity; } SB[] = {
+      {HEAD_SYNTAX_KIND,     "synrt_syntax_kind",     1},
+      {HEAD_SYNTAX_DATUM,    "synrt_syntax_datum",    1},
+      {HEAD_SYNTAX_HEAD,     "synrt_syntax_head",     1},
+      {HEAD_SYNTAX_ARGS,     "synrt_syntax_args",     1},
+      {HEAD_SYNTAX_COMMANDS, "synrt_syntax_commands", 1},
+      {HEAD_SYNTAX_POS,      "synrt_syntax_pos",      1},
+      {HEAD_SYNTAX_STR,      "synrt_syntax_str",      1},
+      {HEAD_MAKE_SYNTAX,     "synrt_make_syntax2",    2},
+      {HEAD_MAKE_SYNTAX,     "synrt_make_syntax3",    3},
+      {HEAD_SYNTAX_ERROR,    "synrt_syntax_error1",   1},
+      {HEAD_SYNTAX_ERROR,    "synrt_syntax_error2",   2},
+    };
+    AstNode *hd = node->data.command.head;
+    uint32_t argc = node->data.command.arg_count;
+    if (hd && hd->type == AST_LIT_STRING && hd->data.lit_string.length == 6 &&
+        memcmp(hd->data.lit_string.value, "gensym", 6) == 0 && argc <= 1) {
+      IrVal prefix = argc == 1 ? compile_expr(cx, node->data.command.args[0])
+                               : irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL -> "g" */);
+      if (cx->failed) return 0;
+      IrVal ga[] = {cx->sp, prefix};
+      return emit_rt_call(cx, "synrt_gensym", ga, 2);
+    }
+    int known = 0;
+    for (size_t i = 0; i < sizeof SB / sizeof SB[0]; i++) {
+      if (SB[i].hid != (HeadId)hid) continue;
+      known = 1;
+      if (SB[i].arity != argc) continue;
+      IrVal ops[3];
+      if (!compile_operands(cx, node->data.command.args, argc, ops)) return 0;
+      IrVal a[4] = {cx->sp, ops[0], ops[1], ops[2]};
+      return emit_rt_call(cx, SB[i].fn, a, (int)argc + 1);
+    }
+    if (known) {
+      cx_failf(cx, "codegen: builtin '%.*s' got the wrong number of arguments",
+               hd->data.lit_string.value, hd->data.lit_string.length);
+      return 0;
+    }
+  }
+
   /* Fixed-arity builtins with JaclVal-uniform runtime entry points: [head a…] →
    * jacl_*(sp, a…). Checked after user procs, so a same-named proc wins. */
   {
@@ -6840,30 +6885,51 @@ IrModule *temen_codegen_staged_macro(const char **names, const uint32_t *lens, u
     (void)irb_suspend(cx.f, cx.cur, irb_const_i64(cx.f, cx.cur, -1));   /* root-fiber prime */
   }
   /* Read the argument syntax values (one per fixed macro param, in order; the trailing rest param,
-   * if variadic, is a vec of the remaining values), bind them, run the macro body, write the
-   * result. `synrt_read_arg` / `synrt_read_rest` are stateful — successive calls consume the one
-   * argument wire in order. */
-  env_reset(&cx);
-  capset_reset(&cx); capset_scan(&cx, body);
-  scope_enter(&cx);
+   * if variadic, is a vec of the remaining values), run the body on them, and write the result.
+   * `synrt_read_arg` / `synrt_read_rest` are stateful — successive calls consume the one argument
+   * wire in order. The body is a function of its parameters, so every way out of it — its end, a
+   * `return`, or an error a statement raised (a `syntax-error` inside a loop returns from the
+   * function at once) — comes back here, where the result is written. */
+  if (nparams > CG_MAX_PARAMS) cx_fail(&cx, "a staged macro takes at most 64 parameters");
+  IrType bt[1 + CG_MAX_PARAMS];
+  for (uint32_t k = 0; k < 1 + CG_MAX_PARAMS; k++) bt[k] = IRB_I64;   /* sp + params, all i64 */
+  int bodyn = cx.failed ? 1 : (int)(1 + nparams);
+  IrFunc *bodyf = irb_func_new(m, bt, bodyn, r1, 1);
   uint32_t nfixed = (variadic && nparams > 0) ? nparams - 1 : nparams;
+  IrVal cargs[1 + CG_MAX_PARAMS];
+  cargs[0] = cx.sp;
   for (uint32_t k = 0; k < nfixed && !cx.failed; k++) {
     IrVal ra[] = {cx.sp};
-    IrVal x = emit_rt_call(&cx, "synrt_read_arg", ra, 1);
-    env_define(&cx, names[k], lens[k], x, /*is_mut=*/0, /*is_cell=*/0);
+    cargs[1 + k] = emit_rt_call(&cx, "synrt_read_arg", ra, 1);
   }
   if (variadic && nparams > 0 && !cx.failed) {
     IrVal ra[] = {cx.sp};
-    IrVal rest = emit_rt_call(&cx, "synrt_read_rest", ra, 1);   /* -> vec of syntax values */
-    env_define(&cx, names[nparams - 1], lens[nparams - 1], rest, /*is_mut=*/0, /*is_cell=*/0);
+    cargs[nparams] = emit_rt_call(&cx, "synrt_read_rest", ra, 1);   /* -> vec of syntax values */
   }
-  IrVal res = compile_expr(&cx, body);
   if (!cx.failed) {
+    IrVal res = irb_call(cx.f, cx.cur, bodyf, cargs, bodyn);
     IrVal wa[] = {cx.sp, res};
     (void)emit_rt_call(&cx, "synrt_write_result", wa, 2);   /* returns v; ignored */
+    if (!cx.failed) { IrVal ret[] = {res}; irb_return(cx.f, cx.cur, ret, 1); }
   }
-  scope_exit(&cx);
-  if (!cx.failed) { IrVal ret[] = {res}; irb_return(cx.f, cx.cur, ret, 1); }
+  /* The body, its parameters bound to the function's (v1 … vN; v0 is sp). */
+  if (!cx.failed) {
+    IrFunc *callerf = cx.f;
+    IrBlock callerb = cx.cur;
+    cx.f = bodyf;
+    cx.cur = irb_block(bodyf, bt, bodyn);
+    cx.sp = 0;
+    env_reset(&cx);
+    capset_reset(&cx); capset_scan(&cx, body);
+    scope_enter(&cx);
+    for (uint32_t k = 0; k < nparams; k++)
+      env_define(&cx, names[k], lens[k], (IrVal)(k + 1), /*is_mut=*/0, /*is_cell=*/0);
+    IrVal v = compile_expr(&cx, body);
+    scope_exit(&cx);
+    if (!cx.failed) { IrVal ret[] = {v}; irb_return(cx.f, cx.cur, ret, 1); }
+    cx.f = callerf;
+    cx.cur = callerb;
+  }
 
   /* Native func 0 = entry: init the runtime, run func 1 as the scheduler root, return its result.
    * (Guest-JIT already did all of this inline in the entry above.) */
