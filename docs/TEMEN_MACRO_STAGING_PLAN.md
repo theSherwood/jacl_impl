@@ -275,6 +275,17 @@ would otherwise capture a call-site binding, and no codegen-able corpus program 
 stays out until a concrete capture-sensitive corpus program makes it observable; the ABI
 (runtime scope-mark stamped by `compile_synquote`) is sketched for then.
 
+*Correction (jacl_impl#271):* the final codegen never reads `scope_mark` — it resolves names by
+spelling — while the typer does. So stamping marks alone would be worse than 0: marked template
+names would make the typer and codegen disagree about which binding a name means. Capture-hygiene
+needs mark-aware lookup in codegen first; until then a macro uses `[gensym]` for temporaries.
+
+**Wire v3 (jacl_impl#271).** The wire now carries a position handle per node (a node the macro
+made takes the call's position), every expression node kind, and a result status (the expansion,
+or the macro's error message); a gensym a run mints is suffixed with its expansion's number on
+decode, since the native path's per-call module restarts the counter. See
+`codegen/selfhost/macro_staging/README.md`, "Wire v3".
+
 ## Phase 6 — drop the legacy VM (in progress)
 
 Goal: the frontend/codegen path stops linking `vm.c` (and the bytecode half of `compiler.c` +

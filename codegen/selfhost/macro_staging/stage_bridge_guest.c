@@ -7,7 +7,7 @@
  *   3. build the {name -> Slot(&fn)} symbol table            (synrt_build_symtab, guest glue)
  *   4. compile+link the object against the table             (__vm_jit_compile_linked)
  *   5. hand it the argument wire, run its entry              (synrt_set_arg_wire, __vm_jit_invoke2)
- *   6. drain + decode the result wire                        (synrt_take_result, synw_decode)
+ *   6. drain + decode the result wire                        (synrt_take_result, synw_decode_result)
  *
  * The staged runtime (jacl_* / synrt_*) is linked into this same `.temen` (jaclrt_staging_guest.c);
  * the symtab binds the macro object's `call.sym` imports to those functions' call_indirect slots.
@@ -17,7 +17,7 @@
 #include "../../../src/jacl.h" /* AstNode, MacroEntry, arena_t */
 #include "../../codegen.h"     /* temen_codegen_staged_macro */
 #include "../../irbuilder.h"   /* irb_to_encoded */
-#include "syn_wire.c"          /* synw_encode / synw_decode (unity; needs the frontend above) */
+#include "syn_wire.c"          /* synw_encode_args / synw_decode_result (unity; needs the frontend above) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,10 +42,10 @@ extern unsigned char synrt_window_log2(void);
 static const unsigned char *g_live_symtab;
 static size_t g_live_symtab_len;
 
-/* Matches jacl_macro_stage_hook: expand `entry(args…)` in-guest, returning the AST in *out
- * (arena-allocated). NULL on success, else an error string. */
-static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **args, uint32_t argc,
-                                                 arena_t *arena, AstNode **out) {
+/* Matches jacl_macro_stage_hook: expand the macro call `call` in-guest, returning the AST in
+ * *out (arena-allocated). NULL on success, else an error string. */
+static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode *call, arena_t *arena,
+                                                 AstNode **out) {
   static char errbuf[256];
   *out = NULL;
   int live = g_live_symtab != NULL;
@@ -63,24 +63,17 @@ static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **
   uint8_t *mbytes = irb_to_encoded(m, &mlen);
   irb_module_free(m);
 
-  /* 3. build the argument wire (one shared version byte, then a syntax node per fixed parameter,
-   * then — variadic only — a u32 count and that many rest-argument nodes). synw_encode prepends a
-   * per-node version byte, so drop it off each node after the first shared one. */
-  uint32_t nfixed = (entry->variadic && entry->param_count > 0) ? entry->param_count - 1 : entry->param_count;
-  size_t cap = 256, wlen = 0; unsigned char *wire = (unsigned char *)malloc(cap);
-  wire[wlen++] = (unsigned char)SYNW_VERSION;
-  #define STAGE_APPEND(PTR, N) do { \
-      while (wlen + (N) > cap) { cap *= 2; wire = (unsigned char *)realloc(wire, cap); } \
-      memcpy(wire + wlen, (PTR), (N)); wlen += (N); } while (0)
-  for (uint32_t i = 0; i < argc; i++) {
-    if (i == nfixed) { uint32_t rest_count = argc - nfixed; STAGE_APPEND(&rest_count, sizeof rest_count); }
-    size_t bn; unsigned char *b = synw_encode(args[i], &bn);
-    if (!b) { free(wire); free(mbytes); return "staged arg encode failed"; }
-    STAGE_APPEND(b + 1, bn - 1);
-    free(b);
+  /* 3. build the argument wire. */
+  SynwCall c;
+  synw_call_begin(&c, call);
+  size_t wlen = 0;
+  unsigned char *wire = synw_encode_args(entry, call, &wlen, &c);
+  if (!wire) {
+    free(mbytes);
+    synw_call_refusal(&c, errbuf, sizeof errbuf);
+    synw_call_end(&c);
+    return errbuf;
   }
-  if (entry->variadic && argc == nfixed) { uint32_t rest_count = 0; STAGE_APPEND(&rest_count, sizeof rest_count); }
-  #undef STAGE_APPEND
 
   /* 4. compile+link the object against a symbol table: the shell's, or one built here. The glue's
    * casts each address in place, which names the function before it in the shell's image
@@ -90,12 +83,12 @@ static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **
   size_t stlen = g_live_symtab_len;
   if (!live) {
     stlen = synrt_build_symtab(symtab, sizeof symtab);
-    if (stlen > sizeof symtab) { free(wire); free(mbytes); return "staged symtab overflow"; }
+    if (stlen > sizeof symtab) { free(wire); free(mbytes); synw_call_end(&c); return "staged symtab overflow"; }
     st = symtab;
   }
   long code = __vm_jit_compile_linked(mbytes, (long)mlen, (void *)st, (long)stlen);
   free(mbytes);
-  if (code < 0) { free(wire); snprintf(errbuf, sizeof errbuf, "jit compile_linked failed (%ld)", code); return errbuf; }
+  if (code < 0) { free(wire); synw_call_end(&c); snprintf(errbuf, sizeof errbuf, "jit compile_linked failed (%ld)", code); return errbuf; }
 
   /* 5. feed the arg wire, run the entry, drain the result wire. On the compiler card the entry
    * runs over the staging data stack (invoke). On the shell's runtime it runs as a line does
@@ -108,7 +101,7 @@ static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **
   if (live) {
     long slot = __vm_jit_install(code);
     __vm_jit_release(code);
-    if (slot < 0) { free(wire); return "no slot to install the staged macro in"; }
+    if (slot < 0) { free(wire); synw_call_end(&c); return "no slot to install the staged macro in"; }
     (void)((long (*)(long))(uintptr_t)slot)(0);
     if (leaf) __vm_jit_uninstall(slot);
   } else {
@@ -117,12 +110,14 @@ static const char *jacl_stage_macro_on_temen_guest(MacroEntry *entry, AstNode **
   }
   size_t reslen = 0; unsigned char *res = synrt_take_result(&reslen);
   free(wire);
-  if (r < 0) { free(res); snprintf(errbuf, sizeof errbuf, "jit invoke failed (%ld)", r); return errbuf; }
+  if (r < 0) { free(res); synw_call_end(&c); snprintf(errbuf, sizeof errbuf, "jit invoke failed (%ld)", r); return errbuf; }
 
   /* 6. decode the result wire back to an AST (strings copied into `arena`). */
-  *out = synw_decode(res, reslen, arena);
+  const char *err = NULL;
+  *out = synw_decode_result(res, reslen, arena, &c, &err);
   free(res);
-  return *out ? NULL : "staged expansion produced invalid syntax";
+  synw_call_end(&c);
+  return *out ? NULL : err;
 }
 
 /* Install the hook. The driver calls this once at startup; activation is still gated by the

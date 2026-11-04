@@ -136,7 +136,9 @@ EOF
   #   unless [==1 2] {…}      -> [if … {} …]          : an `if`-lowering (br_if)
   #   quad   5               -> [+ [+ 5 5] [+ 5 5]]  : four boxed 5s, three `jacl_add` (re-expansion)
   #   pack   10 20 30 40     -> [vec 10 20 30 40]    : four `jacl_vec_push` (variadic `~@rest` splice)
-  #   fresh  42              -> [mut g__0 42]        : the `[gensym]` -> synrt_gensym mint runs in-guest
+  #   fresh  42              -> [mut g__0_N 42]      : the `[gensym]` -> synrt_gensym mint runs in-guest
+  #   unless … { print "…$x"; break }                 : wire v3 kinds (interp string, break) cross in-guest
+  #   keep 1; keep 2 in one proc                      : two expansions' gensyms are named apart (#271)
   cat > "$OUT/stagetest_main.c" <<'EOF'
 #include <stdio.h>
 #include <string.h>
@@ -148,6 +150,8 @@ static const char *const CASES[][2] = {
   {"nested", "defmacro twice {x} { syntax-quote [+ ~x ~x] }\ndefmacro quad {x} { syntax-quote [twice [twice ~x]] }\nquad 5\n"},
   {"splice", "defmacro pack {first ..rest} { syntax-quote [vec ~first ~@rest] }\npack 10 20 30 40\n"},
   {"gensym", "defmacro fresh {v} { syntax-quote [mut [gensym] ~v] }\nproc run {} {\n  fresh 42\n  99\n}\nrun\n"},
+  {"body",   "defmacro unless {cond body} { syntax-quote [if ~cond {} ~body] }\ndef x 7\nwhile $true { unless [== 1 2] { print \"x is $x\"; break } }\n"},
+  {"twogen", "defmacro keep {v} { syntax-quote [def [gensym \"k\"] ~v] }\nproc f {} {\n  keep 1\n  keep 2\n  77\n}\nf\n"},
 };
 int main(void) {
   jacl_install_temen_stage_hook();
@@ -171,9 +175,11 @@ EOF
   [ "$(case_out nested | grep -c "$(int_const 5)")" -ge 4 ] && [ "$(case_out nested | grep -c '"jacl_add"')" -ge 3 ] || { echo "STAGETEST FAIL: nested" >&2; sf=1; }
   [ "$(case_out splice | grep -c 'jacl_vec_push')" -ge 4 ]                                             || { echo "STAGETEST FAIL: splice" >&2; sf=1; }
   case_out gensym | grep -q "$(int_const 99)"                                                          || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
+  case_out body   | grep -q '"jacl_str_concat"' && case_out body | grep -q '"jacl_print"'              || { echo "STAGETEST FAIL: body"   >&2; sf=1; }
+  case_out twogen | grep -q "$(int_const 77)"                                                          || { echo "STAGETEST FAIL: twogen" >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/stagetest.out"                                                       && { echo "STAGETEST FAIL: error/NULL in output" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
-    echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym) expanded in-guest via the Jit capability."
+    echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym/body/twogen) expanded in-guest via the Jit capability."
   else
     echo "STAGETEST FAIL — a corpus case did not expand as expected in-guest." >&2
     exit 1

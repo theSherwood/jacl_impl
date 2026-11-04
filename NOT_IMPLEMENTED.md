@@ -87,6 +87,7 @@ Status snapshot:
 | **Globbing** (`glob`) | Medium | None | Reads `$ctx.pwd`; returns a stream. Pattern engine + brace expansion. |
 | **`par-each`** | Medium | None | Concurrent stream processing. Hard part is backpressure (open question in `DESIGN.md`). |
 | **Regular expressions** | Medium | Lib exists (see §2) | Literal syntax (`/regex/`) + capture-group bindings + VM bridge. |
+| **Macro syntax builtins + capture-hygiene** | Medium | None | Staged macros (the only macro path since the legacy VM went) are template-only: `syntax-kind/head/args/commands/datum/pos/str`, `make-syntax` and `syntax-error` are not lowered for staged bodies, and macro bodies are compiled per call site. Capture-hygiene needs codegen to resolve names by scope mark (it resolves by spelling; only the typer reads marks), so macros use `[gensym]` for temporaries. jacl_impl#271. |
 | **Bignum / numeric tower** | Medium | Lib exists (see §2) | `JACL_TAG_BIGNUM` exists; no VM arithmetic dispatch. Plan is bigint+bigfloat with implicit promotion in `dyn`. Rationals dropped. |
 
 ---

@@ -12,7 +12,11 @@ int main(int argc, char **argv) {
     arena_t a = {0};
     ParseResult pr = parser_parse(lexer_lex(argv[i], &a), &a);
     if (pr.count < 1 || !pr.nodes[0]) return 3;
-    size_t n; unsigned char *b = synw_encode(pr.nodes[0], &n);
+    /* With a call table, so the nodes carry real (nonzero) position handles. */
+    SynwCall c;
+    synw_call_begin(&c, pr.nodes[0]);
+    size_t n; unsigned char *b = synw_encode(pr.nodes[0], &n, &c);
+    synw_call_end(&c);
     if (!b) return 4;
     /* synw_encode prepends the version byte; keep it for the first node, strip it for
      * the rest so the stream is `version, node0, node1, …`. */

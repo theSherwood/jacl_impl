@@ -6,13 +6,15 @@
 JaclVal __jacl_macro(JaclVal x) {
   JaclVal head = jacl_vec_empty();
   head = jacl_vec_push(head, jaclrt_i32(3));   /* LIT_STRING */
-  head = jacl_vec_push(head, jaclrt_i32(0));
-  head = jacl_vec_push(head, jaclrt_i32(0));
+  head = jacl_vec_push(head, jaclrt_i32(0));   /* scope_mark */
+  head = jacl_vec_push(head, jaclrt_i32(0));   /* flags */
+  head = jacl_vec_push(head, jaclrt_i32(0));   /* position handle: made by the macro */
   head = jacl_vec_push(head, jacl_str_new("+", 1));
   JaclVal cmd = jacl_vec_empty();
   cmd = jacl_vec_push(cmd, jaclrt_i32(0));      /* COMMAND */
   cmd = jacl_vec_push(cmd, jaclrt_i32(0));      /* scope_mark */
   cmd = jacl_vec_push(cmd, jaclrt_i32(0));      /* flags */
+  cmd = jacl_vec_push(cmd, jaclrt_i32(0));      /* position handle: made by the macro */
   cmd = jacl_vec_push(cmd, jaclrt_i32(1));      /* head_id "+" */
   cmd = jacl_vec_push(cmd, head);
   cmd = jacl_vec_push(cmd, x);
