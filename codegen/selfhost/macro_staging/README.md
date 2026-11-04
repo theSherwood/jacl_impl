@@ -29,7 +29,7 @@ across the host↔staged-macro boundary by **serialization**, not shared heap ob
 
 | File | Role |
 |---|---|
-| `syn_wire.{h,c}` | Compiler side of the ABI: `AstNode ↔ bytes`. Self-describing, preserves hygiene fields (`scope_mark`/`is_caret`/`is_gensym`). Corpus-scoped node kinds (command/block/literal/var-ref); unsupported kinds return NULL, grow as needed. |
+| `syn_wire.{h,c}` | Compiler side of the ABI: `AstNode ↔ bytes`. Self-describing, preserves hygiene fields (`scope_mark`/`is_caret`/`is_gensym`) and positions (see "Wire v3" below). Every expression node kind crosses; the top-level declarations and a literal wider than 64 bits are refused with a reason. |
 | `syn_wire_test.c` + `run_wire_test.sh` | Round-trip test: parse → encode → decode → assert pretty-print equal **and** re-encode byte-identical. |
 
 ```sh
@@ -40,8 +40,8 @@ codegen/selfhost/macro_staging/run_wire_test.sh   # syn_wire round-trips
 
 The mirror of `syn_wire` for code running **inside** a staged macro on the TEMEN
 runtime: it converts the same wire bytes to/from the **plain-data** syntax
-representation — a jaclrt **vector** `[kind, scope_mark, flags, …payload]` (option B:
-no special GC type). Compiled to TEMEN as runtime code for real macros; built natively
+representation — a jaclrt **vector** `[kind, scope_mark, flags, pos, …payload]` (option B:
+no special GC type; `pos` is the node's position handle, carried and never interpreted). Compiled to TEMEN as runtime code for real macros; built natively
 (with an `__vm_*` shim) for the test.
 
 | File | Role |
@@ -57,7 +57,7 @@ codegen/selfhost/macro_staging/run_rt_codec_test.sh   # syn_wire ≡ syn_rt on t
 ## Phase 1(B) — codegen lowering of `syntax-quote`
 
 `codegen/codegen.c` now lowers `AST_SYNTAX_QUOTE` (via `compile_synquote`) into runtime
-construction of a plain-data syntax vec — the exact `[kind, scope_mark, flags, …payload]`
+construction of a plain-data syntax vec — the exact `[kind, scope_mark, flags, pos, …payload]`
 schema `syn_rt` uses. A `~unquote` hole evaluates its child (already a syntax value) and
 splices it in. So a macro body compiled by the TEMEN codegen *builds* the same plain-data
 a staged macro reads/writes.
@@ -100,14 +100,15 @@ syntax vec. Proven on the real engine:
 
 ```
 print syntax-quote [+ 1 2]
-  ->  [vec 0 0 0 1 [vec 3 0 0 "+"] [vec 1 0 0 1] [vec 1 0 0 2]]
+  ->  [vec 0 0 0 0 1 [vec 3 0 0 0 "+"] [vec 1 0 0 0 1] [vec 1 0 0 0 2]]
 
 print syntax-quote [if [== 1 2] {} { foo }]
-  ->  [vec 0 0 0 26 [vec 3 0 0 "if"] [vec 0 0 0 10 [vec 3 0 0 "=="] …] [vec 5 0 0 0] [vec 5 0 0 0 …]]
+  ->  [vec 0 0 0 0 29 [vec 3 0 0 0 "if"] [vec 0 0 0 0 13 [vec 3 0 0 0 "=="] …] [vec 5 0 0 0 0] [vec 5 0 0 0 0 …]]
 ```
 
 Exactly the `syn_rt` schema — commands, nested commands, string heads, empty/non-empty
-blocks (`5` = BLOCK), literals. So the codegen `syntax-quote` lowering + jaclrt vec
+blocks (`5` = BLOCK), literals, each with position handle `0` (the macro made it). So the
+codegen `syntax-quote` lowering + jaclrt vec
 construction execute correctly on the real engine. (`run_temen_e2e.sh` is heavy — builds the
 Rust harness + translates the runtime — and skips cleanly without cargo/gcc/clang.)
 
@@ -141,3 +142,35 @@ and run it on the engine (a Rust link driver, like `jacl_temen`, with an explici
 `__jacl_macro` export). Then: arity>1 (args frame), `~@` splicing, the hygiene ABI (Phase
 4), the staging pipeline behind `JACL_STAGE_ON_TEMEN` (Phase 5), and dropping the legacy VM
 (Phase 6).
+
+## Wire v3 (jacl_impl#271)
+
+The wire grew past the parity corpus, so ordinary code can cross a macro:
+
+- **Every expression node kind.** Interpolated strings, spreads, `!cmd` (with `&`),
+  `break`/`continue`/`return`, and the quote/syntax-quote/unquote forms, in both directions and
+  in `syntax-quote` templates. The top-level declarations (`use`, `struct`, `defmacro`, `ctx`)
+  never appear inside an expression; they, and a literal wider than 64 bits (#105), are refused
+  with a reason and the offending node's position.
+- **Positions.** Each node the compiler writes gets a handle (1, 2, …) into a table the
+  `SynwCall` keeps for that expansion; the macro carries handles through untouched, and decoding
+  restores each node's start/end. Handle 0 marks a node the macro made — a template node, a
+  gensym — which takes the macro call's position. An error in the caller's code inside a macro
+  call now reports its own line, not `0:0`.
+- **Gensyms named per expansion.** A staged run numbers its gensyms from zero (the native path
+  instantiates a fresh module per call), so on decode the host suffixes each gensym the run
+  minted with the expansion's number (`k__0` → `k__0_7`). The numbering is per process, so REPL
+  lines never reuse one.
+- **A result status.** The result wire is `version, status, …`: status 0 carries the expansion,
+  status 1 a message — the error value the macro returned (`error "…"`), or why the value is not
+  syntax. The expander reports it at the call: `4:1: macro 'picky': picky wants a block`.
+
+Macro-introduced names are still not marked per expansion: codegen resolves names by spelling,
+so a mark only the typer reads would make the two disagree. A macro that needs a temporary uses
+`[gensym]`.
+
+```sh
+codegen/selfhost/macro_staging/run_wire_test.sh       # round trips, positions, gensym naming, refusals, results
+codegen/selfhost/macro_staging/run_rt_codec_test.sh   # both codecs agree on every kind
+( cd runtime/harness && cargo test --release --test codegen -- macro gensym )   # end to end on TEMEN
+```

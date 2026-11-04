@@ -3664,14 +3664,20 @@ static IrVal proc_value(Cx *cx, Proc *pv) {
 
 /* Lower one expression to an i64 SSA value (a JaclVal) in the current block. */
 /* Lower a `syntax-quote` template into runtime construction of a plain-data syntax
- * value — a jaclrt vector [kind, scope_mark, flags, ...payload], the representation
+ * value — a jaclrt vector [kind, scope_mark, flags, pos, ...payload], the representation
  * codegen/selfhost/macro_staging/syn_rt.c decodes/encodes (docs/TEMEN_MACRO_STAGING_PLAN.md,
- * option B). An `~unquote` hole evaluates its child (already a syntax value) and splices
- * it in. Node kinds are corpus-scoped (command/block/literal/var-ref); others fail.
+ * option B; the payload of each kind is listed in syn_rt.h). An `~unquote` hole evaluates its
+ * child (already a syntax value) and splices it in. Every expression node kind can appear in
+ * a template; the top-level declarations cannot.
  *
- * NOTE (hygiene, Phase 4): scope_mark is baked from the template node here. A real staged
- * macro needs the *runtime* macro-expansion mark instead — a later ABI addition. Correct
- * as-is for a top-level `syntax-quote` (scope_mark 0). */
+ * `pos` is 0 on every node built here: the macro made it, so it takes the macro call's
+ * position when the expansion comes back (syn_wire.c).
+ *
+ * NOTE (hygiene): scope_mark is baked from the template node here (0 for a top-level
+ * `syntax-quote`). Macro-introduced names are not marked per expansion yet: codegen resolves
+ * names by spelling alone, so a mark it does not read would only make the typer — which does
+ * read marks — disagree with it about which binding a name means. A macro that needs a
+ * temporary uses `[gensym]`. */
 static IrVal syn_i32(Cx *cx, int32_t x) {
   return irb_const_i64(cx->f, cx->cur, jaclval_i32(x));
 }
@@ -3682,6 +3688,23 @@ static IrVal syn_vpush(Cx *cx, IrVal vec, IrVal elem) {
 static IrVal syn_vconcat(Cx *cx, IrVal a_vec, IrVal b_vec) {
   IrVal a[] = {cx->sp, a_vec, b_vec};
   return emit_rt_call(cx, "jacl_vec_concat", a, 3);
+}
+static IrVal compile_unquote_operand(Cx *cx, AstNode *child);   /* fwd: syn_push_items splices */
+/* A template child that may be absent: its syntax value, or nil. */
+static IrVal syn_opt(Cx *cx, AstNode *t) {
+  return t ? compile_synquote(cx, t) : irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL */);
+}
+/* Push each of `items` onto `v`; a `~@x` item concatenates its vec-of-syntax instead (mirrors
+ * the legacy compiler's has-splice branch: OP_VEC_CONCAT vs OP_VEC_PUSH). */
+static IrVal syn_push_items(Cx *cx, IrVal v, AstNode **items, uint32_t n) {
+  for (uint32_t i = 0; i < n && !cx->failed; i++) {
+    AstNode *it = items[i];
+    if (it->type == AST_UNQUOTE_SPLICING)
+      v = syn_vconcat(cx, v, compile_unquote_operand(cx, it->data.unquote_splicing.child));
+    else
+      v = syn_vpush(cx, v, compile_synquote(cx, it));
+  }
+  return v;
 }
 /* Compile an unquote/unquote-splicing operand -> a syntax value (or, for splicing, a vec of
  * syntax values). A bare word `~x` / `~@x` parses as AST_LIT_STRING "x"; resolve it as a
@@ -3734,6 +3757,7 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
   v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->type));
   v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->scope_mark));
   v = syn_vpush(cx, v, syn_i32(cx, (t->is_caret ? 1 : 0) | (t->is_gensym ? 2 : 0)));
+  v = syn_vpush(cx, v, syn_i32(cx, 0));   /* position handle: made by the macro */
   switch (t->type) {
     case AST_LIT_INT:
       /* Any literal ordinary code accepts can be quoted (jacl #113): `lit_int_val` gives the
@@ -3757,33 +3781,31 @@ static IrVal compile_synquote(Cx *cx, AstNode *t) {
     case AST_VAR_REF:
       v = syn_vpush(cx, v, compile_string_literal(cx, t->data.var_ref.name, t->data.var_ref.length));
       break;
-    case AST_COMMAND: {
+    case AST_COMMAND:
       v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.command.head_id));
-      IrVal head = t->data.command.head ? compile_synquote(cx, t->data.command.head)
-                                        : irb_const_i64(cx->f, cx->cur, 0 /* JACL_NIL */);
-      v = syn_vpush(cx, v, head);
-      /* A `~@x` arg concatenates its vec-of-syntax into the args; a normal arg is pushed
-       * (mirrors the legacy compiler's has-splice branch: OP_VEC_CONCAT vs OP_VEC_PUSH). */
-      for (uint32_t i = 0; i < t->data.command.arg_count && !cx->failed; i++) {
-        AstNode *arg = t->data.command.args[i];
-        if (arg->type == AST_UNQUOTE_SPLICING)
-          v = syn_vconcat(cx, v, compile_unquote_operand(cx, arg->data.unquote_splicing.child));
-        else
-          v = syn_vpush(cx, v, compile_synquote(cx, arg));
-      }
+      v = syn_vpush(cx, v, syn_opt(cx, t->data.command.head));
+      v = syn_push_items(cx, v, t->data.command.args, t->data.command.arg_count);
       break;
-    }
-    case AST_BLOCK: {
+    case AST_BLOCK:
       v = syn_vpush(cx, v, syn_i32(cx, t->data.block.trailing_semi ? 1 : 0));
-      for (uint32_t i = 0; i < t->data.block.count && !cx->failed; i++) {
-        AstNode *cmd = t->data.block.commands[i];
-        if (cmd->type == AST_UNQUOTE_SPLICING)
-          v = syn_vconcat(cx, v, compile_unquote_operand(cx, cmd->data.unquote_splicing.child));
-        else
-          v = syn_vpush(cx, v, compile_synquote(cx, cmd));
-      }
+      v = syn_push_items(cx, v, t->data.block.commands, t->data.block.count);
       break;
-    }
+    case AST_INTERP_STRING:
+      v = syn_push_items(cx, v, t->data.interp_string.segments, t->data.interp_string.count);
+      break;
+    case AST_QUOTE:        v = syn_vpush(cx, v, compile_synquote(cx, t->data.quote.child)); break;
+    case AST_SYNTAX_QUOTE: v = syn_vpush(cx, v, compile_synquote(cx, t->data.syntax_quote.child)); break;
+    case AST_SPREAD:       v = syn_vpush(cx, v, compile_synquote(cx, t->data.spread.expr)); break;
+    case AST_BREAK:        v = syn_vpush(cx, v, syn_opt(cx, t->data.break_stmt.value)); break;
+    case AST_RETURN:       v = syn_vpush(cx, v, syn_opt(cx, t->data.return_stmt.value)); break;
+    case AST_CONTINUE:     break;
+    case AST_SHELL_CMD:
+      v = syn_vpush(cx, v, syn_i32(cx, (int32_t)t->data.shell_cmd.head_id));
+      v = syn_vpush(cx, v, syn_i32(cx, (t->data.shell_cmd.background ? 1 : 0) |
+                                       (t->data.shell_cmd.stream ? 2 : 0)));
+      v = syn_vpush(cx, v, compile_synquote(cx, t->data.shell_cmd.head));
+      v = syn_push_items(cx, v, t->data.shell_cmd.args, t->data.shell_cmd.arg_count);
+      break;
     default:
       cx_fail(cx, "syntax-quote: unsupported template node kind");
       break;

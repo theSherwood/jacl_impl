@@ -1,9 +1,9 @@
 /* stage_bridge — the Phase 5 macro-staging hook implementation (installed into the frontend's
  * `jacl_macro_stage_hook`). It expands a macro call by running the macro body on the TEMEN engine:
  *   1. codegen the body into a staged-macro module   (temen_codegen_staged_macro)
- *   2. encode the call's argument ASTs to a syn_wire  (synw_encode; version byte, then N nodes)
+ *   2. encode the call's argument ASTs to a syn_wire  (synw_encode_args)
  *   3. run the module on TEMEN in-process               (jacl_temen_stage, runtime/harness staticlib)
- *   4. decode the result wire back to an AstNode       (synw_decode)
+ *   4. decode the result wire back to an AstNode       (synw_decode_result)
  * This lives in the codegen/driver layer (not src/) so the frontend stays free of any codegen
  * or TEMEN dependency — the driver installs the hook. See docs/TEMEN_MACRO_STAGING_PLAN.md (Phase 5).
  *
@@ -12,7 +12,7 @@
 #include "../../../src/jacl.h" /* AstNode, MacroEntry, arena_t, ast_alloc, arena_alloc */
 #include "../../codegen.h"     /* temen_codegen_staged_macro */
 #include "../../irbuilder.h"   /* irb_to_encoded */
-#include "syn_wire.c"          /* synw_encode / synw_decode (unity; needs the frontend above) */
+#include "syn_wire.c"          /* synw_encode_args / synw_decode_result (unity; needs the frontend above) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,10 +24,10 @@ extern int jacl_temen_stage(const unsigned char *module_bytes, size_t module_len
                           unsigned char **out_ptr, size_t *out_len);
 extern void jacl_temen_stage_free(unsigned char *ptr, size_t len);
 
-/* Matches jacl_macro_stage_hook: expand `entry(args…)` on TEMEN, returning the AST in *out
- * (arena-allocated). NULL on success, else an error string. */
-static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode **args, uint32_t argc,
-                                           arena_t *arena, AstNode **out) {
+/* Matches jacl_macro_stage_hook: expand the macro call `call` on TEMEN, returning the AST in
+ * *out (arena-allocated). NULL on success, else an error string. */
+static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode *call, arena_t *arena,
+                                           AstNode **out) {
   static char errbuf[256];
   *out = NULL;
 
@@ -39,45 +39,34 @@ static const char *jacl_stage_macro_on_temen(MacroEntry *entry, AstNode **args, 
   size_t mlen = 0;
   uint8_t *mbytes = irb_to_encoded(m, &mlen);
 
-  /* 2. encode the argument ASTs to the wire the staged entry reads: one shared version byte,
-   * then a syntax node per fixed parameter, then (variadic only) a u32 count and that many
-   * rest-argument nodes. `synw_encode` prepends the version byte, so strip it off each node. */
-  uint32_t nfixed = (entry->variadic && entry->param_count > 0) ? entry->param_count - 1 : entry->param_count;
-  size_t cap = 256, wlen = 0; unsigned char *wire = (unsigned char *)malloc(cap);
-  wire[wlen++] = (unsigned char)SYNW_VERSION;
-  #define STAGE_APPEND(PTR, N) do { \
-      while (wlen + (N) > cap) { cap *= 2; wire = (unsigned char *)realloc(wire, cap); } \
-      memcpy(wire + wlen, (PTR), (N)); wlen += (N); } while (0)
-  for (uint32_t i = 0; i < argc; i++) {
-    if (i == nfixed) {   /* start of the rest section: emit the u32 count of rest args */
-      uint32_t rest_count = argc - nfixed;
-      STAGE_APPEND(&rest_count, sizeof rest_count);
-    }
-    size_t bn; unsigned char *b = synw_encode(args[i], &bn);
-    if (!b) { free(wire); free(mbytes); return "staged arg encode failed"; }
-    STAGE_APPEND(b + 1, bn - 1);   /* drop synw_encode's per-node version byte */
-    free(b);
+  /* 2. encode the argument ASTs to the wire the staged entry reads. */
+  SynwCall c;
+  synw_call_begin(&c, call);
+  size_t wlen = 0;
+  unsigned char *wire = synw_encode_args(entry, call, &wlen, &c);
+  if (!wire) {
+    free(mbytes);
+    synw_call_refusal(&c, errbuf, sizeof errbuf);
+    synw_call_end(&c);
+    return errbuf;
   }
-  /* A variadic macro called with no rest args still needs the (zero) count written. */
-  if (entry->variadic && argc == nfixed) {
-    uint32_t rest_count = 0;
-    STAGE_APPEND(&rest_count, sizeof rest_count);
-  }
-  #undef STAGE_APPEND
 
   /* 3. run on TEMEN. */
   unsigned char *res = NULL; size_t reslen = 0;
   int rc = jacl_temen_stage(mbytes, mlen, wire, wlen, &res, &reslen);
   free(wire); free(mbytes);
   if (rc != 0) {
+    synw_call_end(&c);
     snprintf(errbuf, sizeof errbuf, "TEMEN staging failed (rc=%d)", rc);
     return errbuf;
   }
 
   /* 4. decode the result wire back to an AST (strings are copied into `arena`). */
-  *out = synw_decode(res, reslen, arena);
+  const char *err = NULL;
+  *out = synw_decode_result(res, reslen, arena, &c, &err);
   jacl_temen_stage_free(res, reslen);
-  return *out ? NULL : "staged expansion produced invalid syntax";
+  synw_call_end(&c);
+  return *out ? NULL : err;
 }
 
 /* Install the hook. The driver calls this once at startup; activation is still gated by the

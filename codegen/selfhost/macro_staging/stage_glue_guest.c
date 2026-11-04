@@ -72,10 +72,11 @@ JaclVal synrt_read_rest(void) {
 static unsigned char *g_res_buf;
 static size_t g_res_len;
 
-/* Encode `v` to the result wire and stash it for the hook to drain. Returns `v` (a codegen
+/* Encode `v` (the expansion, or the error the macro returned) to the result wire and stash it
+ * for the hook to drain. Returns `v` (a codegen
  * `call.sym` expects one i64 result; the caller ignores it). A macro writes its result once. */
 JaclVal synrt_write_result(JaclVal v) {
-  size_t n; unsigned char *out = synrt_encode(v, &n);
+  size_t n; unsigned char *out = synrt_encode_result(v, &n);
   if (out) { free(g_res_buf); g_res_buf = out; g_res_len = n; }
   return v;
 }
@@ -224,33 +225,12 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
   return pos;
 }
 
-/* `[gensym]` / `[gensym "prefix"]`: mint a fresh hygienic name `prefix__N` as a plain-data
- * var-ref syntax value `[VAR_REF, scope_mark=0, is_gensym, name]`. A per-run counter suffices —
- * gensym'd names are unique and end up dead in the emitted IR, so the exact N is unobservable. */
+/* `[gensym]` / `[gensym "prefix"]`: mint a fresh name `prefix__N` as a plain-data var-ref syntax
+ * value. The host renames each for the expansion that made it when the result comes back
+ * (syn_wire.c), so N only has to be unique within a run. */
 JaclVal synrt_gensym(JaclVal prefix) {
   static uint32_t g_gensym_ctr;
-  static char name[80];
-  uint32_t plen = 0;
-  if (!jaclrt_is_nil(prefix)) {
-    plen = jacl_str_len(prefix);
-    if (plen > 64) plen = 64;
-    jacl_str_bytes(prefix, name, sizeof name);
-  }
-  if (plen == 0) { name[0] = 'g'; plen = 1; }
-  uint32_t nl = plen;
-  name[nl++] = '_'; name[nl++] = '_';
-  uint32_t n = g_gensym_ctr++;
-  char d[16]; int dc = 0;
-  if (n == 0) d[dc++] = '0';
-  while (n > 0) { d[dc++] = (char)('0' + (n % 10)); n /= 10; }
-  for (int i = dc - 1; i >= 0; i--) name[nl++] = d[i];
-  JaclVal namev = jacl_str_new(name, nl);
-  JaclVal v = jacl_vec_empty();
-  v = jacl_vec_push(v, jaclrt_i32(4));   /* AST_VAR_REF */
-  v = jacl_vec_push(v, jaclrt_i32(0));   /* scope_mark */
-  v = jacl_vec_push(v, jaclrt_i32(2));   /* flags: is_gensym */
-  v = jacl_vec_push(v, namev);
-  return v;
+  return synrt_gensym_node(prefix, g_gensym_ctr++);
 }
 
 /* Data-free string-literal construction for in-guest staged macros (§3b). The macro object emits

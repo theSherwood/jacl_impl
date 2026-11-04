@@ -14,13 +14,20 @@ command -v "$CC" >/dev/null || { echo "note: $CC not found — skipping rt-codec
 "$CC" -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$CODEGEN" "$DIR/gen_wire.c" -lpthread -lm -o "$B/gen_wire"
 "$CC" -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$RT" -I "$DIR" "$DIR/rt_roundtrip.c" -lm -o "$B/rt_roundtrip"
 
-# The wide entries are jacl #113: the wire carries AST_LIT_INT as 8 bytes (SYNW_VERSION 2),
+# The wide entries are jacl #113: the wire carries AST_LIT_INT as 8 bytes (since SYNW_VERSION 2),
 # and the runtime side rebuilds it through jacl_i64_box so the plain-data form stays
 # canonical — an inline i32 where one fits, a boxed i64 only where it must. INT64_MIN and
 # INT64_MAX are here because they are where a sign-extension slip shows up.
+# The rest are every other node kind a macro argument can hold (wire v3): interpolated
+# strings, spreads, shell commands (with `&`), break/continue/return, and the quote forms.
 snips=("42" "foo" "[+ 1 2]" "[+ 1 [* 2 3]]" "[if [== 1 2] {} { set hit 5 }]" "{ set x 1 }" \
        "[twice [twice 5]]" "5000000000" "[+ 5000000000 1]" "9223372036854775807" \
-       "[- 0 9223372036854775807]" "[+ 5000000000 [* 3000000000 2]]")
+       "[- 0 9223372036854775807]" "[+ 5000000000 [* 3000000000 2]]" \
+       "\"x is \$x and \$[+ 1 2]\"" "{ print \"x is \$x\" }" "[vec ..\$xs]" \
+       "{ !ls -la | !wc -l }" "{ !sleep 1 & }" \
+       "{ for \$xs x { if [> \$x 2] { break } else { continue } } }" \
+       "{ return 5 }" "{ return }" "{ break 3 }" \
+       "syntax-quote [if ~c {} ~@body]" "quote [a b]")
 fail=0
 for s in "${snips[@]}"; do
   "$B/gen_wire" "$s" > "$B/a.bin"

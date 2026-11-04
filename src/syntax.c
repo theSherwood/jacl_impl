@@ -811,9 +811,16 @@ static const char *expand__build_error_with_chain(ExpandState *es,
     return buf;
 }
 
+/* The message leads with the failing call's position, since the drivers print the message
+ * and nothing else. */
 static void expand__set_error(ExpandState *es, const char *msg,
                                uint32_t line, uint32_t col,
                                arena_t *arena) {
+    char located[512];
+    if (line > 0) {
+        snprintf(located, sizeof located, "%u:%u: %s", line, col, msg);
+        msg = located;
+    }
     es->error_msg  = expand__build_error_with_chain(es, msg, arena);
     es->error_line = line;
     es->error_col  = col;
@@ -903,13 +910,14 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 /* Optional staging hook (Phase 5 of docs/TEMEN_MACRO_STAGING_PLAN.md). When installed by the
  * codegen driver, a macro call is expanded by running the macro body on the **TEMEN engine**
  * (codegen the body → run in-process via the `jacl_temen_stage` bridge → decode the result)
- * instead of the legacy bytecode VM. The hook takes the macro entry and the call's argument
- * ASTs and returns the expanded AST in `*out` (allocated in `arena`); it returns NULL on
- * success or an error string. Left NULL (a build that does not link the TEMEN stage bridge) the
- * behaviour is exactly the legacy path. This is the seam that keeps `src/` free of any
- * codegen/TEMEN dependency: the driver installs it. */
-const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode **args, uint32_t argc,
-                                     arena_t *arena, AstNode **out) = NULL;
+ * instead of the legacy bytecode VM. The hook takes the macro entry and the call (an
+ * AST_COMMAND: its arguments, and the position the expansion's own nodes take) and returns the
+ * expanded AST in `*out` (allocated in `arena`); it returns NULL on success or an error string.
+ * Left NULL (a build that does not link the TEMEN stage bridge) the behaviour is exactly the
+ * legacy path. This is the seam that keeps `src/` free of any codegen/TEMEN dependency: the
+ * driver installs it. */
+const char *(*jacl_macro_stage_hook)(MacroEntry *entry, AstNode *call, arena_t *arena,
+                                     AstNode **out) = NULL;
 
 /* Whether to stage macros on TEMEN (Phase 6.2: staging is the **default** once the bridge is
  * linked). It applies only where `jacl_macro_stage_hook` is installed — a build without the
@@ -985,8 +993,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                  * then splices + re-expands exactly like the legacy tail below. */
                 if (jacl_macro_stage_hook && jacl_stage_on_temen_enabled()) {
                     AstNode *expanded = NULL;
-                    const char *serr = jacl_macro_stage_hook(
-                        entry, node->data.command.args, argc, arena, &expanded);
+                    const char *serr = jacl_macro_stage_hook(entry, node, arena, &expanded);
                     if (serr) {
                         char err[256];
                         snprintf(err, sizeof(err), "macro '%.*s': %s",

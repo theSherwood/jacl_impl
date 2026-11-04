@@ -1307,6 +1307,148 @@ assert [== [passthru 9223372036854775807] 9223372036854775807]
     assert!(stdout.is_empty(), "unexpected output: {:?}", String::from_utf8_lossy(&stdout));
 }
 
+/// Write `src` to a temp file and run it through the staged driver, as [`run_jacl_file`].
+fn run_jacl_source(name: &str, src: &str) -> (i64, Vec<u8>) {
+    let path = std::env::temp_dir().join(format!("jacl_{name}_{}.jacl", std::process::id()));
+    std::fs::write(&path, src).expect("write fixture");
+    let out = run_jacl_file(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    out
+}
+
+/// Compile `src` through the staged driver, expecting it to be refused; returns its stderr.
+fn staged_emit_error(name: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("jacl_{name}_{}.jacl", std::process::id()));
+    std::fs::write(&path, src).expect("write fixture");
+    let out = Command::new(staged_driver())
+        .env("JACL_STAGE_ON_TEMEN", "1")
+        .arg("--file")
+        .arg(&path)
+        .output()
+        .expect("run staged emit_jacl --file");
+    let _ = std::fs::remove_file(&path);
+    assert!(!out.status.success(), "{name}: expected the compile to fail but it succeeded");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn a_macro_argument_can_hold_any_expression() {
+    // jacl_impl#271. The staged-syntax wire carried six node kinds, so a block holding an
+    // interpolated string, a `break`/`continue`/`return` or a spread could not be passed to a
+    // macro at all ("staged arg encode failed"). Wire v3 carries every expression kind.
+    let src = r#"
+defmacro unless {cond body} {
+  syntax-quote [if ~cond {} ~body]
+}
+defmacro sum-all {..xs} {
+  syntax-quote [+ ~@xs]
+}
+proc first-big {xs} {
+  for $xs x {
+    unless [< $x 100] {
+      print "found $x"
+      return $x
+    }
+  }
+  -1
+}
+assert [== [first-big [vec 5 150 7 300]] 150]
+mut n 0
+while $true {
+  set n [+ $n 1]
+  unless [< $n 3] { break }
+}
+assert [== $n 3]
+mut odd 0
+for [vec 1 2 3 4 5] v {
+  unless [== [% $v 2] 1] { continue }
+  set odd [+ $odd $v]
+}
+assert [== $odd 9]
+def nums [vec 1 2 3]
+assert [== [sum-all ..$nums] 6]
+"#;
+    let (ret, stdout) = run_jacl_source("macro_any_expression", src);
+    assert!(!is_jacl_error(ret), "a macro argument did not survive staging (0x{:016x})", ret as u64);
+    assert_eq!(String::from_utf8_lossy(&stdout), "found 150\n");
+}
+
+#[test]
+fn a_macro_template_can_build_any_expression() {
+    // The same from the other side: `syntax-quote` built only those six kinds, so a template
+    // holding an interpolated string or a `break` failed to compile.
+    let src = r#"
+defmacro say-x {} {
+  syntax-quote [print "x is $x"]
+}
+defmacro stop-when {c} {
+  syntax-quote [if ~c { break } {}]
+}
+def x 7
+say-x
+mut i 0
+while $true {
+  set i [+ $i 1]
+  stop-when [== $i 4]
+}
+assert [== $i 4]
+"#;
+    let (ret, stdout) = run_jacl_source("macro_any_template", src);
+    assert!(!is_jacl_error(ret), "a macro template did not survive staging (0x{:016x})", ret as u64);
+    assert_eq!(String::from_utf8_lossy(&stdout), "x is 7\n");
+}
+
+#[test]
+fn gensyms_from_two_expansions_do_not_collide() {
+    // Every staged run numbers its gensyms from zero, so two expansions in one scope both bound
+    // `k__0` ("variable 'k__0' already defined in this scope"). The host now names each gensym
+    // for the expansion that minted it.
+    let src = r#"
+defmacro keep {v} {
+  syntax-quote [def [gensym "k"] ~v]
+}
+proc f {} {
+  keep 1
+  keep 2
+  "ok"
+}
+assert [== [f] "ok"]
+"#;
+    let (ret, stdout) = run_jacl_source("macro_gensyms", src);
+    assert!(!is_jacl_error(ret), "two gensym expansions collided (0x{:016x})", ret as u64);
+    assert!(stdout.is_empty(), "unexpected output: {:?}", String::from_utf8_lossy(&stdout));
+}
+
+#[test]
+fn a_failing_macro_reports_its_message_at_the_call() {
+    // A macro that returned an error value trapped its staged run (a MemoryFault, reported only
+    // as "TEMEN staging failed (rc=3)"), and so did one that returned a value that is not syntax.
+    // The result wire now carries the macro's message, and the error leads with the call's
+    // position.
+    let err = staged_emit_error(
+        "macro_error",
+        "defmacro picky {x} {\n  error \"picky wants a block\"\n}\npicky 5\n",
+    );
+    assert!(err.contains("4:1: macro 'picky': picky wants a block"), "unexpected error: {err}");
+    let err = staged_emit_error("macro_not_syntax", "defmacro answer {} {\n  42\n}\nanswer\n");
+    assert!(
+        err.contains("4:1: macro 'answer': the macro returned a value that is not syntax"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn an_error_inside_a_macro_argument_points_at_its_line() {
+    // The wire carried no positions, so every node that crossed a macro came back at 0:0, and a
+    // type error in the caller's own code inside a macro call read `type error: 0:0`.
+    let err = staged_emit_error(
+        "macro_arg_position",
+        "defmacro unless {cond body} {\n  syntax-quote [if ~cond {} ~body]\n}\n\
+         unless [== 1 2] {\n  def i32 n \"not a number\"\n}\n",
+    );
+    assert!(err.contains("type error: 5:"), "unexpected error: {err}");
+}
+
 const READ_LINE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/read_line.jacl");
 
 #[test]
