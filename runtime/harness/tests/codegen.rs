@@ -1825,9 +1825,15 @@ fn a_spread_in_a_vec_splices_its_elements() {
          proc f {..xs} { vec-len [vec 0 ..$xs] }\n\
          print [f 7 8]\n\
          print [error? [vec 1 ..5]]\n\
-         print [error? [vec-concat [vec 1] 5]]\n",
+         print [error? [vec-concat [vec 1] 5]]\n\
+         proc g {..xs} { vec 0 ..$xs }\n\
+         print [g 7 8]\n\
+         def {a ..rest} [vec 1 2 3]\n\
+         print $rest\n",
     );
-    assert_eq!(out, "[vec 1 2 3 4 2 3]\n[vec 2 3]\n3\ntrue\ntrue\n");
+    // #277: in `{}` command mode, `vec 0 ..$xs` spread too (it passed `..` and `$xs`), and a
+    // pattern's `..rest` still collects the rest whether or not a comma precedes it.
+    assert_eq!(out, "[vec 1 2 3 4 2 3]\n[vec 2 3]\n3\ntrue\ntrue\n[vec 0 7 8]\n[vec 2 3]\n");
 }
 
 #[test]

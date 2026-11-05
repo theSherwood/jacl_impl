@@ -293,7 +293,7 @@ JACL has a stream type representing a lazy sequence — elements are produced on
 
 - `!cmd` — external command stdout is a stream of bytes
 - `lines` — converts a byte/string stream or string into a stream of line strings
-- Ranges `(1..1000000)` — produce streams of values
+- Ranges (`[range 1 1000000]`) — produce streams of values
 - Any builtin or proc that yields sequential data
 
 ### Stream-aware commands
@@ -619,7 +619,7 @@ proc log {level, ..msgs} { ... }         # variadic params
 
 ### Spreading
 
-In `[]` juxtaposition and `!cmd` args, `..` spreads a collection into separate arguments:
+In a command's arguments (`[]`, `{}` and `!cmd`), `..` spreads a collection into separate arguments. A bare `..`, with nothing after it, is the rest marker (`{x, ..}`) rather than a spread:
 
 ```
 def args [vec "-la" "/tmp"]

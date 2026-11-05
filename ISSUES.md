@@ -40,10 +40,8 @@ variadically; only the old binary-`+` oracle rejected it).
 
 The `for`-iteration cases were reconciled: the loop syntax changed from `for NAME in COLLECTION`
 to **`for COLLECTION binding { body }`** (collection first, no `in`), and `[range A B]` yields
-i64, so the accumulator is typed `i64`. (Note: `codegen/codegen.c`'s `compile_for` still carries
-a legacy `for NAME in [range …]` branch the reference compiler no longer accepts — dead via the
-normal `emit_jacl` path, which validates through the reference first; left in place since
-removing it would also orphan the `compile_for_range` integer fast-path.)
+i64, so the accumulator is typed `i64`. (The legacy `for NAME in …` branches in `compile_for`, and
+the `compile_for_range` fast path only they reached, were removed in #277.)
 
 Un-ignore each remaining case as its gap is fixed. Meanwhile the codegen path also stays covered
 by the compiler card's STAGETEST (`codegen/selfhost/build_compiler_temen.sh --selftest`) and by the
