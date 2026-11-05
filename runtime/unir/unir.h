@@ -8,6 +8,11 @@
 
 #include <stdint.h>
 
+/* A store in this vat, and its syncs with a home (issue #395): the unit holds unir_store.h's
+ * functions too, the native static library's, and below are the edges its syncs travel over
+ * here (`unir_home_*`). */
+#include "unir_store.h"
+
 typedef struct unir_vat unir_vat;
 typedef struct unir_producer unir_producer;
 typedef struct unir_consumer unir_consumer;
@@ -20,6 +25,7 @@ typedef struct unir_job unir_job;
 typedef struct unir_notification unir_notification;
 typedef struct unir_drawer unir_drawer;
 typedef struct unir_tui unir_tui;
+typedef struct unir_home unir_home;
 
 /* One named capability in a child's endowment. */
 typedef struct unir_grant {
@@ -48,7 +54,9 @@ typedef struct unir_grant {
 #define UNIR_ENDED_CANCELLED 2u
 
 /* The embedder defines these: the unit's heap (its handles and the vat's bookkeeping). A
- * translated library has no allocator of its own. unir_host_alloc returns NULL on failure. */
+ * translated library has no allocator of its own. unir_host_alloc returns NULL on failure.
+ * The unit asks for at most 16-byte alignment; it serves a larger one itself, from a larger
+ * allocation. */
 void *unir_host_alloc(uint64_t size, uint64_t align);
 void unir_host_free(void *ptr, uint64_t size, uint64_t align);
 
@@ -478,5 +486,26 @@ int64_t unir_tui_key(unir_tui *t, unir_event *e);
 /* Ends the frame and presents it on the drawer `d`, as unir_drawer_present presents cells. 0, or
  * an edge error. */
 int64_t unir_tui_present(unir_vat *vat, unir_tui *t, unir_drawer *d);
+
+/* A replica's home (issue #395): a store's syncs (unir_store.h) carry their frames over a
+ * session with a store vat, which a vat opens here. unir_home_open opens the session with the
+ * store vat granted to `vat` as `name` (`name.requests`, `name.replies`, `name.post`; or the one
+ * its door names `name`), each ring of `capacity` slots of `slot_size` bytes: NULL with
+ * `*status` set. unir_home_pull and unir_home_push make a sync of `store` with the home, as
+ * unir_sync_pull and unir_sync_push do, over the session as it connected (a store vat grown
+ * past this end is spoken to as this end knows it); one sync on a home at a time.
+ * unir_home_send sends the home every frame the sync made, in order: 0, or an edge error, which
+ * the sync is told (unir_sync_ended). unir_home_take gives the sync every message the home sent,
+ * waiting up to `timeout_ns` (negative: as long as it takes) for the first when none has come:
+ * how many, 0 if none came; or an edge error, which the sync is told. unir_home_free ends the
+ * session. */
+unir_home *unir_home_open(unir_vat *vat, const uint8_t *name, uint64_t name_len,
+                          uint32_t capacity, uint32_t slot_size, int64_t *status);
+unir_sync *unir_home_pull(unir_home *h, unir_store *store, const char *name, const char *me,
+                          const char *peer, int32_t moves, uint64_t lease);
+unir_sync *unir_home_push(unir_home *h, unir_store *store, const char *name, uint64_t wait);
+int64_t unir_home_send(unir_vat *vat, unir_home *h, unir_sync *sync);
+int64_t unir_home_take(unir_vat *vat, unir_home *h, unir_sync *sync, int64_t timeout_ns);
+void unir_home_free(unir_vat *vat, unir_home *h);
 
 #endif

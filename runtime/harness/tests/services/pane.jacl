@@ -259,8 +259,9 @@ proc main {} {
             reset $fg $true
           }
           if [&& [== $cmd "fg"] [!= $job $nil]] {
-            reset $fg $true
+            ## Said before the job resumes, so nothing it shows precedes it.
             say $s $command 0 "job 1 continued\n"
+            reset $fg $true
           }
         }
         typed $s [concat "> " $line]
