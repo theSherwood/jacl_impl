@@ -21,6 +21,13 @@ extern "C" {
 
 typedef struct unir_store unir_store;
 
+/* On temen the program defines these: the unit's heap. A translated library has no allocator of
+ * its own (#445). unir_host_alloc returns NULL on failure. The unit asks for at most 16-byte
+ * alignment; it serves a larger one itself, from a larger allocation. Natively, `unir-store-c`
+ * brings Rust's allocator, and nothing calls them. */
+void *unir_host_alloc(uint64_t size, uint64_t align);
+void unir_host_free(void *ptr, uint64_t size, uint64_t align);
+
 /* Catalog entries: what a frame is. Requests are entry 0; a sync takes the rest from its home
  * (`unir_sync_took`), and `unir_store_owed` gives changes and fed parts. */
 #define UNIR_STORE_REPLY 1
@@ -104,6 +111,9 @@ int32_t unir_store_publish(unir_store *store, uint64_t version, uint8_t id[32]);
 int64_t unir_store_read(unir_store *store, uint64_t version, uint64_t at, uint8_t *buf,
                         size_t cap);
 
+/* How many bytes text document `version` holds; -1 if it is no text document. */
+int64_t unir_store_len(unir_store *store, uint64_t version);
+
 /* Where line `line` (from 0) of text document `version` starts, found through the store's
  * line summary: 0 with `*offset` set; -1 if it has fewer lines, or is no text document. */
 int32_t unir_store_line(unir_store *store, uint64_t version, uint64_t line, uint64_t *offset);
@@ -130,9 +140,13 @@ typedef struct unir_limits {
 } unir_limits;
 
 /* How a puller moves its ref to what the home feeds it: merging it in, as a writer does; or
- * along with the home, as a reader of a ref it never writes does. */
+ * along with the home, as a reader of a ref it never writes does. Or'ed in, UNIR_SYNC_ONCE: it
+ * asks the home to flush, so that what it pulls is durable there, then ends once it holds what
+ * the home's ref held, at once if that had no head, as an editor opening a document pulls it
+ * (#442). */
 #define UNIR_SYNC_MERGE 0
 #define UNIR_SYNC_WITH_HOME 2
+#define UNIR_SYNC_ONCE 4
 
 /* A puller of ref `name` from the home: fed it as it moves, and moving the ref here to it as
  * `moves` says. `me` and `peer` name this store and the home, the same two on both sides; it
@@ -143,7 +157,8 @@ unir_sync *unir_sync_pull(unir_store *store, const char *name, const char *me,
                           const unir_limits *limits);
 
 /* A pusher of ref `name` to the home: it publishes the ref each time it moves here, waiting at
- * most `wait` ns for each move. NULL if `name` is not UTF-8. */
+ * most `wait` ns for each move. A head it publishes is durable at the home: the home flushed
+ * after its ref moved (#442). NULL if `name` is not UTF-8. */
 unir_sync *unir_sync_push(unir_store *store, const char *name, uint64_t wait,
                           const unir_limits *limits);
 
