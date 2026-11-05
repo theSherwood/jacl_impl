@@ -2510,7 +2510,7 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
         temen_run::Backend::Bytecode,
         temen_run::Backend::Jit,
     ] {
-        let out = pane_session(
+        let (out, frames) = pane_session(
             &client,
             log2,
             backend,
@@ -2535,11 +2535,19 @@ fn a_jacl_program_runs_in_a_terminal_pane() {
         );
         // The view, live: the definition added in the foreground shows at once.
         assert!(at("dangling: f0 b") < at("dangling: none"), "{backend:?}");
-        // In the background the job's output waits for `fg`.
-        assert!(at("job 1 stopped") < at("job 1 continued"), "{backend:?}");
+        // In the background the job's output waits for `fg`: no frame the terminal drew before
+        // the one that shows the job continued shows it. Compared by frame, not by place in the
+        // stream: a frame that shows both draws the job's block, above, first.
+        let frame = |s: &str| {
+            frames
+                .iter()
+                .position(|f| f.contains(s))
+                .unwrap_or_else(|| panic!("{backend:?}: no frame shows {s:?}: {out:?}"))
+        };
+        assert!(frame("job 1 stopped") < frame("job 1 continued"), "{backend:?}");
         assert!(
-            at("job 1 continued") < at("dangling: f1 c"),
-            "{backend:?}: shown while stopped: {out:?}"
+            frame("job 1 continued") <= frame("dangling: f1 c"),
+            "{backend:?}: shown while stopped: {frames:?}"
         );
         // Nothing but the driver's own sequences reached the terminal: every escape opens a CSI.
         assert!(
@@ -2561,7 +2569,7 @@ fn pane_session(
     name: &str,
     script: &'static [(&'static str, &'static str, usize)],
     limit: std::time::Duration,
-) -> String {
+) -> (String, Vec<String>) {
     use jacl_runtime_harness::pane;
     use std::sync::{Arc, Mutex};
     let dir = std::env::temp_dir().join(format!("jacl_{name}_{}_{backend:?}", std::process::id()));
@@ -2569,6 +2577,9 @@ fn pane_session(
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let shown = Arc::new(Mutex::new(String::new()));
     let (tee, keys) = (Arc::clone(&shown), Arc::clone(&shown));
+    // Each of the terminal vat's writes is one frame it drew (unir's `drive`).
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let framed = Arc::clone(&frames);
     let (client, dir2) = (client.clone(), dir.clone());
     let (done, finished) = std::sync::mpsc::channel();
     // The terminal vat waits on stdin's bell (theSherwood/unir#259). What the terminal shows
@@ -2578,9 +2589,11 @@ fn pane_session(
     std::thread::spawn(move || {
         let mut step = 0;
         let mut terminal = |h: &mut temen_interp::Host| {
-            let (tee, rung) = (Arc::clone(&tee), Arc::clone(&bell));
+            let (tee, rung, framed) = (Arc::clone(&tee), Arc::clone(&bell), Arc::clone(&framed));
             h.set_stream_tee(jacl_runtime_harness::stdout_tee(move |b| {
-                tee.lock().unwrap().push_str(&String::from_utf8_lossy(b));
+                let frame = String::from_utf8_lossy(b);
+                tee.lock().unwrap().push_str(&frame);
+                framed.lock().unwrap().push(frame.into_owned());
                 jacl_runtime_harness::bell::ring(&rung);
             }));
             let keys = Arc::clone(&keys);
@@ -2619,7 +2632,8 @@ fn pane_session(
         !is_jacl_error(status[3]) && status[3] != -1,
         "{backend:?}: {name}.jacl failed: {out:?}"
     );
-    out
+    let frames = std::mem::take(&mut *frames.lock().unwrap());
+    (out, frames)
 }
 
 const WAKE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/wake.jacl");
@@ -2637,7 +2651,7 @@ fn a_pane_client_waits_on_its_notification() {
         temen_run::Backend::Bytecode,
         temen_run::Backend::Jit,
     ] {
-        let out = pane_session(
+        let (out, _) = pane_session(
             &client,
             log2,
             backend,
