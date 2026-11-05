@@ -1641,6 +1641,9 @@ static int test_roundtrip_interp(void) {
   ASSERT(roundtrip_ok("print \"result: $[+ 1 2]\""));
   ASSERT(roundtrip_ok("print \"$a and $b\""));
   ASSERT(roundtrip_ok("print \"$a$b\""));
+  /* Shell words print and parse back (#277) */
+  ASSERT(roundtrip_ok("!ls -la /usr/bin x.y --color=auto 0755 42"));
+  ASSERT(roundtrip_ok("!echo --msg=\"hi there\" $dir/sub $dir ..$args [f x] | !grep -v y"));
   /* A literal `$` prints as `\$`, which must lex back to `$` (#273) */
   ASSERT(roundtrip_ok("print \"cost: \\$5\""));
   ASSERT(roundtrip_ok("print \"a $ b\""));
@@ -3163,14 +3166,16 @@ static int test_shell_cmd_multiple_args(void) {
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_SHELL_CMD);
   ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "git", 3) == 0);
-  /* --short lexes as OPERATOR(--) + WORD(short), so 3 args */
-  ASSERT(n->data.shell_cmd.arg_count >= 2);
+  /* a shell argument is one word: status, --short (#277) */
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 2);
+  ASSERT_U32_EQ(n->data.shell_cmd.args[1]->data.lit_string.length, 7);
+  ASSERT(memcmp(n->data.shell_cmd.args[1]->data.lit_string.value, "--short", 7) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* !ls -la → handles flag-style args (-la is OPERATOR + WORD) */
+/* !ls -la → a flag is one argument (#277: it lexed as OPERATOR(-) + WORD(la), two) */
 static int test_shell_cmd_flag_args(void) {
   setup();
   ParseResult r = parse("!ls -la");
@@ -3179,8 +3184,9 @@ static int test_shell_cmd_flag_args(void) {
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_SHELL_CMD);
   ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
-  /* -la lexes as OPERATOR(-) + WORD(la), so 2 args */
-  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 2);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
+  ASSERT_U32_EQ(n->data.shell_cmd.args[0]->data.lit_string.length, 3);
+  ASSERT(memcmp(n->data.shell_cmd.args[0]->data.lit_string.value, "-la", 3) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3200,6 +3206,30 @@ static int test_shell_cmd_bracketed(void) {
   ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
   ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
   ASSERT(memcmp(n->data.shell_cmd.args[0]->data.lit_string.value, "la", 2) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* vec 0 ..$xs → in command mode `..expr` is a spread, as in brackets (#277); a bare `..`,
+ * with nothing after it to spread (the rest marker in `{x ..}`), stays a word */
+static int test_cmd_mode_spread(void) {
+  setup();
+  ParseResult r = parse("vec 0 ..$xs");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[1]->type == AST_SPREAD);
+  ASSERT(n->data.command.args[1]->data.spread.expr->type == AST_VAR_REF);
+  ParseResult r2 = parse("f x ..");
+  ASSERT_U32_EQ(r2.error_count, 0);
+  AstNode* m = r2.nodes[0];
+  ASSERT(m->type == AST_COMMAND);
+  ASSERT_U32_EQ(m->data.command.arg_count, 2);
+  ASSERT(m->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(m->data.command.args[1]->data.lit_string.value, "..", 2) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3673,6 +3703,7 @@ int main(void) {
     {"shell_cmd_error_no_name", test_shell_cmd_error_no_name},
     {"shell_cmd_neq_not_shell", test_shell_cmd_neq_not_shell},
     {"shell_cmd_bracketed",     test_shell_cmd_bracketed},
+    {"cmd_mode_spread",         test_cmd_mode_spread},
     /* Implicit Context US-002: ctx declarations */
     {"ctx_decl_basic",         test_ctx_decl_basic},
     {"ctx_decl_mutable",       test_ctx_decl_mutable},

@@ -733,10 +733,17 @@ static void pb_float(PB *p, float f) {
 static void pp(PB *p, JaclVal v);
 
 /* `[head a b …]`'s head and arguments, space-separated. */
+/* A command's head or argument, or a shell command's: a shell command there is written
+ * `[!cmd ...]`, since its words run on to the next `]` (ast.c's ast__pp_operand). */
+static void pp_operand(PB *p, JaclVal v) {
+  if (!is_syntax(v) || kind_of(v) != K_SHELL_CMD) { pp(p, v); return; }
+  pb_c(p, '['); pp(p, v); pb_c(p, ']');
+}
+
 static void pp_head_args(PB *p, JaclVal head, JaclVal v, uint32_t from) {
-  if (!jaclrt_is_nil(head)) pp(p, head);
+  if (!jaclrt_is_nil(head)) pp_operand(p, head);
   uint32_t n = jacl_vec_count(v);
-  for (uint32_t i = from; i < n; i++) { pb_c(p, ' '); pp(p, jacl_vec_get(v, i)); }
+  for (uint32_t i = from; i < n; i++) { pb_c(p, ' '); pp_operand(p, jacl_vec_get(v, i)); }
 }
 
 /* A node whose text is a name: a string literal's value, or a var-ref's name. */

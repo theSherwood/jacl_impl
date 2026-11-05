@@ -761,6 +761,17 @@ int ast__needs_quoting(const char* s, uint32_t len) {
  * Internal: Pretty-print a single AST node into a string buffer
  * ------------------------------------------------------------------------- */
 
+/* A command's head or argument, or a shell command's: a shell command there is written
+ * `[!cmd ...]`, since a shell command's words run on to the next `]` (#277). Mirrored by
+ * syn_rt's pp_head_args. */
+void ast__pp_node(AstStrBuf* b, AstNode* node);
+static void ast__pp_operand(AstStrBuf* b, AstNode* node) {
+  if (node->type != AST_SHELL_CMD) { ast__pp_node(b, node); return; }
+  ast__buf_char(b, '[');
+  ast__pp_node(b, node);
+  ast__buf_char(b, ']');
+}
+
 void ast__pp_node(AstStrBuf* b, AstNode* node) {
   switch (node->type) {
     case AST_LIT_INT: {
@@ -847,10 +858,10 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
             /* Single-command body: unwrap the block and print command directly */
             AstNode* cmd = body_block->data.block.commands[0];
             if (cmd->type == AST_COMMAND) {
-              ast__pp_node(b, cmd->data.command.head);
+              ast__pp_operand(b, cmd->data.command.head);
               for (uint32_t i = 0; i < cmd->data.command.arg_count; i++) {
                 ast__buf_char(b, ' ');
-                ast__pp_node(b, cmd->data.command.args[i]);
+                ast__pp_operand(b, cmd->data.command.args[i]);
               }
             } else {
               ast__pp_node(b, cmd);
@@ -876,10 +887,10 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
         ast__buf_cstr(b, " {");
         if (params->type == AST_COMMAND &&
             params->data.command.head->data.lit_string.length > 0) {
-          ast__pp_node(b, params->data.command.head);
+          ast__pp_operand(b, params->data.command.head);
           for (uint32_t i = 0; i < params->data.command.arg_count; i++) {
             ast__buf_char(b, ' ');
-            ast__pp_node(b, params->data.command.args[i]);
+            ast__pp_operand(b, params->data.command.args[i]);
           }
         }
         ast__buf_char(b, '}');
@@ -889,10 +900,10 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
         break;
       }
       ast__buf_char(b, '[');
-      ast__pp_node(b, head);
+      ast__pp_operand(b, head);
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         ast__buf_char(b, ' ');
-        ast__pp_node(b, node->data.command.args[i]);
+        ast__pp_operand(b, node->data.command.args[i]);
       }
       ast__buf_char(b, ']');
       break;
@@ -928,10 +939,10 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
             break;
           case AST_COMMAND:
             ast__buf_cstr(b, "$[");
-            ast__pp_node(b, seg->data.command.head);
+            ast__pp_operand(b, seg->data.command.head);
             for (uint32_t j = 0; j < seg->data.command.arg_count; j++) {
               ast__buf_char(b, ' ');
-              ast__pp_node(b, seg->data.command.args[j]);
+              ast__pp_operand(b, seg->data.command.args[j]);
             }
             ast__buf_char(b, ']');
             break;
@@ -1086,10 +1097,10 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
     }
     case AST_SHELL_CMD: {
       ast__buf_char(b, '!');
-      ast__pp_node(b, node->data.shell_cmd.head);
+      ast__pp_operand(b, node->data.shell_cmd.head);
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
         ast__buf_char(b, ' ');
-        ast__pp_node(b, node->data.shell_cmd.args[i]);
+        ast__pp_operand(b, node->data.shell_cmd.args[i]);
       }
       break;
     }

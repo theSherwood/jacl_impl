@@ -2728,13 +2728,14 @@ static int test_equals_vs_eq_eq(void) {
 
 static int test_bang_vs_neq(void) {
   setup();
-  /* "!" is TOKEN_BANG, "!=" is TOKEN_OPERATOR */
-  LexResult r = lexer_lex("! !=", &test_arena);
-  ASSERT_U32_EQ(r.count, 3); /* BANG OPERATOR EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
-  ASSERT_U32_EQ(r.tokens[0].length, 1);
-  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
-  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  /* "!=" is TOKEN_OPERATOR, "!" is TOKEN_BANG. (After a `!`, what follows is shell words,
+   * so the operator comes first here.) */
+  LexResult r = lexer_lex("!= !", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* OPERATOR BANG EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[1].length, 1);
   ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
@@ -2849,17 +2850,15 @@ static int test_bang_git_status(void) {
 
 static int test_bang_ls_la(void) {
   setup();
-  /* "!ls -la" → TOKEN_BANG + TOKEN_WORD + TOKEN_OPERATOR (-) + TOKEN_WORD (la) */
+  /* "!ls -la" → TOKEN_BANG + TOKEN_WORD + TOKEN_WORD (-la): a shell argument is one word (#277) */
   LexResult r = lexer_lex("!ls -la", &test_arena);
-  ASSERT_U32_EQ(r.count, 5); /* BANG WORD OPERATOR WORD EOF */
+  ASSERT_U32_EQ(r.count, 4); /* BANG WORD WORD EOF */
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
   ASSERT(token_text_eq(r.tokens[1], "ls"));
-  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
-  ASSERT(token_text_eq(r.tokens[2], "-"));
-  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
-  ASSERT(token_text_eq(r.tokens[3], "la"));
-  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "-la"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -2939,16 +2938,128 @@ static int test_bang_in_pipeline(void) {
 
 static int test_bang_neq_distinction(void) {
   setup();
-  /* Verify ! and != are distinguished properly */
-  /* "!ls != foo" → BANG WORD OPERATOR WORD EOF */
-  LexResult r = lexer_lex("!ls != foo", &test_arena);
-  ASSERT_U32_EQ(r.count, 5);
+  /* Verify ! and != are distinguished properly. Inside a shell command `!=` is an argument,
+   * as it is to `test`: "!test a != b" → BANG WORD WORD WORD(!=) WORD EOF */
+  LexResult r = lexer_lex("!test a != b", &test_arena);
+  ASSERT_U32_EQ(r.count, 6);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
-  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
-  ASSERT(token_text_eq(r.tokens[2], "!="));
   ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
-  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT(token_text_eq(r.tokens[3], "!="));
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* A shell argument is a word: whitespace separates words, and operator characters, `.`, `/` and
+ * `=` are part of one (#277) */
+static int test_bang_shell_words(void) {
+  setup();
+  LexResult r = lexer_lex("!ls -la /usr/bin x.y *.jacl --color=auto 0755 1.10 if -7 42", &test_arena);
+  ASSERT_U32_EQ(r.count, 13); /* BANG + 9 WORDs + 2 INTs + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  const char* want[] = {"ls", "-la", "/usr/bin", "x.y", "*.jacl", "--color=auto", "0755", "1.10", "if"};
+  for (int i = 0; i < 9; i++) {
+    ASSERT_INT_EQ(r.tokens[1 + i].type, TOKEN_WORD);
+    ASSERT(token_text_eq(r.tokens[1 + i], want[i]));
+  }
+  /* A plain integer is the number: a JACL stage receives it as a value */
+  ASSERT_INT_EQ(r.tokens[10].type, TOKEN_INT);
+  ASSERT(r.tokens[10].payload.int_val == -7);
+  ASSERT_INT_EQ(r.tokens[11].type, TOKEN_INT);
+  ASSERT(r.tokens[11].payload.int_val == 42);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* A quoted run inside a word joins it, spaces and all; a word that is not as written is a string */
+static int test_bang_shell_word_quoted(void) {
+  setup();
+  LexResult r = lexer_lex("!echo --msg=\"hi there\" \"-la\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 5); /* BANG WORD STRING STRING EOF */
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "--msg=hi there");
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[3].payload.text, "-la");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* `$name` alone stays a variable; with text around it, the word interpolates */
+static int test_bang_shell_word_interp(void) {
+  setup();
+  LexResult r = lexer_lex("!ls $dir $dir/sub", &test_arena);
+  ASSERT_U32_EQ(r.count, 7); /* BANG WORD VAR STRING_BEGIN INTERP_VAR STRING_END EOF */
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_VAR);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_STRING_BEGIN);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_INTERP_VAR);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[5].payload.text, "/sub");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* The command ends where JACL resumes: a closing `]`, `|`, `;`. A `[...]` argument is JACL, and
+ * the words resume after it; a `[`/`{` the word opens keeps its own closer. */
+static int test_bang_shell_word_ends(void) {
+  setup();
+  LexResult r = lexer_lex("[!ls -la [f a-b] x[0-9]] | !grep {a,b}; y", &test_arena);
+  /* [ ! ls -la [ f a-b ] x[0-9] ] | ! grep {a,b} ; y EOF */
+  ASSERT_U32_EQ(r.count, 17);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_BANG);
+  ASSERT(token_text_eq(r.tokens[3], "-la"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_LBRACKET);
+  ASSERT(token_text_eq(r.tokens[6], "a-b"));
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_RBRACKET);
+  ASSERT(token_text_eq(r.tokens[8], "x[0-9]"));
+  ASSERT_INT_EQ(r.tokens[9].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[10].type, TOKEN_PIPE);
+  ASSERT(token_text_eq(r.tokens[13], "{a,b}"));
+  ASSERT_INT_EQ(r.tokens[14].type, TOKEN_SEMICOLON);
+  ASSERT_INT_EQ(r.tokens[15].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* A shell command inside a `[...]` argument of another is shell words too, and the outer
+ * command's words resume after the `]` */
+static int test_bang_shell_nested(void) {
+  setup();
+  LexResult r = lexer_lex("!git commit -m [!date -u] -q", &test_arena);
+  /* ! git commit -m [ ! date -u ] -q EOF */
+  ASSERT_U32_EQ(r.count, 11);
+  ASSERT(token_text_eq(r.tokens[3], "-m"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[7], "-u"));
+  ASSERT_INT_EQ(r.tokens[8].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[9].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[9], "-q"));
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* A macro named `!` is not a shell command */
+static int test_bang_macro_name(void) {
+  setup();
+  LexResult r = lexer_lex("defmacro ! {x} {}", &test_arena);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DEFMACRO);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_LBRACE);
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -3148,6 +3259,12 @@ int main(void) {
     {"bang_with_splat",              test_bang_with_splat},
     {"bang_in_pipeline",             test_bang_in_pipeline},
     {"bang_neq_distinction",         test_bang_neq_distinction},
+    {"bang_shell_words",             test_bang_shell_words},
+    {"bang_shell_word_quoted",       test_bang_shell_word_quoted},
+    {"bang_shell_word_interp",       test_bang_shell_word_interp},
+    {"bang_shell_word_ends",         test_bang_shell_word_ends},
+    {"bang_shell_nested",            test_bang_shell_nested},
+    {"bang_macro_name",              test_bang_macro_name},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

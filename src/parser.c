@@ -329,6 +329,8 @@ AstNode* parser__parse_block(Parser* p);
 AstNode* parser__parse_interp_string(Parser* p);
 AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head);
 static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets);
+static AstNode* parser__parse_spread(Parser* p, const char* what);
+static int parser__dotdot_is_bare(Parser* p);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -441,18 +443,8 @@ AstNode* parser__parse_command(Parser* p) {
     }
     /* Spread expression: ..expr */
     if (parser__peek(p)->type == TOKEN_DOTDOT) {
-      Token* dotdot = parser__advance(p); /* consume '..' */
-      AstNode* inner = parser__parse_expr(p);
-      if (inner == NULL) {
-        AstNode* err = parser__error(p, "expected expression after '..' in spread", dotdot);
-        parser__sync_bracket(p);
-        return err;
-      }
-      AstNode* spread = ast_alloc(p->arena);
-      spread->type  = AST_SPREAD;
-      spread->start = parser__token_start(dotdot);
-      spread->end   = inner->end;
-      spread->data.spread.expr = inner;
+      AstNode* spread = parser__parse_spread(p, "expected expression after '..' in spread");
+      if (spread->type == AST_ERROR) { parser__sync_bracket(p); return spread; }
       parser__arr_push(&args, spread);
       continue;
     }
@@ -1929,16 +1921,41 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
  * Non-word atoms ($var, literals, [], (), {}) are returned bare.
  * ------------------------------------------------------------------------- */
 
+/* `..expr`, a spread: consumes the `..` and the expression after it. When none follows, an error
+ * node saying `what`. */
+static AstNode* parser__parse_spread(Parser* p, const char* what) {
+  Token* dotdot = parser__advance(p); /* consume '..' */
+  AstNode* inner = parser__parse_expr(p);
+  if (inner == NULL) return parser__error(p, what, dotdot);
+  AstNode* spread = ast_alloc(p->arena);
+  spread->type  = AST_SPREAD;
+  spread->start = parser__token_start(dotdot);
+  spread->end   = inner->end;
+  spread->data.spread.expr = inner;
+  return spread;
+}
+
+/* Is the `..` at the cursor bare, with no operand after it to spread? */
+static int parser__dotdot_is_bare(Parser* p) {
+  if (p->pos + 1 >= p->count) return 1;
+  Token* next = &p->tokens[p->pos + 1];
+  TokenType t = next->type;
+  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_COMMA || t == TOKEN_EOF ||
+         t == TOKEN_RBRACE || t == TOKEN_RBRACKET || parser__is_operator(next);
+}
+
 /* `!cmd args...` → AST_SHELL_CMD (external shell command). The arguments run to the end of the
  * command or a pipe/&&/||/& — or, `in_brackets` (`[!ls -la]`), to the closing bracket. */
 static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets) {
   Token* bang = parser__advance(p); /* consume '!' */
   SourcePos start = parser__token_start(bang);
 
-  /* Parse command name: word, string, or variable */
+  /* Parse command name: a shell word (which may interpolate, as `$dir/run.sh` does), a
+   * variable, or a `$[...]` expression */
   Token* cmd_tok = parser__peek(p);
   if (cmd_tok->type != TOKEN_WORD && cmd_tok->type != TOKEN_STRING &&
-      cmd_tok->type != TOKEN_VAR) {
+      cmd_tok->type != TOKEN_STRING_BEGIN && cmd_tok->type != TOKEN_VAR &&
+      cmd_tok->type != TOKEN_DOLLAR_BRACKET) {
     return parser__error(p, "expected command name after '!'", cmd_tok);
   }
 
@@ -1957,16 +1974,8 @@ static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets) {
          !(in_brackets && parser__peek(p)->type == TOKEN_RBRACKET)) {
     /* Spread expression: ..expr */
     if (parser__peek(p)->type == TOKEN_DOTDOT) {
-      Token* dotdot = parser__advance(p); /* consume '..' */
-      AstNode* inner = parser__parse_expr(p);
-      if (inner == NULL) {
-        return parser__error(p, "expected expression after '..' in shell command", dotdot);
-      }
-      AstNode* spread = ast_alloc(p->arena);
-      spread->type  = AST_SPREAD;
-      spread->start = parser__token_start(dotdot);
-      spread->end   = inner->end;
-      spread->data.spread.expr = inner;
+      AstNode* spread = parser__parse_spread(p, "expected expression after '..' in shell command");
+      if (spread->type == AST_ERROR) return spread;
       parser__arr_push(&args, spread);
       continue;
     }
@@ -2112,6 +2121,13 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
   parser__arr_init(&args, p->arena);
 
   while (!parser__is_operand_end(p)) {
+    /* `..expr` spreads, as in `[...]`. A bare `..` (`{x ..}`, the rest marker) stays a word. */
+    if (parser__peek(p)->type == TOKEN_DOTDOT && !parser__dotdot_is_bare(p)) {
+      AstNode* spread = parser__parse_spread(p, "expected expression after '..' in spread");
+      if (spread->type == AST_ERROR) return spread;
+      parser__arr_push(&args, spread);
+      continue;
+    }
     AstNode* arg = parser__parse_expr(p);
     if (arg == NULL) break;
     parser__arr_push(&args, arg);

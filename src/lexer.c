@@ -368,10 +368,36 @@ const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
  * Internal: Forward declarations for mutually recursive functions
  * ------------------------------------------------------------------------- */
 
+/* What lexer__lex_string_body reads: a "..." body, a """...""" body, or a shell word (#277):
+ * the whitespace-separated name and arguments of a `!cmd`, which may hold quoted runs, escapes
+ * and interpolation as a string body does. */
+#define LEX_STR_QUOTED 0
+#define LEX_STR_TRIPLE 1
+#define LEX_STR_WORD   2
+
+/* Does `c` end a shell word? Whitespace separates words; a newline, `;`, `|`, `&` or a closing
+ * `]`/`}` also ends the command, and is lexed as usual. `sq`/`br`: the `[`/`{` the word itself
+ * has open, whose closers stay in it (`file[0-9].txt`, `{a,b}`). */
+static int lexer__shell_word_ends(char c, int sq, int br) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ';' || c == '|' || c == '&' ||
+         (c == ']' && sq == 0) || (c == '}' && br == 0);
+}
+
+/* Is the shell word at `s` a plain decimal integer: `-`?, then `0` or digits without a leading
+ * zero? Such a word is that number, so a JACL stage receives it as a value, and a host command
+ * gets the same text back (exec passes a value as its printed form). `0755`, `1.10` or `1e3`
+ * would not print back as written, so they stay text. */
+static int lexer__shell_word_is_int(const char* s) {
+  uint32_t i = s[0] == '-' ? 1 : 0;
+  if (s[i] < '0' || s[i] > '9') return 0;
+  if (s[i] == '0' && (i > 0 || (s[i + 1] >= '0' && s[i + 1] <= '9'))) return 0;   /* -0, 07 */
+  while (s[i] >= '0' && s[i] <= '9') i++;
+  return s[i] == '\0' || lexer__shell_word_ends(s[i], 0, 0);
+}
 void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
-                                    uint32_t str_col, bool is_triple);
+                                    uint32_t str_col, int mode);
 void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count);
 void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
@@ -664,7 +690,8 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
 void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
-                                    uint32_t str_col, bool is_triple) {
+                                    uint32_t str_col, int mode) {
+  bool is_triple = mode == LEX_STR_TRIPLE;
   StringBuf sb;
   strbuf_init(&sb, lex->arena);
   const char* str_error = NULL;
@@ -672,10 +699,23 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
   uint32_t seg_start = str_start;
   uint32_t seg_line  = str_line;
   uint32_t seg_col   = str_col;
+  /* A shell word: inside a quoted run; `[`/`{` opened within the word (a glob class, a brace
+   * pattern), whose closer is the word's own; and whether it is the source text as written. */
+  int in_quotes = 0, sq = 0, br = 0, raw = 1;
 
   while (lexer__peek(lex) != '\0' && !str_error) {
     /* Check for closing delimiter */
-    if (is_triple) {
+    if (mode == LEX_STR_WORD) {
+      char wc = lexer__peek(lex);
+      if (!in_quotes && lexer__shell_word_ends(wc, sq, br)) break;
+      if (wc == '"') { in_quotes = !in_quotes; raw = 0; lexer__advance(lex); continue; }
+      if (!in_quotes) {
+        if (wc == '[') sq++;
+        else if (wc == ']') sq--;
+        else if (wc == '{') br++;
+        else if (wc == '}') br--;
+      }
+    } else if (is_triple) {
       if (lexer__peek(lex) == '"' &&
           lex->source[lex->pos + 1] == '"' &&
           lex->source[lex->pos + 2] == '"')
@@ -701,6 +741,7 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
     if (ch == '\\') {
       lexer__advance(lex); /* consume backslash */
       str_error = lexer__handle_escape(lex, &sb);
+      raw = 0;
       continue;
     }
 
@@ -779,14 +820,14 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
     lexer__advance(lex);
   }
 
-  /* Check for unterminated string */
-  if (!str_error && lexer__peek(lex) == '\0') {
+  /* Check for unterminated string (a shell word ends at EOF, unless a quoted run is open) */
+  if (!str_error && lexer__peek(lex) == '\0' && (mode != LEX_STR_WORD || in_quotes)) {
     str_error = is_triple ? "unterminated triple-quoted string"
                           : "unterminated string";
   }
 
   if (str_error) {
-    if (!is_triple) lexer__skip_to_string_end(lex);
+    if (mode == LEX_STR_QUOTED) lexer__skip_to_string_end(lex);
     Token tok = lexer__make_token(lex, TOKEN_ERROR, str_start, str_line, str_col);
     tok.payload.error_msg = str_error;
     lexer__arr_push(arr, tok);
@@ -794,8 +835,8 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
     return;
   }
 
-  /* Consume closing delimiter */
-  lexer__advance(lex); /* " */
+  /* Consume closing delimiter (a shell word's terminator belongs to what follows it) */
+  if (mode != LEX_STR_WORD) lexer__advance(lex); /* " */
   if (is_triple) {
     lexer__advance(lex); /* " */
     lexer__advance(lex); /* " */
@@ -883,6 +924,11 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
     end_tok.length = lex->pos - seg_start;
     end_tok.payload.text = sb.data;
     lexer__arr_push(arr, end_tok);
+  } else if (mode == LEX_STR_WORD && raw) {
+    /* A shell word as written is a word, as `ls` was before shell words */
+    Token tok = lexer__make_token(lex, TOKEN_WORD, str_start, str_line, str_col);
+    tok.payload.text = lex->source + str_start;
+    lexer__arr_push(arr, tok);
   } else {
     Token tok = lexer__make_token(lex, TOKEN_STRING, str_start, str_line, str_col);
     tok.payload.text = sb.data;
@@ -1079,7 +1125,7 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       uint32_t sl = lex->line;
       uint32_t sc = lex->col;
       lexer__advance(lex);
-      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, false);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, LEX_STR_QUOTED);
       continue;
     }
 
@@ -1368,7 +1414,7 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
       uint32_t sl = lex->line;
       uint32_t sc = lex->col;
       lexer__advance(lex);
-      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, false);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, LEX_STR_QUOTED);
       continue;
     }
 
@@ -1410,8 +1456,60 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
 
   uint32_t error_count = 0;
 
+  /* Shell words (#277): after the `!` of a shell command, its name and arguments are words
+   * separated by whitespace, not JACL tokens, so `-la`, `/usr/bin` and `--color=auto` are one
+   * argument each. `shell` is 1 while lexing those words and 2 inside a `[...]` / `$[...]`
+   * argument, which is JACL, `shell_depth` brackets deep; its closing `]` resumes the words. */
+  int shell = 0;
+  int shell_depth = 0;
+  /* A shell command inside a `[...]` argument of another (`!git commit -m [!date]`): the outer
+   * one's `shell_depth`, restored when the inner command ends. */
+  int shell_outer[8];
+  int shell_nest = 0;
+
   for (;;) {
     char c = lexer__peek(&lex);
+
+    /* A shell command's words: what starts the next item decides how it lexes. */
+    if (shell == 1) {
+      char c1 = c ? lex.source[lex.pos + 1] : '\0';
+      char c2 = c1 ? lex.source[lex.pos + 2] : '\0';
+      if (c == ' ' || c == '\t') { lexer__advance(&lex); continue; }
+      if (c == '\0' || lexer__shell_word_ends(c, 0, 0)) {
+        shell = 0;                          /* the command ends: lex its terminator as usual */
+        if (shell_nest > 0) { shell = 2; shell_depth = shell_outer[--shell_nest]; }
+      } else if (c == '#') {
+        /* a comment, as usual; the newline after it ends the command */
+      } else if (c == '[' || (c == '$' && c1 == '[')) {
+        shell = 2; shell_depth = 0;         /* a JACL argument, until its closing `]` */
+      } else if (c == '.' && c1 == '.' && (c2 == '$' || c2 == '[')) {
+        /* `..$xs` / `..[...]`: a spread, whose operand is lexed by the rules above */
+        Token tok = lexer__make_token(&lex, TOKEN_DOTDOT, lex.pos, lex.line, lex.col);
+        tok.payload.text = lex.source + lex.pos;
+        lexer__advance(&lex);
+        lexer__advance(&lex);
+        tok.length = 2;
+        lexer__arr_push(&arr, tok);
+        continue;
+      } else if (c == '$' && lexer__is_word_start(c1)) {
+        /* `$name` as a whole word passes the value itself; with text around it (`$dir/x`)
+         * the word interpolates, as a string would. */
+        uint32_t k = lex.pos + 1;
+        while (lexer__is_word_char(lex.source[k]) &&
+               !(lex.source[k] == '-' && lex.source[k + 1] == '>')) k++;
+        if (!(lex.source[k] == '\0' || lexer__shell_word_ends(lex.source[k], 0, 0))) {
+          lexer__lex_string_body(&lex, &arr, &error_count, lex.pos, lex.line, lex.col, LEX_STR_WORD);
+          continue;
+        }
+      } else if (c == '"' && c1 == '"' && c2 == '"') {
+        /* a triple-quoted string, as usual */
+      } else if (lexer__shell_word_is_int(lex.source + lex.pos)) {
+        /* a plain integer, lexed as the number it is */
+      } else {
+        lexer__lex_string_body(&lex, &arr, &error_count, lex.pos, lex.line, lex.col, LEX_STR_WORD);
+        continue;
+      }
+    }
 
     /* EOF */
     if (c == '\0') {
@@ -1462,6 +1560,10 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       }
       Token tok = lexer__make_token(&lex, type, start, sline, scol);
       lexer__arr_push(&arr, tok);
+      if (shell == 2) {
+        if (c == '[') shell_depth++;
+        else if (c == ']' && --shell_depth == 0) shell = 1;
+      }
       continue;
     }
 
@@ -1713,6 +1815,16 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       Token tok = lexer__make_token(&lex, otype, start, sline, scol);
       tok.payload.text = lex.source + start;
       lexer__arr_push(&arr, tok);
+      /* `!` starts a shell command, whose name and arguments are shell words; not when it
+       * names a macro (`defmacro ! {...}`). */
+      if (otype == TOKEN_BANG && shell != 1 &&
+          !(arr.count >= 2 && arr.tokens[arr.count - 2].type == TOKEN_DEFMACRO)) {
+        if (shell == 2) {
+          if (shell_nest == (int)(sizeof shell_outer / sizeof shell_outer[0])) continue;
+          shell_outer[shell_nest++] = shell_depth;
+        }
+        shell = 1;
+      }
       continue;
     }
 
@@ -1730,6 +1842,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         lexer__advance(&lex); /* consume '[' */
         Token tok = lexer__make_token(&lex, TOKEN_DOLLAR_BRACKET, start, sline, scol);
         lexer__arr_push(&arr, tok);
+        if (shell == 2) shell_depth++;
         continue;
       }
 
@@ -1799,10 +1912,10 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         lexer__advance(&lex); /* consume first '"' */
         lexer__advance(&lex); /* consume second '"' */
         lexer__advance(&lex); /* consume third '"' */
-        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, true);
+        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, LEX_STR_TRIPLE);
       } else {
         lexer__advance(&lex); /* consume opening '"' */
-        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, false);
+        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, LEX_STR_QUOTED);
       }
       continue;
     }

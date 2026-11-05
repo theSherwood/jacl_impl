@@ -2014,6 +2014,11 @@ static int kw_is(AstNode *n, const char *kw, uint32_t kl) {
          memcmp(n->data.lit_string.value, kw, kl) == 0;
 }
 
+/* The name a pattern's `..name` collects into, when it parsed as a spread of a bare word; else NULL. */
+static AstNode *rest_spread_name(AstNode *n) {
+  return n->type == AST_SPREAD && n->data.spread.expr->type == AST_LIT_STRING ? n->data.spread.expr : NULL;
+}
+
 /* ---- closures ---- */
 
 #define CG_CAP_MAX CG_MAX_PARAMS
@@ -2521,70 +2526,6 @@ static IrVal compile_for_generator(Cx *cx, AstNode *gen_call, const char *name, 
   fill_frame(cx, frame);
   irb_br(cx->f, cx->cur, header, frame, w);
 
-  enter_frame_block(cx, exit_blk);
-  scope_exit(cx);
-  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
-}
-
-/* [for NAME in RANGE { body }] over an integer range, desugared onto the loop
- * machinery: `i = start; while i < end { body; i = i + 1 }`. The induction var (bound
- * to NAME) and the end bound are threaded as locals, so the generic frame machinery
- * carries them across the header/body/exit edges. */
-static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
-                               AstNode *start_node, AstNode *end_node, AstNode *body) {
-  scope_enter(cx); /* loop scope: holds the induction var + end bound */
-  AstNode *bounds[2] = {start_node, end_node};
-  cx->move_ok_here = 1;   /* both bounds go straight into the loop's env */
-  IrVal bv2[2];
-  if (!compile_operands(cx, bounds, 2, bv2)) { scope_exit(cx); return 0; }
-  IrVal startv = bv2[0], endv = bv2[1];
-  env_define(cx, name, nlen, startv, /*is_mut=*/1, /*is_cell=*/0);
-  env_define(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN, endv, /*is_mut=*/0, /*is_cell=*/0);
-  if (cx->failed) { scope_exit(cx); return 0; }
-  if (!frame_guard(cx)) { scope_exit(cx); return 0; }
-
-  int w = frame_width(cx);
-  IrBlock header = new_i64_block(cx, w);
-  IrBlock body_blk = new_i64_block(cx, w);
-  IrBlock step_blk = new_i64_block(cx, w);   /* i = i + 1 (continue lands here) */
-  IrBlock exit_blk = new_i64_block(cx, w);
-
-  IrVal frame[IRB_MAX_FRAME + 2];
-  fill_frame(cx, frame);
-  irb_br(cx->f, cx->cur, header, frame, w);
-
-  /* header: i < end ? */
-  enter_loop_header(cx, header);
-  {
-    Binding *bi = env_lookup(cx, name, nlen);
-    Binding *be = env_lookup(cx, FOR_END_SENTINEL, FOR_END_SENTINEL_LEN);
-    IrVal cond = emit_binop_call(cx, "jacl_lt", bi->value, be->value);
-    IrVal truth = emit_truthy(cx, cond);
-    fill_frame(cx, frame);
-    irb_br_if(cx->f, cx->cur, truth, body_blk, frame, w, exit_blk, frame, w);
-  }
-
-  /* body: run, then fall into the step */
-  enter_frame_block(cx, body_blk);
-  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
-    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 0;
-    (void)compile_expr(cx, body); /* body value discarded; may read NAME */
-    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; cx->loop_brk_ok = sk; }
-  if (cx->failed) { scope_exit(cx); return 0; }
-  fill_frame(cx, frame);
-  irb_br(cx->f, cx->cur, step_blk, frame, w);
-
-  /* step: i = i + 1, loop back */
-  enter_frame_block(cx, step_blk);
-  {
-    Binding *bi = env_lookup(cx, name, nlen);
-    IrVal one = irb_const_i64(cx->f, cx->cur, jaclval_i32(1));
-    bi->value = emit_binop_call(cx, "jacl_add", bi->value, one);
-    fill_frame(cx, frame);
-    irb_br(cx->f, cx->cur, header, frame, w);
-  }
-
-  /* exit: rebind, then drop the loop scope; for evaluates to nil */
   enter_frame_block(cx, exit_blk);
   scope_exit(cx);
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
@@ -3632,21 +3573,6 @@ static IrVal compile_for(Cx *cx, AstNode *node) {
       return compile_for_generator(cx, args[0], args[1]->data.lit_string.value,
                                    args[1]->data.lit_string.length, args[2]);
   }
-  if (argc >= 4 && args[0]->type == AST_LIT_STRING && kw_is(args[1], "in", 2)) {
-    const char *name = args[0]->data.lit_string.value;
-    uint32_t nlen = args[0]->data.lit_string.length;
-    /* `in [range A B] { body }` */
-    if (argc == 4 && args[2]->type == AST_COMMAND &&
-        args[2]->data.command.head_id == HEAD_RANGE &&
-        args[2]->data.command.arg_count == 2 && args[3]->type == AST_BLOCK) {
-      return compile_for_range(cx, name, nlen, args[2]->data.command.args[0],
-                               args[2]->data.command.args[1], args[3]);
-    }
-    /* `in A .. B { body }` */
-    if (argc == 6 && kw_is(args[3], "..", 2) && args[5]->type == AST_BLOCK) {
-      return compile_for_range(cx, name, nlen, args[2], args[4], args[5]);
-    }
-  }
   /* `for COLL k v { body }` — two-name iteration (map: key + value; vec/arr: index +
    * element). Both names bind per iteration via the iter-key/iter-val accessors. */
   if (argc == 4 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_LIT_STRING &&
@@ -3929,10 +3855,13 @@ static IrVal compile_shell_stages(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
   { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
   for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-    IrVal e = compile_elem_pinned(cx, node->data.shell_cmd.args[i], &argv);
+    /* `..$args` splices the vector's elements, one argument each. */
+    AstNode *an = node->data.shell_cmd.args[i];
+    int spread = an->type == AST_SPREAD;
+    IrVal e = compile_elem_pinned(cx, spread ? an->data.spread.expr : an, &argv);
     if (cx->failed) return 0;
     IrVal a[] = {cx->sp, argv, e};
-    argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
+    argv = emit_rt_call(cx, spread ? "jacl_vec_concat" : "jacl_vec_push", a, 3);
   }
   IrVal a[] = {cx->sp, stages, argv};
   return emit_rt_call(cx, "jacl_vec_push", a, 3);
@@ -4403,16 +4332,18 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         toks[nt++] = cmd->data.command.args[j];
     }
     int all_words = nt > 0;
-    for (int i = 0; i < nt; i++) if (toks[i]->type != AST_LIT_STRING) all_words = 0;
+    for (int i = 0; i < nt; i++)
+      if (toks[i]->type != AST_LIT_STRING && !rest_spread_name(toks[i])) all_words = 0;
     if (all_words) {
       IrVal v = compile_expr(cx, node->data.command.args[1]);
       if (cx->failed) return 0;
       for (int k = 0, pos = 0; k < nt; k++, pos++) {
-        /* `..rest` — the trailing name collects V[pos..] into a fresh vector
-         * (positional; the `..` marker token precedes the rest name). */
-        if (toks[k]->data.lit_string.length == 2 &&
-            memcmp(toks[k]->data.lit_string.value, "..", 2) == 0 && k + 1 < nt) {
-          AstNode *rn = toks[k + 1];
+        /* `..rest` — the trailing name collects V[pos..] into a fresh vector (positional). It is
+         * the word `..` before the name when `..` heads its own command (`{a, ..rest}`), else a
+         * spread of the name (`{a ..rest}`). */
+        AstNode *rn = rest_spread_name(toks[k]);
+        if (!rn && kw_is(toks[k], "..", 2) && k + 1 < nt) rn = toks[k + 1];
+        if (rn) {
           IrVal start = irb_const_i64(cx->f, cx->cur, jaclval_i32(pos));
           IrVal big = irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff));
           IrVal sa[] = {cx->sp, v, start, big};
