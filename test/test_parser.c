@@ -3186,6 +3186,25 @@ static int test_shell_cmd_flag_args(void) {
   TEST_PASS();
 }
 
+/* def files [!ls la] → the bracketed form is the AST_SHELL_CMD `!ls la` is in command mode (#273) */
+static int test_shell_cmd_bracketed(void) {
+  setup();
+  ParseResult r = parse("def files [!ls la]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* d = r.nodes[0];
+  ASSERT(d->type == AST_COMMAND);
+  ASSERT_U32_EQ(d->data.command.arg_count, 2);
+  AstNode* n = d->data.command.args[1];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
+  ASSERT(memcmp(n->data.shell_cmd.args[0]->data.lit_string.value, "la", 2) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* !"my script.sh" → quoted command name */
 static int test_shell_cmd_quoted_name(void) {
   setup();
@@ -3653,6 +3672,7 @@ int main(void) {
     {"shell_cmd_in_pipeline",   test_shell_cmd_in_pipeline},
     {"shell_cmd_error_no_name", test_shell_cmd_error_no_name},
     {"shell_cmd_neq_not_shell", test_shell_cmd_neq_not_shell},
+    {"shell_cmd_bracketed",     test_shell_cmd_bracketed},
     /* Implicit Context US-002: ctx declarations */
     {"ctx_decl_basic",         test_ctx_decl_basic},
     {"ctx_decl_mutable",       test_ctx_decl_mutable},

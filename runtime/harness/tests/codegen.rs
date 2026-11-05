@@ -1707,6 +1707,24 @@ fn shell_out_runs_when_exec_is_granted() {
 }
 
 #[test]
+fn a_bracketed_shell_command_is_a_value() {
+    // #273: `[!cmd …]` parsed as a command named `!` ("unsupported command head '!'"), though
+    // SYNTAX.md shows `def files [!ls -la]`. It is now the node `!cmd …` is in command mode.
+    let path = std::env::temp_dir().join(format!("jacl_bracket_shell_{}.jacl", std::process::id()));
+    std::fs::write(&path, "def out [!echo hi there]\nprint \"<$out>\"\nprint [!echo again]\n")
+        .expect("write fixture");
+    let (linked, entry) = emit_and_link_file(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    let caps = [("exec", temen_run::exec::host_exec(&["echo"]))];
+    let run = inst
+        .run_with_caps(temen_run::Backend::Jit, &temen_run::RunConfig::default(), &caps)
+        .expect("run");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "<hi there\n>\nagain\n\n");
+}
+
+#[test]
 fn clock_reads_the_granted_clock() {
     // `[clock]` (runtime/clockcap.c) is the granted "clock" capability's op 0: the host's time in
     // nanoseconds, which the file reads from a clock that starts at 2^40 and moves 2 ms a read, on
