@@ -764,6 +764,7 @@ int ast__needs_quoting(const char* s, uint32_t len) {
 /* A command's head or argument, or a shell command's: a shell command there is written
  * `[!cmd ...]`, since a shell command's words run on to the next `]` (#277). Mirrored by
  * syn_rt's pp_head_args. */
+void ast__pp_node(AstStrBuf* b, AstNode* node);
 static void ast__pp_operand(AstStrBuf* b, AstNode* node) {
   if (node->type != AST_SHELL_CMD) { ast__pp_node(b, node); return; }
   ast__buf_char(b, '[');
