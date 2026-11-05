@@ -2074,6 +2074,8 @@ static void collect_caps(Cx *cx, AstNode *node, const char **bound, uint32_t *bl
   }
 }
 
+HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
+
 /* Is `node` a closure literal? Lambda `[\ {params} {body}]` (params in a BLOCK) or
  * anonymous `[proc {params} {body}]` (empty name). Fills the out-params if so. */
 static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNode **body) {
@@ -2218,6 +2220,20 @@ static void capset_scan(Cx *cx, AstNode *node) {
     collect_bound(body, bound, blen, &nb);
     add_free_varrefs(body, bound, blen, nb, cx->capset, cx->capsetlen, &cx->ncapset);
     return; /* don't descend into the closure */
+  }
+  /* `[\ * $it 2]`, an implicit-`it` lambda: its body is the command its args make, as
+   * compile_expr builds it. */
+  AstNode *h = node->type == AST_COMMAND ? node->data.command.head : NULL;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 && h->data.lit_string.value[0] == '\\' &&
+      node->data.command.arg_count >= 1 && node->data.command.args[0]->type != AST_BLOCK) {
+    AstNode cmd = *node;
+    cmd.data.command.head = node->data.command.args[0];
+    cmd.data.command.args = node->data.command.args + 1;
+    cmd.data.command.arg_count = node->data.command.arg_count - 1;
+    cmd.data.command.head_id = jacl_compute_head_id_bridge(cmd.data.command.head);
+    const char *bound[1] = {"it"}; uint32_t blen[1] = {2};
+    add_free_varrefs(&cmd, bound, blen, 1, cx->capset, cx->capsetlen, &cx->ncapset);
+    return;
   }
   if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
   if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
@@ -2574,8 +2590,56 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
+/* [for {INIT; COND; STEP} { body }] — C-style: INIT runs once, in the loop's own scope, then
+ * `while COND { body; STEP }`, with `continue` landing on STEP. The loop is nil. */
+static IrVal compile_for_cstyle(Cx *cx, AstNode *hdr, AstNode *body) {
+  if (hdr->data.block.count != 3) { cx_fail(cx, "C-style for needs {init; cond; step}"); return 0; }
+  AstNode **part = hdr->data.block.commands;
+  scope_enter(cx);
+  cx->move_ok = 1;
+  (void)compile_expr(cx, part[0]);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock step_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  enter_loop_header(cx, header);
+  cx->move_ok = 1;
+  IrVal cond = compile_expr(cx, part[1]);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  IrVal truth = emit_truthy(cx, cond);
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, body_blk, frame, w, exit_blk, frame, w);
+
+  enter_frame_block(cx, body_blk);
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 0;
+    (void)compile_expr(cx, body);
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; cx->loop_brk_ok = sk; }
+  if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, step_blk, frame, w);
+
+  enter_frame_block(cx, step_blk);
+  cx->move_ok = 1;
+  (void)compile_expr(cx, part[2]);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  enter_frame_block(cx, exit_blk);
+  scope_exit(cx);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+
 /* Synthesized AST nodes (heap-allocated; live for the compile) for sugar forms. */
-HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
 static AstNode *synth_word(const char *v, uint32_t len) {
   AstNode *n = calloc(1, sizeof(AstNode));
   n->type = AST_LIT_STRING;
@@ -3019,6 +3083,16 @@ static void emit_error_branch_if(Cx *cx, IrVal truth, IrVal errv) {
 static void emit_stmt_error_check(Cx *cx, IrVal v) {
   if (cx->failed) return;
   emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
+}
+
+/* A binding statement (def/mut/set) CAPTURES its value: an error bound to a name does not
+ * auto-return; it propagates only when the name is later USED unhandled (matching the old VM,
+ * where a def leaves no error on the stack for CHECK_ERROR). So `def r [await $f]` /
+ * `def e [error …]` can be inspected with error?/error-val. */
+static int stmt_is_binding(AstNode *stmt) {
+  if (stmt->type != AST_COMMAND) return 0;
+  uint8_t hid = stmt->data.command.head_id;
+  return hid == HEAD_DEF || hid == HEAD_MUT || hid == HEAD_SET;
 }
 
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
@@ -3545,6 +3619,8 @@ static IrVal compile_try(Cx *cx, AstNode *node) {
 static IrVal compile_for(Cx *cx, AstNode *node) {
   uint32_t argc = node->data.command.arg_count;
   AstNode **args = node->data.command.args;
+  if (argc == 2 && args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK)
+    return compile_for_cstyle(cx, args[0], args[1]);
   /* Canonical `for COLLECTION name { body }` over a generator (collection is a call to
    * a generator proc). Other canonical collections are reconciled in Phase 4. */
   if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK &&
@@ -3931,11 +4007,15 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
   if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
   if (hid == HEAD_IF) return compile_if(cx, node);
   if (hid == HEAD_WHILE) return compile_while(cx, node);
-  if (hid == HEAD_AMP_AMP || hid == HEAD_PIPE_PIPE) {
+  /* `and` / `or` are the prelude's names for `&&` / `||`; its macros do not run on the emit
+   * path, so they are lowered here by name, as `incr` and `assert` are. */
+  AstNode *named = node->data.command.head;
+  int is_named_and = named && kw_is(named, "and", 3), is_named_or = named && kw_is(named, "or", 2);
+  if (hid == HEAD_AMP_AMP || hid == HEAD_PIPE_PIPE || is_named_and || is_named_or) {
     /* `[&& a b …]` / `[|| a b …]` — short-circuit logical fold. Reference lowers
      * `&& L R` as `if L {R} {false}` and `|| L R` as `if L {true} {R}`. With more than
      * two operands it right-folds: `[&& a b c]` == `a && (b && c)`. */
-    int is_and = (hid == HEAD_AMP_AMP);
+    int is_and = (hid == HEAD_AMP_AMP) || is_named_and;
     AstNode **args = node->data.command.args;
     uint32_t ac = node->data.command.arg_count;
     if (ac == 0)
@@ -4718,10 +4798,13 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     IrVal empty[] = {cx->sp};
     IrVal acc = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-      IrVal e = compile_elem_pinned(cx, node->data.command.args[i], &acc);
+      /* `..$xs` splices the vector's elements, as into a variadic call's rest vector. */
+      AstNode *an = node->data.command.args[i];
+      int spread = an->type == AST_SPREAD;
+      IrVal e = compile_elem_pinned(cx, spread ? an->data.spread.expr : an, &acc);
       if (cx->failed) return 0;
       IrVal a[] = {cx->sp, acc, e};
-      acc = emit_rt_call(cx, "jacl_vec_push", a, 3);
+      acc = emit_rt_call(cx, spread ? "jacl_vec_concat" : "jacl_vec_push", a, 3);
     }
     return acc;
   }
@@ -5276,6 +5359,44 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
  *
  * `*handled` is 1 when one of this group's guards matched (the return value is then the compiled
  * value), 0 when none did and the caller must fall through to the next group. */
+/* `[assert PRED]`: nil when PRED holds. When it fails, PRED's own error if it is one, else an
+ * error whose message is "assertion failed: <source>", as the prelude macro words it (its
+ * expansion, `[if PRED {} { panic "assertion failed: …" }]`, does not run on the emit path).
+ * Only the failing branch builds the message, so a passing assert allocates nothing. */
+static IrVal compile_assert(Cx *cx, AstNode *pred) {
+  IrVal v = compile_expr(cx, pred);
+  if (cx->failed || !frame_guard(cx)) return 0;
+  IrVal held = emit_truthy(cx, v);
+  IrVal zero = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal not_held = irb_intcmp(cx->f, cx->cur, IRB_I32, IRB_EQ, held, zero);
+  IrVal fails = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_OR, not_held, emit_is_error_bit(cx, v));
+  int w = frame_width(cx);
+  IrBlock fail_blk = new_i64_block(cx, w + 1);   /* + PRED's value */
+  IrBlock join = new_i64_block(cx, w + 1);       /* + the assert's value */
+  IrVal fa[IRB_MAX_FRAME + 2], ja[IRB_MAX_FRAME + 2];
+  fill_frame(cx, fa); fa[w] = v;
+  fill_frame(cx, ja); ja[w] = irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  irb_br_if(cx->f, cx->cur, fails, fail_blk, fa, w + 1, join, ja, w + 1);
+
+  enter_frame_block(cx, fail_blk);
+  static const char pre[] = "assertion failed: ";
+  arena_t arena = {0};
+  const char *src = ast_pretty_print(pred, &arena);
+  uint32_t pl = sizeof pre - 1, sl = (uint32_t)strlen(src);
+  char *msg = arena_alloc(&arena, pl + sl);
+  memcpy(msg, pre, pl);
+  memcpy(msg + pl, src, sl);
+  IrVal m = compile_string_literal(cx, msg, pl + sl);
+  arena_destroy(&arena);
+  IrVal a[] = {cx->sp, (IrVal)w, m};
+  IrVal e = emit_rt_call(cx, "jacl_assert_failed", a, 3);
+  fill_frame(cx, ja); ja[w] = e;
+  irb_br(cx->f, cx->cur, join, ja, w + 1);
+
+  enter_frame_block(cx, join);
+  return (IrVal)w;
+}
+
 /* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
  * and each is called exactly once — at -O2 clang would inline it straight back and undo the
  * split (measured: without this the caller's estimated emitted size barely moves). */
@@ -5454,18 +5575,11 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       node->data.command.arg_count >= 1) {
     /* Two forms: `[assert EXPR]` (single truthy check) and the predicate form
      * `[assert OP a b …]`, which evaluates `[OP a b …]` and asserts its truth. */
-    IrVal v;
-    if (node->data.command.arg_count == 1) {
-      v = compile_expr(cx, node->data.command.args[0]);
-    } else {
-      AstNode *cmd = synth_command(node->data.command.args[0],
-                                   node->data.command.args + 1,
-                                   node->data.command.arg_count - 1);
-      v = compile_expr(cx, cmd);
-    }
-    if (cx->failed) return 0;
-    IrVal a[] = {cx->sp, v};
-    return emit_rt_call(cx, "jacl_assert", a, 2);
+    AstNode *pred = node->data.command.arg_count == 1
+                        ? node->data.command.args[0]
+                        : synth_command(node->data.command.args[0], node->data.command.args + 1,
+                                        node->data.command.arg_count - 1);
+    return compile_assert(cx, pred);
   }
 
   /* `[panic]` / `[panic MSG]` — halt with a message (surfaced as a propagating error).
@@ -5915,14 +6029,9 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
         cx->move_ok = 1;   /* statement position: nothing outlives the statement */
         last = compile_expr(cx, stmt);
         if (cx->failed) break;
-        /* Error auto-return, but not for a binding, which captures its value here as in a proc's
-         * body (compile_tail's block): `def v [await $f]` in a loop or a branch can be inspected
-         * with error?/error-val too. */
-        int is_binding = stmt->type == AST_COMMAND &&
-                         (stmt->data.command.head_id == HEAD_DEF ||
-                          stmt->data.command.head_id == HEAD_MUT ||
-                          stmt->data.command.head_id == HEAD_SET);
-        if (i + 1 < bn && !is_binding) emit_stmt_error_check(cx, last);
+        /* Error auto-return, but not for a binding, as in a proc's body (compile_tail's block):
+         * `def v [await $f]` in a loop or a branch can be inspected with error?/error-val too. */
+        if (i + 1 < bn && !stmt_is_binding(stmt)) emit_stmt_error_check(cx, last);
         if (cx->failed) break;
       }
       scope_exit(cx);
@@ -6127,15 +6236,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
       }
       cx->move_ok = 1;   /* statement position: nothing outlives the statement */
       IrVal sv = compile_expr(cx, stmt);
-      /* A binding statement (def/mut/set) CAPTURES its value — an error bound to a name
-       * does not auto-return; it propagates only when the name is later USED unhandled
-       * (matching the old VM, where a def leaves no error on the stack for CHECK_ERROR).
-       * So `def r [await $f]` / `def e [error …]` can be inspected with error?/error-val. */
-      int is_binding = stmt->type == AST_COMMAND &&
-                       (stmt->data.command.head_id == HEAD_DEF ||
-                        stmt->data.command.head_id == HEAD_MUT ||
-                        stmt->data.command.head_id == HEAD_SET);
-      if (!cx->failed && !is_binding) emit_stmt_error_check(cx, sv);  /* error auto-return */
+      if (!cx->failed && !stmt_is_binding(stmt)) emit_stmt_error_check(cx, sv);  /* error auto-return */
     }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
     scope_exit(cx);
@@ -6654,15 +6755,18 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
     cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
-    IrVal last = 0; int have = 0;
-    for (uint32_t i = 0; i < count; i++) {
+    cx.ret_raw = REP_TAGGED;   /* the body returns one tagged word */
+    uint32_t last_form = count;   /* the form whose value is the program's (count: none) */
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) last_form = i;
+    IrVal last = 0;
+    for (uint32_t i = 0; i < count && !cx.failed; i++) {
       if (is_proc_def(nodes[i])) continue;
       cx.move_ok = 1;   /* statement position: nothing outlives the statement */
       last = compile_expr(&cx, nodes[i]);
-      have = 1;
-      if (cx.failed) break;
+      /* As in a block: a failing statement ends the program, its error the result. */
+      if (i != last_form && !stmt_is_binding(nodes[i])) emit_stmt_error_check(&cx, last);
     }
-    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
+    if (last_form == count && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
     scope_exit(&cx);
     cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
@@ -6750,14 +6854,18 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
     cx.at_top_level = 1;
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
-    IrVal last = 0; int have = 0;
+    cx.ret_raw = REP_TAGGED;   /* the line returns one tagged word */
+    uint32_t last_form = count;   /* the form whose value is the line's (count: none) */
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) last_form = i;
+    IrVal last = 0;
     for (uint32_t i = 0; i < count && !cx.failed; i++) {
       if (is_proc_def(nodes[i])) continue;
       cx.move_ok = 1;
       last = compile_expr(&cx, nodes[i]);
-      have = 1;
+      /* As in a block: a failing statement ends the line, its error the line's value. */
+      if (i != last_form && !stmt_is_binding(nodes[i])) emit_stmt_error_check(&cx, last);
     }
-    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, JACLVAL_NIL);
+    if (last_form == count && !cx.failed) last = irb_const_i64(cx.f, cx.cur, JACLVAL_NIL);
     scope_exit(&cx);
     cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }

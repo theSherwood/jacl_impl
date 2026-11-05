@@ -328,6 +328,7 @@ AstNode* parser__parse_expr(Parser* p);
 AstNode* parser__parse_block(Parser* p);
 AstNode* parser__parse_interp_string(Parser* p);
 AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head);
+static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -359,6 +360,19 @@ AstNode* parser__parse_command(Parser* p) {
     node->data.command.args      = NULL;
     node->data.command.arg_count = 0;
     return node;
+  }
+
+  /* `[!cmd args...]`: a shell command as a value, the node `!cmd args...` is in command mode. */
+  if (parser__peek(p)->type == TOKEN_BANG) {
+    AstNode* sh = parser__parse_shell_cmd(p, 1);
+    if (sh->type == AST_ERROR) { parser__sync_bracket(p); return sh; }
+    if (parser__peek(p)->type != TOKEN_RBRACKET) {
+      AstNode* err = parser__error(p, "expected ']' to close [!cmd ...]", open);
+      parser__sync_bracket(p);
+      return err;
+    }
+    parser__advance(p); /* consume ']' */
+    return sh;
   }
 
   /* Parse head (command name) */
@@ -1915,6 +1929,72 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
  * Non-word atoms ($var, literals, [], (), {}) are returned bare.
  * ------------------------------------------------------------------------- */
 
+/* `!cmd args...` → AST_SHELL_CMD (external shell command). The arguments run to the end of the
+ * command or a pipe/&&/||/& — or, `in_brackets` (`[!ls -la]`), to the closing bracket. */
+static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets) {
+  Token* bang = parser__advance(p); /* consume '!' */
+  SourcePos start = parser__token_start(bang);
+
+  /* Parse command name: word, string, or variable */
+  Token* cmd_tok = parser__peek(p);
+  if (cmd_tok->type != TOKEN_WORD && cmd_tok->type != TOKEN_STRING &&
+      cmd_tok->type != TOKEN_VAR) {
+    return parser__error(p, "expected command name after '!'", cmd_tok);
+  }
+
+  AstNode* head = parser__parse_expr(p);
+  if (head == NULL) {
+    return parser__error(p, "expected command name after '!'", bang);
+  }
+
+  /* Collect arguments until pipe/and/or/amp or command-end.
+   * Unlike regular commands, shell commands don't stop at operators like -
+   * since "-la" is a valid shell argument. */
+  NodeArray args;
+  parser__arr_init(&args, p->arena);
+
+  while (!parser__is_shell_cmd_end(p) &&
+         !(in_brackets && parser__peek(p)->type == TOKEN_RBRACKET)) {
+    /* Spread expression: ..expr */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      Token* dotdot = parser__advance(p); /* consume '..' */
+      AstNode* inner = parser__parse_expr(p);
+      if (inner == NULL) {
+        return parser__error(p, "expected expression after '..' in shell command", dotdot);
+      }
+      AstNode* spread = ast_alloc(p->arena);
+      spread->type  = AST_SPREAD;
+      spread->start = parser__token_start(dotdot);
+      spread->end   = inner->end;
+      spread->data.spread.expr = inner;
+      parser__arr_push(&args, spread);
+      continue;
+    }
+
+    AstNode* arg = parser__parse_expr(p);
+    if (arg == NULL) break;
+    parser__arr_push(&args, arg);
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_SHELL_CMD;
+  node->start = start;
+  node->end   = args.count > 0 ? args.nodes[args.count - 1]->end : head->end;
+  node->data.shell_cmd.head      = head;
+  node->data.shell_cmd.args      = args.nodes;
+  node->data.shell_cmd.arg_count = args.count;
+
+  /* Check for background execution: !cmd & */
+  node->data.shell_cmd.background = 0;
+  node->data.shell_cmd.stream = 0;
+  if (parser__peek(p)->type == TOKEN_AMP) {
+    parser__advance(p); /* consume '&' */
+    node->data.shell_cmd.background = 1;
+    node->end = parser__token_end(&p->tokens[p->pos - 1]);
+  }
+  return node;
+}
+
 AstNode* parser__parse_cmd_operand(Parser* p) {
   /* ctx inside a block/proc — reject (must be at module top level) */
   Token* peek = parser__peek(p);
@@ -1977,69 +2057,7 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
     return node;
   }
 
-  /* !cmd args... → AST_SHELL_CMD (external shell command) */
-  if (peek->type == TOKEN_BANG) {
-    Token* bang = parser__advance(p); /* consume '!' */
-    SourcePos start = parser__token_start(bang);
-
-    /* Parse command name: word, string, or variable */
-    Token* cmd_tok = parser__peek(p);
-    if (cmd_tok->type != TOKEN_WORD && cmd_tok->type != TOKEN_STRING &&
-        cmd_tok->type != TOKEN_VAR) {
-      return parser__error(p, "expected command name after '!'", cmd_tok);
-    }
-
-    AstNode* head = parser__parse_expr(p);
-    if (head == NULL) {
-      return parser__error(p, "expected command name after '!'", bang);
-    }
-
-    /* Collect arguments until pipe/and/or/amp or command-end.
-     * Unlike regular commands, shell commands don't stop at operators like -
-     * since "-la" is a valid shell argument. */
-    NodeArray args;
-    parser__arr_init(&args, p->arena);
-
-    while (!parser__is_shell_cmd_end(p)) {
-      /* Spread expression: ..expr */
-      if (parser__peek(p)->type == TOKEN_DOTDOT) {
-        Token* dotdot = parser__advance(p); /* consume '..' */
-        AstNode* inner = parser__parse_expr(p);
-        if (inner == NULL) {
-          return parser__error(p, "expected expression after '..' in shell command", dotdot);
-        }
-        AstNode* spread = ast_alloc(p->arena);
-        spread->type  = AST_SPREAD;
-        spread->start = parser__token_start(dotdot);
-        spread->end   = inner->end;
-        spread->data.spread.expr = inner;
-        parser__arr_push(&args, spread);
-        continue;
-      }
-
-      AstNode* arg = parser__parse_expr(p);
-      if (arg == NULL) break;
-      parser__arr_push(&args, arg);
-    }
-
-    AstNode* node = ast_alloc(p->arena);
-    node->type  = AST_SHELL_CMD;
-    node->start = start;
-    node->end   = args.count > 0 ? args.nodes[args.count - 1]->end : head->end;
-    node->data.shell_cmd.head      = head;
-    node->data.shell_cmd.args      = args.nodes;
-    node->data.shell_cmd.arg_count = args.count;
-
-    /* Check for background execution: !cmd & */
-    node->data.shell_cmd.background = 0;
-    node->data.shell_cmd.stream = 0;
-    if (parser__peek(p)->type == TOKEN_AMP) {
-      parser__advance(p); /* consume '&' */
-      node->data.shell_cmd.background = 1;
-      node->end = parser__token_end(&p->tokens[p->pos - 1]);
-    }
-    return node;
-  }
+  if (peek->type == TOKEN_BANG) return parser__parse_shell_cmd(p, 0);
 
   TokenType head_token_type = parser__peek(p)->type;
   AstNode* head = parser__parse_expr(p);

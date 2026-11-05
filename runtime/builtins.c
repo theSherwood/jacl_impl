@@ -1039,11 +1039,10 @@ JaclVal jacl_lines(JaclVal s) {
   return out;
 }
 
-/* [assert COND] — nil when truthy, an error otherwise. */
-JaclVal jacl_assert(JaclVal v) {
-  if (jaclrt_is_error(v)) return v;
-  int truthy = !(v == JACL_FALSE || v == JACL_NIL);
-  return truthy ? JACL_NIL : jaclrt_error();
+/* A failed `[assert PRED]`'s value: PRED's own error if it is one, else an error carrying MSG
+ * ("assertion failed: <source>"). Codegen tests PRED inline and calls this only when it fails. */
+JaclVal jacl_assert_failed(JaclVal v, JaclVal msg) {
+  return jaclrt_is_error(v) ? v : jacl_error_new(msg);
 }
 /* [panic MSG] — halt with a message. The reference emits OP_PANIC (unconditional halt);
  * the TEMEN backend surfaces it as an error value carrying the message, which the

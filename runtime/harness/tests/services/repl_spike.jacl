@@ -6,6 +6,7 @@
 ## collections run while it does, and its argument must survive them. A macro whose body does not
 ## compile is refused, a new one or a redefinition, and the table and the lines after are as before.
 ## A macro may call the syntax builtins (#271), which the shell's table binds like the runtime's.
+## A failing statement ends its line (#273): the `set` after it does not run.
 ##
 print [repl-eval "def x 41"]
 print [repl-eval "proc inc {n} { + \x24n 1 }"]
@@ -32,3 +33,6 @@ print [repl-eval "unless [== 1 2] { + 1 2 }"]
 print [repl-eval "nope"]
 print [repl-eval "defmacro arity {x} { make-syntax \"lit-int\" [vec-len [syntax-args \x24x]] }"]
 print [repl-eval "arity [f 1 2 3]"]
+print [repl-eval "mut seen 0"]
+print [repl-eval "error stop; set seen 1"]
+print [repl-eval "\x24seen"]

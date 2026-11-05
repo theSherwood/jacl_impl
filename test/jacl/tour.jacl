@@ -309,15 +309,18 @@ proc main {} {
   assert [== $hit 5]
 
   # ----- interpret / sandbox -----
-  # `[interpret SRC]` compiles and runs SRC in a child VM with the
+  # `[interpret SRC]` compiles and runs SRC in a sandbox with the
   # default prelude. `[interpret PRELUDE SRC]` restricts to the
   # entries in PRELUDE, so an empty map yields a no-I/O sandbox.
   # `[interpret-prelude]` returns the default prelude as a map, so
   # you can derive subsets by `map-remove` / `map-set`.
-  assert [== [interpret "[+ 1 [* 2 3]]"] 7]
-  assert [== [interpret [map] "[+ 10 20]"] 30]
-  # Blocked primitives surface as error values rather than aborting.
   def safe [map-remove [interpret-prelude] "spawn"]
+  assert [not [map-has $safe "spawn"]]
+  # Compiling at run time is the embedder's to grant (the `interp`
+  # capability, or a program that links the compiler, like the shell).
+  # This tour runs without it, so `interpret` is a catchable error value,
+  # as a blocked primitive is.
+  assert [error? [interpret "[+ 1 [* 2 3]]"]]
   assert [error? [interpret $safe "[spawn { 99 }]"]]
 }
 

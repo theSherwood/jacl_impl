@@ -734,7 +734,7 @@ EMSCRIPTEN_KEEPALIVE char *jacl_emit_compile_obj(const char *source, size_t *out
 /* Staged build: link the TEMEN staging bridge (stage_bridge.c + the runtime/harness staticlib)
  * and install the macro-staging hook. Activation is still gated by the JACL_STAGE_ON_TEMEN env
  * var inside the expander, so this build behaves identically to the normal one unless the env
- * var is set. Built by run_diff.sh's --temen mode. */
+ * var is set. Built by jacl_runtime_harness::staged_driver (the harness tests, jacl_temen). */
 extern void jacl_install_temen_stage_hook(void);
 #endif
 

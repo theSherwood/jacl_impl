@@ -16,7 +16,7 @@
 //! mounts a `bundle`-built data image as an in-memory fs — reads see the bundled assets,
 //! writes are discarded when the run ends (the portable / browser-shaped grant).
 //!
-//! The pipeline is the parity harness's: frontend+codegen emit driver → temen-ir link
+//! The pipeline is the parity harness's: frontend+codegen emit driver (macros staged on TEMEN) → temen-ir link
 //! against the translated runtime (+ extern catalog) → powerbox → run. Default backend
 //! is the JIT; `--interp` runs the tree-walking interpreter instead.
 
@@ -25,23 +25,13 @@ use std::process::Command;
 
 use temen_ir::LinkUnit;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-
-/// Build the codegen driver (same recipe as parity.rs: gcc, the unity frontend).
+/// Build the codegen driver: the frontend and codegen with the macro-staging bridge, so a program's
+/// `defmacro`s expand on TEMEN, as the harness tests build it. It goes beside this binary, in
+/// `target/<profile>`, which holds the staticlib it links.
 fn build_driver() -> PathBuf {
-    let out = std::env::temp_dir().join(format!("jacl_temen_emit_{}", std::process::id()));
-    let status = Command::new("gcc")
-        .args(["-O0", "-w", "-D_DEFAULT_SOURCE"])
-        .arg(format!("{ROOT}/codegen/tests/emit_jacl.c"))
-        .arg(format!("{ROOT}/codegen/codegen.c"))
-        .arg(format!("{ROOT}/codegen/irbuilder.c"))
-        .arg("-o")
-        .arg(&out)
-        .args(["-lm", "-lpthread"])
-        .status()
-        .expect("spawn gcc (is gcc installed?)");
-    assert!(status.success(), "gcc failed to build the codegen driver");
-    out
+    let exe = std::env::current_exe().unwrap_or_else(|e| die(&format!("current_exe: {e}")));
+    let profile_dir = exe.parent().unwrap_or_else(|| die("current_exe has no directory"));
+    jacl_runtime_harness::staged_driver(profile_dir).unwrap_or_else(|e| die(&e))
 }
 
 fn die(msg: &str) -> ! {
@@ -136,7 +126,12 @@ fn cmd_run(args: &[String]) -> ! {
 
     // Compile: frontend + TEMEN codegen via the emit driver.
     let driver = build_driver();
-    let out = Command::new(&driver).arg("--file").arg(&prog).output().expect("run emit driver");
+    let out = Command::new(&driver)
+        .env("JACL_STAGE_ON_TEMEN", "1")
+        .arg("--file")
+        .arg(&prog)
+        .output()
+        .expect("run emit driver");
     if !out.status.success() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
@@ -220,7 +215,12 @@ fn cmd_run(args: &[String]) -> ! {
     std::io::stderr().write_all(&run.stderr).ok();
     match run.outcome {
         temen_run::Outcome::Exited(c) => std::process::exit(c),
-        temen_run::Outcome::Returned(_) => std::process::exit(0),
+        // A program that ends in an uncaught error (a failed assert, a panic) fails; the runtime
+        // has printed it. The error flag is JaclVal bit 61 (runtime/jaclrt.h JACL_FLAG_ERROR).
+        temen_run::Outcome::Returned(v) => std::process::exit(match v.first() {
+            Some(temen_interp::Value::I64(x)) if (*x as u64) & (1 << 61) != 0 => 1,
+            _ => 0,
+        }),
     }
 }
 

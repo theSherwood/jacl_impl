@@ -139,10 +139,13 @@ __attribute__((noinline)) JaclVal jacl_vec_set(JaclVal vec, uint32_t idx, JaclVa
   for (uint32_t i = n; i < idx; i++) v = jacl_vec_push(v, JACL_NIL);
   return jacl_vec_push(v, elem);
 }
-/* Persistent concatenation of two vectors. */
+/* Persistent concatenation of two vectors (dynamic or typed). Anything else is an error, not a
+ * root cell to read: `[vec-concat …]` and a spread `..$xs` hand this whatever the program has. */
 __attribute__((noinline)) JaclVal jacl_vec_concat(JaclVal a, JaclVal b) {
   if (jaclrt_is_error(a)) return a;
   if (jaclrt_is_error(b)) return b;
+  uint32_t ta = jaclrt_type_index(a), tb = jaclrt_type_index(b);
+  if ((ta != 0x06 && ta != 0x1B) || (tb != 0x06 && tb != 0x1B)) return jaclrt_error();
   jvec_root *ra = (jvec_root*)jaclrt_as_ptr(a), *rb = (jvec_root*)jaclrt_as_ptr(b);
   return jaclrt_from_ptr(JACL_TAG_VECTOR, jvec_concat(ra, rb));
 }

@@ -46,7 +46,7 @@ normal `emit_jacl` path, which validates through the reference first; left in pl
 removing it would also orphan the `compile_for_range` integer fast-path.)
 
 Un-ignore each remaining case as its gap is fixed. Meanwhile the codegen path also stays covered
-by `codegen/selfhost/macro_staging/run_diff.sh` (legacy oracle) and `--temen` (staged), and by the
+by the compiler card's STAGETEST (`codegen/selfhost/build_compiler_temen.sh --selftest`) and by the
 `jacl_temen` binary on the `test/jacl` corpus.
 
 ## irbuilder.rs — 3 link-model tests ignored (2026-07-29)

@@ -1,4 +1,0 @@
-defmacro pack {first ..rest} {
-  syntax-quote [vec ~first ~@rest]
-}
-pack 10 20 30 40

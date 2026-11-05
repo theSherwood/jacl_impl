@@ -1,6 +1,0 @@
-defmacro fresh {v} { syntax-quote [mut [gensym] ~v] }
-proc run {} {
-  fresh 42
-  99
-}
-run

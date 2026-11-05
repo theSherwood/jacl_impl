@@ -390,6 +390,7 @@ const char* lexer__handle_escape(Lexer* lex, StringBuf* sb) {
   switch (esc) {
     case '\\': strbuf_push(sb, '\\'); lexer__advance(lex); return NULL;
     case '"':  strbuf_push(sb, '"');  lexer__advance(lex); return NULL;
+    case '$':  strbuf_push(sb, '$');  lexer__advance(lex); return NULL;  /* a literal $, not interpolation */
     case 'n':  strbuf_push(sb, '\n'); lexer__advance(lex); return NULL;
     case 't':  strbuf_push(sb, '\t'); lexer__advance(lex); return NULL;
     case 'r':  strbuf_push(sb, '\r'); lexer__advance(lex); return NULL;

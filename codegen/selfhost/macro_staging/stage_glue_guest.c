@@ -200,7 +200,7 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     /* timeout (cooperative deadline over sleeping) */ \
     SYM(jacl_timeout_begin); SYM(jacl_timeout_end); \
     /* diagnostics / errors / traces */ \
-    SYM(jacl_panic); SYM(jacl_assert); SYM(jacl_cannot_call); \
+    SYM(jacl_panic); SYM(jacl_assert_failed); SYM(jacl_cannot_call); \
     SYM(jacl_stack_trace); SYM(jacl_trace_push); SYM(jacl_trace_line); SYM(jacl_trace_snapshot); \
     /* comparisons + remaining arithmetic (the operator lowering table) */ \
     SYM(jacl_div); SYM(jacl_mod); SYM(jacl_lt); SYM(jacl_gt); SYM(jacl_le); SYM(jacl_ge); SYM(jacl_ne); \

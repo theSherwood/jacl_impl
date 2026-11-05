@@ -53,7 +53,7 @@ pub fn stdout_tee(mut tee: impl FnMut(&[u8]) + Send + 'static) -> temen_interp::
 /// which `link` resolves, so there is no separate relocation table: the returned `Module` is a
 /// pre-link unit, fed to `link`/`link_with_manifest` as a `LinkUnit`. Objects decode via
 /// `decode_unit` (`decode_module` rejects them). (`emit_jacl --text` still emits temen-text for
-/// goldens; that path is consumed by shell diffs, not this decoder.)
+/// people and shell diffs; this decoder does not read it.)
 pub fn decode_emitted(bytes: &[u8]) -> Result<temen_ir::Module, String> {
     temen_encode::decode_unit(bytes).map_err(|e| format!("decode object: {e:?}"))
 }
@@ -155,6 +155,53 @@ pub fn emit_program(path: &std::path::Path) -> Result<temen_ir::Module, String> 
         ));
     }
     decode_emitted(&out.stdout).map_err(|e| format!("decode emitted IR: {e}"))
+}
+
+/// The frontend and codegen's emit driver built with the macro-staging bridge, so a `defmacro`'s body
+/// runs on TEMEN (run it with `JACL_STAGE_ON_TEMEN=1`). It links this crate's staticlib from
+/// `profile_dir` (`target/<profile>`), which building a test or a bin does not produce, so cargo is
+/// asked for it first (a no-op when it is current: checking only that the file exists once linked
+/// a stale one whose decoder rejected the wire the C encoder emitted). The driver is built beside
+/// the staticlib, so a run replaces the last one's rather than leaving 23 MB in the temp directory
+/// each time (#198), under a name of its own and renamed into place, since several processes may
+/// build it at once.
+pub fn staged_driver(profile_dir: &std::path::Path) -> Result<PathBuf, String> {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+    if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
+        cargo.arg("--release");
+    }
+    let st = cargo.status().map_err(|e| format!("cargo build --lib: {e}"))?;
+    let staticlib = profile_dir.join("libjacl_runtime_harness.a");
+    if !st.success() || !staticlib.exists() {
+        return Err(format!("could not build {} for the staged driver", staticlib.display()));
+    }
+    let out = profile_dir.join("jacl_emit_staged");
+    let tmp = profile_dir.join(format!("jacl_emit_staged.{}", std::process::id()));
+    let status = Command::new("gcc")
+        .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
+        .arg("-I")
+        .arg(format!("{root}/codegen"))
+        .arg(format!("{root}/codegen/tests/emit_jacl.c"))
+        .arg(format!("{root}/codegen/codegen.c"))
+        .arg(format!("{root}/codegen/irbuilder.c"))
+        .arg(format!("{root}/codegen/selfhost/macro_staging/stage_bridge.c"))
+        .arg("-L")
+        .arg(profile_dir)
+        // The Rust staticlib pulls in libstd's system deps.
+        .args([
+            "-ljacl_runtime_harness", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc",
+        ])
+        .arg("-o")
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("gcc: {e}"))?;
+    if !status.success() {
+        return Err("gcc failed to build the TEMEN-staged codegen driver".into());
+    }
+    std::fs::rename(&tmp, &out).map_err(|e| format!("move the staged driver into place: {e}"))?;
+    Ok(out)
 }
 
 /// `program` linked with the runtime `rt` and given its entry: a child's a vat spawns (`child`), or

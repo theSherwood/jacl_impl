@@ -1115,9 +1115,6 @@ fn string_slice_from() {
 /// Absolute path to the canonical syntax tour.
 const TOUR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/tour.jacl");
 
-/// Repo root (for the codegen sources + macro-staging bridge the staged driver links).
-const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-
 /// JACL error flag — bit 61 of a `JaclVal` (mirrors `JACL_FLAG_ERROR` in `runtime/jaclrt.h`).
 /// A failed `assert` expands to `panic`, which the TEMEN backend surfaces as an error *value*
 /// that auto-returns out of the job (builtins.c `jacl_panic`) — so a tripped assert shows up
@@ -1136,60 +1133,14 @@ fn target_profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Build the **TEMEN-staged** frontend driver: `emit_jacl` + codegen + the macro-staging bridge
-/// (`stage_bridge.c`), linked against this crate's `libjacl_runtime_harness.a` (which exports
-/// `jacl_temen_stage`). This is the `codegen/selfhost/macro_staging/run_diff.sh --temen` recipe. It
-/// is required for tour.jacl specifically: the tour defines and invokes a `defmacro`, and macro
-/// bodies now expand by staging on the TEMEN engine (there is no legacy bytecode compiler to fall
-/// back to), so the plain emit-only `driver()` rejects it with "emit-only build". Cached per
+/// The **TEMEN-staged** frontend driver (`jacl_runtime_harness::staged_driver`): a program that
+/// defines a `defmacro`, as tour.jacl does, needs it, since macro bodies expand by staging on the
+/// TEMEN engine and the plain emit-only `driver()` rejects one with "emit-only build". Cached per
 /// test process.
 fn staged_driver() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let profile_dir = target_profile_dir();
-        let staticlib = profile_dir.join("libjacl_runtime_harness.a");
-        // `cargo test` builds only the test binary + rlib, not the `[staticlib]` artifact the C
-        // driver links against — materialize it. Always ask cargo (a no-op when it is current):
-        // checking only that the file exists linked a stale one after a temen bump, whose decoder
-        // rejected the wire version the C encoder now emits.
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
-        if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
-            cmd.arg("--release");
-        }
-        let st = cmd.status().expect("spawn cargo build --lib");
-        assert!(
-            st.success() && staticlib.exists(),
-            "could not build {} for the staged driver",
-            staticlib.display()
-        );
-        // Beside the staticlib, so a run overwrites the last one's rather than leaving 23 MB in
-        // the temp directory each time (#198); built under a name of its own and renamed into
-        // place, since several test binaries may build it at once.
-        let out = profile_dir.join("jacl_emit_staged");
-        let tmp = profile_dir.join(format!("jacl_emit_staged.{}", std::process::id()));
-        let status = Command::new("gcc")
-            .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
-            .arg("-I")
-            .arg(format!("{REPO_ROOT}/codegen"))
-            .arg(format!("{REPO_ROOT}/codegen/tests/emit_jacl.c"))
-            .arg(format!("{REPO_ROOT}/codegen/codegen.c"))
-            .arg(format!("{REPO_ROOT}/codegen/irbuilder.c"))
-            .arg(format!("{REPO_ROOT}/codegen/selfhost/macro_staging/stage_bridge.c"))
-            .arg("-L")
-            .arg(&profile_dir)
-            // The Rust staticlib pulls in libstd's system deps — the same link line run_diff.sh uses.
-            .args([
-                "-ljacl_runtime_harness", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl",
-                "-lc",
-            ])
-            .arg("-o")
-            .arg(&tmp)
-            .status()
-            .expect("spawn gcc (staged driver)");
-        assert!(status.success(), "gcc failed to build the TEMEN-staged codegen driver");
-        std::fs::rename(&tmp, &out).expect("move the staged driver into place");
-        out
+        jacl_runtime_harness::staged_driver(&target_profile_dir()).unwrap_or_else(|e| panic!("{e}"))
     })
     .as_path()
 }
@@ -1707,6 +1658,24 @@ fn shell_out_runs_when_exec_is_granted() {
 }
 
 #[test]
+fn a_bracketed_shell_command_is_a_value() {
+    // #273: `[!cmd …]` parsed as a command named `!` ("unsupported command head '!'"), though
+    // SYNTAX.md shows `def files [!ls -la]`. It is now the node `!cmd …` is in command mode.
+    let path = std::env::temp_dir().join(format!("jacl_bracket_shell_{}.jacl", std::process::id()));
+    std::fs::write(&path, "def out [!echo hi there]\nprint \"<$out>\"\nprint [!echo again]\n")
+        .expect("write fixture");
+    let (linked, entry) = emit_and_link_file(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    let caps = [("exec", temen_run::exec::host_exec(&["echo"]))];
+    let run = inst
+        .run_with_caps(temen_run::Backend::Jit, &temen_run::RunConfig::default(), &caps)
+        .expect("run");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "<hi there\n>\nagain\n\n");
+}
+
+#[test]
 fn clock_reads_the_granted_clock() {
     // `[clock]` (runtime/clockcap.c) is the granted "clock" capability's op 0: the host's time in
     // nanoseconds, which the file reads from a clock that starts at 2^40 and moves 2 ms a read, on
@@ -1779,6 +1748,136 @@ fn a_binding_captures_an_error_in_a_nested_block() {
         src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
     let (_, out) = run_jacl_file(path);
     assert_eq!(String::from_utf8_lossy(&out), want);
+}
+
+#[test]
+fn a_failing_top_level_statement_stops_the_program() {
+    // #273: the top level ran on past a failed assert or a panic, and only the last form's value was
+    // the program's, so a self-checking program (the tour) checked nothing before its last line. A
+    // failing statement now ends the program with its error, as one in a block does.
+    for (name, failing) in [("toperr_assert", "assert [== 1 2]"), ("toperr_panic", "panic boom")] {
+        let (ret, out) = run_jacl_source(name, &format!("print before\n{failing}\nprint after\n"));
+        assert!(is_jacl_error(ret), "{name}: the program's value is the error (0x{:016x})", ret as u64);
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.starts_with("before\n<error: ") && !out.contains("after"), "{name}: {out:?}");
+    }
+    // A failure inside a proc stops the program at the call too.
+    let (ret, out) = run_jacl_source(
+        "toperr_call",
+        "proc check {} { assert [== 1 2]; print unreached }\ncheck\nprint after\n",
+    );
+    assert!(is_jacl_error(ret));
+    assert!(!String::from_utf8_lossy(&out).contains("after"));
+    // A binding holds an error rather than returning it, at the top level as in a block.
+    let out = staged_stdout(
+        "toperr_def",
+        "def e [error boom]\nprint [error? $e]\nmut m [error boom]\nprint [error? $m]\nprint after\n",
+    );
+    assert_eq!(out, "true\ntrue\nafter\n");
+}
+
+#[test]
+fn a_failing_assert_says_what_failed() {
+    // #273: `assert` lowered to a bare error, printed `<error: nil>`; SYNTAX.md and the prelude
+    // macro promise "assertion failed: <source>". A predicate that is itself an error stays that
+    // error, and a passing assert is nil.
+    let out = staged_stdout(
+        "assertmsg",
+        "def x 5\n\
+         print [assert [== $x 5]]\n\
+         print [assert [== $x 6]]\n\
+         print [assert == $x 7]\n\
+         print [assert [error boom]]\n",
+    );
+    assert_eq!(
+        out,
+        "nil\n<error: assertion failed: [== $x 6]>\n<error: assertion failed: [== $x 7]>\n<error: boom>\n"
+    );
+}
+
+#[test]
+fn and_and_or_short_circuit_like_their_operators() {
+    // #273: `and` / `or` are prelude macros over `&&` / `||`, which the emit path does not run, and
+    // codegen had no lowering for them ("unsupported command head 'and'").
+    let out = staged_stdout(
+        "andor",
+        "print [and $true $false]\n\
+         print [or $false $true]\n\
+         mut hits 0\n\
+         proc hit {v} { set hits [+ $hits 1]; $v }\n\
+         print [and $false [hit $true]]\n\
+         print [or $true [hit $false]]\n\
+         print $hits\n",
+    );
+    assert_eq!(out, "false\ntrue\nfalse\ntrue\n0\n");
+}
+
+#[test]
+fn a_spread_in_a_vec_splices_its_elements() {
+    // #273: `[vec 1 ..$more]` failed ("unsupported AST node (type 19)"): codegen spliced a spread
+    // only into an operator or a variadic call. Spreading what is not a vector is an error value
+    // (jacl_vec_concat checked no tag before, and read whatever it was given as a vector).
+    let out = staged_stdout(
+        "vecspread",
+        "def more [vec 2 3]\n\
+         print [vec 1 ..$more 4 ..$more]\n\
+         print [vec ..[vec] ..$more]\n\
+         proc f {..xs} { vec-len [vec 0 ..$xs] }\n\
+         print [f 7 8]\n\
+         print [error? [vec 1 ..5]]\n\
+         print [error? [vec-concat [vec 1] 5]]\n",
+    );
+    assert_eq!(out, "[vec 1 2 3 4 2 3]\n[vec 2 3]\n3\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_c_style_for_runs_init_then_cond_body_step() {
+    // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
+    // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;
+    // a `mut` the header declares is the loop's own, or, already declared, the enclosing one.
+    let out = staged_stdout(
+        "cfor",
+        "mut p 1\n\
+         for {mut i 1; <= $i 4; incr i} { set p [* $p $i] }\n\
+         print $p\n\
+         proc k {} {\n\
+           mut s 0\n\
+           for {mut i 0; < $i 10; set i [+ $i 1]} {\n\
+             if [== $i 3] { continue }\n\
+             if [== $i 6] { break }\n\
+             set s [+ $s $i]\n\
+           }\n\
+           print $s\n\
+           mut j 100\n\
+           for {mut j 0; < $j 3; incr j} {}\n\
+           print $j\n\
+         }\n\
+         k\n",
+    );
+    assert_eq!(out, "24\n12\n3\n");
+}
+
+#[test]
+fn an_it_lambda_shares_the_mut_it_captures() {
+    // `[\ cmd …]`, the implicit-`it` lambda, was not seen as a closure when codegen chose which
+    // `mut`s to box, so capturing one failed to compile ("captured mutable not boxed") — at the top
+    // level and in a proc, through a var-ref or a bare `set` target.
+    let out = staged_stdout(
+        "itlambda",
+        "mut n 0\n\
+         def bump [\\ set n [+ $n $it]]\n\
+         bump 5\n\
+         bump 2\n\
+         print $n\n\
+         proc k {} {\n\
+           mut flag 0\n\
+           def raise [\\ set flag 1]\n\
+           raise 0\n\
+           print $flag\n\
+         }\n\
+         k\n",
+    );
+    assert_eq!(out, "7\n1\n");
 }
 
 const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");
