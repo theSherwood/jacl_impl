@@ -1782,6 +1782,32 @@ fn a_binding_captures_an_error_in_a_nested_block() {
 }
 
 #[test]
+fn a_failing_top_level_statement_stops_the_program() {
+    // #273: the top level ran on past a failed assert or a panic, and only the last form's value was
+    // the program's, so a self-checking program (the tour) checked nothing before its last line. A
+    // failing statement now ends the program with its error, as one in a block does.
+    for (name, failing) in [("toperr_assert", "assert [== 1 2]"), ("toperr_panic", "panic boom")] {
+        let (ret, out) = run_jacl_source(name, &format!("print before\n{failing}\nprint after\n"));
+        assert!(is_jacl_error(ret), "{name}: the program's value is the error (0x{:016x})", ret as u64);
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.starts_with("before\n<error: ") && !out.contains("after"), "{name}: {out:?}");
+    }
+    // A failure inside a proc stops the program at the call too.
+    let (ret, out) = run_jacl_source(
+        "toperr_call",
+        "proc check {} { assert [== 1 2]; print unreached }\ncheck\nprint after\n",
+    );
+    assert!(is_jacl_error(ret));
+    assert!(!String::from_utf8_lossy(&out).contains("after"));
+    // A binding holds an error rather than returning it, at the top level as in a block.
+    let out = staged_stdout(
+        "toperr_def",
+        "def e [error boom]\nprint [error? $e]\nmut m [error boom]\nprint [error? $m]\nprint after\n",
+    );
+    assert_eq!(out, "true\ntrue\nafter\n");
+}
+
+#[test]
 fn a_c_style_for_runs_init_then_cond_body_step() {
     // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
     // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;

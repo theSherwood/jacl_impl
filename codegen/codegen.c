@@ -3085,6 +3085,16 @@ static void emit_stmt_error_check(Cx *cx, IrVal v) {
   emit_error_branch_if(cx, emit_is_error_bit(cx, v), v);
 }
 
+/* A binding statement (def/mut/set) CAPTURES its value: an error bound to a name does not
+ * auto-return; it propagates only when the name is later USED unhandled (matching the old VM,
+ * where a def leaves no error on the stack for CHECK_ERROR). So `def r [await $f]` /
+ * `def e [error …]` can be inspected with error?/error-val. */
+static int stmt_is_binding(AstNode *stmt) {
+  if (stmt->type != AST_COMMAND) return 0;
+  uint8_t hid = stmt->data.command.head_id;
+  return hid == HEAD_DEF || hid == HEAD_MUT || hid == HEAD_SET;
+}
+
 /* Zero-filled fixed-size buffer (dynamic Buf: an arr with n i32-0 elements). */
 #define CG_MAX_BUF_DIMS 6   /* mirrors flatbuf.c FB_MAX_DIMS (jacl_fbuf_new_nd's arity) */
 static IrVal emit_type_default(Cx *cx, AstNode *tnode, int depth); /* fwd */
@@ -5981,14 +5991,9 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
         cx->move_ok = 1;   /* statement position: nothing outlives the statement */
         last = compile_expr(cx, stmt);
         if (cx->failed) break;
-        /* Error auto-return, but not for a binding, which captures its value here as in a proc's
-         * body (compile_tail's block): `def v [await $f]` in a loop or a branch can be inspected
-         * with error?/error-val too. */
-        int is_binding = stmt->type == AST_COMMAND &&
-                         (stmt->data.command.head_id == HEAD_DEF ||
-                          stmt->data.command.head_id == HEAD_MUT ||
-                          stmt->data.command.head_id == HEAD_SET);
-        if (i + 1 < bn && !is_binding) emit_stmt_error_check(cx, last);
+        /* Error auto-return, but not for a binding, as in a proc's body (compile_tail's block):
+         * `def v [await $f]` in a loop or a branch can be inspected with error?/error-val too. */
+        if (i + 1 < bn && !stmt_is_binding(stmt)) emit_stmt_error_check(cx, last);
         if (cx->failed) break;
       }
       scope_exit(cx);
@@ -6193,15 +6198,7 @@ static void compile_tail(Cx *cx, AstNode *node) {
       }
       cx->move_ok = 1;   /* statement position: nothing outlives the statement */
       IrVal sv = compile_expr(cx, stmt);
-      /* A binding statement (def/mut/set) CAPTURES its value — an error bound to a name
-       * does not auto-return; it propagates only when the name is later USED unhandled
-       * (matching the old VM, where a def leaves no error on the stack for CHECK_ERROR).
-       * So `def r [await $f]` / `def e [error …]` can be inspected with error?/error-val. */
-      int is_binding = stmt->type == AST_COMMAND &&
-                       (stmt->data.command.head_id == HEAD_DEF ||
-                        stmt->data.command.head_id == HEAD_MUT ||
-                        stmt->data.command.head_id == HEAD_SET);
-      if (!cx->failed && !is_binding) emit_stmt_error_check(cx, sv);  /* error auto-return */
+      if (!cx->failed && !stmt_is_binding(stmt)) emit_stmt_error_check(cx, sv);  /* error auto-return */
     }
     if (!cx->failed) compile_tail(cx, node->data.block.commands[bn - 1]);
     scope_exit(cx);
@@ -6720,15 +6717,18 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
     cx.at_top_level = 1;   /* top-level def/mut mirror into the module-global map */
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
-    IrVal last = 0; int have = 0;
-    for (uint32_t i = 0; i < count; i++) {
+    cx.ret_raw = REP_TAGGED;   /* the body returns one tagged word */
+    uint32_t last_form = count;   /* the form whose value is the program's (count: none) */
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) last_form = i;
+    IrVal last = 0;
+    for (uint32_t i = 0; i < count && !cx.failed; i++) {
       if (is_proc_def(nodes[i])) continue;
       cx.move_ok = 1;   /* statement position: nothing outlives the statement */
       last = compile_expr(&cx, nodes[i]);
-      have = 1;
-      if (cx.failed) break;
+      /* As in a block: a failing statement ends the program, its error the result. */
+      if (i != last_form && !stmt_is_binding(nodes[i])) emit_stmt_error_check(&cx, last);
     }
-    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
+    if (last_form == count && !cx.failed) last = irb_const_i64(cx.f, cx.cur, jaclval_i32(0));
     scope_exit(&cx);
     cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }
@@ -6816,14 +6816,18 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
     cx.at_top_level = 1;
     for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) capset_scan(&cx, nodes[i]);
     scope_enter(&cx);
-    IrVal last = 0; int have = 0;
+    cx.ret_raw = REP_TAGGED;   /* the line returns one tagged word */
+    uint32_t last_form = count;   /* the form whose value is the line's (count: none) */
+    for (uint32_t i = 0; i < count; i++) if (!is_proc_def(nodes[i])) last_form = i;
+    IrVal last = 0;
     for (uint32_t i = 0; i < count && !cx.failed; i++) {
       if (is_proc_def(nodes[i])) continue;
       cx.move_ok = 1;
       last = compile_expr(&cx, nodes[i]);
-      have = 1;
+      /* As in a block: a failing statement ends the line, its error the line's value. */
+      if (i != last_form && !stmt_is_binding(nodes[i])) emit_stmt_error_check(&cx, last);
     }
-    if (!have && !cx.failed) last = irb_const_i64(cx.f, cx.cur, JACLVAL_NIL);
+    if (last_form == count && !cx.failed) last = irb_const_i64(cx.f, cx.cur, JACLVAL_NIL);
     scope_exit(&cx);
     cx.at_top_level = 0;
     if (!cx.failed) { IrVal ret[] = {last}; irb_return(cx.f, cx.cur, ret, 1); }

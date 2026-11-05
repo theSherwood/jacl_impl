@@ -1030,6 +1030,7 @@ Pool sizing keeps `with-ctx` and concurrency forks cheap in practice. There is c
 ## Error handling
 
 - Errors are values (existing JACL design)
+- **A statement that evaluates to an error ends what runs it** — its proc, the program, or a REPL line — with that error, unless a `try` catches it. A binding (`def`/`mut`/`set`) holds an error instead, to inspect with `error?`/`error-val`. A program that ends in an error prints it, and `jacl_temen run` exits 1.
 - **Pipes short-circuit on error by default** — if a stage produces an error, subsequent stages don't run
 - **`catch` as a pipe stage** for inline recovery:
   ```

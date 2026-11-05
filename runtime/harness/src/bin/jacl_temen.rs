@@ -220,7 +220,12 @@ fn cmd_run(args: &[String]) -> ! {
     std::io::stderr().write_all(&run.stderr).ok();
     match run.outcome {
         temen_run::Outcome::Exited(c) => std::process::exit(c),
-        temen_run::Outcome::Returned(_) => std::process::exit(0),
+        // A program that ends in an uncaught error (a failed assert, a panic) fails; the runtime
+        // has printed it. The error flag is JaclVal bit 61 (runtime/jaclrt.h JACL_FLAG_ERROR).
+        temen_run::Outcome::Returned(v) => std::process::exit(match v.first() {
+            Some(temen_interp::Value::I64(x)) if (*x as u64) & (1 << 61) != 0 => 1,
+            _ => 0,
+        }),
     }
 }
 
