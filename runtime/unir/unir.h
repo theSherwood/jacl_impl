@@ -53,12 +53,8 @@ typedef struct unir_grant {
 #define UNIR_ENDED_COMPLETE 1u
 #define UNIR_ENDED_CANCELLED 2u
 
-/* The embedder defines these: the unit's heap (its handles and the vat's bookkeeping). A
- * translated library has no allocator of its own. unir_host_alloc returns NULL on failure.
- * The unit asks for at most 16-byte alignment; it serves a larger one itself, from a larger
- * allocation. */
-void *unir_host_alloc(uint64_t size, uint64_t align);
-void unir_host_free(void *ptr, uint64_t size, uint64_t align);
+/* The unit's heap, `unir_host_alloc` and `unir_host_free`, which the embedder defines, is
+ * declared in `unir_store.h`: its handles, the vat's bookkeeping and the store all use it. */
 
 /* The root vat. Regions map in [map_base, map_end), which must be free window space. */
 unir_vat *unir_vat_root(uint64_t map_base, uint64_t map_end);
@@ -177,8 +173,8 @@ unir_schema *unir_agreement_schema(const unir_agreement *a);
  * none. A session's activator gives its shell one (`n`), which its pane's events signal
  * while the pane is armed (unir_service_arm). unir_notification_wait takes the badges signalled
  * since the last wait into `*badges` (if not NULL), waiting up to `timeout_ns` (negative: as long
- * as it takes) while there are none: 0 if none came, a timeout or a spurious wakeup, so a waiter
- * retries what it waits for either way. It returns 0 or UNIR_ESUBSTRATE. A wait takes every
+ * as it takes) while there are none: 0 only once the timeout has passed (unir decision #432.2).
+ * It returns 0 or UNIR_ESUBSTRATE. A wait takes every
  * badge, so a notification has one waiter at a time. unir_notification_signal signals `badge`
  * (nonzero, else UNIR_EINVALID), waking the waiter: how a vat's own tasks wake the one waiting.
  * Neither takes the vat, as an end's operations do not: a runtime waits while its tasks use it. */
@@ -304,8 +300,9 @@ unir_schema *unir_schema_grid(void);
  * is done; UNIR_ELOST if its region was lost, or another error, the job killed either way.
  * unir_job_arm arms the job's report and the jobs session for a wait on the shell's
  * notification (unir_notification_wait, which takes no vat, issue #208): 1 if both armed, 0 if
- * something is there to take (then do not wait); unir_job_disarm them after the wait. A job that
- * ends without reporting signals nothing, so wait with a timeout. unir_job_kill kills it, as
+ * something is there to take (then do not wait); unir_job_disarm them after the wait. The job's
+ * end signals the notification too, reported or not (#432), so a wait needs no timeout.
+ * unir_job_kill kills it, as
  * when the pane closes under it. unir_job_close closes its region with the activator and joins
  * it: its exit status, or UNIR_ESUBSTRATE if it was killed. */
 unir_jobs *unir_jobs_open(unir_vat *vat, const char *name, uint64_t name_len, int64_t *status);
@@ -421,8 +418,11 @@ int64_t unir_cells_write(unir_cell *cells, uint32_t cols, uint32_t row, uint32_t
  * transient under the widget's id: a list's scroll, an input's cursor, and which widget has the
  * focus. Tab moves the focus to the next widget in the order the frame drew them, as the next
  * frame begins; the focused widget takes the keys it knows, and the rest are the program's
- * (unir_tui_key). A frame takes the keys up to the next Tab; that Tab and those after it wait for
- * the next frame (unir_tui_pending). Once running, a frame allocates nothing. */
+ * (unir_tui_key). A click is the pointer's primary button going down and coming up on the same
+ * rectangle, as a touch lets go; a button takes it as it takes Enter. A frame takes the keys and
+ * the pointer's moves up to the next Tab, or up to the pointer's next release, which ends the
+ * frame's one click; what comes after waits for the next frame (unir_tui_pending). Once running,
+ * a frame allocates nothing. */
 typedef struct unir_rect {
   uint32_t x, y; /* its top left: column x of row y */
   uint32_t w, h;
@@ -443,10 +443,11 @@ typedef struct unir_part {
 unir_tui *unir_tui_new(void);
 void unir_tui_free(unir_tui *t);
 /* Takes `*e`, an event the program's drawer heard: the region's size, which the next frame is
- * drawn at, or a key, which waits for a frame. 0, or UNIR_EINVALID for an event that is not
- * one. */
+ * drawn at, or a key or the pointer's move, which waits for a frame. 0, or UNIR_EINVALID for an
+ * event that is not one. */
 int64_t unir_tui_event(unir_tui *t, const unir_event *e);
-/* 1 if keys wait for a frame: draw one, whether or not anything else came. Else 0. */
+/* 1 if keys or the pointer's moves wait for a frame: draw one, whether or not anything else
+ * came. Else 0. */
 int64_t unir_tui_pending(const unir_tui *t);
 /* Begins a frame at the region's size, every cell blank; its area, the whole region, in
  * `*area`. */
@@ -476,8 +477,9 @@ int64_t unir_tui_list(unir_tui *t, uint32_t id, const unir_rect *r, const uint8_
  * What is not UTF-8 is cut. Returns 1 if the text changed, else 0. */
 int64_t unir_tui_input(unir_tui *t, uint32_t id, const unir_rect *r, uint8_t *buf, uint64_t cap,
                        uint64_t *len);
-/* A button, `[label]` in `*r`'s first row, reversed with the focus, which takes Enter and Space.
- * Returns 1 if it was pressed, 0 if not, or UNIR_EINVALID if `label` is not UTF-8. */
+/* A button, `[label]` in `*r`'s first row, reversed with the focus or while the pointer holds it
+ * down. With the focus it takes Enter and Space, and it takes a click on it. Returns 1 if it was
+ * pressed, 0 if not, or UNIR_EINVALID if `label` is not UTF-8. */
 int64_t unir_tui_button(unir_tui *t, uint32_t id, const unir_rect *r, const uint8_t *label,
                         uint64_t len);
 /* The frame's next key no widget took, now the program's, into `*e`: 1, or 0 once none is left.

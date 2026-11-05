@@ -704,8 +704,8 @@ JaclVal jacl_handler_open(JaclVal image, JaclVal args, JaclVal text, JaclVal fue
 
 /* The shell's jobs session (unir decision #236.5), opened on first use, under the vat's lock. */
 static unir_jobs *jacl_unir_jobs;
-/* How long the activator has to answer for a job's region, and how often a job is looked at
- * again while armed: temen signals nothing when a child ends without reporting. */
+/* How long the activator has to answer for a job's region, and how often a runtime that opened
+ * no notification looks at a job again: nothing else can wake it. */
 #define JACL_JOB_ANSWER_NS 10000000000L
 #define JACL_JOB_POLL_NS 50000000L
 
@@ -812,11 +812,11 @@ JaclVal jacl_legacy_job(JaclVal image, JaclVal args, JaclVal fuel, JaclVal memor
       failed = n < 0 ? n : armed;
       break;
     }
-    /* Armed, it waits on the vat's notification, which the job's report and the jobs session
-     * signal, holding no vat (#242). A job that ends without reporting signals nothing, so it
-     * looks again after JACL_JOB_POLL_NS; without the notification it polls that often. */
+    /* Armed, it waits as long as it takes on the vat's notification, holding no vat (#242): the
+     * job's report, the jobs session and the job's end signal it, the end whether the job
+     * reported or not (unir#432). Without the notification it polls every JACL_JOB_POLL_NS. */
     if (armed > 0 || !woken)
-      (void)vat_await(seen, JACL_JOB_POLL_NS, woken ? (int32_t)(JACL_JOB_POLL_NS / 1000 + 1) : 0);
+      (void)vat_await(seen, woken ? -1 : JACL_JOB_POLL_NS, woken ? -1 : 0);
     if (armed > 0) {
       vat = vat_take();
       (void)unir_job_disarm(vat, jobs, job);

@@ -898,7 +898,7 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   static const uint8_t magic[8] = {'T', 'E', 'M', 'E', 'N', 0, 0, 0};
   out_raw(&o, magic, 8);
   out_u8(&o, has_data_self ? 0x01 : 0x00); out_u8(&o, 0x00); /* kind:u16 LE (0=module, 1=object) */
-  out_u8(&o, 16); out_u8(&o, 0x00);                          /* version:u16 LE = 16 */
+  out_u8(&o, 17); out_u8(&o, 0x00);                          /* version:u16 LE = 17 */
   out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); out_u8(&o, 0x00); /* flags:u32 LE = 0 */
   /* Memory descriptor: presence flag, then size_log2, then the v11 shadow-arena flag (and, if
    * set, its `[base, end)` as two ulebs). JACL's GC owns its heap placement and declares no
@@ -949,9 +949,18 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
   }
   /* Impl-export section: none. */
   out_uleb(&o, 0);
-  /* Functions. */
+  /* Functions. v17 (temen#2596): each body after its length in bytes, so temen finds every body
+   * without decoding the ones before it. The length goes in four bytes, a padded uleb128 temen
+   * reads as any other, kept before the body and filled in once it is written. */
   out_uleb(&o, (uint64_t)m->nfuncs);
-  for (int i = 0; i < m->nfuncs; i++) enc_func(&o, m->funcs[i], &tab);
+  for (int i = 0; i < m->nfuncs; i++) {
+    size_t at = o.len;
+    out_raw(&o, "\x80\x80\x80\x00", 4);
+    enc_func(&o, m->funcs[i], &tab);
+    uint64_t n = (uint64_t)(o.len - at - 4);
+    if (n >= (1u << 28)) { fprintf(stderr, "irbuilder: a function of 256 MiB or more\n"); abort(); }
+    for (int k = 0; k < 4; k++) o.buf[at + k] = (char)(((n >> (7 * k)) & 0x7f) | (k < 3 ? 0x80 : 0));
+  }
   /* No debug section: decode treats "no bytes after funcs" as no debug info. */
 
   for (int i = 0; i < tab.ntypes; i++) { free(tab.types[i].params); free(tab.types[i].results); }
