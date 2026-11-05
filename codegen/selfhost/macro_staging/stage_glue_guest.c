@@ -162,7 +162,8 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_len); SYM(jacl_eq); SYM(jacl_add); SYM(jacl_sub); SYM(jacl_mul); \
     SYM(jacl_first); SYM(jacl_index_get); \
     /* closures (spawn/parallel/race compile each { block } to a 0-param closure) */ \
-    SYM(jacl_closure_new); SYM(jacl_closure_set); SYM(jacl_closure_fn); SYM(jacl_is_closure_v); \
+    SYM(jacl_closure_new); SYM(jacl_closure_new_shape); SYM(jacl_closure_set); SYM(jacl_closure_fn); \
+    SYM(jacl_closure_fn_for); SYM(jacl_closure_arity_error); SYM(jacl_is_closure_v); \
     SYM(jacl_proc_sig_register); \
     /* top-level `def` bindings become runtime globals (jacl_global_get/set) */ \
     SYM(jacl_global_get); SYM(jacl_global_set); \
@@ -183,7 +184,7 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_closure_upval); \
     /* structs + field/dot access */ \
     SYM(jacl_struct_new); SYM(jacl_struct_put); SYM(jacl_struct_init_field); \
-    SYM(jacl_field_get); SYM(jacl_field_or_index); SYM(jacl_dot_dyn); SYM(jacl_dot_dyn_set); SYM(jacl_qdot); \
+    SYM(jacl_field_get); SYM(jacl_field_or_index); SYM(jacl_destructure_rest); SYM(jacl_dot_dyn); SYM(jacl_dot_dyn_set); SYM(jacl_qdot); \
     /* mutable arrays + buffers (Arr / Buf / flatbuf) */ \
     SYM(jacl_arr_copy); SYM(jacl_arr_set_at); SYM(jacl_arr_set_at_zero); \
     SYM(jacl_buf_get_checked); SYM(jacl_buf_offset_checked); \

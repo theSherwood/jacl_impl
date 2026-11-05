@@ -55,6 +55,8 @@ static const char *binary_runtime_fn(uint8_t head_id) {
  * for it naturally becomes the phi of the two edges. */
 #define IRB_MAX_FRAME 256
 #define CG_MAX_PARAMS 64
+/* A closure's shape bit: its last parameter collects the rest (runtime/jaclrt.h JACL_CLOSURE_REST) */
+#define CLOSURE_REST 0x8000
 /* Top-level names a program, or a REPL session's lines together, may bind (the global map's). */
 #define CG_MAX_GLOBALS 1024
 
@@ -142,6 +144,7 @@ typedef struct {
   IrFunc     *func;
   AstNode    *body;
   const char *pnames[CG_MAX_PARAMS]; uint32_t plens[CG_MAX_PARAMS]; int nparams;
+  int rest;   /* the last parameter collects the rest: the function takes (sp, self, args) */
   const char *cnames[CG_MAX_PARAMS]; uint32_t clens[CG_MAX_PARAMS]; int ccell[CG_MAX_PARAMS]; int ncaps;
 } Pending;
 
@@ -190,6 +193,8 @@ typedef struct {
     const char *fn[CG_MAX_PARAMS]; uint32_t fl[CG_MAX_PARAMS];
     const char *ft[CG_MAX_PARAMS]; uint32_t ftl[CG_MAX_PARAMS];   /* field type name/len */
     int nf;
+    uint32_t tidx;   /* the typer's index for it, which its declaration carries; UINT32_MAX for
+                      * one an earlier REPL line declared (this line's typer never saw it) */
   } sdefs[32];
   int nsdefs;
 
@@ -254,12 +259,13 @@ static SDef *sdef_lookup(Cx *cx, const char *name, uint32_t len) {
     if (cx->sdefs[i].len == len && memcmp(cx->sdefs[i].name, name, len) == 0) return &cx->sdefs[i];
   return NULL;
 }
-static void sdef_register(Cx *cx, AstNode *node) {
+static void sdef_register(Cx *cx, AstNode *node, uint32_t tidx) {
   if (sdef_lookup(cx, node->data.defstruct.name, node->data.defstruct.name_len)) return;
   if (cx->nsdefs >= 32) { cx_fail(cx, "too many struct declarations"); return; }
   SDef *sd = &cx->sdefs[cx->nsdefs++];
   sd->name = node->data.defstruct.name;
   sd->len = node->data.defstruct.name_len;
+  sd->tidx = tidx;
   sd->nf = 0;
   for (uint32_t k = 0; k < node->data.defstruct.field_count && sd->nf < CG_MAX_PARAMS; k++) {
     sd->fn[sd->nf] = node->data.defstruct.field_names[k];
@@ -1954,11 +1960,91 @@ static IrVal emit_binop_guarded(Cx *cx, int move_ok, const char *fn, IrVal lhs, 
   return (IrVal)w;                            /* the join's result param */
 }
 
+/* Call the closure `cv` with the `argc` values in `av`, all valid in the current block, as the
+ * shape it was made with says (jacl_closure_new_shape): one taking exactly argc parameters is
+ * called with them; one whose last parameter collects the rest (#280) with them packed in a
+ * vector, when argc covers its fixed ones; any other is not called, and the result is the
+ * catchable error `proc 'NAME' expects …` (#281: the call trapped the guest). `name` names the
+ * callee for that message (NULL: unnamed). Emission continues in a merge block; the result is
+ * returned there. The paths are new blocks, so a value the caller needs afterwards must ride the
+ * frame: a binding, or a pin. */
+static IrVal emit_closure_invoke(Cx *cx, IrVal cv, const IrVal *av, uint32_t argc,
+                                 const char *name, uint32_t nlen) {
+  if (cx->failed || !frame_guard(cx)) return 0;
+  IrVal fa[] = {cx->sp, cv, irb_const_i64(cx->f, cx->cur, (int64_t)argc)};
+  IrVal fr = emit_rt_call(cx, "jacl_closure_fn_for", fa, 3);
+  IrVal hi = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SHR_U, fr, irb_const_i64(cx->f, cx->cur, 32));
+  IrVal direct = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, hi, irb_const_i64(cx->f, cx->cur, 0));
+  int w = frame_width(cx);
+  int x = w + 2 + (int)argc;                     /* frame, closure, function, arguments */
+  IrBlock call_blk = new_i64_block(cx, x), other_blk = new_i64_block(cx, x);
+  IrBlock pack_blk = new_i64_block(cx, x), err_blk = new_i64_block(cx, x);
+  IrBlock merge = new_i64_block(cx, w + 1);
+  IrVal edge[IRB_MAX_FRAME + 2 + CG_MAX_PARAMS + 2];
+  fill_frame(cx, edge);
+  edge[w] = cv; edge[w + 1] = fr;
+  for (uint32_t i = 0; i < argc; i++) edge[w + 2 + i] = av[i];
+  irb_br_if(cx->f, cx->cur, direct, call_blk, edge, x, other_blk, edge, x);
+
+  IrType r1[] = {IRB_I64};
+  IrVal out[IRB_MAX_FRAME + 2];
+  enter_frame_block(cx, call_blk);              /* exactly argc parameters */
+  {
+    IrVal cargs[2 + CG_MAX_PARAMS]; IrType sig[2 + CG_MAX_PARAMS];
+    cargs[0] = cx->sp; cargs[1] = (IrVal)w; sig[0] = sig[1] = IRB_I64;
+    for (uint32_t i = 0; i < argc; i++) { cargs[2 + i] = (IrVal)(w + 2 + i); sig[2 + i] = IRB_I64; }
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, (IrVal)(w + 1));
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+    fill_frame(cx, out); out[w] = r;
+    irb_br(cx->f, cx->cur, merge, out, w + 1);
+  }
+  enter_frame_block(cx, other_blk);             /* packed for a rest parameter, or neither */
+  {
+    IrVal h = irb_intbin(cx->f, cx->cur, IRB_I64, IRB_SHR_U, (IrVal)(w + 1), irb_const_i64(cx->f, cx->cur, 32));
+    IrVal packed = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_EQ, h, irb_const_i64(cx->f, cx->cur, 1));
+    fill_frame(cx, edge);
+    for (int k = 0; k < 2 + (int)argc; k++) edge[w + k] = (IrVal)(w + k);
+    irb_br_if(cx->f, cx->cur, packed, pack_blk, edge, x, err_blk, edge, x);
+  }
+  enter_frame_block(cx, pack_blk);
+  {
+    IrVal ea[] = {cx->sp};
+    IrVal vec = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+    for (uint32_t i = 0; i < argc; i++) {
+      IrVal pa[] = {cx->sp, vec, (IrVal)(w + 2 + i)};
+      vec = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+    }
+    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
+    IrVal cargs[] = {cx->sp, (IrVal)w, vec};
+    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, (IrVal)(w + 1));
+    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+    fill_frame(cx, out); out[w] = r;
+    irb_br(cx->f, cx->cur, merge, out, w + 1);
+  }
+  enter_frame_block(cx, err_blk);
+  {
+    IrVal nm = name ? compile_string_literal(cx, name, nlen) : irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+    IrVal ea[] = {cx->sp, nm, (IrVal)w, irb_const_i64(cx->f, cx->cur, (int64_t)argc)};
+    IrVal r = emit_rt_call(cx, "jacl_closure_arity_error", ea, 4);
+    fill_frame(cx, out); out[w] = r;
+    irb_br(cx->f, cx->cur, merge, out, w + 1);
+  }
+  enter_frame_block(cx, merge);
+  return (IrVal)w;
+}
+
+/* The name a call's head gives its callee, for an arity error: `f` in `[$f …]` and `[f …]`. */
+static void call_head_name(AstNode *head, const char **name, uint32_t *nlen) {
+  *name = NULL; *nlen = 0;
+  if (head && head->type == AST_VAR_REF) { *name = head->data.var_ref.name; *nlen = head->data.var_ref.length; }
+  else if (head && head->type == AST_LIT_STRING) { *name = head->data.lit_string.value; *nlen = head->data.lit_string.length; }
+}
+
 /* Call `cval` as a closure with `argc` args (compiled inside the call arm), guarding against
  * a non-closure head: `[42 1]` would otherwise read a garbage function index and trap, so
  * branch on is-closure and yield a clean `cannot call` error. The result flows through a
  * merge block (block-local SSA); cval is threaded into the call arm as an extra param. */
-static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint32_t argc) {
+static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode *head, AstNode **args, uint32_t argc) {
   IrVal isc = emit_rt_call(cx, "jacl_is_closure_v", (IrVal[]){cx->sp, cval}, 2);
   IrVal truth = emit_truthy(cx, isc);
   if (!frame_guard(cx)) return 0;
@@ -1974,9 +2060,6 @@ static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint3
   enter_frame_block(cx, call_blk);
   {
     IrVal cv = (IrVal)w;                          /* threaded cval */
-    IrVal cargs[2 + CG_MAX_PARAMS];
-    IrType sig[2 + CG_MAX_PARAMS];
-    sig[0] = sig[1] = IRB_I64;
     /* `cv` (a param of this block) has to survive the arguments' compilation: an argument may
      * move the emission point, and it does not ride the frame on its own. The callee index is
      * read from it *after* the arguments — a pin rides the frame as an i64 block param, so the
@@ -1986,14 +2069,12 @@ static IrVal emit_guarded_closure_call(Cx *cx, IrVal cval, AstNode **args, uint3
     uint32_t nca = argc < CG_MAX_PARAMS ? argc : CG_MAX_PARAMS;
     IrVal av[CG_MAX_PARAMS];
     if (nca && !compile_operands(cx, args, nca, av)) return 0;
-    for (uint32_t i = 0; i < nca; i++) { cargs[2 + i] = av[i]; sig[2 + i] = IRB_I64; }
-    cargs[0] = cx->sp; cargs[1] = pin_get(cx, p_cv);
+    IrVal c = pin_get(cx, p_cv);
     pin_release(cx, pm, 1);
-    IrVal fnargs[] = {cx->sp, cargs[1]};
-    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fnargs, 2);
-    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-    IrType r1[] = {IRB_I64};
-    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, (int)argc + 2, r1, 1, fnw, cargs, (int)argc + 2);
+    const char *name; uint32_t nlen;
+    call_head_name(head, &name, &nlen);
+    IrVal r = emit_closure_invoke(cx, c, av, nca, name, nlen);
+    if (cx->failed) return 0;
     fill_frame(cx, frame);
     frame[w] = r;
     irb_br(cx->f, cx->cur, merge, frame, w + 1);
@@ -2106,8 +2187,9 @@ static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNod
 /* Extract closure param names (tolerant — returns the count, 0 on malformed). Lambda
  * params arrive in a BLOCK (`[\ {x} …]`), anon proc params in a command
  * (`[proc {x} …]`); both flatten to type/name tokens (types skipped). */
-static int closure_param_names(AstNode *pnode, int in_block, const char **ns, uint32_t *ls) {
+static int closure_param_names(AstNode *pnode, int in_block, const char **ns, uint32_t *ls, int *rest) {
   AstNode *toks[CG_MAX_PARAMS * 2 + 4]; int nt = 0;
+  if (rest) *rest = 0;
   if (!pnode) return 0; /* a parameterless closure (e.g. a spawn block) */
   if (in_block) {
     if (pnode->type != AST_BLOCK) return 0;
@@ -2126,6 +2208,15 @@ static int closure_param_names(AstNode *pnode, int in_block, const char **ns, ui
   if (nt == 1 && toks[0]->type == AST_LIT_STRING && toks[0]->data.lit_string.length == 0) return 0;
   int np = 0, i = 0;
   while (i < nt && np < CG_MAX_PARAMS) {
+    /* `..name`, the last parameter, collects the rest (#280): the word `..` before the name
+     * when `..` heads its own command (`{a, ..rest}`), else a spread of the name */
+    AstNode *rn = rest_spread_name(toks[i]);
+    if (!rn && kw_is(toks[i], "..", 2) && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) rn = toks[i + 1];
+    if (rn) {
+      ns[np] = rn->data.lit_string.value; ls[np] = rn->data.lit_string.length; np++;
+      if (rest) *rest = 1;
+      return np;
+    }
     if (toks[i]->type == AST_COMMAND && i + 1 < nt && toks[i + 1]->type == AST_LIT_STRING) i += 1;
     if (toks[i]->type != AST_LIT_STRING) return np;
     const char *s = toks[i]->data.lit_string.value; uint32_t n = toks[i]->data.lit_string.length;
@@ -2219,7 +2310,7 @@ static void capset_scan(Cx *cx, AstNode *node) {
   AstNode *pnode, *body; int in_block;
   if (closure_literal(node, &pnode, &in_block, &body)) {
     const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
-    int np = closure_param_names(pnode, in_block, pn, pl);
+    int np = closure_param_names(pnode, in_block, pn, pl, NULL);
     const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
     for (int k = 0; k < np; k++) set_add(bound, blen, &nb, pn[k], pl[k]);
     collect_bound(body, bound, blen, &nb);
@@ -2274,7 +2365,7 @@ static int is_captured_name(Cx *cx, const char *s, uint32_t l) {
 }
 
 static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
-                        const char **pn, uint32_t *pl, int np,
+                        const char **pn, uint32_t *pl, int np, int rest,
                         const char **cn, uint32_t *cl, const int *cc, int nc) {
   if (cx->npending == cx->cap_pending) {
     cx->cap_pending = cx->cap_pending ? cx->cap_pending * 2 : 8;
@@ -2282,7 +2373,7 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
     if (!cx->pending) { fprintf(stderr, "codegen: oom\n"); abort(); }
   }
   Pending *p = &cx->pending[cx->npending++];
-  p->func = func; p->body = body; p->nparams = np; p->ncaps = nc;
+  p->func = func; p->body = body; p->nparams = np; p->rest = rest; p->ncaps = nc;
   for (int i = 0; i < np; i++) { p->pnames[i] = pn[i]; p->plens[i] = pl[i]; }
   for (int i = 0; i < nc; i++) { p->cnames[i] = cn[i]; p->clens[i] = cl[i]; p->ccell[i] = cc[i]; }
 }
@@ -2292,7 +2383,8 @@ static void pending_add(Cx *cx, IrFunc *func, AstNode *body,
  * params (a BLOCK for `\`, a command for `proc`). Returns the closure JaclVal. */
 static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body, AstNode *ret_ann) {
   const char *pn[CG_MAX_PARAMS]; uint32_t pl[CG_MAX_PARAMS];
-  int np = closure_param_names(pnode, in_block, pn, pl);
+  int rest;
+  int np = closure_param_names(pnode, in_block, pn, pl, &rest);
 
   const char *bound[CG_CAP_MAX]; uint32_t blen[CG_CAP_MAX]; int nb = 0;
   for (int k = 0; k < np; k++) set_add(bound, blen, &nb, pn[k], pl[k]);
@@ -2300,20 +2392,23 @@ static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body
   const char *cn[CG_CAP_MAX]; uint32_t cl[CG_CAP_MAX]; int nc = 0;
   collect_caps(cx, body, bound, blen, nb, cn, cl, &nc);
 
-  /* closure function: (i64 sp, i64 self, params…) -> i64 */
+  /* closure function: (i64 sp, i64 self, params…) -> i64, or (sp, self, args) when the last
+   * parameter collects the rest, every argument in one vector */
+  int nfp = rest ? 1 : np;
   IrType pt[2 + CG_MAX_PARAMS];
   pt[0] = IRB_I64; pt[1] = IRB_I64;
-  for (int k = 0; k < np; k++) pt[2 + k] = IRB_I64;
+  for (int k = 0; k < nfp; k++) pt[2 + k] = IRB_I64;
   IrType r1[] = {IRB_I64};
-  IrFunc *fn = irb_func_new(cx->m, pt, 2 + np, r1, 1);
+  IrFunc *fn = irb_func_new(cx->m, pt, 2 + nfp, r1, 1);
 
   /* build the closure object at the creation site, capturing current values; a captured
    * `mut` is a cell, so we capture the shared cell pointer (mutations stay visible). */
   IrVal fnref = irb_ref_func(cx->f, cx->cur, fn);
   IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
   IrVal nupv = irb_const_i64(cx->f, cx->cur, nc);
-  IrVal new_args[] = {cx->sp, fnref64, nupv};
-  IrVal clos = emit_rt_call(cx, "jacl_closure_new", new_args, 3);
+  IrVal shape = irb_const_i64(cx->f, cx->cur, rest ? (int64_t)((np - 1) | CLOSURE_REST) : np);
+  IrVal new_args[] = {cx->sp, fnref64, nupv, shape};
+  IrVal clos = emit_rt_call(cx, "jacl_closure_new_shape", new_args, 4);
   int ccell[CG_CAP_MAX];
   for (int i = 0; i < nc; i++) {
     Binding *b = env_lookup(cx, cn[i], cl[i]);
@@ -2334,7 +2429,7 @@ static IrVal compile_closure(Cx *cx, AstNode *pnode, int in_block, AstNode *body
     IrVal ra[] = {cx->sp, fnref64, sigv};
     (void)emit_rt_call(cx, "jacl_proc_sig_register", ra, 3);
   }
-  pending_add(cx, fn, body, pn, pl, np, cn, cl, ccell, nc);
+  pending_add(cx, fn, body, pn, pl, np, rest, cn, cl, ccell, nc);
   return clos;
 }
 
@@ -2697,13 +2792,8 @@ static IrVal emit_fire_watchers(Cx *cx, IrVal atom, IrVal oldv, IrVal newv, IrVa
     IrVal idx1 = emit_binop_call(cx, "jacl_add", bi->value, one);
     IrVal ga[] = {cx->sp, bw->value, idx1};
     IrVal cb = emit_rt_call(cx, "jacl_index_get", ga, 3);   /* the callback at [idx+1] */
-    IrVal fa[] = {cx->sp, cb};
-    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
-    IrType r1[] = {IRB_I64};
-    IrVal cargs[] = {cx->sp, cb, bo->value, bn->value};
-    (void)irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+    IrVal wa[] = {bo->value, bn->value};
+    (void)emit_closure_invoke(cx, cb, wa, 2, NULL, 0);
     fill_frame(cx, frame);
     irb_br(cx->f, cx->cur, next, frame, wd);
   }
@@ -2787,14 +2877,11 @@ static IrVal stream_into_vec(Cx *cx, IrVal src, int is_gen, IrVal clo, int is_fi
     }
     IrVal keep = elem;
     if (clo) {
-      Binding *bc = env_lookup(cx, ST_CLO, 7);
-      IrVal fa[] = {cx->sp, bc->value};
-      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
-      IrType r1[] = {IRB_I64};
-      IrVal cargs[] = {cx->sp, bc->value, elem};
-      IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      IrVal cv = env_lookup(cx, ST_CLO, 7)->value;
+      int pe = pin_push(cx, elem);                  /* a filter keeps the element itself */
+      IrVal r = emit_closure_invoke(cx, cv, &elem, 1, NULL, 0);
+      elem = pin_get(cx, pe);
+      pin_drop(cx, pe);
       if (is_filter) {
         IrVal truth = emit_truthy(cx, r);
         fill_frame(cx, frame);
@@ -2887,13 +2974,8 @@ static IrVal stream_into_map(Cx *cx, IrVal src, IrVal clo, int is_filter) {
     IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
     IrVal va[] = {cx->sp, bs->value, bi->value};
     IrVal val = emit_rt_call(cx, "jacl_iter_val_at", va, 3);
-    IrVal fa[] = {cx->sp, bc->value};
-    IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-    IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-    IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
-    IrType r1[] = {IRB_I64};
-    IrVal cargs[] = {cx->sp, bc->value, key, val};
-    IrVal r = irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+    IrVal kv[] = {key, val};
+    IrVal r = emit_closure_invoke(cx, bc->value, kv, 2, NULL, 0);
     if (is_filter) {
       /* keep the ORIGINAL (k, v) when cb is truthy. Recompute k/v in the keep block from
        * the frame-carried src + i (block-local SSA — body's key/val aren't visible there). */
@@ -3066,6 +3148,19 @@ static IrVal emit_buf_new(Cx *cx, AstNode *ann) {
   }
   return av;
 }
+/* The struct a value is known to hold, for `def {..}` (#280): the typer's verdict, or — for a
+ * struct an earlier REPL line declared, which this line's typer never saw — a constructor of it.
+ * NULL when neither can tell. */
+static SDef *value_sdef(Cx *cx, AstNode *v) {
+  if (v->inferred_type == TYPE_STRUCT && v->inferred_struct_idx != UINT32_MAX)
+    for (int i = 0; i < cx->nsdefs; i++)
+      if (cx->sdefs[i].tidx == v->inferred_struct_idx) return &cx->sdefs[i];
+  if (v->type == AST_COMMAND && v->data.command.head && v->data.command.head->type == AST_LIT_STRING)
+    return sdef_lookup(cx, v->data.command.head->data.lit_string.value,
+                       v->data.command.head->data.lit_string.length);
+  return NULL;
+}
+
 /* Record a typed collection annotation on the just-defined binding. */
 static void bind_annotate(Cx *cx, const char *name, uint32_t len,
                           const char *et, uint32_t etl, int32_t bufn) {
@@ -3466,20 +3561,13 @@ static IrVal compile_for_each(Cx *cx, AstNode *coll_node, const char *name, uint
         Proc *cp = proc_lookup(cx, cb_node->data.var_ref.name, cb_node->data.var_ref.length);
         if (cp && !cp->variadic && cp->arity >= 1 && cp->arity <= 2) cbarity = cp->arity;
       }
-      IrVal fa[] = {cx->sp, bcb->value};
-      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-      IrType r1[] = {IRB_I64};
       if (cbarity == 2) {
         IrVal ka[] = {cx->sp, bc->value, bi->value};
         IrVal key = emit_rt_call(cx, "jacl_iter_key_at", ka, 3);
-        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64, IRB_I64};
-        IrVal cargs[] = {cx->sp, bcb->value, key, elem};
-        (void)irb_call_indirect(cx->f, cx->cur, sig, 4, r1, 1, fnw, cargs, 4);
+        IrVal kv[] = {key, elem};
+        (void)emit_closure_invoke(cx, bcb->value, kv, 2, NULL, 0);
       } else {
-        IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
-        IrVal cargs[] = {cx->sp, bcb->value, elem};
-        (void)irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+        (void)emit_closure_invoke(cx, bcb->value, &elem, 1, NULL, 0);
       }
     }
     cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb2; cx->loop_width = sw; cx->loop_brk_ok = sk;
@@ -3626,22 +3714,41 @@ static IrFunc *proc_value_wrapper(Cx *cx, Proc *p) {
   if (p->wrapper) return p->wrapper;
   IrType pt[2 + CG_MAX_PARAMS];
   IrType r1[] = {IRB_I64};
-  int n = 2 + p->arity;
+  /* A variadic proc's adapter takes (sp, self, args), its arguments packed in one vector (its
+   * shape says so, proc_value_shape), and passes the proc its fixed ones and the rest. */
+  int n = p->variadic ? 3 : 2 + p->arity;
   for (int k = 0; k < n; k++) pt[k] = IRB_I64;
   IrFunc *w = irb_func_new(cx->m, pt, n, r1, 1);
   IrFunc *sf = cx->f; IrBlock sb = cx->cur; IrVal ssp = cx->sp; uint8_t srr = cx->ret_raw;
   cx->f = w;
   cx->ret_raw = REP_TAGGED;    /* the wrapper has the closure ABI: one tagged result */
   cx->cur = irb_block(w, pt, n);
+  cx->sp = 0;
   IrVal cargs[1 + CG_MAX_PARAMS];
   cargs[0] = 0;                                     /* sp (param 0; self at 1 is not passed on) */
-  for (int k = 0; k < p->arity; k++) cargs[1 + k] = (IrVal)(2 + k);
+  if (p->variadic) {
+    for (int k = 0; k < p->fixed_arity; k++) {
+      IrVal ga[] = {0, (IrVal)2, irb_const_i64(w, cx->cur, jaclval_i32(k))};
+      cargs[1 + k] = emit_rt_call(cx, "jacl_vec_get_at", ga, 3);
+    }
+    IrVal sa[] = {0, (IrVal)2, irb_const_i64(w, cx->cur, jaclval_i32(p->fixed_arity)),
+                  irb_const_i64(w, cx->cur, jaclval_i32(0x3fffffff))};
+    cargs[1 + p->fixed_arity] = emit_rt_call(cx, "jacl_vec_slice", sa, 4);
+  } else {
+    for (int k = 0; k < p->arity; k++) cargs[1 + k] = (IrVal)(2 + k);
+  }
   IrVal r = irb_call(w, cx->cur, p->func, cargs, 1 + p->arity);
   if (cx->repl) emit_keep_self(cx);
   irb_return(w, cx->cur, &r, 1);
   p->wrapper = w;
   cx->f = sf; cx->cur = sb; cx->sp = ssp; cx->ret_raw = srr;
   return w;
+}
+
+/* The shape of a proc's value (jacl_closure_new_shape): its arity, or its fixed parameters and
+ * CLOSURE_REST when its last collects the rest. */
+static int64_t proc_value_shape(Proc *p) {
+  return p->variadic ? (int64_t)(p->fixed_arity | CLOSURE_REST) : (int64_t)p->arity;
 }
 
 /* A top-level proc as a value (`$cb`): a zero-capture closure over its adapter, its signature
@@ -3651,8 +3758,8 @@ static IrVal proc_value(Cx *cx, Proc *pv) {
   IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
   IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
   IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
-  IrVal na[] = {cx->sp, fnref64, nupv};
-  IrVal clos = emit_rt_call(cx, "jacl_closure_new", na, 3);
+  IrVal na[] = {cx->sp, fnref64, nupv, irb_const_i64(cx->f, cx->cur, proc_value_shape(pv))};
+  IrVal clos = emit_rt_call(cx, "jacl_closure_new_shape", na, 4);
   uint32_t pargc = pv->def->data.command.arg_count;
   AstNode *params = pv->def->data.command.args[1];
   AstNode *ret_ann = (pargc >= 4) ? pv->def->data.command.args[pargc - 2] : NULL;
@@ -4296,7 +4403,7 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
            !is_type_ctor_head(node->data.command.head)))) {
     IrVal cval = compile_expr(cx, node->data.command.head);
     if (cx->failed) return 0;
-    return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
+    return emit_guarded_closure_call(cx, cval, node->data.command.head, node->data.command.args, node->data.command.arg_count);
   }
 
   /* `def [Buf N T] name` — zero-filled fixed buffer declaration (no initializer). */
@@ -4324,12 +4431,31 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       node->data.command.args[1]->type != AST_BLOCK) {
     AstNode *blk = node->data.command.args[0];
     AstNode *toks[CG_MAX_PARAMS]; int nt = 0;
+    int all_fields = 0;   /* a bare `..` (`{..}`, `{x, ..}`): every field not named (#280) */
     for (uint32_t i = 0; i < blk->data.block.count; i++) {
       AstNode *cmd = blk->data.block.commands[i];
+      if (kw_is(cmd, "..", 2)) { all_fields = 1; continue; }
       if (cmd->type != AST_COMMAND) { nt = -1; break; }
       if (cmd->data.command.head && nt < CG_MAX_PARAMS) toks[nt++] = cmd->data.command.head;
       for (uint32_t j = 0; j < cmd->data.command.arg_count && nt < CG_MAX_PARAMS; j++)
         toks[nt++] = cmd->data.command.args[j];
+    }
+    if (nt > 0 && kw_is(toks[nt - 1], "..", 2)) { all_fields = 1; nt--; }   /* `{x ..}` */
+    if (all_fields && nt >= 0) {
+      /* The field names come from the struct the value is known to hold. */
+      SDef *sd = value_sdef(cx, node->data.command.args[1]);
+      if (!sd) {
+        cx_fail(cx, "`def {..}` binds every field of a struct, so it needs a value whose struct "
+                    "type is known at compile time; for any other value, name the fields: "
+                    "`def {x, y} V`");
+        return 0;
+      }
+      for (int f = 0; f < sd->nf && nt < CG_MAX_PARAMS; f++) {
+        int named = 0;
+        for (int k = 0; k < nt; k++)
+          if (kw_is(toks[k], sd->fn[f], sd->fl[f])) named = 1;
+        if (!named) toks[nt++] = synth_word(sd->fn[f], sd->fl[f]);
+      }
     }
     int all_words = nt > 0;
     for (int i = 0; i < nt; i++)
@@ -4344,10 +4470,16 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         AstNode *rn = rest_spread_name(toks[k]);
         if (!rn && kw_is(toks[k], "..", 2) && k + 1 < nt) rn = toks[k + 1];
         if (rn) {
-          IrVal start = irb_const_i64(cx->f, cx->cur, jaclval_i32(pos));
-          IrVal big = irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff));
-          IrVal sa[] = {cx->sp, v, start, big};
-          IrVal rest = emit_rt_call(cx, "jacl_vec_slice", sa, 4);
+          /* The rest of a vector from `pos` on; of a struct or a map, its other fields. */
+          IrVal ea[] = {cx->sp};
+          IrVal names = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+          for (int j = 0; j < k; j++) {
+            IrVal nm = compile_string_literal(cx, toks[j]->data.lit_string.value, toks[j]->data.lit_string.length);
+            IrVal pa[] = {cx->sp, names, nm};
+            names = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+          }
+          IrVal ra[] = {cx->sp, v, irb_const_i64(cx->f, cx->cur, jaclval_i32(pos)), names};
+          IrVal rest = emit_rt_call(cx, "jacl_destructure_rest", ra, 4);
           env_define(cx, rn->data.lit_string.value, rn->data.lit_string.length,
                      rest, /*is_mut=*/0, /*is_cell=*/0);
           break;   /* rest is always last */
@@ -5002,7 +5134,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
     if (hb) {
       IrVal cval = hb->value;
       if (hb->is_cell) { IrVal a[] = {cx->sp, cval}; cval = emit_rt_call(cx, "jacl_cell_get", a, 2); }
-      return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
+      return emit_guarded_closure_call(cx, cval, node->data.command.head, node->data.command.args, node->data.command.arg_count);
     }
     /* At a REPL, an earlier line's proc is a closure in the global map (temen_codegen_repl). */
     const char *gn = node->data.command.head->data.lit_string.value;
@@ -5011,7 +5143,7 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
       IrVal key = compile_string_literal(cx, gn, gl);
       IrVal a[] = {cx->sp, key};
       IrVal cval = emit_rt_call(cx, "jacl_global_get", a, 2);
-      return emit_guarded_closure_call(cx, cval, node->data.command.args, node->data.command.arg_count);
+      return emit_guarded_closure_call(cx, cval, node->data.command.head, node->data.command.args, node->data.command.arg_count);
     }
   }
 
@@ -5403,13 +5535,11 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       IrVal ref = env_lookup(cx, SW_REF, 7)->value, clo = env_lookup(cx, SW_CLO, 7)->value;
       IrVal da[] = {cx->sp, ref};
       IrVal cur = emit_rt_call(cx, "jacl_box_get", da, 2);
-      IrVal fa[] = {cx->sp, clo};
-      IrVal fn = emit_rt_call(cx, "jacl_closure_fn", fa, 2);
-      IrVal fnw = irb_convert(cx->f, cx->cur, IRB_WRAP_I64, fn);
-      IrType sig[] = {IRB_I64, IRB_I64, IRB_I64};
-      IrType r1[] = {IRB_I64};
-      IrVal cargs[] = {cx->sp, clo, cur};
-      IrVal nv = irb_call_indirect(cx->f, cx->cur, sig, 3, r1, 1, fnw, cargs, 3);
+      int pc = pin_push(cx, cur);                   /* the CAS compares with it */
+      IrVal nv = emit_closure_invoke(cx, clo, &cur, 1, NULL, 0);
+      cur = pin_get(cx, pc);
+      pin_drop(cx, pc);
+      ref = env_lookup(cx, SW_REF, 7)->value;
       IrVal ca[] = {cx->sp, ref, cur, nv};
       IrVal committed = emit_rt_call(cx, "jacl_box_cas", ca, 4);
       env_lookup(cx, SW_CUR, 7)->value = cur;
@@ -5918,8 +6048,8 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
     }
 
-    case AST_DEFSTRUCT:
-      sdef_register(cx, node);
+    case AST_DEFSTRUCT:   /* a nested declaration: the typer indexes only top-level ones */
+      sdef_register(cx, node, UINT32_MAX);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
     case AST_DEFMACRO:
@@ -6010,8 +6140,8 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
           IrVal fnref = irb_ref_func(cx->f, cx->cur, w);
           IrVal fnref64 = irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, fnref);
           IrVal nupv = irb_const_i64(cx->f, cx->cur, 0);
-          IrVal na[] = {cx->sp, fnref64, nupv};
-          val = emit_rt_call(cx, "jacl_closure_new", na, 3);
+          IrVal na[] = {cx->sp, fnref64, nupv, irb_const_i64(cx->f, cx->cur, proc_value_shape(pv))};
+          val = emit_rt_call(cx, "jacl_closure_new_shape", na, 4);
         } else {
           IrVal gk = compile_string_literal(cx, en, el);
           IrVal ga[] = {cx->sp, gk};
@@ -6583,30 +6713,43 @@ static void compile_procs(Cx *cx) {
 static void compile_pending_closures(Cx *cx) {
   for (int i = 0; i < cx->npending && !cx->failed; i++) {
     Pending p = cx->pending[i]; /* copy: the worklist may realloc as bodies enqueue */
+    int nfp = p.rest ? 1 : p.nparams;   /* (sp, self, args) when the last collects the rest */
     IrType ptypes[2 + CG_MAX_PARAMS];
-    for (int k = 0; k < 2 + p.nparams; k++) ptypes[k] = IRB_I64;
+    for (int k = 0; k < 2 + nfp; k++) ptypes[k] = IRB_I64;
     cx->f = p.func;
     cx->ret_raw = REP_TAGGED;           /* a closure body is always the boxed convention */
-    cx->cur = irb_block(p.func, ptypes, 2 + p.nparams);
+    cx->cur = irb_block(p.func, ptypes, 2 + nfp);
     if (cx->repl) {
       /* The closure's function calls its body, then keeps the closure live (emit_keep_self),
        * however the body returns: a tail call out of it included. */
       IrType r1[] = {IRB_I64};
-      IrFunc *body = irb_func_new(cx->m, ptypes, 2 + p.nparams, r1, 1);
+      IrFunc *body = irb_func_new(cx->m, ptypes, 2 + nfp, r1, 1);
       IrVal args[2 + CG_MAX_PARAMS];
-      for (int k = 0; k < 2 + p.nparams; k++) args[k] = (IrVal)k;
-      IrVal r = irb_call(p.func, cx->cur, body, args, 2 + p.nparams);
+      for (int k = 0; k < 2 + nfp; k++) args[k] = (IrVal)k;
+      IrVal r = irb_call(p.func, cx->cur, body, args, 2 + nfp);
       emit_keep_self(cx);
       irb_return(p.func, cx->cur, &r, 1);
       cx->f = body;
-      cx->cur = irb_block(body, ptypes, 2 + p.nparams);
+      cx->cur = irb_block(body, ptypes, 2 + nfp);
     }
     cx->sp = 0; /* param 0; self is param 1 */
     cx->cur_is_generator = 0;
     env_reset(cx);
     capset_reset(cx); capset_scan(cx, p.body); /* muts captured by this closure's own nested closures */
     scope_enter(cx);
-    for (int k = 0; k < p.nparams; k++) env_define(cx, p.pnames[k], p.plens[k], (IrVal)(2 + k), /*is_mut=*/0, /*is_cell=*/0);
+    if (p.rest) {
+      /* The fixed parameters are the first arguments, and the last parameter the others. */
+      for (int k = 0; k < p.nparams - 1; k++) {
+        IrVal ga[] = {cx->sp, (IrVal)2, irb_const_i64(cx->f, cx->cur, jaclval_i32(k))};
+        env_define(cx, p.pnames[k], p.plens[k], emit_rt_call(cx, "jacl_vec_get_at", ga, 3), 0, 0);
+      }
+      IrVal sa[] = {cx->sp, (IrVal)2, irb_const_i64(cx->f, cx->cur, jaclval_i32(p.nparams - 1)),
+                    irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff))};
+      env_define(cx, p.pnames[p.nparams - 1], p.plens[p.nparams - 1],
+                 emit_rt_call(cx, "jacl_vec_slice", sa, 4), 0, 0);
+    } else {
+      for (int k = 0; k < p.nparams; k++) env_define(cx, p.pnames[k], p.plens[k], (IrVal)(2 + k), /*is_mut=*/0, /*is_cell=*/0);
+    }
     for (int j = 0; j < p.ncaps; j++) {
       IrVal idx = irb_const_i64(cx->f, cx->cur, j);
       IrVal uargs[] = {cx->sp, /*self=*/1, idx};
@@ -6655,7 +6798,7 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
   IrBlock main_block = inline_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
-    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i], nodes[i]->inferred_struct_idx);
   register_externs(&cx, nodes, count);  /* pass 0b: extern (FFI) declarations */
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   for (uint32_t i = 0; i < count; i++) mark_proc_global_refs(&cx, nodes[i]); /* …the ones procs touch */
@@ -6754,9 +6897,9 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
    * unit names one of them (a slot each, temen §22 unit-own funcrefs); in a leaf it does nothing. */
   IrFunc *reg = irb_func_new(m, i64_2, 2, r1, 1);
 
-  for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i]);
+  for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i], UINT32_MAX);
   for (uint32_t i = 0; i < count; i++)
-    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i], nodes[i]->inferred_struct_idx);
   register_externs(&cx, nodes, count);
   for (uint32_t i = 0; i < env->nglobals; i++) global_add(&cx, env->globals[i], env->global_lens[i]);
   scan_top_globals(&cx, nodes, count);

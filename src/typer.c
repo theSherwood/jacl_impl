@@ -1340,6 +1340,25 @@ static bool typer__proc_literal_has_annotation(TyperCtx* tc, AstNode* lit) {
   return false;
 }
 
+/* The word `..` of a destructuring pattern (`{..}`, `{x ..}`, `{x, ..rest}`). */
+static bool typer__is_dotdot(const AstNode* n) {
+  return n->type == AST_LIT_STRING && n->data.lit_string.length == 2 &&
+         memcmp(n->data.lit_string.value, "..", 2) == 0;
+}
+
+/* Bind a name a `{…}` destructuring pattern introduces: at `t` when it is given, else at the
+ * type of the field it names when the value is a struct with that field, else dyn. */
+static void typer__bind_pattern_name(TyperCtx* tc, const TyperStruct* src, const char* nm,
+                                     uint32_t nl, uint32_t mark, JaclType t) {
+  uint32_t si = UINT32_MAX;
+  for (uint32_t fi = 0; t == TYPE_DYN && src && fi < src->field_count; fi++) {
+    if (src->field_name_lens[fi] != nl || memcmp(src->field_names[fi], nm, nl) != 0) continue;
+    t = (JaclType)src->field_types[fi];
+    if (t == TYPE_STRUCT) si = src->field_struct_idxs[fi];
+  }
+  typer__scope_add(tc, nm, nl, mark, (uint8_t)t, si);
+}
+
 static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
@@ -1644,7 +1663,11 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       /* `{x, y}` named destructuring (parser produces AST_BLOCK
        * with each name as a zero-arg AST_COMMAND inside).
        * Match destructured names against the source struct's field
-       * types when available. */
+       * types when available. The names are the ones codegen binds, so
+       * none of them resolves to an outer binding here: every word of an
+       * item (`{a b}` is two), `..rest` (the word `..` then the name, or a
+       * spread of the name), and a bare `..`, which stands for every field
+       * of the struct (#280). A typed item `i32 x` binds x at i32. */
       JaclType saved_et = tc->expected_type;
       tc->expected_type = TYPE_DYN;
       typer__infer_node(tc, args[1]);
@@ -1654,41 +1677,55 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
           args[1]->inferred_struct_idx < tc->struct_count) {
         src_struct = &tc->structs[args[1]->inferred_struct_idx];
       }
+      /* Flatten the items into words as codegen does, setting typed items
+       * (`i32 x`) aside. */
       uint32_t bcount = args[0]->data.block.count;
+      AstNode* toks[64];  uint32_t nt = 0;
+      AstNode* typed[64]; uint32_t ntyped = 0;
+      AstNode* dd = NULL;   /* a bare `..`: it stands for every field */
       for (uint32_t i = 0; i < bcount; i++) {
         AstNode* item = args[0]->data.block.commands[i];
-        const char* nm = NULL;
-        uint32_t    nl = 0;
-        JaclType    item_t = TYPE_DYN;
-        if (item->type == AST_COMMAND && item->data.command.head &&
-            item->data.command.head->type == AST_LIT_STRING) {
-          if (item->data.command.arg_count == 0) {
-            /* Bare name */
-            nm = item->data.command.head->data.lit_string.value;
-            nl = item->data.command.head->data.lit_string.length;
-          } else if (item->data.command.arg_count == 1 &&
-                     item->data.command.args[0]->type == AST_LIT_STRING &&
-                     is_type_keyword(item->data.command.head->data.lit_string.value,
-                                     item->data.command.head->data.lit_string.length)) {
-            /* Typed: `i32 x` */
-            item_t = type_from_keyword(item->data.command.head->data.lit_string.value,
-                                       item->data.command.head->data.lit_string.length);
-            nm = item->data.command.args[0]->data.lit_string.value;
-            nl = item->data.command.args[0]->data.lit_string.length;
-          }
+        if (typer__is_dotdot(item)) { dd = item; continue; }
+        if (item->type != AST_COMMAND || !item->data.command.head) continue;
+        AstNode*  h  = item->data.command.head;
+        AstNode** ia = item->data.command.args;
+        uint32_t  ac = item->data.command.arg_count;
+        if (ac == 1 && h->type == AST_LIT_STRING && ia[0]->type == AST_LIT_STRING &&
+            is_type_keyword(h->data.lit_string.value, h->data.lit_string.length)) {
+          if (ntyped < 64) typed[ntyped++] = item;
+          continue;
         }
-        if (!nm) continue;
-        if (item_t == TYPE_DYN && src_struct) {
-          for (uint32_t fi = 0; fi < src_struct->field_count; fi++) {
-            if (src_struct->field_name_lens[fi] == nl &&
-                memcmp(src_struct->field_names[fi], nm, nl) == 0) {
-              item_t = (JaclType)src_struct->field_types[fi];
-              break;
-            }
-          }
+        if (nt < 64) toks[nt++] = h;
+        for (uint32_t j = 0; j < ac && nt < 64; j++) toks[nt++] = ia[j];
+      }
+      if (nt > 0 && typer__is_dotdot(toks[nt - 1])) dd = toks[--nt];   /* `{x ..}` */
+      /* `..`'s fields go in first, so a field the pattern names as well
+       * takes that item's type. */
+      for (uint32_t fi = 0; dd && src_struct && fi < src_struct->field_count; fi++)
+        typer__bind_pattern_name(tc, src_struct, src_struct->field_names[fi],
+                                 src_struct->field_name_lens[fi], dd->scope_mark, TYPE_DYN);
+      for (uint32_t i = 0; i < ntyped; i++) {
+        AstNode* h = typed[i]->data.command.head;
+        AstNode* n = typed[i]->data.command.args[0];
+        typer__bind_pattern_name(tc, NULL, n->data.lit_string.value, n->data.lit_string.length,
+                                 n->scope_mark,
+                                 type_from_keyword(h->data.lit_string.value,
+                                                   h->data.lit_string.length));
+      }
+      for (uint32_t k = 0; k < nt; k++) {
+        /* `..rest` (the word `..` then the name, or a spread of the name)
+         * collects the rest, so it is dyn; it is always last. */
+        AstNode* t = toks[k];
+        if (t->type == AST_SPREAD || (typer__is_dotdot(t) && k + 1 < nt)) {
+          AstNode* rest = (t->type == AST_SPREAD) ? t->data.spread.expr : toks[k + 1];
+          if (rest && rest->type == AST_LIT_STRING)
+            typer__bind_pattern_name(tc, NULL, rest->data.lit_string.value,
+                                     rest->data.lit_string.length, rest->scope_mark, TYPE_DYN);
+          break;
         }
-        typer__scope_add(tc, nm, nl, item->scope_mark,
-                         (uint8_t)item_t, UINT32_MAX);
+        if (t->type == AST_LIT_STRING)
+          typer__bind_pattern_name(tc, src_struct, t->data.lit_string.value,
+                                   t->data.lit_string.length, t->scope_mark, TYPE_DYN);
       }
       node->inferred_type = TYPE_NIL;
       return true;
@@ -1904,13 +1941,18 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t inherited_buf_len = 0;
   /* Ref-element [Vec T] (e.g. [Vec str]): plain-vec rep carrying a static
    * element stamp — propagate it into the binding so var-ref reads keep the
-   * element type and for-loops over the binding narrow. */
+   * element type and for-loops over the binding narrow. A struct element
+   * stamp (`[vec [P …] [P …]]`, #280) is what this value holds, not a
+   * declared type: a `mut` may be set to any vec later, so only a `def`
+   * keeps it. */
+  bool vec_stamp = value_node->inferred_struct_idx != UINT32_MAX &&
+                   !(node->data.command.head_id == HEAD_MUT &&
+                     value_node->inferred_struct_idx < tc->struct_count);
   if (effective == TYPE_DYN && (JaclType)value_node->inferred_type == TYPE_VEC &&
-      value_node->inferred_struct_idx != UINT32_MAX) {
+      vec_stamp) {
     effective = TYPE_VEC;
   }
-  if (effective == TYPE_VEC &&
-      value_node->inferred_struct_idx != UINT32_MAX) {
+  if (effective == TYPE_VEC && vec_stamp) {
     struct_idx = value_node->inferred_struct_idx;
   }
   /* Ref-kind [Map ...] forms ([Map str], [Map K str], [Map str dyn]):
@@ -3349,6 +3391,10 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
     TyperStruct* s = &tc->structs[tc->struct_count++];
     s->name     = node->data.defstruct.name;
     s->name_len = node->data.defstruct.name_len;
+    /* The declaration carries the index its name has here, so codegen can tell which struct a
+     * node's `inferred_struct_idx` names (`def {..}`, #280). That is this slot, unless the name
+     * came first as a `use` import's placeholder (or an earlier declaration of it). */
+    node->inferred_struct_idx = typer__struct_index(tc, s->name, s->name_len);
     uint32_t fc = node->data.defstruct.field_count;
     if (fc > TYPER_MAX_STRUCT_FIELDS) fc = TYPER_MAX_STRUCT_FIELDS;
     s->field_count = (uint8_t)fc;
@@ -3963,6 +4009,22 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   if (!typer__head_selects(node->data.command.head_id)) tc->expected_type = TYPE_DYN;
   typer__infer_command_inner(tc, node);
   tc->expected_type = outer_et;
+}
+
+/* The struct every argument of `node` is, or UINT32_MAX when there are none or they differ: the
+ * element type of a `[vec [P …] [P …]]` literal, which a for-loop over it then narrows to (#280).
+ * Such a stamp states what this one value holds. Vecs are persistent — a push makes a new,
+ * unstamped vec — and only a `def` carries the stamp into its binding, so it stays true. */
+static uint32_t typer__elems_struct(const TyperCtx* tc, const AstNode* node) {
+  uint32_t idx = UINT32_MAX;
+  for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+    const AstNode* a = node->data.command.args[i];
+    if (a->inferred_type != TYPE_STRUCT || a->inferred_struct_idx >= tc->struct_count ||
+        (i > 0 && a->inferred_struct_idx != idx))
+      return UINT32_MAX;
+    idx = a->inferred_struct_idx;
+  }
+  return idx;
 }
 
 /* The named-command arm of `typer__infer_command_inner`, split out of it so each emitted function
@@ -4585,6 +4647,8 @@ static void typer__infer_cmd_named(TyperCtx* tc, AstNode* node, AstNode* head) {
           node->inferred_key_struct_idx = UINT32_MAX;
         }
       }
+    } else if (hid == HEAD_VEC) {
+      node->inferred_struct_idx = typer__elems_struct(tc, node);
     }
   } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
     /* [box $val]: runtime returns a box wrapping the value. The

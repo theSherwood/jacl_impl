@@ -13,12 +13,52 @@
  * fnref / index / count flow as raw i64 integers; captured values flow as JaclVals. */
 #include "jaclrt.h"
 
+/* A closure whose function takes no arguments after (sp, self): a spawned block's. */
 JaclVal jacl_closure_new(JaclVal fnref, JaclVal nupvals) {
+  return jacl_closure_new_shape(fnref, nupvals, 0);
+}
+
+/* A closure, with the shape of its function in the header's spare half-word: the parameters it
+ * takes after (sp, self), and with JACL_CLOSURE_REST, that the last collects the rest. Such a
+ * function takes (sp, self, args), every argument packed in one vector, since a caller cannot
+ * know how many are fixed (#280). */
+JaclVal jacl_closure_new_shape(JaclVal fnref, JaclVal nupvals, JaclVal shape) {
   uint32_t n = (uint32_t)(uint64_t)nupvals;
   JaclObj *o = (JaclObj *)jacl_alloc(JOBJ_FUNC, (uint32_t)(sizeof(int64_t) * (1 + n)));
+  o->_rsv = (uint16_t)(uint64_t)shape;
   int64_t *slots = (int64_t *)jacl_obj_payload(o);
   slots[0] = (int64_t)fnref;
   return jaclrt_from_ptr(JACL_TAG_CLOSURE, o);
+}
+
+/* The function to call closure `c` with `argc` arguments, by its shape: its index when it takes
+ * exactly argc; the index with bit 32 set when its last parameter collects the rest and argc
+ * covers the fixed ones, to call with the arguments packed in a vector; -1 when it takes neither,
+ * which used to trap the call (#281). */
+JaclVal jacl_closure_fn_for(JaclVal c, JaclVal argc) {
+  JaclObj *o = (JaclObj *)jaclrt_as_ptr(c);
+  uint64_t fn = (uint64_t)((int64_t *)jacl_obj_payload(o))[0];
+  uint32_t shape = o->_rsv, n = (uint32_t)(uint64_t)argc;
+  if (!(shape & JACL_CLOSURE_REST)) return shape == n ? (JaclVal)fn : (JaclVal)-1;
+  return n >= (shape & ~JACL_CLOSURE_REST) ? (JaclVal)(fn | ((uint64_t)1 << 32)) : (JaclVal)-1;
+}
+
+/* The error for calling closure `c` with `argc` arguments it does not take: "proc 'NAME' expects
+ * N arguments but got M", "closure expects …" when the call names none, "at least N" when its last
+ * parameter collects the rest. */
+JaclVal jacl_closure_arity_error(JaclVal name, JaclVal c, JaclVal argc) {
+  uint32_t shape = ((JaclObj *)jaclrt_as_ptr(c))->_rsv;
+  uint32_t want = shape & ~JACL_CLOSURE_REST;
+  JaclVal s = jaclrt_is_string(name)
+                  ? jacl_str_concat(jacl_str_concat(jacl_str_new("proc '", 6), name),
+                                    jacl_str_new("' expects ", 10))
+                  : jacl_str_new("closure expects ", 16);
+  if (shape & JACL_CLOSURE_REST) s = jacl_str_concat(s, jacl_str_new("at least ", 9));
+  s = jacl_str_concat(s, jacl_to_string(jaclrt_i32((int32_t)want)));
+  s = jacl_str_concat(s, want == 1 ? jacl_str_new(" argument but got ", 18)
+                                   : jacl_str_new(" arguments but got ", 19));
+  s = jacl_str_concat(s, jacl_to_string(jaclrt_i32((int32_t)(uint64_t)argc)));
+  return jacl_error_new(s);
 }
 
 /* #215: a REPL unit's closure function calls this as it returns, passing its closure, which so

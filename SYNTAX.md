@@ -116,7 +116,9 @@ it has domain errors instead. Full rules: `docs/TEMEN_NUMERICS.md`.
   - `{x, ..}` — explicit x, plus everything else
   - `{x, ..rest}` — explicit x, remaining fields collected into rest
   - `[..]` — all positions
-  - Only works on fully-typed containers (compiler must know names)
+  - `{..}` needs the value's struct type at compile time (compiler must know names): a constructor,
+    a struct-typed binding, param or field, a proc's declared return, a loop over a vec of one
+    struct. For any other value, name the fields
 - `_` for wildcards
 - `def {..} $point` — binds x and y from Point into current scope
 - `use "shapes.jacl" {..}` — import all public bindings

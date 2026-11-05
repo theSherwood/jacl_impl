@@ -6,7 +6,8 @@
 ## collections run while it does, and its argument must survive them. A macro whose body does not
 ## compile is refused, a new one or a redefinition, and the table and the lines after are as before.
 ## A macro may call the syntax builtins (#271), which the shell's table binds like the runtime's.
-## A failing statement ends its line (#273): the `set` after it does not run.
+## A failing statement ends its line (#273): the `set` after it does not run. `def {..}` binds the
+## fields of a struct an earlier line declared, and of one its own line declares (#280).
 ##
 print [repl-eval "def x 41"]
 print [repl-eval "proc inc {n} { + \x24n 1 }"]
@@ -36,3 +37,5 @@ print [repl-eval "arity [f 1 2 3]"]
 print [repl-eval "mut seen 0"]
 print [repl-eval "error stop; set seen 1"]
 print [repl-eval "\x24seen"]
+print [repl-eval "def {..} [Point x 5 y 6]; + \x24x \x24y"]
+print [repl-eval "struct Pair {i32 a, i32 b}; def {..} [Pair a 1 b 2]; + \x24a \x24b"]
