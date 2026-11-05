@@ -90,6 +90,8 @@ typedef struct {
   const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
   int32_t     buf_size;                            /* fixed Buf length, or -1 */
   BindRep     rep;                                 /* tagged JaclVal, or a raw machine word */
+  int         sdef1;   /* 1 + the cx->sdefs index of the struct it holds, when codegen can see
+                        * it (a constructor, a struct-typed def or param); 0 when not (#280) */
 } Binding;
 
 /* A top-level proc: name -> its TEMEN function + arity. Registered before any body is
@@ -3145,6 +3147,21 @@ static IrVal emit_buf_new(Cx *cx, AstNode *ann) {
   }
   return av;
 }
+/* The struct a value expression evidently makes, for `def {..}` (#280): a constructor `[P …]`, or
+ * a binding known to hold one. 1 + its cx->sdefs index; 0 when codegen cannot tell. */
+static int value_sdef1(Cx *cx, AstNode *v) {
+  if (v->type == AST_COMMAND && v->data.command.head && v->data.command.head->type == AST_LIT_STRING) {
+    SDef *sd = sdef_lookup(cx, v->data.command.head->data.lit_string.value,
+                           v->data.command.head->data.lit_string.length);
+    if (sd) return (int)(sd - cx->sdefs) + 1;
+  }
+  if (v->type == AST_VAR_REF) {
+    Binding *b = env_lookup(cx, v->data.var_ref.name, v->data.var_ref.length);
+    if (b) return b->sdef1;
+  }
+  return 0;
+}
+
 /* Record a typed collection annotation on the just-defined binding. */
 static void bind_annotate(Cx *cx, const char *name, uint32_t len,
                           const char *et, uint32_t etl, int32_t bufn) {
@@ -4415,12 +4432,31 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
       node->data.command.args[1]->type != AST_BLOCK) {
     AstNode *blk = node->data.command.args[0];
     AstNode *toks[CG_MAX_PARAMS]; int nt = 0;
+    int all_fields = 0;   /* a bare `..` (`{..}`, `{x, ..}`): every field not named (#280) */
     for (uint32_t i = 0; i < blk->data.block.count; i++) {
       AstNode *cmd = blk->data.block.commands[i];
+      if (kw_is(cmd, "..", 2)) { all_fields = 1; continue; }
       if (cmd->type != AST_COMMAND) { nt = -1; break; }
       if (cmd->data.command.head && nt < CG_MAX_PARAMS) toks[nt++] = cmd->data.command.head;
       for (uint32_t j = 0; j < cmd->data.command.arg_count && nt < CG_MAX_PARAMS; j++)
         toks[nt++] = cmd->data.command.args[j];
+    }
+    if (nt > 0 && kw_is(toks[nt - 1], "..", 2)) { all_fields = 1; nt--; }   /* `{x ..}` */
+    if (all_fields && nt >= 0) {
+      /* The field names come from the struct the value is known to hold. */
+      int s1 = value_sdef1(cx, node->data.command.args[1]);
+      if (!s1) {
+        cx_fail(cx, "`def {..}` binds every field of a struct, so it needs a value whose "
+                    "struct type is known here: a constructor, or a binding made or declared as one");
+        return 0;
+      }
+      SDef *sd = &cx->sdefs[s1 - 1];
+      for (int f = 0; f < sd->nf && nt < CG_MAX_PARAMS; f++) {
+        int named = 0;
+        for (int k = 0; k < nt; k++)
+          if (kw_is(toks[k], sd->fn[f], sd->fl[f])) named = 1;
+        if (!named) toks[nt++] = synth_word(sd->fn[f], sd->fl[f]);
+      }
     }
     int all_words = nt > 0;
     for (int i = 0; i < nt; i++)
@@ -4435,10 +4471,16 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         AstNode *rn = rest_spread_name(toks[k]);
         if (!rn && kw_is(toks[k], "..", 2) && k + 1 < nt) rn = toks[k + 1];
         if (rn) {
-          IrVal start = irb_const_i64(cx->f, cx->cur, jaclval_i32(pos));
-          IrVal big = irb_const_i64(cx->f, cx->cur, jaclval_i32(0x3fffffff));
-          IrVal sa[] = {cx->sp, v, start, big};
-          IrVal rest = emit_rt_call(cx, "jacl_vec_slice", sa, 4);
+          /* The rest of a vector from `pos` on; of a struct or a map, its other fields. */
+          IrVal ea[] = {cx->sp};
+          IrVal names = emit_rt_call(cx, "jacl_vec_empty", ea, 1);
+          for (int j = 0; j < k; j++) {
+            IrVal nm = compile_string_literal(cx, toks[j]->data.lit_string.value, toks[j]->data.lit_string.length);
+            IrVal pa[] = {cx->sp, names, nm};
+            names = emit_rt_call(cx, "jacl_vec_push", pa, 3);
+          }
+          IrVal ra[] = {cx->sp, v, irb_const_i64(cx->f, cx->cur, jaclval_i32(pos)), names};
+          IrVal rest = emit_rt_call(cx, "jacl_destructure_rest", ra, 4);
           env_define(cx, rn->data.lit_string.value, rn->data.lit_string.length,
                      rest, /*is_mut=*/0, /*is_cell=*/0);
           break;   /* rest is always last */
@@ -4655,6 +4697,12 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     }
     /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
      * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
+    /* The struct the binding holds, when the def names it (`def Point p V`) or its value
+     * evidently makes one: what `def {..} $p` binds (#280). */
+    SDef *tsd = (tshift && bargs[0]->type == AST_LIT_STRING)
+                    ? sdef_lookup(cx, bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length)
+                    : NULL;
+    int vs1 = tsd ? (int)(tsd - cx->sdefs) + 1 : value_sdef1(cx, bargs[tshift + 1]);
     if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
       IrVal a[] = {cx->sp, val};
       IrVal cell = emit_rt_call(cx, "jacl_cell_new", a, 2);
@@ -4680,6 +4728,10 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         if (tt) bind_annotate(cx, name, len, tt->data.lit_string.value,
                               tt->data.lit_string.length, buf_ann_size(annsrc));
       }
+    }
+    if (vs1 && !cx->failed) {
+      Binding *nb = env_lookup(cx, name, len);
+      if (nb) nb->sdef1 = vs1;
     }
     /* A top-level binding mirrors into the module-global map so procs/closures see it. */
     if (cx->at_top_level && is_global_name(cx, name, len)) {
@@ -6611,6 +6663,17 @@ static void compile_procs(Cx *cx) {
           Binding *b = env_lookup(cx, names[k], lens[k]);
           if (b) b->rep = rep;
         }
+      }
+    }
+
+    /* A param typed with a struct (`{Point q}`) is known to hold one: `def {..} $q` (#280). */
+    if (!p->is_generator) {
+      const char *pty[CG_MAX_PARAMS]; uint32_t ptl[CG_MAX_PARAMS];
+      int nty = extract_param_types(def->data.command.args[1], pty, ptl);
+      for (int k = 0; k < nty && k < arity; k++) {
+        SDef *sd = pty[k] ? sdef_lookup(cx, pty[k], ptl[k]) : NULL;
+        Binding *b = sd ? env_lookup(cx, names[k], lens[k]) : NULL;
+        if (b) b->sdef1 = (int)(sd - cx->sdefs) + 1;
       }
     }
 

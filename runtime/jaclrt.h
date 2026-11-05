@@ -522,6 +522,7 @@ JaclVal jacl_closure_new(JaclVal fnref, JaclVal nupvals);
 JaclVal jacl_closure_new_shape(JaclVal fnref, JaclVal nupvals, JaclVal shape);
 JaclVal jacl_closure_fn_for(JaclVal c, JaclVal argc);         /* fnref, | 1<<32 to pack, or -1 */
 JaclVal jacl_closure_arity_error(JaclVal name, JaclVal c, JaclVal argc);
+JaclVal jacl_destructure_rest(JaclVal v, JaclVal start, JaclVal names); /* `def {a, ..rest} V` */
 JaclVal jacl_closure_set(JaclVal c, JaclVal i, JaclVal v);
 JaclVal jacl_closure_fn(JaclVal c);
 JaclVal jacl_closure_upval(JaclVal c, JaclVal i);

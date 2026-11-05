@@ -1758,6 +1758,35 @@ fn a_closure_rest_parameter_collects_the_rest() {
     );
 }
 
+#[test]
+fn a_destructuring_dotdot_binds_the_other_fields() {
+    // #280: `def {..} $p` and `def {x, ..} $p` failed to compile ("binding form needs a name and a
+    // value"), and `def {x, ..rest} $p` sliced a struct as a vector. A bare `..` binds every field
+    // of a struct whose type codegen can see; `..rest` collects a struct's or a map's other fields
+    // into a map, and a vector's other elements into a vector.
+    let out = staged_stdout(
+        "dotdot_destructure",
+        "struct P {i32 x, i32 y, i32 z}\n\
+         proc a {} { def p [P x 1 y 2 z 3]; def {..} $p; + [+ $x $y] $z }\n\
+         print [a]\n\
+         proc b {} { def p [P x 1 y 2 z 3]; def {y, ..} $p; + $x $y }\n\
+         print [b]\n\
+         proc c {P q} { def {..} $q; $z }\n\
+         print [c [P x 7 y 8 z 9]]\n\
+         def p [P x 1 y 2 z 3]\n\
+         def {x, ..rest} $p\n\
+         print [map-get $rest y]\n\
+         print [map-has $rest x]\n\
+         def {a, ..others} [map a 1 b 2]\n\
+         print [map-has $others b]\n\
+         def {h, ..t} [vec 1 2 3]\n\
+         print $t\n",
+    );
+    assert_eq!(out, "6\n3\n9\n2\nfalse\ntrue\n[vec 2 3]\n");
+    let err = staged_emit_error("dotdot_unknown", "def ps [vec 1]\ndef {..} [vec-get $ps 0]\n");
+    assert!(err.contains("struct type is known here"), "{err}");
+}
+
 /// `# expect-error:` programs in `test/jacl` that do not yet fail with their message on TEMEN
 /// (#281): mostly checks the legacy compiler made and nothing ported. When a fix makes one fail as
 /// it says, take it off; the gate fails while a listed program passes, so the list only shrinks.

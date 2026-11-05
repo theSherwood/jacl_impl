@@ -184,7 +184,7 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_closure_upval); \
     /* structs + field/dot access */ \
     SYM(jacl_struct_new); SYM(jacl_struct_put); SYM(jacl_struct_init_field); \
-    SYM(jacl_field_get); SYM(jacl_field_or_index); SYM(jacl_dot_dyn); SYM(jacl_dot_dyn_set); SYM(jacl_qdot); \
+    SYM(jacl_field_get); SYM(jacl_field_or_index); SYM(jacl_destructure_rest); SYM(jacl_dot_dyn); SYM(jacl_dot_dyn_set); SYM(jacl_qdot); \
     /* mutable arrays + buffers (Arr / Buf / flatbuf) */ \
     SYM(jacl_arr_copy); SYM(jacl_arr_set_at); SYM(jacl_arr_set_at_zero); \
     SYM(jacl_buf_get_checked); SYM(jacl_buf_offset_checked); \
