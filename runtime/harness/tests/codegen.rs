@@ -1781,6 +1781,33 @@ fn a_binding_captures_an_error_in_a_nested_block() {
     assert_eq!(String::from_utf8_lossy(&out), want);
 }
 
+#[test]
+fn a_c_style_for_runs_init_then_cond_body_step() {
+    // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
+    // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;
+    // a `mut` the header declares is the loop's own, or, already declared, the enclosing one.
+    let out = staged_stdout(
+        "cfor",
+        "mut p 1\n\
+         for {mut i 1; <= $i 4; incr i} { set p [* $p $i] }\n\
+         print $p\n\
+         proc k {} {\n\
+           mut s 0\n\
+           for {mut i 0; < $i 10; set i [+ $i 1]} {\n\
+             if [== $i 3] { continue }\n\
+             if [== $i 6] { break }\n\
+             set s [+ $s $i]\n\
+           }\n\
+           print $s\n\
+           mut j 100\n\
+           for {mut j 0; < $j 3; incr j} {}\n\
+           print $j\n\
+         }\n\
+         k\n",
+    );
+    assert_eq!(out, "24\n12\n3\n");
+}
+
 const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");
 const STAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 

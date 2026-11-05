@@ -2574,6 +2574,55 @@ static IrVal compile_for_range(Cx *cx, const char *name, uint32_t nlen,
   return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 }
 
+/* [for {INIT; COND; STEP} { body }] — C-style: INIT runs once, in the loop's own scope, then
+ * `while COND { body; STEP }`, with `continue` landing on STEP. The loop is nil. */
+static IrVal compile_for_cstyle(Cx *cx, AstNode *hdr, AstNode *body) {
+  if (hdr->data.block.count != 3) { cx_fail(cx, "C-style for needs {init; cond; step}"); return 0; }
+  AstNode **part = hdr->data.block.commands;
+  scope_enter(cx);
+  cx->move_ok = 1;
+  (void)compile_expr(cx, part[0]);
+  if (cx->failed || !frame_guard(cx)) { scope_exit(cx); return 0; }
+
+  int w = frame_width(cx);
+  IrBlock header = new_i64_block(cx, w);
+  IrBlock body_blk = new_i64_block(cx, w);
+  IrBlock step_blk = new_i64_block(cx, w);
+  IrBlock exit_blk = new_i64_block(cx, w);
+
+  IrVal frame[IRB_MAX_FRAME + 2];
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  enter_loop_header(cx, header);
+  cx->move_ok = 1;
+  IrVal cond = compile_expr(cx, part[1]);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  IrVal truth = emit_truthy(cx, cond);
+  fill_frame(cx, frame);
+  irb_br_if(cx->f, cx->cur, truth, body_blk, frame, w, exit_blk, frame, w);
+
+  enter_frame_block(cx, body_blk);
+  { int si = cx->in_loop; IrBlock sc = cx->loop_continue, sb = cx->loop_break; int sw = cx->loop_width; int sk = cx->loop_brk_ok;
+    cx->in_loop = 1; cx->loop_continue = step_blk; cx->loop_break = exit_blk; cx->loop_width = w; cx->loop_brk_ok = 0;
+    (void)compile_expr(cx, body);
+    cx->in_loop = si; cx->loop_continue = sc; cx->loop_break = sb; cx->loop_width = sw; cx->loop_brk_ok = sk; }
+  if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, step_blk, frame, w);
+
+  enter_frame_block(cx, step_blk);
+  cx->move_ok = 1;
+  (void)compile_expr(cx, part[2]);
+  if (cx->failed) { scope_exit(cx); return 0; }
+  fill_frame(cx, frame);
+  irb_br(cx->f, cx->cur, header, frame, w);
+
+  enter_frame_block(cx, exit_blk);
+  scope_exit(cx);
+  return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+}
+
 /* Synthesized AST nodes (heap-allocated; live for the compile) for sugar forms. */
 HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
 static AstNode *synth_word(const char *v, uint32_t len) {
@@ -3545,6 +3594,8 @@ static IrVal compile_try(Cx *cx, AstNode *node) {
 static IrVal compile_for(Cx *cx, AstNode *node) {
   uint32_t argc = node->data.command.arg_count;
   AstNode **args = node->data.command.args;
+  if (argc == 2 && args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK)
+    return compile_for_cstyle(cx, args[0], args[1]);
   /* Canonical `for COLLECTION name { body }` over a generator (collection is a call to
    * a generator proc). Other canonical collections are reconciled in Phase 4. */
   if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK &&
