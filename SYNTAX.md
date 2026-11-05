@@ -1328,7 +1328,7 @@ The June 2026 syntax redesign revised several decisions; remaining work (just th
 | Comments (`#`, `##`) | yes |
 | Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
 | `panic` builtin | `OP_PANIC`: pops a string message, halts with that message. Zero-arg form emits the default literal `"panic"`. |
-| `assert` prelude macro | Two forms: `assert <expr>` (truthy check) and `[assert <op> arg1 arg2 …]` (predicate form). Both expand to `[if <pred> {} { panic "<source>" }]`. Bare command-mode `assert <op> arg1 arg2 …` is currently blocked by the parser treating operators as command-arg terminators; use the bracketed form. |
+| `assert` prelude macro | Two forms: `assert <expr>` (truthy check) and `[assert <op> arg1 arg2 …]` (predicate form). Both expand to `[if <pred> {} { panic "assertion failed: <source>" }]` (on TEMEN, codegen lowers it directly: nil when it holds, else that error, or the predicate's own error if it is one). Bare command-mode `assert <op> arg1 arg2 …` is currently blocked by the parser treating operators as command-arg terminators; use the bracketed form. |
 | Persistent collections (vectors, maps) | RRB-tree, HAMT |
 | Mutable state (`box`, `atom`, `swap`, `reset`) | thread-local boxes, CAS atoms |
 | Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS + SM transform; NxM scheduler |

@@ -5352,6 +5352,44 @@ static IrVal compile_cmd_call_forms(Cx *cx, AstNode *node, uint8_t hid, int *han
  *
  * `*handled` is 1 when one of this group's guards matched (the return value is then the compiled
  * value), 0 when none did and the caller must fall through to the next group. */
+/* `[assert PRED]`: nil when PRED holds. When it fails, PRED's own error if it is one, else an
+ * error whose message is "assertion failed: <source>", as the prelude macro words it (its
+ * expansion, `[if PRED {} { panic "assertion failed: …" }]`, does not run on the emit path).
+ * Only the failing branch builds the message, so a passing assert allocates nothing. */
+static IrVal compile_assert(Cx *cx, AstNode *pred) {
+  IrVal v = compile_expr(cx, pred);
+  if (cx->failed || !frame_guard(cx)) return 0;
+  IrVal held = emit_truthy(cx, v);
+  IrVal zero = irb_const_i32(cx->f, cx->cur, 0);
+  IrVal not_held = irb_intcmp(cx->f, cx->cur, IRB_I32, IRB_EQ, held, zero);
+  IrVal fails = irb_intbin(cx->f, cx->cur, IRB_I32, IRB_OR, not_held, emit_is_error_bit(cx, v));
+  int w = frame_width(cx);
+  IrBlock fail_blk = new_i64_block(cx, w + 1);   /* + PRED's value */
+  IrBlock join = new_i64_block(cx, w + 1);       /* + the assert's value */
+  IrVal fa[IRB_MAX_FRAME + 2], ja[IRB_MAX_FRAME + 2];
+  fill_frame(cx, fa); fa[w] = v;
+  fill_frame(cx, ja); ja[w] = irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
+  irb_br_if(cx->f, cx->cur, fails, fail_blk, fa, w + 1, join, ja, w + 1);
+
+  enter_frame_block(cx, fail_blk);
+  static const char pre[] = "assertion failed: ";
+  arena_t arena = {0};
+  const char *src = ast_pretty_print(pred, &arena);
+  uint32_t pl = sizeof pre - 1, sl = (uint32_t)strlen(src);
+  char *msg = arena_alloc(&arena, pl + sl);
+  memcpy(msg, pre, pl);
+  memcpy(msg + pl, src, sl);
+  IrVal m = compile_string_literal(cx, msg, pl + sl);
+  arena_destroy(&arena);
+  IrVal a[] = {cx->sp, (IrVal)w, m};
+  IrVal e = emit_rt_call(cx, "jacl_assert_failed", a, 3);
+  fill_frame(cx, ja); ja[w] = e;
+  irb_br(cx->f, cx->cur, join, ja, w + 1);
+
+  enter_frame_block(cx, join);
+  return (IrVal)w;
+}
+
 /* `noinline`: these exist ONLY to keep each emitted function under the host optimizer's limit,
  * and each is called exactly once — at -O2 clang would inline it straight back and undo the
  * split (measured: without this the caller's estimated emitted size barely moves). */
@@ -5530,18 +5568,11 @@ static IrVal compile_cmd_struct_forms(Cx *cx, AstNode *node, uint8_t hid, int *h
       node->data.command.arg_count >= 1) {
     /* Two forms: `[assert EXPR]` (single truthy check) and the predicate form
      * `[assert OP a b …]`, which evaluates `[OP a b …]` and asserts its truth. */
-    IrVal v;
-    if (node->data.command.arg_count == 1) {
-      v = compile_expr(cx, node->data.command.args[0]);
-    } else {
-      AstNode *cmd = synth_command(node->data.command.args[0],
-                                   node->data.command.args + 1,
-                                   node->data.command.arg_count - 1);
-      v = compile_expr(cx, cmd);
-    }
-    if (cx->failed) return 0;
-    IrVal a[] = {cx->sp, v};
-    return emit_rt_call(cx, "jacl_assert", a, 2);
+    AstNode *pred = node->data.command.arg_count == 1
+                        ? node->data.command.args[0]
+                        : synth_command(node->data.command.args[0], node->data.command.args + 1,
+                                        node->data.command.arg_count - 1);
+    return compile_assert(cx, pred);
   }
 
   /* `[panic]` / `[panic MSG]` — halt with a message (surfaced as a propagating error).

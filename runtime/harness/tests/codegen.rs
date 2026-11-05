@@ -1808,6 +1808,25 @@ fn a_failing_top_level_statement_stops_the_program() {
 }
 
 #[test]
+fn a_failing_assert_says_what_failed() {
+    // #273: `assert` lowered to a bare error, printed `<error: nil>`; SYNTAX.md and the prelude
+    // macro promise "assertion failed: <source>". A predicate that is itself an error stays that
+    // error, and a passing assert is nil.
+    let out = staged_stdout(
+        "assertmsg",
+        "def x 5\n\
+         print [assert [== $x 5]]\n\
+         print [assert [== $x 6]]\n\
+         print [assert == $x 7]\n\
+         print [assert [error boom]]\n",
+    );
+    assert_eq!(
+        out,
+        "nil\n<error: assertion failed: [== $x 6]>\n<error: assertion failed: [== $x 7]>\n<error: boom>\n"
+    );
+}
+
+#[test]
 fn a_c_style_for_runs_init_then_cond_body_step() {
     // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
     // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;

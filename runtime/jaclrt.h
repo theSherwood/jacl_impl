@@ -422,7 +422,7 @@ JaclVal jacl_range_vec(JaclVal a, JaclVal b);      /* [range A B) as a vector */
 JaclVal jacl_range_inclusive(JaclVal a, JaclVal b);/* [range-inclusive A B] as a vector */
 JaclVal jacl_vec_push_v(JaclVal v, JaclVal elem);  /* error-propagating [vec-push V E] */
 JaclVal jacl_vec_slice(JaclVal v, JaclVal s, JaclVal e); /* [vec-slice V S E) sub-vector */
-JaclVal jacl_assert(JaclVal v);                    /* [assert COND] -> nil / error */
+JaclVal jacl_assert_failed(JaclVal v, JaclVal msg); /* a failed [assert PRED] -> error */
 JaclVal jacl_ctx_get(void);                        /* the ambient \$ctx map */
 JaclVal jacl_ctx_swap(JaclVal m);                  /* replace \$ctx, returning the old */
 JaclVal jacl_ctx_set_field(JaclVal name, JaclVal v);
