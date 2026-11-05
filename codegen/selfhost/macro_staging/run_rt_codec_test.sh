@@ -40,12 +40,12 @@ echo "rt-codec: syn_wire and syn_rt agree byte-for-byte."
 # `syntax-str` (syn_rt's printer, run inside a staged macro) must write what the frontend's
 # ast_pretty_print writes for the same node: both sets of snippets, plus the printer's own
 # cases — floats (printf %g, then `.0`), strings that need quoting and escaping, `->`, procs and
-# lambdas, `^name`.
+# lambdas, `^name`, and a shell command as an operand (written `[!cmd …]`).
 "$CC" -std=gnu11 -O1 -w -D_GNU_SOURCE -I "$RT" -I "$DIR" "$DIR/rt_syntax_str.c" -lm -o "$B/rt_syntax_str"
 pp_snips=("3.14" "0.5" "100.0" "2.5" "0.0001" "0.00001" "123456.0" "1234567.0" "0.1" "-2.75" \
           "-7" "\"hello world\"" "\"\"" "\"a\\\\b\"" "\"say \\\"hi\\\"\"" "\"x\\ny\"" "\"7up\"" "\$p->x" \
           "proc f {a b} { + \$a \$b }" "[\\ + \$it 1]" "syntax-quote [def ^it 1]" \
-          "[- 0 9223372036854775807]")
+          "[- 0 9223372036854775807]" "!ls -la /usr/bin | !grep \"x y\"" "[f [!date -u] 2]")
 for s in "${snips[@]}" "${pp_snips[@]}"; do
   want="$("$B/gen_wire" --pp "$s")"
   got="$("$B/gen_wire" "$s" | "$B/rt_syntax_str")" || got="<syntax-str failed>"

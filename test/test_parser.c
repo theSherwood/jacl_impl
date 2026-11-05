@@ -1641,6 +1641,9 @@ static int test_roundtrip_interp(void) {
   ASSERT(roundtrip_ok("print \"result: $[+ 1 2]\""));
   ASSERT(roundtrip_ok("print \"$a and $b\""));
   ASSERT(roundtrip_ok("print \"$a$b\""));
+  /* Shell words print and parse back (#277) */
+  ASSERT(roundtrip_ok("!ls -la /usr/bin x.y --color=auto 0755 42"));
+  ASSERT(roundtrip_ok("!echo --msg=\"hi there\" $dir/sub $dir ..$args [f x] | !grep -v y"));
   /* A literal `$` prints as `\$`, which must lex back to `$` (#273) */
   ASSERT(roundtrip_ok("print \"cost: \\$5\""));
   ASSERT(roundtrip_ok("print \"a $ b\""));
