@@ -4007,11 +4007,15 @@ static IrVal compile_cmd_control_forms(Cx *cx, AstNode *node, uint8_t hid, int *
   if (hid == HEAD_EXTERN) return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
   if (hid == HEAD_IF) return compile_if(cx, node);
   if (hid == HEAD_WHILE) return compile_while(cx, node);
-  if (hid == HEAD_AMP_AMP || hid == HEAD_PIPE_PIPE) {
+  /* `and` / `or` are the prelude's names for `&&` / `||`; its macros do not run on the emit
+   * path, so they are lowered here by name, as `incr` and `assert` are. */
+  AstNode *named = node->data.command.head;
+  int is_named_and = named && kw_is(named, "and", 3), is_named_or = named && kw_is(named, "or", 2);
+  if (hid == HEAD_AMP_AMP || hid == HEAD_PIPE_PIPE || is_named_and || is_named_or) {
     /* `[&& a b …]` / `[|| a b …]` — short-circuit logical fold. Reference lowers
      * `&& L R` as `if L {R} {false}` and `|| L R` as `if L {true} {R}`. With more than
      * two operands it right-folds: `[&& a b c]` == `a && (b && c)`. */
-    int is_and = (hid == HEAD_AMP_AMP);
+    int is_and = (hid == HEAD_AMP_AMP) || is_named_and;
     AstNode **args = node->data.command.args;
     uint32_t ac = node->data.command.arg_count;
     if (ac == 0)

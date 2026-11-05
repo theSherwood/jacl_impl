@@ -1827,6 +1827,23 @@ fn a_failing_assert_says_what_failed() {
 }
 
 #[test]
+fn and_and_or_short_circuit_like_their_operators() {
+    // #273: `and` / `or` are prelude macros over `&&` / `||`, which the emit path does not run, and
+    // codegen had no lowering for them ("unsupported command head 'and'").
+    let out = staged_stdout(
+        "andor",
+        "print [and $true $false]\n\
+         print [or $false $true]\n\
+         mut hits 0\n\
+         proc hit {v} { set hits [+ $hits 1]; $v }\n\
+         print [and $false [hit $true]]\n\
+         print [or $true [hit $false]]\n\
+         print $hits\n",
+    );
+    assert_eq!(out, "false\ntrue\nfalse\ntrue\n0\n");
+}
+
+#[test]
 fn a_c_style_for_runs_init_then_cond_body_step() {
     // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
     // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;
