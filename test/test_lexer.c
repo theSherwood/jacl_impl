@@ -1190,6 +1190,19 @@ static int test_string_escape_n_t_r(void) {
   TEST_PASS();
 }
 
+static int test_string_escape_dollar(void) {
+  setup();
+  /* JACL: "cost: \$5 \$name" — `\$` is a literal `$`, so neither starts an interpolation */
+  LexResult r = lexer_lex("\"cost: \\$5 \\$name\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "cost: $5 $name");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_string_escape_null(void) {
   setup();
   /* JACL: "a\0b" — contains embedded null byte */
@@ -3034,6 +3047,7 @@ int main(void) {
     {"string_escape_backslash",   test_string_escape_backslash},
     {"string_escape_quote",       test_string_escape_quote},
     {"string_escape_n_t_r",       test_string_escape_n_t_r},
+    {"string_escape_dollar",      test_string_escape_dollar},
     {"string_escape_null",        test_string_escape_null},
     {"string_hex_escape",         test_string_hex_escape},
     {"string_unicode_4digit",     test_string_unicode_4digit},

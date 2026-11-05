@@ -1641,6 +1641,9 @@ static int test_roundtrip_interp(void) {
   ASSERT(roundtrip_ok("print \"result: $[+ 1 2]\""));
   ASSERT(roundtrip_ok("print \"$a and $b\""));
   ASSERT(roundtrip_ok("print \"$a$b\""));
+  /* A literal `$` prints as `\$`, which must lex back to `$` (#273) */
+  ASSERT(roundtrip_ok("print \"cost: \\$5\""));
+  ASSERT(roundtrip_ok("print \"a $ b\""));
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
