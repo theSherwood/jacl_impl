@@ -1,25 +1,14 @@
-# Macro-staging differential gate (Phase 0)
+# Macro staging on TEMEN
 
-The safety net for migrating compile-time macro evaluation off the legacy bytecode
-VM (`src/vm.c`) onto the TEMEN backend — see `docs/TEMEN_MACRO_STAGING_PLAN.md`.
+Compile-time macro evaluation, moved off the legacy bytecode VM (`src/vm.c`) onto the TEMEN
+backend — see `docs/TEMEN_MACRO_STAGING_PLAN.md`.
 
-The migration's contract is that **nothing observable changes**: a program using
-user `defmacro`s must emit byte-identical TEMEN IR whether the macro ran on `vm.c` or
-on TEMEN. This harness enforces that.
-
-| Path | Role |
-|---|---|
-| `corpus/*.jacl` | User-`defmacro` programs (control-flow template, arg-splice, nested/recursive expansion; grows to cover hygiene/gensym, variadic, error cases). |
-| `golden/*.ir` | Oracle snapshots — the TEMEN IR each program emits with macros expanded on `vm.c`. Checked in; the diff target. |
-| `run_diff.sh` | Build the native frontend, emit each corpus program, diff vs golden. `--update` regenerates golden. `build/` is git-ignored. |
-
-```sh
-codegen/selfhost/macro_staging/run_diff.sh            # gate: all must match
-codegen/selfhost/macro_staging/run_diff.sh --update   # after an intentional corpus change
-```
-
-Later phases run the same gate with `JACL_STAGE_ON_TEMEN=1` (macros evaluated on TEMEN);
-green means parity with the `vm.c` oracle.
+The migration's contract was that **nothing observable changes**: a program using user
+`defmacro`s had to emit byte-identical TEMEN IR whether the macro ran on `vm.c` or on TEMEN.
+`run_diff.sh` enforced it against `vm.c`'s output. With the migration done and `vm.c` gone there
+is no oracle left, so that gate is retired (#273). Its corpus runs in CI as the compiler card's
+STAGETEST (`codegen/selfhost/build_compiler_temen.sh --selftest`), alongside the harness's macro
+tests (`runtime/harness/tests/codegen.rs`).
 
 ## Phase 1(B) — syntax-value ABI (`syn_wire`)
 

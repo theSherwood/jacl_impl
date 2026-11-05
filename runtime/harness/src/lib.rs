@@ -53,7 +53,7 @@ pub fn stdout_tee(mut tee: impl FnMut(&[u8]) + Send + 'static) -> temen_interp::
 /// which `link` resolves, so there is no separate relocation table: the returned `Module` is a
 /// pre-link unit, fed to `link`/`link_with_manifest` as a `LinkUnit`. Objects decode via
 /// `decode_unit` (`decode_module` rejects them). (`emit_jacl --text` still emits temen-text for
-/// goldens; that path is consumed by shell diffs, not this decoder.)
+/// people and shell diffs; this decoder does not read it.)
 pub fn decode_emitted(bytes: &[u8]) -> Result<temen_ir::Module, String> {
     temen_encode::decode_unit(bytes).map_err(|e| format!("decode object: {e:?}"))
 }
@@ -189,7 +189,7 @@ pub fn staged_driver(profile_dir: &std::path::Path) -> Result<PathBuf, String> {
         .arg(format!("{root}/codegen/selfhost/macro_staging/stage_bridge.c"))
         .arg("-L")
         .arg(profile_dir)
-        // The Rust staticlib pulls in libstd's system deps — the same link line run_diff.sh uses.
+        // The Rust staticlib pulls in libstd's system deps.
         .args([
             "-ljacl_runtime_harness", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc",
         ])

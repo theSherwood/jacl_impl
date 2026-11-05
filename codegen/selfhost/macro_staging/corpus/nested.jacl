@@ -1,3 +1,0 @@
-defmacro twice {x} { syntax-quote [+ ~x ~x] }
-defmacro quad {x} { syntax-quote [twice [twice ~x]] }
-quad 5
