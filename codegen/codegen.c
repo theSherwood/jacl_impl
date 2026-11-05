@@ -90,8 +90,6 @@ typedef struct {
   const char *elem_type; uint32_t elem_type_len;   /* declared element type, or NULL */
   int32_t     buf_size;                            /* fixed Buf length, or -1 */
   BindRep     rep;                                 /* tagged JaclVal, or a raw machine word */
-  int         sdef1;   /* 1 + the cx->sdefs index of the struct it holds, when codegen can see
-                        * it (a constructor, a struct-typed def or param); 0 when not (#280) */
 } Binding;
 
 /* A top-level proc: name -> its TEMEN function + arity. Registered before any body is
@@ -195,6 +193,8 @@ typedef struct {
     const char *fn[CG_MAX_PARAMS]; uint32_t fl[CG_MAX_PARAMS];
     const char *ft[CG_MAX_PARAMS]; uint32_t ftl[CG_MAX_PARAMS];   /* field type name/len */
     int nf;
+    uint32_t tidx;   /* the typer's index for it, which its declaration carries; UINT32_MAX for
+                      * one an earlier REPL line declared (this line's typer never saw it) */
   } sdefs[32];
   int nsdefs;
 
@@ -259,12 +259,13 @@ static SDef *sdef_lookup(Cx *cx, const char *name, uint32_t len) {
     if (cx->sdefs[i].len == len && memcmp(cx->sdefs[i].name, name, len) == 0) return &cx->sdefs[i];
   return NULL;
 }
-static void sdef_register(Cx *cx, AstNode *node) {
+static void sdef_register(Cx *cx, AstNode *node, uint32_t tidx) {
   if (sdef_lookup(cx, node->data.defstruct.name, node->data.defstruct.name_len)) return;
   if (cx->nsdefs >= 32) { cx_fail(cx, "too many struct declarations"); return; }
   SDef *sd = &cx->sdefs[cx->nsdefs++];
   sd->name = node->data.defstruct.name;
   sd->len = node->data.defstruct.name_len;
+  sd->tidx = tidx;
   sd->nf = 0;
   for (uint32_t k = 0; k < node->data.defstruct.field_count && sd->nf < CG_MAX_PARAMS; k++) {
     sd->fn[sd->nf] = node->data.defstruct.field_names[k];
@@ -3147,19 +3148,17 @@ static IrVal emit_buf_new(Cx *cx, AstNode *ann) {
   }
   return av;
 }
-/* The struct a value expression evidently makes, for `def {..}` (#280): a constructor `[P …]`, or
- * a binding known to hold one. 1 + its cx->sdefs index; 0 when codegen cannot tell. */
-static int value_sdef1(Cx *cx, AstNode *v) {
-  if (v->type == AST_COMMAND && v->data.command.head && v->data.command.head->type == AST_LIT_STRING) {
-    SDef *sd = sdef_lookup(cx, v->data.command.head->data.lit_string.value,
-                           v->data.command.head->data.lit_string.length);
-    if (sd) return (int)(sd - cx->sdefs) + 1;
-  }
-  if (v->type == AST_VAR_REF) {
-    Binding *b = env_lookup(cx, v->data.var_ref.name, v->data.var_ref.length);
-    if (b) return b->sdef1;
-  }
-  return 0;
+/* The struct a value is known to hold, for `def {..}` (#280): the typer's verdict, or — for a
+ * struct an earlier REPL line declared, which this line's typer never saw — a constructor of it.
+ * NULL when neither can tell. */
+static SDef *value_sdef(Cx *cx, AstNode *v) {
+  if (v->inferred_type == TYPE_STRUCT && v->inferred_struct_idx != UINT32_MAX)
+    for (int i = 0; i < cx->nsdefs; i++)
+      if (cx->sdefs[i].tidx == v->inferred_struct_idx) return &cx->sdefs[i];
+  if (v->type == AST_COMMAND && v->data.command.head && v->data.command.head->type == AST_LIT_STRING)
+    return sdef_lookup(cx, v->data.command.head->data.lit_string.value,
+                       v->data.command.head->data.lit_string.length);
+  return NULL;
 }
 
 /* Record a typed collection annotation on the just-defined binding. */
@@ -4444,13 +4443,13 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     if (nt > 0 && kw_is(toks[nt - 1], "..", 2)) { all_fields = 1; nt--; }   /* `{x ..}` */
     if (all_fields && nt >= 0) {
       /* The field names come from the struct the value is known to hold. */
-      int s1 = value_sdef1(cx, node->data.command.args[1]);
-      if (!s1) {
-        cx_fail(cx, "`def {..}` binds every field of a struct, so it needs a value whose "
-                    "struct type is known here: a constructor, or a binding made or declared as one");
+      SDef *sd = value_sdef(cx, node->data.command.args[1]);
+      if (!sd) {
+        cx_fail(cx, "`def {..}` binds every field of a struct, so it needs a value whose struct "
+                    "type is known at compile time; for any other value, name the fields: "
+                    "`def {x, y} V`");
         return 0;
       }
-      SDef *sd = &cx->sdefs[s1 - 1];
       for (int f = 0; f < sd->nf && nt < CG_MAX_PARAMS; f++) {
         int named = 0;
         for (int k = 0; k < nt; k++)
@@ -4697,12 +4696,6 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     }
     /* A `mut` captured by a closure is boxed in a heap cell so the mutation is
      * shared; `def` (immutable) and uncaptured `mut` stay plain SSA values. */
-    /* The struct the binding holds, when the def names it (`def Point p V`) or its value
-     * evidently makes one: what `def {..} $p` binds (#280). */
-    SDef *tsd = (tshift && bargs[0]->type == AST_LIT_STRING)
-                    ? sdef_lookup(cx, bargs[0]->data.lit_string.value, bargs[0]->data.lit_string.length)
-                    : NULL;
-    int vs1 = tsd ? (int)(tsd - cx->sdefs) + 1 : value_sdef1(cx, bargs[tshift + 1]);
     if (hid == HEAD_MUT && is_captured_name(cx, name, len)) {
       IrVal a[] = {cx->sp, val};
       IrVal cell = emit_rt_call(cx, "jacl_cell_new", a, 2);
@@ -4728,10 +4721,6 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
         if (tt) bind_annotate(cx, name, len, tt->data.lit_string.value,
                               tt->data.lit_string.length, buf_ann_size(annsrc));
       }
-    }
-    if (vs1 && !cx->failed) {
-      Binding *nb = env_lookup(cx, name, len);
-      if (nb) nb->sdef1 = vs1;
     }
     /* A top-level binding mirrors into the module-global map so procs/closures see it. */
     if (cx->at_top_level && is_global_name(cx, name, len)) {
@@ -6059,8 +6048,8 @@ static IrVal compile_expr_node(Cx *cx, AstNode *node) {
       return emit_rt_call(cx, "jacl_ctx_set_field", a, 3);
     }
 
-    case AST_DEFSTRUCT:
-      sdef_register(cx, node);
+    case AST_DEFSTRUCT:   /* a nested declaration: the typer indexes only top-level ones */
+      sdef_register(cx, node, UINT32_MAX);
       return irb_const_i64(cx->f, cx->cur, JACLVAL_NIL);
 
     case AST_DEFMACRO:
@@ -6666,17 +6655,6 @@ static void compile_procs(Cx *cx) {
       }
     }
 
-    /* A param typed with a struct (`{Point q}`) is known to hold one: `def {..} $q` (#280). */
-    if (!p->is_generator) {
-      const char *pty[CG_MAX_PARAMS]; uint32_t ptl[CG_MAX_PARAMS];
-      int nty = extract_param_types(def->data.command.args[1], pty, ptl);
-      for (int k = 0; k < nty && k < arity; k++) {
-        SDef *sd = pty[k] ? sdef_lookup(cx, pty[k], ptl[k]) : NULL;
-        Binding *b = sd ? env_lookup(cx, names[k], lens[k]) : NULL;
-        if (b) b->sdef1 = (int)(sd - cx->sdefs) + 1;
-      }
-    }
-
     /* By-value `[Buf N T]` params: copy the caller's array into a fresh one so callee
      * mutations don't escape (BUFFER_DESIGN.md Tier 2). Non-array args pass through. */
     if (!p->is_generator) {
@@ -6820,7 +6798,7 @@ IrModule *temen_codegen_program(AstNode **nodes, uint32_t count, int module_mode
   IrBlock main_block = inline_guest ? entry_block : irb_block(mainf, i64_2, 2);
 
   for (uint32_t i = 0; i < count; i++)                /* pass 0: struct declarations */
-    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i], nodes[i]->inferred_struct_idx);
   register_externs(&cx, nodes, count);  /* pass 0b: extern (FFI) declarations */
   scan_top_globals(&cx, nodes, count); /* top-level def/mut names → module globals */
   for (uint32_t i = 0; i < count; i++) mark_proc_global_refs(&cx, nodes[i]); /* …the ones procs touch */
@@ -6919,9 +6897,9 @@ IrModule *temen_codegen_repl(AstNode **nodes, uint32_t count, const TemenReplEnv
    * unit names one of them (a slot each, temen §22 unit-own funcrefs); in a leaf it does nothing. */
   IrFunc *reg = irb_func_new(m, i64_2, 2, r1, 1);
 
-  for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i]);
+  for (uint32_t i = 0; i < env->nstructs; i++) sdef_register(&cx, env->structs[i], UINT32_MAX);
   for (uint32_t i = 0; i < count; i++)
-    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i]);
+    if (nodes[i]->type == AST_DEFSTRUCT) sdef_register(&cx, nodes[i], nodes[i]->inferred_struct_idx);
   register_externs(&cx, nodes, count);
   for (uint32_t i = 0; i < env->nglobals; i++) global_add(&cx, env->globals[i], env->global_lens[i]);
   scan_top_globals(&cx, nodes, count);

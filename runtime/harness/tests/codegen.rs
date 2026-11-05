@@ -1762,8 +1762,8 @@ fn a_closure_rest_parameter_collects_the_rest() {
 fn a_destructuring_dotdot_binds_the_other_fields() {
     // #280: `def {..} $p` and `def {x, ..} $p` failed to compile ("binding form needs a name and a
     // value"), and `def {x, ..rest} $p` sliced a struct as a vector. A bare `..` binds every field
-    // of a struct whose type codegen can see; `..rest` collects a struct's or a map's other fields
-    // into a map, and a vector's other elements into a vector.
+    // of a struct whose type is known at compile time; `..rest` collects a struct's or a map's
+    // other fields into a map, and a vector's other elements into a vector.
     let out = staged_stdout(
         "dotdot_destructure",
         "struct P {i32 x, i32 y, i32 z}\n\
@@ -1784,7 +1784,46 @@ fn a_destructuring_dotdot_binds_the_other_fields() {
     );
     assert_eq!(out, "6\n3\n9\n2\nfalse\ntrue\n[vec 2 3]\n");
     let err = staged_emit_error("dotdot_unknown", "def ps [vec 1]\ndef {..} [vec-get $ps 0]\n");
-    assert!(err.contains("struct type is known here"), "{err}");
+    assert!(err.contains("struct type is known at compile time"), "{err}");
+}
+
+#[test]
+fn a_destructuring_dotdot_takes_the_struct_the_typer_infers() {
+    // #280: `def {..}` found its struct only in a constructor or a binding codegen had watched being
+    // made, so a global struct read in a proc, a proc's typed return, and a loop over a vec of
+    // structs failed to compile. It takes the struct the typer infers. A vec literal of one struct
+    // carries that element type, and a `def` keeps it; a `mut` does not (it may be set to any vec),
+    // nor does a pushed copy. The names `..` binds are the typer's too, so the field `x` is an i32
+    // here even where an outer `x` is a str.
+    let out = staged_stdout(
+        "dotdot_typer",
+        "struct P {i32 x, i32 y}\n\
+         struct Q {P at, str name}\n\
+         def p [P x 1 y 2]\n\
+         proc show {} { def {..} $p; + $x $y }\n\
+         print [show]\n\
+         proc origin {} P { P x 5 y 6 }\n\
+         def {..} [origin]\n\
+         print [+ $x $y]\n\
+         def ps [vec [P x 10 y 20] [P x 30 y 40]]\n\
+         for $ps q { def {..} $q; print [+ $x $y] }\n\
+         def {..} [Q at [P x 3 y 4] name n]\n\
+         def {..} $at\n\
+         print \"$name $x $y\"\n",
+    );
+    assert_eq!(out, "3\n11\n30\n70\nn 3 4\n");
+    let out = staged_stdout(
+        "dotdot_shadow",
+        "struct P {i32 x, i32 y}\ndef str x outer\ndef {..} [P x 7 y 8]\ndef i32 w $x\nprint $w\n",
+    );
+    assert_eq!(out, "7\n");
+    for (name, src) in [
+        ("dotdot_mut", "mut ms [vec [P x 1 y 2]]\nfor $ms q { def {..} $q }\n"),
+        ("dotdot_pushed", "def ps [vec [P x 1 y 2]]\nfor [vec-push $ps 9] q { def {..} $q }\n"),
+    ] {
+        let err = staged_emit_error(name, &format!("struct P {{i32 x, i32 y}}\n{src}"));
+        assert!(err.contains("struct type is known at compile time"), "{name}: {err}");
+    }
 }
 
 /// `# expect-error:` programs in `test/jacl` that do not yet fail with their message on TEMEN
