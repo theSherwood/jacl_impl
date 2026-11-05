@@ -1808,6 +1808,29 @@ fn a_c_style_for_runs_init_then_cond_body_step() {
     assert_eq!(out, "24\n12\n3\n");
 }
 
+#[test]
+fn an_it_lambda_shares_the_mut_it_captures() {
+    // `[\ cmd …]`, the implicit-`it` lambda, was not seen as a closure when codegen chose which
+    // `mut`s to box, so capturing one failed to compile ("captured mutable not boxed") — at the top
+    // level and in a proc, through a var-ref or a bare `set` target.
+    let out = staged_stdout(
+        "itlambda",
+        "mut n 0\n\
+         def bump [\\ set n [+ $n $it]]\n\
+         bump 5\n\
+         bump 2\n\
+         print $n\n\
+         proc k {} {\n\
+           mut flag 0\n\
+           def raise [\\ set flag 1]\n\
+           raise 0\n\
+           print $flag\n\
+         }\n\
+         k\n",
+    );
+    assert_eq!(out, "7\n1\n");
+}
+
 const PIPELINES_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines.jacl");
 const STAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pipelines");
 

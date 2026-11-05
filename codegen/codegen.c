@@ -2074,6 +2074,8 @@ static void collect_caps(Cx *cx, AstNode *node, const char **bound, uint32_t *bl
   }
 }
 
+HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
+
 /* Is `node` a closure literal? Lambda `[\ {params} {body}]` (params in a BLOCK) or
  * anonymous `[proc {params} {body}]` (empty name). Fills the out-params if so. */
 static int closure_literal(AstNode *node, AstNode **pnode, int *in_block, AstNode **body) {
@@ -2218,6 +2220,20 @@ static void capset_scan(Cx *cx, AstNode *node) {
     collect_bound(body, bound, blen, &nb);
     add_free_varrefs(body, bound, blen, nb, cx->capset, cx->capsetlen, &cx->ncapset);
     return; /* don't descend into the closure */
+  }
+  /* `[\ * $it 2]`, an implicit-`it` lambda: its body is the command its args make, as
+   * compile_expr builds it. */
+  AstNode *h = node->type == AST_COMMAND ? node->data.command.head : NULL;
+  if (h && h->type == AST_LIT_STRING && h->data.lit_string.length == 1 && h->data.lit_string.value[0] == '\\' &&
+      node->data.command.arg_count >= 1 && node->data.command.args[0]->type != AST_BLOCK) {
+    AstNode cmd = *node;
+    cmd.data.command.head = node->data.command.args[0];
+    cmd.data.command.args = node->data.command.args + 1;
+    cmd.data.command.arg_count = node->data.command.arg_count - 1;
+    cmd.data.command.head_id = jacl_compute_head_id_bridge(cmd.data.command.head);
+    const char *bound[1] = {"it"}; uint32_t blen[1] = {2};
+    add_free_varrefs(&cmd, bound, blen, 1, cx->capset, cx->capsetlen, &cx->ncapset);
+    return;
   }
   if (node->type == AST_RETURN) { if (node->data.return_stmt.value) capset_scan(cx, node->data.return_stmt.value); return; }
   if (node->type == AST_BLOCK) { for (uint32_t i = 0; i < node->data.block.count; i++) capset_scan(cx, node->data.block.commands[i]); return; }
@@ -2624,7 +2640,6 @@ static IrVal compile_for_cstyle(Cx *cx, AstNode *hdr, AstNode *body) {
 }
 
 /* Synthesized AST nodes (heap-allocated; live for the compile) for sugar forms. */
-HeadId jacl_compute_head_id_bridge(AstNode *head); /* frontend (via the unity driver) */
 static AstNode *synth_word(const char *v, uint32_t len) {
   AstNode *n = calloc(1, sizeof(AstNode));
   n->type = AST_LIT_STRING;
