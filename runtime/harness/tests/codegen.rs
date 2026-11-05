@@ -1862,6 +1862,24 @@ fn and_and_or_short_circuit_like_their_operators() {
 }
 
 #[test]
+fn a_spread_in_a_vec_splices_its_elements() {
+    // #273: `[vec 1 ..$more]` failed ("unsupported AST node (type 19)"): codegen spliced a spread
+    // only into an operator or a variadic call. Spreading what is not a vector is an error value
+    // (jacl_vec_concat checked no tag before, and read whatever it was given as a vector).
+    let out = staged_stdout(
+        "vecspread",
+        "def more [vec 2 3]\n\
+         print [vec 1 ..$more 4 ..$more]\n\
+         print [vec ..[vec] ..$more]\n\
+         proc f {..xs} { vec-len [vec 0 ..$xs] }\n\
+         print [f 7 8]\n\
+         print [error? [vec 1 ..5]]\n\
+         print [error? [vec-concat [vec 1] 5]]\n",
+    );
+    assert_eq!(out, "[vec 1 2 3 4 2 3]\n[vec 2 3]\n3\ntrue\ntrue\n");
+}
+
+#[test]
 fn a_c_style_for_runs_init_then_cond_body_step() {
     // `for {init; cond; step} { body }` had no lowering: it fell into `for COLL { body }` and
     // iterated over the header block's value. `continue` runs the step; `break` leaves the loop;

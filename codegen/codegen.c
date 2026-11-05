@@ -4798,10 +4798,13 @@ static IrVal compile_cmd_binding_forms(Cx *cx, AstNode *node, uint8_t hid, int *
     IrVal empty[] = {cx->sp};
     IrVal acc = emit_rt_call(cx, "jacl_vec_empty", empty, 1);
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-      IrVal e = compile_elem_pinned(cx, node->data.command.args[i], &acc);
+      /* `..$xs` splices the vector's elements, as into a variadic call's rest vector. */
+      AstNode *an = node->data.command.args[i];
+      int spread = an->type == AST_SPREAD;
+      IrVal e = compile_elem_pinned(cx, spread ? an->data.spread.expr : an, &acc);
       if (cx->failed) return 0;
       IrVal a[] = {cx->sp, acc, e};
-      acc = emit_rt_call(cx, "jacl_vec_push", a, 3);
+      acc = emit_rt_call(cx, spread ? "jacl_vec_concat" : "jacl_vec_push", a, 3);
     }
     return acc;
   }
