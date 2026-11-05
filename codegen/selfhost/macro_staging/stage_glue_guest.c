@@ -162,7 +162,8 @@ size_t synrt_build_symtab(unsigned char *out, size_t cap) {
     SYM(jacl_len); SYM(jacl_eq); SYM(jacl_add); SYM(jacl_sub); SYM(jacl_mul); \
     SYM(jacl_first); SYM(jacl_index_get); \
     /* closures (spawn/parallel/race compile each { block } to a 0-param closure) */ \
-    SYM(jacl_closure_new); SYM(jacl_closure_set); SYM(jacl_closure_fn); SYM(jacl_is_closure_v); \
+    SYM(jacl_closure_new); SYM(jacl_closure_new_shape); SYM(jacl_closure_set); SYM(jacl_closure_fn); \
+    SYM(jacl_closure_fn_for); SYM(jacl_closure_arity_error); SYM(jacl_is_closure_v); \
     SYM(jacl_proc_sig_register); \
     /* top-level `def` bindings become runtime globals (jacl_global_get/set) */ \
     SYM(jacl_global_get); SYM(jacl_global_set); \

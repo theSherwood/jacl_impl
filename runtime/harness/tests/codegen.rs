@@ -1708,11 +1708,61 @@ fn a_shell_argument_is_one_word() {
     );
 }
 
+#[test]
+fn a_closure_called_with_the_wrong_number_of_arguments_is_an_error() {
+    // #281: an indirect call checked only that the callee was a closure, so a wrong argument count
+    // reached call_indirect, and the guest was killed (IndirectCallType). A closure now records how
+    // many parameters it takes, and a call that does not match is a catchable error.
+    let out = staged_stdout(
+        "closure_arity",
+        "proc add3 {a, b, c} { + [+ $a $b] $c }\n\
+         def f $add3\n\
+         print [f 1 2 3]\n\
+         print [$f 1]\n\
+         def g [\\ {x} { * $x 2 }]\n\
+         print [g 3 4]\n\
+         print [error? [g 3 4]]\n\
+         print [collect [transform [vec 1] [\\ {a b} { + $a $b }]]]\n",
+    );
+    assert_eq!(
+        out,
+        "6\n<error: proc 'f' expects 3 arguments but got 1>\n\
+         <error: proc 'g' expects 1 argument but got 2>\ntrue\n\
+         [vec \"closure expects 2 arguments but got 1\"]\n"
+    );
+}
+
+#[test]
+fn a_closure_rest_parameter_collects_the_rest() {
+    // #280: `[\ {a, ..rest} …]` bound `..` and `rest` as two parameters, so a call with any other
+    // count trapped, and a variadic proc used as a value did too. A closure whose last parameter
+    // collects the rest takes its arguments packed in one vector.
+    let out = staged_stdout(
+        "closure_rest",
+        "def r [\\ {a, ..rest} { vec-len $rest }]\n\
+         print [r 1 2 3]\n\
+         print [r 1]\n\
+         print [r]\n\
+         def p [proc {a, ..rest} { vec-len $rest }]\n\
+         print [p 1 2 3]\n\
+         def all [\\ {..xs} { vec-len $xs }]\n\
+         print [all]\n\
+         print [collect [transform [vec 7 8] $all]]\n\
+         proc lg {l, ..m} { vec-len $m }\n\
+         def h $lg\n\
+         print [h 1 2 3]\n",
+    );
+    assert_eq!(
+        out,
+        "2\n0\n<error: proc 'r' expects at least 1 argument but got 0>\n2\n0\n[vec 1 1]\n2\n"
+    );
+}
+
 /// `# expect-error:` programs in `test/jacl` that do not yet fail with their message on TEMEN
 /// (#281): mostly checks the legacy compiler made and nothing ported. When a fix makes one fail as
 /// it says, take it off; the gate fails while a listed program passes, so the list only shrinks.
 const EXPECT_ERROR_BURN_DOWN: &[&str] = &[
-    "arity_alias", "arr_ref_elem_error", "arr_wide_dyn_error", "buf_literal_mismatch",
+    "arr_ref_elem_error", "arr_wide_dyn_error", "buf_literal_mismatch",
     "buf_literal_overflow", "buf_literal_value_negative", "buf_literal_value_overflow",
     "buf_proc_param_value_size_cap", "ctx_def_reserved_error", "ctx_dup_pwd_error",
     "ctx_mut_reserved_error", "ctx_set_immutable_error", "ctx_unknown_field_error",
