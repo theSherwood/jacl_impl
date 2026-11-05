@@ -1115,9 +1115,6 @@ fn string_slice_from() {
 /// Absolute path to the canonical syntax tour.
 const TOUR_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/tour.jacl");
 
-/// Repo root (for the codegen sources + macro-staging bridge the staged driver links).
-const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-
 /// JACL error flag — bit 61 of a `JaclVal` (mirrors `JACL_FLAG_ERROR` in `runtime/jaclrt.h`).
 /// A failed `assert` expands to `panic`, which the TEMEN backend surfaces as an error *value*
 /// that auto-returns out of the job (builtins.c `jacl_panic`) — so a tripped assert shows up
@@ -1136,60 +1133,14 @@ fn target_profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Build the **TEMEN-staged** frontend driver: `emit_jacl` + codegen + the macro-staging bridge
-/// (`stage_bridge.c`), linked against this crate's `libjacl_runtime_harness.a` (which exports
-/// `jacl_temen_stage`). This is the `codegen/selfhost/macro_staging/run_diff.sh --temen` recipe. It
-/// is required for tour.jacl specifically: the tour defines and invokes a `defmacro`, and macro
-/// bodies now expand by staging on the TEMEN engine (there is no legacy bytecode compiler to fall
-/// back to), so the plain emit-only `driver()` rejects it with "emit-only build". Cached per
+/// The **TEMEN-staged** frontend driver (`jacl_runtime_harness::staged_driver`): a program that
+/// defines a `defmacro`, as tour.jacl does, needs it, since macro bodies expand by staging on the
+/// TEMEN engine and the plain emit-only `driver()` rejects one with "emit-only build". Cached per
 /// test process.
 fn staged_driver() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let profile_dir = target_profile_dir();
-        let staticlib = profile_dir.join("libjacl_runtime_harness.a");
-        // `cargo test` builds only the test binary + rlib, not the `[staticlib]` artifact the C
-        // driver links against — materialize it. Always ask cargo (a no-op when it is current):
-        // checking only that the file exists linked a stale one after a temen bump, whose decoder
-        // rejected the wire version the C encoder now emits.
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
-        if profile_dir.file_name().and_then(|s| s.to_str()) == Some("release") {
-            cmd.arg("--release");
-        }
-        let st = cmd.status().expect("spawn cargo build --lib");
-        assert!(
-            st.success() && staticlib.exists(),
-            "could not build {} for the staged driver",
-            staticlib.display()
-        );
-        // Beside the staticlib, so a run overwrites the last one's rather than leaving 23 MB in
-        // the temp directory each time (#198); built under a name of its own and renamed into
-        // place, since several test binaries may build it at once.
-        let out = profile_dir.join("jacl_emit_staged");
-        let tmp = profile_dir.join(format!("jacl_emit_staged.{}", std::process::id()));
-        let status = Command::new("gcc")
-            .args(["-DJACL_STAGE_ON_TEMEN_BUILD", "-std=gnu11", "-O1", "-w", "-D_GNU_SOURCE"])
-            .arg("-I")
-            .arg(format!("{REPO_ROOT}/codegen"))
-            .arg(format!("{REPO_ROOT}/codegen/tests/emit_jacl.c"))
-            .arg(format!("{REPO_ROOT}/codegen/codegen.c"))
-            .arg(format!("{REPO_ROOT}/codegen/irbuilder.c"))
-            .arg(format!("{REPO_ROOT}/codegen/selfhost/macro_staging/stage_bridge.c"))
-            .arg("-L")
-            .arg(&profile_dir)
-            // The Rust staticlib pulls in libstd's system deps — the same link line run_diff.sh uses.
-            .args([
-                "-ljacl_runtime_harness", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl",
-                "-lc",
-            ])
-            .arg("-o")
-            .arg(&tmp)
-            .status()
-            .expect("spawn gcc (staged driver)");
-        assert!(status.success(), "gcc failed to build the TEMEN-staged codegen driver");
-        std::fs::rename(&tmp, &out).expect("move the staged driver into place");
-        out
+        jacl_runtime_harness::staged_driver(&target_profile_dir()).unwrap_or_else(|e| panic!("{e}"))
     })
     .as_path()
 }
