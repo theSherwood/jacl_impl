@@ -140,6 +140,21 @@ it has domain errors instead. Full rules: `docs/TEMEN_NUMERICS.md`.
 - **Scripts:** bare unknown commands are compile errors (strict by default)
 - **Pragma `#! path-fallback`:** opt-in for scripts to enable `$PATH` fallback (file-level)
 
+### Arguments are words
+
+After `!`, the command's name and arguments are words separated by whitespace, as in a shell, not
+JACL tokens: `!ls -la /usr/bin` and `!git log --format=%H ../src` pass one argument per word.
+
+- A word ends at whitespace, or at a newline, `;`, `|`, `&`, `]` or `}`, which end the command as
+  they do elsewhere. A `[` or `{` the word opens keeps its own closer: `file[0-9].txt`, `{a,b}`.
+- A quoted run joins a word, spaces and all: `"my file.txt"`, `--msg="hi there"`. Escapes and
+  `$name` / `$[...]` work inside a word as in a string: `$dir/sub`.
+- `$name` or `$[...]` alone passes the value, `[...]` is a JACL expression, and `..$xs` or
+  `..[...]` spreads a vector into separate arguments.
+- A plain decimal integer (`42`, `-7`) is that number, so a JACL program stage receives it as a
+  value. A host command receives each argument as text (a value as its printed form), so it gets
+  `42` as written. Any other word, `0755` and `1.10` included, is text.
+
 ### `!cmd` — simple form (95% of use cases)
 
 Returns stdout as a string value on success, error value on failure.

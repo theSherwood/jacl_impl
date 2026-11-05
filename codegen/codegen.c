@@ -3855,10 +3855,13 @@ static IrVal compile_shell_stages(Cx *cx, AstNode *node) {
   if (cx->failed) return 0;
   { IrVal a[] = {cx->sp, argv, headv}; argv = emit_rt_call(cx, "jacl_vec_push", a, 3); }
   for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-    IrVal e = compile_elem_pinned(cx, node->data.shell_cmd.args[i], &argv);
+    /* `..$args` splices the vector's elements, one argument each. */
+    AstNode *an = node->data.shell_cmd.args[i];
+    int spread = an->type == AST_SPREAD;
+    IrVal e = compile_elem_pinned(cx, spread ? an->data.spread.expr : an, &argv);
     if (cx->failed) return 0;
     IrVal a[] = {cx->sp, argv, e};
-    argv = emit_rt_call(cx, "jacl_vec_push", a, 3);
+    argv = emit_rt_call(cx, spread ? "jacl_vec_concat" : "jacl_vec_push", a, 3);
   }
   IrVal a[] = {cx->sp, stages, argv};
   return emit_rt_call(cx, "jacl_vec_push", a, 3);

@@ -1950,10 +1950,12 @@ static AstNode* parser__parse_shell_cmd(Parser* p, int in_brackets) {
   Token* bang = parser__advance(p); /* consume '!' */
   SourcePos start = parser__token_start(bang);
 
-  /* Parse command name: word, string, or variable */
+  /* Parse command name: a shell word (which may interpolate, as `$dir/run.sh` does), a
+   * variable, or a `$[...]` expression */
   Token* cmd_tok = parser__peek(p);
   if (cmd_tok->type != TOKEN_WORD && cmd_tok->type != TOKEN_STRING &&
-      cmd_tok->type != TOKEN_VAR) {
+      cmd_tok->type != TOKEN_STRING_BEGIN && cmd_tok->type != TOKEN_VAR &&
+      cmd_tok->type != TOKEN_DOLLAR_BRACKET) {
     return parser__error(p, "expected command name after '!'", cmd_tok);
   }
 

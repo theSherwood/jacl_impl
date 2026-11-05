@@ -1676,6 +1676,39 @@ fn a_bracketed_shell_command_is_a_value() {
 }
 
 #[test]
+fn a_shell_argument_is_one_word() {
+    // #277: shell arguments lexed as JACL tokens, so `-la` reached echo as `-` and `la`, `/usr/bin`
+    // as four pieces, and `--color=auto` did not lex. Now whitespace separates words; a quoted run
+    // joins one; `$name` alone is its value and with text around it interpolates; `..$xs` spreads
+    // (it did not compile: no shell argument spread had a lowering); a value that is not a string
+    // is passed as its text. A plain integer (`-1`) lexes as the number, for a JACL stage, and
+    // reaches a host command as written; `0755` and `1.10`, which would not print back so, stay text.
+    let path = std::env::temp_dir().join(format!("jacl_shell_words_{}.jacl", std::process::id()));
+    std::fs::write(
+        &path,
+        "def dir \"/tmp\"\n\
+         def args [vec p q]\n\
+         def n 7\n\
+         print [!echo -n -la /usr/bin ../x x.y *.jacl --color=auto a=b -1 0755 1.10]\n\
+         print [!echo -n --msg=\"hi there\" $dir/sub ..$args $n file[0-9].txt {a,b}]\n",
+    )
+    .expect("write fixture");
+    let (linked, entry) = emit_and_link_file(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    let caps = [("exec", temen_run::exec::host_exec(&["echo"]))];
+    let run = inst
+        .run_with_caps(temen_run::Backend::Jit, &temen_run::RunConfig::default(), &caps)
+        .expect("run");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "-la /usr/bin ../x x.y *.jacl --color=auto a=b -1 0755 1.10\n\
+         --msg=hi there /tmp/sub p q 7 file[0-9].txt {a,b}\n"
+    );
+}
+
+#[test]
 fn clock_reads_the_granted_clock() {
     // `[clock]` (runtime/clockcap.c) is the granted "clock" capability's op 0: the host's time in
     // nanoseconds, which the file reads from a clock that starts at 2^40 and moves 2 ms a read, on

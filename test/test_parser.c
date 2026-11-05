@@ -3163,14 +3163,16 @@ static int test_shell_cmd_multiple_args(void) {
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_SHELL_CMD);
   ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "git", 3) == 0);
-  /* --short lexes as OPERATOR(--) + WORD(short), so 3 args */
-  ASSERT(n->data.shell_cmd.arg_count >= 2);
+  /* a shell argument is one word: status, --short (#277) */
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 2);
+  ASSERT_U32_EQ(n->data.shell_cmd.args[1]->data.lit_string.length, 7);
+  ASSERT(memcmp(n->data.shell_cmd.args[1]->data.lit_string.value, "--short", 7) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* !ls -la → handles flag-style args (-la is OPERATOR + WORD) */
+/* !ls -la → a flag is one argument (#277: it lexed as OPERATOR(-) + WORD(la), two) */
 static int test_shell_cmd_flag_args(void) {
   setup();
   ParseResult r = parse("!ls -la");
@@ -3179,8 +3181,9 @@ static int test_shell_cmd_flag_args(void) {
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_SHELL_CMD);
   ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
-  /* -la lexes as OPERATOR(-) + WORD(la), so 2 args */
-  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 2);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
+  ASSERT_U32_EQ(n->data.shell_cmd.args[0]->data.lit_string.length, 3);
+  ASSERT(memcmp(n->data.shell_cmd.args[0]->data.lit_string.value, "-la", 3) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();

@@ -47,6 +47,7 @@ JaclVal jacl_exec_capture(JaclVal argv) {
   for (int32_t i = 0; i < n; i++) {
     JaclVal e = jacl_vec_get_at(argv, jaclrt_i32(i));
     if (jaclrt_is_error(e)) return e;
+    if (!jaclrt_is_string(e)) e = jacl_to_string(e);   /* an argument is its text, as "$x" is */
     if (!jaclrt_is_string(e)) return jaclrt_error();
     uint32_t el = jacl_str_len(e);
     if (alen + el + 1 > sizeof ab) return jaclrt_error();
