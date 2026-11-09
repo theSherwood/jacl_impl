@@ -27,6 +27,10 @@
 static unir_service *jacl_services[JACL_SERVICES];
 /* Whether each was opened with the vat's notification, which its events signal while it is armed. */
 static uint8_t jacl_service_woken[JACL_SERVICES];
+/* jacl_unir_stirs when each session's last `service-event` returned (or it opened): a task's write
+ * or end since then ends its next stirred wait at once, so none is lost between a program's look
+ * at its tasks and its next wait. */
+static int32_t jacl_service_stirs[JACL_SERVICES];
 
 static unir_service *service_of(JaclVal s) {
   if (!jaclrt_is_i32(s)) return 0;
@@ -64,6 +68,7 @@ static JaclVal service_open(JaclVal name, JaclVal note) {
   if (s) {
     jacl_services[slot] = s;
     jacl_service_woken[slot] = !jaclrt_is_nil(note);
+    jacl_service_stirs[slot] = __vm_atomic_load32(&jacl_unir_stirs);
   }
   vat_give();
   if (s) return jaclrt_i32(slot);
@@ -126,40 +131,24 @@ JaclVal jacl_service_call(JaclVal svc, JaclVal req) {
   return service_result(s, r, "service-call");
 }
 
-/* [service-event S WAIT]: the service's next event as [map name value], or nil if none came: at
- * once if WAIT is false or nil; when one comes if WAIT is true; and if WAIT is a number of
- * seconds, within that long, or sooner once one of this program's tasks writes to a transcript or
- * ends (vat_stir), so a shell waiting for its pane notices its jobs (#219). Waiting for a service
- * opened with the vat's notification, it arms the service, whose next event signals the
- * notification, and parks until the notification's waiter or a task's write moves
- * jacl_unir_events; only a task's write or end moves jacl_unir_stirs. Any other service it polls,
- * giving the vat back between polls, from 50 microseconds apart to a millisecond. */
-JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
-  unir_service *s = service_of(svc);
-  if (!s) return chan_err("service-event: not an open service");
-  /* How long it may wait: not at all (0), as long as it takes (-1), or WAIT seconds. */
-  long left = jaclrt_is_bool(wait) && jaclrt_as_bool(wait) ? -1 : 0;
-  if (!jaclrt_is_nil(wait) && !jaclrt_is_bool(wait)) {
-    double secs = jacl_secs(wait);
-    if (!(secs >= 0)) return chan_err("service-event: WAIT is not a boolean or a number of seconds");
-    left = secs < 1e9 ? (long)(secs * 1e9) : (long)1e18;
-  }
-  int woken = jacl_service_woken[jaclrt_as_i32(svc)];
-  int32_t start = __vm_atomic_load32(&jacl_unir_stirs);
+/* The service's next event, waiting as jacl_service_event says: `left` ns (-1: as long as it
+ * takes), ended early by a task's write or end since `start` if `stirred`. */
+static JaclVal service_event_wait(unir_service *s, int woken, long left, int stirred, int32_t start) {
   for (long idle = 50000;; idle = idle < 1000000 ? idle * 2 : 1000000) {
     int32_t seen = __vm_atomic_load32(&jacl_unir_events);
-    if (left > 0 && __vm_atomic_load32(&jacl_unir_stirs) != start) return JACL_NIL;   /* a task wrote or ended */
+    if (stirred && __vm_atomic_load32(&jacl_unir_stirs) != start) return JACL_NIL;   /* a task wrote or ended */
     unir_vat *vat = vat_take();
     int64_t r = unir_service_event(vat, s, 0);
     int64_t armed = r == 0 && left && woken ? unir_service_arm(vat, s) : 0;
     vat_give();
     if (r != 0 || !left) return service_result(s, r, "service-event");
     /* Armed, or polling: wait for the next poll, an event, a task's write, or the time WAIT
-     * allows, at most a slice at a time. Not armed but woken, an event is ready: look again. */
+     * allows, a bounded wait at most a slice at a time. Not armed but woken, an event is ready:
+     * look again. */
     if (armed > 0 || !woken) {
-      long ns = left < 0 || left > JACL_UNIR_SLICE_NS ? JACL_UNIR_SLICE_NS : left;
-      if (!woken && idle < ns) ns = idle;
-      int32_t mark = !woken ? 0 : left < 0 ? -1 : (int32_t)(ns / 1000 + 1);
+      long ns = !woken ? (left > 0 && left < idle ? left : idle)
+              : left < 0 ? -1 : left > JACL_UNIR_SLICE_NS ? JACL_UNIR_SLICE_NS : left;
+      int32_t mark = !woken ? 0 : ns < 0 ? -1 : (int32_t)(ns / 1000 + 1);
       if (vat_await(seen, ns, mark) == 2 && left > 0) left = left > ns ? left - ns : 0;
     }
     if (armed > 0) {
@@ -170,6 +159,38 @@ JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
     jacl_ctl_point();   /* a waiting job can be cancelled or suspended */
     if (!left) return JACL_NIL;
   }
+}
+
+/* [service-event S WAIT]: the service's next event as [map name value], or nil if none came: at
+ * once if WAIT is false or nil; when one comes if WAIT is true; and if WAIT is a number of
+ * seconds, within that long, or sooner once one of this program's tasks has written to a
+ * transcript or ended (vat_stir) since the last `service-event` on S returned, so a shell waiting
+ * for its pane notices its jobs (#219) and misses none that ended while it looked at the others
+ * (jacl_impl#270). A negative number has no bound: when one comes, or a task writes or ends.
+ * Waiting for a service opened with the vat's notification, it arms the service, whose next event
+ * signals the notification, and parks until the notification's waiter, a task's write or end, or a
+ * request to stop the task moves jacl_unir_events; only a task's write or end moves
+ * jacl_unir_stirs. Any other service it polls, giving the vat back between polls, from 50
+ * microseconds apart to a millisecond. */
+JaclVal jacl_service_event(JaclVal svc, JaclVal wait) {
+  unir_service *s = service_of(svc);
+  if (!s) return chan_err("service-event: not an open service");
+  /* How long it may wait: not at all (0), as long as it takes (-1), or WAIT seconds; and whether
+   * a task's write or end ends the wait (`stirred`), as it does a number's. */
+  long left = jaclrt_is_bool(wait) && jaclrt_as_bool(wait) ? -1 : 0;
+  int stirred = 0;
+  if (!jaclrt_is_nil(wait) && !jaclrt_is_bool(wait)) {
+    double secs = jacl_secs(wait);
+    if ((!jacl_is_num(wait) && !jacl_is_f64(wait)) || secs != secs)
+      return chan_err("service-event: WAIT is not a boolean or a number of seconds");
+    left = secs < 0 ? -1 : secs < 1e9 ? (long)(secs * 1e9) : (long)1e18;
+    stirred = 1;
+  }
+  int32_t i = jaclrt_as_i32(svc);
+  JaclVal v = service_event_wait(s, jacl_service_woken[i], left, stirred, jacl_service_stirs[i]);
+  /* What the program sees next starts here: it looks at its tasks after this returns. */
+  jacl_service_stirs[i] = __vm_atomic_load32(&jacl_unir_stirs);
+  return v;
 }
 
 /* [service-send S [map NAME V]]: V as a message of the entry named NAME; nil, or an error. */

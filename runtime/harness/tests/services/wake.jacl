@@ -3,8 +3,9 @@
 ## wake — a pane client that waits on the vat's notification (#219; theSherwood/unir#208): run by
 ## unir's store vat in its `shell` mode, as pane.jacl is, which grants it the notification the
 ## pane's events signal as `n`. A wait of a number of seconds ends at its time, or sooner once
-## a task writes to a transcript or ends; a key the terminal types ends one with the key. The waits
-## a task ends would otherwise last ten minutes.
+## a task has written to a transcript or ended since the last call returned, so none is lost
+## (jacl_impl#270); a key the terminal types ends one with the key. The waits a task ends would
+## otherwise last ten minutes.
 ##
 
 ## Asserts that R is not an error.
@@ -32,13 +33,21 @@ proc main {} {
   def w [spawn { sleep 0.05; ok [transcript-line $t "written"] }]
   assert [== [service-event $p 600] $nil]
   await $w
-  ## So does a task's end.
+  ## So does a task's end. A look first (WAIT false) makes the session's last call now.
+  assert [== [service-event $p $false] $nil]
   def e [spawn { sleep 0.05 }]
   assert [== [service-event $p 600] $nil]
   await $e
-  ## The terminal types a key once this line shows.
+  ## A task that ended after the last call returned, before the wait began, ends it at once: none
+  ## is lost between a look at the tasks and the next wait.
+  assert [== [service-event $p $false] $nil]
+  await [spawn { 0 }]
+  assert [== [service-event $p 600] $nil]
+  ## The terminal types a key once this line shows. The program's own write is a write too, so the
+  ## first wait may come back with nothing.
   ok [transcript-line $t "ready"]
-  def k [service-event $p 600]
+  mut k [service-event $p 600]
+  while [== $k $nil] { set k [service-event $p 600] }
   assert [map-has $k "keys"]
   ok [transcript-line $t "keyed"]
   assert [map-has [service-call $s [map "Commit" [map "name" "~done" "base" $nil "edits" [vec]]]] "Version"]

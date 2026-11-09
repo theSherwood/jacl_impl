@@ -31,6 +31,8 @@
 #define JACL_STAGE_FUEL (1ull << 40)
 /* How much of a failed stage's stderr its error value carries: the end of it. */
 #define JACL_STAGE_ERR_TAIL 512u
+/* How long a pipeline's reader waits on its output before it pumps the stages' stderr and looks
+ * at its job's requests again (pipe_read): nothing yet waits on several edges at once. */
 #define JACL_STAGE_POLL_NS 1000000
 /* A stage's spawn payload, its arguments and environment as one value (docs/CTX_ENV.md): at most
  * the args area (unir.h, unir_spawn). */
@@ -64,7 +66,7 @@ static void stage_open(void) {
   if (__vm_atomic_load32(&jacl_stage_opened) == 2 || !jacl_stage()) return;
   if (__vm_atomic_cas32(&jacl_stage_opened, 0, 1) != 0) {
     while (__vm_atomic_load32(&jacl_stage_opened) != 2)
-      __vm_wait32(&jacl_stage_opened, 1, JACL_STAGE_POLL_NS);
+      __vm_wait32(&jacl_stage_opened, 1, -1);
     return;
   }
   static const char *const names[3] = {"unir.stdin", "unir.stdout", "unir.stderr"};
@@ -99,11 +101,12 @@ JaclVal jacl_stdin(void) { return stage_end(0); }
 JaclVal jacl_stdout(void) { return stage_end(1); }
 JaclVal jacl_stderr(void) { return stage_end(2); }
 
-/* Claims a stage's end, waiting while another fiber's operation holds it: the wait on the busy
- * word parks this fiber, so the holder (perhaps parked for credit on this worker) can finish. */
+/* Claims a stage's end, waiting while another fiber's operation holds it, until chan_release
+ * wakes it: the wait on the busy word parks this fiber, so the holder (perhaps parked for credit
+ * on this worker) can finish. */
 static JaclChan *stage_claim(JaclVal end) {
   JaclChan *c = chan_of(end);
-  while (__vm_atomic_cas32(&c->busy, 0, 1) != 0) __vm_wait32(&c->busy, 1, JACL_STAGE_POLL_NS);
+  while (__vm_atomic_cas32(&c->busy, 0, 1) != 0) __vm_wait32(&c->busy, 1, -1);
   return c;
 }
 

@@ -272,8 +272,9 @@ proc main {} {
         set ahead [vec-slice $ahead 1 [length $ahead]]
       } else {
         ## Waiting, for the pane's next event, or until a job writes or ends, so the next pass
-        ## commits what it wrote or reaps it (#219). A second at most: a pass a second, idle.
-        set e [service-event $p [if $idle { 1 } else { $false }]]
+        ## commits what it wrote or reaps it (#219). Each of those wakes it, so it waits with no
+        ## bound (a negative WAIT): an idle shell makes no pass at all.
+        set e [service-event $p [if $idle { -1 } else { $false }]]
         set idle $false
       }
       if [== $e $nil] { set more $false } else {

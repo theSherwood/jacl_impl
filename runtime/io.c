@@ -91,14 +91,35 @@ JaclVal jacl_try_read_line(void) {
   return jacl_str_new(jacl_line, n);
 }
 
-/* `[read-line]` — `[try-read-line]` that waits for the line: in 10 ms slices while the host has
- * nothing yet, a cancellable point each (as `sleep`). */
+/* The host's stdin bell, granted as `stdin.bell` (unir decision #259.1): op 0 waits, off the
+ * caller's thread, until the host rings it, when stdin may have bytes; op 1 rings it. A ring
+ * between two waits ends the next at once, and need not say what arrived. -2 until looked up, -1
+ * if none is granted. */
+static int jacl_stdin_bell = -2;
+static int stdin_bell(void) {
+  if (jacl_stdin_bell == -2) jacl_stdin_bell = __vm_cap_resolve("stdin.bell", 10);
+  return jacl_stdin_bell;
+}
+
+/* Rings the stdin bell, if one is granted, so a `read-line` waiting on it looks again: a cancel or
+ * a suspend (sched.c's job_request) then reaches it. */
+static void stdin_bell_ring(void) {
+  int b = stdin_bell();
+  if (b >= 0) (void)__vm_host_call(b, 1, 0, 0, 0, 0);
+}
+
+/* `[read-line]` — `[try-read-line]` that waits for the line, a job-control point before each
+ * read (as `sleep`). While the host has nothing yet it waits on the host's stdin bell. A host that
+ * answers "nothing yet" and grants no bell leaves it nothing to wait on, so it reads again every
+ * 10 ms. */
 JaclVal jacl_read_line(void) {
   for (;;) {
+    jacl_ctl_point();
     JaclVal l = jacl_try_read_line();
     if (l != JACL_FALSE) return l;
-    jacl_ctl_point();
-    (void)__vm_wait32(&jacl_sleep_word, 0, 10000000L);
+    int bell = stdin_bell();
+    if (bell >= 0) (void)__vm_host_call(bell, 0, 0, 0, 0, 0);
+    else (void)__vm_wait32(&jacl_sleep_word, 0, 10000000L);
   }
 }
 

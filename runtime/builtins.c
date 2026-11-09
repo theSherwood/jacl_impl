@@ -734,10 +734,12 @@ JaclVal jacl_box_cas(JaclVal b, JaclVal cur, JaclVal nv) {
   return jaclrt_bool(__atomic_compare_exchange_n(slot, &expected, (int64_t)nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
 }
 JaclVal jacl_is_box_v(JaclVal v) { return jaclrt_bool(jaclrt_type_index(v) == 0x0B); }
-/* [sleep S] — S seconds (i32 or f32): park on a private futex word until the
- * timeout elapses (the futex wait re-checks GC, so a sleeping fiber's worker
- * still answers stop-the-world requests through the scheduler loop). */
+/* [sleep S] — S seconds (i32 or f32): one wait to the deadline, on the running task's cancel word
+ * (sched.c), so a cancel ends it at once. A suspend holds the task at the job-control point after
+ * it, so the sleep keeps its deadline. The wait parks the fiber, not its worker, which answers
+ * stop-the-world requests meanwhile. */
 int __vm_wait32(void *p, int expected, long timeout_ns);
+/* A word nothing moves, for a wait that only its timeout ends (io.c's poll of stdin). */
 static int32_t jacl_sleep_word;
 
 /* ---- `[timeout D { body }]` — a cooperative deadline over a body's sleeping ----
@@ -780,11 +782,11 @@ JaclVal jacl_sleep(JaclVal secs) {
     if (total > jacl_to_budget[lvl]) { total = jacl_to_budget[lvl]; jacl_to_fired[lvl] = 1; }
     jacl_to_budget[lvl] -= total;
   }
-  while (total > 0) {
-    jacl_ctl_point();                            /* a sleeping task can be cancelled or suspended */
-    long chunk = total > 1000000L ? 1000000L : total;   /* 1 ms slices: stay GC-responsive */
-    (void)__vm_wait32(&jacl_sleep_word, 0, chunk);
-    total -= chunk;
+  if (total > 0) {
+    jacl_ctl_point();                            /* stopped or cancelled before it sleeps */
+    int32_t *cancelled = jacl_cancel_word();
+    if (!__vm_atomic_load32(cancelled)) (void)__vm_wait32(cancelled, 0, total);
+    jacl_ctl_point();                            /* ... or while it slept */
   }
   return JACL_NIL;
 }

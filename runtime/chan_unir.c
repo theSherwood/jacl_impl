@@ -73,24 +73,20 @@ static unir_vat *unir_vat_get(void);
 
 /* The vat, one call at a time: of unir.h's calls only an edge's end operations and a
  * notification's take no vat, and this runtime's fibers run on several workers. A call waits its
- * turn parked, never spinning against a fiber parked inside one. A call that waits for a peer (a
- * service's reply, a child that starts or ends) holds the vat meanwhile; a wait that may be long
- * (a service's next event, a legacy job's next screen) does not: it waits on the vat's
- * notification, or polls, giving the vat back between polls. The vat, or 0. */
+ * turn parked, never spinning against a fiber parked inside one, until vat_give wakes it. A call
+ * that waits for a peer (a service's reply, a child that starts or ends) holds the vat meanwhile; a
+ * wait that may be long (a service's next event, a legacy job's next screen) does not: it waits on
+ * the vat's notification, or polls, giving the vat back between polls. The vat, or 0. */
 static int32_t jacl_unir_vat_lock;
 static unir_vat *vat_take(void) {
   while (__vm_atomic_cas32(&jacl_unir_vat_lock, 0, 1) != 0)
-    (void)__vm_wait32(&jacl_unir_vat_lock, 1, 1000000);
+    (void)__vm_wait32(&jacl_unir_vat_lock, 1, -1);
   return unir_vat_get();
 }
 static void vat_give(void) {
   __vm_atomic_store32(&jacl_unir_vat_lock, 0);
   (void)__vm_notify(&jacl_unir_vat_lock, 1);
 }
-
-/* Waits `ns` nanoseconds parked, as a poll's interval. */
-static int32_t jacl_unir_idle;
-static void vat_idle(long ns) { (void)__vm_wait32(&jacl_unir_idle, 0, ns); }
 
 /* The vat's notification (unir decision #208.1), once a service is opened with it ([service NAME
  * N]): the service's events signal it while it is armed, and this runtime signals it itself
@@ -101,13 +97,16 @@ static char jacl_unir_note_name[64];
 static int32_t jacl_unir_note_waiting;
 /* The badge this runtime signals itself with; a root's are small. */
 #define JACL_UNIR_OWN (1ull << 63)
-/* The longest one wait lasts: an unbounded one is made of these (temen#1711). */
+/* The longest one wait of a bounded `service-event` lasts. The runtime reads no clock, so a wait
+ * that something else ends early (another service's event) starts again with what was left when
+ * its slice began; the slices bound how late that makes it. An unbounded wait is one wait. */
 #define JACL_UNIR_SLICE_NS 1000000000L
 
-/* Moves whenever a service opened with the notification may have an event, or a task wrote to a
- * transcript or ended: what a fiber waiting for a service's next event parks on (vat_await). */
+/* Moves whenever a service opened with the notification may have an event, a task wrote to a
+ * transcript or ended, or a task was asked to stop: what a fiber waiting for a service's next
+ * event parks on (vat_await). */
 static int32_t jacl_unir_events;
-/* Moves when a task writes to a transcript or ends (vat_stir): what ends a timed wait early. */
+/* Moves when a task writes to a transcript or ends (vat_stir): what ends a stirred wait early. */
 static int32_t jacl_unir_stirs;
 
 /* Wakes the worker waiting on the notification, if one is open. */
@@ -115,28 +114,36 @@ static void vat_wake(void) {
   if (jacl_unir_note) (void)unir_notification_signal(jacl_unir_note, JACL_UNIR_OWN);
 }
 
-/* What a fiber waiting for a service's next event wants to see: a task wrote to a transcript, or
- * ended. Wakes it, and the worker waiting on the notification for it. */
-static void vat_stir(void) {
-  (void)__vm_atomic_add32(&jacl_unir_stirs, 1);
+/* Moves jacl_unir_events, so every fiber parked for an event looks again. A fiber looks when its
+ * worker re-polls it, so the caller wakes the workers too. */
+static void vat_events(void) {
   (void)__vm_atomic_add32(&jacl_unir_events, 1);
   (void)__vm_notify(&jacl_unir_events, 1 << 30);
-  vat_wake();
 }
 
-/* An idle worker's wait on the notification, up to `ns` (negative: as long as it takes), if one
- * is open and no other worker waits on it: 1 if it waited. A badge from outside, a service's
- * event, moves jacl_unir_events, so the fibers parked for one see it when the worker re-polls
- * them; this runtime's own signals moved it already. */
+/* What a fiber waiting for a service's next event wants to see: a task wrote to a transcript, or
+ * ended. Wakes it, and every worker, so its own re-polls it. */
+static void vat_stir(void) {
+  (void)__vm_atomic_add32(&jacl_unir_stirs, 1);
+  vat_events();
+  pool_wake();
+}
+
+/* An idle worker's wait on the notification, up to `ns` (negative: as long as it takes; 0: a look,
+ * which takes what came while the worker ran), if one is open and no other worker waits on it: 1 if
+ * it waited. A badge from outside, a service's event, moves jacl_unir_events, so the fibers parked
+ * for one see it when their workers re-poll them; this runtime's own signals moved it already. The
+ * other idle workers wait for a pool wake, so a badge from outside wakes them, a fiber parked on
+ * one of them may have its event, and so does the end of a wait: while this worker runs, one of
+ * them waits here instead. */
 static int vat_wait_idle(long ns) {
   if (!jacl_unir_note || __vm_atomic_cas32(&jacl_unir_note_waiting, 0, 1) != 0) return 0;
   uint64_t badges = 0;
   (void)unir_notification_wait(jacl_unir_note, ns, &badges);
   __vm_atomic_store32(&jacl_unir_note_waiting, 0);
-  if (badges & ~JACL_UNIR_OWN) {
-    (void)__vm_atomic_add32(&jacl_unir_events, 1);
-    (void)__vm_notify(&jacl_unir_events, 1 << 30);
-  }
+  int outside = (badges & ~JACL_UNIR_OWN) != 0;
+  if (outside) vat_events();
+  if (jacl_pool_nthreads && (outside || ns)) pool_nudge();
   return 1;
 }
 

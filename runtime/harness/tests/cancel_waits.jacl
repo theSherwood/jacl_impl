@@ -1,0 +1,14 @@
+##
+## cancel_waits — a cancel ends a task's wait at once (jacl_impl#270). A `sleep` waits once, to its
+## deadline, and a `read-line` waits on the host's stdin bell until the host rings it, so each ends
+## only because the cancel wakes it: the sleep is ten minutes, and stdin has nothing, ever. Prints
+## how each task ended.
+##
+
+def s [spawn { sleep 600 }]
+def r [spawn { read-line }]
+sleep 0.02
+assert [cancel $s]
+assert [cancel $r]
+print [error-val [await $s]]
+print [error-val [await $r]]

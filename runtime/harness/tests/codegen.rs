@@ -1581,6 +1581,99 @@ fn read_line_reads_the_host_stdin_a_line_at_a_time() {
     assert_eq!(String::from_utf8_lossy(&stdout), "1: hello\n2: \n3: world\nlines: 3\n");
 }
 
+/// A lazy stdin source over `lines` (temen#2019): "nothing yet" at first and until the next line
+/// comes, so a reader always waits at least once; the end once the sender is gone.
+fn lazy_stdin(lines: std::sync::mpsc::Receiver<Vec<u8>>) -> temen_interp::StdinSource {
+    let mut first = true;
+    Box::new(move || {
+        if std::mem::take(&mut first) {
+            return None;
+        }
+        match lines.try_recv() {
+            Ok(line) => Some(line),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+        }
+    })
+}
+
+#[test]
+fn read_line_waits_on_the_stdin_bell() {
+    // jacl_impl#270: with the host's stdin answering "nothing yet" and its bell granted as
+    // `stdin.bell` (unir decision #259.1), `read-line` waits on the bell, which the host rings as
+    // each line comes, rather than reading stdin every 10 ms.
+    use jacl_runtime_harness::bell;
+    use std::sync::Arc;
+    let (linked, entry) = emit_and_link_file(READ_LINE_JACL);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
+        let bell: Arc<bell::Bell> = Arc::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let typist = {
+            let bell = Arc::clone(&bell);
+            std::thread::spawn(move || {
+                for line in ["hello\r\n", "\n", "world"] {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    let _ = tx.send(line.as_bytes().to_vec());
+                    bell::ring(&bell);
+                }
+                drop(tx);
+                bell::ring(&bell);
+            })
+        };
+        let mut rx = Some(rx);
+        let mut setup =
+            |h: &mut temen_interp::Host| h.set_stdin_source(lazy_stdin(rx.take().expect("one run")));
+        let caps = [("stdin.bell", bell::capability(&bell))];
+        let run = inst
+            .run_with_caps_and_host(backend, &temen_run::RunConfig::default(), &caps, Some(&mut setup))
+            .unwrap_or_else(|e| panic!("run read_line.jacl on {backend:?}: {e}"));
+        typist.join().expect("the typist");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "1: hello\n2: \n3: world\nlines: 3\n", "{backend:?}");
+        assert!(bell::waited(&bell), "{backend:?}: read-line read stdin again instead of waiting on its bell");
+    }
+}
+
+const CANCEL_WAITS_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cancel_waits.jacl");
+
+#[test]
+fn a_cancel_ends_a_tasks_wait_at_once() {
+    // jacl_impl#270: `sleep` waits once, to its deadline, and `read-line` on the host's stdin bell
+    // until the host rings it, so a cancel must wake each (sched.c's job_request): before, each
+    // looked again every slice (1 ms, 10 ms). Neither ends by itself; a run that hangs fails at the
+    // limit rather than holding the suite. With one worker the tasks reach their waits before the
+    // program's own sleep is re-polled, so the read is waiting on the bell when it is cancelled.
+    use jacl_runtime_harness::bell;
+    use std::sync::Arc;
+    let (linked, entry) = emit_and_link_file(CANCEL_WAITS_JACL);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Jit] {
+        let pb = pb.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+            let bell: Arc<bell::Bell> = Arc::default();
+            let (_never, rx) = std::sync::mpsc::channel();
+            let mut rx = Some(rx);
+            let mut setup =
+                |h: &mut temen_interp::Host| h.set_stdin_source(lazy_stdin(rx.take().expect("one run")));
+            let caps = [("stdin.bell", bell::capability(&bell))];
+            let run = inst
+                .run_with_caps_and_host(backend, &temen_run::RunConfig::default(), &caps, Some(&mut setup))
+                .map(|run| run.stdout)
+                .map_err(|e| e.to_string());
+            let _ = done.send((run, bell::waited(&bell)));
+        });
+        let (run, waited) = finished
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("{backend:?}: a cancelled task's wait never ended"));
+        let out = run.unwrap_or_else(|e| panic!("run cancel_waits.jacl on {backend:?}: {e}"));
+        assert_eq!(String::from_utf8_lossy(&out), "cancelled\ncancelled\n", "{backend:?}");
+        assert!(waited, "{backend:?}: the read never waited on the bell, so its cancel was not tested");
+    }
+}
+
 const BYTE_LENGTH_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/byte_length.jacl");
 
 #[test]
@@ -2862,8 +2955,8 @@ const WAKE_JACL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/services/wak
 fn a_pane_client_waits_on_its_notification() {
     // #219 (theSherwood/unir#208): a pane client that opens the pane with the notification its
     // events signal waits for them on it, its worker too, rather than polling. A wait of a number
-    // of seconds ends at its time, or sooner once a task writes to a transcript or ends, and a
-    // key ends one with the key. wake.jacl's waits that a task ends would last ten minutes, so a
+    // of seconds ends at its time, or sooner once a task has written to a transcript or ended since
+    // the last call returned, so none is lost (jacl_impl#270), and a key ends one with the key. wake.jacl's waits that a task ends would last ten minutes, so a
     // task that did not end one would fail this run at its limit.
     let (client, log2) = child_image(WAKE_JACL, "");
     for backend in [

@@ -135,8 +135,10 @@ Each returns whether it reached a live task: false for a finished one, or the pr
 
 **Job-control points.** Tasks are cooperative, so a request takes effect where the task is not
 running: while it is queued, parked on an `await`, or held. A running task acts on it at its next
-job-control point: an `await`, each millisecond of a `sleep`, and each poll of a pipeline's output;
-and in code the shell compiles from a line, a loop's header once a slice of the line's loop headers
+job-control point: an `await`; a `sleep`, which a `cancel` ends at once and which otherwise keeps its
+deadline, so a `suspend` holds the task when it ends (jacl_impl#270); a wait for a service's event or
+for a line of stdin, which either request ends at once; and each poll of a pipeline's output; and in
+code the shell compiles from a line, a loop's header once a slice of the line's loop headers
 (`JACL_LOOP_SLICE`, 16,384) has run (#218). There the task yields to the others, request or not,
 so a line that never waits doesn't starve the shell's own task. A job-control point acts only on
 the task's own fiber, not on a generator's it resumed. At those points its fiber holds nothing

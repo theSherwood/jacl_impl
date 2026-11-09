@@ -82,11 +82,11 @@ static JaclTranscript *transcript_of(JaclVal t) {
 }
 
 /* Takes `x` for one call (transcript_done releases it), parking while another fiber's call holds
- * it: a call holds it only while the store answers. */
+ * it, until the release wakes it: a call holds it only while the store answers. */
 static void transcript_wait(JaclTranscript *x) {
   while (__vm_atomic_cas32(&x->busy, 0, 1) != 0) {
     jacl_ctl_point();                              /* a waiting job can be cancelled or suspended */
-    (void)__vm_wait32(&x->busy, 1, 1000000);
+    (void)__vm_wait32(&x->busy, 1, -1);
   }
 }
 
@@ -107,11 +107,17 @@ static JaclTranscript *transcript_take(JaclVal t, const char *what, JaclVal *err
   return 0;
 }
 
-/* Gives `x` back after a call, waking a fiber that waits its turn, and one waiting for a
- * service's next event (vat_stir): a shell commits what a job wrote (#219). */
-static JaclVal transcript_done(JaclTranscript *x, JaclVal r) {
+/* Gives `x` back after a call, waking a fiber that waits its turn. */
+static JaclVal transcript_give(JaclTranscript *x, JaclVal r) {
   __vm_atomic_store32(&x->busy, 0);
   (void)__vm_notify(&x->busy, 1);
+  return r;
+}
+
+/* Gives `x` back after a call that wrote to it, waking also a fiber waiting for a service's next
+ * event (vat_stir): a shell commits what a job wrote (#219). */
+static JaclVal transcript_done(JaclTranscript *x, JaclVal r) {
+  (void)transcript_give(x, r);
   vat_stir();
   return r;
 }
@@ -426,7 +432,8 @@ JaclVal jacl_transcript_flush(JaclVal t) {
   JaclTranscript *x = transcript_take(t, "transcript-flush", &err);
   if (!x) return err;
   int64_t r = transcript_commit(x);
-  return transcript_done(x, r < 0 ? transcript_err("transcript-flush", r) : JACL_NIL);
+  /* A commit is no write: nothing waits for one, so it stirs nothing. */
+  return transcript_give(x, r < 0 ? transcript_err("transcript-flush", r) : JACL_NIL);
 }
 
 /* ---- A job's output (#204) ----

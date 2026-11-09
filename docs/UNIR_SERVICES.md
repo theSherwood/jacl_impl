@@ -29,8 +29,10 @@ def t [service-schema $e "events"]                ; one entry's schema, for a tr
   `ENTRY` is the event's catalog entry name (the store vat's is `changes`). Events that arrive while a
   call waits for its reply are kept for later. With `WAIT` false or nil it returns at once, nil if no
   event is there; with `WAIT` true it waits for one; with a number of seconds it waits that long, and
-  returns nil sooner once one of the program's tasks writes to a transcript or ends, so a shell waiting
-  for its pane notices its jobs (#219).
+  returns nil sooner once one of the program's tasks has written to a transcript or ended since the
+  last `service-event` on `S` returned, so a shell waiting for its pane notices its jobs (#219), even
+  one that ended while it looked at the others (jacl_impl#270). A negative number waits with no
+  bound, for an event or a task's write or end.
 - `[service NAME N]` connects as `[service NAME]` does, to a service whose events signal the
   notification the vat was endowed with as `N` (unir decision #208.1): in unir's sessions a shell's
   pane signals its vat's own, `n` (unir decision #262.9). Waiting for such a service's events waits
@@ -172,11 +174,15 @@ The vat is one call at a time (docs/UNIR_CHANNELS.md), so no wait for a service'
   fiber parks on a word of its own (`jacl_unir_events`), and its job is marked as waiting on the
   notification. A worker with nothing to run, whose parked fibers all wait so, waits on the notification
   itself (`unir_notification_wait`, which takes no vat), until its fibers' first timeout, rather than
-  re-polling them every millisecond. An event from outside wakes the worker, which moves the word and
-  re-polls the fiber. The runtime signals the notification itself when a task writes to a transcript or
-  ends, and when a job becomes ready to run (`pool_wake`). Only one worker waits on it at a time, since
-  a wait takes every badge; with more than one worker, each still re-polls every millisecond, when it
-  also answers a collection.
+  re-polling them every millisecond. An event from outside wakes the worker, which moves the word,
+  wakes the other workers and re-polls the fiber. The runtime signals the notification itself when a
+  task writes to a transcript or ends, when a job becomes ready to run, and when a collection begins
+  (`pool_wake`), and moves the word when a task is cancelled or suspended, so a waiting task acts on
+  it at once. Only one worker waits on it at a time, since a wait takes every badge; the others wait
+  for a pool wake, which each of these sends.
+- An unbounded wait is one wait. A bounded one waits a second at a time: the runtime reads no clock,
+  so a wait that something else ends early (another service's event) starts again with what was left
+  when its second began, and the seconds bound how late that makes it.
 - **Any other service** is polled, from 50 µs apart to a millisecond, the vat given back between polls.
 
 ## Build
@@ -305,9 +311,11 @@ defines, the lines after it see: a binding, a `mut` a later line sets, a proc, a
   reference's, which shows only its output: the profile says what opening a name means.
 - **Waiting.** The shell opens its pane with the notification its events signal (`[service "pane"
   "n"]`). When a pass of its loop finds nothing to do, its next read of the pane waits on that
-  notification for up to a second, or until a job writes to the transcript or ends (#219). So a key, a
-  job's output and a job's end each start a pass as they come, and an idle shell makes one pass a
-  second.
+  notification, with no bound, until a key comes or a job writes to the transcript or ends (#219;
+  jacl_impl#270). A write or an end since the shell's last read of the pane counts, so one that comes
+  while a pass looks at the jobs is not lost. So a key, a job's output and a job's end each start a
+  pass as they come, and an idle shell makes none. Committing what was written (`transcript-flush`)
+  is not a write, so a pass's own commit wakes nothing.
 - **The profile.** Before the first prompt the shell evaluates the store's document `profile`, if it
   has one, in its own domain, so every line sees what the profile defines. It reads it 2 KiB at a
   time, since a reply is one of the session's 4 KiB frames. unir's stage 7 session

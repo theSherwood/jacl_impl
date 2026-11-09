@@ -89,7 +89,9 @@ extern JaclVal jacl_ctx_cur;
 #define JACL_POOL_WORKERS      1            /* main = worker 0; cooperative single-thread default */
 #endif
 static int jacl_pool_workers = JACL_POOL_WORKERS;   /* this run's pool size, set by sched_init */
-#define JACL_WAIT_NS           1000000L     /* 1 ms futex timeout: every wait re-checks GC */
+/* How often an idle worker re-polls the fibers parked on it that its own wait would not see woken
+ * (idle_ns): temen fires a parked fiber's deadline, and delivers its wake, at the resumer's poll. */
+#define JACL_WAIT_NS           1000000L
 #define JACL_SCHED_PRIME       ((long)-1)   /* fiber-entry prime suspend value (see worker_loop) */
 #define JACL_SCHED_CTL         ((long)-2)   /* job-control point suspend value (jacl_ctl_point) */
 #define JACL_LOOP_SLICE        (1 << 14)    /* loop headers a shell line runs between yields (jacl_loop_point) */
@@ -119,13 +121,14 @@ static int   jacl_task_stack_nfree = -1;   /* -1 = uninitialized */
  * contract for each context: a FIBER caller suspends (jacl_gc_safepoint — the fiber switch
  * spills its registers and parks it in the scanned table), a BARE worker parks its vCPU.
  * Parking a vCPU while its fiber is RUNNING would make the collector's gc.roots refuse
- * (FiberFault: running fiber on another vCPU), so park_if_requested no-ops in-task. */
+ * (FiberFault: running fiber on another vCPU), so park_if_requested no-ops in-task. A waiter
+ * waits until sunlock wakes it: the holder never waits or parks for a collection meanwhile. */
 static int32_t jacl_sched_lock;
 static void slock(void) {
   while (__vm_atomic_cas32(&jacl_sched_lock, 0, 1) != 0) {
     jacl_gc_safepoint();                 /* fiber context: suspend for the collection */
     jacl_gc_worker_park_if_requested();  /* bare context: park the vCPU (no-op in-task) */
-    __vm_wait32(&jacl_sched_lock, 1, JACL_WAIT_NS);
+    __vm_wait32(&jacl_sched_lock, 1, -1);
   }
 }
 static void sunlock(void) { __vm_atomic_store32(&jacl_sched_lock, 0); __vm_notify(&jacl_sched_lock, 1); }
@@ -177,6 +180,7 @@ static void mark_task_stacks(void) {
  *   i64@(p+10) resume_arg (await result, set when woken)
  *   i64@(p+12) next_waiter (job link) i64@(p+14) waiters_head (jobs parked on this)
  *   i64@(p+16) stack ptr
+ *   p[21] 1 once the job is cancelled: what a wait that a cancel ends waits on (jacl_cancel_word)
  *   p[24] job control (JACL_CTL_CANCEL / JACL_CTL_SUSPEND requested; JOB_HELD while on the suspended list)
  *   p[25] while parked waiting on the vat's notification, for how long in µs, -1 for as long as it
  *         takes (jacl_event_wait); else 0
@@ -198,7 +202,7 @@ static JaclObj *make_job(long fn, long prime, int is_root, int owner) {
   job_set(j, 2, fn); job_set(j, 4, prime);
   job_set(j, 6, 0); job_set(j, 8, 0); job_set(j, 10, 0);
   job_set(j, 12, 0); job_set(j, 14, 0); job_set(j, 16, 0);
-  p[18] = 0; p[19] = 0; p[20] = owner;
+  p[18] = 0; p[19] = 0; p[20] = owner; p[21] = 0;
   job_set(j, 22, (long)jacl_ctx_cur);   /* snapshot the spawner's $ctx (nil for the root) */
   p[24] = 0; p[25] = 0; job_set(j, 26, 0); job_set(j, 28, 0);
   return j;
@@ -264,15 +268,24 @@ static JaclObj *rq_pop(int self) {           /* under slock — from THIS worker
   jp(j)[18] = 0;
   return j;
 }
+/* io.c: rings the host's stdin bell, so a `read-line` waiting on it looks again. */
+static void stdin_bell_ring(void);
 #ifdef JACL_UNIR
 /* chan_unir.c: the vat's notification, which an idle worker waits on when it can (#219). */
 static void vat_wake(void);
+static void vat_events(void);
 static void vat_stir(void);
 static int vat_wait_idle(long ns);
 #endif
-static void pool_wake(void) {
+/* Wakes the workers idle on jacl_pool_event. A worker reads the event before it looks for work
+ * (worker_loop), so a wake that comes after it looked ends its wait. */
+static void pool_nudge(void) {
   __vm_atomic_add32(&jacl_pool_event, 1);
   __vm_notify(&jacl_pool_event, jacl_pool_workers);
+}
+/* Wakes every idle worker: new work, shutdown, a collection, or a fiber to re-poll. */
+static void pool_wake(void) {
+  pool_nudge();
 #ifdef JACL_UNIR
   vat_wake();   /* a worker may be waiting on the vat's notification instead */
 #endif
@@ -427,6 +440,11 @@ static void finish_job_outcome(JaclObj *job, int oc, long out) {
  * still-parked ones stay linked in place. Walked in place so the whole list stays GC-reachable
  * from `jacl_blocked_head` across a resume's safepoints. Returns 1 if any fiber progressed. */
 static int repoll_blocked(int self) {
+#ifdef JACL_UNIR
+  /* What came for them while this worker ran: a job that computes never lets it wait on the
+   * notification, and the fibers parked for a service's event would not see it (#218). */
+  (void)vat_wait_idle(0);
+#endif
   int progressed = 0;
   JaclObj *prev = 0, *job = jacl_blocked_head[self];
   while (job) {
@@ -451,10 +469,8 @@ static int repoll_blocked(int self) {
 
 /* How long this idle worker may wait before it re-polls the fibers parked on it: a tick, unless
  * each of them waits on the vat's notification (jacl_event_wait), which wakes the worker itself
- * (#219). Then until the first of their timeouts, or as long as it takes (-1). A worker with others
- * keeps the tick, at which it answers a collection. */
+ * (#219). Then until the first of their timeouts, or as long as it takes (-1). */
 static long idle_ns(int self) {
-  if (jacl_pool_nthreads) return JACL_WAIT_NS;
   long ns = -1;
   for (JaclObj *b = jacl_blocked_head[self]; b; b = (JaclObj *)job_get(b, 12)) {
     long us = jp(b)[25];
@@ -466,18 +482,22 @@ static long idle_ns(int self) {
 
 /* An idle worker's wait, up to `ns` (negative: as long as it takes): on the vat's notification
  * when it can, which a service's event or this runtime's own signal ends at once (#219); else for
- * a pool wake. */
-static void idle_wait(long ns) {
+ * a pool wake past `ev`, the event the worker read before it looked for work. Whatever it must
+ * answer wakes it: work, shutdown and a collection (pool_wake), and a parked fiber's wake. A pool
+ * wake since `ev` ends it before it waits at all: its signal on the notification may have been
+ * taken by the look that re-polled the fibers (repoll_blocked). */
+static void idle_wait(long ns, int ev) {
+  if (__vm_atomic_load32(&jacl_pool_event) != ev) return;
 #ifdef JACL_UNIR
   if (vat_wait_idle(ns)) return;
 #endif
-  int ev = __vm_atomic_load32(&jacl_pool_event);
-  __vm_wait32(&jacl_pool_event, ev, ns < 0 ? JACL_WAIT_NS : ns);
+  __vm_wait32(&jacl_pool_event, ev, ns);
 }
 
 static void worker_loop(int is_main) {
   int self = jacl_sched_self();
   for (;;) {
+    int ev = __vm_atomic_load32(&jacl_pool_event);   /* before it looks: see pool_nudge */
     jacl_gc_worker_park_if_requested();
     slock();
     JaclObj *job = rq_pop(self);
@@ -496,13 +516,13 @@ static void worker_loop(int is_main) {
         if (!progressed && jacl_blocked_head[self]) {
           long ns = idle_ns(self);
           jacl_running_job[self] = 0;             /* idle: hold no root */
-          idle_wait(ns);
+          idle_wait(ns, ev);
         }
         continue;
       }
       if (__vm_atomic_load32(&jacl_pool_shutdown)) break;
       jacl_running_job[self] = 0;                 /* idle: hold no root */
-      idle_wait(JACL_WAIT_NS);
+      idle_wait(-1, ev);
       continue;
     }
     jacl_running_job[self] = job;                 /* root it before resume (closes the pop→resume window) */
@@ -731,6 +751,15 @@ static void jacl_event_wait(int32_t us) {
 }
 #endif
 
+/* The word a cancel of the running job moves from 0 to 1 and wakes (p[21]), for a wait a cancel
+ * must end, such as `sleep`'s: a suspend does not move it, so a wait it holds keeps its deadline.
+ * Off a job's own fiber, a word nothing moves. */
+static int32_t jacl_no_cancel;
+int32_t *jacl_cancel_word(void) {
+  JaclObj *j = ctl_job();
+  return j ? &jp(j)[21] : &jacl_no_cancel;
+}
+
 /* The running job's pending cancel or suspend, or 0; 0 off a job's own fiber. */
 int jacl_ctl_pending(void) {
   JaclObj *j = ctl_job();
@@ -802,6 +831,19 @@ static JaclVal job_request(JaclVal fut, int bit) {
     }
   }
   sunlock();
+  /* A job parked in a wait looks again, and acts on the request at its job-control point: a wait
+   * for a service's event (vat_events) and a read of stdin (its bell) on either request, and a
+   * wait on the job's cancel word (`sleep`'s) on a cancel. */
+  if (live && bit == JACL_CTL_CANCEL) {
+    __vm_atomic_store32(&jp(j)[21], 1);
+    __vm_notify(&jp(j)[21], 1 << 30);
+  }
+  if (live && bit) {
+#ifdef JACL_UNIR
+    vat_events();
+#endif
+    stdin_bell_ring();
+  }
   pool_wake();
   return jaclrt_bool(live);
 }
