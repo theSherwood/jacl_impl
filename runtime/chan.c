@@ -114,7 +114,11 @@ static JaclChan *chan_claim(JaclVal v, uint32_t end, const char *op, JaclVal *er
   return c;
 }
 
-static void chan_release(JaclChan *c) { __vm_atomic_store32(&c->busy, 0); }
+/* Ends a claim, waking a fiber waiting to claim the end (pipe_unir.c's stage_claim). */
+static void chan_release(JaclChan *c) {
+  __vm_atomic_store32(&c->busy, 0);
+  (void)__vm_notify(&c->busy, 1);
+}
 
 /* Writes every byte on a claimed write end, in frames of at most `max`. */
 static JaclVal chan_write_all(JaclChan *c, const uint8_t *p, uint32_t n) {

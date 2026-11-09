@@ -126,7 +126,8 @@ static int32_t jacl_gc_violations;
  * worker's own scheduler loop (which then runs the collection on the OS thread). */
 static int32_t jacl_gc_handoff[JACL_MAX_WORKERS];
 static long    jacl_gc_swept[JACL_MAX_WORKERS];   /* the collection's result, across the suspend */
-#define JACL_GC_WAIT_NS 1000000L   /* 1 ms futex timeout: every wait re-checks (hang-proof) */
+/* sched.c: wakes every idle worker, so each answers a collection at its loop's top. */
+static void pool_wake(void);
 
 /* The current worker (vCPU) index: the per-vCPU TLS word temen seeds to a dense id. */
 static int jacl_gc_self(void) {
@@ -268,7 +269,11 @@ void jacl_gc_worker_register(void) {
 void jacl_gc_worker_unregister(void) {
   int w = jacl_gc_self();
   __vm_atomic_store32(&jacl_gc_active[w], 0);
-  __vm_notify(&jacl_gc_parked[w], 1);   /* wake a collector waiting for us to park */
+  /* A collector waiting for us to park waits on `parked`: move it, so a wait that began after it
+   * read `active` still ends. Any collection in progress has its epoch, so it counts as parked
+   * (the order stays monotonic, and a later collection still needs a fresh park). */
+  __vm_atomic_store32(&jacl_gc_parked[w], __vm_atomic_load32(&jacl_gc_epoch));
+  __vm_notify(&jacl_gc_parked[w], 1);
 }
 
 /* The scheduler tells the runtime when it is running a task fiber: only then may a
@@ -329,7 +334,7 @@ void jacl_gc_worker_park_if_requested(void) {
   for (;;) {
     int d = __vm_atomic_load32(&jacl_gc_done);
     if (d == e) break;
-    __vm_wait32(&jacl_gc_done, d, JACL_GC_WAIT_NS);
+    __vm_wait32(&jacl_gc_done, d, -1);   /* until the collector publishes `done` */
   }
 }
 
@@ -626,8 +631,9 @@ long jacl_gc_collect(void) {
     return -1;
   }
   __vm_atomic_store32(&jacl_gc_collector, w);
-  /* request a stop: epoch != done now signals "collection in progress" */
+  /* request a stop: epoch != done now signals "collection in progress"; an idle worker wakes for it */
   __vm_atomic_add32(&jacl_gc_epoch, 1);
+  pool_wake();
   if (__vm_atomic_load32(&jacl_gc_in_task[w])) {
     /* We are inside a task fiber, and the quiesce barrier must WAIT. A `memory.wait`
      * issued from a fiber parks the FIBER, not the OS thread (temen §3.6 slice 5a), so
@@ -669,7 +675,7 @@ static inline __attribute__((always_inline)) long jacl_gc_quiesce_and_sweep(int 
       if (!__vm_atomic_load32(&jacl_gc_active[i])) break;     /* not in the set (or exited) */
       int pe = __vm_atomic_load32(&jacl_gc_parked[i]);
       if (pe >= e) break;                                     /* parked for this epoch (or later) */
-      __vm_wait32(&jacl_gc_parked[i], pe, JACL_GC_WAIT_NS);   /* block while still < e (re-checks active) */
+      __vm_wait32(&jacl_gc_parked[i], pe, -1);   /* until it parks, or leaves the set (both move it) */
     }
   }
   /* — world stopped — all other tasks suspended (scannable), all other vCPUs parked */

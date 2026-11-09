@@ -381,6 +381,7 @@ JaclVal jacl_clock(void);         /* [clock]: the host's time, in ns (clockcap.c
 #define JACL_CTL_CANCEL  1
 #define JACL_CTL_SUSPEND 2
 int  jacl_ctl_pending(void);   /* the running task's pending request, or 0 */
+int32_t *jacl_cancel_word(void);   /* moves to 1 when the running task is cancelled: a wait a cancel ends waits on it */
 void jacl_ctl_point(void);     /* act on it: end (cancel) or hold (suspend) the task */
 void jacl_loop_point(void);    /* a shell line's loop header: a job-control point every slice */
 void jacl_task_end(JaclVal v); /* end the running task (the program's own too) with value V */
