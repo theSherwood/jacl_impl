@@ -2094,11 +2094,12 @@ fn an_editor_keeps_its_document_in_the_store_vat() {
     // saved and not what it typed after.
     serve_twice(EDITOR_JACL, |backend, [first, second]| {
         // 11 versions typed, 6 more on the branch, 3 unsaved, and the System the vat runs as
-        // (ref `sys/serve`, theSherwood/unir#262).
-        assert_eq!(first, ["doc \"hello there!!!\"", "versions 21"], "{backend:?}");
-        // The unsaved 3 are gone; undo and redo mint nothing. The System is written again: it
-        // names the session its store opens as, which is new.
-        assert_eq!(second, ["doc \"hello there\"", "versions 19"], "{backend:?}");
+        // (ref `sys/serve`, theSherwood/unir#262): its document, and the composition the ref
+        // names, which pins it (theSherwood/unir decision #262.13).
+        assert_eq!(first, ["doc \"hello there!!!\"", "versions 22"], "{backend:?}");
+        // The unsaved 3 are gone; undo and redo mint nothing. The System is written again, its
+        // two versions: it names the session its store opens as, which is new.
+        assert_eq!(second, ["doc \"hello there\"", "versions 21"], "{backend:?}");
     });
 }
 
@@ -2108,11 +2109,12 @@ fn a_directory_of_files_lives_in_the_store_vat() {
     // committed into directory `root` twice; after the restart the tree is as committed and the
     // first commit still holds the first version of main.
     serve_twice(FILES_JACL, |backend, [first, second]| {
-        // Four file versions (main twice), two directory versions and the System's
-        // (theSherwood/unir#262); nothing on `doc`.
-        assert_eq!(first, ["doc \"\"", "versions 7"], "{backend:?}");
-        // And the second session's System, which names that session.
-        assert_eq!(second, ["doc \"\"", "versions 8"], "{backend:?}");
+        // Four file versions (main twice), two directory versions and the System's two, its
+        // document and the composition that pins it (theSherwood/unir#262, decision #262.13);
+        // nothing on `doc`.
+        assert_eq!(first, ["doc \"\"", "versions 8"], "{backend:?}");
+        // And the second session's System, two more, which names that session.
+        assert_eq!(second, ["doc \"\"", "versions 10"], "{backend:?}");
     });
 }
 

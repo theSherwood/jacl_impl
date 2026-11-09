@@ -102,7 +102,8 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's 
   that starts or ends) holds the vat meanwhile; a wait that may be long does not. A service's next
   event is waited for on the vat's notification when the service was opened with it, and polled for
   otherwise (docs/UNIR_SERVICES.md, "Waiting"); a legacy job's next screen is waited for the same
-  way, its report armed to signal the notification (`unir_job_arm`, #242).
+  way, its report armed to signal the notification (`unir_job_arm`, #242), and its end signalling
+  it too, reported or not (unir#432), so the wait has no bound (#270).
 
 ## Build
 
