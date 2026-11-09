@@ -1,5 +1,7 @@
 # expect-error: call depth exceeded
-# Unbounded direct recursion hits VM_FRAMES_MAX (256) and should surface
-# a clean call-depth error instead of a generic "stack overflow". §16.
-proc rec {n} { rec [+ $n 1] }
+# Unbounded recursion should surface a clean call-depth error instead of a generic "stack
+# overflow". §16. The recursive call is not in tail position: a tail call reuses its frame, so
+# `proc rec {n} { rec [+ $n 1] }` runs forever on a backend with tail calls (TEMEN) rather than
+# testing the depth limit (#281).
+proc rec {n} { + 1 [rec [+ $n 1]] }
 rec 0

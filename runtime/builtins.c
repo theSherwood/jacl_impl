@@ -1155,6 +1155,33 @@ JaclVal jacl_field_get(JaclVal v, JaclVal name) {
   if (t == 0x07) return jacl_map_get(v, name);
   return jaclrt_error();
 }
+/* `def {a, ..rest} V`'s rest (#280): of a struct or a map, a map of its fields (entries) whose
+ * names are not among `names`, the ones the pattern binds itself; of a vector or an array, its
+ * elements from `start` on. */
+JaclVal jacl_destructure_rest(JaclVal v, JaclVal start, JaclVal names) {
+  if (jaclrt_is_error(v)) return v;
+  if (jaclrt_type_index(v) == 0x1D) v = jacl_ptr_deref(v);
+  uint32_t t = jaclrt_type_index(v);
+  int32_t nn = jaclrt_as_i32(jacl_len(names));
+  if (t == 0x07) {
+    JaclVal out = v;
+    for (int32_t i = 0; i < nn; i++) out = jacl_map_remove(out, jacl_vec_get_at(names, jaclrt_i32(i)));
+    return out;
+  }
+  if (t == 0x12) {
+    JaclVal *p = (JaclVal *)jacl_obj_payload((JaclObj *)jaclrt_as_ptr(v));
+    int32_t nf = jaclrt_as_i32(p[1]);
+    JaclVal out = jacl_map_empty();
+    for (int32_t f = 0; f < nf; f++) {
+      int named = 0;
+      for (int32_t i = 0; i < nn && !named; i++)
+        named = jacl_str_eq(jacl_vec_get_at(names, jaclrt_i32(i)), p[2 + 2 * f]);
+      if (!named) out = jacl_map_set(out, p[2 + 2 * f], p[3 + 2 * f]);
+    }
+    return out;
+  }
+  return jacl_vec_slice(v, start, jaclrt_i32(0x3fffffff));
+}
 JaclVal jacl_vec_set_at(JaclVal v, JaclVal idx, JaclVal elem) {
   if (jaclrt_is_error(v)) return v;
   if (jaclrt_type_index(idx) != 0x02) return jaclrt_error();

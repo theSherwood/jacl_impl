@@ -517,6 +517,12 @@ JaclVal jacl_to_string(JaclVal v);         /* i32/bool/nil/string -> string */
 /* P2.6 closures + cells (see closure.c). fnref/index/count are raw i64; values are
  * JaclVals. A closure holds [fnref, upvals…]; a cell is a shared mutable box. */
 JaclVal jacl_closure_new(JaclVal fnref, JaclVal nupvals);
+/* A closure's shape (closure.c): its parameter count, and this bit when the last collects the rest */
+#define JACL_CLOSURE_REST 0x8000u
+JaclVal jacl_closure_new_shape(JaclVal fnref, JaclVal nupvals, JaclVal shape);
+JaclVal jacl_closure_fn_for(JaclVal c, JaclVal argc);         /* fnref, | 1<<32 to pack, or -1 */
+JaclVal jacl_closure_arity_error(JaclVal name, JaclVal c, JaclVal argc);
+JaclVal jacl_destructure_rest(JaclVal v, JaclVal start, JaclVal names); /* `def {a, ..rest} V` */
 JaclVal jacl_closure_set(JaclVal c, JaclVal i, JaclVal v);
 JaclVal jacl_closure_fn(JaclVal c);
 JaclVal jacl_closure_upval(JaclVal c, JaclVal i);

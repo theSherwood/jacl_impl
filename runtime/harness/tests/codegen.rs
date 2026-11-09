@@ -1709,6 +1709,224 @@ fn a_shell_argument_is_one_word() {
 }
 
 #[test]
+fn a_closure_called_with_the_wrong_number_of_arguments_is_an_error() {
+    // #281: an indirect call checked only that the callee was a closure, so a wrong argument count
+    // reached call_indirect, and the guest was killed (IndirectCallType). A closure now records how
+    // many parameters it takes, and a call that does not match is a catchable error.
+    let out = staged_stdout(
+        "closure_arity",
+        "proc add3 {a, b, c} { + [+ $a $b] $c }\n\
+         def f $add3\n\
+         print [f 1 2 3]\n\
+         print [$f 1]\n\
+         def g [\\ {x} { * $x 2 }]\n\
+         print [g 3 4]\n\
+         print [error? [g 3 4]]\n\
+         print [collect [transform [vec 1] [\\ {a b} { + $a $b }]]]\n",
+    );
+    assert_eq!(
+        out,
+        "6\n<error: proc 'f' expects 3 arguments but got 1>\n\
+         <error: proc 'g' expects 1 argument but got 2>\ntrue\n\
+         [vec \"closure expects 2 arguments but got 1\"]\n"
+    );
+}
+
+#[test]
+fn a_closure_rest_parameter_collects_the_rest() {
+    // #280: `[\ {a, ..rest} …]` bound `..` and `rest` as two parameters, so a call with any other
+    // count trapped, and a variadic proc used as a value did too. A closure whose last parameter
+    // collects the rest takes its arguments packed in one vector.
+    let out = staged_stdout(
+        "closure_rest",
+        "def r [\\ {a, ..rest} { vec-len $rest }]\n\
+         print [r 1 2 3]\n\
+         print [r 1]\n\
+         print [r]\n\
+         def p [proc {a, ..rest} { vec-len $rest }]\n\
+         print [p 1 2 3]\n\
+         def all [\\ {..xs} { vec-len $xs }]\n\
+         print [all]\n\
+         print [collect [transform [vec 7 8] $all]]\n\
+         proc lg {l, ..m} { vec-len $m }\n\
+         def h $lg\n\
+         print [h 1 2 3]\n",
+    );
+    assert_eq!(
+        out,
+        "2\n0\n<error: proc 'r' expects at least 1 argument but got 0>\n2\n0\n[vec 1 1]\n2\n"
+    );
+}
+
+#[test]
+fn a_destructuring_dotdot_binds_the_other_fields() {
+    // #280: `def {..} $p` and `def {x, ..} $p` failed to compile ("binding form needs a name and a
+    // value"), and `def {x, ..rest} $p` sliced a struct as a vector. A bare `..` binds every field
+    // of a struct whose type is known at compile time; `..rest` collects a struct's or a map's
+    // other fields into a map, and a vector's other elements into a vector.
+    let out = staged_stdout(
+        "dotdot_destructure",
+        "struct P {i32 x, i32 y, i32 z}\n\
+         proc a {} { def p [P x 1 y 2 z 3]; def {..} $p; + [+ $x $y] $z }\n\
+         print [a]\n\
+         proc b {} { def p [P x 1 y 2 z 3]; def {y, ..} $p; + $x $y }\n\
+         print [b]\n\
+         proc c {P q} { def {..} $q; $z }\n\
+         print [c [P x 7 y 8 z 9]]\n\
+         def p [P x 1 y 2 z 3]\n\
+         def {x, ..rest} $p\n\
+         print [map-get $rest y]\n\
+         print [map-has $rest x]\n\
+         def {a, ..others} [map a 1 b 2]\n\
+         print [map-has $others b]\n\
+         def {h, ..t} [vec 1 2 3]\n\
+         print $t\n",
+    );
+    assert_eq!(out, "6\n3\n9\n2\nfalse\ntrue\n[vec 2 3]\n");
+    let err = staged_emit_error("dotdot_unknown", "def ps [vec 1]\ndef {..} [vec-get $ps 0]\n");
+    assert!(err.contains("struct type is known at compile time"), "{err}");
+}
+
+#[test]
+fn a_destructuring_dotdot_takes_the_struct_the_typer_infers() {
+    // #280: `def {..}` found its struct only in a constructor or a binding codegen had watched being
+    // made, so a global struct read in a proc, a proc's typed return, and a loop over a vec of
+    // structs failed to compile. It takes the struct the typer infers. A vec literal of one struct
+    // carries that element type, and a `def` keeps it; a `mut` does not (it may be set to any vec),
+    // nor does a pushed copy. The names `..` binds are the typer's too, so the field `x` is an i32
+    // here even where an outer `x` is a str.
+    let out = staged_stdout(
+        "dotdot_typer",
+        "struct P {i32 x, i32 y}\n\
+         struct Q {P at, str name}\n\
+         def p [P x 1 y 2]\n\
+         proc show {} { def {..} $p; + $x $y }\n\
+         print [show]\n\
+         proc origin {} P { P x 5 y 6 }\n\
+         def {..} [origin]\n\
+         print [+ $x $y]\n\
+         def ps [vec [P x 10 y 20] [P x 30 y 40]]\n\
+         for $ps q { def {..} $q; print [+ $x $y] }\n\
+         def {..} [Q at [P x 3 y 4] name n]\n\
+         def {..} $at\n\
+         print \"$name $x $y\"\n",
+    );
+    assert_eq!(out, "3\n11\n30\n70\nn 3 4\n");
+    let out = staged_stdout(
+        "dotdot_shadow",
+        "struct P {i32 x, i32 y}\ndef str x outer\ndef {..} [P x 7 y 8]\ndef i32 w $x\nprint $w\n",
+    );
+    assert_eq!(out, "7\n");
+    for (name, src) in [
+        ("dotdot_mut", "mut ms [vec [P x 1 y 2]]\nfor $ms q { def {..} $q }\n"),
+        ("dotdot_pushed", "def ps [vec [P x 1 y 2]]\nfor [vec-push $ps 9] q { def {..} $q }\n"),
+    ] {
+        let err = staged_emit_error(name, &format!("struct P {{i32 x, i32 y}}\n{src}"));
+        assert!(err.contains("struct type is known at compile time"), "{name}: {err}");
+    }
+}
+
+/// `# expect-error:` programs in `test/jacl` that do not yet fail with their message on TEMEN
+/// (#281): mostly checks the legacy compiler made and nothing ported. When a fix makes one fail as
+/// it says, take it off; the gate fails while a listed program passes, so the list only shrinks.
+const EXPECT_ERROR_BURN_DOWN: &[&str] = &[
+    "arr_ref_elem_error", "arr_wide_dyn_error", "buf_literal_mismatch",
+    "buf_literal_overflow", "buf_literal_value_negative", "buf_literal_value_overflow",
+    "buf_proc_param_value_size_cap", "ctx_def_reserved_error", "ctx_dup_pwd_error",
+    "ctx_mut_reserved_error", "ctx_set_immutable_error", "ctx_unknown_field_error",
+    "ctx_with_ctx_bad_field_error", "ctx_with_ctx_type_error", "def_lhs_vec_narrowing",
+    "for_map_struct_err", "generator_return_value_keyword", "generator_tail_call_error",
+    "generator_tail_if_else_error", "generator_tail_nested_block_error",
+    "generator_tail_try_body_error", "generator_tail_with_ctx_error", "map_ref_kind_error",
+    "map_set_stamped_error", "map_wide_dyn_error", "optional_chain_struct", "overflow_call_depth",
+    "set_param_error", "sm_field_shadow_repro", "stream_struct_hof_named_error",
+    "struct_closure_capture_error", "struct_immutable_error", "struct_in_map_error",
+    "struct_in_vec_error", "struct_map_set_error", "struct_proc_return_error",
+    "struct_ref_slot_cap", "struct_vec_push_error", "to_error", "type_enforce_vec_get",
+    "typed_closure_arity_error", "typed_closure_arr_error", "typed_closure_compound_arr_err",
+    "typed_closure_compound_map_key_def_err", "typed_closure_compound_map_key_err",
+    "typed_closure_compound_map_val_err", "typed_closure_compound_param_err",
+    "typed_closure_compound_return_arr_err", "typed_closure_compound_return_def_err",
+    "typed_closure_compound_return_err", "typed_closure_compound_return_map_key_err",
+    "typed_closure_expr_arg_error", "typed_closure_global_proc_wrong_sig_err",
+    "typed_closure_nested_proc_param_err", "typed_closure_param_arity_error",
+    "typed_closure_param_named_arg_error", "typed_closure_param_type_error",
+    "typed_closure_return_arity_error", "typed_closure_struct_param_error",
+    "typed_closure_struct_return_error", "typed_closure_vec_error", "typed_conversion_error",
+    "vec_push_stamped_error", "vec_ref_elem_error", "vec_wide_dyn_error",
+];
+
+/// How `path` fails: `Ok` when its compile error, or the uncaught error that ends its run, carries
+/// `want`; else what happened instead.
+fn expect_error_outcome(path: &Path, want: &str, rt: &temen_llvm::Translated) -> Result<(), String> {
+    let out = Command::new(staged_driver())
+        .env("JACL_STAGE_ON_TEMEN", "1")
+        .arg("--file")
+        .arg(path)
+        .output()
+        .expect("run staged emit_jacl --file");
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        if err.contains(want) {
+            return Ok(());
+        }
+        return Err(format!("its compile failed with {:?}", err.lines().next().unwrap_or("")));
+    }
+    let program = decode_emitted(&out.stdout).map_err(|e| format!("decode: {e}"))?;
+    let linked = link_with_manifest(&[
+        LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
+        LinkUnit { module: program, exports: vec![("__prog_entry".to_string(), 0)], ..Default::default() },
+    ])
+    .map_err(|e| format!("link: {e:?}"))?;
+    let entry = linked.resolve_export("__prog_entry").ok_or("no entry after link")?;
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).map_err(|e| e.to_string())?;
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).map_err(|e| e.to_string())?;
+    let mut config = temen_run::RunConfig::default();
+    config.limits.fuel = Some(4_000_000_000);
+    let run = inst
+        .run_with_caps(temen_run::Backend::Jit, &config, &[])
+        .map_err(|e| format!("its run stopped: {e}"))?;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    match stdout.lines().filter(|l| l.starts_with("<error")).last() {
+        Some(l) if l.contains(want) => Ok(()),
+        Some(l) => Err(format!("it ended in {l}")),
+        None => Err("it ran without an error".into()),
+    }
+}
+
+#[test]
+fn every_expect_error_program_fails_with_its_message() {
+    // #281: the legacy compiler ran as emit_jacl's error oracle, and with it gone 68 of these
+    // programs compiled, and most ran, with nothing checking. Each must now fail, at compile or at
+    // run time, with the text its `# expect-error:` line gives, or be on EXPECT_ERROR_BURN_DOWN.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl");
+    let mut cases: Vec<(String, PathBuf, String)> = std::fs::read_dir(dir)
+        .expect("read test/jacl")
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            if path.extension()?.to_str()? != "jacl" {
+                return None;
+            }
+            let src = std::fs::read_to_string(&path).ok()?;
+            let want = src.lines().find_map(|l| l.strip_prefix("# expect-error:"))?.trim().to_string();
+            Some((path.file_stem()?.to_str()?.to_string(), path, want))
+        })
+        .collect();
+    cases.sort();
+    let rt = translate_runtime();
+    let mut wrong = Vec::new();
+    for (name, path, want) in &cases {
+        let listed = EXPECT_ERROR_BURN_DOWN.contains(&name.as_str());
+        match expect_error_outcome(path, want, &rt) {
+            Ok(()) if listed => wrong.push(format!("{name}: fails as expected now; take it off the list")),
+            Err(e) if !listed => wrong.push(format!("{name}: expected an error with {want:?}, but {e}")),
+            _ => {}
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} programs:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+}
+
+#[test]
 fn clock_reads_the_granted_clock() {
     // `[clock]` (runtime/clockcap.c) is the granted "clock" capability's op 0: the host's time in
     // nanoseconds, which the file reads from a clock that starts at 2^40 and moves 2 ms a read, on
