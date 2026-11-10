@@ -13,8 +13,8 @@ command -v "$CC" >/dev/null || { echo "note: $CC not found — skipping emit_mac
   "$DIR/emit_macro_body.c" "$CG/codegen.c" "$CG/irbuilder.c" -lpthread -lm -o "$B/emit_macro_body"
 printf 'defmacro twice {x} { syntax-quote [+ ~x ~x] }\n' > "$B/twice.jacl"
 out="$("$B/emit_macro_body" "$B/twice.jacl")"
-if printf '%s' "$out" | grep -qE '^func \(' && printf '%s' "$out" | grep -q 'jacl_vec_empty'; then
+if grep -qE '^func \(' <<<"$out" && grep -q 'jacl_vec_empty' <<<"$out"; then
   echo "  PASS  twice -> __jacl_macro temen-text (builds plain-data vec)"
 else
-  echo "  FAIL  emit_macro_body output:" >&2; printf '%s\n' "$out" | head -5 >&2; exit 1
+  echo "  FAIL  emit_macro_body output:" >&2; head -5 <<<"$out" >&2; exit 1
 fi
