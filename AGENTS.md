@@ -17,7 +17,6 @@
   VM and its Emscripten `--wasm` check were removed in item 6 — TEMEN is the
   sole backend; the browser build now lives in `demo/temen/build_assets.sh`.)
 - Prefer snake_case for values and functions. Prefer PascalCase for types.
-- If there is a DESIGN.md, upon completion of an entire prd.json, update DESIGN.md to show what was completed. Be very concise about things already implemented.
 
 ## When writing JACL source
 
