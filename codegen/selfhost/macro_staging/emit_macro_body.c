@@ -1,6 +1,6 @@
 /* Tool: read a .jacl file containing a `defmacro`, compile its body to a module with a
- * single __jacl_macro(sp, params…) function (temen_codegen_macro_body), print the temen-text.
- * The codegen input to the staged-macro link (see stage_macro.rs). */
+ * single __jacl_macro(sp, params…) function (temen_codegen_macro_body), and write it to stdout
+ * as a temen-encode object. The codegen input to the staged-macro link (see stage_macro.rs). */
 #include "../../../src/jacl.c"
 HeadId jacl_compute_head_id_bridge(AstNode *head) { return ast__compute_head_id(head); }
 #include "../../codegen.h"
@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
                                dm->data.defmacro.body, &idx, err, sizeof err);
   }
   if (!m) { fprintf(stderr, "codegen: %s\n", err); return 1; }
-  /* Emit the temen-encode **object** (v9); stage_macro.rs decodes it with `decode_emitted`.
+  /* Emit the temen-encode **object**; stage_macro.rs decodes it with `decode_emitted`.
    * String/data literals lower to inline `data.self` addresses that `link` resolves — no
    * separate relocation section (the object carries everything). */
   size_t len = 0;
