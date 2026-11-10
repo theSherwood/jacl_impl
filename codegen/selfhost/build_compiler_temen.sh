@@ -104,6 +104,11 @@ if [ "${1:-}" = "--selftest" ]; then
   # (tag 0x02 in the top byte, jaclrt.h), and each `+`/`*` calls its runtime entry (`jacl_add`,
   # `jacl_mul`) behind an inline fast path whose shape is codegen's to change.
   int_const() { echo "i64.const $(( (2 << 56) + $1 ))"; }
+  # `has P TEXT`: whether TEXT has a line matching P. Checks pass it a slice of a test's output whole
+  # and never pipe the slice to `grep -q`, which quits at its first match: under pipefail, an awk
+  # still writing a slice longer than its 4 KiB buffer then dies of SIGPIPE, failing a check that
+  # matched (#286).
+  has() { grep -q -- "$1" <<<"$2"; }
 
   echo "=== selftest: compile a fixed JACL program on the TEMEN engine ==="
   # A driver with a hardcoded source (no stdin), so try_translate — which runs the
@@ -174,15 +179,15 @@ EOF
   # Slice per-case output with awk so the greps below can't cross a case boundary.
   case_out() { awk "/CASE $1 BEGIN/,/CASE $1 END/" "$OUT/stagetest.out"; }
   sf=0
-  [ "$(case_out twice  | grep -c "$(int_const 21)")" -ge 2 ] && case_out twice | grep -q '"jacl_add"' || { echo "STAGETEST FAIL: twice"  >&2; sf=1; }
-  case_out unless | grep -q 'br_if'                                                                    || { echo "STAGETEST FAIL: unless" >&2; sf=1; }
+  [ "$(case_out twice  | grep -c "$(int_const 21)")" -ge 2 ] && has '"jacl_add"' "$(case_out twice)" || { echo "STAGETEST FAIL: twice"  >&2; sf=1; }
+  has 'br_if' "$(case_out unless)"                                                                     || { echo "STAGETEST FAIL: unless" >&2; sf=1; }
   [ "$(case_out nested | grep -c "$(int_const 5)")" -ge 4 ] && [ "$(case_out nested | grep -c '"jacl_add"')" -ge 3 ] || { echo "STAGETEST FAIL: nested" >&2; sf=1; }
   [ "$(case_out splice | grep -c 'jacl_vec_push')" -ge 4 ]                                             || { echo "STAGETEST FAIL: splice" >&2; sf=1; }
-  case_out gensym | grep -q "$(int_const 99)"                                                          || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
-  case_out body   | grep -q '"jacl_str_concat"' && case_out body | grep -q '"jacl_print"'              || { echo "STAGETEST FAIL: body"   >&2; sf=1; }
-  case_out twogen | grep -q "$(int_const 77)"                                                          || { echo "STAGETEST FAIL: twogen" >&2; sf=1; }
-  case_out arity  | grep -q "$(int_const 3)"                                                           || { echo "STAGETEST FAIL: arity"  >&2; sf=1; }
-  case_out mksyn  | grep -q 'br_if'                                                                    || { echo "STAGETEST FAIL: mksyn"  >&2; sf=1; }
+  has "$(int_const 99)" "$(case_out gensym)"                                                           || { echo "STAGETEST FAIL: gensym" >&2; sf=1; }
+  has '"jacl_str_concat"' "$(case_out body)" && has '"jacl_print"' "$(case_out body)"                  || { echo "STAGETEST FAIL: body"   >&2; sf=1; }
+  has "$(int_const 77)" "$(case_out twogen)"                                                           || { echo "STAGETEST FAIL: twogen" >&2; sf=1; }
+  has "$(int_const 3)" "$(case_out arity)"                                                             || { echo "STAGETEST FAIL: arity"  >&2; sf=1; }
+  has 'br_if' "$(case_out mksyn)"                                                                      || { echo "STAGETEST FAIL: mksyn"  >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/stagetest.out"                                                       && { echo "STAGETEST FAIL: error/NULL in output" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
     echo "STAGETEST PASS — the whole macro corpus (twice/unless/nested/splice/gensym/body/twogen/arity/mksyn) expanded in-guest via the Jit capability."
@@ -287,8 +292,8 @@ EOF
   a1_out() { awk '/A1 BEGIN/,/A1 END/' "$OUT/snaptest.out"; }
   b_out()  { awk '/B BEGIN/,/B END/'   "$OUT/snaptest.out"; }
   sf=0
-  a1_out | grep -q '"jacl_mul"' && a1_out | grep -q '"jacl_add"' || { echo "SNAPTEST FAIL: warm arithmetic compile" >&2; sf=1; }
-  [ "$(b_out | grep -c "$(int_const 5)")" -ge 2 ] && b_out | grep -q '"jacl_add"' || { echo "SNAPTEST FAIL: macro-after-warmup" >&2; sf=1; }
+  has '"jacl_mul"' "$(a1_out)" && has '"jacl_add"' "$(a1_out)" || { echo "SNAPTEST FAIL: warm arithmetic compile" >&2; sf=1; }
+  [ "$(b_out | grep -c "$(int_const 5)")" -ge 2 ] && has '"jacl_add"' "$(b_out)" || { echo "SNAPTEST FAIL: macro-after-warmup" >&2; sf=1; }
   grep -q 'ISOLATION OK' "$OUT/snaptest.out" || { echo "SNAPTEST FAIL: compiles not isolated" >&2; sf=1; }
   grep -q '%%ERROR%%\|NULL' "$OUT/snaptest.out" && { echo "SNAPTEST FAIL: error/NULL in warm compile" >&2; sf=1; }
   if [ "$sf" = 0 ]; then
