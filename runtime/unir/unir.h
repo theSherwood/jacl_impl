@@ -343,22 +343,46 @@ typedef struct unir_cell {
 #define UNIR_STYLE_REVERSE 8u
 
 /* What a program hears: the region's size (rows, cols); a key (key, mods) while the region has
- * the focus; the focus gained (focus 1) or lost; or the pointer over the region (issue #284): its
- * cell (row, col, from the region's top left) and the buttons held (bit 0 the primary, which a
- * touch presses; 1 the middle; 2 the secondary). A key is a character, or a named key from
- * UNIR_KEY_ENTER on, with Ctrl (the lower-case byte) or Alt (a character) in `mods`. */
+ * the focus; the focus gained (focus 1) or lost; a pointer over the region (issue #231); the
+ * wheel or a trackpad scrolling over it; or a pointer leaving it. A key is a character, with
+ * Ctrl (the lower-case byte) or Alt (a character) in `mods`; or a named key from UNIR_KEY_ENTER
+ * on, with any of the modifier keys held in `mods` (issue #483).
+ *
+ * A pointer is one of several at once (`pointer`: 0 the mouse, a finger or a pen its own while
+ * it touches) of a device (UNIR_DEVICE_*), at a cell (row, col) from the region's top left, with
+ * the buttons it holds (UNIR_BUTTON_*: a finger's touch and a pen's tip are the primary; a long
+ * press, as the host reports it, the secondary) and the modifier keys held (`mods`, UNIR_MOD_*).
+ * From a press until its buttons all let go, it goes to the region the press began in: its cell
+ * is outside the region once it leaves it. A scroll is at the mouse's cell, how far `down` and
+ * `right` in 120ths of a notch (UNIR_NOTCH; a trackpad's come smaller), and `mods`. A pointer
+ * leaving (`pointer`) went off the region, or the host took its press back, as it does a touch
+ * it makes a gesture of: a press it ends lets go of nothing. */
 typedef struct unir_event {
   uint32_t kind; /* UNIR_EVENT_* */
   uint32_t rows, cols;
   uint32_t key, mods;
   uint32_t focus;
-  uint32_t row, col, buttons;
+  int32_t row, col;
+  uint32_t buttons;
+  uint32_t pointer, device;
+  int32_t down, right;
 } unir_event;
 
 #define UNIR_EVENT_SIZE 1u
 #define UNIR_EVENT_KEY 2u
 #define UNIR_EVENT_FOCUS 3u
 #define UNIR_EVENT_POINTER 4u
+#define UNIR_EVENT_SCROLL 5u
+#define UNIR_EVENT_LEAVE 6u
+#define UNIR_DEVICE_MOUSE 0u
+#define UNIR_DEVICE_TOUCH 1u
+#define UNIR_DEVICE_PEN 2u
+#define UNIR_BUTTON_PRIMARY 1u
+#define UNIR_BUTTON_MIDDLE 2u
+#define UNIR_BUTTON_SECONDARY 4u
+#define UNIR_BUTTON_BACK 8u
+#define UNIR_BUTTON_FORWARD 16u
+#define UNIR_NOTCH 120
 #define UNIR_KEY_ENTER 0x110000u
 #define UNIR_KEY_TAB 0x110001u
 #define UNIR_KEY_BACKSPACE 0x110002u
@@ -372,8 +396,12 @@ typedef struct unir_event {
 #define UNIR_KEY_END 0x11000au
 #define UNIR_KEY_PAGE_UP 0x11000bu
 #define UNIR_KEY_PAGE_DOWN 0x11000cu
+#define UNIR_KEY_INSERT 0x11000du
+#define UNIR_KEY_F1 0x11000eu /* F2 to F12 follow it */
 #define UNIR_MOD_CTRL 1u
 #define UNIR_MOD_ALT 2u
+#define UNIR_MOD_SHIFT 4u /* named keys', pointers' and scrolls'; a character's is its case */
+#define UNIR_MOD_META 8u
 
 /* The program's end of the region it was endowed with as `name`: `name.lines` and `name.input`,
  * its edges, and `name.post`, which they signal the compositor through; and, a shell's job,
@@ -418,9 +446,11 @@ int64_t unir_cells_write(unir_cell *cells, uint32_t cols, uint32_t row, uint32_t
  * transient under the widget's id: a list's scroll, an input's cursor, and which widget has the
  * focus. Tab moves the focus to the next widget in the order the frame drew them, as the next
  * frame begins; the focused widget takes the keys it knows, and the rest are the program's
- * (unir_tui_key). A click is the pointer's primary button going down and coming up on the same
- * rectangle, as a touch lets go; a button takes it as it takes Enter. A frame takes the keys and
- * the pointer's moves up to the next Tab, or up to the pointer's next release, which ends the
+ * (unir_tui_key). A click is a pointer's primary button going down and coming up on the same
+ * rectangle, as a touch lets go, each of several pointers its own press; a button takes it as it
+ * takes Enter, a list's item and an input's character take it too, and a click on a list or an
+ * input gives it the focus (#231). The wheel and a finger scroll a list. A frame takes the keys
+ * and the pointers' moves up to the next Tab, or up to a pointer's next release, which ends the
  * frame's one click; what comes after waits for the next frame (unir_tui_pending). Once running,
  * a frame allocates nothing. */
 typedef struct unir_rect {
@@ -443,11 +473,11 @@ typedef struct unir_part {
 unir_tui *unir_tui_new(void);
 void unir_tui_free(unir_tui *t);
 /* Takes `*e`, an event the program's drawer heard: the region's size, which the next frame is
- * drawn at, or a key or the pointer's move, which waits for a frame. 0, or UNIR_EINVALID for an
- * event that is not one. */
+ * drawn at, or a key, a pointer's move, a scroll or a pointer leaving, which waits for a frame.
+ * 0, or UNIR_EINVALID for an event that is not one. */
 int64_t unir_tui_event(unir_tui *t, const unir_event *e);
-/* 1 if keys or the pointer's moves wait for a frame: draw one, whether or not anything else
- * came. Else 0. */
+/* 1 if keys or the pointers' moves wait for a frame, or a click moved the focus: draw one,
+ * whether or not anything else came. Else 0. */
 int64_t unir_tui_pending(const unir_tui *t);
 /* Begins a frame at the region's size, every cell blank; its area, the whole region, in
  * `*area`. */
