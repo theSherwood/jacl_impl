@@ -61,10 +61,14 @@ struct IrFunc {
 
 typedef struct { uint64_t off; char *bytes; uint32_t len; } DataSeg;
 
+/* A function the module exports under a name (temen's export section). */
+typedef struct { char *name; int func; } IrExport;
+
 struct IrModule {
   IrFunc **funcs; int nfuncs, cap_funcs;
   int      has_memory; uint8_t mem_log2;
   DataSeg *data; int ndata, cap_data; uint64_t data_top;
+  IrExport *exports; int nexports, cap_exports;
 };
 
 /* ---- small helpers ---- */
@@ -185,6 +189,20 @@ IrFunc *irb_func_new(IrModule *m, const IrType *params, int nparams,
 int irb_func_index(const IrModule *m, const IrFunc *f) {
   for (int i = 0; i < m->nfuncs; i++) if (m->funcs[i] == f) return i;
   return -1;
+}
+
+void irb_export(IrModule *m, const char *name, const IrFunc *f) {
+  int idx = irb_func_index(m, f);
+  if (idx < 0) { fprintf(stderr, "irbuilder: export of an unknown function\n"); abort(); }
+  if (m->nexports == m->cap_exports) {
+    m->cap_exports = m->cap_exports ? m->cap_exports * 2 : 2;
+    m->exports = realloc(m->exports, (size_t)m->cap_exports * sizeof(IrExport));
+    if (!m->exports) { fprintf(stderr, "irbuilder: out of memory\n"); abort(); }
+  }
+  size_t n = strlen(name);
+  char *copy = xmalloc(n + 1);
+  memcpy(copy, name, n + 1);
+  m->exports[m->nexports++] = (IrExport){copy, idx};
 }
 
 IrBlock irb_block(IrFunc *f, const IrType *params, int nparams) {
@@ -578,6 +596,11 @@ char *irb_to_text(const IrModule *m) {
     out_str(&o, "\"\n");
   }
   if (m->has_memory) out_fmt(&o, "memory %u\n\n", (unsigned)m->mem_log2);
+  /* temen-text's function exports, `export <idx> func "<name>" <funcidx>`. The names are the
+   * codegen's own identifiers, so they need no escaping. */
+  for (int i = 0; i < m->nexports; i++)
+    out_fmt(&o, "export %d func \"%s\" %d\n%s", i, m->exports[i].name, m->exports[i].func,
+            i + 1 == m->nexports ? "\n" : "");
   for (int i = 0; i < m->nfuncs; i++) {
     if (i > 0) out_str(&o, "\n");
     out_func(&o, m->funcs[i], i);
@@ -936,8 +959,12 @@ uint8_t *irb_to_encoded(const IrModule *m, size_t *out_len) {
     out_uleb(&o, tab.imports[i].type_idx);
     out_u8(&o, 0);
   }
-  /* Export section: none (irb emits no named entry points). */
-  out_uleb(&o, 0);
+  /* Export section: each export's name and function index (a program's `__jacl_entry`). */
+  out_uleb(&o, (uint64_t)m->nexports);
+  for (int i = 0; i < m->nexports; i++) {
+    out_str_bin(&o, m->exports[i].name);
+    out_uleb(&o, (uint64_t)m->exports[i].func);
+  }
   /* Object-only data-export section (v9), written only in the object dialect: none. */
   if (has_data_self) out_uleb(&o, 0);
   /* Type section: each entry tagged (0=func), then param + result type lists. */
@@ -1012,6 +1039,8 @@ void irb_module_free(IrModule *m) {
   }
   for (int i = 0; i < m->ndata; i++) free(m->data[i].bytes);
   free(m->data);
+  for (int i = 0; i < m->nexports; i++) free(m->exports[i].name);
+  free(m->exports);
   free(m->funcs);
   free(m);
 }

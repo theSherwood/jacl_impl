@@ -1,0 +1,6 @@
+# expect-error: returns a pointer
+# An extern's result crosses the C ABI as the integer of its declared
+# width (#290). A pointer result has no JACL value to box it as, so the
+# declaration is refused: return the address as an i64.
+extern t_where {} [Ptr u8]
+print [t_where]

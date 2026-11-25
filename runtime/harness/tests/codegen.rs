@@ -1149,6 +1149,11 @@ fn staged_driver() -> &'static Path {
 /// macros expand on the TEMEN engine) and link it with the runtime. Returns the linked module
 /// and its entry.
 fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
+    link_program(path, emit_file(path), Vec::new())
+}
+
+/// The `.jacl` file at `path`, compiled by the staged driver, unlinked.
+fn emit_file(path: &str) -> temen_ir::Module {
     let out = Command::new(staged_driver())
         .env("JACL_STAGE_ON_TEMEN", "1")
         .arg("--file")
@@ -1160,19 +1165,20 @@ fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
         "staged emit_jacl --file {path} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let program =
-        decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"));
+    decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"))
+}
 
+/// `program` linked with the runtime and the units in `with` (an extern's C, say), and its entry.
+fn link_program(path: &str, program: temen_ir::Module, with: Vec<LinkUnit>) -> (temen_ir::Module, u32) {
     let rt = translate_runtime();
-    let linked = link(&[
-        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
-        LinkUnit {
-            module: program,
-            exports: vec![("__prog_entry".to_string(), 0)],
-            ..Default::default()
-        },
-    ])
-    .unwrap_or_else(|e| panic!("link {path}: {e:?}"));
+    let mut units = vec![LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() }];
+    units.extend(with);
+    units.push(LinkUnit {
+        module: program,
+        exports: vec![("__prog_entry".to_string(), 0)],
+        ..Default::default()
+    });
+    let linked = link(&units).unwrap_or_else(|e| panic!("link {path}: {e:?}"));
     let entry = linked
         .resolve_export("__prog_entry")
         .unwrap_or_else(|| panic!("{path}: entry export missing after link"));
@@ -2079,6 +2085,47 @@ fn file_info_tells_a_files_size_and_kind() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_extern_crosses_the_c_abi_in_its_declared_widths() {
+    // #290: an `extern`'s scalars and its result cross in their declared widths, so an i64 or a u64
+    // keeps its high half and a u32 or u64 at the top of its range is not negative, beside pointers
+    // into JACL buffers. `buf_extern_c.jacl` calls the C catalog (`extern_catalog.c`) with each.
+    // Its own `# expect:` lines, on the tree-walker, the bytecode engine and the JIT.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/buf_extern_c.jacl");
+    let src = std::fs::read_to_string(path).expect("read buf_extern_c.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let cat = jacl_runtime_harness::translate_catalog();
+    let catalog = LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() };
+    let (linked, entry) = link_program(path, emit_file(path), vec![catalog]);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    // `Backend::Bytecode` falls back to the tree-walker for a module outside its subset.
+    assert!(
+        temen_interp::bytecode::SharedProgram::compile(&pb).is_some(),
+        "buf_extern_c is outside the bytecode engine's subset, so its bytecode run would be a tree-walk"
+    );
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Bytecode, temen_run::Backend::Jit] {
+        let run = inst
+            .run(backend, &temen_run::RunConfig::default())
+            .unwrap_or_else(|e| panic!("run buf_extern_c on {backend:?}: {e}"));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), want, "{backend:?}");
+    }
+}
+
+#[test]
+fn a_program_object_exports_its_entry() {
+    // #290: an application's linker (temen-link) binds the `__jacl_entry` its own code imports to
+    // the export of that name in the program's object, so the object names its entry, func 0, in
+    // the binary form and the text form alike.
+    let object = decode_emitted(&emit("bind_read")).expect("decode the object");
+    let text = temen_text::parse_module(&emit_text("bind_read")).expect("parse the text");
+    for (form, m) in [("object", &object), ("text", &text)] {
+        let exports: Vec<_> = m.exports.iter().map(|e| (e.name.as_str(), e.func)).collect();
+        assert_eq!(exports, [("__jacl_entry", 0)], "the {form}'s exports");
+    }
 }
 
 #[test]

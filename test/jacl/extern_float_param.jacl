@@ -1,0 +1,6 @@
+# expect-error: a f64 can't cross the C ABI
+# An extern's scalar crosses the C ABI as the integer of its declared
+# width (#290). A float has no such integer, so the declaration is
+# refused rather than its bits passed as an i32.
+extern t_half {f64 x} i64
+print [t_half 1.5]

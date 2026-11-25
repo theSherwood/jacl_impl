@@ -9,18 +9,31 @@
 # expect: 102
 # expect: 102
 # expect: 102
+# expect: 12000000007
+# expect: 10999999999
+# expect: -9000000000
+# expect: 18446744073709551614
+# expect: 1
+# expect: 4294967295
+# expect: 4294967294
 # Real C extern calls operating on JACL buffers. Verifies that
 # `[addr $buf]` produces a stable pointer the C side can dereference,
 # that the GC doesn't move buffer-local bytes during the call, and
 # that the [Buf N T] -> [Ptr T] decay at call boundaries matches the
-# C ABI. The catalog functions live in test_jacl_harness.c
-# (harness_native_t_*); fixture names are kept <=7 bytes so they encode
-# as inline strings without the intern table. See BUFFER_DESIGN.md
-# Tier 2 (test-harness native-fn registration).
+# C ABI, and that a scalar crosses in its declared width: an i64 or u64
+# keeps its high half, and a u32 or u64 at the top of its range stays
+# unsigned (#290). The catalog functions live in
+# runtime/harness/extern_catalog.c; fixture names are kept <=7 bytes so
+# they encode as inline strings without the intern table. See
+# BUFFER_DESIGN.md Tier 2 (test-harness native-fn registration).
 
 extern t_sumi {[Ptr i32] buf i32 len} i32
 extern t_fill {[Ptr u8] buf i32 len i32 byte} i32
 extern t_xor {[Ptr u8] dst [Ptr u8] src i32 len} i32
+extern t_mad {i64 a i64 b i64 c} i64
+extern t_sum64 {[Ptr i64] buf i64 len} i64
+extern t_not64 {u64 x} u64
+extern t_not32 {u32 x} u32
 
 proc sum {} {
   # Callee reads back the i32 elements the caller stored. Decayed
@@ -54,3 +67,23 @@ proc xor {} {
   print [buf-get $dst 3]
 }
 [xor]
+
+proc wide {} {
+  # i64 params and result: 3000000000 * 4 + 7 needs 34 bits, and so
+  # does a negative result's high half.
+  print [t_mad 3000000000 4 7]
+  # A pointer into an i64 buffer beside an i64 length; the elements
+  # are past i32 too.
+  def [Buf 3 i64] xs [[Buf 3 i64] 5000000000 6000000000 -1]
+  print [t_sum64 $xs 3]
+  print [t_mad -3000000000 3 0]
+  # A u64 result past INT64_MAX is that number, not a negative one, and
+  # it goes back in as itself.
+  def big [t_not64 1]
+  print $big
+  print [t_not64 [t_not64 1]]
+  # A u32 at the top of its range, out and back in.
+  print [t_not32 0]
+  print [t_not32 1]
+}
+[wide]

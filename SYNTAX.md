@@ -1244,7 +1244,7 @@ def line [try-read-line]                                 ; the same without wait
 [buf-unchecked-set $magic $i $v]
 
 struct ElfHeader { i32 version, [Buf 4 u8] magic }       ; buf as struct field
-extern i32 read {i32 fd [Ptr u8] dst u64 len}
+extern read {i32 fd [Ptr u8] dst u64 len} i64
 [read 0 $scratch 256]                                    ; implicit [Buf]→[Ptr] decay
 ```
 
@@ -1252,6 +1252,14 @@ extern i32 read {i32 fd [Ptr u8] dst u64 len}
 (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64`/`f32`/`f64`/`bool`),
 `[Ptr U]`, or value-type struct. `[Buf N T]` decays to `[Ptr T]` at
 extern and JACL proc call sites when the pointee matches.
+
+An `extern name {params} T` declares a C function by its C signature.
+Each scalar param and the result cross in their declared width: `i64`
+and `u64` as 64 bits, `u32` as an unsigned 32 bits, and `i32`, the
+narrower integers, `bool` and an untyped param as a C `int`. A
+`[Ptr T]` or `[Buf N T]` param passes the address. A float, a string
+or a struct by value can't cross yet, and neither can a pointer
+result: return the address as an `i64`.
 
 ## Open design questions
 
