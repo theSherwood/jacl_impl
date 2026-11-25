@@ -81,14 +81,6 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
-      # runtime/build.sh llvm-links the vendored unir unit (runtime/unir/unir_cabi.ll), which is
-      # rustc's LLVM 21 IR; LLVM 18's llvm-link cannot read it (docs/UNIR_CHANNELS.md, Build).
-      - name: Install llvm-link 21 (links the unir unit into the runtime)
-        run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          sudo bash /tmp/llvm.sh 21
-          llvm-link-21 --version
-
       # This job exists because of jacl #141. The `test` job above runs `./build.sh`, which is
       # the *reference VM*'s unit suite; the Rust harness — which owns the differential
       # interp-vs-JIT check AGENTS.md names as the way the backend is verified — ran in no job
@@ -105,6 +97,53 @@ jobs:
       # have turned #142 into a red job instead of a hang in the first place.)
       - name: Harness tests
         run: ( cd runtime/harness && timeout 1800 cargo test --release )
+
+  app:
+    name: An application links a JACL program (nimony and temen-link)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # vendor/temen, and the nimony and nativenif provision-nimony.sh builds
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            runtime/harness
+            vendor/temen
+            vendor/temen/crates/temen-llvm
+
+      - name: Install clang/LLVM 18 (the runtime's and the application's C)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      # The nimony toolchain, cached as vendor/temen's own CI caches it: keyed on the nimony and
+      # nativenif commits vendor/temen pins and on the script that builds them, exact key or rebuild.
+      - name: Pin the nimony cache to vendor/temen's nimony
+        id: nimony-rev
+        run: echo "sha=$(git -C vendor/temen rev-parse HEAD:nimony)-$(git -C vendor/temen rev-parse HEAD:nativenif)" >> "$GITHUB_OUTPUT"
+      - name: Cache the nimony toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/temen/nimony/bin
+            ~/.cache/nim
+            ~/.cache/temen-ci/nim
+          key: nimony-${{ runner.os }}-${{ steps.nimony-rev.outputs.sha }}-${{ hashFiles('vendor/temen/scripts/ci/provision-nimony.sh') }}
+      - name: Build the nimony toolchain
+        run: vendor/temen/scripts/ci/provision-nimony.sh "$GITHUB_WORKSPACE/vendor/temen" >> "$GITHUB_ENV"
+
+      # examples/app/build.sh, then the program on every engine (#290). JACL_REQUIRE_NIMONY turns the
+      # test's SKIP for a missing toolchain into a failure, so this job can't pass without running it.
+      - name: The example application, on every engine
+        run: ( cd runtime/harness && JACL_REQUIRE_NIMONY=1 timeout 1800 cargo test --release --test app -- --nocapture )
 
   playground-run-gate:
     name: Playground run path
@@ -138,14 +177,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
-
-      # runtime/build.sh llvm-links the vendored unir unit (runtime/unir/unir_cabi.ll), which is
-      # rustc's LLVM 21 IR; LLVM 18's llvm-link cannot read it (docs/UNIR_CHANNELS.md, Build).
-      - name: Install llvm-link 21 (links the unir unit into the runtime)
-        run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          sudo bash /tmp/llvm.sh 21
-          llvm-link-21 --version
 
       # This job exists because of jacl #134: the playground's gates only ran in pages.yml,
       # which is push-to-main only, so a PR could not see them. PR #92 broke the run-path gate,
@@ -252,11 +283,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-18 llvm-18-dev libclang-18-dev
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
-
-      - name: Install llvm-link 21 (links the unir unit into the runtime)
-        run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          sudo bash /tmp/llvm.sh 21
 
       - name: Setup Node
         uses: actions/setup-node@v4
