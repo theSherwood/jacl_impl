@@ -138,7 +138,7 @@ runtime/unir/         vendored from unir: the C ABI's unit and headers, the stor
   one commit's C ABI talks to the store vat of the same commit.
 - **The TEMEN pins.** The unit and the images were translated by unir's `vendor/temen`, and this
   repo's temen decodes and runs them, so the two must share temen's wire format and IR. They may
-  differ otherwise: unir 065b95d's pin is temen 4aea8e0, this repo's is f99ad5c, and neither
+  differ otherwise: unir 065b95d's pin is temen 4aea8e0, this repo's is fdeffd2, and neither
   `temen-encode` nor temen's instruction set changed between them. A re-vendor checks this before
   it moves `UNIR_REV`.
 - **Later:** the runtime itself can join the base, laid out once with the unit. That gives #250's
