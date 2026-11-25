@@ -11,8 +11,8 @@ which targeted the retired native VM.
 
 - A **channel is a Unir edge**: a bounded SPSC ring in a TEMEN shared region, with credit, marks and
   terminals (unir spec §1a, §8). JACL does not implement a ring of its own.
-- The runtime reaches edges through **unir's C ABI** (`unir.h`). The Rust edge unit is `llvm-link`ed
-  into `jaclrt` before its one translation, so a JACL program still links one runtime module.
+- The runtime reaches edges through **unir's C ABI** (`unir.h`), unir's temen link unit, which each
+  image links after laying it out as a base (Build, below).
 - **Blocking is fiber parking.** An edge read or write that must wait calls `__vm_wait32` inside the
   calling fiber. TEMEN parks the fiber, not the worker (the §3.6 5a contract `sleep` already relies on),
   and `worker_loop`'s `repoll_blocked` resumes it. No new scheduler machinery.
@@ -45,7 +45,7 @@ which targeted the retired native VM.
 ```
 runtime/chan.c        platform-neutral: the JaclChan object, read/write/close, framing, the busy flag
 runtime/chan_unir.c   the Unir backend over unir.h, plus the unit's heap (unir_host_alloc/free)
-runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's images, UNIR_REV
+runtime/unir/         vendored from unir: the C ABI's unit and headers, the store vat's images, UNIR_REV
 ```
 
 - **The object.** A channel end is one GC object (`JOBJ_BLOB`, so no traced pointers). It holds the
@@ -107,29 +107,42 @@ runtime/unir/         vendored from unir: unir.h, unir_cabi.ll, the store vat's 
 
 ## Build
 
-- **What unir ships.** unir's `e2e/temen` emits the edge unit as internalized LLVM IR
-  (`cargo run --release -- cabi-ll <dir>`, which writes `unir_cabi.ll` and copies `unir.h`).
-  `jacl_impl` vendors both files under `runtime/unir/`, with the unir commit in `UNIR_REV`, the way the
-  playground bundle is committed. A runtime build then needs no Rust toolchain.
-- **Exports.** The vendored unit exports the functions `runtime/unir/EXPORTS` lists: `unir.h`'s
-  vat, edge, job, service and screen calls, including `unir_spawn` for pipelines
-  (`docs/UNIR_PIPELINES.md`). It is emitted with that list, `cabi-ll runtime/unir $(cat
-  runtime/unir/EXPORTS)`. Since unir#408 (unir#395) the C ABI also holds the store (`unir_store.h`, which
-  `unir.h` includes, and `unir.h`'s `unir_home_*`). The runtime calls none of it, and exported it
-  would stay in every image: 36 MB more IR here, and a shell image of 3.2 MB instead of 1.8 MB. So
-  the store's headers are vendored for `unir.h` to compile, and its functions are not exported. A
-  runtime that calls one adds it to `EXPORTS`. `codegen.rs::the_runtime_compiles_to_bytecode` guards that the
-  runtime stays inside the bytecode engine's subset, which a module that both spawns and uses fibers
-  is since theSherwood/temen#1789.
-- **Linking.** `runtime/build.sh` compiles `jaclrt.c` to `.ll` with clang 18 as today, then runs
-  `llvm-link jaclrt.ll runtime/unir/unir_cabi.ll` and translates the result once. The unit's IR comes
-  from rustc's LLVM 21, and LLVM 18's `llvm-link` cannot read it, so **this step needs `llvm-link`
-  from LLVM 21 or later** (`LLVM_LINK`, defaulting to `llvm-link-21`). CI installs it next to clang 18.
-  The harness (`translate_runtime`) links the same way.
-- **The TEMEN pin** must match unir's: the unit's `__vm_*` builtins are lowered by this repo's
-  `temen-llvm`. `UNIR_REV` records the unir commit, whose `vendor/temen` pin must equal ours.
-- **Later:** once temen#1746 lets the on-ramp import across translated units, unir can ship a
-  translated `.temen` unit and `jaclrt` links it through `temen_ir::link`, which drops the LLVM 21 step.
+- **What unir ships.** unir's `e2e/temen` builds its C ABI as a temen link unit
+  (`cargo run --release -- cabi-unit <dir>`, which writes `unir_cabi.temeno` and copies `unir.h` and
+  `unir_store.h`; theSherwood/unir decision #126.1). `jacl_impl` vendors them under `runtime/unir/`,
+  with the unir commit in `UNIR_REV`, the way the playground bundle is committed. A runtime build
+  then needs no Rust toolchain of unir's and no LLVM but clang's.
+- **The unit is unir's whole C ABI**: `unir.h`'s vat, edge, job, service and screen calls, including
+  `unir_spawn` for pipelines (`docs/UNIR_PIPELINES.md`), and the store's (`unir_store.h`, which
+  `unir.h` includes, and `unir.h`'s `unir_home_*`). The runtime calls none of the store's.
+- **Linking** (jacl_impl#267). The runtime's C is compiled with clang 18 and translated as a link unit
+  (`temen-llvm`'s `link_unit`). Its calls into the C ABI stay symbols, and the function pointers in
+  its data are recorded. `runtime/harness/src/lib.rs`'s `link` is the one route every image takes:
+  it decodes the unit once, lays it out as a base (`temen_ir::link_base`), and links the runtime and
+  the program after it. Each of the unit's functions none of them can reach links as a trap
+  (`base_live`, a copy of temen's until theSherwood/temen#2751 moves it into `temen_ir`), so an image
+  carries what the runtime uses of the C ABI, not all of it (theSherwood/unir decision #409.1).
+  - The unit's heap, `unir_host_alloc` and `unir_host_free`, is the runtime's (`chan_unir.c`).
+  - A call through a function pointer in the unit's data, such as `core::fmt`'s and every Rust
+    `dyn` call's, reaches the function it names (theSherwood/temen#2308). `tests/unir_unit.rs` calls
+    `unir_sync_print`, which formats with `core::fmt`, on every engine.
+  - `runtime/build.sh` writes `jaclrt.temen`, the one library the playground links programs
+    against, with the harness's `link_runtime`: the runtime linked with the unit this way.
+  - An application links the runtime as a link unit beside its own code, with temen-link
+    (`docs/APPLICATIONS.md`, #290).
+  - `codegen.rs::the_runtime_compiles_to_bytecode` guards that the linked runtime stays inside the
+    bytecode engine's subset, which a module that both spawns and uses fibers is since
+    theSherwood/temen#1789.
+- **One unir commit.** `UNIR_REV` names the commit the unit, its headers and the store vat's images
+  (`docs/UNIR_SERVICES.md`) all come from, and a re-vendor moves them together: a program built on
+  one commit's C ABI talks to the store vat of the same commit.
+- **The TEMEN pins.** The unit and the images were translated by unir's `vendor/temen`, and this
+  repo's temen decodes and runs them, so the two must share temen's wire format and IR. They may
+  differ otherwise: unir 065b95d's pin is temen 4aea8e0, this repo's is fdeffd2, and neither
+  `temen-encode` nor temen's instruction set changed between them. A re-vendor checks this before
+  it moves `UNIR_REV`.
+- **Later:** the runtime itself can join the base, laid out once with the unit. That gives #250's
+  pruning and #83's link-once lever, by theSherwood/temen#2168's route.
 
 ## Tests
 

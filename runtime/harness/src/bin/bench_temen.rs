@@ -71,7 +71,7 @@ fn build_instance(
     }
     let program = jacl_runtime_harness::decode_emitted(&out.stdout)?;
 
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = jacl_runtime_harness::link(&[
         LinkUnit {
             module: rt.module.clone(),
             exports: rt.exports.clone(),

@@ -84,36 +84,111 @@ fn compile_driver_defs(driver_abs: &str, defines: &[&str]) -> PathBuf {
     bc
 }
 
-/// The runtime unity TU built as `runtime/build.sh` builds it: with `JACL_UNIR`, so channels
-/// run on Unir edges, and llvm-linked with the vendored unir unit (`runtime/unir/unir_cabi.ll`,
-/// docs/UNIR_CHANNELS.md). The unit is rustc's LLVM 21 IR, so this needs `llvm-link` from LLVM 21
-/// or later (`LLVM_LINK`, default `llvm-link-21`). Returns the linked textual IR.
-fn compile_runtime_with_unir() -> PathBuf {
-    let dir = std::env::temp_dir();
+/// The C at `src` compiled to textual IR as the runtime is compiled: with `JACL_UNIR`, so channels
+/// run on Unir edges (docs/UNIR_CHANNELS.md). Returns the IR's path.
+fn compile_unir_c(src: &str) -> PathBuf {
     let tag = format!("{}_{:?}", std::process::id(), std::thread::current().id());
     let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-    let c_ll = dir.join(format!("jaclrt_unir_c_{tag}.ll"));
-    let linked = dir.join(format!("jaclrt_unir_{tag}.ll"));
+    let stem = std::path::Path::new(src).file_stem().and_then(|s| s.to_str()).unwrap_or("unit");
+    let ll = std::env::temp_dir().join(format!("jaclrt_unir_{stem}_{tag}.ll"));
     let status = Command::new("clang")
         .args(["-O2", "-S", "-emit-llvm", "-fno-vectorize", "-fno-slp-vectorize", "-DNDEBUG"])
         .args(["-DJACL_UNIR", "--target=x86_64-unknown-linux-gnu"])
         .arg("-I").arg(RUNTIME_DIR)
-        .arg(format!("{RUNTIME_DIR}/jaclrt.c"))
-        .arg("-o").arg(&c_ll)
+        .arg(src)
+        .arg("-o").arg(&ll)
         .status()
         .expect("spawn clang (is clang installed?)");
-    assert!(status.success(), "clang failed to compile the runtime");
-    let llvm_link = std::env::var("LLVM_LINK").unwrap_or_else(|_| "llvm-link-21".into());
-    let status = Command::new(&llvm_link)
-        .arg("-S")
-        .arg(&c_ll)
-        .arg(format!("{RUNTIME_DIR}/unir/unir_cabi.ll"))
-        .arg("-o").arg(&linked)
-        .status()
-        .unwrap_or_else(|e| panic!("spawn {llvm_link} (LLVM 21+ llvm-link; set LLVM_LINK): {e}"));
-    assert!(status.success(), "{llvm_link} failed to link the unir unit");
-    let _ = std::fs::remove_file(&c_ll);
-    linked
+    assert!(status.success(), "clang failed to compile {src}");
+    ll
+}
+
+/// The IR at `ll` translated as a link unit (theSherwood/temen#1746). Its calls into unir's C ABI
+/// stay symbols, which [`link`] binds to the C ABI's unit, and the function pointers in its data
+/// are recorded, so a call through one reaches the function it names (theSherwood/temen#2308).
+pub fn translate_unit(ll: &std::path::Path) -> temen_llvm::Translated {
+    let opts = temen_llvm::TranslateOptions { link_unit: true, ..Default::default() };
+    temen_llvm::translate_ll_path_with_options(ll, opts)
+        .unwrap_or_else(|e| panic!("temen-llvm: translate {} as a link unit: {e:?}", ll.display()))
+}
+
+/// unir's C ABI as unir builds it, `runtime/unir/unir_cabi.temeno` (theSherwood/unir decision
+/// #126.1), laid out once as the base programs link against (`temen_ir::link_base`,
+/// theSherwood/temen#2168), with its exports by name.
+struct Base {
+    module: temen_ir::Module,
+    exports: Vec<(String, temen_ir::FuncIdx)>,
+}
+
+fn unir_base() -> &'static Base {
+    static BASE: std::sync::OnceLock<Base> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let path = format!("{RUNTIME_DIR}/unir/unir_cabi.temeno");
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let module = temen_encode::decode_unit(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path}: {e:?}"));
+        let unit = temen_ir::LinkUnit {
+            exports: module.exports.iter().map(|e| (e.name.clone(), e.func)).collect(),
+            data_exports: module.data_exports.clone(),
+            module,
+        };
+        let module = temen_ir::link_base(&[temen_ir::LinkUnitRef::from(&unit)])
+            .expect("unir's C ABI lays out as a base");
+        let exports = module.exports.iter().map(|e| (e.name.clone(), e.func)).collect();
+        Base { module, exports }
+    })
+}
+
+/// `units` linked as `temen_ir::link_with_manifest` links them, after unir's C ABI when any of them
+/// calls into it: the C ABI's unit is laid out first as a base ([`unir_base`]), and each of its
+/// functions none of `units` can reach links as a trap ([`base_live`]), so an image carries what it
+/// uses of the C ABI, not all of it (#267, theSherwood/unir decision #409.1). An import no unit
+/// exports stays in the module's manifest, for the host to bind.
+pub fn link(units: &[temen_ir::LinkUnit]) -> Result<temen_ir::Module, temen_ir::LinkError> {
+    let base = unir_base();
+    let live = base_live(base, units);
+    let base = live.as_deref().map(|live| temen_ir::LinkUnitRef {
+        module: &base.module,
+        exports: &base.exports,
+        data_exports: &base.module.data_exports,
+        live: Some(live),
+    });
+    let refs: Vec<_> = base.into_iter().chain(units.iter().map(temen_ir::LinkUnitRef::from)).collect();
+    temen_ir::link_with_manifest_ref(&refs)
+}
+
+/// Which of the base's functions `units` can reach, or `None` when they name none of its exports:
+/// those they import, or name in their code or data, those the base's own data names (vtables) or
+/// offers, and all those call. temen's `base_live` (`browser/src/lib.rs`) over several units, as
+/// theSherwood/unir#409 copies it, until theSherwood/temen#2751 moves it into `temen_ir`.
+fn base_live(base: &Base, units: &[temen_ir::LinkUnit]) -> Option<Vec<bool>> {
+    let export = |name: &str| base.exports.iter().find(|(n, _)| n == name).map(|&(_, f)| f);
+    let mut named = Vec::new();
+    for unit in units {
+        let m = &unit.module;
+        let ref_syms = m.funcs.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.insts).filter_map(
+            |i| match i {
+                temen_ir::Inst::RefSym { name } => std::str::from_utf8(name).ok(),
+                _ => None,
+            },
+        );
+        let names = m.imports.iter().map(|i| i.name.as_str())
+            .chain(m.data_funcrefs.iter().map(|r| r.name.as_str()))
+            .chain(ref_syms);
+        named.extend(names.filter_map(export));
+    }
+    if named.is_empty() {
+        return None;
+    }
+    let roots = temen_ir::data_funcref_targets(&base.module)
+        .into_iter()
+        .flatten()
+        .chain(base.module.impl_exports.iter().flat_map(|e| e.ops.iter().copied()))
+        .chain(named);
+    Some(
+        temen_ir::reachable_funcs(&base.module, roots)
+            .unwrap_or_else(|_| vec![true; base.module.funcs.len()]),
+    )
 }
 
 /// The JACL program at `path`, compiled as a child image a vat spawns (the frontend and codegen's
@@ -211,7 +286,7 @@ pub fn link_image(
     rt: temen_llvm::Translated,
     child: bool,
 ) -> Result<(temen_ir::Module, u8), String> {
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = link(&[
         temen_ir::LinkUnit {
             module: rt.module,
             exports: rt.exports,
@@ -241,21 +316,24 @@ pub fn link_image(
 }
 
 /// Translate the runtime **unity TU** (`runtime/jaclrt.c`, no test driver) on its
-/// own — the separately-compiled runtime artifact. The returned `exports` name each
-/// `jacl_*` function with its module index, so a program module can resolve a
-/// `call.import "jacl_*"` against it through `temen_ir::link` (the separate-artifact
-/// path: compile the runtime once, link many programs against it). This is the
-/// in-process analogue of `runtime/build.sh`'s `clang … | temen-llvm-translate`.
+/// own, as a link unit — the separately-compiled runtime artifact. The returned `exports` name
+/// each `jacl_*` function with its module index, so a program module can resolve a
+/// `call.import "jacl_*"` against it through [`link`] (the separate-artifact path: compile the
+/// runtime once, link many programs against it), which also links in unir's C ABI. The runtime's
+/// capability imports (`write`, …) stay in the linked module's manifest, and the host binds them
+/// at `instantiate_with_imports` time.
 pub fn translate_runtime() -> temen_llvm::Translated {
-    let ll = compile_runtime_with_unir();
-    let t = temen_llvm::translate_ll_path(&ll).expect("temen-llvm: translate runtime");
-    // Each is ~6 MB, written per call: left behind, a test suite's runs fill the disk.
+    translate_c_unit(&format!("{RUNTIME_DIR}/jaclrt.c"))
+}
+
+/// The C at `src` compiled as the runtime is ([`compile_unir_c`]) and translated as a link unit
+/// ([`translate_unit`]).
+pub fn translate_c_unit(src: &str) -> temen_llvm::Translated {
+    let ll = compile_unir_c(src);
+    let t = translate_unit(&ll);
+    // Each is megabytes, written per call: left behind, a test suite's runs fill the disk.
     let _ = std::fs::remove_file(&ll);
     t
-    // The runtime keeps its `write` (jacl_print) capability import as a manifest slot: it links
-    // through `temen_ir::link_with_manifest` (which retains an import no unit exports), and the host
-    // binds `write` at `instantiate_with_imports` time. (Pre-refresh this was lowered to a cap.call
-    // via the now-deleted `resolve_capability_imports`; the manifest path is the phase-4 model.)
 }
 
 /// Translate the runtime **plus the staged-macro I/O glue** (`syn_rt` + `synrt_read_arg` /

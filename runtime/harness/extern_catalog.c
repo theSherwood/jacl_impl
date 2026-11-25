@@ -40,3 +40,24 @@ int32_t t_xor(int64_t dst, int64_t src, int32_t len) {
   for (int32_t i = 0; i < len; i++) d[i] ^= s[i];
   return len;
 }
+
+/* `a * b + c` in 64 bits: an extern's i64 params and result keep their high halves (#290). */
+int64_t t_mad(int64_t a, int64_t b, int64_t c) { return a * b + c; }
+
+/* Sum `len` i64 elements starting at `addr`: a pointer into a JACL buffer beside an i64 length,
+ * as an application's C ABI takes them (#290). */
+int64_t t_sum64(int64_t addr, int64_t len) {
+  const int64_t *p = (const int64_t *)(uintptr_t)addr;
+  int64_t sum = 0;
+  for (int64_t i = 0; i < len; i++) sum += p[i];
+  return sum;
+}
+
+/* `~x` at each unsigned width: a u64 past INT64_MAX and a u32 past INT32_MAX cross as themselves,
+ * neither negative nor truncated (#290). */
+uint64_t t_not64(uint64_t x) { return ~x; }
+uint32_t t_not32(uint32_t x) { return ~x; }
+
+/* `-x` at i32: an argument's arithmetic overflows into an error, not a wrapped word, before the
+ * call is made (#290). */
+int32_t t_neg(int32_t x) { return -x; }

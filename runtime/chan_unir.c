@@ -1,6 +1,6 @@
 /* chan_unir.c — the channel backend over Unir edges (docs/UNIR_CHANNELS.md). Included by
- * chan.c when the runtime is built with JACL_UNIR, which also requires linking the unir unit
- * (runtime/unir/unir_cabi.ll; runtime/build.sh does both).
+ * chan.c when the runtime is built with JACL_UNIR, which also requires linking unir's C ABI, the
+ * vendored unit runtime/unir/unir_cabi.temeno (runtime/harness/src/lib.rs, `link`).
  *
  * A channel is one edge whose region this vat maps twice, once per end. Edge writes and reads
  * run with no timeout: a wait inside them parks the calling fiber (TEMEN §3.6 5a), and

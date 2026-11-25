@@ -86,7 +86,7 @@ fn main() {
     let no_data_funcrefs = [&rt.module, &cat.module, &program]
         .iter()
         .all(|m| m.data_funcrefs.is_empty());
-    let mut linked = temen_ir::link_with_manifest(&[
+    let mut linked = jacl_runtime_harness::link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {

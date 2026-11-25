@@ -112,7 +112,7 @@ fn link(sock: Arc<TcpStream>, bell: &Arc<Bell>) -> HostCap {
         let (sock, queue) = (Arc::clone(&sock), Arc::clone(&queue));
         // A delivery longer than the caller's buffer, and how much of it was handed over.
         let mut rest: Option<(Vec<u8>, usize)> = None;
-        let proc: temen_interp::HostProc = Box::new(move |op, args, mem, _| {
+        let proc: temen_interp::HostProc = Box::new(move |op, args, out, mem, _| {
             use std::io::Write;
             let r = match (op, args, mem) {
                 (0, [ptr, len, ..], Some(mem)) => match mem.read_bytes(*ptr as u64, *len as u64) {
@@ -122,16 +122,16 @@ fn link(sock: Arc<TcpStream>, bell: &Arc<Bell>) -> HostCap {
                 (1, [ptr, len, ..], Some(mem)) => {
                     if rest.is_none() {
                         let got = match queue.lock().expect("the reader's queue").try_recv() {
-                            Err(TryRecvError::Empty) => return Ok(vec![-2]),
+                            Err(TryRecvError::Empty) => return temen_interp::put_results(out, &[-2]),
                             r => r.ok(),
                         };
-                        let Some(d) = got else { return Ok(vec![-1]) };
+                        let Some(d) = got else { return temen_interp::put_results(out, &[-1]) };
                         rest = Some((d, 0));
                     }
                     let (bytes, at) = rest.take().expect("taken above");
                     let n = (bytes.len() - at).min(*len as usize);
                     if mem.write_bytes(*ptr as u64, &bytes[at..at + n]).is_none() {
-                        return Ok(vec![-1]);
+                        return temen_interp::put_results(out, &[-1]);
                     }
                     if at + n < bytes.len() {
                         rest = Some((bytes, at + n));
@@ -144,7 +144,7 @@ fn link(sock: Arc<TcpStream>, bell: &Arc<Bell>) -> HostCap {
                 }
                 _ => -1,
             };
-            Ok(vec![r])
+            temen_interp::put_results(out, &[r])
         });
         Some((proc, temen_interp::CapState::Uncaptured))
     })
@@ -231,10 +231,10 @@ pub fn kept(dir: &Path, role: u8) -> Result<Keys, String> {
 fn keys(k: Keys) -> HostCap {
     HostCap::host_proc(0, move |_, _| {
         let k = k.clone();
-        let give: temen_interp::HostProc = Box::new(move |op, args, mem, _| {
+        let give: temen_interp::HostProc = Box::new(move |op, args, out, mem, _| {
             let put = match (op, args) {
-                (1, _) => return Ok(vec![k.keystore.len() as i64]),
-                (3, _) => return Ok(vec![0]),
+                (1, _) => return temen_interp::put_results(out, &[k.keystore.len() as i64]),
+                (3, _) => return temen_interp::put_results(out, &[0]),
                 (0 | 4, [ptr, 32, ..]) => Some((*ptr, k.peer.to_vec())),
                 (2, [ptr, len, ..]) if *len as usize == k.keystore.len() => {
                     Some((*ptr, k.keystore.clone()))
@@ -245,7 +245,7 @@ fn keys(k: Keys) -> HostCap {
                 (Some((at, b)), Some(mem)) => mem.write_bytes(at as u64, &b).is_some(),
                 _ => false,
             };
-            Ok(vec![if written { 0 } else { -1 }])
+            temen_interp::put_results(out, &[if written { 0 } else { -1 }])
         });
         Some((give, temen_interp::CapState::Uncaptured))
     })
@@ -255,8 +255,8 @@ fn keys(k: Keys) -> HostCap {
 /// Unix epoch, which a token's validity is in.
 fn clock(epoch: Instant) -> HostCap {
     HostCap::host_proc(0, move |_, _| {
-        let tick: temen_interp::HostProc = Box::new(move |op, _, _, _| {
-            Ok(vec![match op {
+        let tick: temen_interp::HostProc = Box::new(move |op, _, out, _, _| {
+            temen_interp::put_results(out, &[match op {
                 1 => std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs() as i64),
@@ -271,10 +271,10 @@ fn clock(epoch: Instant) -> HostCap {
 /// machines' chunk ids never collide.
 fn entropy() -> HostCap {
     HostCap::host_proc(0, |_, _| {
-        let draw: temen_interp::HostProc = Box::new(|_, _, _, _| {
+        let draw: temen_interp::HostProc = Box::new(|_, _, out, _, _| {
             let mut b = [0u8; 8];
             let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
-            Ok(vec![if ok.is_ok() { i64::from_le_bytes(b) } else { 0 }])
+            temen_interp::put_results(out, &[if ok.is_ok() { i64::from_le_bytes(b) } else { 0 }])
         });
         Some((draw, temen_interp::CapState::Stateless))
     })

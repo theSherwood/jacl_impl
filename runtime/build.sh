@@ -1,21 +1,18 @@
 #!/bin/sh
 # Produce the JACL runtime artifacts for the TEMEN backend:
 #
-#   1. jaclrt.ll   — the clang stage (runtime C -> clang -O2 -emit-llvm), built with JACL_UNIR so
-#                    channels run on Unir edges (docs/UNIR_CHANNELS.md), then llvm-linked with the
-#                    vendored unir unit (unir/unir_cabi.ll).
-#   2. jaclrt.temen  — the TEMEN-IR module (temen-llvm-translate of the linked IR), the
-#                    reusable, separately-compiled runtime that programs link against.
-#                    Exports ride in-band in the module now — temen-llvm retired the
-#                    `.syms` export sidecar — so a program module resolves its
-#                    `call.import "jacl_*"` through temen_ir::link over the module's own
-#                    export table (temen_link_run reads `module.exports` directly).
+#   1. jaclrt.temen  — the TEMEN-IR module programs link against: the runtime C, built with
+#                    JACL_UNIR so channels run on Unir edges (docs/UNIR_CHANNELS.md), translated
+#                    as a link unit and linked with unir's C ABI, the vendored unit
+#                    (unir/unir_cabi.temeno), by the harness's `link_runtime`. Each function of the
+#                    C ABI the runtime cannot reach links as a trap. Exports ride in-band in the
+#                    module, so a program module resolves its `call.import "jacl_*"` through
+#                    temen_ir::link over the module's own export table (temen_link_run reads
+#                    `module.exports` directly).
 #
 # This is the separate-artifact path (TEMEN_BACKEND_PHASE2.md P2.0): compile the
 # runtime once here, link many JACL-emitted program modules against it. Requires
-# clang (LLVM 18, to match the temen submodule) and libLLVM-18 dev (for temen-llvm), plus
-# llvm-link from LLVM 21 or later (LLVM_LINK): the unir unit is rustc's LLVM 21 IR, which
-# LLVM 18 cannot read.
+# clang (LLVM 18, to match the temen submodule) and libLLVM-18 dev (for temen-llvm).
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="${DIR}/build"
@@ -35,19 +32,14 @@ if [ -z "${TEMEN_LLVM_TRANSLATE:-}" ]; then
   ( cd "$TEMEN_LLVM" && cargo build --release --bin temen-llvm-translate )
 fi
 
-# 1. runtime C -> LLVM IR, linked with the unir unit. -fno-*vectorize keeps the IR in temen-llvm's
-#    scalar subset (the backend ingests auto-vec selectively; the runtime stays scalar).
-LLVM_LINK="${LLVM_LINK:-llvm-link-21}"
-clang -O2 -S -emit-llvm -DNDEBUG -DJACL_UNIR -fno-vectorize -fno-slp-vectorize \
-  --target=x86_64-unknown-linux-gnu -I "$DIR" "$DIR/jaclrt.c" -o "$OUT/jaclrt_c.ll"
-"$LLVM_LINK" -S "$OUT/jaclrt_c.ll" "$DIR/unir/unir_cabi.ll" -o "$OUT/jaclrt.ll"
-echo "runtime IR:       $OUT/jaclrt.ll (with unir $(cat "$DIR/unir/UNIR_REV"))"
+# 1. runtime C -> a link unit -> linked with unir's C ABI, through the harness's one route
+#    (runtime/harness/src/lib.rs: `translate_runtime`, `link`), which the harness's tests and
+#    precompiled cards take too. The debug build is the one demo/temen/build_assets.sh's
+#    `emit_temen` uses.
+( cd "$DIR/harness" && cargo run --quiet --bin link_runtime -- "$OUT/jaclrt.temen" )
+echo "runtime module:   $OUT/jaclrt.temen (with unir $(cat "$DIR/unir/UNIR_REV"))"
 
-# 2. linked IR -> TEMEN-IR module (exports in-band), via the standalone CLI.
-"$TRANSLATE" "$OUT/jaclrt.ll" -o "$OUT/jaclrt.temen"
-echo "runtime module:   $OUT/jaclrt.temen"
-
-# 3. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's
+# 2. staging runtime (jaclrt + the syn_rt macro-I/O glue) as one module: the library jacl_emit.wasm's
 #    macro staging links each codegen'd macro body against, so `synrt_read_arg`/`synrt_write_result`
 #    (and the jacl_* runtime) resolve by name. Same scalar subset as jaclrt.temen.
 STAGING="${DIR}/../codegen/selfhost/macro_staging"

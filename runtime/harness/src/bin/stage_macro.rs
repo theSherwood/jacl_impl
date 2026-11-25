@@ -63,7 +63,7 @@ fn main() {
     // 2. translate the staging-extended runtime, link, wrap the entry in the powerbox _start.
     eprintln!("stage_macro: translating staging runtime…");
     let rt = jacl_runtime_harness::translate_runtime_staging();
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = jacl_runtime_harness::link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
             module: program,

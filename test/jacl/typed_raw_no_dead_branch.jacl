@@ -1,0 +1,14 @@
+# expect: 6
+# A raw binding of a literal or of a raw read, and a wrapping op, can't
+# overflow, so their trees end in no overflow branch (codegen.c,
+# emit_sticky_branch). codegen.rs's
+# a_raw_tree_that_cannot_overflow_ends_in_no_branch counts the branches
+# this module emits: none.
+proc mix {i32 n} i32 {
+  def i32 a 5
+  def i32 b $n
+  def i64 c 7
+  def u32 d 9
+  [+% $a $b]
+}
+print [mix 1]

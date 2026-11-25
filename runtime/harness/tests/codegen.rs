@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use jacl_runtime_harness::{decode_emitted, translate_runtime};
+use jacl_runtime_harness::{decode_emitted, link, translate_runtime};
 use temen_interp::Value;
-use temen_ir::{link_with_manifest, LinkUnit};
+use temen_ir::LinkUnit;
 
 const CODEGEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codegen");
 
@@ -102,10 +102,10 @@ fn run_case_with(
 
     let rt = translate_runtime();
     // Retain the runtime's manifest capability imports (`write`, …) through the link
-    // (post-IMPORTS.md-phase-4): `link_with_manifest` keeps an import no unit exports, and the
+    // (post-IMPORTS.md-phase-4): `link` keeps an import no unit exports, and the
     // host binds it at instantiate. The program's entry is its func 0 — export it so we can
     // resolve its final index after linking (mirrors bin/jacl_temen.rs).
-    let linked = link_with_manifest(&[
+    let linked = link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
             module: program,
@@ -1123,13 +1123,13 @@ fn is_jacl_error(v: i64) -> bool {
     (v as u64) & (1u64 << 61) != 0
 }
 
-/// This crate's `target/<profile>` dir, deduced from the running test binary
-/// (`target/<profile>/deps/<test>-<hash>`). Holds `libjacl_runtime_harness.a`.
+/// This crate's `target/<profile>` dir, which holds its binaries and `libjacl_runtime_harness.a`.
+/// A binary's path names it in every cargo layout. The test's own binary does not since cargo 1.100,
+/// which runs it from `target/<profile>/build/<crate>/<hash>/out/`, not `target/<profile>/deps/`.
 fn target_profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.ancestors()
-        .nth(2)
-        .expect("target/<profile> above deps/")
+    Path::new(env!("CARGO_BIN_EXE_jacl_temen"))
+        .parent()
+        .expect("target/<profile> holds the binaries")
         .to_path_buf()
 }
 
@@ -1149,6 +1149,11 @@ fn staged_driver() -> &'static Path {
 /// macros expand on the TEMEN engine) and link it with the runtime. Returns the linked module
 /// and its entry.
 fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
+    link_program(path, emit_file(path), Vec::new())
+}
+
+/// The `.jacl` file at `path`, compiled by the staged driver, unlinked.
+fn emit_file(path: &str) -> temen_ir::Module {
     let out = Command::new(staged_driver())
         .env("JACL_STAGE_ON_TEMEN", "1")
         .arg("--file")
@@ -1160,19 +1165,20 @@ fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
         "staged emit_jacl --file {path} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let program =
-        decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"));
+    decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"))
+}
 
+/// `program` linked with the runtime and the units in `with` (an extern's C, say), and its entry.
+fn link_program(path: &str, program: temen_ir::Module, with: Vec<LinkUnit>) -> (temen_ir::Module, u32) {
     let rt = translate_runtime();
-    let linked = link_with_manifest(&[
-        LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
-        LinkUnit {
-            module: program,
-            exports: vec![("__prog_entry".to_string(), 0)],
-            ..Default::default()
-        },
-    ])
-    .unwrap_or_else(|e| panic!("link {path}: {e:?}"));
+    let mut units = vec![LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() }];
+    units.extend(with);
+    units.push(LinkUnit {
+        module: program,
+        exports: vec![("__prog_entry".to_string(), 0)],
+        ..Default::default()
+    });
+    let linked = link(&units).unwrap_or_else(|e| panic!("link {path}: {e:?}"));
     let entry = linked
         .resolve_export("__prog_entry")
         .unwrap_or_else(|| panic!("{path}: entry export missing after link"));
@@ -1966,7 +1972,7 @@ fn expect_error_outcome(path: &Path, want: &str, rt: &temen_llvm::Translated) ->
         return Err(format!("its compile failed with {:?}", err.lines().next().unwrap_or("")));
     }
     let program = decode_emitted(&out.stdout).map_err(|e| format!("decode: {e}"))?;
-    let linked = link_with_manifest(&[
+    let linked = link(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
         LinkUnit { module: program, exports: vec![("__prog_entry".to_string(), 0)], ..Default::default() },
     ])
@@ -2035,8 +2041,8 @@ fn clock_reads_the_granted_clock() {
     let clock = || {
         temen_run::HostCap::host_proc(0, |_, _| {
             let next = std::sync::atomic::AtomicI64::new(1 << 40);
-            let read: temen_interp::HostProc = Box::new(move |_, _, _, _| {
-                Ok(vec![next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
+            let read: temen_interp::HostProc = Box::new(move |_, _, out, _, _| {
+                temen_interp::put_results(out, &[next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
             });
             Some((read, temen_interp::CapState::Stateless))
         })
@@ -2079,6 +2085,64 @@ fn file_info_tells_a_files_size_and_kind() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_extern_crosses_the_c_abi_in_its_declared_widths() {
+    // #290: an `extern`'s scalars and its result cross in their declared widths, so an i64 or a u64
+    // keeps its high half and a u32 or u64 at the top of its range is not negative, beside pointers
+    // into JACL buffers. `buf_extern_c.jacl` calls the C catalog (`extern_catalog.c`) with each.
+    // Its own `# expect:` lines, on the tree-walker, the bytecode engine and the JIT.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/buf_extern_c.jacl");
+    let src = std::fs::read_to_string(path).expect("read buf_extern_c.jacl");
+    let want: String =
+        src.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let cat = jacl_runtime_harness::translate_catalog();
+    let catalog = LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() };
+    let (linked, entry) = link_program(path, emit_file(path), vec![catalog]);
+    let pb = temen_ir::synth_manifest_start(linked, entry, false).expect("synth_manifest_start");
+    // `Backend::Bytecode` falls back to the tree-walker for a module outside its subset.
+    assert!(
+        temen_interp::bytecode::SharedProgram::compile(&pb).is_some(),
+        "buf_extern_c is outside the bytecode engine's subset, so its bytecode run would be a tree-walk"
+    );
+    let inst = temen_run::instantiate_with_imports(pb, jacl_imports()).expect("instantiate");
+    for backend in [temen_run::Backend::TreeWalk, temen_run::Backend::Bytecode, temen_run::Backend::Jit] {
+        let run = inst
+            .run(backend, &temen_run::RunConfig::default())
+            .unwrap_or_else(|e| panic!("run buf_extern_c on {backend:?}: {e}"));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), want, "{backend:?}");
+    }
+}
+
+#[test]
+fn a_raw_tree_that_cannot_overflow_ends_in_no_branch() {
+    // #290: a raw binding's tree ends in a branch out on overflow, unless none of its ops could
+    // set the overflow bit (`emit_sticky_branch`). A literal, a raw read and a wrapping op can't,
+    // so `typed_raw_no_dead_branch.jacl`, all raw bindings of those, emits no branch at all. main's
+    // codegen emitted six, one for each of its raw trees.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/typed_raw_no_dead_branch.jacl");
+    let m = emit_file(path);
+    let branches = m
+        .funcs
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .filter(|b| matches!(b.term, temen_ir::Terminator::BrIf { .. }))
+        .count();
+    assert_eq!(branches, 0, "typed_raw_no_dead_branch.jacl's conditional branches");
+}
+
+#[test]
+fn a_program_object_exports_its_entry() {
+    // #290: an application's linker (temen-link) binds the `__jacl_entry` its own code imports to
+    // the export of that name in the program's object, so the object names its entry, func 0, in
+    // the binary form and the text form alike.
+    let object = decode_emitted(&emit("bind_read")).expect("decode the object");
+    let text = temen_text::parse_module(&emit_text("bind_read")).expect("parse the text");
+    for (form, m) in [("object", &object), ("text", &text)] {
+        let exports: Vec<_> = m.exports.iter().map(|e| (e.name.as_str(), e.func)).collect();
+        assert_eq!(exports, [("__jacl_entry", 0)], "the {form}'s exports");
+    }
 }
 
 #[test]
@@ -2756,12 +2820,14 @@ fn two_editors_share_a_document_across_machines() {
 
 #[test]
 fn the_runtime_compiles_to_bytecode() {
-    // temen's bytecode engine refuses a module with both an Instantiator op and fibers, and
-    // falls back to the tree-walker. The scheduler uses fibers, so the vendored unir unit
-    // leaves out `unir_spawn`/`unir_join` (docs/UNIR_CHANNELS.md, Build).
+    // The runtime as programs run it, linked with unir's C ABI, stays inside temen's bytecode
+    // engine's subset: outside it, `Backend::Bytecode` falls back to the tree-walker, and a
+    // bytecode run is a second tree-walk (docs/UNIR_CHANNELS.md, Build).
     let rt = translate_runtime();
+    let linked = link(&[LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() }])
+        .expect("link the runtime with unir's C ABI");
     assert!(
-        temen_interp::bytecode::SharedProgram::compile(&rt.module).is_some(),
+        temen_interp::bytecode::SharedProgram::compile(&linked).is_some(),
         "jaclrt is outside the bytecode engine's subset"
     );
 }

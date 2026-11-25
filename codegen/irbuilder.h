@@ -87,6 +87,9 @@ IrFunc   *irb_func_new(IrModule *m, const IrType *params, int nparams,
                        const IrType *results, int nresults);
 /* The function's index in the module (the value a `call` references). */
 int       irb_func_index(const IrModule *m, const IrFunc *f);
+/* Export `f` under `name`: the symbol a linker binds another unit's import of `name` to. An
+ * application's temen-link binds a JACL program's `__jacl_entry` this way (#290). */
+void      irb_export(IrModule *m, const char *name, const IrFunc *f);
 
 /* Append a block with typed params; returns its index within the function. */
 IrBlock   irb_block(IrFunc *f, const IrType *params, int nparams);

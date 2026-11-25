@@ -1632,8 +1632,14 @@ extern size_t gc_sweep_concurrent (ThreadHeap *heap, GCBlock *skip_block, uint32
  * compiled as a separate compilation unit from libjacl.a, the test's copy
  * of these function pointers starts as NULL. This constructor runs at
  * program startup to wire them up.
+ *
+ * An emit-only build (JACL_EMIT_ONLY: the compiler as a guest, and the
+ * shell) leaves it out. Its files call no template function themselves, so
+ * the copies it wires are never read, and the shell's runtime is a temen
+ * link unit, which runs no static constructor (jacl_impl#267).
  * ======================================================================== */
 
+#ifndef JACL_EMIT_ONLY
 __attribute__((constructor))
 static void jacl__init_template_handlers(void) {
     /* HAMT key handlers */
@@ -1649,6 +1655,7 @@ static void jacl__init_template_handlers(void) {
         .summarize = rope_summary_summarize
     });
 }
+#endif /* JACL_EMIT_ONLY */
 
 
 #endif /* JACL_H */

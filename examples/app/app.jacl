@@ -1,0 +1,17 @@
+# A JACL program an application links into its own temen program (#290). The application's Nim
+# calls `__jacl_entry`, which runs this top level on the runtime's scheduler.
+#
+# Its `extern`s call the application's Nim (`app_scale`) and C (`app_sum`), each with 64-bit
+# integers and a pointer into a JACL buffer. Its channel runs on unir's edges, through the one unir
+# unit the application links.
+extern app_scale {i64 x [Ptr u8] p i64 n} i64
+extern app_sum {[Ptr i64] xs i64 n i64 k} i64
+
+def [Buf 4 u8] bytes [[Buf 4 u8] 1 2 3 4]
+print [app_scale 1000000000000 $bytes 4]
+def [Buf 2 i64] xs [[Buf 2 i64] 5000000000 6000000000]
+print [app_sum $xs 2 7]
+
+def {w, r} [channel]
+write $w "on unir"
+print [buf-string [read $r 100]]

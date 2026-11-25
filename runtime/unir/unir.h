@@ -16,7 +16,6 @@
 typedef struct unir_vat unir_vat;
 typedef struct unir_producer unir_producer;
 typedef struct unir_consumer unir_consumer;
-typedef struct unir_schema unir_schema;
 typedef struct unir_agreement unir_agreement;
 typedef struct unir_service unir_service;
 typedef struct unir_transcript unir_transcript;
@@ -24,6 +23,7 @@ typedef struct unir_jobs unir_jobs;
 typedef struct unir_job unir_job;
 typedef struct unir_notification unir_notification;
 typedef struct unir_drawer unir_drawer;
+typedef struct unir_surface unir_surface;
 typedef struct unir_tui unir_tui;
 typedef struct unir_home unir_home;
 
@@ -34,19 +34,7 @@ typedef struct unir_grant {
   int64_t cap;
 } unir_grant;
 
-#define UNIR_EENDED (-1)        /* the edge has ended; nothing more moves */
-#define UNIR_ESTALLED (-2)      /* the peer rang nothing within the timeout; still open */
-#define UNIR_ETOO_LARGE (-3)    /* payload over the geometry's maximum; edge unaffected */
-#define UNIR_ETOO_SMALL (-4)    /* the next frame does not fit the buffer; it stays unread */
-#define UNIR_EGEOMETRY (-5)     /* invalid geometry, or a region too small for it */
-#define UNIR_ESUBSTRATE (-6)    /* a vat operation failed */
-#define UNIR_EINVALID (-7)      /* a malformed argument */
-#define UNIR_ENOCAP (-8)        /* the vat was endowed with nothing under that name */
-#define UNIR_EREFUSED (-9)      /* the consumer refused the offer; it cancels the edge */
-#define UNIR_EUNTYPED (-10)     /* no offer: the edge's first frame is not on substream 0 */
-#define UNIR_EMALFORMED (-11)   /* not a canonical message of that type */
-#define UNIR_EMISMATCH (-12)    /* a value that does not fit the type it is sent as */
-#define UNIR_ELOST (-13)        /* a job's region was lost with its compositor: it was killed */
+/* The errors, UNIR_E*, are unir_store.h's (#579): its codec returns them too. */
 
 /* `*_ended`: 0 while open; else bits 0-1 kind (1 complete, 2 cancelled, 3 severed), for a
  * sever bits 2-5 the cause (unir-wire Cause) and bit 6 the side (1 = consumer). */
@@ -68,6 +56,17 @@ int64_t unir_vat_args(const unir_vat *vat, uint8_t *buf, uint64_t cap);
 
 /* The capability the vat was endowed with under `name`, or UNIR_ENOCAP. */
 int64_t unir_endowed(const unir_vat *vat, const char *name, uint64_t name_len);
+
+/* Nanoseconds since the host's epoch on `clock`, the clock the vat was endowed with (as
+ * `clock`: unir_endowed): monotonic, what a program times with and its timers and syncs run
+ * on. UNIR_EINVALID if `clock` is no capability's. */
+int64_t unir_clock_now(int64_t clock);
+
+/* Fills `buf` with `len` random bytes from `entropy`, the entropy the vat was endowed with (as
+ * `entropy`: unir_endowed): what a program draws its store's source (§9.3) and its own ids
+ * from, since temen has no randomness of its own. 0, or UNIR_EINVALID if `entropy` is no
+ * capability's. */
+int64_t unir_entropy_fill(int64_t entropy, void *buf, uint64_t len);
 
 /* A fresh zeroed region of `len` bytes; returns its capability. */
 int64_t unir_region_create(unir_vat *vat, uint64_t len);
@@ -134,14 +133,7 @@ int64_t unir_consumer_sever(unir_consumer *c, uint32_t cause);
 uint32_t unir_consumer_ended(const unir_consumer *c);
 void unir_consumer_free(unir_consumer *c);
 
-/* Typed edges (unir spec §3, issues #41, #43). A schema is a connection schema's canonical
- * encoding, as unir-schemac emits it (`<name>_schema`); NULL if malformed or invalid. */
-unir_schema *unir_schema_new(const uint8_t *bytes, uint64_t len);
-void unir_schema_free(unir_schema *s);
-/* 0 if `frame` is the canonical encoding of a message of catalog entry `entry`, else
- * UNIR_EMALFORMED (UNIR_EINVALID: no such entry). Verify only memory no peer can write. */
-int64_t unir_schema_verify(const unir_schema *s, uint32_t entry, const uint8_t *frame,
-                           uint64_t len);
+/* Typed edges (unir spec §3, issues #41, #43), over a schema: unir_store.h's `unir_schema`. */
 
 /* Offers `s` as the edge's first traffic (a Hello, then the schema) and waits for the
  * consumer's answer: 0 once accepted, then entry i's messages go on substream i + 1;
@@ -366,6 +358,20 @@ typedef struct unir_event {
   uint32_t buttons;
   uint32_t pointer, device;
   int32_t down, right;
+  /* A surface's alone (#356, #357; unir_surface_next); zero for a region's. */
+  uint32_t scale;      /* a size's: the display's, a whole number */
+  uint32_t pixels;     /* a scroll's: 1 if `down` and `right` are 64ths of a pixel */
+  uint32_t code;       /* a stroke's: its USB HID usage on the keyboard page, 0 if unknown */
+  uint32_t state;      /* a stroke's: UNIR_STROKE_DOWN, UNIR_STROKE_REPEAT or UNIR_STROKE_UP */
+  uint32_t caret;      /* a composition's: its caret's byte offset in `text` */
+  const uint8_t *text; /* a stroke's, committed text's or a composition's: UTF-8, until the next call */
+  uint64_t text_len;
+  /* A composed event's (#573): the newest frame of the surface's, by unir_surface_frames' count,
+   * that a display the compositor handed the GPU holds; when the compositor took it, and when it
+   * handed the GPU that display, in nanoseconds on the clock unir_clock_now reads. */
+  uint64_t frame;
+  uint64_t took;
+  uint64_t submitted;
 } unir_event;
 
 #define UNIR_EVENT_SIZE 1u
@@ -374,6 +380,13 @@ typedef struct unir_event {
 #define UNIR_EVENT_POINTER 4u
 #define UNIR_EVENT_SCROLL 5u
 #define UNIR_EVENT_LEAVE 6u
+#define UNIR_EVENT_STROKE 7u  /* a surface's: a key went down, repeated or came up */
+#define UNIR_EVENT_TEXT 8u    /* a surface's: text an input method committed */
+#define UNIR_EVENT_COMPOSE 9u /* a surface's: text an input method is composing */
+#define UNIR_EVENT_COMPOSED 10u /* a surface's: a display holding its frame went to the GPU */
+#define UNIR_STROKE_DOWN 0u
+#define UNIR_STROKE_REPEAT 1u
+#define UNIR_STROKE_UP 2u
 #define UNIR_DEVICE_MOUSE 0u
 #define UNIR_DEVICE_TOUCH 1u
 #define UNIR_DEVICE_PEN 2u
@@ -436,6 +449,114 @@ void unir_drawer_close(unir_vat *vat, unir_drawer *d);
 int64_t unir_cells_write(unir_cell *cells, uint32_t cols, uint32_t row, uint32_t col,
                          const uint8_t *text, uint64_t len, uint32_t style, uint32_t fg,
                          uint32_t bg);
+
+/* Surfaces (spec #355.4, #355.5; decisions #355.3, #355.4; issue #355): a rectangle of the display
+ * a program draws in pixels, which the compositor composes on the GPU. A program builds each
+ * frame, rectangles of RGBA and a display list painted over them, and presents it. It goes once
+ * the frame going has, replacing any presented since that has not begun to go, so the program
+ * never waits on the compositor. Its events are a region's (unir_event), in the surface's pixels:
+ * a size's `cols` and `rows` are its width and height, and a pointer's or a scroll's `col` and
+ * `row` its place. A new size starts the surface anew: what was drawn for the old, and a frame
+ * presented for it that has not begun to go, go nowhere; draw it whole. A size's `scale` is the
+ * display's (#357): how many of its own pixels each of the surface's is. A change of it comes as a
+ * size, even at the same width and height.
+ *
+ * A surface hears keys as strokes (#356), UNIR_EVENT_STROKE: `key` is what the key means with no
+ * modifier held (a character, a letter in lower case; a named key from UNIR_KEY_ENTER on; or 0, as
+ * a modifier key's own), `code` its place (its USB HID usage), `state` what it did, `mods` the
+ * modifier keys held, and `text` what it typed, if anything. An input method's text comes as it
+ * composes (UNIR_EVENT_COMPOSE, its caret at byte `caret`; empty text ends the composition with
+ * nothing committed) and as it commits (UNIR_EVENT_TEXT). A scroll with `pixels` is a trackpad's,
+ * in 64ths of the surface's pixels; without, a wheel's, in 120ths of a notch.
+ *
+ * A display list paints in order, each command over what is before it, within the surface. Its
+ * places and lengths are 26.6 fixed point, 64ths of a pixel, across and down from the surface's
+ * top left. A colour is UNIR_RGBA's: red, green, blue and alpha, 8 bits each; alpha does not
+ * multiply the others. A field its kind does not read is zero, or the command is UNIR_EINVALID.
+ *   UNIR_FILL      the area (x, y, w, h), its corners rounded by `radius` (0 is square), in `rgba`;
+ *   UNIR_SHADOW    that rounded area's shadow, blurred by `blur`, its standard deviation, in `rgba`;
+ *   UNIR_GRADIENT  that rounded area, `rgba` at (from_x, from_y) and `end_rgba` at (to_x, to_y),
+ *                  mixed in proportion between and each held beyond its end;
+ *   UNIR_GLYPHS    a run: the `count` glyphs of the list's `glyphs` from `first`, of font `font`
+ *                  with an em of `size`, in `rgba`, placed from (x, y), a point on their baseline;
+ *   UNIR_CLIP      what follows draws within that rounded area, until the UNIR_UNCLIP closing it;
+ *   UNIR_UNCLIP    closes the newest clip.
+ * The compositor cuts off a surface whose list names a font not sent, has a run with no size, an
+ * unclip with no clip open, a clip left open, or more than 64 clips open, 65,536 commands or 2^20
+ * glyphs in a frame: unir_surface_next is UNIR_EENDED from then on. */
+typedef struct unir_command {
+  uint32_t kind; /* UNIR_FILL ... UNIR_UNCLIP */
+  int32_t x, y, w, h;
+  int32_t radius;
+  int32_t blur;
+  uint32_t rgba;
+  uint32_t end_rgba;
+  int32_t from_x, from_y;
+  int32_t to_x, to_y;
+  uint32_t font; /* < 65,536 */
+  int32_t size;
+  uint32_t first, count;
+} unir_command;
+
+/* A glyph of a run: its id in the run's font (< 65,536), and its place from the run's origin. */
+typedef struct unir_glyph {
+  uint32_t id;
+  int32_t x, y;
+} unir_glyph;
+
+#define UNIR_RGBA(r, g, b, a) \
+  ((uint32_t)(r) << 24 | (uint32_t)(g) << 16 | (uint32_t)(b) << 8 | (uint32_t)(a))
+#define UNIR_FILL 0u
+#define UNIR_SHADOW 1u
+#define UNIR_GRADIENT 2u
+#define UNIR_GLYPHS 3u
+#define UNIR_CLIP 4u
+#define UNIR_UNCLIP 5u
+
+/* The program's end of the surface it was endowed with as `name`: `name.draw` and `name.show`,
+ * its edges, and `name.post`, which they signal the compositor through. It offers the surface's
+ * schema and accepts it back. NULL with `*status` set if it could not connect. */
+unir_surface *unir_surface_open(unir_vat *vat, const char *name, uint64_t name_len,
+                                int64_t *status);
+/* Sends what the ring has room for of what was presented, then takes the next event into `*e`:
+ * 1, 0 if none has come, or an error (UNIR_EENDED once the compositor ended the surface). */
+int64_t unir_surface_next(unir_vat *vat, unir_surface *s, unir_event *e);
+/* Draws `w` by `h` pixels at (x, y) into the frame being built, cut to the surface: `rgba` is its
+ * rows top to bottom, each `w` pixels of red, green, blue and alpha. 0, or UNIR_EINVALID for a
+ * place or a size past 65,535. */
+int64_t unir_surface_draw(unir_surface *s, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                          const uint8_t *rgba);
+/* A TrueType or OpenType font, which runs name by `id` from the next frame presented on: it goes
+ * before that frame. Another under the same `id` replaces it. 0, UNIR_EINVALID for an id past
+ * 65,535, or UNIR_EMALFORMED for a font past 32 MiB (the compositor cuts off a surface whose
+ * fonts are not fonts, or come to more than 64 MiB). */
+int64_t unir_surface_font(unir_surface *s, uint32_t id, const uint8_t *bytes, uint64_t len);
+/* Adds `n` commands to the display list of the frame being built, which paints over its pixels
+ * once presented; their runs' glyphs are from the `n_glyphs` of `glyphs`. Either array may be
+ * NULL when its count is 0, as a list with no runs has no glyphs. 0, or UNIR_EINVALID for a
+ * command that is not one (nothing is added). */
+int64_t unir_surface_list(unir_surface *s, const unir_command *commands, uint64_t n,
+                          const unir_glyph *glyphs, uint64_t n_glyphs);
+/* The frame built since the last is whole: it goes once the frame going has, replacing any
+ * presented since that has not begun to go. This sends what the ring has room for and never
+ * waits. 0, or an edge error. */
+int64_t unir_surface_present(unir_vat *vat, unir_surface *s);
+/* How many frames the surface has presented: the newest one's number, which a composed event
+ * (UNIR_EVENT_COMPOSED) names it by once a display holding it went to the GPU (#573). A frame
+ * replaced before it went is never composed. */
+uint64_t unir_surface_frames(const unir_surface *s);
+/* Whether the surface hears, for each frame it presents from now on, when a display holding it
+ * went to the GPU: UNIR_EVENT_COMPOSED (#573). Nonzero `on` asks; a surface hears none until it
+ * does. */
+void unir_surface_hear_composed(unir_surface *s, uint32_t on);
+/* Arms the surface for a wait on the program's notification (unir_notification_wait), which the
+ * compositor's ends signal: 1 if it armed, 0 if an event, or room for a frame waiting to go, is
+ * there (then do not wait). unir_surface_disarm it after the wait, whatever the wait returned. */
+int64_t unir_surface_arm(unir_vat *vat, unir_surface *s);
+int64_t unir_surface_disarm(unir_vat *vat, unir_surface *s);
+/* Ends the surface: what was presented goes, waiting for room as it must, then the compositor
+ * hears the end, and the surface's place goes to the others. */
+void unir_surface_close(unir_vat *vat, unir_surface *s);
 
 /* The TUI library (#237): a program's frames in immediate mode, presented on the region it holds
  * as a drawer (unir_drawer_open). Each round the program gives it what the drawer heard
@@ -523,8 +644,8 @@ int64_t unir_tui_present(unir_vat *vat, unir_tui *t, unir_drawer *d);
  * session with a store vat, which a vat opens here. unir_home_open opens the session with the
  * store vat granted to `vat` as `name` (`name.requests`, `name.replies`, `name.post`; or the one
  * its door names `name`), each ring of `capacity` slots of `slot_size` bytes: NULL with
- * `*status` set. unir_home_pull and unir_home_push make a sync of `store` with the home, as
- * unir_sync_pull and unir_sync_push do, over the session as it connected (a store vat grown
+ * `*status` set. unir_home_pull and unir_home_forward make a sync of `store` with the home, as
+ * unir_sync_pull and unir_sync_forward do, over the session as it connected (a store vat grown
  * past this end is spoken to as this end knows it); one sync on a home at a time.
  * unir_home_send sends the home every frame the sync made, in order: 0, or an edge error, which
  * the sync is told (unir_sync_ended). unir_home_take gives the sync every message the home sent,
@@ -535,9 +656,15 @@ unir_home *unir_home_open(unir_vat *vat, const uint8_t *name, uint64_t name_len,
                           uint32_t capacity, uint32_t slot_size, int64_t *status);
 unir_sync *unir_home_pull(unir_home *h, unir_store *store, const char *name, const char *me,
                           const char *peer, int32_t moves, uint64_t lease);
-unir_sync *unir_home_push(unir_home *h, unir_store *store, const char *name, uint64_t wait);
+unir_sync *unir_home_forward(unir_home *h, unir_store *store, const char *name, const char *peer,
+                             const char *writer, uint64_t wait);
 int64_t unir_home_send(unir_vat *vat, unir_home *h, unir_sync *sync);
 int64_t unir_home_take(unir_vat *vat, unir_home *h, unir_sync *sync, int64_t timeout_ns);
+/* unir_home_arm arms the home for a wait on the program's notification, among its other ends:
+ * 1 if it armed, 0 if a message the home sent is there to take (then do not wait); or an edge
+ * error. unir_home_disarm it after the wait, whatever the wait returned, and take what came. */
+int64_t unir_home_arm(unir_vat *vat, unir_home *h);
+int64_t unir_home_disarm(unir_vat *vat, unir_home *h);
 void unir_home_free(unir_vat *vat, unir_home *h);
 
 #endif
