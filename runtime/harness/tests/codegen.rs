@@ -2041,8 +2041,8 @@ fn clock_reads_the_granted_clock() {
     let clock = || {
         temen_run::HostCap::host_proc(0, |_, _| {
             let next = std::sync::atomic::AtomicI64::new(1 << 40);
-            let read: temen_interp::HostProc = Box::new(move |_, _, _, _| {
-                Ok(vec![next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
+            let read: temen_interp::HostProc = Box::new(move |_, _, out, _, _| {
+                temen_interp::put_results(out, &[next.fetch_add(2_000_000, std::sync::atomic::Ordering::Relaxed)])
             });
             Some((read, temen_interp::CapState::Stateless))
         })

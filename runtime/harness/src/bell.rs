@@ -58,13 +58,13 @@ pub fn capability(bell: &Arc<Bell>) -> HostCap {
     let bell = Arc::clone(bell);
     let make = Arc::new(move || -> temen_interp::OffloadHostProc {
         let (bell, seen) = (Arc::clone(&bell), Arc::default());
-        Box::new(move |op, _| match op {
+        Box::new(move |op, _, out| match op {
             0 => wait_for(&bell, &seen),
             1 => {
                 ring(&bell);
-                OffloadOutcome::Done(Ok(vec![0]))
+                OffloadOutcome::Done(temen_interp::put_results(out, &[0]))
             }
-            _ => OffloadOutcome::Done(Ok(vec![-1])),
+            _ => OffloadOutcome::Done(temen_interp::put_results(out, &[-1])),
         })
     });
     HostCap::custom(temen_interp::cap_id::HOST_PROC, 0, move |h, _| {
