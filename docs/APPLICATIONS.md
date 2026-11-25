@@ -38,9 +38,11 @@ temen-link -o:app.temen --edge:caps <its Nim modules> jaclrt.temeno prog.temeno 
   `unir_host_free` (`runtime/chan_unir.c`). An application whose own code exports them too, as
   unir's `unir_store.nim` does, leaves its copy out. With both, temen-link fails the link (exit 3).
 - **`extern`.** A JACL program calls an application's C function or Nim `exportc` proc by its C
-  name. Each scalar crosses in its declared width (SYNTAX.md, `[Buf N T]`), a pointer into a JACL
-  buffer as its address, and the data-stack pointer goes first, as temen's on-ramp passes it.
-  temen-link binds Nim's procs and C's functions alike (theSherwood/temen#3178).
+  name. Every param has a type, and a scalar crosses in its declared width (SYNTAX.md,
+  `[Buf N T]`): a `dyn` value reaches one through `[to T $v]`, and an argument's arithmetic errors
+  on overflow as a binding's of its type does. A pointer into a JACL buffer crosses as its address,
+  and the data-stack pointer goes first, as temen's on-ramp passes it. temen-link binds Nim's procs
+  and C's functions alike (theSherwood/temen#3178).
 - **The stack.** A function JACL calls runs on the calling JACL fiber's stack, 64 KiB
   (`runtime/sched.c`), so it has to fit there.
 - **What the host grants.** The program's manifest asks for Nim's capability edge (`stream_write`,

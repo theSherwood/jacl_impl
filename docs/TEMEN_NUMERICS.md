@@ -299,7 +299,9 @@ tree. It was the **binding** that carried a tag. What actually changes:
 - **Overflow becomes control flow.** The boxed tree folds its sticky overflow bit into the
   result's error flag, which works only because a tagged i32 has a spare bit to put it in. A
   raw word does not, so the same bit becomes a branch through the enclosing `[try …]` or the
-  function's error return — identical trade to `i64`, forced by the same fact.
+  function's error return — identical trade to `i64`, forced by the same fact. A tree none of
+  whose ops can set the bit (a literal, a raw binding's read, a wrapping op) gets no branch,
+  since its bit is still the constant it started as (`emit_sticky_branch`, #290).
 
 One guard is load-bearing: the raw representation is taken **only where the typer proved the
 value is `i32`**. Unlike `i64`, whose fallback crossing goes through `jacl_i64_unbox` and
@@ -489,9 +491,10 @@ shape `jacl_div` returns for a zero divisor). `+% -% *%` skip the check and emit
 which wrap two i32s modulo 2^32, two wide ints modulo 2^64, and return a type error for
 anything else — coercing a float into a wrapping op would defeat the point of asking.
 
-At the `extern` (C ABI) boundary a typed scalar argument is *not* checked: it is handed to
-C as a machine i32, so C's wrapping is the contract there, the same reason a pointer
-argument decays to a raw address.
+At the `extern` (C ABI) boundary an argument is compiled as a raw binding of its param's type
+is, so its arithmetic errors on overflow there too (#290). Until #290 an i32 argument wrapped,
+on the view that C's wrapping was the contract at the boundary. But the arithmetic is JACL's,
+done before the value reaches C, and an i64 argument's overflow errors as the binding's does.
 
 History: the typed path wrapped silently until jacl #102 — see that issue for the
 alternatives considered (documenting the wrap, versus checking it).

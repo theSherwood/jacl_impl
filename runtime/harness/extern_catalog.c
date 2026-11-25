@@ -57,3 +57,7 @@ int64_t t_sum64(int64_t addr, int64_t len) {
  * neither negative nor truncated (#290). */
 uint64_t t_not64(uint64_t x) { return ~x; }
 uint32_t t_not32(uint32_t x) { return ~x; }
+
+/* `-x` at i32: an argument's arithmetic overflows into an error, not a wrapped word, before the
+ * call is made (#290). */
+int32_t t_neg(int32_t x) { return -x; }

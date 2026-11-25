@@ -1,0 +1,7 @@
+# expect-error: param 'x' needs the C type it crosses as
+# An untyped param is a dyn, which no C integer holds (INVARIANTS.md
+# V1). The typer lets any value through one, so passing it as a C int
+# would truncate a tagged word, a string's pointer included, into a
+# plausible integer (V7). The declaration is refused instead.
+extern t_not32 {x} i32
+print [t_not32 5]

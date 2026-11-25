@@ -16,13 +16,16 @@
 # expect: 1
 # expect: 4294967295
 # expect: 4294967294
+# expect: -2147483647
+# expect: true
 # Real C extern calls operating on JACL buffers. Verifies that
 # `[addr $buf]` produces a stable pointer the C side can dereference,
 # that the GC doesn't move buffer-local bytes during the call, and
 # that the [Buf N T] -> [Ptr T] decay at call boundaries matches the
 # C ABI, and that a scalar crosses in its declared width: an i64 or u64
-# keeps its high half, and a u32 or u64 at the top of its range stays
-# unsigned (#290). The catalog functions live in
+# keeps its high half, a u32 or u64 at the top of its range stays
+# unsigned, and an argument's arithmetic errors on overflow as a raw
+# binding's of its type does (#290). The catalog functions live in
 # runtime/harness/extern_catalog.c; fixture names are kept <=7 bytes so
 # they encode as inline strings without the intern table. See
 # BUFFER_DESIGN.md Tier 2 (test-harness native-fn registration).
@@ -34,6 +37,7 @@ extern t_mad {i64 a i64 b i64 c} i64
 extern t_sum64 {[Ptr i64] buf i64 len} i64
 extern t_not64 {u64 x} u64
 extern t_not32 {u32 x} u32
+extern t_neg {i32 x} i32
 
 proc sum {} {
   # Callee reads back the i32 elements the caller stored. Decayed
@@ -87,3 +91,13 @@ proc wide {} {
   print [t_not32 1]
 }
 [wide]
+
+proc neg_past {} {
+  # An i32 argument is computed as a raw i32 binding's tree is, so
+  # INT32_MAX + 1 is an error before the call (INVARIANTS.md V5), not
+  # INT32_MIN handed to C.
+  def i32 big 2147483647
+  [t_neg [+ $big 1]]
+}
+print [t_neg 2147483647]
+print [error? [neg_past]]

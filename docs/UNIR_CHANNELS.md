@@ -128,6 +128,8 @@ runtime/unir/         vendored from unir: the C ABI's unit and headers, the stor
     `unir_sync_print`, which formats with `core::fmt`, on every engine.
   - `runtime/build.sh` writes `jaclrt.temen`, the one library the playground links programs
     against, with the harness's `link_runtime`: the runtime linked with the unit this way.
+  - An application links the runtime as a link unit beside its own code, with temen-link
+    (`docs/APPLICATIONS.md`, #290).
   - `codegen.rs::the_runtime_compiles_to_bytecode` guards that the linked runtime stays inside the
     bytecode engine's subset, which a module that both spawns and uses fibers is since
     theSherwood/temen#1789.

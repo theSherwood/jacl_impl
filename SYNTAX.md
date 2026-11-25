@@ -1256,10 +1256,11 @@ extern and JACL proc call sites when the pointee matches.
 An `extern name {params} T` declares a C function by its C signature.
 Each scalar param and the result cross in their declared width: `i64`
 and `u64` as 64 bits, `u32` as an unsigned 32 bits, and `i32`, the
-narrower integers, `bool` and an untyped param as a C `int`. A
-`[Ptr T]` or `[Buf N T]` param passes the address. A float, a string
-or a struct by value can't cross yet, and neither can a pointer
-result: return the address as an `i64`.
+narrower integers and `bool` as a C `int`. A `[Ptr T]` or `[Buf N T]`
+param passes the address. Every param needs its type, since no C type
+holds a `dyn`; a `dyn` argument reaches a typed param through
+`[to T $v]`. A float, a string or a struct by value can't cross yet,
+and neither can a pointer result: return the address as an `i64`.
 
 ## Open design questions
 

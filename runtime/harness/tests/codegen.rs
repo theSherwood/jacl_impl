@@ -2116,6 +2116,23 @@ fn an_extern_crosses_the_c_abi_in_its_declared_widths() {
 }
 
 #[test]
+fn a_raw_tree_that_cannot_overflow_ends_in_no_branch() {
+    // #290: a raw binding's tree ends in a branch out on overflow, unless none of its ops could
+    // set the overflow bit (`emit_sticky_branch`). A literal, a raw read and a wrapping op can't,
+    // so `typed_raw_no_dead_branch.jacl`, all raw bindings of those, emits no branch at all. main's
+    // codegen emitted six, one for each of its raw trees.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/jacl/typed_raw_no_dead_branch.jacl");
+    let m = emit_file(path);
+    let branches = m
+        .funcs
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .filter(|b| matches!(b.term, temen_ir::Terminator::BrIf { .. }))
+        .count();
+    assert_eq!(branches, 0, "typed_raw_no_dead_branch.jacl's conditional branches");
+}
+
+#[test]
 fn a_program_object_exports_its_entry() {
     // #290: an application's linker (temen-link) binds the `__jacl_entry` its own code imports to
     // the export of that name in the program's object, so the object names its entry, func 0, in

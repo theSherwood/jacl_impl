@@ -702,9 +702,12 @@ static uint8_t extern_scalar_kind(const char *s, uint32_t n) {
 static int extern_wide(uint8_t k) { return k == EXTERN_I64 || k == EXTERN_U64 || k == EXTERN_PTR; }
 
 /* Classify an extern's params for the C-ABI: a compound type token (`[Ptr T]` / `[Buf N T]`)
- * decays to a raw address; a typed scalar crosses in its declared width (extern_scalar_kind), and
- * an untyped one as a native i32. Mirrors extract_param_types' token walk. Returns the arity, or
- * -1 with `*bad` the type token when a param's type is one no C-ABI scalar holds. */
+ * decays to a raw address, and a typed scalar crosses in its declared width (extern_scalar_kind).
+ * Mirrors extract_param_types' token walk. Returns the arity; or -1 with `*bad` the type token
+ * when a param's type is one no C-ABI scalar holds, or -2 with `*bad` the name of an untyped
+ * param. An untyped param is a `dyn`, which no C integer holds either (INVARIANTS.md V1): the
+ * typer lets any value through it, so the crossing would truncate a tagged word, a string's
+ * pointer included, into a plausible integer (V7). */
 static int extract_extern_kinds(AstNode *plist, uint8_t *kind, AstNode **bad) {
   if (!plist || plist->type != AST_COMMAND) return 0;
   AstNode *toks[CG_MAX_PARAMS * 2 + 2];
@@ -732,8 +735,8 @@ static int extract_extern_kinds(AstNode *plist, uint8_t *kind, AstNode **bad) {
       kind[np++] = k;
       i += 2;
     } else {
-      kind[np++] = EXTERN_I32;             /* untyped -> i32 */
-      i += 1;
+      *bad = toks[i];
+      return -2;
     }
   }
   return np;
@@ -1268,17 +1271,29 @@ static IrVal compile_raw_i64(Cx *cx, AstNode *node, int ovf_slot) {
     return emit_rt_call(cx, "jacl_i64_unbox", a, 2); }
 }
 
-/* Compile a typed i64 tree to a raw word, branching out on overflow at the root. */
-static IrVal compile_i64_tree(Cx *cx, AstNode *node) {
-  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
-  IrVal v = compile_raw_i64(cx, node, ovf);
-  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
-  int pv = pin_push(cx, v);
+/* Finish a raw tree: branch out through the error path when its sticky bit is set. `clear` is
+ * the constant the bit started as, in block `start`. A tree none of whose ops could set the bit (a
+ * literal, a raw binding read) still holds that constant there, so it gets no branch, since there
+ * is nothing to check. A value id names a value only within its block, so the block is compared
+ * too: a tree that moved the emission point gets the branch. */
+static void emit_sticky_branch(Cx *cx, int ovf, IrBlock start, IrVal clear) {
   IrVal bit = pin_get(cx, ovf);
+  if (cx->cur == start && bit == clear) return;
   IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
   IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
   IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
   emit_error_branch_if(cx, truth, errv);
+}
+
+/* Compile a typed i64 tree to a raw word, branching out on overflow at the root. */
+static IrVal compile_i64_tree(Cx *cx, AstNode *node) {
+  IrBlock start = cx->cur;
+  IrVal clear = irb_const_i64(cx->f, cx->cur, 0);
+  int ovf = pin_push(cx, clear);
+  IrVal v = compile_raw_i64(cx, node, ovf);
+  if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
+  int pv = pin_push(cx, v);
+  emit_sticky_branch(cx, ovf, start, clear);
   v = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return v;
@@ -1516,15 +1531,13 @@ static IrVal compile_uint_tree(Cx *cx, AstNode *node, int bits) {
  * word has no spare bit to hold the error, so the sticky bit becomes control flow. The 32-bit
  * form **zero**-extends, which is that slot's invariant. */
 static IrVal compile_uint_tree_raw(Cx *cx, AstNode *node, int bits) {
-  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrBlock start = cx->cur;
+  IrVal clear = irb_const_i64(cx->f, cx->cur, 0);
+  int ovf = pin_push(cx, clear);
   IrVal v = compile_uint(cx, node, bits, ovf);
   if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
   int pv = pin_push(cx, bits == 32 ? irb_convert(cx->f, cx->cur, IRB_EXTEND_I32U, v) : v);
-  IrVal bit = pin_get(cx, ovf);
-  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
-  IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
-  IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
-  emit_error_branch_if(cx, truth, errv);
+  emit_sticky_branch(cx, ovf, start, clear);
   IrVal out = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return out;
@@ -1538,15 +1551,13 @@ static IrVal compile_uint_tree_raw(Cx *cx, AstNode *node, int bits) {
  * to become control flow — through the enclosing `[try …]` or the function's error return.
  * Identical trade to `compile_i64_tree`, forced by the same fact about the representation. */
 static IrVal compile_i32_tree_raw(Cx *cx, AstNode *node) {
-  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
+  IrBlock start = cx->cur;
+  IrVal clear = irb_const_i64(cx->f, cx->cur, 0);
+  int ovf = pin_push(cx, clear);
   IrVal v = compile_i32(cx, node, ovf);
   if (cx->failed) { pin_release(cx, ovf, 1); return 0; }
   int pv = pin_push(cx, irb_convert(cx->f, cx->cur, IRB_EXTEND_I32S, v));  /* the invariant */
-  IrVal bit = pin_get(cx, ovf);
-  IrVal zero = irb_const_i64(cx->f, cx->cur, 0);
-  IrVal truth = irb_intcmp(cx->f, cx->cur, IRB_I64, IRB_NE, bit, zero);
-  IrVal errv = irb_const_i64(cx->f, cx->cur, JACLVAL_FLAG_ERROR | (int64_t)JACL_TAG_I32_SHIFTED);
-  emit_error_branch_if(cx, truth, errv);
+  emit_sticky_branch(cx, ovf, start, clear);
   IrVal out = pin_get(cx, pv);
   pin_release(cx, ovf, 2);
   return out;
@@ -6489,15 +6500,17 @@ static void register_externs(Cx *cx, AstNode **nodes, uint32_t count) {
     e->rkind = EXTERN_I32;
     if (rt && rt->type == AST_LIT_STRING) {
       e->rkind = extern_scalar_kind(rt->data.lit_string.value, rt->data.lit_string.length);
-      if (e->rkind == REP_TAGGED) bad = rt;
+      if (e->rkind == REP_TAGGED && !bad) bad = rt;   /* a param's refusal is named first */
     } else if (rt) {
       cx_failf(cx, "codegen: extern '%.*s' returns a pointer; return its address as an i64", nm, nl);
       return;
     }
     if (bad) {
       char msg[192];
-      snprintf(msg, sizeof msg, "codegen: extern '%.*s': a %.*s can't cross the C ABI", (int)nl, nm,
-               (int)bad->data.lit_string.length, bad->data.lit_string.value);
+      snprintf(msg, sizeof msg,
+               e->arity == -2 ? "codegen: extern '%.*s': param '%.*s' needs the C type it crosses as"
+                              : "codegen: extern '%.*s': a %.*s can't cross the C ABI",
+               (int)nl, nm, (int)bad->data.lit_string.length, bad->data.lit_string.value);
       cx_fail(cx, msg);
       return;
     }
@@ -6524,38 +6537,38 @@ static IrVal emit_extern_call(Cx *cx, EDef *e, AstNode *node) {
   IrVal cargs[1 + CG_MAX_PARAMS];
   sig[0] = IRB_I64;
   /* Pin each argument across the next one's compilation (#100): an argument may move the
-   * emission point, which would strand the ones already computed. An i32-wide argument is
-   * widened into the pin and narrowed back out.
+   * emission point, which would strand the ones already computed.
    *
-   * Overflow in an i32 argument is *not* flagged: the value is being handed to C as a machine
-   * i32, so C's wrapping is the contract at this boundary — the same reason a pointer argument
-   * decays to a raw address here. A 64-bit or unsigned argument is the word a raw binding of its
-   * type would hold (compile_i64_tree, compile_uint_tree_raw), so its arithmetic overflows as
-   * that binding's would, and a dyn value that doesn't fit is an error, not a truncated word. */
+   * A scalar argument is the word a raw binding of its declared type holds, compiled as that
+   * binding's tree is (compile_i32_tree_raw, compile_i64_tree, compile_uint_tree_raw), so its
+   * arithmetic errors on overflow as the binding's would (INVARIANTS.md V5). The typer has
+   * already refused a dyn argument that no `[to T $v]` brought to the type. An i32 or a u32
+   * crosses as the low half of its word. */
   int epm = pin_mark(cx);
-  int ovf = pin_push(cx, irb_const_i64(cx->f, cx->cur, 0));
   for (int i = 0; i < e->arity; i++) {
     AstNode *arg = node->data.command.args[i];
     uint8_t k = e->pkind[i];
+    IrVal v;
     if (k == EXTERN_PTR) {                               /* pointer: decay to a raw address */
-      IrVal v = compile_expr(cx, arg);
+      IrVal p = compile_expr(cx, arg);
       if (cx->failed) return 0;
-      IrVal ra[] = {cx->sp, v};
-      (void)pin_push(cx, emit_rt_call(cx, "jacl_raw_ptr", ra, 2));  /* i64 machine address */
+      IrVal ra[] = {cx->sp, p};
+      v = emit_rt_call(cx, "jacl_raw_ptr", ra, 2);       /* i64 machine address */
     } else if (k == EXTERN_I32) {
-      (void)pin_i32_push(cx, compile_i32(cx, arg, ovf));
+      v = compile_i32_tree_raw(cx, arg);
+    } else if (k == EXTERN_I64) {
+      v = compile_i64_tree(cx, arg);
     } else {
-      IrVal v = k == EXTERN_I64 ? compile_i64_tree(cx, arg)
-                                : compile_uint_tree_raw(cx, arg, k == EXTERN_U32 ? 32 : 64);
-      (void)pin_push(cx, v);                             /* a u32 rides zero-extended */
+      v = compile_uint_tree_raw(cx, arg, k == EXTERN_U32 ? 32 : 64);
     }
     if (cx->failed) return 0;
+    (void)pin_push(cx, v);
     sig[1 + i] = extern_wide(k) ? IRB_I64 : IRB_I32;
   }
   for (int i = 0; i < e->arity; i++)
-    cargs[1 + i] = extern_wide(e->pkind[i]) ? pin_get(cx, epm + 1 + i) : pin_i32_get(cx, epm + 1 + i);
+    cargs[1 + i] = extern_wide(e->pkind[i]) ? pin_get(cx, epm + i) : pin_i32_get(cx, epm + i);
   cargs[0] = cx->sp;
-  pin_release(cx, epm, e->arity + 1);
+  pin_release(cx, epm, e->arity);
   emit_trace_line(cx, node->start.line);
   IrType r1[] = {extern_wide(e->rkind) ? IRB_I64 : IRB_I32};
   IrVal handle = irb_const_i32(cx->f, cx->cur, 0);
