@@ -8,7 +8,7 @@
 ## store's log; what was typed after it is lost at a restart.
 ##
 ## First run (no `doc`): type "hello world", undo back to "hello", redo and undo once, keep the
-## undone tip as ref `doc/world`, type " there" (a branch), publish and save, then type "!!!"
+## undone tip as ref `doc/world`, type " there" (a branch), read its id and digest and save, then type "!!!"
 ## and exit unsaved. Second run: `doc` is "hello there" again; follow it, undo and redo across
 ## the restart, each move heard as an event positioned by the store's epoch and the ref's move
 ## sequence, and read the
@@ -71,7 +71,10 @@ proc first-run {s} {
   move $s "doc/world" $nil $tip
   set h [type $s $h 5 " there"]
   assert [== [text $s $h] "hello there"]
-  assert [== [vec-len [ask $s [map "Publish" $h] "Id"]] 32]
+  def id [ask $s [map "Id" $h] "Id"]
+  assert [map-has $id "source"]
+  assert [map-has $id "counter"]
+  assert [== [vec-len [ask $s [map "Digest" $h] "Digest"]] 32]
   ask $s "Flush" "Durable"
   set h [type $s $h 11 "!!!"]
   assert [== [text $s $h] "hello there!!!"]
