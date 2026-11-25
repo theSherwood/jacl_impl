@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use temen_ir::{LinkUnit, Module};
 
 /// The staging-extended runtime, translated once (translation is the expensive step and is
-/// the same for every macro). `link_with_manifest` consumes the module, so each call links a
+/// the same for every macro). [`crate::link`] takes the units by value, so each call links a
 /// clone. `None` if translation ever fails (reported per-call).
 fn staging_runtime() -> &'static Option<(Module, Vec<(String, u32)>)> {
     static RT: OnceLock<Option<(Module, Vec<(String, u32)>)>> = OnceLock::new();
@@ -96,7 +96,7 @@ fn stage_run(module_bytes: &[u8], stdin_bytes: &[u8]) -> Result<Vec<u8>, String>
         .as_ref()
         .ok_or_else(|| "staging runtime translation unavailable".to_string())?;
 
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = crate::link(&[
         LinkUnit { module: rt_module.clone(), exports: rt_exports.clone(), ..Default::default() },
         LinkUnit {
             module: program,

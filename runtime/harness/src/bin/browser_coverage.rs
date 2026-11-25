@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use temen_interp::{bytecode, cap_id, BoundImport, Host, StreamRole};
-use temen_ir::{link_with_manifest, LinkUnit, Module};
+use temen_ir::{LinkUnit, Module};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -131,7 +131,7 @@ fn run_case(driver: &PathBuf, rt: &temen_llvm::Translated, cat: &temen_llvm::Tra
     };
 
     // 2. link vs runtime + catalog, powerbox `_start`
-    let linked = match link_with_manifest(&[
+    let linked = match jacl_runtime_harness::link(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
         LinkUnit { module: cat.module.clone(), exports: cat.exports.clone(), ..Default::default() },
         LinkUnit { module: program, exports: vec![("__jacl_entry".to_string(), 0)], ..Default::default() },

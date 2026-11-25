@@ -146,7 +146,7 @@ fn cmd_run(args: &[String]) -> ! {
     // Retain the runtime's manifest capability imports through link (post-IMPORTS.md-phase-4;
     // docs/TEMEN_IMPORT_MIGRATION_ASK.md), wrap the program entry (its func 0) in the paramless
     // powerbox `_start`, and bind the powerbox names.
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = jacl_runtime_harness::link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {

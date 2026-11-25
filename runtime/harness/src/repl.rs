@@ -4,7 +4,8 @@
 //!
 //! The image is the runtime as [`crate::translate_runtime`] builds it, with `JACL_REPL` and the
 //! macro-staging glue in its unit (`repl_rt.c`), and the emit-only frontend, codegen, the staging
-//! bridge, and the REPL's bridge and C library, llvm-linked into one unit. A macro defined at the
+//! bridge, and the REPL's bridge and C library, llvm-linked into one link unit, which
+//! [`crate::link`] links with unir's C ABI as it does the runtime. A macro defined at the
 //! prompt stages on that runtime (#214). The frontend's own value runtime defines two names jaclrt
 //! does, so the frontend is compiled with its copies renamed ([`RENAMED`]). A line's unit, and a
 //! staged macro's, imports the runtime by name, bound against a table of every `jacl_*` function
@@ -123,7 +124,7 @@ fn symtab_source(names: &[String]) -> String {
     s
 }
 
-/// The shell's runtime, translated: jaclrt and unir's unit, the compiler, and the REPL.
+/// The shell's runtime, translated as a link unit: jaclrt, the compiler, and the REPL.
 pub fn translate_shell_runtime() -> temen_llvm::Translated {
     let tag = format!("{}_{:?}", std::process::id(), std::thread::current().id());
     let tag: String = tag
@@ -199,24 +200,23 @@ pub fn translate_shell_runtime() -> temen_llvm::Translated {
         &[],
     );
 
+    // The same LLVM as clang's: every input is clang's IR.
     let linked = out("shell.ll");
-    let llvm_link = std::env::var("LLVM_LINK").unwrap_or_else(|_| "llvm-link-21".into());
+    let llvm_link = std::env::var("LLVM_LINK").unwrap_or_else(|_| "llvm-link".into());
     let status = Command::new(&llvm_link)
         .arg("-S")
         .arg(&rt)
-        .arg(format!("{runtime}/unir/unir_cabi.ll"))
         .args(units.iter().map(|(_, name, _)| out(name)))
         .arg(out("symtab.ll"))
         .arg("-o")
         .arg(&linked)
         .status()
-        .unwrap_or_else(|e| panic!("spawn {llvm_link} (LLVM 21+ llvm-link; set LLVM_LINK): {e}"));
+        .unwrap_or_else(|e| panic!("spawn {llvm_link} (set LLVM_LINK): {e}"));
     assert!(
         status.success(),
         "{llvm_link} failed to link the shell's runtime"
     );
-    let t =
-        temen_llvm::translate_ll_path(&linked).expect("temen-llvm: translate the shell's runtime");
+    let t = crate::translate_unit(&linked);
     let _ = std::fs::remove_dir_all(&dir);
     t
 }

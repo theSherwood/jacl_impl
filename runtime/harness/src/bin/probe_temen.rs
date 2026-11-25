@@ -52,7 +52,7 @@ fn link_program(prog: &PathBuf) -> Module {
 
     let rt = jacl_runtime_harness::translate_runtime();
     let cat = jacl_runtime_harness::translate_catalog();
-    let linked = temen_ir::link_with_manifest(&[
+    let linked = jacl_runtime_harness::link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit { module: cat.module, exports: cat.exports, ..Default::default() },
         LinkUnit {

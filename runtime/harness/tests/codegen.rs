@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use jacl_runtime_harness::{decode_emitted, translate_runtime};
+use jacl_runtime_harness::{decode_emitted, link, translate_runtime};
 use temen_interp::Value;
-use temen_ir::{link_with_manifest, LinkUnit};
+use temen_ir::LinkUnit;
 
 const CODEGEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codegen");
 
@@ -102,10 +102,10 @@ fn run_case_with(
 
     let rt = translate_runtime();
     // Retain the runtime's manifest capability imports (`write`, …) through the link
-    // (post-IMPORTS.md-phase-4): `link_with_manifest` keeps an import no unit exports, and the
+    // (post-IMPORTS.md-phase-4): `link` keeps an import no unit exports, and the
     // host binds it at instantiate. The program's entry is its func 0 — export it so we can
     // resolve its final index after linking (mirrors bin/jacl_temen.rs).
-    let linked = link_with_manifest(&[
+    let linked = link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
             module: program,
@@ -1164,7 +1164,7 @@ fn emit_and_link_file(path: &str) -> (temen_ir::Module, u32) {
         decode_emitted(&out.stdout).unwrap_or_else(|e| panic!("decode {path}: {e}"));
 
     let rt = translate_runtime();
-    let linked = link_with_manifest(&[
+    let linked = link(&[
         LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() },
         LinkUnit {
             module: program,
@@ -1966,7 +1966,7 @@ fn expect_error_outcome(path: &Path, want: &str, rt: &temen_llvm::Translated) ->
         return Err(format!("its compile failed with {:?}", err.lines().next().unwrap_or("")));
     }
     let program = decode_emitted(&out.stdout).map_err(|e| format!("decode: {e}"))?;
-    let linked = link_with_manifest(&[
+    let linked = link(&[
         LinkUnit { module: rt.module.clone(), exports: rt.exports.clone(), ..Default::default() },
         LinkUnit { module: program, exports: vec![("__prog_entry".to_string(), 0)], ..Default::default() },
     ])
@@ -2756,12 +2756,14 @@ fn two_editors_share_a_document_across_machines() {
 
 #[test]
 fn the_runtime_compiles_to_bytecode() {
-    // temen's bytecode engine refuses a module with both an Instantiator op and fibers, and
-    // falls back to the tree-walker. The scheduler uses fibers, so the vendored unir unit
-    // leaves out `unir_spawn`/`unir_join` (docs/UNIR_CHANNELS.md, Build).
+    // The runtime as programs run it, linked with unir's C ABI, stays inside temen's bytecode
+    // engine's subset: outside it, `Backend::Bytecode` falls back to the tree-walker, and a
+    // bytecode run is a second tree-walk (docs/UNIR_CHANNELS.md, Build).
     let rt = translate_runtime();
+    let linked = link(&[LinkUnit { module: rt.module, exports: rt.exports, ..Default::default() }])
+        .expect("link the runtime with unir's C ABI");
     assert!(
-        temen_interp::bytecode::SharedProgram::compile(&rt.module).is_some(),
+        temen_interp::bytecode::SharedProgram::compile(&linked).is_some(),
         "jaclrt is outside the bytecode engine's subset"
     );
 }
