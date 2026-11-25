@@ -1123,13 +1123,13 @@ fn is_jacl_error(v: i64) -> bool {
     (v as u64) & (1u64 << 61) != 0
 }
 
-/// This crate's `target/<profile>` dir, deduced from the running test binary
-/// (`target/<profile>/deps/<test>-<hash>`). Holds `libjacl_runtime_harness.a`.
+/// This crate's `target/<profile>` dir, which holds its binaries and `libjacl_runtime_harness.a`.
+/// A binary's path names it in every cargo layout. The test's own binary does not since cargo 1.100,
+/// which runs it from `target/<profile>/build/<crate>/<hash>/out/`, not `target/<profile>/deps/`.
 fn target_profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.ancestors()
-        .nth(2)
-        .expect("target/<profile> above deps/")
+    Path::new(env!("CARGO_BIN_EXE_jacl_temen"))
+        .parent()
+        .expect("target/<profile> holds the binaries")
         .to_path_buf()
 }
 
