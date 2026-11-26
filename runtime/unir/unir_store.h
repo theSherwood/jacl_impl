@@ -164,9 +164,19 @@ int32_t unir_store_advance(unir_store *store, const char *name, uint64_t expecte
 /* The head of ref `name`: 1 with `*version` set, 0 if it has none. */
 int32_t unir_store_head(unir_store *store, const char *name, uint64_t *version);
 
-/* Version `version`'s id, published: the same in every store that holds it. 0 with `id` set;
- * -1 if the store holds no such version. */
-int32_t unir_store_publish(unir_store *store, uint64_t version, uint8_t id[32]);
+/* Version `version`'s id (#604): its source then its counter, each little-endian, given where it
+ * was minted and the same in every store that holds it. It names the version and proves nothing
+ * of its content. 0 with `id` set; -1 if the store holds no such version. */
+int32_t unir_store_id(unir_store *store, uint64_t version, uint8_t id[16]);
+
+/* The version whose id is `id` (#593, #604), found without reading any other: 1 with `*version`
+ * set, 0 if the store holds none. */
+int32_t unir_store_find(unir_store *store, const uint8_t id[16], uint64_t *version);
+
+/* Version `version`'s digest (#604): what commits to its content, as its id does not. Two
+ * versions with one digest hold the same content. 0 with `digest` set; -1 if the store holds no
+ * such version with its body. */
+int32_t unir_store_digest(unir_store *store, uint64_t version, uint8_t digest[32]);
 
 /* Up to `cap` bytes of text document `version` from offset `at`, read in place: how many; -1
  * if `version` is no text document here, or `at` is past its end. */
@@ -180,6 +190,21 @@ int64_t unir_store_read(unir_store *store, uint64_t version, uint64_t at, uint8_
 int64_t unir_store_annotations(unir_store *store, uint64_t version, uint64_t from, uint64_t to,
                                unir_annotation *out, size_t cap);
 
+/* What turns text document `from` (UNIR_STORE_NONE: an empty one) into text document `to`, read
+ * in place (#359): the changes a commit on `from` would make to give it `to`'s text and
+ * annotations, as unir_store_commit takes them, into `*changes`. Its edits each apply to the
+ * text the ones before it left: replaces, with the bytes they insert, as moved text is one too
+ * until a diff reports a move as UNIR_EDIT_MOVE (#595). Then the ids of
+ * `from`'s annotations that `to` holds otherwise or not at all, each with where it starts once
+ * the edits are applied, in `from`'s order; then the annotations of `to` that the edits do not
+ * carry there, in `to`'s order. An annotation the edits carry to where `to` holds it is in
+ * neither, so a reader that applies the edits to what it holds of `from`, moving its annotations
+ * over each as the store does (§9.8), needs only the rest: an undo, a redo or a pull applied in
+ * place. `stamp` is `to`'s. The arrays and what they point at are the store's, valid until the
+ * next call on the store; one with no items is NULL. 0; -1 if either is no text document here.
+ * Between versions a few edits apart it costs about what the edits touched, not the document. */
+int32_t unir_store_changes(unir_store *store, uint64_t from, uint64_t to, unir_changes *changes);
+
 /* How many bytes text document `version` holds; -1 if it is no text document. */
 int64_t unir_store_len(unir_store *store, uint64_t version);
 
@@ -189,7 +214,7 @@ int64_t unir_store_len(unir_store *store, uint64_t version);
  * two texts that read alike but were written apart are not the same. A carried commit keeps its
  * placement, so a forwarder that rebases its writer's ref onto the home's version of the commit
  * moves it to the same buffers, and a reader mirroring its content has nothing to reload. It
- * costs the hashing of what was not yet hashed, as publishing does. */
+ * costs the hashing of what was not yet hashed, as a digest does. */
 int32_t unir_store_same(unir_store *store, uint64_t a, uint64_t b);
 
 /* Where line `line` (from 0) of text document `version` starts, found through the store's
